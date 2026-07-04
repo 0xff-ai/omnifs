@@ -4,10 +4,12 @@
 //! removed at runtime through [`MountRuntimes::add_mount`] and
 //! [`MountRuntimes::remove_mount`]; there is no startup directory scan.
 
+use crate::auth::credential_service_for_file;
 use crate::cache::Caches;
 use crate::cloner::GitCloner;
 use crate::snapshot::MountSnapshot;
 use crate::{BuildError, HostContext, Runtime, component_engine};
+use omnifs_auth::CredentialService;
 use omnifs_workspace::mounts::materialize::{MaterializationMode, materialize};
 use omnifs_workspace::mounts::{Registry, Spec};
 use omnifs_workspace::provider::Catalog;
@@ -29,6 +31,10 @@ pub struct MountRuntimes {
     caches: Arc<Caches>,
     cloner: Arc<GitCloner>,
     context: HostContext,
+    /// The single host-wide credential owner: store access, expiry, and OAuth
+    /// refresh for every mount. Shared so mounts resolving to the same
+    /// credential share one refresh state.
+    credential_service: Arc<CredentialService>,
     instances: parking_lot::RwLock<HashMap<String, Arc<Runtime>>>,
     root_mount: parking_lot::RwLock<Option<String>>,
     timer_shutdown: watch::Sender<bool>,
@@ -63,12 +69,17 @@ impl MountRuntimes {
         let caches = Caches::open(context.cache_dir())
             .map_err(|e| RegistryError::RuntimeError(format!("cache open: {e}")))?;
 
+        // One credential owner for the whole host, shared across every mount.
+        let credential_service = credential_service_for_file(context.credentials_file())
+            .map_err(|e| RegistryError::RuntimeError(format!("credential service init: {e}")))?;
+
         let (timer_shutdown, _) = watch::channel(false);
         Ok(Self {
             engine,
             caches,
             cloner,
             context,
+            credential_service,
             instances: parking_lot::RwLock::new(HashMap::new()),
             root_mount: parking_lot::RwLock::new(None),
             timer_shutdown,
@@ -137,6 +148,7 @@ impl MountRuntimes {
                 self.cloner.clone(),
                 &self.context,
                 &self.caches,
+                &self.credential_service,
             )
         } else {
             Runtime::new(
@@ -146,6 +158,7 @@ impl MountRuntimes {
                 self.cloner.clone(),
                 &self.context,
                 &self.caches,
+                &self.credential_service,
             )
         }
         .map_err(|error| registry_error(&mount, error))?;
@@ -1097,6 +1110,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
+    #[allow(clippy::too_many_lines)]
     async fn revalidation_timer_refreshes_recent_object_without_provider_invalidation() {
         let config_dir = tempfile::tempdir().expect("temp config dir");
         let cache_dir = tempfile::tempdir().expect("temp cache dir");
@@ -1129,9 +1143,19 @@ mod tests {
             providers_dir.path(),
             &paths.credentials_file,
         );
+        let credential_service = crate::auth::credential_service_for_file(&paths.credentials_file)
+            .expect("credential service");
         let runtime = Arc::new(
-            Runtime::new_for_callout_tests(&engine, &base_wasm, &spec, cloner, &context, &caches)
-                .expect("runtime"),
+            Runtime::new_for_callout_tests(
+                &engine,
+                &base_wasm,
+                &spec,
+                cloner,
+                &context,
+                &caches,
+                &credential_service,
+            )
+            .expect("runtime"),
         );
 
         let timer_config_dir = tempfile::tempdir().expect("timer config dir");

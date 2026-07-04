@@ -11,7 +11,6 @@ use oauth2::{
 use omnifs_workspace::authn::OauthScheme;
 use omnifs_workspace::creds::CredentialEntry;
 use secrecy::SecretString;
-use std::time::Duration;
 use time::OffsetDateTime;
 use url::Url;
 
@@ -59,11 +58,9 @@ pub(crate) fn credential_entry_from_token(
     >,
 ) -> CredentialEntry {
     let now = OffsetDateTime::now_utc();
-    let expires_at = token.expires_in().map(|expires_in| {
-        let skew = Duration::from_mins(1);
-        let effective = expires_in.checked_sub(skew).unwrap_or(expires_in);
-        now + effective
-    });
+    // Stamp the real expiry; the freshness margin is applied at check time in
+    // `service::is_fresh`, not baked in here.
+    let expires_at = token.expires_in().map(|expires_in| now + expires_in);
     let refresh_token = token
         .refresh_token()
         .map(|token| SecretString::from(token.secret().to_owned()));

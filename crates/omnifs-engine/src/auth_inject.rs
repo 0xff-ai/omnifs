@@ -1,23 +1,31 @@
-//! Authentication and credential injection for HTTP requests.
+//! Authentication header injection for HTTP requests.
 //!
-//! `AuthManager` owns provider-agnostic HTTP auth strategies. Static tokens
-//! inject headers directly. OAuth strategies keep tokens outside the provider
-//! sandbox and let `HttpStack` retry once with rebuilt headers.
+//! `AuthManager` maps a mount's auth config onto per-credential strategies and
+//! delegates every credential concern (store access, expiry, OAuth refresh) to
+//! the shared `omnifs_auth::CredentialService`. `AuthManager` keeps only two
+//! jobs: matching a request URL to the credentials that apply to it, and
+//! composing the resolved material into wire headers. The service is the single
+//! fail-closed owner of the bytes.
 
-use crate::singleflight::Group;
-use arc_swap::ArcSwapOption;
-use omnifs_auth::{AuthError as OAuthError, OAuthClient, OAuthRequest};
-use omnifs_workspace::authn::CredentialId;
-use omnifs_workspace::authn::{AuthManifest, SchemeResolveError};
-use omnifs_workspace::creds::{CredStoreError, CredentialEntry, CredentialStore, FileStore};
-use omnifs_workspace::mounts::{Auth, AuthKind, OAuth, StaticToken};
-use secrecy::ExposeSecret;
+use omnifs_auth::{
+    AuthError as OAuthError, AuthUnavailable, CredentialService, OAuthClient, OAuthRequest,
+};
+use omnifs_workspace::authn::{AuthKind, AuthManifest, CredentialId, SchemeResolveError};
+use omnifs_workspace::creds::{CredentialStore, FileStore};
+use omnifs_workspace::ids::ProviderName;
+use omnifs_workspace::mounts::{Auth, OAuth, StaticToken};
 use std::path::Path;
 use std::sync::Arc;
-use time::{Duration as TimeDuration, OffsetDateTime};
 
-const DEFAULT_ACCOUNT: &str = "default";
-const OAUTH_REFRESH_WINDOW: TimeDuration = TimeDuration::seconds(60);
+/// Build the single host-wide credential owner over the on-disk store. OAuth
+/// refresh uses a no-redirect client, matching the login flows.
+pub(crate) fn credential_service_for_file(
+    credentials_file: &Path,
+) -> Result<Arc<CredentialService>, InjectError> {
+    let store: Arc<dyn CredentialStore> = Arc::new(FileStore::new(credentials_file));
+    let oauth = OAuthClient::new()?;
+    Ok(Arc::new(CredentialService::new(store, oauth)))
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum InjectError {
@@ -31,16 +39,14 @@ pub enum InjectError {
     OAuthSchemeNotFound(String),
     #[error("oauth auth scheme is ambiguous; set auth.scheme")]
     AmbiguousOAuthScheme,
-    #[error("credential store is required for auth type `{0}`")]
-    CredentialStoreRequired(AuthKind),
     #[error("credential id error: {0}")]
     CredentialId(String),
-    #[error("credential store error: {0}")]
-    CredentialStore(#[from] CredStoreError),
     #[error("oauth error: {0}")]
     OAuth(String),
     #[error("oauth refresh failed: {0}")]
     RefreshFailed(String),
+    #[error("credential unavailable: {0}")]
+    Unavailable(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,97 +56,58 @@ pub enum RefreshOutcome {
     NotApplicable,
 }
 
-enum AuthStrategy {
-    Static(StaticTokenStrategy),
-    OAuth(Box<OAuth2PkceStrategy>),
+/// One mount credential resolved to the domains it authorizes. Domain matching
+/// lives here; the credential bytes live in the `CredentialService` under `id`.
+struct Strategy {
+    kind: AuthKind,
+    id: CredentialId,
+    domains: Vec<String>,
 }
 
-/// Manages authentication header injection for HTTP requests by delegating to
-/// per-mount strategies.
+impl Strategy {
+    fn applies_to_url(&self, url: &str) -> bool {
+        let host = url::Url::parse(url)
+            .ok()
+            .and_then(|u| u.host_str().map(String::from));
+        host.is_some_and(|host| self.domains.iter().any(|domain| domain == &host))
+    }
+}
+
+/// Maps a mount's auth config onto per-credential strategies over a shared
+/// [`CredentialService`]. A no-auth mount has no strategies and no service.
 pub struct AuthManager {
-    strategies: Vec<AuthStrategy>,
-}
-
-struct StaticTokenStrategy {
-    domain: String,
-    header_name: String,
-    header_value: Option<String>,
-}
-
-struct AuthStoreContext {
-    provider_name: String,
-    store: Arc<dyn CredentialStore>,
-    oauth_http: reqwest_oauth2::Client,
-}
-
-struct OAuth2PkceStrategy {
-    request: OAuthRequest,
-    credential_id: CredentialId,
-    store: Arc<dyn CredentialStore>,
-    oauth_http: reqwest_oauth2::Client,
-    current: ArcSwapOption<CredentialEntry>,
-    refreshes: Group<String, Option<CredentialEntry>, String>,
-}
-
-impl AuthStrategy {
-    fn headers_for_url(&self, url: &str) -> Vec<(String, String)> {
-        match self {
-            Self::Static(strategy) => strategy.headers_for_url(url),
-            Self::OAuth(strategy) => strategy.headers_for_url(url),
-        }
-    }
-
-    fn requires_auth_for_url(&self, url: &str) -> bool {
-        match self {
-            Self::Static(strategy) => strategy.requires_auth_for_url(url),
-            Self::OAuth(strategy) => strategy.requires_auth_for_url(url),
-        }
-    }
-
-    async fn prepare_for_url(&self, url: &str) -> Result<(), InjectError> {
-        match self {
-            Self::Static(_) => Ok(()),
-            Self::OAuth(strategy) => strategy.prepare_for_url(url).await,
-        }
-    }
-
-    fn should_refresh_for_response(
-        &self,
-        url: &str,
-        status: reqwest::StatusCode,
-        headers: &reqwest::header::HeaderMap,
-    ) -> bool {
-        match self {
-            Self::Static(_) => false,
-            Self::OAuth(strategy) => strategy.should_refresh_for_response(url, status, headers),
-        }
-    }
-
-    async fn refresh_for_url(&self, url: &str) -> Result<RefreshOutcome, InjectError> {
-        match self {
-            Self::Static(_) => Ok(RefreshOutcome::NotApplicable),
-            Self::OAuth(strategy) => strategy.refresh_for_url(url).await,
-        }
-    }
+    service: Option<Arc<CredentialService>>,
+    strategies: Vec<Strategy>,
 }
 
 impl AuthManager {
     pub fn none() -> Self {
-        Self { strategies: vec![] }
+        Self {
+            service: None,
+            strategies: vec![],
+        }
     }
 
-    fn from_configs_manifest_store(
+    /// Build over a shared service (the daemon-wide credential owner). Each
+    /// strategy registers its credential with the service.
+    pub fn from_configs_manifest_service(
         configs: &[Auth],
         manifest: Option<&AuthManifest>,
-        store_context: Option<&AuthStoreContext>,
+        provider_name: &str,
+        service: Arc<CredentialService>,
     ) -> Result<Self, InjectError> {
         let mut strategies = Vec::new();
         for config in configs {
-            strategies.extend(Self::build_strategies(config, manifest, store_context)?);
+            strategies.extend(build_strategies(config, manifest, provider_name, &service)?);
         }
-        Ok(Self { strategies })
+        Ok(Self {
+            service: Some(service),
+            strategies,
+        })
     }
 
+    /// Test/standalone constructor: build a dedicated service around `store` and
+    /// `oauth_http`, then register strategies against it.
     #[doc(hidden)]
     pub fn from_configs_manifest_store_with_http(
         configs: &[Auth],
@@ -149,80 +116,55 @@ impl AuthManager {
         store: Arc<dyn CredentialStore>,
         oauth_http: reqwest_oauth2::Client,
     ) -> Result<Self, InjectError> {
-        let context = AuthStoreContext {
-            provider_name: provider_name.into(),
+        let provider_name = provider_name.into();
+        let service = Arc::new(CredentialService::new(
             store,
-            oauth_http,
-        };
-        Self::from_configs_manifest_store(configs, manifest, Some(&context))
-    }
-
-    pub fn from_configs_manifest_store_with_store(
-        configs: &[Auth],
-        manifest: Option<&AuthManifest>,
-        provider_name: impl Into<String>,
-        store: Arc<dyn CredentialStore>,
-    ) -> Result<Self, InjectError> {
-        let oauth_http = reqwest_oauth2::ClientBuilder::new()
-            .redirect(reqwest_oauth2::redirect::Policy::none())
-            .build()
-            .map_err(|e| InjectError::OAuth(e.to_string()))?;
-        Self::from_configs_manifest_store_with_http(
-            configs,
-            manifest,
-            provider_name,
-            store,
-            oauth_http,
-        )
-    }
-
-    fn build_strategies(
-        config: &Auth,
-        manifest: Option<&AuthManifest>,
-        store_context: Option<&AuthStoreContext>,
-    ) -> Result<Vec<AuthStrategy>, InjectError> {
-        match config {
-            Auth::StaticToken(config) => {
-                StaticTokenStrategy::from_manifest_config(config, manifest, store_context)
-                    .map(|strategies| strategies.into_iter().map(AuthStrategy::Static).collect())
-            },
-            Auth::OAuth(config) => {
-                let context =
-                    store_context.ok_or(InjectError::CredentialStoreRequired(AuthKind::OAuth))?;
-                let strategy = OAuth2PkceStrategy::from_manifest_config(
-                    config,
-                    manifest,
-                    context.provider_name.as_str(),
-                    Arc::clone(&context.store),
-                    context.oauth_http.clone(),
-                )?;
-                Ok(vec![AuthStrategy::OAuth(Box::new(strategy))])
-            },
-        }
+            OAuthClient::from_http_client(oauth_http),
+        ));
+        Self::from_configs_manifest_service(configs, manifest, &provider_name, service)
     }
 
     pub async fn prepare_for_url(&self, url: &str) -> Result<(), InjectError> {
+        let Some(service) = &self.service else {
+            return Ok(());
+        };
         for strategy in self
             .strategies
             .iter()
-            .filter(|strategy| strategy.requires_auth_for_url(url))
+            .filter(|strategy| strategy.kind == AuthKind::OAuth && strategy.applies_to_url(url))
         {
-            strategy.prepare_for_url(url).await?;
+            match service.authorization(&strategy.id).await {
+                // A never-authorized credential falls through to the empty-headers
+                // "no credentials" denial in the caller; a refresh failure fails
+                // the prepare outright. Both deny.
+                Ok(_) | Err(AuthUnavailable::Missing) => {},
+                Err(error) => return Err(InjectError::Unavailable(error.to_string())),
+            }
         }
         Ok(())
     }
 
     pub fn headers_for_url(&self, url: &str) -> Vec<(String, String)> {
+        let Some(service) = &self.service else {
+            return Vec::new();
+        };
         self.strategies
             .iter()
-            .flat_map(|strategy| strategy.headers_for_url(url))
+            .filter(|strategy| strategy.applies_to_url(url))
+            .filter_map(|strategy| service.cached_authorization(&strategy.id))
+            .map(|material| {
+                (
+                    material.name().to_string(),
+                    material.expose_value().to_string(),
+                )
+            })
             .collect()
     }
 
     pub fn requires_auth_for_url(&self, url: &str) -> bool {
         self.strategies
             .iter()
-            .any(|strategy| strategy.requires_auth_for_url(url))
+            .any(|strategy| strategy.applies_to_url(url))
     }
 
     pub fn should_refresh_for_response(
@@ -231,295 +173,126 @@ impl AuthManager {
         status: reqwest::StatusCode,
         headers: &reqwest::header::HeaderMap,
     ) -> bool {
-        self.strategies
-            .iter()
-            .any(|strategy| strategy.should_refresh_for_response(url, status, headers))
+        self.strategies.iter().any(|strategy| {
+            strategy.kind == AuthKind::OAuth
+                && strategy.applies_to_url(url)
+                && oauth_should_refresh(status, headers)
+        })
     }
 
     pub async fn refresh_for_url(&self, url: &str) -> Result<RefreshOutcome, InjectError> {
+        let Some(service) = &self.service else {
+            return Ok(RefreshOutcome::NotApplicable);
+        };
         let mut saw_no_credential = false;
-        for strategy in &self.strategies {
-            match strategy.refresh_for_url(url).await? {
-                RefreshOutcome::Refreshed => return Ok(RefreshOutcome::Refreshed),
-                RefreshOutcome::NoCredential => saw_no_credential = true,
-                RefreshOutcome::NotApplicable => {},
+        for strategy in self
+            .strategies
+            .iter()
+            .filter(|strategy| strategy.applies_to_url(url))
+        {
+            if strategy.kind != AuthKind::OAuth {
+                continue;
+            }
+            match service.refresh(&strategy.id).await {
+                Ok(Some(_)) => return Ok(RefreshOutcome::Refreshed),
+                Ok(None) => saw_no_credential = true,
+                Err(error) => return Err(InjectError::RefreshFailed(error.to_string())),
             }
         }
-        if saw_no_credential {
-            Ok(RefreshOutcome::NoCredential)
+        Ok(if saw_no_credential {
+            RefreshOutcome::NoCredential
         } else {
-            Ok(RefreshOutcome::NotApplicable)
-        }
-    }
-}
-
-pub(crate) fn credential_store_for_file(credentials_file: &Path) -> Arc<dyn CredentialStore> {
-    Arc::new(FileStore::new(credentials_file))
-}
-
-impl StaticTokenStrategy {
-    fn from_manifest_config(
-        config: &StaticToken,
-        manifest: Option<&AuthManifest>,
-        store_context: Option<&AuthStoreContext>,
-    ) -> Result<Vec<Self>, InjectError> {
-        let manifest = manifest.ok_or(InjectError::ManifestRequired(AuthKind::StaticToken))?;
-        let scheme = manifest
-            .resolve_static_scheme(config.scheme.as_deref())
-            .map_err(InjectError::from)?;
-        let header_value = Self::credential_value(config, &scheme.key, store_context)?
-            .map(|token| format!("{}{}", scheme.value_prefix, token));
-        let header_name = scheme
-            .header_name
-            .clone()
-            .unwrap_or_else(|| "Authorization".to_string());
-        Ok(scheme
-            .inject_domains
-            .iter()
-            .map(|domain| Self {
-                domain: domain.clone(),
-                header_name: header_name.clone(),
-                header_value: header_value.clone(),
-            })
-            .collect())
-    }
-
-    fn credential_value(
-        config: &StaticToken,
-        scheme: &str,
-        store_context: Option<&AuthStoreContext>,
-    ) -> Result<Option<String>, InjectError> {
-        let context =
-            store_context.ok_or(InjectError::CredentialStoreRequired(AuthKind::StaticToken))?;
-        let account = config
-            .account
-            .clone()
-            .unwrap_or_else(|| DEFAULT_ACCOUNT.to_string());
-        let credential_id = CredentialId::new(&context.provider_name, scheme, account)
-            .map_err(|e| InjectError::CredentialId(e.to_string()))?;
-        Ok(context
-            .store
-            .get(&credential_id)?
-            .filter(|entry| entry.kind() == AuthKind::StaticToken)
-            .map(|entry| entry.access_token().expose_secret().to_string()))
-    }
-
-    fn applies_to_url(&self, url: &str) -> bool {
-        let host = url::Url::parse(url)
-            .ok()
-            .and_then(|u| u.host_str().map(String::from));
-        host.is_some_and(|host| host == self.domain)
-    }
-}
-
-impl StaticTokenStrategy {
-    fn headers_for_url(&self, url: &str) -> Vec<(String, String)> {
-        if !self.applies_to_url(url) {
-            return Vec::new();
-        }
-        self.header_value.as_ref().map_or_else(Vec::new, |value| {
-            vec![(self.header_name.clone(), value.clone())]
+            RefreshOutcome::NotApplicable
         })
     }
+}
 
-    fn requires_auth_for_url(&self, url: &str) -> bool {
-        self.applies_to_url(url)
+fn build_strategies(
+    config: &Auth,
+    manifest: Option<&AuthManifest>,
+    provider_name: &str,
+    service: &CredentialService,
+) -> Result<Vec<Strategy>, InjectError> {
+    match config {
+        Auth::StaticToken(inner) => build_static(config, inner, manifest, provider_name, service),
+        Auth::OAuth(inner) => build_oauth(config, inner, manifest, provider_name, service),
     }
 }
 
-impl OAuth2PkceStrategy {
-    fn from_manifest_config(
-        config: &OAuth,
-        manifest: Option<&AuthManifest>,
-        provider_name: &str,
-        store: Arc<dyn CredentialStore>,
-        oauth_http: reqwest_oauth2::Client,
-    ) -> Result<Self, InjectError> {
-        let manifest = manifest.ok_or(InjectError::ManifestRequired(AuthKind::OAuth))?;
-        let scheme = manifest
-            .resolve_oauth_scheme(config.scheme.as_deref())
-            .map_err(InjectError::from)?
-            .clone();
-        let account = config
-            .account
-            .clone()
-            .unwrap_or_else(|| DEFAULT_ACCOUNT.to_string());
-        let credential_id = CredentialId::new(provider_name, &scheme.key, account)
-            .map_err(|e| InjectError::CredentialId(e.to_string()))?;
-        let current = store.get(&credential_id)?;
-        let request = OAuthRequest::from_mount_config(Some(config), scheme)?;
-        Ok(Self {
-            request,
-            credential_id,
-            store,
-            oauth_http,
-            current: ArcSwapOption::from(current.map(Arc::new)),
-            refreshes: Group::new(),
-        })
-    }
-
-    fn applies_to_url(&self, url: &str) -> bool {
-        let host = url::Url::parse(url)
-            .ok()
-            .and_then(|u| u.host_str().map(String::from));
-        host.is_some_and(|host| {
-            self.request
-                .scheme()
-                .inject_domains
-                .iter()
-                .any(|domain| domain == &host)
-        })
-    }
-
-    fn header_name(&self) -> String {
-        self.request
-            .scheme()
-            .inject_header_name
-            .clone()
-            .unwrap_or_else(|| "Authorization".to_string())
-    }
-
-    async fn refresh_if_needed(&self, force: bool) -> Result<Option<CredentialEntry>, InjectError> {
-        let prior = self.current.load_full();
-        if !force && prior.as_deref().is_some_and(oauth_entry_is_fresh) {
-            return Ok(prior.as_deref().cloned());
-        }
-
-        if !force
-            && let Some(stored) = self.load_store_entry()?
-            && oauth_entry_is_fresh(&stored)
-        {
-            self.current.store(Some(Arc::new(stored.clone())));
-            return Ok(Some(stored));
-        }
-
-        let key = self.credential_id.storage_key();
-        let result = self
-            .refreshes
-            .work(&key, async move {
-                self.refresh_under_lock(force)
-                    .await
-                    .map_err(|e| e.to_string())
-            })
-            .await;
-        match result {
-            Ok(entry) => Ok(entry),
-            Err(Some(error)) => Err(InjectError::RefreshFailed(error)),
-            Err(None) => Err(InjectError::RefreshFailed(
-                "refresh leader failed".to_string(),
-            )),
-        }
-    }
-
-    async fn refresh_under_lock(
-        &self,
-        force: bool,
-    ) -> Result<Option<CredentialEntry>, InjectError> {
-        let current = self.current.load_full();
-        let Some(stored) = self.load_store_entry()? else {
-            self.current.store(None);
-            return Ok(None);
-        };
-
-        if stored_entry_satisfies(&stored, current.as_deref(), force) {
-            self.current.store(Some(Arc::new(stored.clone())));
-            return Ok(Some(stored));
-        }
-
-        let Some(refresh_token) = stored.refresh_token() else {
-            self.current.store(Some(Arc::new(stored.clone())));
-            return if force {
-                Err(InjectError::RefreshFailed(format!(
-                    "OAuth credential {} has no refresh token",
-                    self.credential_id
-                )))
-            } else {
-                Ok(Some(stored))
-            };
-        };
-
-        let client = OAuthClient::from_http_client(self.oauth_http.clone());
-        match client.refresh(self.request.clone(), refresh_token).await {
-            Ok(refreshed) => {
-                self.store.put(&self.credential_id, &refreshed)?;
-                self.current.store(Some(Arc::new(refreshed.clone())));
-                Ok(Some(refreshed))
-            },
-            Err(OAuthError::TokenEndpoint { error, .. }) if error == "invalid_grant" => {
-                self.store.delete(&self.credential_id)?;
-                self.current.store(None);
-                Err(InjectError::RefreshFailed(
-                    "OAuth refresh token was rejected".to_string(),
-                ))
-            },
-            Err(error) => Err(InjectError::OAuth(error.to_string())),
-        }
-    }
-
-    fn load_store_entry(&self) -> Result<Option<CredentialEntry>, InjectError> {
-        let entry = self.store.get(&self.credential_id)?;
-        Ok(entry.filter(|entry| entry.kind() == AuthKind::OAuth))
-    }
+fn build_static(
+    auth: &Auth,
+    config: &StaticToken,
+    manifest: Option<&AuthManifest>,
+    provider_name: &str,
+    service: &CredentialService,
+) -> Result<Vec<Strategy>, InjectError> {
+    let manifest = manifest.ok_or(InjectError::ManifestRequired(AuthKind::StaticToken))?;
+    let scheme = manifest
+        .resolve_static_scheme(config.scheme.as_deref())
+        .map_err(InjectError::from)?;
+    let id = credential_id(provider_name, auth, &scheme.key)?;
+    let header_name = scheme
+        .header_name
+        .clone()
+        .unwrap_or_else(|| "Authorization".to_string());
+    let value_prefix = scheme.value_prefix.clone();
+    let domains = scheme.inject_domains.clone();
+    service.register_static(id.clone(), header_name, value_prefix);
+    Ok(vec![Strategy {
+        kind: AuthKind::StaticToken,
+        id,
+        domains,
+    }])
 }
 
-impl OAuth2PkceStrategy {
-    fn headers_for_url(&self, url: &str) -> Vec<(String, String)> {
-        if !self.applies_to_url(url) {
-            return Vec::new();
-        }
-        let Some(entry) = self.current.load_full() else {
-            return Vec::new();
-        };
-        if !oauth_entry_is_valid(&entry) {
-            return Vec::new();
-        }
-        let value = format!(
-            "{}{}",
-            self.request.scheme().inject_value_prefix,
-            entry.access_token().expose_secret()
-        );
-        vec![(self.header_name(), value)]
-    }
+fn build_oauth(
+    auth: &Auth,
+    config: &OAuth,
+    manifest: Option<&AuthManifest>,
+    provider_name: &str,
+    service: &CredentialService,
+) -> Result<Vec<Strategy>, InjectError> {
+    let manifest = manifest.ok_or(InjectError::ManifestRequired(AuthKind::OAuth))?;
+    let scheme = manifest
+        .resolve_oauth_scheme(config.scheme.as_deref())
+        .map_err(InjectError::from)?
+        .clone();
+    let id = credential_id(provider_name, auth, &scheme.key)?;
+    let request = OAuthRequest::from_mount_config(Some(config), scheme)?;
+    let domains = request.scheme().inject_domains.clone();
+    service.register_oauth(id.clone(), request);
+    Ok(vec![Strategy {
+        kind: AuthKind::OAuth,
+        id,
+        domains,
+    }])
+}
 
-    fn requires_auth_for_url(&self, url: &str) -> bool {
-        self.applies_to_url(url)
-    }
+fn credential_id(
+    provider_name: &str,
+    auth: &Auth,
+    scheme: &str,
+) -> Result<CredentialId, InjectError> {
+    let provider =
+        ProviderName::new(provider_name).map_err(|e| InjectError::CredentialId(e.to_string()))?;
+    CredentialId::for_mount(&provider, auth, scheme)
+        .map_err(|e| InjectError::CredentialId(e.to_string()))
+}
 
-    async fn prepare_for_url(&self, url: &str) -> Result<(), InjectError> {
-        if !self.applies_to_url(url) {
-            return Ok(());
-        }
-        let prior = self.current.load_full();
-        match self.refresh_if_needed(false).await {
-            Ok(_) => Ok(()),
-            Err(_error) if prior.as_deref().is_some_and(oauth_entry_is_valid) => Ok(()),
-            Err(error) => Err(error),
-        }
-    }
+fn oauth_should_refresh(status: reqwest::StatusCode, headers: &reqwest::header::HeaderMap) -> bool {
+    status == reqwest::StatusCode::UNAUTHORIZED
+        || (status == reqwest::StatusCode::FORBIDDEN && bearer_invalid_token(headers))
+}
 
-    fn should_refresh_for_response(
-        &self,
-        url: &str,
-        status: reqwest::StatusCode,
-        headers: &reqwest::header::HeaderMap,
-    ) -> bool {
-        if !self.applies_to_url(url) {
-            return false;
-        }
-        status == reqwest::StatusCode::UNAUTHORIZED
-            || (status == reqwest::StatusCode::FORBIDDEN && bearer_invalid_token(headers))
-    }
-
-    async fn refresh_for_url(&self, url: &str) -> Result<RefreshOutcome, InjectError> {
-        if !self.applies_to_url(url) {
-            return Ok(RefreshOutcome::NotApplicable);
-        }
-        match self.refresh_if_needed(true).await {
-            Ok(Some(_)) => Ok(RefreshOutcome::Refreshed),
-            Ok(None) => Ok(RefreshOutcome::NoCredential),
-            Err(error) => Err(error),
-        }
-    }
+fn bearer_invalid_token(headers: &reqwest::header::HeaderMap) -> bool {
+    headers
+        .get_all(reqwest::header::WWW_AUTHENTICATE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .any(|value| {
+            let lower = value.to_ascii_lowercase();
+            lower.contains("bearer") && lower.contains("invalid_token")
+        })
 }
 
 impl From<OAuthError> for InjectError {
@@ -548,51 +321,4 @@ impl From<SchemeResolveError> for InjectError {
             },
         }
     }
-}
-
-fn oauth_entry_is_valid(entry: &CredentialEntry) -> bool {
-    entry
-        .expires_at()
-        .is_none_or(|expires_at| expires_at > OffsetDateTime::now_utc())
-}
-
-fn oauth_entry_is_fresh(entry: &CredentialEntry) -> bool {
-    entry
-        .expires_at()
-        .is_none_or(|expires_at| expires_at - OffsetDateTime::now_utc() > OAUTH_REFRESH_WINDOW)
-}
-
-fn stored_entry_satisfies(
-    stored: &CredentialEntry,
-    current: Option<&CredentialEntry>,
-    force: bool,
-) -> bool {
-    if !oauth_entry_is_valid(stored) {
-        return false;
-    }
-    if !force {
-        return oauth_entry_is_fresh(stored);
-    }
-    current.is_none_or(|current| !same_oauth_token(stored, current))
-}
-
-fn same_oauth_token(left: &CredentialEntry, right: &CredentialEntry) -> bool {
-    left.access_token().expose_secret() == right.access_token().expose_secret()
-        && left
-            .refresh_token()
-            .map(|token| token.expose_secret().to_owned())
-            == right
-                .refresh_token()
-                .map(|token| token.expose_secret().to_owned())
-}
-
-fn bearer_invalid_token(headers: &reqwest::header::HeaderMap) -> bool {
-    headers
-        .get_all(reqwest::header::WWW_AUTHENTICATE)
-        .iter()
-        .filter_map(|value| value.to_str().ok())
-        .any(|value| {
-            let lower = value.to_ascii_lowercase();
-            lower.contains("bearer") && lower.contains("invalid_token")
-        })
 }

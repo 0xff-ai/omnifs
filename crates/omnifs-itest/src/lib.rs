@@ -84,6 +84,8 @@ impl RuntimeHarness {
             path: cache_dir.path().to_path_buf(),
             source: std::io::Error::other(error.to_string()),
         })?;
+        let credential_service =
+            omnifs_engine::test_support::auth::credential_service_for_file(&paths.credentials_file);
         let runtime = Engine::new_for_callout_tests(
             engine,
             &wasm_path,
@@ -96,6 +98,7 @@ impl RuntimeHarness {
                 &paths.credentials_file,
             ),
             &caches,
+            &credential_service,
         )?;
 
         Ok(Self {

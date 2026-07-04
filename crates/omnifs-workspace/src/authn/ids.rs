@@ -318,15 +318,15 @@ mod tests {
         }
     }
 
-    /// Parity with the host derivation (`omnifs-engine/src/auth_inject.rs`): account
-    /// from the mount auth config or the literal "default", then
-    /// `CredentialId::new(provider_name, scheme_key, account)` where the
-    /// scheme key was resolved from the spec value or the manifest default.
+    /// Parity with the host injector derivation (`omnifs-engine/src/auth_inject.rs`),
+    /// which now calls `for_mount` directly: account from the mount auth config
+    /// or the literal "default", then `CredentialId::new(provider_name,
+    /// scheme_key, account)` where the scheme key was resolved from the spec
+    /// value or the manifest default.
     #[test]
     fn for_mount_matches_the_host_derivation() {
         use crate::mounts::{Auth, OAuth};
 
-        const HOST_DEFAULT_ACCOUNT: &str = "default";
         let provider = ProviderName::new("linear").unwrap();
         for (spec_scheme, account) in [(None, None), (Some("oauth-app"), Some("personal"))] {
             let auth = Auth::OAuth(OAuth {
@@ -339,7 +339,7 @@ mod tests {
             let resolved_scheme = auth.scheme().unwrap_or("oauth-app");
             let host_account = auth
                 .account()
-                .map_or_else(|| HOST_DEFAULT_ACCOUNT.to_owned(), str::to_owned);
+                .map_or_else(|| "default".to_owned(), str::to_owned);
             let host_expected = CredentialId::new("linear", resolved_scheme, host_account).unwrap();
             let got = CredentialId::for_mount(&provider, &auth, resolved_scheme).unwrap();
             assert_eq!(got, host_expected);

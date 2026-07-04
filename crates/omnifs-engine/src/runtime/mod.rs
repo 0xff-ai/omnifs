@@ -5,7 +5,7 @@
 //! Op execution is in `op_lifecycle`; WASI store plumbing is in `wasi`.
 
 use crate::archive::ArchiveExecutor;
-use crate::auth::{AuthManager, credential_store_for_file};
+use crate::auth::AuthManager;
 use crate::blob::{BlobExecutor, BlobLimits};
 use crate::blob_cache::BlobCache;
 use crate::cache::{Caches, Store};
@@ -21,6 +21,7 @@ use crate::instance::Instance;
 use crate::invalidation::InvalidationState;
 use crate::tree_refs::TreeRefs;
 use dashmap::DashMap;
+use omnifs_auth::CredentialService;
 use omnifs_caps::{Grant, PreopenedPath};
 use omnifs_core::path::Path;
 use omnifs_wit::provider::types as wit_types;
@@ -314,8 +315,18 @@ impl Runtime {
         cloner: Arc<GitCloner>,
         context: &HostContext,
         caches: &Arc<Caches>,
+        credential_service: &Arc<CredentialService>,
     ) -> std::result::Result<Self, BuildError> {
-        Self::build(engine, wasm_path, config, cloner, context, caches, false)
+        Self::build(
+            engine,
+            wasm_path,
+            config,
+            cloner,
+            context,
+            caches,
+            credential_service,
+            false,
+        )
     }
 
     #[doc(hidden)]
@@ -326,10 +337,21 @@ impl Runtime {
         cloner: Arc<GitCloner>,
         context: &HostContext,
         caches: &Arc<Caches>,
+        credential_service: &Arc<CredentialService>,
     ) -> std::result::Result<Self, BuildError> {
-        Self::build(engine, wasm_path, config, cloner, context, caches, true)
+        Self::build(
+            engine,
+            wasm_path,
+            config,
+            cloner,
+            context,
+            caches,
+            credential_service,
+            true,
+        )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn build(
         engine: &wasmtime::Engine,
         wasm_path: &StdPath,
@@ -337,6 +359,7 @@ impl Runtime {
         cloner: Arc<GitCloner>,
         context: &HostContext,
         caches: &Arc<Caches>,
+        credential_service: &Arc<CredentialService>,
         capture_test_callouts: bool,
     ) -> std::result::Result<Self, BuildError> {
         let (test_callouts, test_rx) = if capture_test_callouts {
@@ -383,13 +406,12 @@ impl Runtime {
         let auth = if config.auth.is_none() {
             Arc::new(AuthManager::none())
         } else {
-            let store = credential_store_for_file(context.credentials_file());
             Arc::new(
-                AuthManager::from_configs_manifest_store_with_store(
+                AuthManager::from_configs_manifest_service(
                     config.auth.as_slice(),
                     auth_manifest.as_ref(),
                     config.provider_name().as_str(),
-                    store,
+                    Arc::clone(credential_service),
                 )
                 .map_err(|e| BuildError::ProviderProtocol(format!("auth config error: {e}")))?,
             )

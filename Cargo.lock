@@ -2837,6 +2837,9 @@ dependencies = [
 name = "omnifs-auth"
 version = "0.2.1"
 dependencies = [
+ "arc-swap",
+ "async_singleflight",
+ "dashmap",
  "http",
  "oauth2",
  "omnifs-workspace",
