@@ -27,6 +27,7 @@ mod runtime;
 mod session;
 mod status;
 mod style;
+mod telemetry;
 mod test_support;
 mod token_source;
 mod upgrade;
@@ -39,9 +40,21 @@ use cli::Cli;
 async fn main() {
     let cli = Cli::parse();
     init_tracing(cli.verbose);
+    // Capture the telemetry label before `run` consumes `cli`. `None` for the
+    // internal `daemon` subcommand, which records `daemon.jsonl` itself.
+    // Subcommands that `std::process::exit` on their own (shell, doctor) record
+    // at their exit site; this covers every command that returns to `main`.
+    let telemetry_label = cli.command.telemetry_label();
     match run(cli).await {
-        Ok(()) => {},
+        Ok(()) => {
+            if let Some(cmd) = telemetry_label {
+                telemetry::record_cli_exit(cmd, 0);
+            }
+        },
         Err(error) => {
+            if let Some(cmd) = telemetry_label {
+                telemetry::record_cli_exit(cmd, 1);
+            }
             anstream::eprint!("{}", error::render(&error));
             std::process::exit(1);
         },

@@ -99,6 +99,31 @@ impl From<bool> for OutputFormat {
 }
 
 impl Commands {
+    /// Top-level subcommand label for `cli.jsonl` telemetry, or `None` for the
+    /// internal `daemon` subcommand (which records `daemon.jsonl` instead of
+    /// counting as CLI usage).
+    pub(crate) fn telemetry_label(&self) -> Option<&'static str> {
+        Some(match self {
+            Self::Status(_) => "status",
+            Self::Up(_) => "up",
+            Self::Down(_) => "down",
+            Self::Logs(_) => "logs",
+            Self::Inspect(_) => "inspect",
+            Self::Shell(_) => "shell",
+            Self::Setup(_) => "setup",
+            Self::Init(_) => "init",
+            Self::Mounts(_) => "mounts",
+            Self::Providers(_) => "providers",
+            Self::Reset(_) => "reset",
+            Self::Doctor(_) => "doctor",
+            Self::Completions(_) => "completions",
+            Self::Version(_) => "version",
+            Self::Debug(_) => "debug",
+            #[cfg(feature = "daemon")]
+            Self::Daemon(_) => return None,
+        })
+    }
+
     pub async fn run(self) -> anyhow::Result<()> {
         match self {
             Self::Doctor(args) => {
@@ -129,9 +154,13 @@ impl Commands {
 }
 
 fn exit_for_verdict(verdict: DoctorVerdict) -> ! {
-    std::process::exit(match verdict {
+    let code = match verdict {
         DoctorVerdict::Clean => 0,
         DoctorVerdict::Failures => 1,
         DoctorVerdict::Warnings => 2,
-    })
+    };
+    // `doctor` exits here rather than returning to `main`, so record its true
+    // verdict code at this exit site.
+    crate::telemetry::record_cli_exit("doctor", code);
+    std::process::exit(code)
 }

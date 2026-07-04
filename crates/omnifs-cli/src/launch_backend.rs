@@ -237,7 +237,11 @@ pub(crate) struct LaunchParams {
 // --- Native launch -----------------------------------------------------------
 
 #[cfg(feature = "daemon")]
-pub(crate) async fn launch_native(cache_dir: &Path, control_addr: SocketAddr) -> Result<()> {
+pub(crate) async fn launch_native(
+    cache_dir: &Path,
+    control_addr: SocketAddr,
+    telemetry_enabled: bool,
+) -> Result<()> {
     use std::process::Stdio;
     use std::time::Duration;
 
@@ -275,6 +279,12 @@ pub(crate) async fn launch_native(cache_dir: &Path, control_addr: SocketAddr) ->
     // the daemon's startup diagnostics in daemon.log.
     if std::env::var_os("RUST_LOG").is_none() {
         command.env("RUST_LOG", "info");
+    }
+
+    // Carry the telemetry off-switch into the daemon child. Only set it when
+    // disabled: an unset `OMNIFS_TELEMETRY` reads as enabled.
+    if !telemetry_enabled {
+        command.env(omnifs_home::telemetry::ENV_SWITCH, "0");
     }
 
     // Own process group so the daemon is not signalled when the CLI or its
@@ -325,7 +335,11 @@ pub(crate) async fn launch_native(cache_dir: &Path, control_addr: SocketAddr) ->
 }
 
 #[cfg(not(feature = "daemon"))]
-pub(crate) async fn launch_native(_cache_dir: &Path, _control_addr: SocketAddr) -> Result<()> {
+pub(crate) async fn launch_native(
+    _cache_dir: &Path,
+    _control_addr: SocketAddr,
+    _telemetry_enabled: bool,
+) -> Result<()> {
     anyhow::bail!(
         "this omnifs binary was built without host-native daemon support; \
          configure the Docker runtime or rebuild with the `daemon` feature"
@@ -484,6 +498,7 @@ mod tests {
                     image: Some("ghcr.io/example/custom:1.2.3".into()),
                     ..Default::default()
                 },
+                ..Default::default()
             };
             let target = DockerTarget::resolve(None, None, &config).unwrap();
             assert_eq!(target.image().as_str(), "ghcr.io/example/custom:1.2.3");
@@ -500,6 +515,7 @@ mod tests {
                         image: Some("ghcr.io/example/config:1.0.0".into()),
                         ..Default::default()
                     },
+                    ..Default::default()
                 };
                 let target = DockerTarget::resolve(None, None, &config).unwrap();
                 assert_eq!(target.image().as_str(), "ghcr.io/example/env:9.9.9");
@@ -526,6 +542,7 @@ mod tests {
                         image: Some("ghcr.io/example/config:1.0.0".into()),
                         container_name: Some("omnifs-config".into()),
                     },
+                    ..Default::default()
                 };
                 let backend = LaunchBackend::from_config(&config).unwrap();
                 let LaunchBackend::Docker(target) = backend else {
@@ -547,6 +564,7 @@ mod tests {
                         container_name: Some("omnifs-config".into()),
                         ..Default::default()
                     },
+                    ..Default::default()
                 };
                 let container_name = DockerTarget::resolve_container_name(None, &config).unwrap();
                 assert_eq!(container_name.as_str(), "omnifs-env");
