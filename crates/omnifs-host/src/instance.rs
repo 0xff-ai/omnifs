@@ -10,7 +10,7 @@
 use std::path::{Component as PathComponent, Path, PathBuf};
 use std::sync::Arc;
 
-use crate::callouts::CalloutHost;
+use crate::callouts::{CalloutHost, ParkSignal};
 use futures::StreamExt;
 use wasmtime::component::{Component, Linker, ResourceTable};
 use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
@@ -52,11 +52,12 @@ enum Command {
 }
 
 impl Instance {
-    pub fn new(
+    pub(crate) fn new(
         engine: &wasmtime::Engine,
         wasm_path: &Path,
         config_bytes: Vec<u8>,
         preopens: &[PreopenedPath],
+        park_signal: Option<ParkSignal>,
     ) -> std::result::Result<Self, BuildError> {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
@@ -67,10 +68,17 @@ impl Instance {
         std::thread::Builder::new()
             .name("omnifs-provider-instance".to_string())
             .spawn(move || {
-                let runtime = match tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                {
+                let mut builder = tokio::runtime::Builder::new_current_thread();
+                builder.enable_all();
+                // Test capture only: signal the harness each time this
+                // single-threaded executor goes idle, so it can close a
+                // captured callout burst on the executor's real quiescence
+                // boundary rather than a timing heuristic. `None` in
+                // production, where nothing observes callout bursts.
+                if let Some(park_signal) = park_signal {
+                    builder.on_thread_park(move || park_signal.notify());
+                }
+                let runtime = match builder.build() {
                     Ok(runtime) => runtime,
                     Err(error) => {
                         let _ = ready_tx.send(Err(BuildError::ProviderProtocol(format!(
