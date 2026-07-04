@@ -9,6 +9,7 @@ use omnifs_engine::HostContext;
 use omnifs_nfs::NfsMountOptions;
 use omnifs_workspace::layout::{Daemon, Workspace, WorkspaceLayout};
 use omnifs_workspace::mounts::materialize::MaterializationMode;
+use std::fmt::Write as _;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 
@@ -143,8 +144,9 @@ impl DaemonContext {
         frontend: Option<FrontendInfo>,
         mounts: Vec<MountInfo>,
         failed: Vec<MountFailure>,
+        credential_degraded: &[(String, String)],
     ) -> DaemonStatus {
-        let health = self.health(frontend.as_ref(), &mounts, &failed);
+        let health = self.health(frontend.as_ref(), &mounts, &failed, credential_degraded);
         DaemonStatus {
             version: env!("CARGO_PKG_VERSION").to_string(),
             api_major: API_MAJOR,
@@ -168,6 +170,7 @@ impl DaemonContext {
         frontend: Option<&FrontendInfo>,
         mounts: &[MountInfo],
         failed: &[MountFailure],
+        credential_degraded: &[(String, String)],
     ) -> DaemonHealth {
         DaemonHealth::new(vec![
             SubsystemHealth::new(
@@ -184,7 +187,7 @@ impl DaemonContext {
                 },
             ),
             self.frontend_health(frontend),
-            mount_health(mounts, failed),
+            mount_health(mounts, failed, credential_degraded),
         ])
     }
 
@@ -208,17 +211,39 @@ impl DaemonContext {
     }
 }
 
-fn mount_health(mounts: &[MountInfo], failed: &[MountFailure]) -> SubsystemHealth {
-    let state = match (mounts.is_empty(), failed.is_empty()) {
-        (_, true) => HealthState::Healthy,
-        (false, false) => HealthState::Degraded,
-        (true, false) => HealthState::Unhealthy,
+/// `credential_degraded` is `(mount, reason)` for a mount whose auth was not
+/// ready at mount-start (see `Runtime::credential_warning`). Unlike `failed`,
+/// a credential-degraded mount is still loaded and present in `mounts`; it
+/// only pulls the Mounts subsystem down to `Degraded`, never `Unhealthy`.
+fn mount_health(
+    mounts: &[MountInfo],
+    failed: &[MountFailure],
+    credential_degraded: &[(String, String)],
+) -> SubsystemHealth {
+    let state = if !failed.is_empty() && mounts.is_empty() {
+        HealthState::Unhealthy
+    } else if !failed.is_empty() || !credential_degraded.is_empty() {
+        HealthState::Degraded
+    } else {
+        HealthState::Healthy
     };
-    let message = if failed.is_empty() {
+    let mut message = if failed.is_empty() {
         format!("{} mount(s) loaded", mounts.len())
     } else {
         format!("{} mount(s) loaded, {} failed", mounts.len(), failed.len())
     };
+    if !credential_degraded.is_empty() {
+        let detail = credential_degraded
+            .iter()
+            .map(|(mount, reason)| format!("{mount}: {reason}"))
+            .collect::<Vec<_>>()
+            .join("; ");
+        let _ = write!(
+            message,
+            ", {} mount(s) with a degraded credential ({detail})",
+            credential_degraded.len()
+        );
+    }
     SubsystemHealth::new(DaemonSubsystem::Mounts, state, message)
 }
 

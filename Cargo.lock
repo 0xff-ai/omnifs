@@ -2843,6 +2843,7 @@ dependencies = [
  "http",
  "oauth2",
  "omnifs-workspace",
+ "rand 0.9.4",
  "rcgen",
  "reqwest 0.12.28",
  "secrecy",
@@ -2852,6 +2853,7 @@ dependencies = [
  "time",
  "tokio",
  "tokio-rustls",
+ "tracing",
  "url",
  "webbrowser",
 ]

@@ -293,6 +293,12 @@ impl MountRuntimes {
         &self.context
     }
 
+    /// The host-wide credential owner, shared across every mount. The daemon
+    /// spawns the proactive OAuth refresh loop on this shared handle.
+    pub fn credential_service(&self) -> &Arc<CredentialService> {
+        &self.credential_service
+    }
+
     pub fn get(&self, mount: &str) -> Option<Arc<Runtime>> {
         self.instances.read().get(mount).cloned()
     }

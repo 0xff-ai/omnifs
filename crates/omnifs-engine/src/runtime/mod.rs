@@ -34,7 +34,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::{fs, io};
-use tracing::debug;
+use tracing::{debug, warn};
 
 pub(crate) mod instance;
 pub(crate) mod registry;
@@ -122,6 +122,11 @@ pub struct Runtime {
     initialize_result: wit_types::InitializeResult,
     pub(crate) mount_name: String,
     pub(crate) provider_name: String,
+    /// Non-secret warning captured once at mount-start when a registered
+    /// credential is `Missing`/`Expired`/`NeedsConsent`. `None` once healthy
+    /// or when the mount has no auth. A build-time snapshot, not a live
+    /// poll: the daemon surfaces it in the Mounts subsystem health.
+    credential_warning: Option<String>,
     next_operation_id: AtomicU64,
     blob_cache: Arc<BlobCache>,
     trees: Arc<TreeRefs>,
@@ -304,6 +309,13 @@ impl Runtime {
         &self.provider_name
     }
 
+    /// Non-secret credential warning captured at mount-start, if the mount's
+    /// auth was not ready when the mount was built.
+    #[must_use]
+    pub fn credential_warning(&self) -> Option<&str> {
+        self.credential_warning.as_deref()
+    }
+
     pub fn namespace(&self) -> Namespace<'_> {
         Namespace { runtime: self }
     }
@@ -417,6 +429,20 @@ impl Runtime {
             )
         };
 
+        // Mount-start validation: a registered credential that is not usable
+        // yet does not block the mount from loading (reads that need it fail
+        // closed per the credential service), but it is worth a warn and a
+        // daemon-visible degraded signal rather than a silent wait for the
+        // first failing read.
+        let credential_warning =
+            crate::auth::build_time_credential_warning(credential_service, &auth);
+        if let Some(warning) = credential_warning.as_deref() {
+            warn!(
+                mount = mount_name,
+                warning, "mount credential is not ready at start"
+            );
+        }
+
         let trees = Arc::new(TreeRefs::new());
         let git = git::GitExecutor::new(cloner, capability.clone(), trees.clone());
 
@@ -450,6 +476,7 @@ impl Runtime {
             initialize_result,
             mount_name: mount_name.to_string(),
             provider_name: config.provider_name().to_string(),
+            credential_warning,
             next_operation_id: AtomicU64::new(1),
             blob_cache,
             trees,

@@ -106,23 +106,32 @@ impl Daemon {
     fn control_status(&self) -> DaemonStatus {
         let root_mount = self.registry.root_mount_name();
         let entries = self.registry.runtime_entries();
-        let mut mounts: Vec<MountInfo> = entries
-            .into_iter()
-            .map(|(mount, runtime)| MountInfo {
+        let mut mounts = Vec::with_capacity(entries.len());
+        let mut credential_degraded = Vec::new();
+        for (mount, runtime) in entries {
+            if let Some(warning) = runtime.credential_warning() {
+                credential_degraded.push((mount.clone(), warning.to_string()));
+            }
+            mounts.push(MountInfo {
                 root_mount: root_mount.as_deref() == Some(mount.as_str()),
                 provider_id: runtime.provider_name().to_string(),
                 mount,
-            })
-            .collect();
+            });
+        }
         mounts.sort_by(|a, b| a.mount.cmp(&b.mount));
+        credential_degraded.sort_by(|a, b| a.0.cmp(&b.0));
 
         let failed = self
             .last_failed
             .lock()
             .map(|failed| failed.clone())
             .unwrap_or_default();
-        self.context
-            .status(self.frontends.serving(), mounts, failed)
+        self.context.status(
+            self.frontends.serving(),
+            mounts,
+            failed,
+            &credential_degraded,
+        )
     }
 
     /// Converge the running mount set to `mounts/*.json`, synchronously. Runs

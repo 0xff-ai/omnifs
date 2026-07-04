@@ -18,11 +18,15 @@ use async_singleflight::Group;
 use dashmap::DashMap;
 use omnifs_workspace::authn::{AuthKind, CredentialId};
 use omnifs_workspace::creds::{CredStoreError, CredentialEntry, CredentialStore};
+use rand::rngs::SmallRng;
+use rand::{Rng, SeedableRng};
 use secrecy::{ExposeSecret, SecretString};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 use time::OffsetDateTime;
+use tokio::sync::Notify;
+use tracing::warn;
 
 /// The single freshness margin. A credential is usable only when at least this
 /// long remains before expiry; inside the window it is refreshed (OAuth) or
@@ -33,6 +37,22 @@ use time::OffsetDateTime;
 // not "1 minute" of wall-clock policy.
 #[allow(clippy::duration_suboptimal_units)]
 pub const REFRESH_WINDOW: Duration = Duration::from_secs(60);
+
+/// Extra sleep the proactive refresh loop adds atop the computed wait, as a
+/// fraction of it. Spreads out credentials whose deadlines coincide instead
+/// of refreshing them in lockstep.
+const REFRESH_JITTER_FRACTION: f64 = 0.10;
+
+/// Floor under the refresh loop's computed sleep. A transient refresh
+/// failure does not move the credential's `expires_at`, so without this
+/// floor a persistent failure would recompute a due-now sleep on every
+/// iteration and hammer the OAuth endpoint in a hot loop.
+const REFRESH_LOOP_MIN_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Fixed seed for the refresh loop's jitter PRNG. Deterministic (not system
+/// randomness) so a test driving the loop with paused time sees a
+/// reproducible sequence of wake-ups.
+const REFRESH_LOOP_SEED: u64 = 0x5EED_1E55_0A57_0000;
 
 /// The one expiry predicate. Every credential expiry decision (emit, refresh,
 /// health) routes through here. A credential with no expiry is always fresh.
@@ -130,6 +150,11 @@ pub struct CredentialService {
     /// Per-credential single-flight: concurrent refreshes for one id coalesce
     /// onto one endpoint call.
     refreshes: Group<String, Option<CredentialEntry>, String>,
+    /// Wakes [`spawn_refresh_loop`](Self::spawn_refresh_loop)'s sleep
+    /// immediately when credential state changes under it (`register_oauth`,
+    /// `store_entry`, `reload`), instead of waiting out whatever deadline it
+    /// last computed.
+    refresh_notify: Notify,
 }
 
 impl CredentialService {
@@ -140,6 +165,7 @@ impl CredentialService {
             oauth,
             states: DashMap::new(),
             refreshes: Group::new(),
+            refresh_notify: Notify::new(),
         }
     }
 
@@ -165,6 +191,11 @@ impl CredentialService {
             value_prefix,
             Some(request),
         );
+        // A newly-registered OAuth credential can change the refresh loop's
+        // nearest deadline (or give it its first one); wake it so a mount
+        // added long after the loop started sleeping is not stranded until
+        // some other credential's deadline happens to fire first.
+        self.refresh_notify.notify_one();
     }
 
     fn register(
@@ -312,6 +343,9 @@ impl CredentialService {
         {
             state.current.store(Some(Arc::new(entry)));
         }
+        // The write may have moved this credential's expiry (or healed a
+        // missing one); wake the refresh loop to recompute its deadline.
+        self.refresh_notify.notify_one();
         Ok(())
     }
 
@@ -321,6 +355,7 @@ impl CredentialService {
             state.current.store(None);
         }
         let _ = self.authorization(id).await;
+        self.refresh_notify.notify_one();
     }
 
     fn state(&self, id: &CredentialId) -> Option<Arc<CredentialState>> {
@@ -423,6 +458,78 @@ impl CredentialService {
             Err(error) => Err(error.to_string()),
         }
     }
+
+    /// Spawn the proactive OAuth refresh loop: it refreshes every registered
+    /// OAuth credential before it enters [`REFRESH_WINDOW`], so a request-path
+    /// [`authorization`](Self::authorization) call almost never has to await a
+    /// live refresh. Never returns on its own; abort the returned handle to
+    /// stop it (the daemon does this on shutdown).
+    #[must_use]
+    pub fn spawn_refresh_loop(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
+        let service = Arc::clone(self);
+        tokio::spawn(async move { service.run_refresh_loop().await })
+    }
+
+    async fn run_refresh_loop(self: Arc<Self>) {
+        let mut rng = SmallRng::seed_from_u64(REFRESH_LOOP_SEED);
+        loop {
+            let Some((id, deadline)) = self.earliest_oauth_deadline() else {
+                // Nothing to schedule around yet (no OAuth credential is
+                // registered, or none carries an expiry). `register_oauth`
+                // wakes this the moment that changes.
+                self.refresh_notify.notified().await;
+                continue;
+            };
+
+            let now = OffsetDateTime::now_utc();
+            let remaining = deadline - now;
+            let remaining = Duration::try_from(remaining).unwrap_or(Duration::ZERO);
+            let sleep_for =
+                (remaining + jitter(&mut rng, remaining)).max(REFRESH_LOOP_MIN_INTERVAL);
+
+            tokio::select! {
+                () = tokio::time::sleep(sleep_for) => {},
+                () = self.refresh_notify.notified() => continue,
+            }
+
+            // The deadline is `expires_at - REFRESH_WINDOW`: by construction,
+            // reaching it means this credential is due now, so force the
+            // rotation through the same single-flight `refresh` the rejection
+            // path uses, rather than re-deriving "is it still fresh" from
+            // `authorization` (which would just repeat the check that placed
+            // this deadline here). `refresh`'s same-token comparison still
+            // no-ops if another caller already rotated it concurrently.
+            if let Err(reason) = self.refresh(&id).await {
+                warn!(credential = %id, error = %reason, "proactive credential refresh failed");
+            }
+        }
+    }
+
+    /// The nearest `expires_at - REFRESH_WINDOW` across every registered
+    /// OAuth credential with a known expiry, and which credential it belongs
+    /// to. Reads only the in-memory cache (never the store): any external
+    /// write reaches this cache through `store_entry` or `reload`, both of
+    /// which wake the loop, so a stale read here is corrected on the next
+    /// wake rather than by polling the store on a timer.
+    fn earliest_oauth_deadline(&self) -> Option<(CredentialId, OffsetDateTime)> {
+        let window = time::Duration::try_from(REFRESH_WINDOW)
+            .expect("REFRESH_WINDOW fits in time::Duration");
+        self.states
+            .iter()
+            .filter(|entry| entry.value().kind == AuthKind::OAuth)
+            .filter_map(|entry| {
+                let expires_at = entry.value().current.load_full()?.expires_at()?;
+                Some((entry.key().clone(), expires_at - window))
+            })
+            .min_by_key(|(_, deadline)| *deadline)
+    }
+}
+
+/// Additive jitter up to [`REFRESH_JITTER_FRACTION`] of `base`, from a
+/// deterministic PRNG (never system randomness, so a test driving the loop
+/// under paused time sees a reproducible sequence of sleeps).
+fn jitter(rng: &mut SmallRng, base: Duration) -> Duration {
+    base.mul_f64(rng.random::<f64>() * REFRESH_JITTER_FRACTION)
 }
 
 fn compose(state: &CredentialState, entry: &CredentialEntry) -> HeaderMaterial {
