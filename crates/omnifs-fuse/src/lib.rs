@@ -38,6 +38,9 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 use tokio::runtime::Handle;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+
+const MAX_IN_FLIGHT_OPS: usize = 64;
 
 /// Shared slot for the kernel notifier. The daemon owns one, passes it to
 /// [`mount::run_blocking`] (which fills it once the session is up), and uses
@@ -59,39 +62,41 @@ pub fn invalidate_root_child(notifier: &NotifierHandle, name: &str) {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct Frontend {
     rt: Handle,
     registry: Arc<ProviderRegistry>,
     /// The renderer-neutral projection core. Owns the listing/lookup/read
     /// DECISION logic (cache consult+populate, pagination, the `@next`/`@all`
     /// controls and mount-root ignore files, invalidation drain). The FUSE
-    /// adapter enters the async runtime once per fuser callback to call it, then
-    /// builds kernel identity (inodes) and reply structures on the neutral
+    /// adapter dispatches each fuser callback onto the async runtime, then builds
+    /// kernel identity (inodes) and reply structures on the neutral
     /// `Node`/`Listing`/`ReadResult` it returns.
-    tree: Tree,
-    inodes: DashMap<u64, NodeEntry>,
+    tree: Arc<Tree>,
+    inodes: Arc<DashMap<u64, NodeEntry>>,
     /// Reverse lookup: (mount name, path) -> inode, for dedup.
     /// Shared via `Arc` so the FUSE notifier can also hold a reference
     /// and invalidate entries concurrently without cloning the map.
     path_to_inode: Arc<PathToInode>,
     notifier: NotifierHandle,
-    next_ino: AtomicU64,
-    dir_snapshots: DashMap<u64, DirSnapshot>,
-    next_fh: AtomicU64,
+    next_ino: Arc<AtomicU64>,
+    dir_snapshots: Arc<DashMap<u64, DirSnapshot>>,
+    next_fh: Arc<AtomicU64>,
     /// Caches file content by file handle; populated on first read, evicted on release.
-    file_cache: DashMap<u64, Vec<u8>>,
+    file_cache: Arc<DashMap<u64, Vec<u8>>>,
     /// `Tree`-owned ranged read handles bound to a FUSE `fh`, each paired with
     /// the kernel inode it serves. The handle owns its `Arc<Runtime>` + provider
     /// handle; the adapter drives `read`/`close` and promotes any learned size
     /// to the inode.
-    ranged_handles: DashMap<u64, RangedSlot>,
+    ranged_handles: Arc<DashMap<u64, RangedSlot>>,
     /// Latest upstream size observed by a per-handle follow pump, keyed by
     /// inode. `getattr` reports `max(entry.size, follow_sizes[ino])` so a
     /// polling `tail -f` sees a live file grow between its own reads. The size
     /// source is `Tree::probe_live_growth`; this map is the FUSE-side reporting.
     follow_sizes: Arc<DashMap<u64, u64>>,
     /// Abort handles for follow pumps, keyed by file handle; aborted on release.
-    follow_pumps: DashMap<u64, tokio::task::AbortHandle>,
+    follow_pumps: Arc<DashMap<u64, tokio::task::AbortHandle>>,
+    op_permits: Arc<Semaphore>,
 }
 
 impl Frontend {
@@ -120,7 +125,7 @@ impl Frontend {
         path_to_inode: Arc<PathToInode>,
         notifier: NotifierHandle,
     ) -> Self {
-        let inodes = DashMap::new();
+        let inodes = Arc::new(DashMap::new());
 
         let root_entry = NodeEntry {
             mount_name: registry.root_mount_name().unwrap_or_default(),
@@ -137,17 +142,18 @@ impl Frontend {
         Self {
             rt,
             registry,
-            tree,
+            tree: Arc::new(tree),
             inodes,
             path_to_inode,
             notifier,
-            next_ino: AtomicU64::new(2),
-            dir_snapshots: DashMap::new(),
-            next_fh: AtomicU64::new(1),
-            file_cache: DashMap::new(),
-            ranged_handles: DashMap::new(),
+            next_ino: Arc::new(AtomicU64::new(2)),
+            dir_snapshots: Arc::new(DashMap::new()),
+            next_fh: Arc::new(AtomicU64::new(1)),
+            file_cache: Arc::new(DashMap::new()),
+            ranged_handles: Arc::new(DashMap::new()),
             follow_sizes: Arc::new(DashMap::new()),
-            follow_pumps: DashMap::new(),
+            follow_pumps: Arc::new(DashMap::new()),
+            op_permits: Arc::new(Semaphore::new(MAX_IN_FLIGHT_OPS)),
         }
     }
 
@@ -155,6 +161,14 @@ impl Frontend {
         let mut config = fuser::Config::default();
         config.mount_options = vec![MountOption::RO, MountOption::FSName("omnifs".to_string())];
         config
+    }
+
+    async fn acquire_op_permit(&self) -> OwnedSemaphorePermit {
+        self.op_permits
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("FUSE op semaphore is never closed")
     }
 
     /// The runtime serving `mount`, if present. The live adapter reaches the

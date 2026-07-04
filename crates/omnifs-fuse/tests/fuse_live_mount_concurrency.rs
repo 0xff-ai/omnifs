@@ -33,7 +33,6 @@ const FAST_BUDGET: Duration = Duration::from_secs(2);
 const SLOW_BODY: &[u8] = b"slow-upstream-body";
 
 #[test]
-#[ignore = "enabled by F1"]
 #[allow(clippy::too_many_lines)] // one mount lifecycle: park, race, teardown
 fn fuse_live_mount_serves_fast_ops_while_provider_read_is_parked() {
     if std::env::var_os("OMNIFS_ACCEPTANCE_LIVE").is_none() {
