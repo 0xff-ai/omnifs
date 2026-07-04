@@ -141,6 +141,15 @@ RUN --mount=type=cache,id=omnifs-cargo-registry,target=/usr/local/cargo/registry
 
 # --- Runtime ---
 
+# --- Runtime base ---
+#
+# The single runtime setup for both images. `runtime-dev` (contributor, built
+# by `just dev`) copies the binary compiled in this Dockerfile; `runtime-release`
+# (built by `scripts/ci/build-runtime-image.sh`) injects a prebuilt binary as a
+# named build context. Because both descend from `runtime-base`, the apt/setup
+# block below has one owner — targeting `runtime-release` never builds the
+# compile toolchain, so no base image needs publishing.
+
 FROM ubuntu:25.10 AS runtime-base
 
 RUN apt-get update \
@@ -162,8 +171,13 @@ COPY scripts/container-zshrc.zsh /etc/zsh/zshrc
 
 COPY scripts/demo.sh /tmp/demo.sh
 COPY scripts/container-entrypoint.sh /usr/local/bin/omnifs-container-entrypoint
+# The container owns its guest paths. Declaring them as image ENV means the
+# entrypoint, the daemon (which resolves OMNIFS_HOME / OMNIFS_MOUNT_POINT from
+# the environment), interactive `docker exec` shells, and the welcome banner all
+# read one value, with no in-image file to source.
 ENV SHELL=/bin/zsh \
-    OMNIFS_HOME=/root/.omnifs
+    OMNIFS_HOME=/root/.omnifs \
+    OMNIFS_MOUNT_POINT=/omnifs
 RUN chmod 0755 /tmp/demo.sh /usr/local/bin/omnifs-container-entrypoint \
     && mkdir -p "$OMNIFS_HOME/cache" /tmp/omnifs-provider-manifests
 
@@ -171,16 +185,15 @@ SHELL ["/bin/zsh", "-c"]
 WORKDIR /
 ENTRYPOINT ["/usr/local/bin/omnifs-container-entrypoint"]
 
-FROM runtime-base AS runtime
-
 # Launcher↔image version handshake. The launcher inspects these labels
 # before `docker create` and refuses to start the container if it is
 # older than the value here — catches the footgun where a
 # contributor's `omnifs` on PATH (e.g. an old npm-installed release)
 # is used to launch an image built from a newer source tree that
 # wires new capabilities (ports, env vars, mounts) the old launcher
-# doesn't know about. `scripts/dev.ts` and CI both pass the workspace version
-# as the build arg.
+# doesn't know about. `scripts/dev.ts`, `scripts/ci/build-runtime-image.sh`,
+# and CI all pass the workspace version as the build arg. Set on `runtime-base`
+# so both final stages inherit the labels.
 #
 # OMNIFS_LAUNCH_PROTOCOL is set to `daemon-control-v<API_MAJOR>` and must
 # match the `EXPECTED_LAUNCH_PROTOCOL` constant in `crates/omnifs-cli/src/runtime.rs`.
@@ -191,5 +204,13 @@ ARG OMNIFS_LAUNCH_PROTOCOL=daemon-control-v1
 LABEL ai.0xff.omnifs.min-launcher-version=${OMNIFS_MIN_LAUNCHER_VERSION}
 LABEL ai.0xff.omnifs.launch-protocol=${OMNIFS_LAUNCH_PROTOCOL}
 
+# Contributor image: the binary compiled in this Dockerfile's `builder` stage.
+FROM runtime-base AS runtime-dev
 COPY --from=builder /omnifs /usr/local/bin/
+RUN chmod 0755 /usr/local/bin/omnifs
+
+# Release image: a prebuilt binary injected as the `omnifs-bin` build context by
+# `scripts/ci/build-runtime-image.sh`, so no compile toolchain is built.
+FROM runtime-base AS runtime-release
+COPY --from=omnifs-bin omnifs /usr/local/bin/omnifs
 RUN chmod 0755 /usr/local/bin/omnifs

@@ -21,6 +21,8 @@ const DB_IMAGE = "omnifs-dev-db:local";
 const DB_CONTAINER = "omnifs-dev-db";
 const K8S_COMPOSE_PROJECT = "omnifs-devcluster";
 const CONTROL_ADDR = "127.0.0.1:7878";
+// The dev launcher's view of the container's guest paths (declared as image ENV
+// in Dockerfile). Used for the home bind mount and the mount-readiness wait.
 const GUEST_HOME = "/root/.omnifs";
 const GUEST_MOUNT = "/omnifs";
 const GUEST_SHELL = "/bin/zsh";
@@ -492,7 +494,7 @@ async function removeContainer(name) {
 
 function buildImage(image, providerStore) {
   return run(
-    $`docker build -t ${image} --build-context ${`provider-wasm=${providerStore}`} --build-arg ${`OMNIFS_MIN_LAUNCHER_VERSION=${workspaceVersion()}`} .`,
+    $`docker build -t ${image} --target runtime-dev --build-context ${`provider-wasm=${providerStore}`} --build-arg ${`OMNIFS_MIN_LAUNCHER_VERSION=${workspaceVersion()}`} .`,
   );
 }
 

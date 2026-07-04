@@ -19,7 +19,7 @@ if [[ -o interactive ]]; then
     print -P "%B%F{7}        *           open a path, read the world.%f%b"
     print -P "%F{8}   ·         ⋆               .              *%f"
     print
-    print "omnifs alpha — projected filesystem at /omnifs"
+    print "omnifs alpha — projected filesystem at ${OMNIFS_MOUNT_POINT}"
     if command -v omnifs >/dev/null 2>&1; then
         print -P "%F{8}version $(omnifs --version 2>/dev/null | awk '{print $NF}')%f"
     fi

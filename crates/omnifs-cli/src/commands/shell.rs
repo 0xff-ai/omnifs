@@ -26,8 +26,9 @@ use clap::Args;
 use omnifs_api::MountInfo;
 
 use crate::launch_record::LaunchRecord;
-use crate::session::GUEST_FUSE_MOUNT;
+use crate::session::GUEST_MOUNT;
 use crate::workspace::Workspace;
+use omnifs_home::OMNIFS_MOUNT_POINT_ENV;
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct ShellArgs {
@@ -146,13 +147,11 @@ impl ShellArgs {
         if std::io::stdin().is_terminal() {
             cmd.arg("-t");
         }
-        cmd.arg("-w").arg(GUEST_FUSE_MOUNT);
+        cmd.arg("-w").arg(GUEST_MOUNT);
         cmd.arg(container);
         if self.command.is_empty() {
             cmd.arg(self.shell.as_deref().unwrap_or("/bin/zsh"));
-            anstream::println!(
-                "omnifs shell (container) at {GUEST_FUSE_MOUNT} (type `exit` to leave)"
-            );
+            anstream::println!("omnifs shell (container) at {GUEST_MOUNT} (type `exit` to leave)");
         } else {
             cmd.args(&self.command);
         }
@@ -195,7 +194,7 @@ fn prev_zdotdir() -> PathBuf {
 
 fn apply_context_env(cmd: &mut Command, mount_point: &Path, mounts: &[MountInfo], hermetic: bool) {
     cmd.env("OMNIFS_IN_SHELL", "1");
-    cmd.env("OMNIFS_MOUNT_POINT", mount_point);
+    cmd.env(OMNIFS_MOUNT_POINT_ENV, mount_point);
     cmd.env("OMNIFS_MOUNTS", mounts_env(mounts));
     if hermetic {
         cmd.env("OMNIFS_HERMETIC", "1");

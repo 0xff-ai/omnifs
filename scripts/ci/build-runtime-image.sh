@@ -30,20 +30,21 @@ if [[ ! -x "$binary" ]]; then
   exit 1
 fi
 
-context="$(mktemp -d)"
+# The release image is the top-level Dockerfile's `runtime-release` target: it
+# shares the `runtime-base` stage with the contributor image, and the prebuilt
+# binary is injected as the `omnifs-bin` named build context rather than copied
+# from a compile stage. Targeting `runtime-release` builds only
+# `ubuntu -> runtime-base -> runtime-release`, so the toolchain never runs.
+bindir="$(mktemp -d)"
 cleanup() {
-  rm -rf "$context"
+  rm -rf "$bindir"
 }
 trap cleanup EXIT
 
-mkdir -p "$context/scripts"
-cp "$binary" "$context/omnifs"
-cp "$root/scripts/demo.sh" "$context/scripts/demo.sh"
-cp "$root/scripts/container-entrypoint.sh" "$context/scripts/container-entrypoint.sh"
-cp "$root/scripts/container-zshrc.zsh" "$context/scripts/container-zshrc.zsh"
+cp "$binary" "$bindir/omnifs"
 
 if [[ -z "$metadata_file" ]]; then
-  metadata_file="$context/build-metadata.json"
+  metadata_file="$bindir/build-metadata.json"
 fi
 
 output_arg=(--load)
@@ -62,10 +63,12 @@ fi
 docker buildx build "${output_arg[@]}" \
   --metadata-file "$metadata_file" \
   --platform "$platform" \
+  --target runtime-release \
+  --build-context "omnifs-bin=$bindir" \
   --build-arg "OMNIFS_MIN_LAUNCHER_VERSION=${OMNIFS_MIN_LAUNCHER_VERSION}" \
   -t "$image" \
-  -f "$(dirname "${BASH_SOURCE[0]}")/Dockerfile.runtime" \
-  "$context"
+  -f "$root/Dockerfile" \
+  "$root"
 
 digest=""
 if [[ -s "$metadata_file" ]]; then
