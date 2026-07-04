@@ -37,6 +37,12 @@ Use the repo gates instead of ad hoc workspace commands. Host-target gates exclu
 
 Run the relevant CI-shaped lanes before a push or PR handoff. Use `just fmt-check` and `just just-check` for preflight parity. Use `just host clippy` and `just host test` for host-target iteration. Use `just providers check`, `just providers build`, and `just providers validate` for WASM iteration.
 
+### Cross-language facts on the container boundary
+
+The guest-container paths `/root/.omnifs` (guest `OMNIFS_HOME`) and `/omnifs` (guest mount point) are env-var-driven. The daemon and host-native CLI resolve them from `OMNIFS_HOME` / `OMNIFS_MOUNT_POINT` (name consts `OMNIFS_HOME_ENV` / `OMNIFS_MOUNT_POINT_ENV` in `omnifs-home`), and the layout under the home has one owner (`omnifs-home::under_root`). Only the Docker boundary names the literal paths, at the three parties that sit on it: the container image declares them as ENV (`Dockerfile`), and each host launcher (`crates/omnifs-cli/src/session.rs` for production, `scripts/dev.ts` for dev) carries its own consts to build bind mounts and wait for the mount. The values are frozen; a change breaks `just dev` and the integration tests loudly.
+
+The two runtime images share one Dockerfile. `runtime-base` owns the apt/setup block; `runtime-dev` (contributor, built by `just dev`) copies the binary from the in-Docker `builder` stage, and `runtime-release` (built by `scripts/ci/build-runtime-image.sh`) injects a prebuilt binary as the `omnifs-bin` build context. Targeting `runtime-release` builds only `ubuntu -> runtime-base -> runtime-release`, so the compile toolchain never runs and no base image is published.
+
 ### Documentation checks
 
 `just docs-check` verifies doc-to-doc links and the contract file template. It does not validate code symbols or code paths. It is a local convenience recipe only; CI does not run it, so it never blocks a merge.
@@ -54,6 +60,7 @@ Run the relevant CI-shaped lanes before a push or PR handoff. Use `just fmt-chec
 - Treat a local aggregate command as the source of truth when CI runs the lanes directly.
 - Run host tests that rebuild providers in parallel without prebuilding providers when contention matters.
 - Treat `just docs-check` as code-symbol validation.
+- Reintroduce a second copy of the runtime apt block; edit `runtime-base` instead. Read a guest-container path from the environment (`OMNIFS_HOME` / `OMNIFS_MOUNT_POINT`) rather than adding a fourth literal off the Docker boundary.
 
 ## Code
 
@@ -70,6 +77,7 @@ Run the relevant CI-shaped lanes before a push or PR handoff. Use `just fmt-chec
 - `crates/omnifs-itest/src/lib.rs`
 - `crates/omnifs-cli/src/provider_bundle.rs`
 - `Dockerfile`
+- `scripts/ci/build-runtime-image.sh`
 - `CONTRIBUTING.md`
 
 ## Validation

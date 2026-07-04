@@ -15,7 +15,7 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
 use crate::error::WithHint;
 use crate::launch_backend::{ContainerName, DockerTarget, ImageRef};
-use crate::session::{CONTAINER_NAME, GUEST_FUSE_MOUNT, IMAGE, OMNIFS_HOME};
+use crate::session::{CONTAINER_NAME, GUEST_HOME, GUEST_MOUNT, IMAGE};
 use omnifs_home::OMNIFS_HOME_ENV;
 
 /// Image label written by `Dockerfile` from the `OMNIFS_MIN_LAUNCHER_VERSION`
@@ -265,7 +265,7 @@ impl Runtime {
 
         self.remove().await?;
 
-        let mut binds = vec![format!("{}:{OMNIFS_HOME}", runtime_home.display())];
+        let mut binds = vec![format!("{}:{GUEST_HOME}", runtime_home.display())];
         if let Some(sock) = std::env::var_os("SSH_AUTH_SOCK") {
             let host_sock = PathBuf::from(&sock);
             if host_sock.exists() {
@@ -399,10 +399,7 @@ impl Runtime {
 
     pub(crate) async fn wait_for_daemon_ready(&self) -> Result<()> {
         let client = crate::client::DaemonClient::new();
-        anstream::println!(
-            "Waiting for {GUEST_FUSE_MOUNT} inside `{}`",
-            self.container_name
-        );
+        anstream::println!("Waiting for {GUEST_MOUNT} inside `{}`", self.container_name);
         for attempt in 0..60 {
             if client.ready().await {
                 anstream::println!("✓ FUSE mount is ready");
@@ -423,7 +420,7 @@ impl Runtime {
                     .status
                     .map_or_else(|| "exited".to_string(), |status| status.to_string());
                 return Err(anyhow::anyhow!(
-                    "container `{}` {status} before {GUEST_FUSE_MOUNT} became available (exit {exit_code})",
+                    "container `{}` {status} before {GUEST_MOUNT} became available (exit {exit_code})",
                     self.container_name
                 ))
                 .with_hint(format!(
@@ -439,7 +436,7 @@ impl Runtime {
         }
         anstream::println!();
         Err(anyhow::anyhow!(
-            "{GUEST_FUSE_MOUNT} did not become available inside `{}` within 60s",
+            "{GUEST_MOUNT} did not become available inside `{}` within 60s",
             self.container_name
         ))
         .with_hint(format!(
@@ -543,7 +540,7 @@ impl Runtime {
         };
 
         let env = vec![
-            format!("{OMNIFS_HOME_ENV}={OMNIFS_HOME}"),
+            format!("{OMNIFS_HOME_ENV}={GUEST_HOME}"),
             "SSH_AUTH_SOCK=/ssh-agent".to_string(),
             "GIT_SSH_COMMAND=ssh -F /dev/null -o StrictHostKeyChecking=accept-new".to_string(),
         ]
@@ -742,7 +739,7 @@ mod tests {
 
         let image = ImageRef::new("ghcr.io/0xff-ai/omnifs:test").unwrap();
         let binds = vec![
-            format!("{}:{OMNIFS_HOME}", paths.config_dir.display()),
+            format!("{}:{GUEST_HOME}", paths.config_dir.display()),
             "/extra:/extra:ro".to_string(),
         ];
         let body =
@@ -752,7 +749,7 @@ mod tests {
 
         assert_eq!(
             binds[0],
-            format!("{}:{OMNIFS_HOME}", paths.config_dir.display())
+            format!("{}:{GUEST_HOME}", paths.config_dir.display())
         );
         assert_eq!(
             binds.last().map(String::as_str),
@@ -761,7 +758,7 @@ mod tests {
         );
 
         let env = body.env.expect("env");
-        let expected_home_env = format!("{OMNIFS_HOME_ENV}={OMNIFS_HOME}");
+        let expected_home_env = format!("{OMNIFS_HOME_ENV}={GUEST_HOME}");
         assert!(
             env.iter().any(|e| e == &expected_home_env),
             "{OMNIFS_HOME_ENV} must be set"

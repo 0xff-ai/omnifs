@@ -18,8 +18,13 @@ pub(crate) const IMAGE: &str = concat!("ghcr.io/0xff-ai/omnifs:", env!("CARGO_PK
 pub(crate) const ENV_IMAGE: &str = "OMNIFS_IMAGE";
 pub(crate) const ENV_CONTAINER_NAME: &str = "OMNIFS_CONTAINER_NAME";
 
-pub(crate) const GUEST_FUSE_MOUNT: &str = "/omnifs";
-pub(crate) const OMNIFS_HOME: &str = "/root/.omnifs";
+// The guest-container paths the launcher targets. The container declares the
+// same values as image ENV (see `Dockerfile`), and the daemon resolves them
+// from the `OMNIFS_HOME` / `OMNIFS_MOUNT_POINT` env vars; these consts are the
+// host launcher's view of that boundary, used to build bind mounts, set the
+// `docker exec` working directory, and wait for the mount.
+pub(crate) const GUEST_HOME: &str = "/root/.omnifs";
+pub(crate) const GUEST_MOUNT: &str = "/omnifs";
 
 #[derive(Debug, Clone)]
 pub(crate) struct MountConfig {

@@ -5,7 +5,7 @@ use omnifs_api::{
     API_MAJOR, API_MINOR, DaemonBackend, DaemonHealth, DaemonStatus, DaemonSubsystem, FrontendInfo,
     HealthState, MountFailure, MountInfo, SubsystemHealth,
 };
-use omnifs_home::{Workspace, WorkspaceLayout};
+use omnifs_home::{OMNIFS_MOUNT_POINT_ENV, Workspace, WorkspaceLayout};
 use omnifs_host::HostContext;
 use omnifs_mount::materialize::MaterializationMode;
 use omnifs_nfs::NfsMountOptions;
@@ -221,7 +221,7 @@ impl ProcessInfo {
 /// `$HOME/omnifs`, deliberately outside `OMNIFS_HOME` so the mounted tree lives
 /// at a normal user-owned location.
 fn resolve_mount_point() -> anyhow::Result<PathBuf> {
-    if let Some(explicit) = std::env::var_os("OMNIFS_MOUNT_POINT") {
+    if let Some(explicit) = std::env::var_os(OMNIFS_MOUNT_POINT_ENV) {
         return Ok(PathBuf::from(explicit));
     }
     let home = std::env::var_os("HOME").ok_or_else(|| {

@@ -22,7 +22,7 @@ use crate::config::ConfiguredBackend;
 use crate::error::WithHint;
 use crate::launch_backend::DockerTarget;
 use crate::runtime::Runtime;
-use crate::session::GUEST_FUSE_MOUNT;
+use crate::session::GUEST_MOUNT;
 use crate::workspace::Workspace;
 
 use self::host_os::HostOs;
@@ -106,8 +106,8 @@ impl SetupArgs {
         } else {
             (
                 "Container FUSE mount",
-                GUEST_FUSE_MOUNT.to_string(),
-                format!("`omnifs shell` then `ls {GUEST_FUSE_MOUNT}`"),
+                GUEST_MOUNT.to_string(),
+                format!("`omnifs shell` then `ls {GUEST_MOUNT}`"),
             )
         };
         let report = summary::SetupSummary::new(

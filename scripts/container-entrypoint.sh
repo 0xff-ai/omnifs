@@ -5,8 +5,7 @@ if [ "$#" -gt 0 ]; then
   exec "$@"
 fi
 
-: "${OMNIFS_MOUNT_POINT:=/omnifs}"
-: "${OMNIFS_HOME:=/root/.omnifs}"
+# OMNIFS_HOME and OMNIFS_MOUNT_POINT are image ENV (see Dockerfile).
 : "${OMNIFS_LOG_FILE:=/tmp/omnifs.log}"
 : "${OMNIFS_LISTEN:=0.0.0.0:7878}"
 : "${RUST_LOG:=info}"

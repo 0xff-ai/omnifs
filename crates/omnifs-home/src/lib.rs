@@ -27,6 +27,7 @@ pub const CACHE_SUBDIR: &str = "cache";
 /// Subdirectory of `cache_dir` holding NFS loopback mount-state files.
 pub const NFS_STATE_SUBDIR: &str = "nfs";
 pub const OMNIFS_HOME_ENV: &str = "OMNIFS_HOME";
+pub const OMNIFS_MOUNT_POINT_ENV: &str = "OMNIFS_MOUNT_POINT";
 
 /// A resolved omnifs workspace.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -4,7 +4,7 @@ use clap::Args;
 
 use crate::config::ConfiguredBackend;
 use crate::launch::{LaunchOutcome, Launcher};
-use crate::session::GUEST_FUSE_MOUNT;
+use crate::session::GUEST_MOUNT;
 use crate::workspace::Workspace;
 
 #[derive(Args, Debug, Clone, Default)]
@@ -32,12 +32,12 @@ impl UpArgs {
             },
             LaunchOutcome::Docker { target } => {
                 anstream::println!(
-                    "✓ {GUEST_FUSE_MOUNT} is mounted inside `{}`",
+                    "✓ {GUEST_MOUNT} is mounted inside `{}`",
                     target.container_name()
                 );
                 anstream::println!();
                 anstream::println!(
-                    "Run `{}` to open a shell inside the container and browse {GUEST_FUSE_MOUNT}.",
+                    "Run `{}` to open a shell inside the container and browse {GUEST_MOUNT}.",
                     crate::style::bold("omnifs shell"),
                 );
             },
