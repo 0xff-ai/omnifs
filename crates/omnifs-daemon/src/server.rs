@@ -10,8 +10,8 @@ use axum::extract::{Path as UrlPath, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Json, Response};
 use omnifs_api::{
-    DaemonBackend, DaemonHealth, DaemonStatus, DaemonSubsystem, FrontendInfo, HealthState,
-    MountFailure, MountInfo, ReadyInfo, ReconcileReport, StopReport, SubsystemHealth,
+    ApiError, DaemonBackend, DaemonHealth, DaemonStatus, DaemonSubsystem, ErrorCode, FrontendInfo,
+    HealthState, MountFailure, MountInfo, ReadyInfo, ReconcileReport, StopReport, SubsystemHealth,
 };
 use omnifs_host::inspector::InspectorSink;
 use omnifs_host::registry::ProviderRegistry;
@@ -34,6 +34,8 @@ use crate::frontends::Frontend;
     info(title = "omnifs daemon control API", version = env!("CARGO_PKG_VERSION")),
     components(schemas(
         ReadyInfo,
+        ApiError,
+        ErrorCode,
         DaemonStatus,
         DaemonHealth,
         SubsystemHealth,
@@ -148,6 +150,7 @@ impl Daemon {
             .failed
             .into_iter()
             .map(|failure| MountFailure {
+                kind: mount_failure_kind(&failure.reason),
                 mount: failure.mount,
                 reason: failure.reason,
             })
@@ -196,11 +199,11 @@ impl Daemon {
 
     fn event_stream(&self) -> Response {
         let Some(sink) = self.sink.clone() else {
-            return (
+            return error_response(
                 StatusCode::NOT_FOUND,
-                "inspector stream disabled (OMNIFS_INSPECTOR=0)\n",
-            )
-                .into_response();
+                ErrorCode::Internal,
+                "inspector stream disabled (OMNIFS_INSPECTOR=0)",
+            );
         };
 
         let subscription = sink.subscribe();
@@ -270,6 +273,8 @@ impl Daemon {
     fn router(state: Arc<Self>) -> Router {
         let (router, _) = Self::api_router().with_state(state).split_for_parts();
         router
+            .fallback(route_not_found)
+            .method_not_allowed_fallback(method_not_allowed)
     }
 }
 
@@ -292,18 +297,20 @@ pub fn openapi_json() -> String {
     operation_id = "ready",
     responses(
         (status = 200, description = "filesystem frontend is serving", body = ReadyInfo),
-        (status = 503, description = "filesystem frontend is not serving yet", body = ReadyInfo),
+        (status = 503, description = "filesystem frontend is not serving yet", body = ApiError),
     ),
 )]
 async fn ready(State(daemon): State<Arc<Daemon>>) -> Response {
     let ready = daemon.control_status().ready();
-    let info = ReadyInfo { ready };
-    let status = if info.ready {
-        StatusCode::OK
+    if ready {
+        Json(ReadyInfo { ready }).into_response()
     } else {
-        StatusCode::SERVICE_UNAVAILABLE
-    };
-    (status, Json(info)).into_response()
+        error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            ErrorCode::Internal,
+            "filesystem frontend is not serving yet",
+        )
+    }
 }
 
 #[utoipa::path(
@@ -333,7 +340,7 @@ async fn mounts_list(State(daemon): State<Arc<Daemon>>) -> Json<Vec<MountInfo>> 
     params(("name" = String, Path, description = "mount name")),
     responses(
         (status = 200, description = "the mount", body = MountInfo),
-        (status = 404, description = "mount not found", content_type = "text/plain", body = String),
+        (status = 404, description = "mount not found", body = ApiError),
     ),
 )]
 async fn mount_inspect(
@@ -347,7 +354,11 @@ async fn mount_inspect(
         .find(|mount| mount.mount == name)
     {
         Some(info) => Json(info).into_response(),
-        None => (StatusCode::NOT_FOUND, format!("mount `{name}` not found\n")).into_response(),
+        None => error_response(
+            StatusCode::NOT_FOUND,
+            ErrorCode::MountNotFound,
+            format!("mount `{name}` not found"),
+        ),
     }
 }
 
@@ -392,11 +403,58 @@ async fn shutdown(State(daemon): State<Arc<Daemon>>) -> Json<StopReport> {
     operation_id = "events",
     responses(
         (status = 200, description = "newline-framed inspector event stream", content_type = "application/x-ndjson", body = String),
-        (status = 404, description = "inspector stream disabled", content_type = "text/plain", body = String),
+        (status = 404, description = "inspector stream disabled", body = ApiError),
     ),
 )]
 async fn events(State(daemon): State<Arc<Daemon>>) -> Response {
     daemon.event_stream()
+}
+
+async fn route_not_found() -> Response {
+    error_response(
+        StatusCode::NOT_FOUND,
+        ErrorCode::Internal,
+        "control route not found",
+    )
+}
+
+async fn method_not_allowed() -> Response {
+    error_response(
+        StatusCode::METHOD_NOT_ALLOWED,
+        ErrorCode::Internal,
+        "method not allowed",
+    )
+}
+
+fn error_response(status: StatusCode, code: ErrorCode, message: impl Into<String>) -> Response {
+    (
+        status,
+        Json(ApiError {
+            code,
+            message: message.into(),
+            detail: None,
+        }),
+    )
+        .into_response()
+}
+
+fn mount_failure_kind(reason: &str) -> ErrorCode {
+    if reason.contains("provider not found") {
+        ErrorCode::ProviderMissing
+    } else if reason.starts_with("failed to read mount spec")
+        || reason.starts_with("failed to parse mount spec")
+        || reason.starts_with("invalid mount name")
+        || reason.contains("must be named")
+        || reason.starts_with("apply provider metadata")
+        || reason.contains("under-grants provider")
+        || reason.contains("preopen")
+        || reason.contains("dynamic unix-socket grant")
+        || reason.starts_with("config error:")
+    {
+        ErrorCode::SpecInvalid
+    } else {
+        ErrorCode::Internal
+    }
 }
 
 fn record_line(record: &omnifs_api::events::InspectorRecord) -> Option<String> {

@@ -200,7 +200,7 @@ ENTRYPOINT ["/usr/local/bin/omnifs-container-entrypoint"]
 # Both are derived from the same API major version; when API_MAJOR bumps, update
 # this arg default and the constant together.
 ARG OMNIFS_MIN_LAUNCHER_VERSION=unknown
-ARG OMNIFS_LAUNCH_PROTOCOL=daemon-control-v1
+ARG OMNIFS_LAUNCH_PROTOCOL=daemon-control-v2
 LABEL ai.0xff.omnifs.min-launcher-version=${OMNIFS_MIN_LAUNCHER_VERSION}
 LABEL ai.0xff.omnifs.launch-protocol=${OMNIFS_LAUNCH_PROTOCOL}
 

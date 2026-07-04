@@ -16,18 +16,38 @@ pub mod events;
 
 /// Control API major version. The CLI refuses to talk to a daemon with a
 /// different major. Bump when routes or payloads change incompatibly.
-pub const API_MAJOR: u16 = 1;
+pub const API_MAJOR: u16 = 2;
 
 /// Control API minor version. The CLI warns but proceeds when the daemon's
 /// minor differs. Bump for additive, backward-compatible additions.
-pub const API_MINOR: u16 = 1;
+pub const API_MINOR: u16 = 0;
 
 /// Default control port. The container publishes it on the host loopback;
 /// both binaries default to it so `omnifs` finds the daemon with zero config.
 pub const DEFAULT_PORT: u16 = 7878;
 
-/// `GET /v1/ready`: 200 with `ready: true` once the filesystem is
-/// serving; 503 with `ready: false` while starting up.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ApiError {
+    pub code: ErrorCode,
+    pub message: String,
+    pub detail: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorCode {
+    AuthRequired,
+    ConsentRequired,
+    MountNotFound,
+    SpecInvalid,
+    ProviderMissing,
+    ReconcileBusy,
+    DaemonShuttingDown,
+    Internal,
+}
+
+/// `GET /v1/ready`: 200 with `ready: true` once the filesystem is serving.
+/// Non-ready responses use [`ApiError`].
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ReadyInfo {
     pub ready: bool,
@@ -208,6 +228,7 @@ pub struct MountInfo {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct MountFailure {
     pub mount: String,
+    pub kind: ErrorCode,
     pub reason: String,
 }
 
