@@ -193,7 +193,7 @@ impl DnsProvider {
     }
 }
 
-async fn root_list(cx: DirCx<State>) -> Result<DirProjection> {
+async fn root_list(cx: DirCx<State>) -> Result<DirListing> {
     let resolvers = cx.state(|state| {
         state
             .resolvers
@@ -212,23 +212,23 @@ async fn root_list(cx: DirCx<State>) -> Result<DirProjection> {
             .collect::<Result<Vec<_>>>()
     })?;
     // Open: the literal `resolvers`/`reverse` siblings are merged by the router.
-    Ok(DirProjection::open(resolvers.into_iter().map(Entry::dir)))
+    Ok(DirListing::open(resolvers.into_iter().map(Entry::dir)))
 }
 
 /// The exhaustive record-type listing for a domain directory.
-fn record_projection() -> DirProjection {
+fn record_projection() -> DirListing {
     let mut names: Vec<String> = SupportedRecordType::all()
         .iter()
         .map(|record_type| record_type.as_ref().to_string())
         .collect();
     names.push("all".to_string());
     names.push("raw".to_string());
-    DirProjection::exhaustive(names.into_iter().map(Entry::file))
+    DirListing::exhaustive(names.into_iter().map(Entry::file))
 }
 
 /// An open (dynamic, non-exhaustive) directory with no statically-listed
 /// children; the router merges any literal siblings and resolves captures
 /// (an IP or domain) on demand.
-fn open_dir() -> DirProjection {
-    DirProjection::open(core::iter::empty::<Entry>())
+fn open_dir() -> DirListing {
+    DirListing::open(core::iter::empty::<Entry>())
 }

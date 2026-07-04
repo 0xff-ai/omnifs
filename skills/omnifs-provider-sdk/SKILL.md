@@ -74,7 +74,7 @@ struct ItemKey {
 impl ExampleProvider {
     fn start(config: Config, r: &mut Router<State>) -> Result<State> {
         r.dir("/").handler(|_cx: DirCx<State>| async move {
-            Ok(DirProjection::exhaustive([Entry::dir("items")]))
+            Ok(DirListing::exhaustive([Entry::dir("items")]))
         })?;
         r.file("/items/{id}/title").handler(
             |cx: Cx<State>, key: ItemKey| async move {
@@ -175,7 +175,7 @@ A file-shaped object projects as a single file, not a directory: `r.file_object:
 - Conditional loads: `cx.version()` is the host-pushed validator for this anchor; map it with `.maybe_if_none_match(..)`. Object loads get `since` handed to them.
 - Two terminal layers on the request builder: object-layer `.load::<T>()`/`conditional` (three-state) vs structural `.json::<T>()`/`.send_checked()` (two-state, errors on non-2xx). Pick deliberately.
 - Batch parallel fetches with `join_all([f1, f2, ..])`: one suspension round, host runs them concurrently, results return in order. Every child must come from the same `Cx` and yield exactly one callout per suspension or results silently misalign.
-- Pagination: return `DirProjection::open(entries).with_cursor(Cursor::Page(n + 1))`; the host echoes the cursor back on continuation.
+- Pagination: for a raw dir listing return `DirListing::paged(entries, Cursor::Page(n + 1))`; for an object collection return `Collection::page(entries).next(cursor)`; the host echoes the cursor back on continuation.
 - Rate limits: a 429 arms a per-authority breaker (cooldown from `Retry-After` or the endpoint's `rate_limit` policy); further calls fast-fail without a callout until cooldown passes.
 - Large bytes stay host-side: `fetch-blob` lands a body in the host blob cache (serve via blob byte-source or `open-archive` into a `TreeRef`); `read-blob` brings ranges across the boundary, sparingly.
 

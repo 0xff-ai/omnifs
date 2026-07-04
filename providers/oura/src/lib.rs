@@ -88,8 +88,8 @@ impl OuraProvider {
     }
 }
 
-async fn root(_cx: DirCx) -> Result<DirProjection> {
-    Ok(DirProjection::open(core::iter::empty::<Entry>()))
+async fn root(_cx: DirCx) -> Result<DirListing> {
+    Ok(DirListing::open(core::iter::empty::<Entry>()))
 }
 
 #[omnifs_sdk::path_segment]
@@ -251,8 +251,8 @@ struct DayKey {
 
 impl DayKey {
     #[allow(clippy::unused_self)]
-    fn entries(self, _cx: DirCx) -> Result<DirProjection> {
-        Ok(DirProjection::exhaustive(Collection::entries()))
+    fn entries(self, _cx: DirCx) -> Result<DirListing> {
+        Ok(DirListing::exhaustive(Collection::entries()))
     }
 }
 

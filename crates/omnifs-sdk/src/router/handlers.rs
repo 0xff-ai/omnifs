@@ -10,7 +10,7 @@ use crate::captures::{CaptureDescriptor, Captures, FromCaptures};
 use crate::cx::Cx;
 use crate::error::Result;
 use crate::handler::{DirCx, TreeRef};
-use crate::projection::{DirProjection, FileProjection};
+use crate::projection::{DirListing, FileProjection};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -22,8 +22,7 @@ type HandlerFuture<T> = Pin<Box<dyn Future<Output = Result<T>>>>;
 /// The supported handler shapes box into one uniform call closure per route
 /// kind; captures travel alongside the context so the closure can parse the
 /// typed key at call time.
-pub(super) type BoxedDirHandler<S> =
-    Arc<dyn Fn(DirCx<S>, Captures) -> HandlerFuture<DirProjection>>;
+pub(super) type BoxedDirHandler<S> = Arc<dyn Fn(DirCx<S>, Captures) -> HandlerFuture<DirListing>>;
 pub(super) type BoxedFileHandler<S> = Arc<dyn Fn(Cx<S>, Captures) -> HandlerFuture<FileProjection>>;
 pub(super) type BoxedTreeRefHandler<S> = Arc<dyn Fn(Cx<S>, Captures) -> HandlerFuture<TreeRef>>;
 
@@ -118,7 +117,7 @@ pub(super) fn accept_validator() -> RouteValidator {
 impl<S, F, Fut> IntoDirHandler<S, NoCaptures> for F
 where
     F: Fn(DirCx<S>) -> Fut + 'static,
-    Fut: Future<Output = Result<DirProjection>> + 'static,
+    Fut: Future<Output = Result<DirListing>> + 'static,
 {
     fn into_dir_handler(self) -> (BoxedDirHandler<S>, RouteValidator) {
         (
@@ -132,13 +131,13 @@ impl<S, C, F, Fut> IntoDirHandler<S, WithCaptures<C>> for F
 where
     C: FromCaptures + 'static,
     F: Fn(DirCx<S>, C) -> Fut + 'static,
-    Fut: Future<Output = Result<DirProjection>> + 'static,
+    Fut: Future<Output = Result<DirListing>> + 'static,
 {
     fn into_dir_handler(self) -> (BoxedDirHandler<S>, RouteValidator) {
         let handler: BoxedDirHandler<S> =
             Arc::new(
                 move |cx: DirCx<S>, caps: Captures| match C::from_captures(&caps) {
-                    Ok(parsed) => Box::pin(self(cx, parsed)) as HandlerFuture<DirProjection>,
+                    Ok(parsed) => Box::pin(self(cx, parsed)) as HandlerFuture<DirListing>,
                     Err(error) => Box::pin(async move { Err(error) }),
                 },
             );
@@ -150,13 +149,13 @@ impl<S, C, F, Fut> IntoDirHandler<S, WithKeyMethod<C>> for F
 where
     C: FromCaptures + 'static,
     F: Fn(C, DirCx<S>) -> Fut + 'static,
-    Fut: Future<Output = Result<DirProjection>> + 'static,
+    Fut: Future<Output = Result<DirListing>> + 'static,
 {
     fn into_dir_handler(self) -> (BoxedDirHandler<S>, RouteValidator) {
         let handler: BoxedDirHandler<S> =
             Arc::new(
                 move |cx: DirCx<S>, caps: Captures| match C::from_captures(&caps) {
-                    Ok(parsed) => Box::pin(self(parsed, cx)) as HandlerFuture<DirProjection>,
+                    Ok(parsed) => Box::pin(self(parsed, cx)) as HandlerFuture<DirListing>,
                     Err(error) => Box::pin(async move { Err(error) }),
                 },
             );
@@ -167,7 +166,7 @@ where
 impl<S, C, F> IntoDirHandler<S, WithSyncKeyMethod<C>> for F
 where
     C: FromCaptures + 'static,
-    F: Fn(C, DirCx<S>) -> Result<DirProjection> + 'static,
+    F: Fn(C, DirCx<S>) -> Result<DirListing> + 'static,
 {
     fn into_dir_handler(self) -> (BoxedDirHandler<S>, RouteValidator) {
         let handler: BoxedDirHandler<S> =
@@ -175,7 +174,7 @@ where
                 move |cx: DirCx<S>, caps: Captures| match C::from_captures(&caps) {
                     Ok(parsed) => {
                         let result = self(parsed, cx);
-                        Box::pin(async move { result }) as HandlerFuture<DirProjection>
+                        Box::pin(async move { result }) as HandlerFuture<DirListing>
                     },
                     Err(error) => Box::pin(async move { Err(error) }),
                 },

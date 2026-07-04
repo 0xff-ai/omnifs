@@ -188,8 +188,8 @@ impl TableDoc {
     }
 }
 
-async fn meta_dir(_cx: DirCx<State>) -> Result<DirProjection> {
-    Ok(DirProjection::exhaustive([
+async fn meta_dir(_cx: DirCx<State>) -> Result<DirListing> {
+    Ok(DirListing::exhaustive([
         Entry::file("info.json"),
         Entry::file("version.txt"),
         Entry::file("path.txt"),
@@ -304,7 +304,7 @@ impl FileInfo {
     }
 }
 
-async fn tables_list(cx: DirCx<State>) -> Result<DirProjection> {
+async fn tables_list(cx: DirCx<State>) -> Result<DirListing> {
     match cx.intent() {
         DirIntent::Lookup { child } => {
             let exists = cx.state(|state| {
@@ -315,9 +315,9 @@ async fn tables_list(cx: DirCx<State>) -> Result<DirProjection> {
                     .map_err(|e| ProviderError::internal(format!("table_exists: {e}")))
             })?;
             if !exists {
-                return Ok(DirProjection::exhaustive([]));
+                return Ok(DirListing::exhaustive([]));
             }
-            Ok(DirProjection::exhaustive([Entry::dir(child)]))
+            Ok(DirListing::exhaustive([Entry::dir(child)]))
         },
         DirIntent::List { .. } | DirIntent::ReadFile { .. } => {
             let names = cx.state(|state| {
@@ -327,7 +327,7 @@ async fn tables_list(cx: DirCx<State>) -> Result<DirProjection> {
                     .list_tables()
                     .map_err(|e| ProviderError::internal(format!("list tables: {e}")))
             })?;
-            Ok(DirProjection::exhaustive(names.into_iter().map(Entry::dir)))
+            Ok(DirListing::exhaustive(names.into_iter().map(Entry::dir)))
         },
     }
 }

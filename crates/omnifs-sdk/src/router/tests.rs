@@ -7,7 +7,7 @@ use crate::error::{ProviderError, ProviderErrorKind, Result};
 use crate::handler::DirCx;
 use crate::identity::{Facet, IdentityCaptures, LogicalId};
 use crate::object::{Canonical, Key, Load, Object, ObjectKind, Validator};
-use crate::projection::{DirProjection, Entry, FileProjection};
+use crate::projection::{DirListing, Entry, FileProjection};
 use crate::repr::{Json, Markdown, Representable};
 use omnifs_core::ContentType;
 use omnifs_wit::provider::types as wit_types;
@@ -345,7 +345,7 @@ fn route_shape_tracks_explicit_child_routes_under_object_anchor() {
         .unwrap();
     router
         .dir("/items/{id}/comments")
-        .handler(|_cx: DirCx<()>| async { Ok(DirProjection::exhaustive([Entry::file("1")])) })
+        .handler(|_cx: DirCx<()>| async { Ok(DirListing::exhaustive([Entry::file("1")])) })
         .unwrap();
     router
         .file("/items/{id}/comments/{idx}")
@@ -492,7 +492,7 @@ fn object_dir_child_lookup_carries_all_sibling_leaves() {
         .unwrap();
     router
         .dir("/items/{id}/comments")
-        .handler(|_cx: DirCx<()>| async { Ok(DirProjection::exhaustive([Entry::file("1")])) })
+        .handler(|_cx: DirCx<()>| async { Ok(DirListing::exhaustive([Entry::file("1")])) })
         .unwrap();
     router.seal().unwrap();
 

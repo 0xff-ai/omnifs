@@ -7,14 +7,17 @@
 //! until its read mode is chosen. The illegal §7 cells (`Live+Inline`,
 //! `Live+Full`, deferred-without-read-mode) are therefore unrepresentable.
 //!
-//! [`DirProjection`] is the author-facing directory listing. It lowers onto
-//! [`crate::browse::Listing`]/[`crate::browse::Effects`]; the router applies
-//! the carried validator, cursor, and extra-file preloads when it forms the
-//! WIT terminal.
+//! [`DirListing`] is the author-facing raw directory listing: what an
+//! `r.dir("/path").handler(fn)` route returns for plain, non-object child
+//! names. A set of child *objects* lists through
+//! [`crate::collection::Collection`] instead; those are the two, and only two,
+//! listing surfaces. Both lower onto the crate-internal [`DirProjection`],
+//! which the router applies (its validator, cursor, and extra-file preloads)
+//! when it forms the WIT terminal.
 //!
 //! Projections describe; the host stores. A handler never caches: it attaches
-//! preloads ([`FileProjection::preload_file`], [`DirProjection::preload_file`],
-//! [`DirProjection::preload_dir`], [`DirProjection::store_canonical`]) and the
+//! preloads ([`FileProjection::preload_file`], [`DirListing::preload_file`],
+//! [`DirListing::preload_dir`], [`DirListing::store_canonical`]) and the
 //! host decides what to keep, evict, and invalidate.
 
 use crate::browse::{Effects, Entry as BrowseEntry};
@@ -360,15 +363,17 @@ impl<Src: Buildable> FileProjBuilder<Src> {
 }
 
 // ===========================================================================
-// Directory projection
+// Directory projection (crate-internal lowering target)
 // ===========================================================================
 
-/// A directory listing. `exhaustive` enumerates every child; `open` is
-/// capped/non-exhaustive with no cursor; `paged` is resumable; `unchanged` is
-/// the listing analog of [`crate::object::Load::Unchanged`] (the cached
-/// validator matched, so the host serves its cached dirents).
-///
-pub struct DirProjection {
+/// The crate-internal lowered form of a directory listing that router dispatch
+/// consumes. Both the author-facing [`DirListing`] and
+/// [`crate::collection::Collection`] lower into this. `exhaustive` enumerates
+/// every child; `open` is capped/non-exhaustive with no cursor; `paged` is
+/// resumable; `unchanged` is the listing analog of
+/// [`crate::object::Load::Unchanged`] (the cached validator matched, so the
+/// host serves its cached dirents).
+pub(crate) struct DirProjection {
     outcome: DirOutcome,
     validator: Option<VersionToken>,
     extra_files: Vec<(String, FileProjection)>,
@@ -550,6 +555,102 @@ impl DirProjection {
             );
         }
         Ok(effects)
+    }
+}
+
+// ===========================================================================
+// Directory listing (author-facing)
+// ===========================================================================
+
+/// A raw navigational directory listing: what an `r.dir("/path").handler(fn)`
+/// route returns. It lists plain child names ([`Entry::dir`] / [`Entry::file`])
+/// that are not typed objects; a set of child *objects* lists through
+/// [`crate::collection::Collection`] instead. These are the SDK's only two
+/// listing surfaces.
+///
+/// `exhaustive` enumerates every child; `open` is capped/non-exhaustive with no
+/// cursor; `paged` is resumable; `unchanged` serves the host's cached dirents
+/// when the listing validator still matches.
+pub struct DirListing(DirProjection);
+
+impl DirListing {
+    /// Every child enumerated: "these are all the names I am aware of." Lookup
+    /// remains the authoritative name oracle and may still resolve names this
+    /// listing omitted; exhaustive is a claim about the enumeration, not a
+    /// promise of future misses.
+    pub fn exhaustive(entries: impl IntoIterator<Item = Entry>) -> Self {
+        Self(DirProjection::exhaustive(entries))
+    }
+
+    /// Deliberately partial with no cursor: the directory is unbounded or
+    /// expensive to enumerate (reverse-DNS, an unbounded id space) and the
+    /// caller navigates by lookup rather than by listing. Use [`Self::paged`]
+    /// instead when the rest is reachable and worth fetching.
+    pub fn open(entries: impl IntoIterator<Item = Entry>) -> Self {
+        Self(DirProjection::open(entries))
+    }
+
+    /// Resumable: a partial page plus an opaque cursor. The host echoes the
+    /// cursor back as the `cursor` argument of the next `list_children` on this
+    /// path; the handler decodes it and continues until a page comes back
+    /// without one.
+    pub fn paged(entries: impl IntoIterator<Item = Entry>, cursor: Cursor) -> Self {
+        Self(DirProjection::paged(entries, cursor))
+    }
+
+    /// The cached validator matched: the host serves its cached dirents and the
+    /// handler enumerated nothing.
+    pub fn unchanged() -> Self {
+        Self(DirProjection::unchanged())
+    }
+
+    /// Record the validator the host echoes on the next `list-children` for a
+    /// cheap re-list.
+    #[must_use]
+    pub fn with_validator(self, validator: impl Into<VersionToken>) -> Self {
+        Self(self.0.with_validator(validator))
+    }
+
+    /// Preload a child file alongside the listing (the `project` effect).
+    /// `path` may be mount-relative or absolute.
+    #[must_use]
+    pub fn preload_file(self, path: impl Into<String>, file: FileProjection) -> Self {
+        Self(self.0.preload_file(path, file))
+    }
+
+    /// Preload a child directory and merge `child`'s listing-time effects under
+    /// `path`. Relative paths on `child` are joined to `path`; absolute paths
+    /// are left unchanged. Enumerated entries on `child` are not merged into
+    /// this listing.
+    #[must_use]
+    pub fn preload_dir(self, path: impl Into<String>, child: DirListing) -> Self {
+        Self(self.0.preload_dir(path, child.0))
+    }
+
+    /// Store canonical bytes at an object anchor so later reads of identity or
+    /// rendered representations can reuse the listing fetch. `leaves` are the
+    /// anchor-relative remainders the host will index for this anchor.
+    #[must_use]
+    pub fn store_canonical(
+        self,
+        id: LogicalId,
+        validator: Option<VersionToken>,
+        bytes: Vec<u8>,
+        leaves: Vec<String>,
+    ) -> Self {
+        Self(self.0.store_canonical(id, validator, bytes, leaves))
+    }
+
+    /// Lower to the crate-internal [`DirProjection`] the router dispatch path
+    /// consumes.
+    pub(crate) fn into_dir_projection(self) -> DirProjection {
+        self.0
+    }
+
+    /// Wrap an already-lowered [`DirProjection`] (e.g. a `Collection` lowering)
+    /// as the public listing a dir route yields.
+    pub(crate) fn from_projection(projection: DirProjection) -> Self {
+        Self(projection)
     }
 }
 

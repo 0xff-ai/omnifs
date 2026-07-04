@@ -1,7 +1,7 @@
 //! Wire-facing browse results and the [`Effects`] channel.
 //!
 //! These types sit between the provider-facing projection layer
-//! ([`crate::projection::DirProjection`], [`crate::projection::FileProjection`])
+//! ([`crate::projection::DirListing`], [`crate::projection::FileProjection`])
 //! and the generated WIT protocol; the router lowers handler returns onto
 //! them. Most provider code only meets [`Effects`], [`EntryKind`], and
 //! [`ReadOutcome`] (re-exported in the prelude); reach for [`Lookup`],

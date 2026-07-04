@@ -24,9 +24,7 @@ pub use crate::object::{
     Canonical, FacetAxis, FacetMetadata, Key, Load, Object, ObjectEntry, ObjectKind, Preloads,
     Validator, decode_json,
 };
-pub use crate::projection::{
-    BlobFile, DirProjection, Entry, FileProjection, StreamFile, TextFormat,
-};
+pub use crate::projection::{BlobFile, DirListing, Entry, FileProjection, StreamFile, TextFormat};
 pub use crate::repr::{
     Atom, Format, Json, Markdown, RenderTable, Representable, Yaml, pretty_json,
 };

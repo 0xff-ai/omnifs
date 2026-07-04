@@ -199,14 +199,14 @@ struct ItemListKey {
 /// leaves at listing time, so a later read of any item leaf serves warm
 /// (collection preload). The typed `Collection`/`Cursor` surface is exercised by
 /// the object-dir `comments` collection.
-async fn item_list(_cx: DirCx<State>, key: ItemListKey) -> Result<DirProjection> {
+async fn item_list(_cx: DirCx<State>, key: ItemListKey) -> Result<DirListing> {
     let filter = key.filter.0.to_string();
     let rows = [7_u64, 8]
         .into_iter()
         .map(|number| canned_item(number).map(|(item, canonical)| (number, item, canonical)))
         .collect::<Result<Vec<_>>>()?;
 
-    let mut projection = DirProjection::exhaustive(
+    let mut projection = DirListing::exhaustive(
         rows.iter()
             .map(|(number, _, _)| Entry::dir(number.to_string())),
     );
@@ -446,8 +446,8 @@ impl TestProvider {
 // Object collection root
 // ===========================================================================
 
-async fn items_root(_cx: DirCx<State>) -> Result<DirProjection> {
-    Ok(DirProjection::exhaustive([
+async fn items_root(_cx: DirCx<State>) -> Result<DirListing> {
+    Ok(DirListing::exhaustive([
         Entry::dir("open"),
         Entry::dir("all"),
     ]))
@@ -461,16 +461,14 @@ async fn root_ignore(_cx: Cx<State>) -> Result<FileProjection> {
 // /hello directory
 // ===========================================================================
 
-async fn hello_dir(_cx: DirCx<State>) -> Result<DirProjection> {
-    Ok(
-        DirProjection::open(core::iter::empty::<Entry>()).preload_dir(
-            "hello/bundle",
-            DirProjection::open([])
-                .preload_file("title", FileProjection::inline(b"title".to_vec()).build())
-                .preload_file("body", FileProjection::inline(b"body".to_vec()).build())
-                .preload_file("empty", FileProjection::inline(Vec::new()).build()),
-        ),
-    )
+async fn hello_dir(_cx: DirCx<State>) -> Result<DirListing> {
+    Ok(DirListing::open(core::iter::empty::<Entry>()).preload_dir(
+        "hello/bundle",
+        DirListing::open([])
+            .preload_file("title", FileProjection::inline(b"title".to_vec()).build())
+            .preload_file("body", FileProjection::inline(b"body".to_vec()).build())
+            .preload_file("empty", FileProjection::inline(Vec::new()).build()),
+    ))
 }
 
 async fn message(_cx: Cx<State>) -> Result<FileProjection> {
@@ -609,9 +607,9 @@ async fn volatile_tail(_cx: Cx<State>) -> Result<FileProjection> {
 // Static sub-directories
 // ===========================================================================
 
-async fn bundle(_cx: DirCx<State>) -> Result<DirProjection> {
+async fn bundle(_cx: DirCx<State>) -> Result<DirListing> {
     Ok(
-        DirProjection::exhaustive([Entry::file("title"), Entry::file("body")])
+        DirListing::exhaustive([Entry::file("title"), Entry::file("body")])
             .preload_file(
                 "hello/bundle/title",
                 FileProjection::inline(b"title".to_vec()).build(),
@@ -623,57 +621,55 @@ async fn bundle(_cx: DirCx<State>) -> Result<DirProjection> {
     )
 }
 
-async fn feed(cx: DirCx<State>) -> Result<DirProjection> {
+async fn feed(cx: DirCx<State>) -> Result<DirListing> {
     let page = cx.page_cursor(0);
     let entries = [
         Entry::dir(format!("item-{}", page * 2)),
         Entry::dir(format!("item-{}", page * 2 + 1)),
     ];
     if page >= 2 {
-        Ok(DirProjection::open(entries))
+        Ok(DirListing::open(entries))
     } else {
-        Ok(DirProjection::paged(entries, Cursor::Page(page + 1))
+        Ok(DirListing::paged(entries, Cursor::Page(page + 1))
             .with_validator(format!("feed-page-{page}")))
     }
 }
 
-async fn unbounded_feed(cx: DirCx<State>) -> Result<DirProjection> {
+async fn unbounded_feed(cx: DirCx<State>) -> Result<DirListing> {
     let page = cx.page_cursor(0);
     let entries = [
         Entry::dir(format!("u-{}", page * 2)),
         Entry::dir(format!("u-{}", page * 2 + 1)),
     ];
-    Ok(DirProjection::paged(entries, Cursor::Page(page + 1)))
+    Ok(DirListing::paged(entries, Cursor::Page(page + 1)))
 }
 
-async fn throttled(_cx: DirCx<State>) -> Result<DirProjection> {
+async fn throttled(_cx: DirCx<State>) -> Result<DirListing> {
     Err(ProviderError::rate_limited("test throttle").with_retry_after(Some(Duration::from_secs(2))))
 }
 
-async fn snapshot(_cx: DirCx<State>) -> Result<DirProjection> {
+async fn snapshot(_cx: DirCx<State>) -> Result<DirListing> {
     Ok(
-        DirProjection::exhaustive([Entry::file("status")]).preload_file(
+        DirListing::exhaustive([Entry::file("status")]).preload_file(
             "hello/snapshot/status",
             FileProjection::inline(b"open\n".to_vec()).build(),
         ),
     )
 }
 
-async fn snapshot_comments(_cx: DirCx<State>) -> Result<DirProjection> {
-    Ok(DirProjection::exhaustive(core::iter::empty::<Entry>()))
+async fn snapshot_comments(_cx: DirCx<State>) -> Result<DirListing> {
+    Ok(DirListing::exhaustive(core::iter::empty::<Entry>()))
 }
 
 // ===========================================================================
 // /scoped
 // ===========================================================================
 
-async fn scoped(_cx: DirCx<State>) -> Result<DirProjection> {
-    Ok(
-        DirProjection::exhaustive([Entry::file("item")]).preload_file(
-            "scoped/item",
-            FileProjection::inline(b"scoped\n".to_vec()).build(),
-        ),
-    )
+async fn scoped(_cx: DirCx<State>) -> Result<DirListing> {
+    Ok(DirListing::exhaustive([Entry::file("item")]).preload_file(
+        "scoped/item",
+        FileProjection::inline(b"scoped\n".to_vec()).build(),
+    ))
 }
 
 async fn scoped_item(_cx: Cx<State>) -> Result<FileProjection> {
@@ -684,11 +680,11 @@ async fn scoped_item(_cx: Cx<State>) -> Result<FileProjection> {
 // /dynamic/{name}
 // ===========================================================================
 
-async fn dynamic(_cx: DirCx<State>, captures: DynamicCaptures) -> Result<DirProjection> {
+async fn dynamic(_cx: DirCx<State>, captures: DynamicCaptures) -> Result<DirListing> {
     let value_path = format!("dynamic/{}/value", captures.name);
     let mut content = captures.name.into_bytes();
     content.push(b'\n');
-    Ok(DirProjection::exhaustive([Entry::file("value")])
+    Ok(DirListing::exhaustive([Entry::file("value")])
         .preload_file(value_path, FileProjection::inline(content).build()))
 }
 

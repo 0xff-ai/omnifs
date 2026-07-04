@@ -16,6 +16,7 @@ use omnifs_sdk::prelude::*;
 use omnifs_sdk::{
     OauthScheme, ProviderAuthManifest, SchemeGuidance, StaticTokenScheme, TokenValidation,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::api::{
@@ -103,7 +104,10 @@ struct IssueListKey {
 
 #[omnifs_sdk::path_captures]
 pub(crate) struct IssueKey {
-    pub(crate) team: Facet<TeamKey>,
+    // Identity: an issue belongs to exactly one team, and the collection uses
+    // `team` to render each child anchor (`/teams/{team}/issues/{filter}/{ident}`).
+    // TeamKey has no finite `choices()`, so it cannot be a facet axis.
+    pub(crate) team: TeamKey,
     // Drives facet-axis view-leaf expansion; not read in provider code.
     #[allow(dead_code)]
     pub(crate) filter: Facet<StateFilter>,
@@ -119,7 +123,7 @@ impl Issue {
         key: &IssueKey,
         _since: Option<Validator>,
     ) -> Result<Load<Issue>> {
-        if key.ident.team() != &*key.team {
+        if key.ident.team() != &key.team {
             return Ok(Load::NotFound);
         }
         let vars = json!({ "id": key.ident.to_string() });
@@ -203,8 +207,15 @@ impl LinearProvider {
         r.dir("/teams").handler(teams_list)?;
         r.dir("/teams/{team}/issues")
             .handler(IssuesRootKey::filters)?;
-        r.dir("/teams/{team}/issues/{filter}")
-            .handler(IssueListKey::list)?;
+        // The `/teams/{team}` anchor hosts the issue listing as a typed
+        // `Collection<Issue>`. A NESTED collection is declared on a parent
+        // object, so `TeamAnchor` exists purely to carry the `issues/{filter}`
+        // collection; it declares no readable face of its own.
+        r.object::<TeamAnchor>("/teams/{team}", |o| {
+            o.dynamic();
+            o.dir("issues/{filter}").collection(TeamAnchor::issues)?;
+            Ok(())
+        })?;
         r.object::<Issue>("/teams/{team}/issues/{filter}/{ident}", |o| {
             o.dynamic();
             o.file("item.json").canonical::<Json>()?;
@@ -222,19 +233,19 @@ impl LinearProvider {
     }
 }
 
-async fn teams_list(cx: DirCx) -> Result<DirProjection> {
+async fn teams_list(cx: DirCx) -> Result<DirListing> {
     let teams = fetch_all_teams(&cx).await?;
     let entries = teams
         .into_iter()
         .filter(|team| team.key.parse::<TeamKey>().is_ok())
         .map(|team| Entry::dir(team.key));
-    Ok(DirProjection::exhaustive(entries))
+    Ok(DirListing::exhaustive(entries))
 }
 
 impl IssuesRootKey {
     #[allow(clippy::unused_self)]
-    fn filters(self, _cx: DirCx) -> Result<DirProjection> {
-        Ok(DirProjection::exhaustive(
+    fn filters(self, _cx: DirCx) -> Result<DirListing> {
+        Ok(DirListing::exhaustive(
             StateFilter::choices()
                 .into_iter()
                 .flatten()
@@ -243,13 +254,40 @@ impl IssuesRootKey {
     }
 }
 
-impl IssueListKey {
-    async fn list(self, cx: DirCx) -> Result<DirProjection> {
-        let team = self.team;
-        let filter = self.filter;
+/// The parent object anchoring the issue collection at `/teams/{team}`.
+///
+/// It declares no canonical or readable face; a NESTED `Collection` must hang
+/// off an object anchor, and this is the minimal one. Because it has no
+/// canonical face, the SDK never loads it (the anchor-listing path
+/// early-returns for a no-canonical object and no read target resolves to it),
+/// so [`Self::load`] exists only to satisfy the `Object` trait.
+#[omnifs_sdk::object(kind = "linear.team", key = crate::IssuesRootKey)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) struct TeamAnchor {}
+
+impl TeamAnchor {
+    pub(crate) async fn load(
+        _cx: &Cx<()>,
+        _key: &IssuesRootKey,
+        _since: Option<Validator>,
+    ) -> Result<Load<TeamAnchor>> {
+        // Unreachable: the `/teams/{team}` anchor has no canonical/readable
+        // face, so neither the list nor read path ever calls it.
+        Ok(Load::NotFound)
+    }
+
+    /// List a team's issues as child `Issue` objects. The listing carries only
+    /// each issue's identifier (the child anchor name); the issue canonical
+    /// loads on the child's own first read.
+    async fn issues(
+        key: IssueListKey,
+        cx: ListCx<NoCursor>,
+    ) -> Result<Collection<Issue, NoCursor>> {
+        let team = key.team;
+        let filter = key.filter;
         let page = fetch_all_issues(&cx, &team, filter).await?;
         let mut seen: HashSet<String> = HashSet::with_capacity(page.items.len());
-        let mut idents: Vec<IssueIdent> = Vec::new();
+        let mut entries: Vec<CollectionEntry<Issue>> = Vec::new();
         for issue in page.items {
             if !seen.insert(issue.identifier.clone()) {
                 continue;
@@ -260,14 +298,17 @@ impl IssueListKey {
             if ident.team() != &team {
                 continue;
             }
-            idents.push(ident);
+            entries.push(CollectionEntry::key(IssueKey {
+                team: team.clone(),
+                filter: Facet(filter),
+                ident,
+            }));
         }
-        let projection = if page.truncated {
-            DirProjection::open(idents.iter().map(|ident| Entry::dir(ident.to_string())))
+        Ok(if page.truncated {
+            Collection::partial(entries)
         } else {
-            DirProjection::exhaustive(idents.iter().map(|ident| Entry::dir(ident.to_string())))
-        };
-        Ok(projection)
+            Collection::complete(entries)
+        })
     }
 }
 

@@ -222,7 +222,7 @@ impl ArxivProvider {
 }
 
 impl PaperKey {
-    async fn versions(cx: DirCx, key: PaperKey) -> Result<DirProjection> {
+    async fn versions(cx: DirCx, key: PaperKey) -> Result<DirListing> {
         let paper = loaded_paper(&cx, &key).await?;
         Paper::version_dirs(&paper)
     }
@@ -230,11 +230,11 @@ impl PaperKey {
 
 impl CategoryKey {
     #[allow(clippy::unused_async)]
-    async fn sub(_cx: DirCx, _key: CategoryKey) -> Result<DirProjection> {
-        Ok(DirProjection::exhaustive([Entry::dir("papers")]))
+    async fn sub(_cx: DirCx, _key: CategoryKey) -> Result<DirListing> {
+        Ok(DirListing::exhaustive([Entry::dir("papers")]))
     }
 
-    async fn recent(cx: DirCx, key: CategoryKey) -> Result<DirProjection> {
+    async fn recent(cx: DirCx, key: CategoryKey) -> Result<DirListing> {
         let page = cx.page_cursor(0);
         let ids = fetch_category_page(&cx, key.category.as_ref(), page).await?;
         let exhaustive = ids.len() < CATEGORY_PAGE_SIZE as usize;
@@ -244,9 +244,9 @@ impl CategoryKey {
                 .map(|id| Entry::dir(id.to_string()))
         });
         if exhaustive {
-            Ok(DirProjection::open(entries))
+            Ok(DirListing::open(entries))
         } else {
-            Ok(DirProjection::paged(entries, Cursor::Page(page + 1)))
+            Ok(DirListing::paged(entries, Cursor::Page(page + 1)))
         }
     }
 }

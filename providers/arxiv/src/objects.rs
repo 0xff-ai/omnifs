@@ -141,8 +141,8 @@ impl Paper {
 
     /// `v1..=latest_version`, derived from the loaded Atom. No callout.
     #[allow(clippy::unnecessary_wraps)]
-    pub(crate) fn version_dirs(paper: &Paper) -> Result<DirProjection> {
-        Ok(DirProjection::exhaustive(
+    pub(crate) fn version_dirs(paper: &Paper) -> Result<DirListing> {
+        Ok(DirListing::exhaustive(
             std::iter::once(Entry::dir("@latest"))
                 .chain((1..=paper.latest_version).map(|v| Entry::dir(format!("v{v}")))),
         ))

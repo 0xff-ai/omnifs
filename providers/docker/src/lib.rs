@@ -284,18 +284,16 @@ impl DockerProvider {
 const PROJECT_LABEL: &str = "com.docker.compose.project";
 const SERVICE_LABEL: &str = "com.docker.compose.service";
 
-async fn project_services(cx: DirCx<State>, key: ProjectKey) -> Result<DirProjection> {
+async fn project_services(cx: DirCx<State>, key: ProjectKey) -> Result<DirListing> {
     let summaries = list_containers(&cx).await?;
     let services = services_for_project(&summaries, key.project.as_str());
-    Ok(DirProjection::exhaustive(
-        services.into_iter().map(Entry::dir),
-    ))
+    Ok(DirListing::exhaustive(services.into_iter().map(Entry::dir)))
 }
 
-async fn service_containers(cx: DirCx<State>, key: ProjectServiceKey) -> Result<DirProjection> {
+async fn service_containers(cx: DirCx<State>, key: ProjectServiceKey) -> Result<DirListing> {
     let summaries = list_containers(&cx).await?;
     let names = containers_for_service(&summaries, key.project.as_str(), key.service.as_str());
-    Ok(DirProjection::exhaustive(names.into_iter().map(Entry::dir)))
+    Ok(DirListing::exhaustive(names.into_iter().map(Entry::dir)))
 }
 
 async fn system_info(cx: Cx<State>) -> Result<FileProjection> {
@@ -338,21 +336,21 @@ async fn containers_listing(cx: Cx<State>) -> Result<FileProjection> {
     ))
 }
 
-async fn by_name(cx: DirCx<State>) -> Result<DirProjection> {
+async fn by_name(cx: DirCx<State>) -> Result<DirListing> {
     let summaries = list_containers(&cx).await?;
-    Ok(DirProjection::exhaustive(
+    Ok(DirListing::exhaustive(
         container_names(&summaries).into_iter().map(Entry::dir),
     ))
 }
 
-async fn by_id(cx: DirCx<State>) -> Result<DirProjection> {
+async fn by_id(cx: DirCx<State>) -> Result<DirListing> {
     let summaries = list_containers(&cx).await?;
-    Ok(DirProjection::exhaustive(
+    Ok(DirListing::exhaustive(
         container_ids(&summaries).into_iter().map(Entry::dir),
     ))
 }
 
-async fn running(cx: DirCx<State>) -> Result<DirProjection> {
+async fn running(cx: DirCx<State>) -> Result<DirListing> {
     listing_filtered(&cx, |summary| {
         if let Some(state) = summary.state {
             state.as_ref() == "running"
@@ -366,7 +364,7 @@ async fn running(cx: DirCx<State>) -> Result<DirProjection> {
     .await
 }
 
-async fn stopped(cx: DirCx<State>) -> Result<DirProjection> {
+async fn stopped(cx: DirCx<State>) -> Result<DirListing> {
     listing_filtered(&cx, |summary| {
         if let Some(state) = summary.state {
             let s = state.as_ref();
@@ -381,7 +379,7 @@ async fn stopped(cx: DirCx<State>) -> Result<DirProjection> {
     .await
 }
 
-async fn listing_filtered<F>(cx: &DirCx<State>, predicate: F) -> Result<DirProjection>
+async fn listing_filtered<F>(cx: &DirCx<State>, predicate: F) -> Result<DirListing>
 where
     F: Fn(&ContainerSummary) -> bool,
 {
@@ -393,7 +391,7 @@ where
         .map(|raw| strip_leading_slash(raw).to_string())
         .filter(|name| !name.is_empty())
         .collect::<Vec<_>>();
-    Ok(DirProjection::exhaustive(names.into_iter().map(Entry::dir)))
+    Ok(DirListing::exhaustive(names.into_iter().map(Entry::dir)))
 }
 
 async fn compose_listing(cx: Cx<State>) -> Result<FileProjection> {

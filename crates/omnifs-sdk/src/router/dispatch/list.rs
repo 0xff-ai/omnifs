@@ -58,13 +58,13 @@ impl<S> Router<S> {
 
         if let Some(route) = shape.dir_route(&abs) {
             let dir_cx = DirCx::new(cx.clone(), DirIntent::List { cursor });
-            let projection = super::route_future(
+            let listing = super::route_future(
                 route.entry.pattern.template(),
                 (route.entry.handler)(dir_cx, route.captures),
             )
             .await
             .map_err(|error| error.with_context("list-children", &abs))?;
-            return shape.dir_projection_into_list(&abs, &projection);
+            return shape.dir_projection_into_list(&abs, &listing.into_dir_projection());
         }
 
         if let Some(route) = shape.object_route(&abs) {
