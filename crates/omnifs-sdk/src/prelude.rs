@@ -18,7 +18,6 @@ pub use crate::file_attrs::{
 pub use crate::handler::{
     Cursor, DirCx, DirIntent, FileChunk, MemoryRangeReader, RangeReader, TreeRef,
 };
-pub use crate::helpers::{err, pretty_json};
 pub use crate::identity::{Facet, IdentityCaptures, LogicalId};
 pub use crate::invalidation::Invalidation;
 pub use crate::object::{
@@ -28,7 +27,9 @@ pub use crate::object::{
 pub use crate::projection::{
     BlobFile, DirProjection, Entry, FileProjection, StreamFile, TextFormat,
 };
-pub use crate::repr::{Atom, Format, Json, Markdown, RenderTable, Representable, Yaml};
+pub use crate::repr::{
+    Atom, Format, Json, Markdown, RenderTable, Representable, Yaml, pretty_json,
+};
 pub use crate::router::{
     DirFace, DirRoute, FileFace, FileRoute, ObjectBlock, ObjectHandle, Router, TreeRefRoute, object,
 };

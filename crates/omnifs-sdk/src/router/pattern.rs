@@ -1,8 +1,8 @@
 //! Route template grammar, matching, precedence, and ambiguity.
 //!
 //! This module owns the route-pattern types ([`Pattern`], [`CaptureLocation`],
-//! [`Match`], [`Error`]). Route matching is SDK-side knowledge; no host, fuse,
-//! or CLI code consumes these types.
+//! [`PatternError`]). Route matching is SDK-side knowledge; no host, fuse, or
+//! CLI code consumes these types.
 //!
 //! # Template grammar
 //!
@@ -38,9 +38,10 @@
 
 use super::handlers::{DirEntry, FileEntry, RouteValidator, TreeRefEntry};
 use crate::captures::{Capture, CaptureDescriptor, Captures};
-use crate::error::{ProviderError, Result};
-use omnifs_core::path::{Path, Segment};
+use crate::error::ProviderError;
+use omnifs_core::path::Path;
 use std::cmp::Reverse;
+use std::fmt;
 
 // ===========================================================================
 // Pattern types
@@ -82,6 +83,66 @@ enum PatternSegment {
     },
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum PatternError {
+    InvalidTemplate { template: String },
+    InvalidSegment { segment: String },
+    InvalidRestCapture { segment: String },
+    RestCaptureNotLast { segment: String },
+    InvalidCaptureSegment { segment: String },
+    InvalidCapturePrefix { segment: String },
+    PathMismatch { path: String },
+    PathPrefixTooLong { path: String },
+    PathPrefixMismatch { path: String },
+    EmptyCaptureName,
+    InvalidCaptureName { name: String },
+}
+
+impl fmt::Display for PatternError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidTemplate { template } => {
+                write!(f, "invalid path template {template:?}")
+            },
+            Self::InvalidSegment { segment } => {
+                write!(f, "invalid path template segment {segment:?}")
+            },
+            Self::InvalidRestCapture { segment } => {
+                write!(f, "invalid rest-capture segment {segment:?}")
+            },
+            Self::RestCaptureNotLast { segment } => {
+                write!(
+                    f,
+                    "rest-capture segment {segment:?} must be the last segment of the pattern"
+                )
+            },
+            Self::InvalidCaptureSegment { segment } => {
+                write!(f, "invalid capture segment {segment:?}")
+            },
+            Self::InvalidCapturePrefix { segment } => {
+                write!(f, "invalid capture prefix in segment {segment:?}")
+            },
+            Self::PathMismatch { path } => write!(f, "path {path} does not match pattern"),
+            Self::PathPrefixTooLong { path } => {
+                write!(f, "path {path} is longer than pattern prefix")
+            },
+            Self::PathPrefixMismatch { path } => {
+                write!(f, "path {path} does not match pattern prefix")
+            },
+            Self::EmptyCaptureName => f.write_str("capture names cannot be empty"),
+            Self::InvalidCaptureName { name } => write!(f, "invalid capture name {name:?}"),
+        }
+    }
+}
+
+impl std::error::Error for PatternError {}
+
+impl From<PatternError> for ProviderError {
+    fn from(error: PatternError) -> Self {
+        Self::invalid_input(error.to_string())
+    }
+}
+
 impl CaptureLocation {
     #[must_use]
     pub fn segment_index(&self) -> usize {
@@ -105,7 +166,7 @@ impl Pattern {
     /// anywhere but last, and malformed capture syntax (nested or unclosed
     /// braces, empty prefix). `"/"` compiles to the empty pattern that matches
     /// only the root path.
-    pub fn parse(template: &str) -> core::result::Result<Self, String> {
+    pub fn parse(template: &str) -> core::result::Result<Self, PatternError> {
         if template == "/" {
             return Ok(Self {
                 segments: Vec::new(),
@@ -115,7 +176,9 @@ impl Pattern {
             });
         }
         if !template.starts_with('/') || template.ends_with('/') || template.contains("//") {
-            return Err(format!("invalid path template {template:?}"));
+            return Err(PatternError::InvalidTemplate {
+                template: template.to_string(),
+            });
         }
 
         let raw_segments: Vec<&str> = template.split('/').skip(1).collect();
@@ -127,16 +190,20 @@ impl Pattern {
 
         for (index, raw) in raw_segments.into_iter().enumerate() {
             if raw.is_empty() || matches!(raw, "." | "..") {
-                return Err(format!("invalid path template segment {raw:?}"));
+                return Err(PatternError::InvalidSegment {
+                    segment: raw.to_string(),
+                });
             }
             if raw.starts_with("{*") {
                 if !raw.ends_with('}') || raw.len() < 4 {
-                    return Err(format!("invalid rest-capture segment {raw:?}"));
+                    return Err(PatternError::InvalidRestCapture {
+                        segment: raw.to_string(),
+                    });
                 }
                 if index != total - 1 {
-                    return Err(format!(
-                        "rest-capture segment {raw:?} must be the last segment of the pattern"
-                    ));
+                    return Err(PatternError::RestCaptureNotLast {
+                        segment: raw.to_string(),
+                    });
                 }
                 let name = &raw[2..raw.len() - 1];
                 validate_capture_name(name)?;
@@ -157,11 +224,15 @@ impl Pattern {
             }
             if let Some(start) = raw.find('{') {
                 if !raw.ends_with('}') || raw[start + 1..raw.len() - 1].contains('{') {
-                    return Err(format!("invalid capture segment {raw:?}"));
+                    return Err(PatternError::InvalidCaptureSegment {
+                        segment: raw.to_string(),
+                    });
                 }
                 let prefix = &raw[..start];
                 if prefix.is_empty() || prefix.contains('/') {
-                    return Err(format!("invalid capture prefix in segment {raw:?}"));
+                    return Err(PatternError::InvalidCapturePrefix {
+                        segment: raw.to_string(),
+                    });
                 }
                 let name = &raw[start + 1..raw.len() - 1];
                 validate_capture_name(name)?;
@@ -203,16 +274,20 @@ impl Pattern {
     /// segment-count match; a rest pattern matches its fixed prefix plus zero
     /// or more trailing segments (so `/ipfs/{cid}/{*path}` matches
     /// `/ipfs/Qm123` itself).
-    pub fn match_path(&self, path: &Path) -> core::result::Result<Captures, String> {
+    pub fn match_path(&self, path: &Path) -> core::result::Result<Captures, PatternError> {
         let segments: Vec<&str> = path.segments().collect();
         if self.has_rest {
             let fixed = self.fixed_prefix_len();
             if segments.len() < fixed || !self.matches_prefix_segments(&segments[..fixed]) {
-                return Err(format!("path {path:?} does not match pattern"));
+                return Err(PatternError::PathMismatch {
+                    path: format!("{path:?}"),
+                });
             }
         } else if segments.len() != self.segments.len() || !self.matches_prefix_segments(&segments)
         {
-            return Err(format!("path {path:?} does not match pattern"));
+            return Err(PatternError::PathMismatch {
+                path: format!("{path:?}"),
+            });
         }
 
         Ok(self.captures_from_segments(&segments))
@@ -222,10 +297,12 @@ impl Pattern {
     /// probe). Captures are decoded only for the segments actually present;
     /// callers must tolerate missing captures (see
     /// [`crate::captures::FromCaptures::validate_present_captures`]).
-    pub fn match_prefix(&self, path: &Path) -> core::result::Result<Captures, String> {
+    pub fn match_prefix(&self, path: &Path) -> core::result::Result<Captures, PatternError> {
         let segments: Vec<&str> = path.segments().collect();
         if !self.has_rest && segments.len() > self.segments.len() {
-            return Err(format!("path {path:?} is longer than pattern prefix"));
+            return Err(PatternError::PathPrefixTooLong {
+                path: format!("{path:?}"),
+            });
         }
         let comparable = if self.has_rest && segments.len() > self.fixed_prefix_len() {
             &segments[..self.fixed_prefix_len()]
@@ -233,7 +310,9 @@ impl Pattern {
             segments.as_slice()
         };
         if !self.matches_prefix_segments(comparable) {
-            return Err(format!("path {path:?} does not match pattern prefix"));
+            return Err(PatternError::PathPrefixMismatch {
+                path: format!("{path:?}"),
+            });
         }
         Ok(self.captures_from_segments(&segments))
     }
@@ -479,18 +558,22 @@ impl PatternSegment {
     }
 }
 
-fn validate_capture_name(name: &str) -> core::result::Result<(), String> {
+fn validate_capture_name(name: &str) -> core::result::Result<(), PatternError> {
     let mut chars = name.chars();
     let Some(first) = chars.next() else {
-        return Err("capture names cannot be empty".to_string());
+        return Err(PatternError::EmptyCaptureName);
     };
     if !(first == '_' || first.is_ascii_alphabetic()) {
-        return Err(format!("invalid capture name {name:?}"));
+        return Err(PatternError::InvalidCaptureName {
+            name: name.to_string(),
+        });
     }
     if chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric()) {
         Ok(())
     } else {
-        Err(format!("invalid capture name {name:?}"))
+        Err(PatternError::InvalidCaptureName {
+            name: name.to_string(),
+        })
     }
 }
 
@@ -621,18 +704,6 @@ where
         })
         .max_by_key(|(index, route, _)| (route.route_pattern().precedence_key(), Reverse(*index)))
         .map(|(_, route, caps)| (route, caps))
-}
-
-pub(crate) fn parse_pattern(template: &str) -> Result<Pattern> {
-    Pattern::parse(template).map_err(ProviderError::invalid_input)
-}
-
-pub(super) fn parse_provider_path(path: &str) -> Result<Path> {
-    Path::parse(path).map_err(|error| ProviderError::invalid_input(error.to_string()))
-}
-
-pub(super) fn parse_child_segment(name: &str) -> Result<Segment> {
-    Segment::try_from(name).map_err(|error| ProviderError::invalid_input(error.to_string()))
 }
 
 #[cfg(test)]

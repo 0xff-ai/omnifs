@@ -5,13 +5,13 @@
 //! `dispatch` submodule) reads it on every host browse call.
 
 use crate::error::{ProviderError, Result};
-use crate::object::{FacetMetadata, Key, Object};
+use crate::object::{FacetMetadata, Key, Object, ObjectKind};
 use std::collections::BTreeSet;
 
 use super::descriptor::{RouteDescriptor, RouteKind};
 use super::handlers::{IntoDirHandler, IntoFileHandler, IntoTreeRefHandler};
 use super::object::{ObjectBlock, ObjectHandle, mount_object, object};
-use super::pattern::{Pattern, parse_pattern};
+use super::pattern::Pattern;
 
 // ===========================================================================
 // Router
@@ -57,7 +57,7 @@ pub struct Router<S = ()> {
 /// resolve the child object's anchor template, view leaves, and facet axes at
 /// seal time.
 pub(super) struct RegisteredObject {
-    pub kind_str: &'static str,
+    pub kind: ObjectKind,
     pub template: String,
     pub has_canonical: bool,
     /// The object's canonical-view leaf names (canonical/representation/derived).
@@ -75,7 +75,7 @@ pub(super) struct CollectionRef<S> {
     pub dir_path: String,
     /// The parent object's template (`dir_path` minus the face name).
     pub parent_template: String,
-    pub child_kind_str: &'static str,
+    pub child_kind: ObjectKind,
     /// Whether the collection can emit `fresh` entries (always true for the
     /// typed `collection::<C>` form).
     pub requires_canonical: bool,
@@ -207,10 +207,10 @@ impl<S> Router<S> {
                 "object template must be absolute: {template}"
             )));
         }
-        let pattern = parse_pattern(template)?;
+        let pattern = Pattern::parse(template)?;
         let mounted = mount_object::<O>(&pattern, handle.spec.as_ref(), template, route_kind)?;
         self.object_registry.push(RegisteredObject {
-            kind_str: O::kind().as_str(),
+            kind: O::kind(),
             template: template.to_string(),
             has_canonical: handle.has_canonical(),
             canonical_view_leaf_names: handle.canonical_view_leaf_names(),
@@ -235,7 +235,7 @@ impl<S> Router<S> {
             self.collections.push(CollectionRef {
                 dir_path: decl.dir_path.clone(),
                 parent_template: decl.parent_template.clone(),
-                child_kind_str: decl.child_kind_str,
+                child_kind: decl.child_kind,
                 requires_canonical: decl.requires_canonical,
                 late_view: entry.late_view.clone(),
                 handler: entry.handler.clone(),
@@ -249,7 +249,7 @@ impl<S> Router<S> {
         let mount = template.trim_end_matches('/');
         for face in handle.tree_faces() {
             let tree_path = format!("{mount}/{}", face.name);
-            let pattern = parse_pattern(&tree_path)?;
+            let pattern = Pattern::parse(&tree_path)?;
             self.treerefs.push(super::handlers::TreeRefEntry {
                 pattern: pattern.clone(),
                 handler: face.handler.clone(),
@@ -263,7 +263,7 @@ impl<S> Router<S> {
         // route claims the path (the choices face does not).
         for face in handle.choices_faces() {
             let choices_path = format!("{mount}/{}", face.name);
-            let pattern = parse_pattern(&choices_path)?;
+            let pattern = Pattern::parse(&choices_path)?;
             let names = face.names;
             let handler: super::handlers::BoxedDirHandler<S> =
                 std::sync::Arc::new(move |_dir_cx, _caps| {
@@ -289,7 +289,7 @@ impl<S> Router<S> {
     }
 
     fn dir_at<Marker, H: IntoDirHandler<S, Marker>>(&mut self, template: &str, h: H) -> Result<()> {
-        let pattern = parse_pattern(template)?;
+        let pattern = Pattern::parse(template)?;
         let (handler, validator) = h.into_dir_handler();
         self.dirs.push(super::handlers::DirEntry {
             pattern: pattern.clone(),
@@ -306,7 +306,7 @@ impl<S> Router<S> {
         ranged: bool,
         h: H,
     ) -> Result<()> {
-        let pattern = parse_pattern(template)?;
+        let pattern = Pattern::parse(template)?;
         let (handler, validator) = h.into_file_handler();
         self.files.push(super::handlers::FileEntry {
             pattern: pattern.clone(),
@@ -323,7 +323,7 @@ impl<S> Router<S> {
         template: &str,
         h: H,
     ) -> Result<()> {
-        let pattern = parse_pattern(template)?;
+        let pattern = Pattern::parse(template)?;
         let (handler, validator) = h.into_treeref_handler();
         self.treerefs.push(super::handlers::TreeRefEntry {
             pattern: pattern.clone(),
@@ -418,7 +418,7 @@ impl<S> Router<S> {
             RouteDescriptor::new(
                 &entry.pattern,
                 entry.route_kind,
-                Some(entry.kind_str.to_string()),
+                Some(entry.kind.as_str().to_string()),
                 entry.validator.capture_descriptors(),
             )
         }));
@@ -440,21 +440,21 @@ impl<S> Router<S> {
             let Some(child) = self
                 .object_registry
                 .iter()
-                .find(|object| object.kind_str == collection.child_kind_str)
+                .find(|object| object.kind == collection.child_kind)
             else {
                 return Err(ProviderError::invalid_input(format!(
                     "collection at {} references object kind {:?}, which is not registered as an r.object route",
-                    collection.dir_path, collection.child_kind_str
+                    collection.dir_path, collection.child_kind
                 )));
             };
             if collection.requires_canonical && !child.has_canonical {
                 return Err(ProviderError::invalid_input(format!(
                     "collection at {} emits fresh entries but child object {:?} ({}) has no canonical face",
-                    collection.dir_path, collection.child_kind_str, child.template
+                    collection.dir_path, collection.child_kind, child.template
                 )));
             }
 
-            let child_pattern = parse_pattern(&child.template)?;
+            let child_pattern = Pattern::parse(&child.template)?;
             // The child key must be derivable from the child template captures
             // (Part 8): every facet axis must name a capture in the template.
             for axis in child.facet_axes {
@@ -462,7 +462,7 @@ impl<S> Router<S> {
                     return Err(ProviderError::invalid_input(format!(
                         "collection at {}: child object {:?} facet {:?} is not a capture in its template {}",
                         collection.dir_path,
-                        collection.child_kind_str,
+                        collection.child_kind,
                         axis.capture_name,
                         child.template
                     )));
@@ -471,12 +471,12 @@ impl<S> Router<S> {
             let facet_expansion =
                 super::object::FacetExpansion::for_axes(&child_pattern, child.facet_axes)?;
 
-            let dir_pattern = parse_pattern(&collection.dir_path)?;
+            let dir_pattern = Pattern::parse(&collection.dir_path)?;
             let dir_depth = dir_pattern.pattern_len();
             descriptors.push(RouteDescriptor::new(
                 &dir_pattern,
                 RouteKind::Collection,
-                Some(collection.child_kind_str.to_string()),
+                Some(collection.child_kind.as_str().to_string()),
                 collection.validator.capture_descriptors(),
             ));
             // ANCHOR when the collection dir path equals the child template;
@@ -488,13 +488,13 @@ impl<S> Router<S> {
             } else {
                 return Err(ProviderError::invalid_input(format!(
                     "collection at {}: child object {:?} template {} is not the collection path nor strictly deeper",
-                    collection.dir_path, collection.child_kind_str, child.template
+                    collection.dir_path, collection.child_kind, child.template
                 )));
             };
 
             let child_view = std::rc::Rc::new(super::object::ResolvedChildView::new(
                 child.template.clone(),
-                crate::object::ObjectKind(child.kind_str),
+                child.kind,
                 child.canonical_view_leaf_names.clone(),
                 facet_expansion,
                 dir_depth,
@@ -521,7 +521,7 @@ impl<S> Router<S> {
                 super::object::CollectionTopology::Anchor => {
                     // Attach to the parent object's anchor: its listing/lookup
                     // runs this collection and merges the child-name entries.
-                    let parent_pattern = parse_pattern(&collection.parent_template)?;
+                    let parent_pattern = Pattern::parse(&collection.parent_template)?;
                     let Some(parent) = self
                         .objects
                         .iter_mut()

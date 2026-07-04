@@ -1,7 +1,9 @@
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{quote, quote_spanned};
 use syn::spanned::Spanned;
-use syn::{Attribute, Expr, Field, Fields, GenericArgument, Item, Lit, Meta, PathArguments, Type};
+use syn::{Attribute, Expr, Field, Fields, Item, Lit, Meta, Type};
+
+use crate::util::{generic_type_arg, has_angle_args};
 
 pub(crate) fn config_item_impl(item: Item) -> Result<TokenStream2, syn::Error> {
     match item {
@@ -308,15 +310,15 @@ fn strip_omnifs_attrs(attrs: &mut Vec<Attribute>) {
 }
 
 fn type_argument(ty: &Type, segment: &syn::PathSegment, index: usize) -> syn::Result<FieldType> {
-    let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+    if !has_angle_args(segment) {
         return Err(syn::Error::new(
             ty.span(),
             format!("{} config fields require type arguments", segment.ident),
         ));
-    };
-    let Some(GenericArgument::Type(arg)) = arguments.args.iter().nth(index) else {
+    }
+    let Some(arg) = generic_type_arg(segment, index) else {
         return Err(syn::Error::new(
-            arguments.span(),
+            segment.arguments.span(),
             format!(
                 "{} config field has an unsupported type argument",
                 segment.ident
@@ -327,7 +329,7 @@ fn type_argument(ty: &Type, segment: &syn::PathSegment, index: usize) -> syn::Re
 }
 
 fn ensure_string_map_key(ty: &Type, segment: &syn::PathSegment) -> syn::Result<()> {
-    let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+    if !has_angle_args(segment) {
         return Err(syn::Error::new(
             ty.span(),
             format!(
@@ -335,10 +337,10 @@ fn ensure_string_map_key(ty: &Type, segment: &syn::PathSegment) -> syn::Result<(
                 segment.ident
             ),
         ));
-    };
-    let Some(GenericArgument::Type(Type::Path(key))) = arguments.args.first() else {
+    }
+    let Some(Type::Path(key)) = generic_type_arg(segment, 0) else {
         return Err(syn::Error::new(
-            arguments.span(),
+            segment.arguments.span(),
             "config map keys must be String",
         ));
     };

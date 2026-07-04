@@ -22,6 +22,7 @@ mod endpoint_macro;
 mod object_macro;
 mod path_segment_macro;
 mod provider_macro;
+mod util;
 
 /// The provider entrypoint: lowers one impl block onto the full WIT export
 /// surface (lifecycle, async namespace, async notify).
