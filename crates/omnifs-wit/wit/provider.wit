@@ -133,10 +133,13 @@ interface types {
     /// Canonical bytes the host pushes into `read-file` on a view-cache miss
     /// under a known object id, so the SDK renders without an upstream call.
     /// `id` is included so the SDK can self-check before rendering.
+    /// `revalidate` asks the SDK to call the object's load path with the
+    /// supplied validator instead of serving directly from `bytes`.
     record canonical-input {
         id: logical-id,
         validator: option<version-token>,
         bytes: list<u8>,
+        revalidate: bool,
     }
 
     // --- Error types ---

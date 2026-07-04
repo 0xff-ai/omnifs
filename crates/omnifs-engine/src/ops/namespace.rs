@@ -138,6 +138,26 @@ impl Namespace<'_> {
         content_type: String,
         fuse_trace: Option<TraceId>,
     ) -> Result<ReadOutcome> {
+        self.read_file_with_mode(path, content_type, fuse_trace, ReadMode::Serve)
+            .await
+    }
+
+    pub(crate) async fn revalidate_file(
+        &self,
+        path: &Path,
+        content_type: String,
+    ) -> Result<ReadOutcome> {
+        self.read_file_with_mode(path, content_type, None, ReadMode::Revalidate)
+            .await
+    }
+
+    async fn read_file_with_mode(
+        &self,
+        path: &Path,
+        content_type: String,
+        fuse_trace: Option<TraceId>,
+        mode: ReadMode,
+    ) -> Result<ReadOutcome> {
         let now = now_millis();
         if self.runtime.cache.negative_for(path, now).is_some() {
             return Err(enoent(path.as_str()));
@@ -156,6 +176,7 @@ impl Namespace<'_> {
                         id,
                         validator,
                         bytes,
+                        revalidate: mode.revalidates(),
                     }
                 });
                 (Some(host_id), canonical)
@@ -181,10 +202,12 @@ impl Namespace<'_> {
         };
 
         // Warm-but-not-live reads coalesce by object identity, so concurrent
-        // reads of distinct paths that alias the same object share one provider
-        // revalidation. Cold reads have no known id yet, so they key on the path.
+        // user reads of distinct paths that alias the same object share one
+        // provider operation. Timer revalidation uses a distinct object key
+        // because a normal warm read may serve pushed bytes without reloading.
+        // Cold reads have no known id yet, so they key on the path.
         let coalesce_key = match &warm_id {
-            Some(host_id) => NsKey::Object(ObjectId::from_bytes(host_id.clone())),
+            Some(host_id) => mode.coalesce_key(ObjectId::from_bytes(host_id.clone())),
             None => NsKey::Path(path.clone()),
         };
         let result = if live {
@@ -195,7 +218,18 @@ impl Namespace<'_> {
         };
 
         match Self::run_op_expect(op_for_error, result, expect_read_file)? {
-            wit_types::ReadFileOutcome::Found(result) => Ok(ReadOutcome::from_wit(result)),
+            wit_types::ReadFileOutcome::Found(result) => {
+                match warm_id {
+                    Some(host_id) => self.runtime.note_read_object(ObjectId::from_bytes(host_id)),
+                    None => {
+                        if let Some(canonical) = self.runtime.cache.cached_canonical_for(path) {
+                            self.runtime
+                                .note_read_object(ObjectId::from_bytes(canonical.id));
+                        }
+                    },
+                }
+                Ok(ReadOutcome::from_wit(result))
+            },
             wit_types::ReadFileOutcome::NotFound(_) => Err(enoent(path.as_str())),
         }
     }
@@ -241,6 +275,25 @@ impl Namespace<'_> {
             })
             .await;
         unshare_outcome((*shared).clone(), EngineError::ProviderProtocol)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReadMode {
+    Serve,
+    Revalidate,
+}
+
+impl ReadMode {
+    fn revalidates(self) -> bool {
+        self == Self::Revalidate
+    }
+
+    fn coalesce_key(self, id: ObjectId) -> NsKey {
+        match self {
+            Self::Serve => NsKey::Object(id),
+            Self::Revalidate => NsKey::Revalidate(id),
+        }
     }
 }
 

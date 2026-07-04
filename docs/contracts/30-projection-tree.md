@@ -27,6 +27,8 @@ The host owns all caching as opaque byte storage. Providers do not add private L
 
 Keep object cache durable and provider-scoped. Treat view cache as derived and disposable. Access cache schema through shared host/tree APIs.
 
+Host revalidation is a cache safety backstop, not a second invalidation channel. `MountRuntimes` drives the per-mount timer, `Runtime::revalidate_recent_objects` chooses from the recent object-read set, and `Namespace::revalidate_file` re-enters `read-file` with the cached canonical id, validator, and bytes so normal provider effects apply any refreshed canonical bytes or invalidations.
+
 ### Listing and lookup
 
 Lookup, listing, and read must use one shared target-resolution model. Listing must be honest about what is currently knowable without inventing provider-specific frontend behavior.

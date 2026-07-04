@@ -223,6 +223,7 @@ fn warm_read_renders_from_pushed_bytes_no_canonical_effect() {
         id,
         validator: None,
         bytes: br#"{"title":"warm"}"#.to_vec(),
+        revalidate: false,
     });
     let outcome = drive(&cx, r.read_file(&cx, "/items/x/item.md", "", Some(cached)));
     let (out, effects) = read_wit(outcome);

@@ -42,6 +42,8 @@ pub struct Spec {
     pub mount: String,
     #[serde(default, skip_serializing_if = "is_false")]
     pub root_mount: bool,
+    #[serde(default = "default_revalidate", skip_serializing_if = "is_true")]
+    pub revalidate: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth: Option<Auth>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -110,6 +112,18 @@ impl<'a> ProviderMetadataInheritance<'a> {
 )]
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde skip predicate ABI"
+)]
+fn is_true(value: &bool) -> bool {
+    *value
+}
+
+fn default_revalidate() -> bool {
+    true
 }
 
 impl Spec {
@@ -759,6 +773,10 @@ mod tests {
             "default root_mount omitted: {written}"
         );
         assert!(
+            !written.contains("revalidate"),
+            "default revalidate omitted: {written}"
+        );
+        assert!(
             !written.contains("capabilities"),
             "absent capabilities omitted: {written}"
         );
@@ -782,6 +800,18 @@ mod tests {
         assert!(
             !registry.remove(&name).expect("remove absent"),
             "removing an absent mount is Ok(false)"
+        );
+    }
+
+    #[test]
+    fn revalidate_false_serializes_as_mount_kill_switch() {
+        let spec = spec_with_provider("github", r#"{ "mount": "github", "revalidate": false }"#);
+
+        assert!(!spec.revalidate);
+        let written = serde_json::to_string(&spec).unwrap();
+        assert!(
+            written.contains(r#""revalidate":false"#),
+            "explicit kill switch preserved: {written}"
         );
     }
 }

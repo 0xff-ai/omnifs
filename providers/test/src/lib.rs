@@ -96,9 +96,12 @@ impl Item {
     /// (conditional load); otherwise fresh, and loading item 7 also preloads its
     /// sibling item 8 from the same payload (object-load prefetch).
     #[allow(clippy::unused_async)]
-    async fn load(_cx: &Cx<State>, key: &ItemKey, since: Option<Validator>) -> Result<Load<Self>> {
+    async fn load(cx: &Cx<State>, key: &ItemKey, since: Option<Validator>) -> Result<Load<Self>> {
         if key.number == 404 {
             return Ok(Load::NotFound);
+        }
+        if key.number == 9 {
+            return load_remote_item(cx, key, since).await;
         }
         let (value, canonical) = canned_item(key.number)?;
         if since.is_some() && since == canonical.validator {
@@ -118,6 +121,37 @@ impl Item {
             ));
         }
         Ok(load)
+    }
+}
+
+async fn load_remote_item(
+    cx: &Cx<State>,
+    key: &ItemKey,
+    since: Option<Validator>,
+) -> Result<Load<Item>> {
+    let mut request = cx
+        .http()
+        .get(format!("https://httpbin.org/anything/items/{}", key.number));
+    if let Some(validator) = since.as_ref() {
+        request = request.header("if-none-match", validator.as_str());
+    }
+    let response = request.send().await?;
+    match response.status().as_u16() {
+        200 => {
+            let validator = response
+                .headers()
+                .get("etag")
+                .and_then(|value| value.to_str().ok())
+                .map(Validator::from);
+            let bytes = response.into_body();
+            let value = Item::decode(&bytes)?;
+            Ok(Load::fresh(value, Canonical::new(bytes, validator)))
+        },
+        304 => Ok(Load::Unchanged),
+        404 => Ok(Load::NotFound),
+        status => Err(ProviderError::network(format!(
+            "remote item returned status {status}"
+        ))),
     }
 }
 

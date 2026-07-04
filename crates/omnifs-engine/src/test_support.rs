@@ -95,6 +95,7 @@ enum TestOpState {
 #[doc(hidden)]
 pub struct PendingTestCallout {
     op_id: u64,
+    callout: wit_types::Callout,
     reply: tokio::sync::oneshot::Sender<wit_types::CalloutResult>,
 }
 
@@ -103,6 +104,12 @@ impl PendingTestCallout {
     #[must_use]
     pub fn op_id(&self) -> u64 {
         self.op_id
+    }
+
+    #[doc(hidden)]
+    #[must_use]
+    pub fn callout(&self) -> &wit_types::Callout {
+        &self.callout
     }
 
     /// Resume the suspended provider future with `result`.
@@ -127,6 +134,7 @@ impl Runtime {
                 Ok(TestSignal::Callout(callout)) => {
                     return Some(PendingTestCallout {
                         op_id: callout.op_id,
+                        callout: callout.callout,
                         reply: callout.reply,
                     });
                 },
