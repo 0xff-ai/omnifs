@@ -12,6 +12,22 @@ use std::path::{Path, PathBuf};
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub system: ConfigSystem,
+    pub telemetry: ConfigTelemetry,
+}
+
+/// Local-only dogfood telemetry policy. On by default; `[telemetry] enabled =
+/// false` opts out. The CLI honors it for its own `cli.jsonl` writer and
+/// propagates it to the daemon it launches (via `OMNIFS_TELEMETRY`).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ConfigTelemetry {
+    pub enabled: bool,
+}
+
+impl Default for ConfigTelemetry {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -55,6 +71,13 @@ impl Config {
     /// default when `setup` has not chosen one.
     pub fn backend(&self) -> ConfiguredBackend {
         self.system.runtime.unwrap_or(ConfiguredBackend::Native)
+    }
+
+    /// Effective telemetry state for this process: the persistent
+    /// `[telemetry] enabled` config field combined with the `OMNIFS_TELEMETRY`
+    /// env kill switch, so either one can turn it off.
+    pub fn telemetry_enabled(&self) -> bool {
+        self.telemetry.enabled && omnifs_home::telemetry::enabled_from_env()
     }
 }
 
@@ -129,5 +152,24 @@ mod tests {
         let config = Config::load(&path).unwrap();
         assert_eq!(config.system.runtime, Some(ConfiguredBackend::Native));
         assert_eq!(config.backend(), ConfiguredBackend::Native);
+    }
+
+    #[test]
+    fn telemetry_defaults_on_and_parses_off_switch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+
+        // Absent config: telemetry defaults on.
+        let default = Config::load(&path).unwrap();
+        assert!(default.telemetry.enabled);
+
+        // Explicit off-switch parses and disables.
+        std::fs::write(&path, "[telemetry]\nenabled = false\n").unwrap();
+        let off = Config::load(&path).unwrap();
+        assert!(!off.telemetry.enabled);
+
+        // A typo'd key is rejected by the strict parser.
+        std::fs::write(&path, "[telemetry]\nenabbled = false\n").unwrap();
+        assert!(Config::load(&path).is_err());
     }
 }

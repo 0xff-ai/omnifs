@@ -224,7 +224,12 @@ fn spawn_and_propagate(mut cmd: Command, context: String) -> Result<()> {
     let status = cmd.status().with_context(|| context)?;
     match status.code() {
         Some(0) | None => Ok(()),
-        Some(code) => std::process::exit(code),
+        Some(code) => {
+            // `shell` forwards the inner command's code and exits here rather
+            // than returning to `main`, so record its usage at this exit site.
+            crate::telemetry::record_cli_exit("shell", code);
+            std::process::exit(code)
+        },
     }
 }
 

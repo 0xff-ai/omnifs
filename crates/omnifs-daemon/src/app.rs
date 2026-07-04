@@ -116,8 +116,17 @@ fn push_option_path(args: &mut Vec<String>, flag: &str, value: Option<&PathBuf>)
 /// until unmounted. Blocks; expects to run on a tokio runtime (the caller
 /// owns runtime and tracing setup).
 pub fn run(args: DaemonArgs) -> anyhow::Result<()> {
+    use omnifs_home::telemetry::{self, DaemonEvent, TelemetrySink};
+
     let context = DaemonContext::resolve(args)?;
     context.prepare_startup_dirs()?;
+
+    // Local-only dogfood counters. No config channel reaches the daemon today,
+    // so the off-switch is the `OMNIFS_TELEMETRY` env var (the CLI propagates
+    // its `[telemetry] enabled = false` into it when launching the daemon).
+    let telemetry_backend = context.telemetry_backend();
+    let telemetry = TelemetrySink::new(context.config_dir(), telemetry::enabled_from_env());
+    telemetry.daemon_event(DaemonEvent::DaemonStart, telemetry_backend, 0);
 
     let cloner = Arc::new(GitCloner::new(context.cache_dir().to_path_buf()));
 
@@ -181,13 +190,27 @@ pub fn run(args: DaemonArgs) -> anyhow::Result<()> {
         mount_point = %daemon.mount_point().display(),
         "starting filesystem frontend"
     );
-    daemon.serve(&rt)?;
+    telemetry.daemon_event(
+        DaemonEvent::FrontendServing,
+        telemetry_backend,
+        registry.runtime_entries().len(),
+    );
+    let serve_result = daemon.serve(&rt);
 
     // `serve` returns once the frontend is unmounted (externally, by a signal,
     // or by the daemon's own shutdown path). Drop every provider here so
     // teardown is symmetric across FUSE and NFS rather than living in one
-    // frontend crate.
+    // frontend crate. Record the stop counters before dropping providers so the
+    // session's mount count is preserved even on a serve error.
+    let served_mounts = registry.runtime_entries().len();
+    telemetry.daemon_event(
+        DaemonEvent::FrontendStopped,
+        telemetry_backend,
+        served_mounts,
+    );
     registry.shutdown_all();
+    telemetry.daemon_event(DaemonEvent::DaemonStop, telemetry_backend, served_mounts);
+    serve_result?;
     Ok(())
 }
 

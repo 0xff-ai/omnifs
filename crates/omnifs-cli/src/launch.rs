@@ -50,6 +50,7 @@ impl<'a> Launcher<'a> {
     pub(crate) async fn launch(self) -> anyhow::Result<LaunchOutcome> {
         let paths = self.workspace.layout();
         let config = self.workspace.config()?;
+        let telemetry_enabled = config.telemetry_enabled();
         // An explicit `--runtime` chooses the backend for this launch and skips
         // the setup gate; otherwise the persisted default decides, and a missing
         // one means setup never ran.
@@ -87,6 +88,7 @@ impl<'a> Launcher<'a> {
                 extra_binds: Vec::new(),
                 extra_env: Vec::new(),
                 reuse_existing_container: true,
+                telemetry_enabled,
             },
             self.workspace.catalog(),
         )
@@ -115,6 +117,10 @@ pub(crate) struct LaunchSpec<'a> {
     pub extra_env: Vec<String>,
     /// Whether a same-image running container may be reused.
     pub reuse_existing_container: bool,
+    /// Effective telemetry state, propagated to the launched daemon so the
+    /// CLI's `[telemetry] enabled = false` off-switch reaches it (the daemon
+    /// has no strict-config channel and reads `OMNIFS_TELEMETRY`).
+    pub telemetry_enabled: bool,
 }
 
 /// Docker-specific mount materialization for launch-time container binds.
@@ -173,17 +179,24 @@ pub(crate) async fn launch_runtime(
         verb,
         configs,
         extra_binds,
-        extra_env,
+        mut extra_env,
         reuse_existing_container,
+        telemetry_enabled,
     } = spec;
 
     std::fs::create_dir_all(&paths.config_dir)
         .with_context(|| format!("create runtime home {}", paths.config_dir.display()))?;
 
     let target = match backend {
-        LaunchBackend::Native => return launch_host_native(paths, verb).await,
+        LaunchBackend::Native => return launch_host_native(paths, verb, telemetry_enabled).await,
         LaunchBackend::Docker(target) => target,
     };
+
+    // Carry the off-switch into the container's daemon. Only push it when
+    // disabled: an unset `OMNIFS_TELEMETRY` reads as enabled.
+    if !telemetry_enabled {
+        extra_env.push(format!("{}=0", omnifs_home::telemetry::ENV_SWITCH));
+    }
 
     anstream::println!("Computing container binds for {} mount(s)", configs.len());
     let preopen_binds =
@@ -228,12 +241,16 @@ fn resolve_control_addr() -> SocketAddr {
 /// Spawn a detached host-native daemon and wait for it to serve. The daemon
 /// reconciles `mounts/` on start; the CLI triggers one more reconcile to
 /// converge any change since and to surface per-mount failures.
-async fn launch_host_native(paths: &WorkspaceLayout, verb: &str) -> anyhow::Result<LaunchOutcome> {
+async fn launch_host_native(
+    paths: &WorkspaceLayout,
+    verb: &str,
+    telemetry_enabled: bool,
+) -> anyhow::Result<LaunchOutcome> {
     reject_existing_host_daemon(paths, verb).await?;
     anstream::println!("Starting omnifs daemon (host-native)");
 
     let addr = resolve_control_addr();
-    crate::launch_backend::launch_native(&paths.cache_dir, addr).await?;
+    crate::launch_backend::launch_native(&paths.cache_dir, addr, telemetry_enabled).await?;
 
     let client = DaemonClient::new();
     match client.reconcile().await {

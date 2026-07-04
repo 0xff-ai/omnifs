@@ -5,7 +5,7 @@ use omnifs_api::{
     API_MAJOR, API_MINOR, DaemonBackend, DaemonHealth, DaemonStatus, DaemonSubsystem, FrontendInfo,
     HealthState, MountFailure, MountInfo, SubsystemHealth,
 };
-use omnifs_home::{OMNIFS_MOUNT_POINT_ENV, Workspace, WorkspaceLayout};
+use omnifs_home::{Daemon, OMNIFS_MOUNT_POINT_ENV, Workspace, WorkspaceLayout};
 use omnifs_host::HostContext;
 use omnifs_mount::materialize::MaterializationMode;
 use omnifs_nfs::NfsMountOptions;
@@ -39,7 +39,7 @@ struct ProcessInfo {
 
 impl DaemonContext {
     pub(crate) fn resolve(args: DaemonArgs) -> anyhow::Result<Self> {
-        let workspace = Workspace::resolve()?;
+        let workspace: Workspace<Daemon> = Workspace::resolve()?;
         let layout = workspace.into_layout();
         let frontend = FrontendKind::platform_default();
         let mount_point = resolve_mount_point()?;
@@ -95,6 +95,19 @@ impl DaemonContext {
 
     pub(crate) fn cache_dir(&self) -> &Path {
         &self.layout.cache_dir
+    }
+
+    pub(crate) fn config_dir(&self) -> &Path {
+        &self.layout.config_dir
+    }
+
+    /// The launch backend mapped to the telemetry vocabulary, recorded on every
+    /// daemon lifecycle event.
+    pub(crate) fn telemetry_backend(&self) -> omnifs_home::telemetry::Backend {
+        match self.backend {
+            DaemonBackend::Native => omnifs_home::telemetry::Backend::Native,
+            DaemonBackend::Docker => omnifs_home::telemetry::Backend::Docker,
+        }
     }
 
     pub(crate) fn mount_point(&self) -> &Path {

@@ -9,6 +9,9 @@
 //!   1. `OMNIFS_HOME`
 //!   2. Default: `$HOME/.omnifs`
 
+pub mod telemetry;
+
+use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -29,10 +32,23 @@ pub const NFS_STATE_SUBDIR: &str = "nfs";
 pub const OMNIFS_HOME_ENV: &str = "OMNIFS_HOME";
 pub const OMNIFS_MOUNT_POINT_ENV: &str = "OMNIFS_MOUNT_POINT";
 
-/// A resolved omnifs workspace.
+/// Role marker for code that only needs the shared workspace layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Shared;
+
+/// Role marker for daemon-side workspace use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Daemon;
+
+/// Role marker for CLI-side workspace use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Cli;
+
+/// A resolved omnifs workspace, parameterized by the capability set using it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Workspace {
+pub struct Workspace<Role = Shared> {
     layout: WorkspaceLayout,
+    _role: PhantomData<Role>,
 }
 
 /// The fully resolved omnifs directory layout.
@@ -125,21 +141,24 @@ impl WorkspaceLayout {
     }
 }
 
-impl Workspace {
-    /// Resolve a workspace from env, `OMNIFS_HOME`, then the `$HOME/.omnifs`
-    /// default.
+impl<Role> Workspace<Role> {
+    /// Resolve a role-specific workspace from env, `OMNIFS_HOME`, then the
+    /// `$HOME/.omnifs` default.
     pub fn resolve() -> Result<Self, ResolveError> {
         Ok(Self::from_layout(WorkspaceLayout::resolve()?))
     }
 
-    /// Assemble a workspace under a single root.
+    /// Assemble a role-specific workspace under a single root.
     pub fn under_root(root: &Path) -> Self {
         Self::from_layout(WorkspaceLayout::under_root(root))
     }
 
     /// Wrap an already-resolved layout.
     pub fn from_layout(layout: WorkspaceLayout) -> Self {
-        Self { layout }
+        Self {
+            layout,
+            _role: PhantomData,
+        }
     }
 
     pub fn layout(&self) -> &WorkspaceLayout {

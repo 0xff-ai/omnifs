@@ -3026,6 +3026,10 @@ version = "0.2.1"
 dependencies = [
  "omnifs-core",
  "serde",
+ "serde_json",
+ "tempfile",
+ "time",
+ "tracing",
 ]
 
 [[package]]
