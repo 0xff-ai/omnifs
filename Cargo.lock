@@ -3015,6 +3015,7 @@ dependencies = [
  "omnifs-api",
  "omnifs-core",
  "omnifs-engine",
+ "omnifs-wit",
  "omnifs-workspace",
  "parking_lot",
  "tempfile",

@@ -12,10 +12,10 @@
 //! batch head-of-line blocks behind the parked read and the budget assertion
 //! fails. F1 (async-first dispatch) flips this test on.
 
+use omnifs_engine::GitCloner;
+use omnifs_engine::HostContext;
+use omnifs_engine::MountRuntimes;
 use omnifs_fuse::new_notifier_handle;
-use omnifs_host::HostContext;
-use omnifs_host::cloner::GitCloner;
-use omnifs_host::registry::ProviderRegistry;
 use omnifs_wit::provider::types::{CalloutResult, Header, HttpResponse};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -201,8 +201,8 @@ fn fuse_live_mount_serves_fast_ops_while_provider_read_is_parked() {
 /// The registry, tokio runtime, and on-disk layout backing one live mount of
 /// the test provider with captured callouts.
 struct MountFixture {
-    registry: Arc<ProviderRegistry>,
-    runtime: Arc<omnifs_host::Runtime>,
+    registry: Arc<MountRuntimes>,
+    runtime: Arc<omnifs_engine::Engine>,
     rt: tokio::runtime::Runtime,
     mount_point: PathBuf,
 }
@@ -243,7 +243,7 @@ impl MountFixture {
 
         let cloner = Arc::new(GitCloner::new(cache_dir.join("clones")));
         let registry = Arc::new(
-            ProviderRegistry::new(
+            MountRuntimes::new(
                 HostContext::new(
                     &cache_dir,
                     &config_dir,
