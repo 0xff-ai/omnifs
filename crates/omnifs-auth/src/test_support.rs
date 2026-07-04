@@ -2,8 +2,8 @@ use crate::callback::LoopbackCallback;
 use crate::client::BoxFuture;
 use crate::{AuthError, ManualCode, UrlOpener};
 use omnifs_workspace::authn::{
-    ClientSideTokenConfig, DeviceCodeConfig, KeyValue, OAuthFlow, OauthScheme, PkceLoopbackConfig,
-    PkceManualCodeConfig, TokenEndpointAuthMethod,
+    ClientSideTokenConfig, DeviceCodeConfig, DevicePollCompat, KeyValue, OAuthFlow, OauthScheme,
+    PkceLoopbackConfig, PkceManualCodeConfig, TokenEndpointAuthMethod,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -18,6 +18,9 @@ pub(super) struct FakeBehavior {
     pub(super) state_override: Option<String>,
     pub(super) token_error: Option<(String, String)>,
     pub(super) device_pending_responses: usize,
+    /// Simulates a non-RFC-8628 token endpoint: the pending response comes
+    /// back as `200 OK` (with the same error body) instead of `400`.
+    pub(super) device_pending_ok_body: bool,
 }
 
 pub(super) struct FakeOpener(pub(super) FakeAuthServer);
@@ -104,10 +107,15 @@ impl FakeAuthServer {
         )
     }
 
-    pub(super) fn device_scheme(&self, revocation_endpoint: Option<String>) -> OauthScheme {
+    pub(super) fn device_scheme(
+        &self,
+        device_poll_compat: DevicePollCompat,
+        revocation_endpoint: Option<String>,
+    ) -> OauthScheme {
         self.scheme(
             OAuthFlow::DeviceCode(DeviceCodeConfig {
                 device_authorization_endpoint: self.endpoint("/device"),
+                device_poll_compat,
             }),
             revocation_endpoint,
         )
@@ -354,7 +362,12 @@ impl FakeAuthServer {
                         "error_description": "The authorization request is still pending.",
                     })
                     .to_string();
-                    write_fake_response(stream, "400 Bad Request", "application/json", &body).await;
+                    let status = if self.state.behavior.device_pending_ok_body {
+                        "200 OK"
+                    } else {
+                        "400 Bad Request"
+                    };
+                    write_fake_response(stream, status, "application/json", &body).await;
                     return;
                 }
                 let id = self.state.next_token.fetch_add(1, Ordering::SeqCst);

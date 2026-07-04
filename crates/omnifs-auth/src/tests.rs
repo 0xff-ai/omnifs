@@ -2,7 +2,7 @@ use crate::callback::{LoopbackCallback, LoopbackEndpoint, accept_callback_reques
 use crate::request::ClientSideTokenLoginRequest;
 use crate::test_support::{FakeAuthServer, FakeBehavior, FakeOpener, FakeRevocationServer};
 use crate::{AuthError, LoginRequest, OAuthClient, OAuthRequest, RevokeOutcome, UrlOpener};
-use omnifs_workspace::authn::OauthScheme;
+use omnifs_workspace::authn::{DevicePollCompat, OauthScheme};
 use omnifs_workspace::creds::Refreshability;
 use secrecy::{ExposeSecret, SecretString};
 use std::sync::Arc;
@@ -66,7 +66,7 @@ async fn client_side_token_login_captures_fragment_token() {
 #[tokio::test]
 async fn device_code_login_against_fake_server() {
     let fake = FakeAuthServer::start(FakeBehavior::default()).await;
-    let scheme = fake.device_scheme(None);
+    let scheme = fake.device_scheme(DevicePollCompat::Rfc8628, None);
     let client = OAuthClient::new().unwrap();
 
     let entry = client
@@ -94,7 +94,7 @@ async fn device_code_login_polls_past_pending_response() {
         ..FakeBehavior::default()
     })
     .await;
-    let scheme = fake.device_scheme(None);
+    let scheme = fake.device_scheme(DevicePollCompat::Rfc8628, None);
     let client = OAuthClient::new().unwrap();
 
     let entry = client
@@ -103,6 +103,53 @@ async fn device_code_login_polls_past_pending_response() {
         .unwrap();
 
     assert_eq!(entry.access_token().expose_secret(), "device-access-1");
+}
+
+/// A non-RFC-8628 token endpoint returns `200 OK` with an error body while
+/// pending. A scheme that declares `DevicePollCompat::ErrorInOkBody` applies
+/// the host rewrite, so the poll loop treats it as a continue signal and the
+/// login still succeeds.
+#[tokio::test]
+async fn device_code_login_rewrites_pending_ok_body_when_declared() {
+    let fake = FakeAuthServer::start(FakeBehavior {
+        device_pending_responses: 1,
+        device_pending_ok_body: true,
+        ..FakeBehavior::default()
+    })
+    .await;
+    let scheme = fake.device_scheme(DevicePollCompat::ErrorInOkBody, None);
+    let client = OAuthClient::new().unwrap();
+
+    let entry = client
+        .login_device_code(device_code_login_request(scheme), |_| async { Ok(()) })
+        .await
+        .unwrap();
+
+    assert_eq!(entry.access_token().expose_secret(), "device-access-1");
+}
+
+/// Without declaring `DevicePollCompat::ErrorInOkBody`, the rewrite shim is a
+/// no-op: a `200 OK` pending response is parsed as a (malformed) success
+/// response and the login fails on the first poll instead of continuing.
+#[tokio::test]
+async fn device_code_login_rfc8628_does_not_rewrite_pending_ok_body() {
+    let fake = FakeAuthServer::start(FakeBehavior {
+        device_pending_responses: 1,
+        device_pending_ok_body: true,
+        ..FakeBehavior::default()
+    })
+    .await;
+    let scheme = fake.device_scheme(DevicePollCompat::Rfc8628, None);
+    let client = OAuthClient::new().unwrap();
+
+    let result = client
+        .login_device_code(device_code_login_request(scheme), |_| async { Ok(()) })
+        .await;
+
+    assert!(
+        result.is_err(),
+        "expected the unrewritten OK body to fail parsing"
+    );
 }
 
 #[tokio::test]
@@ -296,7 +343,7 @@ async fn refresh_exchange_parses_rotated_refresh_token() {
 #[tokio::test]
 async fn device_code_refresh_does_not_require_redirect_uri() {
     let fake = FakeAuthServer::start(FakeBehavior::default()).await;
-    let scheme = fake.device_scheme(None);
+    let scheme = fake.device_scheme(DevicePollCompat::Rfc8628, None);
     let client = OAuthClient::new().unwrap();
 
     let entry = client

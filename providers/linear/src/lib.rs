@@ -14,7 +14,8 @@ use hashbrown::HashSet;
 use omnifs_sdk::prelude::*;
 #[cfg(not(target_arch = "wasm32"))]
 use omnifs_sdk::{
-    OauthScheme, ProviderAuthManifest, SchemeGuidance, StaticTokenScheme, TokenValidation,
+    AmbientSource, OauthScheme, ProviderAuthManifest, SchemeGuidance, StaticTokenScheme,
+    TokenValidation,
 };
 use serde_json::json;
 
@@ -161,7 +162,8 @@ fn auth() -> ProviderAuthManifest {
                         ("identity", "/data/viewer/email"),
                         ("workspace", "/data/viewer/organization/urlKey"),
                     ]),
-                ),
+                )
+                .ambient([AmbientSource::env_var("LINEAR_API_KEY")]),
             SchemeGuidance::new().summary("A personal API key created in Linear's API settings."),
         )
         .oauth(

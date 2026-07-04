@@ -1,138 +1,187 @@
-//! Pre-OAuth context detection. Probes env vars and the `gh` CLI for
-//! credentials the user likely already has. The init flow can offer to
-//! import these instead of starting OAuth.
+//! Ambient credential detection: a generic interpreter over a provider's
+//! declared `authn::AmbientSource`s. The host never hardcodes a provider's
+//! probe here; it only knows how to read an env var or run a declared
+//! command and take its trimmed stdout as a token. The init flow can offer
+//! to import a detected credential instead of starting a fresh auth flow.
 
+use omnifs_workspace::authn::{AmbientKind, AmbientSource, AuthManifest};
 use secrecy::SecretString;
+use std::io::Read;
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
+
+/// How long an ambient command may run before it is killed and ignored.
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Clone)]
 pub enum DetectedCredential {
     /// An environment variable carries a token.
     EnvVar { name: String, value: SecretString },
-    /// `gh auth token` returned a logged-in token. Scope/account metadata
-    /// comes from `gh auth status` when available.
-    GhCli {
-        account: String,
-        scopes: Vec<String>,
-        token: SecretString,
-    },
+    /// A declared command's trimmed stdout carried a token. `note` is the
+    /// provider-supplied human-facing description of the source.
+    Command { note: String, value: SecretString },
 }
 
-pub fn detect(provider_name: &str) -> Vec<DetectedCredential> {
-    let mut found = Vec::new();
-    match provider_name {
-        "github" => {
-            if let Some(value) = std::env::var_os("GITHUB_TOKEN")
-                && !value.is_empty()
-            {
-                found.push(DetectedCredential::EnvVar {
-                    name: "GITHUB_TOKEN".to_string(),
-                    value: SecretString::from(value.to_string_lossy().into_owned()),
-                });
+/// Reads every ambient source declared across `manifest`'s static-token
+/// schemes and returns the credentials found, in declaration order.
+pub fn detect(manifest: Option<&AuthManifest>) -> Vec<DetectedCredential> {
+    let Some(manifest) = manifest else {
+        return Vec::new();
+    };
+    manifest.ambient_sources().filter_map(read_source).collect()
+}
+
+fn read_source(source: &AmbientSource) -> Option<DetectedCredential> {
+    match &source.kind {
+        AmbientKind::EnvVar { name } => {
+            let value = std::env::var_os(name)?;
+            if value.is_empty() {
+                return None;
             }
-            if let Some(gh) = detect_gh_cli() {
-                found.push(gh);
-            }
+            Some(DetectedCredential::EnvVar {
+                name: name.clone(),
+                value: SecretString::from(value.to_string_lossy().into_owned()),
+            })
         },
-        "linear" => {
-            if let Some(value) = std::env::var_os("LINEAR_API_KEY")
-                && !value.is_empty()
-            {
-                found.push(DetectedCredential::EnvVar {
-                    name: "LINEAR_API_KEY".to_string(),
-                    value: SecretString::from(value.to_string_lossy().into_owned()),
-                });
-            }
+        AmbientKind::Command { argv } => {
+            let token = run_command(argv)?;
+            Some(DetectedCredential::Command {
+                note: source.note.clone(),
+                value: SecretString::from(token),
+            })
         },
-        _ => {},
     }
-    found
 }
 
-fn detect_gh_cli() -> Option<DetectedCredential> {
-    let token = gh_auth_token()?;
-    let (account, scopes) =
-        gh_auth_identity().unwrap_or_else(|| ("unknown".to_string(), Vec::new()));
-    Some(DetectedCredential::GhCli {
-        account,
-        scopes,
-        token: SecretString::from(token),
-    })
-}
-
-fn gh_auth_token() -> Option<String> {
-    let output = std::process::Command::new("gh")
-        .args(["auth", "token"])
-        .output()
+/// Runs `argv` as a plain argv exec (never a shell, no string interpolation)
+/// and returns its trimmed stdout if it exits successfully within
+/// [`COMMAND_TIMEOUT`]. A command that is still running at the deadline is
+/// killed and treated as not found.
+fn run_command(argv: &[String]) -> Option<String> {
+    let (binary, rest) = argv.split_first()?;
+    let mut child = Command::new(binary)
+        .args(rest)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
         .ok()?;
-    if !output.status.success() {
+
+    // Drain stdout on a separate thread so a chatty command can't deadlock on
+    // pipe backpressure while we poll for exit below. Killing the child on
+    // timeout closes its stdout, so joining afterwards never blocks long.
+    let mut stdout = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stdout.read_to_end(&mut buf);
+        buf
+    });
+
+    let exited = wait_within(&mut child, COMMAND_TIMEOUT);
+    if !exited {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    let output = reader.join().ok()?;
+    if !exited {
         return None;
     }
-    let token = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+    let token = String::from_utf8_lossy(&output).trim().to_string();
     (!token.is_empty()).then_some(token)
 }
 
-fn gh_auth_identity() -> Option<(String, Vec<String>)> {
-    let output = std::process::Command::new("gh")
-        .args(["auth", "status"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
+/// Polls `child` until it exits or `timeout` elapses. Returns whether it
+/// exited successfully within the deadline.
+fn wait_within(child: &mut Child, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) if Instant::now() >= deadline => return false,
+            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+            Err(_) => return false,
+        }
     }
-    let combined = format!(
-        "{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let account = combined.lines().find_map(|line| {
-        line.split_once("account ").map(|(_, rest)| {
-            rest.split_whitespace()
-                .next()
-                .unwrap_or("")
-                .trim_start_matches('@')
-                .to_string()
-        })
-    })?;
-
-    let scopes = combined
-        .lines()
-        .find_map(|line| {
-            line.split_once("Token scopes:").map(|(_, rest)| {
-                rest.split(',')
-                    .map(|scope| scope.trim().trim_matches('\'').to_string())
-                    .filter(|scope| !scope.is_empty())
-                    .collect()
-            })
-        })
-        .unwrap_or_default();
-
-    Some((account, scopes))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use omnifs_workspace::authn::{AuthScheme, StaticTokenScheme};
+    use secrecy::ExposeSecret;
+
+    fn manifest_with(sources: Vec<AmbientSource>) -> AuthManifest {
+        AuthManifest {
+            schemes: vec![AuthScheme::StaticToken(StaticTokenScheme {
+                key: "pat".to_string(),
+                header_name: None,
+                value_prefix: "Bearer ".to_string(),
+                description: "test".to_string(),
+                inject_domains: vec![],
+                creation_url: None,
+                validation: None,
+                ambient_sources: sources,
+            })],
+        }
+    }
 
     #[test]
     #[allow(unsafe_code)]
-    fn detect_github_env_var() {
-        // SAFETY: this is the only test in this module and no other test in the
-        // crate mutates GITHUB_TOKEN, so no concurrent env write can race here.
-        // There is no explicit lock; adding one (e.g. a module-level Mutex) would
-        // be the right fix if a second GITHUB_TOKEN-mutating test is ever added.
+    fn detect_env_var_source() {
+        // SAFETY: this is the only test in this module and no other test in
+        // the crate mutates DETECT_TEST_ENV_VAR, so no concurrent env write
+        // can race here.
         unsafe {
-            std::env::set_var("GITHUB_TOKEN", "ghp_abc");
+            std::env::set_var("DETECT_TEST_ENV_VAR", "token-value");
         }
-        let found = detect("github");
-        let has_env_var = found.iter().any(
-            |d| matches!(d, DetectedCredential::EnvVar { name, .. } if name == "GITHUB_TOKEN"),
+        let manifest = manifest_with(vec![AmbientSource::env_var("DETECT_TEST_ENV_VAR")]);
+        let found = detect(Some(&manifest));
+        assert!(
+            found.iter().any(|d| matches!(
+                d,
+                DetectedCredential::EnvVar { name, .. } if name == "DETECT_TEST_ENV_VAR"
+            )),
+            "found: {found:?}"
         );
-        assert!(has_env_var, "found: {found:?}");
-        // SAFETY: same rationale as the set_var above; restoring the previous
-        // state before the test returns.
+        // SAFETY: same rationale as the set_var above.
         unsafe {
-            std::env::remove_var("GITHUB_TOKEN");
+            std::env::remove_var("DETECT_TEST_ENV_VAR");
         }
+    }
+
+    #[test]
+    fn detect_command_source() {
+        let manifest = manifest_with(vec![
+            AmbientSource::command(["echo", "  command-token  "]).note("echo probe"),
+        ]);
+        let found = detect(Some(&manifest));
+        let credential = found
+            .into_iter()
+            .find(|d| matches!(d, DetectedCredential::Command { .. }))
+            .expect("command credential detected");
+        let DetectedCredential::Command { note, value } = credential else {
+            unreachable!()
+        };
+        assert_eq!(note, "echo probe");
+        assert_eq!(value.expose_secret(), "command-token");
+    }
+
+    #[test]
+    fn detect_command_source_times_out() {
+        let manifest = manifest_with(vec![AmbientSource::command(["sleep", "10"])]);
+        let start = Instant::now();
+        let found = detect(Some(&manifest));
+        assert!(found.is_empty());
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "expected the command to be killed at the timeout, took {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[test]
+    fn detect_returns_empty_without_manifest() {
+        assert!(detect(None).is_empty());
     }
 }

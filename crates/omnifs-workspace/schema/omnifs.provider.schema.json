@@ -180,6 +180,73 @@
         }
       ]
     },
+    "AmbientKind": {
+      "description": "The mechanism a host uses to read an ambient credential.",
+      "oneOf": [
+        {
+          "description": "Read the token from an environment variable.",
+          "type": "object",
+          "properties": {
+            "envVar": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "name"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "envVar"
+          ]
+        },
+        {
+          "description": "Run a command (argv exec, never a shell) and take its trimmed stdout as\nthe token.",
+          "type": "object",
+          "properties": {
+            "command": {
+              "type": "object",
+              "properties": {
+                "argv": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "argv"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "command"
+          ]
+        }
+      ]
+    },
+    "AmbientSource": {
+      "description": "A place the host can look for a token the user already has for this scheme.\n\nDeclared by the provider and interpreted generically by the host: the host\nnever special-cases a provider by name. The `note` is human-facing text\nshown next to the detected credential during `omnifs init`.",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/AmbientKind"
+        },
+        "note": {
+          "description": "Human-facing description of where this credential comes from.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "kind"
+      ]
+    },
     "AuthScheme": {
       "oneOf": [
         {
@@ -376,11 +443,31 @@
       "properties": {
         "deviceAuthorizationEndpoint": {
           "type": "string"
+        },
+        "devicePollCompat": {
+          "description": "How this provider's token endpoint signals a still-pending authorization\nwhile the user approves the device. Declares whether the host must apply\nthe pending-in-OK-body compatibility rewrite. Defaults to RFC 8628.",
+          "$ref": "#/$defs/DevicePollCompat",
+          "default": "rfc8628"
         }
       },
       "additionalProperties": false,
       "required": [
         "deviceAuthorizationEndpoint"
+      ]
+    },
+    "DevicePollCompat": {
+      "description": "How a device-code token endpoint reports a still-pending authorization.\n\nRFC 8628 mandates a 4xx response with an `error` body while the user is\nstill approving. Some providers instead return `200 OK` with the same error\nbody; the host rewrites those to a 4xx so the poll loop keeps waiting. The\nprovider declares which behavior its token endpoint exhibits.",
+      "oneOf": [
+        {
+          "description": "Conformant: the token endpoint returns a 4xx status with an error body\nwhile pending. No host rewrite is applied.",
+          "type": "string",
+          "const": "rfc8628"
+        },
+        {
+          "description": "Non-conformant: the token endpoint returns `200 OK` with an error JSON\nbody while pending. The host rewrites such responses to `400` so the\npoll loop treats `authorization_pending`/`slow_down` as continue signals.",
+          "type": "string",
+          "const": "errorInOkBody"
+        }
       ]
     },
     "HostResourceBinding": {
@@ -757,6 +844,13 @@
     "StaticTokenScheme": {
       "type": "object",
       "properties": {
+        "ambientSources": {
+          "description": "Places the host may find a token the user already has, so `omnifs init`\ncan offer to import it instead of starting a fresh flow. Each source is\nan environment variable or a command to run; the host reads them\ngenerically, with no provider name baked into the host.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AmbientSource"
+          }
+        },
         "creationUrl": {
           "type": [
             "string",
