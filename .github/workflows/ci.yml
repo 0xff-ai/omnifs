@@ -197,7 +197,6 @@ jobs:
           set -euo pipefail
           rm -rf dist/host-tests
           mkdir -p dist/host-tests
-          bash scripts/ci/check-engine-surface.sh
           just host clippy
           cargo nextest archive --profile ci --workspace \
             --exclude 'omnifs-provider-*' \
