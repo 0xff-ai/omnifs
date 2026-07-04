@@ -5,7 +5,7 @@ Owns: FUSE and NFS frontend adapter boundaries, protocol state, mount behavior, 
 
 ## Read when
 
-Read this before touching `omnifs-fuse`, `omnifs-nfs`, frontend startup, protocol replies, filehandles, stateids, inode tables, kernel notifications, NFS leases, macOS mount readiness, or live mount tests.
+Read this before touching `omnifs-fuse`, `omnifs-nfs`, `omnifs-mtab`, frontend startup, protocol replies, filehandles, stateids, inode tables, kernel notifications, NFS leases, macOS mount readiness, or live mount tests.
 
 ## Rules
 
@@ -25,7 +25,11 @@ Keep FUSE inode tables, kernel notifications, mount/unmount mechanics, and FUSE 
 
 macOS host-native integration uses read-only NFSv4.0 loopback. NFS is a frontend protocol boundary, not a provider protocol.
 
-Keep NFS filehandles, stateids, leases, mount state, and NFS protocol errors in `omnifs-nfs`. Preserve read-only behavior for mutation operations. Keep macOS mount readiness and teardown in the NFS path.
+Keep NFS filehandles, stateids, leases, and NFS protocol errors in `omnifs-nfs`. Preserve read-only behavior for mutation operations. Keep macOS mount readiness and teardown behavior in the NFS/CLI path.
+
+### Mount-table mechanics
+
+Keep `/proc/mounts` parsing, NFS mount state-file schema/IO, and shared platform unmount command construction in `omnifs-mtab`. Frontends and lifecycle code call that crate instead of carrying duplicate parsers, state versions, or unmount argv builders.
 
 ### NFS deferral and `NFS4ERR_DELAY`
 
@@ -57,6 +61,7 @@ Keep NFS filehandles, stateids, leases, mount state, and NFS protocol errors in 
 
 - `crates/omnifs-fuse/src`
 - `crates/omnifs-nfs/src`
+- `crates/omnifs-mtab/src`
 - `crates/omnifs-tree/src`
 - `crates/omnifs-daemon/src/frontends.rs`
 - `crates/omnifs-cli/src/runtime.rs`

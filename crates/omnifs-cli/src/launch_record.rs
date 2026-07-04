@@ -6,7 +6,7 @@
 //! from `[system].runtime`.
 //!
 //! An unknown `version` field is reported and treated as an error rather than
-//! silently ignored, matching the NFS `STATE_VERSION` discipline.
+//! silently ignored, matching the NFS mount-state version discipline.
 
 use std::path::{Path, PathBuf};
 

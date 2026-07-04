@@ -11,18 +11,16 @@ use std::fmt::Write as _;
 use std::path::Path;
 #[cfg(not(target_os = "linux"))]
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Command;
+#[cfg(not(target_os = "linux"))]
+use std::process::Stdio;
 use std::time::Duration;
 
 #[cfg(target_os = "linux")]
 use anyhow::Context as _;
 #[cfg(not(target_os = "linux"))]
-use omnifs_nfs::NfsMountState;
-
-/// State-file schema version this CLI understands. A daemon-side bump lands in
-/// `TeardownSummary::skipped` so `down` does not claim "nothing is running".
-#[cfg(not(target_os = "linux"))]
-const STATE_VERSION: u8 = 1;
+use omnifs_mtab::NfsMountState;
+use omnifs_mtab::{Platform, UnmountCommand};
 
 /// Outcome of a host-native teardown sweep, classified so `omnifs down` reports
 /// only what actually happened.
@@ -117,15 +115,9 @@ pub(crate) fn teardown_host_native_fuse(mount_point: &Path) -> anyhow::Result<bo
         return Ok(false);
     }
 
-    let status = Command::new("fusermount")
-        .arg("-u")
-        .arg(mount_point)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
+    UnmountCommand::graceful(Platform::Linux, mount_point)
+        .run_quiet()
         .context("run fusermount -u")?;
-
-    anyhow::ensure!(status.success(), "fusermount -u exited with {status}");
     anyhow::ensure!(
         mount_settled(mount_point),
         "{} is still mounted; re-run `omnifs down`",
@@ -136,12 +128,7 @@ pub(crate) fn teardown_host_native_fuse(mount_point: &Path) -> anyhow::Result<bo
 
 #[cfg(target_os = "linux")]
 pub(crate) fn force_unmount_host_native(mount_point: &Path) {
-    let _ = Command::new("fusermount")
-        .arg("-uz")
-        .arg(mount_point)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+    let _ = UnmountCommand::forced(Platform::Linux, mount_point).run_quiet();
 }
 
 /// Tear down every host-native NFS mount recorded under `state_dir`.
@@ -165,7 +152,7 @@ pub(crate) fn teardown_host_native_nfs(state_dir: &Path) -> anyhow::Result<Teard
         if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
             continue;
         }
-        let state = match read_state(&path) {
+        let state = match NfsMountState::read_file(&path) {
             Ok(state) => state,
             Err(error) => {
                 eprintln!("omnifs: skipping mount state {}: {error}", path.display());
@@ -173,7 +160,7 @@ pub(crate) fn teardown_host_native_nfs(state_dir: &Path) -> anyhow::Result<Teard
                 continue;
             },
         };
-        if state.version != STATE_VERSION {
+        if state.version != NfsMountState::VERSION {
             eprintln!(
                 "omnifs: skipping mount state {} (unsupported version {})",
                 path.display(),
@@ -207,19 +194,13 @@ pub(crate) fn teardown_host_native_nfs(state_dir: &Path) -> anyhow::Result<Teard
     Ok(summary)
 }
 
-#[cfg(not(target_os = "linux"))]
-fn read_state(path: &Path) -> anyhow::Result<NfsMountState> {
-    let file = std::fs::File::open(path)?;
-    Ok(serde_json::from_reader(file)?)
-}
-
 /// Tear down one recorded mount and record the outcome in `summary`.
 ///
 /// The unmount is always forced. The sweep is reached only when the daemon is
 /// not managing its own teardown (it did not answer the control API), so a
-/// non-force `diskutil unmount` would block forever on an NFS server that has
-/// already vanished (a `kill -9` leaves exactly such a stale mount). A forced
-/// unmount is safe for a read-only projection and returns promptly.
+/// non-force unmount can wait on an NFS server that has already vanished (a
+/// `kill -9` leaves exactly such a stale mount). A forced unmount is safe for a
+/// read-only projection.
 #[cfg(not(target_os = "linux"))]
 fn tear_down_one(state_file: &Path, mount_point: &Path, pid: u32, summary: &mut TeardownSummary) {
     unmount(mount_point, true);
@@ -261,81 +242,17 @@ fn tear_down_orphan(
 }
 
 /// Unmount the loopback view. `force` is used when the recording daemon is
-/// already dead, so a stale mount whose NFS server has vanished does not hang a
-/// clean unmount. Output is swallowed: `diskutil` prints a scary "Unmount
-/// failed" even for stale mounts it ultimately clears, so the authoritative
-/// signal is whether the mount survives (see `mount_settled`), not its exit text.
+/// already dead, so stale mounts use the platform's forced teardown path.
+/// Output is swallowed: the authoritative signal is whether the mount survives
+/// (see `mount_settled`), not the platform tool's exit text.
 #[cfg(target_os = "macos")]
 fn unmount(mount_point: &Path, force: bool) {
-    // A root forced unmount clears a dead-server NFS mount instantly without
-    // contacting the (vanished) server, where `diskutil unmount force` blocks in
-    // an uninterruptible NFS syscall. omnifs already mounts via `sudo -n
-    // mount_nfs`, so `sudo -n umount -f` stays within that trust model. The mount
-    // is recorded by its symlinked path (e.g. /var/...), but the kernel mount
-    // table holds the resolved path (/private/var/...), so resolve symlinks
-    // first or `umount` reports "not currently mounted". Resolve via the PARENT
-    // and rejoin the leaf, never stat-ing the mount point itself: a stat on a
-    // dead-server NFS mount hangs as badly as the unmount we are trying to avoid.
-    if force
-        && let Some(canonical) = mount_point
-            .parent()
-            .and_then(|parent| std::fs::canonicalize(parent).ok())
-            .and_then(|parent| mount_point.file_name().map(|leaf| parent.join(leaf)))
-    {
-        let cleared = Command::new("sudo")
-            .args(["-n", "umount", "-f"])
-            .arg(&canonical)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|status| status.success());
-        if cleared {
-            return;
-        }
-    }
-
-    // Fallback (sudo timestamp expired, or a non-force call): bound `diskutil` so
-    // a dead-server mount it cannot clear never hangs `omnifs down`; the kernel
-    // clears such a mount on its own NFS timeout.
-    let mut command = Command::new("diskutil");
-    command.arg("unmount");
-    if force {
-        command.arg("force");
-    }
-    command
-        .arg(mount_point)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    run_bounded(command, Duration::from_secs(5));
-}
-
-/// Run `command` to completion, killing it if it exceeds `limit`. Keeps a
-/// blocking unmount tool from hanging the caller on a wedged NFS mount whose
-/// server has vanished.
-#[cfg(target_os = "macos")]
-fn run_bounded(mut command: Command, limit: Duration) {
-    let Ok(mut child) = command.spawn() else {
-        return;
+    let command = if force {
+        UnmountCommand::forced(Platform::Macos, mount_point)
+    } else {
+        UnmountCommand::graceful(Platform::Macos, mount_point)
     };
-    let deadline = std::time::Instant::now() + limit;
-    loop {
-        match child.try_wait() {
-            // Exited cleanly, or we cannot poll it: nothing more to do.
-            Ok(Some(_)) | Err(_) => return,
-            Ok(None) => {
-                if std::time::Instant::now() >= deadline {
-                    // SIGKILL but do NOT wait: a diskutil stuck in an
-                    // uninterruptible NFS unmount syscall ignores the signal
-                    // until the kernel NFS timeout, so waiting would reintroduce
-                    // the hang. Drop the handle; the CLI exits shortly and init
-                    // reaps the orphan.
-                    let _ = child.kill();
-                    return;
-                }
-                std::thread::sleep(Duration::from_millis(100));
-            },
-        }
-    }
+    let _ = command.run_quiet();
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -345,15 +262,12 @@ pub(crate) fn force_unmount_host_native(mount_point: &Path) {
 
 #[cfg(all(not(target_os = "macos"), not(target_os = "linux")))]
 fn unmount(mount_point: &Path, force: bool) {
-    let mut command = Command::new("umount");
-    if force {
-        command.arg("-f");
-    }
-    let _ = command
-        .arg(mount_point)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+    let command = if force {
+        UnmountCommand::forced(Platform::Other, mount_point)
+    } else {
+        UnmountCommand::graceful(Platform::Other, mount_point)
+    };
+    let _ = command.run_quiet();
 }
 
 /// Best-effort SIGTERM so a live daemon exits promptly and releases the control

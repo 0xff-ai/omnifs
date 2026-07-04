@@ -6,6 +6,8 @@ use omnifs_fuse::NotifierHandle;
 #[cfg(target_os = "linux")]
 use omnifs_fuse::mount;
 use omnifs_host::registry::ProviderRegistry;
+#[cfg(target_os = "linux")]
+use omnifs_mtab::proc_mounts;
 use omnifs_nfs::NfsMountOptions;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -13,8 +15,6 @@ use tokio::runtime::Handle;
 
 use crate::app::FrontendKind;
 use crate::context::DaemonContext;
-#[cfg(target_os = "linux")]
-use crate::proc_mounts;
 
 pub(crate) enum Frontend {
     #[cfg(target_os = "linux")]
@@ -108,9 +108,9 @@ impl Frontend {
         match self {
             #[cfg(target_os = "linux")]
             Frontend::Fuse(frontend) => proc_mounts::find_mount(&frontend.mount_point)
-                .filter(|mount| mount.source == "omnifs" && mount.fs_type.starts_with("fuse"))
+                .filter(|mount| mount.device == "omnifs" && mount.fs_type.starts_with("fuse"))
                 .map(|mount| FrontendInfo {
-                    source: mount.source,
+                    source: mount.device,
                     fs_type: mount.fs_type,
                 }),
             Frontend::Nfs(frontend) => nfs_serving(&frontend.mount_point),
@@ -153,7 +153,7 @@ fn nfs_serving(mount_point: &Path) -> Option<FrontendInfo> {
     proc_mounts::find_mount(mount_point)
         .filter(|mount| mount.fs_type.starts_with("nfs"))
         .map(|mount| FrontendInfo {
-            source: mount.source,
+            source: mount.device,
             fs_type: mount.fs_type,
         })
 }

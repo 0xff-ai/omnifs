@@ -32,6 +32,7 @@ omnifs-fuse = { version = "0.2.1", path = "crates/omnifs-fuse" }
 omnifs-home = { version = "0.2.1", path = "crates/omnifs-home" }
 omnifs-host = { version = "0.2.1", path = "crates/omnifs-host" }
 omnifs-core = { version = "0.2.1", path = "crates/omnifs-core" }
+omnifs-mtab = { version = "0.2.1", path = "crates/omnifs-mtab" }
 omnifs-mount = { version = "0.2.1", path = "crates/omnifs-mount" }
 omnifs-nfs = { version = "0.2.1", path = "crates/omnifs-nfs" }
 omnifs-provider = { version = "0.2.1", path = "crates/omnifs-provider" }

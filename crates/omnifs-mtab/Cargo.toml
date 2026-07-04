@@ -1,0 +1,18 @@
+[package]
+name = "omnifs-mtab"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Shared omnifs mount-table parsing, mount state, and unmount mechanics"
+categories = ["filesystem"]
+keywords = ["omnifs", "filesystem", "mount"]
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

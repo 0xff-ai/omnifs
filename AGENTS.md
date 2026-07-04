@@ -80,6 +80,7 @@ Allowed, but never as a side effect. Surface the tradeoff and get sign-off in th
 - `crates/omnifs-host`: trusted runtime, callouts, auth, namespace, cache access, pagination, and archive execution.
 - `crates/omnifs-tree`: shared projection semantics consumed by every frontend.
 - `crates/omnifs-fuse` and `crates/omnifs-nfs`: protocol adapters.
+- `crates/omnifs-mtab`: `/proc/mounts` parsing, NFS mount state files, and shared platform unmount command construction.
 - `crates/omnifs-daemon`: control server, app context, frontend startup, and daemon runtime.
 - `crates/omnifs-cli`: setup, lifecycle, auth commands, dev sessions, and control-plane UX.
 - `crates/omnifs-cache`: opaque byte and record storage owned by the host.
