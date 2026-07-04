@@ -8,7 +8,7 @@ use crate::archive::ArchiveExecutor;
 use crate::auth::{AuthManager, credential_store_for_file};
 use crate::blob::{BlobExecutor, BlobLimits};
 use crate::blob_cache::BlobCache;
-use crate::callouts::{CalloutHost, TestCallout, TestCallouts};
+use crate::callouts::{CalloutHost, TestCallout, TestCallouts, TestSignal};
 use crate::capability::{CapabilityChecker, config_str};
 use crate::cloner::GitCloner;
 use crate::coalesce::Coalesce;
@@ -134,7 +134,7 @@ pub struct Runtime {
     /// Injected inspector sink. Defaults to the process-global configured sink
     /// so production wiring is unchanged; tests can supply their own.
     pub(crate) inspector: Option<Arc<InspectorSink>>,
-    test_callouts: Option<std::sync::Mutex<mpsc::Receiver<TestCallout>>>,
+    test_callouts: Option<std::sync::Mutex<mpsc::Receiver<TestSignal>>>,
 }
 
 /// Test operation driver used by provider integration tests that need to
@@ -325,7 +325,8 @@ impl Runtime {
             .cloned();
 
         let preopens = resolve_preopens(config, config_metadata.as_ref());
-        let instance = Instance::new(engine, wasm_path, config_bytes, &preopens)?;
+        let park_signal = test_callouts.as_ref().map(TestCallouts::park_signal);
+        let instance = Instance::new(engine, wasm_path, config_bytes, &preopens, park_signal)?;
 
         validate_instance_config(config_metadata.as_ref(), config, mount_name)?;
 
@@ -486,11 +487,21 @@ impl Runtime {
     /// suspended on host imports at the same instant before answering either.
     #[doc(hidden)]
     pub fn try_recv_test_callout(&self) -> Option<PendingTestCallout> {
-        let received = self.test_callouts.as_ref()?.lock().ok()?.try_recv().ok()?;
-        Some(PendingTestCallout {
-            op_id: received.op_id,
-            reply: received.reply,
-        })
+        let inbox = self.test_callouts.as_ref()?;
+        let guard = inbox.lock().ok()?;
+        loop {
+            match guard.try_recv() {
+                Ok(TestSignal::Callout(callout)) => {
+                    return Some(PendingTestCallout {
+                        op_id: callout.op_id,
+                        reply: callout.reply,
+                    });
+                },
+                // Idle-executor markers are not callouts; skip them.
+                Ok(TestSignal::Parked) => {},
+                Err(_) => return None,
+            }
+        }
     }
 }
 
@@ -613,6 +624,12 @@ impl<'a> TestOp<'a> {
         })
     }
 
+    /// Safety net for a `Parked` marker that never arrives while a callout
+    /// burst is draining. The marker, not this timeout, closes a burst; the
+    /// window is wide enough that only a genuine lost signal (a harness bug)
+    /// trips it, turning a would-be hang into a bounded, diagnosable wait.
+    const BURST_WATCHDOG: std::time::Duration = std::time::Duration::from_secs(5);
+
     fn wait_for_progress(
         runtime: &Runtime,
         op: &Op,
@@ -623,7 +640,7 @@ impl<'a> TestOp<'a> {
         let inbox = runtime.test_callouts.as_ref().ok_or_else(|| {
             Error::ProviderProtocol("test callout inbox is not configured".to_string())
         })?;
-        let recv_callout = |timeout| {
+        let recv_signal = |timeout| {
             inbox
                 .lock()
                 .expect("test callout receiver poisoned")
@@ -640,13 +657,32 @@ impl<'a> TestOp<'a> {
                 Err(mpsc::TryRecvError::Empty) => {},
             }
 
-            match recv_callout(std::time::Duration::from_millis(10)) {
-                Ok(first) => {
+            match recv_signal(std::time::Duration::from_millis(10)) {
+                Ok(TestSignal::Callout(first)) => {
                     let mut callouts = Vec::new();
                     let mut replies = Vec::new();
                     Self::push_test_callout(id, first, &mut callouts, &mut replies)?;
-                    while let Ok(next) = recv_callout(std::time::Duration::from_millis(1)) {
-                        Self::push_test_callout(id, next, &mut callouts, &mut replies)?;
+                    // The instance's single-threaded executor enqueues every
+                    // callout of this round before it can park, so a `Parked`
+                    // marker arrives in FIFO order right after the last one.
+                    // Collect until that marker: the burst boundary is read
+                    // from the executor's own quiescence, never inferred from
+                    // the gap between two enqueues.
+                    loop {
+                        match recv_signal(Self::BURST_WATCHDOG) {
+                            Ok(TestSignal::Callout(next)) => {
+                                Self::push_test_callout(id, next, &mut callouts, &mut replies)?;
+                            },
+                            // `Parked` closes the burst; the watchdog timeout
+                            // is the safety net for a lost marker. Either way
+                            // the round is done being collected.
+                            Ok(TestSignal::Parked) | Err(mpsc::RecvTimeoutError::Timeout) => break,
+                            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                                return Err(Error::ProviderProtocol(
+                                    "test callout receiver closed".to_string(),
+                                ));
+                            },
+                        }
                     }
                     return Ok(TestOpState::WaitingForCallouts {
                         callouts,
@@ -654,7 +690,10 @@ impl<'a> TestOp<'a> {
                         result_rx,
                     });
                 },
-                Err(mpsc::RecvTimeoutError::Timeout) => {},
+                // A park with no callout in flight (the op most likely
+                // returned) or a poll timeout: loop to re-check the result
+                // channel.
+                Ok(TestSignal::Parked) | Err(mpsc::RecvTimeoutError::Timeout) => {},
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
                     return Err(Error::ProviderProtocol(
                         "test callout receiver closed".to_string(),

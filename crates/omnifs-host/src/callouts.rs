@@ -124,11 +124,24 @@ pub(crate) fn callout_network(message: impl Into<String>) -> wit_types::CalloutR
     callout_error(wit_types::ErrorKind::Network, message, true)
 }
 
+/// One item on the [`TestCallouts`] capture channel: a captured provider
+/// callout awaiting an answer, or a marker that the provider instance's
+/// executor has gone idle. The `Parked` marker demarcates a callout burst
+/// deterministically. The instance runs on a single-threaded executor, so
+/// every callout a round issues is enqueued before that executor can park;
+/// the marker therefore follows the round's last callout in FIFO order, and
+/// the harness reads the burst boundary instead of guessing it from the gap
+/// between two enqueues.
+pub(crate) enum TestSignal {
+    Callout(TestCallout),
+    Parked,
+}
+
 /// Test-only capture channel for provider integration tests that inspect
 /// outbound HTTP/blob imports before answering them.
 #[derive(Clone)]
 pub(crate) struct TestCallouts {
-    tx: mpsc::Sender<TestCallout>,
+    tx: mpsc::Sender<TestSignal>,
 }
 
 pub(crate) struct TestCallout {
@@ -137,21 +150,43 @@ pub(crate) struct TestCallout {
     pub(crate) reply: tokio::sync::oneshot::Sender<wit_types::CalloutResult>,
 }
 
+/// Emits a [`TestSignal::Parked`] each time the provider instance's executor
+/// goes idle. Installed as the tokio `on_thread_park` hook, so it fires only
+/// at true quiescence: a self-woken task keeps the run queue non-empty and
+/// does not park, so a park means the round's callouts are all enqueued and
+/// the guest can make no further progress until one is answered.
+#[derive(Clone)]
+pub(crate) struct ParkSignal {
+    tx: mpsc::Sender<TestSignal>,
+}
+
+impl ParkSignal {
+    pub(crate) fn notify(&self) {
+        let _ = self.tx.send(TestSignal::Parked);
+    }
+}
+
 impl TestCallouts {
-    pub(crate) fn channel() -> (Self, mpsc::Receiver<TestCallout>) {
+    pub(crate) fn channel() -> (Self, mpsc::Receiver<TestSignal>) {
         let (tx, rx) = mpsc::channel();
         (Self { tx }, rx)
+    }
+
+    pub(crate) fn park_signal(&self) -> ParkSignal {
+        ParkSignal {
+            tx: self.tx.clone(),
+        }
     }
 
     async fn run(&self, op_id: u64, callout: wit_types::Callout) -> wit_types::CalloutResult {
         let (reply, response) = tokio::sync::oneshot::channel();
         if self
             .tx
-            .send(TestCallout {
+            .send(TestSignal::Callout(TestCallout {
                 op_id,
                 callout,
                 reply,
-            })
+            }))
             .is_err()
         {
             return callout_internal("test callout receiver dropped");
