@@ -43,9 +43,8 @@ pub mod http {
 }
 
 pub mod pagination {
-    pub use crate::pagination::{
-        IGNORE_CONTENT, MAX_PAGINATION_PAGES, NextPageOutcome, is_reserved_provider_leaf,
-    };
+    pub use crate::pagination::{MAX_PAGINATION_PAGES, NextPageOutcome};
+    pub use crate::tree::synthetic::{IGNORE_CONTENT, is_reserved_provider_leaf};
 }
 
 pub mod wit_protocol {

@@ -21,7 +21,7 @@ use omnifs_core::path::Path;
 use omnifs_engine::Engine;
 use omnifs_engine::test_support::probe_live_growth;
 use omnifs_engine::view::{FileAttrsCache, FileSize, ReadMode, Stability};
-use omnifs_engine::{Node, RequestCtx, Tree};
+use omnifs_engine::{Node, RequestCtx, ServingContext, Tree};
 use omnifs_itest::{RuntimeHarness, make_engine, make_runtime};
 use tempfile::TempDir;
 
@@ -44,7 +44,10 @@ fn live_tree() -> LiveTree {
         ..
     } = make_runtime(&engine);
     let runtime = Arc::new(runtime);
-    let tree = Tree::for_runtime(Arc::clone(&runtime), "test");
+    let tree = Tree::new(ServingContext::single(
+        "test".to_string(),
+        Arc::clone(&runtime),
+    ));
     LiveTree {
         tree,
         runtime,

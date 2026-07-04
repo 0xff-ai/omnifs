@@ -83,8 +83,12 @@ impl Tree {
             return Ok(ListOutcome::Subtree(dir.clone()));
         }
 
-        if self.is_mount_enumeration_root(node.mount(), node.path()) {
+        if self
+            .ctx
+            .is_mount_enumeration_root(node.mount(), node.path())
+        {
             let entries = self
+                .ctx
                 .mount_names()
                 .unwrap_or_default()
                 .into_iter()
@@ -97,7 +101,7 @@ impl Tree {
             }));
         }
 
-        let runtime = self.runtime_for(node.mount())?;
+        let runtime = self.ctx.runtime_for(node.mount())?;
         let path = node.path();
 
         // An explicit-cursor continuation is a raw page drain: no cache consult,
@@ -253,7 +257,7 @@ fn snapshot_from_provider_listing(
     // renderer-facing synthetic entries.
     let mut persisted = dirent_records.clone();
     if paginated {
-        persisted.extend(Runtime::control_entries());
+        persisted.extend(synthetic::control_entries());
     }
     let dirents_payload = DirentsPayload {
         entries: persisted,

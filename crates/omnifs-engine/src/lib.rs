@@ -15,6 +15,7 @@ pub(crate) mod pagination;
 pub mod render;
 pub(crate) mod runtime;
 pub(crate) mod sandbox;
+pub(crate) mod serving;
 pub mod singleflight;
 pub mod test_support;
 pub(crate) mod tools;
@@ -29,6 +30,7 @@ pub use inspect::{
 };
 pub use runtime::registry::{MountFailure, MountRuntimes, ReconcileOutcome, RegistryError};
 pub use runtime::{BuildError, EngineError, HostContext, Runtime as Engine};
+pub use serving::ServingContext;
 pub use tree::{
     Chunk, Cursor, Entry, EntryOrigin, InvalidationReport, ListOutcome, Listing, Node, NodeBody,
     PaginationControl, RangedHandle, ReadResult, RequestCtx, Synthetic, SyntheticContent, Tree,

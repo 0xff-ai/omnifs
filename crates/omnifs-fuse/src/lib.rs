@@ -28,6 +28,7 @@ use inode::NodeEntry;
 #[cfg(test)]
 use omnifs_engine::Engine;
 use omnifs_engine::MountRuntimes;
+use omnifs_engine::ServingContext;
 use omnifs_engine::Tree;
 use omnifs_engine::render::{PathKey, PathToInode};
 use omnifs_engine::view as view_types;
@@ -137,7 +138,7 @@ impl Frontend {
         };
         inodes.insert(ROOT_INO, root_entry);
 
-        let tree = Tree::new(Arc::clone(&registry));
+        let tree = Tree::new(ServingContext::from_runtimes(Arc::clone(&registry)));
 
         Self {
             rt,

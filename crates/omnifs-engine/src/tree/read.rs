@@ -11,7 +11,7 @@ use std::path::PathBuf;
 
 use crate::cache::{Record as CacheRecord, RecordKind};
 use crate::ops::namespace::{ReadBytes, ReadOutcome};
-use crate::pagination::{self, NextPageOutcome};
+use crate::pagination::NextPageOutcome;
 use crate::view as view_types;
 use crate::view::{AttrPayload, EntryMeta, FileAttrsCache, FilePayload, LookupPayload};
 use crate::{EngineError, Runtime};
@@ -117,7 +117,7 @@ impl Tree {
         mount: &str,
         path: &omnifs_core::path::Path,
     ) -> Option<FileAttrsCache> {
-        let runtime = self.runtime_for(mount).ok()?;
+        let runtime = self.ctx.runtime_for(mount).ok()?;
         FileAttrStore::new(&runtime, path).cached()
     }
 
@@ -127,7 +127,7 @@ impl Tree {
         path: &omnifs_core::path::Path,
         attrs: FileAttrsCache,
     ) -> Result<()> {
-        let runtime = self.runtime_for(mount)?;
+        let runtime = self.ctx.runtime_for(mount)?;
         FileAttrStore::new(&runtime, path).publish(attrs)
     }
 
@@ -155,7 +155,7 @@ impl Tree {
             return Ok(ReadResult::Subtree(dir.clone()));
         }
 
-        let runtime = self.runtime_for(node.mount())?;
+        let runtime = self.ctx.runtime_for(node.mount())?;
         let path = node.path();
         let attr_store = FileAttrStore::new(&runtime, path);
         let projected_attrs = attr_store.cached().or_else(|| node.attrs().cloned());
@@ -270,7 +270,7 @@ impl Tree {
                 content_type: None,
             }),
             SyntheticContent::PaginationControl(action) => {
-                let runtime = self.runtime_for(node.mount())?;
+                let runtime = self.ctx.runtime_for(node.mount())?;
                 let Some((parent, _)) = node.path().parent_and_name() else {
                     return Err(TreeError::invalid_input(format!(
                         "pagination control has no parent: {}",
@@ -301,7 +301,7 @@ impl Tree {
                 let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
                 Ok(ReadResult::Bytes {
                     data: bytes,
-                    attrs: Some(pagination::control_read_attrs(len)),
+                    attrs: Some(super::synthetic::control_read_attrs(len)),
                     content_type: None,
                 })
             },

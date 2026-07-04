@@ -5,7 +5,6 @@ use std::sync::Arc;
 use crate::Runtime;
 use crate::cache::{Record, RecordKind};
 use crate::effect_apply::LookupOutcome;
-use crate::pagination::is_control_name;
 use crate::view::{DirentsPayload, EntryMeta};
 use omnifs_core::path::Path;
 
@@ -23,7 +22,7 @@ impl Tree {
     /// path) in its handle and calls resolve again to rebuild a `Node` after
     /// eviction, without re-walking from root.
     pub async fn resolve(&self, path: &Path, ctx: &RequestCtx) -> Result<Node> {
-        let (mount, rel) = self.split_mount_path(path)?;
+        let (mount, rel) = self.ctx.split_mount_path(path)?;
 
         // The mount root is always a directory; no provider round trip needed.
         if rel.is_root() {
@@ -35,7 +34,7 @@ impl Tree {
             ));
         }
 
-        let runtime = self.runtime_for(&mount)?;
+        let runtime = self.ctx.runtime_for(&mount)?;
         let Some((parent, name)) = rel.parent_and_name() else {
             return Err(TreeError::invalid_input(format!(
                 "resolve: path has no parent: {}",
@@ -62,7 +61,7 @@ impl Tree {
     /// result (a real provider `.gitignore` wins). Subtree outcomes resolve
     /// through `Runtime::resolve_tree_ref` into `NodeBody::Subtree`.
     pub async fn resolve_child(&self, parent: &Node, name: &str, ctx: &RequestCtx) -> Result<Node> {
-        let runtime = self.runtime_for(parent.mount())?;
+        let runtime = self.ctx.runtime_for(parent.mount())?;
         self.resolve_child_in(
             parent.mount().to_string(),
             &runtime,
@@ -88,8 +87,9 @@ impl Tree {
             TreeError::invalid_input(format!("resolve_child: invalid name {name:?}: {e}"))
         })?;
 
-        if self.is_mount_enumeration_root(&mount, parent)
+        if self.ctx.is_mount_enumeration_root(&mount, parent)
             && self
+                .ctx
                 .mount_names()
                 .is_some_and(|mounts| mounts.iter().any(|m| m == name))
         {
@@ -105,7 +105,7 @@ impl Tree {
         // cached dirents (a resume cursor remains). A reserved control name is
         // never a real provider entry, so once the control is gone (feed
         // exhausted) the lookup is NotFound; we never consult the provider for it.
-        if is_control_name(name) {
+        if synthetic::is_control_name(name) {
             return match synthetic::resolve_synthetic_child(runtime, parent, name, false) {
                 Some((meta, syn)) => Ok(Node::synthetic(mount, rel, meta, syn)),
                 None => Err(TreeError::not_found(rel.as_str())),
