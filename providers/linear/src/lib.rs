@@ -16,14 +16,13 @@ use omnifs_sdk::prelude::*;
 use omnifs_sdk::{
     OauthScheme, ProviderAuthManifest, SchemeGuidance, StaticTokenScheme, TokenValidation,
 };
-use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::api::{
     GqlResponse, ISSUE_BY_IDENTIFIER_QUERY, ISSUES_QUERY, IssueNodeData, IssuePage, IssuesData,
-    TEAMS_QUERY, Team, TeamsData, gql_request, gql_unwrap,
+    TEAM_BY_KEY_QUERY, TEAMS_QUERY, TeamByKeyData, TeamsData, gql_request, gql_unwrap,
 };
-use crate::objects::Issue;
+use crate::objects::{Issue, Team};
 
 /// State filter directories under `/teams/{team}/issues/`.
 #[omnifs_sdk::path_segment]
@@ -92,7 +91,7 @@ impl std::fmt::Display for IssueIdent {
 struct LinearApi;
 
 #[omnifs_sdk::path_captures]
-struct IssuesRootKey {
+struct TeamPath {
     team: TeamKey,
 }
 
@@ -205,15 +204,19 @@ fn auth() -> ProviderAuthManifest {
 impl LinearProvider {
     fn start(r: &mut Router) -> Result<()> {
         r.dir("/teams").handler(teams_list)?;
-        r.dir("/teams/{team}/issues")
-            .handler(IssuesRootKey::filters)?;
-        // The `/teams/{team}` anchor hosts the issue listing as a typed
-        // `Collection<Issue>`. A NESTED collection is declared on a parent
-        // object, so `TeamAnchor` exists purely to carry the `issues/{filter}`
-        // collection; it declares no readable face of its own.
-        r.object::<TeamAnchor>("/teams/{team}", |o| {
+        r.dir("/teams/{team}/issues").handler(TeamPath::filters)?;
+        // `/teams/{team}` is a Team object: it projects the team's own canonical
+        // bytes and derived files, and hosts the nested `Collection<Issue>` at
+        // `issues/{filter}`.
+        r.object::<Team>("/teams/{team}", |o| {
             o.dynamic();
-            o.dir("issues/{filter}").collection(TeamAnchor::issues)?;
+            o.file("item.json").canonical::<Json>()?;
+            o.file("item.md").representation::<Markdown>()?;
+            o.file("name").computed(Team::name)?;
+            o.file("description.md")
+                .lazy()
+                .computed(Team::description)?;
+            o.dir("issues/{filter}").collection(Team::issues)?;
             Ok(())
         })?;
         r.object::<Issue>("/teams/{team}/issues/{filter}/{ident}", |o| {
@@ -242,7 +245,7 @@ async fn teams_list(cx: DirCx) -> Result<DirListing> {
     Ok(DirListing::exhaustive(entries))
 }
 
-impl IssuesRootKey {
+impl TeamPath {
     #[allow(clippy::unused_self)]
     fn filters(self, _cx: DirCx) -> Result<DirListing> {
         Ok(DirListing::exhaustive(
@@ -254,26 +257,30 @@ impl IssuesRootKey {
     }
 }
 
-/// The parent object anchoring the issue collection at `/teams/{team}`.
-///
-/// It declares no canonical or readable face; a NESTED `Collection` must hang
-/// off an object anchor, and this is the minimal one. Because it has no
-/// canonical face, the SDK never loads it (the anchor-listing path
-/// early-returns for a no-canonical object and no read target resolves to it),
-/// so [`Self::load`] exists only to satisfy the `Object` trait.
-#[omnifs_sdk::object(kind = "linear.team", key = crate::IssuesRootKey)]
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct TeamAnchor {}
-
-impl TeamAnchor {
+impl Team {
+    /// Fetch a single Linear team by key. Linear's GraphQL has no
+    /// `If-None-Match`; `since` is unused so we always full-fetch and never
+    /// return `Load::Unchanged`.
     pub(crate) async fn load(
-        _cx: &Cx<()>,
-        _key: &IssuesRootKey,
+        cx: &Cx<()>,
+        key: &TeamPath,
         _since: Option<Validator>,
-    ) -> Result<Load<TeamAnchor>> {
-        // Unreachable: the `/teams/{team}` anchor has no canonical/readable
-        // face, so neither the list nor read path ever calls it.
-        Ok(Load::NotFound)
+    ) -> Result<Load<Team>> {
+        let vars = json!({ "teamKey": key.team.as_str() });
+        let resp: GqlResponse<TeamByKeyData> = cx
+            .endpoint(LinearApi)
+            .post("/graphql")
+            .body_json(&gql_request(TEAM_BY_KEY_QUERY, &vars))
+            .json()
+            .await?;
+        let Some(node) = gql_unwrap(resp)?.teams.nodes.into_iter().next() else {
+            return Ok(Load::NotFound);
+        };
+        let bytes = node.get().as_bytes().to_vec();
+        let value: Team = serde_json::from_str(node.get())
+            .map_err(|e| ProviderError::invalid_input(format!("linear team node parse: {e}")))?;
+        let validator = value.version().map(Validator::from);
+        Ok(Load::fresh(value, Canonical::new(bytes, validator)))
     }
 
     /// List a team's issues as child `Issue` objects. The listing carries only
