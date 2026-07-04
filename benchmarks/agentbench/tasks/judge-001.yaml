@@ -1,0 +1,7 @@
+id: judge-001
+family: navigation
+prompt: "In the github-like tree under github/, read GitHub issue acme-api#3 (github/repos/acme-api/issues/3/) and summarize its main theme in one sentence."
+success:
+  type: judge
+  value: "The answer correctly identifies that acme-api#3 concerns retry backoff behavior and is tracked in Linear as ENG-107."
+max_turns: 20

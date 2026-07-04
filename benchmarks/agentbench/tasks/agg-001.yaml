@@ -1,0 +1,7 @@
+id: agg-001
+family: aggregation
+prompt: "In the github-like tree under github/, count how many issues in repository acme-api are in the closed state. Each issue body (github/repos/acme-api/issues/<n>/body.md) has a 'state:' line. Report only the count as a number."
+success:
+  type: regex
+  value: '\b4\b'
+max_turns: 30

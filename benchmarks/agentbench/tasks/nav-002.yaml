@@ -1,0 +1,7 @@
+id: nav-002
+family: navigation
+prompt: "In the github-like tree under github/, report the label applied to issue acme-cli#2 (github/repos/acme-cli/issues/2/body.md). Answer with the single label word."
+success:
+  type: contains
+  value: "enhancement"
+max_turns: 20

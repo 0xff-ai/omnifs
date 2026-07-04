@@ -1,0 +1,7 @@
+id: corr-002
+family: correlation
+prompt: "You are exploring a dataset with a github-like tree under github/ and a linear-like tree under linear/. Linear issue OPS-204 (linear/issues/OPS-204/issue.md) references a GitHub issue. Report that GitHub issue in the form <repo>#<number>."
+success:
+  type: regex
+  value: "acme-web#7"
+max_turns: 30

@@ -1,0 +1,7 @@
+id: nav-001
+family: navigation
+prompt: "In the github-like tree under github/, report the exact title of issue acme-web#5 (github/repos/acme-web/issues/5/body.md). The title is the text after the colon on the first heading line."
+success:
+  type: contains
+  value: "Guard against duplicate reconcile runs"
+max_turns: 20

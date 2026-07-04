@@ -1,0 +1,7 @@
+id: agg-002
+family: aggregation
+prompt: "In the github-like tree under github/, count the total number of comment files across all issues in repository acme-cli. Comments live at github/repos/acme-cli/issues/<n>/comments/<c>.md. Report only the total count as a number."
+success:
+  type: regex
+  value: '\b9\b'
+max_turns: 30

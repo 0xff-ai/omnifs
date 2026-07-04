@@ -1,0 +1,7 @@
+id: recon-002
+family: reconstruction
+prompt: "In the github-like tree under github/, read the comments on GitHub issue acme-api#3 (github/repos/acme-api/issues/3/comments/). One commenter proposes a specific default config value. Report that config assignment exactly as written (name=value)."
+success:
+  type: contains
+  value: "max_retries=5"
+max_turns: 25
