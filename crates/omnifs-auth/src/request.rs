@@ -1,4 +1,4 @@
-use crate::client::AuthError;
+use crate::error::AuthError;
 use oauth2::basic::BasicClient;
 use oauth2::{
     AuthType, AuthUrl, ClientId, ClientSecret, DeviceAuthorizationUrl, EndpointMaybeSet,
@@ -119,9 +119,7 @@ impl OAuthRequest {
             .set_token_uri(token_uri)
             .set_revocation_url_option(revocation_url);
 
-        if let Some((secret, auth_type)) =
-            token_endpoint_secret(self.scheme.token_endpoint_auth, self.client_secret.as_ref())?
-        {
+        if let Some((secret, auth_type)) = self.token_endpoint_secret()? {
             client = client.set_client_secret(secret);
             client = client.set_auth_type(auth_type);
         }
@@ -148,9 +146,7 @@ impl OAuthRequest {
             .set_device_authorization_url(device_uri)
             .set_revocation_url_option(revocation_url);
 
-        if let Some((secret, auth_type)) =
-            token_endpoint_secret(self.scheme.token_endpoint_auth, self.client_secret.as_ref())?
-        {
+        if let Some((secret, auth_type)) = self.token_endpoint_secret()? {
             client = client.set_client_secret(secret);
             client = client.set_auth_type(auth_type);
         }
@@ -186,6 +182,58 @@ impl OAuthRequest {
             .clone()
             .or_else(|| self.scheme.default_client_id.clone())
             .ok_or(AuthError::MissingClientId)
+    }
+
+    fn token_endpoint_secret(&self) -> Result<Option<(ClientSecret, AuthType)>, AuthError> {
+        let auth_type = match self.scheme.token_endpoint_auth {
+            TokenEndpointAuthMethod::None => return Ok(None),
+            TokenEndpointAuthMethod::ClientSecretPost => AuthType::RequestBody,
+            TokenEndpointAuthMethod::ClientSecretBasic => AuthType::BasicAuth,
+        };
+        let secret = self
+            .client_secret
+            .as_ref()
+            .ok_or(AuthError::MissingClientSecret)?;
+        Ok(Some((
+            ClientSecret::new(secret.expose_secret().to_owned()),
+            auth_type,
+        )))
+    }
+
+    /// Build an [`OAuthRequest`] from a mount's `auth` config block, applying
+    /// scope, injection, redirect, and client credential overrides.
+    pub fn from_mount_config(
+        config: Option<&OAuth>,
+        scheme: OauthScheme,
+    ) -> Result<OAuthRequest, AuthError> {
+        let Some(config) = config else {
+            return Ok(OAuthRequest::new(scheme));
+        };
+
+        let mut request_config = OAuthRequestConfig::default();
+        if let Some(scopes) = &config.scopes {
+            request_config = request_config.with_scopes(scopes.clone());
+        }
+        if let Some(domain) = non_empty_config_value(config.domain.as_deref(), "auth.domain")? {
+            request_config = request_config.with_inject_domain(domain);
+        }
+        if let Some(header) = non_empty_config_value(config.header.as_deref(), "auth.header")? {
+            request_config = request_config.with_inject_header(header);
+        }
+        if let Some(redirect_uri) =
+            non_empty_config_value(config.redirect_uri.as_deref(), "auth.redirectUri")?
+        {
+            request_config = request_config.with_redirect_uri(redirect_uri);
+        }
+        if let Some(client_id) =
+            non_empty_config_value(config.client_id.as_deref(), "auth.clientId")?
+        {
+            request_config = request_config.with_client_id(client_id);
+        }
+        if let Some(client_secret) = read_oauth_client_secret(config)? {
+            request_config = request_config.with_client_secret(client_secret);
+        }
+        Ok(OAuthRequest::from_config(scheme, request_config))
     }
 }
 
@@ -282,56 +330,6 @@ pub struct ClientSideTokenLoginRequest {
 pub struct DeviceCodeLoginRequest {
     pub(crate) oauth: OAuthRequest,
     pub(crate) flow: DeviceCodeConfig,
-}
-
-fn token_endpoint_secret(
-    method: TokenEndpointAuthMethod,
-    secret: Option<&SecretString>,
-) -> Result<Option<(ClientSecret, AuthType)>, AuthError> {
-    let auth_type = match method {
-        TokenEndpointAuthMethod::None => return Ok(None),
-        TokenEndpointAuthMethod::ClientSecretPost => AuthType::RequestBody,
-        TokenEndpointAuthMethod::ClientSecretBasic => AuthType::BasicAuth,
-    };
-    let secret = secret.ok_or(AuthError::MissingClientSecret)?;
-    Ok(Some((
-        ClientSecret::new(secret.expose_secret().to_owned()),
-        auth_type,
-    )))
-}
-
-/// Build an [`OAuthRequest`] from a mount's `auth` config block, applying
-/// scope, injection, redirect, and client credential overrides.
-pub fn oauth_request_from_config(
-    config: Option<&OAuth>,
-    scheme: OauthScheme,
-) -> Result<OAuthRequest, AuthError> {
-    let Some(config) = config else {
-        return Ok(OAuthRequest::new(scheme));
-    };
-
-    let mut request_config = OAuthRequestConfig::default();
-    if let Some(scopes) = &config.scopes {
-        request_config = request_config.with_scopes(scopes.clone());
-    }
-    if let Some(domain) = non_empty_config_value(config.domain.as_deref(), "auth.domain")? {
-        request_config = request_config.with_inject_domain(domain);
-    }
-    if let Some(header) = non_empty_config_value(config.header.as_deref(), "auth.header")? {
-        request_config = request_config.with_inject_header(header);
-    }
-    if let Some(redirect_uri) =
-        non_empty_config_value(config.redirect_uri.as_deref(), "auth.redirectUri")?
-    {
-        request_config = request_config.with_redirect_uri(redirect_uri);
-    }
-    if let Some(client_id) = non_empty_config_value(config.client_id.as_deref(), "auth.clientId")? {
-        request_config = request_config.with_client_id(client_id);
-    }
-    if let Some(client_secret) = read_oauth_client_secret(config)? {
-        request_config = request_config.with_client_secret(client_secret);
-    }
-    Ok(OAuthRequest::from_config(scheme, request_config))
 }
 
 fn read_oauth_client_secret(config: &OAuth) -> Result<Option<SecretString>, AuthError> {
