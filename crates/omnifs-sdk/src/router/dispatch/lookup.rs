@@ -92,13 +92,13 @@ impl<S> Router<S> {
                     child: name.to_string(),
                 },
             );
-            let projection = super::route_future(
+            let listing = super::route_future(
                 route.entry.pattern.template(),
                 (route.entry.handler)(dir_cx, route.captures),
             )
             .await
             .map_err(|error| error.with_context("lookup-child", &child_abs))?;
-            return shape.projection_lookup(&parent_abs, name, &projection);
+            return shape.projection_lookup(&parent_abs, name, &listing.into_dir_projection());
         }
 
         Ok(Lookup::not_found())

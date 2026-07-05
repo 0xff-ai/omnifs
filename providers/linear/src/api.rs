@@ -10,7 +10,7 @@
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::objects::Issue;
+use crate::objects::{Issue, Team};
 
 /// One page of Linear's `teams` query.
 pub(crate) const TEAMS_QUERY: &str = r"
@@ -67,6 +67,23 @@ query IssueByIdentifier($id: String!) {
     state { name type }
     assignee { name displayName email }
     description
+  }
+}
+";
+
+/// Single-team fetch by key (e.g. `ENG`). Linear's `team(id:)` takes the
+/// team UUID, not the key, so we filter the `teams` connection by key and take
+/// the first node.
+pub(crate) const TEAM_BY_KEY_QUERY: &str = r"
+query TeamByKey($teamKey: String!) {
+  teams(first: 1, filter: { key: { eq: $teamKey } }) {
+    nodes {
+      id
+      key
+      name
+      description
+      updatedAt
+    }
   }
 }
 ";
@@ -129,9 +146,16 @@ pub(crate) struct TeamsData {
     pub(crate) teams: TeamsConnection,
 }
 
+/// Single-team fetch: keep each node's raw JSON so the object's canonical bytes
+/// are exactly what Linear returned, mirroring the single-issue fetch.
 #[derive(Debug, Deserialize)]
-pub(crate) struct Team {
-    pub(crate) key: String,
+pub(crate) struct TeamByKeyData {
+    pub(crate) teams: TeamRawConnection,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct TeamRawConnection {
+    pub(crate) nodes: Vec<Box<serde_json::value::RawValue>>,
 }
 
 #[derive(Debug, Deserialize)]

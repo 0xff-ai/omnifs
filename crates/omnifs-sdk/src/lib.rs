@@ -122,7 +122,7 @@
 //! | [`router`] | Route registration ([`router::Router`]) and dispatch |
 //! | [`captures`] | Typed segment parsing, [`captures::Captures`], choices |
 //! | [`object`] / [`identity`] | The object model: [`object::Key`], [`object::Load`], logical ids, facets |
-//! | [`projection`] | What handlers return: [`projection::DirProjection`], [`projection::FileProjection`], [`projection::Entry`] |
+//! | [`projection`] | What handlers return: [`projection::DirListing`] (raw dir listings), [`projection::FileProjection`], [`projection::Entry`]; objects list through [`collection::Collection`] |
 //! | [`file_attrs`] | Size, stability, version tokens, projection validation |
 //! | [`repr`] | Multi-format object representations (`item.md`, `item.json`) |
 //! | [`cx`] | Handler context: state access, callout builders, [`cx::join_all`] |

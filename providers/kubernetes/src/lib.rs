@@ -213,21 +213,21 @@ impl KubernetesProvider {
     }
 }
 
-fn empty_dir() -> DirProjection {
-    DirProjection::exhaustive(core::iter::empty::<Entry>())
+fn empty_dir() -> DirListing {
+    DirListing::exhaustive(core::iter::empty::<Entry>())
 }
 
-fn dir_listing(names: Vec<String>) -> DirProjection {
-    DirProjection::exhaustive(names.into_iter().map(Entry::dir))
+fn dir_listing(names: Vec<String>) -> DirListing {
+    DirListing::exhaustive(names.into_iter().map(Entry::dir))
 }
 
-async fn namespaces_dir(cx: DirCx<State>) -> Result<DirProjection> {
+async fn namespaces_dir(cx: DirCx<State>) -> Result<DirListing> {
     let api = KubeApi::new(&cx);
     Ok(dir_listing(api.list_names("/api/v1/namespaces").await?))
 }
 
 impl NamespaceKey {
-    async fn types(self, cx: DirCx<State>) -> Result<DirProjection> {
+    async fn types(self, cx: DirCx<State>) -> Result<DirListing> {
         let api = KubeApi::new(&cx);
         Ok(dir_listing(
             api.list_types_for_listing(Some(self.ns.as_str())).await?,
@@ -235,12 +235,12 @@ impl NamespaceKey {
     }
 }
 
-async fn ns_types_dir(cx: DirCx<State>, key: NamespaceKey) -> Result<DirProjection> {
+async fn ns_types_dir(cx: DirCx<State>, key: NamespaceKey) -> Result<DirListing> {
     key.types(cx).await
 }
 
 impl NsTypeKey {
-    async fn resources(self, cx: DirCx<State>) -> Result<DirProjection> {
+    async fn resources(self, cx: DirCx<State>) -> Result<DirListing> {
         let api = KubeApi::new(&cx);
         let resource = api.resource(self.rtype.as_str()).await?;
         if !resource.namespaced {
@@ -253,15 +253,15 @@ impl NsTypeKey {
     }
 }
 
-async fn ns_resources_dir(cx: DirCx<State>, key: NsTypeKey) -> Result<DirProjection> {
+async fn ns_resources_dir(cx: DirCx<State>, key: NsTypeKey) -> Result<DirListing> {
     key.resources(cx).await
 }
 
-async fn pod_logs_dir(cx: DirCx<State>, key: PodLogsKey) -> Result<DirProjection> {
+async fn pod_logs_dir(cx: DirCx<State>, key: PodLogsKey) -> Result<DirListing> {
     let containers = KubeApi::new(&cx)
         .pod_containers(key.ns.as_str(), key.name.as_str())
         .await?;
-    Ok(DirProjection::exhaustive(
+    Ok(DirListing::exhaustive(
         containers
             .into_iter()
             .map(|c| Entry::file(format!("{c}.log"))),
@@ -282,13 +282,13 @@ async fn pod_log_read(cx: Cx<State>, key: PodLogKey) -> Result<FileProjection> {
         .build())
 }
 
-async fn cluster_types_dir(cx: DirCx<State>) -> Result<DirProjection> {
+async fn cluster_types_dir(cx: DirCx<State>) -> Result<DirListing> {
     let api = KubeApi::new(&cx);
     Ok(dir_listing(api.list_types_for_listing(None).await?))
 }
 
 impl ClusterTypeKey {
-    async fn resources(self, cx: DirCx<State>) -> Result<DirProjection> {
+    async fn resources(self, cx: DirCx<State>) -> Result<DirListing> {
         let api = KubeApi::new(&cx);
         let resource = api.resource(self.rtype.as_str()).await?;
         if resource.namespaced {
@@ -300,6 +300,6 @@ impl ClusterTypeKey {
     }
 }
 
-async fn cluster_resources_dir(cx: DirCx<State>, key: ClusterTypeKey) -> Result<DirProjection> {
+async fn cluster_resources_dir(cx: DirCx<State>, key: ClusterTypeKey) -> Result<DirListing> {
     key.resources(cx).await
 }

@@ -20,9 +20,9 @@ use serde_json::json;
 
 use crate::api::{
     GqlResponse, ISSUE_BY_IDENTIFIER_QUERY, ISSUES_QUERY, IssueNodeData, IssuePage, IssuesData,
-    TEAMS_QUERY, Team, TeamsData, gql_request, gql_unwrap,
+    TEAM_BY_KEY_QUERY, TEAMS_QUERY, TeamByKeyData, TeamsData, gql_request, gql_unwrap,
 };
-use crate::objects::Issue;
+use crate::objects::{Issue, Team};
 
 /// State filter directories under `/teams/{team}/issues/`.
 #[omnifs_sdk::path_segment]
@@ -91,7 +91,7 @@ impl std::fmt::Display for IssueIdent {
 struct LinearApi;
 
 #[omnifs_sdk::path_captures]
-struct IssuesRootKey {
+struct TeamPath {
     team: TeamKey,
 }
 
@@ -103,7 +103,10 @@ struct IssueListKey {
 
 #[omnifs_sdk::path_captures]
 pub(crate) struct IssueKey {
-    pub(crate) team: Facet<TeamKey>,
+    // Identity: an issue belongs to exactly one team, and the collection uses
+    // `team` to render each child anchor (`/teams/{team}/issues/{filter}/{ident}`).
+    // TeamKey has no finite `choices()`, so it cannot be a facet axis.
+    pub(crate) team: TeamKey,
     // Drives facet-axis view-leaf expansion; not read in provider code.
     #[allow(dead_code)]
     pub(crate) filter: Facet<StateFilter>,
@@ -119,7 +122,7 @@ impl Issue {
         key: &IssueKey,
         _since: Option<Validator>,
     ) -> Result<Load<Issue>> {
-        if key.ident.team() != &*key.team {
+        if key.ident.team() != &key.team {
             return Ok(Load::NotFound);
         }
         let vars = json!({ "id": key.ident.to_string() });
@@ -201,10 +204,21 @@ fn auth() -> ProviderAuthManifest {
 impl LinearProvider {
     fn start(r: &mut Router) -> Result<()> {
         r.dir("/teams").handler(teams_list)?;
-        r.dir("/teams/{team}/issues")
-            .handler(IssuesRootKey::filters)?;
-        r.dir("/teams/{team}/issues/{filter}")
-            .handler(IssueListKey::list)?;
+        r.dir("/teams/{team}/issues").handler(TeamPath::filters)?;
+        // `/teams/{team}` is a Team object: it projects the team's own canonical
+        // bytes and derived files, and hosts the nested `Collection<Issue>` at
+        // `issues/{filter}`.
+        r.object::<Team>("/teams/{team}", |o| {
+            o.dynamic();
+            o.file("item.json").canonical::<Json>()?;
+            o.file("item.md").representation::<Markdown>()?;
+            o.file("name").computed(Team::name)?;
+            o.file("description.md")
+                .lazy()
+                .computed(Team::description)?;
+            o.dir("issues/{filter}").collection(Team::issues)?;
+            Ok(())
+        })?;
         r.object::<Issue>("/teams/{team}/issues/{filter}/{ident}", |o| {
             o.dynamic();
             o.file("item.json").canonical::<Json>()?;
@@ -222,19 +236,19 @@ impl LinearProvider {
     }
 }
 
-async fn teams_list(cx: DirCx) -> Result<DirProjection> {
+async fn teams_list(cx: DirCx) -> Result<DirListing> {
     let teams = fetch_all_teams(&cx).await?;
     let entries = teams
         .into_iter()
         .filter(|team| team.key.parse::<TeamKey>().is_ok())
         .map(|team| Entry::dir(team.key));
-    Ok(DirProjection::exhaustive(entries))
+    Ok(DirListing::exhaustive(entries))
 }
 
-impl IssuesRootKey {
+impl TeamPath {
     #[allow(clippy::unused_self)]
-    fn filters(self, _cx: DirCx) -> Result<DirProjection> {
-        Ok(DirProjection::exhaustive(
+    fn filters(self, _cx: DirCx) -> Result<DirListing> {
+        Ok(DirListing::exhaustive(
             StateFilter::choices()
                 .into_iter()
                 .flatten()
@@ -243,13 +257,44 @@ impl IssuesRootKey {
     }
 }
 
-impl IssueListKey {
-    async fn list(self, cx: DirCx) -> Result<DirProjection> {
-        let team = self.team;
-        let filter = self.filter;
+impl Team {
+    /// Fetch a single Linear team by key. Linear's GraphQL has no
+    /// `If-None-Match`; `since` is unused so we always full-fetch and never
+    /// return `Load::Unchanged`.
+    pub(crate) async fn load(
+        cx: &Cx<()>,
+        key: &TeamPath,
+        _since: Option<Validator>,
+    ) -> Result<Load<Team>> {
+        let vars = json!({ "teamKey": key.team.as_str() });
+        let resp: GqlResponse<TeamByKeyData> = cx
+            .endpoint(LinearApi)
+            .post("/graphql")
+            .body_json(&gql_request(TEAM_BY_KEY_QUERY, &vars))
+            .json()
+            .await?;
+        let Some(node) = gql_unwrap(resp)?.teams.nodes.into_iter().next() else {
+            return Ok(Load::NotFound);
+        };
+        let bytes = node.get().as_bytes().to_vec();
+        let value: Team = serde_json::from_str(node.get())
+            .map_err(|e| ProviderError::invalid_input(format!("linear team node parse: {e}")))?;
+        let validator = value.version().map(Validator::from);
+        Ok(Load::fresh(value, Canonical::new(bytes, validator)))
+    }
+
+    /// List a team's issues as child `Issue` objects. The listing carries only
+    /// each issue's identifier (the child anchor name); the issue canonical
+    /// loads on the child's own first read.
+    async fn issues(
+        key: IssueListKey,
+        cx: ListCx<NoCursor>,
+    ) -> Result<Collection<Issue, NoCursor>> {
+        let team = key.team;
+        let filter = key.filter;
         let page = fetch_all_issues(&cx, &team, filter).await?;
         let mut seen: HashSet<String> = HashSet::with_capacity(page.items.len());
-        let mut idents: Vec<IssueIdent> = Vec::new();
+        let mut entries: Vec<CollectionEntry<Issue>> = Vec::new();
         for issue in page.items {
             if !seen.insert(issue.identifier.clone()) {
                 continue;
@@ -260,14 +305,17 @@ impl IssueListKey {
             if ident.team() != &team {
                 continue;
             }
-            idents.push(ident);
+            entries.push(CollectionEntry::key(IssueKey {
+                team: team.clone(),
+                filter: Facet(filter),
+                ident,
+            }));
         }
-        let projection = if page.truncated {
-            DirProjection::open(idents.iter().map(|ident| Entry::dir(ident.to_string())))
+        Ok(if page.truncated {
+            Collection::partial(entries)
         } else {
-            DirProjection::exhaustive(idents.iter().map(|ident| Entry::dir(ident.to_string())))
-        };
-        Ok(projection)
+            Collection::complete(entries)
+        })
     }
 }
 

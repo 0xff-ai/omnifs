@@ -9,7 +9,7 @@
 //! Registration verbs:
 //!
 //! - [`Router::dir`]: a directory route; the handler returns a
-//!   [`crate::projection::DirProjection`].
+//!   [`crate::projection::DirListing`].
 //! - [`Router::file`]: a file route; the handler returns a
 //!   [`crate::projection::FileProjection`].
 //! - [`Router::treeref`]: a subtree handoff; the handler returns a

@@ -120,8 +120,8 @@ under budget even with periodic refresh.
 - Labels. Filter by label, or expose label sets as directories.
 - Pagination cursors. The current implementation flattens all pages
   into one listing (capped at 2000 issues). Larger workspaces would
-  want pagination via `Listing::partial` with `next_cursor` (host `@next` /
-  `DirProjection` cursor resume) instead of flattening all pages.
+  want pagination via a typed `Collection::page(entries).next(cursor)`
+  (host `@next` cursor resume) instead of flattening all pages.
 - Automated live OAuth validation. CI still relies on fake OAuth servers
   because the real flow requires browser authorization.
 - `on-event` invalidation. Linear has webhooks but the provider does

@@ -271,9 +271,7 @@ impl<S> Router<S> {
                         .iter()
                         .map(|name| crate::projection::Entry::dir(*name))
                         .collect::<Vec<_>>();
-                    Box::pin(
-                        async move { Ok(crate::projection::DirProjection::exhaustive(entries)) },
-                    )
+                    Box::pin(async move { Ok(crate::projection::DirListing::exhaustive(entries)) })
                 });
             self.dirs.push(super::handlers::DirEntry {
                 pattern: pattern.clone(),
@@ -510,7 +508,11 @@ impl<S> Router<S> {
                     let view = child_view.clone();
                     let boxed: super::handlers::BoxedDirHandler<S> =
                         std::sync::Arc::new(move |dir_cx, caps| {
-                            handler(dir_cx, caps, view.clone())
+                            let fut = handler(dir_cx, caps, view.clone());
+                            Box::pin(async move {
+                                fut.await
+                                    .map(crate::projection::DirListing::from_projection)
+                            })
                         });
                     self.dirs.push(super::handlers::DirEntry {
                         pattern: dir_pattern,
