@@ -68,8 +68,14 @@ impl<S> Router<S> {
             }
         }
 
-        if shape.object_route(&child_abs).is_some() {
-            return Ok(shape.static_dir_lookup(&parent_abs, name));
+        if let Some(object_route) = shape.object_route(&child_abs) {
+            let file_wins = file_match.as_ref().is_some_and(|file_route| {
+                file_route.entry.pattern.precedence_key()
+                    > object_route.entry.pattern.precedence_key()
+            });
+            if !file_wins {
+                return Ok(shape.static_dir_lookup(&parent_abs, name));
+            }
         }
 
         let object_file_lookup = shape.object_leaf_lookup(&parent_abs, name);
