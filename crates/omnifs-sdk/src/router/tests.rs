@@ -141,6 +141,26 @@ fn read_text(router: &Router<()>, path: &str) -> String {
     String::from_utf8(content.content().expect("inline text").to_vec()).unwrap()
 }
 
+fn lookup_child_entry(router: &Router<()>, parent: &str, name: &str) -> wit_types::LookupEntry {
+    let cx = Cx::new(1, Rc::new(RefCell::new(())));
+    let lookup = poll_ready(router.lookup_child(&cx, parent, name)).unwrap();
+    let (wire, _effects) = lookup.into_result_and_effects();
+    let wit_types::LookupChildResult::Entry(entry) = wire else {
+        panic!("expected lookup of {parent}/{name} to resolve to an entry");
+    };
+    entry
+}
+
+fn list_entries(router: &Router<()>, path: &str) -> Vec<wit_types::DirEntry> {
+    let cx = Cx::new(1, Rc::new(RefCell::new(())));
+    let list = poll_ready(router.list_children(&cx, path, None, None)).unwrap();
+    let (wire, _effects) = list.into_result_and_effects();
+    let wit_types::ListChildrenResult::Entries(listing) = wire else {
+        panic!("expected {path} to list entries");
+    };
+    listing.entries
+}
+
 #[test]
 fn object_without_stability_fails_to_finish() {
     let result = object::<DemoObj>("/items/{id}", |o| {
@@ -650,6 +670,84 @@ fn explicit_readme_registration_wins() {
 
     assert_eq!(read_text(&router, "/README.md"), "custom root");
     assert_eq!(read_text(&router, "/items/README.md"), "custom branch");
+}
+
+#[test]
+fn literal_root_readme_beats_root_object_capture() {
+    let mut router = Router::<()>::new();
+    router
+        .object::<DemoObj>("/{id}", |o| {
+            o.dynamic();
+            o.file("item.json").canonical::<Json>()?;
+            Ok(())
+        })
+        .unwrap();
+    router.seal().unwrap();
+
+    let entry = lookup_child_entry(&router, "/", "README.md");
+    assert_eq!(entry.target.name.as_str(), "README.md");
+    assert!(
+        matches!(entry.target.kind, wit_types::EntryKind::File(_)),
+        "literal README file route must win lookup over the root object capture"
+    );
+
+    let root = read_text(&router, "/README.md");
+    assert!(root.contains("The keying schema is the path grammar below."));
+    assert!(root.contains("- `/{id}` - object `demo.obj`"));
+
+    let entries = list_entries(&router, "/");
+    let readme = entries
+        .iter()
+        .find(|entry| entry.name == "README.md")
+        .expect("root listing must include the synthesized README");
+    assert!(
+        matches!(&readme.kind, wit_types::EntryKind::File(_)),
+        "root listing must report README.md as a file"
+    );
+}
+
+#[test]
+fn root_object_capture_still_resolves_non_literal_names() {
+    let mut router = Router::<()>::new();
+    router
+        .object::<DemoObj>("/{id}", |o| {
+            o.dynamic();
+            o.file("item.json").canonical::<Json>()?;
+            Ok(())
+        })
+        .unwrap();
+    router.seal().unwrap();
+
+    let entry = lookup_child_entry(&router, "/", "torvalds");
+    assert_eq!(entry.target.name.as_str(), "torvalds");
+    assert!(
+        matches!(entry.target.kind, wit_types::EntryKind::Directory),
+        "non-literal names must still resolve through the object capture"
+    );
+}
+
+#[test]
+fn explicit_literal_file_beats_root_object_capture() {
+    let mut router = Router::<()>::new();
+    router
+        .object::<DemoObj>("/{id}", |o| {
+            o.dynamic();
+            o.file("item.json").canonical::<Json>()?;
+            Ok(())
+        })
+        .unwrap();
+    router
+        .file("/rate_limit")
+        .handler(|_cx: Cx<()>| async { Ok(FileProjection::inline(b"ok").build()) })
+        .unwrap();
+    router.seal().unwrap();
+
+    let entry = lookup_child_entry(&router, "/", "rate_limit");
+    assert_eq!(entry.target.name.as_str(), "rate_limit");
+    assert!(
+        matches!(entry.target.kind, wit_types::EntryKind::File(_)),
+        "explicit literal file route must win lookup over the object capture"
+    );
 }
 
 // ---------------------------------------------------------------------------
