@@ -198,7 +198,14 @@ async fn lists_root_and_nested_directories() {
     let t = tree_harness();
 
     let root = t.list_names("/").await;
-    for expected in ["items", "hello", "scoped", "checkout", "dynamic"] {
+    for expected in [
+        "README.md",
+        "items",
+        "hello",
+        "scoped",
+        "checkout",
+        "dynamic",
+    ] {
         assert!(
             root.contains(&expected.to_string()),
             "root missing {expected}: {root:?}"
@@ -220,6 +227,36 @@ async fn lists_root_and_nested_directories() {
             items_open.contains(&expected.to_string()),
             "/items/open missing {expected}: {items_open:?}"
         );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn generated_readmes_are_visible_and_hidden_by_root_ignore_patterns() {
+    let t = tree_harness();
+
+    let root_readme = t.assert_file("/README.md").await;
+    let root_body = match t.tree.read(&root_readme, &t.ctx).await.unwrap() {
+        ReadResult::Bytes { data, .. } => String::from_utf8(data).unwrap(),
+        ReadResult::Subtree(dir) => panic!("README.md must be provider bytes, got {dir:?}"),
+    };
+    assert!(root_body.contains("The keying schema is the path grammar below."));
+    assert!(root_body.contains("`/hello/message`"));
+
+    let hello_readme = t.assert_file("/hello/README.md").await;
+    let hello_body = match t.tree.read(&hello_readme, &t.ctx).await.unwrap() {
+        ReadResult::Bytes { data, .. } => String::from_utf8(data).unwrap(),
+        ReadResult::Subtree(dir) => panic!("branch README.md must be provider bytes, got {dir:?}"),
+    };
+    assert!(hello_body.contains("route table for `/hello`"));
+    assert!(hello_body.contains("`/hello/message`"));
+
+    let ignore = t.assert_file("/.gitignore").await;
+    assert!(ignore.is_synthetic(), ".gitignore remains a tree synthetic");
+    match t.tree.read(&ignore, &t.ctx).await.unwrap() {
+        ReadResult::Bytes { data, .. } => {
+            assert_eq!(data, b"@*\n/README.md\n/*/README.md\n");
+        },
+        ReadResult::Subtree(dir) => panic!(".gitignore must be synthetic bytes, got {dir:?}"),
     }
 }
 

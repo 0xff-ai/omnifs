@@ -238,10 +238,12 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
         .unwrap();
     match reverse_listing {
         NamespaceListOutcome::Entries(listing) => {
-            assert!(
-                listing.entries.is_empty(),
-                "reverse dir should not eagerly list dynamic children: {listing:?}"
-            );
+            let names: Vec<&str> = listing
+                .entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect();
+            assert_eq!(names, vec!["README.md"]);
         },
         other => {
             panic!("expected reverse dir listing, got {other:?}")

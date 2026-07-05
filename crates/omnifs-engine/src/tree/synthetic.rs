@@ -4,8 +4,8 @@
 //! renderer presents them identically:
 //!
 //! - the mount-root ignore files (`.gitignore`/`.ignore`/`.rgignore`), static
-//!   `@*\n` bytes that hide the `@`-prefixed control files from ignore-respecting
-//!   tree walks;
+//!   bytes that hide the `@`-prefixed control files and generated provider
+//!   README leaves from ignore-respecting tree walks;
 //! - the pagination controls (`@next`/`@all`), an action whose read advances the
 //!   parent directory's accumulated dirents.
 //!
@@ -27,14 +27,14 @@ const CTRL_ALL: &str = "@all";
 /// provider data cannot shadow `@next`/`@all`.
 const CTRL_PREFIX: char = '@';
 
-/// Mount-root ignore files. Each carries a single `@*` pattern so recursive
-/// tools that honor ignore files (`rg`, `fd`, git) skip the `@next`/`@all`
-/// control files by default and never trigger pagination during a tree walk.
+/// Mount-root ignore files. Each carries patterns so recursive tools that
+/// honor ignore files (`rg`, `fd`, git) skip the `@next`/`@all` control files
+/// and generated README leaves by default.
 pub const IGNORE_FILES: [&str; 3] = [".gitignore", ".ignore", ".rgignore"];
 
 /// Content served for any mount-root ignore file: ignore every `@`-prefixed
-/// control entry.
-pub const IGNORE_CONTENT: &str = "@*\n";
+/// control entry, the provider-root README, and one top-level branch README.
+pub const IGNORE_CONTENT: &str = "@*\n/README.md\n/*/README.md\n";
 
 /// True when `name` is one of the synthetic control-file leaves.
 #[must_use]

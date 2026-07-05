@@ -37,7 +37,7 @@ fn cluster_and_namespace_listings_classify_scope_and_filter_unreadable() {
     let harness = kube_harness();
 
     let cluster_types = warm_discovery(&harness);
-    assert_eq!(cluster_types, vec!["namespaces", "nodes"]);
+    assert_eq!(cluster_types, vec!["README.md", "namespaces", "nodes"]);
 
     let namespaced_types = list_type_names(&harness, "/namespaces/demo");
     assert_eq!(

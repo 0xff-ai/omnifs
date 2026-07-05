@@ -18,6 +18,22 @@ fn parse_path(s: &str) -> Path {
 }
 
 #[test]
+fn github_root_readme_snapshot() {
+    let harness = github_harness();
+    let readme = harness
+        .read("/README.md")
+        .unwrap()
+        .into_read_file()
+        .unwrap();
+    let actual = String::from_utf8(omnifs_itest::expect_inline(&readme).to_vec()).unwrap();
+    let expected = include_str!("snapshots/root-readme.md").trim_end();
+    if actual.trim_end() != expected {
+        eprintln!("{actual}");
+    }
+    assert_eq!(actual.trim_end(), expected);
+}
+
+#[test]
 fn github_provider_routes_namespace_and_numeric_paths() {
     let harness = github_harness();
     // listing a repo dir triggers repo_gate, which fetches /repos/{owner}/{repo}
@@ -691,7 +707,7 @@ fn github_root_and_owner_listings_ignore_unclassified_repo_paths() {
                 .iter()
                 .map(|entry| entry.name.as_str())
                 .collect();
-            assert!(names.is_empty(), "unexpected root names: {names:?}");
+            assert_eq!(names, vec!["README.md"]);
         },
         other => panic!("expected root listing, got {other:?}"),
     }
@@ -1707,18 +1723,19 @@ fn github_provider_lookup_owner_validates_and_owner_listing_classifies_with_org_
         other => panic!("expected owner listing result, got {other:?}"),
     }
 
-    // Root is not enumerable; should always return empty, regardless
-    // of which owners have been resolved in prior calls.
+    // Root does not enumerate owners; it only exposes the generated README,
+    // regardless of which owners have been resolved in prior calls.
     let root_listing = harness.list("/").unwrap();
     match root_listing.result().unwrap() {
         OpResult::ListChildren(ListChildrenResult::Entries(listing)) => {
-            assert!(
-                listing.entries.is_empty(),
-                "root should be empty, got {:?}",
-                listing.entries
-            );
+            let names: Vec<&str> = listing
+                .entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect();
+            assert_eq!(names, vec!["README.md"]);
         },
-        other => panic!("expected empty root listing, got {other:?}"),
+        other => panic!("expected README-only root listing, got {other:?}"),
     }
 }
 

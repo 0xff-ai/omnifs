@@ -97,9 +97,10 @@ async fn db_tables_listing_exhaustive_names() {
     match root {
         NamespaceListOutcome::Entries(listing) => {
             let names: Vec<_> = listing.entries.iter().map(|e| e.name.as_str()).collect();
+            assert!(names.contains(&"README.md"));
             assert!(names.contains(&"meta"));
             assert!(names.contains(&"tables"));
-            assert_eq!(names.len(), 2);
+            assert_eq!(names.len(), 3);
         },
         other => panic!("expected root listing, got {other:?}"),
     }
@@ -114,10 +115,17 @@ async fn db_tables_listing_exhaustive_names() {
         NamespaceListOutcome::Entries(listing) => {
             assert!(listing.exhaustive);
             let names: Vec<_> = listing.entries.iter().map(|e| e.name.as_str()).collect();
+            assert!(names.contains(&"README.md"));
             assert!(names.contains(&"Album"));
             assert!(names.contains(&"Artist"));
             assert!(names.contains(&"Wide"));
-            assert!(listing.entries.iter().all(|e| e.meta.is_directory()));
+            assert!(
+                listing
+                    .entries
+                    .iter()
+                    .filter(|entry| entry.name != "README.md")
+                    .all(|entry| entry.meta.is_directory())
+            );
         },
         other => panic!("expected tables listing, got {other:?}"),
     }
@@ -146,6 +154,7 @@ async fn db_meta_listing_is_direct_path_surface() {
         NamespaceListOutcome::Entries(listing) => {
             assert!(listing.exhaustive);
             let names: Vec<_> = listing.entries.iter().map(|e| e.name.as_str()).collect();
+            assert!(names.contains(&"README.md"));
             assert!(names.contains(&"info.json"));
             assert!(names.contains(&"version.txt"));
             assert!(names.contains(&"path.txt"));

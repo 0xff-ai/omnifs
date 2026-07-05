@@ -378,6 +378,14 @@ impl Pattern {
         self.segments.len()
     }
 
+    #[must_use]
+    pub(super) fn first_literal_segment(&self) -> Option<&str> {
+        match self.segments.first()? {
+            PatternSegment::Literal(name) => Some(name.as_str()),
+            PatternSegment::Capture { .. } | PatternSegment::Rest { .. } => None,
+        }
+    }
+
     /// Render the canonical template represented by this compiled pattern.
     #[must_use]
     pub fn template(&self) -> String {
