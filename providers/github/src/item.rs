@@ -2,15 +2,20 @@
 //! provider.
 
 use rc_zip_sync::ReadZip;
+use serde::Deserialize;
 
 use omnifs_core::ContentType;
 use omnifs_sdk::prelude::*;
 
 use crate::api::GitHubApi;
-use crate::objects::{Comment, Issue, ItemData, Owner, PullRequest, Repo, WorkflowRun};
+use crate::objects::{
+    ChangedFile, CheckRun, Comment, Issue, ItemData, Notification, Owner, PullRequest, Repo,
+    Review, ReviewComment, WorkflowRun,
+};
 use crate::{
-    COMMENT_PAGE_SIZE, OwnerName, RepoId, RepoName, StateFilter, WorkflowRunsResponse,
-    fetch_owner_repos, list_items, resolve_owner_kind,
+    CHECK_RUN_PAGE_SIZE, COMMENT_PAGE_SIZE, CheckRunsResponse, FILE_PAGE_SIZE, FilePath,
+    NOTIFICATION_PAGE_SIZE, OwnerName, REVIEW_PAGE_SIZE, RepoId, RepoName, StateFilter, ThreadId,
+    WorkflowRunsResponse, fetch_owner_repos, list_items, resolve_owner_kind,
 };
 
 /// Identity discriminator for the comment anchor's `{item_kind}` segment. A
@@ -75,6 +80,50 @@ pub(crate) struct PullKey {
 }
 
 #[omnifs_sdk::path_captures]
+pub(crate) struct ChangedFileKey {
+    pub(crate) owner: OwnerName,
+    pub(crate) repo: RepoName,
+    #[allow(dead_code)]
+    pub(crate) filter: Facet<StateFilter>,
+    pub(crate) number: u64,
+    pub(crate) path: FilePath,
+}
+
+#[omnifs_sdk::path_captures]
+pub(crate) struct ReviewKey {
+    pub(crate) owner: OwnerName,
+    pub(crate) repo: RepoName,
+    #[allow(dead_code)]
+    pub(crate) filter: Facet<StateFilter>,
+    pub(crate) number: u64,
+    pub(crate) review_id: u64,
+}
+
+#[omnifs_sdk::path_captures]
+pub(crate) struct ReviewCommentKey {
+    pub(crate) owner: OwnerName,
+    pub(crate) repo: RepoName,
+    #[allow(dead_code)]
+    pub(crate) filter: Facet<StateFilter>,
+    #[allow(dead_code)]
+    pub(crate) number: u64,
+    #[allow(dead_code)]
+    pub(crate) review_id: u64,
+    pub(crate) comment_id: u64,
+}
+
+#[omnifs_sdk::path_captures]
+pub(crate) struct CheckRunKey {
+    pub(crate) owner: OwnerName,
+    pub(crate) repo: RepoName,
+    #[allow(dead_code)]
+    pub(crate) filter: Facet<StateFilter>,
+    #[allow(dead_code)]
+    pub(crate) number: u64,
+    pub(crate) check_run_id: u64,
+}
+
+#[omnifs_sdk::path_captures]
 pub(crate) struct CommentKey {
     pub(crate) owner: OwnerName,
     pub(crate) repo: RepoName,
@@ -90,6 +139,11 @@ pub(crate) struct RunKey {
     pub(crate) owner: OwnerName,
     pub(crate) repo: RepoName,
     pub(crate) run_id: u64,
+}
+
+#[omnifs_sdk::path_captures]
+pub(crate) struct NotificationKey {
+    pub(crate) thread_id: ThreadId,
 }
 
 /// The collection-dir key for `issues/{filter}` and `pulls/{filter}`: it
@@ -194,6 +248,70 @@ impl PullRequest {
     }
 }
 
+impl ChangedFile {
+    pub(crate) async fn load(
+        cx: &Cx,
+        key: &ChangedFileKey,
+        _since: Option<Validator>,
+    ) -> Result<Load<Self>> {
+        let filename = key.path.decoded()?;
+        let Some(file) = find_pull_file(cx, key, &filename).await? else {
+            return Ok(Load::NotFound);
+        };
+        let canonical = serde_json::to_vec(&file)
+            .map_err(|err| ProviderError::invalid_input(format!("canonical encode: {err}")))?;
+        Ok(Load::fresh(file, Canonical::new(canonical, None)))
+    }
+}
+
+impl Review {
+    pub(crate) async fn load(
+        cx: &Cx,
+        key: &ReviewKey,
+        since: Option<Validator>,
+    ) -> Result<Load<Self>> {
+        let repo = RepoId::new(&key.owner, &key.repo);
+        cx.endpoint(GitHubApi)
+            .get(format!(
+                "/repos/{repo}/pulls/{}/reviews/{}",
+                key.number, key.review_id
+            ))
+            .maybe_if_none_match(since.as_ref())
+            .load_with(decode_json::<Self>)
+            .await
+    }
+}
+
+impl ReviewComment {
+    pub(crate) async fn load(
+        cx: &Cx,
+        key: &ReviewCommentKey,
+        since: Option<Validator>,
+    ) -> Result<Load<Self>> {
+        let repo = RepoId::new(&key.owner, &key.repo);
+        cx.endpoint(GitHubApi)
+            .get(format!("/repos/{repo}/pulls/comments/{}", key.comment_id))
+            .maybe_if_none_match(since.as_ref())
+            .load_with(decode_json::<Self>)
+            .await
+    }
+}
+
+impl CheckRun {
+    pub(crate) async fn load(
+        cx: &Cx,
+        key: &CheckRunKey,
+        since: Option<Validator>,
+    ) -> Result<Load<Self>> {
+        let repo = RepoId::new(&key.owner, &key.repo);
+        cx.endpoint(GitHubApi)
+            .get(format!("/repos/{repo}/check-runs/{}", key.check_run_id))
+            .maybe_if_none_match(since.as_ref())
+            .load_with(decode_json::<Self>)
+            .await
+    }
+}
+
 impl Comment {
     pub(crate) async fn load(
         cx: &Cx,
@@ -220,6 +338,20 @@ impl WorkflowRun {
         let repo = RepoId::new(&key.owner, &key.repo);
         cx.endpoint(GitHubApi)
             .get(format!("/repos/{repo}/actions/runs/{}", key.run_id))
+            .maybe_if_none_match(since.as_ref())
+            .load_with(decode_json::<Self>)
+            .await
+    }
+}
+
+impl Notification {
+    pub(crate) async fn load(
+        cx: &Cx,
+        key: &NotificationKey,
+        since: Option<Validator>,
+    ) -> Result<Load<Self>> {
+        cx.endpoint(GitHubApi)
+            .get(format!("/notifications/threads/{}", key.thread_id))
             .maybe_if_none_match(since.as_ref())
             .load_with(decode_json::<Self>)
             .await
@@ -372,6 +504,176 @@ impl PullRequest {
         )
         .await
     }
+
+    pub(crate) async fn files(
+        key: PullKey,
+        cx: ListCx<PageCursor>,
+    ) -> Result<Collection<ChangedFile, PageCursor>> {
+        let page = cx.cursor().map_or(1, |c| c.0);
+        let files = pull_files_page(&cx, &key.owner, &key.repo, key.number, page).await?;
+        let len = files.len() as u64;
+        let entries = files
+            .into_iter()
+            .filter_map(|file| {
+                let path = FilePath::from_github_path(&file.filename)?;
+                Some(CollectionEntry::computed(
+                    ChangedFileKey {
+                        owner: key.owner.clone(),
+                        repo: key.repo.clone(),
+                        filter: key.filter,
+                        number: key.number,
+                        path,
+                    },
+                    eager_file_leaves(&file),
+                ))
+            })
+            .collect::<Vec<_>>();
+        page_or_complete(entries, len, FILE_PAGE_SIZE, page)
+    }
+
+    pub(crate) async fn reviews(
+        key: PullKey,
+        cx: ListCx<PageCursor>,
+    ) -> Result<Collection<Review, PageCursor>> {
+        let page = cx.cursor().map_or(1, |c| c.0);
+        let reviews = reviews_page(&cx, &key.owner, &key.repo, key.number, page).await?;
+        let len = reviews.len() as u64;
+        let entries = reviews
+            .into_iter()
+            .map(|review| {
+                let review_id = review.id;
+                CollectionEntry::computed(
+                    ReviewKey {
+                        owner: key.owner.clone(),
+                        repo: key.repo.clone(),
+                        filter: key.filter,
+                        number: key.number,
+                        review_id,
+                    },
+                    eager_review_leaves(&review),
+                )
+            })
+            .collect::<Vec<_>>();
+        page_or_complete(entries, len, REVIEW_PAGE_SIZE, page)
+    }
+
+    pub(crate) async fn checks(
+        key: PullKey,
+        cx: ListCx<PageCursor>,
+    ) -> Result<Collection<CheckRun, PageCursor>> {
+        let repo = RepoId::new(&key.owner, &key.repo);
+        let pull: PullHeadResponse = cx
+            .endpoint(GitHubApi)
+            .get(format!("/repos/{repo}/pulls/{}", key.number))
+            .json()
+            .await?;
+        let page = cx.cursor().map_or(1, |c| c.0);
+        let runs: CheckRunsResponse = cx
+            .endpoint(GitHubApi)
+            .get(format!(
+                "/repos/{repo}/commits/{}/check-runs?per_page={CHECK_RUN_PAGE_SIZE}&page={page}",
+                pull.head.sha
+            ))
+            .json()
+            .await?;
+        let len = runs.check_runs.len() as u64;
+        let entries = runs
+            .check_runs
+            .into_iter()
+            .map(|check| {
+                let check_run_id = check.id;
+                CollectionEntry::computed(
+                    CheckRunKey {
+                        owner: key.owner.clone(),
+                        repo: key.repo.clone(),
+                        filter: key.filter,
+                        number: key.number,
+                        check_run_id,
+                    },
+                    eager_check_leaves(&check),
+                )
+            })
+            .collect::<Vec<_>>();
+        page_or_complete(entries, len, CHECK_RUN_PAGE_SIZE, page)
+    }
+}
+
+impl Review {
+    pub(crate) async fn comments(
+        key: ReviewKey,
+        cx: ListCx<PageCursor>,
+    ) -> Result<Collection<ReviewComment, PageCursor>> {
+        let page = cx.cursor().map_or(1, |c| c.0);
+        let comments =
+            review_comments_page(&cx, &key.owner, &key.repo, key.number, key.review_id, page)
+                .await?;
+        let len = comments.len() as u64;
+        let entries = comments
+            .into_iter()
+            .map(|comment| {
+                let comment_id = comment.id;
+                CollectionEntry::computed(
+                    ReviewCommentKey {
+                        owner: key.owner.clone(),
+                        repo: key.repo.clone(),
+                        filter: key.filter,
+                        number: key.number,
+                        review_id: key.review_id,
+                        comment_id,
+                    },
+                    eager_review_comment_leaves(&comment),
+                )
+            })
+            .collect::<Vec<_>>();
+        page_or_complete(entries, len, REVIEW_PAGE_SIZE, page)
+    }
+}
+
+impl Notification {
+    pub(crate) async fn list(cx: DirCx) -> Result<DirListing> {
+        match cx.intent() {
+            DirIntent::Lookup { child } => {
+                let entries = child
+                    .strip_prefix("thread-")
+                    .and_then(|id| id.parse::<ThreadId>().ok())
+                    .map(|_| Entry::dir(child.clone()));
+                Ok(DirListing::exhaustive(entries))
+            },
+            DirIntent::ReadFile { .. } => Ok(DirListing::exhaustive([])),
+            DirIntent::List { .. } => {
+                let page = u64::from(cx.page_cursor(1));
+                let notifications = notifications_page(&cx, page).await?;
+                let len = notifications.len() as u64;
+                let entries = notifications
+                    .iter()
+                    .filter_map(|notification| {
+                        notification
+                            .id
+                            .parse::<ThreadId>()
+                            .ok()
+                            .map(|_| Entry::dir(format!("thread-{}", notification.id)))
+                    })
+                    .collect::<Vec<_>>();
+                let mut listing = if len < NOTIFICATION_PAGE_SIZE {
+                    DirListing::exhaustive(entries)
+                } else {
+                    DirListing::paged(entries, Cursor::Page(cx.page_cursor(1) + 1))
+                };
+                for notification in notifications {
+                    if notification.id.parse::<ThreadId>().is_ok() {
+                        listing = listing.preload_file(
+                            format!("thread-{}/item.md", notification.id),
+                            FileProjection::inline(notification.item_markdown())
+                                .content_type(ContentType::Markdown)
+                                .dynamic()
+                                .build(),
+                        );
+                    }
+                }
+                Ok(listing)
+            },
+        }
+    }
 }
 
 // ===========================================================================
@@ -386,7 +688,7 @@ impl PullRequest {
             .get(format!("/repos/{repo_id}/pulls/{}", key.number))
             .header("Accept", "application/vnd.github.diff")
             .into_blob()
-            .cache_key(format!("github/pulls/{repo_id}/{}/diff", key.number))
+            .cache_key(format!("github/pulls/{repo_id}/{}/diff.patch", key.number))
             .fetch()
             .await?;
         Ok(BlobFile::new(blob.id)
@@ -446,6 +748,46 @@ fn eager_item_leaves(item: &ItemData) -> Vec<(String, FileProjection)> {
     ]
 }
 
+fn eager_file_leaves(file: &ChangedFile) -> Vec<(String, FileProjection)> {
+    vec![
+        ("filename".to_string(), inline_text(&file.filename)),
+        ("status".to_string(), inline_text(&file.status)),
+    ]
+}
+
+fn eager_review_leaves(review: &Review) -> Vec<(String, FileProjection)> {
+    let login = review.user.as_ref().map_or("", |u| u.login.as_str());
+    vec![
+        (
+            "state".to_string(),
+            inline_text(review.state.as_deref().unwrap_or("")),
+        ),
+        ("user".to_string(), inline_text(login)),
+    ]
+}
+
+fn eager_review_comment_leaves(comment: &ReviewComment) -> Vec<(String, FileProjection)> {
+    let login = comment.user.as_ref().map_or("", |u| u.login.as_str());
+    vec![
+        ("author".to_string(), inline_text(login)),
+        (
+            "path".to_string(),
+            inline_text(comment.path.as_deref().unwrap_or("")),
+        ),
+    ]
+}
+
+fn eager_check_leaves(check: &CheckRun) -> Vec<(String, FileProjection)> {
+    vec![
+        ("name".to_string(), inline_text(&check.name)),
+        ("status".to_string(), inline_text(&check.status)),
+        (
+            "conclusion".to_string(),
+            inline_text(check.conclusion.as_deref().unwrap_or("")),
+        ),
+    ]
+}
+
 /// The shallow eager leaves a comment listing row can fill from the lossy list
 /// payload: `author` and `body.md` render the same bytes from any source, so
 /// they preload at listing time. `comment.json`/`comment.md` come from the
@@ -470,6 +812,107 @@ fn complete_or_partial<T: omnifs_sdk::object::Object, C: ListCursor>(
     } else {
         Collection::partial(entries)
     }
+}
+
+fn page_or_complete<T: omnifs_sdk::object::Object>(
+    entries: Vec<CollectionEntry<T>>,
+    len: u64,
+    page_size: u64,
+    page: u64,
+) -> Result<Collection<T, PageCursor>> {
+    if len < page_size {
+        Ok(Collection::complete(entries))
+    } else {
+        Ok(Collection::page(entries).next(PageCursor(page + 1)))
+    }
+}
+
+async fn pull_files_page(
+    cx: &Cx,
+    owner: &OwnerName,
+    repo: &RepoName,
+    number: u64,
+    page: u64,
+) -> Result<Vec<ChangedFile>> {
+    let repo = RepoId::new(owner, repo);
+    cx.endpoint(GitHubApi)
+        .get(format!(
+            "/repos/{repo}/pulls/{number}/files?per_page={FILE_PAGE_SIZE}&page={page}"
+        ))
+        .json()
+        .await
+}
+
+async fn find_pull_file(
+    cx: &Cx,
+    key: &ChangedFileKey,
+    filename: &str,
+) -> Result<Option<ChangedFile>> {
+    const MAX_FILE_PAGES: u64 = 30;
+
+    for page in 1..=MAX_FILE_PAGES {
+        let files = pull_files_page(cx, &key.owner, &key.repo, key.number, page).await?;
+        let len = files.len() as u64;
+        if let Some(file) = files.into_iter().find(|file| file.filename == filename) {
+            return Ok(Some(file));
+        }
+        if len < FILE_PAGE_SIZE {
+            return Ok(None);
+        }
+    }
+    Ok(None)
+}
+
+async fn reviews_page(
+    cx: &Cx,
+    owner: &OwnerName,
+    repo: &RepoName,
+    number: u64,
+    page: u64,
+) -> Result<Vec<Review>> {
+    let repo = RepoId::new(owner, repo);
+    cx.endpoint(GitHubApi)
+        .get(format!(
+            "/repos/{repo}/pulls/{number}/reviews?per_page={REVIEW_PAGE_SIZE}&page={page}"
+        ))
+        .json()
+        .await
+}
+
+async fn review_comments_page(
+    cx: &Cx,
+    owner: &OwnerName,
+    repo: &RepoName,
+    number: u64,
+    review_id: u64,
+    page: u64,
+) -> Result<Vec<ReviewComment>> {
+    let repo = RepoId::new(owner, repo);
+    cx.endpoint(GitHubApi)
+        .get(format!(
+            "/repos/{repo}/pulls/{number}/reviews/{review_id}/comments?per_page={REVIEW_PAGE_SIZE}&page={page}"
+        ))
+        .json()
+        .await
+}
+
+async fn notifications_page(cx: &Cx, page: u64) -> Result<Vec<Notification>> {
+    cx.endpoint(GitHubApi)
+        .get(format!(
+            "/notifications?per_page={NOTIFICATION_PAGE_SIZE}&page={page}"
+        ))
+        .json()
+        .await
+}
+
+#[derive(Debug, Deserialize)]
+struct PullHeadResponse {
+    head: PullHead,
+}
+
+#[derive(Debug, Deserialize)]
+struct PullHead {
+    sha: String,
 }
 
 async fn comments_collection(

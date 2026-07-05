@@ -16,7 +16,10 @@ mod objects;
 use api::GitHubApi;
 use item::ItemKind;
 pub(crate) use objects::ItemData;
-use objects::{Comment, Issue, Owner, PullRequest, Repo, WorkflowRun};
+use objects::{
+    ChangedFile, CheckRun, Comment, Issue, Notification, Owner, PullRequest, Repo, Review,
+    ReviewComment, WorkflowRun,
+};
 #[cfg(not(target_arch = "wasm32"))]
 use omnifs_sdk::{
     AmbientSource, DevicePollCompat, OauthScheme, ProviderAuthManifest, SchemeGuidance,
@@ -150,10 +153,67 @@ impl GithubProvider {
             o.file("state").computed(PullRequest::state)?;
             o.file("user").computed(PullRequest::user)?;
             o.file("body").lazy().computed(PullRequest::body)?;
-            o.file("diff").blob(PullRequest::diff)?;
+            o.file("diff.patch").blob(PullRequest::diff)?;
             o.dir("comments").collection(PullRequest::comments)?;
+            o.dir("files").collection(PullRequest::files)?;
+            o.dir("reviews").collection(PullRequest::reviews)?;
+            o.dir("checks").collection(PullRequest::checks)?;
             Ok(())
         })?;
+
+        r.object::<ChangedFile>(
+            "/{owner}/{repo}/pulls/{filter}/{number}/files/{path}",
+            |o| {
+                o.dynamic();
+                o.file("file.json").canonical::<Json>()?;
+                o.file("file.md").representation::<Markdown>()?;
+                o.file("filename").computed(ChangedFile::filename)?;
+                o.file("status").computed(ChangedFile::status)?;
+                o.file("patch.patch").lazy().computed(ChangedFile::patch)?;
+                Ok(())
+            },
+        )?;
+
+        r.object::<Review>(
+            "/{owner}/{repo}/pulls/{filter}/{number}/reviews/{review_id}",
+            |o| {
+                o.dynamic();
+                o.file("review.json").canonical::<Json>()?;
+                o.file("review.md").representation::<Markdown>()?;
+                o.file("state").computed(Review::state)?;
+                o.file("user").computed(Review::user)?;
+                o.file("body.md").lazy().computed(Review::body_md)?;
+                o.dir("comments").collection(Review::comments)?;
+                Ok(())
+            },
+        )?;
+
+        r.object::<ReviewComment>(
+            "/{owner}/{repo}/pulls/{filter}/{number}/reviews/{review_id}/comments/{comment_id}",
+            |o| {
+                o.dynamic();
+                o.file("comment.json").canonical::<Json>()?;
+                o.file("comment.md").representation::<Markdown>()?;
+                o.file("body.md").lazy().computed(ReviewComment::body_md)?;
+                o.file("author").computed(ReviewComment::author)?;
+                o.file("path").computed(ReviewComment::path)?;
+                Ok(())
+            },
+        )?;
+
+        r.object::<CheckRun>(
+            "/{owner}/{repo}/pulls/{filter}/{number}/checks/{check_run_id}",
+            |o| {
+                o.dynamic();
+                o.file("check.json").canonical::<Json>()?;
+                o.file("check.md").representation::<Markdown>()?;
+                o.file("name").computed(CheckRun::name)?;
+                o.file("status").computed(CheckRun::status)?;
+                o.file("conclusion").computed(CheckRun::conclusion)?;
+                o.file("summary.md").lazy().computed(CheckRun::summary_md)?;
+                Ok(())
+            },
+        )?;
 
         r.object::<WorkflowRun>("/{owner}/{repo}/actions/runs/{run_id}", |o| {
             o.dynamic();
@@ -176,6 +236,16 @@ impl GithubProvider {
             },
         )?;
 
+        r.dir("/notifications").handler(Notification::list)?;
+        r.object::<Notification>("/notifications/thread-{thread_id}", |o| {
+            o.dynamic();
+            o.file("notification.json").canonical::<Json>()?;
+            o.file("item.md").representation::<Markdown>()?;
+            o.file("reason").computed(Notification::reason)?;
+            o.file("subject").computed(Notification::subject)?;
+            Ok(())
+        })?;
+
         Ok(())
     }
 }
@@ -187,6 +257,90 @@ pub struct OwnerName(String);
 #[omnifs_sdk::path_segment(validate = is_safe_segment)]
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RepoName(String);
+
+#[omnifs_sdk::path_segment(validate = FilePath::is_valid_segment)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct FilePath(String);
+
+impl FilePath {
+    pub(crate) fn from_github_path(path: &str) -> Option<Self> {
+        let encoded = Self::encode(path);
+        encoded.parse().ok()
+    }
+
+    pub(crate) fn decoded(&self) -> Result<String> {
+        let bytes = Self::decode_bytes(&self.0)?;
+        String::from_utf8(bytes)
+            .map_err(|err| ProviderError::invalid_input(format!("file path is not utf-8: {err}")))
+    }
+
+    pub(crate) fn is_valid_segment(s: &str) -> bool {
+        if s.is_empty() || s == "." || s == ".." || s.as_bytes().contains(&b'/') {
+            return false;
+        }
+        let bytes = s.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'%' => {
+                    if i + 2 >= bytes.len()
+                        || !bytes[i + 1].is_ascii_hexdigit()
+                        || !bytes[i + 2].is_ascii_hexdigit()
+                    {
+                        return false;
+                    }
+                    i += 3;
+                },
+                b if is_unreserved_path_byte(b) => i += 1,
+                _ => return false,
+            }
+        }
+        true
+    }
+
+    fn encode(path: &str) -> String {
+        let mut encoded = String::with_capacity(path.len());
+        for byte in path.bytes() {
+            if is_unreserved_path_byte(byte) {
+                encoded.push(char::from(byte));
+            } else {
+                const HEX: &[u8; 16] = b"0123456789ABCDEF";
+                encoded.push('%');
+                encoded.push(char::from(HEX[(byte >> 4) as usize]));
+                encoded.push(char::from(HEX[(byte & 0x0F) as usize]));
+            }
+        }
+        if encoded == "." {
+            "%2E".to_string()
+        } else if encoded == ".." {
+            "%2E%2E".to_string()
+        } else {
+            encoded
+        }
+    }
+
+    fn decode_bytes(s: &str) -> Result<Vec<u8>> {
+        let bytes = s.as_bytes();
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'%' {
+                let hi = hex_value(bytes[i + 1])?;
+                let lo = hex_value(bytes[i + 2])?;
+                out.push((hi << 4) | lo);
+                i += 3;
+            } else {
+                out.push(bytes[i]);
+                i += 1;
+            }
+        }
+        Ok(out)
+    }
+}
+
+#[omnifs_sdk::path_segment(validate = is_safe_segment)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct ThreadId(String);
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct RepoId {
@@ -232,7 +386,22 @@ pub fn is_safe_segment(s: &str) -> bool {
 /// ignore files (`.gitignore`/`.ignore`/`.rgignore`) as phantom owner
 /// directories, which would shadow them and defeat the ignore mechanism.
 pub fn is_safe_owner(s: &str) -> bool {
-    !s.starts_with('.') && is_safe_segment(s)
+    !s.eq_ignore_ascii_case("notifications") && !s.starts_with('.') && is_safe_segment(s)
+}
+
+const fn is_unreserved_path_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~')
+}
+
+fn hex_value(byte: u8) -> Result<u8> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        b'A'..=b'F' => Ok(byte - b'A' + 10),
+        _ => Err(ProviderError::invalid_input(
+            "bad percent-encoded file path",
+        )),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -328,7 +497,11 @@ pub(crate) async fn resolve_owner_kind(cx: &Cx, owner: &OwnerName) -> Result<Opt
     }
 }
 
+pub(crate) const FILE_PAGE_SIZE: u64 = 100;
+pub(crate) const REVIEW_PAGE_SIZE: u64 = 100;
+pub(crate) const CHECK_RUN_PAGE_SIZE: u64 = 100;
 pub(crate) const COMMENT_PAGE_SIZE: u64 = 100;
+pub(crate) const NOTIFICATION_PAGE_SIZE: u64 = 50;
 
 const PAGE_SIZE: u64 = 100;
 const SEARCH_RESULT_CAP: u64 = 1000;
@@ -344,6 +517,12 @@ struct SearchResults {
 pub(crate) struct ListPage {
     pub(crate) items: Vec<ItemData>,
     pub(crate) exhaustive: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct CheckRunsResponse {
+    #[serde(default)]
+    pub(crate) check_runs: Vec<CheckRun>,
 }
 
 #[derive(Debug, Deserialize)]

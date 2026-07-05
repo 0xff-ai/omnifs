@@ -14,6 +14,7 @@ The keying schema is the path grammar below. Literal segments are written as-is.
 - `/{owner}/{repo}/pulls` - directory
   - `{owner}`: `String`
   - `{repo}`: `String`
+- `/notifications` - directory
 - `/{owner}/{repo}/repo` - subtree
   - `{owner}`: `OwnerName`
   - `{repo}`: `RepoName`
@@ -32,6 +33,31 @@ The keying schema is the path grammar below. Literal segments are written as-is.
   - `{repo}`: `RepoName`
   - `{filter}`: `StateFilter` choices `open`, `all`
   - `{number}`: `u64`
+- `/{owner}/{repo}/pulls/{filter}/{number}/files/{path}` - object `github.pull_file`
+  - `{owner}`: `OwnerName`
+  - `{repo}`: `RepoName`
+  - `{filter}`: `StateFilter` choices `open`, `all`
+  - `{number}`: `u64`
+  - `{path}`: `FilePath`
+- `/{owner}/{repo}/pulls/{filter}/{number}/reviews/{review_id}` - object `github.review`
+  - `{owner}`: `OwnerName`
+  - `{repo}`: `RepoName`
+  - `{filter}`: `StateFilter` choices `open`, `all`
+  - `{number}`: `u64`
+  - `{review_id}`: `u64`
+- `/{owner}/{repo}/pulls/{filter}/{number}/reviews/{review_id}/comments/{comment_id}` - object `github.review_comment`
+  - `{owner}`: `OwnerName`
+  - `{repo}`: `RepoName`
+  - `{filter}`: `StateFilter` choices `open`, `all`
+  - `{number}`: `u64`
+  - `{review_id}`: `u64`
+  - `{comment_id}`: `u64`
+- `/{owner}/{repo}/pulls/{filter}/{number}/checks/{check_run_id}` - object `github.check`
+  - `{owner}`: `OwnerName`
+  - `{repo}`: `RepoName`
+  - `{filter}`: `StateFilter` choices `open`, `all`
+  - `{number}`: `u64`
+  - `{check_run_id}`: `u64`
 - `/{owner}/{repo}/actions/runs/{run_id}` - object `github.run`
   - `{owner}`: `OwnerName`
   - `{repo}`: `RepoName`
@@ -43,6 +69,8 @@ The keying schema is the path grammar below. Literal segments are written as-is.
   - `{filter}`: `StateFilter` choices `open`, `all`
   - `{number}`: `u64`
   - `{comment_id}`: `u64`
+- `/notifications/thread-{thread_id}` - object `github.notification`
+  - `{thread_id}`: `ThreadId`
 - `/{owner}/{repo}` - collection of `github.repo`
   - `{owner}`: `OwnerName`
   - `{repo}`: `String`
@@ -67,6 +95,27 @@ The keying schema is the path grammar below. Literal segments are written as-is.
   - `{repo}`: `RepoName`
   - `{filter}`: `StateFilter` choices `open`, `all`
   - `{number}`: `u64`
+- `/{owner}/{repo}/pulls/{filter}/{number}/files` - collection of `github.pull_file`
+  - `{owner}`: `OwnerName`
+  - `{repo}`: `RepoName`
+  - `{filter}`: `StateFilter` choices `open`, `all`
+  - `{number}`: `u64`
+- `/{owner}/{repo}/pulls/{filter}/{number}/reviews` - collection of `github.review`
+  - `{owner}`: `OwnerName`
+  - `{repo}`: `RepoName`
+  - `{filter}`: `StateFilter` choices `open`, `all`
+  - `{number}`: `u64`
+- `/{owner}/{repo}/pulls/{filter}/{number}/checks` - collection of `github.check`
+  - `{owner}`: `OwnerName`
+  - `{repo}`: `RepoName`
+  - `{filter}`: `StateFilter` choices `open`, `all`
+  - `{number}`: `u64`
+- `/{owner}/{repo}/pulls/{filter}/{number}/reviews/{review_id}/comments` - collection of `github.review_comment`
+  - `{owner}`: `OwnerName`
+  - `{repo}`: `RepoName`
+  - `{filter}`: `StateFilter` choices `open`, `all`
+  - `{number}`: `u64`
+  - `{review_id}`: `u64`
 
 ## Example commands
 

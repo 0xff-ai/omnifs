@@ -707,7 +707,7 @@ fn github_root_and_owner_listings_ignore_unclassified_repo_paths() {
                 .iter()
                 .map(|entry| entry.name.as_str())
                 .collect();
-            assert_eq!(names, vec!["README.md"]);
+            assert_eq!(names, vec!["README.md", "notifications"]);
         },
         other => panic!("expected root listing, got {other:?}"),
     }
@@ -853,11 +853,11 @@ fn github_provider_missing_item_resources_validate_on_lookup() {
     }
 
     let diff_lookup = harness
-        .lookup("/octocat/Hello-World/issues/open/999999999", "diff")
+        .lookup("/octocat/Hello-World/issues/open/999999999", "diff.patch")
         .unwrap();
     match diff_lookup.result().unwrap() {
         OpResult::LookupChild(LookupChildResult::NotFound(_)) => {},
-        other => panic!("expected issue diff lookup to be NotFound, got {other:?}"),
+        other => panic!("expected issue diff.patch lookup to be NotFound, got {other:?}"),
     }
 
     // Reading a face under a missing comment object triggers a fetch; a 404
@@ -948,10 +948,13 @@ fn github_pr_lookup_validates_and_exposes_diff() {
                 names,
                 vec![
                     "body",
+                    "checks",
                     "comments",
-                    "diff",
+                    "diff.patch",
+                    "files",
                     "item.json",
                     "item.md",
+                    "reviews",
                     "state",
                     "title",
                     "user",
@@ -1001,7 +1004,7 @@ fn github_pr_lookup_validates_and_exposes_diff() {
     }
 
     let mut diff = harness
-        .read("/octocat/Hello-World/pulls/open/7/diff")
+        .read("/octocat/Hello-World/pulls/open/7/diff.patch")
         .unwrap();
     let diff_fetch = match diff.callouts() {
         [Callout::FetchBlob(request)] => request,
@@ -1043,7 +1046,7 @@ fn github_pr_lookup_validates_and_exposes_diff() {
     }
 
     let mut retry = harness
-        .read("/octocat/Hello-World/pulls/open/7/diff")
+        .read("/octocat/Hello-World/pulls/open/7/diff.patch")
         .unwrap();
     assert!(
         retry.is_waiting_for_callouts(),
@@ -1061,6 +1064,457 @@ fn github_pr_lookup_validates_and_exposes_diff() {
             assert_eq!(error.kind, ErrorKind::Network);
         },
         other => panic!("expected Network error on refetch, got {other:?}"),
+    }
+}
+
+#[test]
+fn github_pr_files_list_and_read_changed_file_objects() {
+    use omnifs_wit::provider::types::{CalloutResult, HttpResponse};
+
+    let harness = github_harness();
+    let mut listed = harness
+        .list("/octocat/Hello-World/pulls/open/7/files")
+        .unwrap();
+    let fetch = listed.expect_single_fetch();
+    assert!(
+        fetch
+            .url
+            .ends_with("/repos/octocat/Hello-World/pulls/7/files?per_page=100&page=1"),
+        "unexpected PR files URL: {}",
+        fetch.url
+    );
+
+    listed
+        .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
+            status: 200,
+            headers: Vec::new(),
+            body: br#"[
+                {
+                    "filename":"src/lib.rs",
+                    "status":"modified",
+                    "additions":5,
+                    "deletions":2,
+                    "changes":7,
+                    "patch":"@@ -1 +1 @@\n-old\n+new"
+                }
+            ]"#
+            .to_vec(),
+        })])
+        .unwrap();
+    match listed.result().unwrap() {
+        OpResult::ListChildren(ListChildrenResult::Entries(listing)) => {
+            let names: Vec<&str> = listing
+                .entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect();
+            assert_eq!(names, vec!["src%2Flib.rs"]);
+            let effects = listed.effects().unwrap();
+            let mut preloaded = project_paths(effects);
+            preloaded.sort_unstable();
+            assert_eq!(
+                preloaded,
+                vec![
+                    "/octocat/Hello-World/pulls/open/7/files/src%2Flib.rs/filename",
+                    "/octocat/Hello-World/pulls/open/7/files/src%2Flib.rs/status",
+                ]
+            );
+            assert!(
+                effects.canonical.is_empty(),
+                "PR files list must not seed changed-file canonicals, got {:?}",
+                effects.canonical
+            );
+        },
+        other => panic!("expected PR files listing, got {other:?}"),
+    }
+
+    let mut read = harness
+        .read("/octocat/Hello-World/pulls/open/7/files/src%2Flib.rs/file.md")
+        .unwrap();
+    let read_fetch = read.expect_single_fetch();
+    assert!(
+        read_fetch
+            .url
+            .ends_with("/repos/octocat/Hello-World/pulls/7/files?per_page=100&page=1"),
+        "unexpected changed-file read URL: {}",
+        read_fetch.url
+    );
+    read.answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
+        status: 200,
+        headers: Vec::new(),
+        body: br#"[
+                {
+                    "filename":"src/lib.rs",
+                    "status":"modified",
+                    "additions":5,
+                    "deletions":2,
+                    "changes":7,
+                    "patch":"@@ -1 +1 @@\n-old\n+new"
+                }
+            ]"#
+        .to_vec(),
+    })])
+    .unwrap();
+    match read.result().unwrap() {
+        OpResult::ReadFile(ReadFileOutcome::Found(file)) => {
+            let body = std::str::from_utf8(omnifs_itest::expect_inline(file)).unwrap();
+            assert!(body.contains("# src/lib.rs"), "unexpected file.md: {body}");
+            assert!(
+                !read.effects().unwrap().canonical.is_empty(),
+                "changed-file read should store canonical bytes from its own load"
+            );
+        },
+        other => panic!("expected changed-file markdown read, got {other:?}"),
+    }
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn github_pr_reviews_and_review_comments_list_and_read_objects() {
+    use omnifs_wit::provider::types::{CalloutResult, HttpResponse};
+
+    let harness = github_harness();
+    let mut reviews = harness
+        .list("/octocat/Hello-World/pulls/open/7/reviews")
+        .unwrap();
+    let fetch = reviews.expect_single_fetch();
+    assert!(
+        fetch
+            .url
+            .ends_with("/repos/octocat/Hello-World/pulls/7/reviews?per_page=100&page=1"),
+        "unexpected reviews URL: {}",
+        fetch.url
+    );
+    reviews
+        .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
+            status: 200,
+            headers: Vec::new(),
+            body: br#"[
+                {
+                    "id":80,
+                    "state":"APPROVED",
+                    "body":"Looks good",
+                    "user":{"login":"reviewer"}
+                }
+            ]"#
+            .to_vec(),
+        })])
+        .unwrap();
+    match reviews.result().unwrap() {
+        OpResult::ListChildren(ListChildrenResult::Entries(listing)) => {
+            let names: Vec<&str> = listing
+                .entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect();
+            assert_eq!(names, vec!["80"]);
+            let effects = reviews.effects().unwrap();
+            assert!(
+                project_paths(effects)
+                    .contains(&"/octocat/Hello-World/pulls/open/7/reviews/80/state"),
+                "missing review state preload"
+            );
+            assert!(
+                effects.canonical.is_empty(),
+                "review list must not seed review canonicals, got {:?}",
+                effects.canonical
+            );
+        },
+        other => panic!("expected reviews listing, got {other:?}"),
+    }
+
+    let mut review_md = harness
+        .read("/octocat/Hello-World/pulls/open/7/reviews/80/review.md")
+        .unwrap();
+    let review_fetch = review_md.expect_single_fetch();
+    assert!(
+        review_fetch
+            .url
+            .ends_with("/repos/octocat/Hello-World/pulls/7/reviews/80"),
+        "unexpected review read URL: {}",
+        review_fetch.url
+    );
+    review_md
+        .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
+            status: 200,
+            headers: Vec::new(),
+            body: br#"{
+                "id":80,
+                "state":"APPROVED",
+                "body":"Looks good",
+                "user":{"login":"reviewer"}
+            }"#
+            .to_vec(),
+        })])
+        .unwrap();
+    match review_md.result().unwrap() {
+        OpResult::ReadFile(ReadFileOutcome::Found(file)) => {
+            let body = std::str::from_utf8(omnifs_itest::expect_inline(file)).unwrap();
+            assert!(body.contains("APPROVED"), "unexpected review.md: {body}");
+        },
+        other => panic!("expected review markdown read, got {other:?}"),
+    }
+
+    let mut comments = harness
+        .list("/octocat/Hello-World/pulls/open/7/reviews/80/comments")
+        .unwrap();
+    let comments_fetch = comments.expect_single_fetch();
+    assert!(
+        comments_fetch.url.ends_with(
+            "/repos/octocat/Hello-World/pulls/7/reviews/80/comments?per_page=100&page=1"
+        ),
+        "unexpected review comments URL: {}",
+        comments_fetch.url
+    );
+    comments
+        .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
+            status: 200,
+            headers: Vec::new(),
+            body: br#"[
+                {
+                    "id":99,
+                    "body":"nit",
+                    "path":"src/lib.rs",
+                    "diff_hunk":"@@ -1 +1 @@",
+                    "user":{"login":"reviewer"}
+                }
+            ]"#
+            .to_vec(),
+        })])
+        .unwrap();
+    match comments.result().unwrap() {
+        OpResult::ListChildren(ListChildrenResult::Entries(listing)) => {
+            let names: Vec<&str> = listing
+                .entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect();
+            assert_eq!(names, vec!["99"]);
+            assert!(
+                comments.effects().unwrap().canonical.is_empty(),
+                "review comment list must not seed canonicals"
+            );
+        },
+        other => panic!("expected review comments listing, got {other:?}"),
+    }
+
+    let mut comment_md = harness
+        .read("/octocat/Hello-World/pulls/open/7/reviews/80/comments/99/comment.md")
+        .unwrap();
+    let comment_md_fetch = comment_md.expect_single_fetch();
+    assert!(
+        comment_md_fetch
+            .url
+            .ends_with("/repos/octocat/Hello-World/pulls/comments/99"),
+        "unexpected review comment read URL: {}",
+        comment_md_fetch.url
+    );
+    comment_md
+        .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
+            status: 200,
+            headers: Vec::new(),
+            body: br#"{
+                "id":99,
+                "body":"nit",
+                "path":"src/lib.rs",
+                "diff_hunk":"@@ -1 +1 @@",
+                "user":{"login":"reviewer"}
+            }"#
+            .to_vec(),
+        })])
+        .unwrap();
+    match comment_md.result().unwrap() {
+        OpResult::ReadFile(ReadFileOutcome::Found(file)) => {
+            let body = std::str::from_utf8(omnifs_itest::expect_inline(file)).unwrap();
+            assert!(
+                body.contains("reviewer on `src/lib.rs`"),
+                "unexpected comment.md: {body}"
+            );
+        },
+        other => panic!("expected review comment markdown read, got {other:?}"),
+    }
+}
+
+#[test]
+fn github_pr_checks_list_from_head_sha_and_read_check_run_objects() {
+    use omnifs_wit::provider::types::{CalloutResult, HttpResponse};
+
+    let harness = github_harness();
+    let mut checks = harness
+        .list("/octocat/Hello-World/pulls/open/7/checks")
+        .unwrap();
+    let pull_fetch = checks.expect_single_fetch();
+    assert!(
+        pull_fetch
+            .url
+            .ends_with("/repos/octocat/Hello-World/pulls/7"),
+        "unexpected PR head URL: {}",
+        pull_fetch.url
+    );
+    checks
+        .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
+            status: 200,
+            headers: Vec::new(),
+            body: br#"{"head":{"sha":"abc123"}}"#.to_vec(),
+        })])
+        .unwrap();
+    let check_fetch = checks.expect_single_fetch();
+    assert!(
+        check_fetch
+            .url
+            .ends_with("/repos/octocat/Hello-World/commits/abc123/check-runs?per_page=100&page=1"),
+        "unexpected check runs URL: {}",
+        check_fetch.url
+    );
+    checks
+        .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
+            status: 200,
+            headers: Vec::new(),
+            body: br#"{
+                "check_runs":[
+                    {
+                        "id":700,
+                        "name":"ci",
+                        "status":"completed",
+                        "conclusion":"success",
+                        "output":{"title":"CI","summary":"All green"}
+                    }
+                ]
+            }"#
+            .to_vec(),
+        })])
+        .unwrap();
+    match checks.result().unwrap() {
+        OpResult::ListChildren(ListChildrenResult::Entries(listing)) => {
+            let names: Vec<&str> = listing
+                .entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect();
+            assert_eq!(names, vec!["700"]);
+            assert!(
+                checks.effects().unwrap().canonical.is_empty(),
+                "check run list must not seed canonicals"
+            );
+        },
+        other => panic!("expected check runs listing, got {other:?}"),
+    }
+
+    let mut check_md = harness
+        .read("/octocat/Hello-World/pulls/open/7/checks/700/check.md")
+        .unwrap();
+    let read_fetch = check_md.expect_single_fetch();
+    assert!(
+        read_fetch
+            .url
+            .ends_with("/repos/octocat/Hello-World/check-runs/700"),
+        "unexpected check run read URL: {}",
+        read_fetch.url
+    );
+    check_md
+        .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
+            status: 200,
+            headers: Vec::new(),
+            body: br#"{
+                "id":700,
+                "name":"ci",
+                "status":"completed",
+                "conclusion":"success",
+                "html_url":"https://github.com/octocat/Hello-World/runs/700",
+                "output":{"title":"CI","summary":"All green"}
+            }"#
+            .to_vec(),
+        })])
+        .unwrap();
+    match check_md.result().unwrap() {
+        OpResult::ReadFile(ReadFileOutcome::Found(file)) => {
+            let body = std::str::from_utf8(omnifs_itest::expect_inline(file)).unwrap();
+            assert!(body.contains("# ci"), "unexpected check.md: {body}");
+            assert!(body.contains("All green"), "unexpected check.md: {body}");
+        },
+        other => panic!("expected check run markdown read, got {other:?}"),
+    }
+}
+
+#[test]
+fn github_notifications_list_and_read_thread_objects() {
+    use omnifs_wit::provider::types::{CalloutResult, HttpResponse};
+
+    let harness = github_harness();
+    let mut listed = harness.list("/notifications").unwrap();
+    let fetch = listed.expect_single_fetch();
+    assert!(
+        fetch.url.ends_with("/notifications?per_page=50&page=1"),
+        "unexpected notifications URL: {}",
+        fetch.url
+    );
+    listed
+        .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
+            status: 200,
+            headers: Vec::new(),
+            body: br#"[
+                {
+                    "id":"123",
+                    "unread":true,
+                    "reason":"mention",
+                    "updated_at":"2026-07-05T00:00:00Z",
+                    "subject":{"title":"Review requested","type":"PullRequest"},
+                    "repository":{"full_name":"octocat/Hello-World"}
+                }
+            ]"#
+            .to_vec(),
+        })])
+        .unwrap();
+    match listed.result().unwrap() {
+        OpResult::ListChildren(ListChildrenResult::Entries(listing)) => {
+            let names: Vec<&str> = listing
+                .entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect();
+            // The generated branch README (route-schema synthesis) lists
+            // alongside the notification threads.
+            assert_eq!(names, vec!["README.md", "thread-123"]);
+            let effects = listed.effects().unwrap();
+            assert!(
+                effects.canonical.is_empty(),
+                "notification list must not seed thread canonicals, got {:?}",
+                effects.canonical
+            );
+        },
+        other => panic!("expected notifications listing, got {other:?}"),
+    }
+
+    let mut item = harness.read("/notifications/thread-123/item.md").unwrap();
+    let read_fetch = item.expect_single_fetch();
+    assert!(
+        read_fetch.url.ends_with("/notifications/threads/123"),
+        "unexpected notification read URL: {}",
+        read_fetch.url
+    );
+    item.answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
+        status: 200,
+        headers: Vec::new(),
+        body: br#"{
+            "id":"123",
+            "unread":true,
+            "reason":"mention",
+            "updated_at":"2026-07-05T00:00:00Z",
+            "subject":{"title":"Review requested","type":"PullRequest"},
+            "repository":{"full_name":"octocat/Hello-World"}
+        }"#
+        .to_vec(),
+    })])
+    .unwrap();
+    match item.result().unwrap() {
+        OpResult::ReadFile(ReadFileOutcome::Found(file)) => {
+            let body = std::str::from_utf8(omnifs_itest::expect_inline(file)).unwrap();
+            assert!(
+                body.contains("# Review requested"),
+                "unexpected notification item.md: {body}"
+            );
+        },
+        other => panic!("expected notification item read, got {other:?}"),
     }
 }
 
@@ -1723,8 +2177,8 @@ fn github_provider_lookup_owner_validates_and_owner_listing_classifies_with_org_
         other => panic!("expected owner listing result, got {other:?}"),
     }
 
-    // Root does not enumerate owners; it only exposes the generated README,
-    // regardless of which owners have been resolved in prior calls.
+    // Root does not enumerate owners: it exposes only the generated README
+    // and the notifications literal. Browsed owners do not leak into it.
     let root_listing = harness.list("/").unwrap();
     match root_listing.result().unwrap() {
         OpResult::ListChildren(ListChildrenResult::Entries(listing)) => {
@@ -1733,9 +2187,9 @@ fn github_provider_lookup_owner_validates_and_owner_listing_classifies_with_org_
                 .iter()
                 .map(|entry| entry.name.as_str())
                 .collect();
-            assert_eq!(names, vec!["README.md"]);
+            assert_eq!(names, vec!["README.md", "notifications"]);
         },
-        other => panic!("expected README-only root listing, got {other:?}"),
+        other => panic!("expected root listing, got {other:?}"),
     }
 }
 
