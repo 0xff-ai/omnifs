@@ -30,9 +30,10 @@ use std::sync::Arc;
 
 use omnifs_core::path::Path;
 use omnifs_engine::Engine;
+use omnifs_engine::render::MATERIALIZE_MAX_BYTES;
 use omnifs_engine::test_support::cache::RecordKind;
 use omnifs_engine::view::{EntryMeta, FileAttrsCache, FilePayload, FileSize, ReadMode, Stability};
-use omnifs_engine::{Node, NodeBody, ReadResult, RequestCtx, ServingContext, Tree};
+use omnifs_engine::{Node, NodeBody, ReadResult, RequestCtx, ServingContext, Tree, TreeErrorKind};
 use omnifs_itest::{RuntimeHarness, make_engine, make_runtime};
 use omnifs_wit::provider::types::{Effects, Invalidation, PathOrPrefix};
 use tempfile::TempDir;
@@ -177,6 +178,49 @@ async fn read_exact_zero_short_circuits() {
     };
     assert!(data.is_empty(), "exact-0 file reads empty");
     assert_eq!(attrs.map(|a| a.size()), Some(FileSize::Exact(0)));
+}
+
+/// The whole-file materialization budget is enforced in `Tree`, before a
+/// frontend can buffer an unbounded full read. The same declared size on a
+/// ranged file is allowed because ranged reads stream through `RangedHandle`.
+#[tokio::test(flavor = "multi_thread")]
+async fn materialize_cap_rejects_full_read_but_allows_ranged_open() {
+    let t = test_tree();
+    let ctx = RequestCtx::default();
+    let oversized = FileSize::Exact(MATERIALIZE_MAX_BYTES + 1);
+
+    let full = Node::new(
+        "test".to_string(),
+        path("/hello/no-such-route"),
+        EntryMeta::file(
+            FileAttrsCache::deferred(oversized, ReadMode::Full, Stability::Stable, None)
+                .expect("valid full attrs"),
+        ),
+        NodeBody::Provider,
+    );
+    let error = t
+        .tree
+        .read(&full, &ctx)
+        .await
+        .expect_err("oversized full read should fail before provider dispatch");
+    assert_eq!(error.kind, TreeErrorKind::TooLarge);
+
+    let ranged = Node::new(
+        "test".to_string(),
+        path("/hello/ranged"),
+        EntryMeta::file(
+            FileAttrsCache::deferred(oversized, ReadMode::Ranged, Stability::Dynamic, None)
+                .expect("valid ranged attrs"),
+        ),
+        NodeBody::Provider,
+    );
+    let handle = t
+        .tree
+        .open(&ranged, &ctx)
+        .await
+        .expect("ranged open should not apply materialize cap")
+        .expect("test provider has a ranged route");
+    handle.close().expect("close ranged handle");
 }
 
 // --- Ranged reads ------------------------------------------------------------

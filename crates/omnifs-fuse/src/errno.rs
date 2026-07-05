@@ -2,7 +2,7 @@
 
 use fuser::Errno;
 use omnifs_api::events::InspectorOutcome;
-use omnifs_engine::{TreeError, TreeErrorKind};
+use omnifs_engine::{RetryClass, TreeError, TreeErrorKind};
 
 /// Map a FUSE errno to a stable inspector outcome.
 pub(super) fn inspector_outcome(errno: Errno) -> InspectorOutcome {
@@ -15,15 +15,24 @@ pub(super) fn inspector_outcome(errno: Errno) -> InspectorOutcome {
 /// `RateLimited` listing/read surfaces as EAGAIN so `ls`/`cat` retry rather than
 /// fail, preserving the pre-extraction behavior.
 pub(super) fn tree_error_errno(error: &TreeError) -> Errno {
-    match error.kind {
-        TreeErrorKind::NotFound => Errno::ENOENT,
-        TreeErrorKind::NotDirectory => Errno::ENOTDIR,
-        TreeErrorKind::IsDirectory => Errno::EISDIR,
-        TreeErrorKind::PermissionDenied => Errno::EACCES,
-        TreeErrorKind::InvalidInput => Errno::EINVAL,
-        TreeErrorKind::TooLarge => Errno::EFBIG,
-        TreeErrorKind::RateLimited => Errno::EAGAIN,
-        TreeErrorKind::Timeout | TreeErrorKind::Network | TreeErrorKind::Internal => Errno::EIO,
+    match error.kind.retry_class() {
+        RetryClass::Retry => match error.kind {
+            TreeErrorKind::RateLimited => Errno::EAGAIN,
+            // Timeout and Network stay EIO: FUSE has no deferral channel.
+            _ => Errno::EIO,
+        },
+        RetryClass::TooLarge => Errno::EFBIG,
+        RetryClass::Gone => match error.kind {
+            TreeErrorKind::NotFound => Errno::ENOENT,
+            TreeErrorKind::NotDirectory => Errno::ENOTDIR,
+            TreeErrorKind::IsDirectory => Errno::EISDIR,
+            _ => Errno::EIO,
+        },
+        RetryClass::Terminal => match error.kind {
+            TreeErrorKind::PermissionDenied => Errno::EACCES,
+            TreeErrorKind::InvalidInput => Errno::EINVAL,
+            _ => Errno::EIO,
+        },
     }
 }
 

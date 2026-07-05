@@ -195,9 +195,9 @@ impl FuseHarness {
         let parent_path = Path::parse(parent).expect("test parent path");
         let child = parent_path.join(name).expect("test child segment");
         let ino_for = |fs: &Frontend| {
-            fs.path_to_inode
-                .get(&PathKey::with_mount_str(Self::MOUNT, child.clone()).expect("mount name"))
-                .map(|r| *r)
+            fs.path_to_inode.id_for_key(
+                &PathKey::with_mount_str(Self::MOUNT, child.clone()).expect("mount name"),
+            )
         };
         match self
             .fs
@@ -965,7 +965,7 @@ async fn volatile_follow_pump_advances_reported_size() {
     // maxed with the follow pump's latest observed upstream end.
     let reported = |fs: &Frontend| -> u64 {
         let base = fs.inodes.get(&ino).map_or(0, |e| e.size);
-        base.max(fs.follow_sizes.get(&ino).map_or(0, |v| *v))
+        base.max(fs.follow_sizes.get(ino).unwrap_or(0))
     };
 
     tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
@@ -1019,7 +1019,7 @@ async fn volatile_follow_pump_probes_from_foreground_eof() {
     drop(ranged);
 
     tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-    let reported = h.fs.follow_sizes.get(&ino).map_or(0, |v| *v);
+    let reported = h.fs.follow_sizes.get(ino).unwrap_or(0);
 
     if let Some((_, pump)) = h.fs.follow_pumps.remove(&fh) {
         pump.abort();

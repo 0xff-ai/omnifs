@@ -40,7 +40,7 @@ pub(crate) mod synthetic;
 use crate::ServingContext;
 use omnifs_api::events::TraceId;
 
-pub use self::error::{TreeError, TreeErrorKind};
+pub use self::error::{RetryClass, TreeError, TreeErrorKind};
 pub use self::handle::{RangedHandle, probe_live_growth, spawn_live_follow_pump};
 pub use self::invalidate::InvalidationReport;
 pub use self::list::{Cursor, ListOutcome, Listing};

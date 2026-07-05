@@ -180,10 +180,3 @@ pub(crate) const ROOT_ID: u64 = 1;
 pub(crate) const EXPORT_ROOT_ID: u64 = 2;
 pub(crate) const OPEN_STATE_LEASE_SECONDS: u64 = 10;
 pub(crate) const MAX_NFS_READ_BYTES: u32 = 1024 * 1024;
-
-/// Cap on bytes the NFS adapter is willing to pull into RAM during a single
-/// full-mode `OPEN`. Files whose declared exact size exceeds this are
-/// rejected before any provider read; non-exact sizes that observably exceed
-/// it after reading are also rejected. Ranged opens bypass this cap because
-/// they stream chunks through the provider handle.
-pub(crate) const OPEN_MATERIALIZE_MAX_BYTES: u64 = 64 * 1024 * 1024;

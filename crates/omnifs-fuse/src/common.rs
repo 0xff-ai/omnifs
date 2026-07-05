@@ -2,6 +2,7 @@
 
 use fuser::FopenFlags;
 use omnifs_core::path::Path;
+use omnifs_engine::render::IdentityBody;
 use omnifs_engine::view::{EntryKind, FileAttrsCache};
 use omnifs_engine::{Node, RangedHandle};
 use std::path::PathBuf;
@@ -38,6 +39,16 @@ impl InodeBody {
     }
 
     pub(crate) fn is_synthetic(&self) -> bool {
+        matches!(self, Self::Synthetic)
+    }
+}
+
+impl IdentityBody for InodeBody {
+    fn is_provider_resolution(&self) -> bool {
+        matches!(self, Self::Provider)
+    }
+
+    fn is_synthetic_marker(&self) -> bool {
         matches!(self, Self::Synthetic)
     }
 }

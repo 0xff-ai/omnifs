@@ -8,7 +8,7 @@ use crate::protocol::consts::{
     NFS4ERR_TOOSMALL, OPEN_STATE_LEASE_SECONDS, OPEN4_SHARE_ACCESS_READ,
 };
 use dashmap::DashMap;
-use omnifs_engine::{TreeError, TreeErrorKind};
+use omnifs_engine::{RetryClass, TreeError, TreeErrorKind};
 #[cfg(test)]
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -84,15 +84,19 @@ impl Status {
 /// is separate (`omnifs_engine::singleflight::Deferred`).
 impl From<&TreeError> for Status {
     fn from(error: &TreeError) -> Self {
-        match error.kind {
-            TreeErrorKind::NotFound => Self::NoEnt,
-            TreeErrorKind::NotDirectory => Self::NotDir,
-            TreeErrorKind::IsDirectory => Self::IsDir,
-            TreeErrorKind::PermissionDenied => Self::Access,
-            TreeErrorKind::InvalidInput => Self::Invalid,
-            TreeErrorKind::TooLarge | TreeErrorKind::Internal => Self::Io,
-            TreeErrorKind::RateLimited | TreeErrorKind::Timeout | TreeErrorKind::Network => {
-                Self::Delay
+        match error.kind.retry_class() {
+            RetryClass::Retry => Self::Delay,
+            RetryClass::TooLarge => Self::Resource,
+            RetryClass::Gone => match error.kind {
+                TreeErrorKind::NotFound => Self::NoEnt,
+                TreeErrorKind::NotDirectory => Self::NotDir,
+                TreeErrorKind::IsDirectory => Self::IsDir,
+                _ => Self::Io,
+            },
+            RetryClass::Terminal => match error.kind {
+                TreeErrorKind::PermissionDenied => Self::Access,
+                TreeErrorKind::InvalidInput => Self::Invalid,
+                _ => Self::Io,
             },
         }
     }
