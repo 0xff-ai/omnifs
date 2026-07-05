@@ -12,6 +12,9 @@
 # Rust source roots and WIT definitions.
 !crates/
 !crates/**
+# omnifs-cli embeds skills/omnifs-usage/SKILL.md via include_str!.
+!skills/
+!skills/**
 !providers/
 !providers/**
 !xtask/
