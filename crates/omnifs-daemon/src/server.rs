@@ -1,4 +1,5 @@
-//! Control API server: `/v1/{ready,status,mounts,reconcile,shutdown,events}`.
+//! Control API server:
+//! `/v1/{ready,status,credentials,providers,mounts,reconcile,shutdown,events}`.
 //!
 //! Serves daemon runtime facts, mount reconciliation and shutdown, and the
 //! inspector event stream over HTTP on the control listener. See
@@ -11,20 +12,27 @@ use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Json, Response};
 use omnifs_api::{
     AddedField, ApiError, AuthDelta, AuthSchemeSurface, AuthSurface, CapabilityChange,
-    CapabilityDirection, DaemonBackend, DaemonHealth, DaemonStatus, DaemonSubsystem, ErrorCode,
-    FieldChange, FrontendInfo, FsType, HealthState, LimitChange, LimitDirection, MountFailure,
-    MountInfo, MountOutcome, MountReport, MountUpdateRequest, ReadyInfo, ReconcileReport,
+    CapabilityDirection, CredentialHealth, CredentialStatus, DaemonBackend, DaemonHealth,
+    DaemonStatus, DaemonSubsystem, ErrorCode, FieldChange, FrontendInfo, FsType, HealthState,
+    LimitChange, LimitDirection, MountFailure, MountInfo, MountOutcome, MountReport,
+    MountUpdateRequest, ProviderArtifact, ProviderSummary, ReadyInfo, ReconcileReport,
     ReconcileRequest, StopReport, SubsystemHealth, UpgradeDelta,
+};
+use omnifs_auth::{
+    CredentialHealth as AuthCredentialHealth, CredentialStatus as AuthCredentialStatus,
 };
 use omnifs_engine::{
     FailureKind, InspectorSink, MountRuntimes, ReconcileBusy, ReconcileOutcome, RegistryError,
 };
+use omnifs_workspace::authn::CredentialId;
 use omnifs_workspace::mounts::materialize::materialize;
 use omnifs_workspace::mounts::{Name as MountName, Registry, Spec, UpgradePlan};
-use omnifs_workspace::provider::Catalog;
+use omnifs_workspace::provider::{Catalog, CatalogError, Provider};
+use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
 use std::path::Path;
 use std::sync::Arc;
+use time::format_description::well_known::Rfc3339;
 use tokio_stream::StreamExt as _;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
@@ -52,6 +60,10 @@ use crate::frontends::Frontend;
         FsType,
         DaemonBackend,
         MountInfo,
+        CredentialHealth,
+        CredentialStatus,
+        ProviderArtifact,
+        ProviderSummary,
         MountFailure,
         MountReport,
         MountOutcome,
@@ -136,7 +148,11 @@ impl Daemon {
             }
             mounts.push(MountInfo {
                 root_mount: root_mount.as_deref() == Some(mount.as_str()),
-                provider_id: runtime.provider_name().to_string(),
+                provider_name: runtime.provider_name().to_string(),
+                provider_id: runtime.provider_id().to_string(),
+                auth_health: runtime
+                    .auth_health()
+                    .map(|health| api_credential_health_kind(&health)),
                 mount,
             });
         }
@@ -355,6 +371,9 @@ impl Daemon {
         OpenApiRouter::new()
             .routes(routes!(ready))
             .routes(routes!(status))
+            .routes(routes!(credentials_list))
+            .routes(routes!(credential_reload))
+            .routes(routes!(providers_list))
             .routes(routes!(mounts_list))
             .routes(routes!(mount_create))
             .routes(routes!(mount_inspect))
@@ -417,6 +436,80 @@ async fn ready(State(daemon): State<Arc<Daemon>>) -> Response {
 )]
 async fn status(State(daemon): State<Arc<Daemon>>) -> Json<DaemonStatus> {
     Json(daemon.control_status())
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/credentials",
+    operation_id = "credentials_list",
+    responses((status = 200, description = "registered credential health", body = [CredentialStatus])),
+)]
+async fn credentials_list(State(daemon): State<Arc<Daemon>>) -> Json<Vec<CredentialStatus>> {
+    let mut statuses = daemon
+        .registry
+        .credential_service()
+        .health()
+        .into_iter()
+        .map(api_credential_status)
+        .collect::<Vec<_>>();
+    statuses.sort_by(|a, b| a.id.cmp(&b.id));
+    Json(statuses)
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/credentials/{id}/reload",
+    operation_id = "credential_reload",
+    params(("id" = String, Path, description = "credential storage key")),
+    responses(
+        (status = 200, description = "refreshed credential health", body = CredentialStatus),
+        (status = 400, description = "invalid credential id", body = ApiError),
+        (status = 404, description = "credential not registered with the daemon", body = ApiError),
+    ),
+)]
+async fn credential_reload(
+    State(daemon): State<Arc<Daemon>>,
+    UrlPath(id): UrlPath<String>,
+) -> Response {
+    let id = match id.parse::<CredentialId>() {
+        Ok(id) => id,
+        Err(error) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                ErrorCode::SpecInvalid,
+                format!("invalid credential id `{id}`: {error}"),
+            );
+        },
+    };
+    match daemon.registry.credential_service().reload(&id).await {
+        Some(status) => Json(api_credential_status(status)).into_response(),
+        None => error_response(
+            StatusCode::NOT_FOUND,
+            ErrorCode::CredentialNotFound,
+            format!("credential `{id}` is not registered with the daemon"),
+        ),
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/providers",
+    operation_id = "providers_list",
+    responses(
+        (status = 200, description = "installed provider catalog", body = [ProviderSummary]),
+        (status = 500, description = "provider catalog unavailable", body = ApiError),
+    ),
+)]
+async fn providers_list(State(daemon): State<Arc<Daemon>>) -> Response {
+    let catalog = Catalog::open(daemon.context.providers_dir());
+    match provider_summaries(&catalog) {
+        Ok(providers) => Json(providers).into_response(),
+        Err(error) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            ErrorCode::Internal,
+            format!("provider catalog unavailable: {error}"),
+        ),
+    }
 }
 
 #[utoipa::path(
@@ -931,6 +1024,81 @@ fn error_kind(error: &RegistryError) -> FailureKind {
         | RegistryError::MountNotFound(_) => FailureKind::SpecInvalid,
         RegistryError::ProviderNotFound(_) => FailureKind::ProviderMissing,
         RegistryError::RuntimeError(_) => FailureKind::Internal,
+    }
+}
+
+fn api_credential_status(status: AuthCredentialStatus) -> CredentialStatus {
+    let refresh_failed_attempts = match &status.health {
+        AuthCredentialHealth::RefreshFailed { attempts } => Some(*attempts),
+        _ => None,
+    };
+    CredentialStatus {
+        id: status.id.to_string(),
+        health: api_credential_health_kind(&status.health),
+        refresh_failed_attempts,
+        expires_at: status.expires_at.map(|expires_at| {
+            expires_at
+                .format(&Rfc3339)
+                .expect("OffsetDateTime formats as RFC3339")
+        }),
+        scopes: status.scopes,
+    }
+}
+
+fn api_credential_health_kind(health: &AuthCredentialHealth) -> CredentialHealth {
+    match health {
+        AuthCredentialHealth::Ready => CredentialHealth::Ready,
+        AuthCredentialHealth::ExpiringSoon => CredentialHealth::ExpiringSoon,
+        AuthCredentialHealth::Expired => CredentialHealth::Expired,
+        AuthCredentialHealth::RefreshFailed { .. } => CredentialHealth::RefreshFailed,
+        AuthCredentialHealth::NeedsConsent => CredentialHealth::NeedsConsent,
+        AuthCredentialHealth::Missing => CredentialHealth::Missing,
+        AuthCredentialHealth::StaticUnvalidated => CredentialHealth::StaticUnvalidated,
+    }
+}
+
+fn provider_summaries(catalog: &Catalog) -> Result<Vec<ProviderSummary>, CatalogError> {
+    let mut by_name = BTreeMap::new();
+    for provider in catalog.installed()? {
+        by_name
+            .entry(provider.meta.name.clone())
+            .or_insert_with(Vec::new)
+            .push(api_provider_artifact(&provider));
+    }
+    for artifacts in by_name.values_mut() {
+        artifacts.sort_by(|a, b| {
+            a.version
+                .cmp(&b.version)
+                .then_with(|| a.id_hash.cmp(&b.id_hash))
+        });
+    }
+
+    let mut names = catalog
+        .installable()?
+        .into_iter()
+        .map(|provider| provider.meta.name)
+        .collect::<BTreeSet<_>>();
+    names.extend(by_name.keys().cloned());
+
+    names
+        .into_iter()
+        .map(|name| {
+            let latest = catalog
+                .latest_by_name(&name)?
+                .map(|provider| api_provider_artifact(&provider));
+            Ok(ProviderSummary {
+                installed: by_name.remove(&name).unwrap_or_default(),
+                name: name.to_string(),
+                latest,
+            })
+        })
+        .collect()
+}
+
+fn api_provider_artifact(provider: &Provider) -> ProviderArtifact {
+    ProviderArtifact {
+        version: provider.meta.version.as_ref().map(ToString::to_string),
+        id_hash: provider.id.to_string(),
     }
 }
 

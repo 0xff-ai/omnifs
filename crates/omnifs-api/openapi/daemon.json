@@ -10,6 +10,74 @@
     "version": "0.2.1"
   },
   "paths": {
+    "/v1/credentials": {
+      "get": {
+        "operationId": "credentials_list",
+        "responses": {
+          "200": {
+            "description": "registered credential health",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/CredentialStatus"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/credentials/{id}/reload": {
+      "post": {
+        "operationId": "credential_reload",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "credential storage key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "refreshed credential health",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CredentialStatus"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid credential id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "credential not registered with the daemon",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/events": {
       "get": {
         "summary": "Stream the inspector history snapshot followed by live records as\nnewline-framed JSON using the same wire format the raw TCP listener used to\nspeak, now chunk-encoded by HTTP. A lagged subscriber gets a\n`# dropped N events` comment line and resumes from the newest record.",
@@ -269,6 +337,36 @@
         }
       }
     },
+    "/v1/providers": {
+      "get": {
+        "operationId": "providers_list",
+        "responses": {
+          "200": {
+            "description": "installed provider catalog",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ProviderSummary"
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "provider catalog unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/ready": {
       "get": {
         "operationId": "ready",
@@ -488,6 +586,56 @@
           "removed"
         ]
       },
+      "CredentialHealth": {
+        "type": "string",
+        "enum": [
+          "ready",
+          "expiring_soon",
+          "expired",
+          "refresh_failed",
+          "needs_consent",
+          "missing",
+          "static_unvalidated"
+        ]
+      },
+      "CredentialStatus": {
+        "type": "object",
+        "required": [
+          "id",
+          "health",
+          "scopes"
+        ],
+        "properties": {
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "RFC3339 expiry timestamp, when the credential carries one."
+          },
+          "health": {
+            "$ref": "#/components/schemas/CredentialHealth"
+          },
+          "id": {
+            "type": "string",
+            "description": "Credential storage key, e.g. `github:oauth:default`."
+          },
+          "refresh_failed_attempts": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          },
+          "scopes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
       "DaemonBackend": {
         "oneOf": [
           {
@@ -553,7 +701,7 @@
       },
       "DaemonStatus": {
         "type": "object",
-        "description": "`GET /v1/status`: the daemon's runtime facts. Host-side state (mount\nconfigs, credential readiness) is the CLI's contribution to the merged\nstatus view; it never comes from the daemon.",
+        "description": "`GET /v1/status`: the daemon's runtime facts, loaded mounts, and non-secret\noperational health. Credentials are represented only by coarse health.",
         "required": [
           "version",
           "mount_point",
@@ -646,6 +794,7 @@
         "type": "string",
         "enum": [
           "auth_required",
+          "credential_not_found",
           "consent_required",
           "mount_not_found",
           "spec_invalid",
@@ -840,16 +989,31 @@
         "type": "object",
         "required": [
           "mount",
+          "provider_name",
           "provider_id",
           "root_mount"
         ],
         "properties": {
+          "auth_health": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/CredentialHealth"
+              }
+            ]
+          },
           "mount": {
             "type": "string"
           },
           "provider_id": {
             "type": "string",
-            "description": "Provider NAME slug. Field name kept as `provider_id` for wire stability; rename deferred to an `API_MAJOR` bump."
+            "description": "Pinned provider content hash for the exact WASM artifact this mount runs."
+          },
+          "provider_name": {
+            "type": "string",
+            "description": "Provider NAME slug, e.g. `github`; credentials key on this value."
           },
           "root_mount": {
             "type": "boolean"
@@ -918,6 +1082,51 @@
             ]
           },
           "spec": {}
+        }
+      },
+      "ProviderArtifact": {
+        "type": "object",
+        "required": [
+          "id_hash"
+        ],
+        "properties": {
+          "id_hash": {
+            "type": "string"
+          },
+          "version": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "ProviderSummary": {
+        "type": "object",
+        "required": [
+          "name",
+          "installed"
+        ],
+        "properties": {
+          "installed": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProviderArtifact"
+            }
+          },
+          "latest": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ProviderArtifact"
+              }
+            ]
+          },
+          "name": {
+            "type": "string"
+          }
         }
       },
       "ReadyInfo": {

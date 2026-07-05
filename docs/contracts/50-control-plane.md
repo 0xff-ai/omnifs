@@ -13,7 +13,11 @@ Read this before touching `omnifs-cli`, `omnifs-daemon`, `omnifs-api`, lifecycle
 
 A single `omnifs` binary is both CLI and daemon. The runtime loop lives behind hidden `omnifs daemon`; there is no separate public `omnifsd` binary.
 
-The daemon exposes a REST API whose schema lives in `omnifs-api` and whose checked-in OpenAPI document is generated from the daemon implementation. Credentials are never transmitted on the wire.
+The daemon exposes a REST API whose schema lives in `omnifs-api` and whose checked-in OpenAPI document is generated from the daemon implementation. Credential material is never transmitted on the wire.
+
+The control API may expose operational state that contains no secrets. `GET /v1/credentials` reports registered credential ids, coarse health, expiry, and scopes only; it never reports access tokens, refresh tokens, client secrets, or header material. `POST /v1/credentials/{id}/reload` reloads a registered credential from the host store and returns the same non-secret status shape. `GET /v1/providers` reports the installed provider catalog by provider name, retained artifact content hashes, and the latest artifact pointer.
+
+Mount wire payloads distinguish provider identity from provider naming. `provider_name` is the human/catalog slug used by credentials and UX. `provider_id` is the pinned provider content hash for the exact artifact the mount runs.
 
 ### Mount delivery
 
@@ -23,7 +27,7 @@ Specs are one file per mount, and a spec file's stem is its mount name: `mounts:
 
 `POST /v1/reconcile` converges the daemon to the on-disk specs. With no body it is a full pass. With `{ "mounts": ["name"] }` it is scoped to those mount names for planning, build, and stale removal. HTTP-triggered reconcile is non-queueing: if another reconcile holds the engine lock, the daemon returns `409 ReconcileBusy` with `Retry-After: 2`. Internal daemon calls that intentionally serialize still wait on the engine lock.
 
-Prefer REST API extensions for new non-secret interactions. Keep credentials off the REST API.
+Prefer REST API extensions for new non-secret interactions. Keep credential material off the REST API.
 
 ### Replica snapshots
 
@@ -64,7 +68,7 @@ Keep Docker-specific bind/materialization policy in Docker launch paths. Keep na
 - Bypass the daemon mount CRUD API for config changes while a compatible daemon is ready.
 - Add a second spec read or write path that bypasses `mount::Registry`, or write a spec to a file whose stem is not its mount name.
 - Add more direct workspace coupling when a REST API extension fits.
-- Put credentials or provider secrets in snapshot export routes or snapshot
+- Put credential material or provider secrets in snapshot export routes or snapshot
   indexes.
 - Infer launch backend only from config when daemon status or launch records identify the running backend.
 - Hand-edit `crates/omnifs-api/openapi/daemon.json`.

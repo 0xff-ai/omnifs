@@ -165,6 +165,16 @@ impl AuthManager {
         self.strategies.iter().map(|strategy| &strategy.id)
     }
 
+    /// Coarsest live health for this mount's registered credentials. `None`
+    /// means the mount has no auth strategies.
+    pub(crate) fn health(&self) -> Option<CredentialHealth> {
+        let service = self.service.as_ref()?;
+        self.strategies
+            .iter()
+            .filter_map(|strategy| service.status(&strategy.id).map(|status| status.health))
+            .max_by_key(CredentialHealth::severity)
+    }
+
     pub async fn report_rejected_for_response(
         &self,
         url: &str,

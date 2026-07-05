@@ -21,7 +21,7 @@ use crate::instance::Instance;
 use crate::invalidation::InvalidationState;
 use crate::tree_refs::TreeRefs;
 use dashmap::DashMap;
-use omnifs_auth::CredentialService;
+use omnifs_auth::{CredentialHealth, CredentialService};
 use omnifs_caps::{Grant, PreopenedPath};
 use omnifs_core::path::Path;
 use omnifs_wit::provider::types as wit_types;
@@ -122,6 +122,8 @@ pub struct Runtime {
     initialize_result: wit_types::InitializeResult,
     pub(crate) mount_name: String,
     pub(crate) provider_name: String,
+    provider_id: ProviderId,
+    auth: Arc<AuthManager>,
     /// Non-secret warning captured once at mount-start when a registered
     /// credential is `Missing`/`Expired`/`NeedsConsent`. `None` once healthy
     /// or when the mount has no auth. A build-time snapshot, not a live
@@ -309,6 +311,14 @@ impl Runtime {
         &self.provider_name
     }
 
+    pub fn provider_id(&self) -> ProviderId {
+        self.provider_id
+    }
+
+    pub fn auth_health(&self) -> Option<CredentialHealth> {
+        self.auth.health()
+    }
+
     /// Non-secret credential warning captured at mount-start, if the mount's
     /// auth was not ready when the mount was built.
     #[must_use]
@@ -476,6 +486,8 @@ impl Runtime {
             initialize_result,
             mount_name: mount_name.to_string(),
             provider_name: config.provider_name().to_string(),
+            provider_id: config.provider.id,
+            auth,
             credential_warning,
             next_operation_id: AtomicU64::new(1),
             blob_cache,

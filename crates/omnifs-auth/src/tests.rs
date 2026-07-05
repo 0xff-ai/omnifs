@@ -453,6 +453,46 @@ async fn report_rejected_403_unrelated_challenge_does_not_refresh() {
 }
 
 #[tokio::test]
+async fn reload_reloads_store_value_for_next_authorization() {
+    let store: Arc<dyn CredentialStore> = Arc::new(MemoryStore::default());
+    let service = CredentialService::new(Arc::clone(&store), OAuthClient::new().unwrap());
+    let id = CredentialId::new("test-provider", "pat", "default").unwrap();
+    service.register_static(
+        id.clone(),
+        "Authorization".to_string(),
+        "Bearer ".to_string(),
+    );
+    store
+        .put(
+            &id,
+            &CredentialEntry::static_token(
+                SecretString::from("old-token".to_string()),
+                OffsetDateTime::now_utc(),
+            ),
+        )
+        .unwrap();
+
+    let old = service.authorization(&id).await.unwrap();
+    assert_eq!(old.expose_value(), "Bearer old-token");
+    store
+        .put(
+            &id,
+            &CredentialEntry::static_token(
+                SecretString::from("new-token".to_string()),
+                OffsetDateTime::now_utc(),
+            ),
+        )
+        .unwrap();
+
+    let status = service.reload(&id).await.expect("registered credential");
+    assert_eq!(status.id, id);
+    assert!(matches!(status.health, CredentialHealth::StaticUnvalidated));
+    let new = service.authorization(&id).await.unwrap();
+
+    assert_eq!(new.expose_value(), "Bearer new-token");
+}
+
+#[tokio::test]
 async fn invalid_grant_refresh_needs_consent_and_keeps_stored_entry() {
     let fake = FakeAuthServer::start(FakeBehavior {
         token_error: Some(("invalid_grant".to_owned(), "revoked".to_owned())),

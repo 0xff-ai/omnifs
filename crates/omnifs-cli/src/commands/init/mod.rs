@@ -289,7 +289,7 @@ impl InitArgs {
             account: auth.account().map(str::to_owned),
         };
 
-        if selection.is_oauth() {
+        let target = if selection.is_oauth() {
             anstream::println!("Re-authenticating `{mount_name}` over OAuth ...");
             crate::auth::login_with_workspace(
                 workspace,
@@ -298,7 +298,7 @@ impl InitArgs {
                 self.no_browser,
                 &self.scopes,
             )
-            .await?;
+            .await?
         } else {
             let source = TokenSource::resolve(
                 self.token.as_deref(),
@@ -306,15 +306,31 @@ impl InitArgs {
                 !self.no_input,
             )?;
             let token = source.read()?;
-            run_static_token_init(manifest, &selection, token, &paths.credentials_file).await?;
-        }
+            run_static_token_init(manifest, &selection, token, &paths.credentials_file).await?
+        };
+        reload_live_credentials(&target).await;
 
         anstream::println!();
         anstream::println!("✓ Re-authenticated `{mount_name}`.");
-        anstream::println!(
-            "If a daemon is running, restart it with `omnifs up` to apply the new credential."
-        );
         Ok(())
+    }
+}
+
+async fn reload_live_credentials(target: &CredentialTarget) {
+    let client = crate::client::DaemonClient::new();
+    for key in target.keys() {
+        match client.reload_credential_if_ready(key).await {
+            Ok(Some(_)) => {
+                anstream::println!("✓ Reloaded `{key}` in the running daemon.");
+            },
+            Ok(None) => {},
+            Err(error) => {
+                anstream::eprintln!(
+                    "Credential `{key}` was stored, but live daemon reload failed: {error:#}"
+                );
+                anstream::eprintln!("Run `omnifs up` to restart with the new credential.");
+            },
+        }
     }
 }
 
@@ -408,7 +424,7 @@ pub(crate) async fn run_static_token_init(
     auth: &AuthSelection,
     token: SecretString,
     credentials_file: &Path,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<CredentialTarget> {
     let static_token_scheme = auth.static_token_scheme(manifest)?;
 
     let header_name = static_token_scheme
@@ -462,7 +478,7 @@ pub(crate) async fn run_static_token_init(
             .with_context(|| "failed to store credential")?;
     }
     anstream::println!("✓ Stored");
-    Ok(())
+    Ok(target)
 }
 
 #[cfg(test)]

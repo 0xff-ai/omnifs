@@ -101,6 +101,17 @@ impl Catalog {
             .collect())
     }
 
+    /// Every retained installed artifact, including older versions kept for
+    /// mounted specs and upgrade history.
+    pub fn installed(&self) -> Result<Vec<Provider>, CatalogError> {
+        let index = self.store().read_index()?;
+        Ok(index
+            .providers
+            .iter()
+            .map(|entry| self.provider_from_entry(entry))
+            .collect())
+    }
+
     /// `<hex>.wasm` for a pinned id (the serving path).
     #[must_use]
     pub fn provider_path_by_id(&self, id: &ProviderId) -> PathBuf {
