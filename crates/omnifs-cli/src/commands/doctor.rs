@@ -509,7 +509,7 @@ fn live_findings(
                 credential
                     .id
                     .starts_with(&format!("{}:", mount.provider_name))
-                    && credential.health != CredentialHealth::Ready
+                    && credential.health.needs_attention()
             })
             .map(|credential| LiveFinding {
                 mount: mount.mount.clone(),
@@ -527,7 +527,7 @@ fn live_findings(
         if credential_findings.peek().is_some() {
             findings.extend(credential_findings);
         } else if let Some(health) = mount.auth_health
-            && health != CredentialHealth::Ready
+            && health.needs_attention()
         {
             findings.push(LiveFinding {
                 mount: mount.mount.clone(),

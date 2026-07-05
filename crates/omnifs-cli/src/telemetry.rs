@@ -70,7 +70,7 @@ async fn health_nudge(workspace: &Workspace) -> Option<String> {
     {
         for mount in &status.mounts {
             if let Some(health) = mount.auth_health
-                && health != CredentialHealth::Ready
+                && health.needs_attention()
             {
                 return Some(format!(
                     "mount `{}` has {}; run `omnifs mounts reauth {}`",
