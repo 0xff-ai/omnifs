@@ -5,7 +5,7 @@ mod flows;
 mod request;
 mod service;
 
-pub use client::{OAuthClient, RevokeOutcome, UrlOpener};
+pub use client::{OAuthClient, OAuthRevokeOutcome, UrlOpener};
 pub use error::AuthError;
 pub use flows::{DeviceCodePrompt, ManualCode};
 pub use request::{
@@ -14,7 +14,7 @@ pub use request::{
 };
 pub use service::{
     AuthUnavailable, CredentialHealth, CredentialService, CredentialStatus, HeaderMaterial,
-    REFRESH_WINDOW, is_fresh,
+    REFRESH_WINDOW, RefreshOutcome, RejectionEvidence, RevokeOutcome, is_fresh,
 };
 
 #[cfg(test)]

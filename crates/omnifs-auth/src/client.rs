@@ -70,21 +70,21 @@ impl OAuthClient {
         &self,
         request: OAuthRequest,
         access_token: SecretString,
-    ) -> Result<RevokeOutcome, AuthError> {
+    ) -> Result<OAuthRevokeOutcome, AuthError> {
         if !request.supports_revocation() {
-            return Ok(RevokeOutcome::Unsupported);
+            return Ok(OAuthRevokeOutcome::Unsupported);
         }
         let client = request.token_client()?;
         let revoke = client.revoke_token(StandardRevocableToken::from(AccessToken::new(
             access_token.expose_secret().to_owned(),
         )))?;
         revoke.request_async(&self.http).await?;
-        Ok(RevokeOutcome::Revoked)
+        Ok(OAuthRevokeOutcome::Revoked)
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RevokeOutcome {
+pub enum OAuthRevokeOutcome {
     Revoked,
     Unsupported,
 }

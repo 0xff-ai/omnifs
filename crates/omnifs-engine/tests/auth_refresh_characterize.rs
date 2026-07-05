@@ -9,12 +9,13 @@
 //!   (a) preparing a request whose credential expires inside the 60s refresh
 //!       window triggers a synchronous refresh (and a fresh credential does not);
 //!   (b) a 401 (and a 403 carrying `WWW-Authenticate: ... invalid_token`) is
-//!       classified as refreshable, and a forced refresh rotates the token once;
-//!   (c) an `invalid_grant` refresh DELETES the stored credential.
+//!       reported to the auth service, which refreshes and rotates the token
+//!       once;
+//!   (c) an `invalid_grant` refresh marks the credential as `NeedsConsent` while
+//!       keeping the stored entry.
 //!
-//! Assertion (c) is TODAY's behavior. A3 intentionally flips it to a
-//! `NeedsConsent` transition that keeps the stored secret; A3 must update this
-//! test when it does.
+//! Assertion (c) intentionally changed in A3 from deletion to a fail-closed
+//! `NeedsConsent` transition that keeps the stored secret for diagnostics.
 //!
 //! Harness note: the step named `omnifs-auth`'s `FakeAuthServer`, but that type
 //! is `pub(super)` inside `omnifs-auth`'s `client` module and unreachable from an
@@ -90,9 +91,9 @@ async fn prepare_outside_refresh_window_does_not_refresh() {
     );
 }
 
-/// A 401 (and a 403 carrying an `invalid_token` bearer challenge) is classified
-/// as refreshable; a plain 403 and a 500 are not. A forced refresh then rotates
-/// the token exactly once.
+/// A 401 (and a 403 carrying an `invalid_token` bearer challenge) is reported
+/// to the auth service as refreshable; a plain 403 and a 500 are not. A
+/// refreshable rejection rotates the token exactly once.
 #[tokio::test]
 async fn response_401_is_refreshable_and_forced_refresh_rotates_once() {
     use reqwest::StatusCode;
@@ -110,32 +111,11 @@ async fn response_401_is_refreshable_and_forced_refresh_rotates_once() {
     );
 
     let empty = reqwest::header::HeaderMap::new();
-    let mut invalid_token = reqwest::header::HeaderMap::new();
-    invalid_token.insert(
-        reqwest::header::WWW_AUTHENTICATE,
-        reqwest::header::HeaderValue::from_static("Bearer error=\"invalid_token\""),
-    );
-
-    assert!(
-        auth.should_refresh_for_response(RESOURCE_URL, StatusCode::UNAUTHORIZED, &empty),
-        "401 is refreshable"
-    );
-    assert!(
-        auth.should_refresh_for_response(RESOURCE_URL, StatusCode::FORBIDDEN, &invalid_token),
-        "403 + invalid_token bearer challenge is refreshable"
-    );
-    assert!(
-        !auth.should_refresh_for_response(RESOURCE_URL, StatusCode::FORBIDDEN, &empty),
-        "a plain 403 is not refreshable"
-    );
-    assert!(
-        !auth.should_refresh_for_response(RESOURCE_URL, StatusCode::INTERNAL_SERVER_ERROR, &empty),
-        "a 500 is not refreshable"
-    );
-
     assert_eq!(
-        auth.refresh_for_url(RESOURCE_URL).await.unwrap(),
-        RefreshOutcome::Refreshed
+        auth.report_rejected_for_response(RESOURCE_URL, StatusCode::UNAUTHORIZED, &empty)
+            .await,
+        RefreshOutcome::Refreshed,
+        "401 is refreshable"
     );
     assert_eq!(
         tokens.refreshes(),
@@ -151,29 +131,73 @@ async fn response_401_is_refreshable_and_forced_refresh_rotates_once() {
             .expose_secret(),
         "access-refresh-1",
     );
+
+    let tokens = FakeTokenServer::start(false).await;
+    let (auth, store, key) = oauth_manager(tokens.endpoint());
+    seed_oauth(store.as_ref(), &key, "old-access", "refresh-1", 3600);
+    auth.prepare_for_url(RESOURCE_URL).await.unwrap();
+    let mut invalid_token = reqwest::header::HeaderMap::new();
+    invalid_token.insert(
+        reqwest::header::WWW_AUTHENTICATE,
+        reqwest::header::HeaderValue::from_static("Bearer error=\"invalid_token\""),
+    );
+    assert_eq!(
+        auth.report_rejected_for_response(RESOURCE_URL, StatusCode::FORBIDDEN, &invalid_token)
+            .await,
+        RefreshOutcome::Refreshed,
+        "403 + invalid_token bearer challenge is refreshable"
+    );
+    assert_eq!(tokens.refreshes(), 1);
+
+    let tokens = FakeTokenServer::start(false).await;
+    let (auth, store, key) = oauth_manager(tokens.endpoint());
+    seed_oauth(store.as_ref(), &key, "old-access", "refresh-1", 3600);
+    auth.prepare_for_url(RESOURCE_URL).await.unwrap();
+    assert_eq!(
+        auth.report_rejected_for_response(RESOURCE_URL, StatusCode::FORBIDDEN, &empty)
+            .await,
+        RefreshOutcome::NotApplicable,
+        "a plain 403 is not refreshable"
+    );
+    assert_eq!(
+        auth.report_rejected_for_response(RESOURCE_URL, StatusCode::INTERNAL_SERVER_ERROR, &empty)
+            .await,
+        RefreshOutcome::NotApplicable,
+        "a 500 is not refreshable"
+    );
+    assert_eq!(tokens.refreshes(), 0);
 }
 
-/// An `invalid_grant` response to a refresh DELETES the stored credential.
-///
-/// TODAY's behavior. A3 replaces the deletion with a `NeedsConsent` transition
-/// that preserves the stored secret; A3 must update this assertion when it does.
+/// An `invalid_grant` response to a refresh keeps the stored credential for
+/// diagnostics and marks it `NeedsConsent`, so later authorization fails closed.
 #[tokio::test]
-async fn invalid_grant_refresh_deletes_stored_credential() {
+async fn invalid_grant_refresh_needs_consent_and_keeps_stored_credential() {
     let tokens = FakeTokenServer::start(true).await;
     let (auth, store, key) = oauth_manager(tokens.endpoint());
     seed_oauth(store.as_ref(), &key, "old-access", "refresh-1", 3600);
     // Load `current` so the forced refresh reaches the token endpoint.
     auth.prepare_for_url(RESOURCE_URL).await.unwrap();
 
-    let result = auth.refresh_for_url(RESOURCE_URL).await;
+    let result = auth
+        .report_rejected_for_response(
+            RESOURCE_URL,
+            reqwest::StatusCode::UNAUTHORIZED,
+            &reqwest::header::HeaderMap::new(),
+        )
+        .await;
     assert!(
-        result.is_err(),
+        matches!(result, RefreshOutcome::RefreshFailed(_)),
         "an invalid_grant refresh surfaces an error"
     );
 
     assert!(
-        store.get(&key).unwrap().is_none(),
-        "invalid_grant deletes the stored credential (A3 changes this)"
+        store.get(&key).unwrap().is_some(),
+        "invalid_grant preserves the stored credential for diagnostics"
+    );
+    let err = auth.prepare_for_url(RESOURCE_URL).await.unwrap_err();
+    assert!(
+        err.to_string().contains("needs re-authentication"),
+        "NeedsConsent credentials fail closed"
     );
 }
 

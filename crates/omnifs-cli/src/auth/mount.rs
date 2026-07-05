@@ -1,7 +1,7 @@
 //! Mount-scoped auth loading, init auth selection, and OAuth request construction.
 
 use anyhow::{Context, anyhow};
-use omnifs_auth::OAuthRequest;
+use omnifs_auth::{CredentialService, OAuthRequest};
 use omnifs_workspace::authn::AuthKind;
 use omnifs_workspace::authn::{AuthManifest, AuthScheme, StaticTokenScheme};
 use omnifs_workspace::creds::CredentialStore;
@@ -181,6 +181,27 @@ impl MountAuth {
             )
         })?;
         self.target_for_scheme(Some(auth), scheme, account)
+    }
+
+    pub(crate) fn register_revocation(
+        &self,
+        service: &CredentialService,
+    ) -> anyhow::Result<CredentialTarget> {
+        let target = self.status_target()?;
+        let Some(auth) = self.primary_auth() else {
+            return Ok(target);
+        };
+        let Some(oauth_config) = auth.as_oauth() else {
+            return Ok(target);
+        };
+        let Some(id) = target.primary_key() else {
+            return Ok(target);
+        };
+
+        let scheme = self.manifest_view().oauth_scheme(auth.scheme())?.clone();
+        let request = OAuthRequest::from_mount_config(Some(oauth_config), scheme)?;
+        service.register_oauth(id.clone(), request);
+        Ok(target)
     }
 
     fn primary_auth(&self) -> Option<&Auth> {

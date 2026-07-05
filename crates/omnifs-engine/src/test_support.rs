@@ -23,8 +23,8 @@ pub use crate::tree::{PaginationControl, Synthetic, SyntheticContent, probe_live
 pub use crate::{Cursor, Engine, EngineError, GitCloner, HostContext};
 
 pub mod auth {
-    pub use crate::auth::{AuthManager, RefreshOutcome};
-    pub use omnifs_auth::CredentialService;
+    pub use crate::auth::AuthManager;
+    pub use omnifs_auth::{CredentialService, RefreshOutcome};
 
     /// A credential service over an on-disk store, matching the production
     /// wiring in `MountRuntimes::new`. For harnesses that build a `Runtime`

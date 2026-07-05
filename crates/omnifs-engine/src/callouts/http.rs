@@ -13,11 +13,12 @@
 //! without re-buffering. That is the only reqwest type any caller ever
 //! sees.
 
-use crate::auth::{AuthManager, RefreshOutcome};
+use crate::auth::AuthManager;
 use crate::callouts::{callout_denied, callout_internal, callout_network, record_outcome};
 use crate::capability::CapabilityChecker;
 use crate::log_redaction::{LogUrl, WitHeaders};
 use dashmap::DashMap;
+use omnifs_auth::RefreshOutcome;
 use omnifs_wit::provider::types as wit_types;
 use reqwest::Url;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
@@ -84,20 +85,19 @@ impl HttpStack {
         let response = self
             .send_once(reqwest_method.clone(), &parsed, url, headers, body, timeout)
             .await?;
-        if !self
+        match self
             .auth
-            .should_refresh_for_response(url, response.status(), response.headers())
+            .report_rejected_for_response(url, response.status(), response.headers())
+            .await
         {
-            return Ok(response);
-        }
-
-        match self.auth.refresh_for_url(url).await {
-            Ok(RefreshOutcome::Refreshed) => {
+            RefreshOutcome::Refreshed => {
                 self.send_once(reqwest_method, &parsed, url, headers, body, timeout)
                     .await
             },
-            Ok(RefreshOutcome::NoCredential | RefreshOutcome::NotApplicable) => Ok(response),
-            Err(error) => Err(callout_denied(format!("auth refresh failed: {error}"))),
+            RefreshOutcome::NoCredential | RefreshOutcome::NotApplicable => Ok(response),
+            RefreshOutcome::RefreshFailed(error) => {
+                Err(callout_denied(format!("auth refresh failed: {error}")))
+            },
         }
     }
 

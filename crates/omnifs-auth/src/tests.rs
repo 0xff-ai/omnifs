@@ -1,11 +1,15 @@
 use crate::callback::{LoopbackCallback, LoopbackEndpoint, accept_callback_request};
 use crate::request::ClientSideTokenLoginRequest;
 use crate::test_support::{FakeAuthServer, FakeBehavior, FakeOpener, FakeRevocationServer};
-use crate::{AuthError, LoginRequest, OAuthClient, OAuthRequest, RevokeOutcome, UrlOpener};
-use omnifs_workspace::authn::{DevicePollCompat, OauthScheme};
-use omnifs_workspace::creds::Refreshability;
+use crate::{
+    AuthError, CredentialHealth, CredentialService, LoginRequest, OAuthClient, OAuthRequest,
+    OAuthRevokeOutcome, RefreshOutcome, RejectionEvidence, RevokeOutcome, UrlOpener,
+};
+use omnifs_workspace::authn::{CredentialId, DevicePollCompat, OauthScheme};
+use omnifs_workspace::creds::{CredentialEntry, CredentialStore, MemoryStore, Refreshability};
 use secrecy::{ExposeSecret, SecretString};
 use std::sync::Arc;
+use time::OffsetDateTime;
 use url::Url;
 
 #[tokio::test]
@@ -305,7 +309,7 @@ async fn optional_revocation_endpoint_works_without_builder_type_branching() {
         .await
         .unwrap();
 
-    assert_eq!(revoked, RevokeOutcome::Revoked);
+    assert_eq!(revoked, OAuthRevokeOutcome::Revoked);
     assert_eq!(revoke_fake.revocations(), 1);
 
     let no_revoke_scheme = fake.loopback_scheme(None);
@@ -316,7 +320,7 @@ async fn optional_revocation_endpoint_works_without_builder_type_branching() {
         )
         .await
         .unwrap();
-    assert_eq!(skipped, RevokeOutcome::Unsupported);
+    assert_eq!(skipped, OAuthRevokeOutcome::Unsupported);
 }
 
 #[tokio::test]
@@ -357,6 +361,182 @@ async fn device_code_refresh_does_not_require_redirect_uri() {
     assert_eq!(entry.access_token().expose_secret(), "access-refresh-1");
 }
 
+#[tokio::test]
+async fn report_rejected_401_single_flights_refresh_and_updates_health() {
+    let fake = FakeAuthServer::start(FakeBehavior {
+        refresh_delay_ms: 50,
+        ..FakeBehavior::default()
+    })
+    .await;
+    let (service, store, id) = service_with_oauth(fake.loopback_scheme(None));
+    seed_oauth(store.as_ref(), &id, "old-access", "refresh-1", 3600);
+    service.authorization(&id).await.unwrap();
+
+    // Collected eagerly so all tasks are spawned (and observe the pre-rotation
+    // token) before any is awaited; a lazy iterator would serialize them.
+    let handles: Vec<_> = (0..8)
+        .map(|_| {
+            let service = Arc::clone(&service);
+            let id = id.clone();
+            tokio::spawn(async move {
+                service
+                    .report_rejected(&id, RejectionEvidence::new(401, None))
+                    .await
+            })
+        })
+        .collect();
+    let mut results = Vec::new();
+    for handle in handles {
+        results.push(handle.await.unwrap());
+    }
+
+    assert!(
+        results
+            .iter()
+            .all(|result| *result == RefreshOutcome::Refreshed)
+    );
+    assert_eq!(fake.refreshes(), 1);
+    assert_eq!(
+        store
+            .get(&id)
+            .unwrap()
+            .unwrap()
+            .access_token()
+            .expose_secret(),
+        "access-refresh-1"
+    );
+    assert!(
+        service
+            .health()
+            .into_iter()
+            .any(|status| { status.id == id && matches!(status.health, CredentialHealth::Ready) })
+    );
+}
+
+#[tokio::test]
+async fn report_rejected_403_bearer_invalid_token_refreshes() {
+    let fake = FakeAuthServer::start(FakeBehavior::default()).await;
+    let (service, store, id) = service_with_oauth(fake.loopback_scheme(None));
+    seed_oauth(store.as_ref(), &id, "old-access", "refresh-1", 3600);
+    service.authorization(&id).await.unwrap();
+
+    let outcome = service
+        .report_rejected(
+            &id,
+            RejectionEvidence::new(
+                403,
+                Some(r#"Bearer realm="api", error="invalid_token""#.to_owned()),
+            ),
+        )
+        .await;
+
+    assert_eq!(outcome, RefreshOutcome::Refreshed);
+    assert_eq!(fake.refreshes(), 1);
+}
+
+#[tokio::test]
+async fn report_rejected_403_unrelated_challenge_does_not_refresh() {
+    let fake = FakeAuthServer::start(FakeBehavior::default()).await;
+    let (service, store, id) = service_with_oauth(fake.loopback_scheme(None));
+    seed_oauth(store.as_ref(), &id, "old-access", "refresh-1", 3600);
+    service.authorization(&id).await.unwrap();
+
+    let outcome = service
+        .report_rejected(
+            &id,
+            RejectionEvidence::new(403, Some(r#"Bearer error="not_invalid_token""#.to_owned())),
+        )
+        .await;
+
+    assert_eq!(outcome, RefreshOutcome::NotApplicable);
+    assert_eq!(fake.refreshes(), 0);
+}
+
+#[tokio::test]
+async fn invalid_grant_refresh_needs_consent_and_keeps_stored_entry() {
+    let fake = FakeAuthServer::start(FakeBehavior {
+        token_error: Some(("invalid_grant".to_owned(), "revoked".to_owned())),
+        ..FakeBehavior::default()
+    })
+    .await;
+    let (service, store, id) = service_with_oauth(fake.loopback_scheme(None));
+    seed_oauth(store.as_ref(), &id, "old-access", "refresh-1", 3600);
+    service.authorization(&id).await.unwrap();
+
+    let outcome = service
+        .report_rejected(&id, RejectionEvidence::new(401, None))
+        .await;
+
+    assert!(matches!(outcome, RefreshOutcome::RefreshFailed(_)));
+    assert_eq!(
+        store
+            .get(&id)
+            .unwrap()
+            .unwrap()
+            .access_token()
+            .expose_secret(),
+        "old-access"
+    );
+    assert!(service.health().into_iter().any(|status| {
+        status.id == id && matches!(status.health, CredentialHealth::NeedsConsent)
+    }));
+    assert!(matches!(
+        service.authorization(&id).await,
+        Err(crate::AuthUnavailable::NeedsConsent)
+    ));
+}
+
+#[tokio::test]
+async fn needs_consent_credential_leaves_the_refresh_schedule() {
+    let fake = FakeAuthServer::start(FakeBehavior {
+        token_error: Some(("invalid_grant".to_owned(), "revoked".to_owned())),
+        ..FakeBehavior::default()
+    })
+    .await;
+    let (service, store, id) = service_with_oauth(fake.loopback_scheme(None));
+    seed_oauth(store.as_ref(), &id, "old-access", "refresh-1", 3600);
+    service.authorization(&id).await.unwrap();
+    assert!(service.earliest_oauth_deadline().is_some());
+
+    service
+        .report_rejected(&id, RejectionEvidence::new(401, None))
+        .await;
+
+    // A NeedsConsent credential's past-due deadline must not pin the loop's
+    // minimum, or it starves every other credential of proactive refresh.
+    assert!(service.earliest_oauth_deadline().is_none());
+}
+
+#[tokio::test]
+async fn revoke_and_delete_revokes_access_token_then_deletes_local_entry() {
+    let fake = FakeAuthServer::start(FakeBehavior::default()).await;
+    let revoke_fake = FakeRevocationServer::start().await;
+    let (service, store, id) =
+        service_with_oauth(fake.loopback_scheme(Some(revoke_fake.endpoint())));
+    seed_oauth(store.as_ref(), &id, "access-1", "refresh-1", 3600);
+
+    let outcome = service.revoke_and_delete(&id).await;
+
+    assert_eq!(outcome, RevokeOutcome::Revoked);
+    assert_eq!(revoke_fake.revoked_tokens(), ["access-1"]);
+    assert!(store.get(&id).unwrap().is_none());
+}
+
+#[tokio::test]
+async fn revoke_and_delete_deletes_local_entry_when_upstream_revoke_fails() {
+    let fake = FakeAuthServer::start(FakeBehavior::default()).await;
+    let revoke_fake = FakeRevocationServer::start_with_failure(true).await;
+    let (service, store, id) =
+        service_with_oauth(fake.loopback_scheme(Some(revoke_fake.endpoint())));
+    seed_oauth(store.as_ref(), &id, "access-1", "refresh-1", 3600);
+
+    let outcome = service.revoke_and_delete(&id).await;
+
+    assert!(matches!(outcome, RevokeOutcome::Failed { .. }));
+    assert_eq!(revoke_fake.revoked_tokens(), ["access-1"]);
+    assert!(store.get(&id).unwrap().is_none());
+}
+
 fn loopback_login_request(scheme: OauthScheme) -> crate::request::LoopbackLoginRequest {
     let LoginRequest::Loopback(request) = OAuthRequest::new(scheme).into_login_request() else {
         panic!("expected loopback login request");
@@ -384,4 +564,48 @@ fn device_code_login_request(scheme: OauthScheme) -> crate::request::DeviceCodeL
         panic!("expected device-code login request");
     };
     request
+}
+
+fn service_with_oauth(
+    scheme: OauthScheme,
+) -> (
+    Arc<CredentialService>,
+    Arc<dyn CredentialStore>,
+    CredentialId,
+) {
+    let store: Arc<dyn CredentialStore> = Arc::new(MemoryStore::default());
+    let http = reqwest::ClientBuilder::new()
+        .danger_accept_invalid_certs(true)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let service = Arc::new(CredentialService::new(
+        Arc::clone(&store),
+        OAuthClient::from_http_client(http),
+    ));
+    let id = CredentialId::new("test-provider", "oauth", "default").unwrap();
+    service.register_oauth(id.clone(), OAuthRequest::new(scheme));
+    (service, store, id)
+}
+
+fn seed_oauth(
+    store: &dyn CredentialStore,
+    id: &CredentialId,
+    access_token: &str,
+    refresh_token: &str,
+    expires_in_seconds: i64,
+) {
+    store
+        .put(
+            id,
+            &CredentialEntry::oauth(
+                SecretString::from(access_token.to_owned()),
+                Some(SecretString::from(refresh_token.to_owned())),
+                Some(OffsetDateTime::now_utc() + time::Duration::seconds(expires_in_seconds)),
+                "Bearer",
+                vec!["read".to_owned()],
+                OffsetDateTime::now_utc(),
+            ),
+        )
+        .unwrap();
 }
