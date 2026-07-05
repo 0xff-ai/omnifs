@@ -36,6 +36,7 @@ use omnifs_caps::{Grants, Limits};
 ///
 /// Loaded from JSON files in the mount spec directory.
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Spec {
     /// The pinned provider reference: the content [`ProviderId`] plus the
     /// [`ProviderMeta`] (name, version) resolved when the CLI pinned it.
@@ -613,6 +614,54 @@ mod tests {
         let mut value: serde_json::Value = serde_json::from_str(body).unwrap();
         value["provider"] = serde_json::to_value(provider_ref(name)).unwrap();
         serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn spec_parse_rejects_unknown_top_level_key() {
+        let spec = serde_json::json!({
+            "provider": provider_ref("demo"),
+            "mount": "demo",
+            "moutn": "typo"
+        });
+
+        let error = serde_json::from_value::<Spec>(spec).expect_err("unknown key must fail");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("unknown field `moutn`"),
+            "error should name the typo'd key, got: {message}"
+        );
+    }
+
+    #[test]
+    fn provider_dev_mount_templates_parse_after_pinning() {
+        let providers_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../providers");
+        let entries = std::fs::read_dir(&providers_dir)
+            .unwrap_or_else(|source| panic!("read {}: {source}", providers_dir.display()));
+        let mut checked = 0;
+
+        for entry in entries {
+            let path = entry.unwrap().path().join("dev/mount.json");
+            if !path.exists() {
+                continue;
+            }
+            let mut value: serde_json::Value = serde_json::from_str(
+                &std::fs::read_to_string(&path)
+                    .unwrap_or_else(|source| panic!("read {}: {source}", path.display())),
+            )
+            .unwrap_or_else(|source| panic!("parse JSON {}: {source}", path.display()));
+            let name = value
+                .get("provider")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_else(|| panic!("{} has no string provider", path.display()))
+                .to_owned();
+            value["provider"] = serde_json::to_value(provider_ref(&name)).unwrap();
+            serde_json::from_value::<Spec>(value)
+                .unwrap_or_else(|source| panic!("parse pinned spec {}: {source}", path.display()));
+            checked += 1;
+        }
+
+        assert!(checked > 0, "expected at least one provider dev mount");
     }
 
     #[test]
