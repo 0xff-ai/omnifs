@@ -35,21 +35,6 @@ pub(crate) struct MountConfig {
 }
 
 impl MountConfig {
-    pub(crate) fn from_parsed(config: Spec, source: PathBuf) -> anyhow::Result<Self> {
-        let name = MountName::new(config.mount.clone()).with_context(|| {
-            format!(
-                "invalid mount name `{}` in {}",
-                config.mount,
-                source.display()
-            )
-        })?;
-        Ok(Self {
-            name,
-            config,
-            source,
-        })
-    }
-
     pub(crate) fn validate_host_managed_credentials(
         &self,
         mount_auth: &MountAuth,

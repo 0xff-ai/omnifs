@@ -11,7 +11,7 @@ use crate::snapshot::MountSnapshot;
 use crate::{BuildError, HostContext, Runtime, component_engine};
 use omnifs_auth::CredentialService;
 use omnifs_workspace::mounts::materialize::{MaterializationMode, materialize};
-use omnifs_workspace::mounts::{Registry, Spec};
+use omnifs_workspace::mounts::{Registry, Spec, UpgradePlan, pinned_manifest};
 use omnifs_workspace::provider::Catalog;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -39,6 +39,7 @@ pub struct MountRuntimes {
     root_mount: parking_lot::RwLock<Option<String>>,
     timer_shutdown: watch::Sender<bool>,
     timer_tasks: parking_lot::Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
+    running_specs: parking_lot::RwLock<HashMap<String, Spec>>,
     /// Per-mount materialized spec fingerprint, used by reconcile to detect a
     /// spec change. The pinned `ProviderRef` is part of the spec, so an artifact
     /// swap shows up as a spec change without re-hashing the WASM.
@@ -84,6 +85,7 @@ impl MountRuntimes {
             root_mount: parking_lot::RwLock::new(None),
             timer_shutdown,
             timer_tasks: parking_lot::Mutex::new(HashMap::new()),
+            running_specs: parking_lot::RwLock::new(HashMap::new()),
             fingerprints: parking_lot::RwLock::new(HashMap::new()),
             reconcile_lock: parking_lot::Mutex::new(()),
         })
@@ -166,6 +168,8 @@ impl MountRuntimes {
             mount,
             is_root,
             revalidate: spec.revalidate,
+            fingerprint: mount_fingerprint(spec),
+            spec: spec.clone(),
             runtime: Arc::new(runtime),
         })
     }
@@ -179,6 +183,8 @@ impl MountRuntimes {
             mount,
             is_root,
             revalidate,
+            fingerprint,
+            spec,
             runtime,
         } = built;
         // Claim the root binding before the instance becomes visible: a
@@ -208,6 +214,8 @@ impl MountRuntimes {
             }
             instances.insert(mount.clone(), Arc::clone(&runtime));
         }
+        self.fingerprints.write().insert(mount.clone(), fingerprint);
+        self.running_specs.write().insert(mount.clone(), spec);
         self.start_timer(&mount, &runtime, revalidate, handle);
         info!(mount = mount.as_str(), root = is_root, "loaded provider");
         Ok(runtime)
@@ -222,6 +230,8 @@ impl MountRuntimes {
             mount,
             is_root,
             revalidate,
+            fingerprint,
+            spec,
             runtime,
         } = built;
 
@@ -260,6 +270,8 @@ impl MountRuntimes {
         };
 
         self.start_timer(&mount, &runtime, revalidate, handle);
+        self.fingerprints.write().insert(mount.clone(), fingerprint);
+        self.running_specs.write().insert(mount.clone(), spec);
         if let Err(error) = old_runtime.shutdown() {
             warn!(mount = mount.as_str(), error = %error, "shutdown failed");
         }
@@ -275,6 +287,8 @@ impl MountRuntimes {
         if let Some(task) = self.timer_tasks.lock().remove(mount) {
             task.abort();
         }
+        self.fingerprints.write().remove(mount);
+        self.running_specs.write().remove(mount);
         {
             let mut root = self.root_mount.write();
             if root.as_deref() == Some(mount) {
@@ -354,8 +368,32 @@ impl MountRuntimes {
         handle: &tokio::runtime::Handle,
         mode: MaterializationMode,
     ) -> ReconcileOutcome {
+        self.reconcile_with_approvals(handle, mode, UpgradeApprovals::default())
+    }
+
+    pub fn reconcile_with_approvals(
+        self: &Arc<Self>,
+        handle: &tokio::runtime::Handle,
+        mode: MaterializationMode,
+        approvals: UpgradeApprovals,
+    ) -> ReconcileOutcome {
         let _guard = self.reconcile_lock.lock();
-        ReconcilePass::new(self, handle, mode).run()
+        ReconcilePass::new(self, handle, mode, approvals).run()
+    }
+
+    pub fn converge_spec(
+        self: &Arc<Self>,
+        handle: &tokio::runtime::Handle,
+        mode: MaterializationMode,
+        spec: Spec,
+        approved: Option<UpgradePlan>,
+    ) -> ReconcileOutcome {
+        let _guard = self.reconcile_lock.lock();
+        let mut approvals = UpgradeApprovals::default();
+        if let Some(plan) = approved {
+            approvals.approve(spec.mount.clone(), plan);
+        }
+        ReconcilePass::new(self, handle, mode, approvals).run_one(spec)
     }
 
     fn build_work(&self, work: LoadWork) -> LoadResult {
@@ -376,9 +414,10 @@ impl MountRuntimes {
                 running,
                 reason,
                 duration: started.elapsed(),
-                built,
+                built: Box::new(built),
             },
             Err(error) => {
+                let kind = error.failure_kind();
                 warn!(
                     mount = mount.as_str(),
                     provider = %wasm_path.display(),
@@ -389,6 +428,7 @@ impl MountRuntimes {
                 );
                 LoadResult::Failed {
                     mount,
+                    kind,
                     reason: error.to_string(),
                 }
             },
@@ -464,6 +504,7 @@ struct ReconcilePass<'a> {
     handle: &'a tokio::runtime::Handle,
     mode: MaterializationMode,
     providers: Catalog,
+    approvals: UpgradeApprovals,
     desired: HashSet<String>,
     outcome: ReconcileOutcome,
     started: Instant,
@@ -474,12 +515,14 @@ impl<'a> ReconcilePass<'a> {
         registry: &'a Arc<MountRuntimes>,
         handle: &'a tokio::runtime::Handle,
         mode: MaterializationMode,
+        approvals: UpgradeApprovals,
     ) -> Self {
         Self {
             registry,
             handle,
             mode,
             providers: Catalog::open(registry.context.providers_dir()),
+            approvals,
             desired: HashSet::new(),
             outcome: ReconcileOutcome::default(),
             started: Instant::now(),
@@ -495,7 +538,9 @@ impl<'a> ReconcilePass<'a> {
             Err(error) => {
                 self.outcome.failed.push(MountFailure {
                     mount: self.registry.context.mounts_dir().display().to_string(),
+                    kind: FailureKind::SpecInvalid,
                     reason: format!("scan mounts dir: {error}"),
+                    detail: None,
                 });
                 return self.outcome;
             },
@@ -507,7 +552,9 @@ impl<'a> ReconcilePass<'a> {
         for failure in registry.failures() {
             self.outcome.failed.push(MountFailure {
                 mount: failure.path.display().to_string(),
+                kind: FailureKind::SpecInvalid,
                 reason: failure.error.to_string(),
+                detail: None,
             });
         }
 
@@ -538,6 +585,20 @@ impl<'a> ReconcilePass<'a> {
         self.outcome
     }
 
+    fn run_one(mut self, spec: Spec) -> ReconcileOutcome {
+        let path = self
+            .registry
+            .context
+            .mounts_dir()
+            .join(format!("{}.json", spec.mount));
+        if let Some(work) = self.plan_spec(spec, &path) {
+            for result in self.load_in_parallel(vec![work]) {
+                self.record_load(result);
+            }
+        }
+        self.outcome
+    }
+
     /// Decide what a desired spec needs. Records unchanged mounts and
     /// materialize/duplicate failures into the outcome directly; returns a
     /// `LoadWork` only for mounts that must be (re)compiled. `path` is the
@@ -548,7 +609,9 @@ impl<'a> ReconcilePass<'a> {
             Err(error) => {
                 self.outcome.failed.push(MountFailure {
                     mount: path.display().to_string(),
+                    kind: FailureKind::SpecInvalid,
                     reason: error.to_string(),
+                    detail: None,
                 });
                 return None;
             },
@@ -575,6 +638,11 @@ impl<'a> ReconcilePass<'a> {
             return None;
         }
 
+        if running && let Some(failure) = self.consent_failure(&mount, &materialized) {
+            self.outcome.failed.push(failure);
+            return None;
+        }
+
         let reason = if prior_fingerprint.is_some() {
             "config"
         } else {
@@ -588,6 +656,63 @@ impl<'a> ReconcilePass<'a> {
             running,
             reason,
         })
+    }
+
+    fn consent_failure(&self, mount: &str, candidate: &Spec) -> Option<MountFailure> {
+        let plan = match self.upgrade_plan(mount, candidate) {
+            Ok(plan) => plan,
+            Err(error) => {
+                return Some(MountFailure {
+                    mount: mount.to_string(),
+                    kind: error.failure_kind(),
+                    reason: error.to_string(),
+                    detail: None,
+                });
+            },
+        };
+        if !plan.requires_approval() {
+            return None;
+        }
+        if self
+            .approvals
+            .get(mount)
+            .is_some_and(|approved| approved.covers(&plan))
+        {
+            return None;
+        }
+        Some(MountFailure {
+            mount: mount.to_string(),
+            kind: FailureKind::ConsentRequired,
+            reason: format!("mount `{mount}` upgrade requires explicit approval"),
+            detail: Some(plan),
+        })
+    }
+
+    fn upgrade_plan(&self, mount: &str, candidate: &Spec) -> Result<UpgradePlan, RegistryError> {
+        let running = self
+            .registry
+            .running_specs
+            .read()
+            .get(mount)
+            .cloned()
+            .ok_or_else(|| {
+                RegistryError::RuntimeError(format!("running mount `{mount}` has no recorded spec"))
+            })?;
+        let old = pinned_manifest(&self.providers, &running)
+            .map_err(|error| RegistryError::ConfigError(error.to_string()))?
+            .ok_or_else(|| {
+                RegistryError::ProviderNotFound(format!(
+                    "running provider artifact for mount `{mount}` is missing"
+                ))
+            })?;
+        let new = pinned_manifest(&self.providers, candidate)
+            .map_err(|error| RegistryError::ConfigError(error.to_string()))?
+            .ok_or_else(|| {
+                RegistryError::ProviderNotFound(format!(
+                    "candidate provider artifact for mount `{mount}` is missing"
+                ))
+            })?;
+        Ok(UpgradePlan::diff(&old, &new))
     }
 
     /// Compile the planned mounts. Compilation dominates reconcile wall-time,
@@ -615,6 +740,7 @@ impl<'a> ReconcilePass<'a> {
                 }))
                 .unwrap_or_else(|_| LoadResult::Failed {
                     mount,
+                    kind: FailureKind::Internal,
                     reason: "reconcile load task panicked".to_string(),
                 });
                 let _ = tx.send((index, result));
@@ -646,10 +772,10 @@ impl<'a> ReconcilePass<'a> {
             } => {
                 let apply_started = Instant::now();
                 let applied = if running {
-                    self.registry.replace_mount(built, self.handle)
+                    self.registry.replace_mount(*built, self.handle)
                 } else {
                     self.registry
-                        .publish_new_mount(built, self.handle)
+                        .publish_new_mount(*built, self.handle)
                         .map(|_| ())
                 };
                 match applied {
@@ -681,13 +807,24 @@ impl<'a> ReconcilePass<'a> {
                     Err(error) => {
                         self.outcome.failed.push(MountFailure {
                             mount,
+                            kind: error.failure_kind(),
                             reason: error.to_string(),
+                            detail: None,
                         });
                     },
                 }
             },
-            LoadResult::Failed { mount, reason } => {
-                self.outcome.failed.push(MountFailure { mount, reason });
+            LoadResult::Failed {
+                mount,
+                kind,
+                reason,
+            } => {
+                self.outcome.failed.push(MountFailure {
+                    mount,
+                    kind,
+                    reason,
+                    detail: None,
+                });
             },
         }
     }
@@ -725,6 +862,8 @@ struct BuiltMount {
     mount: String,
     is_root: bool,
     revalidate: bool,
+    fingerprint: u64,
+    spec: Spec,
     runtime: Arc<Runtime>,
 }
 
@@ -738,10 +877,11 @@ enum LoadResult {
         running: bool,
         reason: &'static str,
         duration: Duration,
-        built: BuiltMount,
+        built: Box<BuiltMount>,
     },
     Failed {
         mount: String,
+        kind: FailureKind,
         reason: String,
     },
 }
@@ -751,7 +891,17 @@ enum LoadResult {
 pub struct MountFailure {
     /// Mount name, or the spec path when the name could not be parsed.
     pub mount: String,
+    pub kind: FailureKind,
     pub reason: String,
+    pub detail: Option<UpgradePlan>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailureKind {
+    ConsentRequired,
+    SpecInvalid,
+    ProviderMissing,
+    Internal,
 }
 
 /// What a reconcile pass changed. Host-local; the daemon maps it to the
@@ -762,6 +912,22 @@ pub struct ReconcileOutcome {
     pub removed: Vec<String>,
     pub updated: Vec<String>,
     pub failed: Vec<MountFailure>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct UpgradeApprovals {
+    plans: HashMap<String, UpgradePlan>,
+}
+
+impl UpgradeApprovals {
+    pub fn approve(&mut self, mount: impl Into<String>, plan: UpgradePlan) {
+        self.plans.insert(mount.into(), plan);
+    }
+
+    #[must_use]
+    pub fn get(&self, mount: &str) -> Option<&UpgradePlan> {
+        self.plans.get(mount)
+    }
 }
 
 /// Fingerprint a materialized spec. The spec carries the pinned `ProviderRef`
@@ -800,9 +966,21 @@ pub enum RegistryError {
     RuntimeError(String),
 }
 
+impl RegistryError {
+    fn failure_kind(&self) -> FailureKind {
+        match self {
+            Self::ConfigError(_) | Self::DuplicateMount(_) | Self::MountNotFound(_) => {
+                FailureKind::SpecInvalid
+            },
+            Self::ProviderNotFound(_) => FailureKind::ProviderMissing,
+            Self::RuntimeError(_) => FailureKind::Internal,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{MountRuntimes, RegistryError};
+    use super::{FailureKind, MountRuntimes, RegistryError};
     use crate::HostContext;
     use crate::Runtime;
     use crate::cache::Caches;
@@ -812,8 +990,8 @@ mod tests {
     use omnifs_core::path::Path as OmnifsPath;
     use omnifs_wit::provider::types::{Callout, CalloutResult, Header, HttpResponse};
     use omnifs_workspace::ids::{ProviderId, ProviderMeta, ProviderName};
-    use omnifs_workspace::mounts::Spec;
     use omnifs_workspace::mounts::materialize::MaterializationMode;
+    use omnifs_workspace::mounts::{Spec, UpgradePlan};
     use omnifs_workspace::provider::ProviderStore;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
@@ -822,11 +1000,20 @@ mod tests {
     /// Lay `src` WASM into the provider store under `providers_dir` and return a
     /// `Spec` (built from `body`, which omits `provider`) pinned to the content
     /// id. Mirrors how the CLI pins a `ProviderRef` after installing an artifact.
-    fn pin_spec(providers_dir: &Path, src: &Path, name: &str, mut body: serde_json::Value) -> Spec {
+    fn pin_spec(providers_dir: &Path, src: &Path, name: &str, body: serde_json::Value) -> Spec {
         let bytes = std::fs::read(src).expect("read provider wasm");
-        let id = ProviderId::from_wasm_bytes(&bytes);
+        pin_spec_bytes(providers_dir, &bytes, name, body)
+    }
+
+    fn pin_spec_bytes(
+        providers_dir: &Path,
+        bytes: &[u8],
+        name: &str,
+        mut body: serde_json::Value,
+    ) -> Spec {
+        let id = ProviderId::from_wasm_bytes(bytes);
         let store = ProviderStore::new(providers_dir);
-        store.put_if_absent(&id, &bytes).expect("put provider");
+        store.put_if_absent(&id, bytes).expect("put provider");
         store
             .install(
                 id,
@@ -839,6 +1026,22 @@ mod tests {
             .expect("install provider");
         body["provider"] = serde_json::json!({ "id": id.to_string(), "meta": { "name": name } });
         serde_json::from_value(body).expect("build pinned spec")
+    }
+
+    fn provider_wasm_with_capabilities(src: &Path, capabilities: &serde_json::Value) -> Vec<u8> {
+        let base = std::fs::read(src).expect("read provider wasm");
+        let metadata = serde_json::json!({
+            "id": "test-provider",
+            "displayName": "Test Provider",
+            "provider": "test_provider.wasm",
+            "defaultMount": "test",
+            "capabilities": capabilities,
+        });
+        omnifs_workspace::provider::embed_provider_metadata_section(
+            &base,
+            serde_json::to_vec(&metadata).unwrap().as_slice(),
+        )
+        .expect("embed provider metadata")
     }
 
     fn wasm_artifact_path(file_name: &str) -> PathBuf {
@@ -1332,6 +1535,86 @@ mod tests {
         assert!(
             !Arc::ptr_eq(&running, &replaced),
             "an update swaps in a new runtime instance"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reconcile_requires_approval_for_capability_widening() {
+        let fx = reconcile_fixture();
+        let old_wasm = provider_wasm_with_capabilities(
+            &fx.base_wasm,
+            &serde_json::json!([
+                { "kind": "domain", "value": "httpbin.org", "why": "test api" }
+            ]),
+        );
+        let new_wasm = provider_wasm_with_capabilities(
+            &fx.base_wasm,
+            &serde_json::json!([
+                { "kind": "domain", "value": "httpbin.org", "why": "test api" },
+                { "kind": "domain", "value": "example.com", "why": "new api" }
+            ]),
+        );
+        let spec = pin_spec_bytes(
+            fx.providers_dir.path(),
+            &old_wasm,
+            "test-provider",
+            serde_json::json!({
+                "mount": "test",
+                "config": {},
+                "capabilities": { "domains": ["httpbin.org"] }
+            }),
+        );
+        let spec_path = fx.mounts_dir.join("test.json");
+        std::fs::write(&spec_path, serde_json::to_vec_pretty(&spec).unwrap()).expect("write spec");
+
+        let handle = tokio::runtime::Handle::current();
+        let first = fx.registry.reconcile(&handle, MaterializationMode::Docker);
+        assert_eq!(first.added, ["test"], "first reconcile: {first:?}");
+        let running = fx.registry.get("test").expect("mount should be running");
+
+        let widened = pin_spec_bytes(
+            fx.providers_dir.path(),
+            &new_wasm,
+            "test-provider",
+            serde_json::json!({
+                "mount": "test",
+                "config": {},
+                "capabilities": { "domains": ["httpbin.org", "example.com"] }
+            }),
+        );
+        std::fs::write(&spec_path, serde_json::to_vec_pretty(&widened).unwrap())
+            .expect("write widened spec");
+
+        let refused = fx.registry.reconcile(&handle, MaterializationMode::Docker);
+        assert!(
+            refused.updated.is_empty(),
+            "unapproved widening must not update: {refused:?}"
+        );
+        let failure = refused
+            .failed
+            .iter()
+            .find(|failure| failure.mount == "test")
+            .expect("widening failure");
+        assert_eq!(failure.kind, FailureKind::ConsentRequired);
+        let actual = failure.detail.clone().expect("actual approval delta");
+        assert!(matches!(actual, UpgradePlan::CapabilityLimitOrAuth { .. }));
+        let still_running = fx.registry.get("test").expect("old mount remains");
+        assert!(Arc::ptr_eq(&running, &still_running));
+
+        let mut approvals = super::UpgradeApprovals::default();
+        approvals.approve("test", actual);
+        let approved =
+            fx.registry
+                .reconcile_with_approvals(&handle, MaterializationMode::Docker, approvals);
+        assert_eq!(
+            approved.updated,
+            ["test"],
+            "approved widening updates the mount: {approved:?}"
+        );
+        let replaced = fx.registry.get("test").expect("mount running after update");
+        assert!(
+            !Arc::ptr_eq(&running, &replaced),
+            "approval permits the runtime swap"
         );
     }
 

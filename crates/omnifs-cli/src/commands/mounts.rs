@@ -121,22 +121,35 @@ pub async fn rm(
     )
     .await?;
 
-    Registry::load(&layout.mounts_dir)?.remove(&name)?;
+    let daemon_delete = match workspace
+        .daemon()
+        .delete_mount_if_ready(name.as_str())
+        .await
+    {
+        Ok(report) => report,
+        Err(error) => {
+            anstream::eprintln!("Running daemon could not remove mount `{name}`: {error:#}");
+            anstream::eprintln!("Falling back to a local mount config delete.");
+            None
+        },
+    };
+    if daemon_delete.is_none() {
+        Registry::load(&layout.mounts_dir)?.remove(&name)?;
+    }
     anstream::println!(
         "Removed mount `{name}` ({})",
         WorkspaceLayout::display(&config_path)
     );
 
-    match workspace.daemon().reconcile_if_running().await {
-        Ok(Some(_)) => {
-            anstream::println!("✓ Unloaded from the running daemon");
-        },
-        Ok(None) => {},
-        Err(error) => {
+    if let Some(report) = daemon_delete {
+        if let Some(failure) = report.failure {
             anstream::eprintln!(
-                "Mount config removed, but unloading it from the running daemon failed: {error:#}"
+                "Mount config removed, but unloading it from the running daemon failed: {}",
+                failure.reason
             );
-        },
+        } else {
+            anstream::println!("✓ Unloaded from the running daemon");
+        }
     }
     Ok(())
 }

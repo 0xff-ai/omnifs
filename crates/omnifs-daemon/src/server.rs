@@ -10,11 +10,16 @@ use axum::extract::{Path as UrlPath, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Json, Response};
 use omnifs_api::{
-    ApiError, DaemonBackend, DaemonHealth, DaemonStatus, DaemonSubsystem, ErrorCode, FrontendInfo,
-    HealthState, MountFailure, MountInfo, ReadyInfo, ReconcileReport, StopReport, SubsystemHealth,
+    AddedField, ApiError, AuthDelta, AuthSchemeSurface, AuthSurface, CapabilityChange,
+    CapabilityDirection, DaemonBackend, DaemonHealth, DaemonStatus, DaemonSubsystem, ErrorCode,
+    FieldChange, FrontendInfo, HealthState, LimitChange, LimitDirection, MountFailure, MountInfo,
+    MountOutcome, MountReport, MountUpdateRequest, ReadyInfo, ReconcileReport, StopReport,
+    SubsystemHealth, UpgradeDelta,
 };
-use omnifs_engine::InspectorSink;
-use omnifs_engine::MountRuntimes;
+use omnifs_engine::{FailureKind, InspectorSink, MountRuntimes, ReconcileOutcome, RegistryError};
+use omnifs_workspace::mounts::materialize::materialize;
+use omnifs_workspace::mounts::{Name as MountName, Registry, Spec, UpgradePlan};
+use omnifs_workspace::provider::Catalog;
 use std::convert::Infallible;
 use std::path::Path;
 use std::sync::Arc;
@@ -45,6 +50,19 @@ use crate::frontends::Frontend;
         DaemonBackend,
         MountInfo,
         MountFailure,
+        MountReport,
+        MountOutcome,
+        MountUpdateRequest,
+        UpgradeDelta,
+        AddedField,
+        FieldChange,
+        CapabilityChange,
+        CapabilityDirection,
+        LimitChange,
+        LimitDirection,
+        AuthDelta,
+        AuthSurface,
+        AuthSchemeSurface,
         ReconcileReport,
         StopReport,
     ))
@@ -144,37 +162,7 @@ impl Daemon {
         let outcome = self
             .registry
             .reconcile(handle, self.context.materialization_mode());
-        for name in &outcome.added {
-            self.update_root_symlink(name, true);
-        }
-        for name in &outcome.updated {
-            self.frontends.invalidate_root_child(name);
-            self.update_root_symlink(name, true);
-        }
-        for name in &outcome.removed {
-            self.frontends.invalidate_root_child(name);
-            self.update_root_symlink(name, false);
-        }
-        let failed: Vec<MountFailure> = outcome
-            .failed
-            .into_iter()
-            .map(|failure| MountFailure {
-                kind: mount_failure_kind(&failure.reason),
-                mount: failure.mount,
-                reason: failure.reason,
-            })
-            .collect();
-        // Remember the failures so `status` can show a dark mount and why,
-        // instead of it simply being absent from `mounts`.
-        if let Ok(mut last) = self.last_failed.lock() {
-            last.clone_from(&failed);
-        }
-        ReconcileReport {
-            added: outcome.added,
-            updated: outcome.updated,
-            removed: outcome.removed,
-            failed,
-        }
+        self.apply_reconcile_outcome(outcome)
     }
 
     /// Reconcile on a blocking task, since it compiles WASM for added or changed
@@ -188,6 +176,90 @@ impl Daemon {
                 warn!(%join_error, "reconcile task failed");
                 ReconcileReport::default()
             })
+    }
+
+    pub async fn converge_spec(
+        self: &Arc<Self>,
+        spec: Spec,
+        approved: Option<UpgradePlan>,
+    ) -> ReconcileReport {
+        let daemon = Arc::clone(self);
+        let handle = tokio::runtime::Handle::current();
+        tokio::task::spawn_blocking(move || {
+            let outcome = daemon.registry.converge_spec(
+                &handle,
+                daemon.context.materialization_mode(),
+                spec,
+                approved,
+            );
+            daemon.apply_reconcile_outcome(outcome)
+        })
+        .await
+        .unwrap_or_else(|join_error| {
+            warn!(%join_error, "mount converge task failed");
+            ReconcileReport::default()
+        })
+    }
+
+    pub async fn remove_mount(self: &Arc<Self>, mount: &str) -> ReconcileReport {
+        let daemon = Arc::clone(self);
+        let mount = mount.to_string();
+        tokio::task::spawn_blocking(move || {
+            let mut outcome = ReconcileOutcome::default();
+            match daemon.registry.remove_mount(&mount) {
+                // Removing an already-absent mount is convergent: report removed.
+                Ok(()) | Err(RegistryError::MountNotFound(_)) => outcome.removed.push(mount),
+                Err(error) => outcome.failed.push(omnifs_engine::MountFailure {
+                    mount,
+                    kind: error_kind(&error),
+                    reason: error.to_string(),
+                    detail: None,
+                }),
+            }
+            daemon.apply_reconcile_outcome(outcome)
+        })
+        .await
+        .unwrap_or_else(|join_error| {
+            warn!(%join_error, "mount removal task failed");
+            ReconcileReport::default()
+        })
+    }
+
+    fn validate_spec(&self, spec: &Spec) -> Result<(), Box<Response>> {
+        let catalog = Catalog::open(self.context.providers_dir());
+        materialize(spec.clone(), &catalog, self.context.materialization_mode())
+            .map(|_| ())
+            .map_err(|error| {
+                Box::new(error_response(
+                    StatusCode::BAD_REQUEST,
+                    ErrorCode::SpecInvalid,
+                    error.to_string(),
+                ))
+            })
+    }
+
+    fn apply_reconcile_outcome(&self, outcome: ReconcileOutcome) -> ReconcileReport {
+        for name in &outcome.added {
+            self.update_root_symlink(name, true);
+        }
+        for name in &outcome.updated {
+            self.frontends.invalidate_root_child(name);
+            self.update_root_symlink(name, true);
+        }
+        for name in &outcome.removed {
+            self.frontends.invalidate_root_child(name);
+            self.update_root_symlink(name, false);
+        }
+        let failed: Vec<MountFailure> = outcome.failed.into_iter().map(api_mount_failure).collect();
+        if let Ok(mut last) = self.last_failed.lock() {
+            last.clone_from(&failed);
+        }
+        ReconcileReport {
+            added: outcome.added,
+            updated: outcome.updated,
+            removed: outcome.removed,
+            failed,
+        }
     }
 
     /// Unmount the frontend from a detached task so the HTTP response flushes
@@ -273,7 +345,10 @@ impl Daemon {
             .routes(routes!(ready))
             .routes(routes!(status))
             .routes(routes!(mounts_list))
+            .routes(routes!(mount_create))
             .routes(routes!(mount_inspect))
+            .routes(routes!(mount_update))
+            .routes(routes!(mount_delete))
             .routes(routes!(mount_export))
             .routes(routes!(reconcile))
             .routes(routes!(shutdown))
@@ -344,6 +419,77 @@ async fn mounts_list(State(daemon): State<Arc<Daemon>>) -> Json<Vec<MountInfo>> 
 }
 
 #[utoipa::path(
+    post,
+    path = "/v1/mounts",
+    operation_id = "mount_create",
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "mount create result", body = MountReport),
+        (status = 400, description = "invalid mount spec", body = ApiError),
+    ),
+)]
+async fn mount_create(
+    State(daemon): State<Arc<Daemon>>,
+    Json(spec_json): Json<serde_json::Value>,
+) -> Response {
+    let spec = match parse_spec_json(spec_json) {
+        Ok(spec) => spec,
+        Err(response) => return *response,
+    };
+    let name = match validate_spec_mount_name(&spec) {
+        Ok(name) => name,
+        Err(response) => return *response,
+    };
+    if let Err(response) = daemon.validate_spec(&spec) {
+        return *response;
+    }
+    let mounts_dir = daemon.context.mounts_dir().to_path_buf();
+    let spec_for_write = spec.clone();
+    let existing = match Registry::load(&mounts_dir).map(|registry| registry.get(&name).is_some()) {
+        Ok(existing) => existing,
+        Err(error) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                ErrorCode::SpecInvalid,
+                error.to_string(),
+            );
+        },
+    };
+    if existing {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::SpecInvalid,
+            format!("mount `{name}` already exists; use PUT to update it"),
+        );
+    }
+    match tokio::task::spawn_blocking(move || {
+        let mut registry = Registry::load(&mounts_dir)?;
+        registry.put(&spec_for_write)
+    })
+    .await
+    {
+        Ok(Ok(())) => {},
+        Ok(Err(error)) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                ErrorCode::SpecInvalid,
+                error.to_string(),
+            );
+        },
+        Err(error) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ErrorCode::Internal,
+                format!("mount create task failed: {error}"),
+            );
+        },
+    }
+
+    let report = daemon.converge_spec(spec, None).await;
+    Json(mount_report(name.as_str(), &report, None)).into_response()
+}
+
+#[utoipa::path(
     get,
     path = "/v1/mounts/{name}",
     operation_id = "mount_inspect",
@@ -370,6 +516,171 @@ async fn mount_inspect(
             format!("mount `{name}` not found"),
         ),
     }
+}
+
+#[utoipa::path(
+    put,
+    path = "/v1/mounts/{name}",
+    operation_id = "mount_update",
+    params(("name" = String, Path, description = "mount name")),
+    request_body = MountUpdateRequest,
+    responses(
+        (status = 200, description = "mount update result", body = MountReport),
+        (status = 400, description = "invalid mount spec or approval", body = ApiError),
+        (status = 404, description = "mount not found", body = ApiError),
+    ),
+)]
+async fn mount_update(
+    State(daemon): State<Arc<Daemon>>,
+    UrlPath(name): UrlPath<String>,
+    Json(request): Json<MountUpdateRequest>,
+) -> Response {
+    let mount_name = match MountName::new(name.clone()) {
+        Ok(name) => name,
+        Err(error) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                ErrorCode::SpecInvalid,
+                format!("invalid mount name `{name}`: {error}"),
+            );
+        },
+    };
+    let spec = match parse_spec_json(request.spec) {
+        Ok(spec) => spec,
+        Err(response) => return *response,
+    };
+    if spec.mount != mount_name.as_str() {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::SpecInvalid,
+            format!(
+                "request path mount `{}` does not match spec mount `{}`",
+                mount_name, spec.mount
+            ),
+        );
+    }
+    if let Err(response) = daemon.validate_spec(&spec) {
+        return *response;
+    }
+    let approved = match request
+        .approved
+        .as_ref()
+        .map(upgrade_plan_from_api)
+        .transpose()
+    {
+        Ok(approved) => approved,
+        Err(error) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                ErrorCode::SpecInvalid,
+                format!("invalid approved upgrade delta: {error}"),
+            );
+        },
+    };
+    let mounts_dir = daemon.context.mounts_dir().to_path_buf();
+    let spec_for_write = spec.clone();
+    let exists = match Registry::load(&mounts_dir) {
+        Ok(registry) => registry.get(&mount_name).is_some(),
+        Err(error) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                ErrorCode::SpecInvalid,
+                error.to_string(),
+            );
+        },
+    };
+    if !exists {
+        return error_response(
+            StatusCode::NOT_FOUND,
+            ErrorCode::MountNotFound,
+            format!("mount `{mount_name}` not found"),
+        );
+    }
+    match tokio::task::spawn_blocking(move || {
+        let mut registry = Registry::load(&mounts_dir)?;
+        registry.put(&spec_for_write)
+    })
+    .await
+    {
+        Ok(Ok(())) => {},
+        Ok(Err(error)) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                ErrorCode::SpecInvalid,
+                error.to_string(),
+            );
+        },
+        Err(error) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ErrorCode::Internal,
+                format!("mount update task failed: {error}"),
+            );
+        },
+    }
+
+    let report = daemon.converge_spec(spec, approved).await;
+    Json(mount_report(mount_name.as_str(), &report, request.approved)).into_response()
+}
+
+#[utoipa::path(
+    delete,
+    path = "/v1/mounts/{name}",
+    operation_id = "mount_delete",
+    params(("name" = String, Path, description = "mount name")),
+    responses(
+        (status = 200, description = "mount delete result", body = MountReport),
+        (status = 404, description = "mount not found", body = ApiError),
+    ),
+)]
+async fn mount_delete(
+    State(daemon): State<Arc<Daemon>>,
+    UrlPath(name): UrlPath<String>,
+) -> Response {
+    let mount_name = match MountName::new(name.clone()) {
+        Ok(name) => name,
+        Err(error) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                ErrorCode::SpecInvalid,
+                format!("invalid mount name `{name}`: {error}"),
+            );
+        },
+    };
+    let mounts_dir = daemon.context.mounts_dir().to_path_buf();
+    let mount_for_task = mount_name.clone();
+    match tokio::task::spawn_blocking(move || {
+        let mut registry = Registry::load(&mounts_dir)?;
+        registry.remove(&mount_for_task)
+    })
+    .await
+    {
+        Ok(Ok(true)) => {},
+        Ok(Ok(false)) => {
+            return error_response(
+                StatusCode::NOT_FOUND,
+                ErrorCode::MountNotFound,
+                format!("mount `{mount_name}` not found"),
+            );
+        },
+        Ok(Err(error)) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                ErrorCode::SpecInvalid,
+                error.to_string(),
+            );
+        },
+        Err(error) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ErrorCode::Internal,
+                format!("mount delete task failed: {error}"),
+            );
+        },
+    }
+
+    let report = daemon.remove_mount(mount_name.as_str()).await;
+    Json(mount_report(mount_name.as_str(), &report, None)).into_response()
 }
 
 #[utoipa::path(
@@ -497,23 +808,93 @@ fn error_response(status: StatusCode, code: ErrorCode, message: impl Into<String
         .into_response()
 }
 
-fn mount_failure_kind(reason: &str) -> ErrorCode {
-    if reason.contains("provider not found") {
-        ErrorCode::ProviderMissing
-    } else if reason.starts_with("failed to read mount spec")
-        || reason.starts_with("failed to parse mount spec")
-        || reason.starts_with("invalid mount name")
-        || reason.contains("must be named")
-        || reason.starts_with("apply provider metadata")
-        || reason.contains("under-grants provider")
-        || reason.contains("preopen")
-        || reason.contains("dynamic unix-socket grant")
-        || reason.starts_with("config error:")
-    {
-        ErrorCode::SpecInvalid
+fn parse_spec_json(value: serde_json::Value) -> Result<Spec, Box<Response>> {
+    serde_json::from_value(value).map_err(|error| {
+        Box::new(error_response(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::SpecInvalid,
+            format!("invalid mount spec: {error}"),
+        ))
+    })
+}
+
+fn validate_spec_mount_name(spec: &Spec) -> Result<MountName, Box<Response>> {
+    MountName::new(spec.mount.clone()).map_err(|error| {
+        Box::new(error_response(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::SpecInvalid,
+            format!("invalid mount name `{}`: {error}", spec.mount),
+        ))
+    })
+}
+
+fn mount_report(
+    mount: &str,
+    report: &ReconcileReport,
+    approved: Option<UpgradeDelta>,
+) -> MountReport {
+    let failure = report
+        .failed
+        .iter()
+        .find(|failure| failure.mount == mount)
+        .cloned();
+    let outcome = if failure.is_some() {
+        MountOutcome::Failed
+    } else if report.added.iter().any(|name| name == mount) {
+        MountOutcome::Added
+    } else if report.updated.iter().any(|name| name == mount) {
+        MountOutcome::Updated
+    } else if report.removed.iter().any(|name| name == mount) {
+        MountOutcome::Removed
     } else {
-        ErrorCode::Internal
+        MountOutcome::Unchanged
+    };
+    MountReport {
+        mount: mount.to_string(),
+        outcome,
+        failure,
+        approved,
     }
+}
+
+fn api_mount_failure(failure: omnifs_engine::MountFailure) -> MountFailure {
+    MountFailure {
+        mount: failure.mount,
+        kind: api_error_code(failure.kind),
+        reason: failure.reason,
+        detail: failure.detail.as_ref().map(|plan| {
+            serde_json::to_value(upgrade_delta_from_plan(plan))
+                .expect("upgrade approval DTO serializes")
+        }),
+    }
+}
+
+fn api_error_code(kind: FailureKind) -> ErrorCode {
+    match kind {
+        FailureKind::ConsentRequired => ErrorCode::ConsentRequired,
+        FailureKind::SpecInvalid => ErrorCode::SpecInvalid,
+        FailureKind::ProviderMissing => ErrorCode::ProviderMissing,
+        FailureKind::Internal => ErrorCode::Internal,
+    }
+}
+
+fn error_kind(error: &RegistryError) -> FailureKind {
+    match error {
+        RegistryError::ConfigError(_)
+        | RegistryError::DuplicateMount(_)
+        | RegistryError::MountNotFound(_) => FailureKind::SpecInvalid,
+        RegistryError::ProviderNotFound(_) => FailureKind::ProviderMissing,
+        RegistryError::RuntimeError(_) => FailureKind::Internal,
+    }
+}
+
+fn upgrade_delta_from_plan(plan: &UpgradePlan) -> UpgradeDelta {
+    serde_json::from_value(serde_json::to_value(plan).expect("workspace upgrade plan serializes"))
+        .expect("workspace and API upgrade delta shapes match")
+}
+
+fn upgrade_plan_from_api(delta: &UpgradeDelta) -> Result<UpgradePlan, serde_json::Error> {
+    serde_json::from_value(serde_json::to_value(delta)?)
 }
 
 fn record_line(record: &omnifs_api::events::InspectorRecord) -> Option<String> {
@@ -531,6 +912,8 @@ fn record_line(record: &omnifs_api::events::InspectorRecord) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use axum::http::StatusCode;
+
     #[test]
     fn checked_in_openapi_matches_implementation() {
         let checked_in: serde_json::Value =
@@ -540,5 +923,25 @@ mod tests {
             serde_json::from_str(&super::openapi_json()).expect("generated OpenAPI spec parses");
 
         assert_eq!(checked_in, generated);
+    }
+
+    #[test]
+    fn create_mount_rejects_secret_field_in_auth_block() {
+        let spec = serde_json::json!({
+            "provider": {
+                "id": "0000000000000000000000000000000000000000000000000000000000000000",
+                "meta": { "name": "demo" }
+            },
+            "mount": "demo",
+            "auth": {
+                "type": "oauth",
+                "scheme": "oauth",
+                "clientSecret": "literal-secret"
+            }
+        });
+
+        let response = super::parse_spec_json(spec).expect_err("spec must be rejected");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 }

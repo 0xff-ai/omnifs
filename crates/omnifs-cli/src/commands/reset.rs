@@ -58,11 +58,10 @@ impl ResetArgs {
             }
         }
 
-        // Tear down the daemon first so a daemon writing files won't race the
-        // credential or mount-config delete. Best-effort: a non-running daemon
-        // or an absent launch record is not a reset failure.
-        DaemonTeardown::new(&workspace).reset_best_effort().await;
-
+        // Mount specs are deleted through the running daemon when it is ready
+        // (live converge per mount); the trailing teardown no longer owns spec
+        // mutation. Credential deletes go through the CredentialService so
+        // OAuth credentials are revoked upstream first.
         let store: Arc<dyn CredentialStore> = Arc::new(FileStore::new(&layout.credentials_file));
         let service = CredentialService::new(store, OAuthClient::new()?);
         for target in &targets {
@@ -80,10 +79,28 @@ impl ResetArgs {
                     .unwrap_or_else(|| target.credential.clone())
             };
             delete_credentials(&service, &credential, keep_credentials, &target.name).await?;
-            fs::remove_file(&target.path)
-                .with_context(|| format!("remove {}", target.path.display()))?;
+            let daemon_delete = match workspace.daemon().delete_mount_if_ready(&target.name).await {
+                Ok(report) => report,
+                Err(error) => {
+                    anstream::eprintln!(
+                        "Running daemon could not remove mount `{}`: {error:#}",
+                        target.name
+                    );
+                    None
+                },
+            };
+            if daemon_delete.is_none() {
+                fs::remove_file(&target.path)
+                    .with_context(|| format!("remove {}", target.path.display()))?;
+            }
             anstream::println!("Removed mount `{}`", target.name);
         }
+
+        // Best-effort: a non-running daemon or an absent launch record is not a
+        // reset failure. Mount specs were already deleted through the daemon
+        // when it was ready, so teardown no longer owns spec mutation.
+        DaemonTeardown::new(&workspace).reset_best_effort().await;
+
         if !targets.is_empty() {
             anstream::println!();
             anstream::println!("✓ Reset complete.");

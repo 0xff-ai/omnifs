@@ -16,20 +16,20 @@ use crate::error::WithHint;
 use anyhow::{Context, anyhow};
 use clap::Args;
 use omnifs_workspace::creds::{CredentialEntry, CredentialStore, FileStore};
-use omnifs_workspace::provider::ProviderManifest;
+use omnifs_workspace::mounts::{Name as MountName, Registry, UpgradePlan};
+use omnifs_workspace::provider::{Catalog, ProviderManifest};
 use secrecy::{ExposeSecret, SecretString};
 use std::path::Path;
 use time::OffsetDateTime;
 
 use crate::auth::AuthSelection;
 use crate::credential_target::CredentialTarget;
-use crate::launch_backend::LaunchBackend;
+use crate::session::MountConfig;
 use crate::token_source::TokenSource;
 use crate::workspace::Workspace;
 pub(crate) use auth_import::AuthImportDecision;
 use mount_file::MountFile;
 use omnifs_workspace::layout::WorkspaceLayout;
-use omnifs_workspace::mounts::Registry;
 use provider_selection::ProviderSelection;
 use spec_creation::MountSpecCreator;
 use token_validation::StaticTokenValidator;
@@ -108,6 +108,18 @@ impl InitArgs {
                 paths.providers_dir.display()
             ))?;
         let reference = provider.reference();
+        let existing_mount = mounts.iter().find(|mount| mount.name == mount_name);
+        let upgrade_approval = match existing_mount {
+            Some(existing) => approved_upgrade_for_existing_mount(
+                catalog,
+                existing,
+                manifest,
+                &provider_name,
+                &mount_name,
+                interactive,
+            )?,
+            None => None,
+        };
         let auth_manifest = manifest.wasm_auth_manifest();
         let default_auth = AuthSelection::from_provider_default(&reference, &mount_name, manifest);
         if interactive {
@@ -153,8 +165,33 @@ impl InitArgs {
         );
         let spec = mount_file.into_spec();
         let mount_path = paths.mounts_dir.join(format!("{mount_name}.json"));
-        Registry::load(&paths.mounts_dir)?.put(&spec)?;
-        anstream::println!("✓ Wrote {}", WorkspaceLayout::display(&mount_path));
+        let daemon_report = match if existing_mount.is_some() {
+            workspace
+                .daemon()
+                .update_mount_if_ready(&spec, upgrade_approval.as_ref())
+                .await
+        } else {
+            workspace.daemon().create_mount_if_ready(&spec).await
+        } {
+            Ok(Some(report)) => {
+                anstream::println!("✓ Wrote {}", WorkspaceLayout::display(&mount_path));
+                Some(report)
+            },
+            Ok(None) => {
+                Registry::load(&paths.mounts_dir)?.put(&spec)?;
+                anstream::println!("✓ Wrote {}", WorkspaceLayout::display(&mount_path));
+                None
+            },
+            Err(error) => {
+                anstream::eprintln!(
+                    "Running daemon could not save mount `{mount_name}`: {error:#}"
+                );
+                anstream::eprintln!("Falling back to a local mount config write.");
+                Registry::load(&paths.mounts_dir)?.put(&spec)?;
+                anstream::println!("✓ Wrote {}", WorkspaceLayout::display(&mount_path));
+                None
+            },
+        };
 
         if let Some(auth) = effective_auth.as_ref() {
             if let Some(token) = import_outcome.token {
@@ -201,27 +238,21 @@ impl InitArgs {
         anstream::println!();
         anstream::println!("Mount `{mount_name}` is ready.");
 
-        let config = crate::session::MountConfig::from_parsed(spec, mount_path.clone())?;
-        let store = FileStore::new(&paths.credentials_file);
-        let backend = LaunchBackend::resolve(&workspace.config()?, None, None)?;
-        match crate::live::add_mount(workspace.daemon(), catalog, &store, config, &backend).await {
-            Ok(crate::live::LiveApply::Applied) => {
-                anstream::println!("✓ Loaded into the running daemon");
+        match daemon_report {
+            Some(report) if report.failure.is_none() => {
+                anstream::println!("✓ Applied to the running daemon");
             },
-            Ok(crate::live::LiveApply::NotRunning) => {
-                anstream::println!("Run `omnifs up` to start it.");
-            },
-            Ok(crate::live::LiveApply::RestartRequired(reason)) => {
-                anstream::println!(
-                    "A daemon is running, but this mount can't load live ({reason}). Run `omnifs up` to restart with it."
-                );
-            },
-            Err(error) => {
+            Some(report) => {
+                let reason = report
+                    .failure
+                    .as_ref()
+                    .map_or("unknown error", |failure| failure.reason.as_str());
                 anstream::eprintln!(
-                    "Mount config saved, but loading it into the running daemon failed: {error:#}"
+                    "Mount config saved, but loading it into the running daemon failed: {reason}"
                 );
                 anstream::eprintln!("Run `omnifs up` to restart with the new mount.");
             },
+            None => anstream::println!("Run `omnifs up` to start it."),
         }
         Ok(())
     }
@@ -285,6 +316,60 @@ impl InitArgs {
         );
         Ok(())
     }
+}
+
+fn approved_upgrade_for_existing_mount(
+    catalog: &Catalog,
+    existing: &MountConfig,
+    candidate_manifest: &ProviderManifest,
+    provider_name: &str,
+    mount_name: &MountName,
+    interactive: bool,
+) -> anyhow::Result<Option<UpgradePlan>> {
+    let existing_provider = existing.config.provider_name();
+    if existing_provider.as_str() != provider_name {
+        anyhow::bail!(
+            "mount `{mount_name}` already exists for provider `{existing_provider}`; remove it first or choose a different name"
+        );
+    }
+
+    let Some(pinned) = catalog
+        .get(&existing.config.provider.id)
+        .with_context(|| format!("load pinned provider for mount `{mount_name}`"))?
+    else {
+        anyhow::bail!(
+            "mount `{mount_name}` pinned provider artifact {id} is missing; cannot compute an upgrade approval",
+            id = existing.config.provider.id,
+        );
+    };
+    let pinned_manifest = pinned
+        .manifest()
+        .with_context(|| format!("read pinned provider manifest for mount `{mount_name}`"))?;
+    let plan = UpgradePlan::diff(&pinned_manifest, candidate_manifest);
+    if !plan.requires_approval() {
+        return Ok(None);
+    }
+    if !interactive {
+        anyhow::bail!(
+            "`omnifs init --no-input` cannot approve provider upgrade changes for existing mount `{mount_name}`"
+        );
+    }
+
+    anstream::println!();
+    anstream::println!(
+        "Mount `{mount_name}` already exists. `{provider_name}` changed its provider surface:"
+    );
+    for change in crate::upgrade::describe_upgrade_changes(&plan) {
+        anstream::println!("  - {change}");
+    }
+    let approved = inquire::Confirm::new("Approve this provider upgrade?")
+        .with_default(false)
+        .prompt()
+        .map_err(|error| anyhow!("confirm prompt: {error}"))?;
+    if !approved {
+        anyhow::bail!("aborted");
+    }
+    Ok(Some(plan))
 }
 
 pub(crate) fn print_capability_justifications(manifest: &ProviderManifest) {

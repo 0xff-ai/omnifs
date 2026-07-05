@@ -17,9 +17,9 @@ The daemon exposes a REST API whose schema lives in `omnifs-api` and whose check
 
 ### Mount delivery
 
-Current mount delivery is disk reconcile. The CLI writes specs under `mounts/`; the daemon loads them from disk on startup and converges the running set through `/v1/reconcile`.
+Current mount delivery is control-API when the daemon is running and disk reconcile when it is not. The CLI probes the daemon and sends mount create/update/delete requests to the REST API when a compatible daemon is ready. With no ready daemon, the CLI writes specs under `mounts/` directly and the next daemon startup converges them through `/v1/reconcile`.
 
-Specs are one file per mount, and a spec file's stem is its mount name: `mounts::Registry` (in `omnifs-workspace`) rejects any file whose stem does not match the spec's `mount`. The Registry is the sole spec owner. The CLI is the only author and writes through it atomically (same-dir temp plus rename); the daemon reads through the same Registry on reconcile. A spec inherits its provider-manifest defaults (the auth scheme and config defaults) at creation time, so serving reads it as-is, with no read-time resolution step. Materialization still reads the pinned manifest, but only to check the spec's capability grants against the provider's declared needs, never to fill defaults.
+Specs are one file per mount, and a spec file's stem is its mount name: `mounts::Registry` (in `omnifs-workspace`) rejects any file whose stem does not match the spec's `mount`. The Registry is the sole spec owner. The daemon writes through it for running-daemon create/update/delete requests; the CLI writes through it only for offline config changes. Registry writes are atomic (same-dir temp plus rename) and serialized by the mount-registry advisory lock. A spec inherits its provider-manifest defaults (the auth scheme and config defaults) at creation time, so serving reads it as-is, with no read-time resolution step. Materialization still reads the pinned manifest, but only to check the spec's capability grants against the provider's declared needs, never to fill defaults.
 
 Prefer REST API extensions for new non-secret interactions. Keep credentials off the REST API.
 
@@ -57,7 +57,7 @@ Keep Docker-specific bind/materialization policy in Docker launch paths. Keep na
 
 ## Must not
 
-- Claim mount specs are POSTed over the control API today.
+- Bypass the daemon mount CRUD API for config changes while a compatible daemon is ready.
 - Add a second spec read or write path that bypasses `mount::Registry`, or write a spec to a file whose stem is not its mount name.
 - Add more direct workspace coupling when a REST API extension fits.
 - Put credentials or provider secrets in snapshot export routes or snapshot
