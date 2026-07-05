@@ -44,6 +44,9 @@ pub struct DaemonArgs {
     /// the container entrypoint does not (it runs in container/rewrite mode).
     #[arg(long)]
     pub host_native: bool,
+    /// Named read-only namespace scope to serve from `<OMNIFS_HOME>/worldviews`.
+    #[arg(long, value_name = "NAME")]
+    pub worldview: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -72,10 +75,11 @@ fn default_listen() -> SocketAddr {
 }
 
 impl DaemonArgs {
-    pub fn host_native(listen: SocketAddr) -> Self {
+    pub fn host_native(listen: SocketAddr, worldview: Option<String>) -> Self {
         Self {
             listen,
             host_native: true,
+            worldview,
             nfs_port: 0,
             nfs_state_dir: None,
             nfs_trace: None,
@@ -100,6 +104,10 @@ impl DaemonArgs {
         }
         if self.host_native {
             args.push("--host-native".to_string());
+        }
+        if let Some(worldview) = &self.worldview {
+            args.push("--worldview".to_string());
+            args.push(worldview.clone());
         }
         args
     }
@@ -160,7 +168,8 @@ pub fn run(args: DaemonArgs) -> anyhow::Result<()> {
     }
 
     let frontend = context.frontend();
-    let frontends = frontends::Frontend::from_context(&context, Arc::clone(&registry));
+    let serving = context.serving_context(Arc::clone(&registry));
+    let frontends = frontends::Frontend::from_context(&context, Arc::clone(&registry), serving);
     let listener = context.bind_control_listener()?;
     let control_token = server::ControlToken::generate(context.control_token_file())?;
     let daemon = Arc::new(server::Daemon::new(

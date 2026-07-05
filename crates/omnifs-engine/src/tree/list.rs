@@ -101,7 +101,15 @@ impl Tree {
             }));
         }
 
-        let runtime = self.ctx.runtime_for(node.mount())?;
+        if let Some(child) = self.ctx.scope_directory_child(node.mount(), node.path()) {
+            return Ok(ListOutcome::Listing(Listing {
+                entries: vec![Entry::provider(child, EntryMeta::directory())],
+                exhaustive: true,
+                next_cursor: None,
+            }));
+        }
+
+        let runtime = self.ctx.runtime_for(node.mount(), node.path())?;
         let path = node.path();
 
         // An explicit-cursor continuation is a raw page drain: no cache consult,

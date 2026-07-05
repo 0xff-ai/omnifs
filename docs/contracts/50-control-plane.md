@@ -35,6 +35,16 @@ Mount specs strict-parse their top-level JSON fields. Unknown top-level keys are
 
 Prefer REST API extensions for new non-secret interactions. Keep credential material off the REST API.
 
+### Worldviews
+
+Worldviews are named, read-only served-namespace scopes stored as strict JSON under `<config_dir>/worldviews/<name>.json`. The file stem must match the top-level `name`. Each `mounts` entry names a mount, may carry an absolute mount-relative `subtree`, and must include `read_only: true`; `read_only: false` is invalid in v0.
+
+`omnifs up --worldview <name>` validates that the worldview file exists and parses before launching. The selected name flows into native daemon args and Docker daemon args. Docker launch reuse must consider the selected worldview, so a container launched for one worldview is not reused for another or for an unscoped launch.
+
+The daemon loads the active worldview from its own config directory at startup and fails closed when it is missing or invalid. A bad worldview must never fall back to an unscoped serving context.
+
+`DaemonStatus.worldview` reports the active worldview name when one is serving. The status field is non-secret operational state, so it is safe in the control API and in `omnifs status`.
+
 ### Replica snapshots
 
 `omnifs snapshot <mount> --out <dir>` exports a configured mount's canonical
@@ -79,6 +89,8 @@ Provider-store indexes strict-parse both the top-level index object and retained
 - Put credential material or provider secrets in snapshot export routes or snapshot
   indexes.
 - Infer launch backend only from config when daemon status or launch records identify the running backend.
+- Serve an unscoped namespace after a requested worldview fails to load.
+- Reuse a Docker daemon launched with a different worldview setting.
 - Hand-edit `crates/omnifs-api/openapi/daemon.json`.
 - Add API routes without keeping client/status behavior and schema generation in step.
 - Reintroduce a separate public `omnifsd` binary name in docs or UX.
@@ -92,11 +104,15 @@ Provider-store indexes strict-parse both the top-level index object and retained
 
 - `crates/omnifs-api/src/lib.rs`
 - `crates/omnifs-daemon/src/app.rs`
+- `crates/omnifs-daemon/src/context.rs`
 - `crates/omnifs-daemon/src/server.rs`
 - `crates/omnifs-cli/src/live.rs`
+- `crates/omnifs-cli/src/commands/up.rs`
 - `crates/omnifs-workspace/src/mounts/mod.rs`
+- `crates/omnifs-workspace/src/worldviews.rs`
 - `crates/omnifs-cli/src/launch.rs`
 - `crates/omnifs-cli/src/runtime.rs`
+- `crates/omnifs-cli/src/status.rs`
 - `crates/omnifs-cli/src/provider_bundle.rs`
 - `crates/omnifs-workspace/src/layout.rs`
 - `scripts/dev.ts`
@@ -109,5 +125,6 @@ Provider-store indexes strict-parse both the top-level index object and retained
 
 - Control API changes need daemon API tests after `just openapi` regenerates the checked-in spec.
 - API shape changes run `just openapi` and keep generated OpenAPI synchronized.
+- Worldview control-plane changes need strict parser coverage, launch plumbing coverage where practical, status JSON/text coverage when changed, and serving-scope tests in `omnifs-engine`.
 - Runtime-mode changes need targeted CLI/daemon tests and live runtime validation for the affected launch path.
 - Contributor workflow changes need CLI tests and, when touching runtime behavior, `just dev -y` plus the smoke path in `CONTRIBUTING.md`.

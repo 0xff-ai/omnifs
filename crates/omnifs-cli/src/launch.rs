@@ -8,6 +8,7 @@ use omnifs_api::{API_MAJOR, API_MINOR, DaemonStatus, DaemonSubsystem};
 use omnifs_workspace::creds::{CredentialStore, FileStore};
 use omnifs_workspace::layout::WorkspaceLayout;
 use omnifs_workspace::mounts::materialize::{self, MaterializationMode, MaterializedMount};
+use omnifs_workspace::worldviews::Worldview;
 
 use crate::client::DaemonClient;
 use crate::config::ConfiguredBackend;
@@ -30,6 +31,8 @@ pub(crate) struct Launcher<'a> {
     /// Per-launch runtime override from `omnifs up --runtime`. When set it wins
     /// over the persisted `[system].runtime` and is never written back.
     runtime_override: Option<ConfiguredBackend>,
+    /// Per-launch serving scope from `omnifs up --worldview`.
+    worldview: Option<String>,
 }
 
 impl<'a> Launcher<'a> {
@@ -38,6 +41,7 @@ impl<'a> Launcher<'a> {
             workspace,
             verb,
             runtime_override: None,
+            worldview: None,
         }
     }
 
@@ -47,10 +51,19 @@ impl<'a> Launcher<'a> {
         self
     }
 
+    pub(crate) fn with_worldview(mut self, worldview: Option<String>) -> Self {
+        self.worldview = worldview;
+        self
+    }
+
     pub(crate) async fn launch(self) -> anyhow::Result<LaunchOutcome> {
         let paths = self.workspace.layout();
         let config = self.workspace.config()?;
         let telemetry_enabled = config.telemetry_enabled();
+        if let Some(worldview) = &self.worldview {
+            Worldview::load(&paths.worldviews_dir, worldview)
+                .with_context(|| format!("validate worldview `{worldview}` before launch"))?;
+        }
         // An explicit `--runtime` chooses the backend for this launch and skips
         // the setup gate; otherwise the persisted default decides, and a missing
         // one means setup never ran.
@@ -92,6 +105,7 @@ impl<'a> Launcher<'a> {
                 extra_env: Vec::new(),
                 reuse_existing_container: true,
                 telemetry_enabled,
+                worldview: self.worldview,
             },
             self.workspace.catalog(),
         )
@@ -124,6 +138,8 @@ pub(crate) struct LaunchSpec<'a> {
     /// CLI's `[telemetry] enabled = false` off-switch reaches it (the daemon
     /// has no strict-config channel and reads `OMNIFS_TELEMETRY`).
     pub telemetry_enabled: bool,
+    /// Active Worldview name for this launch, if any.
+    pub worldview: Option<String>,
 }
 
 /// Docker-specific mount spec builder for launch-time container binds.
@@ -186,13 +202,16 @@ pub(crate) async fn launch_runtime(
         mut extra_env,
         reuse_existing_container,
         telemetry_enabled,
+        worldview,
     } = spec;
 
     std::fs::create_dir_all(&paths.config_dir)
         .with_context(|| format!("create runtime home {}", paths.config_dir.display()))?;
 
     let target = match backend {
-        LaunchBackend::Native => return launch_host_native(paths, verb, telemetry_enabled).await,
+        LaunchBackend::Native => {
+            return launch_host_native(paths, verb, telemetry_enabled, worldview).await;
+        },
         LaunchBackend::Docker(target) => target,
     };
 
@@ -201,6 +220,11 @@ pub(crate) async fn launch_runtime(
     if !telemetry_enabled {
         extra_env.push(format!("{}=0", omnifs_workspace::telemetry::ENV_SWITCH));
     }
+    extra_env.push(format!(
+        "{}={}",
+        omnifs_api::OMNIFS_WORLDVIEW_ENV,
+        worldview.as_deref().unwrap_or_default()
+    ));
 
     anstream::eprintln!("Computing container binds for {} mount(s)", configs.len());
     let preopen_binds =
@@ -249,12 +273,14 @@ async fn launch_host_native(
     paths: &WorkspaceLayout,
     verb: &str,
     telemetry_enabled: bool,
+    worldview: Option<String>,
 ) -> anyhow::Result<LaunchOutcome> {
     reject_existing_host_daemon(paths, verb).await?;
     anstream::eprintln!("Starting omnifs daemon (host-native)");
 
     let addr = resolve_control_addr();
-    crate::launch_backend::launch_native(&paths.cache_dir, addr, telemetry_enabled).await?;
+    crate::launch_backend::launch_native(&paths.cache_dir, addr, telemetry_enabled, worldview)
+        .await?;
 
     let client = DaemonClient::new();
     match client.reconcile().await {

@@ -24,6 +24,7 @@ pub const CONFIG_FILE: &str = "config.toml";
 pub const CREDENTIALS_FILE: &str = "credentials.json";
 pub const CONTROL_TOKEN_FILE: &str = "control-token";
 pub const MOUNTS_SUBDIR: &str = "mounts";
+pub const WORLDVIEWS_SUBDIR: &str = "worldviews";
 pub const PROVIDERS_SUBDIR: &str = "providers";
 pub const CACHE_SUBDIR: &str = "cache";
 /// Subdirectory of `cache_dir` holding NFS loopback mount-state files.
@@ -58,6 +59,8 @@ pub struct WorkspaceLayout {
     pub cache_dir: PathBuf,
     /// Staging directory holding one JSON file per mount.
     pub mounts_dir: PathBuf,
+    /// Directory holding named namespace-serving scopes.
+    pub worldviews_dir: PathBuf,
     /// Directory holding compiled provider WASM components, looked up
     /// by the `provider:` field of each mount config.
     pub providers_dir: PathBuf,
@@ -100,6 +103,7 @@ impl WorkspaceLayout {
             config_file: config_dir.join(CONFIG_FILE),
             credentials_file: config_dir.join(CREDENTIALS_FILE),
             mounts_dir: config_dir.join(MOUNTS_SUBDIR),
+            worldviews_dir: config_dir.join(WORLDVIEWS_SUBDIR),
             providers_dir: config_dir.join(PROVIDERS_SUBDIR),
             cache_dir: config_dir.join(CACHE_SUBDIR),
             config_dir,
@@ -203,6 +207,10 @@ impl<Role> Workspace<Role> {
 
     pub fn mounts_dir(&self) -> &Path {
         &self.layout.mounts_dir
+    }
+
+    pub fn worldviews_dir(&self) -> &Path {
+        &self.layout.worldviews_dir
     }
 
     pub fn providers_dir(&self) -> &Path {

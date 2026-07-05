@@ -118,7 +118,7 @@ impl Tree {
         mount: &str,
         path: &omnifs_core::path::Path,
     ) -> Option<FileAttrsCache> {
-        let runtime = self.ctx.runtime_for(mount).ok()?;
+        let runtime = self.ctx.runtime_for(mount, path).ok()?;
         FileAttrStore::new(&runtime, path).cached()
     }
 
@@ -128,7 +128,7 @@ impl Tree {
         path: &omnifs_core::path::Path,
         attrs: FileAttrsCache,
     ) -> Result<()> {
-        let runtime = self.ctx.runtime_for(mount)?;
+        let runtime = self.ctx.runtime_for(mount, path)?;
         FileAttrStore::new(&runtime, path).publish(attrs)
     }
 
@@ -156,7 +156,7 @@ impl Tree {
             return Ok(ReadResult::Subtree(dir.clone()));
         }
 
-        let runtime = self.ctx.runtime_for(node.mount())?;
+        let runtime = self.ctx.runtime_for(node.mount(), node.path())?;
         let path = node.path();
         let attr_store = FileAttrStore::new(&runtime, path);
         let projected_attrs = attr_store.cached().or_else(|| node.attrs().cloned());
@@ -273,7 +273,7 @@ impl Tree {
                 content_type: None,
             }),
             SyntheticContent::PaginationControl(action) => {
-                let runtime = self.ctx.runtime_for(node.mount())?;
+                let runtime = self.ctx.runtime_for(node.mount(), node.path())?;
                 let Some((parent, _)) = node.path().parent_and_name() else {
                     return Err(TreeError::invalid_input(format!(
                         "pagination control has no parent: {}",

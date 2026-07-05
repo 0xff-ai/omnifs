@@ -35,6 +35,16 @@ Lookup, listing, and read must use one shared target-resolution model. Listing m
 
 Keep ordered route precedence in one dispatcher. Model negative lookups once in tree or host policy if they become needed. Verify parent-directory traversal, not only intended leaf reads.
 
+### Serving scopes
+
+`ServingContext` owns any read-only scope applied to the served namespace. A worldview filters the mount set and may bind a mount to a mount-relative subtree prefix. That scope is projection semantics, so it belongs in `omnifs-engine`, not in FUSE, NFS, the daemon, or providers.
+
+Scope enforcement must stay on the shared serving funnels. `split_mount_path` and mount enumeration decide which mounts exist, `runtime_for` rejects out-of-scope target paths before provider dispatch, and the tree uses `scope_child_resolution` and `scope_directory_child` to expose the synthetic ancestor directories that make a scoped subtree reachable by component-by-component lookup.
+
+A mount omitted from the active scope does not exist. A scoped subtree serves the prefix itself and descendants normally, serves only synthetic read-only ancestor directories above the prefix, and returns NotFound for every other path. Resolve, list, read, and open must all fail closed for out-of-scope paths, including direct handle rehydration or guessed provider-relative paths.
+
+`registry_runtime` may keep seeing all runtimes because invalidation is host bookkeeping, not serving.
+
 ### Live growth
 
 Follow-mode reads, growing sizes, EOF discovery, and invalidation for live files need one shared owner. Frontend pumps may deliver protocol mechanics, but not semantic rules for file growth, EOF learning, or cached attrs.
@@ -44,6 +54,7 @@ Follow-mode reads, growing sizes, EOF discovery, and invalidation for live files
 - Let FUSE and NFS rediscover provider policy independently.
 - Let frontends build projection cache keys or match on cache payload schema.
 - Add per-frontend negative lookup policy, dotfile exceptions, or lookup suppression lists.
+- Let frontends or providers know about worldview scope rules.
 - Add parallel provider-facing and wire-facing file structs that can disagree.
 - Reintroduce placeholder sizes for unknown-length files.
 - Let a frontend decide whether a learned size is authoritative.
@@ -65,4 +76,5 @@ Follow-mode reads, growing sizes, EOF discovery, and invalidation for live files
 - Add cross-frontend or tree conformance tests for behavior shared by FUSE and NFS.
 - Cache changes need cold and warm read tests, plus invalidation coverage when behavior changes.
 - Route/lookup/listing changes need tests that hit lookup, list, and read for the same route surface, including cold and warm paths.
+- Serving-scope changes need tests that prove mount filtering, scoped subtree reachability through synthetic ancestors, and NotFound behavior across resolve, list, read, and open.
 - Size-sensitive changes need stat/read checks and relevant real-tool behavior.

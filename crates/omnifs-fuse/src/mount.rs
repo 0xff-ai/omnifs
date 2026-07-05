@@ -6,8 +6,8 @@
 use crate::common::InodeBody;
 use crate::{Frontend, NotifierHandle};
 use fuser::Session;
-use omnifs_engine::MountRuntimes;
 use omnifs_engine::render::PathToInode;
+use omnifs_engine::{MountRuntimes, ServingContext};
 use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
@@ -24,14 +24,31 @@ pub fn run_blocking(
     rt: &Handle,
     notifier: &NotifierHandle,
 ) -> Result<(), Error> {
+    run_blocking_with_context(
+        mount_point,
+        registry,
+        rt,
+        notifier,
+        ServingContext::from_runtimes(Arc::clone(registry)),
+    )
+}
+
+pub fn run_blocking_with_context(
+    mount_point: &Path,
+    registry: &Arc<MountRuntimes>,
+    rt: &Handle,
+    notifier: &NotifierHandle,
+    serving: ServingContext,
+) -> Result<(), Error> {
     // Create shared path_to_inode map for invalidation.
     let path_to_inode: Arc<PathToInode<InodeBody>> = Arc::new(PathToInode::new());
 
-    let fs = Frontend::new_with_path_map_and_notifier(
+    let fs = Frontend::new_with_context(
         rt.clone(),
         Arc::clone(registry),
         Arc::clone(&path_to_inode),
         Arc::clone(notifier),
+        serving,
     );
     let config = Frontend::mount_config();
 

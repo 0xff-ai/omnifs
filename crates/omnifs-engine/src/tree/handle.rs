@@ -167,7 +167,7 @@ impl Tree {
             return Ok(None);
         }
 
-        let runtime = self.ctx.runtime_for(node.mount())?;
+        let runtime = self.ctx.runtime_for(node.mount(), node.path())?;
         let opened = match runtime.namespace().open_file(node.path()).await {
             Ok(opened) => opened,
             Err(error) if error.is_provider_not_found_or_invalid_input() => return Ok(None),
@@ -195,7 +195,7 @@ impl Tree {
         mount: &str,
         path: &Path,
     ) -> Result<Option<FileAttrsCache>> {
-        let runtime = self.ctx.runtime_for(mount)?;
+        let runtime = self.ctx.runtime_for(mount, path)?;
         let opened = match runtime.namespace().open_file(path).await {
             Ok(opened) => opened,
             Err(error) if error.is_provider_not_found_or_invalid_input() => return Ok(None),

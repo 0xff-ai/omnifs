@@ -11,3 +11,4 @@ pub mod layout;
 pub mod mounts;
 pub mod provider;
 pub mod telemetry;
+pub mod worldviews;
