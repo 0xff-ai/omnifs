@@ -12,23 +12,24 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
 use std::io::IsTerminal;
+use std::path::PathBuf;
 
 use anyhow::{Context, anyhow};
 use clap::Args;
+use omnifs_workspace::layout::WorkspaceLayout;
 use omnifs_workspace::provider::{Provider, ProviderManifest};
 
-use crate::commands::{init, up};
+use crate::commands::init;
 use crate::config::ConfiguredBackend;
-use crate::error::WithHint;
-use crate::launch_backend::DockerTarget;
 use crate::launch_backend::GUEST_MOUNT;
-use crate::runtime::Runtime;
+use crate::stages::PromptMode;
 use crate::workspace::Workspace;
 
 use self::host_os::HostOs;
 use self::summary::InitResult;
 
 #[derive(Args, Debug, Clone, Default)]
+#[allow(clippy::struct_excessive_bools)] // mirrors CLI flags 1:1
 pub struct SetupArgs {
     /// Skip the final daemon launch.
     #[arg(long)]
@@ -36,6 +37,16 @@ pub struct SetupArgs {
     /// Skip confirmations; auto-accept detected ambient credentials.
     #[arg(short = 'y', long)]
     pub yes: bool,
+    /// Fail instead of prompting. Use flags or --yes for every answer.
+    #[arg(long)]
+    pub no_input: bool,
+    /// Runtime to persist as the default.
+    #[arg(long, value_enum)]
+    pub runtime: Option<ConfiguredBackend>,
+    /// Mount point to preview for host-native runs. To persist it for launch,
+    /// export `OMNIFS_MOUNT_POINT` with the same value.
+    #[arg(long, value_name = "PATH")]
+    pub mount_point: Option<PathBuf>,
     /// Preselect providers and skip the picker.
     #[arg(long, value_delimiter = ',')]
     pub providers: Vec<String>,
@@ -46,57 +57,53 @@ pub struct SetupArgs {
 
 impl SetupArgs {
     pub async fn run(self) -> anyhow::Result<()> {
-        require_tty()?;
+        let terminal = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+        let mode = PromptMode {
+            interactive: terminal && !self.no_input,
+            yes: self.yes,
+            no_input: self.no_input,
+        };
 
         let os = HostOs::detect();
-        print_banner(os);
-        print_explainer(os);
-        if os == HostOs::Unsupported {
-            anyhow::bail!("omnifs does not yet run on this platform");
-        }
+        print_orientation(os);
 
         let workspace = Workspace::resolve()?;
         let paths = workspace.layout();
         let config = workspace.config()?;
+        let environment = crate::stages::environment_check(os, &workspace)?;
+        print_environment(&environment);
         crate::provider_bundle::ensure_providers_installed(&paths.providers_dir)?;
         fs::create_dir_all(&paths.mounts_dir)
             .with_context(|| format!("create {}", paths.mounts_dir.display()))?;
 
-        // Choose and record the default launch backend so `omnifs up`/`down`
-        // read it. The picker defaults to Docker on macOS and native on Linux;
-        // re-running setup is how the default is changed.
-        let backend = select_runtime(os, config.system.runtime, self.yes)?;
-        let mut file = crate::config::ConfigFile::load(&paths.config_file)?;
-        file.set_system_backend(backend)?;
-        file.save()?;
-        let host_native = backend == ConfiguredBackend::Native;
-
-        if !host_native {
-            let docker_target = DockerTarget::resolve(None, None, &config)?;
-            let runtime = connect_runtime(os, &docker_target).await?;
-            runtime
-                .pull_image_with_progress(docker_target.image().as_str())
-                .await?;
+        let mounts = workspace.mounts()?;
+        if environment.configured && self.providers.is_empty() && !self.yes {
+            match review_mode(&workspace, &mounts, mode)? {
+                ReviewAction::Exit => return Ok(()),
+                ReviewAction::AddProvider => {},
+            }
         }
 
+        let backend =
+            crate::stages::runtime_selection(os, config.system.runtime, self.runtime, mode)?;
+        crate::stages::persist_runtime(paths, backend)?;
+        let host_native = backend == ConfiguredBackend::Native;
+        let mount_point = crate::stages::mount_point_resolution(self.mount_point.clone(), mode)?;
+
+        print_runtime(backend, os);
+        print_mount_point(&mount_point, host_native);
+
         let catalog = workspace.catalog();
-        let mounts = workspace.mounts()?;
         let installed = crate::catalog::installed_providers(catalog)?;
         if installed.is_empty() {
             anyhow::bail!("no built-in or plugin providers are available");
         }
         let configured = crate::catalog::configured_mounts(catalog, &mounts)?;
 
-        let selected = resolve_selection(&self, &installed, &configured)?;
+        let selected = resolve_selection(&self, &installed, &configured, mode)?;
         let results = run_init_loop(&selected, &self, &installed, &workspace).await;
 
         let (mount_label, mount_root, browse_hint) = if host_native {
-            // Preview the exact mount point the daemon will serve at through the
-            // shared resolver, so the summary matches the served location even
-            // when OMNIFS_MOUNT_POINT is set.
-            let mount_point = omnifs_workspace::layout::resolve_mount_point().ok_or_else(|| {
-                anyhow::anyhow!("cannot resolve host mount point: set HOME or OMNIFS_MOUNT_POINT")
-            })?;
             let mount_root = omnifs_workspace::layout::WorkspaceLayout::display(&mount_point);
             (
                 "Host mount",
@@ -128,107 +135,178 @@ impl SetupArgs {
                 "\nNo mounts to launch. Add one with `omnifs init <provider>`, then run `omnifs up`."
             );
         } else {
-            launch_via_up().await?;
+            let outcome = launch_via_up().await?;
+            if let Some(mount) = results
+                .iter()
+                .find(|result| result.outcome.is_ok())
+                .map(|result| result.mount_name.as_str())
+            {
+                match crate::stages::verify_first_read(&outcome, mount) {
+                    Ok(read) => print_first_read(&read),
+                    Err(error) => anstream::eprintln!(
+                        "First read check failed; run `omnifs doctor` for details: {error:#}"
+                    ),
+                }
+            }
         }
+        print_graduation(&results);
         Ok(())
     }
 }
 
-fn require_tty() -> anyhow::Result<()> {
-    if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
-        return Ok(());
-    }
-    Err(anyhow!(
-        "`omnifs setup` requires an interactive terminal. For non-interactive use, run `omnifs init <provider>` per provider and then `omnifs up`."
-    ))
-}
-
-fn print_banner(os: HostOs) {
+fn print_orientation(os: HostOs) {
     anstream::println!();
     anstream::println!("{} ({})", crate::style::bold("omnifs setup"), os.name());
     anstream::println!();
-}
-
-fn print_explainer(os: HostOs) {
+    anstream::println!("omnifs projects services into your filesystem as regular files.");
+    anstream::println!("A local daemon serves them at one mount point.");
+    anstream::println!("The CLI manages setup, auth, launch, and troubleshooting.");
+    anstream::println!();
     anstream::println!("{}", os.explain_runtime());
     anstream::println!();
 }
 
-/// The default runtime for a fresh setup on this OS: Docker on macOS (where
-/// host-native is loopback NFS and experimental), native on Linux/WSL where the
-/// kernel FUSE path is the norm.
-fn default_runtime(os: HostOs) -> ConfiguredBackend {
-    match os {
-        HostOs::MacOs => ConfiguredBackend::Docker,
-        HostOs::LinuxNative | HostOs::LinuxWsl | HostOs::Unsupported => ConfiguredBackend::Native,
+fn print_environment(report: &crate::stages::EnvironmentReport) {
+    anstream::println!("1/6  environment    {} ✓", report.os.name());
+    if report.configured {
+        anstream::println!("                   existing workspace found");
     }
 }
 
-/// One selectable runtime row, carrying its backend and an OS-specific label.
-struct RuntimeChoice {
-    backend: ConfiguredBackend,
-    label: &'static str,
-}
-
-impl fmt::Display for RuntimeChoice {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.label)
-    }
-}
-
-/// Runtime options for the picker, ordered with this OS's default first. Native
-/// on macOS is labelled experimental (loopback NFS); Docker reads the same on
-/// every OS.
-fn runtime_choices(os: HostOs) -> Vec<RuntimeChoice> {
-    let docker = RuntimeChoice {
-        backend: ConfiguredBackend::Docker,
-        label: "docker  — Linux FUSE inside a container",
-    };
-    let native = RuntimeChoice {
-        backend: ConfiguredBackend::Native,
-        label: match os {
-            HostOs::MacOs => "native  — host loopback NFS (experimental)",
-            _ => "native  — host kernel FUSE",
+fn print_runtime(backend: ConfiguredBackend, os: HostOs) {
+    let consequence = match (backend, os) {
+        (ConfiguredBackend::Docker, HostOs::MacOs) => {
+            "Docker (recommended) - Linux FUSE in a container"
         },
+        (ConfiguredBackend::Docker, _) => "Docker - Linux FUSE in a container",
+        (ConfiguredBackend::Native, HostOs::MacOs) => "native NFS (experimental)",
+        (ConfiguredBackend::Native, _) => "native FUSE",
     };
-    match default_runtime(os) {
-        ConfiguredBackend::Docker => vec![docker, native],
-        ConfiguredBackend::Native => vec![native, docker],
+    anstream::println!("2/6  runtime        {consequence}");
+}
+
+fn print_mount_point(path: &std::path::Path, host_native: bool) {
+    let display = WorkspaceLayout::display(path);
+    if host_native {
+        anstream::println!("3/6  mount point    {display}");
+    } else {
+        anstream::println!("3/6  mount point    {GUEST_MOUNT} inside the runtime container");
     }
 }
 
-/// Pick the default runtime: under `--yes` take the existing config value or the
-/// OS default without prompting; otherwise prompt with that value preselected.
-fn select_runtime(
-    os: HostOs,
-    current: Option<ConfiguredBackend>,
-    yes: bool,
-) -> anyhow::Result<ConfiguredBackend> {
-    let preferred = current.unwrap_or_else(|| default_runtime(os));
-    if yes {
-        return Ok(preferred);
-    }
-    let choices = runtime_choices(os);
-    let start = choices
+fn print_first_read(read: &crate::stages::FirstRead) {
+    anstream::println!();
+    anstream::println!("6/6  launch         ran `{}`", read.command);
+    anstream::print!("{}", read.output);
+}
+
+fn print_graduation(results: &[InitResult]) {
+    let ready: Vec<&InitResult> = results
         .iter()
-        .position(|choice| choice.backend == preferred)
-        .unwrap_or(0);
-    let chosen = inquire::Select::new("Which runtime should omnifs use?", choices)
-        .with_starting_cursor(start)
-        .with_help_message("up/down to move, enter to confirm; re-run setup to change it")
-        .prompt()
-        .map_err(|e| anyhow!("runtime prompt: {e}"))?;
-    Ok(chosen.backend)
+        .filter(|result| result.outcome.is_ok())
+        .collect();
+    if ready.is_empty() {
+        return;
+    }
+    anstream::println!();
+    anstream::println!("{}", crate::style::bold("You're set. Daily commands:"));
+    anstream::println!("  omnifs");
+    anstream::println!("  omnifs doctor");
+    anstream::println!("  omnifs init <provider>");
+    anstream::println!();
+    anstream::println!("Shell completions are available with `omnifs completions <shell>`.");
 }
 
-async fn connect_runtime(os: HostOs, target: &DockerTarget) -> anyhow::Result<Runtime> {
-    let runtime = Runtime::connect_for(target).context("connect to Docker daemon")?;
-    runtime
-        .ping()
-        .await
-        .context("Docker daemon did not respond")
-        .with_hint(os.docker_install_hint())?;
-    Ok(runtime)
+enum ReviewAction {
+    AddProvider,
+    Exit,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ReviewChoice {
+    AddProvider,
+    ChangeRuntime,
+    RecheckEnvironment,
+    Exit,
+}
+
+impl fmt::Display for ReviewChoice {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::AddProvider => "add provider",
+            Self::ChangeRuntime => "change runtime",
+            Self::RecheckEnvironment => "re-check environment",
+            Self::Exit => "leave unchanged",
+        })
+    }
+}
+
+fn review_mode(
+    workspace: &Workspace,
+    mounts: &[crate::mount_config::MountConfig],
+    mode: PromptMode,
+) -> anyhow::Result<ReviewAction> {
+    anstream::println!();
+    anstream::println!("{}", crate::style::bold("Setup review"));
+    if let Ok(config) = workspace.config() {
+        anstream::println!(
+            "  runtime  {}",
+            config
+                .system
+                .runtime
+                .map_or("unset".to_string(), |runtime| format!("{runtime:?}")
+                    .to_lowercase())
+        );
+    }
+    if mounts.is_empty() {
+        anstream::println!("  mounts   none");
+    } else {
+        for mount in mounts {
+            anstream::println!(
+                "  mount    {} ({})",
+                mount.name,
+                mount.config.provider_name()
+            );
+        }
+    }
+    if mode.no_input {
+        anyhow::bail!(
+            "`omnifs setup --no-input` is in review mode; pass --providers <provider> to add one, --runtime <docker|native> to change runtime, or --yes to accept defaults"
+        );
+    }
+    if !mode.interactive {
+        anyhow::bail!(
+            "`omnifs setup` is in review mode and needs a terminal; pass --providers <provider>, --runtime <docker|native>, or --yes"
+        );
+    }
+    let choice = inquire::Select::new(
+        "What do you want to change?",
+        vec![
+            ReviewChoice::AddProvider,
+            ReviewChoice::ChangeRuntime,
+            ReviewChoice::RecheckEnvironment,
+            ReviewChoice::Exit,
+        ],
+    )
+    .prompt()
+    .map_err(|error| anyhow!("review prompt: {error}"))?;
+    match choice {
+        ReviewChoice::AddProvider => Ok(ReviewAction::AddProvider),
+        ReviewChoice::ChangeRuntime => {
+            let os = HostOs::detect();
+            let current = workspace.config()?.system.runtime;
+            let runtime = crate::stages::runtime_selection(os, current, None, mode)?;
+            crate::stages::persist_runtime(workspace.layout(), runtime)?;
+            anstream::println!("Runtime updated.");
+            Ok(ReviewAction::Exit)
+        },
+        ReviewChoice::RecheckEnvironment => {
+            let report = crate::stages::environment_check(HostOs::detect(), workspace)?;
+            print_environment(&report);
+            Ok(ReviewAction::Exit)
+        },
+        ReviewChoice::Exit => Ok(ReviewAction::Exit),
+    }
 }
 
 /// Resolve which provider IDs to configure: explicit `--providers` wins,
@@ -237,9 +315,24 @@ fn resolve_selection(
     args: &SetupArgs,
     installed: &[(Provider, ProviderManifest)],
     configured: &BTreeMap<String, String>,
+    mode: PromptMode,
 ) -> anyhow::Result<Vec<String>> {
+    anstream::println!("4/6  first mount");
     if !args.providers.is_empty() {
         return validate_preselected(&args.providers, installed, configured);
+    }
+    if mode.yes {
+        return Ok(Vec::new());
+    }
+    if mode.no_input {
+        anyhow::bail!(
+            "`omnifs setup --no-input` needs --providers <provider>[,<provider>...] for the first mount, or use --yes to configure only setup defaults"
+        );
+    }
+    if !mode.interactive {
+        anyhow::bail!(
+            "`omnifs setup` needs an interactive terminal for provider selection; pass --providers <provider>[,<provider>...] or --yes"
+        );
     }
 
     if !configured.is_empty() {
@@ -299,7 +392,15 @@ fn default_off(provider_name: &str) -> bool {
 /// One-row summary shown inside the multi-select.
 fn option_line(manifest: &ProviderManifest) -> String {
     let summary = capability_summary(manifest).unwrap_or_else(|| "no extra capabilities".into());
-    format!("{:<14} {}", manifest.id, summary)
+    let auth = if manifest.auth.is_none() {
+        "no credentials needed"
+    } else {
+        "auth required"
+    };
+    format!(
+        "{:<14} {:<23} {} ({summary})",
+        manifest.id, auth, manifest.display_name
+    )
 }
 
 /// A compact one-line capability summary for the multi-select row.
@@ -393,6 +494,9 @@ async fn run_init_loop(
     workspace: &Workspace,
 ) -> Vec<InitResult> {
     let mut out = Vec::new();
+    if !selected.is_empty() {
+        anstream::println!("5/6  auth + grants");
+    }
     for provider_name in selected {
         let Some((_, manifest)) = crate::catalog::find_installed(installed, provider_name) else {
             out.push(InitResult {
@@ -407,9 +511,7 @@ async fn run_init_loop(
         anstream::println!();
         anstream::println!("{}", crate::style::bold(format!("--- {provider_name} ---")));
 
-        init::print_capability_justifications(manifest);
-
-        if !args.yes {
+        if !args.yes && !args.no_input {
             let proceed = inquire::Confirm::new(&format!("Configure `{provider_name}`?"))
                 .with_default(true)
                 .prompt();
@@ -432,22 +534,36 @@ async fn run_init_loop(
                     continue;
                 },
             }
+        } else if args.no_input && !args.yes {
+            out.push(InitResult {
+                provider_name: provider_name.clone(),
+                mount_name,
+                outcome: Err("missing --yes for provider confirmation".into()),
+            });
+            continue;
         }
 
         let init_args = init::InitArgs {
             provider: Some(provider_name.clone()),
             as_name: None,
-            no_input: false,
+            no_input: args.no_input || args.yes,
             yes: args.yes,
             no_browser: args.no_browser,
             token: None,
             token_env: None,
+            no_validate: false,
             scopes: Vec::new(),
+            scheme: None,
+            no_auth: false,
+            config_json: None,
+            capabilities_json: None,
+            limits_json: None,
         };
-        let outcome = init_args
-            .run_in_workspace(workspace)
-            .await
-            .map_err(|e| e.to_string());
+        let outcome = crate::stages::configure_mount(init_args, workspace).await;
+        let (mount_name, outcome) = match outcome {
+            Ok(outcome) => (outcome.mount_name, Ok(())),
+            Err(error) => (mount_name, Err(error.to_string())),
+        };
         out.push(InitResult {
             provider_name: provider_name.clone(),
             mount_name,
@@ -457,8 +573,9 @@ async fn run_init_loop(
     out
 }
 
-async fn launch_via_up() -> anyhow::Result<()> {
+async fn launch_via_up() -> anyhow::Result<crate::launch::LaunchOutcome> {
     anstream::println!();
     anstream::println!("Launching omnifs ...");
-    up::UpArgs::default().run().await
+    let workspace = Workspace::resolve()?;
+    crate::stages::launch(&workspace, None, "omnifs setup").await
 }

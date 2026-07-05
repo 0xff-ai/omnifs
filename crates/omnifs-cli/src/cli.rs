@@ -203,3 +203,49 @@ fn exit_for_verdict(verdict: DoctorVerdict) -> ExitCode {
         DoctorVerdict::Warnings => ExitCode::Degraded,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use clap::CommandFactory;
+
+    use super::Cli;
+
+    #[test]
+    fn wizard_prompt_sites_have_non_interactive_flags() {
+        let command = Cli::command();
+        let table = [
+            ("setup orientation", "setup", "yes"),
+            ("setup environment check", "setup", "no-input"),
+            ("setup runtime selection", "setup", "runtime"),
+            ("setup mount point", "setup", "mount-point"),
+            ("setup provider picker", "setup", "providers"),
+            ("setup provider confirmation", "setup", "yes"),
+            ("init provider picker", "init", "provider"),
+            ("init mount name collision", "init", "as"),
+            ("init auth scheme", "init", "scheme"),
+            ("init OAuth browser", "init", "no-browser"),
+            ("init static token", "init", "token-env"),
+            ("init auth suppression", "init", "no-auth"),
+            ("init provider config", "init", "config-json"),
+            ("init capability grants", "init", "capabilities-json"),
+            ("init resource limits", "init", "limits-json"),
+            ("up readiness wait", "up", "wait"),
+        ];
+
+        for (prompt, subcommand, arg) in table {
+            assert!(
+                has_arg(&command, subcommand, arg),
+                "prompt site `{prompt}` must be covered by `{subcommand}` arg `{arg}`"
+            );
+        }
+    }
+
+    fn has_arg(command: &clap::Command, subcommand: &str, arg: &str) -> bool {
+        let Some(command) = command.find_subcommand(subcommand) else {
+            return false;
+        };
+        command
+            .get_arguments()
+            .any(|candidate| candidate.get_id() == arg || candidate.get_long() == Some(arg))
+    }
+}

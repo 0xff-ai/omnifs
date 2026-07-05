@@ -59,26 +59,6 @@ impl HostOs {
         format!("{lead}\n\n{per_os}")
     }
 
-    pub fn docker_install_hint(self) -> &'static str {
-        match self {
-            Self::MacOs => {
-                "Install Docker Desktop (https://docs.docker.com/desktop/install/mac/) \
-                or OrbStack (https://orbstack.dev). \
-                Either exposes a Docker socket the CLI will pick up."
-            },
-            Self::LinuxNative => {
-                "Install Docker Engine (https://docs.docker.com/engine/install/) \
-                and ensure your user is in the `docker` group, \
-                or install Podman with docker-socket compatibility."
-            },
-            Self::LinuxWsl => {
-                "Install Docker Desktop for Windows and enable WSL2 integration for this distro, \
-                or install Docker Engine inside your WSL distro."
-            },
-            Self::Unsupported => "omnifs needs macOS, Linux, or WSL2.",
-        }
-    }
-
     fn is_wsl() -> bool {
         std::fs::read_to_string("/proc/version")
             .is_ok_and(|content| Self::wsl_marker_present(&content))

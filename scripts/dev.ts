@@ -1,6 +1,5 @@
 #!/usr/bin/env bun
 
-import { $ } from "bun";
 import {
   chmodSync,
   cpSync,
@@ -16,6 +15,89 @@ import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 
+type ShellOutput = { exitCode: number };
+type ShellCommand = PromiseLike<ShellOutput> & {
+  cwd(path: string): ShellCommand;
+  env(env: Record<string, string | undefined>): ShellCommand;
+  nothrow(): ShellCommand;
+  quiet(): ShellCommand;
+  text(): Promise<string>;
+};
+type ShellTag = (strings: TemplateStringsArray, ...values: unknown[]) => ShellCommand;
+
+declare const Bun: {
+  argv: string[];
+  $: ShellTag;
+  spawn(
+    args: string[],
+    options: {
+      cwd: string;
+      env: Record<string, string | undefined>;
+      stdin: "inherit";
+      stdout: "inherit";
+      stderr: "inherit";
+    },
+  ): { exited: Promise<number> };
+};
+
+type DevOptions = {
+  profile: string;
+  image: string | null;
+  yes: boolean;
+  detach: boolean;
+  noShell: boolean;
+  home: string | null;
+  providerStore: string | null;
+  skipCliBuild: boolean;
+};
+
+type ProviderStoreIndex = {
+  latest?: Record<string, string>;
+  providers: Array<{ id: string }>;
+};
+
+type DevMountTemplate = {
+  mount: string;
+  provider: string;
+  auth?: {
+    type?: string;
+    scheme?: string;
+  };
+  config?: unknown;
+  capabilities?: unknown;
+  limits?: unknown;
+};
+
+type DevMountRender = {
+  name: string;
+  provider: string;
+  template: DevMountTemplate;
+  tokenEnv?: string;
+};
+
+type DevHomeRender = {
+  mounts: DevMountRender[];
+  skipped: string[];
+  credentialEnv: Record<string, string>;
+};
+
+type TemplateEntry = {
+  path: string;
+  template: DevMountTemplate;
+};
+
+type Fixtures = {
+  k8s: boolean;
+  k8sSockDir: string | null;
+  dbContainerId: string | null;
+  binds: string[];
+};
+
+type ReconcileReport = {
+  failed?: Array<{ mount: string; reason: string }>;
+};
+
+const $ = Bun.$;
 const CONTAINER_NAME = process.env.OMNIFS_CONTAINER_NAME || "omnifs";
 const DB_IMAGE = "omnifs-dev-db:local";
 const DB_CONTAINER = "omnifs-dev-db";
@@ -29,9 +111,8 @@ const GUEST_SHELL = "/bin/zsh";
 
 // Dev mounts whose provider needs a static token, and the host env var that
 // holds it. Dev orchestration, not provider or mount data, so it lives here
-// rather than in the mount templates. The same env var name appears as a
-// `${VAR}` placeholder in `contrib/dev-credentials.json`.
-const DEV_TOKEN_ENV = { github: "GITHUB_TOKEN", linear: "LINEAR_API_KEY" };
+// rather than in the mount templates.
+const DEV_TOKEN_ENV: Record<string, string> = { github: "GITHUB_TOKEN", linear: "LINEAR_API_KEY" };
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const workspace = resolve(scriptDir, "..");
@@ -60,7 +141,7 @@ async function main() {
   }
   assertFile(join(providerStore, "index.json"), "provider store bundle");
 
-  const builds = [];
+  const builds: Promise<void>[] = [];
   if (!options.skipCliBuild) {
     builds.push(
       run($`cargo build -p omnifs-cli --no-default-features`.env({
@@ -93,7 +174,7 @@ async function main() {
     }
   }
 
-  writeDevHome(devHome, providerStore, image, render);
+  await writeDevHome(devHome, providerStore, image, render);
 
   const fixtures = await startFixtures(render.mounts, devHome);
   try {
@@ -128,8 +209,8 @@ async function main() {
   }
 }
 
-function parseArgs(args) {
-  const options = {
+function parseArgs(args: string[]): DevOptions {
+  const options: DevOptions = {
     profile: "default",
     image: null,
     yes: false,
@@ -164,7 +245,7 @@ function parseArgs(args) {
   return options;
 }
 
-function requireValue(args, index, flag) {
+function requireValue(args: string[], index: number, flag: string): string {
   const value = args[index];
   if (!value || value.startsWith("--")) {
     throw new Error(`${flag} requires a value`);
@@ -172,7 +253,7 @@ function requireValue(args, index, flag) {
   return value;
 }
 
-async function checkPrerequisites(options) {
+async function checkPrerequisites(options: DevOptions): Promise<void> {
   const commands = ["bun", "docker"];
   if (!options.providerStore) {
     commands.push("just");
@@ -194,11 +275,11 @@ async function checkPrerequisites(options) {
   }
 }
 
-async function commandExists(command) {
+async function commandExists(command: string): Promise<boolean> {
   return commandSucceeds($`${command} --version`.quiet().nothrow());
 }
 
-function readProfile(profile) {
+function readProfile(profile: string): string[] {
   const path = join(workspace, "contrib/dev-profiles", `${profile}.toml`);
   const raw = readFileSync(path, "utf8");
   const match = raw.match(/mounts\s*=\s*\[([^\]]*)\]/m);
@@ -208,26 +289,30 @@ function readProfile(profile) {
   return [...match[1].matchAll(/"([^"]+)"/g)].map((item) => item[1]);
 }
 
-function discoverTemplates() {
+function discoverTemplates(): Map<string, TemplateEntry> {
   const providersDir = join(workspace, "providers");
-  const templates = new Map();
+  const templates = new Map<string, TemplateEntry>();
   for (const provider of readdirSync(providersDir)) {
     const path = join(providersDir, provider, "dev/mount.json");
     if (!existsSync(path)) {
       continue;
     }
-    const template = JSON.parse(readFileSync(path, "utf8"));
+    const template = JSON.parse(readFileSync(path, "utf8")) as DevMountTemplate;
     templates.set(template.mount, { path, template });
   }
   return templates;
 }
 
-async function renderDevHomePlan(profileMounts, providerStore, options) {
-  const index = JSON.parse(readFileSync(join(providerStore, "index.json"), "utf8"));
+async function renderDevHomePlan(
+  profileMounts: string[],
+  providerStore: string,
+  options: DevOptions,
+): Promise<DevHomeRender> {
+  const index = JSON.parse(readFileSync(join(providerStore, "index.json"), "utf8")) as ProviderStoreIndex;
   const templates = discoverTemplates();
-  const mounts = [];
-  const skipped = [];
-  const credentialEnv = {};
+  const mounts: DevMountRender[] = [];
+  const skipped: string[] = [];
+  const credentialEnv: Record<string, string> = {};
 
   for (const mountName of profileMounts) {
     const found = templates.get(mountName);
@@ -238,7 +323,7 @@ async function renderDevHomePlan(profileMounts, providerStore, options) {
 
     const spec = structuredClone(found.template);
     const providerName = spec.provider;
-    spec.provider = providerRef(index, providerName);
+    assertProviderInStore(index, providerName);
 
     const tokenEnv = DEV_TOKEN_ENV[providerName];
     if (tokenEnv) {
@@ -250,13 +335,13 @@ async function renderDevHomePlan(profileMounts, providerStore, options) {
       credentialEnv[tokenEnv] = token;
     }
 
-    mounts.push({ name: mountName, provider: providerName, spec });
+    mounts.push({ name: mountName, provider: providerName, template: spec, tokenEnv });
   }
 
   return { mounts, skipped, credentialEnv };
 }
 
-function providerRef(index, providerName) {
+function assertProviderInStore(index: ProviderStoreIndex, providerName: string): void {
   const id = index.latest?.[providerName];
   if (!id) {
     throw new Error(`provider store bundle has no latest entry for ${providerName}`);
@@ -265,14 +350,13 @@ function providerRef(index, providerName) {
   if (!entry) {
     throw new Error(`provider store bundle index is missing provider ${id}`);
   }
-  const meta = { name: entry.name };
-  if (entry.version) {
-    meta.version = entry.version;
-  }
-  return { id, meta };
 }
 
-async function resolveToken(providerName, tokenEnv, options) {
+async function resolveToken(
+  providerName: string,
+  tokenEnv: string,
+  options: DevOptions,
+): Promise<string | null> {
   const fromEnv = process.env[tokenEnv];
   if (fromEnv) {
     return fromEnv;
@@ -293,25 +377,19 @@ async function resolveToken(providerName, tokenEnv, options) {
   return token || null;
 }
 
-// Render the dev credential store from the checked-in template, replacing each
-// `"${VAR}"` placeholder with the JSON-encoded env value dev resolved (so the
-// token is escaped correctly), or `null` when the var is absent. The template
-// (`contrib/dev-credentials.json`) owns the entry shape, mirroring
-// `omnifs_creds::CredentialEntry`; dev only fills in secrets. Entries left
-// without a token are dropped, so a mount with no token has no credential.
-function renderCredentials(credentialEnv) {
-  const raw = readFileSync(join(workspace, "contrib/dev-credentials.json"), "utf8");
-  const filled = raw.replace(/"\$\{(\w+)\}"/g, (_, name) =>
-    credentialEnv[name] === undefined ? "null" : JSON.stringify(credentialEnv[name]),
-  );
-  const store = JSON.parse(filled);
-  store.entries = Object.fromEntries(
-    Object.entries(store.entries).filter(([, entry]) => entry.access_token !== null),
-  );
-  return store;
-}
-
-function printPlan({ devHome, image, profile, render, keepRunning }) {
+function printPlan({
+  devHome,
+  image,
+  profile,
+  render,
+  keepRunning,
+}: {
+  devHome: string;
+  image: string;
+  profile: string;
+  render: DevHomeRender;
+  keepRunning: boolean;
+}): void {
   console.log("");
   console.log("omnifs contributor dev session");
   console.log(`  Profile     ${profile}`);
@@ -331,14 +409,21 @@ function printPlan({ devHome, image, profile, render, keepRunning }) {
   console.log("");
 }
 
-function writeDevHome(devHome, providerStore, image, render) {
+async function writeDevHome(
+  devHome: string,
+  providerStore: string,
+  image: string,
+  render: DevHomeRender,
+): Promise<void> {
   mkdirSync(devHome, { recursive: true });
   chmodPrivateDir(devHome);
 
   const mountsDir = join(devHome, "mounts");
   const providersDir = join(devHome, "providers");
+  const credentialsPath = join(devHome, "credentials.json");
   rmSync(mountsDir, { recursive: true, force: true });
   rmSync(providersDir, { recursive: true, force: true });
+  rmSync(credentialsPath, { force: true });
   mkdirSync(mountsDir, { recursive: true });
   cpSync(providerStore, providersDir, { recursive: true });
 
@@ -348,17 +433,99 @@ function writeDevHome(devHome, providerStore, image, render) {
   );
 
   for (const mount of render.mounts) {
-    writeJson(join(mountsDir, `${mount.name}.json`), mount.spec);
+    await runInitMount(devHome, image, mount, render.credentialEnv);
   }
-
-  const credentialsPath = join(devHome, "credentials.json");
-  writeJson(credentialsPath, renderCredentials(render.credentialEnv));
-  chmodPrivateFile(credentialsPath);
+  if (existsSync(credentialsPath)) {
+    chmodPrivateFile(credentialsPath);
+  }
 }
 
-async function startFixtures(mounts, devHome) {
+async function runInitMount(
+  devHome: string,
+  image: string,
+  mount: DevMountRender,
+  credentialEnv: Record<string, string>,
+): Promise<void> {
+  const args = [
+    "init",
+    mount.provider,
+    "--as",
+    mount.name,
+    "--no-input",
+    "--yes",
+  ];
+  if (Object.prototype.hasOwnProperty.call(mount.template, "auth")) {
+    const auth = mount.template.auth;
+    if (auth?.type === "static-token") {
+      if (auth.scheme) {
+        args.push("--scheme", auth.scheme);
+      }
+      if (mount.tokenEnv) {
+        // Dev/CI tokens (e.g. the Actions integration token) can fail the
+        // provider's validation probe while working for their scope; dev
+        // rendering stores them unvalidated, as it always has.
+        args.push("--token-env", mount.tokenEnv, "--no-validate");
+      }
+    } else {
+      throw new Error(`${mount.name}: unsupported dev auth template ${JSON.stringify(auth)}`);
+    }
+  } else {
+    args.push("--no-auth");
+  }
+  if (mount.template.config) {
+    args.push("--config-json", JSON.stringify(mount.template.config));
+  }
+  if (mount.template.capabilities) {
+    args.push("--capabilities-json", JSON.stringify(mount.template.capabilities));
+  }
+  if (mount.template.limits) {
+    args.push("--limits-json", JSON.stringify(mount.template.limits));
+  }
+
+  const hostCli = hostCliBinary();
+  if (hostCli) {
+    await run(
+      $`${hostCli} ${args}`.env({
+        ...process.env,
+        ...credentialEnv,
+        OMNIFS_HOME: devHome,
+        OMNIFS_DAEMON_ADDR: "127.0.0.1:9",
+      }),
+    );
+    return;
+  }
+
+  // No host-built CLI (the CI smoke lane passes --skip-cli-build and only has
+  // the prebuilt image): render through the image's own binary in a one-shot
+  // container against the same dev home. Token env vars pass by name only, so
+  // their values never appear in the docker command line.
+  const dockerArgs = [
+    "run",
+    "--rm",
+    "--entrypoint",
+    "/usr/local/bin/omnifs",
+    "-v",
+    `${devHome}:${GUEST_HOME}`,
+    "-e",
+    `OMNIFS_HOME=${GUEST_HOME}`,
+    "-e",
+    "OMNIFS_DAEMON_ADDR=127.0.0.1:9",
+  ];
+  if (mount.tokenEnv && credentialEnv[mount.tokenEnv] !== undefined) {
+    dockerArgs.push("-e", mount.tokenEnv);
+  }
+  dockerArgs.push(image, ...args);
+  await run(
+    $`docker ${dockerArgs}`.env({
+      ...process.env,
+      ...credentialEnv,
+    }),
+  );
+}
+
+async function startFixtures(mounts: DevMountRender[], devHome: string): Promise<Fixtures> {
   const mountNames = new Set(mounts.map((mount) => mount.name));
-  const fixtures = {
+  const fixtures: Fixtures = {
     k8s: false,
     k8sSockDir: null,
     dbContainerId: null,
@@ -391,7 +558,15 @@ async function startFixtures(mounts, devHome) {
   return fixtures;
 }
 
-async function launchContainer({ devHome, image, fixtures }) {
+async function launchContainer({
+  devHome,
+  image,
+  fixtures,
+}: {
+  devHome: string;
+  image: string;
+  fixtures: Fixtures;
+}): Promise<void> {
   await removeContainer(CONTAINER_NAME);
 
   const args = [
@@ -461,21 +636,21 @@ async function waitForReady() {
 }
 
 async function reconcile() {
-  const report = await fetchJson("/v1/reconcile", { method: "POST" });
+  const report = await fetchJson<ReconcileReport>("/v1/reconcile", { method: "POST" });
   for (const failure of report.failed || []) {
     console.error(`warning: mount \`${failure.mount}\` did not load: ${failure.reason}`);
   }
 }
 
-async function fetchJson(path, init = {}) {
+async function fetchJson<T>(path: string, init: RequestInit = {}): Promise<T> {
   const response = await fetch(`http://${CONTROL_ADDR}${path}`, init);
   if (!response.ok) {
     throw new Error(`${init.method || "GET"} ${path} failed with HTTP ${response.status}`);
   }
-  return response.json();
+  return response.json() as Promise<T>;
 }
 
-async function teardownSession(fixtures) {
+async function teardownSession(fixtures: Fixtures): Promise<void> {
   await removeContainer(CONTAINER_NAME);
   if (fixtures.k8s && fixtures.k8sSockDir) {
     await run(
@@ -492,11 +667,11 @@ async function teardownSession(fixtures) {
   }
 }
 
-async function removeContainer(name) {
+async function removeContainer(name: string): Promise<void> {
   await run($`docker rm -f ${name}`.quiet().nothrow());
 }
 
-function buildImage(image, providerStore) {
+function buildImage(image: string, providerStore: string): Promise<void> {
   return run(
     $`docker build -t ${image} --target runtime-dev --build-context ${`provider-wasm=${providerStore}`} --build-arg ${`OMNIFS_MIN_LAUNCHER_VERSION=${workspaceVersion()}`} .`,
   );
@@ -508,19 +683,20 @@ function workspaceVersion() {
   return match?.[1] || "unknown";
 }
 
-async function gitShortHead() {
+async function gitShortHead(): Promise<string> {
   return (await awaitText($`git rev-parse --short=12 HEAD`)).trim();
 }
 
-function keepRunning(options) {
+function keepRunning(options: DevOptions): boolean {
   return options.detach || options.noShell;
 }
 
-function writeJson(path, value) {
-  writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`);
+function hostCliBinary(): string | null {
+  const path = join(workspace, "target/debug/omnifs");
+  return existsSync(path) ? path : null;
 }
 
-function chmodPrivateDir(path) {
+function chmodPrivateDir(path: string): void {
   try {
     chmodSync(path, 0o700);
   } catch {
@@ -528,7 +704,7 @@ function chmodPrivateDir(path) {
   }
 }
 
-function chmodPrivateFile(path) {
+function chmodPrivateFile(path: string): void {
   try {
     chmodSync(path, 0o600);
   } catch {
@@ -536,13 +712,13 @@ function chmodPrivateFile(path) {
   }
 }
 
-function assertFile(path, label) {
+function assertFile(path: string, label: string): void {
   if (!existsSync(path)) {
     throw new Error(`missing ${label} at ${path}`);
   }
 }
 
-async function confirm(question, defaultYes) {
+async function confirm(question: string, defaultYes: boolean): Promise<boolean> {
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
     return false;
   }
@@ -559,20 +735,20 @@ async function confirm(question, defaultYes) {
   }
 }
 
-async function run(command) {
+async function run(command: ShellCommand): Promise<void> {
   await command;
 }
 
-async function awaitText(command) {
+async function awaitText(command: ShellCommand): Promise<string> {
   return command.quiet().text();
 }
 
-async function commandSucceeds(command) {
+async function commandSucceeds(command: ShellCommand): Promise<boolean> {
   const output = await command;
   return output.exitCode === 0;
 }
 
-async function runInteractive(args) {
+async function runInteractive(args: string[]): Promise<void> {
   const child = Bun.spawn(args, {
     cwd: workspace,
     env: process.env,
@@ -586,6 +762,6 @@ async function runInteractive(args) {
   }
 }
 
-function sleep(ms) {
+function sleep(ms: number): Promise<void> {
   return new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
 }

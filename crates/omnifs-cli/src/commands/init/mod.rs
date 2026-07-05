@@ -5,33 +5,26 @@
 //! the resolved omnifs config file, and runs the provider's default auth flow
 //! when one is declared.
 
-mod auth_import;
+pub(crate) mod auth_import;
 mod detect;
-mod mount_file;
-mod provider_selection;
-mod spec_creation;
+pub(crate) mod mount_file;
+pub(crate) mod provider_selection;
+pub(crate) mod spec_creation;
 mod token_validation;
 
-use crate::error::WithHint;
-use anyhow::{Context, anyhow};
+use anyhow::Context;
 use clap::Args;
 use omnifs_workspace::creds::{CredentialEntry, CredentialStore, FileStore};
-use omnifs_workspace::mounts::{Name as MountName, Registry, UpgradePlan};
-use omnifs_workspace::provider::{Catalog, ProviderManifest};
+use omnifs_workspace::provider::ProviderManifest;
 use secrecy::{ExposeSecret, SecretString};
 use std::path::Path;
 use time::OffsetDateTime;
 
 use crate::auth::AuthSelection;
 use crate::credential_target::CredentialTarget;
-use crate::mount_config::MountConfig;
-use crate::token_source::TokenSource;
 use crate::workspace::Workspace;
 pub(crate) use auth_import::AuthImportDecision;
-use mount_file::MountFile;
-use omnifs_workspace::layout::WorkspaceLayout;
-use provider_selection::ProviderSelection;
-use spec_creation::MountSpecCreator;
+pub(crate) use auth_import::ImportOutcome;
 use token_validation::StaticTokenValidator;
 
 #[derive(Args, Debug, Clone)]
@@ -57,9 +50,29 @@ pub struct InitArgs {
     /// Read the static token from this environment variable.
     #[arg(long, value_name = "ENV_VAR", conflicts_with = "token")]
     pub token_env: Option<String>,
+    /// Store the static token without the provider's upstream validation
+    /// probe (for CI or restricted tokens that fail the probe endpoint but
+    /// work for their intended scope).
+    #[arg(long)]
+    pub no_validate: bool,
     /// OAuth scope to request. Repeat for multiple scopes.
     #[arg(long = "scope")]
     pub scopes: Vec<String>,
+    /// Auth scheme to use instead of the provider default.
+    #[arg(long, value_name = "SCHEME")]
+    pub scheme: Option<String>,
+    /// Do not write an auth block, even if the provider declares a default.
+    #[arg(long, conflicts_with_all = ["token", "token_env", "scheme"])]
+    pub no_auth: bool,
+    /// Full provider config JSON object to write into the mount spec.
+    #[arg(long = "config-json", value_name = "JSON")]
+    pub config_json: Option<String>,
+    /// Full capability grants JSON object to write into the mount spec.
+    #[arg(long = "capabilities-json", value_name = "JSON")]
+    pub capabilities_json: Option<String>,
+    /// Full resource limits JSON object to write into the mount spec.
+    #[arg(long = "limits-json", value_name = "JSON")]
+    pub limits_json: Option<String>,
 }
 
 impl InitArgs {
@@ -68,242 +81,11 @@ impl InitArgs {
         self.run_in_workspace(&workspace).await
     }
 
-    #[allow(clippy::too_many_lines)]
     pub(crate) async fn run_in_workspace(self, workspace: &Workspace) -> anyhow::Result<()> {
-        let paths = workspace.layout();
-        crate::provider_bundle::ensure_providers_installed(&paths.providers_dir)?;
-        let interactive = !self.no_input;
-        let catalog = workspace.catalog();
-        let mounts = workspace.mounts()?;
-        let installed = crate::catalog::installed_providers(catalog)?;
-        if installed.is_empty() {
-            anyhow::bail!("no built-in or disk providers are available");
-        }
-
-        let provider_selection = ProviderSelection::new(&mounts, &installed);
-        let (provider_name, mount_name) = provider_selection.resolve(
-            self.provider.as_deref(),
-            self.as_name.as_deref(),
-            interactive,
-            self.yes,
-        )?;
-
-        let (provider, manifest) = crate::catalog::find_installed(&installed, &provider_name)
-            .ok_or_else(|| {
-                anyhow!(
-                    "provider `{provider_name}` not found; available: {}",
-                    provider_selection.provider_names().join(", ")
-                )
-            })
-            .with_hint("Run `omnifs init` (no args) to see the picker of available providers")
-            .with_hint(format!(
-                "Or run `omnifs providers add <wasm-or-dir>` to install provider artifacts into {}",
-                paths.providers_dir.display()
-            ))?;
-        let reference = provider.reference();
-        let existing_mount = mounts.iter().find(|mount| mount.name == mount_name);
-        let upgrade_approval = match existing_mount {
-            Some(existing) => approved_upgrade_for_existing_mount(
-                catalog,
-                existing,
-                manifest,
-                &provider_name,
-                &mount_name,
-                interactive,
-            )?,
-            None => None,
-        };
-        let auth_manifest = manifest.wasm_auth_manifest();
-        let default_auth = AuthSelection::from_provider_default(&reference, &mount_name, manifest);
-        if interactive {
-            print_capability_justifications(manifest);
-        }
-        if self.no_input && default_auth.as_ref().is_some_and(AuthSelection::is_oauth) {
-            anyhow::bail!(
-                "`omnifs init --no-input` cannot complete OAuth. Run `omnifs init {provider_name}` interactively."
-            );
-        }
-        let creator = MountSpecCreator::new(&reference, &mount_name, manifest);
-        if self.no_input && creator.requires_prompt() {
-            anyhow::bail!(
-                "`omnifs init --no-input` cannot complete provider config prompts for `{provider_name}`. Run `omnifs init {provider_name}` interactively."
-            );
-        }
-        let created = creator.create(interactive)?;
-
-        // Resolve the effective auth before writing the mount config. If the
-        // mount's default auth is OAuth and the user accepts an ambient
-        // credential (gh CLI token, GITHUB_TOKEN env), we promote the mount
-        // to a static-token mount using a static scheme from the manifest.
-        // Storing under the OAuth scheme would make `omnifs up` later apply
-        // OAuth header semantics (Bearer prefix, scope handling) to a plain
-        // PAT, which breaks providers like Linear whose static scheme uses
-        // no header prefix.
-        let import_outcome = AuthImportDecision::new(
-            default_auth,
-            auth_manifest.as_ref(),
-            &provider_name,
-            interactive,
-            self.yes,
-        )
-        .resolve()?;
-        let effective_auth = import_outcome.auth.clone();
-
-        let mount_file = MountFile::new(
-            &mount_name,
-            &reference,
-            effective_auth.as_ref(),
-            &self.scopes,
-            created,
-        );
-        let spec = mount_file.into_spec();
-        let mount_path = paths.mounts_dir.join(format!("{mount_name}.json"));
-        let daemon_report = match if existing_mount.is_some() {
-            workspace
-                .daemon()
-                .update_mount_if_ready(&spec, upgrade_approval.as_ref())
-                .await
-        } else {
-            workspace.daemon().create_mount_if_ready(&spec).await
-        } {
-            Ok(Some(report)) => {
-                anstream::eprintln!("✓ Wrote {}", WorkspaceLayout::display(&mount_path));
-                Some(report)
-            },
-            Ok(None) => {
-                Registry::load(&paths.mounts_dir)?.put(&spec)?;
-                anstream::eprintln!("✓ Wrote {}", WorkspaceLayout::display(&mount_path));
-                None
-            },
-            Err(error) => {
-                anstream::eprintln!(
-                    "Running daemon could not save mount `{mount_name}`: {error:#}"
-                );
-                anstream::eprintln!("Falling back to a local mount config write.");
-                Registry::load(&paths.mounts_dir)?.put(&spec)?;
-                anstream::eprintln!("✓ Wrote {}", WorkspaceLayout::display(&mount_path));
-                None
-            },
-        };
-
-        if let Some(auth) = effective_auth.as_ref() {
-            if let Some(token) = import_outcome.token {
-                run_static_token_init(manifest, auth, token, &paths.credentials_file).await?;
-            } else if auth.is_oauth() {
-                anstream::eprintln!("Starting OAuth login for `{mount_name}` ...");
-                crate::auth::login_with_workspace(
-                    workspace,
-                    mount_name.as_str(),
-                    auth.account.as_deref(),
-                    self.no_browser,
-                    &self.scopes,
-                )
-                .await
-                .inspect_err(|_| {
-                    anstream::eprintln!(
-                        "Mount `{mount_name}` was created, but login did not complete. Run `omnifs mounts reauth {mount_name}` to finish."
-                    );
-                })?;
-            } else {
-                if interactive && let Ok(scheme) = auth.static_token_scheme(manifest) {
-                    let guidance = manifest
-                        .auth
-                        .as_ref()
-                        .map(|auth| auth.guidance_for(&scheme.key))
-                        .unwrap_or_default();
-                    anstream::eprintln!();
-                    anstream::eprintln!("Authenticating `{mount_name}` with a static token:");
-                    crate::auth::explain::render_static_token_intro(
-                        scheme.creation_url.as_deref(),
-                        &guidance,
-                    );
-                }
-                let source = TokenSource::resolve(
-                    self.token.as_deref(),
-                    self.token_env.as_deref(),
-                    interactive,
-                )?;
-                let token = source.read()?;
-                run_static_token_init(manifest, auth, token, &paths.credentials_file).await?;
-            }
-        }
-
-        anstream::eprintln!();
-        anstream::eprintln!("Mount `{mount_name}` is ready.");
-
-        match daemon_report {
-            Some(report) if report.failure.is_none() => {
-                anstream::eprintln!("✓ Applied to the running daemon");
-            },
-            Some(report) => {
-                let reason = report
-                    .failure
-                    .as_ref()
-                    .map_or("unknown error", |failure| failure.reason.as_str());
-                anstream::eprintln!(
-                    "Mount config saved, but loading it into the running daemon failed: {reason}"
-                );
-                anstream::eprintln!("Run `omnifs up` to restart with the new mount.");
-            },
-            None => anstream::eprintln!("Run `omnifs up` to start it."),
-        }
-        crate::telemetry::maybe_print_health_nudge(workspace).await;
-        Ok(())
+        crate::stages::configure_mount(self, workspace)
+            .await
+            .map(|_| ())
     }
-}
-
-fn approved_upgrade_for_existing_mount(
-    catalog: &Catalog,
-    existing: &MountConfig,
-    candidate_manifest: &ProviderManifest,
-    provider_name: &str,
-    mount_name: &MountName,
-    interactive: bool,
-) -> anyhow::Result<Option<UpgradePlan>> {
-    let existing_provider = existing.config.provider_name();
-    if existing_provider.as_str() != provider_name {
-        anyhow::bail!(
-            "mount `{mount_name}` already exists for provider `{existing_provider}`; remove it first or choose a different name"
-        );
-    }
-
-    let Some(pinned) = catalog
-        .get(&existing.config.provider.id)
-        .with_context(|| format!("load pinned provider for mount `{mount_name}`"))?
-    else {
-        anyhow::bail!(
-            "mount `{mount_name}` pinned provider artifact {id} is missing; cannot compute an upgrade approval",
-            id = existing.config.provider.id,
-        );
-    };
-    let pinned_manifest = pinned
-        .manifest()
-        .with_context(|| format!("read pinned provider manifest for mount `{mount_name}`"))?;
-    let plan = UpgradePlan::diff(&pinned_manifest, candidate_manifest);
-    if !plan.requires_approval() {
-        return Ok(None);
-    }
-    if !interactive {
-        anyhow::bail!(
-            "`omnifs init --no-input` cannot approve provider upgrade changes for existing mount `{mount_name}`"
-        );
-    }
-
-    anstream::println!();
-    anstream::println!(
-        "Mount `{mount_name}` already exists. `{provider_name}` changed its provider surface:"
-    );
-    for change in crate::upgrade::describe_upgrade_changes(&plan) {
-        anstream::println!("  - {change}");
-    }
-    let approved = inquire::Confirm::new("Approve this provider upgrade?")
-        .with_default(false)
-        .prompt()
-        .map_err(|error| anyhow!("confirm prompt: {error}"))?;
-    if !approved {
-        anyhow::bail!("aborted");
-    }
-    Ok(Some(plan))
 }
 
 pub(crate) fn print_capability_justifications(manifest: &ProviderManifest) {
@@ -342,6 +124,7 @@ pub(crate) async fn run_static_token_init(
     auth: &AuthSelection,
     token: SecretString,
     credentials_file: &Path,
+    validate: bool,
 ) -> anyhow::Result<CredentialTarget> {
     let static_token_scheme = auth.static_token_scheme(manifest)?;
 
@@ -352,11 +135,15 @@ pub(crate) async fn run_static_token_init(
     let header_prefix = static_token_scheme.value_prefix.as_str();
 
     let validation = match static_token_scheme.validation.as_ref() {
-        Some(v) => Some(
+        Some(v) if validate => Some(
             StaticTokenValidator::new(v, header_name, header_prefix)
                 .validate(token.expose_secret())
                 .await?,
         ),
+        Some(_) => {
+            anstream::eprintln!("Skipping token validation (--no-validate).");
+            None
+        },
         None => None,
     };
     if let Some(outcome) = &validation {
@@ -401,8 +188,9 @@ pub(crate) async fn run_static_token_init(
 
 #[cfg(test)]
 mod tests {
+    use super::mount_file::MountFile;
     use super::spec_creation::{CreatedMountSpec, MountSpecCreator};
-    use super::{AuthImportDecision, InitArgs, MountFile};
+    use super::{AuthImportDecision, InitArgs};
     use crate::auth::AuthSelection;
     use crate::workspace::Workspace;
     use omnifs_caps::{
@@ -418,6 +206,38 @@ mod tests {
         ProviderStore,
     };
     use serde_json::Value;
+
+    #[test]
+    fn config_override_skips_default_generation_for_required_fields() {
+        // A provider whose config has a required field with no default (db's
+        // `path`) cannot generate a valid default config; a supplied
+        // --config-json must bypass default generation, not fail on it.
+        let mut manifest = provider_manifest();
+        manifest.config = Some(ConfigMetadata {
+            fields: vec![ConfigField {
+                name: "path".to_string(),
+                value_type: ConfigType::String,
+                required: true,
+                default: None,
+                description: None,
+                binding: None,
+            }],
+        });
+
+        let reference = provider_ref("db");
+        let mount_name = MountName::try_from("db").unwrap();
+        let creator = MountSpecCreator::new(&reference, &mount_name, &manifest);
+
+        creator
+            .create(false)
+            .expect_err("default generation must fail without the required field");
+
+        let created = creator.create_for_config_override();
+        assert_eq!(created.config, None);
+        creator
+            .validate(&serde_json::json!({"path": "/data/test.db"}))
+            .expect("override config with the required field validates");
+    }
 
     #[test]
     fn generate_mount_config_materializes_config_defaults() {
@@ -535,7 +355,13 @@ mod tests {
             no_browser: true,
             token: None,
             token_env: None,
+            no_validate: false,
             scopes: Vec::new(),
+            scheme: None,
+            no_auth: false,
+            config_json: None,
+            capabilities_json: None,
+            limits_json: None,
         };
 
         tokio::runtime::Builder::new_current_thread()

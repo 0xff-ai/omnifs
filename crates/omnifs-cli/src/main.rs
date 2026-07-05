@@ -25,6 +25,7 @@ mod mount_report;
 mod mount_tree;
 mod provider_bundle;
 mod runtime;
+mod stages;
 mod status;
 mod style;
 mod telemetry;

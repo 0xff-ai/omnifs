@@ -14,11 +14,19 @@ pub struct UpArgs {
     /// configured default again.
     #[arg(long, value_enum)]
     pub runtime: Option<ConfiguredBackend>,
+    /// Wait until /v1/ready answers, failing with exit code 3 on timeout.
+    #[arg(long, value_name = "DURATION")]
+    pub wait: Option<String>,
 }
 
 impl UpArgs {
     pub async fn run(self) -> anyhow::Result<()> {
         let workspace = Workspace::resolve()?;
+        let wait = self
+            .wait
+            .as_deref()
+            .map(crate::stages::parse_wait_duration)
+            .transpose()?;
         let launcher = Launcher::new(&workspace, "omnifs up").with_runtime_override(self.runtime);
         match launcher.launch().await? {
             LaunchOutcome::Native { mount_point } => {
@@ -41,6 +49,10 @@ impl UpArgs {
                     crate::style::bold("omnifs shell"),
                 );
             },
+        }
+        if let Some(timeout) = wait {
+            crate::stages::wait_until_ready(&workspace, timeout).await?;
+            anstream::eprintln!("Daemon is ready.");
         }
         crate::telemetry::maybe_print_health_nudge(&workspace).await;
         Ok(())

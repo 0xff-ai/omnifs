@@ -64,6 +64,11 @@ pub struct ReauthArgs {
     /// Read the static token from this environment variable.
     #[arg(long, value_name = "ENV_VAR", conflicts_with = "token")]
     pub token_env: Option<String>,
+    /// Store the static token without the provider's upstream validation
+    /// probe (for CI or restricted tokens that fail the probe endpoint but
+    /// work for their intended scope).
+    #[arg(long)]
+    pub no_validate: bool,
     /// OAuth scope to request. Repeat for multiple scopes.
     #[arg(long = "scope")]
     pub scopes: Vec<String>,
@@ -191,6 +196,7 @@ impl ReauthArgs {
                 &selection,
                 token,
                 &paths.credentials_file,
+                !self.no_validate,
             )
             .await?
         };

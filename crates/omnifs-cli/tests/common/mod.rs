@@ -109,6 +109,13 @@ pub fn nfs_serial_lock() -> TcpListener {
 /// Install the test provider into the provider store under `providers_dir` and
 /// return its content id.
 pub fn install_test_provider(providers_dir: &Path) -> omnifs_workspace::ids::ProviderId {
+    install_test_provider_as(providers_dir, "test-provider")
+}
+
+pub fn install_test_provider_as(
+    providers_dir: &Path,
+    provider_name: &str,
+) -> omnifs_workspace::ids::ProviderId {
     let bytes = std::fs::read(release_wasm_dir().join("test_provider.wasm"))
         .expect("read test provider wasm");
     let id = omnifs_workspace::ids::ProviderId::from_wasm_bytes(&bytes);
@@ -118,7 +125,7 @@ pub fn install_test_provider(providers_dir: &Path) -> omnifs_workspace::ids::Pro
         .install(
             id,
             omnifs_workspace::ids::ProviderMeta {
-                name: omnifs_workspace::ids::ProviderName::new("test-provider").unwrap(),
+                name: omnifs_workspace::ids::ProviderName::new(provider_name).unwrap(),
                 version: None,
             },
             "test_provider.wasm".into(),

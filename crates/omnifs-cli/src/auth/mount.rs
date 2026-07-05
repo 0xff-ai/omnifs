@@ -51,6 +51,43 @@ impl AuthSelection {
         self.auth_type == AuthKind::OAuth
     }
 
+    pub(crate) fn from_scheme(
+        auth_manifest: Option<&AuthManifest>,
+        scheme: &str,
+        account: Option<String>,
+    ) -> anyhow::Result<Self> {
+        let manifest = auth_manifest.ok_or_else(|| anyhow!("provider has no auth manifest"))?;
+        if manifest.resolve_static_scheme(Some(scheme)).is_ok() {
+            return Ok(Self {
+                auth_type: AuthKind::StaticToken,
+                scheme: Some(scheme.to_string()),
+                account,
+            });
+        }
+        if manifest.resolve_oauth_scheme(Some(scheme)).is_ok() {
+            return Ok(Self {
+                auth_type: AuthKind::OAuth,
+                scheme: Some(scheme.to_string()),
+                account,
+            });
+        }
+        anyhow::bail!("provider has no auth scheme `{scheme}`")
+    }
+
+    pub(crate) fn static_token(
+        auth_manifest: Option<&AuthManifest>,
+        scheme: Option<&str>,
+        account: Option<String>,
+    ) -> anyhow::Result<Self> {
+        let manifest = auth_manifest.ok_or_else(|| anyhow!("provider has no auth manifest"))?;
+        let static_scheme = manifest.resolve_static_scheme(scheme)?;
+        Ok(Self {
+            auth_type: AuthKind::StaticToken,
+            scheme: Some(static_scheme.key.clone()),
+            account,
+        })
+    }
+
     pub(crate) fn promote_imported_static(
         mut self,
         auth_manifest: Option<&AuthManifest>,
