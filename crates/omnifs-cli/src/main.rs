@@ -19,7 +19,6 @@ mod inspector;
 mod launch;
 mod launch_backend;
 mod launch_record;
-mod live;
 mod mount_report;
 mod mount_tree;
 mod provider_bundle;

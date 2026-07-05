@@ -50,13 +50,9 @@ impl<'a> ProviderSelection<'a> {
         let proposed = explicit_name.map_or_else(|| manifest.default_mount.clone(), str::to_string);
         let proposed_name = MountName::new(proposed.as_str())?;
 
-        // Explicit --as collisions always error, regardless of --yes.
+        // An explicit --as collision is the update/re-consent path. Accidental
+        // default-name collisions still go through the unique-name flow below.
         if explicit_name.is_some() {
-            if mount_exists(self.mounts, &proposed_name) {
-                anyhow::bail!(
-                    "mount `{proposed}` already exists; choose a different name with --as"
-                );
-            }
             return Ok((provider, proposed_name));
         }
 

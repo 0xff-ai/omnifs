@@ -212,25 +212,6 @@ impl LaunchBackend {
         }
     }
 
-    pub(crate) fn resolve(
-        config: &Config,
-        container_name: Option<String>,
-        image: Option<String>,
-    ) -> anyhow::Result<Self> {
-        match config.backend() {
-            ConfiguredBackend::Native => Ok(Self::Native),
-            ConfiguredBackend::Docker => Ok(Self::Docker(DockerTarget::resolve(
-                container_name,
-                image,
-                config,
-            )?)),
-        }
-    }
-
-    pub(crate) fn is_docker(&self) -> bool {
-        matches!(self, Self::Docker(_))
-    }
-
     /// Reclaim backend-specific resources after a graceful control-API shutdown
     /// has been attempted. For native: sweep any stale mount. For Docker: stop
     /// and remove the container.

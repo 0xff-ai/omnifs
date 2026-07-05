@@ -6,8 +6,10 @@
 
 use anyhow::{Context as _, Result};
 use omnifs_api::{
-    API_MAJOR, API_MINOR, ApiError, DaemonStatus, ErrorCode, ReconcileReport, StopReport,
+    API_MAJOR, API_MINOR, ApiError, DaemonStatus, ErrorCode, MountReport, MountUpdateRequest,
+    ReconcileReport, StopReport, UpgradeDelta,
 };
+use omnifs_workspace::mounts::{Spec, UpgradePlan};
 use std::time::Duration;
 
 use crate::error::WithHint;
@@ -202,12 +204,74 @@ impl DaemonClient {
         response.json().await.context("parse reconcile report")
     }
 
-    /// Reconcile only when a compatible daemon is running.
-    pub(crate) async fn reconcile_if_running(&self) -> Result<Option<ReconcileReport>> {
-        if self.compatible_status_optional().await?.is_none() {
+    pub(crate) async fn create_mount_if_ready(&self, spec: &Spec) -> Result<Option<MountReport>> {
+        if !self.ready().await {
             return Ok(None);
         }
-        self.reconcile().await.map(Some)
+        self.require_compatible().await?;
+        let response = self
+            .http
+            .post(format!("{}/v1/mounts", self.base))
+            .json(&serde_json::to_value(spec).context("serialize mount spec")?)
+            .timeout(Duration::from_mins(3))
+            .send()
+            .await
+            .with_context(|| format!("create mount `{}` on daemon at {}", spec.mount, self.base))?;
+        let response = Self::ensure_success(response, "daemon mount create request failed").await?;
+        response
+            .json()
+            .await
+            .context("parse mount create report")
+            .map(Some)
+    }
+
+    pub(crate) async fn update_mount_if_ready(
+        &self,
+        spec: &Spec,
+        approved: Option<&UpgradePlan>,
+    ) -> Result<Option<MountReport>> {
+        if !self.ready().await {
+            return Ok(None);
+        }
+        self.require_compatible().await?;
+        let request = MountUpdateRequest {
+            spec: serde_json::to_value(spec).context("serialize mount spec")?,
+            approved: approved.map(upgrade_delta_to_api).transpose()?,
+        };
+        let response = self
+            .http
+            .put(format!("{}/v1/mounts/{}", self.base, spec.mount))
+            .json(&request)
+            .timeout(Duration::from_mins(3))
+            .send()
+            .await
+            .with_context(|| format!("update mount `{}` on daemon at {}", spec.mount, self.base))?;
+        let response = Self::ensure_success(response, "daemon mount update request failed").await?;
+        response
+            .json()
+            .await
+            .context("parse mount update report")
+            .map(Some)
+    }
+
+    pub(crate) async fn delete_mount_if_ready(&self, mount: &str) -> Result<Option<MountReport>> {
+        if !self.ready().await {
+            return Ok(None);
+        }
+        self.require_compatible().await?;
+        let response = self
+            .http
+            .delete(format!("{}/v1/mounts/{mount}", self.base))
+            .timeout(Duration::from_mins(3))
+            .send()
+            .await
+            .with_context(|| format!("delete mount `{mount}` on daemon at {}", self.base))?;
+        let response = Self::ensure_success(response, "daemon mount delete request failed").await?;
+        response
+            .json()
+            .await
+            .context("parse mount delete report")
+            .map(Some)
     }
 
     /// Export a mount snapshot tar only when a compatible daemon is running.
@@ -273,6 +337,11 @@ impl DaemonClient {
             Err(_) => false,
         }
     }
+}
+
+fn upgrade_delta_to_api(plan: &UpgradePlan) -> Result<UpgradeDelta> {
+    serde_json::from_value(serde_json::to_value(plan).context("serialize approved upgrade delta")?)
+        .context("convert approved upgrade delta to API DTO")
 }
 
 fn hint_for(code: ErrorCode) -> &'static str {

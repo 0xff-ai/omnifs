@@ -29,7 +29,9 @@ pub use inspect::{
     InspectorConfig, InspectorRequestScope, InspectorSink, Subscription, current_trace_id, global,
     init_global_from_env,
 };
-pub use runtime::registry::{MountFailure, MountRuntimes, ReconcileOutcome, RegistryError};
+pub use runtime::registry::{
+    FailureKind, MountFailure, MountRuntimes, ReconcileOutcome, RegistryError, UpgradeApprovals,
+};
 pub use runtime::{BuildError, EngineError, HostContext, Runtime as Engine};
 pub use serving::ServingContext;
 pub use tree::{

@@ -21,11 +21,12 @@ pub use upgrade::{
 };
 
 use std::collections::BTreeMap;
-use std::fs;
+use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::ids::{ProviderName, ProviderRef};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
 use crate::provider::{Catalog, CatalogError, ProviderManifest};
@@ -249,6 +250,11 @@ pub enum SpecError {
         path: PathBuf,
         source: std::io::Error,
     },
+    #[error("failed to lock mount registry {}: {source}", path.display())]
+    LockMounts {
+        path: PathBuf,
+        source: std::io::Error,
+    },
     #[error("failed to parse config schema for provider `{provider}`: {source}")]
     ConfigSchema {
         provider: String,
@@ -306,6 +312,7 @@ pub fn pinned_manifest(
 #[derive(Debug)]
 pub struct Registry {
     mounts_dir: PathBuf,
+    lock_path: PathBuf,
     specs: BTreeMap<name::Name, Spec>,
     failures: Vec<SpecLoadFailure>,
 }
@@ -325,11 +332,19 @@ impl Registry {
     pub fn load(mounts_dir: impl AsRef<Path>) -> Result<Self, SpecError> {
         let mut registry = Self {
             mounts_dir: mounts_dir.as_ref().to_path_buf(),
+            lock_path: Self::lock_path_for(mounts_dir.as_ref()),
             specs: BTreeMap::new(),
             failures: Vec::new(),
         };
         registry.scan()?;
         Ok(registry)
+    }
+
+    #[must_use]
+    pub fn lock_path_for(mounts_dir: &Path) -> PathBuf {
+        let mut path = mounts_dir.as_os_str().to_owned();
+        path.push(".lock");
+        PathBuf::from(path)
     }
 
     fn scan(&mut self) -> Result<(), SpecError> {
@@ -426,10 +441,24 @@ impl Registry {
     /// reader (the daemon reconcile) sees either the old file or the new one,
     /// never a torn write.
     ///
-    /// Specs are one file per mount with no shared mutable index, so atomic
-    /// per-file rename is sufficient; unlike the provider store's `index.json`
-    /// read-modify-write, no advisory lock is needed.
+    /// The registry lock serializes CLI and daemon writers across the
+    /// scan-modify-write sequence, while the same-directory rename keeps each
+    /// individual file replacement atomic for concurrent readers.
     pub fn put(&mut self, spec: &Spec) -> Result<(), SpecError> {
+        let lock = self.lock()?;
+        let result = self.put_locked(spec);
+        match (result, lock.unlock()) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), _) => Err(error),
+            (Ok(()), Err(source)) => Err(SpecError::LockMounts {
+                path: self.lock_path.clone(),
+                source,
+            }),
+        }
+    }
+
+    fn put_locked(&mut self, spec: &Spec) -> Result<(), SpecError> {
+        self.scan()?;
         let name = name::Name::new(spec.mount.clone()).map_err(|source| SpecError::MountName {
             path: self.mounts_dir.clone(),
             mount: spec.mount.clone(),
@@ -450,6 +479,20 @@ impl Registry {
     /// Remove a mount's spec file and drop it from the mirror. Returns whether a
     /// file was present (a missing file is not an error).
     pub fn remove(&mut self, name: &name::Name) -> Result<bool, SpecError> {
+        let lock = self.lock()?;
+        let result = self.remove_locked(name);
+        match (result, lock.unlock()) {
+            (Ok(removed), Ok(())) => Ok(removed),
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(source)) => Err(SpecError::LockMounts {
+                path: self.lock_path.clone(),
+                source,
+            }),
+        }
+    }
+
+    fn remove_locked(&mut self, name: &name::Name) -> Result<bool, SpecError> {
+        self.scan()?;
         self.specs.remove(name);
         let path = self.spec_path(name);
         match fs::remove_file(&path) {
@@ -457,6 +500,31 @@ impl Registry {
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
             Err(source) => Err(SpecError::RemoveSpec { path, source }),
         }
+    }
+
+    fn lock(&self) -> Result<File, SpecError> {
+        if let Some(parent) = self.lock_path.parent() {
+            fs::create_dir_all(parent).map_err(|source| SpecError::LockMounts {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&self.lock_path)
+            .map_err(|source| SpecError::LockMounts {
+                path: self.lock_path.clone(),
+                source,
+            })?;
+        lock.lock_exclusive()
+            .map_err(|source| SpecError::LockMounts {
+                path: self.lock_path.clone(),
+                source,
+            })?;
+        Ok(lock)
     }
 }
 

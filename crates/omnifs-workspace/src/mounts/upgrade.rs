@@ -10,10 +10,15 @@
 
 use std::collections::{HashMap, HashSet};
 
+use serde::{Deserialize, Serialize};
+
+use crate::provider::ProviderAuthManifest;
 use crate::provider::ProviderManifest;
+use crate::provider::config::ConfigType;
 
 /// How a candidate provider artifact differs from the pinned one.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum UpgradePlan {
     /// No relevant change; keep serving the pinned artifact (or repin freely).
     Identical,
@@ -42,8 +47,8 @@ impl UpgradePlan {
         let new_caps = extract_capabilities(new);
         let old_limits = extract_limits(old);
         let new_limits = extract_limits(new);
-        let old_auth = old.auth.as_ref().map(|auth| auth.default.clone());
-        let new_auth = new.auth.as_ref().map(|auth| auth.default.clone());
+        let old_auth = old.auth.as_ref().map(AuthSurface::from_manifest);
+        let new_auth = new.auth.as_ref().map(AuthSurface::from_manifest);
 
         let caps_changed = normalize_caps(&old_caps) != normalize_caps(&new_caps);
         let limits_changed = normalize_limits(&old_limits) != normalize_limits(&new_limits);
@@ -93,26 +98,53 @@ impl UpgradePlan {
             Self::BreakingConfig { changes }
         }
     }
+
+    #[must_use]
+    pub fn requires_approval(&self) -> bool {
+        matches!(
+            self,
+            Self::BreakingConfig { .. } | Self::CapabilityLimitOrAuth { .. }
+        )
+    }
+
+    #[must_use]
+    pub fn covers(&self, actual: &Self) -> bool {
+        !actual.requires_approval() || self == actual
+    }
 }
 
 /// A new optional config field added by the candidate, with its default value.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AddedField {
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default: Option<serde_json::Value>,
 }
 
 /// A single config-field change between two manifests.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FieldChange {
     Added {
         name: String,
         required: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         default: Option<serde_json::Value>,
     },
-    Removed(String),
-    BecameRequired(String),
-    BecameOptional(String),
+    Removed {
+        name: String,
+    },
+    BecameRequired {
+        name: String,
+    },
+    BecameOptional {
+        name: String,
+    },
+    TypeChanged {
+        name: String,
+        old: serde_json::Value,
+        new: serde_json::Value,
+    },
 }
 
 impl FieldChange {
@@ -130,46 +162,101 @@ impl FieldChange {
                 required: false,
                 ..
             } => format!("new optional field `{name}`"),
-            Self::Removed(name) => format!("removed field `{name}`"),
-            Self::BecameRequired(name) => format!("`{name}` is now required"),
-            Self::BecameOptional(name) => format!("`{name}` is now optional"),
+            Self::Removed { name } => format!("removed field `{name}`"),
+            Self::BecameRequired { name } => format!("`{name}` is now required"),
+            Self::BecameOptional { name } => format!("`{name}` is now optional"),
+            Self::TypeChanged { name, .. } => format!("`{name}` changed type"),
         }
     }
 }
 
 /// A capability change between two manifests.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilityChange {
     pub kind: String,
     pub value: String,
     pub direction: CapabilityDirection,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CapabilityDirection {
     Added,
     Removed,
 }
 
 /// A scalar runtime-limit change between two manifests.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LimitChange {
     pub name: String,
     pub value: String,
     pub direction: LimitDirection,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum LimitDirection {
     Added,
     Removed,
 }
 
 /// An auth-scheme change between two manifests.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthDelta {
-    pub old: Option<String>,
-    pub new: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub old: Option<AuthSurface>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new: Option<AuthSurface>,
+}
+
+impl AuthDelta {
+    #[must_use]
+    pub fn describe(&self) -> String {
+        format!(
+            "auth surface changed from `{}` to `{}`",
+            self.old.as_ref().map_or("none", AuthSurface::default_key),
+            self.new.as_ref().map_or("none", AuthSurface::default_key)
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthSurface {
+    pub default: String,
+    pub schemes: Vec<AuthSchemeSurface>,
+}
+
+impl AuthSurface {
+    fn from_manifest(manifest: &ProviderAuthManifest) -> Self {
+        let mut schemes = manifest
+            .schemes
+            .iter()
+            .filter_map(|scheme| {
+                let key = scheme.key()?.to_string();
+                Some(AuthSchemeSurface {
+                    key,
+                    scheme: serde_json::to_value(scheme)
+                        .expect("auth schemes are serializable provider metadata"),
+                })
+            })
+            .collect::<Vec<_>>();
+        schemes.sort_by(|a, b| a.key.cmp(&b.key));
+        Self {
+            default: manifest.default.clone(),
+            schemes,
+        }
+    }
+
+    #[must_use]
+    pub fn default_key(&self) -> &str {
+        self.default.as_str()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthSchemeSurface {
+    pub key: String,
+    pub scheme: serde_json::Value,
 }
 
 // ── Extraction ──────────────────────────────────────────────────────────────
@@ -177,6 +264,7 @@ pub struct AuthDelta {
 struct Field {
     name: String,
     required: bool,
+    value_type: serde_json::Value,
     default: Option<serde_json::Value>,
 }
 
@@ -190,9 +278,14 @@ fn extract_config_fields(manifest: &ProviderManifest) -> Vec<Field> {
         .map(|field| Field {
             name: field.name.clone(),
             required: field.required,
+            value_type: type_value(&field.value_type),
             default: field.default.clone(),
         })
         .collect()
+}
+
+fn type_value(value_type: &ConfigType) -> serde_json::Value {
+    serde_json::to_value(value_type).expect("config field types are serializable metadata")
 }
 
 /// A capability flattened for diffing: kind, value, and whether it resolves
@@ -298,20 +391,33 @@ fn limit_change(limit: &FlatLimit, direction: LimitDirection) -> LimitChange {
 }
 
 fn diff_fields(old: &[Field], new: &[Field]) -> Vec<FieldChange> {
-    let old_map: HashMap<&str, bool> = old.iter().map(|f| (f.name.as_str(), f.required)).collect();
-    let new_map: HashMap<&str, bool> = new.iter().map(|f| (f.name.as_str(), f.required)).collect();
+    let old_map: HashMap<&str, &Field> = old.iter().map(|f| (f.name.as_str(), f)).collect();
+    let new_map: HashMap<&str, &Field> = new.iter().map(|f| (f.name.as_str(), f)).collect();
 
     let mut changes = Vec::new();
-    for (name, required) in &old_map {
+    for (name, old_field) in &old_map {
         match new_map.get(name) {
-            Some(&new_required) if *required && !new_required => {
-                changes.push(FieldChange::BecameOptional((*name).to_string()));
+            Some(new_field) => {
+                if old_field.value_type != new_field.value_type {
+                    changes.push(FieldChange::TypeChanged {
+                        name: (*name).to_string(),
+                        old: old_field.value_type.clone(),
+                        new: new_field.value_type.clone(),
+                    });
+                }
+                if old_field.required && !new_field.required {
+                    changes.push(FieldChange::BecameOptional {
+                        name: (*name).to_string(),
+                    });
+                } else if !old_field.required && new_field.required {
+                    changes.push(FieldChange::BecameRequired {
+                        name: (*name).to_string(),
+                    });
+                }
             },
-            Some(&new_required) if !required && new_required => {
-                changes.push(FieldChange::BecameRequired((*name).to_string()));
-            },
-            Some(_) => {},
-            None => changes.push(FieldChange::Removed((*name).to_string())),
+            None => changes.push(FieldChange::Removed {
+                name: (*name).to_string(),
+            }),
         }
     }
     for field in new {
@@ -365,6 +471,67 @@ mod tests {
             "limits": limits,
         });
         ProviderManifest::from_bytes(json.to_string().as_bytes()).expect("manifest parses")
+    }
+
+    fn manifest_with_auth(auth: &serde_json::Value) -> ProviderManifest {
+        let json = serde_json::json!({
+            "id": "demo",
+            "displayName": "Demo",
+            "provider": "omnifs_provider_demo.wasm",
+            "defaultMount": "demo",
+            "capabilities": [
+                { "kind": "domain", "value": "api.example.com", "why": "api" },
+                { "kind": "domain", "value": "uploads.example.com", "why": "uploads" }
+            ],
+            "auth": auth,
+        });
+        ProviderManifest::from_bytes(json.to_string().as_bytes()).expect("manifest parses")
+    }
+
+    fn oauth_auth(mut scheme: serde_json::Value) -> serde_json::Value {
+        if scheme["flow"].is_null() {
+            scheme["flow"] = serde_json::json!({
+                "pkceLoopback": { "redirectUriTemplate": "http://127.0.0.1:{port}/callback" }
+            });
+        }
+        serde_json::json!({
+            "default": "oauth",
+            "schemes": [{ "oauth": scheme }],
+        })
+    }
+
+    fn oauth_scheme() -> serde_json::Value {
+        serde_json::json!({
+            "key": "oauth",
+            "displayName": "OAuth",
+            "authorizationEndpoint": "https://auth.example.com/authorize",
+            "tokenEndpoint": "https://auth.example.com/token",
+            "revocationEndpoint": "https://auth.example.com/revoke",
+            "defaultClientId": "client",
+            "defaultScopes": ["read"],
+            "flow": {
+                "pkceLoopback": { "redirectUriTemplate": "http://127.0.0.1:{port}/callback" }
+            },
+            "injectDomains": ["api.example.com"],
+            "injectHeaderName": "Authorization",
+            "injectValuePrefix": "Bearer "
+        })
+    }
+
+    fn assert_auth_requires_consent(old_auth: &serde_json::Value, new_auth: &serde_json::Value) {
+        let old = manifest_with_auth(old_auth);
+        let new = manifest_with_auth(new_auth);
+        match UpgradePlan::diff(&old, &new) {
+            UpgradePlan::CapabilityLimitOrAuth {
+                capabilities,
+                limits,
+                auth: Some(_),
+            } => {
+                assert!(capabilities.is_empty());
+                assert!(limits.is_empty());
+            },
+            other => panic!("expected auth consent delta, got {other:?}"),
+        }
     }
 
     #[test]
@@ -469,6 +636,75 @@ mod tests {
             UpgradePlan::diff(&base, &with_required_default),
             UpgradePlan::BreakingConfig { .. }
         ));
+    }
+
+    #[test]
+    fn oauth_endpoint_only_change_requires_consent() {
+        let old = oauth_scheme();
+        let mut new = old.clone();
+        new["authorizationEndpoint"] = serde_json::json!("https://auth.example.com/v2/authorize");
+
+        assert_auth_requires_consent(&oauth_auth(old), &oauth_auth(new));
+    }
+
+    #[test]
+    fn oauth_scope_change_requires_consent() {
+        let old = oauth_scheme();
+        let mut new = old.clone();
+        new["defaultScopes"] = serde_json::json!(["read", "write"]);
+
+        assert_auth_requires_consent(&oauth_auth(old), &oauth_auth(new));
+    }
+
+    #[test]
+    fn oauth_inject_domain_change_requires_consent() {
+        let old = oauth_scheme();
+        let mut new = old.clone();
+        new["injectDomains"] = serde_json::json!(["api.example.com", "uploads.example.com"]);
+
+        assert_auth_requires_consent(&oauth_auth(old), &oauth_auth(new));
+    }
+
+    #[test]
+    fn oauth_inject_header_change_requires_consent() {
+        let old = oauth_scheme();
+        let mut new = old.clone();
+        new["injectHeaderName"] = serde_json::json!("X-Omnifs-Token");
+
+        assert_auth_requires_consent(&oauth_auth(old), &oauth_auth(new));
+    }
+
+    #[test]
+    fn oauth_flow_kind_change_requires_consent() {
+        let old = oauth_scheme();
+        let mut new = old.clone();
+        new["flow"] = serde_json::json!({
+            "deviceCode": { "deviceAuthorizationEndpoint": "https://auth.example.com/device" }
+        });
+
+        assert_auth_requires_consent(&oauth_auth(old), &oauth_auth(new));
+    }
+
+    #[test]
+    fn config_type_change_is_breaking() {
+        let old_fields = serde_json::json!([
+            { "name": "endpoint", "type": { "kind": "string" }, "required": true }
+        ]);
+        let new_fields = serde_json::json!([
+            { "name": "endpoint", "type": { "kind": "object", "fields": [] }, "required": true }
+        ]);
+        let old = manifest(&old_fields);
+        let new = manifest(&new_fields);
+
+        match UpgradePlan::diff(&old, &new) {
+            UpgradePlan::BreakingConfig { changes } => {
+                assert!(matches!(
+                    changes.as_slice(),
+                    [FieldChange::TypeChanged { name, .. }] if name == "endpoint"
+                ));
+            },
+            other => panic!("expected type change to be breaking, got {other:?}"),
+        }
     }
 
     #[test]

@@ -101,34 +101,11 @@ pub(crate) fn run_upgrade_check(
                 limits,
                 auth,
             } => {
-                let mut parts = Vec::new();
-                for change in &capabilities {
-                    let direction = match change.direction {
-                        omnifs_workspace::mounts::CapabilityDirection::Added => "added",
-                        omnifs_workspace::mounts::CapabilityDirection::Removed => "removed",
-                    };
-                    parts.push(format!(
-                        "{direction} capability `{}` = `{}`",
-                        change.kind, change.value
-                    ));
-                }
-                for change in &limits {
-                    let direction = match change.direction {
-                        omnifs_workspace::mounts::LimitDirection::Added => "added",
-                        omnifs_workspace::mounts::LimitDirection::Removed => "removed",
-                    };
-                    parts.push(format!(
-                        "{direction} limit `{}` = `{}`",
-                        change.name, change.value
-                    ));
-                }
-                if let Some(auth) = auth {
-                    parts.push(format!(
-                        "auth scheme changed from `{}` to `{}`",
-                        auth.old.as_deref().unwrap_or("none"),
-                        auth.new.as_deref().unwrap_or("none"),
-                    ));
-                }
+                let parts = describe_upgrade_changes(&UpgradePlan::CapabilityLimitOrAuth {
+                    capabilities,
+                    limits,
+                    auth,
+                });
                 anstream::eprintln!(
                     "warning: mount `{mount}` keeps its pinned `{name}`: a newer artifact changed \
                      its access or runtime surface and needs re-consent.\nChanges: {}\n\
@@ -139,6 +116,51 @@ pub(crate) fn run_upgrade_check(
         }
     }
     Ok(migrated)
+}
+
+pub(crate) fn describe_upgrade_changes(plan: &UpgradePlan) -> Vec<String> {
+    match plan {
+        UpgradePlan::Identical => Vec::new(),
+        UpgradePlan::AdditiveConfig { added } => added
+            .iter()
+            .map(|field| format!("new optional field `{}`", field.name))
+            .collect(),
+        UpgradePlan::BreakingConfig { changes } => changes
+            .iter()
+            .map(omnifs_workspace::mounts::FieldChange::describe)
+            .collect(),
+        UpgradePlan::CapabilityLimitOrAuth {
+            capabilities,
+            limits,
+            auth,
+        } => {
+            let mut parts = Vec::new();
+            for change in capabilities {
+                let direction = match change.direction {
+                    omnifs_workspace::mounts::CapabilityDirection::Added => "added",
+                    omnifs_workspace::mounts::CapabilityDirection::Removed => "removed",
+                };
+                parts.push(format!(
+                    "{direction} capability `{}` = `{}`",
+                    change.kind, change.value
+                ));
+            }
+            for change in limits {
+                let direction = match change.direction {
+                    omnifs_workspace::mounts::LimitDirection::Added => "added",
+                    omnifs_workspace::mounts::LimitDirection::Removed => "removed",
+                };
+                parts.push(format!(
+                    "{direction} limit `{}` = `{}`",
+                    change.name, change.value
+                ));
+            }
+            if let Some(auth) = auth {
+                parts.push(auth.describe());
+            }
+            parts
+        },
+    }
 }
 
 /// Fill new optional config fields and repin the provider to `reference`,

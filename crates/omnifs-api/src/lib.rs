@@ -20,7 +20,7 @@ pub const API_MAJOR: u16 = 2;
 
 /// Control API minor version. The CLI warns but proceeds when the daemon's
 /// minor differs. Bump for additive, backward-compatible additions.
-pub const API_MINOR: u16 = 2;
+pub const API_MINOR: u16 = 3;
 
 /// Default control port. The container publishes it on the host loopback;
 /// both binaries default to it so `omnifs` finds the daemon with zero config.
@@ -230,6 +230,138 @@ pub struct MountFailure {
     pub mount: String,
     pub kind: ErrorCode,
     pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct MountReport {
+    pub mount: String,
+    pub outcome: MountOutcome,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<MountFailure>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approved: Option<UpgradeDelta>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum MountOutcome {
+    Added,
+    Updated,
+    Removed,
+    Unchanged,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct MountUpdateRequest {
+    pub spec: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approved: Option<UpgradeDelta>,
+}
+
+/// Wire representation of a reviewed provider-upgrade delta.
+///
+/// The control API keeps this as transport data, not as a credential-bearing
+/// mount spec. The daemon converts it back into the workspace upgrade model and
+/// checks that it covers the actual diff computed at the hot-swap boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum UpgradeDelta {
+    Identical,
+    AdditiveConfig {
+        added: Vec<AddedField>,
+    },
+    BreakingConfig {
+        changes: Vec<FieldChange>,
+    },
+    CapabilityLimitOrAuth {
+        capabilities: Vec<CapabilityChange>,
+        limits: Vec<LimitChange>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        auth: Option<AuthDelta>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct AddedField {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum FieldChange {
+    Added {
+        name: String,
+        required: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        default: Option<serde_json::Value>,
+    },
+    Removed {
+        name: String,
+    },
+    BecameRequired {
+        name: String,
+    },
+    BecameOptional {
+        name: String,
+    },
+    TypeChanged {
+        name: String,
+        old: serde_json::Value,
+        new: serde_json::Value,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct CapabilityChange {
+    pub kind: String,
+    pub value: String,
+    pub direction: CapabilityDirection,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CapabilityDirection {
+    Added,
+    Removed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct LimitChange {
+    pub name: String,
+    pub value: String,
+    pub direction: LimitDirection,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum LimitDirection {
+    Added,
+    Removed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct AuthDelta {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub old: Option<AuthSurface>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new: Option<AuthSurface>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct AuthSurface {
+    pub default: String,
+    pub schemes: Vec<AuthSchemeSurface>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct AuthSchemeSurface {
+    pub key: String,
+    pub scheme: serde_json::Value,
 }
 
 /// `POST /v1/reconcile`: what converging the running mount set to the on-disk

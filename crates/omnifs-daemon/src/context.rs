@@ -104,6 +104,14 @@ impl DaemonContext {
         &self.layout.config_dir
     }
 
+    pub(crate) fn mounts_dir(&self) -> &Path {
+        &self.layout.mounts_dir
+    }
+
+    pub(crate) fn providers_dir(&self) -> &Path {
+        &self.layout.providers_dir
+    }
+
     /// The launch backend mapped to the telemetry vocabulary, recorded on every
     /// daemon lifecycle event.
     pub(crate) fn telemetry_backend(&self) -> omnifs_workspace::telemetry::Backend {
