@@ -10,7 +10,9 @@ use omnifs_api::{
     MountUpdateRequest, ProviderSummary, ReconcileReport, StopReport, UpgradeDelta,
 };
 use omnifs_workspace::authn::CredentialId;
+use omnifs_workspace::layout::{CONTROL_TOKEN_FILE, WorkspaceLayout};
 use omnifs_workspace::mounts::{Spec, UpgradePlan};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::control::addr::daemon_addr;
@@ -21,6 +23,7 @@ const EXPORT_API_MINOR: u16 = 2;
 pub(crate) struct DaemonClient {
     base: String,
     http: reqwest::Client,
+    token_file: PathBuf,
 }
 
 #[derive(Debug)]
@@ -75,15 +78,31 @@ impl DaemonControlState {
 
 impl DaemonClient {
     pub(crate) fn new() -> Self {
-        let http = reqwest::Client::builder()
+        let token_file = WorkspaceLayout::resolve().map_or_else(
+            |_| PathBuf::from(CONTROL_TOKEN_FILE),
+            |layout| layout.control_token_file(),
+        );
+        Self::from_token_file(token_file)
+    }
+
+    pub(crate) fn for_layout(layout: &WorkspaceLayout) -> Self {
+        Self::from_token_file(layout.control_token_file())
+    }
+
+    fn from_token_file(token_file: PathBuf) -> Self {
+        Self {
+            base: format!("http://{}", daemon_addr()),
+            http: Self::http_client(),
+            token_file,
+        }
+    }
+
+    fn http_client() -> reqwest::Client {
+        reqwest::Client::builder()
             .connect_timeout(Duration::from_millis(500))
             .timeout(Duration::from_secs(5))
             .build()
-            .expect("reqwest client with static config");
-        Self {
-            base: format!("http://{}", daemon_addr()),
-            http,
-        }
+            .expect("reqwest client with static config")
     }
 
     /// Probe for a daemon and classify its control state in one step.
@@ -146,11 +165,37 @@ impl DaemonClient {
         path: &str,
         context: &'static str,
     ) -> Result<Option<reqwest::Response>> {
-        match self.http.get(format!("{}{}", self.base, path)).send().await {
+        let token = match read_control_token_file(&self.token_file) {
+            Ok(token) => token,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if self.ready().await {
+                    return Err(self.control_token_unavailable_error(&error));
+                }
+                return Ok(None);
+            },
+            Err(error) => return Err(self.control_token_unavailable_error(&error)),
+        };
+        match self
+            .http
+            .get(format!("{}{}", self.base, path))
+            .bearer_auth(token)
+            .send()
+            .await
+        {
             Ok(response) => Ok(Some(response)),
             Err(error) if error.is_connect() || error.is_timeout() => Ok(None),
             Err(error) => Err(error).with_context(|| format!("{context} at {}", self.base)),
         }
+    }
+
+    fn authenticated(&self, request: reqwest::RequestBuilder) -> Result<reqwest::RequestBuilder> {
+        let token = read_control_token_file(&self.token_file)
+            .map_err(|error| self.control_token_unavailable_error(&error))?;
+        Ok(request.bearer_auth(token))
+    }
+
+    fn control_token_unavailable_error(&self, error: &std::io::Error) -> anyhow::Error {
+        control_token_unavailable_error(&self.token_file, error)
     }
 
     async fn parse_status(response: reqwest::Response) -> Result<DaemonStatus> {
@@ -196,9 +241,11 @@ impl DaemonClient {
     /// mounts, so it gets the long mount-load timeout rather than the default.
     pub(crate) async fn reconcile(&self) -> Result<ReconcileReport> {
         let response = self
-            .http
-            .post(format!("{}/v1/reconcile", self.base))
-            .timeout(Duration::from_mins(3))
+            .authenticated(
+                self.http
+                    .post(format!("{}/v1/reconcile", self.base))
+                    .timeout(Duration::from_mins(3)),
+            )?
             .send()
             .await
             .with_context(|| format!("reconcile mounts on daemon at {}", self.base))?;
@@ -212,10 +259,12 @@ impl DaemonClient {
         }
         self.require_compatible().await?;
         let response = self
-            .http
-            .post(format!("{}/v1/mounts", self.base))
-            .json(&serde_json::to_value(spec).context("serialize mount spec")?)
-            .timeout(Duration::from_mins(3))
+            .authenticated(
+                self.http
+                    .post(format!("{}/v1/mounts", self.base))
+                    .json(&serde_json::to_value(spec).context("serialize mount spec")?)
+                    .timeout(Duration::from_mins(3)),
+            )?
             .send()
             .await
             .with_context(|| format!("create mount `{}` on daemon at {}", spec.mount, self.base))?;
@@ -241,10 +290,12 @@ impl DaemonClient {
             approved: approved.map(upgrade_delta_to_api).transpose()?,
         };
         let response = self
-            .http
-            .put(format!("{}/v1/mounts/{}", self.base, spec.mount))
-            .json(&request)
-            .timeout(Duration::from_mins(3))
+            .authenticated(
+                self.http
+                    .put(format!("{}/v1/mounts/{}", self.base, spec.mount))
+                    .json(&request)
+                    .timeout(Duration::from_mins(3)),
+            )?
             .send()
             .await
             .with_context(|| format!("update mount `{}` on daemon at {}", spec.mount, self.base))?;
@@ -262,9 +313,11 @@ impl DaemonClient {
         }
         self.require_compatible().await?;
         let response = self
-            .http
-            .delete(format!("{}/v1/mounts/{mount}", self.base))
-            .timeout(Duration::from_mins(3))
+            .authenticated(
+                self.http
+                    .delete(format!("{}/v1/mounts/{mount}", self.base))
+                    .timeout(Duration::from_mins(3)),
+            )?
             .send()
             .await
             .with_context(|| format!("delete mount `{mount}` on daemon at {}", self.base))?;
@@ -290,8 +343,7 @@ impl DaemonClient {
             .map_err(|()| anyhow::anyhow!("daemon base URL cannot be used as a path base"))?
             .extend(["v1", "credentials", id.as_str(), "reload"]);
         let response = self
-            .http
-            .post(url)
+            .authenticated(self.http.post(url))?
             .send()
             .await
             .with_context(|| format!("reload credential `{id}` on daemon at {}", self.base))?;
@@ -310,8 +362,7 @@ impl DaemonClient {
         }
         self.require_compatible().await?;
         let response = self
-            .http
-            .get(format!("{}/v1/providers", self.base))
+            .authenticated(self.http.get(format!("{}/v1/providers", self.base)))?
             .send()
             .await
             .with_context(|| format!("list providers on daemon at {}", self.base))?;
@@ -329,8 +380,7 @@ impl DaemonClient {
         }
         self.require_compatible().await?;
         let response = self
-            .http
-            .get(format!("{}/v1/credentials", self.base))
+            .authenticated(self.http.get(format!("{}/v1/credentials", self.base)))?
             .send()
             .await
             .with_context(|| format!("list credentials on daemon at {}", self.base))?;
@@ -351,9 +401,11 @@ impl DaemonClient {
             return Ok(None);
         }
         let response = self
-            .http
-            .get(format!("{}/v1/mounts/{mount}/export", self.base))
-            .timeout(Duration::from_mins(1))
+            .authenticated(
+                self.http
+                    .get(format!("{}/v1/mounts/{mount}/export", self.base))
+                    .timeout(Duration::from_mins(1)),
+            )?
             .send()
             .await
             .with_context(|| format!("export mount `{mount}` from daemon at {}", self.base))?
@@ -370,12 +422,14 @@ impl DaemonClient {
     /// down. `None` when no daemon answered, so the caller can fall back to a
     /// stale-mount sweep.
     pub(crate) async fn shutdown(&self) -> Result<Option<StopReport>> {
-        match self
-            .http
-            .post(format!("{}/v1/shutdown", self.base))
-            .send()
-            .await
+        let request = match self.authenticated(self.http.post(format!("{}/v1/shutdown", self.base)))
         {
+            Ok(request) => request,
+            Err(error) if self.ready().await => return Err(error),
+            Err(_) => return Ok(None),
+        };
+
+        match request.send().await {
             Ok(response) => {
                 let report = Self::ensure_success(response, "daemon shutdown request failed")
                     .await?
@@ -407,6 +461,32 @@ impl DaemonClient {
     }
 }
 
+pub(crate) fn read_control_token_file(path: &Path) -> std::io::Result<String> {
+    let token = std::fs::read_to_string(path)?;
+    let token = token.trim();
+    if token.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "control token file is empty",
+        ));
+    }
+    Ok(token.to_string())
+}
+
+fn control_token_unavailable_error(path: &Path, error: &std::io::Error) -> anyhow::Error {
+    let path = path.display().to_string();
+    match Err::<(), _>(anyhow::anyhow!(
+        "daemon control token unavailable at {path}: {error}"
+    ))
+    .with_exit_code(ExitCode::AuthRequired)
+    .with_hint(format!(
+        "Run `omnifs up` to restart the daemon and regenerate {path}"
+    )) {
+        Ok(()) => unreachable!("control token error construction always starts from Err"),
+        Err(error) => error,
+    }
+}
+
 fn upgrade_delta_to_api(plan: &UpgradePlan) -> Result<UpgradeDelta> {
     serde_json::from_value(serde_json::to_value(plan).context("serialize approved upgrade delta")?)
         .context("convert approved upgrade delta to API DTO")
@@ -422,16 +502,17 @@ fn hint_for(code: ErrorCode) -> &'static str {
         },
         ErrorCode::ProviderMissing => "Try: just providers build",
         ErrorCode::ReconcileBusy => "Try: rerun the command after reconcile finishes",
-        ErrorCode::DaemonShuttingDown => "Try: omnifs up",
+        ErrorCode::Unauthorized | ErrorCode::DaemonShuttingDown => "Try: omnifs up",
         ErrorCode::Internal => "Try: omnifs doctor",
     }
 }
 
 fn exit_code_for(code: ErrorCode) -> ExitCode {
     match code {
-        ErrorCode::AuthRequired | ErrorCode::ConsentRequired | ErrorCode::CredentialNotFound => {
-            ExitCode::AuthRequired
-        },
+        ErrorCode::Unauthorized
+        | ErrorCode::AuthRequired
+        | ErrorCode::ConsentRequired
+        | ErrorCode::CredentialNotFound => ExitCode::AuthRequired,
         ErrorCode::DaemonShuttingDown => ExitCode::DaemonUnavailable,
         ErrorCode::MountNotFound
         | ErrorCode::SpecInvalid
@@ -476,6 +557,59 @@ mod tests {
     use tokio::net::TcpListener;
 
     #[tokio::test]
+    async fn status_optional_attaches_control_token_header() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request = read_request(&mut stream).await;
+            let lower = request.to_ascii_lowercase();
+            assert!(
+                lower.contains("\r\nauthorization: bearer test-token\r\n"),
+                "status request must carry bearer token, got:\n{request}"
+            );
+            let response = json_response(&status_body("test-daemon", API_MAJOR, API_MINOR));
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let (client, _home) = test_client(addr, "test-token");
+        let status = client.status_optional().await.unwrap().unwrap();
+        assert_eq!(status.version, "test-daemon");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn missing_control_token_with_ready_daemon_is_auth_required() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request = read_request(&mut stream).await;
+            assert!(
+                request.starts_with("GET /v1/ready "),
+                "missing-token classification should probe ready, got:\n{request}"
+            );
+            let response = json_response(r#"{"ready":true}"#);
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let home = tempfile::tempdir().unwrap();
+        let missing_token = home.path().join("control-token");
+        let client = DaemonClient {
+            base: format!("http://{addr}"),
+            http: DaemonClient::http_client(),
+            token_file: missing_token.clone(),
+        };
+
+        let error = client.status_optional().await.unwrap_err();
+        assert_eq!(crate::error::exit_code(&error), ExitCode::AuthRequired);
+        let rendered = crate::error::render(&error);
+        assert!(rendered.contains(&missing_token.display().to_string()));
+        assert!(rendered.contains("omnifs up"));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn status_optional_maps_api_errors_to_hints() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -506,14 +640,7 @@ mod tests {
             stream.write_all(response.as_bytes()).await.unwrap();
         });
 
-        let client = DaemonClient {
-            base: format!("http://{addr}"),
-            http: reqwest::Client::builder()
-                .connect_timeout(Duration::from_millis(500))
-                .timeout(Duration::from_secs(5))
-                .build()
-                .unwrap(),
-        };
+        let (client, _home) = test_client(addr, "test-token");
 
         let error = client.status_optional().await.unwrap_err();
         let rendered = crate::error::render(&error);
@@ -524,6 +651,7 @@ mod tests {
 
     #[test]
     fn hint_table_covers_every_error_code() {
+        assert_eq!(hint_for(ErrorCode::Unauthorized), "Try: omnifs up");
         assert_eq!(
             hint_for(ErrorCode::AuthRequired),
             "Try: omnifs mounts reauth <name>"
@@ -567,14 +695,7 @@ mod tests {
             stream.write_all(response.as_bytes()).await.unwrap();
         });
 
-        let client = DaemonClient {
-            base: format!("http://{addr}"),
-            http: reqwest::Client::builder()
-                .connect_timeout(Duration::from_millis(500))
-                .timeout(Duration::from_secs(5))
-                .build()
-                .unwrap(),
-        };
+        let (client, _home) = test_client(addr, "test-token");
 
         let err = client
             .probe()
@@ -602,14 +723,7 @@ mod tests {
             stream.write_all(response.as_bytes()).await.unwrap();
         });
 
-        let client = DaemonClient {
-            base: format!("http://{addr}"),
-            http: reqwest::Client::builder()
-                .connect_timeout(Duration::from_millis(500))
-                .timeout(Duration::from_secs(5))
-                .build()
-                .unwrap(),
-        };
+        let (client, _home) = test_client(addr, "test-token");
 
         // Minor skew: probe must succeed (return Compatible).
         assert!(matches!(
@@ -623,6 +737,26 @@ mod tests {
             "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
             body.len(),
             body
+        )
+    }
+
+    async fn read_request(stream: &mut tokio::net::TcpStream) -> String {
+        let mut request = [0; 2048];
+        let read = stream.read(&mut request).await.unwrap();
+        String::from_utf8_lossy(&request[..read]).to_string()
+    }
+
+    fn test_client(addr: std::net::SocketAddr, token: &str) -> (DaemonClient, tempfile::TempDir) {
+        let home = tempfile::tempdir().unwrap();
+        let token_file = home.path().join("control-token");
+        std::fs::write(&token_file, token).unwrap();
+        (
+            DaemonClient {
+                base: format!("http://{addr}"),
+                http: DaemonClient::http_client(),
+                token_file,
+            },
+            home,
         )
     }
 

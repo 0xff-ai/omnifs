@@ -75,6 +75,7 @@ impl DaemonContext {
     }
 
     pub(crate) fn prepare_startup_dirs(&self) -> anyhow::Result<()> {
+        std::fs::create_dir_all(&self.layout.config_dir)?;
         std::fs::create_dir_all(&self.mount_point)?;
         std::fs::create_dir_all(&self.layout.cache_dir)?;
         Ok(())
@@ -107,6 +108,10 @@ impl DaemonContext {
 
     pub(crate) fn config_dir(&self) -> &Path {
         &self.layout.config_dir
+    }
+
+    pub(crate) fn control_token_file(&self) -> PathBuf {
+        self.layout.control_token_file()
     }
 
     pub(crate) fn mounts_dir(&self) -> &Path {

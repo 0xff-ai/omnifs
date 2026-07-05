@@ -100,6 +100,10 @@ impl Fixture {
         self.home_path().join("launch.json")
     }
 
+    fn control_token_path(&self) -> PathBuf {
+        self.home_path().join("control-token")
+    }
+
     /// Write the test mount spec (`test.json`) into `<home>/mounts/`.
     fn write_test_spec(&self) {
         std::fs::write(
@@ -401,8 +405,12 @@ fn scenarios_3_to_6_lifecycle_cycle() {
 
     // Verify backend is native via the daemon status API directly.
     let base = format!("http://{}", fixture.daemon_addr);
+    let token = std::fs::read_to_string(fixture.control_token_path())
+        .expect("daemon control token must exist after up");
+    let auth_header = format!("Authorization: Bearer {}", token.trim());
+    let status_url = format!("{base}/v1/status");
     let status_resp = Command::new("curl")
-        .args(["-fs", &format!("{base}/v1/status")])
+        .args(["-fs", "-H", &auth_header, &status_url])
         .output()
         .expect("curl /v1/status");
     let status_json: serde_json::Value = serde_json::from_slice(&status_resp.stdout)

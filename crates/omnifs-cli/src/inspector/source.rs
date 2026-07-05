@@ -9,6 +9,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 
+use crate::client::read_control_token_file;
+
 /// Outcome of one [`EventsClient::attach`] call.
 pub enum AttachOutcome {
     /// Could not connect or the daemon refused the stream; retry later.
@@ -24,10 +26,11 @@ pub struct EventsClient {
     rt: tokio::runtime::Runtime,
     http: reqwest::Client,
     url: String,
+    token_file: PathBuf,
 }
 
 impl EventsClient {
-    pub fn new(addr: &str) -> Result<Self> {
+    pub fn new(addr: &str, token_file: PathBuf) -> Result<Self> {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -40,6 +43,7 @@ impl EventsClient {
             rt,
             http,
             url: format!("http://{addr}/v1/events"),
+            token_file,
         })
     }
 
@@ -55,7 +59,10 @@ impl EventsClient {
         use omnifs_api::events::split_complete_lines;
 
         self.rt.block_on(async {
-            let response = match self.http.get(&self.url).send().await {
+            let Ok(token) = read_control_token_file(&self.token_file) else {
+                return Ok(AttachOutcome::Unreachable);
+            };
+            let response = match self.http.get(&self.url).bearer_auth(token).send().await {
                 Ok(response) if response.status().is_success() => response,
                 _ => return Ok(AttachOutcome::Unreachable),
             };
@@ -85,6 +92,7 @@ pub enum SourceKind {
     Socket {
         addr: String,
         record: Option<PathBuf>,
+        token_file: PathBuf,
     },
 }
 
@@ -110,10 +118,16 @@ impl EventSource {
         let (tx, rx) = mpsc::channel();
         let handle = match kind {
             SourceKind::Replay(path) => Some(thread::spawn(move || replay_path(&path, &tx))),
-            SourceKind::Socket { addr, record } => {
+            SourceKind::Socket {
+                addr,
+                record,
+                token_file,
+            } => {
                 // The live socket source reconnects forever; detach it
                 // so quitting the TUI never waits on the reconnect loop.
-                let handle = thread::spawn(move || socket_source(&addr, record.as_deref(), &tx));
+                let handle = thread::spawn(move || {
+                    socket_source(&addr, record.as_deref(), &token_file, &tx);
+                });
                 drop(handle);
                 None
             },
@@ -165,7 +179,7 @@ fn replay_path(path: &Path, tx: &Sender<SourceMessage>) {
 /// `just dev`. Connect/disconnect transitions are reported through
 /// `SourceMessage` so the front-end never claims "connected" while the
 /// stream is still failing.
-fn socket_source(addr: &str, record: Option<&Path>, tx: &Sender<SourceMessage>) {
+fn socket_source(addr: &str, record: Option<&Path>, token_file: &Path, tx: &Sender<SourceMessage>) {
     /// Receiver hung up; stop the source thread.
     struct Hangup;
 
@@ -176,7 +190,7 @@ fn socket_source(addr: &str, record: Option<&Path>, tx: &Sender<SourceMessage>) 
             .open(path)
             .ok()
     });
-    let Ok(client) = EventsClient::new(addr) else {
+    let Ok(client) = EventsClient::new(addr, token_file.to_path_buf()) else {
         return;
     };
 

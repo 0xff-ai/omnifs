@@ -7,7 +7,8 @@ mod common;
 
 use common::with_env;
 use omnifs_workspace::layout::{
-    CACHE_SUBDIR, CONFIG_FILE, CREDENTIALS_FILE, OMNIFS_HOME_ENV, ResolveError, WorkspaceLayout,
+    CACHE_SUBDIR, CONFIG_FILE, CONTROL_TOKEN_FILE, CREDENTIALS_FILE, OMNIFS_HOME_ENV, ResolveError,
+    WorkspaceLayout,
 };
 
 #[test]
@@ -22,6 +23,10 @@ fn under_root_builds_the_workspace_layout() {
     assert_eq!(
         paths.credentials_file,
         paths.config_dir.join(CREDENTIALS_FILE)
+    );
+    assert_eq!(
+        paths.control_token_file(),
+        paths.config_dir.join(CONTROL_TOKEN_FILE)
     );
     assert_eq!(paths.cache_dir, paths.config_dir.join(CACHE_SUBDIR));
 }
