@@ -123,6 +123,21 @@ pub enum CredentialHealth {
     StaticUnvalidated,
 }
 
+impl CredentialHealth {
+    #[must_use]
+    pub fn severity(&self) -> u8 {
+        match self {
+            Self::Ready => 0,
+            Self::StaticUnvalidated => 1,
+            Self::ExpiringSoon => 2,
+            Self::RefreshFailed { .. } => 3,
+            Self::Expired => 4,
+            Self::NeedsConsent => 5,
+            Self::Missing => 6,
+        }
+    }
+}
+
 /// HTTP rejection evidence reported by the host callout path.
 ///
 /// Classification lives here, next to refresh policy: a 401 always asks an
@@ -473,27 +488,16 @@ impl CredentialService {
             .iter()
             .map(|entry| {
                 let id = entry.key().clone();
-                let state = entry.value();
-                let cached = self.current_entry(state, &id).ok().flatten();
-                let (health, expires_at, scopes) = match cached {
-                    None => (CredentialHealth::Missing, None, Vec::new()),
-                    Some(credential) => {
-                        let failures = state.refresh_failures.load(Ordering::Relaxed);
-                        (
-                            classify(state, &credential, now, failures),
-                            credential.expires_at(),
-                            credential.scopes().to_vec(),
-                        )
-                    },
-                };
-                CredentialStatus {
-                    id,
-                    health,
-                    expires_at,
-                    scopes,
-                }
+                self.status_from_state(id, entry.value(), now)
             })
             .collect()
+    }
+
+    /// Non-secret health for one registered credential.
+    #[must_use]
+    pub fn status(&self, id: &CredentialId) -> Option<CredentialStatus> {
+        let state = self.state(id)?;
+        Some(self.status_from_state(id.clone(), &state, OffsetDateTime::now_utc()))
     }
 
     /// Write a credential through the single store owner and refresh the cached
@@ -518,17 +522,45 @@ impl CredentialService {
         Ok(())
     }
 
-    /// Drop the cached entry for `id` and re-read/refresh it from the store.
-    pub async fn reload(&self, id: &CredentialId) {
-        if let Some(state) = self.state(id) {
-            state.current.store(None);
-        }
+    /// Drop the cached entry for `id`, re-read/refresh it from the store, and
+    /// return the refreshed non-secret status. `None` means no mounted provider
+    /// has registered this credential with the service.
+    pub async fn reload(&self, id: &CredentialId) -> Option<CredentialStatus> {
+        let state = self.state(id)?;
+        state.current.store(None);
         let _ = self.authorization(id).await;
         self.refresh_notify.notify_one();
+        self.status(id)
     }
 
     fn state(&self, id: &CredentialId) -> Option<Arc<CredentialState>> {
         self.states.get(id).map(|slot| Arc::clone(slot.value()))
+    }
+
+    fn status_from_state(
+        &self,
+        id: CredentialId,
+        state: &CredentialState,
+        now: OffsetDateTime,
+    ) -> CredentialStatus {
+        let cached = self.current_entry(state, &id).ok().flatten();
+        let (health, expires_at, scopes) = match cached {
+            None => (CredentialHealth::Missing, None, Vec::new()),
+            Some(credential) => {
+                let failures = state.refresh_failures.load(Ordering::Relaxed);
+                (
+                    classify(state, &credential, now, failures),
+                    credential.expires_at(),
+                    credential.scopes().to_vec(),
+                )
+            },
+        };
+        CredentialStatus {
+            id,
+            health,
+            expires_at,
+            scopes,
+        }
     }
 
     /// The current entry for `id`: the cached value, else a store read that

@@ -13,6 +13,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use super::explain::{self, AuthMode};
+use crate::credential_target::CredentialTarget;
 use crate::style;
 use crate::workspace::Workspace;
 use omnifs_workspace::authn::SchemeGuidance;
@@ -26,7 +27,7 @@ async fn login(
     account: Option<&str>,
     no_browser: bool,
     scopes: &[String],
-) -> anyhow::Result<()> {
+) -> anyhow::Result<CredentialTarget> {
     let mount_auth = crate::auth::load_mount_auth(catalog, mounts, mount)?;
     let (request, target) = mount_auth.oauth_request(account, scopes)?;
     let guidance = omnifs_workspace::mounts::pinned_manifest(catalog, mount_auth.spec())
@@ -106,7 +107,7 @@ async fn login(
             "GitHub granted no scopes. Public resources will work; rerun with `--scope repo` for private repositories."
         );
     }
-    Ok(())
+    Ok(target)
 }
 
 pub(crate) async fn login_with_workspace(
@@ -115,7 +116,7 @@ pub(crate) async fn login_with_workspace(
     account: Option<&str>,
     no_browser: bool,
     scopes: &[String],
-) -> anyhow::Result<()> {
+) -> anyhow::Result<CredentialTarget> {
     let store = Box::new(FileStore::new(&workspace.layout().credentials_file));
     let mounts = workspace.mounts()?;
     login(

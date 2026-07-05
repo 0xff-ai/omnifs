@@ -202,11 +202,11 @@ fn apply_context_env(cmd: &mut Command, mount_point: &Path, mounts: &[MountInfo]
 }
 
 /// `mount=provider;mount=provider` for the rc to parse into its prompt map. Mount
-/// names and provider ids are validated identifiers, so neither carries `;`/`=`.
+/// names and provider names are validated identifiers, so neither carries `;`/`=`.
 fn mounts_env(mounts: &[MountInfo]) -> String {
     mounts
         .iter()
-        .map(|m| format!("{}={}", m.mount, m.provider_id))
+        .map(|m| format!("{}={}", m.mount, m.provider_name))
         .collect::<Vec<_>>()
         .join(";")
 }

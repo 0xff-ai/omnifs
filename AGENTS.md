@@ -112,7 +112,7 @@ Allowed, but never as a side effect. Surface the tradeoff and get sign-off in th
 
 - A single `omnifs` binary is both CLI and daemon. The runtime loop lives behind hidden `omnifs daemon`.
 - The CLI owns setup, credentials, lifecycle, and user-facing commands. It talks to the daemon through the REST API and the on-disk workspace under `OMNIFS_HOME`.
-- The REST API schema lives in `omnifs-api`. Credentials are never transmitted on the wire.
+- The REST API schema lives in `omnifs-api`. Credential material is never transmitted on the wire; credential health is non-secret operational state.
 - Mount specs are one file per mount under `mounts/`, and a spec file's stem is its mount name. `mounts::Registry` (in `omnifs-workspace`) is the sole spec owner: the CLI is the only author and writes through it atomically, the daemon reads through it on reconcile. `provider::Catalog` (in `omnifs-workspace`) is the provider index over the content-addressed store. A spec inherits its provider-manifest defaults (auth scheme and config) at creation time, so it is self-contained: reading or serving it is a plain parse, with no read-time resolution step.
 - Runtime modes are host-native and Docker. Docker runs the Linux daemon and exposes FUSE inside the container.
 - Linux defaults to FUSE. macOS defaults to read-only NFSv4.0 loopback through `omnifs-nfs`.

@@ -6,9 +6,10 @@
 
 use anyhow::{Context as _, Result};
 use omnifs_api::{
-    API_MAJOR, API_MINOR, ApiError, DaemonStatus, ErrorCode, MountReport, MountUpdateRequest,
-    ReconcileReport, StopReport, UpgradeDelta,
+    API_MAJOR, API_MINOR, ApiError, CredentialStatus, DaemonStatus, ErrorCode, MountReport,
+    MountUpdateRequest, ReconcileReport, StopReport, UpgradeDelta,
 };
+use omnifs_workspace::authn::CredentialId;
 use omnifs_workspace::mounts::{Spec, UpgradePlan};
 use std::time::Duration;
 
@@ -274,6 +275,34 @@ impl DaemonClient {
             .map(Some)
     }
 
+    pub(crate) async fn reload_credential_if_ready(
+        &self,
+        id: &CredentialId,
+    ) -> Result<Option<CredentialStatus>> {
+        if !self.ready().await {
+            return Ok(None);
+        }
+        self.require_compatible().await?;
+        let mut url = reqwest::Url::parse(&self.base).context("parse daemon base URL")?;
+        let id = id.to_string();
+        url.path_segments_mut()
+            .map_err(|()| anyhow::anyhow!("daemon base URL cannot be used as a path base"))?
+            .extend(["v1", "credentials", id.as_str(), "reload"]);
+        let response = self
+            .http
+            .post(url)
+            .send()
+            .await
+            .with_context(|| format!("reload credential `{id}` on daemon at {}", self.base))?;
+        let response =
+            Self::ensure_success(response, "daemon credential reload request failed").await?;
+        response
+            .json()
+            .await
+            .context("parse credential reload status")
+            .map(Some)
+    }
+
     /// Export a mount snapshot tar only when a compatible daemon is running.
     pub(crate) async fn export_mount_if_running(&self, mount: &str) -> Result<Option<Vec<u8>>> {
         let Some(status) = self.compatible_status_optional().await? else {
@@ -347,6 +376,7 @@ fn upgrade_delta_to_api(plan: &UpgradePlan) -> Result<UpgradeDelta> {
 fn hint_for(code: ErrorCode) -> &'static str {
     match code {
         ErrorCode::AuthRequired | ErrorCode::ConsentRequired => "Try: omnifs mounts reauth <name>",
+        ErrorCode::CredentialNotFound => "Try: omnifs init --reauth <mount>",
         ErrorCode::MountNotFound => "Try: omnifs mounts ls",
         ErrorCode::SpecInvalid => {
             "Try: edit the mount spec or recreate it with `omnifs init <provider> --as <name>`"
@@ -437,6 +467,10 @@ mod tests {
         assert_eq!(
             hint_for(ErrorCode::ConsentRequired),
             "Try: omnifs mounts reauth <name>"
+        );
+        assert_eq!(
+            hint_for(ErrorCode::CredentialNotFound),
+            "Try: omnifs init --reauth <mount>"
         );
         assert_eq!(hint_for(ErrorCode::MountNotFound), "Try: omnifs mounts ls");
         assert_eq!(

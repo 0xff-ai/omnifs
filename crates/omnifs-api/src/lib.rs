@@ -20,7 +20,7 @@ pub const API_MAJOR: u16 = 3;
 
 /// Control API minor version. The CLI warns but proceeds when the daemon's
 /// minor differs. Bump for additive, backward-compatible additions.
-pub const API_MINOR: u16 = 0;
+pub const API_MINOR: u16 = 1;
 
 /// Docker container name environment variable set by launchers and read by the
 /// daemon when reporting backend identity.
@@ -45,6 +45,7 @@ pub struct ApiError {
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
     AuthRequired,
+    CredentialNotFound,
     ConsentRequired,
     MountNotFound,
     SpecInvalid,
@@ -61,9 +62,8 @@ pub struct ReadyInfo {
     pub ready: bool,
 }
 
-/// `GET /v1/status`: the daemon's runtime facts. Host-side state (mount
-/// configs, credential readiness) is the CLI's contribution to the merged
-/// status view; it never comes from the daemon.
+/// `GET /v1/status`: the daemon's runtime facts, loaded mounts, and non-secret
+/// operational health. Credentials are represented only by coarse health.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct DaemonStatus {
     pub version: String,
@@ -260,9 +260,53 @@ pub struct FrontendInfo {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct MountInfo {
     pub mount: String,
-    /// Provider NAME slug. Field name kept as `provider_id` for wire stability; rename deferred to an `API_MAJOR` bump.
+    /// Provider NAME slug, e.g. `github`; credentials key on this value.
+    pub provider_name: String,
+    /// Pinned provider content hash for the exact WASM artifact this mount runs.
     pub provider_id: String,
     pub root_mount: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_health: Option<CredentialHealth>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialHealth {
+    Ready,
+    ExpiringSoon,
+    Expired,
+    RefreshFailed,
+    NeedsConsent,
+    Missing,
+    StaticUnvalidated,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct CredentialStatus {
+    /// Credential storage key, e.g. `github:oauth:default`.
+    pub id: String,
+    pub health: CredentialHealth,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_failed_attempts: Option<u32>,
+    /// RFC3339 expiry timestamp, when the credential carries one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+    pub scopes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct ProviderArtifact {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    pub id_hash: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct ProviderSummary {
+    pub name: String,
+    pub installed: Vec<ProviderArtifact>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest: Option<ProviderArtifact>,
 }
 
 /// One mount that did not converge during a reconcile. `mount` is the mount
@@ -430,4 +474,34 @@ pub struct StopReport {
     #[schema(value_type = String)]
     pub mount_point: PathBuf,
     pub providers_dropped: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CredentialHealth, CredentialStatus};
+
+    #[test]
+    fn credential_wire_status_is_public_data_only() {
+        let status = CredentialStatus {
+            id: "github:oauth:default".to_string(),
+            health: CredentialHealth::Ready,
+            refresh_failed_attempts: None,
+            expires_at: Some("2026-07-05T12:00:00Z".to_string()),
+            scopes: vec!["repo".to_string()],
+        };
+        let json = serde_json::to_value(status).expect("credential status serializes");
+
+        assert_eq!(json["id"], "github:oauth:default");
+        assert_eq!(json["health"], "ready");
+        assert_eq!(json["expires_at"], "2026-07-05T12:00:00Z");
+    }
+
+    #[test]
+    fn credential_wire_types_do_not_reference_secret_types() {
+        let source = include_str!("lib.rs");
+
+        assert!(!source.contains(concat!("Header", "Material")));
+        assert!(!source.contains(concat!("Secret", "String")));
+        assert!(!source.contains(concat!("omnifs", "_auth")));
+    }
 }

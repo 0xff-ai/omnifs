@@ -15,6 +15,7 @@ path = "src/bin/openapi.rs"
 
 [dependencies]
 omnifs-api = { workspace = true }
+omnifs-auth = { workspace = true }
 omnifs-workspace = { workspace = true }
 omnifs-engine = { workspace = true }
 omnifs-nfs = { workspace = true }
@@ -27,6 +28,7 @@ tracing = { workspace = true }
 utoipa = { workspace = true }
 utoipa-axum = { workspace = true }
 serde_json = { workspace = true }
+time = { workspace = true, features = ["formatting"] }
 
 # FUSE links fuser, which is Linux-only; the host-native NFS frontend builds on macOS without it.
 [target.'cfg(target_os = "linux")'.dependencies]
