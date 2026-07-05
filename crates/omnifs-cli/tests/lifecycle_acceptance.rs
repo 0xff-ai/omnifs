@@ -408,9 +408,16 @@ fn scenarios_3_to_6_lifecycle_cycle() {
     let status_json: serde_json::Value = serde_json::from_slice(&status_resp.stdout)
         .expect("daemon /v1/status must return valid JSON");
     assert_eq!(
-        status_json["backend"].as_str().unwrap_or(""),
+        status_json["backend"]["kind"].as_str().unwrap_or(""),
         "native",
         "daemon backend must be 'native'; got: {:?}",
+        status_json["backend"]
+    );
+    assert!(
+        status_json["backend"]["pid"]
+            .as_u64()
+            .is_some_and(|pid| pid > 0),
+        "daemon backend must report its pid; got: {:?}",
         status_json["backend"]
     );
 

@@ -378,7 +378,26 @@ impl MountRuntimes {
         approvals: UpgradeApprovals,
     ) -> ReconcileOutcome {
         let _guard = self.reconcile_lock.lock();
-        ReconcilePass::new(self, handle, mode, approvals).run()
+        ReconcilePass::new(self, handle, mode, approvals, ReconcileScope::all()).run()
+    }
+
+    pub fn try_reconcile_scoped(
+        self: &Arc<Self>,
+        handle: &tokio::runtime::Handle,
+        mode: MaterializationMode,
+        mounts: Option<Vec<String>>,
+    ) -> Result<ReconcileOutcome, ReconcileBusy> {
+        let Some(_guard) = self.reconcile_lock.try_lock() else {
+            return Err(ReconcileBusy);
+        };
+        Ok(ReconcilePass::new(
+            self,
+            handle,
+            mode,
+            UpgradeApprovals::default(),
+            ReconcileScope::from_mounts(mounts),
+        )
+        .run())
     }
 
     pub fn converge_spec(
@@ -393,7 +412,7 @@ impl MountRuntimes {
         if let Some(plan) = approved {
             approvals.approve(spec.mount.clone(), plan);
         }
-        ReconcilePass::new(self, handle, mode, approvals).run_one(spec)
+        ReconcilePass::new(self, handle, mode, approvals, ReconcileScope::all()).run_one(spec)
     }
 
     fn build_work(&self, work: LoadWork) -> LoadResult {
@@ -505,6 +524,7 @@ struct ReconcilePass<'a> {
     mode: MaterializationMode,
     providers: Catalog,
     approvals: UpgradeApprovals,
+    scope: ReconcileScope,
     desired: HashSet<String>,
     outcome: ReconcileOutcome,
     started: Instant,
@@ -516,6 +536,7 @@ impl<'a> ReconcilePass<'a> {
         handle: &'a tokio::runtime::Handle,
         mode: MaterializationMode,
         approvals: UpgradeApprovals,
+        scope: ReconcileScope,
     ) -> Self {
         Self {
             registry,
@@ -523,6 +544,7 @@ impl<'a> ReconcilePass<'a> {
             mode,
             providers: Catalog::open(registry.context.providers_dir()),
             approvals,
+            scope,
             desired: HashSet::new(),
             outcome: ReconcileOutcome::default(),
             started: Instant::now(),
@@ -549,7 +571,11 @@ impl<'a> ReconcilePass<'a> {
         // A spec that fails to parse or carries an invalid mount name is
         // recorded and skipped; it never aborts the pass or disturbs a running
         // mount.
-        for failure in registry.failures() {
+        for failure in registry
+            .failures()
+            .iter()
+            .filter(|failure| self.scope.includes_failure_path(&failure.path))
+        {
             self.outcome.failed.push(MountFailure {
                 mount: failure.path.display().to_string(),
                 kind: FailureKind::SpecInvalid,
@@ -563,6 +589,9 @@ impl<'a> ReconcilePass<'a> {
         // compile-heavy loads carry into phase 2.
         let mut work = Vec::new();
         for (name, spec) in registry.iter() {
+            if !self.scope.contains(name.as_str()) {
+                continue;
+            }
             if let Some(item) = self.plan_spec(spec.clone(), &registry.spec_path(name)) {
                 work.push(item);
             }
@@ -831,7 +860,7 @@ impl<'a> ReconcilePass<'a> {
 
     fn remove_stale_mounts(&mut self) {
         for mount in self.registry.mounts() {
-            if !self.desired.contains(&mount) {
+            if self.scope.contains(&mount) && !self.desired.contains(&mount) {
                 let mount_started = Instant::now();
                 if self.registry.remove_mount(&mount).is_ok() {
                     info!(
@@ -843,6 +872,39 @@ impl<'a> ReconcilePass<'a> {
                 }
                 self.registry.remove_fingerprint(&mount);
             }
+        }
+    }
+}
+
+struct ReconcileScope {
+    mounts: Option<HashSet<String>>,
+}
+
+impl ReconcileScope {
+    fn all() -> Self {
+        Self { mounts: None }
+    }
+
+    fn from_mounts(mounts: Option<Vec<String>>) -> Self {
+        Self {
+            mounts: mounts.map(|mounts| mounts.into_iter().collect()),
+        }
+    }
+
+    fn contains(&self, mount: &str) -> bool {
+        match &self.mounts {
+            Some(mounts) => mounts.contains(mount),
+            None => true,
+        }
+    }
+
+    fn includes_failure_path(&self, path: &Path) -> bool {
+        match &self.mounts {
+            Some(mounts) => path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .is_some_and(|stem| mounts.contains(stem)),
+            None => true,
         }
     }
 }
@@ -903,6 +965,9 @@ pub enum FailureKind {
     ProviderMissing,
     Internal,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReconcileBusy;
 
 /// What a reconcile pass changed. Host-local; the daemon maps it to the
 /// control-API report type.
@@ -1656,5 +1721,88 @@ mod tests {
             "a removed mount is no longer served"
         );
         assert!(fx.registry.mounts().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn scoped_reconcile_leaves_out_of_scope_mount_untouched() {
+        let fx = reconcile_fixture();
+        let test_spec = pin_spec(
+            fx.providers_dir.path(),
+            &fx.base_wasm,
+            "test-provider",
+            serde_json::json!({
+                "mount": "test",
+                "config": {},
+                "capabilities": { "domains": ["httpbin.org"] }
+            }),
+        );
+        let other_spec = pin_spec(
+            fx.providers_dir.path(),
+            &fx.base_wasm,
+            "test-provider",
+            serde_json::json!({
+                "mount": "other",
+                "config": {},
+                "capabilities": { "domains": ["httpbin.org"] }
+            }),
+        );
+        let test_path = fx.mounts_dir.join("test.json");
+        let other_path = fx.mounts_dir.join("other.json");
+        std::fs::write(&test_path, serde_json::to_vec_pretty(&test_spec).unwrap())
+            .expect("write test spec");
+        std::fs::write(&other_path, serde_json::to_vec_pretty(&other_spec).unwrap())
+            .expect("write other spec");
+
+        let handle = tokio::runtime::Handle::current();
+        let first = fx.registry.reconcile(&handle, MaterializationMode::Docker);
+        assert_eq!(
+            first.added,
+            ["other", "test"],
+            "first reconcile adds both mounts: {first:?}"
+        );
+        let other_running = fx.registry.get("other").expect("other mount is running");
+
+        std::fs::remove_file(&other_path).expect("delete out-of-scope spec");
+        let scoped = fx
+            .registry
+            .try_reconcile_scoped(
+                &handle,
+                MaterializationMode::Docker,
+                Some(vec!["test".to_string()]),
+            )
+            .expect("scoped reconcile must acquire lock");
+
+        assert!(
+            scoped.removed.is_empty(),
+            "out-of-scope deleted spec must not remove a running mount: {scoped:?}"
+        );
+        let still_running = fx.registry.get("other").expect("other mount still running");
+        assert!(Arc::ptr_eq(&other_running, &still_running));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn try_reconcile_scoped_reports_busy_when_lock_is_held() {
+        let config_dir = tempfile::tempdir().expect("temp config dir");
+        let cache_dir = tempfile::tempdir().expect("temp cache dir");
+        let providers_dir = tempfile::tempdir().expect("temp providers dir");
+        let paths = omnifs_workspace::layout::WorkspaceLayout::under_root(config_dir.path());
+        let registry = Arc::new(
+            MountRuntimes::new(
+                HostContext::new(
+                    cache_dir.path(),
+                    &paths.config_dir,
+                    providers_dir.path(),
+                    &paths.credentials_file,
+                ),
+                Arc::new(GitCloner::new(cache_dir.path().join("clones"))),
+            )
+            .expect("registry init"),
+        );
+        let handle = tokio::runtime::Handle::current();
+        let _guard = registry.reconcile_lock.lock();
+
+        let result = registry.try_reconcile_scoped(&handle, MaterializationMode::Docker, None);
+
+        assert!(matches!(result, Err(super::ReconcileBusy)));
     }
 }

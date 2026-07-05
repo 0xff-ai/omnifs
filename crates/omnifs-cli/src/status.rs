@@ -3,7 +3,9 @@
 use omnifs_workspace::creds::FileStore;
 use std::fmt::Write as _;
 
-use omnifs_api::{DaemonHealth, DaemonStatus, DaemonSubsystem, HealthState, SubsystemHealth};
+use omnifs_api::{
+    DaemonHealth, DaemonStatus, DaemonSubsystem, FsType, HealthState, SubsystemHealth,
+};
 use omnifs_workspace::layout::WorkspaceLayout;
 use omnifs_workspace::provider::Catalog;
 
@@ -326,7 +328,7 @@ pub(crate) struct FailedMountJson {
 pub(crate) struct MountJson {
     pub source: String,
     pub mount_point: std::path::PathBuf,
-    pub fs_type: String,
+    pub fs_type: FsType,
 }
 
 impl StatusReport {
@@ -361,7 +363,7 @@ impl StatusReport {
                 r.frontend.as_ref().map(|frontend| MountJson {
                     source: frontend.source.clone(),
                     mount_point: r.mount_point.clone(),
-                    fs_type: frontend.fs_type.clone(),
+                    fs_type: frontend.fs_type,
                 })
             }),
             paths: self.paths.clone(),

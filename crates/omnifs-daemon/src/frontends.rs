@@ -1,6 +1,6 @@
 //! Filesystem frontends managed by the daemon.
 
-use omnifs_api::FrontendInfo;
+use omnifs_api::{FrontendInfo, FsType};
 use omnifs_engine::MountRuntimes;
 #[cfg(target_os = "linux")]
 use omnifs_fuse::NotifierHandle;
@@ -103,7 +103,7 @@ impl Frontend {
                 .filter(|mount| mount.device == "omnifs" && mount.fs_type.starts_with("fuse"))
                 .map(|mount| FrontendInfo {
                     source: mount.device,
-                    fs_type: mount.fs_type,
+                    fs_type: FsType::Fuse,
                 }),
             Frontend::Nfs(frontend) => nfs_serving(&frontend.mount_point),
         }
@@ -146,7 +146,7 @@ fn nfs_serving(mount_point: &Path) -> Option<FrontendInfo> {
         .filter(|mount| mount.fs_type.starts_with("nfs"))
         .map(|mount| FrontendInfo {
             source: mount.device,
-            fs_type: mount.fs_type,
+            fs_type: FsType::Nfs,
         })
 }
 
@@ -156,6 +156,6 @@ fn nfs_serving(mount_point: &Path) -> Option<FrontendInfo> {
 fn nfs_serving(mount_point: &Path) -> Option<FrontendInfo> {
     omnifs_nfs::mount_is_active(mount_point).then(|| FrontendInfo {
         source: "omnifs".to_string(),
-        fs_type: "nfs".to_string(),
+        fs_type: FsType::Nfs,
     })
 }

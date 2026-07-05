@@ -11,7 +11,7 @@ use omnifs_workspace::mounts::materialize::{self, MaterializationMode, Materiali
 
 use crate::client::DaemonClient;
 use crate::config::ConfiguredBackend;
-use crate::launch_backend::{DockerTarget, LaunchBackend, LaunchParams};
+use crate::launch_backend::{DockerTarget, LaunchBackend};
 use crate::launch_record::LaunchRecord;
 use crate::runtime::Runtime;
 use crate::session::MountConfig;
@@ -264,12 +264,7 @@ async fn launch_host_native(
     let status = client.status().await.ok();
     if let Some(status) = &status {
         report_launch_status(status);
-        let record_params = LaunchParams {
-            control_addr: addr,
-            mount_point: Some(status.mount_point.clone()),
-            backend: LaunchBackend::Native,
-        };
-        write_launch_record(&paths.config_dir, &record_params, Some(status.pid));
+        write_launch_record(&paths.config_dir, status, addr);
     }
     Ok(LaunchOutcome::Native {
         mount_point: status.map(|status| status.mount_point),
@@ -433,12 +428,7 @@ async fn finish_docker_launch(
         let addr: SocketAddr = format!("127.0.0.1:{}", omnifs_api::DEFAULT_PORT)
             .parse()
             .expect("static address is valid");
-        let record_params = LaunchParams {
-            control_addr: addr,
-            mount_point: Some(status.mount_point.clone()),
-            backend: LaunchBackend::Docker(target.clone()),
-        };
-        write_launch_record(&paths.config_dir, &record_params, None);
+        write_launch_record(&paths.config_dir, &status, addr);
     }
     Ok(LaunchOutcome::Docker {
         target: target.clone(),
@@ -448,8 +438,8 @@ async fn finish_docker_launch(
 /// Build and persist the launch record at `<config_dir>/launch.json`.
 /// Best-effort: a failure here is logged but does not abort the launch, since
 /// the daemon is already serving.
-fn write_launch_record(config_dir: &Path, params: &LaunchParams, daemon_pid: Option<u32>) {
-    match LaunchRecord::new(params, daemon_pid) {
+fn write_launch_record(config_dir: &Path, status: &DaemonStatus, control_addr: SocketAddr) {
+    match LaunchRecord::from_status(status, control_addr) {
         Ok(record) => {
             if let Err(error) = record.write(config_dir) {
                 anstream::eprintln!("warning: could not write launch record: {error:#}");

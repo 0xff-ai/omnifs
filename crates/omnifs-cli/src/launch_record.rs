@@ -11,11 +11,10 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
-use omnifs_api::DaemonBackend;
+use omnifs_api::{DaemonBackend, DaemonStatus};
 use serde::{Deserialize, Serialize};
 
-use crate::launch_backend::{DockerTarget, LaunchBackend, LaunchParams};
-use crate::session::{CONTAINER_NAME, IMAGE};
+use crate::launch_backend::{DockerTarget, LaunchBackend};
 
 /// Schema version this CLI understands. A bump here means the CLI writing the
 /// record knows something the current CLI does not; the current CLI reports
@@ -47,24 +46,30 @@ enum RecordedBackend {
 }
 
 impl LaunchRecord {
-    /// Build a record from launch params. `daemon_pid` is the PID of the
-    /// spawned daemon on the native path; pass `None` for Docker.
-    pub(crate) fn new(params: &LaunchParams, daemon_pid: Option<u32>) -> Result<Self> {
-        let backend = match &params.backend {
-            LaunchBackend::Native => RecordedBackend::Native {
-                daemon_pid: daemon_pid
-                    .ok_or_else(|| anyhow::anyhow!("native launch record requires daemon_pid"))?,
-            },
-            LaunchBackend::Docker(target) => RecordedBackend::Docker {
-                container_name: target.container_name().as_str().to_string(),
-                image: target.image().as_str().to_string(),
+    /// Cache the backend identity reported by a ready daemon.
+    pub(crate) fn from_status(
+        status: &DaemonStatus,
+        control_addr: std::net::SocketAddr,
+    ) -> Result<Self> {
+        let backend = match &status.backend {
+            DaemonBackend::Native { pid } => RecordedBackend::Native { daemon_pid: *pid },
+            DaemonBackend::Docker {
+                container_name,
+                image,
+            } => {
+                DockerTarget::new(container_name.clone(), image.clone())
+                    .context("daemon reported invalid Docker backend identity")?;
+                RecordedBackend::Docker {
+                    container_name: container_name.clone(),
+                    image: image.clone(),
+                }
             },
         };
         Ok(Self {
             version: RECORD_VERSION,
             backend,
-            control_addr: params.control_addr.to_string(),
-            mount_point: params.mount_point.clone(),
+            control_addr: control_addr.to_string(),
+            mount_point: Some(status.mount_point.clone()),
         })
     }
 
@@ -157,45 +162,6 @@ impl LaunchRecord {
                 image,
             )?)),
         }
-    }
-}
-
-/// Reconstruct the backend from a daemon's status backend plus the launch
-/// record, so `down`/`reset` dispatch teardown without naming native or Docker.
-///
-/// A host-native daemon needs no record. A container daemon reads the record for
-/// its container name and image; an absent, unreadable, or incomplete record
-/// falls back to the default container name (with a warning), so a corrupt
-/// record never strands a running container after the daemon has already been
-/// asked to shut down.
-pub(crate) fn backend_from_daemon(
-    backend: DaemonBackend,
-    config_dir: &Path,
-) -> Result<LaunchBackend> {
-    match backend {
-        DaemonBackend::Native => Ok(LaunchBackend::Native),
-        DaemonBackend::Docker => {
-            let default_backend = || {
-                Ok(LaunchBackend::Docker(DockerTarget::new(
-                    CONTAINER_NAME.to_string(),
-                    IMAGE.to_string(),
-                )?))
-            };
-            match LaunchRecord::read(config_dir)
-                .and_then(|record| record.map(LaunchRecord::into_backend).transpose())
-            {
-                Ok(Some(backend)) => Ok(backend),
-                Ok(None) => default_backend(),
-                Err(error) => {
-                    anstream::eprintln!(
-                        "warning: launch record unreadable ({error:#}); \
-                         using default container name `{}`",
-                        crate::session::CONTAINER_NAME
-                    );
-                    default_backend()
-                },
-            }
-        },
     }
 }
 

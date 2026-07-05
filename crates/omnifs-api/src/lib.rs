@@ -16,11 +16,19 @@ pub mod events;
 
 /// Control API major version. The CLI refuses to talk to a daemon with a
 /// different major. Bump when routes or payloads change incompatibly.
-pub const API_MAJOR: u16 = 2;
+pub const API_MAJOR: u16 = 3;
 
 /// Control API minor version. The CLI warns but proceeds when the daemon's
 /// minor differs. Bump for additive, backward-compatible additions.
-pub const API_MINOR: u16 = 3;
+pub const API_MINOR: u16 = 0;
+
+/// Docker container name environment variable set by launchers and read by the
+/// daemon when reporting backend identity.
+pub const OMNIFS_CONTAINER_NAME_ENV: &str = "OMNIFS_CONTAINER_NAME";
+
+/// Docker image environment variable set by launchers and read by the daemon
+/// when reporting backend identity.
+pub const OMNIFS_IMAGE_ENV: &str = "OMNIFS_IMAGE";
 
 /// Default control port. The container publishes it on the host loopback;
 /// both binaries default to it so `omnifs` finds the daemon with zero config.
@@ -82,8 +90,8 @@ pub struct DaemonStatus {
     /// frontend-agnostic for future NFSv4/FSKit modes), when one is up.
     pub frontend: Option<FrontendInfo>,
     /// Backend serving this daemon, so the CLI tears down and reports the right
-    /// backend without inferring it from configuration. A daemon old enough to
-    /// omit the field predates host-native and is read as Docker.
+    /// backend without inferring it from configuration. Missing identity is not
+    /// reclaimable; teardown stops instead of guessing.
     #[serde(default, alias = "launch")]
     pub backend: DaemonBackend,
     /// Provider mounts loaded in the registry.
@@ -196,23 +204,57 @@ pub enum HealthState {
 
 /// Backend serving a daemon. The CLI reads this (and the launch record) instead
 /// of inferring the backend from `[system].runtime`.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DaemonBackend {
     /// Daemon spawned as a host-native child process.
-    #[serde(alias = "host_native")]
-    Native,
-    /// Daemon running inside a Docker container. The legacy interpretation for
-    /// a status payload that omits the field.
-    #[default]
-    #[serde(alias = "container")]
-    Docker,
+    Native { pid: u32 },
+    /// Daemon running inside a Docker container.
+    Docker {
+        container_name: String,
+        image: String,
+    },
+}
+
+impl Default for DaemonBackend {
+    fn default() -> Self {
+        Self::Docker {
+            container_name: String::new(),
+            image: String::new(),
+        }
+    }
+}
+
+impl DaemonBackend {
+    #[must_use]
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Native { .. } => "native",
+            Self::Docker { .. } => "container",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FsType {
+    Fuse,
+    Nfs,
+}
+
+impl std::fmt::Display for FsType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Fuse => f.write_str("fuse"),
+            Self::Nfs => f.write_str("nfs"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct FrontendInfo {
     pub source: String,
-    pub fs_type: String,
+    pub fs_type: FsType,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -372,6 +414,13 @@ pub struct ReconcileReport {
     pub removed: Vec<String>,
     pub updated: Vec<String>,
     pub failed: Vec<MountFailure>,
+}
+
+/// Optional request body for `POST /v1/reconcile`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
+pub struct ReconcileRequest {
+    #[serde(default)]
+    pub mounts: Vec<String>,
 }
 
 /// `POST /v1/shutdown`: what the daemon tore down before exiting.

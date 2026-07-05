@@ -30,7 +30,8 @@ pub use inspect::{
     init_global_from_env,
 };
 pub use runtime::registry::{
-    FailureKind, MountFailure, MountRuntimes, ReconcileOutcome, RegistryError, UpgradeApprovals,
+    FailureKind, MountFailure, MountRuntimes, ReconcileBusy, ReconcileOutcome, RegistryError,
+    UpgradeApprovals,
 };
 pub use runtime::{BuildError, EngineError, HostContext, Runtime as Engine};
 pub use serving::ServingContext;

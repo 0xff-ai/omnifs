@@ -21,6 +21,8 @@ Current mount delivery is control-API when the daemon is running and disk reconc
 
 Specs are one file per mount, and a spec file's stem is its mount name: `mounts::Registry` (in `omnifs-workspace`) rejects any file whose stem does not match the spec's `mount`. The Registry is the sole spec owner. The daemon writes through it for running-daemon create/update/delete requests; the CLI writes through it only for offline config changes. Registry writes are atomic (same-dir temp plus rename) and serialized by the mount-registry advisory lock. A spec inherits its provider-manifest defaults (the auth scheme and config defaults) at creation time, so serving reads it as-is, with no read-time resolution step. Materialization still reads the pinned manifest, but only to check the spec's capability grants against the provider's declared needs, never to fill defaults.
 
+`POST /v1/reconcile` converges the daemon to the on-disk specs. With no body it is a full pass. With `{ "mounts": ["name"] }` it is scoped to those mount names for planning, build, and stale removal. HTTP-triggered reconcile is non-queueing: if another reconcile holds the engine lock, the daemon returns `409 ReconcileBusy` with `Retry-After: 2`. Internal daemon calls that intentionally serialize still wait on the engine lock.
+
 Prefer REST API extensions for new non-secret interactions. Keep credentials off the REST API.
 
 ### Replica snapshots
@@ -44,6 +46,8 @@ flow.
 The daemon runs host-native or in Docker. Docker is one launch mechanism, not the architecture. Host-native frontend defaults are FUSE on Linux and NFSv4 loopback on non-Linux.
 
 `omnifs setup` chooses the default runtime and records it at `[system].runtime`; the picker defaults to Docker on macOS (where host-native is loopback NFS and experimental) and host-native on Linux/WSL. `omnifs up --runtime <docker|native>` overrides that default for a single launch without persisting it. The override flows into the launch record, so `down`, `status`, and `shell` read the actually-running backend from the daemon and launch record, never from `[system].runtime`.
+
+`DaemonStatus.backend` is the daemon-reported backend fact, not a config echo: native reports its process id, and Docker reports the launcher-provided container name plus image. `launch.json` is only a cache of those daemon-reported facts for stale teardown. If neither daemon status nor a valid launch record identifies the backend, teardown reports an unknown backend and stops without guessing a container name.
 
 Keep Docker-specific bind/materialization policy in Docker launch paths. Keep native and Docker daemon argument generation aligned where behavior is shared.
 

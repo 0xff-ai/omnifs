@@ -12,11 +12,13 @@ use axum::response::{IntoResponse, Json, Response};
 use omnifs_api::{
     AddedField, ApiError, AuthDelta, AuthSchemeSurface, AuthSurface, CapabilityChange,
     CapabilityDirection, DaemonBackend, DaemonHealth, DaemonStatus, DaemonSubsystem, ErrorCode,
-    FieldChange, FrontendInfo, HealthState, LimitChange, LimitDirection, MountFailure, MountInfo,
-    MountOutcome, MountReport, MountUpdateRequest, ReadyInfo, ReconcileReport, StopReport,
-    SubsystemHealth, UpgradeDelta,
+    FieldChange, FrontendInfo, FsType, HealthState, LimitChange, LimitDirection, MountFailure,
+    MountInfo, MountOutcome, MountReport, MountUpdateRequest, ReadyInfo, ReconcileReport,
+    ReconcileRequest, StopReport, SubsystemHealth, UpgradeDelta,
 };
-use omnifs_engine::{FailureKind, InspectorSink, MountRuntimes, ReconcileOutcome, RegistryError};
+use omnifs_engine::{
+    FailureKind, InspectorSink, MountRuntimes, ReconcileBusy, ReconcileOutcome, RegistryError,
+};
 use omnifs_workspace::mounts::materialize::materialize;
 use omnifs_workspace::mounts::{Name as MountName, Registry, Spec, UpgradePlan};
 use omnifs_workspace::provider::Catalog;
@@ -47,6 +49,7 @@ use crate::frontends::Frontend;
         DaemonSubsystem,
         HealthState,
         FrontendInfo,
+        FsType,
         DaemonBackend,
         MountInfo,
         MountFailure,
@@ -64,6 +67,7 @@ use crate::frontends::Frontend;
         AuthSurface,
         AuthSchemeSurface,
         ReconcileReport,
+        ReconcileRequest,
         StopReport,
     ))
 )]
@@ -156,8 +160,7 @@ impl Daemon {
     /// `registry.reconcile`, then reflects the result into the frontend: added
     /// and updated mounts (re)create the root symlink, removed and updated
     /// mounts invalidate the root child so a torn-down mount does not linger as
-    /// a phantom directory. Callable directly from the blocking startup path; the
-    /// `POST /v1/reconcile` handler wraps it in a blocking task.
+    /// a phantom directory. Callable directly from the blocking startup path.
     pub fn reconcile_blocking(&self, handle: &tokio::runtime::Handle) -> ReconcileReport {
         let outcome = self
             .registry
@@ -165,17 +168,25 @@ impl Daemon {
         self.apply_reconcile_outcome(outcome)
     }
 
-    /// Reconcile on a blocking task, since it compiles WASM for added or changed
-    /// mounts.
-    pub async fn reconcile(self: &Arc<Self>) -> ReconcileReport {
+    pub async fn try_reconcile(
+        self: &Arc<Self>,
+        mounts: Option<Vec<String>>,
+    ) -> Result<ReconcileReport, ReconcileBusy> {
         let daemon = Arc::clone(self);
         let handle = tokio::runtime::Handle::current();
-        tokio::task::spawn_blocking(move || daemon.reconcile_blocking(&handle))
-            .await
-            .unwrap_or_else(|join_error| {
-                warn!(%join_error, "reconcile task failed");
-                ReconcileReport::default()
-            })
+        tokio::task::spawn_blocking(move || {
+            let outcome = daemon.registry.try_reconcile_scoped(
+                &handle,
+                daemon.context.materialization_mode(),
+                mounts,
+            )?;
+            Ok(daemon.apply_reconcile_outcome(outcome))
+        })
+        .await
+        .unwrap_or_else(|join_error| {
+            warn!(%join_error, "reconcile task failed");
+            Ok(ReconcileReport::default())
+        })
     }
 
     pub async fn converge_spec(
@@ -737,10 +748,32 @@ async fn mount_export(
     post,
     path = "/v1/reconcile",
     operation_id = "reconcile",
-    responses((status = 200, description = "what the reconcile changed", body = ReconcileReport)),
+    request_body = Option<ReconcileRequest>,
+    responses(
+        (status = 200, description = "what the reconcile changed", body = ReconcileReport),
+        (status = 409, description = "another reconcile is already in progress", body = ApiError),
+    ),
 )]
-async fn reconcile(State(daemon): State<Arc<Daemon>>) -> Json<ReconcileReport> {
-    Json(daemon.reconcile().await)
+async fn reconcile(
+    State(daemon): State<Arc<Daemon>>,
+    request: Option<Json<ReconcileRequest>>,
+) -> Response {
+    let mounts = request.map(|Json(request)| request.mounts);
+    if let Some(mounts) = &mounts {
+        for mount in mounts {
+            if let Err(error) = MountName::new(mount.clone()) {
+                return error_response(
+                    StatusCode::BAD_REQUEST,
+                    ErrorCode::SpecInvalid,
+                    format!("invalid mount name `{mount}`: {error}"),
+                );
+            }
+        }
+    }
+    match daemon.try_reconcile(mounts).await {
+        Ok(report) => Json(report).into_response(),
+        Err(ReconcileBusy) => reconcile_busy_response(),
+    }
 }
 
 /// `POST /v1/shutdown`: unmount the frontend and exit. The daemon holds the
@@ -802,6 +835,19 @@ fn error_response(status: StatusCode, code: ErrorCode, message: impl Into<String
         Json(ApiError {
             code,
             message: message.into(),
+            detail: None,
+        }),
+    )
+        .into_response()
+}
+
+fn reconcile_busy_response() -> Response {
+    (
+        StatusCode::CONFLICT,
+        [(header::RETRY_AFTER, "2")],
+        Json(ApiError {
+            code: ErrorCode::ReconcileBusy,
+            message: "another reconcile is already in progress".to_string(),
             detail: None,
         }),
     )
@@ -943,5 +989,16 @@ mod tests {
         let response = super::parse_spec_json(spec).expect_err("spec must be rejected");
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn reconcile_busy_response_sets_retry_after() {
+        let response = super::reconcile_busy_response();
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            response.headers().get(axum::http::header::RETRY_AFTER),
+            Some(&axum::http::HeaderValue::from_static("2"))
+        );
     }
 }

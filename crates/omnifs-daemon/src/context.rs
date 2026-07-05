@@ -3,7 +3,8 @@
 use crate::app::{DaemonArgs, FrontendKind};
 use omnifs_api::{
     API_MAJOR, API_MINOR, DaemonBackend, DaemonHealth, DaemonStatus, DaemonSubsystem, FrontendInfo,
-    HealthState, MountFailure, MountInfo, SubsystemHealth,
+    HealthState, MountFailure, MountInfo, OMNIFS_CONTAINER_NAME_ENV, OMNIFS_IMAGE_ENV,
+    SubsystemHealth,
 };
 use omnifs_engine::HostContext;
 use omnifs_nfs::NfsMountOptions;
@@ -46,10 +47,14 @@ impl DaemonContext {
         let mount_point = omnifs_workspace::layout::resolve_mount_point().ok_or_else(|| {
             anyhow::anyhow!("cannot resolve mount point: set HOME or OMNIFS_MOUNT_POINT")
         })?;
+        let process = ProcessInfo::current();
         let backend = if args.host_native {
-            DaemonBackend::Native
+            DaemonBackend::Native { pid: process.pid }
         } else {
-            DaemonBackend::Docker
+            DaemonBackend::Docker {
+                container_name: std::env::var(OMNIFS_CONTAINER_NAME_ENV).unwrap_or_default(),
+                image: std::env::var(OMNIFS_IMAGE_ENV).unwrap_or_default(),
+            }
         };
         let nfs = NfsContext {
             bind: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), args.nfs_port),
@@ -65,7 +70,7 @@ impl DaemonContext {
             root_symlinks: args.root_symlinks,
             listen: args.listen,
             nfs,
-            process: ProcessInfo::current(),
+            process,
         })
     }
 
@@ -115,9 +120,9 @@ impl DaemonContext {
     /// The launch backend mapped to the telemetry vocabulary, recorded on every
     /// daemon lifecycle event.
     pub(crate) fn telemetry_backend(&self) -> omnifs_workspace::telemetry::Backend {
-        match self.backend {
-            DaemonBackend::Native => omnifs_workspace::telemetry::Backend::Native,
-            DaemonBackend::Docker => omnifs_workspace::telemetry::Backend::Docker,
+        match &self.backend {
+            DaemonBackend::Native { .. } => omnifs_workspace::telemetry::Backend::Native,
+            DaemonBackend::Docker { .. } => omnifs_workspace::telemetry::Backend::Docker,
         }
     }
 
@@ -134,9 +139,9 @@ impl DaemonContext {
     }
 
     pub(crate) fn materialization_mode(&self) -> MaterializationMode {
-        match self.backend {
-            DaemonBackend::Native => MaterializationMode::HostNative,
-            DaemonBackend::Docker => MaterializationMode::Docker,
+        match &self.backend {
+            DaemonBackend::Native { .. } => MaterializationMode::HostNative,
+            DaemonBackend::Docker { .. } => MaterializationMode::Docker,
         }
     }
 
@@ -166,7 +171,7 @@ impl DaemonContext {
             cache_dir: self.layout.cache_dir.clone(),
             providers_dir: self.layout.providers_dir.clone(),
             frontend,
-            backend: self.backend,
+            backend: self.backend.clone(),
             mounts,
             failed,
             health,
@@ -189,10 +194,7 @@ impl DaemonContext {
             SubsystemHealth::new(
                 DaemonSubsystem::Backend,
                 HealthState::Healthy,
-                match self.backend {
-                    DaemonBackend::Native => "native daemon",
-                    DaemonBackend::Docker => "docker container",
-                },
+                backend_health_message(&self.backend),
             ),
             self.frontend_health(frontend),
             mount_health(mounts, failed, credential_degraded),
@@ -216,6 +218,19 @@ impl DaemonContext {
                 format!("not serving at {}", self.mount_point.display()),
             ),
         }
+    }
+}
+
+fn backend_health_message(backend: &DaemonBackend) -> String {
+    match backend {
+        DaemonBackend::Native { pid } => format!("native daemon pid {pid}"),
+        DaemonBackend::Docker {
+            container_name,
+            image,
+        } if !container_name.is_empty() && !image.is_empty() => {
+            format!("docker container {container_name} from {image}")
+        },
+        DaemonBackend::Docker { .. } => "docker container identity unavailable".to_string(),
     }
 }
 
