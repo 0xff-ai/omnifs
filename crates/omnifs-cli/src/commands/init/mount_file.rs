@@ -9,7 +9,7 @@ use omnifs_workspace::mounts::{Auth, OAuth, StaticToken};
 /// Composes the [`Spec`] for a newly authored mount. The on-disk JSON is the
 /// `Spec`'s own serialization, persisted atomically by `Registry::put`; this
 /// type only assembles the in-memory value.
-pub(super) struct MountFile<'a> {
+pub(crate) struct MountFile<'a> {
     mount_name: &'a MountName,
     /// The pinned provider reference written into the mount spec, taken from the
     /// latest installed artifact for this provider.
@@ -20,7 +20,7 @@ pub(super) struct MountFile<'a> {
 }
 
 impl<'a> MountFile<'a> {
-    pub(super) fn new(
+    pub(crate) fn new(
         mount_name: &'a MountName,
         reference: &'a ProviderRef,
         auth: Option<&'a AuthSelection>,
@@ -36,7 +36,7 @@ impl<'a> MountFile<'a> {
         }
     }
 
-    pub(super) fn into_spec(self) -> Spec {
+    pub(crate) fn into_spec(self) -> Spec {
         Spec {
             provider: self.reference.clone(),
             mount: self.mount_name.to_string(),

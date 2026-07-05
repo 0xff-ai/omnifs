@@ -4,20 +4,20 @@ use anyhow::anyhow;
 use omnifs_workspace::mounts::Name as MountName;
 use omnifs_workspace::provider::{Provider, ProviderManifest};
 
-pub(super) struct ProviderSelection<'a> {
+pub(crate) struct ProviderSelection<'a> {
     mounts: &'a [MountConfig],
     installed: &'a [(Provider, ProviderManifest)],
 }
 
 impl<'a> ProviderSelection<'a> {
-    pub(super) fn new(
+    pub(crate) fn new(
         mounts: &'a [MountConfig],
         installed: &'a [(Provider, ProviderManifest)],
     ) -> Self {
         Self { mounts, installed }
     }
 
-    pub(super) fn provider_names(&self) -> Vec<String> {
+    pub(crate) fn provider_names(&self) -> Vec<String> {
         let mut manifests: Vec<&ProviderManifest> = self
             .installed
             .iter()
@@ -35,7 +35,7 @@ impl<'a> ProviderSelection<'a> {
         crate::catalog::find_installed(self.installed, name).map(|(_, manifest)| manifest)
     }
 
-    pub(super) fn resolve(
+    pub(crate) fn resolve(
         &self,
         provider_arg: Option<&str>,
         explicit_name: Option<&str>,

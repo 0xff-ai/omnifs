@@ -7,7 +7,7 @@ mod common;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use common::{install_test_provider, omnifs_bin};
+use common::{install_test_provider, install_test_provider_as, omnifs_bin};
 
 struct Fixture {
     home: tempfile::TempDir,
@@ -172,4 +172,32 @@ fn bare_invocation_without_setup_points_to_setup() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("omnifs is not set up"));
     assert!(stdout.contains("omnifs setup"));
+}
+
+#[test]
+fn scripted_setup_and_init_do_not_prompt() {
+    let fixture = Fixture::new();
+    install_test_provider_as(&fixture.home_path().join("providers"), "test");
+
+    let setup = fixture.run(&["setup", "-y", "--no-up"]);
+    assert_eq!(
+        exit_code(&setup),
+        0,
+        "setup -y --no-up must succeed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&setup.stdout),
+        String::from_utf8_lossy(&setup.stderr)
+    );
+
+    let init = fixture.run(&["init", "test", "--no-input", "--yes"]);
+    assert_eq!(
+        exit_code(&init),
+        0,
+        "init test --no-input --yes must succeed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&init.stdout),
+        String::from_utf8_lossy(&init.stderr)
+    );
+    assert!(
+        fixture.home_path().join("mounts/test.json").is_file(),
+        "init must write the test mount spec"
+    );
 }

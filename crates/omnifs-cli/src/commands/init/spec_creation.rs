@@ -9,20 +9,20 @@ use serde_json::Value;
 use std::path::PathBuf;
 
 #[derive(Debug, Default, Clone)]
-pub(super) struct CreatedMountSpec {
-    pub(super) config: Option<Value>,
-    pub(super) capabilities: Option<Grants>,
-    pub(super) limits: Option<Limits>,
+pub(crate) struct CreatedMountSpec {
+    pub(crate) config: Option<Value>,
+    pub(crate) capabilities: Option<Grants>,
+    pub(crate) limits: Option<Limits>,
 }
 
-pub(super) struct MountSpecCreator<'a> {
+pub(crate) struct MountSpecCreator<'a> {
     reference: &'a ProviderRef,
     mount_name: &'a MountName,
     manifest: &'a ProviderManifest,
 }
 
 impl<'a> MountSpecCreator<'a> {
-    pub(super) fn new(
+    pub(crate) fn new(
         reference: &'a ProviderRef,
         mount_name: &'a MountName,
         manifest: &'a ProviderManifest,
@@ -34,7 +34,20 @@ impl<'a> MountSpecCreator<'a> {
         }
     }
 
-    pub(super) fn create(&self, interactive: bool) -> anyhow::Result<CreatedMountSpec> {
+    /// Spec skeleton for a caller that supplies the whole config through an
+    /// override flag: manifest-seeded grants and limits, no generated config,
+    /// no prompts, no default-config validation (the override is validated
+    /// where it is applied).
+    pub(crate) fn create_for_config_override(&self) -> CreatedMountSpec {
+        CreatedMountSpec {
+            config: None,
+            capabilities: (!self.manifest.capabilities.is_empty())
+                .then(|| self.manifest.provider_capabilities()),
+            limits: (!self.manifest.limits.is_empty()).then(|| self.manifest.provider_limits()),
+        }
+    }
+
+    pub(crate) fn create(&self, interactive: bool) -> anyhow::Result<CreatedMountSpec> {
         // Seed explicit grants from the manifest's declared needs. The manifest
         // never grants at runtime; the spec owns these grants from here on.
         let capabilities =
@@ -71,14 +84,14 @@ impl<'a> MountSpecCreator<'a> {
         })
     }
 
-    pub(super) fn requires_prompt(&self) -> bool {
+    pub(crate) fn requires_prompt(&self) -> bool {
         let Some(config_metadata) = self.manifest.config.as_ref() else {
             return false;
         };
         config_metadata.requires_prompt()
     }
 
-    fn validate(&self, config: &Value) -> anyhow::Result<()> {
+    pub(crate) fn validate(&self, config: &Value) -> anyhow::Result<()> {
         let config_metadata = self
             .manifest
             .config
