@@ -2,7 +2,9 @@
 
 use anyhow::Result;
 use clap::Args;
+use serde::Serialize;
 
+use crate::error::ExitCode;
 use crate::workspace::Workspace;
 use omnifs_workspace::layout::WorkspaceLayout;
 use omnifs_workspace::provider::{Catalog, DirStatus};
@@ -12,13 +14,22 @@ pub struct VersionArgs {
     /// Print extended version detail.
     #[arg(long = "detail")]
     pub detail: bool,
+    /// Emit machine-readable JSON.
+    #[arg(long)]
+    pub json: bool,
 }
 
 impl VersionArgs {
-    pub async fn run(self) -> Result<()> {
+    pub async fn run(self) -> Result<ExitCode> {
+        if self.json {
+            let workspace = Workspace::resolve()?;
+            let payload = VersionJson::collect(&workspace).await?;
+            anstream::println!("{}", serde_json::to_string(&payload)?);
+            return Ok(ExitCode::Success);
+        }
         if !self.detail {
             anstream::println!("omnifs {}", env!("CARGO_PKG_VERSION"));
-            return Ok(());
+            return Ok(ExitCode::Success);
         }
 
         let workspace = Workspace::resolve()?;
@@ -70,7 +81,64 @@ impl VersionArgs {
             "  config file:  {}",
             WorkspaceLayout::display(&workspace.layout().config_file)
         );
-        Ok(())
+        Ok(ExitCode::Success)
+    }
+}
+
+#[derive(Serialize)]
+struct VersionJson {
+    cli: String,
+    daemon: Option<DaemonVersionJson>,
+    store: String,
+    providers: String,
+    paths: VersionPathsJson,
+}
+
+#[derive(Serialize)]
+struct DaemonVersionJson {
+    version: String,
+    api_major: u16,
+    api_minor: u16,
+    pid: u32,
+}
+
+#[derive(Serialize)]
+struct VersionPathsJson {
+    config: std::path::PathBuf,
+    cache: std::path::PathBuf,
+    mounts: std::path::PathBuf,
+    providers: std::path::PathBuf,
+    credentials: std::path::PathBuf,
+    config_file: std::path::PathBuf,
+}
+
+impl VersionJson {
+    async fn collect(workspace: &Workspace) -> Result<Self> {
+        let daemon = workspace
+            .daemon()
+            .status_optional()
+            .await?
+            .map(|status| DaemonVersionJson {
+                version: status.version,
+                api_major: status.api_major,
+                api_minor: status.api_minor,
+                pid: status.pid,
+            });
+        let paths = workspace.layout();
+        Ok(Self {
+            cli: env!("CARGO_PKG_VERSION").to_string(),
+            daemon,
+            store: "file".to_string(),
+            providers: provider_dir_summary(workspace.catalog()),
+            paths: VersionPathsJson {
+                config: paths.config_dir.clone(),
+                cache: paths.cache_dir.clone(),
+                mounts: paths.mounts_dir.clone(),
+                providers: paths.providers_dir.clone(),
+                credentials: paths.credentials_file.clone(),
+                config_file: paths.config_file.clone(),
+            },
+        })
     }
 }
 

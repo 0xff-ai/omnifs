@@ -10,5 +10,5 @@ pub(crate) mod readiness;
 
 pub(crate) use login::login_with_workspace;
 pub(crate) use manifest_view::AuthManifestView;
-pub(crate) use mount::{AuthSelection, MountAuth, load_mount_auth, mount_auth};
+pub(crate) use mount::{AuthSelection, MountAuth};
 pub(crate) use readiness::{AuthProbeSeverity, AuthProbeSummary, AuthReadiness, AuthTerminalKind};

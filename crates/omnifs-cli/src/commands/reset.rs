@@ -8,11 +8,10 @@
 //! Backend-transparent: probes the control port then falls back to the launch
 //! record, never branches on `[system].runtime`.
 
-use std::fs;
-
 use anyhow::Context;
 use clap::Args;
 use omnifs_auth::{CredentialService, OAuthClient};
+use omnifs_workspace::mounts::Registry;
 
 use crate::commands::mounts::delete_credentials;
 use crate::credential_target::CredentialTarget;
@@ -72,7 +71,7 @@ impl ResetArgs {
                     .config
                     .as_ref()
                     .map(|spec| {
-                        crate::auth::mount_auth(workspace.catalog(), spec.clone())
+                        crate::auth::MountAuth::from_spec(workspace.catalog(), spec.clone())
                             .register_revocation(&service)
                     })
                     .transpose()?
@@ -90,7 +89,10 @@ impl ResetArgs {
                 },
             };
             if daemon_delete.is_none() {
-                fs::remove_file(&target.path)
+                let name = omnifs_workspace::mounts::Name::new(target.name.clone())
+                    .with_context(|| format!("invalid mount name `{}`", target.name))?;
+                Registry::load(&layout.mounts_dir)?
+                    .remove(&name)
                     .with_context(|| format!("remove {}", target.path.display()))?;
             }
             anstream::println!("Removed mount `{}`", target.name);
@@ -105,6 +107,7 @@ impl ResetArgs {
             anstream::println!();
             anstream::println!("✓ Reset complete.");
         }
+        crate::telemetry::maybe_print_health_nudge(&workspace).await;
         Ok(())
     }
 }

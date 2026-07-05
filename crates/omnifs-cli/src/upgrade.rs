@@ -26,7 +26,7 @@ use omnifs_workspace::mounts::{ProviderMetadataInheritance, UpgradePlan};
 use omnifs_workspace::mounts::{Registry, Spec};
 use omnifs_workspace::provider::{Catalog, ProviderManifest};
 
-use crate::session::MountConfig;
+use crate::mount_config::MountConfig;
 
 /// Run the upgrade check over all mounts, auto-migrating additive upgrades
 /// in-place and warning (without blocking the other mounts) on any per-mount
@@ -47,7 +47,7 @@ pub(crate) fn run_upgrade_check(
             anstream::eprintln!(
                 "warning: mount `{mount}` provider artifact is missing (pinned id {id}); \
                  the daemon will report this mount as failed. \
-                 Run `omnifs mounts add {mount}` or `omnifs init {name}` to re-pin it.",
+                 Run `omnifs init {name} --as {mount}` to re-pin it.",
                 id = spec.provider.id,
             );
             continue;

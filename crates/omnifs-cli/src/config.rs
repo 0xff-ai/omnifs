@@ -85,7 +85,7 @@ impl Config {
 /// Resolve one setting through the single CLI precedence chain:
 /// CLI flag > env var > config file > built-in default.
 ///
-/// The env var is read through [`crate::session::env_string`] (an empty value
+/// The env var is read through [`env_string`] (an empty value
 /// counts as unset) and parsed into `T`; an unset, empty, or unparseable value
 /// falls through to the config source and finally the default. Every CLI
 /// setting resolves through this one chain so precedence lives in a single
@@ -97,9 +97,13 @@ pub(crate) fn resolve_setting<T: FromStr>(
     from_config: impl FnOnce() -> Option<T>,
     default: T,
 ) -> T {
-    flag.or_else(|| crate::session::env_string(env).and_then(|value| value.parse().ok()))
+    flag.or_else(|| env_string(env).and_then(|value| value.parse().ok()))
         .or_else(from_config)
         .unwrap_or(default)
+}
+
+pub(crate) fn env_string(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|value| !value.is_empty())
 }
 
 pub struct ConfigFile {

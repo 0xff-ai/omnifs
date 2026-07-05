@@ -25,8 +25,8 @@ use anyhow::{Context, Result};
 use clap::Args;
 use omnifs_api::MountInfo;
 
+use crate::launch_backend::GUEST_MOUNT;
 use crate::launch_record::LaunchRecord;
-use crate::session::GUEST_MOUNT;
 use crate::workspace::Workspace;
 use omnifs_workspace::layout::OMNIFS_MOUNT_POINT_ENV;
 

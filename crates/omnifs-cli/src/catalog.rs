@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, HashSet};
 use omnifs_workspace::mounts::Name as MountName;
 use omnifs_workspace::provider::{Catalog, Provider, ProviderManifest};
 
-use crate::session::MountConfig;
+use crate::mount_config::MountConfig;
 
 /// The latest installed artifact per provider name, each paired with its loaded
 /// manifest, for the `init` and `setup` provider pickers. A corrupt artifact is

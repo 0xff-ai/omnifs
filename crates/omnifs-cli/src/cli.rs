@@ -4,12 +4,15 @@ use clap::{Parser, Subcommand};
 
 use crate::commands;
 use crate::commands::doctor::DoctorVerdict;
+use crate::error::ExitCode;
+use crate::workspace::Workspace;
 
 #[derive(Parser)]
 #[command(
     name = "omnifs",
     version,
-    about = "omnifs: a virtual filesystem for everything"
+    about = "omnifs: a virtual filesystem for everything",
+    after_help = "Exit codes:\n  0  success\n  1  generic failure\n  2  usage error\n  3  daemon unreachable\n  4  auth or consent required\n  5  degraded health"
 )]
 pub struct Cli {
     /// Increase tracing verbosity. -v = info, -vv = debug with span events.
@@ -18,7 +21,7 @@ pub struct Cli {
     pub verbose: u8,
 
     #[command(subcommand)]
-    pub command: Commands,
+    pub command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
@@ -45,15 +48,15 @@ pub enum Commands {
     /// First-run wizard: detect OS, explain Docker, pick several providers,
     /// authenticate each, and launch the container in one pass.
     ///
-    /// Run this once to get started; use `omnifs mounts add` (or `omnifs init`)
-    /// to add a single provider later. Re-runnable: already-configured
+    /// Run this once to get started; use `omnifs init` to add a single
+    /// provider later. Re-runnable: already-configured
     /// providers are listed but excluded from the picker.
     Setup(commands::setup::SetupArgs),
 
-    /// Interactive setup for a new mount (alias for `omnifs mounts add`).
+    /// Interactive setup for a new mount.
     Init(commands::init::InitArgs),
 
-    /// Manage configured mounts: add, ls, rm.
+    /// Manage configured mounts: ls, reauth, rm.
     Mounts(commands::mounts::MountsArgs),
 
     /// Manage installed provider WASM artifacts.
@@ -104,6 +107,21 @@ impl From<bool> for OutputFormat {
     }
 }
 
+impl Cli {
+    pub(crate) fn telemetry_label(&self) -> Option<&'static str> {
+        self.command
+            .as_ref()
+            .map_or(Some("bare"), Commands::telemetry_label)
+    }
+
+    pub async fn run(self) -> anyhow::Result<ExitCode> {
+        match self.command {
+            Some(command) => command.run().await,
+            None => run_bare().await,
+        }
+    }
+}
+
 impl Commands {
     /// Top-level subcommand label for `cli.jsonl` telemetry, or `None` for the
     /// internal `daemon` subcommand (which records `daemon.jsonl` instead of
@@ -132,45 +150,56 @@ impl Commands {
         })
     }
 
-    pub async fn run(self) -> anyhow::Result<()> {
+    pub async fn run(self) -> anyhow::Result<ExitCode> {
         match self {
             Self::Doctor(args) => {
                 let verdict = args.run().await?;
-                exit_for_verdict(verdict);
+                Ok(exit_for_verdict(verdict))
             },
             Self::Status(args) => args.run().await,
-            Self::Setup(args) => args.run().await,
-            Self::Init(args) => args.run().await,
-            Self::Up(args) => args.run().await,
-            Self::Down(args) => args.run().await,
-            Self::Logs(args) => args.run().await,
-            Self::Inspect(args) => args.run().await,
-            Self::Shell(args) => args.run().await,
-            Self::Snapshot(args) => args.run().await,
+            Self::Setup(args) => args.run().await.map(|()| ExitCode::Success),
+            Self::Init(args) => args.run().await.map(|()| ExitCode::Success),
+            Self::Up(args) => args.run().await.map(|()| ExitCode::Success),
+            Self::Down(args) => args.run().await.map(|()| ExitCode::Success),
+            Self::Logs(args) => args.run().await.map(|()| ExitCode::Success),
+            Self::Inspect(args) => args.run().await.map(|()| ExitCode::Success),
+            Self::Shell(args) => args.run().await.map(|()| ExitCode::Success),
+            Self::Snapshot(args) => args.run().await.map(|()| ExitCode::Success),
             Self::Mounts(args) => args.run().await,
-            Self::Providers(args) => args.run(),
-            Self::Skill(args) => args.run(),
-            Self::Reset(args) => args.run().await,
+            Self::Providers(args) => args.run().await,
+            Self::Skill(args) => args.run().map(|()| ExitCode::Success),
+            Self::Reset(args) => args.run().await.map(|()| ExitCode::Success),
             Self::Completions(args) => {
                 args.run();
-                Ok(())
+                Ok(ExitCode::Success)
             },
             Self::Version(args) => args.run().await,
-            Self::Debug(args) => args.run(),
+            Self::Debug(args) => args.run().map(|()| ExitCode::Success),
             #[cfg(feature = "daemon")]
-            Self::Daemon(args) => omnifs_daemon::run(args),
+            Self::Daemon(args) => omnifs_daemon::run(args).map(|()| ExitCode::Success),
         }
     }
 }
 
-fn exit_for_verdict(verdict: DoctorVerdict) -> ! {
-    let code = match verdict {
-        DoctorVerdict::Clean => 0,
-        DoctorVerdict::Failures => 1,
-        DoctorVerdict::Warnings => 2,
-    };
-    // `doctor` exits here rather than returning to `main`, so record its true
-    // verdict code at this exit site.
-    crate::telemetry::record_cli_exit("doctor", code);
-    std::process::exit(code)
+async fn run_bare() -> anyhow::Result<ExitCode> {
+    let workspace = Workspace::resolve()?;
+    let configured = workspace
+        .config()
+        .is_ok_and(|config| config.system.runtime.is_some())
+        || workspace.mounts().is_ok_and(|mounts| !mounts.is_empty());
+
+    if configured {
+        commands::status::StatusArgs::default().run().await
+    } else {
+        anstream::println!("omnifs is not set up. Run `omnifs setup` to get started.");
+        Ok(ExitCode::Success)
+    }
+}
+
+fn exit_for_verdict(verdict: DoctorVerdict) -> ExitCode {
+    match verdict {
+        DoctorVerdict::Clean => ExitCode::Success,
+        DoctorVerdict::Failures => ExitCode::GenericFailure,
+        DoctorVerdict::Warnings => ExitCode::Degraded,
+    }
 }

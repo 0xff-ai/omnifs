@@ -4,7 +4,7 @@ use clap::Args;
 
 use crate::config::ConfiguredBackend;
 use crate::launch::{LaunchOutcome, Launcher};
-use crate::session::GUEST_MOUNT;
+use crate::launch_backend::GUEST_MOUNT;
 use crate::workspace::Workspace;
 
 #[derive(Args, Debug, Clone, Default)]
@@ -22,26 +22,27 @@ impl UpArgs {
         let launcher = Launcher::new(&workspace, "omnifs up").with_runtime_override(self.runtime);
         match launcher.launch().await? {
             LaunchOutcome::Native { mount_point } => {
-                anstream::println!();
+                anstream::eprintln!();
                 if let Some(mount_point) = mount_point {
-                    anstream::println!(
+                    anstream::eprintln!(
                         "Browse it directly: `{}`",
                         crate::style::bold(format!("ls {}", mount_point.display())),
                     );
                 }
             },
             LaunchOutcome::Docker { target } => {
-                anstream::println!(
+                anstream::eprintln!(
                     "✓ {GUEST_MOUNT} is mounted inside `{}`",
                     target.container_name()
                 );
-                anstream::println!();
-                anstream::println!(
+                anstream::eprintln!();
+                anstream::eprintln!(
                     "Run `{}` to open a shell inside the container and browse {GUEST_MOUNT}.",
                     crate::style::bold("omnifs shell"),
                 );
             },
         }
+        crate::telemetry::maybe_print_health_nudge(&workspace).await;
         Ok(())
     }
 }

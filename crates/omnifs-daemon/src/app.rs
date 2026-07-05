@@ -68,7 +68,7 @@ impl FrontendKind {
 }
 
 fn default_listen() -> SocketAddr {
-    SocketAddr::from(([127, 0, 0, 1], omnifs_api::DEFAULT_PORT))
+    omnifs_api::default_listen_addr()
 }
 
 impl DaemonArgs {

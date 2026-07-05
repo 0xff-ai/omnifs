@@ -34,6 +34,13 @@ pub const OMNIFS_IMAGE_ENV: &str = "OMNIFS_IMAGE";
 /// both binaries default to it so `omnifs` finds the daemon with zero config.
 pub const DEFAULT_PORT: u16 = 7878;
 
+/// Default loopback control address used by host-side clients and native
+/// daemon launches.
+#[must_use]
+pub fn default_listen_addr() -> std::net::SocketAddr {
+    std::net::SocketAddr::from(([127, 0, 0, 1], DEFAULT_PORT))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ApiError {
     pub code: ErrorCode,

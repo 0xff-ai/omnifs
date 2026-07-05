@@ -11,4 +11,4 @@ pub mod ui;
 pub use app::ConnectionMode;
 pub use format::format_record;
 pub use run::{run_plain, run_tui};
-pub use source::{SourceKind, daemon_addr};
+pub use source::SourceKind;

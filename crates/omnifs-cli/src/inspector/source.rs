@@ -9,18 +9,6 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 
-/// Resolve the daemon control address (`host:port`): `OMNIFS_DAEMON_ADDR`
-/// when set, else the loopback port the container publishes on the host.
-/// Single source of truth for every consumer of the control API.
-pub fn daemon_addr() -> String {
-    crate::config::resolve_setting(
-        None,
-        "OMNIFS_DAEMON_ADDR",
-        || None,
-        format!("127.0.0.1:{}", omnifs_api::DEFAULT_PORT),
-    )
-}
-
 /// Outcome of one [`EventsClient::attach`] call.
 pub enum AttachOutcome {
     /// Could not connect or the daemon refused the stream; retry later.

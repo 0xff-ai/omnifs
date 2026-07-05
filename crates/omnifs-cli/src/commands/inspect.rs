@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 use anyhow::Context;
 use clap::Args;
 
-use crate::inspector::{ConnectionMode, SourceKind, daemon_addr, run_plain, run_tui};
+use crate::control::addr::daemon_addr;
+use crate::inspector::{ConnectionMode, SourceKind, run_plain, run_tui};
 use crate::launch_backend::{ContainerName, DockerTarget};
 use crate::workspace::Workspace;
 
@@ -68,6 +69,7 @@ impl InspectArgs {
         if let Some(path) = self.replay {
             return run_plain(SourceKind::Replay(path));
         }
+        Workspace::resolve()?.daemon().require_compatible().await?;
         let _container = self.resolve_container()?;
         check_record_path(self.record.as_deref())?;
         let addr = daemon_addr();

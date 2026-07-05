@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use crate::client::DaemonClient;
 use crate::config::Config;
 use crate::credential_target::CredentialTarget;
-use crate::session::MountConfig;
+use crate::mount_config::MountConfig;
 use omnifs_workspace::mounts::Spec;
 
 /// Resolved local omnifs home for one CLI command.

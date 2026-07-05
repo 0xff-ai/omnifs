@@ -4,12 +4,14 @@ use omnifs_workspace::creds::FileStore;
 use std::fmt::Write as _;
 
 use omnifs_api::{
-    DaemonHealth, DaemonStatus, DaemonSubsystem, FsType, HealthState, SubsystemHealth,
+    CredentialHealth, DaemonHealth, DaemonStatus, DaemonSubsystem, FsType, HealthState,
+    SubsystemHealth,
 };
 use omnifs_workspace::layout::WorkspaceLayout;
 use omnifs_workspace::provider::Catalog;
 
 use crate::auth::AuthTerminalKind;
+use crate::error::ExitCode;
 pub(crate) use crate::mount_report::{ProviderConfigStatus, ProviderReadyStatus, UserMountStatus};
 
 #[derive(Debug, Clone)]
@@ -22,22 +24,26 @@ pub(crate) struct StatusReport {
     pub(crate) providers: Vec<ProviderConfigStatus>,
 }
 
-pub(crate) fn collect_status(
-    catalog: &Catalog,
-    paths: WorkspaceLayout,
-    runtime: Option<DaemonStatus>,
-    mounts: Vec<crate::session::MountConfig>,
-) -> StatusReport {
-    let store = FileStore::new(&paths.credentials_file);
-    StatusReport {
-        runtime,
-        user_mounts: crate::mount_report::scan_user_mount_configs(catalog, mounts.clone(), &store),
-        providers: crate::mount_report::scan_provider_configs(catalog, mounts),
-        paths,
-    }
-}
-
 impl StatusReport {
+    pub(crate) fn collect(
+        catalog: &Catalog,
+        paths: WorkspaceLayout,
+        runtime: Option<DaemonStatus>,
+        mounts: Vec<crate::mount_config::MountConfig>,
+    ) -> Self {
+        let store = FileStore::new(&paths.credentials_file);
+        Self {
+            runtime,
+            user_mounts: crate::mount_report::scan_user_mount_configs(
+                catalog,
+                mounts.clone(),
+                &store,
+            ),
+            providers: crate::mount_report::scan_provider_configs(catalog, mounts),
+            paths,
+        }
+    }
+
     pub(crate) fn render(&self, detail: bool) -> String {
         let mut out = String::new();
 
@@ -54,7 +60,7 @@ impl StatusReport {
             "runtime",
             format_runtime(self.runtime.as_ref())
         );
-        let _ = writeln!(out, "  {:<7} │ {}", "mount", format_mount(self));
+        let _ = writeln!(out, "  {:<7} │ {}", "mount", self.format_mount());
         let _ = writeln!(
             out,
             "  {:<7} │ {}",
@@ -97,7 +103,7 @@ impl StatusReport {
             );
         } else {
             for mount in &self.user_mounts {
-                write_mount_row(&mut out, mount);
+                Self::write_mount_row(&mut out, mount);
             }
         }
 
@@ -115,6 +121,85 @@ impl StatusReport {
 
         out
     }
+
+    pub(crate) fn exit_code(&self) -> ExitCode {
+        if self.is_degraded() {
+            ExitCode::Degraded
+        } else {
+            ExitCode::Success
+        }
+    }
+
+    fn is_degraded(&self) -> bool {
+        if let Some(runtime) = &self.runtime
+            && (!runtime.failed.is_empty()
+                || matches!(
+                    runtime.health.overall_state(),
+                    HealthState::Degraded | HealthState::Unhealthy
+                )
+                || runtime.mounts.iter().any(|mount| {
+                    mount
+                        .auth_health
+                        .is_some_and(|health| health != CredentialHealth::Ready)
+                }))
+        {
+            return true;
+        }
+
+        self.user_mounts.iter().any(|mount| match mount {
+            UserMountStatus::Ready(mount) => matches!(
+                mount.auth.terminal_row().kind,
+                AuthTerminalKind::Missing | AuthTerminalKind::Error
+            ),
+            UserMountStatus::Invalid { .. } => true,
+        })
+    }
+
+    fn format_mount(&self) -> String {
+        match &self.runtime {
+            Some(runtime) if !runtime.health.subsystems.is_empty() => runtime
+                .health
+                .subsystem(DaemonSubsystem::Frontend)
+                .map_or_else(
+                    || WorkspaceLayout::display(&runtime.mount_point),
+                    |frontend| frontend.message.clone(),
+                ),
+            Some(runtime) => {
+                let mp = WorkspaceLayout::display(&runtime.mount_point);
+                match &runtime.frontend {
+                    Some(frontend) => format!("{mp} ({})", frontend.fs_type),
+                    None => format!("{mp} (not mounted)"),
+                }
+            },
+            None => "—".to_string(),
+        }
+    }
+
+    fn write_mount_row(out: &mut String, mount: &UserMountStatus) {
+        match mount {
+            UserMountStatus::Ready(m) => {
+                let row = m.auth.terminal_row();
+                let glyph = match row.kind {
+                    AuthTerminalKind::None => crate::style::dim("◯"),
+                    AuthTerminalKind::Ready => crate::style::success("●"),
+                    AuthTerminalKind::Missing | AuthTerminalKind::Error => crate::style::error("●"),
+                };
+                let _ = writeln!(out, "  {glyph}  {:<14} {}", m.mount, row.summary);
+            },
+            UserMountStatus::Invalid { config_path, error } => {
+                let name = config_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("<unknown>");
+                let _ = writeln!(
+                    out,
+                    "  {}  {:<14} invalid ({error})",
+                    crate::style::error("●"),
+                    name
+                );
+            },
+        }
+    }
 }
 
 fn format_runtime(runtime: Option<&DaemonStatus>) -> String {
@@ -128,26 +213,6 @@ fn format_runtime(runtime: Option<&DaemonStatus>) -> String {
         "running ({})",
         health_state_label(runtime.health.overall_state())
     )
-}
-
-fn format_mount(report: &StatusReport) -> String {
-    match &report.runtime {
-        Some(runtime) if !runtime.health.subsystems.is_empty() => runtime
-            .health
-            .subsystem(DaemonSubsystem::Frontend)
-            .map_or_else(
-                || WorkspaceLayout::display(&runtime.mount_point),
-                |frontend| frontend.message.clone(),
-            ),
-        Some(runtime) => {
-            let mp = WorkspaceLayout::display(&runtime.mount_point);
-            match &runtime.frontend {
-                Some(frontend) => format!("{mp} ({})", frontend.fs_type),
-                None => format!("{mp} (not mounted)"),
-            }
-        },
-        None => "—".to_string(),
-    }
 }
 
 fn write_daemon_health(out: &mut String, health: &DaemonHealth) {
@@ -187,32 +252,6 @@ fn health_state_label(state: HealthState) -> &'static str {
         HealthState::Healthy => "healthy",
         HealthState::Degraded => "degraded",
         HealthState::Unhealthy => "unhealthy",
-    }
-}
-
-pub(crate) fn write_mount_row(out: &mut String, mount: &UserMountStatus) {
-    match mount {
-        UserMountStatus::Ready(m) => {
-            let row = m.auth.terminal_row();
-            let glyph = match row.kind {
-                AuthTerminalKind::None => crate::style::dim("◯"),
-                AuthTerminalKind::Ready => crate::style::success("●"),
-                AuthTerminalKind::Missing | AuthTerminalKind::Error => crate::style::error("●"),
-            };
-            let _ = writeln!(out, "  {glyph}  {:<14} {}", m.mount, row.summary);
-        },
-        UserMountStatus::Invalid { config_path, error } => {
-            let name = config_path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("<unknown>");
-            let _ = writeln!(
-                out,
-                "  {}  {:<14} invalid ({error})",
-                crate::style::error("●"),
-                name
-            );
-        },
     }
 }
 

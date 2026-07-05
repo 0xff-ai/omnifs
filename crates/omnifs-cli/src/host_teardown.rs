@@ -40,6 +40,49 @@ pub(crate) struct TeardownSummary {
     pub skipped: usize,
 }
 
+#[cfg(not(target_os = "linux"))]
+impl TeardownSummary {
+    /// Tear down one recorded mount and record the outcome.
+    ///
+    /// The unmount is always forced. The sweep is reached only when the daemon
+    /// is not managing its own teardown (it did not answer the control API), so
+    /// a non-force unmount can wait on an NFS server that has already vanished
+    /// (a `kill -9` leaves exactly such a stale mount). A forced unmount is
+    /// safe for a read-only projection.
+    fn tear_down_one(&mut self, state_file: &Path, mount_point: &Path, pid: u32) {
+        unmount(mount_point, true);
+        signal_term(pid);
+
+        if !mount_settled(mount_point) {
+            // Still mounted: keep the state file so a later `down` retries.
+            self.failed.push(mount_point.to_path_buf());
+            return;
+        }
+        // Mount is gone. The daemon removes its own state file on clean exit;
+        // remove it ourselves if it lingered or was orphaned.
+        remove_state_file(state_file);
+        self.unmounted += 1;
+    }
+
+    fn tear_down_orphan(&mut self, state_file: &Path, mount_point: &Path, live_mount_exists: bool) {
+        if live_mount_exists {
+            remove_state_file(state_file);
+            self.swept_orphans += 1;
+            return;
+        }
+
+        if omnifs_nfs::mount_is_active(mount_point) {
+            unmount(mount_point, true);
+            if !mount_settled(mount_point) {
+                self.failed.push(mount_point.to_path_buf());
+                return;
+            }
+        }
+        remove_state_file(state_file);
+        self.swept_orphans += 1;
+    }
+}
+
 pub(crate) fn open_handle_summary(mount_point: &Path) -> Option<String> {
     let output = Command::new("lsof")
         .args(["-F", "pcfn", "--"])
@@ -180,65 +223,17 @@ pub(crate) fn teardown_host_native_nfs(state_dir: &Path) -> anyhow::Result<Teard
     let mut seen_mount_points = HashSet::new();
     for (path, state) in states {
         if !pid_alive(state.pid) {
-            tear_down_orphan(
+            summary.tear_down_orphan(
                 &path,
                 &state.mount_point,
                 live_mount_points.contains(&state.mount_point),
-                &mut summary,
             );
         } else if seen_mount_points.insert(state.mount_point.clone()) {
-            tear_down_one(&path, &state.mount_point, state.pid, &mut summary);
+            summary.tear_down_one(&path, &state.mount_point, state.pid);
         }
     }
 
     Ok(summary)
-}
-
-/// Tear down one recorded mount and record the outcome in `summary`.
-///
-/// The unmount is always forced. The sweep is reached only when the daemon is
-/// not managing its own teardown (it did not answer the control API), so a
-/// non-force unmount can wait on an NFS server that has already vanished (a
-/// `kill -9` leaves exactly such a stale mount). A forced unmount is safe for a
-/// read-only projection.
-#[cfg(not(target_os = "linux"))]
-fn tear_down_one(state_file: &Path, mount_point: &Path, pid: u32, summary: &mut TeardownSummary) {
-    unmount(mount_point, true);
-    signal_term(pid);
-
-    if !mount_settled(mount_point) {
-        // Still mounted: keep the state file so a later `down` retries.
-        summary.failed.push(mount_point.to_path_buf());
-        return;
-    }
-    // Mount is gone. The daemon removes its own state file on clean exit;
-    // remove it ourselves if it lingered or was orphaned.
-    remove_state_file(state_file);
-    summary.unmounted += 1;
-}
-
-#[cfg(not(target_os = "linux"))]
-fn tear_down_orphan(
-    state_file: &Path,
-    mount_point: &Path,
-    live_mount_exists: bool,
-    summary: &mut TeardownSummary,
-) {
-    if live_mount_exists {
-        remove_state_file(state_file);
-        summary.swept_orphans += 1;
-        return;
-    }
-
-    if omnifs_nfs::mount_is_active(mount_point) {
-        unmount(mount_point, true);
-        if !mount_settled(mount_point) {
-            summary.failed.push(mount_point.to_path_buf());
-            return;
-        }
-    }
-    remove_state_file(state_file);
-    summary.swept_orphans += 1;
 }
 
 /// Unmount the loopback view. `force` is used when the recording daemon is

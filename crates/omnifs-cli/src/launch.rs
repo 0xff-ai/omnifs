@@ -11,10 +11,10 @@ use omnifs_workspace::mounts::materialize::{self, MaterializationMode, Materiali
 
 use crate::client::DaemonClient;
 use crate::config::ConfiguredBackend;
-use crate::launch_backend::{DockerTarget, LaunchBackend};
+use crate::launch_backend::{BackendOverrides, DockerTarget, LaunchBackend};
 use crate::launch_record::LaunchRecord;
+use crate::mount_config::MountConfig;
 use crate::runtime::Runtime;
-use crate::session::MountConfig;
 use crate::workspace::Workspace;
 use omnifs_workspace::provider::Catalog;
 
@@ -54,15 +54,18 @@ impl<'a> Launcher<'a> {
         // An explicit `--runtime` chooses the backend for this launch and skips
         // the setup gate; otherwise the persisted default decides, and a missing
         // one means setup never ran.
-        let backend = if let Some(runtime) = self.runtime_override {
-            LaunchBackend::for_backend(runtime, &config)?
-        } else if config.system.runtime.is_none() {
+        let backend = if self.runtime_override.is_none() && config.system.runtime.is_none() {
             anyhow::bail!(
                 "`{}` requires setup to choose a daemon backend; run `omnifs setup` first, or pass `--runtime <docker|native>`",
                 self.verb
             );
         } else {
-            LaunchBackend::from_config(&config)?
+            LaunchBackend::resolve(
+                BackendOverrides {
+                    runtime: self.runtime_override,
+                },
+                &config,
+            )?
         };
 
         let configs = self.workspace.mounts()?;
@@ -77,7 +80,7 @@ impl<'a> Launcher<'a> {
 
         crate::upgrade::run_upgrade_check(&paths.providers_dir, &configs)?;
 
-        anstream::println!("Using mount configs from {}", paths.mounts_dir.display());
+        anstream::eprintln!("Using mount configs from {}", paths.mounts_dir.display());
         launch_runtime(
             LaunchSpec {
                 backend,
@@ -147,7 +150,8 @@ impl<'a> DockerMountSpecBuilder<'a> {
         )
         .with_context(|| format!("materialize mount {}", config.source.display()))?;
 
-        let mount_auth = crate::auth::mount_auth(self.catalog, materialized.spec().clone());
+        let mount_auth =
+            crate::auth::MountAuth::from_spec(self.catalog, materialized.spec().clone());
         config.validate_host_managed_credentials(&mount_auth, self.store)?;
 
         Ok(materialized)
@@ -198,7 +202,7 @@ pub(crate) async fn launch_runtime(
         extra_env.push(format!("{}=0", omnifs_workspace::telemetry::ENV_SWITCH));
     }
 
-    anstream::println!("Computing container binds for {} mount(s)", configs.len());
+    anstream::eprintln!("Computing container binds for {} mount(s)", configs.len());
     let preopen_binds =
         DockerMountSpecBuilder::new(catalog, store.as_ref()).materialize_bind_specs(&configs)?;
     let all_binds: Vec<String> = preopen_binds.into_iter().chain(extra_binds).collect();
@@ -227,7 +231,7 @@ pub(crate) async fn launch_runtime(
 /// `127.0.0.1:DEFAULT_PORT` on any parse error.
 fn parse_control_addr(addr: &str) -> SocketAddr {
     addr.parse()
-        .unwrap_or_else(|_| SocketAddr::from(([127, 0, 0, 1], omnifs_api::DEFAULT_PORT)))
+        .unwrap_or_else(|_| omnifs_api::default_listen_addr())
 }
 
 /// Read the daemon control address from the environment (`OMNIFS_DAEMON_ADDR`),
@@ -235,7 +239,7 @@ fn parse_control_addr(addr: &str) -> SocketAddr {
 /// spawned daemon (`--listen`) and the client (`DaemonClient::new`) use this
 /// so a per-test override moves them together.
 fn resolve_control_addr() -> SocketAddr {
-    parse_control_addr(&crate::inspector::daemon_addr())
+    parse_control_addr(&crate::control::addr::daemon_addr())
 }
 
 /// Spawn a detached host-native daemon and wait for it to serve. The daemon
@@ -247,7 +251,7 @@ async fn launch_host_native(
     telemetry_enabled: bool,
 ) -> anyhow::Result<LaunchOutcome> {
     reject_existing_host_daemon(paths, verb).await?;
-    anstream::println!("Starting omnifs daemon (host-native)");
+    anstream::eprintln!("Starting omnifs daemon (host-native)");
 
     let addr = resolve_control_addr();
     crate::launch_backend::launch_native(&paths.cache_dir, addr, telemetry_enabled).await?;
@@ -425,9 +429,7 @@ async fn finish_docker_launch(
     report_reconcile_failures(&report);
     if let Ok(status) = client.status().await {
         report_launch_status(&status);
-        let addr: SocketAddr = format!("127.0.0.1:{}", omnifs_api::DEFAULT_PORT)
-            .parse()
-            .expect("static address is valid");
+        let addr = omnifs_api::default_listen_addr();
         write_launch_record(&paths.config_dir, &status, addr);
     }
     Ok(LaunchOutcome::Docker {
@@ -453,14 +455,14 @@ fn write_launch_record(config_dir: &Path, status: &DaemonStatus, control_addr: S
 
 fn report_launch_status(status: &DaemonStatus) {
     if let Some(frontend) = status.health.subsystem(DaemonSubsystem::Frontend) {
-        anstream::println!("✓ {}", frontend.message);
+        anstream::eprintln!("✓ {}", frontend.message);
     } else {
-        anstream::println!("✓ Mount is serving at {}", status.mount_point.display());
+        anstream::eprintln!("✓ Mount is serving at {}", status.mount_point.display());
     }
 
     if let Some(mounts) = status.health.subsystem(DaemonSubsystem::Mounts) {
-        anstream::println!("✓ {}", mounts.message);
+        anstream::eprintln!("✓ {}", mounts.message);
     } else {
-        anstream::println!("✓ Runtime sees {} provider(s)", status.mounts.len());
+        anstream::eprintln!("✓ Runtime sees {} provider(s)", status.mounts.len());
     }
 }

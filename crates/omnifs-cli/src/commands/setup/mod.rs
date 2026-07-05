@@ -21,8 +21,8 @@ use crate::commands::{init, up};
 use crate::config::ConfiguredBackend;
 use crate::error::WithHint;
 use crate::launch_backend::DockerTarget;
+use crate::launch_backend::GUEST_MOUNT;
 use crate::runtime::Runtime;
-use crate::session::GUEST_MOUNT;
 use crate::workspace::Workspace;
 
 use self::host_os::HostOs;
@@ -48,7 +48,7 @@ impl SetupArgs {
     pub async fn run(self) -> anyhow::Result<()> {
         require_tty()?;
 
-        let os = host_os::detect();
+        let os = HostOs::detect();
         print_banner(os);
         print_explainer(os);
         if os == HostOs::Unsupported {
@@ -125,7 +125,7 @@ impl SetupArgs {
             anstream::println!("\nSkipping daemon launch (--no-up).");
         } else if !any_ready {
             anstream::println!(
-                "\nNo mounts to launch. Add one with `omnifs mounts add <provider>`, then run `omnifs up`."
+                "\nNo mounts to launch. Add one with `omnifs init <provider>`, then run `omnifs up`."
             );
         } else {
             launch_via_up().await?;
@@ -139,22 +139,18 @@ fn require_tty() -> anyhow::Result<()> {
         return Ok(());
     }
     Err(anyhow!(
-        "`omnifs setup` requires an interactive terminal. For non-interactive use, run `omnifs mounts add <provider>` per provider and then `omnifs up`."
+        "`omnifs setup` requires an interactive terminal. For non-interactive use, run `omnifs init <provider>` per provider and then `omnifs up`."
     ))
 }
 
 fn print_banner(os: HostOs) {
     anstream::println!();
-    anstream::println!(
-        "{} ({})",
-        crate::style::bold("omnifs setup"),
-        host_os::name(os)
-    );
+    anstream::println!("{} ({})", crate::style::bold("omnifs setup"), os.name());
     anstream::println!();
 }
 
 fn print_explainer(os: HostOs) {
-    anstream::println!("{}", host_os::explain_runtime(os));
+    anstream::println!("{}", os.explain_runtime());
     anstream::println!();
 }
 
@@ -231,7 +227,7 @@ async fn connect_runtime(os: HostOs, target: &DockerTarget) -> anyhow::Result<Ru
         .ping()
         .await
         .context("Docker daemon did not respond")
-        .with_hint(host_os::docker_install_hint(os))?;
+        .with_hint(os.docker_install_hint())?;
     Ok(runtime)
 }
 
@@ -442,7 +438,6 @@ async fn run_init_loop(
             provider: Some(provider_name.clone()),
             as_name: None,
             no_input: false,
-            reauth: false,
             yes: args.yes,
             no_browser: args.no_browser,
             token: None,

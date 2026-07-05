@@ -9,7 +9,7 @@ use omnifs_workspace::mounts::Spec;
 use omnifs_workspace::provider::Catalog;
 
 use crate::auth::AuthReadiness;
-use crate::session::MountConfig;
+use crate::mount_config::MountConfig;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct ProviderReadyStatus {
@@ -60,13 +60,7 @@ pub(crate) fn load_mount_by_name(mounts: &[MountConfig], name: &MountName) -> an
 /// its manifest is unreadable (a corrupt install), which the scans surface as
 /// `Invalid`.
 fn artifact_present(catalog: &Catalog, spec: &Spec) -> anyhow::Result<bool> {
-    match catalog.get(&spec.provider.id)? {
-        Some(provider) => {
-            provider.manifest()?;
-            Ok(true)
-        },
-        None => Ok(false),
-    }
+    Ok(omnifs_workspace::mounts::pinned_manifest(catalog, spec)?.is_some())
 }
 
 pub(crate) fn scan_provider_configs(
@@ -136,7 +130,7 @@ fn read_user_mount_status(
 ) -> anyhow::Result<UserMountReadyStatus> {
     let spec = &configured.config;
     let provider_present = artifact_present(catalog, spec)?;
-    let auth = crate::auth::mount_auth(catalog, spec.clone()).readiness(store);
+    let auth = crate::auth::MountAuth::from_spec(catalog, spec.clone()).readiness(store);
     Ok(UserMountReadyStatus {
         config_path: configured.source.clone(),
         mount: spec.mount.clone(),

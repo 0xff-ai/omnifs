@@ -1,7 +1,8 @@
 //! `omnifs status` verb handler.
 
 use crate::cli::OutputFormat;
-use crate::status::collect_status;
+use crate::error::ExitCode;
+use crate::status::StatusReport;
 use crate::workspace::Workspace;
 use anyhow::Context as _;
 use clap::Args;
@@ -17,11 +18,11 @@ pub struct StatusArgs {
 }
 
 impl StatusArgs {
-    pub async fn run(self) -> anyhow::Result<()> {
+    pub async fn run(self) -> anyhow::Result<ExitCode> {
         let workspace = Workspace::resolve()?;
         let mounts = workspace.mounts()?;
         let runtime = workspace.daemon().compatible_status_optional().await?;
-        let report = collect_status(
+        let report = StatusReport::collect(
             workspace.catalog(),
             workspace.layout().clone(),
             runtime,
@@ -38,6 +39,6 @@ impl StatusArgs {
                 anstream::print!("{}", report.render(self.detail));
             },
         }
-        Ok(())
+        Ok(report.exit_code())
     }
 }

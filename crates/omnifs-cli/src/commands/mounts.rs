@@ -1,7 +1,6 @@
-//! `omnifs mounts rm <name>` — remove a mount config and (by default) its
-//! stored credential.
+//! `omnifs mounts` — list, re-authenticate, or remove configured mounts.
 
-use anyhow::{Context, bail};
+use anyhow::{Context, anyhow, bail};
 use clap::{Args, Subcommand};
 use omnifs_auth::{CredentialService, OAuthClient};
 use omnifs_workspace::creds::{CredentialStore, FileStore};
@@ -12,7 +11,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::credential_target::CredentialTarget;
-use crate::session::MountConfig;
+use crate::error::ExitCode;
+use crate::mount_config::MountConfig;
+use crate::token_source::TokenSource;
 use crate::workspace::Workspace;
 use omnifs_workspace::layout::WorkspaceLayout;
 
@@ -24,10 +25,10 @@ pub struct MountsArgs {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum MountsCommand {
-    /// Add a mount interactively (same as `omnifs init`).
-    Add(crate::commands::init::InitArgs),
     /// List configured mounts with their provider and auth state.
-    Ls,
+    Ls(LsArgs),
+    /// Re-authenticate an existing mount.
+    Reauth(ReauthArgs),
     /// Remove a mount config (and its stored credential, by default).
     Rm {
         name: String,
@@ -40,44 +41,184 @@ pub enum MountsCommand {
     },
 }
 
+#[derive(Args, Debug, Clone, Default)]
+pub struct LsArgs {
+    /// Emit machine-readable JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ReauthArgs {
+    /// Existing mount name to re-authenticate.
+    pub name: String,
+    /// Skip prompts. Static-token mounts also require --token or --token-env.
+    #[arg(long)]
+    pub no_input: bool,
+    /// Print the OAuth URL instead of opening a browser.
+    #[arg(long)]
+    pub no_browser: bool,
+    /// Read the static token from this source. Use `-` for stdin.
+    #[arg(long, conflicts_with = "token_env")]
+    pub token: Option<String>,
+    /// Read the static token from this environment variable.
+    #[arg(long, value_name = "ENV_VAR", conflicts_with = "token")]
+    pub token_env: Option<String>,
+    /// OAuth scope to request. Repeat for multiple scopes.
+    #[arg(long = "scope")]
+    pub scopes: Vec<String>,
+}
+
 impl MountsArgs {
-    pub async fn run(self) -> anyhow::Result<()> {
+    pub async fn run(self) -> anyhow::Result<ExitCode> {
         match self.command {
-            MountsCommand::Add(args) => args.run().await,
-            MountsCommand::Ls => ls(),
+            MountsCommand::Ls(args) => ls(&args),
+            MountsCommand::Reauth(args) => args.run().await.map(|()| ExitCode::Success),
             MountsCommand::Rm {
                 name,
                 force,
                 keep_credentials,
             } => {
                 let workspace = Workspace::resolve()?;
-                rm(&workspace, &name, force, keep_credentials).await
+                rm(&workspace, &name, force, keep_credentials)
+                    .await
+                    .map(|()| ExitCode::Success)
             },
         }
     }
 }
 
-fn ls() -> anyhow::Result<()> {
+#[derive(serde::Serialize)]
+struct MountsJson {
+    mounts: Vec<crate::status::UserMountStatus>,
+}
+
+fn ls(args: &LsArgs) -> anyhow::Result<ExitCode> {
     let workspace = Workspace::resolve()?;
     let layout = workspace.layout();
     let mounts = workspace.mounts()?;
-    if mounts.is_empty() {
-        anstream::println!(
-            "No mounts configured. Add one with `omnifs mounts add` (or `omnifs init`)."
-        );
-        return Ok(());
-    }
     let store = FileStore::new(&layout.credentials_file);
+    let statuses =
+        crate::mount_report::scan_user_mount_configs(workspace.catalog(), mounts.clone(), &store);
+    let exit_code = if statuses.iter().any(|status| match status {
+        crate::status::UserMountStatus::Ready(mount) => matches!(
+            mount.auth.terminal_row().kind,
+            crate::auth::AuthTerminalKind::Missing | crate::auth::AuthTerminalKind::Error
+        ),
+        crate::status::UserMountStatus::Invalid { .. } => true,
+    }) {
+        ExitCode::Degraded
+    } else {
+        ExitCode::Success
+    };
+    if args.json {
+        let payload = MountsJson { mounts: statuses };
+        anstream::println!("{}", serde_json::to_string(&payload)?);
+        return Ok(exit_code);
+    }
+    if mounts.is_empty() {
+        anstream::println!("No mounts configured.");
+        anstream::eprintln!("Run `omnifs init` to add one.");
+        return Ok(ExitCode::Success);
+    }
     for mount in &mounts {
         let name = crate::style::bold(mount.name.as_str());
         let provider = mount.config.provider_name().to_string();
-        let auth = crate::auth::mount_auth(workspace.catalog(), mount.config.clone())
+        let auth = crate::auth::MountAuth::from_spec(workspace.catalog(), mount.config.clone())
             .readiness(&store)
             .terminal_row()
             .summary;
         anstream::println!("{name}  {}  {auth}", crate::style::dim(provider));
     }
-    Ok(())
+    Ok(exit_code)
+}
+
+impl ReauthArgs {
+    async fn run(self) -> anyhow::Result<()> {
+        let workspace = Workspace::resolve()?;
+        self.run_in_workspace(&workspace).await
+    }
+
+    /// Re-acquire the credential for an existing mount: OAuth login or a fresh
+    /// static token, dispatched on the mount's stored auth. The spec is left
+    /// untouched; only the credential store changes.
+    async fn run_in_workspace(self, workspace: &Workspace) -> anyhow::Result<()> {
+        let paths = workspace.layout();
+        let mount_name = self.name.as_str();
+        let mounts = workspace.mounts()?;
+        let mount_config = mounts
+            .iter()
+            .find(|m| m.name.as_str() == mount_name)
+            .ok_or_else(|| {
+                anyhow!("no mount named `{mount_name}`; run `omnifs init <provider>` to create it")
+            })?;
+        let Some(auth) = mount_config.config.auth.as_ref() else {
+            anyhow::bail!("mount `{mount_name}` needs no authentication");
+        };
+
+        let installed = crate::catalog::installed_providers(workspace.catalog())?;
+        let provider_name = mount_config.config.provider_name();
+        let (_, manifest) = crate::catalog::find_installed(&installed, provider_name.as_str())
+            .ok_or_else(|| {
+                anyhow!("provider `{provider_name}` for mount `{mount_name}` is not installed")
+            })?;
+
+        let selection = crate::auth::AuthSelection {
+            auth_type: auth.kind(),
+            scheme: auth.scheme().map(str::to_owned),
+            account: auth.account().map(str::to_owned),
+        };
+
+        let target = if selection.is_oauth() {
+            anstream::eprintln!("Re-authenticating `{mount_name}` over OAuth ...");
+            crate::auth::login_with_workspace(
+                workspace,
+                mount_name,
+                selection.account.as_deref(),
+                self.no_browser,
+                &self.scopes,
+            )
+            .await?
+        } else {
+            let source = TokenSource::resolve(
+                self.token.as_deref(),
+                self.token_env.as_deref(),
+                !self.no_input,
+            )?;
+            let token = source.read()?;
+            crate::commands::init::run_static_token_init(
+                manifest,
+                &selection,
+                token,
+                &paths.credentials_file,
+            )
+            .await?
+        };
+        self.reload_live_credentials(&target).await;
+
+        anstream::eprintln!();
+        anstream::eprintln!("✓ Re-authenticated `{mount_name}`.");
+        crate::telemetry::maybe_print_health_nudge(workspace).await;
+        Ok(())
+    }
+
+    async fn reload_live_credentials(&self, target: &CredentialTarget) {
+        let client = crate::client::DaemonClient::new();
+        for key in target.keys() {
+            match client.reload_credential_if_ready(key).await {
+                Ok(Some(_)) => {
+                    anstream::eprintln!("✓ Reloaded `{key}` in the running daemon.");
+                },
+                Ok(None) => {},
+                Err(error) => {
+                    anstream::eprintln!(
+                        "Credential `{key}` was stored, but live daemon reload failed: {error:#}"
+                    );
+                    anstream::eprintln!("Run `omnifs up` to restart with the new credential.");
+                },
+            }
+        }
+    }
 }
 
 pub async fn rm(
@@ -100,7 +241,7 @@ pub async fn rm(
     let credential_target = if keep_credentials {
         CredentialTarget::for_mount(&mount.config)
     } else {
-        crate::auth::mount_auth(workspace.catalog(), mount.config.clone())
+        crate::auth::MountAuth::from_spec(workspace.catalog(), mount.config.clone())
             .register_revocation(&service)?
     };
 
@@ -136,7 +277,7 @@ pub async fn rm(
     if daemon_delete.is_none() {
         Registry::load(&layout.mounts_dir)?.remove(&name)?;
     }
-    anstream::println!(
+    anstream::eprintln!(
         "Removed mount `{name}` ({})",
         WorkspaceLayout::display(&config_path)
     );
@@ -148,7 +289,7 @@ pub async fn rm(
                 failure.reason
             );
         } else {
-            anstream::println!("✓ Unloaded from the running daemon");
+            anstream::eprintln!("✓ Unloaded from the running daemon");
         }
     }
     Ok(())
@@ -160,21 +301,21 @@ fn confirm(
     target: &CredentialTarget,
     keep_credentials: bool,
 ) -> anyhow::Result<()> {
-    anstream::println!("Remove mount `{name}`? This will:");
-    anstream::println!("  • delete {}", WorkspaceLayout::display(config_path));
+    anstream::eprintln!("Remove mount `{name}`? This will:");
+    anstream::eprintln!("  • delete {}", WorkspaceLayout::display(config_path));
     match target {
         CredentialTarget::Internal(_) if !keep_credentials => {
             for key in target.keys() {
-                anstream::println!("  • delete the stored credential `{}`", key.storage_key());
+                anstream::eprintln!("  • delete the stored credential `{}`", key.storage_key());
             }
         },
         CredentialTarget::Internal(_) => {
-            anstream::println!("  • keep the stored credential (--keep-credentials)");
+            anstream::eprintln!("  • keep the stored credential (--keep-credentials)");
         },
         CredentialTarget::None => {},
     }
-    anstream::print!("Continue? [y/N] ");
-    std::io::stdout().flush()?;
+    anstream::eprint!("Continue? [y/N] ");
+    std::io::stderr().flush()?;
     let mut answer = String::new();
     std::io::stdin().read_line(&mut answer)?;
     let answer = answer.trim().to_lowercase();
@@ -200,7 +341,7 @@ pub(crate) async fn delete_credentials(
         if let Some(error) = outcome.delete_error() {
             bail!("delete credential for mount `{name}`: {error}");
         }
-        anstream::println!("Credential `{}`: {outcome}", key.storage_key());
+        anstream::eprintln!("Credential `{}`: {outcome}", key.storage_key());
     }
     Ok(())
 }
