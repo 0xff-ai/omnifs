@@ -300,6 +300,22 @@
       "post": {
         "summary": "`POST /v1/reconcile`: converge the running mount set to `mounts/*.json`.",
         "operationId": "reconcile",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/ReconcileRequest"
+                  }
+                ]
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "what the reconcile changed",
@@ -307,6 +323,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ReconcileReport"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "another reconcile is already in progress",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
                 }
               }
             }
@@ -463,12 +489,53 @@
         ]
       },
       "DaemonBackend": {
-        "type": "string",
-        "description": "Backend serving a daemon. The CLI reads this (and the launch record) instead\nof inferring the backend from `[system].runtime`.",
-        "enum": [
-          "native",
-          "docker"
-        ]
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Daemon spawned as a host-native child process.",
+            "required": [
+              "pid",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "native"
+                ]
+              },
+              "pid": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Daemon running inside a Docker container.",
+            "required": [
+              "container_name",
+              "image",
+              "kind"
+            ],
+            "properties": {
+              "container_name": {
+                "type": "string"
+              },
+              "image": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "docker"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Backend serving a daemon. The CLI reads this (and the launch record) instead\nof inferring the backend from `[system].runtime`."
       },
       "DaemonHealth": {
         "type": "object",
@@ -510,7 +577,7 @@
           },
           "backend": {
             "$ref": "#/components/schemas/DaemonBackend",
-            "description": "Backend serving this daemon, so the CLI tears down and reports the right\nbackend without inferring it from configuration. A daemon old enough to\nomit the field predates host-native and is read as Docker."
+            "description": "Backend serving this daemon, so the CLI tears down and reports the right\nbackend without inferring it from configuration. Missing identity is not\nreclaimable; teardown stops instead of guessing."
           },
           "cache_dir": {
             "type": "string"
@@ -699,12 +766,19 @@
         ],
         "properties": {
           "fs_type": {
-            "type": "string"
+            "$ref": "#/components/schemas/FsType"
           },
           "source": {
             "type": "string"
           }
         }
+      },
+      "FsType": {
+        "type": "string",
+        "enum": [
+          "fuse",
+          "nfs"
+        ]
       },
       "HealthState": {
         "type": "string",
@@ -887,6 +961,18 @@
             }
           },
           "updated": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "ReconcileRequest": {
+        "type": "object",
+        "description": "Optional request body for `POST /v1/reconcile`.",
+        "properties": {
+          "mounts": {
             "type": "array",
             "items": {
               "type": "string"

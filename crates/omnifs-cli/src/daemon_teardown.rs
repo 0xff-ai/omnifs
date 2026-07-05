@@ -3,14 +3,14 @@
 #[cfg(feature = "daemon")]
 use std::fmt;
 use std::path::Path;
-#[cfg(feature = "daemon")]
 use std::path::PathBuf;
 #[cfg(feature = "daemon")]
 use std::time::Duration;
 
 use crate::launch_backend::LaunchBackend;
-use crate::launch_record::{LaunchRecord, backend_from_daemon};
+use crate::launch_record::LaunchRecord;
 use crate::workspace::Workspace;
+use anyhow::Context as _;
 
 pub(crate) struct DaemonTeardown<'a> {
     workspace: &'a Workspace,
@@ -28,42 +28,43 @@ impl<'a> DaemonTeardown<'a> {
         let config_dir = &layout.config_dir;
         let nfs_state_dir = layout.nfs_state_dir();
 
-        // Step 1: a live daemon answers; ask it to shut down, then reclaim.
-        if let Some(status) = self.live_status_for_sweep().await? {
-            anstream::println!("Stopping daemon (pid {})...", status.pid);
-            match self.workspace.daemon().shutdown().await? {
-                Some(report) => {
-                    wait_unmounted(&report.mount_point, force)?;
-                    anstream::println!("✓ Unmounted {}", report.mount_point.display());
-                },
-                None => {
-                    // Daemon disappeared between probe and shutdown; the
-                    // reclaim below sweeps whatever it left behind.
-                    anstream::println!("Daemon exited before shutdown completed; sweeping...");
-                },
-            }
-            let backend = backend_from_daemon(status.backend, config_dir)?;
-            backend
-                .reclaim(Some(status.mount_point.as_path()), &nfs_state_dir)
-                .await?;
-            LaunchRecord::remove(config_dir)?;
-            return Ok(());
+        match self.resolve_running_backend().await? {
+            Some(RunningBackend::Live { status, backend }) => {
+                anstream::println!("Stopping daemon (pid {})...", status.pid);
+                match self.workspace.daemon().shutdown().await? {
+                    Some(report) => {
+                        wait_unmounted(&report.mount_point, force)?;
+                        anstream::println!("✓ Unmounted {}", report.mount_point.display());
+                    },
+                    None => {
+                        // Daemon disappeared between probe and shutdown; the
+                        // reclaim below sweeps whatever it left behind.
+                        anstream::println!("Daemon exited before shutdown completed; sweeping...");
+                    },
+                }
+                backend
+                    .reclaim(Some(status.mount_point.as_path()), &nfs_state_dir)
+                    .await?;
+                LaunchRecord::remove(config_dir)?;
+            },
+            Some(RunningBackend::Cached {
+                backend,
+                mount_point,
+            }) => {
+                anstream::println!("No live daemon found; sweeping from launch record...");
+                backend
+                    .reclaim(mount_point.as_deref(), &nfs_state_dir)
+                    .await?;
+                LaunchRecord::remove(config_dir)?;
+            },
+            None => {
+                // Genuinely nothing: no live daemon, no launch record. The
+                // fail-safe "unknown backend" stop lives in the error paths of
+                // resolve_running_backend (unreportable identity, corrupt
+                // record), never here.
+                anstream::println!("Nothing to tear down.");
+            },
         }
-
-        // Step 2: no live daemon; the launch record says what was started.
-        if let Some(record) = LaunchRecord::read(config_dir)? {
-            let mount_point = record.mount_point().map(Path::to_path_buf);
-            anstream::println!("No live daemon found; sweeping from launch record...");
-            let backend = record.into_backend()?;
-            backend
-                .reclaim(mount_point.as_deref(), &nfs_state_dir)
-                .await?;
-            LaunchRecord::remove(config_dir)?;
-            return Ok(());
-        }
-
-        // Step 3: nothing is running.
-        anstream::println!("Nothing to tear down.");
         Ok(())
     }
 
@@ -73,10 +74,12 @@ impl<'a> DaemonTeardown<'a> {
         let config_dir = &layout.config_dir;
         let nfs_state_dir = layout.nfs_state_dir();
 
-        let backend = match self.backend_from_live_or_record().await {
-            Ok(Some(backend)) => backend,
+        let running = match self.resolve_running_backend().await {
+            Ok(Some(running)) => running,
             Ok(None) => {
-                anstream::println!("⚠  No running daemon found; skipping daemon teardown");
+                anstream::println!(
+                    "⚠  No running daemon or launch record; skipping daemon teardown"
+                );
                 return;
             },
             Err(error) => {
@@ -85,19 +88,24 @@ impl<'a> DaemonTeardown<'a> {
             },
         };
 
-        let mount_point = match self.workspace.daemon().shutdown().await {
-            Ok(Some(report)) => {
-                anstream::println!("✓ Daemon stopped");
-                Some(report.mount_point)
-            },
-            Ok(None) => {
-                anstream::println!("No daemon answered shutdown; sweeping...");
-                None
-            },
-            Err(error) => {
-                anstream::eprintln!("⚠  Daemon shutdown call failed: {error:#}");
-                None
-            },
+        let (backend, fallback_mount_point, live) = running.into_parts();
+        let mount_point = if live {
+            match self.workspace.daemon().shutdown().await {
+                Ok(Some(report)) => {
+                    anstream::println!("✓ Daemon stopped");
+                    Some(report.mount_point)
+                },
+                Ok(None) => {
+                    anstream::println!("No daemon answered shutdown; sweeping...");
+                    fallback_mount_point
+                },
+                Err(error) => {
+                    anstream::eprintln!("⚠  Daemon shutdown call failed: {error:#}");
+                    fallback_mount_point
+                },
+            }
+        } else {
+            fallback_mount_point
         };
 
         if let Err(error) = backend
@@ -121,18 +129,49 @@ impl<'a> DaemonTeardown<'a> {
     }
 
     /// Identify the backend from the live daemon or the launch record.
-    async fn backend_from_live_or_record(&self) -> anyhow::Result<Option<LaunchBackend>> {
+    async fn resolve_running_backend(&self) -> anyhow::Result<Option<RunningBackend>> {
         let config_dir = &self.workspace.layout().config_dir;
-        if let Ok(status) = self.workspace.daemon().status().await {
-            let backend = backend_from_daemon(status.backend, config_dir)?;
-            return Ok(Some(backend));
+        if let Some(status) = self.live_status_for_sweep().await? {
+            let backend = LaunchBackend::try_from(&status.backend)
+                .context("unknown backend: daemon did not report reclaimable identity")?;
+            return Ok(Some(RunningBackend::Live {
+                status: Box::new(status),
+                backend,
+            }));
         }
 
         if let Some(record) = LaunchRecord::read(config_dir)? {
-            return Ok(Some(record.into_backend()?));
+            let mount_point = record.mount_point().map(Path::to_path_buf);
+            return Ok(Some(RunningBackend::Cached {
+                backend: record.into_backend()?,
+                mount_point,
+            }));
         }
 
         Ok(None)
+    }
+}
+
+enum RunningBackend {
+    Live {
+        status: Box<omnifs_api::DaemonStatus>,
+        backend: LaunchBackend,
+    },
+    Cached {
+        backend: LaunchBackend,
+        mount_point: Option<PathBuf>,
+    },
+}
+
+impl RunningBackend {
+    fn into_parts(self) -> (LaunchBackend, Option<PathBuf>, bool) {
+        match self {
+            Self::Live { status, backend } => (backend, Some(status.mount_point), true),
+            Self::Cached {
+                backend,
+                mount_point,
+            } => (backend, mount_point, false),
+        }
     }
 }
 

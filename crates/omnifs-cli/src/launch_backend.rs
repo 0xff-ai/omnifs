@@ -1,20 +1,20 @@
 //! The launch backend: native-vs-Docker target types and the spawn/reclaim
 //! operations behind them.
 //!
-//! `LaunchBackend` is the one type callers branch on; `LaunchParams` carries
-//! the common launch intent. Native spawn builds typed
-//! [`omnifs_daemon::DaemonArgs`] so flag knowledge stays next to the daemon
-//! argument surface. `LaunchBackend::reclaim` tears down backend-specific
-//! resources after a control-API shutdown; callers (down.rs, reset.rs) never
-//! branch on native-vs-docker themselves.
+//! `LaunchBackend` is the one type callers branch on. Native spawn builds
+//! typed [`omnifs_daemon::DaemonArgs`] so flag knowledge stays next to the
+//! daemon argument surface. `LaunchBackend::reclaim` tears down
+//! backend-specific resources after a control-API shutdown; callers (down.rs,
+//! reset.rs) never branch on native-vs-docker themselves.
 
 use std::fmt;
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 #[cfg(feature = "daemon")]
 use anyhow::Context as _;
 use anyhow::Result;
+use omnifs_api::DaemonBackend;
 #[cfg(feature = "daemon")]
 use omnifs_daemon::DaemonArgs;
 
@@ -233,14 +233,21 @@ impl LaunchBackend {
     }
 }
 
-/// Backend-agnostic launch intent plus the chosen backend's specifics.
-#[derive(Debug, Clone)]
-pub(crate) struct LaunchParams {
-    pub control_addr: SocketAddr,
-    /// Recorded in `launch.json` after the daemon is ready; not passed on argv
-    /// (the daemon resolves mount point from `OMNIFS_MOUNT_POINT` or `$HOME/omnifs`).
-    pub mount_point: Option<PathBuf>,
-    pub backend: LaunchBackend,
+impl TryFrom<&DaemonBackend> for LaunchBackend {
+    type Error = anyhow::Error;
+
+    fn try_from(backend: &DaemonBackend) -> Result<Self> {
+        match backend {
+            DaemonBackend::Native { .. } => Ok(Self::Native),
+            DaemonBackend::Docker {
+                container_name,
+                image,
+            } => Ok(Self::Docker(DockerTarget::new(
+                container_name.clone(),
+                image.clone(),
+            )?)),
+        }
+    }
 }
 
 // --- Native launch -----------------------------------------------------------

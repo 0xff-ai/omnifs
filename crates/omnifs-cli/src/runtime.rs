@@ -15,7 +15,9 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
 use crate::error::WithHint;
 use crate::launch_backend::{ContainerName, DockerTarget, ImageRef};
-use crate::session::{CONTAINER_NAME, GUEST_HOME, GUEST_MOUNT, IMAGE};
+use crate::session::{
+    CONTAINER_NAME, ENV_CONTAINER_NAME, ENV_IMAGE, GUEST_HOME, GUEST_MOUNT, IMAGE,
+};
 use omnifs_workspace::layout::OMNIFS_HOME_ENV;
 
 /// Image label written by `Dockerfile` from the `OMNIFS_MIN_LAUNCHER_VERSION`
@@ -27,7 +29,7 @@ const LAUNCH_PROTOCOL_LABEL: &str = "ai.0xff.omnifs.launch-protocol";
 /// Derived from `omnifs_api::API_MAJOR` so the image-label check and the
 /// control-API check are one fact in two places that cannot drift independently.
 /// A unit test in this module verifies the string matches the numeric constant.
-const EXPECTED_LAUNCH_PROTOCOL: &str = "daemon-control-v2";
+const EXPECTED_LAUNCH_PROTOCOL: &str = "daemon-control-v3";
 
 /// Outcome of a Docker daemon reachability probe.
 pub(crate) enum DockerProbeOutcome {
@@ -288,7 +290,8 @@ impl Runtime {
             self.container_name,
             self.image
         );
-        let create = Self::build_container_body(&self.image, binds, extra_env);
+        let create =
+            Self::build_container_body(&self.container_name, &self.image, binds, extra_env);
         self.docker
             .create_container(
                 Some(CreateContainerOptions {
@@ -511,6 +514,7 @@ impl Runtime {
     }
 
     fn build_container_body(
+        container_name: &ContainerName,
         image: &ImageRef,
         binds: Vec<String>,
         extra_env: Vec<String>,
@@ -541,6 +545,8 @@ impl Runtime {
 
         let env = vec![
             format!("{OMNIFS_HOME_ENV}={GUEST_HOME}"),
+            format!("{ENV_CONTAINER_NAME}={container_name}"),
+            format!("{ENV_IMAGE}={image}"),
             "SSH_AUTH_SOCK=/ssh-agent".to_string(),
             "GIT_SSH_COMMAND=ssh -F /dev/null -o StrictHostKeyChecking=accept-new".to_string(),
         ]
@@ -738,12 +744,17 @@ mod tests {
         std::fs::create_dir_all(&paths.config_dir).unwrap();
 
         let image = ImageRef::new("ghcr.io/0xff-ai/omnifs:test").unwrap();
+        let container_name = ContainerName::new("omnifs-test").unwrap();
         let binds = vec![
             format!("{}:{GUEST_HOME}", paths.config_dir.display()),
             "/extra:/extra:ro".to_string(),
         ];
-        let body =
-            Runtime::build_container_body(&image, binds, vec!["GITHUB_TOKEN=secret".to_string()]);
+        let body = Runtime::build_container_body(
+            &container_name,
+            &image,
+            binds,
+            vec!["GITHUB_TOKEN=secret".to_string()],
+        );
         let host_config = body.host_config.expect("host config");
         let binds = host_config.binds.expect("binds");
 
@@ -762,6 +773,16 @@ mod tests {
         assert!(
             env.iter().any(|e| e == &expected_home_env),
             "{OMNIFS_HOME_ENV} must be set"
+        );
+        assert!(
+            env.iter()
+                .any(|e| e == &format!("{ENV_CONTAINER_NAME}=omnifs-test")),
+            "{ENV_CONTAINER_NAME} must be set"
+        );
+        assert!(
+            env.iter()
+                .any(|e| e == &format!("{ENV_IMAGE}=ghcr.io/0xff-ai/omnifs:test")),
+            "{ENV_IMAGE} must be set"
         );
         assert!(
             env.iter().any(|e| e == "SSH_AUTH_SOCK=/ssh-agent"),

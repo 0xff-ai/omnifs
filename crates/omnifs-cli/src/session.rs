@@ -15,8 +15,8 @@ use crate::{auth::MountAuth, error::WithHint};
 
 pub(crate) const CONTAINER_NAME: &str = "omnifs";
 pub(crate) const IMAGE: &str = concat!("ghcr.io/0xff-ai/omnifs:", env!("CARGO_PKG_VERSION"));
-pub(crate) const ENV_IMAGE: &str = "OMNIFS_IMAGE";
-pub(crate) const ENV_CONTAINER_NAME: &str = "OMNIFS_CONTAINER_NAME";
+pub(crate) const ENV_IMAGE: &str = omnifs_api::OMNIFS_IMAGE_ENV;
+pub(crate) const ENV_CONTAINER_NAME: &str = omnifs_api::OMNIFS_CONTAINER_NAME_ENV;
 
 // The guest-container paths the launcher targets. The container declares the
 // same values as image ENV (see `Dockerfile`), and the daemon resolves them
