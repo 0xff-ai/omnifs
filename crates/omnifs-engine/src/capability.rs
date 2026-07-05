@@ -2,9 +2,9 @@
 //!
 //! The capability model, the matching rules, and the per-callout decision live
 //! in [`omnifs_caps`]; this module is the enforcement seam: it resolves a
-//! mounted provider's grants into a runtime [`Allowlist`] (resolving a dynamic
-//! socket grant from the config field the provider marks as a host socket) and
-//! gates every provider callout through it.
+//! mounted provider's grants into a runtime [`Allowlist`] (resolving dynamic
+//! domain and socket grants from provider config fields) and gates every
+//! provider callout through it.
 
 use std::path::PathBuf;
 
@@ -26,10 +26,11 @@ impl CapabilityChecker {
     }
 
     /// Build the enforcement allowlist from a mount spec's grants plus the
-    /// provider's runtime-requested capabilities. A dynamic unix-socket grant is
-    /// resolved from the config field the provider marks as a host socket; a
-    /// malformed or missing value resolves to no socket, so the provider is
-    /// simply denied at callout time.
+    /// provider's runtime-requested capabilities. A dynamic domain grant is
+    /// resolved from a `domains` string-array config field. A dynamic
+    /// unix-socket grant is resolved from the config field the provider marks as
+    /// a host socket. A malformed or missing value resolves to no grant, so the
+    /// provider is simply denied at callout time.
     #[must_use]
     pub fn from_config(
         config: &Spec,
@@ -76,10 +77,22 @@ fn allowlist_from_config(
     unix_sockets.dedup();
 
     Allowlist {
-        domains: literal(grants.and_then(|g| g.domains.as_ref())),
+        domains: domains(config, grants.and_then(|g| g.domains.as_ref()), metadata),
         git_repos: literal(grants.and_then(|g| g.git_repos.as_ref())),
         needs_git: provider_caps.needs_git,
         unix_sockets,
+    }
+}
+
+fn domains(
+    config: &Spec,
+    grant: Option<&Grant<String>>,
+    metadata: Option<&ConfigMetadata>,
+) -> Vec<String> {
+    match grant {
+        Some(Grant::Literal(values)) => values.clone(),
+        Some(Grant::Dynamic(_)) => dynamic_domains(config, metadata),
+        None => Vec::new(),
     }
 }
 
@@ -100,6 +113,26 @@ fn dynamic_socket(config: &Spec, metadata: Option<&ConfigMetadata>) -> Option<Pa
         .ok()
         .flatten()
         .map(PathBuf::from)
+}
+
+fn dynamic_domains(config: &Spec, metadata: Option<&ConfigMetadata>) -> Vec<String> {
+    let Some(field) = metadata.and_then(ConfigMetadata::domain_list_field) else {
+        return Vec::new();
+    };
+    let Some(values) = config
+        .config_raw
+        .as_ref()
+        .and_then(|config| config.get(field))
+        .and_then(serde_json::Value::as_array)
+    else {
+        return Vec::new();
+    };
+    values
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .filter(|domain| *domain != "*")
+        .map(ToString::to_string)
+        .collect()
 }
 
 /// The string value of a mount config field, if present.

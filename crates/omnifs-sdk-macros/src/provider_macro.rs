@@ -94,15 +94,15 @@ impl Parse for ProviderArgs {
 }
 
 /// Placeholder value for a dynamic capability. The concrete value is resolved at
-/// mount-start from the config field marked with the matching host-resource, so
-/// the manifest value is descriptive only and never read.
+/// mount-start from provider config, so the manifest value is descriptive only
+/// and never read.
 const DYNAMIC_PLACEHOLDER: &str = "resolved from config at mount-start";
 
-/// Parse `capabilities(domain("v", "why"), unix_socket(dynamic, "why"),
+/// Parse `capabilities(domain("v", "why"), domain(dynamic, "why"),
+/// unix_socket(dynamic, "why"),
 /// preopened_path(dynamic, "why"), ...)` into the manifest's declared
-/// `AccessNeed`s. Literal string kinds take `("value", "why")`; `unix_socket`
-/// and `preopened_path` are `dynamic`, resolved at mount-start from the
-/// `HostSocket`/`HostFile` config field binding.
+/// `AccessNeed`s. Literal string kinds take `("value", "why")`; dynamic
+/// capabilities resolve at mount-start from config fields.
 fn parse_capabilities(content: ParseStream<'_>) -> syn::Result<Vec<omnifs_caps::AccessNeed>> {
     let mut needs = Vec::new();
     while !content.is_empty() {
@@ -110,23 +110,13 @@ fn parse_capabilities(content: ParseStream<'_>) -> syn::Result<Vec<omnifs_caps::
         let inner;
         syn::parenthesized!(inner in content);
         let need = match kind.to_string().as_str() {
-            "domain" | "git_repo" => {
-                let value: LitStr = inner.parse()?;
-                let _: Token![,] = inner.parse()?;
-                let why: LitStr = inner.parse()?;
-                let (value, why) = (value.value(), why.value());
-                if kind == "domain" {
-                    omnifs_caps::AccessNeed::Domain {
-                        value,
-                        why,
-                        dynamic: false,
-                    }
-                } else {
-                    omnifs_caps::AccessNeed::GitRepo {
-                        value,
-                        why,
-                        dynamic: false,
-                    }
+            "domain" => parse_domain_need(&inner, &kind)?,
+            "git_repo" => {
+                let (value, why) = parse_literal_need(&inner)?;
+                omnifs_caps::AccessNeed::GitRepo {
+                    value,
+                    why,
+                    dynamic: false,
                 }
             },
             "unix_socket" => omnifs_caps::AccessNeed::UnixSocket {
@@ -235,6 +225,42 @@ fn reject_duplicate_limit<T>(
     } else {
         Ok(())
     }
+}
+
+fn parse_literal_need(inner: ParseStream<'_>) -> syn::Result<(String, String)> {
+    let value: LitStr = inner.parse()?;
+    let _: Token![,] = inner.parse()?;
+    let why: LitStr = inner.parse()?;
+    Ok((value.value(), why.value()))
+}
+
+fn parse_domain_need(
+    inner: ParseStream<'_>,
+    kind: &syn::Ident,
+) -> syn::Result<omnifs_caps::AccessNeed> {
+    if inner.peek(syn::Ident) {
+        let marker: syn::Ident = inner.parse()?;
+        if marker == "dynamic" {
+            let _: Token![,] = inner.parse()?;
+            let why: LitStr = inner.parse()?;
+            return Ok(omnifs_caps::AccessNeed::Domain {
+                value: DYNAMIC_PLACEHOLDER.to_string(),
+                why: why.value(),
+                dynamic: true,
+            });
+        }
+        return Err(syn::Error::new(
+            marker.span(),
+            format!("unsupported `{kind}` marker `{marker}`; expected `dynamic`"),
+        ));
+    }
+
+    let (value, why) = parse_literal_need(inner)?;
+    Ok(omnifs_caps::AccessNeed::Domain {
+        value,
+        why,
+        dynamic: false,
+    })
 }
 
 /// Parse a `(dynamic, "why")` capability body. Only the dynamic form is
@@ -499,10 +525,15 @@ fn capability_tokens(need: &omnifs_caps::AccessNeed) -> TokenStream2 {
     // field at mount-start; the placeholder mirrors the host's marker.
     let dynamic_placeholder = "resolved from config at mount-start";
     match need {
-        omnifs_caps::AccessNeed::Domain { value, why, .. } => {
+        omnifs_caps::AccessNeed::Domain {
+            value,
+            why,
+            dynamic,
+            ..
+        } => {
             let value = LitStr::new(value, Span::call_site());
             let why = LitStr::new(why, Span::call_site());
-            quote! { omnifs_sdk::AccessNeed::Domain { value: #value.to_string(), why: #why.to_string(), dynamic: false } }
+            quote! { omnifs_sdk::AccessNeed::Domain { value: #value.to_string(), why: #why.to_string(), dynamic: #dynamic } }
         },
         omnifs_caps::AccessNeed::GitRepo { value, why, .. } => {
             let value = LitStr::new(value, Span::call_site());

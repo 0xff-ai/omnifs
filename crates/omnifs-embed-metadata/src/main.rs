@@ -58,6 +58,10 @@ const PROVIDERS: &[ProviderEntry] = &[
         "omnifs_provider_oura.wasm",
         omnifs_provider_oura::provider_metadata,
     ),
+    (
+        "omnifs_provider_web.wasm",
+        omnifs_provider_web::provider_metadata,
+    ),
     ("test_provider.wasm", test_provider::provider_metadata),
 ];
 

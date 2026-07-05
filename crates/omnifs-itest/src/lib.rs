@@ -36,7 +36,27 @@ impl RuntimeHarness {
         Self::with_engine(config_json, &engine)
     }
 
+    pub fn new_real_callouts(config_json: &str) -> Result<Self, BuildError> {
+        let engine = make_engine();
+        Self::with_engine_real_callouts(config_json, &engine)
+    }
+
     pub fn with_engine(config_json: &str, engine: &wasmtime::Engine) -> Result<Self, BuildError> {
+        Self::with_engine_and_callouts(config_json, engine, true)
+    }
+
+    pub fn with_engine_real_callouts(
+        config_json: &str,
+        engine: &wasmtime::Engine,
+    ) -> Result<Self, BuildError> {
+        Self::with_engine_and_callouts(config_json, engine, false)
+    }
+
+    fn with_engine_and_callouts(
+        config_json: &str,
+        engine: &wasmtime::Engine,
+        capture_test_callouts: bool,
+    ) -> Result<Self, BuildError> {
         let clone_dir = tempfile::tempdir().map_err(|source| BuildError::CacheDir {
             path: std::env::temp_dir(),
             source,
@@ -86,20 +106,33 @@ impl RuntimeHarness {
         })?;
         let credential_service =
             omnifs_engine::test_support::auth::credential_service_for_file(&paths.credentials_file);
-        let runtime = Engine::new_for_callout_tests(
-            engine,
-            &wasm_path,
-            &spec,
-            cloner,
-            &HostContext::new(
-                cache_dir.path(),
-                &paths.config_dir,
-                providers_dir.path(),
-                &paths.credentials_file,
-            ),
-            &caches,
-            &credential_service,
-        )?;
+        let context = HostContext::new(
+            cache_dir.path(),
+            &paths.config_dir,
+            providers_dir.path(),
+            &paths.credentials_file,
+        );
+        let runtime = if capture_test_callouts {
+            Engine::new_for_callout_tests(
+                engine,
+                &wasm_path,
+                &spec,
+                cloner,
+                &context,
+                &caches,
+                &credential_service,
+            )
+        } else {
+            Engine::new(
+                engine,
+                &wasm_path,
+                &spec,
+                cloner,
+                &context,
+                &caches,
+                &credential_service,
+            )
+        }?;
 
         Ok(Self {
             engine: engine.clone(),

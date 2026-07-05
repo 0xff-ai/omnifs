@@ -54,9 +54,21 @@ async fn all_providers_initialize_and_seal() {
         ("omnifs_provider_kubernetes.wasm", "k8s"),
         ("omnifs_provider_linear.wasm", "linear"),
         ("omnifs_provider_oura.wasm", "oura"),
+        ("omnifs_provider_web.wasm", "web"),
     ];
     for (wasm, mount) in providers {
-        let config = format!(r#"{{"provider":"{wasm}","mount":"{mount}"}}"#);
+        let config = if wasm == "omnifs_provider_web.wasm" {
+            format!(
+                r#"{{
+                    "provider":"{wasm}",
+                    "mount":"{mount}",
+                    "capabilities": {{ "domains": {{ "dynamic": true }} }},
+                    "config": {{ "domains": ["example.com"] }}
+                }}"#
+            )
+        } else {
+            format!(r#"{{"provider":"{wasm}","mount":"{mount}"}}"#)
+        };
         let result = omnifs_itest::try_make_runtime_from_config(&config);
         assert!(
             result.is_ok(),

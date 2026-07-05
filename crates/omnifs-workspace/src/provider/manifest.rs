@@ -172,20 +172,22 @@ impl ProviderManifest {
         }
         for entry in &self.capabilities {
             validate_non_empty("capabilities.why", entry.why())?;
-            // A dynamic grant is resolved at mount-start from a config field
-            // bound to the matching host resource: a unix socket into the
-            // callout allowlist, a preopened path into a WASI preopen. Any
-            // other dynamic kind has no resolver and would resolve to an empty
-            // allowlist, denying the provider at its first callout. Reject
-            // those at the manifest boundary.
+            // A dynamic grant is resolved at mount-start from config: domains
+            // from the provider's `domains` field, a unix socket from a
+            // host-socket field, and a preopened path from a host-file field.
+            // Any other dynamic kind has no resolver and would resolve to an
+            // empty allowlist, denying the provider at its first callout.
+            // Reject those at the manifest boundary.
             if entry.is_dynamic()
                 && !matches!(
                     entry,
-                    AccessNeed::UnixSocket { .. } | AccessNeed::PreopenedPath { .. }
+                    AccessNeed::Domain { .. }
+                        | AccessNeed::UnixSocket { .. }
+                        | AccessNeed::PreopenedPath { .. }
                 )
             {
                 return Err(ProviderMetadataError::Validation(
-                    "only unixSocket and preopenedPath capabilities may declare \
+                    "only domain, unixSocket, and preopenedPath capabilities may declare \
                      `dynamic: true`; a dynamic capability of another kind cannot be \
                      resolved at runtime"
                         .to_string(),
@@ -667,6 +669,54 @@ mod tests {
                     )
                 }
             ),
+        );
+    }
+
+    #[test]
+    fn provider_metadata_allows_dynamic_domain_needs_only_where_resolvable() {
+        let accepted = serde_json::json!({
+            "id": "web",
+            "displayName": "Web",
+            "provider": "omnifs_provider_web.wasm",
+            "defaultMount": "web",
+            "capabilities": [
+                {
+                    "kind": "domain",
+                    "value": "resolved from config at mount-start",
+                    "why": "Fetch configured web domains.",
+                    "dynamic": true
+                }
+            ],
+            "config": {
+                "fields": [{
+                    "name": "domains",
+                    "type": { "kind": "array", "items": { "kind": "string" } },
+                    "default": []
+                }]
+            }
+        });
+        let bytes = serde_json::to_vec(&accepted).unwrap();
+        ProviderManifest::from_bytes(&bytes).expect("dynamic domain need is resolvable");
+
+        let rejected = serde_json::json!({
+            "id": "bad",
+            "displayName": "Bad",
+            "provider": "bad.wasm",
+            "defaultMount": "bad",
+            "capabilities": [
+                {
+                    "kind": "gitRepo",
+                    "value": "resolved from config at mount-start",
+                    "why": "No dynamic git resolver exists.",
+                    "dynamic": true
+                }
+            ]
+        });
+        let bytes = serde_json::to_vec(&rejected).unwrap();
+        let error = ProviderManifest::from_bytes(&bytes).unwrap_err();
+        assert!(
+            matches!(&error, ProviderMetadataError::Validation(message) if message.contains("only domain, unixSocket, and preopenedPath")),
+            "unexpected error: {error}"
         );
     }
 

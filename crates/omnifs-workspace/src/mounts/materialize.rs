@@ -147,6 +147,14 @@ pub enum MaterializeError {
          {detail}; fix the mount's `endpoint`"
     )]
     UnresolvedDynamicSocket { mount: String, detail: String },
+    /// A dynamic domain grant whose `domains` config does not resolve to at
+    /// least one concrete hostname. The runtime allowlist would be empty, so
+    /// the provider would be denied at its first callout.
+    #[error(
+        "mount `{mount}` has a dynamic domain grant that does not resolve: \
+         {detail}; fix the mount's `domains` config"
+    )]
+    UnresolvedDynamicDomains { mount: String, detail: String },
 }
 
 /// Materialize `spec` against `catalog`.
@@ -182,6 +190,7 @@ pub fn materialize(
                     .join(", "),
             });
         }
+        check_dynamic_domains(&spec, manifest.config.as_ref())?;
         check_dynamic_socket(&spec, manifest.config.as_ref())?;
     }
 
@@ -236,6 +245,61 @@ fn check_dynamic_socket(
         mount: spec.mount.clone(),
         detail,
     })
+}
+
+fn check_dynamic_domains(
+    spec: &Spec,
+    metadata: Option<&ConfigMetadata>,
+) -> Result<(), MaterializeError> {
+    let is_dynamic = spec
+        .capabilities
+        .as_ref()
+        .and_then(|caps| caps.domains.as_ref())
+        .is_some_and(|grant| matches!(grant, Grant::Dynamic(_)));
+    if !is_dynamic {
+        return Ok(());
+    }
+    let Some(field) = metadata.and_then(ConfigMetadata::domain_list_field) else {
+        return Err(MaterializeError::UnresolvedDynamicDomains {
+            mount: spec.mount.clone(),
+            detail: "no config field named `domains` is a string array".to_string(),
+        });
+    };
+    let domains = config_string_array(spec, field);
+    let detail = match domains {
+        None => format!("no `{field}` config is set"),
+        Some([]) => format!("`{field}` is empty"),
+        Some(domains) => {
+            if let Some(domain) = domains.iter().find(|domain| !is_dynamic_domain(domain)) {
+                format!("invalid domain `{domain}`")
+            } else {
+                return Ok(());
+            }
+        },
+    };
+    Err(MaterializeError::UnresolvedDynamicDomains {
+        mount: spec.mount.clone(),
+        detail,
+    })
+}
+
+fn config_string_array<'a>(spec: &'a Spec, field: &str) -> Option<&'a [serde_json::Value]> {
+    spec.config_raw
+        .as_ref()
+        .and_then(|config| config.get(field))
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::as_slice)
+}
+
+fn is_dynamic_domain(value: &serde_json::Value) -> bool {
+    let Some(domain) = value.as_str() else {
+        return false;
+    };
+    domain != "*"
+        && !domain.is_empty()
+        && !domain.contains("://")
+        && !domain.contains('/')
+        && !domain.contains(':')
 }
 
 #[cfg(test)]

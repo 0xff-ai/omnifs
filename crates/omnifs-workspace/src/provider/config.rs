@@ -57,6 +57,21 @@ impl ConfigMetadata {
             .map(|(name, _)| name)
     }
 
+    /// The config field that supplies a dynamic domain grant, if present.
+    #[must_use]
+    pub fn domain_list_field(&self) -> Option<&str> {
+        self.fields
+            .iter()
+            .find(|field| {
+                field.name == "domains"
+                    && matches!(
+                        &field.value_type,
+                        ConfigType::Array { items } if matches!(items.as_ref(), ConfigType::String)
+                    )
+            })
+            .map(|field| field.name.as_str())
+    }
+
     pub fn validate_config(&self, config: &serde_json::Value) -> Result<(), ConfigError> {
         let mut errors = Vec::new();
         validate_object_value(&self.fields, config, "", &mut errors);
