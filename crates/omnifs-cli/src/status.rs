@@ -140,7 +140,7 @@ impl StatusReport {
                 || runtime.mounts.iter().any(|mount| {
                     mount
                         .auth_health
-                        .is_some_and(|health| health != CredentialHealth::Ready)
+                        .is_some_and(CredentialHealth::needs_attention)
                 }))
         {
             return true;

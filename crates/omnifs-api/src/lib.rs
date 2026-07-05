@@ -288,6 +288,21 @@ pub enum CredentialHealth {
     StaticUnvalidated,
 }
 
+impl CredentialHealth {
+    /// True when the credential needs user action now. `StaticUnvalidated` is
+    /// the permanent steady state of a static-token credential (there is no
+    /// way to validate it without upstream traffic) and `ExpiringSoon` is the
+    /// refresh scheduler's job, so neither degrades status, nudges, or
+    /// doctor verdicts.
+    #[must_use]
+    pub fn needs_attention(self) -> bool {
+        matches!(
+            self,
+            Self::Expired | Self::RefreshFailed | Self::NeedsConsent | Self::Missing
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct CredentialStatus {
     /// Credential storage key, e.g. `github:oauth:default`.
@@ -486,6 +501,17 @@ pub struct StopReport {
 #[cfg(test)]
 mod tests {
     use super::{CredentialHealth, CredentialStatus};
+
+    #[test]
+    fn steady_state_healths_do_not_need_attention() {
+        assert!(!CredentialHealth::Ready.needs_attention());
+        assert!(!CredentialHealth::StaticUnvalidated.needs_attention());
+        assert!(!CredentialHealth::ExpiringSoon.needs_attention());
+        assert!(CredentialHealth::Expired.needs_attention());
+        assert!(CredentialHealth::RefreshFailed.needs_attention());
+        assert!(CredentialHealth::NeedsConsent.needs_attention());
+        assert!(CredentialHealth::Missing.needs_attention());
+    }
 
     #[test]
     fn credential_wire_status_is_public_data_only() {
