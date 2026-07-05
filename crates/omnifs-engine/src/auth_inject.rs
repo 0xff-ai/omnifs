@@ -8,7 +8,8 @@
 //! fail-closed owner of the bytes.
 
 use omnifs_auth::{
-    AuthError as OAuthError, AuthUnavailable, CredentialService, OAuthClient, OAuthRequest,
+    AuthError as OAuthError, AuthUnavailable, CredentialHealth, CredentialService, OAuthClient,
+    OAuthRequest,
 };
 use omnifs_workspace::authn::{AuthKind, AuthManifest, CredentialId, SchemeResolveError};
 use omnifs_workspace::creds::{CredentialStore, FileStore};
@@ -167,6 +168,12 @@ impl AuthManager {
             .any(|strategy| strategy.applies_to_url(url))
     }
 
+    /// Credential ids this manager registered with the service, for the
+    /// mount-start credential health check. Empty for a no-auth mount.
+    pub(crate) fn credential_ids(&self) -> impl Iterator<Item = &CredentialId> {
+        self.strategies.iter().map(|strategy| &strategy.id)
+    }
+
     pub fn should_refresh_for_response(
         &self,
         url: &str,
@@ -277,6 +284,32 @@ fn credential_id(
         ProviderName::new(provider_name).map_err(|e| InjectError::CredentialId(e.to_string()))?;
     CredentialId::for_mount(&provider, auth, scheme)
         .map_err(|e| InjectError::CredentialId(e.to_string()))
+}
+
+/// Non-secret credential health for one mount, checked once at mount-start:
+/// `Some` when a registered credential is `Missing`, `Expired`, or
+/// `NeedsConsent`. `None` for a no-auth mount or once every registered
+/// credential is at least usable. The mount still loads either way; the
+/// daemon surfaces the warning in the Mounts subsystem health without
+/// blocking the mount on it.
+pub(crate) fn build_time_credential_warning(
+    service: &CredentialService,
+    manager: &AuthManager,
+) -> Option<String> {
+    let ids: std::collections::HashSet<&CredentialId> = manager.credential_ids().collect();
+    if ids.is_empty() {
+        return None;
+    }
+    service.health().into_iter().find_map(|status| {
+        if !ids.contains(&status.id) {
+            return None;
+        }
+        matches!(
+            status.health,
+            CredentialHealth::Missing | CredentialHealth::Expired | CredentialHealth::NeedsConsent
+        )
+        .then(|| format!("credential {} is {:?}", status.id, status.health))
+    })
 }
 
 fn oauth_should_refresh(status: reqwest::StatusCode, headers: &reqwest::header::HeaderMap) -> bool {

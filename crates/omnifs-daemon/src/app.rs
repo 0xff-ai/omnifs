@@ -142,6 +142,13 @@ pub fn run(args: DaemonArgs) -> anyhow::Result<()> {
         Arc::new(MountRuntimes::new(host_context, Arc::clone(&cloner))?)
     };
 
+    // Proactively refreshes every registered OAuth credential before it enters
+    // its refresh window, so a request-path authorization call almost never
+    // has to await a live refresh. Spawned on the shared credential service
+    // (not per-mount) so a credential registered by any later reconcile is
+    // picked up without restarting the loop.
+    let refresh_loop = registry.credential_service().spawn_refresh_loop();
+
     let rt = Handle::current();
     let sink = init_global_from_env();
     if let Some(sink) = &sink {
@@ -208,6 +215,7 @@ pub fn run(args: DaemonArgs) -> anyhow::Result<()> {
         telemetry_backend,
         served_mounts,
     );
+    refresh_loop.abort();
     registry.shutdown_all();
     telemetry.daemon_event(DaemonEvent::DaemonStop, telemetry_backend, served_mounts);
     serve_result?;
