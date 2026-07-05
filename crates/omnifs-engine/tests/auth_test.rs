@@ -199,9 +199,12 @@ async fn refresh_without_applicable_strategy_reports_not_applicable() {
 
     assert_eq!(
         manager
-            .refresh_for_url("https://api.example.com/repos")
-            .await
-            .unwrap(),
+            .report_rejected_for_response(
+                "https://api.example.com/repos",
+                reqwest::StatusCode::UNAUTHORIZED,
+                &reqwest::header::HeaderMap::new(),
+            )
+            .await,
         RefreshOutcome::NotApplicable
     );
 }
@@ -212,9 +215,12 @@ async fn refresh_without_stored_oauth_credential_reports_no_credential() {
     let (auth, _store, _key) = oauth_manager(tokens.endpoint(), "localhost".to_string());
 
     assert_eq!(
-        auth.refresh_for_url("https://localhost/resource")
-            .await
-            .unwrap(),
+        auth.report_rejected_for_response(
+            "https://localhost/resource",
+            reqwest::StatusCode::UNAUTHORIZED,
+            &reqwest::header::HeaderMap::new(),
+        )
+        .await,
         RefreshOutcome::NoCredential
     );
     assert_eq!(tokens.refreshes(), 0);
@@ -268,7 +274,7 @@ async fn oauth_401_refreshes_and_retries_once() {
     auth.prepare_for_url(&api.url()).await.unwrap();
 
     let stack = HttpStack::with_https_client(
-        auth,
+        Arc::clone(&auth),
         Arc::new(CapabilityChecker::new(Allowlist {
             domains: vec![FakeHttpsApiServer::domain()],
             git_repos: Vec::new(),
@@ -317,14 +323,21 @@ async fn concurrent_oauth_refreshes_coalesce_inside_one_process() {
 
     let results = futures::future::join_all((0..8).map(|_| {
         let auth = Arc::clone(&auth);
-        async move { auth.refresh_for_url("https://localhost/resource").await }
+        async move {
+            auth.report_rejected_for_response(
+                "https://localhost/resource",
+                reqwest::StatusCode::UNAUTHORIZED,
+                &reqwest::header::HeaderMap::new(),
+            )
+            .await
+        }
     }))
     .await;
 
     assert!(
         results
             .into_iter()
-            .all(|result| result.unwrap() == RefreshOutcome::Refreshed)
+            .all(|result| result == RefreshOutcome::Refreshed)
     );
     assert_eq!(tokens.refreshes(), 1);
 }
@@ -376,7 +389,7 @@ async fn fetch_blob_uses_same_oauth_retry_path() {
 }
 
 #[tokio::test]
-async fn oauth_refresh_failure_surfaces_denied_and_clears_store() {
+async fn oauth_refresh_failure_surfaces_denied_and_preserves_store() {
     let tokens = FakeTokenServer::start(true).await;
     let api = FakeHttpsApiServer::start("Bearer never-used", "ok").await;
     let (auth, store, key) = oauth_manager(tokens.endpoint(), FakeHttpsApiServer::domain());
@@ -384,7 +397,7 @@ async fn oauth_refresh_failure_surfaces_denied_and_clears_store() {
     auth.prepare_for_url(&api.url()).await.unwrap();
 
     let stack = HttpStack::with_https_client(
-        auth,
+        Arc::clone(&auth),
         Arc::new(CapabilityChecker::new(Allowlist {
             domains: vec![FakeHttpsApiServer::domain()],
             git_repos: Vec::new(),
@@ -412,7 +425,9 @@ async fn oauth_refresh_failure_surfaces_denied_and_clears_store() {
 
     assert_eq!(api.calls(), 1);
     assert_eq!(tokens.refreshes(), 0);
-    assert!(store.get(&key).unwrap().is_none());
+    assert!(store.get(&key).unwrap().is_some());
+    let err = auth.prepare_for_url(&api.url()).await.unwrap_err();
+    assert!(err.to_string().contains("needs re-authentication"));
 }
 
 #[tokio::test]
@@ -452,9 +467,12 @@ async fn oauth_config_client_id_overrides_missing_manifest_default_for_refresh()
     .unwrap();
 
     assert_eq!(
-        auth.refresh_for_url("https://localhost/resource")
-            .await
-            .unwrap(),
+        auth.report_rejected_for_response(
+            "https://localhost/resource",
+            reqwest::StatusCode::UNAUTHORIZED,
+            &reqwest::header::HeaderMap::new(),
+        )
+        .await,
         RefreshOutcome::Refreshed
     );
     assert_eq!(tokens.refreshes(), 1);

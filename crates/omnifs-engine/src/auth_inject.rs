@@ -9,7 +9,7 @@
 
 use omnifs_auth::{
     AuthError as OAuthError, AuthUnavailable, CredentialHealth, CredentialService, OAuthClient,
-    OAuthRequest,
+    OAuthRequest, RefreshOutcome, RejectionEvidence,
 };
 use omnifs_workspace::authn::{AuthKind, AuthManifest, CredentialId, SchemeResolveError};
 use omnifs_workspace::creds::{CredentialStore, FileStore};
@@ -44,17 +44,8 @@ pub enum InjectError {
     CredentialId(String),
     #[error("oauth error: {0}")]
     OAuth(String),
-    #[error("oauth refresh failed: {0}")]
-    RefreshFailed(String),
     #[error("credential unavailable: {0}")]
     Unavailable(String),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RefreshOutcome {
-    Refreshed,
-    NoCredential,
-    NotApplicable,
 }
 
 /// One mount credential resolved to the domains it authorizes. Domain matching
@@ -174,23 +165,16 @@ impl AuthManager {
         self.strategies.iter().map(|strategy| &strategy.id)
     }
 
-    pub fn should_refresh_for_response(
+    pub async fn report_rejected_for_response(
         &self,
         url: &str,
         status: reqwest::StatusCode,
         headers: &reqwest::header::HeaderMap,
-    ) -> bool {
-        self.strategies.iter().any(|strategy| {
-            strategy.kind == AuthKind::OAuth
-                && strategy.applies_to_url(url)
-                && oauth_should_refresh(status, headers)
-        })
-    }
-
-    pub async fn refresh_for_url(&self, url: &str) -> Result<RefreshOutcome, InjectError> {
+    ) -> RefreshOutcome {
         let Some(service) = &self.service else {
-            return Ok(RefreshOutcome::NotApplicable);
+            return RefreshOutcome::NotApplicable;
         };
+        let evidence = RejectionEvidence::new(status.as_u16(), www_authenticate(headers));
         let mut saw_no_credential = false;
         for strategy in self
             .strategies
@@ -200,17 +184,23 @@ impl AuthManager {
             if strategy.kind != AuthKind::OAuth {
                 continue;
             }
-            match service.refresh(&strategy.id).await {
-                Ok(Some(_)) => return Ok(RefreshOutcome::Refreshed),
-                Ok(None) => saw_no_credential = true,
-                Err(error) => return Err(InjectError::RefreshFailed(error.to_string())),
+            match service
+                .report_rejected(&strategy.id, evidence.clone())
+                .await
+            {
+                RefreshOutcome::Refreshed => return RefreshOutcome::Refreshed,
+                RefreshOutcome::NoCredential => saw_no_credential = true,
+                RefreshOutcome::RefreshFailed(error) => {
+                    return RefreshOutcome::RefreshFailed(error);
+                },
+                RefreshOutcome::NotApplicable => {},
             }
         }
-        Ok(if saw_no_credential {
+        if saw_no_credential {
             RefreshOutcome::NoCredential
         } else {
             RefreshOutcome::NotApplicable
-        })
+        }
     }
 }
 
@@ -312,20 +302,13 @@ pub(crate) fn build_time_credential_warning(
     })
 }
 
-fn oauth_should_refresh(status: reqwest::StatusCode, headers: &reqwest::header::HeaderMap) -> bool {
-    status == reqwest::StatusCode::UNAUTHORIZED
-        || (status == reqwest::StatusCode::FORBIDDEN && bearer_invalid_token(headers))
-}
-
-fn bearer_invalid_token(headers: &reqwest::header::HeaderMap) -> bool {
-    headers
+fn www_authenticate(headers: &reqwest::header::HeaderMap) -> Option<String> {
+    let values = headers
         .get_all(reqwest::header::WWW_AUTHENTICATE)
         .iter()
         .filter_map(|value| value.to_str().ok())
-        .any(|value| {
-            let lower = value.to_ascii_lowercase();
-            lower.contains("bearer") && lower.contains("invalid_token")
-        })
+        .collect::<Vec<_>>();
+    (!values.is_empty()).then(|| values.join(", "))
 }
 
 impl From<OAuthError> for InjectError {

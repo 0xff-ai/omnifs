@@ -12,13 +12,15 @@ use std::fs;
 
 use anyhow::Context;
 use clap::Args;
+use omnifs_auth::{CredentialService, OAuthClient};
 
 use crate::commands::mounts::delete_credentials;
 use crate::credential_target::CredentialTarget;
 use crate::daemon_teardown::DaemonTeardown;
 use crate::workspace::{MountRemovalTarget, Workspace};
-use omnifs_workspace::creds::FileStore;
+use omnifs_workspace::creds::{CredentialStore, FileStore};
 use omnifs_workspace::layout::WorkspaceLayout;
+use std::sync::Arc;
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct ResetArgs {
@@ -61,9 +63,23 @@ impl ResetArgs {
         // or an absent launch record is not a reset failure.
         DaemonTeardown::new(&workspace).reset_best_effort().await;
 
-        let store = FileStore::new(&layout.credentials_file);
+        let store: Arc<dyn CredentialStore> = Arc::new(FileStore::new(&layout.credentials_file));
+        let service = CredentialService::new(store, OAuthClient::new()?);
         for target in &targets {
-            delete_credentials(&store, &target.credential, keep_credentials, &target.name)?;
+            let credential = if keep_credentials {
+                target.credential.clone()
+            } else {
+                target
+                    .config
+                    .as_ref()
+                    .map(|spec| {
+                        crate::auth::mount_auth(workspace.catalog(), spec.clone())
+                            .register_revocation(&service)
+                    })
+                    .transpose()?
+                    .unwrap_or_else(|| target.credential.clone())
+            };
+            delete_credentials(&service, &credential, keep_credentials, &target.name).await?;
             fs::remove_file(&target.path)
                 .with_context(|| format!("remove {}", target.path.display()))?;
             anstream::println!("Removed mount `{}`", target.name);

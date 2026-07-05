@@ -1,4 +1,4 @@
-use anyhow::{Context, anyhow};
+use anyhow::anyhow;
 use omnifs_workspace::authn::{AccountId, CredentialId, SchemeId as AuthSchemeId};
 use omnifs_workspace::creds::{CredentialEntry, CredentialStore};
 use omnifs_workspace::ids::ProviderName;
@@ -74,20 +74,6 @@ impl CredentialTarget {
             Self::Internal(key) => Some(key),
             Self::None => None,
         }
-    }
-
-    pub(crate) fn delete_from(
-        &self,
-        store: &dyn CredentialStore,
-        mount_name: &str,
-    ) -> anyhow::Result<()> {
-        for key in self.keys() {
-            store
-                .delete(key)
-                .with_context(|| format!("delete credential for mount `{mount_name}`"))?;
-            anstream::println!("Deleted credential `{}`", key.storage_key());
-        }
-        Ok(())
     }
 
     pub(crate) fn lookup(

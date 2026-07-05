@@ -14,6 +14,7 @@ use crate::client::DaemonClient;
 use crate::config::Config;
 use crate::credential_target::CredentialTarget;
 use crate::session::MountConfig;
+use omnifs_workspace::mounts::Spec;
 
 /// Resolved local omnifs home for one CLI command.
 pub(crate) struct Workspace {
@@ -30,6 +31,7 @@ pub(crate) struct Workspace {
 pub(crate) struct MountRemovalTarget {
     pub(crate) name: String,
     pub(crate) path: PathBuf,
+    pub(crate) config: Option<Spec>,
     pub(crate) credential: CredentialTarget,
 }
 
@@ -115,6 +117,7 @@ impl Workspace {
             targets.push(MountRemovalTarget {
                 name: name.to_string(),
                 path: registry.spec_path(name),
+                config: Some(spec.clone()),
                 credential: CredentialTarget::for_mount(spec),
             });
         }
@@ -136,6 +139,7 @@ impl Workspace {
             targets.push(MountRemovalTarget {
                 name,
                 path: failure.path.clone(),
+                config: None,
                 credential: CredentialTarget::None,
             });
         }

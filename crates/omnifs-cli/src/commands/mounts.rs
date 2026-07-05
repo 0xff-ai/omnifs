@@ -3,11 +3,13 @@
 
 use anyhow::{Context, bail};
 use clap::{Args, Subcommand};
+use omnifs_auth::{CredentialService, OAuthClient};
 use omnifs_workspace::creds::{CredentialStore, FileStore};
 use omnifs_workspace::mounts::Name as MountName;
 use omnifs_workspace::mounts::Registry;
 use std::io::Write as _;
 use std::path::Path;
+use std::sync::Arc;
 
 use crate::credential_target::CredentialTarget;
 use crate::session::MountConfig;
@@ -93,7 +95,14 @@ pub async fn rm(
         missing_mount_error(&layout.config_file, &mounts, name.as_str()).unwrap_err()
     })?;
     let config_path = mount.source.clone();
-    let credential_target = CredentialTarget::for_mount(&mount.config);
+    let store: Arc<dyn CredentialStore> = Arc::new(FileStore::new(&layout.credentials_file));
+    let service = CredentialService::new(Arc::clone(&store), OAuthClient::new()?);
+    let credential_target = if keep_credentials {
+        CredentialTarget::for_mount(&mount.config)
+    } else {
+        crate::auth::mount_auth(workspace.catalog(), mount.config.clone())
+            .register_revocation(&service)?
+    };
 
     if !force {
         confirm(
@@ -104,8 +113,13 @@ pub async fn rm(
         )?;
     }
 
-    let store = FileStore::new(&layout.credentials_file);
-    delete_credentials(&store, &credential_target, keep_credentials, name.as_str())?;
+    delete_credentials(
+        &service,
+        &credential_target,
+        keep_credentials,
+        name.as_str(),
+    )
+    .await?;
 
     Registry::load(&layout.mounts_dir)?.remove(&name)?;
     anstream::println!(
@@ -157,8 +171,8 @@ fn confirm(
     Ok(())
 }
 
-pub(crate) fn delete_credentials(
-    store: &dyn CredentialStore,
+pub(crate) async fn delete_credentials(
+    service: &CredentialService,
     target: &CredentialTarget,
     keep_credentials: bool,
     name: &str,
@@ -168,7 +182,14 @@ pub(crate) fn delete_credentials(
     }
     // Credential delete happens before the mount-file delete so that on
     // store failure we don't orphan the mount config.
-    target.delete_from(store, name)
+    for key in target.keys() {
+        let outcome = service.revoke_and_delete(key).await;
+        if let Some(error) = outcome.delete_error() {
+            bail!("delete credential for mount `{name}`: {error}");
+        }
+        anstream::println!("Credential `{}`: {outcome}", key.storage_key());
+    }
+    Ok(())
 }
 
 fn missing_mount_error(
@@ -214,9 +235,9 @@ mod tests {
         let err = rm(&workspace, "../leak", true, false).await.unwrap_err();
         assert!(format!("{err:#}").contains("invalid mount name"));
     }
-    #[test]
-    fn delete_credentials_deletes_internal_key() {
-        let store = MemoryStore::new();
+    #[tokio::test]
+    async fn delete_credentials_deletes_internal_key() {
+        let store = Arc::new(MemoryStore::new());
         let key = CredentialId::new("github", "device", "default").unwrap();
         let entry = CredentialEntry::static_token(
             SecretString::from("secret".to_owned()),
@@ -225,7 +246,10 @@ mod tests {
         store.put(&key, &entry).unwrap();
 
         let target = CredentialTarget::Internal(key.clone());
-        delete_credentials(&store, &target, false, "github").unwrap();
+        let service = CredentialService::new(store.clone(), OAuthClient::new().unwrap());
+        delete_credentials(&service, &target, false, "github")
+            .await
+            .unwrap();
 
         assert!(store.get(&key).unwrap().is_none());
     }

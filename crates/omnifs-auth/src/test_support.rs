@@ -6,8 +6,8 @@ use omnifs_workspace::authn::{
     PkceLoopbackConfig, PkceManualCodeConfig, TokenEndpointAuthMethod,
 };
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
@@ -21,6 +21,7 @@ pub(super) struct FakeBehavior {
     /// Simulates a non-RFC-8628 token endpoint: the pending response comes
     /// back as `200 OK` (with the same error body) instead of `400`.
     pub(super) device_pending_ok_body: bool,
+    pub(super) refresh_delay_ms: u64,
 }
 
 pub(super) struct FakeOpener(pub(super) FakeAuthServer);
@@ -49,6 +50,7 @@ struct FakeState {
     codes: Mutex<HashMap<String, String>>,
     device_pending_remaining: AtomicUsize,
     next_token: AtomicUsize,
+    refreshes: AtomicUsize,
 }
 
 impl FakeAuthServer {
@@ -63,6 +65,7 @@ impl FakeAuthServer {
                 codes: Mutex::new(HashMap::new()),
                 device_pending_remaining: AtomicUsize::new(device_pending_responses),
                 next_token: AtomicUsize::new(1),
+                refreshes: AtomicUsize::new(0),
             }),
         };
         let task_server = server.clone();
@@ -199,6 +202,10 @@ impl FakeAuthServer {
         })
     }
 
+    pub(super) fn refreshes(&self) -> usize {
+        self.state.refreshes.load(Ordering::SeqCst)
+    }
+
     async fn handle(&self, mut stream: tokio::net::TcpStream) {
         let mut buf = vec![0; 8192];
         let read = stream.read(&mut buf).await.unwrap();
@@ -299,6 +306,7 @@ impl FakeAuthServer {
         write_fake_response(stream, "200 OK", "application/json", &body).await;
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn handle_token(&self, stream: &mut tokio::net::TcpStream, body: &str) {
         let params: HashMap<String, String> = url::form_urlencoded::parse(body.as_bytes())
             .into_owned()
@@ -384,7 +392,13 @@ impl FakeAuthServer {
                     params.get("refresh_token").map(String::as_str),
                     Some("refresh-1")
                 );
-                let id = self.state.next_token.fetch_add(1, Ordering::SeqCst);
+                if self.state.behavior.refresh_delay_ms > 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        self.state.behavior.refresh_delay_ms,
+                    ))
+                    .await;
+                }
+                let id = self.state.refreshes.fetch_add(1, Ordering::SeqCst) + 1;
                 let body = serde_json::json!({
                     "access_token": format!("access-refresh-{id}"),
                     "refresh_token": format!("refresh-rotated-{id}"),
@@ -404,10 +418,16 @@ impl FakeAuthServer {
 pub(super) struct FakeRevocationServer {
     base: Url,
     revocations: Arc<AtomicUsize>,
+    tokens: Arc<StdMutex<Vec<String>>>,
+    fail: bool,
 }
 
 impl FakeRevocationServer {
     pub(super) async fn start() -> Self {
+        Self::start_with_failure(false).await
+    }
+
+    pub(super) async fn start_with_failure(fail: bool) -> Self {
         let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -426,6 +446,8 @@ impl FakeRevocationServer {
         let server = Self {
             base: Url::parse(&format!("https://{addr}")).unwrap(),
             revocations: Arc::new(AtomicUsize::new(0)),
+            tokens: Arc::new(StdMutex::new(Vec::new())),
+            fail,
         };
         let task_server = server.clone();
         tokio::spawn(async move {
@@ -443,10 +465,24 @@ impl FakeRevocationServer {
                     let Ok(read) = stream.read(&mut buf).await else {
                         return;
                     };
-                    if !String::from_utf8_lossy(&buf[..read]).starts_with("POST /revoke ") {
+                    let request = String::from_utf8_lossy(&buf[..read]);
+                    if !request.starts_with("POST /revoke ") {
                         return;
                     }
+                    let body = request.split("\r\n\r\n").nth(1).unwrap_or_default();
+                    let params: HashMap<String, String> =
+                        url::form_urlencoded::parse(body.as_bytes())
+                            .into_owned()
+                            .collect();
+                    if let Some(token) = params.get("token") {
+                        task_server.tokens.lock().unwrap().push(token.clone());
+                    }
                     task_server.revocations.fetch_add(1, Ordering::SeqCst);
+                    if task_server.fail {
+                        let response = "HTTP/1.1 500 Internal Server Error\r\ncontent-type: application/json\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}";
+                        stream.write_all(response.as_bytes()).await.unwrap();
+                        return;
+                    }
                     let response = "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}";
                     stream.write_all(response.as_bytes()).await.unwrap();
                 });
@@ -461,6 +497,10 @@ impl FakeRevocationServer {
 
     pub(super) fn revocations(&self) -> usize {
         self.revocations.load(Ordering::SeqCst)
+    }
+
+    pub(super) fn revoked_tokens(&self) -> Vec<String> {
+        self.tokens.lock().unwrap().clone()
     }
 }
 
