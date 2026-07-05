@@ -59,6 +59,9 @@ pub enum Commands {
     /// Manage installed provider WASM artifacts.
     Providers(commands::providers::ProvidersArgs),
 
+    /// Install omnifs usage skills for agent harnesses.
+    Skill(commands::skill::SkillArgs),
+
     /// Nuke every mount config and (by default) its stored credential,
     /// then stop and remove the container. Asks for confirmation unless
     /// `--yes` is set.
@@ -118,6 +121,7 @@ impl Commands {
             Self::Init(_) => "init",
             Self::Mounts(_) => "mounts",
             Self::Providers(_) => "providers",
+            Self::Skill(_) => "skill",
             Self::Reset(_) => "reset",
             Self::Doctor(_) => "doctor",
             Self::Completions(_) => "completions",
@@ -145,6 +149,7 @@ impl Commands {
             Self::Snapshot(args) => args.run().await,
             Self::Mounts(args) => args.run().await,
             Self::Providers(args) => args.run(),
+            Self::Skill(args) => args.run(),
             Self::Reset(args) => args.run().await,
             Self::Completions(args) => {
                 args.run();

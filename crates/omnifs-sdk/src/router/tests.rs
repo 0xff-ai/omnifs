@@ -122,6 +122,25 @@ fn demo_handle() -> Result<ObjectHandle<DemoObj>> {
     })
 }
 
+fn poll_ready<F: Future>(future: F) -> F::Output {
+    let mut future = Box::pin(future);
+    let waker = Waker::noop();
+    let mut ctx = Context::from_waker(waker);
+    match future.as_mut().poll(&mut ctx) {
+        Poll::Ready(result) => result,
+        Poll::Pending => panic!("test future should complete without callouts"),
+    }
+}
+
+fn read_text(router: &Router<()>, path: &str) -> String {
+    let cx = Cx::new(1, Rc::new(RefCell::new(())));
+    let outcome = poll_ready(router.read_file(&cx, path, "text/markdown", None)).unwrap();
+    let crate::browse::ReadOutcome::Found(content) = outcome else {
+        panic!("expected {path} to read as a file");
+    };
+    String::from_utf8(content.content().expect("inline text").to_vec()).unwrap()
+}
+
 #[test]
 fn object_without_stability_fails_to_finish() {
     let result = object::<DemoObj>("/items/{id}", |o| {
@@ -568,6 +587,69 @@ fn dynamic_capture_prefix_lists_route_table_children_without_stub_dir() {
         .map(|entry| entry.name.as_str())
         .collect();
     assert_eq!(names, vec!["body"]);
+}
+
+#[test]
+fn seal_synthesizes_root_and_branch_readmes() {
+    let mut router = Router::<()>::new();
+    router
+        .object::<DemoObj>("/items/{id}", |o| {
+            o.dynamic();
+            o.file("item.json").canonical::<Json>()?;
+            o.file("item.md").representation::<Markdown>()?;
+            Ok(())
+        })
+        .unwrap();
+    router.seal().unwrap();
+
+    let root = read_text(&router, "/README.md");
+    assert!(root.contains("The keying schema is the path grammar below."));
+    assert!(root.contains("- `/items/{id}` - object `demo.obj`"));
+    assert!(root.contains("- `{id}`: `String`"));
+    assert!(root.contains("- `cat './items/{id}/item.json'`"));
+    assert!(
+        router
+            .routes()
+            .iter()
+            .all(|route| route.template != "/README.md"),
+        "generated README leaves stay out of Router::routes()"
+    );
+
+    let branch = read_text(&router, "/items/README.md");
+    assert!(branch.contains("route table for `/items`"));
+    assert!(branch.contains("- `/items/{id}` - object `demo.obj`"));
+    assert!(branch.contains("- `cat './{id}/item.json'`"));
+}
+
+#[test]
+fn empty_router_synthesizes_root_readme() {
+    let mut router = Router::<()>::new();
+    router.seal().unwrap();
+
+    let root = read_text(&router, "/README.md");
+    assert!(root.contains("No provider routes are declared under this scope."));
+    assert!(router.routes().is_empty());
+}
+
+#[test]
+fn explicit_readme_registration_wins() {
+    let mut router = Router::<()>::new();
+    router
+        .file("/README.md")
+        .handler(|_cx: Cx<()>| async { Ok(FileProjection::body(b"custom root").build()) })
+        .unwrap();
+    router
+        .file("/items/{id}/body")
+        .handler(|_cx: Cx<()>| async { Ok(FileProjection::body(b"body").build()) })
+        .unwrap();
+    router
+        .file("/items/README.md")
+        .handler(|_cx: Cx<()>| async { Ok(FileProjection::body(b"custom branch").build()) })
+        .unwrap();
+    router.seal().unwrap();
+
+    assert_eq!(read_text(&router, "/README.md"), "custom root");
+    assert_eq!(read_text(&router, "/items/README.md"), "custom branch");
 }
 
 // ---------------------------------------------------------------------------

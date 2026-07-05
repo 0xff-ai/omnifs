@@ -78,12 +78,13 @@ async fn test_list_root() {
         .unwrap();
     match result {
         NamespaceListOutcome::Entries(listing) => {
-            assert_eq!(listing.entries.len(), 6);
+            assert_eq!(listing.entries.len(), 7);
             let names: Vec<&str> = listing
                 .entries
                 .iter()
                 .map(|entry| entry.name.as_str())
                 .collect();
+            assert!(names.contains(&"README.md"));
             assert!(names.contains(&"items"));
             assert!(names.contains(&"hello"));
             assert!(names.contains(&"scoped"));
@@ -94,6 +95,7 @@ async fn test_list_root() {
                 listing
                     .entries
                     .iter()
+                    .filter(|entry| entry.name != "README.md")
                     .all(|entry| entry.meta.is_directory())
             );
         },
@@ -113,8 +115,9 @@ async fn test_list_hello_dir() {
         .unwrap();
     match result {
         NamespaceListOutcome::Entries(listing) => {
-            assert_eq!(listing.entries.len(), 16);
+            assert_eq!(listing.entries.len(), 17);
             let names: Vec<&str> = listing.entries.iter().map(|e| e.name.as_str()).collect();
+            assert!(names.contains(&"README.md"));
             assert!(names.contains(&"remote-a"));
             assert!(names.contains(&"remote-b"));
             assert!(names.contains(&"message"));
@@ -399,6 +402,7 @@ async fn test_read_file_sibling_projections_do_not_erase_parent_dirents() {
     assert_eq!(
         entry_names,
         vec![
+            "README.md",
             "bundle",
             "feed",
             "fresh-full",
@@ -831,6 +835,7 @@ async fn test_lookup_returns_siblings_and_list_warms_child_shape() {
     assert_eq!(
         lookup_names,
         vec![
+            "README.md",
             "bundle",
             "feed",
             "fresh-full",

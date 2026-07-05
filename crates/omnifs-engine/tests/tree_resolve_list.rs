@@ -165,10 +165,11 @@ async fn list_root_yields_known_children() {
         .map(|e| e.name.as_str())
         .collect();
     // Verified against providers/test/src/lib.rs route registrations on this
-    // branch: the root projects items, hello, scoped, the /dynamic capture
-    // prefix, the checkout treeref, and the slow delay route the concurrency
-    // net added.
-    assert_eq!(names.len(), 6, "got {names:?}");
+    // branch: the root projects the generated README plus items, hello,
+    // scoped, the /dynamic capture prefix, the checkout treeref, and the slow
+    // delay route the concurrency net added.
+    assert_eq!(names.len(), 7, "got {names:?}");
+    assert!(names.contains(&"README.md"));
     assert!(names.contains(&"items"));
     assert!(names.contains(&"hello"));
     assert!(names.contains(&"scoped"));
@@ -183,7 +184,7 @@ async fn list_root_yields_known_children() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn list_hello_yields_sixteen_children_with_message() {
+async fn list_hello_yields_seventeen_children_with_message() {
     let t = test_tree();
     let tree = &t.tree;
     let ctx = RequestCtx::default();
@@ -199,10 +200,12 @@ async fn list_hello_yields_sixteen_children_with_message() {
     let names: Vec<&str> = listing.entries.iter().map(|e| e.name.as_str()).collect();
     // Verified against providers/test/src/lib.rs: /hello projects 11 files
     // (message, greeting, projected, lazy, fresh-full, ranged, unknown-ranged,
-    // large-ranged, volatile-tail, remote-a, remote-b) and 5 dirs (bundle, feed,
-    // unbounded, throttled, snapshot) = 16. `remote-a`/`remote-b` are the
-    // callout-suspending leaves the host concurrency test drives.
-    assert_eq!(listing.entries.len(), 16, "got {names:?}");
+    // large-ranged, volatile-tail, remote-a, remote-b), 5 dirs (bundle, feed,
+    // unbounded, throttled, snapshot), and the generated branch README = 17.
+    // `remote-a`/`remote-b` are the callout-suspending leaves the host
+    // concurrency test drives.
+    assert_eq!(listing.entries.len(), 17, "got {names:?}");
+    assert!(names.contains(&"README.md"));
     assert!(names.contains(&"message"));
     assert!(names.contains(&"remote-a"));
     assert!(names.contains(&"remote-b"));

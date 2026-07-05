@@ -139,7 +139,12 @@ fn root_is_open_and_date_directories_list_day_files() {
     match root.result().unwrap() {
         OpResult::ListChildren(ListChildrenResult::Entries(listing)) => {
             assert!(!listing.exhaustive);
-            assert!(listing.entries.is_empty());
+            let names: Vec<&str> = listing
+                .entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect();
+            assert_eq!(names, vec!["README.md"]);
         },
         other => panic!("expected root listing, got {other:?}"),
     }

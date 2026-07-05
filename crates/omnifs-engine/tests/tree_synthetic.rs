@@ -298,9 +298,9 @@ async fn read_all_control_exhausts_then_control_is_gone() {
 // --- Root ignore files -------------------------------------------------------
 
 /// The mount root carries the `.gitignore`/`.ignore`/`.rgignore` ignore files as
-/// synthetic entries, each serving the fixed `@*\n` content so ignore-respecting
-/// tree walks skip the `@`-prefixed controls. They are synthetic and resolve +
-/// read through `Tree`.
+/// synthetic entries, each serving fixed ignore content so ignore-respecting
+/// tree walks skip the `@`-prefixed controls and generated README leaves. They
+/// are synthetic and resolve + read through `Tree`.
 #[tokio::test(flavor = "multi_thread")]
 async fn root_ignore_synthesized() {
     let t = test_tree();
@@ -337,7 +337,7 @@ async fn root_ignore_synthesized() {
     let ReadResult::Bytes { data, .. } = result else {
         panic!("ignore file reads as bytes");
     };
-    assert_eq!(data, b"@*\n");
+    assert_eq!(data, b"@*\n/README.md\n/*/README.md\n");
 }
 
 /// A non-root directory does NOT synthesize ignore files (they belong only at

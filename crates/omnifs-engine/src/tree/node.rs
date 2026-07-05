@@ -23,8 +23,8 @@ pub enum NodeBody {
 /// `content`:
 ///
 /// - the mount-root ignore files (`.gitignore`/`.ignore`/`.rgignore`) are
-///   `Fixed` static bytes (`@*\n`), so a recursive ignore-respecting tool skips
-///   the `@`-prefixed control files during a tree walk;
+///   `Fixed` static bytes, so a recursive ignore-respecting tool skips the
+///   `@`-prefixed control files and generated README leaves during a tree walk;
 /// - the pagination controls (`@next`/`@all`) are a `PaginationControl` ACTION:
 ///   reading one runs the host's accumulating pagination (advancing the parent
 ///   directory's cached dirents) and returns a one-line status, so the content

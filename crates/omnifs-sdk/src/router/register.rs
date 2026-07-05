@@ -6,12 +6,16 @@
 
 use crate::error::{ProviderError, Result};
 use crate::object::{FacetMetadata, Key, Object, ObjectKind};
+use crate::projection::FileProjection;
+use omnifs_core::ContentType;
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use super::descriptor::{RouteDescriptor, RouteKind};
 use super::handlers::{IntoDirHandler, IntoFileHandler, IntoTreeRefHandler};
 use super::object::{ObjectBlock, ObjectHandle, mount_object, object};
 use super::pattern::Pattern;
+use super::readme::{ObjectLeaves, Readme, Scope};
 
 // ===========================================================================
 // Router
@@ -364,7 +368,9 @@ impl<S> Router<S> {
             }
         }
 
-        self.route_descriptors = self.describe_routes(collection_descriptors);
+        let route_descriptors = self.describe_routes(collection_descriptors);
+        self.synthesize_readme_routes(&route_descriptors)?;
+        self.route_descriptors = route_descriptors;
         Ok(())
     }
 
@@ -422,6 +428,51 @@ impl<S> Router<S> {
         }));
         routes.extend(collection_descriptors);
         routes
+    }
+
+    fn synthesize_readme_routes(&mut self, routes: &[RouteDescriptor]) -> Result<()> {
+        let object_leaves = self
+            .object_registry
+            .iter()
+            .map(|object| ObjectLeaves {
+                template: object.template.clone(),
+                leaf_names: object.canonical_view_leaf_names.clone(),
+            })
+            .collect::<Vec<_>>();
+        let mut scopes = vec![Scope::Root];
+        scopes.extend(super::readme::branch_scopes(routes));
+        for scope in scopes {
+            let path = scope.readme_path();
+            if self
+                .leaf_claims
+                .iter()
+                .any(|claim| claim.template() == path)
+            {
+                continue;
+            }
+            let body = Readme::new(scope, routes, &object_leaves).render();
+            self.synthesize_readme_route(&path, body)?;
+        }
+        Ok(())
+    }
+
+    fn synthesize_readme_route(&mut self, path: &str, body: String) -> Result<()> {
+        let pattern = Pattern::parse(path)?;
+        let bytes = body.into_bytes();
+        let handler: super::handlers::BoxedFileHandler<S> = Arc::new(move |_cx, _caps| {
+            let bytes = bytes.clone();
+            Box::pin(
+                async move { Ok(FileProjection::body_with_type(bytes, ContentType::Markdown)) },
+            )
+        });
+        self.files.push(super::handlers::FileEntry {
+            pattern: pattern.clone(),
+            handler,
+            validator: super::handlers::accept_validator(),
+            ranged: false,
+        });
+        self.leaf_claims.push(pattern);
+        Ok(())
     }
 
     /// Resolve every declared collection against the object registry, fill its
