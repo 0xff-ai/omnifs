@@ -122,6 +122,237 @@ impl Representable<Markdown> for PullRequest {
     }
 }
 
+#[omnifs_sdk::object(kind = "github.pull_file", key = crate::item::ChangedFileKey)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct ChangedFile {
+    pub(crate) filename: String,
+    pub(crate) status: String,
+    #[serde(default)]
+    pub(crate) additions: u64,
+    #[serde(default)]
+    pub(crate) deletions: u64,
+    #[serde(default)]
+    pub(crate) changes: u64,
+    #[serde(default)]
+    pub(crate) patch: Option<String>,
+    #[serde(default)]
+    pub(crate) previous_filename: Option<String>,
+    #[serde(default)]
+    pub(crate) blob_url: Option<String>,
+    #[serde(default)]
+    pub(crate) raw_url: Option<String>,
+    #[serde(default)]
+    pub(crate) contents_url: Option<String>,
+}
+
+impl ChangedFile {
+    pub(crate) fn filename(&self, _key: &crate::item::ChangedFileKey) -> Result<FileProjection> {
+        Ok(FileProjection::text(self.filename.clone(), TextFormat::Raw).build())
+    }
+
+    pub(crate) fn status(&self, _key: &crate::item::ChangedFileKey) -> Result<FileProjection> {
+        Ok(FileProjection::text(self.status.clone(), TextFormat::Raw).build())
+    }
+
+    pub(crate) fn patch(&self, _key: &crate::item::ChangedFileKey) -> Result<FileProjection> {
+        let patch = self.patch.as_deref().unwrap_or("");
+        Ok(FileProjection::body(patch.to_owned())
+            .content_type(ContentType::Custom("text/x-diff"))
+            .build())
+    }
+}
+
+impl Representable<Markdown> for ChangedFile {
+    fn represent(&self) -> Vec<u8> {
+        let previous = self
+            .previous_filename
+            .as_ref()
+            .map_or(String::new(), |name| {
+                format!("- Previous filename: {name}\n")
+            });
+        format!(
+            "# {}\n\n- Status: {}\n- Additions: {}\n- Deletions: {}\n- Changes: {}\n{}",
+            self.filename, self.status, self.additions, self.deletions, self.changes, previous
+        )
+        .into_bytes()
+    }
+}
+
+#[omnifs_sdk::object(kind = "github.review", key = crate::item::ReviewKey)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct Review {
+    pub(crate) id: u64,
+    #[serde(default)]
+    pub(crate) user: Option<User>,
+    #[serde(default)]
+    pub(crate) body: Option<String>,
+    #[serde(default)]
+    pub(crate) state: Option<String>,
+    #[serde(default)]
+    pub(crate) submitted_at: Option<String>,
+    #[serde(default)]
+    pub(crate) commit_id: Option<String>,
+}
+
+impl Review {
+    pub(crate) fn state(&self, _key: &crate::item::ReviewKey) -> Result<FileProjection> {
+        Ok(FileProjection::text(self.state.clone().unwrap_or_default(), TextFormat::Raw).build())
+    }
+
+    pub(crate) fn user(&self, _key: &crate::item::ReviewKey) -> Result<FileProjection> {
+        let login = self.user.as_ref().map_or("", |u| u.login.as_str());
+        Ok(FileProjection::text(login.to_owned(), TextFormat::Raw).build())
+    }
+
+    pub(crate) fn body_md(&self, _key: &crate::item::ReviewKey) -> Result<FileProjection> {
+        let body = self.body.as_deref().unwrap_or("");
+        Ok(FileProjection::body(body.to_owned())
+            .content_type(ContentType::Markdown)
+            .build())
+    }
+}
+
+impl Representable<Markdown> for Review {
+    fn represent(&self) -> Vec<u8> {
+        let user = self.user.as_ref().map_or("", |u| u.login.as_str());
+        let state = self.state.as_deref().unwrap_or("");
+        let submitted = self.submitted_at.as_deref().unwrap_or("");
+        let body = self.body.as_deref().unwrap_or("");
+        format!(
+            "# Review {}\n\n- State: {state}\n- User: {user}\n- Submitted: {submitted}\n\n{body}\n",
+            self.id
+        )
+        .into_bytes()
+    }
+}
+
+#[omnifs_sdk::object(kind = "github.review_comment", key = crate::item::ReviewCommentKey)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct ReviewComment {
+    pub(crate) id: u64,
+    #[serde(default)]
+    pub(crate) user: Option<User>,
+    #[serde(default)]
+    pub(crate) body: Option<String>,
+    #[serde(default)]
+    pub(crate) path: Option<String>,
+    #[serde(default)]
+    pub(crate) diff_hunk: Option<String>,
+}
+
+impl ReviewComment {
+    pub(crate) fn body_md(&self, _key: &crate::item::ReviewCommentKey) -> Result<FileProjection> {
+        let body = self.body.as_deref().unwrap_or("");
+        Ok(FileProjection::body(body.to_owned())
+            .content_type(ContentType::Markdown)
+            .build())
+    }
+
+    pub(crate) fn author(&self, _key: &crate::item::ReviewCommentKey) -> Result<FileProjection> {
+        let login = self.user.as_ref().map_or("", |u| u.login.as_str());
+        Ok(FileProjection::text(login.to_owned(), TextFormat::Raw).build())
+    }
+
+    pub(crate) fn path(&self, _key: &crate::item::ReviewCommentKey) -> Result<FileProjection> {
+        Ok(FileProjection::text(self.path.clone().unwrap_or_default(), TextFormat::Raw).build())
+    }
+}
+
+impl Representable<Markdown> for ReviewComment {
+    fn represent(&self) -> Vec<u8> {
+        let user = self.user.as_ref().map_or("", |u| u.login.as_str());
+        let path = self.path.as_deref().unwrap_or("");
+        let body = self.body.as_deref().unwrap_or("");
+        let diff = self.diff_hunk.as_deref().unwrap_or("");
+        format!("{user} on `{path}`:\n\n{body}\n\n```diff\n{diff}\n```\n").into_bytes()
+    }
+}
+
+#[omnifs_sdk::object(kind = "github.check", key = crate::item::CheckRunKey)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct CheckRun {
+    pub(crate) id: u64,
+    pub(crate) name: String,
+    pub(crate) status: String,
+    #[serde(default)]
+    pub(crate) conclusion: Option<String>,
+    #[serde(default)]
+    pub(crate) html_url: Option<String>,
+    #[serde(default)]
+    pub(crate) output: Option<CheckOutput>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub(crate) struct CheckOutput {
+    #[serde(default)]
+    pub(crate) title: Option<String>,
+    #[serde(default)]
+    pub(crate) summary: Option<String>,
+    #[serde(default)]
+    pub(crate) text: Option<String>,
+}
+
+impl CheckRun {
+    pub(crate) fn name(&self, _key: &crate::item::CheckRunKey) -> Result<FileProjection> {
+        Ok(FileProjection::text(self.name.clone(), TextFormat::Raw).build())
+    }
+
+    pub(crate) fn status(&self, _key: &crate::item::CheckRunKey) -> Result<FileProjection> {
+        Ok(FileProjection::text(self.status.clone(), TextFormat::Raw).build())
+    }
+
+    pub(crate) fn conclusion(&self, _key: &crate::item::CheckRunKey) -> Result<FileProjection> {
+        Ok(
+            FileProjection::text(self.conclusion.clone().unwrap_or_default(), TextFormat::Raw)
+                .build(),
+        )
+    }
+
+    pub(crate) fn summary_md(&self, _key: &crate::item::CheckRunKey) -> Result<FileProjection> {
+        Ok(FileProjection::body(self.summary_markdown())
+            .content_type(ContentType::Markdown)
+            .build())
+    }
+
+    fn summary_markdown(&self) -> String {
+        let Some(output) = &self.output else {
+            return String::new();
+        };
+        let mut summary = String::new();
+        if let Some(title) = &output.title {
+            summary.push_str("## ");
+            summary.push_str(title);
+            summary.push_str("\n\n");
+        }
+        if let Some(body) = &output.summary {
+            summary.push_str(body);
+            summary.push('\n');
+        }
+        if let Some(text) = &output.text {
+            if !summary.ends_with("\n\n") {
+                summary.push('\n');
+            }
+            summary.push_str(text);
+            summary.push('\n');
+        }
+        summary
+    }
+}
+
+impl Representable<Markdown> for CheckRun {
+    fn represent(&self) -> Vec<u8> {
+        let conclusion = self.conclusion.as_deref().unwrap_or("");
+        let url = self.html_url.as_deref().unwrap_or("");
+        format!(
+            "# {}\n\n- Status: {}\n- Conclusion: {conclusion}\n- URL: {url}\n\n{}",
+            self.name,
+            self.status,
+            self.summary_markdown()
+        )
+        .into_bytes()
+    }
+}
+
 /// A GitHub owner (user or organization) profile. Today the upstream profile
 /// JSON is the canonical payload; `profile.md` renders it.
 #[omnifs_sdk::object(kind = "github.owner", key = crate::item::OwnerKey)]
@@ -187,6 +418,69 @@ impl Representable<Markdown> for Comment {
     fn represent(&self) -> Vec<u8> {
         let body = self.body.as_deref().unwrap_or("");
         format!("{}:\n{body}\n", self.user.login).into_bytes()
+    }
+}
+
+#[omnifs_sdk::object(kind = "github.notification", key = crate::item::NotificationKey)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct Notification {
+    pub(crate) id: String,
+    #[serde(default)]
+    pub(crate) unread: bool,
+    #[serde(default)]
+    pub(crate) reason: Option<String>,
+    #[serde(default)]
+    pub(crate) updated_at: Option<String>,
+    pub(crate) subject: NotificationSubject,
+    #[serde(default)]
+    pub(crate) repository: Option<NotificationRepo>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct NotificationSubject {
+    pub(crate) title: String,
+    #[serde(rename = "type")]
+    pub(crate) kind: String,
+    #[serde(default)]
+    pub(crate) url: Option<String>,
+    #[serde(default)]
+    pub(crate) latest_comment_url: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct NotificationRepo {
+    #[serde(default)]
+    pub(crate) full_name: Option<String>,
+}
+
+impl Notification {
+    pub(crate) fn reason(&self, _key: &crate::item::NotificationKey) -> Result<FileProjection> {
+        Ok(FileProjection::text(self.reason.clone().unwrap_or_default(), TextFormat::Raw).build())
+    }
+
+    pub(crate) fn subject(&self, _key: &crate::item::NotificationKey) -> Result<FileProjection> {
+        Ok(FileProjection::text(self.subject.title.clone(), TextFormat::Raw).build())
+    }
+
+    pub(crate) fn item_markdown(&self) -> Vec<u8> {
+        let repo = self
+            .repository
+            .as_ref()
+            .and_then(|repo| repo.full_name.as_deref())
+            .unwrap_or("");
+        let reason = self.reason.as_deref().unwrap_or("");
+        let updated = self.updated_at.as_deref().unwrap_or("");
+        format!(
+            "# {}\n\n- Type: {}\n- Repository: {repo}\n- Reason: {reason}\n- Unread: {}\n- Updated: {updated}\n",
+            self.subject.title, self.subject.kind, self.unread
+        )
+        .into_bytes()
+    }
+}
+
+impl Representable<Markdown> for Notification {
+    fn represent(&self) -> Vec<u8> {
+        self.item_markdown()
     }
 }
 
