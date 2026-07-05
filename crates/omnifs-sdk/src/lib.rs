@@ -150,7 +150,8 @@ pub use omnifs_caps::{AccessNeed, PreopenMode, PreopenedPath};
 pub use omnifs_caps::{LimitDeclarations, ResourceLimit};
 #[cfg(not(target_arch = "wasm32"))]
 pub use omnifs_workspace::authn::{
-    OauthScheme, SchemeGuidance, StaticTokenScheme, TokenValidation,
+    AmbientKind, AmbientSource, DevicePollCompat, OauthScheme, SchemeGuidance, StaticTokenScheme,
+    TokenValidation,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use omnifs_workspace::provider::{

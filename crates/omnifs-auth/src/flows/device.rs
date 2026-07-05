@@ -2,6 +2,7 @@ use crate::client::OAuthClient;
 use crate::error::AuthError;
 use crate::flows::{credential_entry_from_token, scopes};
 use crate::request::DeviceCodeLoginRequest;
+use omnifs_workspace::authn::DevicePollCompat;
 use omnifs_workspace::creds::CredentialEntry;
 use std::future::Future;
 use std::pin::Pin;
@@ -53,7 +54,7 @@ impl OAuthClient {
         for param in &request.oauth.scheme.extra_token_params {
             token_request = token_request.add_extra_param(&param.key, &param.value);
         }
-        let polling_http = device_polling_http(&self.http);
+        let polling_http = device_polling_http(&self.http, request.flow.device_poll_compat);
         let token = token_request
             .request_async(
                 &polling_http,
@@ -66,17 +67,20 @@ impl OAuthClient {
     }
 }
 
-/// Wraps a [`reqwest::Client`] for device-code polling and rewrites GitHub's
-/// non-RFC-8628 behavior: GitHub returns 200 OK with an error JSON body
-/// (`{"error":"authorization_pending",...}`) while the user is still
+/// Wraps a [`reqwest::Client`] for device-code polling and, when the scheme
+/// declares [`DevicePollCompat::ErrorInOkBody`], rewrites a non-RFC-8628
+/// pending response: the token endpoint returns 200 OK with an error JSON
+/// body (`{"error":"authorization_pending",...}`) while the user is still
 /// approving the device. Without this shim oauth2 5.x parses the 200 as a
 /// success token response, fails the JSON schema check, and the entire poll
 /// loop bails on the first iteration with `Failed to parse server response`.
-fn device_polling_http(http: &reqwest::Client) -> DevicePollingHttp {
-    DevicePollingHttp(http.clone())
+/// A no-op for [`DevicePollCompat::Rfc8628`] (the default), since a
+/// conformant token endpoint never returns 200 while pending.
+fn device_polling_http(http: &reqwest::Client, compat: DevicePollCompat) -> DevicePollingHttp {
+    DevicePollingHttp(http.clone(), compat)
 }
 
-struct DevicePollingHttp(reqwest::Client);
+struct DevicePollingHttp(reqwest::Client, DevicePollCompat);
 
 impl<'c> oauth2::AsyncHttpClient<'c> for DevicePollingHttp {
     type Error = oauth2::HttpClientError<reqwest::Error>;
@@ -85,10 +89,14 @@ impl<'c> oauth2::AsyncHttpClient<'c> for DevicePollingHttp {
 
     fn call(&'c self, request: oauth2::HttpRequest) -> Self::Future {
         let inner = self.0.clone();
+        let compat = self.1;
         Box::pin(async move {
             let response =
                 <reqwest::Client as oauth2::AsyncHttpClient<'_>>::call(&inner, request).await?;
-            Ok(rewrite_pending_to_error_status(response))
+            Ok(match compat {
+                DevicePollCompat::Rfc8628 => response,
+                DevicePollCompat::ErrorInOkBody => rewrite_pending_to_error_status(response),
+            })
         })
     }
 }
@@ -96,8 +104,8 @@ impl<'c> oauth2::AsyncHttpClient<'c> for DevicePollingHttp {
 /// If the response is 200 OK but the JSON body has an `error` field, rewrite
 /// to 400 so oauth2's response handling routes it through the error-response
 /// path (where `authorization_pending` and `slow_down` continue the poll).
-/// Compliant providers never hit this rewrite (they already return 4xx with
-/// an error body), so this is a no-op for everything but GitHub.
+/// Only called when the scheme declares `DevicePollCompat::ErrorInOkBody`;
+/// conformant providers (`Rfc8628`) never reach this function.
 pub(crate) fn rewrite_pending_to_error_status(
     response: oauth2::HttpResponse,
 ) -> oauth2::HttpResponse {

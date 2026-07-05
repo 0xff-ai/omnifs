@@ -8,7 +8,7 @@ pub mod scheme;
 pub use ids::{AccountId, AuthKind, CredentialId, CredentialIdError, SchemeId};
 pub use resolve::SchemeResolveError;
 pub use scheme::{
-    AuthManifest, AuthScheme, ClientSideTokenConfig, DeviceCodeConfig, KeyValue, OAuthFlow,
-    OauthScheme, PkceLoopbackConfig, PkceManualCodeConfig, SchemeGuidance, StaticTokenScheme,
-    TokenEndpointAuthMethod, TokenValidation,
+    AmbientKind, AmbientSource, AuthManifest, AuthScheme, ClientSideTokenConfig, DeviceCodeConfig,
+    DevicePollCompat, KeyValue, OAuthFlow, OauthScheme, PkceLoopbackConfig, PkceManualCodeConfig,
+    SchemeGuidance, StaticTokenScheme, TokenEndpointAuthMethod, TokenValidation,
 };

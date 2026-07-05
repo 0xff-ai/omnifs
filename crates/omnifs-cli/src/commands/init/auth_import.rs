@@ -46,7 +46,7 @@ impl<'a> AuthImportDecision<'a> {
                 token: None,
             });
         }
-        let detected = detect::detect(self.provider_name);
+        let detected = detect::detect(self.auth_manifest);
         if detected.is_empty() {
             return Ok(ImportOutcome {
                 auth: self.default_auth,
@@ -70,11 +70,11 @@ impl<'a> AuthImportDecision<'a> {
     }
 
     /// Semantics:
-    /// - Single detected env credential: prints the credential, asks `[y/N/o for OAuth]`.
-    ///   Default is N (start OAuth). `y` imports; `N` or `o` falls through.
-    /// - Single detected `GhCli` credential: prints the credential, asks
-    ///   `[Y/n/o for OAuth]`. Default is Y (import). `n` or `o` falls through.
-    ///   For write-capable scopes, the warning is printed before the prompt.
+    /// - Single detected credential: prints the credential, asks
+    ///   `[y/N/o for OAuth]`. Default is N (start OAuth). `y` imports; `N` or
+    ///   `o` falls through. The host treats every ambient source the same
+    ///   way regardless of kind (env var or command): only the provider
+    ///   declares where to look, never how much to trust what it finds.
     /// - Multiple detected credentials: uses `inquire::Select` for the user to pick one,
     ///   with OAuth as the last option (default).
     /// - `yes` flag: silently accepts the first detected credential without prompting.
@@ -116,7 +116,7 @@ impl<'a> AuthImportDecision<'a> {
         for (i, cred) in detected.iter().enumerate() {
             let label = format!("[{}]", i + 1);
             if chosen.starts_with(&label) {
-                return token_after_optional_gh_confirmation(cred);
+                return Ok(Some(credential_value(cred)));
             }
         }
         Ok(None)
@@ -129,119 +129,44 @@ fn imported_token_with_notice(credential: &detect::DetectedCredential) -> Secret
             anstream::println!("Importing credential from ${name} (--yes).");
             value.clone()
         },
-        detect::DetectedCredential::GhCli { account, token, .. } => {
-            anstream::println!("Importing credential from gh CLI (@{account}) (--yes).");
-            token.clone()
+        detect::DetectedCredential::Command { note, value } => {
+            anstream::println!("Importing credential from {note} (--yes).");
+            value.clone()
         },
     }
 }
 
 fn prompt_single_import(cred: &detect::DetectedCredential) -> anyhow::Result<Option<SecretString>> {
-    match cred {
-        detect::DetectedCredential::EnvVar { name, value } => {
-            anstream::println!("Detected:");
-            anstream::println!("  • ${name} in environment");
-            anstream::println!();
-            let answer = inquire::Text::new("Import existing credential? [y/N/o for OAuth]")
-                .with_default("N")
-                .prompt()
-                .map_err(|e| anyhow::anyhow!("prompt error: {e}"))?;
-            if answer.trim().eq_ignore_ascii_case("y") {
-                Ok(Some(value.clone()))
-            } else {
-                Ok(None)
-            }
-        },
-        detect::DetectedCredential::GhCli {
-            account,
-            scopes,
-            token,
-        } => {
-            anstream::println!("Detected:");
-            anstream::println!(
-                "  • gh CLI logged in as @{account} (scopes: {})",
-                scopes.join(", ")
-            );
-            anstream::println!();
-            if !confirm_gh_import(account, scopes)? {
-                return Ok(None);
-            }
-            Ok(Some(token.clone()))
-        },
-    }
-}
-
-fn token_after_optional_gh_confirmation(
-    credential: &detect::DetectedCredential,
-) -> anyhow::Result<Option<SecretString>> {
-    match credential {
-        detect::DetectedCredential::GhCli {
-            scopes,
-            account,
-            token,
-        } => {
-            if !confirm_gh_import(account, scopes)? {
-                return Ok(None);
-            }
-            Ok(Some(token.clone()))
-        },
-        detect::DetectedCredential::EnvVar { value, .. } => Ok(Some(value.clone())),
+    anstream::println!("Detected:");
+    anstream::println!("  • {}", credential_label(cred));
+    anstream::println!();
+    let answer = inquire::Text::new("Import existing credential? [y/N/o for OAuth]")
+        .with_default("N")
+        .prompt()
+        .map_err(|e| anyhow::anyhow!("prompt error: {e}"))?;
+    if answer.trim().eq_ignore_ascii_case("y") {
+        Ok(Some(credential_value(cred)))
+    } else {
+        Ok(None)
     }
 }
 
 fn print_detected_header(detected: &[detect::DetectedCredential]) {
     anstream::println!("Detected:");
     for cred in detected {
-        match cred {
-            detect::DetectedCredential::EnvVar { name, .. } => {
-                anstream::println!("  • ${name} in environment");
-            },
-            detect::DetectedCredential::GhCli {
-                account, scopes, ..
-            } => {
-                anstream::println!(
-                    "  • gh CLI logged in as @{account} (scopes: {})",
-                    scopes.join(", ")
-                );
-            },
-        }
+        anstream::println!("  • {}", credential_label(cred));
     }
 }
 
 fn credential_label(cred: &detect::DetectedCredential) -> String {
     match cred {
-        detect::DetectedCredential::EnvVar { name, .. } => format!("${name}"),
-        detect::DetectedCredential::GhCli { account, .. } => {
-            format!("gh CLI (@{account})")
-        },
+        detect::DetectedCredential::EnvVar { name, .. } => format!("${name} in environment"),
+        detect::DetectedCredential::Command { note, .. } => note.clone(),
     }
 }
 
-fn confirm_gh_import(account: &str, scopes: &[String]) -> anyhow::Result<bool> {
-    let write_scopes: Vec<&str> = scopes
-        .iter()
-        .filter(|s| {
-            matches!(
-                s.as_str(),
-                "repo" | "workflow" | "admin:org" | "delete_repo"
-            )
-        })
-        .map(String::as_str)
-        .collect();
-    if !write_scopes.is_empty() {
-        anstream::println!(
-            "These tokens carry write access via '{}' scope(s).",
-            write_scopes.join("', '")
-        );
-        anstream::println!();
-    }
-    let prompt = format!("Import gh CLI credential (@{account})? [Y/n/o for OAuth]");
-    let answer = inquire::Text::new(&prompt)
-        .with_default("y")
-        .prompt()
-        .map_err(|e| anyhow::anyhow!("prompt error: {e}"))?;
-    Ok(matches!(
-        answer.trim().to_ascii_lowercase().as_str(),
-        "y" | "yes"
-    ))
+fn credential_value(cred: &detect::DetectedCredential) -> SecretString {
+    let (detect::DetectedCredential::EnvVar { value, .. }
+    | detect::DetectedCredential::Command { value, .. }) = cred;
+    value.clone()
 }

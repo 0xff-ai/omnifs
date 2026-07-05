@@ -19,7 +19,8 @@ pub(crate) use objects::ItemData;
 use objects::{Comment, Issue, Owner, PullRequest, Repo, WorkflowRun};
 #[cfg(not(target_arch = "wasm32"))]
 use omnifs_sdk::{
-    OauthScheme, ProviderAuthManifest, SchemeGuidance, StaticTokenScheme, TokenValidation,
+    AmbientSource, DevicePollCompat, OauthScheme, ProviderAuthManifest, SchemeGuidance,
+    StaticTokenScheme, TokenValidation,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,7 +50,11 @@ fn auth() -> ProviderAuthManifest {
                 .validation(
                     TokenValidation::get("https://api.github.com/user")
                         .extract([("identity", "/login")]),
-                ),
+                )
+                .ambient([
+                    AmbientSource::env_var("GITHUB_TOKEN"),
+                    AmbientSource::command(["gh", "auth", "token"]).note("gh CLI login"),
+                ]),
             SchemeGuidance::new()
                 .summary(
                     "A classic personal access token; the create link pre-selects the read:user scope.",
@@ -70,7 +75,8 @@ fn auth() -> ProviderAuthManifest {
                 "https://github.com/login/oauth/access_token",
             )
             .inject(["api.github.com"])
-            .client_id("Ov23licogxMDzS47s9sF"),
+            .client_id("Ov23licogxMDzS47s9sF")
+            .device_poll_compat(DevicePollCompat::ErrorInOkBody),
             SchemeGuidance::new().summary(
                 "Approve a one-time code at github.com/login/device using omnifs's GitHub app; nothing to copy back.",
             ),

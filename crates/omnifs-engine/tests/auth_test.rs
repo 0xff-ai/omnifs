@@ -31,6 +31,7 @@ fn github_pat_manifest() -> AuthManifest {
             inject_domains: vec!["api.github.com".to_string()],
             creation_url: None,
             validation: None,
+            ambient_sources: Vec::new(),
         })],
     }
 }
@@ -116,6 +117,7 @@ fn test_auth_manifest_backed_static_token_injection() {
             inject_domains: vec!["api.example.com".to_string()],
             creation_url: None,
             validation: None,
+            ambient_sources: Vec::new(),
         })],
     };
     let store: Arc<dyn CredentialStore> = Arc::new(MemoryStore::default());
@@ -165,6 +167,7 @@ fn test_auth_manifest_backed_static_token_missing_credential_still_requires_auth
             inject_domains: vec!["api.example.com".to_string()],
             creation_url: None,
             validation: None,
+            ambient_sources: Vec::new(),
         })],
     };
 

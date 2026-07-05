@@ -96,6 +96,7 @@ mod tests {
             inject_domains: vec!["api.example.com".to_string()],
             creation_url: None,
             validation: None,
+            ambient_sources: Vec::new(),
         })
     }
 

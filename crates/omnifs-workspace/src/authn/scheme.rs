@@ -7,6 +7,21 @@ pub struct AuthManifest {
     pub schemes: Vec<AuthScheme>,
 }
 
+impl AuthManifest {
+    /// Ambient credential sources declared across this manifest's static-token
+    /// schemes, in declaration order. `omnifs init` interprets these to offer an
+    /// existing token for import.
+    pub fn ambient_sources(&self) -> impl Iterator<Item = &AmbientSource> {
+        self.schemes
+            .iter()
+            .filter_map(|scheme| match scheme {
+                AuthScheme::StaticToken(scheme) => Some(scheme.ambient_sources.iter()),
+                _ => None,
+            })
+            .flatten()
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 #[allow(clippy::large_enum_variant)]
@@ -83,6 +98,37 @@ pub struct StaticTokenScheme {
     pub creation_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub validation: Option<TokenValidation>,
+    /// Places the host may find a token the user already has, so `omnifs init`
+    /// can offer to import it instead of starting a fresh flow. Each source is
+    /// an environment variable or a command to run; the host reads them
+    /// generically, with no provider name baked into the host.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ambient_sources: Vec<AmbientSource>,
+}
+
+/// A place the host can look for a token the user already has for this scheme.
+///
+/// Declared by the provider and interpreted generically by the host: the host
+/// never special-cases a provider by name. The `note` is human-facing text
+/// shown next to the detected credential during `omnifs init`.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AmbientSource {
+    pub kind: AmbientKind,
+    /// Human-facing description of where this credential comes from.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub note: String,
+}
+
+/// The mechanism a host uses to read an ambient credential.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum AmbientKind {
+    /// Read the token from an environment variable.
+    EnvVar { name: String },
+    /// Run a command (argv exec, never a shell) and take its trimmed stdout as
+    /// the token.
+    Command { argv: Vec<String> },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -145,6 +191,30 @@ pub struct ClientSideTokenConfig {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DeviceCodeConfig {
     pub device_authorization_endpoint: String,
+    /// How this provider's token endpoint signals a still-pending authorization
+    /// while the user approves the device. Declares whether the host must apply
+    /// the pending-in-OK-body compatibility rewrite. Defaults to RFC 8628.
+    #[serde(default)]
+    pub device_poll_compat: DevicePollCompat,
+}
+
+/// How a device-code token endpoint reports a still-pending authorization.
+///
+/// RFC 8628 mandates a 4xx response with an `error` body while the user is
+/// still approving. Some providers instead return `200 OK` with the same error
+/// body; the host rewrites those to a 4xx so the poll loop keeps waiting. The
+/// provider declares which behavior its token endpoint exhibits.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum DevicePollCompat {
+    /// Conformant: the token endpoint returns a 4xx status with an error body
+    /// while pending. No host rewrite is applied.
+    #[default]
+    Rfc8628,
+    /// Non-conformant: the token endpoint returns `200 OK` with an error JSON
+    /// body while pending. The host rewrites such responses to `400` so the
+    /// poll loop treats `authorization_pending`/`slow_down` as continue signals.
+    ErrorInOkBody,
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]

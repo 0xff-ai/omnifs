@@ -560,6 +560,9 @@ mod tests {
                     inject_domains: vec![],
                     creation_url: None,
                     validation: None,
+                    ambient_sources: vec![omnifs_workspace::authn::AmbientSource::env_var(
+                        "LINEAR_API_KEY",
+                    )],
                 }),
                 AuthScheme::Oauth(omnifs_workspace::authn::OauthScheme {
                     key: "oauth".to_string(),
@@ -731,6 +734,7 @@ mod tests {
                         inject_domains: domains.clone(),
                         creation_url: None,
                         validation: None,
+                        ambient_sources: Vec::new(),
                     }),
                 ],
             }),

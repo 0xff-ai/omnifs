@@ -11,9 +11,9 @@
 use std::collections::BTreeMap;
 
 use crate::authn::scheme::{
-    AuthScheme, ClientSideTokenConfig, DeviceCodeConfig, OAuthFlow, OauthScheme,
-    PkceLoopbackConfig, SchemeGuidance, StaticTokenScheme, TokenEndpointAuthMethod,
-    TokenValidation,
+    AmbientKind, AmbientSource, AuthScheme, ClientSideTokenConfig, DeviceCodeConfig,
+    DevicePollCompat, OAuthFlow, OauthScheme, PkceLoopbackConfig, SchemeGuidance,
+    StaticTokenScheme, TokenEndpointAuthMethod, TokenValidation,
 };
 use crate::provider::manifest::ProviderAuthManifest;
 
@@ -92,6 +92,7 @@ impl StaticTokenScheme {
             inject_domains: Vec::new(),
             creation_url: None,
             validation: None,
+            ambient_sources: Vec::new(),
         }
     }
 
@@ -125,6 +126,52 @@ impl StaticTokenScheme {
         self.validation = Some(validation);
         self
     }
+
+    /// Declare where the host may find a token the user already has, so
+    /// `omnifs init` can offer to import it instead of starting a fresh flow.
+    #[must_use]
+    pub fn ambient<I>(mut self, sources: I) -> Self
+    where
+        I: IntoIterator<Item = AmbientSource>,
+    {
+        self.ambient_sources = sources.into_iter().collect();
+        self
+    }
+}
+
+impl AmbientSource {
+    /// An ambient source read from an environment variable.
+    #[must_use]
+    pub fn env_var(name: impl Into<String>) -> Self {
+        Self {
+            kind: AmbientKind::EnvVar { name: name.into() },
+            note: String::new(),
+        }
+    }
+
+    /// An ambient source read from a command's trimmed stdout. Declares argv
+    /// only; the host execs it directly, never through a shell.
+    #[must_use]
+    pub fn command<I, S>(argv: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Self {
+            kind: AmbientKind::Command {
+                argv: strings(argv),
+            },
+            note: String::new(),
+        }
+    }
+
+    /// Human-facing description shown next to the detected credential during
+    /// `omnifs init`.
+    #[must_use]
+    pub fn note(mut self, note: impl Into<String>) -> Self {
+        self.note = note.into();
+        self
+    }
 }
 
 impl OauthScheme {
@@ -144,6 +191,7 @@ impl OauthScheme {
             token_endpoint,
             OAuthFlow::DeviceCode(DeviceCodeConfig {
                 device_authorization_endpoint: device_authorization_endpoint.into(),
+                device_poll_compat: DevicePollCompat::Rfc8628,
             }),
         )
     }
@@ -246,6 +294,17 @@ impl OauthScheme {
         S: Into<String>,
     {
         self.default_scopes = strings(scopes);
+        self
+    }
+
+    /// Declare how this scheme's device-code token endpoint signals a pending
+    /// authorization. Only a device-code flow has this behavior, so this is a
+    /// no-op on any other flow.
+    #[must_use]
+    pub fn device_poll_compat(mut self, compat: DevicePollCompat) -> Self {
+        if let OAuthFlow::DeviceCode(config) = &mut self.flow {
+            config.device_poll_compat = compat;
+        }
         self
     }
 }
