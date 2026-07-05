@@ -15,6 +15,10 @@ A single `omnifs` binary is both CLI and daemon. The runtime loop lives behind h
 
 The daemon exposes a REST API whose schema lives in `omnifs-api` and whose checked-in OpenAPI document is generated from the daemon implementation. Credential material is never transmitted on the wire.
 
+The daemon authenticates its control port with a per-start bearer token stored at `<config_dir>/control-token`. It writes the token before the listener serves, overwrites stale files on restart, and keeps the file mode at `0600`. The CLI reads that same host-visible file and attaches `Authorization: Bearer <token>` on every protected control request. In Docker mode, `<config_dir>` is the shared `OMNIFS_HOME` bind mount, so the host CLI reads the token file written by the in-container daemon.
+
+`GET /v1/ready` is the only unauthenticated control route. Every other route, including `/v1/events`, snapshot export routes, and future routes, is authenticated by default through the daemon router middleware. Missing or wrong bearer tokens fail closed with HTTP 401 and an `ApiError` whose code is `Unauthorized`.
+
 The control API may expose operational state that contains no secrets. `GET /v1/credentials` reports registered credential ids, coarse health, expiry, and scopes only; it never reports access tokens, refresh tokens, client secrets, or header material. `POST /v1/credentials/{id}/reload` reloads a registered credential from the host store and returns the same non-secret status shape. `GET /v1/providers` reports the installed provider catalog by provider name, retained artifact content hashes, and the latest artifact pointer.
 
 Mount wire payloads distinguish provider identity from provider naming. `provider_name` is the human/catalog slug used by credentials and UX. `provider_id` is the pinned provider content hash for the exact artifact the mount runs.

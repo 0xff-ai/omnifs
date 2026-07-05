@@ -22,6 +22,7 @@ const DEFAULT_HOME_SUBDIR: &str = ".omnifs";
 // flat shape.
 pub const CONFIG_FILE: &str = "config.toml";
 pub const CREDENTIALS_FILE: &str = "credentials.json";
+pub const CONTROL_TOKEN_FILE: &str = "control-token";
 pub const MOUNTS_SUBDIR: &str = "mounts";
 pub const PROVIDERS_SUBDIR: &str = "providers";
 pub const CACHE_SUBDIR: &str = "cache";
@@ -112,6 +113,11 @@ impl WorkspaceLayout {
     /// `omnifs down`, so the producer and consumer cannot drift.
     pub fn nfs_state_dir(&self) -> PathBuf {
         self.cache_dir.join(NFS_STATE_SUBDIR)
+    }
+
+    /// Bearer token file for the daemon control port (`<config_dir>/control-token`).
+    pub fn control_token_file(&self) -> PathBuf {
+        self.config_dir.join(CONTROL_TOKEN_FILE)
     }
 
     pub fn provider_path(&self, provider: &str) -> PathBuf {
@@ -213,6 +219,10 @@ impl<Role> Workspace<Role> {
 
     pub fn nfs_state_dir(&self) -> PathBuf {
         self.layout.nfs_state_dir()
+    }
+
+    pub fn control_token_file(&self) -> PathBuf {
+        self.layout.control_token_file()
     }
 
     pub fn display_path(&self, path: &Path) -> String {

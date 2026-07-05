@@ -793,6 +793,7 @@
       "ErrorCode": {
         "type": "string",
         "enum": [
+          "unauthorized",
           "auth_required",
           "credential_not_found",
           "consent_required",

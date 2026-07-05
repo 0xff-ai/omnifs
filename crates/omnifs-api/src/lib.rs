@@ -20,7 +20,7 @@ pub const API_MAJOR: u16 = 3;
 
 /// Control API minor version. The CLI warns but proceeds when the daemon's
 /// minor differs. Bump for additive, backward-compatible additions.
-pub const API_MINOR: u16 = 1;
+pub const API_MINOR: u16 = 2;
 
 /// Docker container name environment variable set by launchers and read by the
 /// daemon when reporting backend identity.
@@ -51,6 +51,7 @@ pub struct ApiError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
+    Unauthorized,
     AuthRequired,
     CredentialNotFound,
     ConsentRequired,

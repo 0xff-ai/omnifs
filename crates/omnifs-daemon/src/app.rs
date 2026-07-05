@@ -162,11 +162,13 @@ pub fn run(args: DaemonArgs) -> anyhow::Result<()> {
     let frontend = context.frontend();
     let frontends = frontends::Frontend::from_context(&context, Arc::clone(&registry));
     let listener = context.bind_control_listener()?;
+    let control_token = server::ControlToken::generate(context.control_token_file())?;
     let daemon = Arc::new(server::Daemon::new(
         context,
         Arc::clone(&registry),
         sink,
         frontends,
+        control_token,
     ));
     daemon.spawn_control(listener, &rt)?;
 
@@ -218,6 +220,7 @@ pub fn run(args: DaemonArgs) -> anyhow::Result<()> {
     refresh_loop.abort();
     registry.shutdown_all();
     telemetry.daemon_event(DaemonEvent::DaemonStop, telemetry_backend, served_mounts);
+    daemon.remove_control_token();
     serve_result?;
     Ok(())
 }

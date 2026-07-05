@@ -79,11 +79,16 @@ pub fn run_plain(source: SourceKind) -> anyhow::Result<()> {
                 emit_plain_line(&line);
             }
         },
-        SourceKind::Socket { addr, record } => {
+        SourceKind::Socket {
+            addr,
+            record,
+            token_file,
+        } => {
             anstream::eprintln!("omnifs inspect: connecting to {addr}...");
             let event_source = EventSource::spawn(SourceKind::Socket {
                 addr: addr.clone(),
                 record,
+                token_file,
             });
             while let Some(message) = event_source.recv() {
                 match message {

@@ -47,7 +47,7 @@ impl Workspace {
 
     pub(crate) fn from_home(home: HomeWorkspace) -> Self {
         let catalog = Catalog::open(home.providers_dir());
-        let daemon = DaemonClient::new();
+        let daemon = DaemonClient::for_layout(home.layout());
         Self {
             home,
             catalog,

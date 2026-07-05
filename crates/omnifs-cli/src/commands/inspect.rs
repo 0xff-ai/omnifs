@@ -45,15 +45,18 @@ impl InspectArgs {
                 "replay".to_string(),
             )
         } else {
-            let container = self.resolve_container()?;
+            let workspace = Workspace::resolve()?;
+            let container = self.resolve_container(&workspace)?;
             check_record_path(self.record.as_deref())?;
             let addr = daemon_addr();
+            let token_file = workspace.layout().control_token_file();
             let label = container.as_str().to_string();
             (
                 ConnectionMode::Inspector,
                 SourceKind::Socket {
                     addr,
                     record: self.record.clone(),
+                    token_file,
                 },
                 label,
             )
@@ -69,18 +72,25 @@ impl InspectArgs {
         if let Some(path) = self.replay {
             return run_plain(SourceKind::Replay(path));
         }
-        Workspace::resolve()?.daemon().require_compatible().await?;
-        let _container = self.resolve_container()?;
+        let workspace = Workspace::resolve()?;
+        workspace.daemon().require_compatible().await?;
+        let _container = self.resolve_container(&workspace)?;
         check_record_path(self.record.as_deref())?;
         let addr = daemon_addr();
         let record = self.record.clone();
-        tokio::task::spawn_blocking(move || run_plain(SourceKind::Socket { addr, record }))
-            .await
-            .context("inspector plain task")?
+        let token_file = workspace.layout().control_token_file();
+        tokio::task::spawn_blocking(move || {
+            run_plain(SourceKind::Socket {
+                addr,
+                record,
+                token_file,
+            })
+        })
+        .await
+        .context("inspector plain task")?
     }
 
-    fn resolve_container(&self) -> anyhow::Result<ContainerName> {
-        let workspace = Workspace::resolve()?;
+    fn resolve_container(&self, workspace: &Workspace) -> anyhow::Result<ContainerName> {
         let config = workspace.config()?;
         DockerTarget::resolve_container_name(self.container_name.clone(), &config)
     }

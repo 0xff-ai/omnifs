@@ -5,10 +5,12 @@
 //! inspector event stream over HTTP on the control listener. See
 //! `docs/contracts/50-control-plane.md`.
 
+use anyhow::Context as _;
 use axum::Router;
 use axum::body::Body;
-use axum::extract::{Path as UrlPath, State};
-use axum::http::{StatusCode, header};
+use axum::extract::{Path as UrlPath, Request, State};
+use axum::http::{Method, StatusCode, header};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Json, Response};
 use omnifs_api::{
     AddedField, ApiError, AuthDelta, AuthSchemeSurface, AuthSurface, CapabilityChange,
@@ -30,7 +32,9 @@ use omnifs_workspace::mounts::{Name as MountName, Registry, Spec, UpgradePlan};
 use omnifs_workspace::provider::{Catalog, CatalogError, Provider};
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
-use std::path::Path;
+use std::io::Write as _;
+use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use time::format_description::well_known::Rfc3339;
 use tokio_stream::StreamExt as _;
@@ -43,6 +47,76 @@ use utoipa_axum::routes;
 
 use crate::context::DaemonContext;
 use crate::frontends::Frontend;
+
+const CONTROL_TOKEN_BYTES: usize = 32;
+const BEARER_PREFIX: &str = "Bearer ";
+
+#[derive(Clone)]
+pub(crate) struct ControlToken {
+    path: Arc<PathBuf>,
+    value: Arc<str>,
+}
+
+impl ControlToken {
+    pub(crate) fn generate(path: PathBuf) -> anyhow::Result<Self> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let mut random = [0_u8; CONTROL_TOKEN_BYTES];
+        getrandom::fill(&mut random).context("generate daemon control token")?;
+        let value = hex::encode(random);
+
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .mode(0o600)
+            .open(&path)
+            .with_context(|| format!("create control token file {}", path.display()))?;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("set control token file mode {}", path.display()))?;
+        file.write_all(value.as_bytes())
+            .with_context(|| format!("write control token file {}", path.display()))?;
+        file.flush()
+            .with_context(|| format!("flush control token file {}", path.display()))?;
+
+        Ok(Self {
+            path: Arc::new(path),
+            value: Arc::from(value),
+        })
+    }
+
+    fn authorizes(&self, headers: &axum::http::HeaderMap) -> bool {
+        let Some(presented) = headers
+            .get(header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix(BEARER_PREFIX))
+        else {
+            return false;
+        };
+
+        constant_time_eq::constant_time_eq(presented.as_bytes(), self.value.as_bytes())
+    }
+
+    fn remove_file(&self) {
+        match std::fs::remove_file(self.path.as_ref()) {
+            Ok(()) => {},
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+            Err(error) => {
+                warn!(%error, path = %self.path.display(), "failed to remove control token file");
+            },
+        }
+    }
+
+    #[cfg(test)]
+    fn from_test_value(value: impl Into<Arc<str>>) -> Self {
+        Self {
+            path: Arc::new(PathBuf::from("control-token")),
+            value: value.into(),
+        }
+    }
+}
 
 #[derive(OpenApi)]
 #[openapi(
@@ -90,6 +164,7 @@ pub struct Daemon {
     registry: Arc<MountRuntimes>,
     sink: Option<Arc<InspectorSink>>,
     frontends: Frontend,
+    control_token: ControlToken,
     /// The last reconcile's failed mounts, surfaced in `status` so a dark mount
     /// is visible with its reason instead of silently absent.
     last_failed: std::sync::Mutex<Vec<MountFailure>>,
@@ -101,12 +176,14 @@ impl Daemon {
         registry: Arc<MountRuntimes>,
         sink: Option<Arc<InspectorSink>>,
         frontends: Frontend,
+        control_token: ControlToken,
     ) -> Self {
         Self {
             context,
             registry,
             sink,
             frontends,
+            control_token,
             last_failed: std::sync::Mutex::new(Vec::new()),
         }
     }
@@ -135,6 +212,10 @@ impl Daemon {
 
     pub fn serve(&self, rt: &tokio::runtime::Handle) -> anyhow::Result<()> {
         self.frontends.serve(rt)
+    }
+
+    pub fn remove_control_token(&self) {
+        self.control_token.remove_file();
     }
 
     fn control_status(&self) -> DaemonStatus {
@@ -386,10 +467,15 @@ impl Daemon {
     }
 
     fn router(state: Arc<Self>) -> Router {
+        let control_token = state.control_token.clone();
         let (router, _) = Self::api_router().with_state(state).split_for_parts();
         router
             .fallback(route_not_found)
             .method_not_allowed_fallback(method_not_allowed)
+            .layer(middleware::from_fn_with_state(
+                control_token,
+                authenticate_control_request,
+            ))
     }
 }
 
@@ -906,6 +992,30 @@ async fn events(State(daemon): State<Arc<Daemon>>) -> Response {
     daemon.event_stream()
 }
 
+async fn authenticate_control_request(
+    State(control_token): State<ControlToken>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if request.method() == Method::GET && request.uri().path() == "/v1/ready" {
+        return next.run(request).await;
+    }
+
+    if control_token.authorizes(request.headers()) {
+        next.run(request).await
+    } else {
+        unauthorized_response()
+    }
+}
+
+fn unauthorized_response() -> Response {
+    error_response(
+        StatusCode::UNAUTHORIZED,
+        ErrorCode::Unauthorized,
+        "control API authorization required",
+    )
+}
+
 async fn route_not_found() -> Response {
     error_response(
         StatusCode::NOT_FOUND,
@@ -1126,7 +1236,14 @@ fn record_line(record: &omnifs_api::events::InspectorRecord) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use axum::http::StatusCode;
+    use axum::Router;
+    use axum::body::{Body, to_bytes};
+    use axum::http::{StatusCode, header};
+    use axum::middleware;
+    use axum::routing::get;
+    use omnifs_api::{ApiError, ErrorCode};
+    use std::os::unix::fs::PermissionsExt as _;
+    use tower::ServiceExt as _;
 
     #[test]
     fn checked_in_openapi_matches_implementation() {
@@ -1168,6 +1285,92 @@ mod tests {
             response.headers().get(axum::http::header::RETRY_AFTER),
             Some(&axum::http::HeaderValue::from_static("2"))
         );
+    }
+
+    #[tokio::test]
+    async fn control_auth_protects_everything_except_ready() {
+        let token = super::ControlToken::from_test_value("right-token");
+        let app = Router::new()
+            .route("/v1/ready", get(|| async { StatusCode::OK }))
+            .route("/v1/status", get(|| async { StatusCode::NO_CONTENT }))
+            .layer(middleware::from_fn_with_state(
+                token,
+                super::authenticate_control_request,
+            ));
+
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/v1/ready")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/v1/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let body = to_bytes(response.into_body(), 1024).await.unwrap();
+        let error: ApiError = serde_json::from_slice(&body).unwrap();
+        assert_eq!(error.code, ErrorCode::Unauthorized);
+
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/v1/status")
+                    .header(header::AUTHORIZATION, "Bearer wrong-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/v1/status")
+                    .header(header::AUTHORIZATION, "Bearer right-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[test]
+    fn control_token_file_is_0600_and_regenerated() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("control-token");
+
+        let first = super::ControlToken::generate(path.clone()).unwrap();
+        let first_value = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(first_value.as_str(), first.value.as_ref());
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+
+        let second = super::ControlToken::generate(path.clone()).unwrap();
+        let second_value = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(second_value.as_str(), second.value.as_ref());
+        assert_ne!(first_value, second_value);
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+
+        second.remove_file();
+        assert!(!path.exists());
     }
 
     #[test]
