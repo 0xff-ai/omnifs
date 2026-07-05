@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use crate::cache::{Record as CacheRecord, RecordKind};
 use crate::ops::namespace::{ReadBytes, ReadOutcome};
 use crate::pagination::NextPageOutcome;
+use crate::render::MATERIALIZE_MAX_BYTES;
 use crate::view as view_types;
 use crate::view::{AttrPayload, EntryMeta, FileAttrsCache, FilePayload, LookupPayload};
 use crate::{EngineError, Runtime};
@@ -160,6 +161,7 @@ impl Tree {
         let attr_store = FileAttrStore::new(&runtime, path);
         let projected_attrs = attr_store.cached().or_else(|| node.attrs().cloned());
         let attrs = projected_attrs.as_ref();
+        enforce_declared_materialize_cap(path, attrs)?;
 
         // Exact-0 short-circuit: a file the projection sizes at exactly zero is
         // empty without any provider call.
@@ -180,6 +182,7 @@ impl Tree {
             && let Some(bytes) = attrs.inline_bytes()
         {
             let data = bytes.to_vec();
+            enforce_observed_materialize_cap(path, data.len())?;
             let attrs = attrs
                 .learned_complete_content_attrs(data.len())
                 .map_err(|error| {
@@ -265,7 +268,7 @@ impl Tree {
     ) -> Result<ReadResult> {
         match content {
             SyntheticContent::Fixed(bytes) => Ok(ReadResult::Bytes {
-                data: bytes.clone(),
+                data: materialized_bytes(node.path(), bytes.clone())?,
                 attrs: node.attrs().cloned(),
                 content_type: None,
             }),
@@ -298,6 +301,7 @@ impl Tree {
                     .cache()
                     .mem_invalidate(&parent, RecordKind::Dirents, None);
                 let bytes = status.into_bytes();
+                enforce_observed_materialize_cap(node.path(), bytes.len())?;
                 let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
                 Ok(ReadResult::Bytes {
                     data: bytes,
@@ -330,6 +334,7 @@ fn finish_read(
             "read for {path} could not resolve its byte source"
         )));
     };
+    enforce_observed_materialize_cap(path, data.len())?;
 
     let attrs_cache = result_attrs
         .learned_complete_content_attrs(data.len())
@@ -466,6 +471,7 @@ fn read_result_from_cache(
     attrs: Option<&FileAttrsCache>,
 ) -> Result<ReadResult> {
     let content_len = payload.content.len();
+    enforce_observed_materialize_cap(path, content_len)?;
     let attrs = attrs
         .map(|attrs| {
             attrs
@@ -482,4 +488,40 @@ fn read_result_from_cache(
         attrs,
         content_type: payload.content_type,
     })
+}
+
+pub(crate) fn enforce_declared_materialize_cap(
+    path: &omnifs_core::path::Path,
+    attrs: Option<&FileAttrsCache>,
+) -> Result<()> {
+    let Some(attrs) = attrs else {
+        return Ok(());
+    };
+    if !attrs.is_deferred_full() {
+        return Ok(());
+    }
+    let view_types::FileSize::Exact(size) = attrs.size() else {
+        return Ok(());
+    };
+    if size <= MATERIALIZE_MAX_BYTES {
+        return Ok(());
+    }
+    Err(TreeError::too_large(format!(
+        "full read for {path} declares {size} bytes, above materialize cap {MATERIALIZE_MAX_BYTES}"
+    )))
+}
+
+fn enforce_observed_materialize_cap(path: &omnifs_core::path::Path, size: usize) -> Result<()> {
+    let size = u64::try_from(size).unwrap_or(u64::MAX);
+    if size <= MATERIALIZE_MAX_BYTES {
+        return Ok(());
+    }
+    Err(TreeError::too_large(format!(
+        "full read for {path} materialized {size} bytes, above cap {MATERIALIZE_MAX_BYTES}"
+    )))
+}
+
+fn materialized_bytes(path: &omnifs_core::path::Path, data: Vec<u8>) -> Result<Vec<u8>> {
+    enforce_observed_materialize_cap(path, data.len())?;
+    Ok(data)
 }

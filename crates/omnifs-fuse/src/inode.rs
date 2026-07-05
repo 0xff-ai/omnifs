@@ -7,7 +7,11 @@ use crate::Frontend;
 use crate::common::InodeBody;
 use fuser::{FileAttr, FileType, INodeNo};
 use omnifs_core::path::Path;
-use omnifs_engine::render::PathKey;
+#[cfg(test)]
+use omnifs_engine::render::PathToInode;
+use omnifs_engine::render::{
+    BackingKind, BackingMetadata, BodyUpdate, IdentityEntry, IdentitySeed, PathKey,
+};
 use omnifs_engine::view::{EntryKind, EntryMeta, FileAttrsCache};
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
@@ -28,74 +32,7 @@ fn current_gid() -> u32 {
 }
 
 /// Tracks the per-node state keyed by inode number for a provider mount.
-pub(crate) struct NodeEntry {
-    pub(crate) mount_name: String,
-    pub(crate) path: Path,
-    pub(crate) kind: EntryKind,
-    pub(crate) attrs: Option<FileAttrsCache>,
-    pub(crate) size: u64,
-    pub(crate) body: InodeBody,
-}
-
-impl NodeEntry {
-    pub(crate) fn meta(&self) -> EntryMeta {
-        match self.kind {
-            EntryKind::Directory => EntryMeta::directory(),
-            EntryKind::File => match self.attrs.clone() {
-                Some(attrs) => EntryMeta::file(attrs),
-                None => EntryMeta::file_without_attrs(),
-            },
-        }
-    }
-
-    fn refresh(
-        &mut self,
-        incoming_kind: EntryKind,
-        incoming_attrs: Option<&FileAttrsCache>,
-        fallback_size: u64,
-    ) {
-        let attrs = self.refreshed_attrs(incoming_kind, incoming_attrs);
-        let size = attrs
-            .as_ref()
-            .map_or(fallback_size, FileAttrsCache::st_size);
-
-        self.kind = incoming_kind;
-        self.attrs = attrs;
-        self.size = size;
-    }
-
-    fn refreshed_attrs(
-        &self,
-        incoming_kind: EntryKind,
-        incoming_attrs: Option<&FileAttrsCache>,
-    ) -> Option<FileAttrsCache> {
-        match (self.attrs.as_ref(), incoming_attrs) {
-            (Some(existing), Some(incoming)) => {
-                // Keep the real, read-observed attrs when a silent refresh must
-                // not erase a learned size; otherwise take the incoming attrs.
-                let refreshed = if existing.keeps_learned_size_over(incoming) {
-                    existing.clone()
-                } else {
-                    incoming.clone()
-                };
-                Some(refreshed)
-            },
-            // A refresh that carries no attributes (a listing entry with only a
-            // kind) is silent about size, so keep the attrs (and learned size)
-            // we already hold for a file. Subtree files re-`stat` at getattr,
-            // so a stale value here never reaches them.
-            (Some(existing), None)
-                if matches!(
-                    (self.kind, incoming_kind),
-                    (EntryKind::File, EntryKind::File)
-                ) =>
-            {
-                Some(existing.clone())
-            },
-            (_, incoming) => incoming.cloned(),
-        }
-    }
-}
+pub(crate) type NodeEntry = IdentityEntry<EntryKind, InodeBody>;
 
 /// What the caller knows about an inode allocation, which drives how the inode
 /// body is updated on an existing node.
@@ -118,12 +55,6 @@ pub(crate) enum NodeOrigin {
 }
 
 /// How an inode refresh updates the body of an existing node.
-enum BodyUpdate {
-    Set(InodeBody),
-    #[cfg(test)]
-    Keep,
-}
-
 impl NodeOrigin {
     fn body_on_insert(&self) -> InodeBody {
         match self {
@@ -135,13 +66,13 @@ impl NodeOrigin {
         }
     }
 
-    fn body_update(&self) -> BodyUpdate {
+    fn body_update(&self) -> BodyUpdate<InodeBody> {
         match self {
             #[cfg(test)]
             NodeOrigin::Refresh => BodyUpdate::Keep,
-            NodeOrigin::Provider => BodyUpdate::Set(InodeBody::Provider),
-            NodeOrigin::Subtree(path) => BodyUpdate::Set(InodeBody::Subtree(path.clone())),
-            NodeOrigin::Synthetic => BodyUpdate::Set(InodeBody::Synthetic),
+            NodeOrigin::Provider => BodyUpdate::Merge(InodeBody::Provider),
+            NodeOrigin::Subtree(path) => BodyUpdate::Merge(InodeBody::Subtree(path.clone())),
+            NodeOrigin::Synthetic => BodyUpdate::Merge(InodeBody::Synthetic),
         }
     }
 }
@@ -248,44 +179,17 @@ impl Frontend {
         origin: &NodeOrigin,
     ) -> u64 {
         let key = PathKey::with_mount_str(mount_name, path.clone()).expect("runtime mount name");
-        // Use entry API to atomically check-or-insert, avoiding a race where
-        // two concurrent lookups for the same (mount, path) allocate different inodes.
-        // Use and_modify to update kind/size on existing entries (stale inode fix).
-        let incoming_attrs = attrs;
-        let body_on_insert = origin.body_on_insert();
-        let body_update = origin.body_update();
-        *self
-            .path_to_inode
-            .entry(key)
-            .and_modify(|existing_ino| {
-                if let Some(mut entry) = self.inodes.get_mut(existing_ino) {
-                    entry.refresh(kind, incoming_attrs.as_ref(), size);
-                    // A genuine resolution overrides the prior body, so a
-                    // `.gitignore` that later appears in the provider stops
-                    // being host-synthesized. An origin-agnostic refresh must
-                    // not demote a still-synthetic node.
-                    match &body_update {
-                        BodyUpdate::Set(body) => entry.body = body.clone(),
-                        #[cfg(test)]
-                        BodyUpdate::Keep => {},
-                    }
-                }
-            })
-            .or_insert_with(|| {
-                let ino = self.alloc_ino();
-                self.inodes.insert(
-                    ino,
-                    NodeEntry {
-                        mount_name: mount_name.to_string(),
-                        path: path.clone(),
-                        kind,
-                        attrs: incoming_attrs.clone(),
-                        size,
-                        body: body_on_insert.clone(),
-                    },
-                );
-                ino
-            })
+        let seed = IdentitySeed::new(
+            mount_name,
+            path.clone(),
+            kind,
+            attrs,
+            size,
+            origin.body_on_insert(),
+        )
+        .with_body_update(origin.body_update());
+        self.path_to_inode
+            .get_or_alloc(key, seed, || self.alloc_ino())
     }
 
     #[allow(clippy::unused_self)]
@@ -335,28 +239,24 @@ impl Frontend {
     /// Build a `FileAttr` from real filesystem metadata.
     #[allow(clippy::unused_self)]
     pub(crate) fn attr_from_metadata(&self, ino: u64, meta: &std::fs::Metadata) -> FileAttr {
-        let kind = if meta.is_dir() {
-            FileType::Directory
-        } else if meta.is_symlink() {
-            FileType::Symlink
-        } else {
-            FileType::RegularFile
+        let backing = BackingMetadata::from_metadata(meta);
+        let kind = match backing.kind {
+            BackingKind::Directory => FileType::Directory,
+            BackingKind::Symlink => FileType::Symlink,
+            BackingKind::File | BackingKind::Other => FileType::RegularFile,
         };
-        let perm = if meta.is_dir() { 0o555 } else { 0o444 };
-        let nlink = if meta.is_dir() { 2 } else { 1 };
-        let now = SystemTime::now();
 
         FileAttr {
             ino: INodeNo(ino),
-            size: meta.len(),
-            blocks: meta.len().div_ceil(512),
-            atime: meta.accessed().unwrap_or(now),
-            mtime: meta.modified().unwrap_or(now),
-            ctime: meta.modified().unwrap_or(now),
-            crtime: meta.created().unwrap_or(now),
+            size: backing.len,
+            blocks: backing.blocks,
+            atime: backing.accessed,
+            mtime: backing.modified,
+            ctime: backing.modified,
+            crtime: backing.created,
             kind,
-            perm,
-            nlink,
+            perm: u16::try_from(backing.mode).unwrap_or(0o444),
+            nlink: backing.nlink,
             uid: current_uid(),
             gid: current_gid(),
             rdev: 0,
@@ -397,12 +297,27 @@ mod tests {
             kind: EntryKind::File,
             attrs: Some(attrs),
             size,
+            size_exact: true,
             body: InodeBody::Provider,
+            extra: (),
         }
     }
 
     fn refresh_file(entry: &mut NodeEntry, incoming: &FileAttrsCache) {
-        entry.refresh(EntryKind::File, Some(incoming), incoming.st_size());
+        let table = PathToInode::<InodeBody>::new();
+        let key = PathKey::with_mount_str("test", entry.path.clone()).unwrap();
+        table.insert_key(key.clone(), 1);
+        table.insert_entry(1, entry.clone());
+        let seed = IdentitySeed::new(
+            "test",
+            entry.path.clone(),
+            EntryKind::File,
+            Some(incoming.clone()),
+            incoming.st_size(),
+            InodeBody::Provider,
+        );
+        assert_eq!(table.get_or_alloc(key, seed, || 2), 1);
+        *entry = table.get(&1).expect("refreshed entry").clone();
     }
 
     struct RefreshCase {

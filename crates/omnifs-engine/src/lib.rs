@@ -34,8 +34,8 @@ pub use runtime::{BuildError, EngineError, HostContext, Runtime as Engine};
 pub use serving::ServingContext;
 pub use tree::{
     Chunk, Cursor, Entry, EntryOrigin, InvalidationReport, ListOutcome, Listing, Node, NodeBody,
-    PaginationControl, RangedHandle, ReadResult, RequestCtx, Synthetic, SyntheticContent, Tree,
-    TreeError, TreeErrorKind, spawn_live_follow_pump,
+    PaginationControl, RangedHandle, ReadResult, RequestCtx, RetryClass, Synthetic,
+    SyntheticContent, Tree, TreeError, TreeErrorKind, spawn_live_follow_pump,
 };
 
 pub(crate) use auth_inject as auth;

@@ -319,6 +319,7 @@ impl Frontend {
             return;
         };
         entry.size = attrs.st_size();
+        entry.size_exact = attrs.has_exact_size();
         entry.attrs = Some(attrs);
     }
 
@@ -335,6 +336,7 @@ impl Frontend {
             return;
         }
         entry.size = observed_end;
+        entry.size_exact = true;
         if let Some(attrs) = entry.attrs.take() {
             entry.attrs = Some(attrs.with_exact_size(observed_end));
         }
@@ -360,12 +362,7 @@ impl Frontend {
             mount_name,
             provider_handle,
             observed_end,
-            move |new_end| {
-                follow_sizes
-                    .entry(ino)
-                    .and_modify(|current| *current = (*current).max(new_end))
-                    .or_insert(new_end);
-            },
+            move |new_end| follow_sizes.grow(ino, new_end),
         );
         self.follow_pumps.insert(fh, pump);
     }

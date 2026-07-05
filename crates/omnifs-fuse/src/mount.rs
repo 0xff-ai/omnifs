@@ -3,8 +3,8 @@
 //! Provides `run_blocking` to start the FUSE filesystem and
 //! `unmount` for clean teardown via fusermount.
 
+use crate::common::InodeBody;
 use crate::{Frontend, NotifierHandle};
-use dashmap::DashMap;
 use fuser::Session;
 use omnifs_engine::MountRuntimes;
 use omnifs_engine::render::PathToInode;
@@ -25,7 +25,7 @@ pub fn run_blocking(
     notifier: &NotifierHandle,
 ) -> Result<(), Error> {
     // Create shared path_to_inode map for invalidation.
-    let path_to_inode: Arc<PathToInode> = Arc::new(DashMap::new());
+    let path_to_inode: Arc<PathToInode<InodeBody>> = Arc::new(PathToInode::new());
 
     let fs = Frontend::new_with_path_map_and_notifier(
         rt.clone(),

@@ -21,14 +21,14 @@ use crate::export::{
     Attr, DirEntry, DirListing, NodeKind, OpenRead, OpenResult, OpenSeed, OpenTable,
     ReadOnlyExport, StateId, Status, StatusResult, ensure_read_access, open_data_slice,
 };
-use crate::protocol::consts::{
-    EXPORT_ROOT_ID, MAX_NFS_READ_BYTES, NFS_EXPORT_NAME, OPEN_MATERIALIZE_MAX_BYTES, ROOT_ID,
-};
-use dashmap::DashMap;
+use crate::protocol::consts::{EXPORT_ROOT_ID, MAX_NFS_READ_BYTES, NFS_EXPORT_NAME, ROOT_ID};
 use omnifs_core::path::{Path, Segment};
 use omnifs_engine::Engine;
 use omnifs_engine::MountRuntimes;
-use omnifs_engine::render::PathKey;
+use omnifs_engine::render::{
+    BackingKind, BackingMetadata, BodyUpdate, FollowSizeTable, IdentityBody, IdentityEntry,
+    IdentityKind, IdentitySeed, IdentityTable, PathKey, stale_ids,
+};
 use omnifs_engine::view as view_types;
 use omnifs_engine::view::{EntryMeta, FileAttrsCache};
 use omnifs_engine::{
@@ -61,19 +61,15 @@ const NFS_INLINE_BUDGET: Duration = Duration::from_millis(75);
 /// it carries the stable identity a `(generation, id)` filehandle rehydrates
 /// from, plus a learned-attrs slot so a size promoted by a `read`/`open` survives
 /// across ops. It is NOT a cache of provider data; `Tree` owns all caching.
+type NodeEntry = IdentityEntry<NodeKind, EntryBody, EntryState>;
+type InodeTable = IdentityTable<u64, EntryBody, ObjectKey, NodeKind, EntryState>;
+
 #[derive(Debug, Clone)]
-struct NodeEntry {
+struct EntryState {
     /// Which export root this inode hangs under (`ROOT_ID` or `EXPORT_ROOT_ID`).
     /// The same protocol path under the two roots gets two distinct inodes.
     scope: u64,
-    mount_name: String,
-    path: Path,
     parent: u64,
-    kind: NodeKind,
-    size: u64,
-    size_exact: bool,
-    attrs: Option<FileAttrsCache>,
-    body: EntryBody,
 }
 
 #[derive(Debug, Clone)]
@@ -103,6 +99,30 @@ impl EntryBody {
     }
 }
 
+impl IdentityBody for EntryBody {
+    fn is_provider_resolution(&self) -> bool {
+        matches!(self, Self::Provider)
+    }
+
+    fn is_synthetic_marker(&self) -> bool {
+        matches!(self, Self::Synthetic(_))
+    }
+
+    fn preserves_over_provider_resolution(&self) -> bool {
+        matches!(self, Self::Subtree(_))
+    }
+
+    fn clears_attrs_and_forces_exact_size(&self) -> bool {
+        matches!(self, Self::Subtree(_))
+    }
+}
+
+impl IdentityKind for NodeKind {
+    fn is_file(self) -> bool {
+        self == NodeKind::File
+    }
+}
+
 struct EntrySeed<'a> {
     scope: u64,
     mount_name: &'a str,
@@ -126,28 +146,6 @@ struct RangedOpen {
     /// Background pump that learns live (`tail -f`) growth into `follow_sizes`,
     /// aborted when this open is torn down. `None` for a non-live ranged file.
     follow_pump: Option<tokio::task::AbortHandle>,
-}
-
-#[derive(Debug, Default)]
-struct FollowSizes {
-    sizes: DashMap<u64, u64>,
-}
-
-impl FollowSizes {
-    fn grow(&self, ino: u64, size: u64) {
-        self.sizes
-            .entry(ino)
-            .and_modify(|current| *current = (*current).max(size))
-            .or_insert(size);
-    }
-
-    fn get(&self, ino: u64) -> Option<u64> {
-        self.sizes.get(&ino).map(|entry| *entry.value())
-    }
-
-    fn remove(&self, ino: u64) {
-        self.sizes.remove(&ino);
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -201,8 +199,8 @@ pub struct Export {
     /// stays inline (see `lookup_via_tree`). Reactive transient-error `DELAY` is
     /// separate (`Status::from`); it does not use this table.
     delayed_lists: Listings,
-    inodes: DashMap<u64, NodeEntry>,
-    path_to_inode: DashMap<ObjectKey, u64>,
+    inodes: Arc<InodeTable>,
+    path_to_inode: Arc<InodeTable>,
     next_ino: AtomicU64,
     root_mount: Option<String>,
     opens: OpenTable<OpenBody>,
@@ -210,7 +208,7 @@ pub struct Export {
     /// `attr` reports `max(entry.size, follow_sizes[ino])` so a polling `tail -f`
     /// over the `noac` mount re-stats, sees growth, and reads the new bytes.
     /// Shared into the spawned pump task, so `Arc`.
-    follow_sizes: Arc<FollowSizes>,
+    follow_sizes: Arc<FollowSizeTable>,
 }
 
 impl Export {
@@ -224,26 +222,28 @@ impl Export {
         );
         let delayed_lists = Listings::new(rt.clone());
         let root_mount = registry.root_mount_name();
-        let inodes = DashMap::new();
-        let path_to_inode = DashMap::new();
+        let inodes = Arc::new(InodeTable::new());
+        let path_to_inode = Arc::clone(&inodes);
         let mount = root_mount.clone().unwrap_or_default();
         for scope in [ROOT_ID, EXPORT_ROOT_ID] {
-            inodes.insert(
+            inodes.insert_entry(
                 scope,
                 NodeEntry {
-                    scope,
                     mount_name: mount.clone(),
                     path: Path::root(),
-                    parent: ROOT_ID,
                     kind: NodeKind::Directory,
                     size: 0,
                     size_exact: true,
                     attrs: None,
                     body: EntryBody::Provider,
+                    extra: EntryState {
+                        scope,
+                        parent: ROOT_ID,
+                    },
                 },
             );
             if root_mount.is_some() {
-                path_to_inode.insert(ObjectKey::new(scope, &mount, &Path::root()), scope);
+                path_to_inode.insert_key(ObjectKey::new(scope, &mount, &Path::root()), scope);
             }
         }
         Self {
@@ -256,7 +256,7 @@ impl Export {
             next_ino: AtomicU64::new(EXPORT_ROOT_ID + 1),
             root_mount,
             opens: OpenTable::new(),
-            follow_sizes: Arc::new(FollowSizes::default()),
+            follow_sizes: Arc::new(FollowSizeTable::default()),
         }
     }
 
@@ -265,9 +265,12 @@ impl Export {
     }
 
     fn remove_object(&self, id: u64) -> Option<NodeEntry> {
-        let (_, entry) = self.inodes.remove(&id)?;
-        self.path_to_inode
-            .remove(&ObjectKey::new(entry.scope, &entry.mount_name, &entry.path));
+        let entry = self.inodes.remove_id(id)?;
+        self.path_to_inode.remove_key(&ObjectKey::new(
+            entry.extra.scope,
+            &entry.mount_name,
+            &entry.path,
+        ));
         Some(entry)
     }
 
@@ -292,22 +295,16 @@ impl Export {
                 || report.prefixes.iter().any(|prefix| path.has_prefix(prefix))
         };
 
-        let stale_paths = self
-            .path_to_inode
-            .iter()
-            .filter_map(|entry| {
-                let key = entry.key();
-                (key.key.mount.as_str() == mount_name
-                    && !key.key.path.is_root()
-                    && matches(&key.key.path))
-                .then(|| key.clone())
-            })
-            .collect::<Vec<_>>();
-        let mut stale_inodes = Vec::with_capacity(stale_paths.len());
-        for key in &stale_paths {
-            let Some(id) = self.path_to_inode.get(key).map(|entry| *entry.value()) else {
+        let stale = stale_ids(&report, &self.path_to_inode, mount_name);
+        let mut stale_inodes = Vec::with_capacity(stale.len());
+        for id in stale {
+            if self
+                .inodes
+                .get(&id)
+                .is_none_or(|entry| entry.path.is_root())
+            {
                 continue;
-            };
+            }
             if self.remove_object(id).is_some() {
                 stale_inodes.push(id);
             }
@@ -344,59 +341,19 @@ impl Export {
             body,
         } = seed;
         let key = ObjectKey::new(scope, mount_name, path);
-        let attrs_for_update = attrs.clone();
-        let body_for_update = body.clone();
-        *self
-            .path_to_inode
-            .entry(key)
-            .and_modify(|existing| {
-                if let Some(mut entry) = self.inodes.get_mut(existing) {
-                    entry.parent = parent;
-                    entry.kind = kind;
-                    if size_exact || !entry.size_exact {
-                        entry.size = size;
-                        entry.size_exact = size_exact;
-                    }
-                    if let Some(incoming_attrs) = attrs_for_update.clone()
-                        && let Some(merged_attrs) = FileAttrsCache::merge_preserving_learned_size(
-                            entry.attrs.as_ref(),
-                            Some(incoming_attrs),
-                        )
-                    {
-                        entry.size = merged_attrs.st_size();
-                        entry.size_exact =
-                            matches!(merged_attrs.size(), view_types::FileSize::Exact(_));
-                        entry.attrs = Some(merged_attrs);
-                    }
-                    if !(matches!(entry.body, EntryBody::Subtree(_))
-                        && matches!(body_for_update, EntryBody::Provider))
-                    {
-                        entry.body.clone_from(&body_for_update);
-                    }
-                    if matches!(entry.body, EntryBody::Subtree(_)) {
-                        entry.size_exact = true;
-                        entry.attrs = None;
-                    }
-                }
-            })
-            .or_insert_with(|| {
-                let id = self.alloc_ino();
-                self.inodes.insert(
-                    id,
-                    NodeEntry {
-                        scope,
-                        mount_name: mount_name.to_string(),
-                        path: path.clone(),
-                        parent,
-                        kind,
-                        size,
-                        size_exact,
-                        attrs,
-                        body,
-                    },
-                );
-                id
-            })
+        let seed = IdentitySeed {
+            mount_name: mount_name.to_string(),
+            path: path.clone(),
+            kind,
+            attrs,
+            size,
+            size_exact,
+            body: body.clone(),
+            body_update: BodyUpdate::Merge(body),
+            extra: EntryState { scope, parent },
+        };
+        self.path_to_inode
+            .get_or_alloc(key, seed, || self.alloc_ino())
     }
 
     fn promote_file_attrs(&self, id: u64, attrs: FileAttrsCache) {
@@ -416,7 +373,7 @@ impl Export {
     fn attr_from_entry(id: u64, entry: &NodeEntry) -> Attr {
         Attr {
             id,
-            parent: entry.parent,
+            parent: entry.extra.parent,
             kind: entry.kind,
             size: entry.size,
             mode: entry.kind.mode(),
@@ -437,33 +394,24 @@ impl Export {
         metadata: &std::fs::Metadata,
     ) -> StatusResult<Attr> {
         let kind = Self::backing_kind(metadata)?;
-        let mtime_sec = metadata
-            .modified()
-            .ok()
-            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-            .map_or(0, |duration| {
-                i64::try_from(duration.as_secs()).unwrap_or(i64::MAX)
-            });
+        let backing = BackingMetadata::from_metadata(metadata);
         Ok(Attr {
             id,
             parent,
             kind,
-            size: metadata.len(),
-            mode: kind.mode(),
+            size: backing.len,
+            mode: backing.mode,
             change: Self::metadata_change(id, metadata),
-            mtime_sec,
+            mtime_sec: backing.mtime_sec,
         })
     }
 
     fn backing_kind(metadata: &std::fs::Metadata) -> StatusResult<NodeKind> {
-        if metadata.is_dir() {
-            Ok(NodeKind::Directory)
-        } else if metadata.file_type().is_symlink() {
-            Ok(NodeKind::Symlink)
-        } else if metadata.is_file() {
-            Ok(NodeKind::File)
-        } else {
-            Err(Status::Invalid)
+        match BackingKind::from_metadata(metadata) {
+            BackingKind::Directory => Ok(NodeKind::Directory),
+            BackingKind::Symlink => Ok(NodeKind::Symlink),
+            BackingKind::File => Ok(NodeKind::File),
+            BackingKind::Other => Err(Status::Invalid),
         }
     }
 
@@ -967,43 +915,6 @@ impl Export {
         })
     }
 
-    /// Refuse the open up-front when we can already prove it would blow the
-    /// materialization budget, or when the declared bytes contract leaves
-    /// the post-read size unbounded. Ranged opens stream chunks through a
-    /// provider handle and bypass this check; backing files and full-mode
-    /// projected files share the same byte-cap policy.
-    fn enforce_materialize_cap(
-        mount_name: &str,
-        path: &Path,
-        attrs: Option<&FileAttrsCache>,
-        backing_path: Option<&FsPath>,
-    ) -> StatusResult<()> {
-        if backing_path.is_some() {
-            return Ok(());
-        }
-        if let Some(projected_attrs) = attrs
-            && projected_attrs.is_deferred_full()
-        {
-            match projected_attrs.size() {
-                view_types::FileSize::Exact(declared) if declared > OPEN_MATERIALIZE_MAX_BYTES => {
-                    tracing::warn!(
-                        op = "open",
-                        mount = %mount_name,
-                        path = %path,
-                        size = declared,
-                        cap = OPEN_MATERIALIZE_MAX_BYTES,
-                        "rejecting full-mode open: declared exact size exceeds materialize cap"
-                    );
-                    return Err(Status::Resource);
-                },
-                view_types::FileSize::Exact(_)
-                | view_types::FileSize::NonZero
-                | view_types::FileSize::Unknown => {},
-            }
-        }
-        Ok(())
-    }
-
     /// Release the provider handle behind a removed ranged open through
     /// `RangedHandle::close`. Consumes the owned `RangedOpen` taken out of the
     /// stateid table: aborts the live-follow pump, drops the inode's follow size
@@ -1156,7 +1067,7 @@ impl ReadOnlyExport for Export {
         let entry = self.inodes.get(&id).ok_or(Status::Stale)?;
         if let Some(path) = &backing_path {
             let metadata = std::fs::symlink_metadata(path).map_err(|_| Status::Stale)?;
-            Self::attr_from_metadata(id, entry.parent, &metadata)
+            Self::attr_from_metadata(id, entry.extra.parent, &metadata)
         } else {
             let mut attr = if self.is_mount_enumeration_root(id) {
                 self.root_attr_from_entry(id, &entry)
@@ -1198,7 +1109,7 @@ impl ReadOnlyExport for Export {
         }
         let mount_name = parent_entry.mount_name.clone();
         let parent_path = parent_entry.path.clone();
-        let scope = parent_entry.scope;
+        let scope = parent_entry.extra.scope;
         let backing_path = parent_entry.body.backing_path().cloned();
         drop(parent_entry);
 
@@ -1207,7 +1118,7 @@ impl ReadOnlyExport for Export {
         // Re-confirm before binding a child to it, otherwise the child would
         // inherit an orphan parent inode that fails Status::Stale on every later
         // attr/lookupp.
-        if !self.inodes.contains_key(&parent) {
+        if !self.inodes.contains_id(parent) {
             return Err(Status::Stale);
         }
 
@@ -1282,12 +1193,12 @@ impl ReadOnlyExport for Export {
         }
         let mount_name = entry.mount_name.clone();
         let path = entry.path.clone();
-        let scope = entry.scope;
+        let scope = entry.extra.scope;
         let backing_path = entry.body.backing_path().cloned();
         drop(entry);
 
         self.drain_invalidations_for_mount(&mount_name);
-        if !self.inodes.contains_key(&id) {
+        if !self.inodes.contains_id(id) {
             return Err(Status::Stale);
         }
 
@@ -1343,7 +1254,7 @@ impl ReadOnlyExport for Export {
         drop(entry);
 
         self.drain_invalidations_for_mount(&mount_name);
-        if !self.inodes.contains_key(&id) {
+        if !self.inodes.contains_id(id) {
             return Err(Status::Stale);
         }
 
@@ -1384,7 +1295,7 @@ impl ReadOnlyExport for Export {
         };
         drop(entry);
         self.drain_invalidations_for_mount(&mount_name);
-        if !self.inodes.contains_key(&id) {
+        if !self.inodes.contains_id(id) {
             return Err(Status::Stale);
         }
         std::fs::read_link(path)
@@ -1406,16 +1317,9 @@ impl ReadOnlyExport for Export {
         let body = entry.body.clone();
         drop(entry);
         self.drain_invalidations_for_mount(&mount_name);
-        if !self.inodes.contains_key(&id) {
+        if !self.inodes.contains_id(id) {
             return Err(Status::Stale);
         }
-
-        Self::enforce_materialize_cap(
-            &mount_name,
-            &path,
-            attrs.as_ref(),
-            body.backing_path().map(PathBuf::as_path),
-        )?;
 
         // The projected placeholder declares the read mode (a `ranged` route
         // carries `Deferred(Ranged)`), so `open` dispatches on it directly: no
@@ -1461,20 +1365,6 @@ impl ReadOnlyExport for Export {
         }
 
         let data = self.read(id)?;
-        // Belt-and-braces guard: providers that declared non-exact sizes can
-        // still return arbitrarily large payloads. The pre-check above only
-        // catches declared exact sizes.
-        if u64::try_from(data.len()).unwrap_or(u64::MAX) > OPEN_MATERIALIZE_MAX_BYTES {
-            tracing::warn!(
-                op = "open",
-                mount = %mount_name,
-                path = %path,
-                size = data.len(),
-                cap = OPEN_MATERIALIZE_MAX_BYTES,
-                "rejecting full-mode open: observed payload exceeds materialize cap"
-            );
-            return Err(Status::Resource);
-        }
         let attr = self.attr(id)?;
         let stateid = self.opens.open(OpenSeed {
             generation,
@@ -1567,6 +1457,8 @@ mod tests {
     use super::*;
     use omnifs_engine::GitCloner;
     use omnifs_engine::HostContext;
+    use omnifs_engine::TreeError;
+    use omnifs_engine::render::MATERIALIZE_MAX_BYTES;
     use tempfile::TempDir;
     use tokio::runtime::Runtime as TokioRuntime;
 
@@ -1634,19 +1526,21 @@ mod tests {
         };
         export
             .path_to_inode
-            .insert(ObjectKey::new(ROOT_ID, "test", &path), id);
-        export.inodes.insert(
+            .insert_key(ObjectKey::new(ROOT_ID, "test", &path), id);
+        export.inodes.insert_entry(
             id,
             NodeEntry {
-                scope: ROOT_ID,
                 mount_name: "test".to_string(),
                 path,
-                parent: ROOT_ID,
                 kind: NodeKind::File,
                 size: recorded_size,
                 size_exact: matches!(declared_size, view_types::FileSize::Exact(_)),
                 attrs: Some(attrs),
                 body: EntryBody::Provider,
+                extra: EntryState {
+                    scope: ROOT_ID,
+                    parent: ROOT_ID,
+                },
             },
         );
     }
@@ -1655,19 +1549,21 @@ mod tests {
         let path = test_path(name);
         export
             .path_to_inode
-            .insert(ObjectKey::new(ROOT_ID, "test", &path), id);
-        export.inodes.insert(
+            .insert_key(ObjectKey::new(ROOT_ID, "test", &path), id);
+        export.inodes.insert_entry(
             id,
             NodeEntry {
-                scope: ROOT_ID,
                 mount_name: "test".to_string(),
                 path,
-                parent: ROOT_ID,
                 kind: NodeKind::File,
                 size,
                 size_exact: true,
                 attrs: None,
                 body: EntryBody::Subtree(backing),
+                extra: EntryState {
+                    scope: ROOT_ID,
+                    parent: ROOT_ID,
+                },
             },
         );
     }
@@ -1692,29 +1588,14 @@ mod tests {
     }
 
     #[test]
-    fn open_state_rejects_oversized_full_mode_declared_exact() {
-        let harness = empty_export();
-        insert_full_mode_leaf(
-            &harness.export,
-            500,
-            "huge-full",
-            view_types::FileSize::Exact(OPEN_MATERIALIZE_MAX_BYTES + 1),
-        );
-
-        let result = harness.export.open_state(
-            7,
-            500,
-            harness.export.opens.active_inodes().len() as u64 + 1,
-            1,
-        );
-        assert!(
-            matches!(result, Err(Status::Resource)),
-            "expected Resource for oversized full-mode OPEN, got {result:?}"
-        );
-        assert!(
-            harness.export.opens.active_inodes().is_empty(),
-            "OPEN must not register an open instance when it rejects the materialize"
-        );
+    fn tree_too_large_maps_to_nfs_resource() {
+        let error = TreeError {
+            kind: TreeErrorKind::TooLarge,
+            message: "too large".to_string(),
+            retryable: false,
+            retry_after: None,
+        };
+        assert_eq!(Status::from(&error), Status::Resource);
     }
 
     #[test]
@@ -1723,7 +1604,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("backing tempdir");
         let backing = temp.path().join("huge.bin");
         let file = std::fs::File::create(&backing).expect("create backing file");
-        file.set_len(OPEN_MATERIALIZE_MAX_BYTES + 1)
+        file.set_len(MATERIALIZE_MAX_BYTES + 1)
             .expect("set backing len");
         drop(file);
 
@@ -1732,7 +1613,7 @@ mod tests {
             600,
             "huge-backing",
             backing,
-            OPEN_MATERIALIZE_MAX_BYTES + 1,
+            MATERIALIZE_MAX_BYTES + 1,
         );
 
         let opened = harness
@@ -1741,7 +1622,7 @@ mod tests {
             .expect("backing open");
         let chunk = harness
             .export
-            .read_state(opened.stateid, OPEN_MATERIALIZE_MAX_BYTES, 8)
+            .read_state(opened.stateid, MATERIALIZE_MAX_BYTES, 8)
             .expect("backing read");
         assert_eq!(chunk.data, vec![0]);
         assert!(chunk.eof);

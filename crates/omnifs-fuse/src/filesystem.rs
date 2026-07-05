@@ -164,9 +164,7 @@ impl Filesystem for Frontend {
             let attr = match &entry.kind {
                 EntryKind::Directory => fs.dir_attr(ino.0),
                 EntryKind::File => {
-                    let size = entry
-                        .size
-                        .max(fs.follow_sizes.get(&ino.0).map_or(0, |v| *v));
+                    let size = entry.size.max(fs.follow_sizes.get(ino.0).unwrap_or(0));
                     fs.file_attr(ino.0, size)
                 },
             };
@@ -451,7 +449,7 @@ impl Filesystem for Frontend {
                 }
             }
             if !fs.ranged_handles.iter().any(|entry| entry.ino == ino.0) {
-                fs.follow_sizes.remove(&ino.0);
+                fs.follow_sizes.remove(ino.0);
             }
             reply.ok();
         }));

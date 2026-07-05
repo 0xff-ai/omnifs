@@ -21,7 +21,7 @@ use tokio::runtime::Handle;
 
 use super::error::{Result, TreeError};
 use super::node::Node;
-use super::read::{Chunk, FileAttrStore};
+use super::read::{Chunk, FileAttrStore, enforce_declared_materialize_cap};
 use crate::{RequestCtx, Tree};
 
 /// Runtime-owned ranged read handle for `Deferred(Ranged)` files. Holds an
@@ -161,6 +161,10 @@ impl Tree {
                 "open requires byte-source::deferred: {}",
                 node.path().as_str()
             )));
+        }
+        if projected.is_deferred_full() {
+            enforce_declared_materialize_cap(node.path(), Some(projected))?;
+            return Ok(None);
         }
 
         let runtime = self.ctx.runtime_for(node.mount())?;
