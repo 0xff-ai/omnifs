@@ -19,7 +19,19 @@ use omnifs_api::DaemonBackend;
 use omnifs_daemon::DaemonArgs;
 
 use crate::config::{Config, ConfiguredBackend, resolve_setting};
-use crate::session::{CONTAINER_NAME, ENV_CONTAINER_NAME, ENV_IMAGE, IMAGE};
+
+pub(crate) const CONTAINER_NAME: &str = "omnifs";
+pub(crate) const IMAGE: &str = concat!("ghcr.io/0xff-ai/omnifs:", env!("CARGO_PKG_VERSION"));
+pub(crate) const ENV_IMAGE: &str = omnifs_api::OMNIFS_IMAGE_ENV;
+pub(crate) const ENV_CONTAINER_NAME: &str = omnifs_api::OMNIFS_CONTAINER_NAME_ENV;
+
+// The guest-container paths the launcher targets. The container declares the
+// same values as image ENV (see `Dockerfile`), and the daemon resolves them
+// from the `OMNIFS_HOME` / `OMNIFS_MOUNT_POINT` env vars; these consts are the
+// host launcher's view of that boundary, used to build bind mounts, set the
+// `docker exec` working directory, and wait for the mount.
+pub(crate) const GUEST_HOME: &str = "/root/.omnifs";
+pub(crate) const GUEST_MOUNT: &str = "/omnifs";
 
 /// How the omnifs process is running, which sets its default tracing level.
 #[derive(Clone, Copy)]
@@ -114,6 +126,10 @@ pub(crate) struct DockerTarget {
 }
 
 impl DockerTarget {
+    pub(crate) fn default_target() -> anyhow::Result<Self> {
+        Self::new(CONTAINER_NAME.to_string(), IMAGE.to_string())
+    }
+
     pub(crate) fn new(container_name: String, image: String) -> anyhow::Result<Self> {
         Ok(Self {
             container_name: ContainerName::new(container_name)?,
@@ -197,15 +213,16 @@ pub(crate) enum LaunchBackend {
     Docker(DockerTarget),
 }
 
-impl LaunchBackend {
-    pub(crate) fn from_config(config: &Config) -> anyhow::Result<Self> {
-        Self::for_backend(config.backend(), config)
-    }
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct BackendOverrides {
+    pub(crate) runtime: Option<ConfiguredBackend>,
+}
 
-    /// Build the launch backend for an explicitly chosen runtime, drawing
-    /// Docker image/container defaults from `config`. `omnifs up --runtime`
-    /// uses this to override the persisted default for one launch.
-    pub(crate) fn for_backend(backend: ConfiguredBackend, config: &Config) -> anyhow::Result<Self> {
+impl LaunchBackend {
+    /// Resolve the launch backend from CLI overrides and persisted config.
+    /// An empty override set reproduces the configured backend behavior.
+    pub(crate) fn resolve(overrides: BackendOverrides, config: &Config) -> anyhow::Result<Self> {
+        let backend = overrides.runtime.unwrap_or_else(|| config.backend());
         match backend {
             ConfiguredBackend::Native => Ok(Self::Native),
             ConfiguredBackend::Docker => Ok(Self::Docker(DockerTarget::from_config(config)?)),
@@ -451,7 +468,9 @@ fn sweep_nfs_state_dir(state_dir: &Path) -> Result<()> {
 // --- Docker reclaim ----------------------------------------------------------
 
 async fn reclaim_docker(container_name: &ContainerName) -> Result<()> {
-    match crate::runtime::Runtime::connect_docker() {
+    let runtime = DockerTarget::default_target()
+        .and_then(|target| crate::runtime::Runtime::connect_for(&target));
+    match runtime {
         Ok(runtime) => {
             runtime.remove_existing(container_name).await?;
             anstream::println!("✓ Container `{container_name}` removed");
@@ -560,7 +579,7 @@ mod tests {
                     },
                     ..Default::default()
                 };
-                let backend = LaunchBackend::from_config(&config).unwrap();
+                let backend = LaunchBackend::resolve(BackendOverrides::default(), &config).unwrap();
                 let LaunchBackend::Docker(target) = backend else {
                     panic!("expected docker backend");
                 };

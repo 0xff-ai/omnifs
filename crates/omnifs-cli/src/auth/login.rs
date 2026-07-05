@@ -21,14 +21,14 @@ use omnifs_workspace::provider::Catalog;
 
 async fn login(
     catalog: &Catalog,
-    mounts: &[crate::session::MountConfig],
+    mounts: &[crate::mount_config::MountConfig],
     store: Box<dyn CredentialStore>,
     mount: &str,
     account: Option<&str>,
     no_browser: bool,
     scopes: &[String],
 ) -> anyhow::Result<CredentialTarget> {
-    let mount_auth = crate::auth::load_mount_auth(catalog, mounts, mount)?;
+    let mount_auth = crate::auth::MountAuth::load(catalog, mounts, mount)?;
     let (request, target) = mount_auth.oauth_request(account, scopes)?;
     let guidance = omnifs_workspace::mounts::pinned_manifest(catalog, mount_auth.spec())
         .ok()
@@ -47,11 +47,11 @@ async fn login(
         LoginRequest::Loopback(request) => client
             .login_loopback(request)
             .await
-            .with_hint(format!("Re-run `omnifs init --reauth {mount}` to retry"))?,
+            .with_hint(format!("Re-run `omnifs mounts reauth {mount}` to retry"))?,
         LoginRequest::ClientSideToken(request) => client
             .login_client_side_token(request)
             .await
-            .with_hint(format!("Re-run `omnifs init --reauth {mount}` to retry"))?,
+            .with_hint(format!("Re-run `omnifs mounts reauth {mount}` to retry"))?,
         LoginRequest::ManualCode(request) => client
             .login_manual_code(request, |url| async move {
                 anstream::println!("Open {url}");
@@ -67,7 +67,7 @@ async fn login(
                     .map_err(|error| omnifs_auth::AuthError::BrowserOpen(error.to_string()))
             })
             .await
-            .with_hint(format!("Re-run `omnifs init --reauth {mount}` to retry"))?,
+            .with_hint(format!("Re-run `omnifs mounts reauth {mount}` to retry"))?,
         LoginRequest::DeviceCode(request) => {
             let bar = indicatif::ProgressBar::new_spinner();
             bar.set_style(indicatif::ProgressStyle::with_template(
@@ -90,7 +90,7 @@ async fn login(
                 },
                 Err(_) => bar.finish_and_clear(),
             }
-            result.with_hint(format!("Re-run `omnifs init --reauth {mount}` to retry"))?
+            result.with_hint(format!("Re-run `omnifs mounts reauth {mount}` to retry"))?
         },
     };
     // Write through the credential service so the single store owner records it.

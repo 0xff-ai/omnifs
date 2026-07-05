@@ -29,6 +29,7 @@ impl DownArgs {
         let workspace = Workspace::resolve()?;
 
         DaemonTeardown::new(&workspace).down(force).await?;
+        crate::telemetry::maybe_print_health_nudge(&workspace).await;
         Ok(())
     }
 }

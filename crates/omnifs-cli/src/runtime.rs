@@ -14,10 +14,8 @@ use futures_util::{StreamExt, TryStreamExt};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
 use crate::error::WithHint;
-use crate::launch_backend::{ContainerName, DockerTarget, ImageRef};
-use crate::session::{
-    CONTAINER_NAME, ENV_CONTAINER_NAME, ENV_IMAGE, GUEST_HOME, GUEST_MOUNT, IMAGE,
-};
+use crate::launch_backend::{ContainerName, DockerTarget, ENV_CONTAINER_NAME, ENV_IMAGE};
+use crate::launch_backend::{GUEST_HOME, GUEST_MOUNT, ImageRef};
 use omnifs_workspace::layout::OMNIFS_HOME_ENV;
 
 /// Image label written by `Dockerfile` from the `OMNIFS_MIN_LAUNCHER_VERSION`
@@ -43,34 +41,30 @@ pub(crate) enum DockerProbeOutcome {
 
 pub(crate) struct Runtime {
     docker: Docker,
-    container_name: ContainerName,
-    image: ImageRef,
+    target: DockerTarget,
 }
 
 impl Runtime {
-    /// Connect to the Docker daemon without binding container/image targets.
-    /// Teardown paths pass an explicit [`ContainerName`] to [`Self::remove_existing`].
-    pub(crate) fn connect_docker() -> Result<Self> {
-        Ok(Self {
-            docker: connect_docker_client()?,
-            container_name: ContainerName::new(CONTAINER_NAME)?,
-            image: ImageRef::new(IMAGE)?,
-        })
-    }
-
     pub(crate) fn connect_for(target: &DockerTarget) -> Result<Self> {
         Ok(Self {
             docker: connect_docker_client()?,
-            container_name: target.container_name().clone(),
-            image: target.image().clone(),
+            target: target.clone(),
         })
+    }
+
+    fn container_name(&self) -> &ContainerName {
+        self.target.container_name()
+    }
+
+    fn image(&self) -> &ImageRef {
+        self.target.image()
     }
 
     pub(crate) async fn connect_ready(
         target: &DockerTarget,
         command: &'static str,
     ) -> Result<Self> {
-        anstream::println!("Connecting to Docker");
+        anstream::eprintln!("Connecting to Docker");
         let runtime = Self::connect_for(target)?;
         runtime
             .ping()
@@ -186,7 +180,7 @@ impl Runtime {
     }
 
     pub(crate) async fn pull_image_with_progress(&self, image: &str) -> Result<()> {
-        anstream::println!("Pulling {image}");
+        anstream::eprintln!("Pulling {image}");
         let (from_image, tag) = image
             .rsplit_once(':')
             .ok_or_else(|| anyhow!("image `{image}` has no tag"))?;
@@ -235,11 +229,11 @@ impl Runtime {
                     }
                 }
             } else if let Some(status) = info.status {
-                anstream::println!("  {status}");
+                anstream::eprintln!("  {status}");
             }
         }
         multi.clear().ok();
-        anstream::println!("✓ Image ready");
+        anstream::eprintln!("✓ Image ready");
         Ok(())
     }
 
@@ -257,10 +251,10 @@ impl Runtime {
         // let reconcile handle config changes. Dev launches force recreation so
         // env vars and fixture binds always match the requested session.
         if reuse_existing && self.running_container_matches_image().await? {
-            anstream::println!(
+            anstream::eprintln!(
                 "Container `{}` is already running on image `{}`; skipping recreate",
-                self.container_name,
-                self.image
+                self.container_name(),
+                self.image()
             );
             return Ok(());
         }
@@ -285,28 +279,31 @@ impl Runtime {
         }
         binds.extend(extra_binds);
 
-        anstream::println!(
+        anstream::eprintln!(
             "Creating container `{}` from image `{}`",
-            self.container_name,
-            self.image
+            self.container_name(),
+            self.image()
         );
         let create =
-            Self::build_container_body(&self.container_name, &self.image, binds, extra_env);
+            Self::build_container_body(self.container_name(), self.image(), binds, extra_env);
         self.docker
             .create_container(
                 Some(CreateContainerOptions {
-                    name: Some(self.container_name.as_str().to_string()),
+                    name: Some(self.container_name().as_str().to_string()),
                     ..Default::default()
                 }),
                 create,
             )
             .await
-            .with_context(|| format!("create container `{}`", self.container_name))?;
-        anstream::println!("Starting container `{}`", self.container_name);
+            .with_context(|| format!("create container `{}`", self.container_name()))?;
+        anstream::eprintln!("Starting container `{}`", self.container_name());
         self.docker
-            .start_container(self.container_name.as_str(), None::<StartContainerOptions>)
+            .start_container(
+                self.container_name().as_str(),
+                None::<StartContainerOptions>,
+            )
             .await
-            .with_context(|| format!("start container `{}`", self.container_name))?;
+            .with_context(|| format!("start container `{}`", self.container_name()))?;
         Ok(())
     }
 
@@ -317,7 +314,7 @@ impl Runtime {
         match self
             .docker
             .inspect_container(
-                self.container_name.as_str(),
+                self.container_name().as_str(),
                 None::<InspectContainerOptions>,
             )
             .await
@@ -339,34 +336,34 @@ impl Runtime {
                     .as_ref()
                     .and_then(|c| c.image.as_deref())
                     .unwrap_or("");
-                Ok(container_image == self.image.as_str())
+                Ok(container_image == self.image().as_str())
             },
             Err(bollard::errors::Error::DockerResponseServerError {
                 status_code: 404, ..
             }) => Ok(false),
             Err(error) => {
-                Err(error).with_context(|| format!("inspect container `{}`", self.container_name))
+                Err(error).with_context(|| format!("inspect container `{}`", self.container_name()))
             },
         }
     }
 
     pub(crate) async fn remove(&self) -> Result<()> {
-        self.remove_existing(&self.container_name).await
+        self.remove_existing(self.container_name()).await
     }
 
     pub(crate) async fn remove_existing(&self, name: &ContainerName) -> Result<()> {
-        anstream::print!("Checking for existing container `{name}` ");
-        std::io::stdout().flush().ok();
+        anstream::eprint!("Checking for existing container `{name}` ");
+        std::io::stderr().flush().ok();
         match self
             .docker
             .inspect_container(name.as_str(), None::<InspectContainerOptions>)
             .await
         {
             Ok(_) => {
-                anstream::println!("found");
+                anstream::eprintln!("found");
                 // Best-effort stop, then remove. Bollard returns errors for
                 // already-stopped containers; we don't care about that case.
-                anstream::println!("Stopping existing container `{name}` (1s timeout)");
+                anstream::eprintln!("Stopping existing container `{name}` (1s timeout)");
                 let _ = self
                     .docker
                     .stop_container(
@@ -377,7 +374,7 @@ impl Runtime {
                         }),
                     )
                     .await;
-                anstream::println!("Removing existing container `{name}`");
+                anstream::eprintln!("Removing existing container `{name}`");
                 self.docker
                     .remove_container(
                         name.as_str(),
@@ -392,7 +389,7 @@ impl Runtime {
             },
             Err(bollard::errors::Error::DockerResponseServerError {
                 status_code: 404, ..
-            }) => anstream::println!("none"),
+            }) => anstream::eprintln!("none"),
             Err(error) => {
                 return Err(error).with_context(|| format!("inspect container `{name}`"));
             },
@@ -402,16 +399,19 @@ impl Runtime {
 
     pub(crate) async fn wait_for_daemon_ready(&self) -> Result<()> {
         let client = crate::client::DaemonClient::new();
-        anstream::println!("Waiting for {GUEST_MOUNT} inside `{}`", self.container_name);
+        anstream::eprintln!(
+            "Waiting for {GUEST_MOUNT} inside `{}`",
+            self.container_name()
+        );
         for attempt in 0..60 {
             if client.ready().await {
-                anstream::println!("✓ FUSE mount is ready");
+                anstream::eprintln!("✓ FUSE mount is ready");
                 return Ok(());
             }
             if let Ok(container) = self
                 .docker
                 .inspect_container(
-                    self.container_name.as_str(),
+                    self.container_name().as_str(),
                     None::<InspectContainerOptions>,
                 )
                 .await
@@ -424,51 +424,51 @@ impl Runtime {
                     .map_or_else(|| "exited".to_string(), |status| status.to_string());
                 return Err(anyhow::anyhow!(
                     "container `{}` {status} before {GUEST_MOUNT} became available (exit {exit_code})",
-                    self.container_name
+                    self.container_name()
                 ))
                 .with_hint(format!(
                     "`docker logs {}` may show why the daemon failed to mount",
-                    self.container_name
+                    self.container_name()
                 ));
             }
             if attempt > 0 && attempt % 5 == 0 {
-                anstream::print!(".");
-                std::io::stdout().flush().ok();
+                anstream::eprint!(".");
+                std::io::stderr().flush().ok();
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
-        anstream::println!();
+        anstream::eprintln!();
         Err(anyhow::anyhow!(
             "{GUEST_MOUNT} did not become available inside `{}` within 60s",
-            self.container_name
+            self.container_name()
         ))
         .with_hint(format!(
             "`docker logs {}` may show why the daemon failed to mount",
-            self.container_name
+            self.container_name()
         ))
         .with_hint("Run `omnifs doctor` to verify Docker, FUSE, and image cache")
     }
 
     async fn ensure_image(&self) -> Result<()> {
-        anstream::print!("Checking image `{}` ", self.image);
-        std::io::stdout().flush().ok();
-        match self.docker.inspect_image(self.image.as_str()).await {
+        anstream::eprint!("Checking image `{}` ", self.image());
+        std::io::stderr().flush().ok();
+        match self.docker.inspect_image(self.image().as_str()).await {
             Ok(_) => {
-                anstream::println!("present");
+                anstream::eprintln!("present");
                 Ok(())
             },
             Err(bollard::errors::Error::DockerResponseServerError {
                 status_code: 404, ..
             }) => {
-                anstream::println!("missing");
-                self.pull_image_with_progress(self.image.as_str())
+                anstream::eprintln!("missing");
+                self.pull_image_with_progress(self.image().as_str())
                     .await
                     .map_err(|pull_err| {
                         // When the pull itself hits a 404 the tag is likely absent
                         // from the registry. Surface an actionable message naming
                         // the tag and pointing at the remediation options instead of
                         // exposing a raw registry 404.
-                        let image_str = self.image.as_str();
+                        let image_str = self.image().as_str();
                         if pull_err.to_string().contains("404")
                             || pull_err.to_string().to_lowercase().contains("not found")
                         {
@@ -485,7 +485,7 @@ impl Runtime {
                         }
                     })
             },
-            Err(error) => Err(error).with_context(|| format!("inspect image `{}`", self.image)),
+            Err(error) => Err(error).with_context(|| format!("inspect image `{}`", self.image())),
         }
     }
 
@@ -499,9 +499,9 @@ impl Runtime {
     async fn verify_launcher_compat(&self) -> Result<()> {
         let image = self
             .docker
-            .inspect_image(self.image.as_str())
+            .inspect_image(self.image().as_str())
             .await
-            .with_context(|| format!("inspect image `{}` for compatibility label", self.image))?;
+            .with_context(|| format!("inspect image `{}` for compatibility label", self.image()))?;
         let labels = image.config.as_ref().and_then(|c| c.labels.as_ref());
         let min_launcher = labels.and_then(|l| l.get(LAUNCHER_VERSION_LABEL));
         let launch_protocol = labels.and_then(|l| l.get(LAUNCH_PROTOCOL_LABEL));
@@ -509,7 +509,7 @@ impl Runtime {
             env!("CARGO_PKG_VERSION"),
             min_launcher.map(String::as_str),
             launch_protocol.map(String::as_str),
-            self.image.as_str(),
+            self.image().as_str(),
         )
     }
 

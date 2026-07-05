@@ -595,11 +595,13 @@ fn scenario_8_failed_mount_surfaced() {
         "test/hello/message content mismatch after partial failure"
     );
 
-    // `status --json` surfaces the broken mount in the failed set.
+    // `status --json` surfaces the broken mount in the failed set and exits
+    // degraded.
     let out = fixture.run(&["status", "--json"]);
-    assert!(
-        out.status.success(),
-        "omnifs status must exit 0 (exit {})\nstderr: {}",
+    assert_eq!(
+        out.status.code(),
+        Some(5),
+        "omnifs status must exit degraded when a mount failed (exit {})\nstderr: {}",
         out.status,
         String::from_utf8_lossy(&out.stderr),
     );

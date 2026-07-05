@@ -1,4 +1,4 @@
-//! Runtime launch constants and mount payload preparation.
+//! Mount payload preparation.
 //!
 //! The host `OMNIFS_HOME` directory is mounted writable into the trusted
 //! runtime container. Credentials stay in the resolved `credentials.json`
@@ -11,20 +11,10 @@ use omnifs_workspace::mounts::Name as MountName;
 use omnifs_workspace::mounts::Spec;
 use std::path::PathBuf;
 
-use crate::{auth::MountAuth, error::WithHint};
-
-pub(crate) const CONTAINER_NAME: &str = "omnifs";
-pub(crate) const IMAGE: &str = concat!("ghcr.io/0xff-ai/omnifs:", env!("CARGO_PKG_VERSION"));
-pub(crate) const ENV_IMAGE: &str = omnifs_api::OMNIFS_IMAGE_ENV;
-pub(crate) const ENV_CONTAINER_NAME: &str = omnifs_api::OMNIFS_CONTAINER_NAME_ENV;
-
-// The guest-container paths the launcher targets. The container declares the
-// same values as image ENV (see `Dockerfile`), and the daemon resolves them
-// from the `OMNIFS_HOME` / `OMNIFS_MOUNT_POINT` env vars; these consts are the
-// host launcher's view of that boundary, used to build bind mounts, set the
-// `docker exec` working directory, and wait for the mount.
-pub(crate) const GUEST_HOME: &str = "/root/.omnifs";
-pub(crate) const GUEST_MOUNT: &str = "/omnifs";
+use crate::{
+    auth::MountAuth,
+    error::{ExitCode, WithExitCode, WithHint},
+};
 
 #[derive(Debug, Clone)]
 pub(crate) struct MountConfig {
@@ -61,20 +51,20 @@ impl MountConfig {
             });
         match (auth.is_oauth(), entry) {
             (_, Ok(_)) => Ok(()),
-            (true, Err(error)) => Err(error).with_hint(format!(
-                "Run `omnifs init --reauth {}` to authenticate",
-                self.name
-            )),
-            (false, Err(error)) => Err(error).with_hint(format!(
-                "Run `omnifs init --reauth {}` to configure this mount's token",
-                self.name
-            )),
+            (true, Err(error)) => Err(error)
+                .with_hint(format!(
+                    "Run `omnifs mounts reauth {}` to authenticate",
+                    self.name
+                ))
+                .with_exit_code(ExitCode::AuthRequired),
+            (false, Err(error)) => Err(error)
+                .with_hint(format!(
+                    "Run `omnifs mounts reauth {}` to configure this mount's token",
+                    self.name
+                ))
+                .with_exit_code(ExitCode::AuthRequired),
         }
     }
-}
-
-pub(crate) fn env_string(name: &str) -> Option<String> {
-    std::env::var(name).ok().filter(|value| !value.is_empty())
 }
 
 #[cfg(test)]

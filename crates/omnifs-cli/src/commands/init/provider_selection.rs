@@ -1,5 +1,5 @@
 use crate::catalog::mount_exists;
-use crate::session::MountConfig;
+use crate::mount_config::MountConfig;
 use anyhow::anyhow;
 use omnifs_workspace::mounts::Name as MountName;
 use omnifs_workspace::provider::{Provider, ProviderManifest};

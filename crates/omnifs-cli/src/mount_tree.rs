@@ -41,10 +41,10 @@ impl MountTreeData {
     pub fn render(&self, views: Views) -> String {
         let views = views.with_defaults();
         let sections = [
-            views.tree.then(|| render_tree(self)),
-            views.paths.then(|| render_paths(self)),
-            views.by_type.then(|| render_by_type(self)),
-            (!self.mutations.is_empty()).then(|| render_mutations(self)),
+            views.tree.then(|| self.render_tree()),
+            views.paths.then(|| self.render_paths()),
+            views.by_type.then(|| self.render_by_type()),
+            (!self.mutations.is_empty()).then(|| self.render_mutations()),
         ]
         .into_iter()
         .flatten()
@@ -55,6 +55,105 @@ impl MountTreeData {
             out.push('\n');
         }
         out
+    }
+
+    fn sorted_handlers(&self) -> Vec<&mts::HandlerRecord> {
+        let mut handlers: Vec<&mts::HandlerRecord> = self.handlers.iter().collect();
+        handlers.sort_by(|left, right| left.path_template.cmp(&right.path_template));
+        handlers
+    }
+
+    fn render_tree(&self) -> String {
+        let handlers = self.sorted_handlers();
+
+        let mut body = String::new();
+        for handler in &handlers {
+            let indent = "  ".repeat(path_depth(&handler.path_template));
+            let _ = writeln!(
+                body,
+                "{indent}{} -> {} [{}]",
+                path_tail(&handler.path_template),
+                handler.handler_name,
+                handler_kind_label(&handler.handler_kind),
+            );
+        }
+
+        format!("{}{}", section_header("Tree"), body)
+    }
+
+    fn render_paths(&self) -> String {
+        let handlers = self.sorted_handlers();
+
+        let col_width = handlers
+            .iter()
+            .map(|handler| handler.path_template.len())
+            .max()
+            .unwrap_or(0)
+            + 2;
+
+        let mut body = String::new();
+        for handler in &handlers {
+            let right = format!(
+                "{} [{}]",
+                handler.handler_name,
+                handler_kind_label(&handler.handler_kind),
+            );
+            let _ = writeln!(body, "{:<col_width$}{right}", handler.path_template);
+        }
+
+        format!("{}{}", section_header("Paths"), body)
+    }
+
+    fn render_by_type(&self) -> String {
+        let mut groups: HashMap<&str, Vec<&mts::HandlerRecord>> = HashMap::new();
+        for handler in &self.handlers {
+            groups
+                .entry(&handler.handler_name)
+                .or_default()
+                .push(handler);
+        }
+
+        let mut groups = groups.into_iter().collect::<Vec<_>>();
+        groups.sort_by(|left, right| left.0.cmp(right.0));
+
+        let col_width = groups.iter().map(|(name, _)| name.len()).max().unwrap_or(0) + 2;
+
+        let mut body = String::new();
+        for (name, handlers) in groups {
+            let mut handlers = handlers;
+            handlers.sort_by(|left, right| left.path_template.cmp(&right.path_template));
+
+            let first = handlers[0];
+            let first_right = format!(
+                "{} [{}]",
+                first.path_template,
+                handler_kind_label(&first.handler_kind),
+            );
+            let _ = writeln!(body, "{name:<col_width$}{first_right}");
+
+            for handler in handlers.iter().skip(1) {
+                let right = format!(
+                    "{} [{}]",
+                    handler.path_template,
+                    handler_kind_label(&handler.handler_kind),
+                );
+                let _ = writeln!(body, "{:<col_width$}{right}", "");
+            }
+        }
+
+        format!("{}{}", section_header("By type"), body)
+    }
+
+    fn render_mutations(&self) -> String {
+        let mut mutations: Vec<&mts::MutationRecord> = self.mutations.iter().collect();
+        mutations.sort_by(|left, right| left.path_template.cmp(&right.path_template));
+
+        let mut body = String::new();
+        for mutation in &mutations {
+            let _ = writeln!(body, "{}", mutation.path_template);
+        }
+
+        format!("{}{}", section_header("Mutations"), body)
     }
 }
 
@@ -129,103 +228,4 @@ fn path_tail(path: &str) -> &str {
     } else {
         path.rsplit('/').next().unwrap_or(path)
     }
-}
-
-fn sorted_handlers(data: &MountTreeData) -> Vec<&mts::HandlerRecord> {
-    let mut handlers: Vec<&mts::HandlerRecord> = data.handlers.iter().collect();
-    handlers.sort_by(|left, right| left.path_template.cmp(&right.path_template));
-    handlers
-}
-
-fn render_tree(data: &MountTreeData) -> String {
-    let handlers = sorted_handlers(data);
-
-    let mut body = String::new();
-    for handler in &handlers {
-        let indent = "  ".repeat(path_depth(&handler.path_template));
-        let _ = writeln!(
-            body,
-            "{indent}{} -> {} [{}]",
-            path_tail(&handler.path_template),
-            handler.handler_name,
-            handler_kind_label(&handler.handler_kind),
-        );
-    }
-
-    format!("{}{}", section_header("Tree"), body)
-}
-
-fn render_paths(data: &MountTreeData) -> String {
-    let handlers = sorted_handlers(data);
-
-    let col_width = handlers
-        .iter()
-        .map(|handler| handler.path_template.len())
-        .max()
-        .unwrap_or(0)
-        + 2;
-
-    let mut body = String::new();
-    for handler in &handlers {
-        let right = format!(
-            "{} [{}]",
-            handler.handler_name,
-            handler_kind_label(&handler.handler_kind),
-        );
-        let _ = writeln!(body, "{:<col_width$}{right}", handler.path_template);
-    }
-
-    format!("{}{}", section_header("Paths"), body)
-}
-
-fn render_by_type(data: &MountTreeData) -> String {
-    let mut groups: HashMap<&str, Vec<&mts::HandlerRecord>> = HashMap::new();
-    for handler in &data.handlers {
-        groups
-            .entry(&handler.handler_name)
-            .or_default()
-            .push(handler);
-    }
-
-    let mut groups = groups.into_iter().collect::<Vec<_>>();
-    groups.sort_by(|left, right| left.0.cmp(right.0));
-
-    let col_width = groups.iter().map(|(name, _)| name.len()).max().unwrap_or(0) + 2;
-
-    let mut body = String::new();
-    for (name, handlers) in groups {
-        let mut handlers = handlers;
-        handlers.sort_by(|left, right| left.path_template.cmp(&right.path_template));
-
-        let first = handlers[0];
-        let first_right = format!(
-            "{} [{}]",
-            first.path_template,
-            handler_kind_label(&first.handler_kind),
-        );
-        let _ = writeln!(body, "{name:<col_width$}{first_right}");
-
-        for handler in handlers.iter().skip(1) {
-            let right = format!(
-                "{} [{}]",
-                handler.path_template,
-                handler_kind_label(&handler.handler_kind),
-            );
-            let _ = writeln!(body, "{:<col_width$}{right}", "");
-        }
-    }
-
-    format!("{}{}", section_header("By type"), body)
-}
-
-fn render_mutations(data: &MountTreeData) -> String {
-    let mut mutations: Vec<&mts::MutationRecord> = data.mutations.iter().collect();
-    mutations.sort_by(|left, right| left.path_template.cmp(&right.path_template));
-
-    let mut body = String::new();
-    for mutation in &mutations {
-        let _ = writeln!(body, "{}", mutation.path_template);
-    }
-
-    format!("{}{}", section_header("Mutations"), body)
 }

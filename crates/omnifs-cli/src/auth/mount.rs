@@ -12,7 +12,7 @@ use omnifs_workspace::provider::{Catalog, ProviderManifest};
 use super::manifest_view::AuthManifestView;
 use super::readiness::AuthReadiness;
 use crate::credential_target::CredentialTarget;
-use crate::session::MountConfig;
+use crate::mount_config::MountConfig;
 /// Auth mode chosen during `omnifs init` before a mount config exists on disk.
 #[derive(Clone, Debug)]
 pub(crate) struct AuthSelection {
@@ -104,37 +104,33 @@ pub(crate) struct MountAuth {
     manifest: Option<AuthManifest>,
 }
 
-pub(crate) fn load_mount_auth(
-    catalog: &Catalog,
-    mounts: &[MountConfig],
-    mount: &str,
-) -> anyhow::Result<MountAuth> {
-    let spec = load_mount_auth_config(mounts, mount)?;
-    Ok(mount_auth(catalog, spec))
-}
-
-fn load_mount_auth_config(mounts: &[MountConfig], mount: &str) -> anyhow::Result<Spec> {
-    let name = MountName::new(mount.to_owned())
-        .with_context(|| format!("invalid mount name `{mount}`"))?;
-    crate::mount_report::load_mount_by_name(mounts, &name)
-        .with_context(|| format!("load mount config `{mount}`"))
-}
-
-/// Build the auth view for a mount spec. The provider's auth manifest is
-/// best-effort: a missing or unreadable artifact leaves `manifest` as `None`,
-/// and the auth helpers surface a clear error at the point a scheme is actually
-/// needed (login, import) rather than failing the whole listing here. The
-/// scheme name itself is already baked into `spec.auth` at creation, so it is
-/// available even when the manifest is not.
-pub(crate) fn mount_auth(catalog: &Catalog, spec: Spec) -> MountAuth {
-    let manifest = omnifs_workspace::mounts::pinned_manifest(catalog, &spec)
-        .ok()
-        .flatten()
-        .and_then(|manifest| manifest.wasm_auth_manifest());
-    MountAuth { spec, manifest }
-}
-
 impl MountAuth {
+    pub(crate) fn load(
+        catalog: &Catalog,
+        mounts: &[MountConfig],
+        mount: &str,
+    ) -> anyhow::Result<Self> {
+        let name = MountName::new(mount.to_owned())
+            .with_context(|| format!("invalid mount name `{mount}`"))?;
+        let spec = crate::mount_report::load_mount_by_name(mounts, &name)
+            .with_context(|| format!("load mount config `{mount}`"))?;
+        Ok(Self::from_spec(catalog, spec))
+    }
+
+    /// Build the auth view for a mount spec. The provider's auth manifest is
+    /// best-effort: a missing or unreadable artifact leaves `manifest` as
+    /// `None`, and the auth helpers surface a clear error at the point a scheme
+    /// is actually needed (login, import) rather than failing the whole listing
+    /// here. The scheme name itself is already baked into `spec.auth` at
+    /// creation, so it is available even when the manifest is not.
+    pub(crate) fn from_spec(catalog: &Catalog, spec: Spec) -> Self {
+        let manifest = omnifs_workspace::mounts::pinned_manifest(catalog, &spec)
+            .ok()
+            .flatten()
+            .and_then(|manifest| manifest.wasm_auth_manifest());
+        Self { spec, manifest }
+    }
+
     pub(crate) fn spec(&self) -> &Spec {
         &self.spec
     }

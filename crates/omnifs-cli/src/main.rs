@@ -10,6 +10,7 @@ mod cli;
 mod client;
 mod commands;
 mod config;
+mod control;
 mod credential_target;
 mod daemon_teardown;
 mod error;
@@ -19,11 +20,11 @@ mod inspector;
 mod launch;
 mod launch_backend;
 mod launch_record;
+mod mount_config;
 mod mount_report;
 mod mount_tree;
 mod provider_bundle;
 mod runtime;
-mod session;
 mod status;
 mod style;
 mod telemetry;
@@ -43,19 +44,24 @@ async fn main() {
     // internal `daemon` subcommand, which records `daemon.jsonl` itself.
     // Subcommands that `std::process::exit` on their own (shell, doctor) record
     // at their exit site; this covers every command that returns to `main`.
-    let telemetry_label = cli.command.telemetry_label();
+    let telemetry_label = cli.telemetry_label();
     match run(cli).await {
-        Ok(()) => {
+        Ok(exit_code) => {
+            let code = exit_code.code();
             if let Some(cmd) = telemetry_label {
-                telemetry::record_cli_exit(cmd, 0);
+                telemetry::record_cli_exit(cmd, code);
+            }
+            if code != 0 {
+                std::process::exit(code);
             }
         },
         Err(error) => {
+            let exit_code = error::exit_code(&error).code();
             if let Some(cmd) = telemetry_label {
-                telemetry::record_cli_exit(cmd, 1);
+                telemetry::record_cli_exit(cmd, exit_code);
             }
             anstream::eprint!("{}", error::render(&error));
-            std::process::exit(1);
+            std::process::exit(exit_code);
         },
     }
 }
@@ -82,6 +88,6 @@ fn init_tracing(verbose: u8) {
     builder.init();
 }
 
-async fn run(cli: Cli) -> anyhow::Result<()> {
-    cli.command.run().await
+async fn run(cli: Cli) -> anyhow::Result<error::ExitCode> {
+    cli.run().await
 }

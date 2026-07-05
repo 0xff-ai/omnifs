@@ -7,14 +7,14 @@
 use anyhow::{Context as _, Result};
 use omnifs_api::{
     API_MAJOR, API_MINOR, ApiError, CredentialStatus, DaemonStatus, ErrorCode, MountReport,
-    MountUpdateRequest, ReconcileReport, StopReport, UpgradeDelta,
+    MountUpdateRequest, ProviderSummary, ReconcileReport, StopReport, UpgradeDelta,
 };
 use omnifs_workspace::authn::CredentialId;
 use omnifs_workspace::mounts::{Spec, UpgradePlan};
 use std::time::Duration;
 
-use crate::error::WithHint;
-use crate::inspector::daemon_addr;
+use crate::control::addr::daemon_addr;
+use crate::error::{ExitCode, WithExitCode, WithHint};
 
 const EXPORT_API_MINOR: u16 = 2;
 
@@ -68,9 +68,7 @@ impl DaemonControlState {
     fn require_compatible(self, base: &str) -> Result<DaemonStatus> {
         match self.compatible_optional(base)? {
             Some(status) => Ok(status),
-            None => Err(anyhow::anyhow!(
-                "no daemon answered on the control port at {base}"
-            )),
+            None => Err(daemon_unavailable_error(base)),
         }
     }
 }
@@ -138,9 +136,9 @@ impl DaemonClient {
 
     /// Daemon runtime facts from a reachable, compatible daemon.
     pub(crate) async fn status(&self) -> Result<DaemonStatus> {
-        self.status_optional().await?.ok_or_else(|| {
-            anyhow::anyhow!("no daemon answered on the control port at {}", self.base)
-        })
+        self.status_optional()
+            .await?
+            .ok_or_else(|| daemon_unavailable_error(&self.base))
     }
 
     async fn get_optional(
@@ -184,7 +182,10 @@ impl DaemonClient {
 
     fn api_error(context: &'static str, api_error: &ApiError) -> anyhow::Error {
         let error = anyhow::anyhow!("{context}: {}", api_error.message);
-        match Err::<(), _>(error).with_hint(hint_for(api_error.code)) {
+        match Err::<(), _>(error)
+            .with_hint(hint_for(api_error.code))
+            .with_exit_code(exit_code_for(api_error.code))
+        {
             Ok(()) => unreachable!("api error construction always starts from Err"),
             Err(error) => error,
         }
@@ -303,6 +304,44 @@ impl DaemonClient {
             .map(Some)
     }
 
+    pub(crate) async fn providers_if_ready(&self) -> Result<Option<Vec<ProviderSummary>>> {
+        if !self.ready().await {
+            return Ok(None);
+        }
+        self.require_compatible().await?;
+        let response = self
+            .http
+            .get(format!("{}/v1/providers", self.base))
+            .send()
+            .await
+            .with_context(|| format!("list providers on daemon at {}", self.base))?;
+        let response = Self::ensure_success(response, "daemon providers request failed").await?;
+        response
+            .json()
+            .await
+            .context("parse daemon providers")
+            .map(Some)
+    }
+
+    pub(crate) async fn credentials_if_ready(&self) -> Result<Option<Vec<CredentialStatus>>> {
+        if !self.ready().await {
+            return Ok(None);
+        }
+        self.require_compatible().await?;
+        let response = self
+            .http
+            .get(format!("{}/v1/credentials", self.base))
+            .send()
+            .await
+            .with_context(|| format!("list credentials on daemon at {}", self.base))?;
+        let response = Self::ensure_success(response, "daemon credentials request failed").await?;
+        response
+            .json()
+            .await
+            .context("parse daemon credentials")
+            .map(Some)
+    }
+
     /// Export a mount snapshot tar only when a compatible daemon is running.
     pub(crate) async fn export_mount_if_running(&self, mount: &str) -> Result<Option<Vec<u8>>> {
         let Some(status) = self.compatible_status_optional().await? else {
@@ -376,7 +415,7 @@ fn upgrade_delta_to_api(plan: &UpgradePlan) -> Result<UpgradeDelta> {
 fn hint_for(code: ErrorCode) -> &'static str {
     match code {
         ErrorCode::AuthRequired | ErrorCode::ConsentRequired => "Try: omnifs mounts reauth <name>",
-        ErrorCode::CredentialNotFound => "Try: omnifs init --reauth <mount>",
+        ErrorCode::CredentialNotFound => "Try: omnifs mounts reauth <mount>",
         ErrorCode::MountNotFound => "Try: omnifs mounts ls",
         ErrorCode::SpecInvalid => {
             "Try: edit the mount spec or recreate it with `omnifs init <provider> --as <name>`"
@@ -385,6 +424,31 @@ fn hint_for(code: ErrorCode) -> &'static str {
         ErrorCode::ReconcileBusy => "Try: rerun the command after reconcile finishes",
         ErrorCode::DaemonShuttingDown => "Try: omnifs up",
         ErrorCode::Internal => "Try: omnifs doctor",
+    }
+}
+
+fn exit_code_for(code: ErrorCode) -> ExitCode {
+    match code {
+        ErrorCode::AuthRequired | ErrorCode::ConsentRequired | ErrorCode::CredentialNotFound => {
+            ExitCode::AuthRequired
+        },
+        ErrorCode::DaemonShuttingDown => ExitCode::DaemonUnavailable,
+        ErrorCode::MountNotFound
+        | ErrorCode::SpecInvalid
+        | ErrorCode::ProviderMissing
+        | ErrorCode::ReconcileBusy
+        | ErrorCode::Internal => ExitCode::GenericFailure,
+    }
+}
+
+fn daemon_unavailable_error(base: &str) -> anyhow::Error {
+    match Err::<(), _>(anyhow::anyhow!(
+        "no daemon answered on the control port at {base}"
+    ))
+    .with_exit_code(ExitCode::DaemonUnavailable)
+    {
+        Ok(()) => unreachable!("daemon unavailable construction always starts from Err"),
+        Err(error) => error,
     }
 }
 
@@ -470,7 +534,7 @@ mod tests {
         );
         assert_eq!(
             hint_for(ErrorCode::CredentialNotFound),
-            "Try: omnifs init --reauth <mount>"
+            "Try: omnifs mounts reauth <mount>"
         );
         assert_eq!(hint_for(ErrorCode::MountNotFound), "Try: omnifs mounts ls");
         assert_eq!(

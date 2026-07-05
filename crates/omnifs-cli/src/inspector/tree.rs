@@ -119,6 +119,18 @@ impl PathNode {
             .values()
             .any(|child| child.is_in_active_focus(now_mono, window_us))
     }
+
+    fn lookup_mut(&mut self, path: &str) -> Option<&mut PathNode> {
+        if path.is_empty() {
+            return Some(self);
+        }
+        let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+        let mut node = self;
+        for segment in segments {
+            node = node.children.get_mut(segment)?;
+        }
+        Some(node)
+    }
 }
 
 /// Glyph state for a node. Ordered so `max()` picks the most
@@ -265,22 +277,10 @@ impl MountForest {
     /// doesn't exist.
     pub fn toggle_collapsed(&mut self, mount: &str, path: &str) -> Option<bool> {
         let tree = self.mounts.get_mut(mount)?;
-        let node = lookup_node_mut(&mut tree.root, path)?;
+        let node = tree.root.lookup_mut(path)?;
         node.manually_collapsed = !node.manually_collapsed;
         Some(node.manually_collapsed)
     }
-}
-
-fn lookup_node_mut<'a>(root: &'a mut PathNode, path: &str) -> Option<&'a mut PathNode> {
-    if path.is_empty() {
-        return Some(root);
-    }
-    let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-    let mut node = root;
-    for segment in segments {
-        node = node.children.get_mut(segment)?;
-    }
-    Some(node)
 }
 
 impl MountForest {
