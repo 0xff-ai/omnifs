@@ -43,6 +43,7 @@ pub enum StoreError {
 
 /// One installed artifact in the index. `file` is display-only provenance.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct IndexEntry {
     pub id: ProviderId,
     pub name: ProviderName,
@@ -53,6 +54,7 @@ pub struct IndexEntry {
 
 /// The provider index: every retained artifact plus a name→latest-id pointer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Index {
     pub version: u32,
     #[serde(default)]
@@ -345,5 +347,56 @@ mod tests {
         std::fs::write(dir.path().join("index.json"), r#"{"version":99}"#).unwrap();
         let store = ProviderStore::new(dir.path());
         assert!(matches!(store.read_index(), Err(StoreError::Version(99))));
+    }
+
+    #[test]
+    fn read_index_rejects_unknown_top_level_key() {
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("index.json"),
+            r#"{"version":1,"providers":[],"latest":{},"providersByName":{}}"#,
+        )
+        .unwrap();
+        let store = ProviderStore::new(dir.path());
+
+        let error = store
+            .read_index()
+            .expect_err("unknown index keys must fail");
+
+        let StoreError::Index { source, .. } = error else {
+            panic!("expected corrupt index error");
+        };
+        let message = source.to_string();
+        assert!(
+            message.contains("unknown field `providersByName`"),
+            "error should name the unknown key, got: {message}"
+        );
+    }
+
+    #[test]
+    fn read_index_rejects_unknown_provider_entry_key() {
+        let dir = tempdir().unwrap();
+        let id = ProviderId::from_wasm_bytes(b"demo").to_string();
+        std::fs::write(
+            dir.path().join("index.json"),
+            format!(
+                r#"{{"version":1,"providers":[{{"id":"{id}","name":"demo","file":"omnifs_provider_demo.wasm","source":"manual"}}]}}"#
+            ),
+        )
+        .unwrap();
+        let store = ProviderStore::new(dir.path());
+
+        let error = store
+            .read_index()
+            .expect_err("unknown entry keys must fail");
+
+        let StoreError::Index { source, .. } = error else {
+            panic!("expected corrupt index error");
+        };
+        let message = source.to_string();
+        assert!(
+            message.contains("unknown field `source`"),
+            "error should name the unknown key, got: {message}"
+        );
     }
 }

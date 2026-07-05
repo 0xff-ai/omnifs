@@ -1169,4 +1169,20 @@ mod tests {
             Some(&axum::http::HeaderValue::from_static("2"))
         );
     }
+
+    #[test]
+    fn create_mount_rejects_unknown_top_level_spec_field() {
+        let spec = serde_json::json!({
+            "provider": {
+                "id": "0000000000000000000000000000000000000000000000000000000000000000",
+                "meta": { "name": "demo" }
+            },
+            "mount": "demo",
+            "moutn": "typo"
+        });
+
+        let response = super::parse_spec_json(spec).expect_err("spec must be rejected");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
 }

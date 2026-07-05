@@ -27,6 +27,8 @@ Specs are one file per mount, and a spec file's stem is its mount name: `mounts:
 
 `POST /v1/reconcile` converges the daemon to the on-disk specs. With no body it is a full pass. With `{ "mounts": ["name"] }` it is scoped to those mount names for planning, build, and stale removal. HTTP-triggered reconcile is non-queueing: if another reconcile holds the engine lock, the daemon returns `409 ReconcileBusy` with `Retry-After: 2`. Internal daemon calls that intentionally serialize still wait on the engine lock.
 
+Mount specs strict-parse their top-level JSON fields. Unknown top-level keys are invalid in on-disk specs and in daemon mount CRUD requests, while the provider-owned `config` object remains opaque to the host.
+
 Prefer REST API extensions for new non-secret interactions. Keep credential material off the REST API.
 
 ### Replica snapshots
@@ -62,6 +64,8 @@ Keep Docker-specific bind/materialization policy in Docker launch paths. Keep na
 ### Provider bundles
 
 `Dockerfile` is the contributor image path for `just dev`. Dev image builds consume the content-addressed provider-store bundle at `target/omnifs-provider-store` as a named Docker build context; the normal runtime image stage must not compile providers again. `scripts/dev.ts` copies that same bundle into the dev provider store for runtime mount pinning. Release runtime image assembly uses `scripts/ci/build-runtime-image.sh`. Release CLI binaries embed the provider bundle and unpack it into `OMNIFS_HOME/providers`.
+
+Provider-store indexes strict-parse both the top-level index object and retained provider entries. Unknown keys make the store unreadable instead of being silently accepted.
 
 ## Must not
 
