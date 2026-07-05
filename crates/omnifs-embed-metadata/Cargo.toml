@@ -25,6 +25,7 @@ omnifs-provider-github = { version = "0.2.1", path = "../../providers/github" }
 omnifs-provider-kubernetes = { version = "0.2.1", path = "../../providers/kubernetes" }
 omnifs-provider-linear = { version = "0.2.1", path = "../../providers/linear" }
 omnifs-provider-oura = { version = "0.2.1", path = "../../providers/oura" }
+omnifs-provider-web = { version = "0.2.1", path = "../../providers/web" }
 test-provider = { version = "0.2.1", path = "../../providers/test" }
 
 [lints]

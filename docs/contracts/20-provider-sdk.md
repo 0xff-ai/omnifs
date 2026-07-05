@@ -33,6 +33,8 @@ Provider manifests are generated from `#[omnifs_sdk::provider]` annotations, eac
 
 Every auth injection domain must be covered by a declared domain capability need in the same manifest. Metadata validation rejects a scheme whose `injectDomains` entry is not matched by the provider's domain needs, and the error names the scheme key and domain.
 
+Dynamic domain needs are declared as `domain(dynamic, "...")` and resolve from a mount config field named `domains` with type `Vec<String>`. The resolved values become the host-enforced HTTP allowlist for that mount. Literal domain needs remain `domain("host.example", "...")`.
+
 Use `just providers build` when artifacts need embedded metadata and validation-ready Wasm; it runs the harvester after the Wasm build. The host reads the section pre-instantiation, so it never instantiates a component to obtain metadata.
 
 ### Host resource config fields

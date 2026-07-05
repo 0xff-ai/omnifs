@@ -29,6 +29,8 @@ Async host imports do not reduce this gate. A provider may suspend on a host imp
 
 Provider manifest `capabilities` declare authority needs only: domains, git repos, unix sockets, and preopened paths. Scalar resource ceilings such as memory and blob byte budgets are manifest `limits` and mount-spec `limits`; they must not be described as provider authority or callout grants.
 
+Dynamic domain needs resolve from a provider config field named `domains`, whose string array becomes the mount's concrete HTTP allowlist at startup. Do not use a wildcard domain grant to stand in for this per-mount enumeration.
+
 ### Auth and credentials
 
 Credentials live host-side. Providers declare auth needs; the host resolves, stores, refreshes, and injects credentials after a callout crosses the WASM boundary.

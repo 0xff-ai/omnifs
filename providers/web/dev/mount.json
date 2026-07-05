@@ -1,0 +1,13 @@
+{
+  "provider": "web",
+  "mount": "web",
+  "capabilities": {
+    "domains": { "dynamic": true }
+  },
+  "config": {
+    "domains": ["example.com"]
+  },
+  "limits": {
+    "max_memory_mb": 128
+  }
+}
