@@ -14,7 +14,10 @@ use futures_util::{StreamExt, TryStreamExt};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
 use crate::error::WithHint;
-use crate::launch_backend::{ContainerName, DockerTarget, ENV_CONTAINER_NAME, ENV_IMAGE};
+use crate::launch_backend::{
+    BUILD_CHANNEL, BuildChannel, ContainerName, DockerTarget, ENV_CONTAINER_NAME, ENV_IMAGE,
+    names_registry,
+};
 use crate::launch_backend::{GUEST_HOME, GUEST_MOUNT, ImageRef};
 use omnifs_workspace::layout::OMNIFS_HOME_ENV;
 
@@ -79,6 +82,12 @@ impl Runtime {
 
     pub(crate) async fn ping(&self) -> Result<()> {
         self.docker.ping().await.map(|_| ()).map_err(Into::into)
+    }
+
+    /// The Docker server version string, if the daemon reports one. Used only
+    /// for the informational reachability row in `omnifs setup`.
+    pub(crate) async fn server_version(&self) -> Option<String> {
+        self.docker.version().await.ok()?.version
     }
 
     /// Probe Docker daemon reachability without requiring a pre-connected client.
@@ -453,9 +462,28 @@ impl Runtime {
         anstream::eprint!("Checking image `{}` ", self.image());
         std::io::stderr().flush().ok();
         match self.docker.inspect_image(self.image().as_str()).await {
-            Ok(_) => {
-                anstream::eprintln!("present");
+            Ok(inspect) => {
+                // Surface the dev image's age so a stale local build is
+                // visible; release channel keeps the terse `present`.
+                match (BUILD_CHANNEL, image_age_words(inspect.created.as_deref())) {
+                    (BuildChannel::Dev, Some(age)) => {
+                        anstream::eprintln!("present (built {age} ago)");
+                    },
+                    _ => anstream::eprintln!("present"),
+                }
                 Ok(())
+            },
+            Err(bollard::errors::Error::DockerResponseServerError {
+                status_code: 404, ..
+            }) if !names_registry(self.image().as_str()) => {
+                // A registry-less reference is a local build product. Never
+                // reach for a registry: refuse and point at the dev build.
+                anstream::eprintln!("missing");
+                let image = self.image();
+                Err(anyhow!(pull_refusal_reason(BUILD_CHANNEL)))
+                    .context(format!("image `{image}` is not present locally"))
+                    .with_hint("build it with `just dev --build-only`")
+                    .with_hint("or set a specific image via the OMNIFS_IMAGE env var or the `[system].image` config key")
             },
             Err(bollard::errors::Error::DockerResponseServerError {
                 status_code: 404, ..
@@ -647,6 +675,54 @@ fn check_launcher_compat(launcher_version: &str, label: Option<&str>) -> Result<
     Ok(())
 }
 
+/// Why a registry-less image absent locally is not pulled, worded per build
+/// channel: only a dev binary defaults to `omnifs:dev`, so a release binary
+/// hitting this path chose a local tag explicitly and must not be told it is a
+/// dev build.
+const fn pull_refusal_reason(channel: BuildChannel) -> &'static str {
+    match channel {
+        BuildChannel::Dev => {
+            "this omnifs binary is a dev build; it uses the locally built runtime image \
+             and never pulls from a registry"
+        },
+        BuildChannel::Release => {
+            "registry-less image references are local build products; omnifs never pulls \
+             them from a registry"
+        },
+    }
+}
+
+/// Render a docker image's RFC3339 `created` timestamp as a coarse relative age
+/// like `3d`, `5h`, or `2m`. Returns `None` when the field is absent, unparsable,
+/// or in the future so the caller falls back to a bare `present`.
+fn image_age_words(created: Option<&str>) -> Option<String> {
+    use time::OffsetDateTime;
+    use time::format_description::well_known::Rfc3339;
+
+    let created = OffsetDateTime::parse(created?, &Rfc3339).ok()?;
+    let secs = (OffsetDateTime::now_utc() - created).whole_seconds();
+    if secs < 0 {
+        return None;
+    }
+    Some(duration_words(secs))
+}
+
+/// Coarse duration-to-words for image age: seconds, minutes, hours, or days.
+fn duration_words(secs: i64) -> String {
+    const MINUTE: i64 = 60;
+    const HOUR: i64 = 60 * MINUTE;
+    const DAY: i64 = 24 * HOUR;
+    if secs < MINUTE {
+        format!("{secs}s")
+    } else if secs < HOUR {
+        format!("{}m", secs / MINUTE)
+    } else if secs < DAY {
+        format!("{}h", secs / HOUR)
+    } else {
+        format!("{}d", secs / DAY)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -735,6 +811,29 @@ mod tests {
             msg.contains("cargo install") || msg.contains("npm"),
             "msg should hint at remediation: {msg}"
         );
+    }
+
+    #[test]
+    fn pull_refusal_reason_names_dev_build_only_on_the_dev_channel() {
+        assert!(pull_refusal_reason(BuildChannel::Dev).contains("dev build"));
+        assert!(!pull_refusal_reason(BuildChannel::Release).contains("dev build"));
+        assert!(pull_refusal_reason(BuildChannel::Release).contains("never pulls"));
+    }
+
+    #[test]
+    fn duration_words_buckets() {
+        assert_eq!(duration_words(5), "5s");
+        assert_eq!(duration_words(120), "2m");
+        assert_eq!(duration_words(3 * 3600), "3h");
+        assert_eq!(duration_words(3 * 86400 + 5), "3d");
+    }
+
+    #[test]
+    fn image_age_words_handles_missing_and_future() {
+        assert_eq!(image_age_words(None), None);
+        assert_eq!(image_age_words(Some("not-a-timestamp")), None);
+        // A far-future timestamp is not a sensible age.
+        assert_eq!(image_age_words(Some("2999-01-01T00:00:00Z")), None);
     }
 
     #[test]

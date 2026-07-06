@@ -6,16 +6,16 @@ use omnifs_auth::{CredentialService, OAuthClient};
 use omnifs_workspace::creds::{CredentialStore, FileStore};
 use omnifs_workspace::mounts::Name as MountName;
 use omnifs_workspace::mounts::Registry;
-use std::io::Write as _;
 use std::path::Path;
 use std::sync::Arc;
 
 use crate::credential_target::CredentialTarget;
-use crate::error::ExitCode;
+use crate::error::{ExitCode, WithExitCode};
 use crate::mount_config::MountConfig;
 use crate::token_source::TokenSource;
 use crate::workspace::Workspace;
 use omnifs_workspace::layout::WorkspaceLayout;
+use std::io::IsTerminal as _;
 
 #[derive(Args, Debug, Clone)]
 pub struct MountsArgs {
@@ -33,8 +33,8 @@ pub enum MountsCommand {
     Rm {
         name: String,
         /// Skip the confirmation prompt.
-        #[arg(long)]
-        force: bool,
+        #[arg(short = 'y', long)]
+        yes: bool,
         /// Skip the credential delete.
         #[arg(long)]
         keep_credentials: bool,
@@ -81,11 +81,11 @@ impl MountsArgs {
             MountsCommand::Reauth(args) => args.run().await.map(|()| ExitCode::Success),
             MountsCommand::Rm {
                 name,
-                force,
+                yes,
                 keep_credentials,
             } => {
                 let workspace = Workspace::resolve()?;
-                rm(&workspace, &name, force, keep_credentials)
+                rm(&workspace, &name, yes, keep_credentials)
                     .await
                     .map(|()| ExitCode::Success)
             },
@@ -121,21 +121,50 @@ fn ls(args: &LsArgs) -> anyhow::Result<ExitCode> {
         anstream::println!("{}", serde_json::to_string(&payload)?);
         return Ok(exit_code);
     }
-    if mounts.is_empty() {
+    if statuses.is_empty() {
         anstream::println!("No mounts configured.");
-        anstream::eprintln!("Run `omnifs init` to add one.");
+        anstream::println!("Run `omnifs init` to add one.");
         return Ok(ExitCode::Success);
     }
-    for mount in &mounts {
-        let name = crate::style::bold(mount.name.as_str());
-        let provider = mount.config.provider_name().to_string();
-        let auth = crate::auth::MountAuth::from_spec(workspace.catalog(), mount.config.clone())
-            .readiness(&store)
-            .terminal_row()
-            .summary;
-        anstream::println!("{name}  {}  {auth}", crate::style::dim(provider));
+    for status in &statuses {
+        anstream::println!("{}", render_mount_row(status));
     }
     Ok(exit_code)
+}
+
+/// One text row per mount, sourced from the same scan that drives the JSON
+/// output and exit code. Invalid mounts (missing or corrupt provider artifact)
+/// render explicitly as a broken row rather than masquerading as normal.
+fn render_mount_row(status: &crate::status::UserMountStatus) -> String {
+    use crate::auth::AuthTerminalKind;
+    use crate::status::UserMountStatus;
+    match status {
+        UserMountStatus::Ready(mount) => {
+            let row = mount.auth.terminal_row();
+            let glyph = match row.kind {
+                AuthTerminalKind::None => crate::style::dim("◯"),
+                AuthTerminalKind::Ready => crate::style::success("●"),
+                AuthTerminalKind::Missing | AuthTerminalKind::Error => crate::style::error("●"),
+            };
+            format!(
+                "{glyph}  {}  {}  {}",
+                crate::style::bold(&mount.mount),
+                crate::style::dim(&mount.provider),
+                row.summary,
+            )
+        },
+        UserMountStatus::Invalid { config_path, error } => {
+            let name = config_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("<unknown>");
+            format!(
+                "{}  {}  invalid ({error})",
+                crate::style::error("●"),
+                crate::style::bold(name),
+            )
+        },
+    }
 }
 
 impl ReauthArgs {
@@ -147,7 +176,7 @@ impl ReauthArgs {
     /// Re-acquire the credential for an existing mount: OAuth login or a fresh
     /// static token, dispatched on the mount's stored auth. The spec is left
     /// untouched; only the credential store changes.
-    async fn run_in_workspace(self, workspace: &Workspace) -> anyhow::Result<()> {
+    pub(crate) async fn run_in_workspace(self, workspace: &Workspace) -> anyhow::Result<()> {
         let paths = workspace.layout();
         let mount_name = self.name.as_str();
         let mounts = workspace.mounts()?;
@@ -174,6 +203,16 @@ impl ReauthArgs {
             account: auth.account().map(str::to_owned),
         };
 
+        // `--no-input` must never reach an OAuth browser handoff (it would hang
+        // on the browser confirm or the manual-code paste). Mirror the init-side
+        // guard: bail naming the interactive and static-token alternatives.
+        if self.no_input && selection.is_oauth() {
+            return Err(anyhow!(
+                "`omnifs mounts reauth {mount_name} --no-input` cannot complete OAuth; run it interactively, or use a static-token scheme with --token - or --token-env VAR"
+            ))
+            .with_exit_code(ExitCode::AuthRequired);
+        }
+
         let target = if selection.is_oauth() {
             anstream::eprintln!("Re-authenticating `{mount_name}` over OAuth ...");
             crate::auth::login_with_workspace(
@@ -181,6 +220,7 @@ impl ReauthArgs {
                 mount_name,
                 selection.account.as_deref(),
                 self.no_browser,
+                self.no_input,
                 &self.scopes,
             )
             .await?
@@ -230,7 +270,7 @@ impl ReauthArgs {
 pub async fn rm(
     workspace: &Workspace,
     name: &str,
-    force: bool,
+    yes: bool,
     keep_credentials: bool,
 ) -> anyhow::Result<()> {
     let layout = workspace.layout();
@@ -251,13 +291,16 @@ pub async fn rm(
             .register_revocation(&service)?
     };
 
-    if !force {
-        confirm(
+    if !yes
+        && !confirm(
             name.as_str(),
             &config_path,
             &credential_target,
             keep_credentials,
-        )?;
+        )?
+    {
+        anstream::eprintln!("Aborted.");
+        return Ok(());
     }
 
     delete_credentials(
@@ -301,12 +344,22 @@ pub async fn rm(
     Ok(())
 }
 
+/// Show what the removal will delete, then ask for confirmation. Returns
+/// whether the user chose to proceed; a declined prompt is a normal outcome,
+/// not an error.
 fn confirm(
     name: &str,
     config_path: &Path,
     target: &CredentialTarget,
     keep_credentials: bool,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
+    // Without a terminal there is no one to answer the prompt; fail fast naming
+    // the skip flag instead of surfacing inquire's raw NotATTY error.
+    if !std::io::stdin().is_terminal() {
+        anyhow::bail!(
+            "cannot confirm removal of `{name}` on a non-interactive stdin; pass -y to skip confirmation"
+        );
+    }
     anstream::eprintln!("Remove mount `{name}`? This will:");
     anstream::eprintln!("  • delete {}", WorkspaceLayout::display(config_path));
     match target {
@@ -320,15 +373,10 @@ fn confirm(
         },
         CredentialTarget::None => {},
     }
-    anstream::eprint!("Continue? [y/N] ");
-    std::io::stderr().flush()?;
-    let mut answer = String::new();
-    std::io::stdin().read_line(&mut answer)?;
-    let answer = answer.trim().to_lowercase();
-    if !matches!(answer.as_str(), "y" | "yes") {
-        bail!("aborted");
-    }
-    Ok(())
+    inquire::Confirm::new("Proceed?")
+        .with_default(false)
+        .prompt()
+        .map_err(crate::ui::from_inquire)
 }
 
 pub(crate) async fn delete_credentials(

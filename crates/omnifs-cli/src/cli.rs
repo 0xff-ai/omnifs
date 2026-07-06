@@ -26,58 +26,71 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Print mount and provider configuration status.
+    /// Show daemon, mount, and auth status
     Status(commands::status::StatusArgs),
 
-    /// Start omnifs with your configured mounts: materialize host credentials
-    /// into a session dir, bind-mount them into the container, then run it.
+    /// Start the daemon and serve configured mounts
+    ///
+    /// Materializes host credentials into a session dir, hands them to the
+    /// runtime backend, and launches it. Under Docker this bind-mounts the
+    /// session dir into the container.
     Up(commands::up::UpArgs),
-    /// Stop and remove the omnifs container and clean up the session dir.
+    /// Stop the daemon and clean up
+    ///
+    /// Tears down the running backend and removes its session dir. Under
+    /// Docker this also removes the container.
     Down(commands::down::DownArgs),
-    /// Tail the daemon log inside the container.
+    /// Tail the daemon log
     Logs(commands::logs::LogsArgs),
-    /// Inspector stream: FUSE, provider, and callout JSONL events.
+    /// Stream FUSE, provider, and callout events
     Inspect(commands::inspect::InspectArgs),
-    /// Open an omnifs-aware shell for exploring the projected tree. The daemon
-    /// mode and mount point come from the run-state file `omnifs up` wrote.
+    /// Open a shell at the projected tree
+    ///
+    /// The daemon mode and mount point come from the run-state file
+    /// `omnifs up` wrote.
     Shell(commands::shell::ShellArgs),
 
-    /// Export a mount's canonical cache as a snapshot directory.
+    /// Export a mount's canonical cache to a directory
     Snapshot(commands::snapshot::SnapshotArgs),
 
-    /// First-run wizard: detect OS, explain Docker, pick several providers,
-    /// authenticate each, and launch the container in one pass.
+    /// Guided setup: runtime, providers, auth, launch
+    ///
+    /// First-run wizard: detect the OS, explain the runtime, pick several
+    /// providers, authenticate each, and launch in one pass.
     ///
     /// Run this once to get started; use `omnifs init` to add a single
-    /// provider later. Re-runnable: already-configured
-    /// providers are listed but excluded from the picker.
+    /// provider later. Re-runnable: already-configured providers are listed
+    /// but excluded from the picker.
     Setup(commands::setup::SetupArgs),
 
-    /// Interactive setup for a new mount.
+    /// Add and authenticate a mount
     Init(commands::init::InitArgs),
 
-    /// Manage configured mounts: ls, reauth, rm.
+    /// List, reauthenticate, or remove mounts
     Mounts(commands::mounts::MountsArgs),
 
-    /// Manage installed provider WASM artifacts.
+    /// List or install provider artifacts
     Providers(commands::providers::ProvidersArgs),
 
-    /// Install omnifs usage skills for agent harnesses.
+    /// Install omnifs usage skills for agent harnesses
     Skill(commands::skill::SkillArgs),
 
-    /// Nuke every mount config and (by default) its stored credential,
-    /// then stop and remove the container. Asks for confirmation unless
-    /// `--yes` is set.
+    /// Remove all mounts and credentials, stop the daemon
+    ///
+    /// Nukes every mount config and (by default) its stored credential, then
+    /// stops the running backend. Asks for confirmation unless `--yes` is set.
     Reset(commands::reset::ResetArgs),
 
-    /// Diagnose environment and auth.
+    /// Diagnose environment, auth, and daemon health
     Doctor(commands::doctor::DoctorArgs),
 
-    /// Print shell completions.
+    /// Print shell completions
     Completions(commands::completions::CompletionsArgs),
 
-    /// Print version information. Use --detail for daemon / store /
-    /// provider count alongside the CLI version.
+    /// Print version information
+    ///
+    /// Use `--detail` for daemon, store, and provider count alongside the CLI
+    /// version.
     Version(commands::version::VersionArgs),
 
     /// Debug utilities. Hidden from `--help`.

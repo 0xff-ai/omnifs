@@ -1,32 +1,30 @@
 //! `omnifs setup`: guided onboarding walkthrough.
 //!
-//! Sequential, npx-style: each step prints inline and stays in scrollback.
-//! Detects host OS, explains the runtime model, prepares the selected runtime,
-//! walks the user through selecting providers, confirms capabilities per
-//! provider, runs `init`, and (unless `--no-up`) launches the daemon.
+//! A single ledger drives the whole wizard: an environment summary, a runtime
+//! choice, a provider picker, a per-provider block for each selection, and a
+//! launch. Every human line prints on stderr through the `crate::ui` design
+//! system; stdout is reserved for machine output.
 
 pub mod host_os;
-pub mod summary;
 
-use std::collections::BTreeMap;
-use std::fmt;
-use std::fs;
 use std::io::IsTerminal;
 use std::path::PathBuf;
 
-use anyhow::{Context, anyhow};
+use anyhow::Context;
 use clap::Args;
 use omnifs_workspace::layout::WorkspaceLayout;
 use omnifs_workspace::provider::{Provider, ProviderManifest};
 
 use crate::commands::init;
 use crate::config::ConfiguredBackend;
+use crate::launch::{LaunchOutcome, Launcher};
 use crate::launch_backend::GUEST_MOUNT;
 use crate::stages::PromptMode;
+use crate::ui;
+use crate::ui::picker::PickerRow;
 use crate::workspace::Workspace;
 
 use self::host_os::HostOs;
-use self::summary::InitResult;
 
 #[derive(Args, Debug, Clone, Default)]
 #[allow(clippy::struct_excessive_bools)] // mirrors CLI flags 1:1
@@ -43,8 +41,7 @@ pub struct SetupArgs {
     /// Runtime to persist as the default.
     #[arg(long, value_enum)]
     pub runtime: Option<ConfiguredBackend>,
-    /// Mount point to preview for host-native runs. To persist it for launch,
-    /// export `OMNIFS_MOUNT_POINT` with the same value.
+    /// Mount point for the native runtime (ignored for docker).
     #[arg(long, value_name = "PATH")]
     pub mount_point: Option<PathBuf>,
     /// Preselect providers and skip the picker.
@@ -53,6 +50,36 @@ pub struct SetupArgs {
     /// Print the OAuth URL instead of opening a browser.
     #[arg(long)]
     pub no_browser: bool,
+}
+
+/// How the shared configure tail titles its sections: the fresh wizard counts
+/// its stages (`── 4/6 first mount ──`), while the review hub is not a
+/// six-stage walk, so its actions print plain rules without counters.
+#[derive(Clone, Copy)]
+enum StageStyle {
+    Wizard,
+    Hub,
+}
+
+impl StageStyle {
+    fn banner(self, n: usize, title: &str) -> String {
+        match self {
+            Self::Wizard => ui::stage_rule(n, 6, title),
+            Self::Hub => ui::rule(title),
+        }
+    }
+}
+
+/// The outcome of configuring one provider during setup.
+enum MountOutcome {
+    Ready,
+    Skipped,
+    Failed(String),
+}
+
+struct InitResult {
+    mount_name: String,
+    outcome: MountOutcome,
 }
 
 impl SetupArgs {
@@ -65,403 +92,480 @@ impl SetupArgs {
         };
 
         let os = HostOs::detect();
-        print_orientation(os);
-
         let workspace = Workspace::resolve()?;
         let paths = workspace.layout();
         let config = workspace.config()?;
         let environment = crate::stages::environment_check(os, &workspace)?;
-        print_environment(&environment);
         crate::provider_bundle::ensure_providers_installed(&paths.providers_dir)?;
-        fs::create_dir_all(&paths.mounts_dir)
+        std::fs::create_dir_all(&paths.mounts_dir)
             .with_context(|| format!("create {}", paths.mounts_dir.display()))?;
 
-        let mounts = workspace.mounts()?;
+        // Review mode: a configured workspace, no explicit providers, no --yes.
+        // A looping hub that owns its own actions.
         if environment.configured && self.providers.is_empty() && !self.yes {
-            match review_mode(&workspace, &mounts, mode)? {
-                ReviewAction::Exit => return Ok(()),
-                ReviewAction::AddProvider => {},
-            }
+            return self.review_mode(&workspace, mode).await;
         }
 
-        let backend =
-            crate::stages::runtime_selection(os, config.system.runtime, self.runtime, mode)?;
-        crate::stages::persist_runtime(paths, backend)?;
-        let host_native = backend == ConfiguredBackend::Native;
-        let mount_point = crate::stages::mount_point_resolution(self.mount_point.clone(), mode)?;
-
-        print_runtime(backend, os);
-        print_mount_point(&mount_point, host_native);
-
-        let catalog = workspace.catalog();
-        let installed = crate::catalog::installed_providers(catalog)?;
+        // Fresh mode: orientation + environment ledger.
+        print_header();
+        let installed = crate::catalog::installed_providers(workspace.catalog())?;
         if installed.is_empty() {
             anyhow::bail!("no built-in or plugin providers are available");
         }
-        let configured = crate::catalog::configured_mounts(catalog, &mounts)?;
-
-        let selected = resolve_selection(&self, &installed, &configured, mode)?;
-        let results = run_init_loop(&selected, &self, &installed, &workspace).await;
-
-        let (mount_label, mount_root, browse_hint) = if host_native {
-            let mount_root = omnifs_workspace::layout::WorkspaceLayout::display(&mount_point);
-            (
-                "Host mount",
-                mount_root.clone(),
-                format!("`ls {mount_root}`"),
-            )
-        } else {
-            (
-                "Container FUSE mount",
-                GUEST_MOUNT.to_string(),
-                format!("`omnifs shell` then `ls {GUEST_MOUNT}`"),
-            )
-        };
-        let report = summary::SetupSummary::new(
-            paths,
-            mount_label,
-            &mount_root,
-            &browse_hint,
-            &configured,
-            &results,
+        anstream::eprintln!("{}", ui::stage_rule(1, 6, "environment"));
+        anstream::eprintln!("{}", ui::ok("environment", os.name()));
+        anstream::eprintln!(
+            "{}",
+            ui::ok("providers", format!("{} installed", installed.len()))
         );
-        anstream::print!("{report}");
+        Self::render_docker_row(&config).await;
 
-        let any_ready = report.any_ready();
-        if self.no_up {
-            anstream::println!("\nSkipping daemon launch (--no-up).");
-        } else if !any_ready {
-            anstream::println!(
-                "\nNo mounts to launch. Add one with `omnifs init <provider>`, then run `omnifs up`."
+        anstream::eprintln!();
+        anstream::eprintln!("{}", ui::stage_rule(2, 6, "runtime"));
+        let backend =
+            crate::stages::runtime_selection(os, config.system.runtime, self.runtime, mode)?;
+        crate::stages::persist_runtime(paths, backend)?;
+        // When the prompt was skipped (--runtime or --yes) the answered line
+        // the picker prints never appears, so state the fact in the ledger.
+        if self.runtime.is_some() || mode.yes {
+            anstream::eprintln!(
+                "{}",
+                ui::ok("runtime", crate::stages::runtime_word(backend))
             );
+        }
+
+        anstream::eprintln!();
+        anstream::eprintln!("{}", ui::stage_rule(3, 6, "mount point"));
+        let mount_point = self.resolve_mount_point(backend, mode)?;
+
+        self.configure_and_launch(&workspace, mount_point, mode, StageStyle::Wizard)
+            .await
+    }
+
+    /// The informational Docker reachability row for the environment stage. It
+    /// never fails setup; an unreachable daemon just notes the native fallback.
+    async fn render_docker_row(config: &crate::config::Config) {
+        let mut live = ui::LiveRow::start("docker", "checking");
+        live.update("connecting");
+        match crate::stages::probe_docker_reachability(config).await {
+            crate::stages::DockerReachability::Running { version } => {
+                live.settle_ok(format!("{version} running"));
+            },
+            crate::stages::DockerReachability::Unreachable => {
+                live.settle_warn("not reachable");
+                anstream::eprintln!(
+                    "{}",
+                    ui::note("start Docker Desktop, or choose the native runtime")
+                );
+            },
+        }
+    }
+
+    /// Resolve the mount point and print the post-answer runtime note. The
+    /// mount-point question is asked ONLY for the native runtime; under docker
+    /// files always appear at `GUEST_MOUNT`.
+    fn resolve_mount_point(
+        &self,
+        backend: ConfiguredBackend,
+        mode: PromptMode,
+    ) -> anyhow::Result<PathBuf> {
+        if backend == ConfiguredBackend::Native {
+            let mount_point =
+                crate::stages::mount_point_resolution(self.mount_point.clone(), mode)?;
+            let display = WorkspaceLayout::display(&mount_point);
+            // State the fact when the prompt was skipped (--mount-point or --yes).
+            if self.mount_point.is_some() || mode.yes {
+                anstream::eprintln!("{}", ui::ok("mount point", &display));
+            }
+            anstream::eprintln!("{}", ui::note(format!("files appear at {display}")));
+            // Launch reads OMNIFS_MOUNT_POINT; a typed/flagged value only previews
+            // unless it is exported.
+            let already = crate::config::env_string("OMNIFS_MOUNT_POINT")
+                .is_some_and(|env| WorkspaceLayout::display(&PathBuf::from(env)) == display);
+            if !already {
+                anstream::eprintln!(
+                    "{}",
+                    ui::note(format!(
+                        "`export OMNIFS_MOUNT_POINT={display}` to persist it"
+                    ))
+                );
+            }
+            Ok(mount_point)
         } else {
-            let outcome = launch_via_up().await?;
-            if let Some(mount) = results
-                .iter()
-                .find(|result| result.outcome.is_ok())
-                .map(|result| result.mount_name.as_str())
-            {
-                match crate::stages::verify_first_read(&outcome, mount) {
-                    Ok(read) => print_first_read(&read),
-                    Err(error) => anstream::eprintln!(
-                        "First read check failed; run `omnifs doctor` for details: {error:#}"
-                    ),
+            if self.mount_point.is_some() {
+                anstream::eprintln!(
+                    "{}",
+                    ui::warn_row(
+                        "mount point",
+                        "--mount-point applies to the native runtime; ignored for docker"
+                    )
+                );
+            }
+            anstream::eprintln!(
+                "{}",
+                ui::note(format!(
+                    "files appear at {GUEST_MOUNT} inside the container"
+                ))
+            );
+            Ok(PathBuf::from(GUEST_MOUNT))
+        }
+    }
+
+    /// Shared tail: pick providers, configure each, launch, and close.
+    async fn configure_and_launch(
+        &self,
+        workspace: &Workspace,
+        mount_point: PathBuf,
+        mode: PromptMode,
+        style: StageStyle,
+    ) -> anyhow::Result<()> {
+        let installed = crate::catalog::installed_providers(workspace.catalog())?;
+        let mounts = workspace.mounts()?;
+        let configured = crate::catalog::configured_mounts(workspace.catalog(), &mounts)?;
+
+        anstream::eprintln!();
+        anstream::eprintln!("{}", style.banner(4, "first mount"));
+        let selected = self.resolve_selection(&installed, &configured, mode)?;
+
+        // Nothing new to configure (all providers already configured, or the
+        // picker was confirmed empty): from the hub, return to it without the
+        // launch narration. The fresh wizard falls through to its own
+        // "no mounts yet" handling below.
+        if selected.is_empty() && matches!(style, StageStyle::Hub) {
+            return Ok(());
+        }
+
+        anstream::eprintln!();
+        anstream::eprintln!("{}", style.banner(5, "auth + grants"));
+        let results = self.run_init_loop(&selected, &installed, workspace).await;
+
+        let any_ready = results
+            .iter()
+            .any(|r| matches!(r.outcome, MountOutcome::Ready))
+            || !configured.is_empty();
+
+        if self.no_up {
+            anstream::eprintln!(
+                "{}",
+                ui::note("daemon launch skipped (--no-up); run `omnifs up` when ready")
+            );
+            Self::print_closer(&results, None);
+            return Ok(());
+        }
+        if !any_ready {
+            anstream::eprintln!(
+                "{}",
+                ui::note("no mounts yet; add one with `omnifs init <provider>`")
+            );
+            return Ok(());
+        }
+
+        let outcome = self
+            .launch_and_report(workspace, &mount_point, &results, style)
+            .await?;
+        Self::print_closer(&results, Some(&outcome));
+        Ok(())
+    }
+
+    async fn launch_and_report(
+        &self,
+        workspace: &Workspace,
+        mount_point: &std::path::Path,
+        results: &[InitResult],
+        style: StageStyle,
+    ) -> anyhow::Result<LaunchOutcome> {
+        anstream::eprintln!();
+        anstream::eprintln!("{}", style.banner(6, "launch"));
+        // `Launcher::launch` writes its own stderr progress lines; a spinner
+        // here would be overwritten mid-line by them. Print a plain note before
+        // and settle into a static row after, as the pre-LiveRow design did.
+        anstream::eprintln!("{}", ui::note("starting the daemon"));
+        let outcome = match Launcher::new(workspace, "omnifs setup").launch().await {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                anstream::eprintln!("{}", ui::fail("daemon", one_line(&error)));
+                return Err(error);
+            },
+        };
+
+        let daemon = match &outcome {
+            LaunchOutcome::Docker { .. } => "running in docker".to_string(),
+            LaunchOutcome::Native { mount_point: mp } => {
+                let mp = mp.clone().unwrap_or_else(|| mount_point.to_path_buf());
+                format!("running natively at {}", WorkspaceLayout::display(&mp))
+            },
+        };
+        anstream::eprintln!("{}", ui::ok("daemon", daemon));
+
+        if let Some(mount) = results
+            .iter()
+            .find(|r| matches!(r.outcome, MountOutcome::Ready))
+            .map(|r| r.mount_name.as_str())
+        {
+            match crate::stages::verify_first_read(&outcome, mount) {
+                Ok(read) => {
+                    let entries = read.output.lines().count();
+                    // Show the actual listing (bounded) so the read is visibly
+                    // real, then the summary row with the count.
+                    for line in read.output.lines().take(5) {
+                        anstream::eprintln!("{}", ui::note(line));
+                    }
+                    anstream::eprintln!(
+                        "{}",
+                        ui::ok(
+                            "first read",
+                            format!("{} ({entries} entries)", read.command)
+                        )
+                    );
+                },
+                Err(error) => {
+                    anstream::eprintln!(
+                        "{}",
+                        ui::warn_row("first read", "failed; run omnifs doctor")
+                    );
+                    anstream::eprintln!("{}", ui::note(one_line(&error)));
+                },
+            }
+        }
+        Ok(outcome)
+    }
+
+    /// The `--yes` auto-selection: every installed, unconfigured provider that
+    /// can complete without user interaction. Prints why the rest were left out.
+    fn yes_auto_select(
+        installed: &[(Provider, ProviderManifest)],
+        configured: &std::collections::BTreeMap<String, String>,
+    ) -> Vec<String> {
+        let mut selected = Vec::new();
+        let mut skipped: Vec<String> = Vec::new();
+        for (provider, manifest) in installed {
+            let name = provider.meta.name.to_string();
+            if configured.contains_key(&name) {
+                continue;
+            }
+            let requires_prompt = manifest
+                .config
+                .as_ref()
+                .is_some_and(omnifs_workspace::provider::ConfigMetadata::requires_prompt);
+            let ambient =
+                !crate::commands::init::detect::detect(manifest.wasm_auth_manifest().as_ref())
+                    .is_empty();
+            if requires_prompt {
+                skipped.push(format!("{name} (needs configuration)"));
+            } else if manifest.auth.is_none() || ambient {
+                selected.push(name);
+            } else {
+                let reason = if matches!(
+                    manifest.default_scheme(),
+                    Some((_, omnifs_workspace::authn::AuthScheme::Oauth(_)))
+                ) {
+                    "needs browser sign-in"
+                } else {
+                    "needs an API key"
+                };
+                skipped.push(format!("{name} ({reason})"));
+            }
+        }
+        if !selected.is_empty() {
+            anstream::eprintln!(
+                "{}",
+                ui::note(format!("auto-selected {}", selected.join(", ")))
+            );
+        }
+        for entry in &skipped {
+            anstream::eprintln!("{}", ui::note(format!("skipped {entry}")));
+        }
+        selected
+    }
+
+    /// The `You're set.` graduation card: any failures/skips first, then one
+    /// row per Ready mount naming where its files live, then the daily-command
+    /// hints. `outcome` is `None` when the daemon was not launched (`--no-up`),
+    /// which also swaps the first hint to `omnifs up`.
+    fn print_closer(results: &[InitResult], outcome: Option<&LaunchOutcome>) {
+        // Surface any failures/skips before the closer.
+        let mut had_failure = false;
+        for result in results {
+            match &result.outcome {
+                MountOutcome::Failed(reason) => {
+                    had_failure = true;
+                    anstream::eprintln!("{}", ui::fail(&result.mount_name, reason));
+                },
+                MountOutcome::Skipped => {
+                    anstream::eprintln!("{}", ui::skip(&result.mount_name, "skipped"));
+                },
+                MountOutcome::Ready => {},
+            }
+        }
+        if had_failure {
+            anstream::eprintln!("{}", ui::note("retry with `omnifs init <provider>`"));
+        }
+
+        anstream::eprintln!();
+        anstream::eprintln!("{}", ui::heading("You're set."));
+        // One row per Ready mount, naming where its files live. Only shown when
+        // the daemon is up; without it there is no live path to point at.
+        if let Some(outcome) = outcome {
+            for result in results {
+                if matches!(result.outcome, MountOutcome::Ready) {
+                    let where_to = ready_mount_location(outcome, &result.mount_name);
+                    anstream::eprintln!("{}", ui::ok(&result.mount_name, where_to));
                 }
             }
         }
-        print_graduation(&results);
-        Ok(())
-    }
-}
-
-fn print_orientation(os: HostOs) {
-    anstream::println!();
-    anstream::println!("{} ({})", crate::style::bold("omnifs setup"), os.name());
-    anstream::println!();
-    anstream::println!("omnifs projects services into your filesystem as regular files.");
-    anstream::println!("A local daemon serves them at one mount point.");
-    anstream::println!("The CLI manages setup, auth, launch, and troubleshooting.");
-    anstream::println!();
-    anstream::println!("{}", os.explain_runtime());
-    anstream::println!();
-}
-
-fn print_environment(report: &crate::stages::EnvironmentReport) {
-    anstream::println!("1/6  environment    {} ✓", report.os.name());
-    if report.configured {
-        anstream::println!("                   existing workspace found");
-    }
-}
-
-fn print_runtime(backend: ConfiguredBackend, os: HostOs) {
-    let consequence = match (backend, os) {
-        (ConfiguredBackend::Docker, HostOs::MacOs) => {
-            "Docker (recommended) - Linux FUSE in a container"
-        },
-        (ConfiguredBackend::Docker, _) => "Docker - Linux FUSE in a container",
-        (ConfiguredBackend::Native, HostOs::MacOs) => "native NFS (experimental)",
-        (ConfiguredBackend::Native, _) => "native FUSE",
-    };
-    anstream::println!("2/6  runtime        {consequence}");
-}
-
-fn print_mount_point(path: &std::path::Path, host_native: bool) {
-    let display = WorkspaceLayout::display(path);
-    if host_native {
-        anstream::println!("3/6  mount point    {display}");
-    } else {
-        anstream::println!("3/6  mount point    {GUEST_MOUNT} inside the runtime container");
-    }
-}
-
-fn print_first_read(read: &crate::stages::FirstRead) {
-    anstream::println!();
-    anstream::println!("6/6  launch         ran `{}`", read.command);
-    anstream::print!("{}", read.output);
-}
-
-fn print_graduation(results: &[InitResult]) {
-    let ready: Vec<&InitResult> = results
-        .iter()
-        .filter(|result| result.outcome.is_ok())
-        .collect();
-    if ready.is_empty() {
-        return;
-    }
-    anstream::println!();
-    anstream::println!("{}", crate::style::bold("You're set. Daily commands:"));
-    anstream::println!("  omnifs");
-    anstream::println!("  omnifs doctor");
-    anstream::println!("  omnifs init <provider>");
-    anstream::println!();
-    anstream::println!("Shell completions are available with `omnifs completions <shell>`.");
-}
-
-enum ReviewAction {
-    AddProvider,
-    Exit,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum ReviewChoice {
-    AddProvider,
-    ChangeRuntime,
-    RecheckEnvironment,
-    Exit,
-}
-
-impl fmt::Display for ReviewChoice {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::AddProvider => "add provider",
-            Self::ChangeRuntime => "change runtime",
-            Self::RecheckEnvironment => "re-check environment",
-            Self::Exit => "leave unchanged",
-        })
-    }
-}
-
-fn review_mode(
-    workspace: &Workspace,
-    mounts: &[crate::mount_config::MountConfig],
-    mode: PromptMode,
-) -> anyhow::Result<ReviewAction> {
-    anstream::println!();
-    anstream::println!("{}", crate::style::bold("Setup review"));
-    if let Ok(config) = workspace.config() {
-        anstream::println!(
-            "  runtime  {}",
-            config
-                .system
-                .runtime
-                .map_or("unset".to_string(), |runtime| format!("{runtime:?}")
-                    .to_lowercase())
+        if outcome.is_none() {
+            anstream::eprintln!("{}", ui::hint("omnifs up", "start the daemon"));
+        } else {
+            anstream::eprintln!("{}", ui::hint("omnifs shell", "browse your files"));
+        }
+        anstream::eprintln!("{}", ui::hint("omnifs status", "check the daemon"));
+        anstream::eprintln!("{}", ui::hint("omnifs init", "add another provider"));
+        anstream::eprintln!(
+            "{}",
+            ui::hint("omnifs completions", "tab completion for your shell")
         );
     }
-    if mounts.is_empty() {
-        anstream::println!("  mounts   none");
-    } else {
-        for mount in mounts {
-            anstream::println!(
-                "  mount    {} ({})",
-                mount.name,
-                mount.config.provider_name()
+
+    /// Resolve which provider names to configure.
+    fn resolve_selection(
+        &self,
+        installed: &[(Provider, ProviderManifest)],
+        configured: &std::collections::BTreeMap<String, String>,
+        mode: PromptMode,
+    ) -> anyhow::Result<Vec<String>> {
+        if !self.providers.is_empty() {
+            return validate_preselected(&self.providers, installed, configured);
+        }
+        if mode.yes {
+            return Ok(Self::yes_auto_select(installed, configured));
+        }
+        if mode.no_input {
+            anyhow::bail!(
+                "`--no-input` needs --providers <provider>[,<provider>...], or pass --yes to configure the auto-selectable providers"
             );
         }
-    }
-    if mode.no_input {
-        anyhow::bail!(
-            "`omnifs setup --no-input` is in review mode; pass --providers <provider> to add one, --runtime <docker|native> to change runtime, or --yes to accept defaults"
-        );
-    }
-    if !mode.interactive {
-        anyhow::bail!(
-            "`omnifs setup` is in review mode and needs a terminal; pass --providers <provider>, --runtime <docker|native>, or --yes"
-        );
-    }
-    let choice = inquire::Select::new(
-        "What do you want to change?",
-        vec![
-            ReviewChoice::AddProvider,
-            ReviewChoice::ChangeRuntime,
-            ReviewChoice::RecheckEnvironment,
-            ReviewChoice::Exit,
-        ],
-    )
-    .prompt()
-    .map_err(|error| anyhow!("review prompt: {error}"))?;
-    match choice {
-        ReviewChoice::AddProvider => Ok(ReviewAction::AddProvider),
-        ReviewChoice::ChangeRuntime => {
-            let os = HostOs::detect();
-            let current = workspace.config()?.system.runtime;
-            let runtime = crate::stages::runtime_selection(os, current, None, mode)?;
-            crate::stages::persist_runtime(workspace.layout(), runtime)?;
-            anstream::println!("Runtime updated.");
-            Ok(ReviewAction::Exit)
-        },
-        ReviewChoice::RecheckEnvironment => {
-            let report = crate::stages::environment_check(HostOs::detect(), workspace)?;
-            print_environment(&report);
-            Ok(ReviewAction::Exit)
-        },
-        ReviewChoice::Exit => Ok(ReviewAction::Exit),
-    }
-}
-
-/// Resolve which provider IDs to configure: explicit `--providers` wins,
-/// otherwise an interactive `inquire::MultiSelect` over unconfigured providers.
-fn resolve_selection(
-    args: &SetupArgs,
-    installed: &[(Provider, ProviderManifest)],
-    configured: &BTreeMap<String, String>,
-    mode: PromptMode,
-) -> anyhow::Result<Vec<String>> {
-    anstream::println!("4/6  first mount");
-    if !args.providers.is_empty() {
-        return validate_preselected(&args.providers, installed, configured);
-    }
-    if mode.yes {
-        return Ok(Vec::new());
-    }
-    if mode.no_input {
-        anyhow::bail!(
-            "`omnifs setup --no-input` needs --providers <provider>[,<provider>...] for the first mount, or use --yes to configure only setup defaults"
-        );
-    }
-    if !mode.interactive {
-        anyhow::bail!(
-            "`omnifs setup` needs an interactive terminal for provider selection; pass --providers <provider>[,<provider>...] or --yes"
-        );
-    }
-
-    if !configured.is_empty() {
-        anstream::println!("{}", crate::style::bold("Already configured"));
-        for (id, mount) in configured {
-            anstream::println!("  {id}  (mount: {mount})");
+        if !mode.interactive {
+            anyhow::bail!(
+                "provider selection needs a terminal; pass --providers <provider>[,<provider>...] or --yes"
+            );
         }
-        anstream::println!();
+        let rows = crate::ui::picker::build_rows(installed, configured);
+        if rows.is_empty() {
+            anstream::eprintln!("{}", ui::note("all providers already configured"));
+            return Ok(Vec::new());
+        }
+        crate::ui::picker::multiselect("What should omnifs mount?", rows)
     }
 
-    let mut selectable: Vec<&ProviderManifest> = installed
-        .iter()
-        .map(|(_, manifest)| manifest)
-        .filter(|manifest| !configured.contains_key(&manifest.id))
-        .collect();
-    if selectable.is_empty() {
-        anstream::println!("All providers already configured. Nothing to add.");
-        return Ok(Vec::new());
-    }
-    // Demote providers that require user-supplied state (PAT, fixture file) to
-    // the bottom of the picker and uncheck them by default so the smoke path
-    // for a fresh setup only enables providers that work with ambient or
-    // browser-based auth.
-    selectable.sort_by_key(|manifest| (default_off(&manifest.id), manifest.id.clone()));
+    async fn run_init_loop(
+        &self,
+        selected: &[String],
+        installed: &[(Provider, ProviderManifest)],
+        workspace: &Workspace,
+    ) -> Vec<InitResult> {
+        let mut out = Vec::new();
+        for provider_name in selected {
+            let Some((_, manifest)) = crate::catalog::find_installed(installed, provider_name)
+            else {
+                out.push(InitResult {
+                    mount_name: provider_name.clone(),
+                    outcome: MountOutcome::Failed(format!("provider `{provider_name}` not found")),
+                });
+                continue;
+            };
+            let mount_name = manifest.default_mount.clone();
 
-    let options: Vec<ProviderOption> = selectable
-        .iter()
-        .map(|manifest| ProviderOption {
-            id: manifest.id.clone(),
-            line: option_line(manifest),
-        })
-        .collect();
-    let default_indices: Vec<usize> = options
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, opt)| (!default_off(&opt.id)).then_some(idx))
-        .collect();
+            anstream::eprintln!();
+            anstream::eprintln!("{}", ui::rule(provider_name));
+            init::render_consent_block(manifest);
 
-    let chosen = inquire::MultiSelect::new("Which providers do you want to configure?", options)
-        .with_default(&default_indices)
-        .with_formatter(&format_selected_providers)
-        .with_help_message("space to toggle, a all, n none, enter confirm, esc cancel")
-        .prompt()
-        .map_err(|e| anyhow!("selection prompt: {e}"))?;
-
-    Ok(chosen.into_iter().map(|opt| opt.id).collect())
-}
-
-/// Providers that don't work end-to-end without an explicit user step (PAT,
-/// fixture file). Listed at the bottom of the setup picker and unchecked by
-/// default so a fresh `omnifs setup` keeps moving without hitting prompts the
-/// user can't satisfy from ambient context.
-fn default_off(provider_name: &str) -> bool {
-    matches!(provider_name, "db" | "linear")
-}
-
-/// One-row summary shown inside the multi-select.
-fn option_line(manifest: &ProviderManifest) -> String {
-    let summary = capability_summary(manifest).unwrap_or_else(|| "no extra capabilities".into());
-    let auth = if manifest.auth.is_none() {
-        "no credentials needed"
-    } else {
-        "auth required"
-    };
-    format!(
-        "{:<14} {:<23} {} ({summary})",
-        manifest.id, auth, manifest.display_name
-    )
-}
-
-/// A compact one-line capability summary for the multi-select row.
-fn capability_summary(manifest: &ProviderManifest) -> Option<String> {
-    let limits = crate::capability::limit_lines(&manifest.limits);
-    if manifest.capabilities.is_empty() && limits.is_empty() {
-        return None;
-    }
-    let mut parts: Vec<String> = manifest
-        .capabilities
-        .iter()
-        .take(3)
-        .map(|entry| {
-            format!(
-                "{}: {}",
-                crate::capability::capability_label(entry).to_lowercase(),
-                crate::capability::capability_value(entry)
-            )
-        })
-        .collect();
-    let limit_slots = 3usize.saturating_sub(parts.len());
-    parts.extend(
-        limits
-            .into_iter()
-            .take(limit_slots)
-            .map(|line| format!("limit: {} {}", line.label.to_lowercase(), line.value)),
-    );
-    if manifest.capabilities.len() + crate::capability::limit_lines(&manifest.limits).len() > 3 {
-        parts.push("…".into());
-    }
-    Some(parts.join("; "))
-}
-
-/// Provider option wrapper so `inquire::MultiSelect` can show a rich
-/// row while we still recover the provider id post-selection.
-#[derive(Debug, Clone)]
-struct ProviderOption {
-    id: String,
-    line: String,
-}
-
-impl fmt::Display for ProviderOption {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.line)
+            let init_args = init::InitArgs {
+                provider: Some(provider_name.clone()),
+                as_name: None,
+                no_input: self.no_input || self.yes,
+                yes: self.yes,
+                no_browser: self.no_browser,
+                token: None,
+                token_env: None,
+                no_validate: false,
+                scopes: Vec::new(),
+                scheme: None,
+                no_auth: false,
+                config_json: None,
+                capabilities_json: None,
+                limits_json: None,
+            };
+            match crate::stages::configure_mount(init_args, workspace, false).await {
+                Ok(outcome) => out.push(InitResult {
+                    mount_name: outcome.mount_name,
+                    outcome: MountOutcome::Ready,
+                }),
+                Err(error) => {
+                    // A cancel (Esc/Ctrl-C at any prompt) or an auth-required
+                    // bail is a skip, not a provider failure.
+                    let skipped = crate::ui::picker::is_canceled(&error)
+                        || crate::error::exit_code(&error) == crate::error::ExitCode::AuthRequired;
+                    out.push(InitResult {
+                        mount_name,
+                        outcome: if skipped {
+                            MountOutcome::Skipped
+                        } else {
+                            MountOutcome::Failed(one_line(&error))
+                        },
+                    });
+                },
+            }
+        }
+        out
     }
 }
 
-fn format_selected_providers(
-    options: &[inquire::list_option::ListOption<&ProviderOption>],
-) -> String {
-    options
-        .iter()
-        .map(|option| option.value.id.as_str())
-        .collect::<Vec<_>>()
-        .join(", ")
+fn print_header() {
+    anstream::eprintln!();
+    anstream::eprintln!("{}", ui::heading("omnifs setup"));
+    anstream::eprintln!();
+    anstream::eprintln!("  omnifs mounts your services as regular files.");
+    anstream::eprintln!("  One daemon, one mount point, your standard tools.");
+    anstream::eprintln!();
+}
+
+/// Mount point for the review-mode add-a-provider path, derived without any
+/// prompt: docker always serves at [`GUEST_MOUNT`]; native uses the resolved
+/// default (`OMNIFS_MOUNT_POINT` or the home-derived path).
+fn add_provider_mount_point(runtime: Option<ConfiguredBackend>) -> anyhow::Result<PathBuf> {
+    match runtime.unwrap_or(ConfiguredBackend::Docker) {
+        ConfiguredBackend::Docker => Ok(PathBuf::from(GUEST_MOUNT)),
+        ConfiguredBackend::Native => {
+            omnifs_workspace::layout::resolve_mount_point().ok_or_else(|| {
+                anyhow::anyhow!("cannot resolve host mount point: set HOME or OMNIFS_MOUNT_POINT")
+            })
+        },
+    }
+}
+
+fn one_line(error: &anyhow::Error) -> String {
+    error.to_string().lines().next().unwrap_or("").to_string()
+}
+
+/// Where a Ready mount's files live for the graduation card: the in-container
+/// path under docker, or the resolved host path under native.
+fn ready_mount_location(outcome: &LaunchOutcome, mount: &str) -> String {
+    match outcome {
+        LaunchOutcome::Docker { .. } => format!("{GUEST_MOUNT}/{mount}"),
+        LaunchOutcome::Native { mount_point } => {
+            let base = mount_point
+                .clone()
+                .or_else(omnifs_workspace::layout::resolve_mount_point)
+                .unwrap_or_else(|| PathBuf::from(GUEST_MOUNT));
+            WorkspaceLayout::display(&base.join(mount))
+        },
+    }
 }
 
 fn validate_preselected(
     requested: &[String],
     installed: &[(Provider, ProviderManifest)],
-    configured: &BTreeMap<String, String>,
+    configured: &std::collections::BTreeMap<String, String>,
 ) -> anyhow::Result<Vec<String>> {
     let known = || {
         installed
@@ -476,9 +580,9 @@ fn validate_preselected(
             anyhow::bail!("provider `{id}` is not available; known: {}", known());
         }
         if configured.contains_key(id) {
-            anstream::println!(
-                "Skipping `{id}` (already configured as `{}`)",
-                configured[id]
+            anstream::eprintln!(
+                "{}",
+                ui::skip(id, format!("already configured as {}", configured[id]))
             );
             continue;
         }
@@ -487,95 +591,351 @@ fn validate_preselected(
     Ok(out)
 }
 
-async fn run_init_loop(
-    selected: &[String],
-    args: &SetupArgs,
-    installed: &[(Provider, ProviderManifest)],
-    workspace: &Workspace,
-) -> Vec<InitResult> {
-    let mut out = Vec::new();
-    if !selected.is_empty() {
-        anstream::println!("5/6  auth + grants");
-    }
-    for provider_name in selected {
-        let Some((_, manifest)) = crate::catalog::find_installed(installed, provider_name) else {
-            out.push(InitResult {
-                provider_name: provider_name.clone(),
-                mount_name: provider_name.clone(),
-                outcome: Err(format!("provider `{provider_name}` not found")),
-            });
-            continue;
-        };
-        let mount_name = manifest.default_mount.clone();
+// ── Review mode ────────────────────────────────────────────────────────────
 
-        anstream::println!();
-        anstream::println!("{}", crate::style::bold(format!("--- {provider_name} ---")));
+/// Ledger width budget for the joined review-mode mounts value.
+const MOUNTS_ROW_WIDTH: usize = 60;
 
-        if !args.yes && !args.no_input {
-            let proceed = inquire::Confirm::new(&format!("Configure `{provider_name}`?"))
-                .with_default(true)
-                .prompt();
-            match proceed {
-                Ok(true) => {},
-                Ok(false) => {
-                    out.push(InitResult {
-                        provider_name: provider_name.clone(),
-                        mount_name,
-                        outcome: Err("skipped by user".into()),
-                    });
-                    continue;
+impl SetupArgs {
+    /// The review hub: a loop over a status ledger and an action menu for an
+    /// already-configured workspace. Each action runs, then control returns to
+    /// the hub; the loop exits on the exit item, Esc, or Ctrl-C.
+    async fn review_mode(&self, workspace: &Workspace, mode: PromptMode) -> anyhow::Result<()> {
+        anstream::eprintln!();
+        anstream::eprintln!("{}", ui::heading("omnifs setup"));
+
+        loop {
+            anstream::eprintln!();
+            let summaries = render_review_ledger(workspace).await?;
+
+            // Non-interactive review keeps its verbatim bail messages.
+            if mode.no_input {
+                anyhow::bail!(
+                    "`omnifs setup --no-input` is in review mode; pass --providers <provider> to add one, --runtime <docker|native> to change runtime, or --yes"
+                );
+            }
+            if !mode.interactive {
+                anyhow::bail!(
+                    "`omnifs setup` is in review mode and needs a terminal; pass --providers <provider>, --runtime <docker|native>, or --yes"
+                );
+            }
+
+            let candidates = reauth_candidates(&summaries);
+            let choice =
+                match crate::ui::picker::select("What next?", review_menu_rows(&candidates)) {
+                    Ok(id) => id,
+                    Err(error) if crate::ui::picker::is_canceled(&error) => return Ok(()),
+                    Err(error) => return Err(error),
+                };
+
+            match choice.as_str() {
+                "add a provider" => {
+                    // Jump straight to the shared configure tail: runtime is
+                    // already persisted and the mount point derives from it.
+                    // Esc at the provider picker returns to the hub, not out
+                    // of setup.
+                    let mount_point = add_provider_mount_point(workspace.config()?.system.runtime)?;
+                    match self
+                        .configure_and_launch(workspace, mount_point, mode, StageStyle::Hub)
+                        .await
+                    {
+                        Ok(()) => {},
+                        Err(error) if crate::ui::picker::is_canceled(&error) => {},
+                        Err(error) => return Err(error),
+                    }
                 },
+                "change runtime" => match crate::stages::runtime_selection(
+                    HostOs::detect(),
+                    workspace.config()?.system.runtime,
+                    None,
+                    mode,
+                ) {
+                    Ok(runtime) => {
+                        crate::stages::persist_runtime(workspace.layout(), runtime)?;
+                        anstream::eprintln!(
+                            "{}",
+                            ui::ok("runtime", crate::stages::runtime_word(runtime))
+                        );
+                    },
+                    Err(error) if crate::ui::picker::is_canceled(&error) => {},
+                    Err(error) => return Err(error),
+                },
+                "run checks" => {
+                    anstream::eprintln!("{}", ui::note("running `omnifs doctor`"));
+                    crate::commands::doctor::DoctorArgs::default().run().await?;
+                },
+                "exit" => return Ok(()),
+                _ => self.reauth_from_hub(workspace, &candidates).await,
+            }
+            // The blank at the top of the next iteration separates this action's
+            // output from the re-rendered ledger.
+        }
+    }
+
+    /// Re-authenticate one mount from the hub. When several mounts need
+    /// attention, a second picker chooses which. A cancel or a reauth failure
+    /// leaves a note and returns to the hub rather than aborting setup.
+    async fn reauth_from_hub(&self, workspace: &Workspace, candidates: &[String]) {
+        let target = if candidates.len() == 1 {
+            candidates[0].clone()
+        } else {
+            match crate::ui::picker::select("Which mount?", reauth_target_rows(candidates)) {
+                Ok(id) => id,
+                // Cancel is a silent return to the hub; anything else is worth
+                // a breadcrumb before returning.
+                Err(error) if crate::ui::picker::is_canceled(&error) => return,
                 Err(error) => {
-                    out.push(InitResult {
-                        provider_name: provider_name.clone(),
-                        mount_name,
-                        outcome: Err(format!("confirm prompt: {error}")),
-                    });
-                    continue;
+                    anstream::eprintln!("{}", ui::note(one_line(&error)));
+                    return;
                 },
             }
-        } else if args.no_input && !args.yes {
-            out.push(InitResult {
-                provider_name: provider_name.clone(),
-                mount_name,
-                outcome: Err("missing --yes for provider confirmation".into()),
-            });
-            continue;
-        }
-
-        let init_args = init::InitArgs {
-            provider: Some(provider_name.clone()),
-            as_name: None,
-            no_input: args.no_input || args.yes,
-            yes: args.yes,
-            no_browser: args.no_browser,
+        };
+        let reauth = crate::commands::mounts::ReauthArgs {
+            name: target,
+            no_input: false,
+            no_browser: self.no_browser,
             token: None,
             token_env: None,
             no_validate: false,
             scopes: Vec::new(),
-            scheme: None,
-            no_auth: false,
-            config_json: None,
-            capabilities_json: None,
-            limits_json: None,
         };
-        let outcome = crate::stages::configure_mount(init_args, workspace).await;
-        let (mount_name, outcome) = match outcome {
-            Ok(outcome) => (outcome.mount_name, Ok(())),
-            Err(error) => (mount_name, Err(error.to_string())),
-        };
-        out.push(InitResult {
-            provider_name: provider_name.clone(),
-            mount_name,
-            outcome,
-        });
+        if let Err(error) = reauth.run_in_workspace(workspace).await {
+            anstream::eprintln!("{}", ui::note(one_line(&error)));
+        }
     }
-    out
 }
 
-async fn launch_via_up() -> anyhow::Result<crate::launch::LaunchOutcome> {
-    anstream::println!();
-    anstream::println!("Launching omnifs ...");
-    let workspace = Workspace::resolve()?;
-    crate::stages::launch(&workspace, None, "omnifs setup").await
+/// Render the review status ledger (runtime, mounts, daemon) and return the
+/// mount summaries the menu needs. Re-run each hub iteration for fresh facts.
+async fn render_review_ledger(
+    workspace: &Workspace,
+) -> anyhow::Result<Vec<crate::mount_report::UserMountStatus>> {
+    let config = workspace.config()?;
+    match config.system.runtime {
+        Some(runtime) => anstream::eprintln!(
+            "{}",
+            ui::ok("runtime", crate::stages::runtime_word(runtime))
+        ),
+        None => anstream::eprintln!("{}", ui::warn_row("runtime", "unset")),
+    }
+
+    let store = omnifs_workspace::creds::FileStore::new(&workspace.layout().credentials_file);
+    let mounts = workspace.mounts()?;
+    let summaries =
+        crate::mount_report::scan_user_mount_configs(workspace.catalog(), mounts, &store);
+    if summaries.is_empty() {
+        anstream::eprintln!("{}", ui::warn_row("mounts", "none configured"));
+    } else {
+        let entries: Vec<(String, &'static str)> = summaries.iter().map(mount_summary).collect();
+        let joined = entries
+            .iter()
+            .map(|(name, state)| format!("{name} ({state})"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        // A long roster overflows the ledger row; wrap it into per-mount notes.
+        if entries.len() > 3 || joined.chars().count() > MOUNTS_ROW_WIDTH {
+            anstream::eprintln!(
+                "{}",
+                ui::ok("mounts", format!("{} configured", entries.len()))
+            );
+            for (name, state) in &entries {
+                anstream::eprintln!("{}", ui::note(format!("{name}: {state}")));
+            }
+        } else {
+            anstream::eprintln!("{}", ui::ok("mounts", joined));
+        }
+    }
+
+    if workspace.daemon().ready().await {
+        anstream::eprintln!("{}", ui::ok("daemon", "running"));
+    } else {
+        anstream::eprintln!("{}", ui::warn_row("daemon", "not running"));
+        anstream::eprintln!("{}", ui::note("start it with `omnifs up`"));
+    }
+
+    Ok(summaries)
+}
+
+/// Mounts whose credential is missing or errored, and so can be reauthed.
+fn reauth_candidates(summaries: &[crate::mount_report::UserMountStatus]) -> Vec<String> {
+    use crate::auth::AuthReadiness;
+    use crate::mount_report::UserMountStatus;
+    summaries
+        .iter()
+        .filter_map(|status| match status {
+            UserMountStatus::Ready(ready) => match &ready.auth {
+                AuthReadiness::Missing { .. } | AuthReadiness::Error { .. } => {
+                    Some(ready.mount.clone())
+                },
+                _ => None,
+            },
+            UserMountStatus::Invalid { .. } => None,
+        })
+        .collect()
+}
+
+/// A menu row with a detail panel: `id` is both the visible left label and the
+/// returned choice.
+fn menu_row(id: &str, summary: &str, panel: Vec<crate::ui::picker::PanelLine>) -> PickerRow {
+    PickerRow {
+        id: id.to_string(),
+        summary: summary.to_string(),
+        cap_tags: Vec::new(),
+        auth_tag: None,
+        default_on: false,
+        detail: crate::ui::picker::Detail { lines: panel },
+    }
+}
+
+/// The review hub menu rows, in display order. The reauth row appears only when
+/// a mount needs attention.
+fn review_menu_rows(candidates: &[String]) -> Vec<PickerRow> {
+    use crate::ui::picker::{PanelLine, PanelRole};
+    let line = |text: &str, role: PanelRole| PanelLine {
+        text: text.to_string(),
+        role,
+    };
+
+    let mut rows = vec![menu_row(
+        "add a provider",
+        "configure another provider",
+        vec![
+            line("add a provider", PanelRole::Head),
+            line(
+                "pick a provider, grant its access, then sign in or paste a token",
+                PanelRole::Plain,
+            ),
+            line(
+                "applies to the running daemon when it is up",
+                PanelRole::Dim,
+            ),
+        ],
+    )];
+
+    if !candidates.is_empty() {
+        let label = if candidates.len() == 1 {
+            format!("reauth {}", candidates[0])
+        } else {
+            "reauth a mount".to_string()
+        };
+        rows.push(menu_row(
+            &label,
+            "renew a mount's credential",
+            vec![
+                line("reauth", PanelRole::Head),
+                line(
+                    "re-run sign-in or paste a fresh token for a mount that lost auth",
+                    PanelRole::Plain,
+                ),
+                line(
+                    &format!("needs attention: {}", candidates.join(", ")),
+                    PanelRole::Dim,
+                ),
+            ],
+        ));
+    }
+
+    rows.push(menu_row(
+        "change runtime",
+        "switch docker or native",
+        vec![
+            line("change runtime", PanelRole::Head),
+            line(
+                "choose how the daemon runs; takes effect on the next omnifs up",
+                PanelRole::Plain,
+            ),
+        ],
+    ));
+    rows.push(menu_row(
+        "run checks",
+        "diagnose with omnifs doctor",
+        vec![
+            line("run checks", PanelRole::Head),
+            line(
+                "probe docker, fuse, providers, credentials, and live mounts",
+                PanelRole::Plain,
+            ),
+        ],
+    ));
+    rows.push(menu_row(
+        "exit",
+        "leave setup",
+        vec![line("exit", PanelRole::Head)],
+    ));
+    rows
+}
+
+/// Picker rows for choosing which mount to reauth when several need it.
+fn reauth_target_rows(candidates: &[String]) -> Vec<PickerRow> {
+    candidates
+        .iter()
+        .map(|name| menu_row(name, "renew this mount's credential", Vec::new()))
+        .collect()
+}
+
+/// A review-ledger entry for one mount: `(name, state word)`.
+fn mount_summary(status: &crate::mount_report::UserMountStatus) -> (String, &'static str) {
+    use crate::auth::AuthReadiness;
+    use crate::mount_report::UserMountStatus;
+    match status {
+        UserMountStatus::Invalid { config_path, .. } => {
+            let name = config_path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or("?")
+                .to_string();
+            (name, "invalid")
+        },
+        UserMountStatus::Ready(ready) => {
+            let state = match &ready.auth {
+                AuthReadiness::None => "no auth needed",
+                AuthReadiness::Ready { .. } => "ready",
+                AuthReadiness::Missing { .. } => "needs auth",
+                AuthReadiness::Error { .. } => "auth error",
+            };
+            (ready.mount.clone(), state)
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The review-mode add-a-provider path must never prompt for a mount
+    /// point: docker (explicit or defaulted) derives the in-container path.
+    #[test]
+    fn add_provider_mount_point_is_prompt_free_under_docker() {
+        assert_eq!(
+            add_provider_mount_point(Some(ConfiguredBackend::Docker)).unwrap(),
+            PathBuf::from(GUEST_MOUNT)
+        );
+        assert_eq!(
+            add_provider_mount_point(None).unwrap(),
+            PathBuf::from(GUEST_MOUNT)
+        );
+    }
+
+    #[test]
+    fn ready_mount_location_uses_container_or_host_path() {
+        let docker = LaunchOutcome::Docker {
+            target: crate::launch_backend::DockerTarget::new(
+                "omnifs".to_string(),
+                "omnifs:dev".to_string(),
+            )
+            .unwrap(),
+        };
+        assert_eq!(
+            ready_mount_location(&docker, "github"),
+            format!("{GUEST_MOUNT}/github")
+        );
+
+        let native = LaunchOutcome::Native {
+            mount_point: Some(PathBuf::from("/mnt/omnifs")),
+        };
+        assert_eq!(
+            ready_mount_location(&native, "github"),
+            "/mnt/omnifs/github"
+        );
+    }
 }

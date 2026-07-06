@@ -45,9 +45,9 @@ impl TokenSource {
         }
     }
 
-    /// Read the token from the resolved source.
-    /// Stdin reads to EOF and trims a single trailing newline.
-    /// Env reads from the named variable (errors if unset or empty).
+    /// Read the token from the resolved source. Every source trims all
+    /// surrounding whitespace and rejects an empty-after-trim value, so a
+    /// stray newline or copy-paste padding never becomes part of the secret.
     /// Interactive prompts via the inquire Password input (TTY only).
     pub fn read(self) -> anyhow::Result<SecretString> {
         match self {
@@ -56,7 +56,7 @@ impl TokenSource {
                 std::io::stdin()
                     .read_to_string(&mut buf)
                     .context("read token from stdin")?;
-                let trimmed = buf.trim_end_matches('\n').trim_end_matches('\r');
+                let trimmed = buf.trim();
                 if trimmed.is_empty() {
                     bail!("stdin produced an empty token");
                 }
@@ -65,10 +65,11 @@ impl TokenSource {
             Self::Env(var) => {
                 let value =
                     std::env::var(&var).with_context(|| format!("read token from ${var}"))?;
-                if value.is_empty() {
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
                     bail!("${var} is empty");
                 }
-                Ok(SecretString::from(value))
+                Ok(SecretString::from(trimmed.to_string()))
             },
             Self::Interactive => {
                 if !std::io::stdin().is_terminal() {
@@ -80,11 +81,12 @@ impl TokenSource {
                     .with_display_mode(inquire::PasswordDisplayMode::Hidden)
                     .without_confirmation()
                     .prompt()
-                    .context("read token from prompt")?;
-                if token.is_empty() {
+                    .map_err(crate::ui::from_inquire)?;
+                let trimmed = token.trim();
+                if trimmed.is_empty() {
                     bail!("token cannot be empty");
                 }
-                Ok(SecretString::from(token))
+                Ok(SecretString::from(trimmed.to_string()))
             },
         }
     }

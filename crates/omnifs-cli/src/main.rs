@@ -29,8 +29,10 @@ mod stages;
 mod status;
 mod style;
 mod telemetry;
+#[cfg(test)]
 mod test_support;
 mod token_source;
+mod ui;
 mod upgrade;
 mod workspace;
 
@@ -41,6 +43,7 @@ use cli::Cli;
 async fn main() {
     let cli = Cli::parse();
     init_tracing(cli.verbose);
+    ui::install_prompt_theme();
     // Capture the telemetry label before `run` consumes `cli`. `None` for the
     // internal `daemon` subcommand, which records `daemon.jsonl` itself.
     // Subcommands that `std::process::exit` on their own (shell, doctor) record
@@ -57,6 +60,17 @@ async fn main() {
             }
         },
         Err(error) => {
+            // A user cancel (picker Esc/Ctrl-C, or an inquire prompt mapped to
+            // the same marker) is a normal exit, not a failure to spell out with
+            // an `Error:` block: render one quiet line and leave.
+            if ui::picker::is_canceled(&error) {
+                let code = error::ExitCode::GenericFailure.code();
+                if let Some(cmd) = telemetry_label {
+                    telemetry::record_cli_exit(cmd, code);
+                }
+                anstream::eprintln!("{}", style::dim("canceled"));
+                std::process::exit(code);
+            }
             let exit_code = error::exit_code(&error).code();
             if let Some(cmd) = telemetry_label {
                 telemetry::record_cli_exit(cmd, exit_code);

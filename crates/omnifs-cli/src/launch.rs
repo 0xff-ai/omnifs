@@ -227,18 +227,20 @@ pub(crate) async fn launch_runtime(
     }
 }
 
-/// Parse a `host:port` string into a `SocketAddr`, falling back to
-/// `127.0.0.1:DEFAULT_PORT` on any parse error.
-fn parse_control_addr(addr: &str) -> SocketAddr {
+/// Parse a `host:port` string into a `SocketAddr`. A malformed value is a hard
+/// error, not a silent fall back to the default: silently defaulting would let
+/// two workspaces that both set a bad `OMNIFS_DAEMON_ADDR` collide on the one
+/// default port instead of failing loudly.
+fn parse_control_addr(addr: &str) -> anyhow::Result<SocketAddr> {
     addr.parse()
-        .unwrap_or_else(|_| omnifs_api::default_listen_addr())
+        .with_context(|| format!("OMNIFS_DAEMON_ADDR is not a valid host:port address: {addr:?}"))
 }
 
 /// Read the daemon control address from the environment (`OMNIFS_DAEMON_ADDR`),
-/// falling back to `127.0.0.1:DEFAULT_PORT` on any parse error. Both the
-/// spawned daemon (`--listen`) and the client (`DaemonClient::new`) use this
-/// so a per-test override moves them together.
-fn resolve_control_addr() -> SocketAddr {
+/// erroring on a malformed value. Both the spawned daemon (`--listen`) and the
+/// client (`DaemonClient::new`) use this so a per-test override moves them
+/// together.
+fn resolve_control_addr() -> anyhow::Result<SocketAddr> {
     parse_control_addr(&crate::control::addr::daemon_addr())
 }
 
@@ -253,7 +255,7 @@ async fn launch_host_native(
     reject_existing_host_daemon(paths, verb).await?;
     anstream::eprintln!("Starting omnifs daemon (host-native)");
 
-    let addr = resolve_control_addr();
+    let addr = resolve_control_addr()?;
     crate::launch_backend::launch_native(&paths.cache_dir, addr, telemetry_enabled).await?;
 
     let client = DaemonClient::new();
@@ -429,7 +431,11 @@ async fn finish_docker_launch(
     report_reconcile_failures(&report);
     if let Ok(status) = client.status().await {
         report_launch_status(&status);
-        let addr = omnifs_api::default_listen_addr();
+        // Record the address the client actually targets (honoring an
+        // `OMNIFS_DAEMON_ADDR` override) rather than always the default. The
+        // record is best-effort, so an unparseable override falls back to the
+        // default here rather than aborting a daemon that is already serving.
+        let addr = resolve_control_addr().unwrap_or_else(|_| omnifs_api::default_listen_addr());
         write_launch_record(&paths.config_dir, &status, addr);
     }
     Ok(LaunchOutcome::Docker {

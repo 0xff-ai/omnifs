@@ -48,7 +48,7 @@ impl InstallTarget {
 
 fn install_claude_code(home: Option<PathBuf>) -> anyhow::Result<()> {
     let Some(home) = home else {
-        anstream::println!(
+        anstream::eprintln!(
             "Could not determine ~/.claude; source skill is at {}",
             source_path().display()
         );
@@ -64,7 +64,7 @@ fn install_claude_code_in(home: &Path) -> anyhow::Result<()> {
     let skill = target.join("SKILL.md");
     std::fs::write(&skill, USAGE_SKILL)
         .with_context(|| format!("write skill file {}", skill.display()))?;
-    anstream::println!("Installed `{SKILL_NAME}` skill at {}", target.display());
+    anstream::eprintln!("Installed `{SKILL_NAME}` skill at {}", target.display());
     Ok(())
 }
 

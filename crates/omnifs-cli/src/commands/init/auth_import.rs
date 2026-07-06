@@ -40,82 +40,82 @@ impl<'a> AuthImportDecision<'a> {
                 token: None,
             });
         }
-        if !self.interactive {
-            return Ok(ImportOutcome {
-                auth: self.default_auth,
-                token: None,
-            });
-        }
         let detected = detect::detect(self.auth_manifest);
-        if detected.is_empty() {
+
+        // `--yes` accepts a detected ambient credential without prompting, even
+        // non-interactively, so the documented behavior is reachable in scripts.
+        if self.yes {
+            if let Some(credential) = detected.first() {
+                anstream::eprintln!(
+                    "{}",
+                    crate::ui::ok(
+                        "credential",
+                        format!("imported from {}", credential_source(credential))
+                    )
+                );
+                return self.promote(credential_value(credential));
+            }
             return Ok(ImportOutcome {
                 auth: self.default_auth,
                 token: None,
             });
         }
-        let Some(token) = self.prompt_for_import(&detected)? else {
+
+        if !self.interactive || detected.is_empty() {
+            return Ok(ImportOutcome {
+                auth: self.default_auth,
+                token: None,
+            });
+        }
+        let Some(token) = Self::prompt_for_import(&detected)? else {
             return Ok(ImportOutcome {
                 auth: self.default_auth,
                 token: None,
             });
         };
+        self.promote(token)
+    }
 
-        let auth_manifest = self.auth_manifest;
-        let provider_name = self.provider_name;
-        let default_auth = self.default_auth.expect("checked default auth presence");
+    fn promote(&self, token: SecretString) -> anyhow::Result<ImportOutcome> {
+        let default_auth = self
+            .default_auth
+            .clone()
+            .expect("checked default auth presence");
         Ok(ImportOutcome {
-            auth: Some(default_auth.promote_imported_static(auth_manifest, provider_name)?),
+            auth: Some(
+                default_auth.promote_imported_static(self.auth_manifest, self.provider_name)?,
+            ),
             token: Some(token),
         })
     }
 
-    /// Semantics:
-    /// - Single detected credential: prints the credential, asks
-    ///   `[y/N/o for OAuth]`. Default is N (start OAuth). `y` imports; `N` or
-    ///   `o` falls through. The host treats every ambient source the same
-    ///   way regardless of kind (env var or command): only the provider
-    ///   declares where to look, never how much to trust what it finds.
-    /// - Multiple detected credentials: uses `inquire::Select` for the user to pick one,
-    ///   with OAuth as the last option (default).
-    /// - `yes` flag: silently accepts the first detected credential without prompting.
+    /// Interactive import decision. A single detected credential offers three
+    /// honest options; multiple credentials use a picker with a sign-in fallback.
+    /// The host treats every ambient source the same way regardless of kind
+    /// (env var or command): only the provider declares where to look, never how
+    /// much to trust what it finds.
     fn prompt_for_import(
-        &self,
         detected: &[detect::DetectedCredential],
     ) -> anyhow::Result<Option<SecretString>> {
-        if self.yes {
-            return Ok(Some(imported_token_with_notice(&detected[0])));
-        }
-
         if detected.len() == 1 {
             return prompt_single_import(&detected[0]);
         }
 
-        let options: Vec<String> = detected
+        let mut options: Vec<String> = detected
             .iter()
-            .enumerate()
-            .map(|(i, credential)| format!("[{}] {}", i + 1, credential_label(credential)))
-            .chain(std::iter::once(format!(
-                "[{}] OAuth (default)",
-                detected.len() + 1
-            )))
+            .map(|credential| format!("import from {}", credential_source(credential)))
             .collect();
-        let oauth_choice = options.len() - 1;
+        options.push("sign in with OAuth instead".to_string());
+        options.push("skip auth for now".to_string());
 
-        print_detected_header(detected);
-        anstream::println!();
-
-        let choice = inquire::Select::new("Import existing credential or start OAuth?", options)
-            .with_starting_cursor(oauth_choice)
-            .prompt_skippable()
-            .map_err(|e| anyhow::anyhow!("prompt error: {e}"))?;
-
-        let Some(chosen) = choice else {
-            return Ok(None);
-        };
+        // `.prompt()` so ESC/ctrl-c cancels the whole command; declining is the
+        // explicit "skip auth for now" option, never a silent fallback.
+        let chosen = inquire::Select::new("How should this mount authenticate?", options.clone())
+            .prompt()
+            .map_err(crate::ui::from_inquire)?;
 
         for (i, cred) in detected.iter().enumerate() {
-            let label = format!("[{}]", i + 1);
-            if chosen.starts_with(&label) {
+            if chosen == options[i] {
                 return Ok(Some(credential_value(cred)));
             }
         }
@@ -123,44 +123,30 @@ impl<'a> AuthImportDecision<'a> {
     }
 }
 
-fn imported_token_with_notice(credential: &detect::DetectedCredential) -> SecretString {
-    match credential {
-        detect::DetectedCredential::EnvVar { name, value } => {
-            anstream::println!("Importing credential from ${name} (--yes).");
-            value.clone()
-        },
-        detect::DetectedCredential::Command { note, value } => {
-            anstream::println!("Importing credential from {note} (--yes).");
-            value.clone()
-        },
-    }
-}
-
 fn prompt_single_import(cred: &detect::DetectedCredential) -> anyhow::Result<Option<SecretString>> {
-    anstream::println!("Detected:");
-    anstream::println!("  • {}", credential_label(cred));
-    anstream::println!();
-    let answer = inquire::Text::new("Import existing credential? [y/N/o for OAuth]")
-        .with_default("N")
+    let import = format!("import from {}", credential_source(cred));
+    let options = vec![
+        import.clone(),
+        "sign in with OAuth instead".to_string(),
+        "skip auth for now".to_string(),
+    ];
+    // `.prompt()` so ESC/ctrl-c cancels the whole command; declining is the
+    // explicit "skip auth for now" option, never a silent fallback.
+    let answer = inquire::Select::new("How should this mount authenticate?", options)
         .prompt()
-        .map_err(|e| anyhow::anyhow!("prompt error: {e}"))?;
-    if answer.trim().eq_ignore_ascii_case("y") {
+        .map_err(crate::ui::from_inquire)?;
+    if answer == import {
         Ok(Some(credential_value(cred)))
     } else {
         Ok(None)
     }
 }
 
-fn print_detected_header(detected: &[detect::DetectedCredential]) {
-    anstream::println!("Detected:");
-    for cred in detected {
-        anstream::println!("  • {}", credential_label(cred));
-    }
-}
-
-fn credential_label(cred: &detect::DetectedCredential) -> String {
+/// Where a detected credential comes from, for display. Env vars render as
+/// `$NAME`; a command renders its provider-supplied note.
+fn credential_source(cred: &detect::DetectedCredential) -> String {
     match cred {
-        detect::DetectedCredential::EnvVar { name, .. } => format!("${name} in environment"),
+        detect::DetectedCredential::EnvVar { name, .. } => format!("${name}"),
         detect::DetectedCredential::Command { note, .. } => note.clone(),
     }
 }

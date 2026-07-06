@@ -49,7 +49,10 @@ impl<'a> StaticTokenValidator<'a> {
                 .body(body.to_string());
         }
 
-        anstream::println!("Validating against {} ...", self.validation.url);
+        anstream::eprintln!(
+            "{}",
+            crate::ui::note(format!("validating against {}", self.validation.url))
+        );
         let response = req.send().await.context("validation request failed")?;
         let status = response.status();
         if u32::from(status.as_u16()) != u32::from(self.validation.expect_status) {

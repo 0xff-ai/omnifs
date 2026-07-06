@@ -22,8 +22,8 @@ pub struct SnapshotArgs {
 impl SnapshotArgs {
     pub async fn run(self) -> anyhow::Result<()> {
         let workspace = Workspace::resolve()?;
-        let mount =
-            MountName::new(self.mount).with_context(|| "invalid mount name for snapshot export")?;
+        let mount = MountName::new(self.mount.clone())
+            .with_context(|| format!("invalid mount name `{}` for snapshot export", self.mount))?;
         require_configured_mount(&workspace, &mount)?;
 
         let source = if let Some(tar) = workspace
@@ -39,7 +39,7 @@ impl SnapshotArgs {
             "cache"
         };
 
-        anstream::println!(
+        anstream::eprintln!(
             "Wrote `{}` snapshot to {} ({source})",
             mount,
             WorkspaceLayout::display(&self.out)

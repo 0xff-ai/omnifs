@@ -231,9 +231,9 @@ fn add_path(store: &ProviderStore, path: &Path, report: &mut AddReport) -> anyho
 
 fn add_dir(store: &ProviderStore, path: &Path, report: &mut AddReport) -> anyhow::Result<()> {
     let mut entries = std::fs::read_dir(path)
-        .with_context(|| format!("scan provider directory {}", path.display()))?
+        .with_context(|| format!("open provider directory {}", path.display()))?
         .collect::<Result<Vec<_>, _>>()
-        .with_context(|| format!("scan provider directory {}", path.display()))?;
+        .with_context(|| format!("read provider directory entry in {}", path.display()))?;
     entries.sort_by_key(std::fs::DirEntry::path);
 
     for entry in entries {

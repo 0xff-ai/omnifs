@@ -298,6 +298,7 @@ jobs:
         id: build
         env:
           OMNIFS_BUILD_DAEMON: "1"
+          OMNIFS_RELEASE: "1"
         run: scripts/ci/build-linux-zigbuild.sh x86_64-unknown-linux-gnu.2.17
 
       - name: Package Linux x64 CLI
@@ -359,6 +360,7 @@ jobs:
         id: build
         env:
           OMNIFS_BUILD_DAEMON: "1"
+          OMNIFS_RELEASE: "1"
         run: scripts/ci/build-linux-zigbuild.sh aarch64-unknown-linux-gnu.2.17
 
       - name: Package Linux arm64 CLI
@@ -420,6 +422,7 @@ jobs:
         id: build
         env:
           DARWIN_RUSTUP_HOME: ${{ github.workspace }}/.cache/darwin-rustup
+          OMNIFS_RELEASE: "1"
         run: scripts/ci/build-darwin-zigbuild.sh
 
       - name: Package Darwin CLI archives

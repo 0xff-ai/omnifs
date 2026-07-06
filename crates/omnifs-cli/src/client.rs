@@ -29,7 +29,12 @@ pub(crate) struct DaemonClient {
 #[derive(Debug)]
 pub(crate) enum DaemonControlState {
     Absent,
-    Sick { reason: String },
+    /// A daemon answered the control port but its status could not be read.
+    /// Carries the original error (chain and hints intact) so the final
+    /// rendering shows the cause once, not a pre-flattened `{:#}` string.
+    Sick {
+        error: anyhow::Error,
+    },
     Incompatible(Box<DaemonStatus>),
     Compatible(Box<DaemonStatus>),
 }
@@ -61,9 +66,10 @@ impl DaemonControlState {
         match self {
             Self::Compatible(status) => Ok(Some(*status)),
             Self::Absent => Ok(None),
-            Self::Sick { reason } => Err(anyhow::anyhow!(
-                "daemon answered on the control port at {base}, but status could not be read: {reason}"
-            )),
+            Self::Sick { error } => Err(error.context(format!(
+                "a daemon answered on the control port at {base}, but its status could not be read \
+                 (it may belong to a different OMNIFS_HOME)"
+            ))),
             Self::Incompatible(status) => Err(incompatible_daemon_error(&status)),
         }
     }
@@ -115,16 +121,12 @@ impl DaemonClient {
             Ok(Some(response)) => response,
             Ok(None) => return DaemonControlState::Absent,
             Err(error) => {
-                return DaemonControlState::Sick {
-                    reason: format!("{error:#}"),
-                };
+                return DaemonControlState::Sick { error };
             },
         };
         let state = match Self::parse_status(response).await {
             Ok(status) => DaemonControlState::from_status(status),
-            Err(error) => DaemonControlState::Sick {
-                reason: format!("{error:#}"),
-            },
+            Err(error) => DaemonControlState::Sick { error },
         };
         state.warn_minor_skew();
         state
@@ -195,7 +197,7 @@ impl DaemonClient {
     }
 
     fn control_token_unavailable_error(&self, error: &std::io::Error) -> anyhow::Error {
-        control_token_unavailable_error(&self.token_file, error)
+        control_token_unavailable_error(&self.base, &self.token_file, error)
     }
 
     async fn parse_status(response: reqwest::Response) -> Result<DaemonStatus> {
@@ -473,14 +475,39 @@ pub(crate) fn read_control_token_file(path: &Path) -> std::io::Result<String> {
     Ok(token.to_string())
 }
 
-fn control_token_unavailable_error(path: &Path, error: &std::io::Error) -> anyhow::Error {
-    let path = path.display().to_string();
+/// A daemon is answering the control address but will not accept this
+/// workspace's credentials. This is almost always a daemon owned by a different
+/// `OMNIFS_HOME` (the `just dev` sandbox at `~/.omnifs-dev`, or another
+/// worktree) holding the shared control port, so pointing the user at `omnifs
+/// up` would mislead: `up` cannot bind a port a foreign daemon already holds
+/// (it fails with "another omnifs daemon is already serving").
+pub(crate) fn foreign_daemon_error(base: &str) -> anyhow::Error {
     match Err::<(), _>(anyhow::anyhow!(
-        "daemon control token unavailable at {path}: {error}"
+        "a daemon is serving on the control address at {base}, but it does not accept this workspace's credentials"
     ))
     .with_exit_code(ExitCode::AuthRequired)
-    .with_hint(format!(
-        "Run `omnifs up` to restart the daemon and regenerate {path}"
+    .with_hint(
+        "It likely belongs to a different OMNIFS_HOME (for example the `just dev` sandbox at ~/.omnifs-dev, or another worktree)",
+    )
+    .with_hint(
+        "Stop it with `omnifs down` from the workspace that owns it, or point this CLI elsewhere by setting OMNIFS_DAEMON_ADDR",
+    ) {
+        Ok(()) => unreachable!("foreign daemon error construction always starts from Err"),
+        Err(error) => error,
+    }
+}
+
+fn control_token_unavailable_error(
+    base: &str,
+    path: &Path,
+    error: &std::io::Error,
+) -> anyhow::Error {
+    // A missing or unreadable token here means we cannot authenticate to
+    // whatever daemon is answering `base`; fold the token-file detail into the
+    // foreign-daemon diagnosis rather than promising a restart that cannot help.
+    match Err::<(), _>(foreign_daemon_error(base)).with_hint(format!(
+        "this workspace's control token at {} is missing or unreadable ({error})",
+        path.display()
     )) {
         Ok(()) => unreachable!("control token error construction always starts from Err"),
         Err(error) => error,
@@ -502,7 +529,11 @@ fn hint_for(code: ErrorCode) -> &'static str {
         },
         ErrorCode::ProviderMissing => "Try: just providers build",
         ErrorCode::ReconcileBusy => "Try: rerun the command after reconcile finishes",
-        ErrorCode::Unauthorized | ErrorCode::DaemonShuttingDown => "Try: omnifs up",
+        ErrorCode::Unauthorized => {
+            "Try: a daemon on this control address rejected this workspace's credentials; \
+             run `omnifs down` from the workspace that owns it, or set OMNIFS_DAEMON_ADDR to point elsewhere"
+        },
+        ErrorCode::DaemonShuttingDown => "Try: omnifs up",
         ErrorCode::Internal => "Try: omnifs doctor",
     }
 }
@@ -605,7 +636,10 @@ mod tests {
         assert_eq!(crate::error::exit_code(&error), ExitCode::AuthRequired);
         let rendered = crate::error::render(&error);
         assert!(rendered.contains(&missing_token.display().to_string()));
-        assert!(rendered.contains("omnifs up"));
+        // A ready daemon that rejects our token is a foreign daemon: point at
+        // `omnifs down`, never `omnifs up` (which cannot bind the held port).
+        assert!(rendered.contains("omnifs down"));
+        assert!(!rendered.contains("omnifs up"));
         server.await.unwrap();
     }
 
@@ -651,7 +685,8 @@ mod tests {
 
     #[test]
     fn hint_table_covers_every_error_code() {
-        assert_eq!(hint_for(ErrorCode::Unauthorized), "Try: omnifs up");
+        assert!(hint_for(ErrorCode::Unauthorized).contains("omnifs down"));
+        assert!(hint_for(ErrorCode::Unauthorized).contains("OMNIFS_DAEMON_ADDR"));
         assert_eq!(
             hint_for(ErrorCode::AuthRequired),
             "Try: omnifs mounts reauth <name>"

@@ -10,7 +10,7 @@ use omnifs_workspace::creds::FileStore;
 
 use crate::auth::{AuthProbeSeverity, AuthProbeSummary};
 use crate::cli::OutputFormat;
-use crate::launch_backend::{DockerTarget, ImageRef};
+use crate::launch_backend::{DockerTarget, ImageRef, names_registry};
 use crate::runtime::Runtime;
 use crate::status::UserMountStatus;
 use crate::workspace::Workspace;
@@ -163,6 +163,13 @@ impl DoctorReport {
     }
 }
 
+/// Width of the probe-name column in the text report.
+const PROBE_NAME_WIDTH: usize = 28;
+/// Visible column where a probe's message begins: `"  "` + glyph + `" "` +
+/// name field + `" "`. Continuation lines in a message indent to here so they
+/// sit under the first line instead of drifting to the left margin.
+const PROBE_MESSAGE_COLUMN: usize = 2 + 1 + 1 + PROBE_NAME_WIDTH + 1;
+
 #[derive(Debug)]
 enum ProbeResult {
     Ok(String),
@@ -181,6 +188,17 @@ impl ProbeResult {
         }
     }
 
+    /// The glyph, colored by severity. Only the glyph carries ANSI; the name
+    /// field is padded uncolored so `{:<28}` column math stays correct.
+    fn colored_glyph(&self) -> String {
+        match self {
+            Self::Ok(_) => crate::style::success(self.glyph()),
+            Self::Warn(_) => crate::style::warn(self.glyph()),
+            Self::Err(_) => crate::style::error(self.glyph()),
+            Self::Skipped(_) => crate::style::dim(self.glyph()),
+        }
+    }
+
     fn message(&self) -> &str {
         match self {
             Self::Ok(m) | Self::Warn(m) | Self::Err(m) => m.as_str(),
@@ -189,7 +207,13 @@ impl ProbeResult {
     }
 
     fn render(&self, name: &str) -> String {
-        format!("  {} {:<28} {}", self.glyph(), name, self.message())
+        format!(
+            "  {} {:<width$} {}",
+            self.colored_glyph(),
+            name,
+            self.message(),
+            width = PROBE_NAME_WIDTH,
+        )
     }
 }
 
@@ -283,7 +307,15 @@ impl Doctor<'_> {
             Ok(_) => ProbeResult::Ok(format!("{image} cached")),
             Err(bollard::errors::Error::DockerResponseServerError {
                 status_code: 404, ..
-            }) => ProbeResult::Warn(format!("{image} not cached (will pull on `omnifs up`)")),
+            }) if names_registry(image.as_str()) => {
+                ProbeResult::Warn(format!("{image} not cached (will pull on `omnifs up`)"))
+            },
+            Err(bollard::errors::Error::DockerResponseServerError {
+                status_code: 404, ..
+            }) => ProbeResult::Err(format!(
+                "{image} not present locally; a dev image is never pulled, so `omnifs up` \
+                 cannot start (build it with `just dev --build-only`)"
+            )),
             Err(error) => ProbeResult::Err(format!("inspect: {error}")),
         }
     }
@@ -384,7 +416,7 @@ impl Doctor<'_> {
                 invalid.len()
             );
             for (name, error) in &invalid {
-                let _ = write!(&mut msg, "\n      - {name}: {error}");
+                let _ = write!(&mut msg, "\n{:PROBE_MESSAGE_COLUMN$}{name}: {error}", "");
             }
             ProbeResult::Err(msg)
         };
@@ -459,17 +491,20 @@ impl Doctor<'_> {
         anstream::println!();
         anstream::println!("Live daemon");
         if let Some(reason) = &live.skipped {
-            anstream::println!("  · skipped: {reason}");
+            anstream::println!("  {} skipped: {reason}", crate::style::dim("·"));
             return;
         }
         if live.findings.is_empty() {
-            anstream::println!("  ✓ all live mounts are healthy");
+            anstream::println!(
+                "  {} all live mounts are healthy",
+                crate::style::success("✓")
+            );
             return;
         }
         for finding in &live.findings {
             let glyph = match finding.state {
-                "err" => "✗",
-                _ => "⚠",
+                "err" => crate::style::error("✗"),
+                _ => crate::style::warn("⚠"),
             };
             anstream::println!(
                 "  {glyph} {:<14} {}; fix: {}",

@@ -49,6 +49,31 @@ NFS loopback mount startup and teardown are frontend delivery concerns. The daem
 
 Do not describe macFUSE, `diskutil`, or macOS FUSE mounting as current behavior. macOS host-native integration is NFSv4 loopback.
 
+## Client-behavior quirks and the product contract
+
+FUSE gives the daemon per-operation control over what the kernel believes. An NFS mount interposes the OS NFS client, which has its own caching, retry, and recovery behavior. This section catalogs the known gaps between NFS-loopback behavior and the product contract, and how each is handled today. The mount options in `omnifs-nfs/src/mount.rs` are the enforcement point for the mitigated rows; every option there carries its rationale in code.
+
+Mitigated by mount options today:
+
+- **Attribute and lookup staleness.** The client caches attrs and lookups on its own schedule, which fights live and growing projected files. Mitigation: `noac` plus `nonegnamecache` (macOS), `actimeo=0` plus `lookupcache=none` (Linux). Cost: every stat and lookup round-trips to the loopback server. Revisit when tree invalidation can drive cache validity instead of disabling caching wholesale.
+- **Hangs against a dead server.** A default NFS mount blocks processes indefinitely when the server dies. Mitigation: `soft`, `timeo=5`, `retrans=1` (Linux) and `intr`, `timeo=5`, `retrans=1`, `retrycnt=0` (macOS) bound the wait; teardown force-unmounts and sweeps state files for daemon crashes.
+- **Delegation and callback complexity.** `nocallback` (macOS) disables delegations, so no callback channel or recall handling exists to get wrong.
+
+Deferred by the read-only contract (these arrive with any write path and must be designed for, not discovered):
+
+- **Silly rename.** Open-unlink becomes a client-issued rename to `.nfsXXXX`, visible in listings until last close. A write-capable frontend must decide whether the server hides these names from readdir.
+- **AppleDouble spray.** With no xattr support in NFSv4.0, the macOS client materializes `._*` companion files on writes carrying Finder metadata, quarantine flags, and resource forks. These would pollute the projected tree and confuse providers.
+- **Write-back and mmap coherence.** Client-side write caching weakens read-after-write visibility across processes; mmap-heavy editors are best effort per the product contract.
+- **Locking.** NFSv4.0 mandatory lock state (and its recovery) is protocol machinery the read-only frontend deliberately keeps narrow.
+
+Open, inherent to the transport:
+
+- **ESTALE across daemon restarts.** Client-held filehandles must remain valid across a daemon restart or the client surfaces stale-filehandle errors; FUSE mounts simply die with the process. Filehandle stability is therefore a durability requirement, not an optimization.
+- **Sleep/wake and lease churn.** The v4.0 lease/grace machinery interacts with laptop sleep; live tests serialize for related reasons.
+- **No xattr surface at all** (until v4.2 is on the table), independent of writes: `xattr -l` answers differently than FUSE would.
+
+When comparing frontends or debating defaults, this catalog is the checklist: a quirk is either mitigated (name the mount option), deferred (name the contract gate), or open (name the consequence). The conformance target for both frontends is the same product-contract toolbox; NFS earns default status per platform by passing it, not by assertion.
+
 ## Rejected shapes
 
 - NFS-specific projection semantics

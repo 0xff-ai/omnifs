@@ -130,7 +130,7 @@ impl ShellArgs {
         apply_context_env(&mut cmd, &mount_point, &mounts, self.hermetic);
         set_cwd_to_mount(&mut cmd, &mount_point);
 
-        anstream::println!(
+        anstream::eprintln!(
             "omnifs shell ({mode}) at {} (type `exit` to leave)",
             mount_point.display()
         );
@@ -151,7 +151,7 @@ impl ShellArgs {
         cmd.arg(container);
         if self.command.is_empty() {
             cmd.arg(self.shell.as_deref().unwrap_or("/bin/zsh"));
-            anstream::println!("omnifs shell (container) at {GUEST_MOUNT} (type `exit` to leave)");
+            anstream::eprintln!("omnifs shell (container) at {GUEST_MOUNT} (type `exit` to leave)");
         } else {
             cmd.args(&self.command);
         }

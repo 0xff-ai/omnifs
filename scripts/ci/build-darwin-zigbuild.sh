@@ -33,6 +33,7 @@ docker run --rm \
   -e HOST_GID="$(id -g)" \
   -e OMNIFS_PACKAGE="$package" \
   -e OMNIFS_BIN="$bin" \
+  -e OMNIFS_RELEASE \
   "$image" \
   bash -lc '
     set -euo pipefail

@@ -19,6 +19,7 @@ use crate::daemon_teardown::DaemonTeardown;
 use crate::workspace::{MountRemovalTarget, Workspace};
 use omnifs_workspace::creds::{CredentialStore, FileStore};
 use omnifs_workspace::layout::WorkspaceLayout;
+use std::io::IsTerminal as _;
 use std::sync::Arc;
 
 #[derive(Args, Debug, Clone, Default)]
@@ -42,17 +43,24 @@ impl ResetArgs {
         let targets = workspace.reset_removal_targets()?;
 
         if targets.is_empty() {
-            anstream::println!("No mount configs found in {}.", layout.mounts_dir.display());
+            anstream::eprintln!("No mount configs found in {}.", layout.mounts_dir.display());
         }
         print_preview(&targets, keep_credentials);
 
         if !yes {
+            // Without a terminal there is no one to answer; fail fast naming the
+            // skip flag instead of surfacing inquire's raw NotATTY error.
+            if !std::io::stdin().is_terminal() {
+                anyhow::bail!(
+                    "cannot confirm reset on a non-interactive stdin; pass -y to skip confirmation"
+                );
+            }
             let proceed = inquire::Confirm::new("Proceed?")
                 .with_default(false)
                 .prompt()
-                .map_err(|error| anyhow::anyhow!("confirm prompt: {error}"))?;
+                .map_err(crate::ui::from_inquire)?;
             if !proceed {
-                anstream::println!("Aborted.");
+                anstream::eprintln!("Aborted.");
                 return Ok(());
             }
         }
@@ -95,7 +103,7 @@ impl ResetArgs {
                     .remove(&name)
                     .with_context(|| format!("remove {}", target.path.display()))?;
             }
-            anstream::println!("Removed mount `{}`", target.name);
+            anstream::eprintln!("Removed mount `{}`", target.name);
         }
 
         // Best-effort: a non-running daemon or an absent launch record is not a
@@ -104,8 +112,8 @@ impl ResetArgs {
         DaemonTeardown::new(&workspace).reset_best_effort().await;
 
         if !targets.is_empty() {
-            anstream::println!();
-            anstream::println!("✓ Reset complete.");
+            anstream::eprintln!();
+            anstream::eprintln!("✓ Reset complete.");
         }
         crate::telemetry::maybe_print_health_nudge(&workspace).await;
         Ok(())
@@ -113,20 +121,20 @@ impl ResetArgs {
 }
 
 fn print_preview(targets: &[MountRemovalTarget], keep_credentials: bool) {
-    anstream::println!("This will:");
+    anstream::eprintln!("This will:");
     for target in targets {
-        anstream::println!("  • delete {}", WorkspaceLayout::display(&target.path));
+        anstream::eprintln!("  • delete {}", WorkspaceLayout::display(&target.path));
         match &target.credential {
             CredentialTarget::Internal(_) if !keep_credentials => {
                 for key in target.credential.keys() {
-                    anstream::println!("      and credential `{}`", key.storage_key());
+                    anstream::eprintln!("      and credential `{}`", key.storage_key());
                 }
             },
             CredentialTarget::Internal(_) => {
-                anstream::println!("      (keeping credentials, --keep-credentials)");
+                anstream::eprintln!("      (keeping credentials, --keep-credentials)");
             },
             CredentialTarget::None => {},
         }
     }
-    anstream::println!("  • stop the running daemon (if any)");
+    anstream::eprintln!("  • stop the running daemon (if any)");
 }

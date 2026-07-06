@@ -1,4 +1,5 @@
 use crate::catalog::mount_exists;
+use crate::error::WithHint;
 use crate::mount_config::MountConfig;
 use anyhow::anyhow;
 use omnifs_workspace::mounts::Name as MountName;
@@ -43,9 +44,21 @@ impl<'a> ProviderSelection<'a> {
         yes: bool,
     ) -> anyhow::Result<(String, MountName)> {
         let provider = self.resolve_provider(provider_arg, interactive)?;
+        // An unknown positional provider bails here (before the caller's own
+        // catalog lookup), so the available-provider list and install hint must
+        // ride on this error or they never reach the user.
         let manifest = self
             .manifest_for(&provider)
-            .ok_or_else(|| anyhow!("provider `{provider}` not found"))?;
+            .ok_or_else(|| {
+                anyhow!(
+                    "provider `{provider}` not found; available: {}",
+                    self.provider_names().join(", ")
+                )
+            })
+            .with_hint("Run `omnifs providers ls` to list installed providers")
+            .with_hint(
+                "Or run `omnifs providers add <wasm-or-dir>` to install a provider artifact",
+            )?;
 
         let proposed = explicit_name.map_or_else(|| manifest.default_mount.clone(), str::to_string);
         let proposed_name = MountName::new(proposed.as_str())?;
@@ -77,7 +90,7 @@ impl<'a> ProviderSelection<'a> {
         }
         inquire::Select::new("Which provider does this mount use?", providers)
             .prompt()
-            .map_err(|e| anyhow!("prompt error: {e}"))
+            .map_err(crate::ui::from_inquire)
     }
 
     fn ensure_unique_name(
@@ -90,19 +103,21 @@ impl<'a> ProviderSelection<'a> {
             return Ok(proposed);
         }
         let suggestion = self.next_available(&proposed)?;
+        // `--yes` accepts the auto-suggested name on collision, even
+        // non-interactively (it never overwrites the existing mount).
+        if yes {
+            return Ok(suggestion);
+        }
         if !interactive {
             anyhow::bail!(
                 "mount `{proposed}` already exists; pass --as explicitly (suggested: `{suggestion}`)"
             );
         }
-        if yes {
-            return Ok(suggestion);
-        }
         anstream::println!("Mount `{proposed}` already exists.");
         let name = inquire::Text::new("New mount name")
             .with_default(suggestion.as_str())
             .prompt()
-            .map_err(|e| anyhow!("prompt error: {e}"))?;
+            .map_err(crate::ui::from_inquire)?;
         Ok(MountName::new(name)?)
     }
 
