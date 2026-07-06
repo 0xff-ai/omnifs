@@ -98,6 +98,7 @@ struct ResolverReverseKey {
 #[omnifs_sdk::provider(
     id = "dns",
     display_name = "DNS",
+    description = "DNS records for any domain",
     mount = "dns",
     capabilities(
         domain(

@@ -204,6 +204,7 @@ struct ProjectServiceKey {
 #[omnifs_sdk::provider(
     id = "docker",
     display_name = "Docker",
+    description = "local containers, images, and logs",
     mount = "docker",
     capabilities(unix_socket(
         dynamic,

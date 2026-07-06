@@ -15,6 +15,10 @@ use std::collections::{BTreeMap, HashSet};
 pub struct ProviderManifest {
     pub id: String,
     pub display_name: String,
+    /// One-line, user-facing summary of what the provider projects.
+    /// Informational catalog/UI context, never identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     /// Filename of the provider WASM component.
     pub provider: String,
     pub default_mount: String,

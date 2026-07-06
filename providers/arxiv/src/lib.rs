@@ -175,6 +175,7 @@ pub struct CategoryKey {
 #[omnifs_sdk::provider(
     id = "arxiv",
     display_name = "arXiv",
+    description = "arXiv papers and abstracts as files",
     mount = "arxiv",
     capabilities(
         domain(

@@ -105,6 +105,7 @@ pub(crate) struct TableDoc {
 #[omnifs_sdk::provider(
     id = "db",
     display_name = "Database",
+    description = "tables and rows of a local database",
     mount = "db",
     capabilities(preopened_path(
         dynamic,
