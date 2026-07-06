@@ -46,6 +46,10 @@ impl InspectArgs {
             )
         } else {
             let workspace = Workspace::resolve()?;
+            // Probe readiness before entering the TUI so a down daemon exits 3
+            // (DaemonUnavailable) the same as the `--plain` path, instead of
+            // opening an empty canvas and exiting 0.
+            workspace.daemon().require_compatible().await?;
             let container = self.resolve_container(&workspace)?;
             check_record_path(self.record.as_deref())?;
             let addr = daemon_addr();

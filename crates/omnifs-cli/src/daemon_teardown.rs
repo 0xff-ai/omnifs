@@ -46,6 +46,7 @@ impl<'a> DaemonTeardown<'a> {
                     .reclaim(Some(status.mount_point.as_path()), &nfs_state_dir)
                     .await?;
                 LaunchRecord::remove(config_dir)?;
+                self.remove_control_token();
             },
             Some(RunningBackend::Cached {
                 backend,
@@ -56,16 +57,63 @@ impl<'a> DaemonTeardown<'a> {
                     .reclaim(mount_point.as_deref(), &nfs_state_dir)
                     .await?;
                 LaunchRecord::remove(config_dir)?;
+                self.remove_control_token();
             },
             None => {
-                // Genuinely nothing: no live daemon, no launch record. The
-                // fail-safe "unknown backend" stop lives in the error paths of
-                // resolve_running_backend (unreportable identity, corrupt
-                // record), never here.
-                anstream::println!("Nothing to tear down.");
+                // No live daemon and no launch record, but a wedged host-native
+                // NFS mount can outlive both. On non-Linux, sweep the NFS state
+                // dir so those recover; the fail-safe "unknown backend" stop
+                // lives in the error paths of resolve_running_backend.
+                Self::sweep_orphaned_host_native_nfs(&nfs_state_dir);
             },
         }
         Ok(())
+    }
+
+    /// Remove the daemon control token after a reclaim so a stale token cannot
+    /// outlive the daemon it authenticated. The daemon deletes it on graceful
+    /// exit; teardown deletes it too for the case where the daemon died without
+    /// cleaning up. A missing token is the normal case, not an error.
+    fn remove_control_token(&self) {
+        let path = self.workspace.layout().control_token_file();
+        if let Err(error) = std::fs::remove_file(&path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            anstream::eprintln!(
+                "⚠  could not remove control token {}: {error}",
+                path.display()
+            );
+        }
+    }
+
+    /// With no live daemon and no launch record, a wedged host-native NFS mount
+    /// can still be orphaned. On non-Linux, sweep the NFS state dir; report only
+    /// when it tore something down, otherwise print the plain nothing note.
+    #[cfg(all(feature = "daemon", not(target_os = "linux")))]
+    fn sweep_orphaned_host_native_nfs(nfs_state_dir: &Path) {
+        match crate::host_teardown::teardown_host_native_nfs(nfs_state_dir) {
+            Ok(summary) if summary.unmounted > 0 || summary.swept_orphans > 0 => {
+                if summary.unmounted > 0 {
+                    anstream::println!(
+                        "✓ Unmounted {} orphaned host-native mount(s)",
+                        summary.unmounted
+                    );
+                }
+                if summary.swept_orphans > 0 {
+                    anstream::println!(
+                        "✓ Swept {} orphaned mount-state file(s)",
+                        summary.swept_orphans
+                    );
+                }
+            },
+            Ok(_) => anstream::println!("Nothing to tear down."),
+            Err(error) => anstream::eprintln!("⚠  Orphaned-mount sweep failed: {error:#}"),
+        }
+    }
+
+    #[cfg(not(all(feature = "daemon", not(target_os = "linux"))))]
+    fn sweep_orphaned_host_native_nfs(_nfs_state_dir: &Path) {
+        anstream::println!("Nothing to tear down.");
     }
 
     /// Best-effort daemon teardown for `omnifs reset`.
@@ -116,6 +164,7 @@ impl<'a> DaemonTeardown<'a> {
         }
 
         let _ = LaunchRecord::remove(config_dir);
+        self.remove_control_token();
     }
 
     /// Probe the control port for teardown. Any status error is treated as

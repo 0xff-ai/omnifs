@@ -47,12 +47,7 @@ impl StatusReport {
     pub(crate) fn render(&self, detail: bool) -> String {
         let mut out = String::new();
 
-        let version = format!("v{}", env!("CARGO_PKG_VERSION"));
-        let header_width = 57usize;
-        let left = "omnifs";
-        let padding = header_width.saturating_sub(left.len() + version.len());
-        let _ = writeln!(out, "{left}{version:>padding$}");
-        let _ = writeln!(out, "{}", "─".repeat(header_width));
+        out.push_str(&render_header(&format!("v{}", env!("CARGO_PKG_VERSION"))));
 
         let _ = writeln!(
             out,
@@ -115,7 +110,7 @@ impl StatusReport {
             let _ = writeln!(
                 out,
                 "{}",
-                crate::style::dim("(use --detail for configured provider detail)")
+                crate::style::dim("(use `omnifs status --detail` for configured provider detail)")
             );
         }
 
@@ -200,6 +195,21 @@ impl StatusReport {
             },
         }
     }
+}
+
+/// Width of the status header rule, in characters. The title line pads the
+/// version out to this same width so it terminates flush with the rule below.
+const HEADER_WIDTH: usize = 57;
+
+/// The two-line status header: `omnifs` left, `version` right-aligned to the
+/// rule's right edge, then the rule itself. Title and rule are the same width.
+fn render_header(version: &str) -> String {
+    let left = "omnifs";
+    let padding = HEADER_WIDTH.saturating_sub(left.len());
+    let mut out = String::new();
+    let _ = writeln!(out, "{left}{version:>padding$}");
+    let _ = writeln!(out, "{}", "─".repeat(HEADER_WIDTH));
+    out
 }
 
 fn format_runtime(runtime: Option<&DaemonStatus>) -> String {
@@ -409,5 +419,24 @@ impl StatusReport {
             mounts: self.user_mounts.clone(),
             providers: self.providers.clone(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{HEADER_WIDTH, render_header};
+
+    #[test]
+    fn header_title_terminates_flush_with_rule() {
+        let header = render_header(&format!("v{}", env!("CARGO_PKG_VERSION")));
+        let mut lines = header.lines();
+        let title = lines.next().expect("title line");
+        let rule = lines.next().expect("rule line");
+        assert_eq!(
+            title.chars().count(),
+            rule.chars().count(),
+            "title `{title}` and rule must be the same visible width",
+        );
+        assert_eq!(rule.chars().count(), HEADER_WIDTH);
     }
 }

@@ -35,12 +35,16 @@ fn read_source(source: &AmbientSource) -> Option<DetectedCredential> {
     match &source.kind {
         AmbientKind::EnvVar { name } => {
             let value = std::env::var_os(name)?;
-            if value.is_empty() {
+            // A whitespace-only value is not a usable token; treat it as absent
+            // rather than importing blank credentials.
+            let value = value.to_string_lossy();
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
                 return None;
             }
             Some(DetectedCredential::EnvVar {
                 name: name.clone(),
-                value: SecretString::from(value.to_string_lossy().into_owned()),
+                value: SecretString::from(trimmed.to_string()),
             })
         },
         AmbientKind::Command { argv } => {

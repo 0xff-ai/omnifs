@@ -49,6 +49,7 @@ type DevOptions = {
   home: string | null;
   providerStore: string | null;
   skipCliBuild: boolean;
+  buildOnly: boolean;
 };
 
 type ProviderStoreIndex = {
@@ -151,9 +152,22 @@ async function main() {
     );
   }
   if (!options.image) {
-    builds.push(buildImage(image, providerStore));
+    // Build the image, then move the floating `omnifs:dev` tag onto it so a
+    // locally built dev binary (which defaults to `omnifs:dev`) always runs the
+    // newest image. An explicit `--image` is the user's own tag; leave the
+    // floating tag alone.
+    builds.push(buildImage(image, providerStore).then(() => tagFloatingDevImage(image)));
   }
   await Promise.all(builds);
+
+  if (options.buildOnly) {
+    const tags = [image];
+    if (!options.image && image !== "omnifs:dev") {
+      tags.push("omnifs:dev");
+    }
+    console.log(`✓ Built ${tags.join(" and ")}`);
+    return;
+  }
 
   const render = await renderDevHomePlan(profileMounts, providerStore, options);
   if (render.mounts.length === 0) {
@@ -219,6 +233,7 @@ function parseArgs(args: string[]): DevOptions {
     home: null,
     providerStore: null,
     skipCliBuild: false,
+    buildOnly: false,
   };
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i];
@@ -234,6 +249,8 @@ function parseArgs(args: string[]): DevOptions {
       options.providerStore = requireValue(args, ++i, "--provider-store");
     } else if (arg === "--skip-cli-build") {
       options.skipCliBuild = true;
+    } else if (arg === "--build-only") {
+      options.buildOnly = true;
     } else if (arg === "--detach") {
       options.detach = true;
     } else if (arg === "--no-shell") {
@@ -693,6 +710,13 @@ async function teardownSession(fixtures: Fixtures): Promise<void> {
 
 async function removeContainer(name: string): Promise<void> {
   await run($`docker rm -f ${name}`.quiet().nothrow());
+}
+
+async function tagFloatingDevImage(image: string): Promise<void> {
+  if (image === "omnifs:dev") {
+    return;
+  }
+  await run($`docker tag ${image} omnifs:dev`);
 }
 
 function buildImage(image: string, providerStore: string): Promise<void> {

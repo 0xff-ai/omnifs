@@ -131,7 +131,7 @@ fn prompt_host_file(name: &str, field: &ConfigField) -> anyhow::Result<PathBuf> 
     let description = field.description.as_deref().unwrap_or(name);
     let raw = inquire::Text::new(description)
         .prompt()
-        .map_err(|e| anyhow!("prompt error: {e}"))?;
+        .map_err(crate::ui::from_inquire)?;
     let path = expand_tilde_path(raw.trim());
     if !path.is_file() {
         anyhow::bail!("{} is not a readable file", path.display());

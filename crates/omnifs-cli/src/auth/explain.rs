@@ -12,8 +12,8 @@ use omnifs_workspace::authn::{OAuthFlow, SchemeGuidance};
 /// An authentication mechanism omnifs knows how to drive, independent of any
 /// particular provider.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(clippy::enum_variant_names)] // every remaining mode is an OAuth flow
 pub(crate) enum AuthMode {
-    StaticToken,
     OauthDeviceCode,
     OauthPkceLoopback,
     OauthPkceManualCode,
@@ -24,7 +24,6 @@ impl AuthMode {
     /// Short human label.
     pub(crate) fn label(self) -> &'static str {
         match self {
-            AuthMode::StaticToken => "Static token",
             AuthMode::OauthDeviceCode => "OAuth device code",
             AuthMode::OauthPkceLoopback => "OAuth browser redirect (PKCE)",
             AuthMode::OauthPkceManualCode => "OAuth paste-the-redirect (PKCE)",
@@ -45,9 +44,6 @@ impl AuthMode {
     /// What the user actually does, a sentence or two.
     pub(crate) fn experience(self) -> &'static str {
         match self {
-            AuthMode::StaticToken => {
-                "You create a token (API key or personal access token) in the provider's web UI and paste it in. omnifs stores it and sends it on every request."
-            },
             AuthMode::OauthDeviceCode => {
                 "omnifs shows a short code and a URL. Open the URL, enter the code, and approve. Nothing listens on a local port, so this works over SSH and on headless machines."
             },
@@ -66,32 +62,19 @@ impl AuthMode {
 
 fn print_steps_and_docs(guidance: &SchemeGuidance) {
     if !guidance.setup_steps.is_empty() {
-        anstream::println!("  {}", style::dim("Setup:"));
+        anstream::eprintln!("  {}", style::dim("Setup:"));
         for (i, step) in guidance.setup_steps.iter().enumerate() {
-            anstream::println!("    {}. {step}", i + 1);
+            anstream::eprintln!("    {}. {step}", i + 1);
         }
     }
     if let Some(url) = &guidance.docs_url {
-        anstream::println!("  {} {}", style::dim("Docs:"), style::accent(url));
+        anstream::eprintln!("  {} {}", style::dim("Docs:"), style::accent(url));
     }
 }
 
 /// Print what an OAuth login is about to do, plus any provider setup steps.
 /// Used at login time, after the caller has printed the scheme header.
 pub(crate) fn render_oauth_intro(mode: AuthMode, guidance: &SchemeGuidance) {
-    anstream::println!("  {}", style::dim(mode.experience()));
-    print_steps_and_docs(guidance);
-}
-
-/// Print how to obtain a static token before prompting the user for one.
-pub(crate) fn render_static_token_intro(creation_url: Option<&str>, guidance: &SchemeGuidance) {
-    anstream::println!("  {}", style::dim(AuthMode::StaticToken.experience()));
-    if let Some(url) = creation_url {
-        anstream::println!(
-            "  {} {}",
-            style::dim("Create a token at:"),
-            style::accent(url)
-        );
-    }
+    anstream::eprintln!("  {}", style::dim(mode.experience()));
     print_steps_and_docs(guidance);
 }

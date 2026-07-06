@@ -3,13 +3,11 @@
 //! Commands own narration. This module owns the stage behavior so the guided
 //! setup wizard and express `init` lane cannot drift from each other.
 
-use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
 use anyhow::{Context, anyhow};
-use omnifs_api::DaemonBackend;
 use omnifs_caps::{Grants, Limits};
 use omnifs_workspace::layout::WorkspaceLayout;
 use omnifs_workspace::mounts::{Name as MountName, Registry, Spec, UpgradePlan};
@@ -25,14 +23,14 @@ use crate::commands::init::{AuthImportDecision, ImportOutcome, InitArgs};
 use crate::commands::setup::host_os::HostOs;
 use crate::config::{ConfigFile, ConfiguredBackend};
 use crate::error::{ExitCode, WithExitCode, WithHint};
-use crate::launch::{LaunchOutcome, Launcher};
+use crate::launch::LaunchOutcome;
 use crate::launch_backend::GUEST_MOUNT;
 use crate::mount_config::MountConfig;
 use crate::token_source::TokenSource;
+use crate::ui::picker::PickerRow;
 use crate::workspace::Workspace;
 
 pub(crate) struct EnvironmentReport {
-    pub(crate) os: HostOs,
     pub(crate) configured: bool,
 }
 
@@ -63,6 +61,33 @@ pub(crate) struct PromptMode {
     pub(crate) no_input: bool,
 }
 
+impl PromptMode {
+    /// The single decision combinator for every wizard prompt site: an explicit
+    /// value wins; `--yes` takes the default; `--no-input` and non-interactive
+    /// sessions bail with a flag hint; otherwise prompt.
+    pub(crate) fn resolve<T>(
+        self,
+        explicit: Option<T>,
+        default: impl FnOnce() -> T,
+        flag_hint: &str,
+        prompt: impl FnOnce() -> anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
+        if let Some(value) = explicit {
+            return Ok(value);
+        }
+        if self.yes {
+            return Ok(default());
+        }
+        if self.no_input {
+            anyhow::bail!("`--no-input` needs {flag_hint}, or pass --yes to accept the default");
+        }
+        if !self.interactive {
+            anyhow::bail!("this step needs a terminal; pass {flag_hint} or --yes");
+        }
+        prompt()
+    }
+}
+
 pub(crate) fn environment_check(
     os: HostOs,
     workspace: &Workspace,
@@ -70,17 +95,24 @@ pub(crate) fn environment_check(
     if os == HostOs::Unsupported {
         anyhow::bail!("omnifs does not yet run on this platform");
     }
-    let configured = workspace
-        .config()
-        .is_ok_and(|config| config.system.runtime.is_some())
-        || workspace.mounts().is_ok_and(|mounts| !mounts.is_empty());
-    Ok(EnvironmentReport { os, configured })
+    // Review mode is for a workspace that already has something to review: a
+    // mount. A persisted runtime alone (setup interrupted before adding a mount)
+    // re-enters the fresh wizard, whose runtime stage preselects that value.
+    let configured = workspace.mounts().is_ok_and(|mounts| !mounts.is_empty());
+    Ok(EnvironmentReport { configured })
 }
 
-pub(crate) fn default_runtime(os: HostOs) -> ConfiguredBackend {
-    match os {
-        HostOs::MacOs => ConfiguredBackend::Docker,
-        HostOs::LinuxNative | HostOs::LinuxWsl | HostOs::Unsupported => ConfiguredBackend::Native,
+/// Docker is the recommended default runtime on every OS. Native (loopback NFS
+/// on macOS, host FUSE on Linux/WSL) is opt-in.
+pub(crate) fn default_runtime(_os: HostOs) -> ConfiguredBackend {
+    ConfiguredBackend::Docker
+}
+
+/// The lowercase runtime word used everywhere the wizard states a runtime fact.
+pub(crate) fn runtime_word(backend: ConfiguredBackend) -> &'static str {
+    match backend {
+        ConfiguredBackend::Docker => "docker",
+        ConfiguredBackend::Native => "native",
     }
 }
 
@@ -90,36 +122,56 @@ pub(crate) fn runtime_selection(
     requested: Option<ConfiguredBackend>,
     mode: PromptMode,
 ) -> anyhow::Result<ConfiguredBackend> {
-    if let Some(requested) = requested {
-        return Ok(requested);
-    }
-
     let preferred = current.unwrap_or_else(|| default_runtime(os));
-    if mode.yes {
-        return Ok(preferred);
-    }
-    if mode.no_input {
-        anyhow::bail!(
-            "`omnifs setup --no-input` needs --runtime <docker|native>, or use --yes to accept the default runtime"
-        );
-    }
-    if !mode.interactive {
-        anyhow::bail!(
-            "`omnifs setup` needs an interactive terminal for runtime selection; pass --runtime <docker|native> or --yes"
-        );
-    }
+    mode.resolve(
+        requested,
+        || preferred,
+        "--runtime <docker|native>",
+        || {
+            let id = crate::ui::picker::select("How should the daemon run?", runtime_rows(os))?;
+            parse_runtime_id(&id)
+        },
+    )
+}
 
-    let choices = runtime_choices(os);
-    let start = choices
-        .iter()
-        .position(|choice| choice.backend == preferred)
-        .unwrap_or(0);
-    let chosen = inquire::Select::new("Which runtime should omnifs use?", choices)
-        .with_starting_cursor(start)
-        .with_help_message("up/down to move, enter to confirm; rerun setup to change it")
-        .prompt()
-        .map_err(|e| anyhow!("runtime prompt: {e}"))?;
-    Ok(chosen.backend)
+/// Map a runtime picker row id back to its backend.
+fn parse_runtime_id(id: &str) -> anyhow::Result<ConfiguredBackend> {
+    match id {
+        "docker" => Ok(ConfiguredBackend::Docker),
+        "native" => Ok(ConfiguredBackend::Native),
+        other => Err(anyhow!("unknown runtime `{other}`")),
+    }
+}
+
+/// Informational Docker reachability, for the setup environment stage. Never
+/// fails setup: an unreachable daemon (or an unresolvable target) is reported,
+/// not raised.
+pub(crate) enum DockerReachability {
+    Running { version: String },
+    Unreachable,
+}
+
+pub(crate) async fn probe_docker_reachability(
+    config: &crate::config::Config,
+) -> DockerReachability {
+    use crate::launch_backend::DockerTarget;
+    use crate::runtime::{DockerProbeOutcome, Runtime};
+
+    let Ok(target) = DockerTarget::resolve(None, None, config) else {
+        return DockerReachability::Unreachable;
+    };
+    match Runtime::probe_docker(&target).await {
+        DockerProbeOutcome::Reachable(runtime) => {
+            let version = runtime
+                .server_version()
+                .await
+                .unwrap_or_else(|| "running".to_string());
+            DockerReachability::Running { version }
+        },
+        DockerProbeOutcome::ConnectFailed(_) | DockerProbeOutcome::PingFailed(_) => {
+            DockerReachability::Unreachable
+        },
+    }
 }
 
 pub(crate) fn persist_runtime(
@@ -135,70 +187,79 @@ pub(crate) fn mount_point_resolution(
     requested: Option<PathBuf>,
     mode: PromptMode,
 ) -> anyhow::Result<PathBuf> {
-    if let Some(requested) = requested {
-        return Ok(requested);
-    }
     let default = omnifs_workspace::layout::resolve_mount_point().ok_or_else(|| {
         anyhow!("cannot resolve host mount point: set HOME or OMNIFS_MOUNT_POINT")
     })?;
-    if mode.yes {
-        return Ok(default);
-    }
-    if mode.no_input {
-        anyhow::bail!(
-            "`omnifs setup --no-input` needs --mount-point <path>, or use --yes to accept the default mount point"
-        );
-    }
-    if !mode.interactive {
-        anyhow::bail!(
-            "`omnifs setup` needs an interactive terminal for mount-point selection; pass --mount-point <path> or --yes"
-        );
-    }
-    let raw = inquire::Text::new("Mount point")
-        .with_default(&WorkspaceLayout::display(&default))
-        .prompt()
-        .map_err(|e| anyhow!("mount point prompt: {e}"))?;
-    Ok(expand_tilde_path(raw.trim()))
+    let default_display = WorkspaceLayout::display(&default);
+    mode.resolve(
+        requested,
+        || default.clone(),
+        "--mount-point <path>",
+        || {
+            let raw = inquire::Text::new("Mount point")
+                .with_default(&default_display)
+                .prompt()
+                .map_err(crate::ui::from_inquire)?;
+            Ok(expand_tilde_path(raw.trim()))
+        },
+    )
 }
 
+#[allow(clippy::too_many_lines)] // linear ledger narration reads best inline
 pub(crate) async fn configure_mount(
     args: InitArgs,
     workspace: &Workspace,
+    standalone: bool,
 ) -> anyhow::Result<MountInitOutcome> {
     ensure_express_defaults(workspace)?;
     let mut plan = spec_creation(&args, workspace)?;
+    // Standalone `omnifs init` opens its own provider block; setup opens the
+    // block in its per-provider loop before calling in.
+    if standalone {
+        anstream::eprintln!("{}", crate::ui::rule(plan.manifest.id.as_str()));
+        crate::commands::init::render_consent_block(&plan.manifest);
+    }
     let daemon_report = persist_mount_spec(workspace, &plan).await?;
     auth(&args, workspace, &mut plan).await?;
 
-    anstream::eprintln!();
-    anstream::eprintln!("Mount `{}` is ready.", plan.mount_name);
-
+    anstream::eprintln!("{}", crate::ui::ok("mount ready", plan.mount_name.as_str()));
     match &daemon_report {
         Some(report) if report.failure.is_none() => {
-            anstream::eprintln!("Applied to the running daemon.");
+            anstream::eprintln!("{}", crate::ui::note("applied to the running daemon"));
         },
         Some(report) => {
             let reason = report
                 .failure
                 .as_ref()
                 .map_or("unknown error", |failure| failure.reason.as_str());
+            anstream::eprintln!("{}", crate::ui::warn_row("daemon", reason));
             anstream::eprintln!(
-                "Mount config saved, but loading it into the running daemon failed: {reason}"
+                "{}",
+                crate::ui::note("saved locally; run `omnifs up` to restart with the new mount")
             );
-            anstream::eprintln!("Run `omnifs up` to restart with the new mount.");
         },
-        None => anstream::eprintln!("Run `omnifs up` to start it."),
+        None if standalone => {
+            anstream::eprintln!("{}", crate::ui::note("run `omnifs up` to start serving it"));
+        },
+        // Inside setup the launch section owns "start the daemon" messaging;
+        // repeating it under every provider block is noise.
+        None => {},
     }
 
-    if daemon_report
-        .as_ref()
-        .is_some_and(|report| report.failure.is_none())
-        && let Ok(read) = verify_first_read_from_running(workspace, plan.mount_name.as_str()).await
-    {
-        anstream::eprintln!("Verified first read with `{}`.", read.command);
+    if standalone {
+        let running = workspace.daemon().ready().await;
+        anstream::eprintln!();
+        if running {
+            let path = browse_path(plan.mount_name.as_str());
+            anstream::eprintln!(
+                "{}",
+                crate::ui::hint(&format!("ls {}", path.display()), "browse it")
+            );
+        } else {
+            anstream::eprintln!("{}", crate::ui::hint("omnifs up", "start serving"));
+        }
     }
-    let try_path = browse_path(plan.mount_name.as_str());
-    anstream::eprintln!("try: ls {}", try_path.display());
+
     crate::telemetry::maybe_print_health_nudge(workspace).await;
 
     Ok(MountInitOutcome {
@@ -206,13 +267,23 @@ pub(crate) async fn configure_mount(
     })
 }
 
+/// Init is interactive only with a real terminal on both ends and without
+/// `--no-input`. A piped stdin is non-interactive even without the flag, so
+/// prompt sites bail cleanly (naming the satisfying flags) instead of hitting
+/// inquire's raw "not a terminal" error. Mirrors setup's terminal derivation.
+fn init_interactive(args: &InitArgs) -> bool {
+    use std::io::IsTerminal;
+    !args.no_input && std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
+}
+
+#[allow(clippy::too_many_lines)] // one linear spec-assembly path
 pub(crate) fn spec_creation(
     args: &InitArgs,
     workspace: &Workspace,
 ) -> anyhow::Result<MountInitPlan> {
     let paths = workspace.layout();
     crate::provider_bundle::ensure_providers_installed(&paths.providers_dir)?;
-    let interactive = !args.no_input;
+    let interactive = init_interactive(args);
     let catalog = workspace.catalog();
     let mounts = workspace.mounts()?;
     let installed = crate::catalog::installed_providers(catalog)?;
@@ -220,9 +291,17 @@ pub(crate) fn spec_creation(
         anyhow::bail!("no built-in or disk providers are available");
     }
 
+    // No provider argument in an interactive session: choose one with the
+    // single-select variant of the setup picker instead of a bare list.
+    let picked = if args.provider.is_none() && interactive {
+        let rows = crate::ui::picker::build_rows(&installed, &std::collections::BTreeMap::new());
+        Some(crate::ui::picker::select("Which provider?", rows)?)
+    } else {
+        None
+    };
     let provider_selection = ProviderSelection::new(&mounts, &installed);
     let (provider_name, mount_name) = provider_selection.resolve(
-        args.provider.as_deref(),
+        args.provider.as_deref().or(picked.as_deref()),
         args.as_name.as_deref(),
         interactive,
         args.yes,
@@ -235,7 +314,7 @@ pub(crate) fn spec_creation(
                 provider_selection.provider_names().join(", ")
             )
         })
-        .with_hint("Run `omnifs init` with no args to see available providers")
+        .with_hint("Run `omnifs providers ls` to list available providers (or `omnifs init` with no args to pick one interactively)")
         .with_hint(format!(
             "Or run `omnifs providers add <wasm-or-dir>` to install provider artifacts into {}",
             paths.providers_dir.display()
@@ -262,20 +341,31 @@ pub(crate) fn spec_creation(
         manifest,
         auth_manifest.as_ref(),
     )?;
-    if interactive {
-        crate::commands::init::print_capability_justifications(manifest);
-    }
-    if args.no_input && default_auth.as_ref().is_some_and(AuthSelection::is_oauth) {
+    // Resolve auth first: an ambient credential (imported under --yes or on the
+    // interactive prompt) promotes an OAuth default to a static token, which lets
+    // a `--no-input` run of an OAuth-default provider complete headlessly. The
+    // OAuth bail only fires when nothing was imported.
+    let import_outcome = AuthImportDecision::new(
+        default_auth,
+        auth_manifest.as_ref(),
+        &provider_name,
+        interactive,
+        args.yes,
+    )
+    .resolve()?;
+    let ImportOutcome { auth, token } = import_outcome;
+
+    if !interactive && token.is_none() && auth.as_ref().is_some_and(AuthSelection::is_oauth) {
         return Err(anyhow!(
-            "`omnifs init --no-input` cannot complete OAuth for `{provider_name}`; pass --token-env VAR with --scheme <static-token-scheme>, pass --no-auth, or run interactively"
+            "cannot complete OAuth for `{provider_name}` without an interactive terminal; pass --token-env VAR with --scheme <static-token-scheme>, pass --no-auth, or run interactively"
         ))
         .with_exit_code(ExitCode::AuthRequired);
     }
 
     let creator = MountSpecCreator::new(&reference, &mount_name, manifest);
-    if args.no_input && creator.requires_prompt() && args.config_json.is_none() {
+    if !interactive && creator.requires_prompt() && args.config_json.is_none() {
         anyhow::bail!(
-            "`omnifs init --no-input` cannot complete provider config prompts for `{provider_name}`; pass --config-json <json>"
+            "cannot complete provider config prompts for `{provider_name}` without an interactive terminal; pass --config-json <json>"
         );
     }
     // A supplied --config-json owns the whole config: skip default generation
@@ -287,16 +377,6 @@ pub(crate) fn spec_creation(
         creator.create(interactive)?
     };
     apply_mount_overrides(args, manifest, &creator, &mut created)?;
-
-    let import_outcome = AuthImportDecision::new(
-        default_auth,
-        auth_manifest.as_ref(),
-        &provider_name,
-        interactive,
-        args.yes,
-    )
-    .resolve()?;
-    let ImportOutcome { auth, token } = import_outcome;
 
     let mount_file = MountFile::new(
         &mount_name,
@@ -328,6 +408,7 @@ pub(crate) async fn auth(
     let Some(auth) = plan.effective_auth.as_ref() else {
         return Ok(());
     };
+    let interactive = init_interactive(args);
     if let Some(token) = plan.imported_token.take() {
         crate::commands::init::run_static_token_init(
             &plan.manifest,
@@ -338,43 +419,68 @@ pub(crate) async fn auth(
         )
         .await?;
     } else if auth.is_oauth() {
-        anstream::eprintln!("Starting OAuth login for `{}` ...", plan.mount_name);
+        // Gate the browser handoff when interactive: a decline is a clean skip,
+        // not a failure.
+        if interactive && !args.yes {
+            let proceed = inquire::Confirm::new(&format!(
+                "Sign in to {} in your browser now?",
+                plan.mount_name
+            ))
+            .with_default(true)
+            .prompt()
+            .map_err(crate::ui::from_inquire)?;
+            if !proceed {
+                anstream::eprintln!(
+                    "{}",
+                    crate::ui::note(format!(
+                        "run `omnifs mounts reauth {}` to sign in later",
+                        plan.mount_name
+                    ))
+                );
+                return Err(anyhow!("sign-in skipped")).with_exit_code(ExitCode::AuthRequired);
+            }
+        }
         crate::auth::login_with_workspace(
             workspace,
             plan.mount_name.as_str(),
             auth.account.as_deref(),
             args.no_browser,
+            args.no_input,
             &args.scopes,
         )
         .await
         .inspect_err(|_| {
             anstream::eprintln!(
-                "Mount `{}` was created, but login did not complete. Run `omnifs mounts reauth {}` to finish.",
-                plan.mount_name,
-                plan.mount_name
+                "{}",
+                crate::ui::note(format!(
+                    "login did not complete; run `omnifs mounts reauth {}` to finish",
+                    plan.mount_name
+                ))
             );
         })?;
+        anstream::eprintln!("{}", crate::ui::ok("signed in", "done"));
     } else {
-        if !args.no_input
-            && let Ok(scheme) = auth.static_token_scheme(&plan.manifest)
-        {
+        if interactive && let Ok(scheme) = auth.static_token_scheme(&plan.manifest) {
             let guidance = plan
                 .manifest
                 .auth
                 .as_ref()
                 .map(|auth| auth.guidance_for(&scheme.key))
                 .unwrap_or_default();
-            anstream::eprintln!();
-            anstream::eprintln!("Authenticating `{}` with a static token:", plan.mount_name);
-            crate::auth::explain::render_static_token_intro(
-                scheme.creation_url.as_deref(),
-                &guidance,
-            );
+            if let Some(url) = &scheme.creation_url {
+                anstream::eprintln!("{}", crate::ui::note(format!("create a token at {url}")));
+            }
+            for step in &guidance.setup_steps {
+                anstream::eprintln!("{}", crate::ui::note(step));
+            }
+            if let Some(url) = &guidance.docs_url {
+                anstream::eprintln!("{}", crate::ui::note(url));
+            }
         }
         let source = TokenSource::resolve(
             args.token.as_deref(),
             args.token_env.as_deref(),
-            !args.no_input,
+            interactive,
         )?;
         let token = source.read()?;
         crate::commands::init::run_static_token_init(
@@ -387,17 +493,6 @@ pub(crate) async fn auth(
         .await?;
     }
     Ok(())
-}
-
-pub(crate) async fn launch(
-    workspace: &Workspace,
-    runtime: Option<ConfiguredBackend>,
-    verb: &'static str,
-) -> anyhow::Result<LaunchOutcome> {
-    Launcher::new(workspace, verb)
-        .with_runtime_override(runtime)
-        .launch()
-        .await
 }
 
 pub(crate) fn verify_first_read(
@@ -415,17 +510,6 @@ pub(crate) fn verify_first_read(
         LaunchOutcome::Docker { target } => {
             run_docker_ls(target.container_name().as_str(), mount_name)
         },
-    }
-}
-
-pub(crate) async fn verify_first_read_from_running(
-    workspace: &Workspace,
-    mount_name: &str,
-) -> anyhow::Result<FirstRead> {
-    let status = workspace.daemon().status().await?;
-    match status.backend {
-        DaemonBackend::Native { .. } => run_host_ls(&status.mount_point.join(mount_name)),
-        DaemonBackend::Docker { container_name, .. } => run_docker_ls(&container_name, mount_name),
     }
 }
 
@@ -464,15 +548,12 @@ fn ensure_express_defaults(workspace: &Workspace) -> anyhow::Result<()> {
     if config.system.runtime.is_some() {
         return Ok(());
     }
-    let os = HostOs::detect();
-    let backend = default_runtime(os);
+    let backend = default_runtime(HostOs::detect());
     persist_runtime(workspace.layout(), backend)?;
     anstream::eprintln!(
-        "omnifs is not set up yet - using defaults ({} runtime on {}).",
-        runtime_word(backend),
-        os.name()
+        "{}",
+        crate::ui::note("using the docker runtime (`omnifs setup` to change)")
     );
-    anstream::eprintln!("For the guided tour, run `omnifs setup`.");
     Ok(())
 }
 
@@ -510,26 +591,35 @@ async fn persist_mount_spec(
     } else {
         workspace.daemon().create_mount_if_ready(&plan.spec).await
     } {
-        Ok(Some(report)) => {
-            anstream::eprintln!("Wrote {}", WorkspaceLayout::display(&plan.mount_path));
-            Some(report)
-        },
+        Ok(Some(report)) => Some(report),
         Ok(None) => {
             Registry::load(&paths.mounts_dir)?.put(&plan.spec)?;
-            anstream::eprintln!("Wrote {}", WorkspaceLayout::display(&plan.mount_path));
             None
         },
         Err(error) => {
-            anstream::eprintln!(
-                "Running daemon could not save mount `{}`: {error:#}",
-                plan.mount_name
-            );
-            anstream::eprintln!("Falling back to a local mount config write.");
             Registry::load(&paths.mounts_dir)?.put(&plan.spec)?;
-            anstream::eprintln!("Wrote {}", WorkspaceLayout::display(&plan.mount_path));
+            anstream::eprintln!(
+                "{}",
+                crate::ui::warn_row(
+                    "daemon",
+                    format!("could not save mount `{}`: {error:#}", plan.mount_name)
+                )
+            );
+            anstream::eprintln!(
+                "{}",
+                crate::ui::note("saved locally; run `omnifs up` to restart with the new mount")
+            );
             None
         },
     };
+    // `Wrote <path>` collapses to a single dim continuation, printed once.
+    anstream::eprintln!(
+        "{}",
+        crate::ui::note(format!(
+            "wrote {}",
+            WorkspaceLayout::display(&plan.mount_path)
+        ))
+    );
     Ok(report)
 }
 
@@ -616,40 +706,76 @@ fn format_duration(duration: Duration) -> String {
     format!("{}s", duration.as_secs())
 }
 
-fn runtime_word(backend: ConfiguredBackend) -> &'static str {
-    match backend {
-        ConfiguredBackend::Docker => "Docker",
-        ConfiguredBackend::Native => "native",
-    }
-}
+/// The two runtime rows for the picker. Docker leads as the recommended
+/// default; the native row's summary and detail panel are per-OS.
+fn runtime_rows(os: HostOs) -> Vec<PickerRow> {
+    use crate::ui::picker::{Detail, PanelLine, PanelRole};
 
-struct RuntimeChoice {
-    backend: ConfiguredBackend,
-    label: &'static str,
-}
-
-impl fmt::Display for RuntimeChoice {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.label)
-    }
-}
-
-fn runtime_choices(os: HostOs) -> Vec<RuntimeChoice> {
-    let docker = RuntimeChoice {
-        backend: ConfiguredBackend::Docker,
-        label: "docker - Linux FUSE inside a container",
+    let plain = |text: &str| PanelLine {
+        text: text.to_string(),
+        role: PanelRole::Plain,
     };
-    let native = RuntimeChoice {
-        backend: ConfiguredBackend::Native,
-        label: match os {
-            HostOs::MacOs => "native - host loopback NFS (experimental)",
-            _ => "native - host kernel FUSE",
+    let dim = |text: &str| PanelLine {
+        text: text.to_string(),
+        role: PanelRole::Dim,
+    };
+    let head = |text: &str| PanelLine {
+        text: text.to_string(),
+        role: PanelRole::Head,
+    };
+
+    let docker = PickerRow {
+        id: "docker".to_string(),
+        summary: "recommended — isolated, no kernel dependencies".to_string(),
+        cap_tags: Vec::new(),
+        auth_tag: None,
+        default_on: true,
+        detail: Detail {
+            lines: vec![
+                head("docker, Linux FUSE in a container"),
+                plain("isolated from your host; no kernel extensions or admin setup"),
+                plain(&format!(
+                    "files appear at {GUEST_MOUNT} inside the container"
+                )),
+                dim("requires Docker running; browse with omnifs shell"),
+            ],
         },
     };
-    match default_runtime(os) {
-        ConfiguredBackend::Docker => vec![docker, native],
-        ConfiguredBackend::Native => vec![native, docker],
-    }
+
+    let native = match os {
+        HostOs::MacOs => PickerRow {
+            id: "native".to_string(),
+            summary: "experimental NFS loopback".to_string(),
+            cap_tags: Vec::new(),
+            auth_tag: None,
+            default_on: false,
+            detail: Detail {
+                lines: vec![
+                    head("native, loopback NFS on macOS"),
+                    plain("files appear directly under your chosen mount point"),
+                    dim("experimental: NFSv4 loopback, read-only"),
+                    dim("no Docker needed"),
+                ],
+            },
+        },
+        _ => PickerRow {
+            id: "native".to_string(),
+            summary: "kernel FUSE".to_string(),
+            cap_tags: Vec::new(),
+            auth_tag: None,
+            default_on: false,
+            detail: Detail {
+                lines: vec![
+                    head("native, host kernel FUSE"),
+                    plain("files appear directly under your chosen mount point"),
+                    plain("uses your kernel's FUSE; no container layer"),
+                    dim("needs /dev/fuse access"),
+                ],
+            },
+        },
+    };
+
+    vec![docker, native]
 }
 
 fn approved_upgrade_for_existing_mount(
@@ -672,8 +798,7 @@ fn approved_upgrade_for_existing_mount(
         .with_context(|| format!("load pinned provider for mount `{mount_name}`"))?
     else {
         anyhow::bail!(
-            "mount `{mount_name}` pinned provider artifact {id} is missing; cannot compute an upgrade approval",
-            id = existing.config.provider.id,
+            "the provider version mount `{mount_name}` was created with is no longer installed"
         );
     };
     let pinned_manifest = pinned
@@ -689,19 +814,35 @@ fn approved_upgrade_for_existing_mount(
         );
     }
 
-    anstream::println!();
-    anstream::println!(
-        "Mount `{mount_name}` already exists. `{provider_name}` changed its provider surface:"
-    );
-    for change in crate::upgrade::describe_upgrade_changes(&plan) {
-        anstream::println!("  - {change}");
+    anstream::eprintln!();
+    anstream::eprintln!("{}", crate::ui::rule(provider_name));
+    anstream::eprintln!("  {provider_name} now requests different access:");
+    for change in crate::upgrade::describe_upgrade_plan(&plan) {
+        anstream::eprintln!("{}", crate::ui::note(change));
     }
     let approved = inquire::Confirm::new("Approve this provider upgrade?")
         .with_default(false)
         .prompt()
-        .map_err(|error| anyhow!("confirm prompt: {error}"))?;
+        .map_err(crate::ui::from_inquire)?;
     if !approved {
         anyhow::bail!("aborted");
     }
     Ok(Some(plan))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn docker_is_the_default_runtime_on_every_os() {
+        for os in [
+            HostOs::MacOs,
+            HostOs::LinuxNative,
+            HostOs::LinuxWsl,
+            HostOs::Unsupported,
+        ] {
+            assert_eq!(default_runtime(os), ConfiguredBackend::Docker);
+        }
+    }
 }

@@ -6,7 +6,7 @@
 //! when one is declared.
 
 pub(crate) mod auth_import;
-mod detect;
+pub(crate) mod detect;
 pub(crate) mod mount_file;
 pub(crate) mod provider_selection;
 pub(crate) mod spec_creation;
@@ -38,8 +38,9 @@ pub struct InitArgs {
     /// Skip prompts. Static-token providers also require --token or --token-env.
     #[arg(long)]
     pub no_input: bool,
-    /// Accept the auto-suggested mount name on collision (never overwrite).
-    #[arg(long)]
+    /// Accept the suggested mount name on a collision (never overwrites), and
+    /// accept a detected ambient credential without prompting.
+    #[arg(short = 'y', long)]
     pub yes: bool,
     /// Print the OAuth URL instead of opening a browser.
     #[arg(long)]
@@ -82,40 +83,25 @@ impl InitArgs {
     }
 
     pub(crate) async fn run_in_workspace(self, workspace: &Workspace) -> anyhow::Result<()> {
-        crate::stages::configure_mount(self, workspace)
+        crate::stages::configure_mount(self, workspace, true)
             .await
             .map(|_| ())
     }
 }
 
-pub(crate) fn print_capability_justifications(manifest: &ProviderManifest) {
-    let limits = crate::capability::limit_lines(&manifest.limits);
-    if manifest.capabilities.is_empty() && limits.is_empty() {
-        return;
+/// The per-provider consent block shared by setup's loop and standalone `init`:
+/// a plain description line, then compact needs and limits lines. All on stderr.
+pub(crate) fn render_consent_block(manifest: &ProviderManifest) {
+    let description = manifest
+        .description
+        .as_deref()
+        .unwrap_or(&manifest.display_name);
+    anstream::eprintln!("  {description}");
+    if let Some(needs) = crate::capability::compact_needs(manifest) {
+        anstream::eprintln!("  {}", crate::style::dim(needs));
     }
-
-    if !manifest.capabilities.is_empty() {
-        anstream::println!();
-        anstream::println!("{}", crate::style::bold("Provider capabilities"));
-        anstream::println!("{} requires:", manifest.display_name);
-        for entry in &manifest.capabilities {
-            anstream::println!(
-                "  • {}: {}",
-                crate::capability::capability_label(entry),
-                crate::capability::capability_value(entry)
-            );
-            anstream::println!("    {}", crate::style::dim(entry.why()));
-        }
-    }
-
-    if !limits.is_empty() {
-        anstream::println!();
-        anstream::println!("{}", crate::style::bold("Provider limits"));
-        anstream::println!("{} requests:", manifest.display_name);
-        for line in limits {
-            anstream::println!("  • {}: {}", line.label, line.value);
-            anstream::println!("    {}", crate::style::dim(line.why));
-        }
+    if let Some(limits) = crate::capability::compact_limits(manifest) {
+        anstream::eprintln!("  {}", crate::style::dim(limits));
     }
 }
 
@@ -141,24 +127,33 @@ pub(crate) async fn run_static_token_init(
                 .await?,
         ),
         Some(_) => {
-            anstream::eprintln!("Skipping token validation (--no-validate).");
+            anstream::eprintln!(
+                "{}",
+                crate::ui::note("token stored without validation (--no-validate)")
+            );
             None
         },
         None => None,
     };
-    if let Some(outcome) = &validation {
-        if let Some(identity) = &outcome.identity {
-            anstream::eprintln!("✓ Authenticated as {identity}");
-        } else {
-            anstream::eprintln!("✓ Token accepted");
-        }
-        if let Some(workspace) = &outcome.workspace {
-            anstream::eprintln!("✓ Workspace: {workspace}");
-        }
+    let identity = validation
+        .as_ref()
+        .and_then(|outcome| outcome.identity.clone());
+    anstream::eprintln!(
+        "{}",
+        crate::ui::ok(
+            "signed in",
+            identity
+                .clone()
+                .unwrap_or_else(|| "token accepted".to_string())
+        )
+    );
+    if let Some(outcome) = &validation
+        && let Some(workspace) = &outcome.workspace
+    {
+        anstream::eprintln!("{}", crate::ui::note(workspace));
     }
 
     let store = FileStore::new(credentials_file);
-    anstream::eprintln!("Storing credential in {} ...", store.backend_label());
     let now = OffsetDateTime::now_utc();
     let mut entry = CredentialEntry::static_token(token, now);
     entry.set_last_validated(validation.as_ref().map(|_| now));
@@ -182,7 +177,7 @@ pub(crate) async fn run_static_token_init(
             .put(key, &entry)
             .with_context(|| "failed to store credential")?;
     }
-    anstream::eprintln!("✓ Stored");
+    anstream::eprintln!("{}", crate::ui::ok("credential", "stored"));
     Ok(target)
 }
 
@@ -461,6 +456,59 @@ mod tests {
         }
     }
 
+    #[test]
+    #[allow(unsafe_code)] // env::set_var/remove_var require unsafe; guarded by lock_env().
+    fn import_outcome_accepts_ambient_credential_non_interactively_with_yes() {
+        // `--yes` must accept a detected ambient credential even when
+        // interactive=false, so the documented scripted behavior is reachable.
+        let _guard = lock_env();
+        // SAFETY: env mutation is isolated by the lock_env() guard above.
+        unsafe {
+            std::env::set_var("LINEAR_API_KEY", "lin_api_xxx");
+        }
+        let auth_manifest = AuthManifest {
+            schemes: vec![AuthScheme::StaticToken(
+                omnifs_workspace::authn::StaticTokenScheme {
+                    key: "pat".to_string(),
+                    header_name: Some("Authorization".to_string()),
+                    value_prefix: String::new(),
+                    description: "Linear API key".to_string(),
+                    inject_domains: vec![],
+                    creation_url: None,
+                    validation: None,
+                    ambient_sources: vec![omnifs_workspace::authn::AmbientSource::env_var(
+                        "LINEAR_API_KEY",
+                    )],
+                },
+            )],
+        };
+        let static_default = AuthSelection {
+            auth_type: omnifs_workspace::authn::AuthKind::StaticToken,
+            scheme: Some("pat".to_string()),
+            account: None,
+        };
+
+        let outcome = AuthImportDecision::new(
+            Some(static_default),
+            Some(&auth_manifest),
+            "linear",
+            false, // non-interactive
+            true,  // --yes
+        )
+        .resolve()
+        .unwrap();
+
+        assert!(
+            outcome.token.is_some(),
+            "non-interactive --yes must import the ambient credential"
+        );
+
+        // SAFETY: env mutation is isolated by the lock_env() guard above.
+        unsafe {
+            std::env::remove_var("LINEAR_API_KEY");
+        }
+    }
+
     fn lock_env() -> std::sync::MutexGuard<'static, ()> {
         static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         ENV_LOCK
@@ -530,6 +578,7 @@ mod tests {
         ProviderManifest {
             id: "linear".to_string(),
             display_name: "Linear".to_string(),
+            description: None,
             provider: "omnifs_provider_linear.wasm".to_string(),
             default_mount: "linear".to_string(),
             version: None,

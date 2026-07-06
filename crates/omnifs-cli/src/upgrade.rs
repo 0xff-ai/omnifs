@@ -22,8 +22,10 @@ use std::path::Path;
 
 use anyhow::Context as _;
 use omnifs_workspace::ids::ProviderRef;
-use omnifs_workspace::mounts::{ProviderMetadataInheritance, UpgradePlan};
-use omnifs_workspace::mounts::{Registry, Spec};
+use omnifs_workspace::mounts::{
+    AuthDelta, CapabilityChange, CapabilityDirection, FieldChange, LimitChange, LimitDirection,
+    ProviderMetadataInheritance, Registry, Spec, UpgradePlan,
+};
 use omnifs_workspace::provider::{Catalog, ProviderManifest};
 
 use crate::mount_config::MountConfig;
@@ -83,10 +85,7 @@ pub(crate) fn run_upgrade_check(
                 );
             },
             UpgradePlan::BreakingConfig { changes } => {
-                let descriptions: Vec<_> = changes
-                    .iter()
-                    .map(omnifs_workspace::mounts::FieldChange::describe)
-                    .collect();
+                let descriptions: Vec<_> = changes.iter().map(FieldChange::describe).collect();
                 anstream::eprintln!(
                     "warning: mount `{mount}` keeps its pinned `{name}`: a newer artifact has a \
                      breaking config change ({}) and cannot be adopted automatically.\n\
@@ -101,11 +100,7 @@ pub(crate) fn run_upgrade_check(
                 limits,
                 auth,
             } => {
-                let parts = describe_upgrade_changes(&UpgradePlan::CapabilityLimitOrAuth {
-                    capabilities,
-                    limits,
-                    auth,
-                });
+                let parts = describe_upgrade_changes(&capabilities, &limits, auth.as_ref());
                 anstream::eprintln!(
                     "warning: mount `{mount}` keeps its pinned `{name}`: a newer artifact changed \
                      its access or runtime surface and needs re-consent.\nChanges: {}\n\
@@ -118,48 +113,60 @@ pub(crate) fn run_upgrade_check(
     Ok(migrated)
 }
 
-pub(crate) fn describe_upgrade_changes(plan: &UpgradePlan) -> Vec<String> {
+/// Human-readable descriptions of a capability/limit/auth upgrade surface. Takes
+/// the destructured parts so callers that already matched the
+/// `CapabilityLimitOrAuth` variant pass them straight through with no rewrap.
+pub(crate) fn describe_upgrade_changes(
+    capabilities: &[CapabilityChange],
+    limits: &[LimitChange],
+    auth: Option<&AuthDelta>,
+) -> Vec<String> {
+    let mut parts = Vec::new();
+    for change in capabilities {
+        let direction = match change.direction {
+            CapabilityDirection::Added => "added",
+            CapabilityDirection::Removed => "removed",
+        };
+        parts.push(format!(
+            "{direction} capability `{}` = `{}`",
+            change.kind, change.value
+        ));
+    }
+    for change in limits {
+        let direction = match change.direction {
+            LimitDirection::Added => "added",
+            LimitDirection::Removed => "removed",
+        };
+        parts.push(format!(
+            "{direction} limit `{}` = `{}`",
+            change.name, change.value
+        ));
+    }
+    if let Some(auth) = auth {
+        parts.push(auth.describe());
+    }
+    parts
+}
+
+/// Human-readable descriptions of any upgrade plan's changes, for approval
+/// prompts that may face a breaking config change as well as a capability/limit/
+/// auth change. Delegates the capability/limit/auth surface to
+/// [`describe_upgrade_changes`].
+pub(crate) fn describe_upgrade_plan(plan: &UpgradePlan) -> Vec<String> {
     match plan {
         UpgradePlan::Identical => Vec::new(),
         UpgradePlan::AdditiveConfig { added } => added
             .iter()
             .map(|field| format!("new optional field `{}`", field.name))
             .collect(),
-        UpgradePlan::BreakingConfig { changes } => changes
-            .iter()
-            .map(omnifs_workspace::mounts::FieldChange::describe)
-            .collect(),
+        UpgradePlan::BreakingConfig { changes } => {
+            changes.iter().map(FieldChange::describe).collect()
+        },
         UpgradePlan::CapabilityLimitOrAuth {
             capabilities,
             limits,
             auth,
-        } => {
-            let mut parts = Vec::new();
-            for change in capabilities {
-                let direction = match change.direction {
-                    omnifs_workspace::mounts::CapabilityDirection::Added => "added",
-                    omnifs_workspace::mounts::CapabilityDirection::Removed => "removed",
-                };
-                parts.push(format!(
-                    "{direction} capability `{}` = `{}`",
-                    change.kind, change.value
-                ));
-            }
-            for change in limits {
-                let direction = match change.direction {
-                    omnifs_workspace::mounts::LimitDirection::Added => "added",
-                    omnifs_workspace::mounts::LimitDirection::Removed => "removed",
-                };
-                parts.push(format!(
-                    "{direction} limit `{}` = `{}`",
-                    change.name, change.value
-                ));
-            }
-            if let Some(auth) = auth {
-                parts.push(auth.describe());
-            }
-            parts
-        },
+        } => describe_upgrade_changes(capabilities, limits, auth.as_ref()),
     }
 }
 

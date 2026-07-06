@@ -16,6 +16,8 @@ docker rm -f omnifs
 
 `scripts/dev.ts` is contributor-only and requires a source checkout. It resolves a dedicated dev home at `~/.omnifs-dev`, copies the provider-store bundle into `~/.omnifs-dev/providers`, writes pinned mount specs under `~/.omnifs-dev/mounts`, interpolates host tokens into the `contrib/dev-credentials.json` template to produce `~/.omnifs-dev/credentials.json`, builds an image tagged `omnifs:<short-sha>-dev`, and starts the container with dev mounts under `/omnifs/<mount>`. Dev auth uses host tokens: set `GITHUB_TOKEN` or `LINEAR_API_KEY`, or allow the script to read `gh auth token` for GitHub when prompted. Authenticated mounts without a token are skipped rather than started broken.
 
+A locally built `omnifs` binary targets the `omnifs:dev` image by default and never pulls; produce that image with `just dev --build-only`, which builds providers, the CLI, and the runtime image, tags it `omnifs:dev`, and exits without launching a container.
+
 Do not add alternate local mount recipes unless explicitly requested.
 
 ## Build and validate

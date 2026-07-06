@@ -21,7 +21,33 @@ use omnifs_daemon::DaemonArgs;
 use crate::config::{Config, ConfiguredBackend, resolve_setting};
 
 pub(crate) const CONTAINER_NAME: &str = "omnifs";
-pub(crate) const IMAGE: &str = concat!("ghcr.io/0xff-ai/omnifs:", env!("CARGO_PKG_VERSION"));
+
+/// Whether this binary was produced by the release packaging lane
+/// (`OMNIFS_RELEASE` set at compile time) or a local/dev build. Release
+/// binaries default to the registry image for their version; dev binaries
+/// default to the locally built dev image and never pull.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BuildChannel {
+    Release,
+    Dev,
+}
+
+pub(crate) const BUILD_CHANNEL: BuildChannel = match option_env!("OMNIFS_RELEASE") {
+    Some(_) => BuildChannel::Release,
+    None => BuildChannel::Dev,
+};
+
+pub(crate) const RELEASE_IMAGE: &str =
+    concat!("ghcr.io/0xff-ai/omnifs:", env!("CARGO_PKG_VERSION"));
+pub(crate) const DEV_IMAGE: &str = "omnifs:dev";
+
+pub(crate) const fn default_image_for(channel: BuildChannel) -> &'static str {
+    match channel {
+        BuildChannel::Release => RELEASE_IMAGE,
+        BuildChannel::Dev => DEV_IMAGE,
+    }
+}
+
 pub(crate) const ENV_IMAGE: &str = omnifs_api::OMNIFS_IMAGE_ENV;
 pub(crate) const ENV_CONTAINER_NAME: &str = omnifs_api::OMNIFS_CONTAINER_NAME_ENV;
 
@@ -119,6 +145,22 @@ impl fmt::Display for ImageRef {
     }
 }
 
+/// omnifs only pulls images whose reference names a registry host
+/// (first path segment contains `.` or `:`, or is `localhost`). Bare
+/// references like `omnifs:dev` are local build products: a Docker Hub
+/// `library/omnifs` would never be a legitimate runtime image, so treating
+/// registry-less references as local-only can't hide a real image.
+pub(crate) fn names_registry(image: &str) -> bool {
+    // Per docker's reference grammar the registry, if present, is the first
+    // path segment before the first `/`. A reference with no `/` (`omnifs:dev`)
+    // has no registry component. A first segment is a registry iff it carries a
+    // host marker: a dot, a port colon, or the literal `localhost`.
+    match image.split_once('/') {
+        None => false,
+        Some((first, _)) => first.contains('.') || first.contains(':') || first == "localhost",
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DockerTarget {
     container_name: ContainerName,
@@ -127,7 +169,10 @@ pub(crate) struct DockerTarget {
 
 impl DockerTarget {
     pub(crate) fn default_target() -> anyhow::Result<Self> {
-        Self::new(CONTAINER_NAME.to_string(), IMAGE.to_string())
+        Self::new(
+            CONTAINER_NAME.to_string(),
+            default_image_for(BUILD_CHANNEL).to_string(),
+        )
     }
 
     pub(crate) fn new(container_name: String, image: String) -> anyhow::Result<Self> {
@@ -183,7 +228,7 @@ impl DockerTarget {
             image,
             ENV_IMAGE,
             || config.system.image.clone(),
-            IMAGE.to_string(),
+            default_image_for(BUILD_CHANNEL).to_string(),
         );
         ImageRef::new(image)
     }
@@ -202,7 +247,7 @@ impl DockerTarget {
             .system
             .image
             .clone()
-            .unwrap_or_else(|| IMAGE.to_string());
+            .unwrap_or_else(|| default_image_for(BUILD_CHANNEL).to_string());
         ImageRef::new(image)
     }
 }
@@ -340,20 +385,37 @@ pub(crate) async fn launch_native(
         }
         if client.ready().await {
             if let Some(pid) = child_pid {
-                if let Ok(status) = client.status().await {
-                    if status.pid == pid {
+                match client.status().await {
+                    Ok(status) if status.pid == pid => {
                         // Confirmed our daemon; drop the handle (kill_on_drop
                         // is false) to detach it.
                         drop(child);
                         return Ok(());
-                    }
-                    let tail = read_log_tail(&log_path);
-                    let _ = child.kill().await;
-                    anyhow::bail!(
-                        "daemon readiness came from pid {}, not spawned pid {pid}; \
-                         another omnifs daemon is already serving on the control port\n{tail}",
-                        status.pid
-                    );
+                    },
+                    Ok(status) => {
+                        let tail = read_log_tail(&log_path);
+                        let _ = child.kill().await;
+                        anyhow::bail!(
+                            "daemon readiness came from pid {}, not spawned pid {pid}; \
+                             another omnifs daemon is already serving on the control port\n{tail}",
+                            status.pid
+                        );
+                    },
+                    // Ready, but our token is rejected: a daemon owned by a
+                    // different workspace holds the port. Fail fast with the
+                    // foreign-daemon diagnosis instead of polling until timeout.
+                    Err(error)
+                        if crate::error::exit_code(&error)
+                            == crate::error::ExitCode::AuthRequired =>
+                    {
+                        let _ = child.kill().await;
+                        return Err(crate::client::foreign_daemon_error(&format!(
+                            "http://{control_addr}"
+                        )));
+                    },
+                    // A transient status error during our own startup: keep
+                    // polling until ready or the timeout.
+                    Err(_) => {},
                 }
             } else {
                 drop(child);
@@ -522,6 +584,33 @@ mod tests {
                 Some(v) => unsafe { std::env::set_var(key, v) },
                 None => unsafe { std::env::remove_var(key) },
             }
+        }
+    }
+
+    #[test]
+    fn dev_channel_defaults_to_local_dev_image() {
+        assert_eq!(default_image_for(BuildChannel::Dev), "omnifs:dev");
+    }
+
+    #[test]
+    fn names_registry_table() {
+        // (reference, expects a registry host, note)
+        let cases = [
+            ("omnifs:dev", false),
+            ("omnifs:abc123-dev", false),
+            // A Docker Hub org path is a pull target in docker semantics, but
+            // NOT for us: its first segment carries no host marker.
+            ("myorg/omnifs:1.0", false),
+            ("ghcr.io/0xff-ai/omnifs:0.2.1", true),
+            ("localhost:5000/omnifs:x", true),
+            ("registry.local/omnifs", true),
+        ];
+        for (image, expected) in cases {
+            assert_eq!(
+                names_registry(image),
+                expected,
+                "names_registry({image:?}) should be {expected}"
+            );
         }
     }
 
