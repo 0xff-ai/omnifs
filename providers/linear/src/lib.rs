@@ -188,6 +188,7 @@ fn auth() -> ProviderAuthManifest {
 #[omnifs_sdk::provider(
     id = "linear",
     display_name = "Linear",
+    description = "issues and projects from your workspace",
     mount = "linear",
     capabilities(
         domain(

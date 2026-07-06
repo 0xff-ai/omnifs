@@ -24,6 +24,7 @@ struct TimerSpec {
 pub struct ProviderArgs {
     id: Option<LitStr>,
     display_name: Option<LitStr>,
+    description: Option<LitStr>,
     mount: Option<LitStr>,
     capabilities: Vec<omnifs_caps::AccessNeed>,
     limits: omnifs_caps::LimitDeclarations,
@@ -36,6 +37,7 @@ impl Parse for ProviderArgs {
         let mut args = Self {
             id: None,
             display_name: None,
+            description: None,
             mount: None,
             capabilities: Vec::new(),
             limits: omnifs_caps::LimitDeclarations::default(),
@@ -53,6 +55,16 @@ impl Parse for ProviderArgs {
                 "display_name" => {
                     let _: Token![=] = input.parse()?;
                     args.display_name = Some(input.parse()?);
+                },
+                "description" => {
+                    let _: Token![=] = input.parse()?;
+                    if args.description.is_some() {
+                        return Err(syn::Error::new(
+                            key.span(),
+                            "duplicate `description` provider argument",
+                        ));
+                    }
+                    args.description = Some(input.parse()?);
                 },
                 "mount" => {
                     let _: Token![=] = input.parse()?;
@@ -80,7 +92,7 @@ impl Parse for ProviderArgs {
                 _ => {
                     return Err(syn::Error::new(
                         key.span(),
-                        "supported provider arguments are `id`/`display_name`/`mount`, `capabilities(...)`, `limits(...)`, `auth = ...`, and `events(...)`",
+                        "supported provider arguments are `id`/`display_name`/`description`/`mount`, `capabilities(...)`, `limits(...)`, `auth = ...`, and `events(...)`",
                     ));
                 },
             }
@@ -413,7 +425,8 @@ fn router_state_type(ty: &Type) -> Option<Type> {
 
 struct ManifestFacts {
     name: String,
-    description: String,
+    display_name: String,
+    description: Option<String>,
     default_mount: String,
     provider_file: String,
     version: Option<String>,
@@ -443,7 +456,8 @@ fn build_manifest_facts_from_args(args: &ProviderArgs) -> syn::Result<ManifestFa
 
     Ok(ManifestFacts {
         name: id,
-        description: display_name,
+        display_name,
+        description: args.description.as_ref().map(syn::LitStr::value),
         default_mount,
         provider_file: format!("{}.wasm", pkg_name.replace('-', "_")),
         version: std::env::var("CARGO_PKG_VERSION").ok(),
@@ -452,12 +466,12 @@ fn build_manifest_facts_from_args(args: &ProviderArgs) -> syn::Result<ManifestFa
 
 fn provider_info_tokens(manifest: &ManifestFacts) -> TokenStream2 {
     let name = &manifest.name;
-    let description = &manifest.description;
+    let display_name = &manifest.display_name;
     quote! {
         omnifs_sdk::prelude::ProviderInfo {
             name: #name.to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
-            description: #description.to_string(),
+            description: #display_name.to_string(),
         }
     }
 }
@@ -490,7 +504,14 @@ fn metadata_tokens(
     auth: Option<&syn::Expr>,
 ) -> TokenStream2 {
     let id = LitStr::new(&manifest.name, Span::call_site());
-    let display_name = LitStr::new(&manifest.description, Span::call_site());
+    let display_name = LitStr::new(&manifest.display_name, Span::call_site());
+    let description = manifest.description.as_ref().map_or_else(
+        || quote! { None },
+        |description| {
+            let description = LitStr::new(description, Span::call_site());
+            quote! { Some(#description.to_string()) }
+        },
+    );
     let provider_file = LitStr::new(&manifest.provider_file, Span::call_site());
     let default_mount = LitStr::new(&manifest.default_mount, Span::call_site());
     let version = manifest.version.as_ref().map_or_else(
@@ -507,6 +528,7 @@ fn metadata_tokens(
         omnifs_sdk::ProviderManifest {
             id: #id.to_string(),
             display_name: #display_name.to_string(),
+            description: #description,
             provider: #provider_file.to_string(),
             default_mount: #default_mount.to_string(),
             version: #version,

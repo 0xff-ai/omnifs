@@ -32,6 +32,13 @@
     "defaultMount": {
       "type": "string"
     },
+    "description": {
+      "description": "One-line, user-facing summary of what the provider projects.\nInformational catalog/UI context, never identity.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "displayName": {
       "type": "string"
     },

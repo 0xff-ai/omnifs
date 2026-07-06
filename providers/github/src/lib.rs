@@ -90,6 +90,7 @@ fn auth() -> ProviderAuthManifest {
 #[omnifs_sdk::provider(
     id = "github",
     display_name = "GitHub",
+    description = "repos, issues, and pull requests",
     mount = "github",
     capabilities(
         domain(

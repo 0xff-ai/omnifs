@@ -61,6 +61,7 @@ fn auth() -> ProviderAuthManifest {
 #[omnifs_sdk::provider(
     id = "oura",
     display_name = "Oura",
+    description = "your Oura ring health data",
     mount = "oura",
     capabilities(
         domain(

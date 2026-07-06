@@ -33,6 +33,7 @@ struct WebKey {
 #[omnifs_sdk::provider(
     id = "web",
     display_name = "Web",
+    description = "configured web pages, fetched as files",
     mount = "web",
     capabilities(domain(
         dynamic,

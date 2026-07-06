@@ -158,6 +158,7 @@ struct PodLogKey {
 #[omnifs_sdk::provider(
     id = "kubernetes",
     display_name = "Kubernetes",
+    description = "cluster resources, read-only",
     mount = "k8s",
     capabilities(unix_socket(
         dynamic,
