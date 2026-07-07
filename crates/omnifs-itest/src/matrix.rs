@@ -362,7 +362,7 @@ fn first_error_line(stderr: &[u8], code: Option<i32>) -> String {
 // Scorecard
 // ===========================================================================
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct Scorecard {
     pub version: u32,
     pub column: String,
@@ -371,7 +371,7 @@ pub struct Scorecard {
     pub rows: Vec<RowResult>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct RowResult {
     pub id: String,
     pub class: String,
@@ -841,6 +841,28 @@ pub const MACOS_NFS_LOOPBACK: Column = Column {
         // the table of tools that need exact size, and the host serves the
         // smallest useful sentinel until a read learns the length. The FUSE
         // lanes pass this row, so the manifestation is NFS-attr-path-specific.
+        ("tar", Expect::Fail),
+    ],
+};
+
+/// Linux NFSv4.0 loopback lane, served by the dual-frontend acceptance test
+/// (`tests/multi_frontend`) alongside a FUSE mount over one shared namespace.
+///
+/// Seeded from [`MACOS_NFS_LOOPBACK`]: the NFS renderer is platform-neutral, so
+/// the same two rows are expected-fail here. `grep -r` opens dropped pagination
+/// controls (a cross-frontend property), and `tar c` reads the not-yet-learned
+/// size sentinel on the NFS attr path. CI's conformance-fuse job runs this on
+/// Linux and is the authority; if a live Linux run disagrees with a seeded
+/// expectation, adjust it here (that is a fix round, not a design change).
+pub const LINUX_NFS_LOOPBACK: Column = Column {
+    id: "linux-nfs-loopback",
+    platform: "linux",
+    expectations: &[
+        GREP_R_PAGINATION_CONTROLS,
+        // Seeded from macOS: bsdtar/GNU tar stats each file before reading and
+        // writes the header from that size; a cold stat reports the sentinel (1)
+        // on the NFS attr path, truncating archived content. Catalogued in
+        // docs/architecture/10-file-attributes.md.
         ("tar", Expect::Fail),
     ],
 };

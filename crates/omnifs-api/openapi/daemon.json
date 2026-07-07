@@ -750,9 +750,16 @@
               },
               {
                 "$ref": "#/components/schemas/FrontendInfo",
-                "description": "The serving filesystem frontend (FUSE today; the protocol stays\nfrontend-agnostic for future NFSv4/FSKit modes), when one is up."
+                "description": "The first serving filesystem frontend, when one is up. Kept for\npre-registry clients that read a single frontend; `frontends` reports the\nwhole served set. Removing this singular field is phase-5 (API-major)\nscope."
               }
             ]
+          },
+          "frontends": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FrontendInfo"
+            },
+            "description": "Every filesystem frontend currently serving. A daemon serves one renderer\nper requested frontend over a single shared namespace (FUSE and NFS can\nrun concurrently on Linux); the default is the single platform frontend."
           },
           "health": {
             "$ref": "#/components/schemas/DaemonHealth",

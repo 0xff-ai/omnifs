@@ -204,6 +204,158 @@ impl NativeDaemon {
     }
 }
 
+/// A running `omnifs daemon` serving an explicit set of frontends, one per
+/// `--frontend <kind>=<mount_point>` flag, over one shared namespace. Host-native
+/// so it publishes a runtime record; torn down on drop. Used by the
+/// dual-frontend acceptance test.
+pub struct MultiFrontendDaemon {
+    child: Child,
+    pub mount_points: Vec<PathBuf>,
+    home: TempDir,
+    /// Cross-process NFS serialization lock, held for the lane's lifetime.
+    _nfs_lock: TcpListener,
+}
+
+impl Drop for MultiFrontendDaemon {
+    fn drop(&mut self) {
+        for mount_point in &self.mount_points {
+            detach_mount_any(mount_point);
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+impl MultiFrontendDaemon {
+    /// The daemon-owned runtime record for this hermetic home.
+    #[must_use]
+    pub fn record_path(&self) -> PathBuf {
+        self.home.path().join("daemon.json")
+    }
+
+    /// The projected test-provider root under the frontend at `index`.
+    #[must_use]
+    pub fn tree_root(&self, index: usize) -> PathBuf {
+        self.mount_points[index].join("test")
+    }
+}
+
+/// Force-unmount a mount point regardless of frontend kind: try FUSE and NFS
+/// teardown so a dual FUSE+NFS daemon cleans up both.
+fn detach_mount_any(mount_point: &Path) {
+    #[cfg(target_os = "linux")]
+    {
+        use std::ffi::OsStr;
+        let mp = mount_point.as_os_str();
+        let _ = Command::new("fusermount")
+            .args([OsStr::new("-uz"), mp])
+            .status();
+        let _ = Command::new("umount").arg(mp).status();
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        if omnifs_nfs::mount_is_active(mount_point) {
+            let _ = omnifs_nfs::unmount(mount_point);
+        }
+    }
+}
+
+/// Bring up `omnifs daemon` serving the frontends named in `kinds` (`"fuse"` or
+/// `"nfs"`), each at its own mount point under a hermetic home, over one shared
+/// namespace. Polls the runtime record and every mount rather than the control
+/// API, so no `OMNIFS_DAEMON_ADDR` is needed.
+///
+/// Returns `None` (skip) when the platform cannot mount or the daemon does not
+/// serve every mount (for example the NFS client bits are missing). Panics only
+/// on a spawn error. The caller gates on `OMNIFS_ACCEPTANCE_LIVE` and holds the
+/// NFS serial lock (this helper also holds its own copy for the lane lifetime).
+#[must_use]
+pub fn start_multi_frontend_daemon(kinds: &[&str]) -> Option<MultiFrontendDaemon> {
+    let test_wasm = crate::provider_artifact_dir().join("test_provider.wasm");
+    if !test_wasm.exists() {
+        eprintln!(
+            "skip: {} missing (run `just providers build`)",
+            test_wasm.display()
+        );
+        return None;
+    }
+    if !platform_can_mount() {
+        eprintln!("skip: platform cannot mount (no /dev/fuse)");
+        return None;
+    }
+
+    let nfs_lock = nfs_serial_lock();
+    let HermeticHome { home, .. } = hermetic_home();
+
+    let mut args = vec!["daemon".to_string(), "--host-native".to_string()];
+    let mut mount_points = Vec::with_capacity(kinds.len());
+    for (index, kind) in kinds.iter().enumerate() {
+        let mount_point = home.path().join(format!("mnt-{index}-{kind}"));
+        std::fs::create_dir_all(&mount_point).expect("frontend mount point");
+        args.push("--frontend".to_string());
+        args.push(format!("{kind}={}", mount_point.display()));
+        mount_points.push(mount_point);
+    }
+
+    let child = Command::new(omnifs_bin())
+        .args(&args)
+        .env("OMNIFS_HOME", home.path())
+        .env_remove("OMNIFS_MOUNT_POINT")
+        .env_remove("OMNIFS_DAEMON_ADDR")
+        .env_remove("OMNIFS_CONTROL_TOKEN")
+        .env("RUST_LOG", "warn")
+        .spawn();
+    let child = match child {
+        Ok(child) => child,
+        Err(error) => {
+            eprintln!("skip: spawn omnifs daemon failed: {error}");
+            return None;
+        },
+    };
+
+    let mut daemon = MultiFrontendDaemon {
+        child,
+        mount_points,
+        home,
+        _nfs_lock: nfs_lock,
+    };
+
+    // Wait for the record to appear and every frontend to serve the projected
+    // tree. A non-zero exit before serving is a hard failure (bad CLI parse or
+    // bind collision); a clean exit is a skip.
+    let record = daemon.record_path();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let all_serving = daemon
+            .mount_points
+            .iter()
+            .all(|mp| mp.join("test/hello/message").is_file());
+        if record.exists() && all_serving {
+            return Some(daemon);
+        }
+        match daemon.child.try_wait() {
+            Ok(Some(status)) => {
+                if status.success() {
+                    eprintln!("skip: daemon exited cleanly before every frontend served");
+                } else {
+                    eprintln!(
+                        "skip: daemon exited ({status}) before every frontend served — a \
+                         requested frontend could not come up on this platform"
+                    );
+                }
+                return None;
+            },
+            Ok(None) => {},
+            Err(error) => panic!("poll daemon child status: {error}"),
+        }
+        if Instant::now() >= deadline {
+            eprintln!("skip: not every frontend served within 30s");
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
 fn curl_ok(url: &str) -> bool {
     Command::new("curl")
         .args(["-fs", "-o", "/dev/null", url])

@@ -1,7 +1,19 @@
 //! Filesystem frontends managed by the daemon.
+//!
+//! The daemon is a frontend registry: it constructs ONE [`TreeNamespace`] over
+//! the shared mount registry and builds one renderer per requested frontend on
+//! top of it. Every renderer subscribes to the same namespace event stream, so a
+//! single invalidation fans out to all of them. Linux can serve FUSE and NFS
+//! concurrently; macOS is NFS-only.
+//!
+//! Supervision is symmetric and matches the daemon's single-mount lifecycle: each
+//! frontend blocks on its own thread until it is unmounted, and the first one to
+//! exit (an error or an external unmount) takes the others down with it, so one
+//! mount dying stops the daemon the same way it does with a single frontend.
 
 use omnifs_api::{FrontendInfo, FsType};
 use omnifs_engine::MountRuntimes;
+use omnifs_engine::Namespace;
 use omnifs_engine::TreeNamespace;
 #[cfg(target_os = "linux")]
 use omnifs_fuse::NotifierHandle;
@@ -12,79 +24,166 @@ use omnifs_mtab::proc_mounts;
 use omnifs_nfs::NfsMountOptions;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::mpsc;
 use tokio::runtime::Handle;
 
-use crate::app::FrontendKind;
+use crate::app::{FrontendKind, FrontendMount};
 use crate::context::DaemonContext;
 
-pub(crate) enum Frontend {
+/// The daemon's frontend registry. Owns the mount registry it builds the shared
+/// namespace from, plus every requested renderer.
+pub(crate) struct Frontends {
+    registry: Arc<MountRuntimes>,
+    instances: Vec<Arc<Instance>>,
+}
+
+/// One requested frontend: the renderer over the shared namespace at its mount
+/// point.
+enum Instance {
     #[cfg(target_os = "linux")]
     Fuse(Fuse),
     Nfs(Nfs),
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) struct Fuse {
+struct Fuse {
     mount_point: PathBuf,
-    registry: Arc<MountRuntimes>,
     notifier: NotifierHandle,
 }
 
-pub(crate) struct Nfs {
+struct Nfs {
     mount_point: PathBuf,
-    registry: Arc<MountRuntimes>,
     options: NfsMountOptions,
 }
 
-impl Frontend {
+impl Frontends {
     pub(crate) fn from_context(context: &DaemonContext, registry: Arc<MountRuntimes>) -> Self {
-        match context.frontend() {
-            #[cfg(target_os = "linux")]
-            FrontendKind::Fuse => Self::fuse(
-                context.mount_point().to_path_buf(),
-                registry,
-                omnifs_fuse::new_notifier_handle(),
-            ),
-            #[cfg(not(target_os = "linux"))]
-            FrontendKind::Fuse => {
-                unreachable!("DaemonContext resolves the NFS frontend on non-Linux hosts")
-            },
-            FrontendKind::Nfs => Self::nfs(
-                context.mount_point().to_path_buf(),
-                registry,
-                context.nfs_mount_options(),
-            ),
+        let instances = context
+            .frontends()
+            .iter()
+            .map(|frontend| Arc::new(Instance::build(frontend, context)))
+            .collect();
+        Self {
+            registry,
+            instances,
         }
     }
 
-    #[cfg(target_os = "linux")]
-    fn fuse(mount_point: PathBuf, registry: Arc<MountRuntimes>, notifier: NotifierHandle) -> Self {
-        Self::Fuse(Fuse {
-            mount_point,
-            registry,
-            notifier,
-        })
-    }
-
-    fn nfs(mount_point: PathBuf, registry: Arc<MountRuntimes>, options: NfsMountOptions) -> Self {
-        Self::Nfs(Nfs {
-            mount_point,
-            registry,
-            options,
-        })
-    }
-
+    /// Build the shared namespace and serve every frontend, each blocking on its
+    /// own thread until unmounted. Returns once ALL frontends have exited; the
+    /// first exit unmounts the rest so the daemon comes down as one unit. The
+    /// first error observed is returned.
     pub fn serve(&self, rt: &Handle) -> anyhow::Result<()> {
-        // The daemon owns namespace construction: both kernel frontends now
-        // consume the narrow `Namespace` surface, not the registry.
+        // One namespace, several renderers: the daemon owns namespace
+        // construction and hands each frontend a `dyn Namespace`.
+        let namespace = TreeNamespace::new(Arc::clone(&self.registry), rt.clone());
+
+        let (exit_tx, exit_rx) = mpsc::channel::<()>();
+        let mut threads = Vec::with_capacity(self.instances.len());
+        for instance in &self.instances {
+            let instance = Arc::clone(instance);
+            let namespace = Arc::clone(&namespace) as Arc<dyn Namespace>;
+            let rt = rt.clone();
+            let exit_tx = exit_tx.clone();
+            let label = instance.label();
+            let thread = std::thread::Builder::new()
+                .name(format!("frontend-{label}"))
+                .spawn(move || {
+                    let result = instance.serve_blocking(namespace, &rt);
+                    // Signal the supervisor that a frontend exited; the receiver
+                    // may already be gone if every frontend raced to exit.
+                    let _ = exit_tx.send(());
+                    result
+                })
+                .expect("spawn frontend thread");
+            threads.push(thread);
+        }
+        drop(exit_tx);
+
+        // Block until the first frontend exits (error or external unmount).
+        let _ = exit_rx.recv();
+        // One mount dying takes the daemon down: unmount the rest so their serve
+        // loops unblock, then join every thread.
+        self.unmount();
+
+        let mut first_error = None;
+        for thread in threads {
+            match thread.join() {
+                Ok(Ok(())) => {},
+                Ok(Err(error)) => {
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                },
+                Err(panic) => {
+                    if first_error.is_none() {
+                        first_error = Some(anyhow::anyhow!("frontend thread panicked: {panic:?}"));
+                    }
+                },
+            }
+        }
+
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    /// The subset of requested frontends currently present in the OS mount table.
+    pub fn serving(&self) -> Vec<FrontendInfo> {
+        self.instances
+            .iter()
+            .filter_map(|instance| instance.serving())
+            .collect()
+    }
+
+    /// Unmount every frontend. Best-effort per frontend; each unblocks its own
+    /// serve loop.
+    pub fn unmount(&self) {
+        for instance in &self.instances {
+            instance.unmount();
+        }
+    }
+
+    /// Invalidate the kernel dentry for a root child across every FUSE frontend
+    /// (NFS has no kernel-notify equivalent here).
+    pub fn invalidate_root_child(&self, name: &str) {
+        for instance in &self.instances {
+            instance.invalidate_root_child(name);
+        }
+    }
+}
+
+impl Instance {
+    fn build(frontend: &FrontendMount, context: &DaemonContext) -> Self {
+        match frontend.kind {
+            #[cfg(target_os = "linux")]
+            FrontendKind::Fuse => Self::Fuse(Fuse {
+                mount_point: frontend.mount_point.clone(),
+                notifier: omnifs_fuse::new_notifier_handle(),
+            }),
+            #[cfg(not(target_os = "linux"))]
+            FrontendKind::Fuse => {
+                // `DaemonContext::resolve` rejects the FUSE frontend off Linux, so
+                // it never reaches the registry there.
+                unreachable!("the fuse frontend is only available on Linux")
+            },
+            FrontendKind::Nfs => Self::Nfs(Nfs {
+                mount_point: frontend.mount_point.clone(),
+                options: context.nfs_mount_options(),
+            }),
+        }
+    }
+
+    /// Block serving this frontend over the shared namespace until it is
+    /// unmounted. Provider teardown is the daemon's job after `serve` returns.
+    fn serve_blocking(&self, namespace: Arc<dyn Namespace>, rt: &Handle) -> anyhow::Result<()> {
         match self {
             #[cfg(target_os = "linux")]
-            Frontend::Fuse(frontend) => {
-                let namespace = TreeNamespace::new(Arc::clone(&frontend.registry), rt.clone());
+            Instance::Fuse(frontend) => {
                 mount::run_blocking(&frontend.mount_point, namespace, rt, &frontend.notifier)?;
             },
-            Frontend::Nfs(frontend) => {
-                let namespace = TreeNamespace::new(Arc::clone(&frontend.registry), rt.clone());
+            Instance::Nfs(frontend) => {
                 omnifs_nfs::mount_blocking(
                     &frontend.mount_point,
                     namespace,
@@ -96,29 +195,29 @@ impl Frontend {
         Ok(())
     }
 
-    pub fn serving(&self) -> Option<FrontendInfo> {
+    fn serving(&self) -> Option<FrontendInfo> {
         match self {
             #[cfg(target_os = "linux")]
-            Frontend::Fuse(frontend) => proc_mounts::find_mount(&frontend.mount_point)
+            Instance::Fuse(frontend) => proc_mounts::find_mount(&frontend.mount_point)
                 .filter(|mount| mount.device == "omnifs" && mount.fs_type.starts_with("fuse"))
                 .map(|mount| FrontendInfo {
                     source: mount.device,
                     fs_type: FsType::Fuse,
                 }),
-            Frontend::Nfs(frontend) => nfs_serving(&frontend.mount_point),
+            Instance::Nfs(frontend) => nfs_serving(&frontend.mount_point),
         }
     }
 
-    /// Unmount the serving frontend from within the daemon, which unblocks the
-    /// `serve` loop so the process can shut down. Best-effort: a failure is
-    /// logged, since `omnifs down` falls back to an external sweep.
-    pub fn unmount(&self) {
+    /// Unmount this frontend from within the daemon, unblocking its `serve`
+    /// loop. Best-effort: a failure is logged, since `omnifs down` falls back to
+    /// an external sweep.
+    fn unmount(&self) {
         let result = match self {
             #[cfg(target_os = "linux")]
-            Frontend::Fuse(frontend) => {
+            Instance::Fuse(frontend) => {
                 omnifs_fuse::mount::unmount(&frontend.mount_point).map_err(|e| e.to_string())
             },
-            Frontend::Nfs(frontend) => {
+            Instance::Nfs(frontend) => {
                 omnifs_nfs::unmount(&frontend.mount_point).map_err(|e| e.to_string())
             },
         };
@@ -127,15 +226,24 @@ impl Frontend {
         }
     }
 
-    pub fn invalidate_root_child(&self, name: &str) {
+    fn invalidate_root_child(&self, name: &str) {
         match self {
             #[cfg(target_os = "linux")]
-            Frontend::Fuse(frontend) => {
+            Instance::Fuse(frontend) => {
                 omnifs_fuse::invalidate_root_child(&frontend.notifier, name);
             },
-            Frontend::Nfs(_) => {
+            Instance::Nfs(_) => {
                 let _ = name;
             },
+        }
+    }
+
+    /// A short kind label for the frontend thread name.
+    fn label(&self) -> &'static str {
+        match self {
+            #[cfg(target_os = "linux")]
+            Instance::Fuse(_) => "fuse",
+            Instance::Nfs(_) => "nfs",
         }
     }
 }

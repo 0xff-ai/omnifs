@@ -348,11 +348,13 @@ jobs:
         with:
           tool: nextest@0.9.132
 
-      - name: Install fuse3
+      - name: Install fuse3 and NFS client
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends fuse3
+          # fuse3 for the FUSE lane; nfs-common provides mount.nfs4 for the
+          # Linux NFS loopback mount the dual-frontend lane exercises.
+          sudo apt-get install -y --no-install-recommends fuse3 nfs-common
 
       - name: Prepare WASM sidecar directory
         run: rm -rf target/wasm32-wasip2/release
@@ -382,7 +384,7 @@ jobs:
           OMNIFS_ACCEPTANCE_LIVE=1 \
           OMNIFS_BIN="$(pwd)/dist-cli/bin/omnifs" \
           cargo nextest run -p omnifs-itest \
-            -E 'binary(frontend_matrix) + binary(control_plane)' --no-capture
+            -E 'binary(frontend_matrix) + binary(control_plane) + binary(multi_frontend)' --no-capture
 
       - name: Upload conformance scorecards
         if: always()
