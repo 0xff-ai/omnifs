@@ -9,6 +9,7 @@ pub mod coalesce;
 pub(crate) mod effects;
 pub(crate) mod inspect;
 pub(crate) mod log_redaction;
+pub mod namespace;
 pub(crate) mod object_id;
 pub(crate) mod ops;
 pub(crate) mod pagination;
@@ -28,6 +29,10 @@ pub use callouts::cloner::{CloneError, GitCloner};
 pub use inspect::{
     InspectorConfig, InspectorRequestScope, InspectorSink, Subscription, current_trace_id, global,
     init_global_from_env,
+};
+pub use namespace::{
+    Attrs, DirCursor, DirEntry, DirPage, EntryKind as NsEntryKind, Epoch, EventStream, Namespace,
+    NodeAnswer, NodeId, NsError, NsEvent, NsRetryClass, ReadAnswer, StabilityClass, TreeNamespace,
 };
 pub use runtime::registry::{
     FailureKind, MountFailure, MountRuntimes, ReconcileBusy, ReconcileOutcome, RegistryError,
@@ -53,5 +58,5 @@ pub(crate) use ops::op;
 pub(crate) use ops::op::Op;
 pub(crate) use ops::validate as op_validate;
 pub(crate) use runtime::wasm::{component_engine, provider_compiler_strategy};
-pub(crate) use runtime::{Namespace, ProviderErrorClass, Runtime};
+pub(crate) use runtime::{ProviderErrorClass, Runtime};
 pub(crate) use runtime::{instance, registry, wasi, wasm};
