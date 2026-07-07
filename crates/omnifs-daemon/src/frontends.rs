@@ -12,7 +12,6 @@
 //! mount dying stops the daemon the same way it does with a single frontend.
 
 use omnifs_api::{FrontendInfo, FsType};
-use omnifs_engine::MountRuntimes;
 use omnifs_engine::Namespace;
 use omnifs_engine::TreeNamespace;
 #[cfg(target_os = "linux")]
@@ -30,11 +29,16 @@ use tokio::runtime::Handle;
 use crate::app::{FrontendKind, FrontendMount};
 use crate::context::DaemonContext;
 
-/// The daemon's frontend registry. Owns the mount registry it builds the shared
-/// namespace from, plus every requested renderer.
+/// The daemon's frontend registry: every in-process renderer over the shared
+/// namespace. The namespace is built once in the startup path (post-reconcile)
+/// and passed to `serve`, so the in-process renderers and the out-of-process
+/// attach listeners serve the same [`TreeNamespace`].
 pub(crate) struct Frontends {
-    registry: Arc<MountRuntimes>,
     instances: Vec<Arc<Instance>>,
+    /// Releases a namespace-only `serve` (no in-process renderer drives the
+    /// lifecycle) when `unmount` fires on shutdown.
+    stop_tx: mpsc::Sender<()>,
+    stop_rx: std::sync::Mutex<Option<mpsc::Receiver<()>>>,
 }
 
 /// One requested frontend: the renderer over the shared namespace at its mount
@@ -57,32 +61,41 @@ struct Nfs {
 }
 
 impl Frontends {
-    pub(crate) fn from_context(context: &DaemonContext, registry: Arc<MountRuntimes>) -> Self {
+    pub(crate) fn from_context(context: &DaemonContext) -> Self {
         let instances = context
             .frontends()
             .iter()
             .map(|frontend| Arc::new(Instance::build(frontend, context)))
             .collect();
+        let (stop_tx, stop_rx) = mpsc::channel::<()>();
         Self {
-            registry,
             instances,
+            stop_tx,
+            stop_rx: std::sync::Mutex::new(Some(stop_rx)),
         }
     }
 
-    /// Build the shared namespace and serve every frontend, each blocking on its
-    /// own thread until unmounted. Returns once ALL frontends have exited; the
-    /// first exit unmounts the rest so the daemon comes down as one unit. The
-    /// first error observed is returned.
-    pub fn serve(&self, rt: &Handle) -> anyhow::Result<()> {
-        // One namespace, several renderers: the daemon owns namespace
-        // construction and hands each frontend a `dyn Namespace`.
-        let namespace = TreeNamespace::new(Arc::clone(&self.registry), rt.clone());
+    /// Serve every in-process frontend over `namespace`, each blocking on its own
+    /// thread until unmounted. Returns once ALL frontends have exited; the first
+    /// exit unmounts the rest so the daemon comes down as one unit. The first
+    /// error observed is returned. A namespace-only daemon (no in-process
+    /// frontend) blocks until shutdown instead, so the attach-socket listeners
+    /// keep serving.
+    pub fn serve(&self, namespace: &Arc<TreeNamespace>, rt: &Handle) -> anyhow::Result<()> {
+        if self.instances.is_empty() {
+            // No in-process renderer drives the lifecycle; block until `unmount`
+            // signals shutdown so the spawned attach listeners keep serving.
+            if let Some(rx) = self.stop_rx.lock().expect("stop rx lock").take() {
+                let _ = rx.recv();
+            }
+            return Ok(());
+        }
 
         let (exit_tx, exit_rx) = mpsc::channel::<()>();
         let mut threads = Vec::with_capacity(self.instances.len());
         for instance in &self.instances {
             let instance = Arc::clone(instance);
-            let namespace = Arc::clone(&namespace) as Arc<dyn Namespace>;
+            let namespace = Arc::clone(namespace) as Arc<dyn Namespace>;
             let rt = rt.clone();
             let exit_tx = exit_tx.clone();
             let label = instance.label();
@@ -138,8 +151,12 @@ impl Frontends {
     }
 
     /// Unmount every frontend. Best-effort per frontend; each unblocks its own
-    /// serve loop.
+    /// serve loop. Also releases a namespace-only `serve`, which has no frontend
+    /// to unmount.
     pub fn unmount(&self) {
+        // Release a blocked namespace-only `serve`; the receiver may already be
+        // gone if `serve` returned or was never namespace-only.
+        let _ = self.stop_tx.send(());
         for instance in &self.instances {
             instance.unmount();
         }

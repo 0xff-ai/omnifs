@@ -38,8 +38,20 @@ pub(crate) struct DaemonContext {
     listen: Option<SocketAddr>,
     /// Random per-start id reported in status and written to the runtime record.
     instance_id: String,
+    /// Requested namespace attach-socket names, each bound at
+    /// `frontends/<name>.sock` and served over the shared namespace. Empty for a
+    /// daemon that only mounts in-process frontends.
+    attach_sockets: Vec<String>,
     nfs: NfsContext,
     process: ProcessInfo,
+}
+
+/// One bound namespace attach socket: its name, its on-disk path (for cleanup on
+/// exit), and the listener the daemon serves the wire over.
+pub(crate) struct AttachSocket {
+    pub name: String,
+    pub path: PathBuf,
+    pub listener: UnixListener,
 }
 
 #[derive(Debug)]
@@ -59,7 +71,10 @@ impl DaemonContext {
     pub(crate) fn resolve(args: DaemonArgs) -> anyhow::Result<Self> {
         let workspace: Workspace<Daemon> = Workspace::resolve()?;
         let layout = workspace.into_layout();
-        let frontends = resolve_frontends(args.frontends.clone())?;
+        let attach_sockets = resolve_attach_sockets(&args.attach_sockets)?;
+        // A daemon asked for an attach socket but no `--frontend` serves the
+        // namespace only: do not inject the platform default in-process frontend.
+        let frontends = resolve_frontends(args.frontends.clone(), attach_sockets.is_empty())?;
         let process = ProcessInfo::current();
         let backend = if args.host_native {
             DaemonBackend::Native { pid: process.pid }
@@ -83,6 +98,7 @@ impl DaemonContext {
             root_symlinks: args.root_symlinks,
             listen: args.listen,
             instance_id: generate_instance_id(),
+            attach_sockets,
             nfs,
             process,
         })
@@ -236,8 +252,68 @@ impl DaemonContext {
     /// The primary (first) frontend's mount point. Status, the shutdown report,
     /// and the container root-symlink nicety key on this; a single-frontend
     /// daemon has exactly one.
+    ///
+    /// Smallest defensible interpretation for a namespace-only daemon (attach
+    /// sockets, no in-process frontend): it has no OS mount point, so this
+    /// returns the empty path rather than panicking. Status then reports an empty
+    /// `mount_point`, which is truthful (nothing is mounted in-process).
     pub(crate) fn mount_point(&self) -> &Path {
-        &self.frontends[0].mount_point
+        self.frontends
+            .first()
+            .map_or(Path::new(""), |frontend| frontend.mount_point.as_path())
+    }
+
+    /// This daemon start's instance id, reported in status, the runtime record,
+    /// and the namespace-wire handshake.
+    pub(crate) fn instance_id(&self) -> &str {
+        &self.instance_id
+    }
+
+    /// Bind every requested attach socket under `frontends/`, returning the bound
+    /// listeners. Mirrors [`bind_control_socket`](Self::bind_control_socket): the
+    /// `frontends/` dir is forced to `0700` and each socket to `0600`, and a
+    /// stale socket (a refused connect probe) is unlinked and rebound. A live
+    /// socket means another daemon owns this workspace, a hard error.
+    pub(crate) fn bind_attach_sockets(&self) -> anyhow::Result<Vec<AttachSocket>> {
+        if self.attach_sockets.is_empty() {
+            return Ok(Vec::new());
+        }
+        let dir = self.layout.frontends_dir();
+        std::fs::create_dir_all(&dir)
+            .with_context(|| format!("create attach socket dir {}", dir.display()))?;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("restrict attach socket dir {} to 0700", dir.display()))?;
+
+        let mut bound = Vec::with_capacity(self.attach_sockets.len());
+        for name in &self.attach_sockets {
+            let path = self.layout.attach_socket(name);
+            if path.exists() {
+                match UnixStream::connect(&path) {
+                    Ok(_) => anyhow::bail!(
+                        "another omnifs daemon is already serving attach socket {}.\n\
+                         Run `omnifs down` to stop it, then try again.",
+                        path.display()
+                    ),
+                    // Refused/ENOENT means the previous daemon is gone; unlink the
+                    // leftover and rebind.
+                    Err(_) => {
+                        std::fs::remove_file(&path).with_context(|| {
+                            format!("remove stale attach socket {}", path.display())
+                        })?;
+                    },
+                }
+            }
+            let listener = UnixListener::bind(&path)
+                .with_context(|| format!("bind attach socket {}", path.display()))?;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                .with_context(|| format!("restrict attach socket {} to 0600", path.display()))?;
+            bound.push(AttachSocket {
+                name: name.clone(),
+                path,
+                listener,
+            });
+        }
+        Ok(bound)
     }
 
     /// Every requested frontend, in order. The registry builds one renderer per
@@ -270,11 +346,18 @@ impl DaemonContext {
     pub(crate) fn status(
         &self,
         serving: Vec<FrontendInfo>,
+        attach_serving: bool,
         mounts: Vec<MountInfo>,
         failed: Vec<MountFailure>,
         credential_degraded: &[(String, String)],
     ) -> DaemonStatus {
-        let health = self.health(&serving, &mounts, &failed, credential_degraded);
+        let health = self.health(
+            &serving,
+            attach_serving,
+            &mounts,
+            &failed,
+            credential_degraded,
+        );
         DaemonStatus {
             version: env!("CARGO_PKG_VERSION").to_string(),
             api_major: API_MAJOR,
@@ -298,6 +381,7 @@ impl DaemonContext {
     fn health(
         &self,
         serving: &[FrontendInfo],
+        attach_serving: bool,
         mounts: &[MountInfo],
         failed: &[MountFailure],
         credential_degraded: &[(String, String)],
@@ -319,19 +403,24 @@ impl DaemonContext {
                 HealthState::Healthy,
                 backend_health_message(&self.backend),
             ),
-            self.frontend_health(serving),
+            self.frontend_health(serving, attach_serving),
             mount_health(mounts, failed, credential_degraded),
         ])
     }
 
-    /// Frontend health over the whole requested set: `Healthy` only when every
-    /// requested frontend is serving, `Degraded` when some but not all are, and
-    /// `Starting` when none are yet. The message always lists the requested set
-    /// so a partial outage names what is missing.
-    fn frontend_health(&self, serving: &[FrontendInfo]) -> SubsystemHealth {
-        let requested = self.frontends.len();
-        let up = serving.len();
-        let listed = self
+    /// Frontend health over every requested *surface*: in-process frontends plus
+    /// namespace attach sockets. `Healthy` only when every surface is up,
+    /// `Degraded` when some but not all are, `Starting` when none are yet. A
+    /// namespace-only daemon (attach sockets, no in-process mount) is `Healthy`
+    /// once its sockets are serving, which is what `/v1/ready` gates on. The
+    /// message lists the requested set so a partial outage names what is missing.
+    fn frontend_health(&self, serving: &[FrontendInfo], attach_serving: bool) -> SubsystemHealth {
+        let attach_requested = self.attach_sockets.len();
+        let requested = self.frontends.len() + attach_requested;
+        let attach_up = if attach_serving { attach_requested } else { 0 };
+        let up = serving.len() + attach_up;
+
+        let mut listed = self
             .frontends
             .iter()
             .map(|frontend| {
@@ -341,19 +430,25 @@ impl DaemonContext {
                     frontend.mount_point.display()
                 )
             })
-            .collect::<Vec<_>>()
-            .join(", ");
+            .collect::<Vec<_>>();
+        listed.extend(
+            self.attach_sockets
+                .iter()
+                .map(|name| format!("attach socket {name}")),
+        );
+        let listed = listed.join(", ");
+
         let (state, message) = if up == 0 {
             (HealthState::Starting, format!("not serving ({listed})"))
         } else if up < requested {
             (
                 HealthState::Degraded,
-                format!("{up}/{requested} frontend(s) serving ({listed})"),
+                format!("{up}/{requested} surface(s) serving ({listed})"),
             )
         } else {
             (
                 HealthState::Healthy,
-                format!("{up}/{requested} frontend(s) serving ({listed})"),
+                format!("{up}/{requested} surface(s) serving ({listed})"),
             )
         };
         SubsystemHealth::new(DaemonSubsystem::Frontend, state, message)
@@ -424,12 +519,20 @@ fn generate_instance_id() -> String {
     hex::encode(bytes)
 }
 
-/// Resolve the requested frontend set. An empty request is the default path: the
-/// single platform-default frontend at the resolved mount point, preserving
-/// today's end-to-end behavior. A non-empty request is served verbatim, after
-/// rejecting duplicate mount points and (off Linux) the Linux-only FUSE frontend.
-fn resolve_frontends(requested: Vec<FrontendMount>) -> anyhow::Result<Vec<FrontendMount>> {
+/// Resolve the requested frontend set. An empty request injects the single
+/// platform-default frontend at the resolved mount point (today's end-to-end
+/// behavior) only when `inject_default` holds; a namespace-only daemon (attach
+/// sockets, no `--frontend`) passes `false` and gets an empty set. A non-empty
+/// request is served verbatim, after rejecting duplicate mount points and (off
+/// Linux) the Linux-only FUSE frontend.
+fn resolve_frontends(
+    requested: Vec<FrontendMount>,
+    inject_default: bool,
+) -> anyhow::Result<Vec<FrontendMount>> {
     if requested.is_empty() {
+        if !inject_default {
+            return Ok(Vec::new());
+        }
         let mount_point = omnifs_workspace::layout::resolve_mount_point().ok_or_else(|| {
             anyhow::anyhow!("cannot resolve mount point: set HOME or OMNIFS_MOUNT_POINT")
         })?;
@@ -453,6 +556,19 @@ fn resolve_frontends(requested: Vec<FrontendMount>) -> anyhow::Result<Vec<Fronte
         }
     }
     Ok(requested)
+}
+
+/// Validate the requested attach-socket names: each is a bare `[a-z0-9-]+` label
+/// (the CLI parser already enforces the charset; this rejects duplicates, which
+/// would collide on one socket path).
+fn resolve_attach_sockets(requested: &[String]) -> anyhow::Result<Vec<String>> {
+    let mut seen = std::collections::HashSet::new();
+    for name in requested {
+        if !seen.insert(name.clone()) {
+            anyhow::bail!("duplicate attach socket name `{name}`");
+        }
+    }
+    Ok(requested.to_vec())
 }
 
 impl ProcessInfo {

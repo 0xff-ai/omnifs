@@ -69,6 +69,14 @@ The default Docker image is chosen by build channel. A release binary (built by 
 
 Keep Docker-specific bind/materialization policy in Docker launch paths. Keep native and Docker daemon argument generation aligned where behavior is shared.
 
+### Namespace attach sockets and out-of-process frontends
+
+The daemon can serve its shared namespace over a Unix socket so a renderer runs in a different process than the projection owner. The `--attach-socket <name>` daemon flag (repeatable, a bare `[a-z0-9-]+` label) binds `$OMNIFS_HOME/frontends/<name>.sock` and serves the same `TreeNamespace` the in-process frontends use, with the daemon's instance id. The `frontends/` dir is `0700` and each socket `0600` (auth is filesystem permissions, like the control socket); a stale socket is unlinked after a refused connect probe, and sockets are removed on graceful exit. The wire is the length-delimited postcard framing in `omnifs-namespace-wire`, not an RPC framework.
+
+A daemon with at least one attach socket and no `--frontend` serves the namespace only, with no in-process mount. `/v1/ready` reports ready once mounts are reconciled and every requested surface (in-process frontends plus attach sockets) is up; the Frontend health subsystem counts surfaces, so a namespace-only daemon is `Healthy` once its sockets serve. A namespace-only daemon reports an empty `DaemonStatus.mount_point` (nothing is mounted in-process). Zero frontends and zero attach sockets is unchanged: the platform default is still injected.
+
+The hidden `omnifs frontend --attach <socket> --kind <fuse|nfs> --mount-point <path> [--nfs-state-dir <dir>]` runner attaches a wire-backed namespace and runs the same renderer entry the daemon uses, blocking until unmount; SIGTERM/SIGINT unmount cleanly. `--kind fuse` is Linux-only. The wire client reconnects with backoff and exposes `AttachEvent::Reattached` when a reconnect lands on a different daemon instance (stale node ids); acting on it in the renderers is a later-phase concern.
+
 ### Dev home
 
 `scripts/dev.ts` owns contributor dev state. It renders a dedicated `~/.omnifs-dev` home, bind-mounts it into the container as `OMNIFS_HOME`, and opens the developer inside that container. Host CLI commands use the normal workspace resolution unless `OMNIFS_HOME` is explicit; do not reintroduce a Rust-side dev command or dev-session owner.
@@ -102,6 +110,8 @@ Provider-store indexes strict-parse both the top-level index object and retained
 - `crates/omnifs-api/src/lib.rs`
 - `crates/omnifs-daemon/src/app.rs`
 - `crates/omnifs-daemon/src/server.rs`
+- `crates/omnifs-daemon/src/frontend.rs`
+- `crates/omnifs-namespace-wire/src/lib.rs`
 - `crates/omnifs-cli/src/live.rs`
 - `crates/omnifs-workspace/src/mounts/mod.rs`
 - `crates/omnifs-cli/src/launch.rs`

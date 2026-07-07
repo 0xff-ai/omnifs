@@ -174,6 +174,74 @@ fn invalidation_reaches_both_frontends_within_one_op() {
 }
 
 // ===========================================================================
+// Test C: out-of-process wire frontend (macOS NFS)
+// ===========================================================================
+
+/// The first live proof of gate 3: a renderer serving the projected tree from a
+/// different process than the projection owner, over the namespace wire. A
+/// namespace-only daemon serves an attach socket; an `omnifs frontend` child
+/// mounts NFS over a wire-backed namespace. The full conformance row table runs
+/// against that out-of-process mount with the same expectations as the in-process
+/// macOS NFS loopback lane, scored as column `macos-nfs-wire`.
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn wire_frontend_nfs_parity() {
+    use omnifs_itest::matrix::{self, Column, Exec, ROWS};
+
+    if !acceptance_gated() {
+        return;
+    }
+
+    let Some(daemon) = live::start_wire_frontend("nfs") else {
+        return;
+    };
+
+    // The out-of-process NFS mount is a fresh column with the same expectations
+    // as the in-process macOS NFS loopback lane: out-of-process parity is the
+    // property under test.
+    let column = Column {
+        id: "macos-nfs-wire",
+        platform: "macos",
+        expectations: matrix::MACOS_NFS_LOOPBACK.expectations,
+    };
+    let scratch = tempfile::tempdir().expect("wire scratch");
+    let card = matrix::run_column(
+        &Exec::Local {
+            root: daemon.tree_root(),
+            scratch: scratch.path().to_path_buf(),
+        },
+        &column,
+        ROWS,
+    );
+
+    // Write and print the scorecard before asserting, so a red run leaves evidence.
+    let path = matrix::write_scorecard(&card);
+    eprintln!("scorecard: {}", path.display());
+    eprintln!("\n{}", matrix::render_table(std::slice::from_ref(&card)));
+
+    let mismatches = matrix::mismatches(&card);
+    assert!(
+        mismatches.is_empty(),
+        "out-of-process wire column `{}` has {} expectation mismatch(es):\n  {}",
+        card.column,
+        mismatches.len(),
+        mismatches.join("\n  ")
+    );
+
+    drop(daemon);
+}
+
+/// The wire-frontend live parity proof targets macOS NFS loopback; skip on Linux.
+#[cfg(target_os = "linux")]
+#[test]
+fn wire_frontend_nfs_parity() {
+    if !acceptance_gated() {
+        return;
+    }
+    eprintln!("skip: the wire-frontend live parity test targets macOS NFS loopback");
+}
+
+// ===========================================================================
 // Helpers
 // ===========================================================================
 

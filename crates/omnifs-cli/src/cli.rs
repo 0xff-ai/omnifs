@@ -104,6 +104,13 @@ pub enum Commands {
     #[command(hide = true)]
     #[cfg(feature = "daemon")]
     Daemon(omnifs_daemon::DaemonArgs),
+
+    /// Run an out-of-process renderer over a daemon namespace socket.
+    /// Internal: attaches a wire-backed namespace and mounts the projected
+    /// tree. Not invoked directly today.
+    #[command(hide = true)]
+    #[cfg(feature = "daemon")]
+    Frontend(omnifs_daemon::FrontendArgs),
 }
 
 /// Human (`Text`) vs machine (`Json`) output selection, shared by commands that
@@ -160,6 +167,8 @@ impl Commands {
             Self::Debug(_) => "debug",
             #[cfg(feature = "daemon")]
             Self::Daemon(_) => return None,
+            #[cfg(feature = "daemon")]
+            Self::Frontend(_) => return None,
         })
     }
 
@@ -190,6 +199,8 @@ impl Commands {
             Self::Debug(args) => args.run().map(|()| ExitCode::Success),
             #[cfg(feature = "daemon")]
             Self::Daemon(args) => omnifs_daemon::run(args).map(|()| ExitCode::Success),
+            #[cfg(feature = "daemon")]
+            Self::Frontend(args) => omnifs_daemon::run_frontend(args).map(|()| ExitCode::Success),
         }
     }
 }

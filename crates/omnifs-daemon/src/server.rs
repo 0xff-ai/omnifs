@@ -151,6 +151,10 @@ pub struct Daemon {
     /// The last reconcile's failed mounts, surfaced in `status` so a dark mount
     /// is visible with its reason instead of silently absent.
     last_failed: std::sync::Mutex<Vec<MountFailure>>,
+    /// Set once the namespace attach-socket listeners are serving. Read into
+    /// frontend health so a namespace-only daemon reports ready only after its
+    /// sockets are up (and mounts reconciled, which precedes the spawn).
+    attach_serving: std::sync::atomic::AtomicBool,
 }
 
 impl Daemon {
@@ -168,11 +172,20 @@ impl Daemon {
             frontends,
             control_token,
             last_failed: std::sync::Mutex::new(Vec::new()),
+            attach_serving: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
     pub fn mount_point(&self) -> &Path {
         self.context.mount_point()
+    }
+
+    /// Mark the namespace attach-socket listeners as serving. Called once, after
+    /// mounts reconcile and the listeners are spawned, so `/v1/ready` flips true
+    /// for a namespace-only daemon.
+    pub fn mark_attach_serving(&self) {
+        self.attach_serving
+            .store(true, std::sync::atomic::Ordering::Release);
     }
 
     /// Serve the control API over TCP with the bearer-token middleware. Used by
@@ -214,8 +227,12 @@ impl Daemon {
         Ok(())
     }
 
-    pub fn serve(&self, rt: &tokio::runtime::Handle) -> anyhow::Result<()> {
-        self.frontends.serve(rt)
+    pub fn serve(
+        &self,
+        namespace: &Arc<omnifs_engine::TreeNamespace>,
+        rt: &tokio::runtime::Handle,
+    ) -> anyhow::Result<()> {
+        self.frontends.serve(namespace, rt)
     }
 
     fn control_status(&self) -> DaemonStatus {
@@ -247,6 +264,8 @@ impl Daemon {
             .unwrap_or_default();
         self.context.status(
             self.frontends.serving(),
+            self.attach_serving
+                .load(std::sync::atomic::Ordering::Acquire),
             mounts,
             failed,
             &credential_degraded,

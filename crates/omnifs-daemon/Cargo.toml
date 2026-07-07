@@ -18,6 +18,7 @@ omnifs-api = { workspace = true }
 omnifs-auth = { workspace = true }
 omnifs-workspace = { workspace = true }
 omnifs-engine = { workspace = true }
+omnifs-namespace-wire = { workspace = true }
 omnifs-nfs = { workspace = true }
 anyhow = { workspace = true }
 axum = "0.8"

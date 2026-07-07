@@ -3095,6 +3095,7 @@ dependencies = [
  "omnifs-engine",
  "omnifs-fuse",
  "omnifs-mtab",
+ "omnifs-namespace-wire",
  "omnifs-nfs",
  "omnifs-workspace",
  "serde_json",

@@ -7,8 +7,10 @@
 
 mod app;
 mod context;
+mod frontend;
 mod frontends;
 mod server;
 
 pub use app::{DaemonArgs, FrontendKind, run};
+pub use frontend::{FrontendArgs, run_frontend};
 pub use server::openapi_json;
