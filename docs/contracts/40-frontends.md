@@ -11,9 +11,13 @@ Read this before touching `omnifs-fuse`, `omnifs-nfs`, `omnifs-mtab`, frontend s
 
 ### Adapter boundary
 
-Frontend crates translate tree answers into protocol state. They do not decide projection semantics.
+Frontend crates translate namespace answers into protocol state. They do not decide projection semantics.
 
-Keep inode numbers, filehandles, stateids, leases, notifications, reply construction, and protocol-specific error mapping in frontend crates. Ask `Tree` for provider-neutral projection answers. Convert neutral core/tree types once at the frontend boundary.
+A frontend consumes the narrow `omnifs_engine::namespace` surface (`Namespace`, `NodeId`, `Attrs`, `DirPage`, `ReadAnswer`, `NsEvent`, and friends) and nothing else of the engine. It never touches `Tree`, `render`, or `view` directly: the already-policied protocol answer (size, TTL, change counter, direct-I/O, read style) crosses the `Namespace` boundary as plain data. Keep inode numbers, filehandles, stateids, leases, notifications, reply construction, and protocol-specific error mapping in frontend crates. Convert namespace types into protocol replies once at the frontend boundary.
+
+### Frontend registry
+
+The daemon is a frontend registry: it constructs one `TreeNamespace` over the shared mount registry and builds one renderer per requested frontend on top of it. Several renderers share a single namespace, so one invalidation fans out to all of them. Linux can serve FUSE and NFS concurrently; macOS is NFS-only. Frontend supervision matches the daemon's single-mount lifecycle: each frontend blocks until unmounted, and the first to exit takes the others down, so the daemon comes down as one unit. Which frontends are served is a daemon concern (`--frontend <kind>=<mount_point>`, repeatable), not a frontend-crate concern.
 
 ### FUSE
 
@@ -62,6 +66,7 @@ Keep `/proc/mounts` parsing, NFS mount state-file schema/IO, and shared platform
 - `crates/omnifs-fuse/src`
 - `crates/omnifs-nfs/src`
 - `crates/omnifs-mtab/src`
+- `crates/omnifs-engine/src/namespace` (the surface frontends consume)
 - `crates/omnifs-engine/src/tree`
 - `crates/omnifs-daemon/src/frontends.rs`
 - `crates/omnifs-cli/src/runtime.rs`
