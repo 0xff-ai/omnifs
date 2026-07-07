@@ -47,6 +47,47 @@ pub struct DaemonArgs {
     /// the container entrypoint does not (it runs in container/rewrite mode).
     #[arg(long)]
     pub host_native: bool,
+    /// Serve a specific frontend at a mount point, as `<kind>=<mount_point>`
+    /// (`fuse` or `nfs`), repeatable. Absent: the platform-default frontend at
+    /// the resolved mount point (today's behavior end to end; the container
+    /// entrypoint and CLI launcher pass nothing here). Present: serve exactly the
+    /// listed set, each at its own mount point (duplicate mount points are
+    /// rejected). This is a daemon surface only; the CLI does not expose it yet.
+    #[arg(long = "frontend", value_name = "KIND=MOUNT_POINT", value_parser = parse_frontend_mount)]
+    pub frontends: Vec<FrontendMount>,
+}
+
+/// One requested frontend: a protocol kind bound to a mount point. Built from the
+/// `--frontend <kind>=<mount_point>` flag and by [`DaemonContext`] when it fills
+/// in the platform default.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FrontendMount {
+    pub kind: FrontendKind,
+    pub mount_point: PathBuf,
+}
+
+/// Parse a `--frontend <kind>=<mount_point>` value. The kind is `fuse` or `nfs`;
+/// the mount point must be non-empty.
+fn parse_frontend_mount(value: &str) -> Result<FrontendMount, String> {
+    let (kind, mount) = value
+        .split_once('=')
+        .ok_or_else(|| format!("expected `<kind>=<mount_point>`, got `{value}`"))?;
+    let kind = match kind {
+        "fuse" => FrontendKind::Fuse,
+        "nfs" => FrontendKind::Nfs,
+        other => {
+            return Err(format!(
+                "unknown frontend kind `{other}`; expected `fuse` or `nfs`"
+            ));
+        },
+    };
+    if mount.is_empty() {
+        return Err("frontend mount point must not be empty".to_string());
+    }
+    Ok(FrontendMount {
+        kind,
+        mount_point: PathBuf::from(mount),
+    })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -68,6 +109,14 @@ impl FrontendKind {
     pub(crate) fn platform_default() -> Self {
         Self::Nfs
     }
+
+    /// The `--frontend` flag token for this kind (`fuse` or `nfs`).
+    pub(crate) fn as_flag(self) -> &'static str {
+        match self {
+            Self::Fuse => "fuse",
+            Self::Nfs => "nfs",
+        }
+    }
 }
 
 impl DaemonArgs {
@@ -81,6 +130,7 @@ impl DaemonArgs {
             nfs_state_dir: None,
             nfs_trace: None,
             root_symlinks: false,
+            frontends: Vec::new(),
         }
     }
 
@@ -104,8 +154,32 @@ impl DaemonArgs {
         if self.host_native {
             args.push("--host-native".to_string());
         }
+        for frontend in &self.frontends {
+            args.push("--frontend".to_string());
+            args.push(format!(
+                "{}={}",
+                frontend.kind.as_flag(),
+                frontend.mount_point.display()
+            ));
+        }
         args
     }
+}
+
+/// A `fuse=/a, nfs=/b` rendering of the served frontend set for the startup log.
+fn frontend_summary(context: &DaemonContext) -> String {
+    context
+        .frontends()
+        .iter()
+        .map(|frontend| {
+            format!(
+                "{}={}",
+                frontend.kind.as_flag(),
+                frontend.mount_point.display()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn push_option_path(args: &mut Vec<String>, flag: &str, value: Option<&PathBuf>) {
@@ -162,8 +236,8 @@ pub fn run(args: DaemonArgs) -> anyhow::Result<()> {
         }
     }
 
-    let frontend = context.frontend();
-    let frontends = frontends::Frontend::from_context(&context, Arc::clone(&registry));
+    let frontend_summary = frontend_summary(&context);
+    let frontends = frontends::Frontends::from_context(&context, Arc::clone(&registry));
 
     // Host-native serves a Unix socket (auth is filesystem permissions); the
     // container serves TCP. A host-native daemon additionally serves TCP only
@@ -232,9 +306,9 @@ pub fn run(args: DaemonArgs) -> anyhow::Result<()> {
     install_signal_handler(&daemon, &rt);
 
     info!(
-        frontend = ?frontend,
+        frontends = %frontend_summary,
         mount_point = %daemon.mount_point().display(),
-        "starting filesystem frontend"
+        "starting filesystem frontends"
     );
     telemetry.daemon_event(
         DaemonEvent::FrontendServing,

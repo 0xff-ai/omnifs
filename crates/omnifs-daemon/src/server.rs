@@ -44,7 +44,7 @@ use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
 use crate::context::DaemonContext;
-use crate::frontends::Frontend;
+use crate::frontends::Frontends;
 
 const CONTROL_TOKEN_BYTES: usize = 32;
 const BEARER_PREFIX: &str = "Bearer ";
@@ -146,7 +146,7 @@ pub struct Daemon {
     context: DaemonContext,
     registry: Arc<MountRuntimes>,
     sink: Option<Arc<InspectorSink>>,
-    frontends: Frontend,
+    frontends: Frontends,
     control_token: ControlToken,
     /// The last reconcile's failed mounts, surfaced in `status` so a dark mount
     /// is visible with its reason instead of silently absent.
@@ -158,7 +158,7 @@ impl Daemon {
         context: DaemonContext,
         registry: Arc<MountRuntimes>,
         sink: Option<Arc<InspectorSink>>,
-        frontends: Frontend,
+        frontends: Frontends,
         control_token: ControlToken,
     ) -> Self {
         Self {

@@ -2,7 +2,7 @@
 
 use anyhow::Context as _;
 
-use crate::app::{DaemonArgs, FrontendKind};
+use crate::app::{DaemonArgs, FrontendKind, FrontendMount};
 use omnifs_api::{
     API_MAJOR, API_MINOR, DaemonBackend, DaemonHealth, DaemonStatus, DaemonSubsystem, FrontendInfo,
     HealthState, MountFailure, MountInfo, OMNIFS_CONTAINER_NAME_ENV, OMNIFS_IMAGE_ENV,
@@ -24,8 +24,11 @@ use std::path::{Path, PathBuf};
 #[derive(Debug)]
 pub(crate) struct DaemonContext {
     layout: WorkspaceLayout,
-    mount_point: PathBuf,
-    frontend: FrontendKind,
+    /// The requested frontend set, each with its own mount point. Never empty:
+    /// an absent `--frontend` flag resolves to the single platform default at the
+    /// resolved mount point. The first entry is the primary, so a single-mount
+    /// caller (the container and CLI launcher paths) keeps today's behavior.
+    frontends: Vec<FrontendMount>,
     backend: DaemonBackend,
     host_native: bool,
     root_symlinks: bool,
@@ -56,10 +59,7 @@ impl DaemonContext {
     pub(crate) fn resolve(args: DaemonArgs) -> anyhow::Result<Self> {
         let workspace: Workspace<Daemon> = Workspace::resolve()?;
         let layout = workspace.into_layout();
-        let frontend = FrontendKind::platform_default();
-        let mount_point = omnifs_workspace::layout::resolve_mount_point().ok_or_else(|| {
-            anyhow::anyhow!("cannot resolve mount point: set HOME or OMNIFS_MOUNT_POINT")
-        })?;
+        let frontends = resolve_frontends(args.frontends.clone())?;
         let process = ProcessInfo::current();
         let backend = if args.host_native {
             DaemonBackend::Native { pid: process.pid }
@@ -77,8 +77,7 @@ impl DaemonContext {
 
         Ok(Self {
             layout,
-            mount_point,
-            frontend,
+            frontends,
             backend,
             host_native: args.host_native,
             root_symlinks: args.root_symlinks,
@@ -91,7 +90,9 @@ impl DaemonContext {
 
     pub(crate) fn prepare_startup_dirs(&self) -> anyhow::Result<()> {
         std::fs::create_dir_all(&self.layout.config_dir)?;
-        std::fs::create_dir_all(&self.mount_point)?;
+        for frontend in &self.frontends {
+            std::fs::create_dir_all(&frontend.mount_point)?;
+        }
         std::fs::create_dir_all(&self.layout.cache_dir)?;
         Ok(())
     }
@@ -172,9 +173,20 @@ impl DaemonContext {
     }
 
     /// Assemble the runtime record for a host-native daemon: a unix endpoint,
-    /// the native backend pid, this build's instance id, and the serving
+    /// the native backend pid, this build's instance id, and every served
     /// frontend at its mount point.
     pub(crate) fn runtime_record(&self) -> RuntimeRecord {
+        let frontends = self
+            .frontends
+            .iter()
+            .map(|frontend| FrontendRecord {
+                kind: match frontend.kind {
+                    FrontendKind::Fuse => RecordFrontendKind::Fuse,
+                    FrontendKind::Nfs => RecordFrontendKind::Nfs,
+                },
+                mount_point: frontend.mount_point.clone(),
+            })
+            .collect();
         RuntimeRecord::new(
             Endpoint::Unix {
                 path: self.control_socket(),
@@ -183,13 +195,7 @@ impl DaemonContext {
                 pid: self.process.pid,
             },
             self.instance_id.clone(),
-            vec![FrontendRecord {
-                kind: match self.frontend {
-                    FrontendKind::Fuse => RecordFrontendKind::Fuse,
-                    FrontendKind::Nfs => RecordFrontendKind::Nfs,
-                },
-                mount_point: self.mount_point.clone(),
-            }],
+            frontends,
         )
     }
 
@@ -227,12 +233,17 @@ impl DaemonContext {
         }
     }
 
+    /// The primary (first) frontend's mount point. Status, the shutdown report,
+    /// and the container root-symlink nicety key on this; a single-frontend
+    /// daemon has exactly one.
     pub(crate) fn mount_point(&self) -> &Path {
-        &self.mount_point
+        &self.frontends[0].mount_point
     }
 
-    pub(crate) fn frontend(&self) -> FrontendKind {
-        self.frontend
+    /// Every requested frontend, in order. The registry builds one renderer per
+    /// entry over one shared namespace.
+    pub(crate) fn frontends(&self) -> &[FrontendMount] {
+        &self.frontends
     }
 
     pub(crate) fn root_symlinks(&self) -> bool {
@@ -253,14 +264,17 @@ impl DaemonContext {
         options
     }
 
+    /// `serving` is the subset of requested frontends currently present in the OS
+    /// mount table. `frontend` (singular) is kept as the first served entry for
+    /// pre-registry clients; `frontends` reports the whole served set.
     pub(crate) fn status(
         &self,
-        frontend: Option<FrontendInfo>,
+        serving: Vec<FrontendInfo>,
         mounts: Vec<MountInfo>,
         failed: Vec<MountFailure>,
         credential_degraded: &[(String, String)],
     ) -> DaemonStatus {
-        let health = self.health(frontend.as_ref(), &mounts, &failed, credential_degraded);
+        let health = self.health(&serving, &mounts, &failed, credential_degraded);
         DaemonStatus {
             version: env!("CARGO_PKG_VERSION").to_string(),
             api_major: API_MAJOR,
@@ -268,11 +282,12 @@ impl DaemonContext {
             pid: self.process.pid,
             instance_id: self.instance_id.clone(),
             executable: self.process.executable.clone(),
-            mount_point: self.mount_point.clone(),
+            mount_point: self.mount_point().to_path_buf(),
             config_dir: self.layout.config_dir.clone(),
             cache_dir: self.layout.cache_dir.clone(),
             providers_dir: self.layout.providers_dir.clone(),
-            frontend,
+            frontend: serving.first().cloned(),
+            frontends: serving,
             backend: self.backend.clone(),
             mounts,
             failed,
@@ -282,7 +297,7 @@ impl DaemonContext {
 
     fn health(
         &self,
-        frontend: Option<&FrontendInfo>,
+        serving: &[FrontendInfo],
         mounts: &[MountInfo],
         failed: &[MountFailure],
         credential_degraded: &[(String, String)],
@@ -304,28 +319,44 @@ impl DaemonContext {
                 HealthState::Healthy,
                 backend_health_message(&self.backend),
             ),
-            self.frontend_health(frontend),
+            self.frontend_health(serving),
             mount_health(mounts, failed, credential_degraded),
         ])
     }
 
-    fn frontend_health(&self, frontend: Option<&FrontendInfo>) -> SubsystemHealth {
-        match frontend {
-            Some(frontend) => SubsystemHealth::new(
-                DaemonSubsystem::Frontend,
-                HealthState::Healthy,
+    /// Frontend health over the whole requested set: `Healthy` only when every
+    /// requested frontend is serving, `Degraded` when some but not all are, and
+    /// `Starting` when none are yet. The message always lists the requested set
+    /// so a partial outage names what is missing.
+    fn frontend_health(&self, serving: &[FrontendInfo]) -> SubsystemHealth {
+        let requested = self.frontends.len();
+        let up = serving.len();
+        let listed = self
+            .frontends
+            .iter()
+            .map(|frontend| {
                 format!(
-                    "{} serving at {}",
-                    frontend.fs_type,
-                    self.mount_point.display()
-                ),
-            ),
-            None => SubsystemHealth::new(
-                DaemonSubsystem::Frontend,
-                HealthState::Starting,
-                format!("not serving at {}", self.mount_point.display()),
-            ),
-        }
+                    "{} at {}",
+                    frontend.kind.as_flag(),
+                    frontend.mount_point.display()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let (state, message) = if up == 0 {
+            (HealthState::Starting, format!("not serving ({listed})"))
+        } else if up < requested {
+            (
+                HealthState::Degraded,
+                format!("{up}/{requested} frontend(s) serving ({listed})"),
+            )
+        } else {
+            (
+                HealthState::Healthy,
+                format!("{up}/{requested} frontend(s) serving ({listed})"),
+            )
+        };
+        SubsystemHealth::new(DaemonSubsystem::Frontend, state, message)
     }
 }
 
@@ -391,6 +422,37 @@ fn generate_instance_id() -> String {
         bytes.copy_from_slice(&pid.to_le_bytes());
     }
     hex::encode(bytes)
+}
+
+/// Resolve the requested frontend set. An empty request is the default path: the
+/// single platform-default frontend at the resolved mount point, preserving
+/// today's end-to-end behavior. A non-empty request is served verbatim, after
+/// rejecting duplicate mount points and (off Linux) the Linux-only FUSE frontend.
+fn resolve_frontends(requested: Vec<FrontendMount>) -> anyhow::Result<Vec<FrontendMount>> {
+    if requested.is_empty() {
+        let mount_point = omnifs_workspace::layout::resolve_mount_point().ok_or_else(|| {
+            anyhow::anyhow!("cannot resolve mount point: set HOME or OMNIFS_MOUNT_POINT")
+        })?;
+        return Ok(vec![FrontendMount {
+            kind: FrontendKind::platform_default(),
+            mount_point,
+        }]);
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    for frontend in &requested {
+        if !seen.insert(frontend.mount_point.clone()) {
+            anyhow::bail!(
+                "duplicate frontend mount point {}",
+                frontend.mount_point.display()
+            );
+        }
+        #[cfg(not(target_os = "linux"))]
+        if frontend.kind == FrontendKind::Fuse {
+            anyhow::bail!("the fuse frontend is only available on Linux");
+        }
+    }
+    Ok(requested)
 }
 
 impl ProcessInfo {

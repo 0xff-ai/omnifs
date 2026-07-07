@@ -21,7 +21,7 @@ pub const API_MAJOR: u16 = 3;
 
 /// Control API minor version. The CLI warns but proceeds when the daemon's
 /// minor differs. Bump for additive, backward-compatible additions.
-pub const API_MINOR: u16 = 3;
+pub const API_MINOR: u16 = 4;
 
 /// Docker container name environment variable set by launchers and read by the
 /// daemon when reporting backend identity.
@@ -100,9 +100,16 @@ pub struct DaemonStatus {
     pub cache_dir: PathBuf,
     #[schema(value_type = String)]
     pub providers_dir: PathBuf,
-    /// The serving filesystem frontend (FUSE today; the protocol stays
-    /// frontend-agnostic for future NFSv4/FSKit modes), when one is up.
+    /// The first serving filesystem frontend, when one is up. Kept for
+    /// pre-registry clients that read a single frontend; `frontends` reports the
+    /// whole served set. Removing this singular field is phase-5 (API-major)
+    /// scope.
     pub frontend: Option<FrontendInfo>,
+    /// Every filesystem frontend currently serving. A daemon serves one renderer
+    /// per requested frontend over a single shared namespace (FUSE and NFS can
+    /// run concurrently on Linux); the default is the single platform frontend.
+    #[serde(default)]
+    pub frontends: Vec<FrontendInfo>,
     /// Backend serving this daemon, so the CLI tears down and reports the right
     /// backend without inferring it from configuration. Missing identity is not
     /// reclaimable; teardown stops instead of guessing.
