@@ -6,12 +6,13 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use futures::future::{BoxFuture, FutureExt};
 use omnifs_engine::{
-    Attrs, DirCursor, DirEntry, DirPage, EventStream, Namespace, NodeAnswer, NodeId, NsEntryKind,
-    NsError, NsEvent, ReadAnswer, ReadStyle, StabilityClass,
+    Attrs, DirCursor, DirEntry, DirPage, Epoch, EventStream, Namespace, NodeAnswer, NodeId,
+    NsEntryKind, NsError, NsEvent, ReadAnswer, ReadStyle, StabilityClass,
 };
 use tokio::io::{AsyncWriteExt, DuplexStream};
 use tokio::sync::broadcast;
@@ -384,4 +385,412 @@ async fn unix_listener_end_to_end() {
 
     let err = namespace.readlink(NodeId(1)).await.unwrap_err();
     assert_eq!(err, NsError::Invalid);
+}
+
+// ===========================================================================
+// Client-side cache: answer memo and read windows
+// ===========================================================================
+//
+// These tests run a real `WireNamespace` (the memo and read windows live in the
+// client) over a `UnixListener`-served counting stub. Each stub method bumps a
+// per-op call counter, so a counter equals the number of wire round-trips: a
+// memoized answer or a windowed read leaves it unchanged.
+
+/// Effectively-infinite TTL, mirroring the engine's stable-entry policy.
+const STUB_TTL_STATIC: Duration = Duration::from_secs(u32::MAX as u64);
+/// A stable, exact-size ranged file (ttl > 0): windows and the memo engage.
+const STABLE_NODE: NodeId = NodeId(100);
+/// A stable child a directory listing names.
+const CHILD_NODE: NodeId = NodeId(101);
+/// A live file (ttl == 0): never memoized, never windowed.
+const LIVE_NODE: NodeId = NodeId(200);
+/// The node a stub `lookup` resolves to.
+const LOOKUP_CHILD: NodeId = NodeId(300);
+/// The directory parent used by the readdir and lookup tests.
+const PARENT: NodeId = NodeId(50);
+
+/// A deterministic byte at absolute file position `i`, so a windowed slice can be
+/// checked against a read-through reference.
+fn pat(i: u64) -> u8 {
+    (i % 251) as u8
+}
+
+fn stable_attrs(size: u64) -> Attrs {
+    Attrs {
+        kind: NsEntryKind::File,
+        size,
+        ttl: STUB_TTL_STATIC,
+        change: 0,
+        direct_io: false,
+        stability: StabilityClass::Stable,
+        read_style: ReadStyle::Whole,
+    }
+}
+
+fn live_attrs() -> Attrs {
+    Attrs {
+        kind: NsEntryKind::File,
+        size: 1,
+        ttl: Duration::ZERO,
+        change: 0,
+        direct_io: false,
+        stability: StabilityClass::Live,
+        read_style: ReadStyle::Ranged,
+    }
+}
+
+/// A `Namespace` that counts every wire op and serves a stable file, a live file,
+/// a directory child, and a lookup target with the TTLs the cache keys off.
+struct MemoStub {
+    events: broadcast::Sender<NsEvent>,
+    stable_size: u64,
+    getattr_calls: AtomicUsize,
+    getattr_exact_calls: AtomicUsize,
+    read_calls: AtomicUsize,
+    lookup_calls: AtomicUsize,
+    readdir_calls: AtomicUsize,
+}
+
+impl MemoStub {
+    fn new(stable_size: u64) -> Arc<Self> {
+        let (events, _) = broadcast::channel(64);
+        Arc::new(Self {
+            events,
+            stable_size,
+            getattr_calls: AtomicUsize::new(0),
+            getattr_exact_calls: AtomicUsize::new(0),
+            read_calls: AtomicUsize::new(0),
+            lookup_calls: AtomicUsize::new(0),
+            readdir_calls: AtomicUsize::new(0),
+        })
+    }
+
+    /// Attrs for a stat of `node`: the stable file reports its full size, the live
+    /// node reports a ttl == 0 answer, every other node a small stable file.
+    fn attrs_of(&self, node: NodeId) -> Attrs {
+        if node == LIVE_NODE {
+            live_attrs()
+        } else if node == STABLE_NODE {
+            stable_attrs(self.stable_size)
+        } else {
+            stable_attrs(13)
+        }
+    }
+}
+
+impl Namespace for MemoStub {
+    fn lookup<'a>(
+        &'a self,
+        _parent: NodeId,
+        _name: &'a str,
+    ) -> BoxFuture<'a, Result<NodeAnswer, NsError>> {
+        self.lookup_calls.fetch_add(1, Ordering::SeqCst);
+        async move {
+            Ok(NodeAnswer {
+                node: LOOKUP_CHILD,
+                attrs: stable_attrs(13),
+                kind: NsEntryKind::File,
+            })
+        }
+        .boxed()
+    }
+
+    fn getattr(&self, node: NodeId) -> BoxFuture<'_, Result<Attrs, NsError>> {
+        self.getattr_calls.fetch_add(1, Ordering::SeqCst);
+        let attrs = self.attrs_of(node);
+        async move { Ok(attrs) }.boxed()
+    }
+
+    fn getattr_exact(&self, node: NodeId) -> BoxFuture<'_, Result<Attrs, NsError>> {
+        self.getattr_exact_calls.fetch_add(1, Ordering::SeqCst);
+        let attrs = self.attrs_of(node);
+        async move { Ok(attrs) }.boxed()
+    }
+
+    fn readdir(
+        &self,
+        _node: NodeId,
+        _cursor: DirCursor,
+        _budget: usize,
+    ) -> BoxFuture<'_, Result<DirPage, NsError>> {
+        self.readdir_calls.fetch_add(1, Ordering::SeqCst);
+        async move {
+            Ok(DirPage {
+                entries: vec![DirEntry {
+                    name: "child".to_string(),
+                    node: CHILD_NODE,
+                    attrs: stable_attrs(13),
+                    kind: NsEntryKind::File,
+                }],
+                next: None,
+            })
+        }
+        .boxed()
+    }
+
+    fn read(
+        &self,
+        node: NodeId,
+        offset: u64,
+        len: u32,
+    ) -> BoxFuture<'_, Result<ReadAnswer, NsError>> {
+        self.read_calls.fetch_add(1, Ordering::SeqCst);
+        let stable_size = self.stable_size;
+        async move {
+            if node == LIVE_NODE {
+                let bytes: Vec<u8> = (0..u64::from(len)).map(|k| pat(offset + k)).collect();
+                return Ok(ReadAnswer {
+                    bytes,
+                    eof: false,
+                    attrs: live_attrs(),
+                });
+            }
+            let avail = stable_size.saturating_sub(offset);
+            let take = u64::from(len).min(avail);
+            let bytes: Vec<u8> = (0..take).map(|k| pat(offset + k)).collect();
+            let eof = offset + take >= stable_size;
+            Ok(ReadAnswer {
+                bytes,
+                eof,
+                attrs: stable_attrs(stable_size),
+            })
+        }
+        .boxed()
+    }
+
+    fn readlink(&self, _node: NodeId) -> BoxFuture<'_, Result<PathBuf, NsError>> {
+        async move { Err(NsError::Invalid) }.boxed()
+    }
+
+    fn subscribe(&self) -> EventStream {
+        EventStream::from_broadcast(self.events.subscribe())
+    }
+}
+
+/// Attach a real `WireNamespace` to a listener serving `stub`. The returned
+/// tempdir owns the socket path and must outlive the namespace.
+async fn attach_stub(stub: Arc<dyn Namespace>) -> (Arc<WireNamespace>, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("ns.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    tokio::spawn(serve_listener(stub, listener, "memo-inst".to_string()));
+    let ns = WireNamespace::attach(socket, tokio::runtime::Handle::current())
+        .await
+        .expect("attach");
+    (ns, dir)
+}
+
+/// Push `event` from the server's stub and wait until the client has observed it.
+/// The client applies the event to its cache before re-broadcasting it, so a
+/// subscriber that receives it is guaranteed the memo is already pruned.
+async fn push_and_settle(
+    stub_events: &broadcast::Sender<NsEvent>,
+    ns: &WireNamespace,
+    event: NsEvent,
+) {
+    let mut sub = ns.subscribe();
+    // The server's event forwarder subscribes at connection setup; wait for it so
+    // the broadcast is not dropped for want of a receiver.
+    while stub_events.receiver_count() == 0 {
+        tokio::task::yield_now().await;
+    }
+    stub_events.send(event.clone()).unwrap();
+    loop {
+        match sub.recv().await {
+            Some(got) if got == event => break,
+            Some(_) => {},
+            None => panic!("client event stream closed before the event arrived"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn ttl_zero_answers_never_served_from_memo() {
+    let stub = MemoStub::new(1);
+    let (ns, _dir) = attach_stub(Arc::clone(&stub) as Arc<dyn Namespace>).await;
+
+    ns.getattr(LIVE_NODE).await.unwrap();
+    ns.getattr(LIVE_NODE).await.unwrap();
+    assert_eq!(
+        stub.getattr_calls.load(Ordering::SeqCst),
+        2,
+        "a live (ttl == 0) node must round-trip every getattr"
+    );
+}
+
+#[tokio::test]
+async fn readdir_seed_serves_getattr_until_invalidated() {
+    let stub = MemoStub::new(13);
+    let (ns, _dir) = attach_stub(Arc::clone(&stub) as Arc<dyn Namespace>).await;
+
+    let page = ns.readdir(PARENT, DirCursor::start(), 0).await.unwrap();
+    assert_eq!(page.entries[0].node, CHILD_NODE);
+
+    // The readdir carried the child's attrs, so a stat resolves from the memo.
+    ns.getattr(CHILD_NODE).await.unwrap();
+    assert_eq!(
+        stub.getattr_calls.load(Ordering::SeqCst),
+        0,
+        "getattr must be served from the readdir seed"
+    );
+    // getattr_exact shares the same per-node memo (a ttl > 0 entry already carries
+    // the exact size a probe would learn).
+    ns.getattr_exact(CHILD_NODE).await.unwrap();
+    assert_eq!(
+        stub.getattr_exact_calls.load(Ordering::SeqCst),
+        0,
+        "getattr_exact must be served from the readdir seed"
+    );
+
+    push_and_settle(
+        &stub.events,
+        &ns,
+        NsEvent::InvalidateSubtree {
+            node: CHILD_NODE,
+            epoch: Epoch(1),
+        },
+    )
+    .await;
+
+    ns.getattr(CHILD_NODE).await.unwrap();
+    assert_eq!(
+        stub.getattr_calls.load(Ordering::SeqCst),
+        1,
+        "an invalidation must force the next getattr to round-trip"
+    );
+}
+
+#[tokio::test]
+async fn lookup_memo_honors_parent_named_events() {
+    let stub = MemoStub::new(13);
+    let (ns, _dir) = attach_stub(Arc::clone(&stub) as Arc<dyn Namespace>).await;
+
+    let first = ns.lookup(PARENT, "child").await.unwrap();
+    let second = ns.lookup(PARENT, "child").await.unwrap();
+    assert_eq!(first.node, second.node);
+    assert_eq!(
+        stub.lookup_calls.load(Ordering::SeqCst),
+        1,
+        "the second lookup must be served from the memo"
+    );
+
+    // The event names the parent, not the child: the (parent, name) entry drops.
+    push_and_settle(
+        &stub.events,
+        &ns,
+        NsEvent::InvalidateSubtree {
+            node: PARENT,
+            epoch: Epoch(1),
+        },
+    )
+    .await;
+
+    ns.lookup(PARENT, "child").await.unwrap();
+    assert_eq!(
+        stub.lookup_calls.load(Ordering::SeqCst),
+        2,
+        "a parent-named event must drop the lookup memo"
+    );
+}
+
+#[tokio::test]
+async fn read_windows_batch_sequential_reads() {
+    let size = 8 * 1024 * 1024u64;
+    let chunk = 128 * 1024u32;
+    let stub = MemoStub::new(size);
+    let (ns, _dir) = attach_stub(Arc::clone(&stub) as Arc<dyn Namespace>).await;
+
+    // Seed the node's exact size so the read path knows it is windowable.
+    assert_eq!(ns.getattr(STABLE_NODE).await.unwrap().size, size);
+
+    let before = stub.read_calls.load(Ordering::SeqCst);
+    let mut offset = 0u64;
+    while offset < size {
+        let answer = ns.read(STABLE_NODE, offset, chunk).await.unwrap();
+        let expected_len =
+            usize::try_from(u64::from(chunk).min(size - offset)).expect("chunk fits usize");
+        assert_eq!(answer.bytes.len(), expected_len);
+        for (k, byte) in answer.bytes.iter().enumerate() {
+            assert_eq!(
+                *byte,
+                pat(offset + k as u64),
+                "byte mismatch at {offset}+{k}"
+            );
+        }
+        assert_eq!(answer.eof, offset + answer.bytes.len() as u64 >= size);
+        offset += answer.bytes.len() as u64;
+    }
+    let windows = stub.read_calls.load(Ordering::SeqCst) - before;
+    assert_eq!(windows, 4, "8 MiB in 2 MiB windows is exactly 4 wire reads");
+
+    // The window drops on the node's event: re-seed the size, then the next read
+    // must refetch rather than serve the stale window.
+    push_and_settle(
+        &stub.events,
+        &ns,
+        NsEvent::InvalidateSubtree {
+            node: STABLE_NODE,
+            epoch: Epoch(1),
+        },
+    )
+    .await;
+    ns.getattr(STABLE_NODE).await.unwrap();
+    let before = stub.read_calls.load(Ordering::SeqCst);
+    ns.read(STABLE_NODE, 0, chunk).await.unwrap();
+    assert_eq!(
+        stub.read_calls.load(Ordering::SeqCst) - before,
+        1,
+        "the window must have dropped on the event, forcing a refetch"
+    );
+}
+
+#[tokio::test]
+async fn ttl_zero_reads_never_window() {
+    let stub = MemoStub::new(8 * 1024 * 1024);
+    let (ns, _dir) = attach_stub(Arc::clone(&stub) as Arc<dyn Namespace>).await;
+
+    let chunk = 128 * 1024u32;
+    for i in 0..4u64 {
+        ns.read(LIVE_NODE, i * u64::from(chunk), chunk)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        stub.read_calls.load(Ordering::SeqCst),
+        4,
+        "a ttl == 0 node reads straight through, one wire read per read"
+    );
+}
+
+#[tokio::test]
+async fn concurrent_reads_do_not_deadlock_or_double_fetch() {
+    let size = 8 * 1024 * 1024u64;
+    let chunk = 128 * 1024u32;
+    let stub = MemoStub::new(size);
+    let (ns, _dir) = attach_stub(Arc::clone(&stub) as Arc<dyn Namespace>).await;
+    ns.getattr(STABLE_NODE).await.unwrap();
+
+    let before = stub.read_calls.load(Ordering::SeqCst);
+    let ns1 = Arc::clone(&ns);
+    let ns2 = Arc::clone(&ns);
+    // Two tasks read into the same first window at once.
+    let t1 = tokio::spawn(async move { ns1.read(STABLE_NODE, 0, chunk).await });
+    let t2 = tokio::spawn(async move { ns2.read(STABLE_NODE, u64::from(chunk), chunk).await });
+    let r1 = t1.await.unwrap().unwrap();
+    let r2 = t2.await.unwrap().unwrap();
+    assert_eq!(r1.bytes[0], pat(0));
+    assert_eq!(r2.bytes[0], pat(u64::from(chunk)));
+
+    // At most one window fetch plus one pass-through: never one fetch per reader.
+    // The chosen semantics: while a window fetch is in flight for a node, a
+    // concurrent read on that node passes through directly rather than blocking.
+    let reads = stub.read_calls.load(Ordering::SeqCst) - before;
+    assert!(reads <= 2, "expected at most 2 wire reads, got {reads}");
+
+    // A later read now hits the stored window with no wire read.
+    let before = stub.read_calls.load(Ordering::SeqCst);
+    ns.read(STABLE_NODE, 2 * u64::from(chunk), chunk)
+        .await
+        .unwrap();
+    assert_eq!(stub.read_calls.load(Ordering::SeqCst) - before, 0);
 }

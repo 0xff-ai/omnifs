@@ -23,6 +23,7 @@ use tokio::runtime::Handle;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::time::sleep;
 
+use crate::cache::{WINDOW_BYTES, WireCache, window_start};
 use crate::frame::{Frame, KIND_EVENT, KIND_REQUEST, KIND_RESPONSE, read_frame, write_frame};
 use crate::{AttachEvent, Handshake, PROTOCOL, WireError, WireRequest, WireResponse};
 
@@ -52,6 +53,10 @@ pub struct WireNamespace {
     outgoing: mpsc::UnboundedSender<Outgoing>,
     events: broadcast::Sender<NsEvent>,
     attach_events: broadcast::Sender<AttachEvent>,
+    /// The client-side batching cache: an answer memo and read windows, both
+    /// keyed off the engine-decided [`Attrs::ttl`]. Shared with the manager task,
+    /// which drops a node's cached state when an invalidation event names it.
+    cache: Arc<WireCache>,
     /// The current server instance id, updated by the manager on every
     /// (re)connect. `Arc<Mutex<..>>` because the manager writes it while callers
     /// read it; the crate deps forbid `arc-swap`.
@@ -78,6 +83,7 @@ impl WireNamespace {
         let (events_tx, _) = broadcast::channel(EVENT_CAPACITY);
         let (attach_tx, _) = broadcast::channel(ATTACH_CAPACITY);
         let instance_slot = Arc::new(Mutex::new(instance_id.clone()));
+        let cache = Arc::new(WireCache::new());
 
         let manager = rt.spawn(manager_loop(ManagerState {
             socket,
@@ -87,6 +93,7 @@ impl WireNamespace {
             outgoing_rx,
             events: events_tx.clone(),
             attach_events: attach_tx.clone(),
+            cache: Arc::clone(&cache),
         }));
 
         Ok(Arc::new(Self {
@@ -94,6 +101,7 @@ impl WireNamespace {
             events: events_tx,
             attach_events: attach_tx,
             instance_id: instance_slot,
+            cache,
             _manager: AbortOnDrop(manager),
         }))
     }
@@ -128,6 +136,22 @@ impl WireNamespace {
             .map_err(|_| NsError::Network)?;
         reply_rx.await.map_err(|_| NsError::Network)?
     }
+
+    /// A read that goes straight to the server, bypassing the window cache. Used
+    /// for the pass-through paths (a `ttl == 0` node, a large read, or a
+    /// concurrent read while a window fetch is already in flight) and for the
+    /// window fetch itself.
+    async fn read_passthrough(
+        &self,
+        node: NodeId,
+        offset: u64,
+        len: u32,
+    ) -> Result<ReadAnswer, NsError> {
+        match self.call(WireRequest::Read { node, offset, len }).await? {
+            WireResponse::Read(answer) => answer,
+            _ => Err(variant_mismatch()),
+        }
+    }
 }
 
 /// A [`WireResponse`] whose variant did not match the request it answers. A
@@ -146,30 +170,54 @@ impl Namespace for WireNamespace {
     ) -> BoxFuture<'a, Result<NodeAnswer, NsError>> {
         let name = name.to_string();
         async move {
-            match self.call(WireRequest::Lookup { parent, name }).await? {
-                WireResponse::Lookup(answer) => answer,
-                _ => Err(variant_mismatch()),
+            // A memoized lookup (only ever a ttl>0 answer) serves without a hop.
+            if let Some(answer) = self.cache.lookup(parent, &name) {
+                return Ok(answer);
             }
+            let answer = match self
+                .call(WireRequest::Lookup {
+                    parent,
+                    name: name.clone(),
+                })
+                .await?
+            {
+                WireResponse::Lookup(answer) => answer?,
+                _ => return Err(variant_mismatch()),
+            };
+            self.cache.put_lookup(parent, &name, &answer);
+            Ok(answer)
         }
         .boxed()
     }
 
     fn getattr(&self, node: NodeId) -> BoxFuture<'_, Result<Attrs, NsError>> {
         async move {
-            match self.call(WireRequest::Getattr { node }).await? {
-                WireResponse::Getattr(answer) => answer,
-                _ => Err(variant_mismatch()),
+            if let Some(attrs) = self.cache.attrs(node) {
+                return Ok(attrs);
             }
+            let attrs = match self.call(WireRequest::Getattr { node }).await? {
+                WireResponse::Getattr(answer) => answer?,
+                _ => return Err(variant_mismatch()),
+            };
+            self.cache.put_attrs(node, &attrs);
+            Ok(attrs)
         }
         .boxed()
     }
 
     fn getattr_exact(&self, node: NodeId) -> BoxFuture<'_, Result<Attrs, NsError>> {
         async move {
-            match self.call(WireRequest::GetattrExact { node }).await? {
-                WireResponse::GetattrExact(answer) => answer,
-                _ => Err(variant_mismatch()),
+            // A ttl>0 memo entry already carries the exact, stable size that
+            // `getattr_exact` would otherwise probe for, so it serves both.
+            if let Some(attrs) = self.cache.attrs(node) {
+                return Ok(attrs);
             }
+            let attrs = match self.call(WireRequest::GetattrExact { node }).await? {
+                WireResponse::GetattrExact(answer) => answer?,
+                _ => return Err(variant_mismatch()),
+            };
+            self.cache.put_attrs(node, &attrs);
+            Ok(attrs)
         }
         .boxed()
     }
@@ -181,7 +229,10 @@ impl Namespace for WireNamespace {
         budget: usize,
     ) -> BoxFuture<'_, Result<DirPage, NsError>> {
         async move {
-            match self
+            // Directory pages are never cached (pagination cursors carry resume
+            // state), but every ttl>0 child seeds the answer memo so the walk's
+            // per-child stat chatter resolves locally.
+            let page = match self
                 .call(WireRequest::Readdir {
                     node,
                     cursor,
@@ -189,9 +240,11 @@ impl Namespace for WireNamespace {
                 })
                 .await?
             {
-                WireResponse::Readdir(answer) => answer,
-                _ => Err(variant_mismatch()),
-            }
+                WireResponse::Readdir(answer) => answer?,
+                _ => return Err(variant_mismatch()),
+            };
+            self.cache.seed_dir_entries(node, &page.entries);
+            Ok(page)
         }
         .boxed()
     }
@@ -203,9 +256,41 @@ impl Namespace for WireNamespace {
         len: u32,
     ) -> BoxFuture<'_, Result<ReadAnswer, NsError>> {
         async move {
-            match self.call(WireRequest::Read { node, offset, len }).await? {
-                WireResponse::Read(answer) => answer,
-                _ => Err(variant_mismatch()),
+            // Only a small read on a stable, exact-size (ttl>0) node windows;
+            // everything else passes through byte-for-byte identical.
+            let Some(size) = self.cache.known_size(node) else {
+                return self.read_passthrough(node, offset, len).await;
+            };
+            if u64::from(len) >= WINDOW_BYTES {
+                return self.read_passthrough(node, offset, len).await;
+            }
+            if let Some(answer) = self.cache.window_slice(node, offset, len, size) {
+                return Ok(answer);
+            }
+            // Miss: claim the sole window fetch for this node, or, if one is
+            // already outstanding, read straight through to avoid a duplicate.
+            if !self.cache.try_begin_window(node) {
+                return self.read_passthrough(node, offset, len).await;
+            }
+            // A concurrent fetch may have filled the window between the miss and
+            // the claim; if so, release the claim and serve it.
+            if let Some(answer) = self.cache.window_slice(node, offset, len, size) {
+                self.cache.abort_window(node);
+                return Ok(answer);
+            }
+            let start = window_start(offset);
+            let want = u64::from(len)
+                .max(WINDOW_BYTES)
+                .min(size.saturating_sub(start));
+            let win_len = u32::try_from(want).unwrap_or(u32::MAX);
+            match self.read_passthrough(node, start, win_len).await {
+                Ok(window) => Ok(self
+                    .cache
+                    .finish_window(node, start, window, offset, len, size)),
+                Err(error) => {
+                    self.cache.abort_window(node);
+                    Err(error)
+                },
             }
         }
         .boxed()
@@ -239,6 +324,7 @@ struct ManagerState {
     outgoing_rx: mpsc::UnboundedReceiver<Outgoing>,
     events: broadcast::Sender<NsEvent>,
     attach_events: broadcast::Sender<AttachEvent>,
+    cache: Arc<WireCache>,
 }
 
 /// The single task that owns the connection: it assigns request ids, tracks
@@ -255,7 +341,7 @@ async fn manager_loop(mut state: ManagerState) {
 
             frame = state.connection.frame_rx.recv() => {
                 if let Some(frame) = frame {
-                    handle_inbound(&frame, &mut pending, &state.events);
+                    handle_inbound(&frame, &mut pending, &state.events, &state.cache);
                 } else {
                     // The connection died: fail every in-flight request, then
                     // reconnect forever (aborted only by dropping the namespace).
@@ -265,6 +351,10 @@ async fn manager_loop(mut state: ManagerState) {
                     match connect_with_backoff(&state.socket, None).await {
                         Ok((connection, new_instance)) => {
                             if new_instance != state.instance {
+                                // A restarted daemon renumbered every NodeId, so
+                                // every memoized answer is stale; drop the cache
+                                // before the frontend re-resolves from the root.
+                                state.cache.clear();
                                 let _ = state.attach_events.send(AttachEvent::Reattached {
                                     old_instance: state.instance.clone(),
                                     new_instance: new_instance.clone(),
@@ -324,6 +414,7 @@ fn handle_inbound(
     frame: &Frame,
     pending: &mut HashMap<u64, oneshot::Sender<Result<WireResponse, NsError>>>,
     events: &broadcast::Sender<NsEvent>,
+    cache: &WireCache,
 ) {
     match frame.kind {
         KIND_RESPONSE => {
@@ -338,6 +429,10 @@ fn handle_inbound(
         },
         KIND_EVENT => {
             if let Ok(event) = postcard::from_bytes::<NsEvent>(&frame.body) {
+                // Drop the named node's cached state before re-broadcasting, so a
+                // subscriber that observes the event never races a stale answer:
+                // if it saw the event, the memo is already pruned.
+                cache.apply_event(&event);
                 let _ = events.send(event);
             }
         },

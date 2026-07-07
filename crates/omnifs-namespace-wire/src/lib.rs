@@ -27,6 +27,7 @@
 //! callers even when the server answers out of order. Events carry
 //! `request_id = 0` and `kind = KIND_EVENT`.
 
+mod cache;
 mod client;
 mod frame;
 mod server;
