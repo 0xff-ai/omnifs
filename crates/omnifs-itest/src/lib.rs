@@ -6,11 +6,11 @@ pub mod tape;
 use omnifs_core::path::{Path, Segment};
 use omnifs_engine::GitCloner;
 use omnifs_engine::test_support::cache::{Caches, Record as CacheRecord, RecordKind};
-use omnifs_engine::test_support::{Op, TestOp};
+use omnifs_engine::test_support::{ObjectId, Op, TestOp};
 use omnifs_engine::{BuildError, Engine, EngineError, HostContext};
 use omnifs_wit::provider::types::{
-    ByteSource, Callout, Effects, HttpRequest, ListChildrenResult, LookupChildResult, OpResult,
-    ReadFileOutcome, ReadFileResult,
+    ByteSource, Callout, CanonicalInput, Effects, HttpRequest, ListChildrenResult,
+    LookupChildResult, OpResult, ReadFileOutcome, ReadFileResult,
 };
 use omnifs_workspace::ids::{ProviderId, ProviderMeta, ProviderName, ProviderRef};
 use omnifs_workspace::mounts::Spec;
@@ -113,6 +113,39 @@ impl RuntimeHarness {
             content_type: path.content_type_mime(None).to_string(),
             path,
             cached_canonical: None,
+        })
+    }
+
+    /// Start a revalidating read: push the path's cached canonical back to the
+    /// provider with `revalidate: true`, the exact op shape the engine's
+    /// background revalidation timer sends through `revalidate_file`, so the
+    /// provider issues a conditional fetch against the stored validator.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the path has no cached canonical: a revalidation only makes
+    /// sense after a prior step warmed the object cache.
+    pub fn revalidate(&self, path: &str) -> Result<TestOp<'_>, EngineError> {
+        let parsed = parse_path(path);
+        let cached = self
+            .runtime
+            .cache()
+            .cached_canonical_for(&parsed)
+            .unwrap_or_else(|| {
+                panic!("revalidate({path}) requires a prior step to cache the object canonical")
+            });
+        let id = ObjectId::from_bytes(cached.id)
+            .to_wit()
+            .expect("cached canonical id decodes to a wit logical id");
+        self.start_op(Op::ReadFile {
+            content_type: parsed.content_type_mime(None).to_string(),
+            path: parsed,
+            cached_canonical: Some(CanonicalInput {
+                id,
+                validator: cached.validator,
+                bytes: cached.bytes,
+                revalidate: true,
+            }),
         })
     }
 

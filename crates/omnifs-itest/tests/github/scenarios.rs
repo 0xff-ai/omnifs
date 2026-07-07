@@ -50,3 +50,27 @@ fn repo_browse() {
         ],
     });
 }
+
+/// Exercise the engine's conditional-revalidation path: a cold read caches the
+/// repo canonical with its etag validator, then the revalidating read pushes it
+/// back so the provider sends a real `if-none-match` fetch and GitHub answers
+/// 304. On replay the conditional header is part of the tape match key, so this
+/// scenario proves the plain and conditional fetches resolve to distinct
+/// entries.
+#[test]
+fn revalidation() {
+    run(&Scenario {
+        name: "revalidation",
+        dir: "github",
+        config: GITHUB_CONFIG,
+        auth: Some(RecordAuth {
+            token_env: "OMNIFS_RECORD_GITHUB_TOKEN",
+        }),
+        rules: TapeRules::default(),
+        setup: None,
+        steps: &[
+            Step::Read("/octocat/Hello-World/repo.json"),
+            Step::Revalidate("/octocat/Hello-World/repo.json"),
+        ],
+    });
+}

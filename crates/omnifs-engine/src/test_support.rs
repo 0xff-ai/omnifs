@@ -18,6 +18,9 @@ pub use crate::ops::namespace::{
     ChunkOutcome, DirEntry, DirListing, ListOutcome as NamespaceListOutcome, OpenOutcome,
     ReadBytes, ReadOutcome,
 };
+// Exposed so test drivers can turn a cached canonical's opaque host id back
+// into the wit `logical-id` a revalidating `read-file` push requires.
+pub use crate::object_id::ObjectId;
 pub use crate::ops::op::Op;
 pub use crate::runtime::wasm::{component_engine, provider_compiler_strategy};
 pub use crate::tree::{PaginationControl, Synthetic, SyntheticContent, probe_live_growth};

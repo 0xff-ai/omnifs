@@ -56,6 +56,11 @@ pub enum Step {
     List(&'static str),
     /// `read-file` at a path; the trace records attrs, bytes, and effects.
     Read(&'static str),
+    /// Revalidating `read-file` at a path: the cached canonical is pushed back
+    /// with `revalidate: true` (the engine's background-revalidation op shape),
+    /// so the provider issues a conditional fetch against the stored validator.
+    /// Requires a prior step to have cached the path's object canonical.
+    Revalidate(&'static str),
     /// `lookup-child`; the trace records the outcome.
     Lookup {
         parent: &'static str,
@@ -222,6 +227,7 @@ fn build_op<'a>(harness: &'a RuntimeHarness, step: &Step) -> TestOp<'a> {
     match step {
         Step::List(path) => harness.list(path),
         Step::Read(path) => harness.read(path),
+        Step::Revalidate(path) => harness.revalidate(path),
         Step::Lookup { parent, name } => harness.lookup(parent, name),
         Step::TimerTick => harness.timer_tick(),
     }
@@ -296,6 +302,7 @@ fn render_step(
     match step {
         Step::List(_) => render_list(result, &mut lines),
         Step::Read(path) => render_read(result, effects, path, blobs, &mut lines),
+        Step::Revalidate(path) => render_revalidate(result, effects, path, blobs, &mut lines),
         Step::Lookup { .. } => render_lookup(result, &mut lines),
         Step::TimerTick => lines.push("on-event".to_owned()),
     }
@@ -307,6 +314,7 @@ fn op_description(step: &Step) -> String {
     match step {
         Step::List(path) => format!("list {path}"),
         Step::Read(path) => format!("read {path}"),
+        Step::Revalidate(path) => format!("revalidate {path}"),
         Step::Lookup { parent, name } => format!("lookup {parent} :: {name}"),
         Step::TimerTick => "timer-tick".to_owned(),
     }
@@ -362,6 +370,33 @@ fn render_read(
             lines.push("not-found".to_owned());
         },
         other => lines.push(format!("unexpected read result: {other:?}")),
+    }
+}
+
+/// Render a revalidating read. An unchanged revalidation (the provider's
+/// conditional fetch matched the validator) serves `byte-source::canonical`
+/// with no new canonical effects, so the trace states the unchanged outcome
+/// instead of resolving bytes from the (empty) effects. A fresh reload (the
+/// validator no longer matched upstream) re-stores the canonical and renders
+/// exactly like a read.
+fn render_revalidate(
+    result: &wit::OpResult,
+    effects: &wit::Effects,
+    path: &str,
+    blobs: &BlobCache,
+    lines: &mut Vec<String>,
+) {
+    match result {
+        wit::OpResult::ReadFile(wit::ReadFileOutcome::Found(file))
+            if matches!(file.bytes, wit::ByteSource::Canonical) && effects.canonical.is_empty() =>
+        {
+            let stability = stability_str(file.attrs.stability);
+            let version = file.attrs.version_token.as_deref().unwrap_or("-");
+            let size = render_size(&file.attrs.size);
+            lines.push(format!("attrs: {stability} {version} {size}"));
+            lines.push("bytes: unchanged (validator matched, served from warm canonical)".into());
+        },
+        other => render_read(other, effects, path, blobs, lines),
     }
 }
 
@@ -556,6 +591,7 @@ fn step_label(step: &Step) -> String {
     match step {
         Step::List(path) => format!("list-{}", last_segment(path)),
         Step::Read(path) => format!("read-{}", last_segment(path)),
+        Step::Revalidate(path) => format!("revalidate-{}", last_segment(path)),
         Step::Lookup { name, .. } => format!("lookup-{}", sanitize(name)),
         Step::TimerTick => "timer-tick".to_owned(),
     }
@@ -785,6 +821,14 @@ mod tests {
         assert_eq!(
             snapshot_name("revalidation", 1, &Step::TimerTick),
             "revalidation__01-timer-tick"
+        );
+        assert_eq!(
+            snapshot_name(
+                "revalidation",
+                1,
+                &Step::Revalidate("/octocat/Hello-World/repo.json")
+            ),
+            "revalidation__01-revalidate-repo-json"
         );
     }
 }

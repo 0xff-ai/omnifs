@@ -1,0 +1,13 @@
+---
+source: crates/omnifs-itest/src/scenario.rs
+expression: trace.clone()
+---
+## step 1: revalidate /octocat/Hello-World/repo.json
+attrs: dynamic "01eb7eaaef70f97e02c06cd82efc6685879adedaf95f8cd93449db795e049a27" unknown
+bytes: unchanged (validator matched, served from warm canonical)
+canonical:
+  (none)
+fs:
+  (none)
+invalidations:
+  (none)
