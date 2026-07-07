@@ -70,4 +70,15 @@ impl Tree {
     pub fn new(ctx: ServingContext) -> Self {
         Self { ctx }
     }
+
+    /// The mount name of the namespace root (see
+    /// [`ServingContext::root_mount_name`]).
+    pub fn root_mount_name(&self) -> String {
+        self.ctx.root_mount_name()
+    }
+
+    /// Every mount currently served (see [`ServingContext::served_mounts`]).
+    pub fn served_mounts(&self) -> Vec<String> {
+        self.ctx.served_mounts()
+    }
 }

@@ -134,6 +134,14 @@ impl RangedHandle {
     /// pass-through is sync. The renderer calls this when its fh/stateid is
     /// released or invalidated.
     pub fn close(self) -> Result<()> {
+        self.release()
+    }
+
+    /// Release the provider handle without consuming the handle. Used by the
+    /// namespace handle cache, which owns the sole reference to a cached handle
+    /// and closes it exactly once at eviction, where a consuming `close` cannot
+    /// be called through a shared owner.
+    pub fn release(&self) -> Result<()> {
         self.runtime
             .call_close_file(self.provider_handle)
             .map_err(Into::into)

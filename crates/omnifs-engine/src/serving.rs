@@ -139,6 +139,26 @@ impl ServingContext {
             && path.is_root()
     }
 
+    /// The mount name of the namespace root: the single mount, a registry's
+    /// root-mounted provider, or `""` for the synthetic mount-enumeration root.
+    pub(crate) fn root_mount_name(&self) -> String {
+        match &self.backing {
+            Backing::Single { mount, .. } => mount.clone(),
+            Backing::Registry(registry) => registry
+                .root_mount_name()
+                .unwrap_or_else(|| MOUNT_ENUMERATION_MOUNT.to_string()),
+        }
+    }
+
+    /// Every mount currently served, for the namespace's background
+    /// invalidation drain. Excludes the synthetic enumeration root.
+    pub(crate) fn served_mounts(&self) -> Vec<String> {
+        match &self.backing {
+            Backing::Single { mount, .. } => vec![mount.clone()],
+            Backing::Registry(registry) => registry.mounts(),
+        }
+    }
+
     pub(crate) fn mount_names(&self) -> Option<Vec<String>> {
         match &self.backing {
             Backing::Registry(registry) if registry.root_mount_name().is_none() => {
