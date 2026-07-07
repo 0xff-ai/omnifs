@@ -1,0 +1,12 @@
+---
+source: crates/omnifs-itest/src/tape/replay.rs
+expression: rendered
+---
+tape miss: no recorded exchange matches this callout
+  scenario tape: tests/github/tapes/repo-browse.jsonl
+  pending: GET https://api.github.com/repos/o/r/issues?page=2
+  nearest candidates (same method + host + path):
+    seq 07: GET https://api.github.com/repos/o/r/issues        [consumed]
+    seq 12: GET https://api.github.com/repos/o/r/issues?page=1 [available]
+  hint: if the provider's request shape changed intentionally, re-record:
+        just itest record github repo-browse

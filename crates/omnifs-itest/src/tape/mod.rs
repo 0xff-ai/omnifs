@@ -5,6 +5,8 @@
 //! arrays so a re-record shows a real textual diff, and only genuinely large or
 //! binary bodies spill to content-addressed sidecar blobs.
 
+pub mod record;
+pub mod replay;
 pub mod scrub;
 
 use base64::Engine as _;
@@ -31,7 +33,7 @@ pub struct TapeEntry {
 }
 
 /// Which callout family an entry recorded.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum TapeKind {
     /// `wit` `Callout::Fetch`.
