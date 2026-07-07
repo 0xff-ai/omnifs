@@ -102,10 +102,17 @@ pub(crate) fn environment_check(
     Ok(EnvironmentReport { configured })
 }
 
-/// Docker is the recommended default runtime on every OS. Native (loopback NFS
-/// on macOS, host FUSE on Linux/WSL) is opt-in.
-pub(crate) fn default_runtime(_os: HostOs) -> ConfiguredBackend {
-    ConfiguredBackend::Docker
+/// The recommended default runtime per host OS. Linux and WSL default to native
+/// kernel FUSE: it is the host-native path, faster, and needs no container.
+/// macOS keeps Docker as its default until the loopback NFS frontend earns it;
+/// native on macOS stays the experimental opt-in.
+pub(crate) fn default_runtime(os: HostOs) -> ConfiguredBackend {
+    match os {
+        HostOs::LinuxNative | HostOs::LinuxWsl => ConfiguredBackend::Native,
+        // Unsupported never reaches here (setup bails in `environment_check`); it
+        // shares macOS's Docker arm as the conservative, dependency-declaring default.
+        HostOs::MacOs | HostOs::Unsupported => ConfiguredBackend::Docker,
+    }
 }
 
 /// The lowercase runtime word used everywhere the wizard states a runtime fact.
@@ -552,7 +559,10 @@ fn ensure_express_defaults(workspace: &Workspace) -> anyhow::Result<()> {
     persist_runtime(workspace.layout(), backend)?;
     anstream::eprintln!(
         "{}",
-        crate::ui::note("using the docker runtime (`omnifs setup` to change)")
+        crate::ui::note(format!(
+            "using the {} runtime (`omnifs setup` to change)",
+            runtime_word(backend)
+        ))
     );
     Ok(())
 }
@@ -706,8 +716,10 @@ fn format_duration(duration: Duration) -> String {
     format!("{}s", duration.as_secs())
 }
 
-/// The two runtime rows for the picker. Docker leads as the recommended
-/// default; the native row's summary and detail panel are per-OS.
+/// The runtime picker rows, ordered and defaulted per host OS. The default row
+/// leads with `default_on: true` and a "recommended" summary. On Linux/WSL that
+/// is native kernel FUSE (no container layer); on macOS it is Docker, while
+/// native there stays the experimental loopback-NFS opt-in.
 fn runtime_rows(os: HostOs) -> Vec<PickerRow> {
     use crate::ui::picker::{Detail, PanelLine, PanelRole};
 
@@ -724,26 +736,29 @@ fn runtime_rows(os: HostOs) -> Vec<PickerRow> {
         role: PanelRole::Head,
     };
 
-    let docker = PickerRow {
-        id: "docker".to_string(),
-        summary: "recommended — isolated, no kernel dependencies".to_string(),
-        cap_tags: Vec::new(),
-        auth_tag: None,
-        default_on: true,
-        detail: Detail {
-            lines: vec![
-                head("docker, Linux FUSE in a container"),
-                plain("isolated from your host; no kernel extensions or admin setup"),
-                plain(&format!(
-                    "files appear at {GUEST_MOUNT} inside the container"
-                )),
-                dim("requires Docker running; browse with omnifs shell"),
-            ],
-        },
+    let docker_detail = || Detail {
+        lines: vec![
+            head("docker, Linux FUSE in a container"),
+            plain("isolated from your host; no kernel extensions or admin setup"),
+            plain(&format!(
+                "files appear at {GUEST_MOUNT} inside the container"
+            )),
+            dim("requires Docker running; browse with omnifs shell"),
+        ],
     };
 
-    let native = match os {
-        HostOs::MacOs => PickerRow {
+    if os == HostOs::MacOs {
+        // macOS: Docker leads as the recommended default; native loopback NFS is
+        // the experimental opt-in until it earns the default.
+        let docker = PickerRow {
+            id: "docker".to_string(),
+            summary: "recommended — isolated, no kernel dependencies".to_string(),
+            cap_tags: Vec::new(),
+            auth_tag: None,
+            default_on: true,
+            detail: docker_detail(),
+        };
+        let native = PickerRow {
             id: "native".to_string(),
             summary: "experimental NFS loopback".to_string(),
             cap_tags: Vec::new(),
@@ -757,25 +772,36 @@ fn runtime_rows(os: HostOs) -> Vec<PickerRow> {
                     dim("no Docker needed"),
                 ],
             },
-        },
-        _ => PickerRow {
-            id: "native".to_string(),
-            summary: "kernel FUSE".to_string(),
-            cap_tags: Vec::new(),
-            auth_tag: None,
-            default_on: false,
-            detail: Detail {
-                lines: vec![
-                    head("native, host kernel FUSE"),
-                    plain("files appear directly under your chosen mount point"),
-                    plain("uses your kernel's FUSE; no container layer"),
-                    dim("needs /dev/fuse access"),
-                ],
-            },
+        };
+        return vec![docker, native];
+    }
+
+    // Linux/WSL: native kernel FUSE leads as the recommended default; Docker
+    // follows as the isolated, dependency-declaring alternative.
+    let native = PickerRow {
+        id: "native".to_string(),
+        summary: "recommended — host kernel FUSE, no container layer".to_string(),
+        cap_tags: Vec::new(),
+        auth_tag: None,
+        default_on: true,
+        detail: Detail {
+            lines: vec![
+                head("native, host kernel FUSE"),
+                plain("files appear directly under your chosen mount point"),
+                plain("uses your kernel's FUSE; no container layer"),
+                dim("needs /dev/fuse access"),
+            ],
         },
     };
-
-    vec![docker, native]
+    let docker = PickerRow {
+        id: "docker".to_string(),
+        summary: "isolated, no kernel dependencies".to_string(),
+        cap_tags: Vec::new(),
+        auth_tag: None,
+        default_on: false,
+        detail: docker_detail(),
+    };
+    vec![native, docker]
 }
 
 fn approved_upgrade_for_existing_mount(
@@ -835,14 +861,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn docker_is_the_default_runtime_on_every_os() {
-        for os in [
-            HostOs::MacOs,
-            HostOs::LinuxNative,
-            HostOs::LinuxWsl,
-            HostOs::Unsupported,
-        ] {
-            assert_eq!(default_runtime(os), ConfiguredBackend::Docker);
+    fn default_runtime_is_native_on_linux_docker_on_macos() {
+        assert_eq!(default_runtime(HostOs::MacOs), ConfiguredBackend::Docker);
+        assert_eq!(
+            default_runtime(HostOs::LinuxNative),
+            ConfiguredBackend::Native
+        );
+        assert_eq!(default_runtime(HostOs::LinuxWsl), ConfiguredBackend::Native);
+    }
+
+    #[test]
+    fn runtime_rows_lead_with_the_per_os_default() {
+        // The picker's first row is what the single-select cursor lands on, so
+        // the default runtime must lead and carry the recommended summary.
+        let mac = runtime_rows(HostOs::MacOs);
+        assert_eq!(mac[0].id, "docker");
+        assert!(mac[0].default_on);
+        assert!(mac[0].summary.contains("recommended"));
+        assert_eq!(mac[1].id, "native");
+        assert!(!mac[1].default_on);
+
+        for os in [HostOs::LinuxNative, HostOs::LinuxWsl] {
+            let rows = runtime_rows(os);
+            assert_eq!(rows[0].id, "native");
+            assert!(rows[0].default_on);
+            assert!(rows[0].summary.contains("recommended"));
+            assert_eq!(rows[1].id, "docker");
+            assert!(!rows[1].default_on);
+            // Docker drops the "recommended" claim on Linux/WSL.
+            assert!(!rows[1].summary.contains("recommended"));
         }
     }
 }
