@@ -1,0 +1,13 @@
+---
+source: crates/omnifs-itest/src/scenario.rs
+expression: trace.clone()
+---
+## step 0: list /
+README.md  file  unknown  stable
+notifications  dir  -  -
+canonical:
+  (none)
+fs:
+  (none)
+invalidations:
+  (none)

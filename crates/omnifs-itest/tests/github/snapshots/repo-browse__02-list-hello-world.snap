@@ -1,0 +1,16 @@
+---
+source: crates/omnifs-itest/src/scenario.rs
+expression: trace.clone()
+---
+## step 2: list /octocat/Hello-World
+actions  dir  -  -
+issues  dir  -  -
+pulls  dir  -  -
+repo  dir  -  -
+repo.json  file  5191  dynamic
+canonical:
+  /octocat/Hello-World/repo.json  sha256:d1625142938e37a5baf02219869b0a0b5fd09f0412d73218488216bac5af24d3
+fs:
+  (none)
+invalidations:
+  (none)

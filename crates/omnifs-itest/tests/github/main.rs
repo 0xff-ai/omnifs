@@ -1,5 +1,6 @@
 #![cfg(not(target_os = "wasi"))]
 
+mod scenarios;
 mod support;
 
 use omnifs_core::path::Path;

@@ -1,0 +1,22 @@
+---
+source: crates/omnifs-itest/src/scenario.rs
+expression: trace.clone()
+---
+## step 1: list /octocat
+Hello-World  dir  -  -
+Spoon-Knife  dir  -  -
+boysenberry-repo-1  dir  -  -
+git-consortium  dir  -  -
+hello-worId  dir  -  -
+linguist  dir  -  -
+octocat.github.io  dir  -  -
+owner.json  file  1232  dynamic
+profile.md  file  unknown  stable
+test-repo1  dir  -  -
+canonical:
+  /octocat/owner.json  sha256:f4118007e52dfa220423725af2bf8c2254e4e00c72fa33f7f8c580c6c0dbd83b
+  /octocat/profile.md  sha256:f4118007e52dfa220423725af2bf8c2254e4e00c72fa33f7f8c580c6c0dbd83b
+fs:
+  (none)
+invalidations:
+  (none)
