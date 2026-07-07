@@ -1,36 +1,29 @@
-//! Tree error to FUSE errno mapping.
+//! Namespace error to FUSE errno mapping.
 
 use fuser::Errno;
-use omnifs_api::events::InspectorOutcome;
-use omnifs_engine::{RetryClass, TreeError, TreeErrorKind};
+use omnifs_engine::{NsError, NsRetryClass};
 
-/// Map a FUSE errno to a stable inspector outcome.
-pub(super) fn inspector_outcome(errno: Errno) -> InspectorOutcome {
-    InspectorOutcome::from_errno_code(i32::from(errno))
-}
-
-/// Map a renderer-neutral [`TreeError`] to its FUSE errno. The projection core
-/// owns the error partition (provider `error-kind` already folded into
-/// `TreeErrorKind`); the FUSE adapter only chooses the kernel status. A
-/// `RateLimited` listing/read surfaces as EAGAIN so `ls`/`cat` retry rather than
-/// fail, preserving the pre-extraction behavior.
-pub(super) fn tree_error_errno(error: &TreeError) -> Errno {
-    match error.kind.retry_class() {
-        RetryClass::Retry => match error.kind {
-            TreeErrorKind::RateLimited => Errno::EAGAIN,
-            // Timeout and Network stay EIO: FUSE has no deferral channel.
+/// Map a plain-data [`NsError`] to its FUSE errno. The namespace owns the error
+/// partition (provider `error-kind` already folded into `NsError`); the FUSE
+/// adapter only chooses the kernel status. A `RateLimited` listing/read surfaces
+/// as `EAGAIN` so `ls`/`cat` retry rather than fail; `Timeout`/`Network` stay
+/// `EIO` because FUSE has no deferral channel.
+pub(super) fn ns_error_errno(error: &NsError) -> Errno {
+    match error.retry_class() {
+        NsRetryClass::Retry => match error {
+            NsError::RateLimited { .. } => Errno::EAGAIN,
             _ => Errno::EIO,
         },
-        RetryClass::TooLarge => Errno::EFBIG,
-        RetryClass::Gone => match error.kind {
-            TreeErrorKind::NotFound => Errno::ENOENT,
-            TreeErrorKind::NotDirectory => Errno::ENOTDIR,
-            TreeErrorKind::IsDirectory => Errno::EISDIR,
+        NsRetryClass::TooLarge => Errno::EFBIG,
+        NsRetryClass::Gone => match error {
+            NsError::NotFound => Errno::ENOENT,
+            NsError::NotDirectory => Errno::ENOTDIR,
+            NsError::IsDirectory => Errno::EISDIR,
             _ => Errno::EIO,
         },
-        RetryClass::Terminal => match error.kind {
-            TreeErrorKind::PermissionDenied => Errno::EACCES,
-            TreeErrorKind::InvalidInput => Errno::EINVAL,
+        NsRetryClass::Terminal => match error {
+            NsError::Permission => Errno::EACCES,
+            NsError::Invalid => Errno::EINVAL,
             _ => Errno::EIO,
         },
     }
@@ -42,15 +35,21 @@ mod tests {
 
     #[test]
     fn rate_limited_maps_to_eagain() {
-        let error = TreeError {
-            kind: TreeErrorKind::RateLimited,
-            message: "rate limited".to_string(),
-            retryable: true,
+        let error = NsError::RateLimited {
             retry_after: Some(std::time::Duration::from_secs(3)),
         };
+        assert_eq!(i32::from(ns_error_errno(&error)), i32::from(Errno::EAGAIN));
+    }
+
+    #[test]
+    fn gone_kinds_map_to_their_errnos() {
         assert_eq!(
-            i32::from(tree_error_errno(&error)),
-            i32::from(Errno::EAGAIN)
+            i32::from(ns_error_errno(&NsError::NotFound)),
+            i32::from(Errno::ENOENT)
+        );
+        assert_eq!(
+            i32::from(ns_error_errno(&NsError::IsDirectory)),
+            i32::from(Errno::EISDIR)
         );
     }
 }

@@ -1,9 +1,9 @@
 //! Kernel-side read slicing.
 //!
-//! The read-path DECISION logic (payload resolution, the cache cascade, the
-//! write fence, learned-size promotion, ranged-EOF learning) lives in
-//! `omnifs-engine tree`'s `read`/`handle` modules; the FUSE adapter keeps only the
-//! kernel offset/size slicing of an already-rendered whole-file buffer.
+//! The read-path decision logic (payload resolution, the cache cascade,
+//! learned-size promotion, ranged-EOF learning) lives behind the namespace; the
+//! FUSE adapter keeps only the kernel offset/size slicing of a whole-file buffer
+//! it materialized once at open.
 
 /// Slice `data` at the given FUSE `offset` and `size`, returning the relevant
 /// byte range. Returns an empty slice when `offset` is past the end.

@@ -3183,8 +3183,6 @@ dependencies = [
  "dashmap",
  "fuser",
  "libc",
- "omnifs-api",
- "omnifs-core",
  "omnifs-engine",
  "omnifs-wit",
  "omnifs-workspace",

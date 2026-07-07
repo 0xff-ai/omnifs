@@ -1,136 +1,99 @@
-//! Shared FUSE constants, path helpers, and inode read targets.
+//! Shared FUSE constants and the protocol-local inode table shape.
 
-use fuser::FopenFlags;
-use omnifs_core::path::Path;
-use omnifs_engine::render::IdentityBody;
-use omnifs_engine::view::{EntryKind, FileAttrsCache};
-use omnifs_engine::{Node, RangedHandle};
+use fuser::FileType;
+use omnifs_engine::NodeId;
 use std::path::PathBuf;
 use std::time::Duration;
 
-/// Kernel-side entry/attr TTL. The host never expires entries on time,
-/// only on capacity or explicit invalidation via the FUSE notifier and
-/// provider cache-invalidate effects. We still must hand the kernel
-/// a finite Duration, so pick one large enough that refresh churn is
-/// irrelevant in practice (~136 years).
+/// Kernel-side entry/attr TTL for a stable exact-size node. The host never
+/// expires entries on time, only on capacity or explicit invalidation via the
+/// FUSE notifier and provider cache-invalidate effects. We still must hand the
+/// kernel a finite `Duration`, so pick one large enough that refresh churn is
+/// irrelevant in practice (~136 years). The namespace bakes this into
+/// [`omnifs_engine::Attrs::ttl`]; FUSE copies it through and only names the
+/// constant for the synthetic root and backing paths it stats itself.
 pub(crate) const TTL: Duration = Duration::from_secs(u32::MAX as u64);
-pub(crate) const TTL_DYNAMIC: Duration = Duration::from_secs(0);
 pub(crate) const ROOT_INO: u64 = 1;
 
-pub(crate) type DirSnapshot = Vec<(u64, String, EntryKind)>;
-
-#[derive(Debug, Clone)]
-pub(crate) enum InodeBody {
-    Provider,
-    Subtree(PathBuf),
-    Synthetic,
+/// One row of the FUSE inode table: the protocol identity a kernel inode number
+/// rehydrates from. It caches no provider bytes; the namespace owns all
+/// projection state. This is the FUSE analogue of the NFS `Inode`.
+#[derive(Clone)]
+pub(crate) struct Inode {
+    /// The parent inode, for `inval_entry` dentry notifications.
+    pub(crate) parent: u64,
+    /// The leaf name under `parent`, for `inval_entry`.
+    pub(crate) name: String,
+    pub(crate) kind: NodeKind,
+    pub(crate) body: Body,
 }
 
-impl InodeBody {
-    pub(crate) fn backing_path(&self) -> Option<&PathBuf> {
+/// What a FUSE inode projects.
+#[derive(Clone)]
+pub(crate) enum Body {
+    /// A namespace node: resolution, attrs, listing, and reads go through the
+    /// [`omnifs_engine::Namespace`] via this handle.
+    Node(NodeId),
+    /// A resolved treeref subtree root: it is a namespace node, but its
+    /// directory is served locally from `root` (its children have no namespace
+    /// identity).
+    Subtree { node: NodeId, root: PathBuf },
+    /// A pure filesystem child under a subtree, served entirely from `path`.
+    Backing(PathBuf),
+}
+
+impl Body {
+    /// The backing directory/file this inode serves from the local filesystem,
+    /// for a subtree root or a backing child.
+    pub(crate) fn backing(&self) -> Option<&PathBuf> {
         match self {
-            Self::Subtree(path) => Some(path),
-            Self::Provider | Self::Synthetic => None,
+            Self::Subtree { root, .. } => Some(root),
+            Self::Backing(path) => Some(path),
+            Self::Node(_) => None,
         }
     }
 
-    pub(crate) fn is_backing(&self) -> bool {
-        matches!(self, Self::Subtree(_))
-    }
-
-    pub(crate) fn is_synthetic(&self) -> bool {
-        matches!(self, Self::Synthetic)
-    }
-}
-
-impl IdentityBody for InodeBody {
-    fn is_provider_resolution(&self) -> bool {
-        matches!(self, Self::Provider)
-    }
-
-    fn is_synthetic_marker(&self) -> bool {
-        matches!(self, Self::Synthetic)
+    /// The namespace handle this inode resolves through, absent for a pure
+    /// backing child.
+    pub(crate) fn node(&self) -> Option<NodeId> {
+        match self {
+            Self::Node(node) | Self::Subtree { node, .. } => Some(*node),
+            Self::Backing(_) => None,
+        }
     }
 }
 
-/// File `EntryMeta` for a synthetic mount-root ignore file, mirroring
-/// the `Tree` synthetic projection. The live adapter materializes ignore files
-/// from `Tree` entries with synthetic origin; the in-crate harness uses this to seed a
-/// host-synthesized inode directly.
-#[cfg(test)]
-pub(crate) fn root_ignore_meta() -> omnifs_engine::view::EntryMeta {
-    omnifs_engine::view::EntryMeta::file(
-        FileAttrsCache::deferred(
-            omnifs_engine::view::FileSize::Exact(b"@*\n".len() as u64),
-            omnifs_engine::view::ReadMode::Full,
-            omnifs_engine::view::Stability::Stable,
-            None,
-        )
-        .expect("root ignore attrs are valid"),
-    )
+/// Node kind at the FUSE boundary, mapped to a `fuser::FileType` for replies.
+/// A namespace `Subtree` (resolved treeref) presents as a directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NodeKind {
+    Directory,
+    File,
+    Symlink,
 }
 
-/// Split a protocol path into `(parent, leaf)`. Returns `None` for the mount
-/// root (`/`).
-pub(crate) fn split_parent_leaf(path: &Path) -> Option<(Path, String)> {
-    let (parent, leaf) = path.parent_and_name()?;
-    Some((parent, leaf.to_string()))
-}
-
-/// A `Tree`-owned ranged handle paired with the kernel inode it serves. The
-/// inode is FUSE identity (not `Tree`'s concern); the adapter keeps it beside
-/// the handle so `release` can scope the live-follow `follow_sizes` cleanup to
-/// the ino without `Tree` ever knowing about inodes.
-pub(crate) struct RangedSlot {
-    pub(crate) ino: u64,
-    pub(crate) handle: RangedHandle,
-}
-
-pub(crate) struct FullReadTarget {
-    pub(crate) ino: u64,
-    pub(crate) fh: u64,
-    pub(crate) mount_name: String,
-    pub(crate) path: Path,
-    pub(crate) body: InodeBody,
-    pub(crate) attrs: Option<FileAttrsCache>,
-}
-
-impl FullReadTarget {
-    pub(crate) fn provider_node(&self) -> Node {
-        Node::provider_file(
-            self.mount_name.clone(),
-            self.path.clone(),
-            self.attrs.clone(),
-        )
-    }
-
-    pub(crate) fn parent_and_leaf(&self) -> Option<(Path, String)> {
-        split_parent_leaf(&self.path)
-    }
-
-    pub(crate) fn is_synthetic_candidate(&self) -> bool {
-        self.body.is_synthetic()
-            || self
-                .parent_and_leaf()
-                .is_some_and(|(_, leaf)| leaf == "@next" || leaf == "@all")
-    }
-
-    pub(crate) fn is_ranged(&self) -> bool {
-        self.attrs
-            .as_ref()
-            .is_some_and(FileAttrsCache::is_deferred_ranged)
-    }
-
-    pub(crate) fn should_prefetch_full(&self) -> bool {
-        self.attrs
-            .as_ref()
-            .is_some_and(|attrs| attrs.is_deferred_full() && !attrs.has_exact_size())
-    }
-
-    pub(crate) fn lazy_open_flags(&self) -> FopenFlags {
-        self.attrs
-            .as_ref()
-            .filter(|attrs| attrs.should_direct_io())
-            .map_or_else(FopenFlags::empty, |_| FopenFlags::FOPEN_DIRECT_IO)
+impl NodeKind {
+    pub(crate) fn file_type(self) -> FileType {
+        match self {
+            Self::Directory => FileType::Directory,
+            Self::File => FileType::RegularFile,
+            Self::Symlink => FileType::Symlink,
+        }
     }
 }
+
+impl From<&omnifs_engine::NsEntryKind> for NodeKind {
+    fn from(kind: &omnifs_engine::NsEntryKind) -> Self {
+        match kind {
+            omnifs_engine::NsEntryKind::Directory | omnifs_engine::NsEntryKind::Subtree { .. } => {
+                Self::Directory
+            },
+            omnifs_engine::NsEntryKind::File => Self::File,
+            omnifs_engine::NsEntryKind::Symlink => Self::Symlink,
+        }
+    }
+}
+
+/// A kernel directory snapshot: the ordered children captured at `opendir`,
+/// replayed across `readdir` offsets.
+pub(crate) type DirSnapshot = Vec<(u64, String, NodeKind)>;

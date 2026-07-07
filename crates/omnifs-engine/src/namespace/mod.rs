@@ -120,6 +120,25 @@ pub enum StabilityClass {
     Live,
 }
 
+/// How a frontend pulls a file's bytes, the pre-decided read shape a frontend
+/// used to derive from `view::ReadMode`/`FileAttrsCache::is_deferred_ranged`.
+///
+/// - `Whole`: the engine serves the entire payload from a single
+///   `read(node, 0, u32::MAX)`. A frontend materializes it once per open and
+///   slices locally, so a mutating control action (`@next`) or an unversioned
+///   dynamic render runs exactly once. Every non-ranged file (inline, canonical,
+///   blob, deferred-full) and every directory is `Whole`.
+/// - `Ranged`: the engine streams by `read(node, offset, len)` per request,
+///   deduping the provider open behind its internal handle cache and learning
+///   the exact size on an EOF-short read. A frontend reads through per protocol
+///   read rather than buffering, so a live (`tail -f`) or large ranged file is
+///   never fully materialized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReadStyle {
+    Whole,
+    Ranged,
+}
+
 /// The already-policied protocol attributes for a node. Every policy decision a
 /// frontend used to make is baked in here:
 ///
@@ -138,6 +157,9 @@ pub struct Attrs {
     pub change: u64,
     pub direct_io: bool,
     pub stability: StabilityClass,
+    /// Whether a frontend materializes the whole payload once or reads through
+    /// per request. See [`ReadStyle`].
+    pub read_style: ReadStyle,
 }
 
 /// The resolved answer for a lookup.
@@ -680,6 +702,7 @@ impl TreeNamespace {
             stability: attrs.map_or(StabilityClass::Stable, |a| stability_class(a.stability())),
             change: self.root_aware_change(id, node, attrs, epoch),
             kind,
+            read_style: read_style_of(attrs),
         }
     }
 
@@ -816,6 +839,7 @@ impl TreeNamespace {
             direct_io: attrs.is_some_and(FileAttrsCache::should_direct_io),
             stability: attrs.map_or(StabilityClass::Stable, |a| stability_class(a.stability())),
             change: change_counter_parts(id, attrs, epoch),
+            read_style: read_style_of(attrs),
         }
     }
 
@@ -876,6 +900,7 @@ impl TreeNamespace {
                 direct_io: grown.should_direct_io(),
                 stability: stability_class(grown.stability()),
                 change: change_counter_parts(id, Some(&grown), node_epoch),
+                read_style: read_style_of(Some(&grown)),
             };
             let _ = events.send(NsEvent::AttrsChanged {
                 node: NodeId(id),
@@ -1004,6 +1029,7 @@ impl TreeNamespace {
                     .map_or(StabilityClass::Stable, |a| stability_class(a.stability())),
                 change: change_counter_parts(id, merged.as_ref(), epoch),
                 kind: kind.clone(),
+                read_style: read_style_of(merged.as_ref()),
             },
             kind,
             name: name.to_string(),
@@ -1155,6 +1181,17 @@ fn stability_class(stability: view_types::Stability) -> StabilityClass {
         view_types::Stability::Stable => StabilityClass::Stable,
         view_types::Stability::Dynamic => StabilityClass::Dynamic,
         view_types::Stability::Live => StabilityClass::Live,
+    }
+}
+
+/// The pre-decided read shape for a node: a deferred-ranged source streams;
+/// every other byte source (and every directory) is materialized whole. Mirrors
+/// the `is_deferred_ranged` branch the FUSE/NFS read paths used to run.
+fn read_style_of(attrs: Option<&FileAttrsCache>) -> ReadStyle {
+    if attrs.is_some_and(FileAttrsCache::is_deferred_ranged) {
+        ReadStyle::Ranged
+    } else {
+        ReadStyle::Whole
     }
 }
 

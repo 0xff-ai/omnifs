@@ -1,80 +1,31 @@
-//! Node allocation and attribute generation for FUSE.
+//! Inode allocation, identity interning, and `FileAttr` construction.
 //!
-//! Manages the mapping from virtual paths to inode numbers with
-//! deduplication and stale entry updates.
+//! FUSE owns kernel identity: it maps a stable namespace [`NodeId`] (or a
+//! backing filesystem path for a resolved treeref subtree) to a kernel inode
+//! number and builds `fuser::FileAttr` replies. It never inspects provider
+//! bytes or the projection's caches; attributes come from the policied
+//! [`omnifs_engine::Attrs`] or from a direct `std::fs` stat of a backing path.
 
 use crate::Frontend;
-use crate::common::InodeBody;
+use crate::common::{Body, Inode, NodeKind, ROOT_INO};
 use fuser::{FileAttr, FileType, INodeNo};
-use omnifs_core::path::Path;
-#[cfg(test)]
-use omnifs_engine::render::PathToInode;
-use omnifs_engine::render::{
-    BackingKind, BackingMetadata, BodyUpdate, IdentityEntry, IdentitySeed, PathKey,
-};
-use omnifs_engine::view::{EntryKind, EntryMeta, FileAttrsCache};
+use omnifs_engine::{Attrs, NodeId, NsEntryKind};
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
-// SAFETY: getuid(2) takes no arguments, reads only kernel-maintained process state,
-// and is always safe to call on any POSIX system.
+// SAFETY: getuid(2) takes no arguments, reads only kernel-maintained process
+// state, and is always safe to call on any POSIX system.
 #[allow(unsafe_code)]
 fn current_uid() -> u32 {
     unsafe { libc::getuid() }
 }
 
-// SAFETY: getgid(2) takes no arguments, reads only kernel-maintained process state,
-// and is always safe to call on any POSIX system.
+// SAFETY: getgid(2) takes no arguments, reads only kernel-maintained process
+// state, and is always safe to call on any POSIX system.
 #[allow(unsafe_code)]
 fn current_gid() -> u32 {
     unsafe { libc::getgid() }
-}
-
-/// Tracks the per-node state keyed by inode number for a provider mount.
-pub(crate) type NodeEntry = IdentityEntry<EntryKind, InodeBody>;
-
-/// What the caller knows about an inode allocation, which drives how the inode
-/// body is updated on an existing node.
-///
-/// A genuine resolution sets the concrete body. The test-only refresh path
-/// leaves the existing body untouched, proving a cache-driven re-touch does not
-/// silently demote a still-synthetic node.
-pub(crate) enum NodeOrigin {
-    /// A cache-driven refresh (cached dirents/control replay) that does not
-    /// assert the node's origin. Leaves the body unchanged on an existing inode;
-    /// defaults to provider on first insert.
-    #[cfg(test)]
-    Refresh,
-    /// A genuine provider resolution proved a real node at this path.
-    Provider,
-    /// Passthrough to a real backing-filesystem file.
-    Subtree(PathBuf),
-    /// Host-synthesized node (a mount-root ignore file).
-    Synthetic,
-}
-
-/// How an inode refresh updates the body of an existing node.
-impl NodeOrigin {
-    fn body_on_insert(&self) -> InodeBody {
-        match self {
-            #[cfg(test)]
-            NodeOrigin::Refresh => InodeBody::Provider,
-            NodeOrigin::Provider => InodeBody::Provider,
-            NodeOrigin::Subtree(path) => InodeBody::Subtree(path.clone()),
-            NodeOrigin::Synthetic => InodeBody::Synthetic,
-        }
-    }
-
-    fn body_update(&self) -> BodyUpdate<InodeBody> {
-        match self {
-            #[cfg(test)]
-            NodeOrigin::Refresh => BodyUpdate::Keep,
-            NodeOrigin::Provider => BodyUpdate::Merge(InodeBody::Provider),
-            NodeOrigin::Subtree(path) => BodyUpdate::Merge(InodeBody::Subtree(path.clone())),
-            NodeOrigin::Synthetic => BodyUpdate::Merge(InodeBody::Synthetic),
-        }
-    }
 }
 
 impl Frontend {
@@ -86,110 +37,100 @@ impl Frontend {
         self.next_fh.fetch_add(1, Ordering::Relaxed)
     }
 
-    #[cfg(test)]
-    pub(crate) fn get_or_alloc_ino(
+    /// Allocate (or reuse) the kernel inode for a resolved namespace node,
+    /// preserving a resolved subtree backing over a later plain provider
+    /// resolution of the same node. Mirrors the NFS `intern_node`, minus the
+    /// export-root scope (FUSE has a single root).
+    pub(crate) fn intern_node(
         &self,
-        mount_name: &str,
-        path: &Path,
-        kind: EntryKind,
-        size: u64,
+        parent: u64,
+        name: &str,
+        node: NodeId,
+        kind: NodeKind,
+        subtree_root: Option<PathBuf>,
     ) -> u64 {
-        self.get_or_alloc_ino_inner(mount_name, path, kind, None, size, &NodeOrigin::Refresh)
+        let ino = *self.by_node.entry(node).or_insert_with(|| self.alloc_ino());
+        if ino == ROOT_INO {
+            return ino;
+        }
+        let existing = self.inodes.get(&ino).map(|entry| entry.body.clone());
+        let body = match (subtree_root, existing) {
+            (Some(root), _) => Body::Subtree { node, root },
+            // A listing re-binds a treeref child as a plain provider directory;
+            // keep the subtree backing a prior lookup resolved.
+            (None, Some(Body::Subtree { node: kept, root })) => Body::Subtree { node: kept, root },
+            (None, _) => Body::Node(node),
+        };
+        self.inodes.insert(
+            ino,
+            Inode {
+                parent,
+                name: name.to_string(),
+                kind,
+                body,
+            },
+        );
+        ino
     }
 
-    /// Allocate (or refresh) an inode from cached metadata WITHOUT asserting the
-    /// node's origin. A refresh leaves an existing `synthetic` flag untouched,
-    /// so replaying a cached listing/control over a synthesized node never
-    /// demotes it. Use [`get_or_alloc_ino_meta_resolved`](Self::get_or_alloc_ino_meta_resolved)
-    /// when a genuine provider resolution should win over a synthetic marker.
-    ///
-    /// The live adapter allocates from a `Tree` `Node`/`Entry` with an asserted
-    /// origin (`_resolved`/`_synthetic`/`_backing`); this origin-agnostic refresh
-    /// variant is exercised by the in-crate harness to prove a cached-metadata
-    /// replay does not demote a still-synthetic node.
-    #[cfg(test)]
-    pub(crate) fn get_or_alloc_ino_meta(
+    /// Allocate (or reuse) the kernel inode for a subtree-local backing path.
+    pub(crate) fn intern_backing(
         &self,
-        mount_name: &str,
-        path: &Path,
-        meta: EntryMeta,
+        parent: u64,
+        name: &str,
+        path: PathBuf,
+        kind: NodeKind,
     ) -> u64 {
-        let size = meta.st_size();
-        let kind = meta.kind();
-        let attrs = meta.into_attrs();
-        self.get_or_alloc_ino_inner(mount_name, path, kind, attrs, size, &NodeOrigin::Refresh)
+        let ino = *self
+            .by_backing
+            .entry(path.clone())
+            .or_insert_with(|| self.alloc_ino());
+        self.inodes.insert(
+            ino,
+            Inode {
+                parent,
+                name: name.to_string(),
+                kind,
+                body: Body::Backing(path),
+            },
+        );
+        ino
     }
 
-    /// Allocate (or refresh) an inode for a node a provider lookup/listing just
-    /// resolved as real. Clears any prior `synthetic` marker so a real provider
-    /// file (e.g. a `.gitignore` the provider projects) wins over the
-    /// host-synthesized ignore content.
-    pub(crate) fn get_or_alloc_ino_meta_resolved(
+    /// Bind a resolved namespace answer to an inode, recording a subtree backing
+    /// when the namespace reports the node is a resolved treeref.
+    pub(crate) fn bind_answer(
         &self,
-        mount_name: &str,
-        path: &Path,
-        meta: EntryMeta,
+        parent: u64,
+        name: &str,
+        node: NodeId,
+        kind: &NsEntryKind,
     ) -> u64 {
-        let size = meta.st_size();
-        let kind = meta.kind();
-        let attrs = meta.into_attrs();
-        self.get_or_alloc_ino_inner(mount_name, path, kind, attrs, size, &NodeOrigin::Provider)
+        let subtree_root = match kind {
+            NsEntryKind::Subtree { root } => Some(root.clone()),
+            _ => None,
+        };
+        self.intern_node(parent, name, node, NodeKind::from(kind), subtree_root)
     }
 
-    pub(crate) fn get_or_alloc_ino_backing(
+    /// Build a kernel `FileAttr` from the policied namespace [`Attrs`], folding
+    /// in a live-follow grown size so a polling `tail -f` re-stats to the latest
+    /// end. The TTL is engine-decided; FUSE copies it through.
+    pub(crate) fn ns_file_attr(
         &self,
-        mount_name: &str,
-        path: &Path,
-        kind: EntryKind,
-        size: u64,
-        backing_path: PathBuf,
-    ) -> u64 {
-        self.get_or_alloc_ino_inner(
-            mount_name,
-            path,
-            kind,
-            None,
-            size,
-            &NodeOrigin::Subtree(backing_path),
-        )
-    }
-
-    /// Allocate (or refresh) the inode for a host-synthesized mount-root ignore
-    /// file, marking it `synthetic` so `open` serves it from a per-`fh` buffer
-    /// rather than the provider.
-    pub(crate) fn get_or_alloc_ino_synthetic(
-        &self,
-        mount_name: &str,
-        path: &Path,
-        meta: EntryMeta,
-    ) -> u64 {
-        let size = meta.st_size();
-        let kind = meta.kind();
-        let attrs = meta.into_attrs();
-        self.get_or_alloc_ino_inner(mount_name, path, kind, attrs, size, &NodeOrigin::Synthetic)
-    }
-
-    fn get_or_alloc_ino_inner(
-        &self,
-        mount_name: &str,
-        path: &Path,
-        kind: EntryKind,
-        attrs: Option<FileAttrsCache>,
-        size: u64,
-        origin: &NodeOrigin,
-    ) -> u64 {
-        let key = PathKey::with_mount_str(mount_name, path.clone()).expect("runtime mount name");
-        let seed = IdentitySeed::new(
-            mount_name,
-            path.clone(),
-            kind,
-            attrs,
-            size,
-            origin.body_on_insert(),
-        )
-        .with_body_update(origin.body_update());
-        self.path_to_inode
-            .get_or_alloc(key, seed, || self.alloc_ino())
+        ino: u64,
+        node: NodeId,
+        attrs: &Attrs,
+    ) -> (FileAttr, Duration) {
+        let attr = match attrs.kind {
+            NsEntryKind::Directory | NsEntryKind::Subtree { .. } => self.dir_attr(ino),
+            NsEntryKind::File => {
+                let grown = self.grown_sizes.get(&node).map_or(0, |g| *g);
+                self.file_attr(ino, attrs.size.max(grown))
+            },
+            NsEntryKind::Symlink => self.symlink_attr(ino, attrs.size),
+        };
+        (attr, attrs.ttl)
     }
 
     #[allow(clippy::unused_self)]
@@ -236,27 +177,20 @@ impl Frontend {
         }
     }
 
-    /// Build a `FileAttr` from real filesystem metadata.
     #[allow(clippy::unused_self)]
-    pub(crate) fn attr_from_metadata(&self, ino: u64, meta: &std::fs::Metadata) -> FileAttr {
-        let backing = BackingMetadata::from_metadata(meta);
-        let kind = match backing.kind {
-            BackingKind::Directory => FileType::Directory,
-            BackingKind::Symlink => FileType::Symlink,
-            BackingKind::File | BackingKind::Other => FileType::RegularFile,
-        };
-
+    pub(crate) fn symlink_attr(&self, ino: u64, size: u64) -> FileAttr {
+        let now = SystemTime::now();
         FileAttr {
             ino: INodeNo(ino),
-            size: backing.len,
-            blocks: backing.blocks,
-            atime: backing.accessed,
-            mtime: backing.modified,
-            ctime: backing.modified,
-            crtime: backing.created,
-            kind,
-            perm: u16::try_from(backing.mode).unwrap_or(0o444),
-            nlink: backing.nlink,
+            size,
+            blocks: size.div_ceil(512),
+            atime: now,
+            mtime: now,
+            ctime: now,
+            crtime: now,
+            kind: FileType::Symlink,
+            perm: 0o777,
+            nlink: 1,
             uid: current_uid(),
             gid: current_gid(),
             rdev: 0,
@@ -264,165 +198,51 @@ impl Frontend {
             flags: 0,
         }
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use omnifs_engine::view as view_types;
-
-    fn attrs(size: view_types::FileSize, version_token: Option<&str>) -> FileAttrsCache {
-        attrs_with(size, view_types::Stability::Dynamic, version_token)
-    }
-
-    fn attrs_with(
-        size: view_types::FileSize,
-        stability: view_types::Stability,
-        version_token: Option<&str>,
-    ) -> FileAttrsCache {
-        FileAttrsCache::deferred(
-            size,
-            view_types::ReadMode::Full,
-            stability,
-            version_token.map(str::to_string),
-        )
-        .expect("test attrs are valid")
-    }
-
-    fn file_entry(attrs: FileAttrsCache) -> NodeEntry {
-        let size = attrs.st_size();
-        NodeEntry {
-            mount_name: "test".to_string(),
-            path: Path::parse("/hello/fresh-full").unwrap(),
-            kind: EntryKind::File,
-            attrs: Some(attrs),
-            size,
-            size_exact: true,
-            body: InodeBody::Provider,
-            extra: (),
+    /// Build a `FileAttr` from a backing path's `std::fs` metadata. The subtree
+    /// children of a resolved treeref are pure local files; the byte boundary
+    /// keeps their real metadata off the provider surface.
+    #[allow(clippy::unused_self)]
+    pub(crate) fn attr_from_metadata(&self, ino: u64, meta: &std::fs::Metadata) -> FileAttr {
+        use std::os::unix::fs::MetadataExt;
+        let file_type = meta.file_type();
+        let kind = if file_type.is_dir() {
+            FileType::Directory
+        } else if file_type.is_symlink() {
+            FileType::Symlink
+        } else {
+            FileType::RegularFile
+        };
+        let now = SystemTime::now();
+        FileAttr {
+            ino: INodeNo(ino),
+            size: meta.len(),
+            blocks: meta.blocks(),
+            atime: meta.accessed().unwrap_or(now),
+            mtime: meta.modified().unwrap_or(now),
+            ctime: meta.modified().unwrap_or(now),
+            crtime: meta.created().unwrap_or(now),
+            kind,
+            perm: u16::try_from(meta.mode() & 0o7777).unwrap_or(0o444),
+            nlink: u32::try_from(meta.nlink()).unwrap_or(1),
+            uid: current_uid(),
+            gid: current_gid(),
+            rdev: 0,
+            blksize: 512,
+            flags: 0,
         }
     }
 
-    fn refresh_file(entry: &mut NodeEntry, incoming: &FileAttrsCache) {
-        let table = PathToInode::<InodeBody>::new();
-        let key = PathKey::with_mount_str("test", entry.path.clone()).unwrap();
-        table.insert_key(key.clone(), 1);
-        table.insert_entry(1, entry.clone());
-        let seed = IdentitySeed::new(
-            "test",
-            entry.path.clone(),
-            EntryKind::File,
-            Some(incoming.clone()),
-            incoming.st_size(),
-            InodeBody::Provider,
-        );
-        assert_eq!(table.get_or_alloc(key, seed, || 2), 1);
-        *entry = table.get(&1).expect("refreshed entry").clone();
-    }
-
-    struct RefreshCase {
-        name: &'static str,
-        existing: FileAttrsCache,
-        incoming: FileAttrsCache,
-        expected: FileAttrsCache,
-    }
-
-    #[test]
-    fn refresh_attrs_follow_learned_size_policy() {
-        let cases = [
-            {
-                let existing = attrs(view_types::FileSize::Exact(42), Some("v1"));
-                let incoming = attrs(view_types::FileSize::Unknown, Some("v1"));
-                RefreshCase {
-                    name: "silent same-version refresh keeps learned exact",
-                    existing: existing.clone(),
-                    incoming,
-                    expected: existing,
-                }
-            },
-            {
-                let incoming = attrs(view_types::FileSize::Exact(7), Some("v1"));
-                RefreshCase {
-                    name: "incoming exact replaces learned exact",
-                    existing: attrs(view_types::FileSize::Exact(42), Some("v1")),
-                    incoming: incoming.clone(),
-                    expected: incoming,
-                }
-            },
-            {
-                let incoming = attrs(view_types::FileSize::Unknown, Some("v2"));
-                RefreshCase {
-                    name: "version change drops learned exact",
-                    existing: attrs(view_types::FileSize::Exact(42), Some("v1")),
-                    expected: incoming.clone(),
-                    incoming,
-                }
-            },
-            {
-                let existing = attrs(view_types::FileSize::Exact(42), None);
-                let incoming = attrs(view_types::FileSize::Unknown, None);
-                RefreshCase {
-                    name: "unversioned dynamic refresh keeps learned exact",
-                    existing: existing.clone(),
-                    incoming,
-                    expected: existing,
-                }
-            },
-            {
-                let existing = attrs_with(
-                    view_types::FileSize::Exact(42),
-                    view_types::Stability::Stable,
-                    None,
-                );
-                let incoming = attrs_with(
-                    view_types::FileSize::Unknown,
-                    view_types::Stability::Stable,
-                    None,
-                );
-                RefreshCase {
-                    name: "stable silent refresh keeps learned exact",
-                    existing: existing.clone(),
-                    incoming,
-                    expected: existing,
-                }
-            },
-            {
-                let existing = attrs_with(
-                    view_types::FileSize::Exact(42),
-                    view_types::Stability::Dynamic,
-                    None,
-                );
-                let incoming = attrs_with(
-                    view_types::FileSize::Unknown,
-                    view_types::Stability::Stable,
-                    None,
-                );
-                RefreshCase {
-                    name: "placeholder stability mismatch keeps learned exact",
-                    existing: existing.clone(),
-                    incoming,
-                    expected: existing,
-                }
-            },
-        ];
-
-        for case in cases {
-            let mut entry = file_entry(case.existing);
-
-            refresh_file(&mut entry, &case.incoming);
-
-            let refreshed = entry.attrs.as_ref().expect("file attrs survive refresh");
-            assert_eq!(
-                refreshed, &case.expected,
-                "{}: refreshed attrs should match expected",
-                case.name
-            );
-            assert_eq!(
-                entry.size,
-                case.expected.st_size(),
-                "{}: inode size should follow refreshed attrs",
-                case.name
-            );
+    /// The kernel `NodeKind` of a backing path, from a `std::fs` stat.
+    #[allow(clippy::unused_self)]
+    pub(crate) fn backing_kind(&self, meta: &std::fs::Metadata) -> NodeKind {
+        let file_type = meta.file_type();
+        if file_type.is_dir() {
+            NodeKind::Directory
+        } else if file_type.is_symlink() {
+            NodeKind::Symlink
+        } else {
+            NodeKind::File
         }
     }
 }

@@ -75,19 +75,15 @@ impl Frontend {
     }
 
     pub fn serve(&self, rt: &Handle) -> anyhow::Result<()> {
+        // The daemon owns namespace construction: both kernel frontends now
+        // consume the narrow `Namespace` surface, not the registry.
         match self {
             #[cfg(target_os = "linux")]
             Frontend::Fuse(frontend) => {
-                mount::run_blocking(
-                    &frontend.mount_point,
-                    &frontend.registry,
-                    rt,
-                    &frontend.notifier,
-                )?;
+                let namespace = TreeNamespace::new(Arc::clone(&frontend.registry), rt.clone());
+                mount::run_blocking(&frontend.mount_point, namespace, rt, &frontend.notifier)?;
             },
             Frontend::Nfs(frontend) => {
-                // The daemon owns namespace construction: the NFS frontend now
-                // consumes the narrow `Namespace` surface, not the registry.
                 let namespace = TreeNamespace::new(Arc::clone(&frontend.registry), rt.clone());
                 omnifs_nfs::mount_blocking(
                     &frontend.mount_point,
