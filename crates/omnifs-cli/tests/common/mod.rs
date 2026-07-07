@@ -8,7 +8,6 @@
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::Duration;
 
 // Guard for env-mutating tests: env is process-global, so all tests that touch
 // it must hold this lock.
@@ -89,21 +88,11 @@ pub fn platform_can_mount() -> bool {
     }
 }
 
-/// Fixed, non-ephemeral port used purely as a cross-process lock for live NFS
-/// mounts. Below the OS ephemeral range, so it never collides with a daemon's
-/// `free_port()`.
-const NFS_LOCK_PORT: u16 = 48761;
-
-/// Acquire the cross-process NFS serialization lock, returning the bound socket
-/// as the guard. nextest runs each integration-test binary as its own process,
-/// so an in-process mutex cannot serialize across binaries.
+/// Acquire the cross-process NFS serialization lock. The port constant and the
+/// bind loop have one owner in `omnifs-itest`, shared with the frontend
+/// conformance matrix so both binaries serialize against the same port.
 pub fn nfs_serial_lock() -> TcpListener {
-    loop {
-        match TcpListener::bind(("127.0.0.1", NFS_LOCK_PORT)) {
-            Ok(listener) => return listener,
-            Err(_) => std::thread::sleep(Duration::from_millis(50)),
-        }
-    }
+    omnifs_itest::live::nfs_serial_lock()
 }
 
 /// Install the test provider into the provider store under `providers_dir` and
