@@ -1,7 +1,7 @@
 use crate::error::NfsFrontendError;
 use crate::export::ReadOnlyExport;
 use crate::protocol::client::ClientTable;
-use crate::protocol::filehandle::{generation, now_sec};
+use crate::protocol::filehandle::now_sec;
 use crate::protocol::rpc::{handle_rpc_record, read_rpc_record, write_rpc_record};
 use crate::trace::Trace;
 use std::io;
@@ -53,6 +53,7 @@ impl Drop for RunningNfsServer {
 pub fn start_server(
     export: Arc<dyn ReadOnlyExport>,
     bind: SocketAddr,
+    generation: u64,
     trace_path: Option<PathBuf>,
 ) -> Result<RunningNfsServer, NfsFrontendError> {
     if !bind.ip().is_loopback() {
@@ -65,7 +66,6 @@ pub fn start_server(
     let listener = TcpListener::bind(bind)?;
     let addr = listener.local_addr()?;
     let trace = Trace::new(trace_path)?;
-    let generation = generation();
     let clients = Arc::new(ClientTable::new(generation));
     trace.line(&format!(
         "ready addr={addr} generation={generation} boot_time={}",
@@ -416,7 +416,7 @@ mod tests {
     #[test]
     fn start_server_rejects_non_loopback_bind() {
         let bind = "0.0.0.0:0".parse().expect("bind addr");
-        let result = start_server(Arc::new(EmptyExport), bind, None);
+        let result = start_server(Arc::new(EmptyExport), bind, 1, None);
         assert!(matches!(result, Err(NfsFrontendError::Io(_))));
     }
 }

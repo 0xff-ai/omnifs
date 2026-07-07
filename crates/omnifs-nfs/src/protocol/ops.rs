@@ -494,7 +494,14 @@ pub(crate) fn handle_open(
         ClaimType::Fh => state.current.ok_or(Status::NoFileHandle),
         ClaimType::Previous => {
             let _delegate_type = reader.u32()?;
-            Err(Status::NotSupported)
+            // A CLAIM_PREVIOUS reclaim arrives when a client detects a server
+            // restart (stale clientid) and tries to reclaim its opens during a
+            // grace period. This read-only server keeps no grace period, so it
+            // answers NFS4ERR_NO_GRACE per RFC 7530, which tells the client to
+            // re-open the file normally (CLAIM_NULL) against its still-valid
+            // filehandle. Returning NFS4ERR_NOTSUPP instead wedges the macOS
+            // client's post-restart recovery.
+            Err(Status::NoGrace)
         },
         ClaimType::DelegateCur => {
             let _stateid = reader.fixed_opaque(16)?;
