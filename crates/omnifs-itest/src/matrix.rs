@@ -802,26 +802,30 @@ ls "$ROOT/hello/bundle" >/dev/null 2>&1 || true
 /// identically on FUSE and NFS.
 const GREP_R_PAGINATION_CONTROLS: (&str, Expect) = ("grep-r", Expect::Fail);
 
-/// FUSE-lane expectation, observed on the fuse-in-docker lane: GNU `tail -f`
-/// on `hello/live-log` delivers only the initial content (one line) and never
-/// the appended bytes. The follow pump does publish growth: an out-of-band
-/// `stat` grows while a handle is open (`omnifs-fuse/src/read.rs` spawns
-/// `spawn_live_follow_pump` and getattr reports the grown size). But the mount
-/// fires no inotify events for that out-of-band growth, and GNU tail's Linux
-/// default follow mode is inotify, so tail blocks forever after the initial
-/// flush; explicit stat-polling probes (`tail ---disable-inotify`, with
-/// `stdbuf -o0`) also captured nothing in 5s. The same fixture delivers growth
-/// to BSD tail over the NFS lane, so this is a FUSE-follow gap; the pump's own
-/// design comment targets a polling `tail -f`, so this row flipping green is
-/// the signal that the gap is closed.
-const TAIL_F_FUSE_FOLLOW_GAP: (&str, Expect) = ("tail-f-growing", Expect::Fail);
+/// fuse-in-docker lane expectation, scoped to the product runtime container's
+/// userland: `tail -f` on `hello/live-log` delivers only the initial content
+/// (one line) and never the appended bytes. This is not a FUSE-frontend gap.
+/// The follow pump does publish growth (`omnifs-fuse/src/read.rs` spawns
+/// `spawn_live_follow_pump` and getattr reports the grown size), and the same
+/// fixture over the same kernel-FUSE frontend delivers growth to GNU `tail` on
+/// native Linux (the conformance-fuse CI lane observed this row PASS) and to
+/// BSD `tail` over the NFS lane. What differs is the container's `tail`: the
+/// runtime image is Ubuntu 25.10 whose `/usr/bin/tail` symlinks to uutils
+/// coreutils 0.2.2 (`/usr/lib/cargo/bin/coreutils/tail`), a Rust coreutils
+/// reimplementation, not GNU tail. (Empirically the container is not busybox
+/// and has no busybox at all.) That `tail` follows the file but surfaces none
+/// of the out-of-band pump growth. This row flipping green is the signal that
+/// the container-userland gap is closed.
+const TAIL_F_CONTAINER_USERLAND_GAP: (&str, Expect) = ("tail-f-growing", Expect::Fail);
 
-/// Linux kernel-FUSE native lane. Seeded from the fuse-in-docker observations
-/// (same frontend); CI validates.
+/// Linux kernel-FUSE native lane. CI's conformance-fuse job runs this on a
+/// GitHub Ubuntu runner with GNU coreutils, where GNU `tail -f` sees the follow
+/// pump's out-of-band growth; that lane observed `tail-f-growing` PASS, so only
+/// the cross-frontend `grep -r` row remains expected-fail here.
 pub const LINUX_FUSE_NATIVE: Column = Column {
     id: "linux-fuse-native",
     platform: "linux",
-    expectations: &[GREP_R_PAGINATION_CONTROLS, TAIL_F_FUSE_FOLLOW_GAP],
+    expectations: &[GREP_R_PAGINATION_CONTROLS],
 };
 
 /// macOS NFSv4.0 loopback lane.
@@ -846,5 +850,5 @@ pub const MACOS_NFS_LOOPBACK: Column = Column {
 pub const FUSE_IN_DOCKER: Column = Column {
     id: "fuse-in-docker",
     platform: "linux",
-    expectations: &[GREP_R_PAGINATION_CONTROLS, TAIL_F_FUSE_FOLLOW_GAP],
+    expectations: &[GREP_R_PAGINATION_CONTROLS, TAIL_F_CONTAINER_USERLAND_GAP],
 };

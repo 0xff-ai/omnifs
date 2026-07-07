@@ -1171,7 +1171,11 @@ mod tests {
     }
 
     async fn wait_for_cached_bytes(runtime: &Runtime, path: &OmnifsPath, expected: &[u8]) {
-        for _ in 0..100 {
+        // Wall-clock deadline, not a yield-count budget: the refresh lands only
+        // after real wasm work whose poll count varies wildly with machine load
+        // (a cold wasmtime compile cache flaked a fixed 100-iteration budget).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while std::time::Instant::now() < deadline {
             if runtime
                 .cache()
                 .cached_canonical_for(path)
