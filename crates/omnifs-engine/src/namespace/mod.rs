@@ -297,6 +297,27 @@ impl EventStream {
             }
         }
     }
+
+    /// Non-blocking drain of one buffered event, `None` when none is ready.
+    ///
+    /// The NFS frontend's `ReadOnlyExport` methods are synchronous and must
+    /// apply invalidation events with drain-before-answer ordering (a stat that
+    /// sees its own invalidation must prune before it re-reads its inode). A
+    /// detached subscriber task cannot guarantee that ordering against a
+    /// synchronous caller, so the frontend polls the buffered events inline
+    /// after each namespace op emits them. A lagged receiver skips the gap; the
+    /// next answer re-resolves fresh state regardless.
+    pub fn try_recv(&mut self) -> Option<NsEvent> {
+        use futures::Stream;
+        let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+        loop {
+            match Stream::poll_next(Pin::new(&mut self.inner), &mut cx) {
+                Poll::Ready(Some(Ok(event))) => return Some(event),
+                Poll::Ready(Some(Err(_))) => {},
+                Poll::Ready(None) | Poll::Pending => return None,
+            }
+        }
+    }
 }
 
 impl futures::Stream for EventStream {
@@ -657,9 +678,35 @@ impl TreeNamespace {
             ttl: ttl_for(attrs),
             direct_io: attrs.is_some_and(FileAttrsCache::should_direct_io),
             stability: attrs.map_or(StabilityClass::Stable, |a| stability_class(a.stability())),
-            change: change_counter(node, attrs, epoch),
+            change: self.root_aware_change(id, node, attrs, epoch),
             kind,
         }
+    }
+
+    /// The change counter for a node, folding the served-mount set into the
+    /// enumeration root's answer. Adding or removing a mount does not invalidate
+    /// the synthetic `/` node (its mount name is `""`, never a served mount), so
+    /// its epoch never moves; a frontend cache keyed on the change attribute
+    /// (the NFS root directory listing under `noac`) would otherwise never drop a
+    /// stale empty listing. Mixing the sorted served mounts in bumps the root's
+    /// change exactly when the mount set changes.
+    fn root_aware_change(
+        &self,
+        id: u64,
+        node: &crate::Node,
+        attrs: Option<&FileAttrsCache>,
+        epoch: u64,
+    ) -> u64 {
+        let change = change_counter(node, attrs, epoch);
+        if id != ROOT_ID || !self.tree.root_mount_name().is_empty() {
+            return change;
+        }
+        let mut hasher = DefaultHasher::new();
+        change.hash(&mut hasher);
+        let mut mounts = self.tree.served_mounts();
+        mounts.sort();
+        mounts.hash(&mut hasher);
+        hasher.finish()
     }
 
     // --- read ---------------------------------------------------------------
@@ -905,11 +952,24 @@ impl TreeNamespace {
         name: &str,
         meta: &EntryMeta,
     ) -> DirEntry {
-        let rel = parent_rel.join(name).unwrap_or_else(|_| parent_rel.clone());
         let full = parent_full
             .join(name)
             .unwrap_or_else(|_| parent_full.clone());
-        let key = (mount.to_string(), rel.as_str().to_string());
+        // The synthetic enumeration root (mount `""`) lists mount roots: a child's
+        // canonical identity is (its mount, `/`), the same key `lookup`/`intern`
+        // mint when the same mount root is reached by name. Deriving it from the
+        // parent's mount (`""`) and joined path instead would give the mount root a
+        // second node id on the readdir path, so a frontend that keys inodes on the
+        // node id would see the same object under two identities.
+        let (child_mount, child_rel) = if mount.is_empty() {
+            (name.to_string(), Path::root())
+        } else {
+            (
+                mount.to_string(),
+                parent_rel.join(name).unwrap_or_else(|_| parent_rel.clone()),
+            )
+        };
+        let key = (child_mount.clone(), child_rel.as_str().to_string());
         let id = *self
             .by_path
             .entry(key)
@@ -923,8 +983,8 @@ impl TreeNamespace {
             id,
             NodeRecord {
                 full_path: full,
-                mount: mount.to_string(),
-                rel,
+                mount: child_mount,
+                rel: child_rel,
                 kind: meta.kind(),
                 attrs: merged.clone(),
                 subtree_root: None,

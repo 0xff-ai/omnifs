@@ -2,6 +2,7 @@
 
 use omnifs_api::{FrontendInfo, FsType};
 use omnifs_engine::MountRuntimes;
+use omnifs_engine::TreeNamespace;
 #[cfg(target_os = "linux")]
 use omnifs_fuse::NotifierHandle;
 #[cfg(target_os = "linux")]
@@ -85,9 +86,12 @@ impl Frontend {
                 )?;
             },
             Frontend::Nfs(frontend) => {
+                // The daemon owns namespace construction: the NFS frontend now
+                // consumes the narrow `Namespace` surface, not the registry.
+                let namespace = TreeNamespace::new(Arc::clone(&frontend.registry), rt.clone());
                 omnifs_nfs::mount_blocking(
                     &frontend.mount_point,
-                    &frontend.registry,
+                    namespace,
                     rt.clone(),
                     &frontend.options,
                 )?;

@@ -1,4 +1,4 @@
-use omnifs_engine::MountRuntimes;
+use omnifs_engine::{MountRuntimes, TreeNamespace};
 use omnifs_nfs::Export;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -14,6 +14,8 @@ pub struct TestExport {
     pub runtime: Runtime,
     #[allow(dead_code)]
     pub registry: Arc<MountRuntimes>,
+    #[allow(dead_code)]
+    pub namespace: Arc<TreeNamespace>,
     _config_dir: TempDir,
     _cache_dir: TempDir,
     _clone_dir: TempDir,
@@ -66,11 +68,16 @@ fn test_export_with_mount_options(mount: &str, root_mount: bool) -> TestExport {
         runtime.handle(),
     );
     let registry = Arc::new(registry);
-    let export = Arc::new(Export::new(runtime.handle().clone(), Arc::clone(&registry)));
+    let namespace = TreeNamespace::new(Arc::clone(&registry), runtime.handle().clone());
+    let export = Arc::new(Export::new(
+        runtime.handle().clone(),
+        Arc::clone(&namespace) as Arc<dyn omnifs_engine::Namespace>,
+    ));
     TestExport {
         export,
         runtime,
         registry,
+        namespace,
         _config_dir: config_dir,
         _cache_dir: cache_dir,
         _clone_dir: clone_dir,

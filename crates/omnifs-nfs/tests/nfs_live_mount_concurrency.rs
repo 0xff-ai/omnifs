@@ -18,6 +18,7 @@
 use omnifs_engine::GitCloner;
 use omnifs_engine::HostContext;
 use omnifs_engine::MountRuntimes;
+use omnifs_engine::TreeNamespace;
 use omnifs_nfs::{NfsMountOptions, mount_blocking, mount_is_active, unmount};
 use omnifs_wit::provider::types::{CalloutResult, Header, HttpResponse};
 use std::net::TcpListener;
@@ -86,7 +87,10 @@ fn nfs_live_mount_serves_fast_ops_while_provider_read_is_parked() {
         let registry = Arc::clone(&fixture.registry);
         let handle = fixture.rt.handle().clone();
         let options = fixture.options.clone();
-        move || mount_blocking(&mount_point, &registry, handle, &options)
+        move || {
+            let namespace = TreeNamespace::new(registry, handle.clone());
+            mount_blocking(&mount_point, namespace, handle, &options)
+        }
     });
 
     // Wait for the kernel mount; treat "cannot mount here" as a skip, matching
