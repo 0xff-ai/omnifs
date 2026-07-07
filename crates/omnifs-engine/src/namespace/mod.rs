@@ -243,7 +243,11 @@ pub enum NsRetryClass {
 /// Plain-data error surface. Mirrors the frontend-relevant classification of the
 /// engine's tree errors plus the retry class, so a frontend maps to errno /
 /// nfsstat4 without importing engine internals.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+///
+/// Serde-derived because it crosses the namespace wire inside every
+/// `WireResponse` (`omnifs-namespace-wire`): a server-side op failure is
+/// postcard-encoded and re-raised on the client renderer verbatim.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 pub enum NsError {
     #[error("not found")]
     NotFound,
@@ -307,6 +311,19 @@ pub struct EventStream {
 }
 
 impl EventStream {
+    /// Build an event stream over an arbitrary broadcast receiver.
+    ///
+    /// The in-engine [`TreeNamespace`] taps its own broadcast sender, but a
+    /// wire-backed client (`omnifs-namespace-wire`) re-broadcasts the events it
+    /// decodes off the socket through a local channel and hands frontends an
+    /// `EventStream` over that receiver; this is the constructor it needs.
+    #[must_use]
+    pub fn from_broadcast(receiver: broadcast::Receiver<NsEvent>) -> Self {
+        Self {
+            inner: BroadcastStream::new(receiver),
+        }
+    }
+
     /// Await the next event, or `None` when the sender is gone.
     pub async fn recv(&mut self) -> Option<NsEvent> {
         use futures::StreamExt;

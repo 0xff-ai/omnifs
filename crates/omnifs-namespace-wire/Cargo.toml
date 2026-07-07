@@ -1,0 +1,26 @@
+[package]
+name = "omnifs-namespace-wire"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Length-delimited postcard wire for the omnifs namespace surface"
+categories = ["filesystem"]
+keywords = ["omnifs", "namespace", "wire", "postcard", "filesystem"]
+
+[dependencies]
+omnifs-engine = { workspace = true }
+postcard = { workspace = true }
+serde = { workspace = true }
+tokio = { workspace = true }
+futures = "0.3"
+tokio-stream = { version = "0.1", features = ["sync"] }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true
