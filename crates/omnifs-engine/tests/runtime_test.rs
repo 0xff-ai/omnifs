@@ -127,7 +127,7 @@ async fn test_list_hello_dir() {
         .unwrap();
     match result {
         NamespaceListOutcome::Entries(listing) => {
-            assert_eq!(listing.entries.len(), 17);
+            assert_eq!(listing.entries.len(), 18);
             let names: Vec<&str> = listing.entries.iter().map(|e| e.name.as_str()).collect();
             assert!(names.contains(&"README.md"));
             assert!(names.contains(&"remote-a"));
@@ -142,6 +142,7 @@ async fn test_list_hello_dir() {
             assert!(names.contains(&"unknown-ranged"));
             assert!(names.contains(&"large-ranged"));
             assert!(names.contains(&"volatile-tail"));
+            assert!(names.contains(&"live-log"));
             assert!(names.contains(&"bundle"));
             assert!(names.contains(&"feed"));
             assert!(names.contains(&"snapshot"));
@@ -421,6 +422,7 @@ async fn test_read_file_sibling_projections_do_not_erase_parent_dirents() {
             "greeting",
             "large-ranged",
             "lazy",
+            "live-log",
             "message",
             "projected",
             "ranged",
@@ -854,6 +856,7 @@ async fn test_lookup_returns_siblings_and_list_warms_child_shape() {
             "greeting",
             "large-ranged",
             "lazy",
+            "live-log",
             "message",
             "projected",
             "ranged",

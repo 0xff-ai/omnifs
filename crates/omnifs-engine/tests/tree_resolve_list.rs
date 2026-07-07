@@ -184,7 +184,7 @@ async fn list_root_yields_known_children() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn list_hello_yields_seventeen_children_with_message() {
+async fn list_hello_yields_eighteen_children_with_message() {
     let t = test_tree();
     let tree = &t.tree;
     let ctx = RequestCtx::default();
@@ -198,15 +198,16 @@ async fn list_hello_yields_seventeen_children_with_message() {
         ListOutcome::Subtree(_) => panic!("/hello is a provider listing"),
     };
     let names: Vec<&str> = listing.entries.iter().map(|e| e.name.as_str()).collect();
-    // Verified against providers/test/src/lib.rs: /hello projects 11 files
+    // Verified against providers/test/src/lib.rs: /hello projects 12 files
     // (message, greeting, projected, lazy, fresh-full, ranged, unknown-ranged,
-    // large-ranged, volatile-tail, remote-a, remote-b), 5 dirs (bundle, feed,
-    // unbounded, throttled, snapshot), and the generated branch README = 17.
-    // `remote-a`/`remote-b` are the callout-suspending leaves the host
-    // concurrency test drives.
-    assert_eq!(listing.entries.len(), 17, "got {names:?}");
+    // large-ranged, volatile-tail, live-log, remote-a, remote-b), 5 dirs
+    // (bundle, feed, unbounded, throttled, snapshot), and the generated branch
+    // README = 18. `remote-a`/`remote-b` are the callout-suspending leaves the
+    // host concurrency test drives; `live-log` is a live ranged file.
+    assert_eq!(listing.entries.len(), 18, "got {names:?}");
     assert!(names.contains(&"README.md"));
     assert!(names.contains(&"message"));
+    assert!(names.contains(&"live-log"));
     assert!(names.contains(&"remote-a"));
     assert!(names.contains(&"remote-b"));
 }
