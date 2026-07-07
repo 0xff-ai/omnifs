@@ -1,37 +1,672 @@
 //! HTTP client for the daemon control API.
 //!
-//! The daemon listens on the container's published loopback port (or its
-//! own loopback when running natively). `OMNIFS_DAEMON_ADDR` overrides the
-//! `host:port` for non-default setups.
+//! The client only ever dials an endpoint it read from its own workspace's
+//! runtime record (`$OMNIFS_HOME/daemon.json`), or an explicit
+//! `OMNIFS_DAEMON_ADDR`. It never dials a default port blind, so a daemon owned
+//! by a different `OMNIFS_HOME` is structurally unaddressable.
+//!
+//! Resolution (per request, so the launcher can poll for the record to appear):
+//! - `OMNIFS_DAEMON_ADDR` set: dial TCP, bearer token from `OMNIFS_CONTROL_TOKEN`
+//!   when set (the bridge/debug path).
+//! - else read the record:
+//!   - absent -> the daemon is not running (exit 3).
+//!   - unix endpoint -> connect the socket; a refused/missing socket is a stale
+//!     record, which is removed and reported.
+//!   - tcp endpoint -> dial with the record's token.
+//! - the instance id echoed by `/v1/status` is asserted equal to the record's,
+//!   so a record overwritten by a restart mid-command is caught.
+
+use std::path::PathBuf;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use anyhow::{Context as _, Result};
+use bytes::Bytes;
+use http::{Method, StatusCode};
+use http_body_util::{BodyExt as _, Full};
+use hyper_util::client::legacy::Client as HyperClient;
+use hyper_util::rt::TokioExecutor;
+use hyperlocal::{UnixConnector, Uri as UnixUri};
 use omnifs_api::{
     API_MAJOR, API_MINOR, ApiError, CredentialStatus, DaemonStatus, ErrorCode, MountReport,
     MountUpdateRequest, ProviderSummary, ReconcileReport, StopReport, UpgradeDelta,
 };
 use omnifs_workspace::authn::CredentialId;
-use omnifs_workspace::layout::{CONTROL_TOKEN_FILE, WorkspaceLayout};
+use omnifs_workspace::layout::WorkspaceLayout;
 use omnifs_workspace::mounts::{Spec, UpgradePlan};
-use std::path::{Path, PathBuf};
-use std::time::Duration;
+use omnifs_workspace::runtime_record::{Endpoint, RuntimeRecord};
+use serde::de::DeserializeOwned;
 
-use crate::control::addr::daemon_addr;
 use crate::error::{ExitCode, WithExitCode, WithHint};
 
 const EXPORT_API_MINOR: u16 = 2;
+const CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Where and how to reach the daemon, resolved fresh for each request.
+enum Target {
+    /// No runtime record and no `OMNIFS_DAEMON_ADDR`: the daemon is not running.
+    Absent,
+    /// `OMNIFS_DAEMON_ADDR` override (bridge/debug). Foreign-daemon copy applies
+    /// only on this path.
+    Env { base: String, token: Option<String> },
+    /// TCP endpoint read from the record (Docker bridge), or forced for the
+    /// launcher's bring-up (`instance` is `None` there, before the record
+    /// exists).
+    Tcp {
+        base: String,
+        token: String,
+        instance: Option<String>,
+    },
+    /// Unix-socket endpoint read from the record (host-native).
+    Unix {
+        socket: PathBuf,
+        instance: Option<String>,
+    },
+}
+
+impl Target {
+    /// A human label for the endpoint, used in error and diagnostic messages.
+    fn label(&self) -> String {
+        match self {
+            Self::Absent => "the daemon".to_string(),
+            Self::Env { base, .. } | Self::Tcp { base, .. } => base.clone(),
+            Self::Unix { socket, .. } => format!("unix:{}", socket.display()),
+        }
+    }
+
+    /// The record's instance id, for the mid-flight-overwrite assertion.
+    fn instance(&self) -> Option<&str> {
+        match self {
+            Self::Tcp { instance, .. } | Self::Unix { instance, .. } => instance.as_deref(),
+            Self::Absent | Self::Env { .. } => None,
+        }
+    }
+}
+
+/// A buffered control-API response: status plus the whole body. Every daemon
+/// method reads a bounded JSON or tar payload, so buffering keeps one primitive
+/// over both transports.
+struct RawResponse {
+    status: StatusCode,
+    body: Bytes,
+}
 
 pub(crate) struct DaemonClient {
-    base: String,
+    /// Layout for record-based resolution. `None` only when the ambient
+    /// workspace could not be resolved (then the client behaves as absent).
+    record_path: Option<PathBuf>,
+    /// A forced TCP target for the Docker launcher's bring-up before the record
+    /// exists. Wins over env and record resolution.
+    forced: Option<(String, String)>,
     http: reqwest::Client,
-    token_file: PathBuf,
+    unix: OnceLock<HyperClient<UnixConnector, Full<Bytes>>>,
+    /// Set once a stale unix socket has been cleaned, so the unavailable error
+    /// can report the record was removed.
+    cleaned_stale: AtomicBool,
+}
+
+impl DaemonClient {
+    pub(crate) fn new() -> Self {
+        let record_path = WorkspaceLayout::resolve()
+            .ok()
+            .map(|layout| layout.runtime_record_file());
+        Self::with_record_path(record_path)
+    }
+
+    pub(crate) fn for_layout(layout: &WorkspaceLayout) -> Self {
+        Self::with_record_path(Some(layout.runtime_record_file()))
+    }
+
+    /// A client forced onto a TCP endpoint with a token, used by the Docker
+    /// launcher during bring-up before the record exists.
+    pub(crate) fn for_tcp(addr: &str, token: impl Into<String>) -> Self {
+        Self {
+            record_path: None,
+            forced: Some((format!("http://{addr}"), token.into())),
+            http: Self::http_client(),
+            unix: OnceLock::new(),
+            cleaned_stale: AtomicBool::new(false),
+        }
+    }
+
+    fn with_record_path(record_path: Option<PathBuf>) -> Self {
+        Self {
+            record_path,
+            forced: None,
+            http: Self::http_client(),
+            unix: OnceLock::new(),
+            cleaned_stale: AtomicBool::new(false),
+        }
+    }
+
+    fn http_client() -> reqwest::Client {
+        reqwest::Client::builder()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(REQUEST_TIMEOUT)
+            .build()
+            .expect("reqwest client with static config")
+    }
+
+    fn unix_client(&self) -> &HyperClient<UnixConnector, Full<Bytes>> {
+        self.unix
+            .get_or_init(|| HyperClient::builder(TokioExecutor::new()).build(UnixConnector))
+    }
+
+    /// Resolve the endpoint to dial for this request. `OMNIFS_DAEMON_ADDR` wins
+    /// over the record; an unparseable record is a hard error.
+    fn resolve(&self) -> Result<Target> {
+        if let Some((base, token)) = &self.forced {
+            return Ok(Target::Tcp {
+                base: base.clone(),
+                token: token.clone(),
+                instance: None,
+            });
+        }
+        if let Some(addr) = env_daemon_addr() {
+            let token = std::env::var("OMNIFS_CONTROL_TOKEN")
+                .ok()
+                .filter(|token| !token.trim().is_empty());
+            return Ok(Target::Env {
+                base: format!("http://{addr}"),
+                token,
+            });
+        }
+        let Some(record_path) = &self.record_path else {
+            return Ok(Target::Absent);
+        };
+        match RuntimeRecord::read(record_path)
+            .with_context(|| format!("read runtime record {}", record_path.display()))?
+        {
+            None => Ok(Target::Absent),
+            Some(record) => match record.endpoint {
+                Endpoint::Unix { path } => Ok(Target::Unix {
+                    socket: path,
+                    instance: Some(record.instance_id),
+                }),
+                Endpoint::Tcp { addr, token } => Ok(Target::Tcp {
+                    base: format!("http://{addr}"),
+                    token,
+                    instance: Some(record.instance_id),
+                }),
+            },
+        }
+    }
+
+    /// One request primitive over both transports. `Ok(None)` means the daemon
+    /// is unreachable (connection refused/timeout, an absent record, or a stale
+    /// unix socket that was cleaned). Other transport failures are errors.
+    async fn request(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<&serde_json::Value>,
+        timeout: Duration,
+    ) -> Result<Option<RawResponse>> {
+        let target = self.resolve()?;
+        match &target {
+            Target::Absent => Ok(None),
+            Target::Env { base, token } => {
+                self.request_tcp(base, token.as_deref(), method, path, body, timeout)
+                    .await
+            },
+            Target::Tcp { base, token, .. } => {
+                self.request_tcp(base, Some(token), method, path, body, timeout)
+                    .await
+            },
+            Target::Unix { socket, .. } => {
+                self.request_unix(socket, method, path, body, timeout).await
+            },
+        }
+    }
+
+    async fn request_tcp(
+        &self,
+        base: &str,
+        token: Option<&str>,
+        method: Method,
+        path: &str,
+        body: Option<&serde_json::Value>,
+        timeout: Duration,
+    ) -> Result<Option<RawResponse>> {
+        let mut builder = self
+            .http
+            .request(method.clone(), format!("{base}{path}"))
+            .timeout(timeout);
+        if let Some(token) = token {
+            builder = builder.bearer_auth(token);
+        }
+        if let Some(body) = body {
+            builder = builder.json(body);
+        }
+        match builder.send().await {
+            Ok(response) => {
+                let status = response.status();
+                let body = response
+                    .bytes()
+                    .await
+                    .with_context(|| format!("read response body from {base}{path}"))?;
+                Ok(Some(RawResponse { status, body }))
+            },
+            Err(error) if error.is_connect() || error.is_timeout() => Ok(None),
+            Err(error) => Err(error).with_context(|| format!("request {method} {base}{path}")),
+        }
+    }
+
+    async fn request_unix(
+        &self,
+        socket: &std::path::Path,
+        method: Method,
+        path: &str,
+        body: Option<&serde_json::Value>,
+        timeout: Duration,
+    ) -> Result<Option<RawResponse>> {
+        let uri: hyper::Uri = UnixUri::new(socket, path).into();
+        let body_bytes = match body {
+            Some(value) => {
+                Bytes::from(serde_json::to_vec(value).context("serialize request body")?)
+            },
+            None => Bytes::new(),
+        };
+        let mut builder = hyper::Request::builder().method(method.clone()).uri(uri);
+        // Only claim a JSON content type when there is a body. A bodyless POST
+        // (e.g. `reconcile()`'s no-argument call) with this header set anyway
+        // makes axum's `Option<Json<T>>` extractor attempt (and fail) to parse
+        // zero bytes as JSON, rejecting the request with 400 instead of the
+        // `None` the handler expects for "no request body".
+        if body.is_some() {
+            builder = builder.header(http::header::CONTENT_TYPE, "application/json");
+        }
+        let request = builder
+            .body(Full::new(body_bytes))
+            .context("build unix-socket request")?;
+
+        let send = self.unix_client().request(request);
+        let response = match tokio::time::timeout(timeout, send).await {
+            // Timed out: treat as unreachable, same as the TCP path.
+            Err(_) => return Ok(None),
+            Ok(Ok(response)) => response,
+            // A connect error means the socket is gone or refused: the record is
+            // stale. Remove it and report absence so the caller falls to the
+            // offline path or the "not running" error.
+            Ok(Err(error)) if error.is_connect() => {
+                self.clean_stale_record();
+                return Ok(None);
+            },
+            Ok(Err(error)) => {
+                return Err(anyhow::anyhow!(
+                    "request {method} over control socket {}: {error}",
+                    socket.display()
+                ));
+            },
+        };
+        let status = response.status();
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .with_context(|| {
+                format!(
+                    "read response body from control socket {}",
+                    socket.display()
+                )
+            })?
+            .to_bytes();
+        Ok(Some(RawResponse { status, body }))
+    }
+
+    /// Remove a stale runtime record after a refused/missing unix socket, so the
+    /// next command sees the daemon as absent rather than dialing a dead socket.
+    fn clean_stale_record(&self) {
+        if let Some(path) = &self.record_path {
+            let _ = RuntimeRecord::remove(path);
+        }
+        self.cleaned_stale.store(true, Ordering::Relaxed);
+    }
+
+    /// The daemon-not-running error, tailored to whether a stale record was just
+    /// cleaned. Exit code 3 (`DaemonUnavailable`).
+    fn unavailable_error(&self) -> anyhow::Error {
+        let message = if self.cleaned_stale.load(Ordering::Relaxed) {
+            "daemon not running (cleaned up a stale record)"
+        } else {
+            "daemon not running"
+        };
+        match Err::<(), _>(anyhow::anyhow!("{message}")).with_exit_code(ExitCode::DaemonUnavailable)
+        {
+            Ok(()) => unreachable!("daemon unavailable construction always starts from Err"),
+            Err(error) => error,
+        }
+    }
+
+    /// Probe for a daemon and classify its control state in one step.
+    async fn probe(&self) -> DaemonControlState {
+        let target = match self.resolve() {
+            Ok(target) => target,
+            Err(error) => return DaemonControlState::Sick { error },
+        };
+        let raw = match self
+            .request(Method::GET, "/v1/status", None, REQUEST_TIMEOUT)
+            .await
+        {
+            Ok(Some(raw)) => raw,
+            Ok(None) => return DaemonControlState::Absent,
+            Err(error) => return DaemonControlState::Sick { error },
+        };
+        let state = match self.status_from_raw(&raw, &target) {
+            Ok(status) => DaemonControlState::from_status(status),
+            Err(error) => DaemonControlState::Sick { error },
+        };
+        state.warn_minor_skew();
+        state
+    }
+
+    /// Raw daemon status probe. Connection absence is `None`; a reachable
+    /// daemon's HTTP status and JSON errors are propagated.
+    pub(crate) async fn status_optional(&self) -> Result<Option<DaemonStatus>> {
+        let target = self.resolve()?;
+        let Some(raw) = self
+            .request(Method::GET, "/v1/status", None, REQUEST_TIMEOUT)
+            .await?
+        else {
+            return Ok(None);
+        };
+        self.status_from_raw(&raw, &target).map(Some)
+    }
+
+    /// Verify the daemon is reachable and speaks this CLI's control API.
+    pub(crate) async fn require_compatible(&self) -> Result<DaemonStatus> {
+        let label = self.resolve().map(|t| t.label()).unwrap_or_default();
+        match self.probe().await.compatible_optional(&label)? {
+            Some(status) => Ok(status),
+            None => Err(self.unavailable_error()),
+        }
+    }
+
+    /// Daemon status when a compatible daemon answers; `None` when no daemon
+    /// answered.
+    pub(crate) async fn compatible_status_optional(&self) -> Result<Option<DaemonStatus>> {
+        let label = self.resolve().map(|t| t.label()).unwrap_or_default();
+        self.probe().await.compatible_optional(&label)
+    }
+
+    /// Daemon runtime facts from a reachable, compatible daemon.
+    pub(crate) async fn status(&self) -> Result<DaemonStatus> {
+        match self.status_optional().await? {
+            Some(status) => Ok(status),
+            None => Err(self.unavailable_error()),
+        }
+    }
+
+    /// Parse a `/v1/status` response, mapping HTTP errors to hints and asserting
+    /// the daemon's instance id against the record we resolved from.
+    fn status_from_raw(&self, raw: &RawResponse, target: &Target) -> Result<DaemonStatus> {
+        let status: DaemonStatus = Self::parse_ok_json(raw, "daemon status request failed")?;
+        self.verify_instance(&status, target)?;
+        Ok(status)
+    }
+
+    /// Assert the connected daemon's instance id matches the record we dialed.
+    /// On mismatch (a restart overwrote the record mid-command), re-read the
+    /// record once; if it has caught up to the live daemon, accept, else error.
+    fn verify_instance(&self, status: &DaemonStatus, target: &Target) -> Result<()> {
+        let Some(expected) = target.instance() else {
+            return Ok(());
+        };
+        if status.instance_id == expected {
+            return Ok(());
+        }
+        if let Some(path) = &self.record_path
+            && let Ok(Some(record)) = RuntimeRecord::read(path)
+            && record.instance_id == status.instance_id
+        {
+            return Ok(());
+        }
+        Err(anyhow::anyhow!(
+            "the daemon runtime record was overwritten mid-command \
+             (daemon instance {}, record instance {expected}); rerun the command",
+            status.instance_id,
+        ))
+    }
+
+    /// Deserialize a successful JSON response, mapping a non-success status to an
+    /// `ApiError`-derived error with hints.
+    fn parse_ok_json<T: DeserializeOwned>(raw: &RawResponse, context: &'static str) -> Result<T> {
+        if raw.status.is_success() {
+            return serde_json::from_slice(&raw.body).context("parse daemon response JSON");
+        }
+        Err(Self::error_from_body(raw, context))
+    }
+
+    fn error_from_body(raw: &RawResponse, context: &'static str) -> anyhow::Error {
+        match serde_json::from_slice::<ApiError>(&raw.body) {
+            Ok(api_error) => Self::api_error(context, &api_error),
+            Err(error) => anyhow::anyhow!(
+                "{context}: daemon returned {} with invalid ApiError JSON: {error}",
+                raw.status
+            ),
+        }
+    }
+
+    fn api_error(context: &'static str, api_error: &ApiError) -> anyhow::Error {
+        let error = anyhow::anyhow!("{context}: {}", api_error.message);
+        match Err::<(), _>(error)
+            .with_hint(hint_for(api_error.code))
+            .with_exit_code(exit_code_for(api_error.code))
+        {
+            Ok(()) => unreachable!("api error construction always starts from Err"),
+            Err(error) => error,
+        }
+    }
+
+    /// Converge the running daemon's mount set to the on-disk desired state.
+    pub(crate) async fn reconcile(&self) -> Result<ReconcileReport> {
+        let raw = self
+            .request(Method::POST, "/v1/reconcile", None, Duration::from_mins(3))
+            .await?
+            .ok_or_else(|| self.unavailable_error())?;
+        Self::parse_ok_json(&raw, "daemon reconcile request failed")
+    }
+
+    pub(crate) async fn create_mount_if_ready(&self, spec: &Spec) -> Result<Option<MountReport>> {
+        if !self.ready().await {
+            return Ok(None);
+        }
+        self.require_compatible().await?;
+        let body = serde_json::to_value(spec).context("serialize mount spec")?;
+        let raw = self
+            .request(
+                Method::POST,
+                "/v1/mounts",
+                Some(&body),
+                Duration::from_mins(3),
+            )
+            .await?
+            .ok_or_else(|| self.unavailable_error())?;
+        Self::parse_ok_json(&raw, "daemon mount create request failed").map(Some)
+    }
+
+    pub(crate) async fn update_mount_if_ready(
+        &self,
+        spec: &Spec,
+        approved: Option<&UpgradePlan>,
+    ) -> Result<Option<MountReport>> {
+        if !self.ready().await {
+            return Ok(None);
+        }
+        self.require_compatible().await?;
+        let request = MountUpdateRequest {
+            spec: serde_json::to_value(spec).context("serialize mount spec")?,
+            approved: approved.map(upgrade_delta_to_api).transpose()?,
+        };
+        let body = serde_json::to_value(&request).context("serialize mount update request")?;
+        let path = format!("/v1/mounts/{}", spec.mount);
+        let raw = self
+            .request(Method::PUT, &path, Some(&body), Duration::from_mins(3))
+            .await?
+            .ok_or_else(|| self.unavailable_error())?;
+        Self::parse_ok_json(&raw, "daemon mount update request failed").map(Some)
+    }
+
+    pub(crate) async fn delete_mount_if_ready(&self, mount: &str) -> Result<Option<MountReport>> {
+        if !self.ready().await {
+            return Ok(None);
+        }
+        self.require_compatible().await?;
+        let path = format!("/v1/mounts/{mount}");
+        let raw = self
+            .request(Method::DELETE, &path, None, Duration::from_mins(3))
+            .await?
+            .ok_or_else(|| self.unavailable_error())?;
+        Self::parse_ok_json(&raw, "daemon mount delete request failed").map(Some)
+    }
+
+    pub(crate) async fn reload_credential_if_ready(
+        &self,
+        id: &CredentialId,
+    ) -> Result<Option<CredentialStatus>> {
+        if !self.ready().await {
+            return Ok(None);
+        }
+        self.require_compatible().await?;
+        let path = format!("/v1/credentials/{id}/reload");
+        let raw = self
+            .request(Method::POST, &path, None, REQUEST_TIMEOUT)
+            .await?
+            .ok_or_else(|| self.unavailable_error())?;
+        Self::parse_ok_json(&raw, "daemon credential reload request failed").map(Some)
+    }
+
+    pub(crate) async fn providers_if_ready(&self) -> Result<Option<Vec<ProviderSummary>>> {
+        if !self.ready().await {
+            return Ok(None);
+        }
+        self.require_compatible().await?;
+        let raw = self
+            .request(Method::GET, "/v1/providers", None, REQUEST_TIMEOUT)
+            .await?
+            .ok_or_else(|| self.unavailable_error())?;
+        Self::parse_ok_json(&raw, "daemon providers request failed").map(Some)
+    }
+
+    pub(crate) async fn credentials_if_ready(&self) -> Result<Option<Vec<CredentialStatus>>> {
+        if !self.ready().await {
+            return Ok(None);
+        }
+        self.require_compatible().await?;
+        let raw = self
+            .request(Method::GET, "/v1/credentials", None, REQUEST_TIMEOUT)
+            .await?
+            .ok_or_else(|| self.unavailable_error())?;
+        Self::parse_ok_json(&raw, "daemon credentials request failed").map(Some)
+    }
+
+    /// Export a mount snapshot tar only when a compatible daemon is running.
+    pub(crate) async fn export_mount_if_running(&self, mount: &str) -> Result<Option<Vec<u8>>> {
+        let Some(status) = self.compatible_status_optional().await? else {
+            return Ok(None);
+        };
+        if status.api_minor < EXPORT_API_MINOR {
+            return Ok(None);
+        }
+        let path = format!("/v1/mounts/{mount}/export");
+        let Some(raw) = self
+            .request(Method::GET, &path, None, Duration::from_mins(1))
+            .await?
+        else {
+            return Ok(None);
+        };
+        if !raw.status.is_success() {
+            return Err(Self::error_from_body(
+                &raw,
+                "daemon snapshot export request failed",
+            ));
+        }
+        Ok(Some(raw.body.to_vec()))
+    }
+
+    /// Ask the daemon to unmount its frontend and exit. `None` when no daemon
+    /// answered, so the caller can fall back to a stale-mount sweep.
+    pub(crate) async fn shutdown(&self) -> Result<Option<StopReport>> {
+        let Some(raw) = self
+            .request(Method::POST, "/v1/shutdown", None, REQUEST_TIMEOUT)
+            .await?
+        else {
+            return Ok(None);
+        };
+        Self::parse_ok_json(&raw, "daemon shutdown request failed").map(Some)
+    }
+
+    /// True once the daemon reports the filesystem is serving.
+    pub(crate) async fn ready(&self) -> bool {
+        matches!(
+            self.request(Method::GET, "/v1/ready", None, REQUEST_TIMEOUT).await,
+            Ok(Some(raw)) if raw.status.is_success()
+        )
+    }
+}
+
+/// Read `OMNIFS_DAEMON_ADDR` from the environment. Unlike the retired
+/// `daemon_addr`, there is no default port fallback: an unset value means "use
+/// the record", never "dial 7878 blind".
+pub(crate) fn env_daemon_addr() -> Option<String> {
+    std::env::var("OMNIFS_DAEMON_ADDR")
+        .ok()
+        .map(|addr| addr.trim().to_string())
+        .filter(|addr| !addr.is_empty())
+}
+
+/// The endpoint the inspector's `GET /v1/events` stream should attach to, in the
+/// same resolution order as the control client. `None` means no daemon is
+/// running (no record, no override).
+#[derive(Clone)]
+pub(crate) enum EventEndpoint {
+    Tcp { base: String, token: Option<String> },
+    Unix { socket: PathBuf },
+}
+
+impl EventEndpoint {
+    /// A short human label for status lines in the inspector.
+    pub(crate) fn label(&self) -> String {
+        match self {
+            Self::Tcp { base, .. } => base.clone(),
+            Self::Unix { socket } => format!("unix:{}", socket.display()),
+        }
+    }
+}
+
+/// Resolve the event-stream endpoint for `layout`: `OMNIFS_DAEMON_ADDR` first,
+/// then the runtime record.
+pub(crate) fn resolve_event_endpoint(layout: &WorkspaceLayout) -> Result<Option<EventEndpoint>> {
+    if let Some(addr) = env_daemon_addr() {
+        let token = std::env::var("OMNIFS_CONTROL_TOKEN")
+            .ok()
+            .filter(|token| !token.trim().is_empty());
+        return Ok(Some(EventEndpoint::Tcp {
+            base: format!("http://{addr}"),
+            token,
+        }));
+    }
+    let record_path = layout.runtime_record_file();
+    let Some(record) = RuntimeRecord::read(&record_path)
+        .with_context(|| format!("read runtime record {}", record_path.display()))?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(match record.endpoint {
+        Endpoint::Unix { path } => EventEndpoint::Unix { socket: path },
+        Endpoint::Tcp { addr, token } => EventEndpoint::Tcp {
+            base: format!("http://{addr}"),
+            token: Some(token),
+        },
+    }))
 }
 
 #[derive(Debug)]
 pub(crate) enum DaemonControlState {
     Absent,
-    /// A daemon answered the control port but its status could not be read.
-    /// Carries the original error (chain and hints intact) so the final
-    /// rendering shows the cause once, not a pre-flattened `{:#}` string.
+    /// A daemon answered but its status could not be read.
     Sick {
         error: anyhow::Error,
     },
@@ -62,428 +697,24 @@ impl DaemonControlState {
         }
     }
 
-    fn compatible_optional(self, base: &str) -> Result<Option<DaemonStatus>> {
+    fn compatible_optional(self, label: &str) -> Result<Option<DaemonStatus>> {
         match self {
             Self::Compatible(status) => Ok(Some(*status)),
             Self::Absent => Ok(None),
             Self::Sick { error } => Err(error.context(format!(
-                "a daemon answered on the control port at {base}, but its status could not be read \
-                 (it may belong to a different OMNIFS_HOME)"
+                "a daemon answered at {label}, but its status could not be read"
             ))),
             Self::Incompatible(status) => Err(incompatible_daemon_error(&status)),
         }
     }
-
-    fn require_compatible(self, base: &str) -> Result<DaemonStatus> {
-        match self.compatible_optional(base)? {
-            Some(status) => Ok(status),
-            None => Err(daemon_unavailable_error(base)),
-        }
-    }
 }
 
-impl DaemonClient {
-    pub(crate) fn new() -> Self {
-        let token_file = WorkspaceLayout::resolve().map_or_else(
-            |_| PathBuf::from(CONTROL_TOKEN_FILE),
-            |layout| layout.control_token_file(),
-        );
-        Self::from_token_file(token_file)
-    }
-
-    pub(crate) fn for_layout(layout: &WorkspaceLayout) -> Self {
-        Self::from_token_file(layout.control_token_file())
-    }
-
-    fn from_token_file(token_file: PathBuf) -> Self {
-        Self {
-            base: format!("http://{}", daemon_addr()),
-            http: Self::http_client(),
-            token_file,
-        }
-    }
-
-    fn http_client() -> reqwest::Client {
-        reqwest::Client::builder()
-            .connect_timeout(Duration::from_millis(500))
-            .timeout(Duration::from_secs(5))
-            .build()
-            .expect("reqwest client with static config")
-    }
-
-    /// Probe for a daemon and classify its control state in one step.
-    ///
-    /// A compatible daemon has the same control API major. Minor skew is
-    /// reported as a note because it is additive. Incompatible and sick daemons
-    /// are returned as typed states so callers do not re-create probe policy.
-    async fn probe(&self) -> DaemonControlState {
-        let response = match self.get_optional("/v1/status", "query daemon status").await {
-            Ok(Some(response)) => response,
-            Ok(None) => return DaemonControlState::Absent,
-            Err(error) => {
-                return DaemonControlState::Sick { error };
-            },
-        };
-        let state = match Self::parse_status(response).await {
-            Ok(status) => DaemonControlState::from_status(status),
-            Err(error) => DaemonControlState::Sick { error },
-        };
-        state.warn_minor_skew();
-        state
-    }
-
-    /// Raw daemon status probe. Connection absence is `None`; a reachable
-    /// daemon's HTTP status and JSON errors are propagated.
-    pub(crate) async fn status_optional(&self) -> Result<Option<DaemonStatus>> {
-        let Some(response) = self
-            .get_optional("/v1/status", "query daemon status")
-            .await?
-        else {
-            return Ok(None);
-        };
-        Self::parse_status(response).await.map(Some)
-    }
-
-    /// Verify the daemon is reachable and speaks this CLI's control API.
-    pub(crate) async fn require_compatible(&self) -> Result<DaemonStatus> {
-        self.probe().await.require_compatible(&self.base)
-    }
-
-    /// Daemon status when a compatible daemon answers; `None` when no daemon
-    /// answered on the control port.
-    pub(crate) async fn compatible_status_optional(&self) -> Result<Option<DaemonStatus>> {
-        self.probe().await.compatible_optional(&self.base)
-    }
-
-    /// Daemon runtime facts from a reachable, compatible daemon.
-    pub(crate) async fn status(&self) -> Result<DaemonStatus> {
-        self.status_optional()
-            .await?
-            .ok_or_else(|| daemon_unavailable_error(&self.base))
-    }
-
-    async fn get_optional(
-        &self,
-        path: &str,
-        context: &'static str,
-    ) -> Result<Option<reqwest::Response>> {
-        let token = match read_control_token_file(&self.token_file) {
-            Ok(token) => token,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                if self.ready().await {
-                    return Err(self.control_token_unavailable_error(&error));
-                }
-                return Ok(None);
-            },
-            Err(error) => return Err(self.control_token_unavailable_error(&error)),
-        };
-        match self
-            .http
-            .get(format!("{}{}", self.base, path))
-            .bearer_auth(token)
-            .send()
-            .await
-        {
-            Ok(response) => Ok(Some(response)),
-            Err(error) if error.is_connect() || error.is_timeout() => Ok(None),
-            Err(error) => Err(error).with_context(|| format!("{context} at {}", self.base)),
-        }
-    }
-
-    fn authenticated(&self, request: reqwest::RequestBuilder) -> Result<reqwest::RequestBuilder> {
-        let token = read_control_token_file(&self.token_file)
-            .map_err(|error| self.control_token_unavailable_error(&error))?;
-        Ok(request.bearer_auth(token))
-    }
-
-    fn control_token_unavailable_error(&self, error: &std::io::Error) -> anyhow::Error {
-        control_token_unavailable_error(&self.base, &self.token_file, error)
-    }
-
-    async fn parse_status(response: reqwest::Response) -> Result<DaemonStatus> {
-        let response = Self::ensure_success(response, "daemon status request failed").await?;
-        response.json().await.context("parse daemon status")
-    }
-
-    async fn ensure_success(
-        response: reqwest::Response,
-        context: &'static str,
-    ) -> Result<reqwest::Response> {
-        if response.status().is_success() {
-            return Ok(response);
-        }
-        Err(Self::response_error(response, context).await)
-    }
-
-    async fn response_error(response: reqwest::Response, context: &'static str) -> anyhow::Error {
-        let status = response.status();
-        match response.json::<ApiError>().await {
-            Ok(api_error) => Self::api_error(context, &api_error),
-            Err(error) => {
-                anyhow::anyhow!(
-                    "{context}: daemon returned {status} with invalid ApiError JSON: {error}"
-                )
-            },
-        }
-    }
-
-    fn api_error(context: &'static str, api_error: &ApiError) -> anyhow::Error {
-        let error = anyhow::anyhow!("{context}: {}", api_error.message);
-        match Err::<(), _>(error)
-            .with_hint(hint_for(api_error.code))
-            .with_exit_code(exit_code_for(api_error.code))
-        {
-            Ok(()) => unreachable!("api error construction always starts from Err"),
-            Err(error) => error,
-        }
-    }
-
-    /// Converge the running daemon's mount set to the on-disk desired state
-    /// under `mounts/*.json`. Reconcile compiles WASM for added or changed
-    /// mounts, so it gets the long mount-load timeout rather than the default.
-    pub(crate) async fn reconcile(&self) -> Result<ReconcileReport> {
-        let response = self
-            .authenticated(
-                self.http
-                    .post(format!("{}/v1/reconcile", self.base))
-                    .timeout(Duration::from_mins(3)),
-            )?
-            .send()
-            .await
-            .with_context(|| format!("reconcile mounts on daemon at {}", self.base))?;
-        let response = Self::ensure_success(response, "daemon reconcile request failed").await?;
-        response.json().await.context("parse reconcile report")
-    }
-
-    pub(crate) async fn create_mount_if_ready(&self, spec: &Spec) -> Result<Option<MountReport>> {
-        if !self.ready().await {
-            return Ok(None);
-        }
-        self.require_compatible().await?;
-        let response = self
-            .authenticated(
-                self.http
-                    .post(format!("{}/v1/mounts", self.base))
-                    .json(&serde_json::to_value(spec).context("serialize mount spec")?)
-                    .timeout(Duration::from_mins(3)),
-            )?
-            .send()
-            .await
-            .with_context(|| format!("create mount `{}` on daemon at {}", spec.mount, self.base))?;
-        let response = Self::ensure_success(response, "daemon mount create request failed").await?;
-        response
-            .json()
-            .await
-            .context("parse mount create report")
-            .map(Some)
-    }
-
-    pub(crate) async fn update_mount_if_ready(
-        &self,
-        spec: &Spec,
-        approved: Option<&UpgradePlan>,
-    ) -> Result<Option<MountReport>> {
-        if !self.ready().await {
-            return Ok(None);
-        }
-        self.require_compatible().await?;
-        let request = MountUpdateRequest {
-            spec: serde_json::to_value(spec).context("serialize mount spec")?,
-            approved: approved.map(upgrade_delta_to_api).transpose()?,
-        };
-        let response = self
-            .authenticated(
-                self.http
-                    .put(format!("{}/v1/mounts/{}", self.base, spec.mount))
-                    .json(&request)
-                    .timeout(Duration::from_mins(3)),
-            )?
-            .send()
-            .await
-            .with_context(|| format!("update mount `{}` on daemon at {}", spec.mount, self.base))?;
-        let response = Self::ensure_success(response, "daemon mount update request failed").await?;
-        response
-            .json()
-            .await
-            .context("parse mount update report")
-            .map(Some)
-    }
-
-    pub(crate) async fn delete_mount_if_ready(&self, mount: &str) -> Result<Option<MountReport>> {
-        if !self.ready().await {
-            return Ok(None);
-        }
-        self.require_compatible().await?;
-        let response = self
-            .authenticated(
-                self.http
-                    .delete(format!("{}/v1/mounts/{mount}", self.base))
-                    .timeout(Duration::from_mins(3)),
-            )?
-            .send()
-            .await
-            .with_context(|| format!("delete mount `{mount}` on daemon at {}", self.base))?;
-        let response = Self::ensure_success(response, "daemon mount delete request failed").await?;
-        response
-            .json()
-            .await
-            .context("parse mount delete report")
-            .map(Some)
-    }
-
-    pub(crate) async fn reload_credential_if_ready(
-        &self,
-        id: &CredentialId,
-    ) -> Result<Option<CredentialStatus>> {
-        if !self.ready().await {
-            return Ok(None);
-        }
-        self.require_compatible().await?;
-        let mut url = reqwest::Url::parse(&self.base).context("parse daemon base URL")?;
-        let id = id.to_string();
-        url.path_segments_mut()
-            .map_err(|()| anyhow::anyhow!("daemon base URL cannot be used as a path base"))?
-            .extend(["v1", "credentials", id.as_str(), "reload"]);
-        let response = self
-            .authenticated(self.http.post(url))?
-            .send()
-            .await
-            .with_context(|| format!("reload credential `{id}` on daemon at {}", self.base))?;
-        let response =
-            Self::ensure_success(response, "daemon credential reload request failed").await?;
-        response
-            .json()
-            .await
-            .context("parse credential reload status")
-            .map(Some)
-    }
-
-    pub(crate) async fn providers_if_ready(&self) -> Result<Option<Vec<ProviderSummary>>> {
-        if !self.ready().await {
-            return Ok(None);
-        }
-        self.require_compatible().await?;
-        let response = self
-            .authenticated(self.http.get(format!("{}/v1/providers", self.base)))?
-            .send()
-            .await
-            .with_context(|| format!("list providers on daemon at {}", self.base))?;
-        let response = Self::ensure_success(response, "daemon providers request failed").await?;
-        response
-            .json()
-            .await
-            .context("parse daemon providers")
-            .map(Some)
-    }
-
-    pub(crate) async fn credentials_if_ready(&self) -> Result<Option<Vec<CredentialStatus>>> {
-        if !self.ready().await {
-            return Ok(None);
-        }
-        self.require_compatible().await?;
-        let response = self
-            .authenticated(self.http.get(format!("{}/v1/credentials", self.base)))?
-            .send()
-            .await
-            .with_context(|| format!("list credentials on daemon at {}", self.base))?;
-        let response = Self::ensure_success(response, "daemon credentials request failed").await?;
-        response
-            .json()
-            .await
-            .context("parse daemon credentials")
-            .map(Some)
-    }
-
-    /// Export a mount snapshot tar only when a compatible daemon is running.
-    pub(crate) async fn export_mount_if_running(&self, mount: &str) -> Result<Option<Vec<u8>>> {
-        let Some(status) = self.compatible_status_optional().await? else {
-            return Ok(None);
-        };
-        if status.api_minor < EXPORT_API_MINOR {
-            return Ok(None);
-        }
-        let response = self
-            .authenticated(
-                self.http
-                    .get(format!("{}/v1/mounts/{mount}/export", self.base))
-                    .timeout(Duration::from_mins(1)),
-            )?
-            .send()
-            .await
-            .with_context(|| format!("export mount `{mount}` from daemon at {}", self.base))?
-            .error_for_status()
-            .context("daemon snapshot export request failed")?;
-        let bytes = response
-            .bytes()
-            .await
-            .context("read snapshot tar response")?;
-        Ok(Some(bytes.to_vec()))
-    }
-
-    /// Ask the daemon to unmount its frontend and exit, returning what it tore
-    /// down. `None` when no daemon answered, so the caller can fall back to a
-    /// stale-mount sweep.
-    pub(crate) async fn shutdown(&self) -> Result<Option<StopReport>> {
-        let request = match self.authenticated(self.http.post(format!("{}/v1/shutdown", self.base)))
-        {
-            Ok(request) => request,
-            Err(error) if self.ready().await => return Err(error),
-            Err(_) => return Ok(None),
-        };
-
-        match request.send().await {
-            Ok(response) => {
-                let report = Self::ensure_success(response, "daemon shutdown request failed")
-                    .await?
-                    .json()
-                    .await
-                    .context("parse stop report")?;
-                Ok(Some(report))
-            },
-            Err(error) if error.is_connect() || error.is_timeout() => Ok(None),
-            Err(error) => Err(error).with_context(|| format!("shutdown daemon at {}", self.base)),
-        }
-    }
-
-    /// True once the daemon reports the filesystem is serving.
-    pub(crate) async fn ready(&self) -> bool {
-        match self
-            .http
-            .get(format!("{}/v1/ready", self.base))
-            .send()
-            .await
-        {
-            Ok(response) if response.status().is_success() => true,
-            Ok(response) => {
-                let _ = Self::response_error(response, "daemon ready request failed").await;
-                false
-            },
-            Err(_) => false,
-        }
-    }
-}
-
-pub(crate) fn read_control_token_file(path: &Path) -> std::io::Result<String> {
-    let token = std::fs::read_to_string(path)?;
-    let token = token.trim();
-    if token.is_empty() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "control token file is empty",
-        ));
-    }
-    Ok(token.to_string())
-}
-
-/// A daemon is answering the control address but will not accept this
-/// workspace's credentials. This is almost always a daemon owned by a different
-/// `OMNIFS_HOME` (the `just dev` sandbox at `~/.omnifs-dev`, or another
-/// worktree) holding the shared control port, so pointing the user at `omnifs
-/// up` would mislead: `up` cannot bind a port a foreign daemon already holds
-/// (it fails with "another omnifs daemon is already serving").
+/// A daemon is answering `OMNIFS_DAEMON_ADDR` but will not accept this
+/// workspace's credentials. This survives only on the explicit override path:
+/// it is almost always a daemon owned by a different `OMNIFS_HOME`.
 pub(crate) fn foreign_daemon_error(base: &str) -> anyhow::Error {
     match Err::<(), _>(anyhow::anyhow!(
-        "a daemon is serving on the control address at {base}, but it does not accept this workspace's credentials"
+        "a daemon is serving at {base}, but it does not accept this workspace's credentials"
     ))
     .with_exit_code(ExitCode::AuthRequired)
     .with_hint(
@@ -493,23 +724,6 @@ pub(crate) fn foreign_daemon_error(base: &str) -> anyhow::Error {
         "Stop it with `omnifs down` from the workspace that owns it, or point this CLI elsewhere by setting OMNIFS_DAEMON_ADDR",
     ) {
         Ok(()) => unreachable!("foreign daemon error construction always starts from Err"),
-        Err(error) => error,
-    }
-}
-
-fn control_token_unavailable_error(
-    base: &str,
-    path: &Path,
-    error: &std::io::Error,
-) -> anyhow::Error {
-    // A missing or unreadable token here means we cannot authenticate to
-    // whatever daemon is answering `base`; fold the token-file detail into the
-    // foreign-daemon diagnosis rather than promising a restart that cannot help.
-    match Err::<(), _>(foreign_daemon_error(base)).with_hint(format!(
-        "this workspace's control token at {} is missing or unreadable ({error})",
-        path.display()
-    )) {
-        Ok(()) => unreachable!("control token error construction always starts from Err"),
         Err(error) => error,
     }
 }
@@ -553,17 +767,6 @@ fn exit_code_for(code: ErrorCode) -> ExitCode {
     }
 }
 
-fn daemon_unavailable_error(base: &str) -> anyhow::Error {
-    match Err::<(), _>(anyhow::anyhow!(
-        "no daemon answered on the control port at {base}"
-    ))
-    .with_exit_code(ExitCode::DaemonUnavailable)
-    {
-        Ok(()) => unreachable!("daemon unavailable construction always starts from Err"),
-        Err(error) => error,
-    }
-}
-
 fn incompatible_daemon_error(status: &DaemonStatus) -> anyhow::Error {
     let detail = if status.api_major == 0 {
         "this daemon predates major/minor API versioning".to_string()
@@ -603,43 +806,9 @@ mod tests {
             stream.write_all(response.as_bytes()).await.unwrap();
         });
 
-        let (client, _home) = test_client(addr, "test-token");
+        let client = DaemonClient::for_tcp(&addr.to_string(), "test-token");
         let status = client.status_optional().await.unwrap().unwrap();
         assert_eq!(status.version, "test-daemon");
-        server.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn missing_control_token_with_ready_daemon_is_auth_required() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let request = read_request(&mut stream).await;
-            assert!(
-                request.starts_with("GET /v1/ready "),
-                "missing-token classification should probe ready, got:\n{request}"
-            );
-            let response = json_response(r#"{"ready":true}"#);
-            stream.write_all(response.as_bytes()).await.unwrap();
-        });
-
-        let home = tempfile::tempdir().unwrap();
-        let missing_token = home.path().join("control-token");
-        let client = DaemonClient {
-            base: format!("http://{addr}"),
-            http: DaemonClient::http_client(),
-            token_file: missing_token.clone(),
-        };
-
-        let error = client.status_optional().await.unwrap_err();
-        assert_eq!(crate::error::exit_code(&error), ExitCode::AuthRequired);
-        let rendered = crate::error::render(&error);
-        assert!(rendered.contains(&missing_token.display().to_string()));
-        // A ready daemon that rejects our token is a foreign daemon: point at
-        // `omnifs down`, never `omnifs up` (which cannot bind the held port).
-        assert!(rendered.contains("omnifs down"));
-        assert!(!rendered.contains("omnifs up"));
         server.await.unwrap();
     }
 
@@ -674,7 +843,7 @@ mod tests {
             stream.write_all(response.as_bytes()).await.unwrap();
         });
 
-        let (client, _home) = test_client(addr, "test-token");
+        let client = DaemonClient::for_tcp(&addr.to_string(), "test-token");
 
         let error = client.status_optional().await.unwrap_err();
         let rendered = crate::error::render(&error);
@@ -730,13 +899,8 @@ mod tests {
             stream.write_all(response.as_bytes()).await.unwrap();
         });
 
-        let (client, _home) = test_client(addr, "test-token");
-
-        let err = client
-            .probe()
-            .await
-            .require_compatible(&client.base)
-            .unwrap_err();
+        let client = DaemonClient::for_tcp(&addr.to_string(), "test-token");
+        let err = client.require_compatible().await.unwrap_err();
         let msg = format!("{err}");
         assert!(
             msg.contains("control API"),
@@ -744,7 +908,7 @@ mod tests {
         );
     }
 
-    /// A daemon reporting the same major but a different minor must proceed (with a warning).
+    /// A daemon reporting the same major but a different minor must proceed.
     #[tokio::test]
     async fn probe_proceeds_on_minor_skew() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -758,13 +922,22 @@ mod tests {
             stream.write_all(response.as_bytes()).await.unwrap();
         });
 
-        let (client, _home) = test_client(addr, "test-token");
-
-        // Minor skew: probe must succeed (return Compatible).
+        let client = DaemonClient::for_tcp(&addr.to_string(), "test-token");
         assert!(matches!(
             client.probe().await,
             DaemonControlState::Compatible(_)
         ));
+    }
+
+    /// With no record and no override, the client is absent and require exits 3.
+    #[tokio::test]
+    async fn absent_record_is_daemon_unavailable() {
+        let home = tempfile::tempdir().unwrap();
+        let record = home.path().join("daemon.json");
+        let client = DaemonClient::with_record_path(Some(record));
+        assert!(client.status_optional().await.unwrap().is_none());
+        let error = client.require_compatible().await.unwrap_err();
+        assert_eq!(crate::error::exit_code(&error), ExitCode::DaemonUnavailable);
     }
 
     fn json_response(body: &str) -> String {
@@ -779,20 +952,6 @@ mod tests {
         let mut request = [0; 2048];
         let read = stream.read(&mut request).await.unwrap();
         String::from_utf8_lossy(&request[..read]).to_string()
-    }
-
-    fn test_client(addr: std::net::SocketAddr, token: &str) -> (DaemonClient, tempfile::TempDir) {
-        let home = tempfile::tempdir().unwrap();
-        let token_file = home.path().join("control-token");
-        std::fs::write(&token_file, token).unwrap();
-        (
-            DaemonClient {
-                base: format!("http://{addr}"),
-                http: DaemonClient::http_client(),
-                token_file,
-            },
-            home,
-        )
     }
 
     fn api_error_response(status: &str, error: &ApiError) -> String {
@@ -810,6 +969,7 @@ mod tests {
                 "version":"{version}",
                 "api_major":{api_major},
                 "api_minor":{api_minor},
+                "instance_id":"testinstance0000",
                 "mount_point":"/tmp/omnifs",
                 "config_dir":"/tmp/omnifs-home",
                 "cache_dir":"/tmp/omnifs-home/cache",

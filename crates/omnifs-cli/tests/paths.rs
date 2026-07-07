@@ -7,9 +7,9 @@ mod common;
 
 use common::with_env;
 use omnifs_workspace::layout::{
-    CACHE_SUBDIR, CONFIG_FILE, CONTROL_TOKEN_FILE, CREDENTIALS_FILE, OMNIFS_HOME_ENV, ResolveError,
-    WorkspaceLayout,
+    CACHE_SUBDIR, CONFIG_FILE, CREDENTIALS_FILE, OMNIFS_HOME_ENV, ResolveError, WorkspaceLayout,
 };
+use omnifs_workspace::runtime_record::{CONTROL_SOCKET_FILE, RUNTIME_RECORD_FILE};
 
 #[test]
 fn under_root_builds_the_workspace_layout() {
@@ -25,8 +25,12 @@ fn under_root_builds_the_workspace_layout() {
         paths.config_dir.join(CREDENTIALS_FILE)
     );
     assert_eq!(
-        paths.control_token_file(),
-        paths.config_dir.join(CONTROL_TOKEN_FILE)
+        paths.runtime_record_file(),
+        paths.config_dir.join(RUNTIME_RECORD_FILE)
+    );
+    assert_eq!(
+        paths.control_socket(),
+        paths.config_dir.join(CONTROL_SOCKET_FILE)
     );
     assert_eq!(paths.cache_dir, paths.config_dir.join(CACHE_SUBDIR));
 }

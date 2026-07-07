@@ -22,7 +22,6 @@ const DEFAULT_HOME_SUBDIR: &str = ".omnifs";
 // flat shape.
 pub const CONFIG_FILE: &str = "config.toml";
 pub const CREDENTIALS_FILE: &str = "credentials.json";
-pub const CONTROL_TOKEN_FILE: &str = "control-token";
 pub const MOUNTS_SUBDIR: &str = "mounts";
 pub const PROVIDERS_SUBDIR: &str = "providers";
 pub const CACHE_SUBDIR: &str = "cache";
@@ -115,9 +114,19 @@ impl WorkspaceLayout {
         self.cache_dir.join(NFS_STATE_SUBDIR)
     }
 
-    /// Bearer token file for the daemon control port (`<config_dir>/control-token`).
-    pub fn control_token_file(&self) -> PathBuf {
-        self.config_dir.join(CONTROL_TOKEN_FILE)
+    /// The daemon-owned runtime record (`<config_dir>/daemon.json`). The daemon
+    /// writes it on start and removes it on graceful exit; the CLI reads it to
+    /// resolve which endpoint to dial.
+    pub fn runtime_record_file(&self) -> PathBuf {
+        self.config_dir
+            .join(crate::runtime_record::RUNTIME_RECORD_FILE)
+    }
+
+    /// The host-native control socket (`<config_dir>/control.sock`). Auth on
+    /// this socket is filesystem permissions, not a bearer token.
+    pub fn control_socket(&self) -> PathBuf {
+        self.config_dir
+            .join(crate::runtime_record::CONTROL_SOCKET_FILE)
     }
 
     pub fn provider_path(&self, provider: &str) -> PathBuf {
@@ -221,8 +230,12 @@ impl<Role> Workspace<Role> {
         self.layout.nfs_state_dir()
     }
 
-    pub fn control_token_file(&self) -> PathBuf {
-        self.layout.control_token_file()
+    pub fn runtime_record_file(&self) -> PathBuf {
+        self.layout.runtime_record_file()
+    }
+
+    pub fn control_socket(&self) -> PathBuf {
+        self.layout.control_socket()
     }
 
     pub fn display_path(&self, path: &Path) -> String {

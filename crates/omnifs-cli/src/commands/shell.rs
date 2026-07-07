@@ -10,8 +10,8 @@
 //! the user exactly where they were with nothing to undo; their real dotfiles
 //! are never touched.
 //!
-//! Backend-aware: the daemon's mode and mount point come from the run-state
-//! file `omnifs up` writes (`<config_dir>/launch.json`). The host-native
+//! Backend-aware: the daemon's mode and mount point come from the runtime
+//! record `omnifs up` writes (`<config_dir>/daemon.json`). The host-native
 //! backend's mount is host-visible, so the subshell above runs on the
 //! host pointed at it. The Docker backend's mount lives inside the container at
 //! the guest mount path and is invisible on the host, so there `omnifs shell`
@@ -26,9 +26,9 @@ use clap::Args;
 use omnifs_api::MountInfo;
 
 use crate::launch_backend::GUEST_MOUNT;
-use crate::launch_record::LaunchRecord;
 use crate::workspace::Workspace;
 use omnifs_workspace::layout::OMNIFS_MOUNT_POINT_ENV;
+use omnifs_workspace::runtime_record::{RecordedBackend, RuntimeRecord};
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct ShellArgs {
@@ -54,12 +54,12 @@ impl ShellArgs {
         let workspace = Workspace::resolve()?;
         let paths = workspace.layout();
 
-        // The run-state file is the source of truth for whether a daemon was
+        // The runtime record is the source of truth for whether a daemon was
         // started and how (native vs container) plus its mount point — no live
         // daemon required to discover the mode.
-        let record = LaunchRecord::read(&paths.config_dir)?.ok_or_else(|| {
+        let record = RuntimeRecord::read(&paths.runtime_record_file())?.ok_or_else(|| {
             anyhow::anyhow!(
-                "no omnifs run-state file in {}; start the daemon with `omnifs up`, \
+                "no omnifs daemon record in {}; start the daemon with `omnifs up`, \
                  then `omnifs shell`",
                 paths.config_dir.display()
             )
@@ -71,7 +71,10 @@ impl ShellArgs {
             return self.exec_in_container(container);
         }
 
-        let mode = record.mode_label();
+        let mode = match record.backend {
+            RecordedBackend::Native { .. } => "native",
+            RecordedBackend::Docker { .. } => "container",
+        };
 
         // A live status call, when the daemon answers, supplies the mount→provider
         // map for the prompt and the canonical mount point; if it does not, fall

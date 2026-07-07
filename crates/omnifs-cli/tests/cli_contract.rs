@@ -101,7 +101,7 @@ fn daemon_required_command_exits_3_when_control_port_is_unreachable() {
 
     assert_eq!(exit_code(&output), 3);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("no daemon answered on the control port"));
+    assert!(stderr.contains("daemon not running"));
 }
 
 #[test]

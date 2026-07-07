@@ -10,4 +10,5 @@ pub mod io;
 pub mod layout;
 pub mod mounts;
 pub mod provider;
+pub mod runtime_record;
 pub mod telemetry;

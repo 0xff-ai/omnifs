@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Context;
 use clap::Args;
 
-use crate::control::addr::daemon_addr;
+use crate::client::resolve_event_endpoint;
 use crate::inspector::{ConnectionMode, SourceKind, run_plain, run_tui};
 use crate::launch_backend::{ContainerName, DockerTarget};
 use crate::workspace::Workspace;
@@ -52,15 +52,14 @@ impl InspectArgs {
             workspace.daemon().require_compatible().await?;
             let container = self.resolve_container(&workspace)?;
             check_record_path(self.record.as_deref())?;
-            let addr = daemon_addr();
-            let token_file = workspace.layout().control_token_file();
+            let endpoint =
+                resolve_event_endpoint(workspace.layout())?.context("daemon is not running")?;
             let label = container.as_str().to_string();
             (
                 ConnectionMode::Inspector,
                 SourceKind::Socket {
-                    addr,
+                    endpoint,
                     record: self.record.clone(),
-                    token_file,
                 },
                 label,
             )
@@ -80,18 +79,12 @@ impl InspectArgs {
         workspace.daemon().require_compatible().await?;
         let _container = self.resolve_container(&workspace)?;
         check_record_path(self.record.as_deref())?;
-        let addr = daemon_addr();
+        let endpoint =
+            resolve_event_endpoint(workspace.layout())?.context("daemon is not running")?;
         let record = self.record.clone();
-        let token_file = workspace.layout().control_token_file();
-        tokio::task::spawn_blocking(move || {
-            run_plain(SourceKind::Socket {
-                addr,
-                record,
-                token_file,
-            })
-        })
-        .await
-        .context("inspector plain task")?
+        tokio::task::spawn_blocking(move || run_plain(SourceKind::Socket { endpoint, record }))
+            .await
+            .context("inspector plain task")?
     }
 
     fn resolve_container(&self, workspace: &Workspace) -> anyhow::Result<ContainerName> {

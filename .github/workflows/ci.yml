@@ -376,12 +376,13 @@ jobs:
           tar -C dist-cli/bin -xJf dist-cli/omnifs-cli-linux-x64.tar.xz
           test -x dist-cli/bin/omnifs
 
-      - name: Run frontend conformance matrix
+      - name: Run frontend conformance matrix and control-plane acceptance
         run: |
           set -euo pipefail
           OMNIFS_ACCEPTANCE_LIVE=1 \
           OMNIFS_BIN="$(pwd)/dist-cli/bin/omnifs" \
-          cargo nextest run -p omnifs-itest -E 'binary(frontend_matrix)' --no-capture
+          cargo nextest run -p omnifs-itest \
+            -E 'binary(frontend_matrix) + binary(control_plane)' --no-capture
 
       - name: Upload conformance scorecards
         if: always()

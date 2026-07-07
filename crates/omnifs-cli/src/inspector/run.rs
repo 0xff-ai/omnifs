@@ -22,7 +22,7 @@ pub fn run_tui(mode: ConnectionMode, container: String, source: SourceKind) -> a
     let mut terminal = Terminal::new(backend).context("create terminal")?;
 
     let addr = match &source {
-        SourceKind::Socket { addr, .. } => Some(addr.clone()),
+        SourceKind::Socket { endpoint, .. } => Some(endpoint.label()),
         SourceKind::Replay(_) => None,
     };
     let mut app = App::new(mode, container, addr);
@@ -79,17 +79,10 @@ pub fn run_plain(source: SourceKind) -> anyhow::Result<()> {
                 emit_plain_line(&line);
             }
         },
-        SourceKind::Socket {
-            addr,
-            record,
-            token_file,
-        } => {
+        SourceKind::Socket { endpoint, record } => {
+            let addr = endpoint.label();
             anstream::eprintln!("omnifs inspect: connecting to {addr}...");
-            let event_source = EventSource::spawn(SourceKind::Socket {
-                addr: addr.clone(),
-                record,
-                token_file,
-            });
+            let event_source = EventSource::spawn(SourceKind::Socket { endpoint, record });
             while let Some(message) = event_source.recv() {
                 match message {
                     SourceMessage::Line(line) => emit_plain_line(&line),

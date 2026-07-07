@@ -4,15 +4,17 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
-use omnifs_api::{API_MAJOR, API_MINOR, DaemonStatus, DaemonSubsystem};
+use omnifs_api::{API_MAJOR, API_MINOR, DaemonStatus, DaemonSubsystem, FsType};
 use omnifs_workspace::creds::{CredentialStore, FileStore};
 use omnifs_workspace::layout::WorkspaceLayout;
 use omnifs_workspace::mounts::materialize::{self, MaterializationMode, MaterializedMount};
+use omnifs_workspace::runtime_record::{
+    Endpoint, FrontendKind as RecordFrontendKind, FrontendRecord, RecordedBackend, RuntimeRecord,
+};
 
-use crate::client::DaemonClient;
+use crate::client::{DaemonClient, env_daemon_addr};
 use crate::config::ConfiguredBackend;
 use crate::launch_backend::{BackendOverrides, DockerTarget, LaunchBackend};
-use crate::launch_record::LaunchRecord;
 use crate::mount_config::MountConfig;
 use crate::runtime::Runtime;
 use crate::workspace::Workspace;
@@ -202,6 +204,12 @@ pub(crate) async fn launch_runtime(
         extra_env.push(format!("{}=0", omnifs_workspace::telemetry::ENV_SWITCH));
     }
 
+    // The container daemon serves TCP, so it needs the bearer token. Generate it
+    // host-side and inject it by name; the host CLI then dials with the same
+    // value, and it is written into the record host-side once the daemon serves.
+    let token = generate_control_token();
+    extra_env.push(format!("OMNIFS_CONTROL_TOKEN={token}"));
+
     anstream::eprintln!("Computing container binds for {} mount(s)", configs.len());
     let preopen_binds =
         DockerMountSpecBuilder::new(catalog, store.as_ref()).materialize_bind_specs(&configs)?;
@@ -216,7 +224,7 @@ pub(crate) async fn launch_runtime(
     )
     .await?;
 
-    match finish_docker_launch(&rt, paths, &target).await {
+    match finish_docker_launch(&rt, paths, &target, &token).await {
         Ok(outcome) => Ok(outcome),
         Err(error) => {
             if let Err(teardown) = rt.remove().await {
@@ -227,26 +235,36 @@ pub(crate) async fn launch_runtime(
     }
 }
 
-/// Parse a `host:port` string into a `SocketAddr`. A malformed value is a hard
-/// error, not a silent fall back to the default: silently defaulting would let
-/// two workspaces that both set a bad `OMNIFS_DAEMON_ADDR` collide on the one
-/// default port instead of failing loudly.
-fn parse_control_addr(addr: &str) -> anyhow::Result<SocketAddr> {
-    addr.parse()
-        .with_context(|| format!("OMNIFS_DAEMON_ADDR is not a valid host:port address: {addr:?}"))
+/// The loopback address the Docker container publishes its control port on,
+/// honoring an `OMNIFS_DAEMON_ADDR` override for non-default setups.
+fn published_control_addr() -> String {
+    env_daemon_addr().unwrap_or_else(|| omnifs_api::default_listen_addr().to_string())
 }
 
-/// Read the daemon control address from the environment (`OMNIFS_DAEMON_ADDR`),
-/// erroring on a malformed value. Both the spawned daemon (`--listen`) and the
-/// client (`DaemonClient::new`) use this so a per-test override moves them
-/// together.
-fn resolve_control_addr() -> anyhow::Result<SocketAddr> {
-    parse_control_addr(&crate::control::addr::daemon_addr())
+/// A fresh 16-byte hex control token. Failure to draw randomness is fatal: a
+/// predictable token would weaken the only guard on the TCP control port.
+fn generate_control_token() -> String {
+    let mut bytes = [0_u8; 16];
+    getrandom::fill(&mut bytes).expect("draw control token randomness");
+    hex::encode(bytes)
+}
+
+/// Parse an `OMNIFS_DAEMON_ADDR` override into a `SocketAddr`, erroring on a
+/// malformed value rather than silently falling back to a default port.
+fn env_control_addr() -> anyhow::Result<Option<SocketAddr>> {
+    match env_daemon_addr() {
+        None => Ok(None),
+        Some(addr) => addr.parse().map(Some).with_context(|| {
+            format!("OMNIFS_DAEMON_ADDR is not a valid host:port address: {addr:?}")
+        }),
+    }
 }
 
 /// Spawn a detached host-native daemon and wait for it to serve. The daemon
-/// reconciles `mounts/` on start; the CLI triggers one more reconcile to
-/// converge any change since and to surface per-mount failures.
+/// serves its Unix socket and writes the runtime record itself; the CLI reads
+/// that record to reach it, triggers one more reconcile to converge any change
+/// since start, and surfaces per-mount failures. Only the debug/test path
+/// (`OMNIFS_DAEMON_ADDR` set) adds a TCP listener.
 async fn launch_host_native(
     paths: &WorkspaceLayout,
     verb: &str,
@@ -255,10 +273,10 @@ async fn launch_host_native(
     reject_existing_host_daemon(paths, verb).await?;
     anstream::eprintln!("Starting omnifs daemon (host-native)");
 
-    let addr = resolve_control_addr()?;
-    crate::launch_backend::launch_native(&paths.cache_dir, addr, telemetry_enabled).await?;
+    let tcp_addr = env_control_addr()?;
+    crate::launch_backend::launch_native(paths, tcp_addr, telemetry_enabled).await?;
 
-    let client = DaemonClient::new();
+    let client = DaemonClient::for_layout(paths);
     match client.reconcile().await {
         Ok(report) => report_reconcile_failures(&report),
         Err(error) => {
@@ -266,11 +284,9 @@ async fn launch_host_native(
         },
     }
 
-    // Read daemon status to get the mount point and PID for the launch record.
     let status = client.status().await.ok();
     if let Some(status) = &status {
         report_launch_status(status);
-        write_launch_record(&paths.config_dir, status, addr);
     }
     Ok(LaunchOutcome::Native {
         mount_point: status.map(|status| status.mount_point),
@@ -278,7 +294,7 @@ async fn launch_host_native(
 }
 
 async fn reject_existing_host_daemon(paths: &WorkspaceLayout, verb: &str) -> anyhow::Result<()> {
-    let client = DaemonClient::new();
+    let client = DaemonClient::for_layout(paths);
     let Some(status) = client.status_optional().await? else {
         return Ok(());
     };
@@ -418,44 +434,67 @@ fn report_reconcile_failures(report: &omnifs_api::ReconcileReport) {
 
 /// Docker path: wait for the in-container daemon to serve (it reconciles from
 /// `mounts/` on start), then converge once more over the control API to surface
-/// any per-mount failure. No spec crosses the wire.
+/// any per-mount failure, and write the runtime record host-side (the container
+/// cannot reliably own a Unix socket on a macOS bind mount). No spec crosses the
+/// wire.
 async fn finish_docker_launch(
     rt: &Runtime,
     paths: &WorkspaceLayout,
     target: &DockerTarget,
+    token: &str,
 ) -> anyhow::Result<LaunchOutcome> {
-    rt.wait_for_daemon_ready().await?;
-    let client = DaemonClient::new();
+    let addr = published_control_addr();
+    let client = DaemonClient::for_tcp(&addr, token.to_string());
+    rt.wait_for_daemon_ready(&client).await?;
     client.require_compatible().await?;
     let report = client.reconcile().await?;
     report_reconcile_failures(&report);
     if let Ok(status) = client.status().await {
         report_launch_status(&status);
-        // Record the address the client actually targets (honoring an
-        // `OMNIFS_DAEMON_ADDR` override) rather than always the default. The
-        // record is best-effort, so an unparseable override falls back to the
-        // default here rather than aborting a daemon that is already serving.
-        let addr = resolve_control_addr().unwrap_or_else(|_| omnifs_api::default_listen_addr());
-        write_launch_record(&paths.config_dir, &status, addr);
+        write_docker_runtime_record(&paths.runtime_record_file(), &status, target, &addr, token);
     }
     Ok(LaunchOutcome::Docker {
         target: target.clone(),
     })
 }
 
-/// Build and persist the launch record at `<config_dir>/launch.json`.
+/// Build and persist the host-side runtime record for the Docker bridge.
 /// Best-effort: a failure here is logged but does not abort the launch, since
 /// the daemon is already serving.
-fn write_launch_record(config_dir: &Path, status: &DaemonStatus, control_addr: SocketAddr) {
-    match LaunchRecord::from_status(status, control_addr) {
-        Ok(record) => {
-            if let Err(error) = record.write(config_dir) {
-                anstream::eprintln!("warning: could not write launch record: {error:#}");
-            }
+fn write_docker_runtime_record(
+    path: &Path,
+    status: &DaemonStatus,
+    target: &DockerTarget,
+    addr: &str,
+    token: &str,
+) {
+    let frontends = status
+        .frontend
+        .as_ref()
+        .map(|frontend| {
+            vec![FrontendRecord {
+                kind: match frontend.fs_type {
+                    FsType::Fuse => RecordFrontendKind::Fuse,
+                    FsType::Nfs => RecordFrontendKind::Nfs,
+                },
+                mount_point: status.mount_point.clone(),
+            }]
+        })
+        .unwrap_or_default();
+    let record = RuntimeRecord::new(
+        Endpoint::Tcp {
+            addr: addr.to_string(),
+            token: token.to_string(),
         },
-        Err(error) => {
-            anstream::eprintln!("warning: could not build launch record: {error:#}");
+        RecordedBackend::Docker {
+            container_name: target.container_name().as_str().to_string(),
+            image: target.image().as_str().to_string(),
         },
+        status.instance_id.clone(),
+        frontends,
+    );
+    if let Err(error) = record.write(path) {
+        anstream::eprintln!("warning: could not write runtime record: {error:#}");
     }
 }
 

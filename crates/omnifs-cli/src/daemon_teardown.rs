@@ -7,10 +7,10 @@ use std::path::PathBuf;
 #[cfg(feature = "daemon")]
 use std::time::Duration;
 
-use crate::launch_backend::LaunchBackend;
-use crate::launch_record::LaunchRecord;
+use crate::launch_backend::{DockerTarget, LaunchBackend};
 use crate::workspace::Workspace;
 use anyhow::Context as _;
+use omnifs_workspace::runtime_record::{RecordedBackend, RuntimeRecord};
 
 pub(crate) struct DaemonTeardown<'a> {
     workspace: &'a Workspace,
@@ -22,10 +22,10 @@ impl<'a> DaemonTeardown<'a> {
     }
 
     /// Stop the daemon and reclaim its backend. The backend is identified from
-    /// the live daemon or launch record, never from `[system].runtime`.
+    /// the live daemon or the runtime record, never from `[system].runtime`.
     pub(crate) async fn down(&self, force: bool) -> anyhow::Result<()> {
         let layout = self.workspace.layout();
-        let config_dir = &layout.config_dir;
+        let record_path = layout.runtime_record_file();
         let nfs_state_dir = layout.nfs_state_dir();
 
         match self.resolve_running_backend().await? {
@@ -45,22 +45,22 @@ impl<'a> DaemonTeardown<'a> {
                 backend
                     .reclaim(Some(status.mount_point.as_path()), &nfs_state_dir)
                     .await?;
-                LaunchRecord::remove(config_dir)?;
-                self.remove_control_token();
+                RuntimeRecord::remove(&record_path)?;
             },
             Some(RunningBackend::Cached {
                 backend,
                 mount_point,
+                native_pid,
             }) => {
-                anstream::println!("No live daemon found; sweeping from launch record...");
+                anstream::println!("No live daemon found; sweeping from runtime record...");
+                Self::signal_stale_native_daemon(native_pid);
                 backend
                     .reclaim(mount_point.as_deref(), &nfs_state_dir)
                     .await?;
-                LaunchRecord::remove(config_dir)?;
-                self.remove_control_token();
+                RuntimeRecord::remove(&record_path)?;
             },
             None => {
-                // No live daemon and no launch record, but a wedged host-native
+                // No live daemon and no runtime record, but a wedged host-native
                 // NFS mount can outlive both. On non-Linux, sweep the NFS state
                 // dir so those recover; the fail-safe "unknown backend" stop
                 // lives in the error paths of resolve_running_backend.
@@ -70,23 +70,23 @@ impl<'a> DaemonTeardown<'a> {
         Ok(())
     }
 
-    /// Remove the daemon control token after a reclaim so a stale token cannot
-    /// outlive the daemon it authenticated. The daemon deletes it on graceful
-    /// exit; teardown deletes it too for the case where the daemon died without
-    /// cleaning up. A missing token is the normal case, not an error.
-    fn remove_control_token(&self) {
-        let path = self.workspace.layout().control_token_file();
-        if let Err(error) = std::fs::remove_file(&path)
-            && error.kind() != std::io::ErrorKind::NotFound
-        {
-            anstream::eprintln!(
-                "⚠  could not remove control token {}: {error}",
-                path.display()
-            );
+    /// A native record's pid is only trustworthy if the process is still alive.
+    /// A live pid means the daemon is wedged (it did not answer the probe): send
+    /// it a SIGTERM so it unmounts before the sweep. A dead pid (the common
+    /// crash case) is left alone; the sweep reclaims its stranded mount.
+    fn signal_stale_native_daemon(native_pid: Option<u32>) {
+        let Some(pid) = native_pid else {
+            return;
+        };
+        if pid_is_alive(pid) {
+            anstream::println!("Signalling wedged daemon (pid {pid}) to stop...");
+            let _ = std::process::Command::new("kill")
+                .args(["-TERM", &pid.to_string()])
+                .status();
         }
     }
 
-    /// With no live daemon and no launch record, a wedged host-native NFS mount
+    /// With no live daemon and no runtime record, a wedged host-native NFS mount
     /// can still be orphaned. On non-Linux, sweep the NFS state dir; report only
     /// when it tore something down, otherwise print the plain nothing note.
     #[cfg(all(feature = "daemon", not(target_os = "linux")))]
@@ -119,7 +119,7 @@ impl<'a> DaemonTeardown<'a> {
     /// Best-effort daemon teardown for `omnifs reset`.
     pub(crate) async fn reset_best_effort(&self) {
         let layout = self.workspace.layout();
-        let config_dir = &layout.config_dir;
+        let record_path = layout.runtime_record_file();
         let nfs_state_dir = layout.nfs_state_dir();
 
         let running = match self.resolve_running_backend().await {
@@ -163,13 +163,12 @@ impl<'a> DaemonTeardown<'a> {
             anstream::eprintln!("⚠  Backend reclaim failed: {error:#}");
         }
 
-        let _ = LaunchRecord::remove(config_dir);
-        self.remove_control_token();
+        let _ = RuntimeRecord::remove(&record_path);
     }
 
     /// Probe the control port for teardown. Any status error is treated as
     /// "not reachable" so a sick-but-present daemon falls through to the
-    /// launch-record sweep instead of failing `omnifs down` hard.
+    /// record sweep instead of failing `omnifs down` hard.
     async fn live_status_for_sweep(&self) -> anyhow::Result<Option<omnifs_api::DaemonStatus>> {
         match self.workspace.daemon().status_optional().await {
             Ok(status) => Ok(status),
@@ -177,9 +176,9 @@ impl<'a> DaemonTeardown<'a> {
         }
     }
 
-    /// Identify the backend from the live daemon or the launch record.
+    /// Identify the backend from the live daemon or the runtime record.
     async fn resolve_running_backend(&self) -> anyhow::Result<Option<RunningBackend>> {
-        let config_dir = &self.workspace.layout().config_dir;
+        let record_path = self.workspace.layout().runtime_record_file();
         if let Some(status) = self.live_status_for_sweep().await? {
             let backend = LaunchBackend::try_from(&status.backend)
                 .context("unknown backend: daemon did not report reclaimable identity")?;
@@ -189,16 +188,48 @@ impl<'a> DaemonTeardown<'a> {
             }));
         }
 
-        if let Some(record) = LaunchRecord::read(config_dir)? {
+        if let Some(record) = RuntimeRecord::read(&record_path)? {
             let mount_point = record.mount_point().map(Path::to_path_buf);
+            let native_pid = match &record.backend {
+                RecordedBackend::Native { pid } => Some(*pid),
+                RecordedBackend::Docker { .. } => None,
+            };
             return Ok(Some(RunningBackend::Cached {
-                backend: record.into_backend()?,
+                backend: launch_backend_from_record(&record.backend)?,
                 mount_point,
+                native_pid,
             }));
         }
 
         Ok(None)
     }
+}
+
+/// Convert the record's backend identity into the CLI's reclaim-capable
+/// backend, validating the Docker container/image identity.
+fn launch_backend_from_record(backend: &RecordedBackend) -> anyhow::Result<LaunchBackend> {
+    match backend {
+        RecordedBackend::Native { .. } => Ok(LaunchBackend::Native),
+        RecordedBackend::Docker {
+            container_name,
+            image,
+        } => Ok(LaunchBackend::Docker(DockerTarget::new(
+            container_name.clone(),
+            image.clone(),
+        )?)),
+    }
+}
+
+/// True when `pid` names a live process (`kill -0` succeeds, or fails for a
+/// reason other than "no such process"). Used before trusting a native record's
+/// pid for a stale sweep.
+fn pid_is_alive(pid: u32) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 enum RunningBackend {
@@ -209,6 +240,7 @@ enum RunningBackend {
     Cached {
         backend: LaunchBackend,
         mount_point: Option<PathBuf>,
+        native_pid: Option<u32>,
     },
 }
 
@@ -219,6 +251,7 @@ impl RunningBackend {
             Self::Cached {
                 backend,
                 mount_point,
+                ..
             } => (backend, mount_point, false),
         }
     }

@@ -316,8 +316,8 @@ impl TryFrom<&DaemonBackend> for LaunchBackend {
 
 #[cfg(feature = "daemon")]
 pub(crate) async fn launch_native(
-    cache_dir: &Path,
-    control_addr: SocketAddr,
+    paths: &omnifs_workspace::layout::WorkspaceLayout,
+    tcp_addr: Option<SocketAddr>,
     telemetry_enabled: bool,
 ) -> Result<()> {
     use std::process::Stdio;
@@ -327,6 +327,7 @@ pub(crate) async fn launch_native(
 
     use crate::client::DaemonClient;
 
+    let cache_dir = &paths.cache_dir;
     std::fs::create_dir_all(cache_dir)
         .with_context(|| format!("create cache dir {}", cache_dir.display()))?;
 
@@ -341,7 +342,7 @@ pub(crate) async fn launch_native(
         .try_clone()
         .with_context(|| format!("clone daemon log handle {}", log_path.display()))?;
 
-    let daemon_args = DaemonArgs::host_native(control_addr);
+    let daemon_args = DaemonArgs::host_native(tcp_addr);
     let argv = daemon_args.to_argv();
     let mut command = Command::new(&binary);
     for arg in &argv {
@@ -375,9 +376,11 @@ pub(crate) async fn launch_native(
         .with_context(|| format!("spawn omnifs daemon ({})", binary.display()))?;
 
     // Poll readiness at a 100ms cadence (snappy startup) for up to 30s; fail
-    // fast if the child exits first.
+    // fast if the child exits first. The client resolves through the runtime
+    // record the daemon writes on start, so `for_layout` sees the daemon the
+    // moment it publishes its record.
     let child_pid = child.id();
-    let client = DaemonClient::new();
+    let client = DaemonClient::for_layout(paths);
     for _ in 0..300 {
         if let Some(status) = child.try_wait().context("poll daemon child status")? {
             let tail = read_log_tail(&log_path);
@@ -409,9 +412,11 @@ pub(crate) async fn launch_native(
                             == crate::error::ExitCode::AuthRequired =>
                     {
                         let _ = child.kill().await;
-                        return Err(crate::client::foreign_daemon_error(&format!(
-                            "http://{control_addr}"
-                        )));
+                        let label = tcp_addr.map_or_else(
+                            || "the control socket".to_string(),
+                            |addr| format!("http://{addr}"),
+                        );
+                        return Err(crate::client::foreign_daemon_error(&label));
                     },
                     // A transient status error during our own startup: keep
                     // polling until ready or the timeout.
@@ -431,8 +436,8 @@ pub(crate) async fn launch_native(
 
 #[cfg(not(feature = "daemon"))]
 pub(crate) async fn launch_native(
-    _cache_dir: &Path,
-    _control_addr: SocketAddr,
+    _paths: &omnifs_workspace::layout::WorkspaceLayout,
+    _tcp_addr: Option<SocketAddr>,
     _telemetry_enabled: bool,
 ) -> Result<()> {
     anyhow::bail!(

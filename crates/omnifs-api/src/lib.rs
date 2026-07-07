@@ -1,8 +1,9 @@
 //! Control API types shared by the `omnifs` CLI and daemon runtime.
 //!
-//! The daemon serves these under `/v1/` on its control listener (TCP
-//! loopback through the container port forward today; a Unix socket in the
-//! future host-native mode). See `docs/contracts/50-control-plane.md`.
+//! The daemon serves these under `/v1/` on its control listener: a Unix
+//! domain socket for the host-native daemon, and TCP loopback for the Docker
+//! bridge and the `OMNIFS_DAEMON_ADDR` debug path. See
+//! `docs/contracts/50-control-plane.md`.
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -20,7 +21,7 @@ pub const API_MAJOR: u16 = 3;
 
 /// Control API minor version. The CLI warns but proceeds when the daemon's
 /// minor differs. Bump for additive, backward-compatible additions.
-pub const API_MINOR: u16 = 2;
+pub const API_MINOR: u16 = 3;
 
 /// Docker container name environment variable set by launchers and read by the
 /// daemon when reporting backend identity.
@@ -83,6 +84,11 @@ pub struct DaemonStatus {
     pub api_minor: u16,
     #[serde(default)]
     pub pid: u32,
+    /// Random 16-hex-character id generated per daemon start. The CLI asserts it
+    /// against the runtime record it resolved from, so a record overwritten by a
+    /// restart mid-command is detected instead of silently trusted.
+    #[serde(default)]
+    pub instance_id: String,
     #[serde(default)]
     #[schema(value_type = String)]
     pub executable: PathBuf,
@@ -210,8 +216,8 @@ pub enum HealthState {
     Unhealthy,
 }
 
-/// Backend serving a daemon. The CLI reads this (and the launch record) instead
-/// of inferring the backend from `[system].runtime`.
+/// Backend serving a daemon. The CLI reads this (and the runtime record)
+/// instead of inferring the backend from `[system].runtime`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DaemonBackend {

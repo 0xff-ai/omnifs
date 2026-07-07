@@ -10,6 +10,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
@@ -104,6 +105,12 @@ const DB_IMAGE = "omnifs-dev-db:local";
 const DB_CONTAINER = "omnifs-dev-db";
 const K8S_COMPOSE_PROJECT = "omnifs-devcluster";
 const CONTROL_ADDR = "127.0.0.1:7878";
+// The daemon no longer writes a control-token file; the container reads its
+// bearer token from OMNIFS_CONTROL_TOKEN. Generate one per dev session and put
+// it in this process's environment so `docker run -e OMNIFS_CONTROL_TOKEN`
+// (by name) forwards the value without it ever appearing on the command line.
+const CONTROL_TOKEN = randomBytes(16).toString("hex");
+process.env.OMNIFS_CONTROL_TOKEN = CONTROL_TOKEN;
 // The dev launcher's view of the container's guest paths (declared as image ENV
 // in Dockerfile). Used for the home bind mount and the mount-readiness wait.
 const GUEST_HOME = "/root/.omnifs";
@@ -194,7 +201,7 @@ async function main() {
   try {
     await launchContainer({ devHome, image, fixtures });
     await waitForReady();
-    await reconcile();
+    await reconcile(devHome);
 
     console.log(`✓ ${GUEST_MOUNT} is ready inside \`${CONTAINER_NAME}\``);
     if (keepRunning(options)) {
@@ -608,6 +615,10 @@ async function launchContainer({
     "-e",
     `OMNIFS_IMAGE=${image}`,
     "-e",
+    // Passed by name: docker reads the value from this process's environment,
+    // so it stays off the command line.
+    "OMNIFS_CONTROL_TOKEN",
+    "-e",
     "SSH_AUTH_SOCK=/ssh-agent",
     "-e",
     "GIT_SSH_COMMAND=ssh -F /dev/null -o StrictHostKeyChecking=accept-new",
@@ -652,34 +663,16 @@ async function waitForReady() {
   throw new Error(`${GUEST_MOUNT} did not become available inside \`${CONTAINER_NAME}\` within 60s`);
 }
 
-async function reconcile() {
-  const token = await waitForControlToken();
+async function reconcile(_devHome: string) {
+  // The container's TCP control port requires the bearer token on everything but
+  // `/v1/ready`; we injected it into the container as OMNIFS_CONTROL_TOKEN, so
+  // use the same in-memory value here.
   const report = await fetchJson<ReconcileReport>("/v1/reconcile", {
     method: "POST",
-    headers: { Authorization: `Bearer ${token}` },
+    headers: { Authorization: `Bearer ${CONTROL_TOKEN}` },
   });
   for (const failure of report.failed || []) {
     console.error(`warning: mount \`${failure.mount}\` did not load: ${failure.reason}`);
-  }
-}
-
-async function waitForControlToken(): Promise<string> {
-  // The daemon writes the token file 0600 inside the container, so the host
-  // user cannot read it through the bind mount; read it through the container.
-  const deadline = Date.now() + 15_000;
-  for (;;) {
-    const token = (
-      await awaitText($`docker exec ${CONTAINER_NAME} cat ${GUEST_HOME}/control-token`.quiet().nothrow())
-    ).trim();
-    if (token) {
-      return token;
-    }
-    if (Date.now() >= deadline) {
-      throw new Error(
-        `control token not readable from ${CONTAINER_NAME}:${GUEST_HOME}/control-token after 15s; check \`docker logs ${CONTAINER_NAME}\``,
-      );
-    }
-    await sleep(250);
   }
 }
 
