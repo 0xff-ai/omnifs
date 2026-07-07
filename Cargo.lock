@@ -3224,6 +3224,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "omnifs-namespace-wire"
+version = "0.2.1"
+dependencies = [
+ "futures",
+ "omnifs-engine",
+ "postcard",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+]
+
+[[package]]
 name = "omnifs-nfs"
 version = "0.2.1"
 dependencies = [
