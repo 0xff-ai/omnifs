@@ -1,38 +1,34 @@
 //! FUSE mount and unmount operations.
 //!
-//! Provides `run_blocking` to start the FUSE filesystem and
-//! `unmount` for clean teardown via fusermount.
+//! Provides `run_blocking` to start the FUSE filesystem over a
+//! [`Namespace`](omnifs_engine::Namespace) and `unmount` for clean teardown via
+//! fusermount.
 
-use crate::common::InodeBody;
 use crate::{Frontend, NotifierHandle};
 use fuser::Session;
-use omnifs_engine::MountRuntimes;
-use omnifs_engine::render::PathToInode;
+use omnifs_engine::Namespace;
 use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 use tokio::runtime::Handle;
 use tracing::info;
 
-/// Mount the FUSE filesystem and block until it exits. Provider teardown is the
-/// daemon's responsibility after `serve` returns, not this function's, so FUSE
-/// and NFS tear down symmetrically. `notifier` is the caller's handle for kernel
-/// invalidation; it is filled once the session is up and cleared on exit.
+/// Mount the FUSE filesystem over `namespace` and block until it exits. The
+/// daemon owns namespace construction and hands the frontend a `dyn Namespace`.
+/// Provider teardown is the daemon's responsibility after `serve` returns, not
+/// this function's, so FUSE and NFS tear down symmetrically. `notifier` is the
+/// caller's handle for kernel invalidation; it is filled once the session is up
+/// and cleared on exit.
 pub fn run_blocking(
     mount_point: &Path,
-    registry: &Arc<MountRuntimes>,
+    namespace: Arc<dyn Namespace>,
     rt: &Handle,
     notifier: &NotifierHandle,
 ) -> Result<(), Error> {
-    // Create shared path_to_inode map for invalidation.
-    let path_to_inode: Arc<PathToInode<InodeBody>> = Arc::new(PathToInode::new());
-
-    let fs = Frontend::new_with_path_map_and_notifier(
-        rt.clone(),
-        Arc::clone(registry),
-        Arc::clone(&path_to_inode),
-        Arc::clone(notifier),
-    );
+    let fs = Frontend::new(rt.clone(), namespace, Arc::clone(notifier));
+    // Apply invalidation/growth events out of band so the kernel drops
+    // huge-TTL dentries even when no op is in flight.
+    fs.spawn_event_pump();
     let config = Frontend::mount_config();
 
     info!(mount = %mount_point.display(), "starting FUSE mount");

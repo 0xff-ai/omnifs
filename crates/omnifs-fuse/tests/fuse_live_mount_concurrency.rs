@@ -61,7 +61,9 @@ fn fuse_live_mount_serves_fast_ops_while_provider_read_is_parked() {
         let handle = fixture.rt.handle().clone();
         move || {
             let notifier = new_notifier_handle();
-            omnifs_fuse::mount::run_blocking(&mount_point, &registry, &handle, &notifier)
+            // The daemon owns namespace construction; the live test mirrors it.
+            let namespace = omnifs_engine::TreeNamespace::new(registry, handle.clone());
+            omnifs_fuse::mount::run_blocking(&mount_point, namespace, &handle, &notifier)
         }
     });
 

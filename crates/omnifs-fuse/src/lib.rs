@@ -1,43 +1,46 @@
-//! FUSE filesystem implementation.
+//! FUSE filesystem frontend over the engine [`Namespace`] surface.
 //!
-//! Bridges the omnifs virtual filesystem to the kernel FUSE subsystem.
-//! Routes operations to WASM providers. Supports direct filesystem
-//! passthrough when providers set backing paths on nodes.
+//! The adapter bridges the omnifs projected tree to the kernel FUSE subsystem.
+//! It consumes only the plain-data namespace surface (node ids, policied attrs,
+//! directory pages, byte reads, and the invalidation event stream) and keeps
+//! FUSE protocol state only: kernel inode numbers, the per-`fh` file-handle
+//! tables (whole-file buffers and ranged read-through nodes), directory
+//! snapshots, kernel dentry/inode notifications, mount/unmount mechanics, reply
+//! construction, errno mapping, and the op-concurrency semaphore. Every
+//! projection answer (name resolution, attributes, listing, reads) comes from a
+//! [`Namespace`]; the adapter never reaches into the projection tree, its
+//! caches, or its render/identity machinery.
+//!
+//! Invalidation and live growth arrive as [`NsEvent`]s on a subscription the
+//! adapter drains inline after each namespace op and on a background pump (so
+//! the kernel is told to drop huge-TTL dentries even when no op is in flight).
+//! An `InvalidateSubtree` prunes the affected inode and fires
+//! `inval_entry`/`inval_inode`; an `AttrsChanged` records a live-follow grown
+//! size that `getattr` folds in, so a polling `tail -f` re-stats to the new end.
 
 pub(crate) mod inode;
 
 mod common;
 mod errno;
 mod filesystem;
-mod listing;
-mod lookup;
 pub mod mount;
-mod read;
+mod ops;
 mod read_helpers;
 mod trace;
 
 #[cfg(test)]
 mod tests;
 
-pub(crate) use common::{DirSnapshot, ROOT_INO, RangedSlot, TTL, TTL_DYNAMIC};
+pub(crate) use common::{Body, DirSnapshot, Inode, NodeKind, ROOT_INO};
 
-use common::{InodeBody, split_parent_leaf};
 use dashmap::DashMap;
-use fuser::{FileAttr, INodeNo, MountOption, Notifier};
-use inode::NodeEntry;
-#[cfg(test)]
-use omnifs_engine::Engine;
-use omnifs_engine::MountRuntimes;
-use omnifs_engine::ServingContext;
-use omnifs_engine::Tree;
-use omnifs_engine::render::{FollowSizeTable, PathKey, PathToInode, stale_ids};
-use omnifs_engine::view as view_types;
-use omnifs_engine::view::{EntryKind, EntryMeta, FileAttrsCache};
+use fuser::{INodeNo, MountOption, Notifier};
+use omnifs_engine::{EventStream, Namespace, NodeId, NsEvent};
 use parking_lot::Mutex;
 use std::ffi::OsStr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
-use std::time::Duration;
 use tokio::runtime::Handle;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
@@ -54,108 +57,78 @@ pub fn new_notifier_handle() -> NotifierHandle {
 }
 
 /// Invalidate the kernel dentry for a direct child of the filesystem root.
-/// Entries are served with effectively-infinite TTLs on the premise that
-/// the daemon invalidates them on change; call this when a mount is
-/// removed so it does not linger as a phantom directory.
+/// Entries are served with effectively-infinite TTLs on the premise that the
+/// daemon invalidates them on change; call this when a mount is removed so it
+/// does not linger as a phantom directory.
 pub fn invalidate_root_child(notifier: &NotifierHandle, name: &str) {
     if let Some(notifier) = notifier.lock().as_ref() {
-        let _ = notifier.inval_entry(INodeNo(ROOT_INO), std::ffi::OsStr::new(name));
+        let _ = notifier.inval_entry(INodeNo(ROOT_INO), OsStr::new(name));
     }
 }
 
 #[derive(Clone)]
 pub(crate) struct Frontend {
     rt: Handle,
-    registry: Arc<MountRuntimes>,
-    /// The renderer-neutral projection core. Owns the listing/lookup/read
-    /// DECISION logic (cache consult+populate, pagination, the `@next`/`@all`
-    /// controls and mount-root ignore files, invalidation drain). The FUSE
-    /// adapter dispatches each fuser callback onto the async runtime, then builds
-    /// kernel identity (inodes) and reply structures on the neutral
-    /// `Node`/`Listing`/`ReadResult` it returns.
-    tree: Arc<Tree>,
-    inodes: Arc<PathToInode<InodeBody>>,
-    /// Reverse lookup: (mount name, path) -> inode, for dedup.
-    /// Shared via `Arc` so the FUSE notifier can also hold a reference
-    /// and invalidate entries concurrently without cloning the map.
-    path_to_inode: Arc<PathToInode<InodeBody>>,
-    notifier: NotifierHandle,
+    /// The projection surface. Every name resolution, attribute, listing, and
+    /// read goes through it; the adapter holds nothing else of the engine.
+    namespace: Arc<dyn Namespace>,
+    /// Invalidation and live-growth events, drained inline after each namespace
+    /// op so the kernel is notified and grown sizes are folded promptly.
+    events: Arc<Mutex<EventStream>>,
+    /// Kernel inode id -> protocol state.
+    inodes: Arc<DashMap<u64, Inode>>,
+    /// namespace node -> inode, so a re-resolved node keeps its inode.
+    by_node: Arc<DashMap<NodeId, u64>>,
+    /// backing path -> inode, for subtree-local children.
+    by_backing: Arc<DashMap<PathBuf, u64>>,
     next_ino: Arc<AtomicU64>,
-    dir_snapshots: Arc<DashMap<u64, DirSnapshot>>,
+    notifier: NotifierHandle,
     next_fh: Arc<AtomicU64>,
-    /// Caches file content by file handle; populated on first read, evicted on release.
+    dir_snapshots: Arc<DashMap<u64, DirSnapshot>>,
+    /// Per-`fh` whole-file buffer for a `Whole` read style: filled once per open
+    /// so a mutating control or an unversioned dynamic render runs exactly once.
     file_cache: Arc<DashMap<u64, Vec<u8>>>,
-    /// `Tree`-owned ranged read handles bound to a FUSE `fh`, each paired with
-    /// the kernel inode it serves. The handle owns its `Arc<Engine>` + provider
-    /// handle; the adapter drives `read`/`close` and promotes any learned size
-    /// to the inode.
-    ranged_handles: Arc<DashMap<u64, RangedSlot>>,
-    /// Latest upstream size observed by a per-handle follow pump, keyed by
-    /// inode. `getattr` reports `max(entry.size, follow_sizes[ino])` so a
-    /// polling `tail -f` sees a live file grow between its own reads. The size
-    /// source is `Tree::probe_live_growth`; this map is the FUSE-side reporting.
-    follow_sizes: Arc<FollowSizeTable>,
-    /// Abort handles for follow pumps, keyed by file handle; aborted on release.
-    follow_pumps: Arc<DashMap<u64, tokio::task::AbortHandle>>,
+    /// Per-`fh` namespace node for a `Ranged` read style: each kernel read is a
+    /// read-through, deduped behind the namespace's internal handle cache.
+    ranged_fhs: Arc<DashMap<u64, NodeId>>,
+    /// Per-node live-follow size learned from an `AttrsChanged` event. `getattr`
+    /// reports `max(namespace size, grown[node])`, so a polling `tail -f`
+    /// re-stats, sees growth, and reads the new bytes through the ranged path.
+    grown_sizes: Arc<DashMap<NodeId, u64>>,
     op_permits: Arc<Semaphore>,
 }
 
 impl Frontend {
-    #[cfg(test)]
-    pub(crate) fn new(rt: Handle, registry: Arc<MountRuntimes>) -> Self {
-        Self::new_with_path_map(rt, registry, Arc::new(PathToInode::new()))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn new_with_path_map(
-        rt: Handle,
-        registry: Arc<MountRuntimes>,
-        path_to_inode: Arc<PathToInode<InodeBody>>,
-    ) -> Self {
-        Self::new_with_path_map_and_notifier(
-            rt,
-            registry,
-            path_to_inode,
-            Arc::new(parking_lot::Mutex::new(None)),
-        )
-    }
-
-    pub(crate) fn new_with_path_map_and_notifier(
-        rt: Handle,
-        registry: Arc<MountRuntimes>,
-        path_to_inode: Arc<PathToInode<InodeBody>>,
-        notifier: NotifierHandle,
-    ) -> Self {
-        let inodes = Arc::clone(&path_to_inode);
-
-        let root_entry = NodeEntry {
-            mount_name: registry.root_mount_name().unwrap_or_default(),
-            path: omnifs_core::path::Path::root(),
-            kind: EntryKind::Directory,
-            attrs: None,
-            size: 0,
-            size_exact: true,
-            body: InodeBody::Provider,
-            extra: (),
-        };
-        inodes.insert_entry(ROOT_INO, root_entry);
-
-        let tree = Tree::new(ServingContext::from_runtimes(Arc::clone(&registry)));
-
+    pub(crate) fn new(rt: Handle, namespace: Arc<dyn Namespace>, notifier: NotifierHandle) -> Self {
+        let events = Arc::new(Mutex::new(namespace.subscribe()));
+        let inodes = Arc::new(DashMap::new());
+        let by_node = Arc::new(DashMap::new());
+        // The root inode projects the namespace root (the mount-enumeration root
+        // or the single/rooted mount's root); every resolution starts here.
+        inodes.insert(
+            ROOT_INO,
+            Inode {
+                parent: ROOT_INO,
+                name: String::new(),
+                kind: NodeKind::Directory,
+                body: Body::Node(NodeId::ROOT),
+            },
+        );
+        by_node.insert(NodeId::ROOT, ROOT_INO);
         Self {
             rt,
-            registry,
-            tree: Arc::new(tree),
+            namespace,
+            events,
             inodes,
-            path_to_inode,
+            by_node,
+            by_backing: Arc::new(DashMap::new()),
+            next_ino: Arc::new(AtomicU64::new(ROOT_INO + 1)),
             notifier,
-            next_ino: Arc::new(AtomicU64::new(2)),
-            dir_snapshots: Arc::new(DashMap::new()),
             next_fh: Arc::new(AtomicU64::new(1)),
+            dir_snapshots: Arc::new(DashMap::new()),
             file_cache: Arc::new(DashMap::new()),
-            ranged_handles: Arc::new(DashMap::new()),
-            follow_sizes: Arc::new(FollowSizeTable::default()),
-            follow_pumps: Arc::new(DashMap::new()),
+            ranged_fhs: Arc::new(DashMap::new()),
+            grown_sizes: Arc::new(DashMap::new()),
             op_permits: Arc::new(Semaphore::new(MAX_IN_FLIGHT_OPS)),
         }
     }
@@ -174,125 +147,83 @@ impl Frontend {
             .expect("FUSE op semaphore is never closed")
     }
 
-    /// The runtime serving `mount`, if present. The live adapter reaches the
-    /// runtime through `Tree`; this registry accessor exists for the in-crate
-    /// harness, which seeds caches and inspects mount-level state directly.
-    #[cfg(test)]
-    pub(crate) fn runtime_for_mount(&self, mount: &str) -> Option<Arc<Engine>> {
-        self.registry.get(mount)
+    // --- events --------------------------------------------------------------
+
+    /// Drain the buffered namespace events emitted since the last drain and
+    /// apply them. Called inline after every namespace op so a caller's own
+    /// invalidation is folded in before it answers, and the kernel is told to
+    /// drop the dentry it cached with a huge TTL.
+    pub(crate) fn apply_pending_events(&self) {
+        let mut events = self.events.lock();
+        while let Some(event) = events.try_recv() {
+            drop(events);
+            self.apply_event(&event);
+            events = self.events.lock();
+        }
     }
 
-    /// Re-bind the cached root inode to the live root mount and return the
-    /// current binding. Mounts arrive at runtime, so a root-mounted
-    /// provider may appear (or disappear) after the `Frontend` was
-    /// constructed. The stale check uses a shared read; the write lock is
-    /// taken only on an actual root-mount change (once per add/remove).
-    pub(crate) fn sync_root_mount(&self) -> Option<String> {
-        let current = self.registry.root_mount_name();
-        let name = current.clone().unwrap_or_default();
-        let stale = self
-            .inodes
-            .get(&ROOT_INO)
-            .is_some_and(|entry| entry.mount_name != name);
-        if stale && let Some(mut entry) = self.inodes.get_mut(&ROOT_INO) {
-            entry.mount_name = name;
-        }
-        current
-    }
-
-    /// Drain pending runtime invalidations and drive the kernel-side fan-out.
-    ///
-    /// `Tree::drain_invalidations` owns the renderer-neutral half: it drains the
-    /// runtime's invalidation queues and evicts the matching mem entries. The
-    /// FUSE adapter consumes the returned `InvalidationReport` to drive its own
-    /// kernel notifier (`inval_entry`/`inval_inode`) and prune the
-    /// `path_to_inode` dedup table, which are kernel/inode-table concerns the
-    /// projection core must not own.
-    pub(crate) fn drain_and_evict_pending(&self, mount: &str) {
-        let report = self.tree.drain_invalidations(mount);
-        if report.is_empty() {
-            return;
-        }
-
-        let stale = stale_ids(&report, &self.path_to_inode, mount);
-
-        for ino in stale {
-            let Some(entry) = self.path_to_inode.get(&ino) else {
-                continue;
-            };
-            let path = entry.path.clone();
-            drop(entry);
-            self.notify_entry_deleted(mount, &path);
-            if let Ok(key) = PathKey::with_mount_str(mount, path.clone()) {
-                self.path_to_inode.remove_key(&key);
+    /// Background pump: apply namespace events continuously so an invalidation
+    /// from the engine's background drain tick reaches the kernel even when no
+    /// op is in flight. The old FUSE adapter drained only on ops; the namespace
+    /// now emits events out of band, so a pump keeps the kernel current.
+    pub(crate) fn spawn_event_pump(&self) {
+        let fs = self.clone();
+        let mut sub = fs.namespace.subscribe();
+        drop(fs.rt.spawn({
+            let fs = fs.clone();
+            async move {
+                while let Some(event) = sub.recv().await {
+                    fs.apply_event(&event);
+                }
             }
-        }
-        for path in &report.changed_dirs {
-            self.notify_dir_changed(mount, path);
+        }));
+    }
+
+    fn apply_event(&self, event: &NsEvent) {
+        match event {
+            NsEvent::InvalidateSubtree { node, .. } => self.invalidate_node(*node),
+            NsEvent::AttrsChanged { node, attrs, .. } => {
+                // Live growth is monotonic; never let a stale event shrink it.
+                let mut entry = self.grown_sizes.entry(*node).or_insert(0);
+                *entry = (*entry).max(attrs.size);
+                drop(entry);
+                if let Some(ino) = self.by_node.get(node).map(|r| *r) {
+                    self.notify_inode_changed(ino);
+                }
+            },
         }
     }
 
-    fn notify_entry_deleted(&self, mount: &str, path: &omnifs_core::path::Path) {
-        let Some((parent_path, child_name)) = split_parent_leaf(path) else {
+    /// Prune the inode for an invalidated node and fire the kernel dentry/inode
+    /// notifications so the kernel re-looks-up and re-stats. The root inode is
+    /// preserved so a client's root handle never goes stale.
+    fn invalidate_node(&self, node: NodeId) {
+        let Some((_, ino)) = self.by_node.remove(&node) else {
             return;
         };
-        let parent_ino = self
-            .path_to_inode
-            .id_for_key(&PathKey::with_mount_str(mount, parent_path).expect("runtime mount name"))
-            .unwrap_or(ROOT_INO);
-        if let Some(notifier) = self.notifier.lock().as_ref() {
-            let _ = notifier.inval_entry(INodeNo(parent_ino), OsStr::new(&child_name));
-        }
-    }
-
-    fn notify_dir_changed(&self, mount: &str, path: &omnifs_core::path::Path) {
-        let Some(dir_ino) = self
-            .path_to_inode
-            .id_for_key(&PathKey::with_mount_str(mount, path.clone()).expect("runtime mount name"))
-        else {
+        if ino == ROOT_INO {
+            self.by_node.insert(node, ino);
             return;
-        };
+        }
+        self.grown_sizes.remove(&node);
+        if let Some((_, inode)) = self.inodes.remove(&ino) {
+            self.notify_entry_deleted(inode.parent, &inode.name);
+        }
+        self.notify_inode_changed(ino);
+    }
+
+    fn notify_entry_deleted(&self, parent_ino: u64, name: &str) {
+        if name.is_empty() {
+            return;
+        }
         if let Some(notifier) = self.notifier.lock().as_ref() {
-            let _ = notifier.inval_inode(INodeNo(dir_ino), 0, 0);
+            let _ = notifier.inval_entry(INodeNo(parent_ino), OsStr::new(name));
         }
     }
 
-    fn attr_for_kind(&self, ino: u64, kind: EntryKind, size: u64) -> FileAttr {
-        match kind {
-            EntryKind::Directory => self.dir_attr(ino),
-            EntryKind::File => self.file_attr(ino, size),
+    fn notify_inode_changed(&self, ino: u64) {
+        if let Some(notifier) = self.notifier.lock().as_ref() {
+            let _ = notifier.inval_inode(INodeNo(ino), 0, 0);
         }
-    }
-
-    pub(crate) fn attr_for_inode_or_meta(
-        &self,
-        ino: u64,
-        fallback_kind: EntryKind,
-        fallback_size: u64,
-    ) -> FileAttr {
-        if let Some(entry) = self.inodes.get(&ino) {
-            return self.attr_for_kind(ino, entry.kind, entry.size);
-        }
-        self.attr_for_kind(ino, fallback_kind, fallback_size)
-    }
-
-    fn ttl_for_attrs(attrs: Option<&FileAttrsCache>) -> Duration {
-        let Some(attrs) = attrs else {
-            return TTL;
-        };
-        if !matches!(attrs.size(), view_types::FileSize::Exact(_))
-            || !matches!(attrs.stability(), view_types::Stability::Stable)
-        {
-            return TTL_DYNAMIC;
-        }
-        TTL
-    }
-
-    pub(crate) fn ttl_for_meta(meta: &EntryMeta) -> Duration {
-        Self::ttl_for_attrs(meta.attrs())
-    }
-
-    fn ttl_for_entry(entry: &NodeEntry) -> Duration {
-        Self::ttl_for_attrs(entry.attrs.as_ref())
     }
 }
