@@ -163,7 +163,9 @@ pub struct NativeDaemon {
     pub mount_point: PathBuf,
     _home: TempDir,
     /// Cross-process NFS serialization lock, held for the lane's lifetime.
-    _nfs_lock: TcpListener,
+    /// `None` when the caller holds the lock externally (the perf lane spans two
+    /// sequential lanes under one lock, so no per-lane bring-up owns its own).
+    _nfs_lock: Option<TcpListener>,
 }
 
 impl Drop for NativeDaemon {
@@ -365,7 +367,9 @@ pub struct WireFrontendDaemon {
     pub mount_point: PathBuf,
     _home: TempDir,
     /// Cross-process NFS serialization lock, held for the lane's lifetime.
-    _nfs_lock: TcpListener,
+    /// `None` when the caller holds the lock externally (the perf lane spans two
+    /// sequential lanes under one lock, so no per-lane bring-up owns its own).
+    _nfs_lock: Option<TcpListener>,
 }
 
 impl Drop for WireFrontendDaemon {
@@ -419,9 +423,22 @@ fn wait_briefly(child: &mut Child) {
 /// up; panics only on a spawn error or a daemon that is alive but never ready
 /// (a real regression in the namespace-only ready path). The caller gates on
 /// `OMNIFS_ACCEPTANCE_LIVE`.
-#[allow(clippy::too_many_lines)] // linear end-to-end bring-up
 #[must_use]
 pub fn start_wire_frontend(kind: &str) -> Option<WireFrontendDaemon> {
+    wire_frontend(kind, Some(nfs_serial_lock()))
+}
+
+/// Like [`start_wire_frontend`] but the caller already holds the NFS serial lock
+/// and keeps holding it. The perf lane holds one lock across both its sequential
+/// lanes, so it must not let each bring-up acquire (and later drop) its own.
+#[must_use]
+pub fn start_wire_frontend_holding_lock(kind: &str) -> Option<WireFrontendDaemon> {
+    wire_frontend(kind, None)
+}
+
+#[allow(clippy::too_many_lines)] // linear end-to-end bring-up
+#[must_use]
+fn wire_frontend(kind: &str, nfs_lock: Option<TcpListener>) -> Option<WireFrontendDaemon> {
     let test_wasm = crate::provider_artifact_dir().join("test_provider.wasm");
     if !test_wasm.exists() {
         eprintln!(
@@ -435,7 +452,6 @@ pub fn start_wire_frontend(kind: &str) -> Option<WireFrontendDaemon> {
         return None;
     }
 
-    let nfs_lock = nfs_serial_lock();
     let hermetic = hermetic_home();
     let home_path = hermetic.home.path().to_path_buf();
 
@@ -586,9 +602,24 @@ fn curl_ok(url: &str) -> bool {
 ///
 /// The caller is responsible for the `OMNIFS_ACCEPTANCE_LIVE` env gate and its
 /// skip message.
-#[allow(clippy::too_many_lines)] // linear end-to-end daemon bring-up
 #[must_use]
 pub fn start_native_daemon() -> Option<NativeDaemon> {
+    // Hold the cross-process NFS lock for the whole lane so this binary's mount
+    // never races the CLI lifecycle suite's mounts in a parallel nextest run.
+    native_daemon(Some(nfs_serial_lock()))
+}
+
+/// Like [`start_native_daemon`] but the caller already holds the NFS serial lock
+/// and keeps holding it. The perf lane holds one lock across both its sequential
+/// lanes, so it must not let each bring-up acquire (and later drop) its own.
+#[must_use]
+pub fn start_native_daemon_holding_lock() -> Option<NativeDaemon> {
+    native_daemon(None)
+}
+
+#[allow(clippy::too_many_lines)] // linear end-to-end daemon bring-up
+#[must_use]
+fn native_daemon(nfs_lock: Option<TcpListener>) -> Option<NativeDaemon> {
     let test_wasm = crate::provider_artifact_dir().join("test_provider.wasm");
     if !test_wasm.exists() {
         eprintln!(
@@ -602,10 +633,6 @@ pub fn start_native_daemon() -> Option<NativeDaemon> {
         eprintln!("skip: platform cannot mount (no /dev/fuse)");
         return None;
     }
-
-    // Hold the cross-process NFS lock for the whole lane so this binary's mount
-    // never races the CLI lifecycle suite's mounts in a parallel nextest run.
-    let nfs_lock = nfs_serial_lock();
 
     let hermetic = hermetic_home();
     let mount_point = hermetic.mount_point.clone();
