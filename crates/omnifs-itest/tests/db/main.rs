@@ -5,7 +5,7 @@ mod db_fixture;
 use omnifs_core::path::Path;
 use omnifs_engine::EngineError;
 use omnifs_engine::test_support::{LookupOutcome, NamespaceListOutcome, ReadBytes};
-use omnifs_itest::{RuntimeHarness, make_runtime_from_config};
+use omnifs_itest::RuntimeHarness;
 use omnifs_wit::provider::types::ErrorKind;
 use serde::Deserialize;
 
@@ -40,7 +40,7 @@ fn db_config(host_file: &str) -> String {
 fn db_harness() -> (tempfile::TempDir, RuntimeHarness) {
     let dir = tempfile::tempdir().unwrap();
     let db_path = db_fixture::write_chinook_fixture(dir.path());
-    let harness = make_runtime_from_config(&db_config(&db_path.display().to_string()));
+    let harness = RuntimeHarness::new(&db_config(&db_path.display().to_string())).unwrap();
     (dir, harness)
 }
 

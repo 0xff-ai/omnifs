@@ -2,7 +2,7 @@
 
 use omnifs_core::path::Path;
 use omnifs_engine::EngineError;
-use omnifs_itest::{RuntimeHarness, TestOpExt, into_inline, make_initialized_runtime};
+use omnifs_itest::{CalloutSetup, RuntimeHarness, TestOpExt, into_inline};
 use omnifs_wit::provider::types::{CalloutResult, ErrorKind, Header, HttpResponse};
 
 fn p(path: &str) -> Path {
@@ -10,7 +10,7 @@ fn p(path: &str) -> Path {
 }
 
 fn web_harness() -> RuntimeHarness {
-    make_initialized_runtime(
+    RuntimeHarness::new(
         r#"
         {
             "provider": "omnifs_provider_web.wasm",
@@ -24,6 +24,7 @@ fn web_harness() -> RuntimeHarness {
         }
     "#,
     )
+    .unwrap()
 }
 
 #[test]
@@ -107,7 +108,7 @@ fn web_provider_empty_rest_fetches_site_root() {
 
 #[tokio::test]
 async fn web_provider_denies_domains_outside_mount_config() {
-    let harness = RuntimeHarness::new_real_callouts(
+    let harness = RuntimeHarness::builder(
         r#"
         {
             "provider": "omnifs_provider_web.wasm",
@@ -121,6 +122,8 @@ async fn web_provider_denies_domains_outside_mount_config() {
         }
     "#,
     )
+    .callouts(CalloutSetup::Real)
+    .build()
     .unwrap();
 
     let error = harness

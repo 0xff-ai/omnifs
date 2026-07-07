@@ -5,7 +5,7 @@ mod support;
 use omnifs_core::path::Path;
 use omnifs_engine::EngineError;
 use omnifs_engine::test_support::{LookupOutcome, NamespaceListOutcome, ReadBytes};
-use omnifs_itest::{make_initialized_runtime, try_make_runtime_from_config};
+use omnifs_itest::RuntimeHarness;
 use omnifs_wit::provider::types::{
     CalloutResult, ErrorKind, HttpResponse, OpResult, ReadFileOutcome, Stability,
 };
@@ -38,7 +38,7 @@ fn assert_lookup_not_found(lookup: &LookupOutcome) {
 
 #[test]
 fn dns_provider_rejects_invalid_default_resolver_config_during_initialize() {
-    let error = match try_make_runtime_from_config(
+    let error = match RuntimeHarness::new(
         r#"
         {
             "provider": "omnifs_provider_dns.wasm",
@@ -72,7 +72,7 @@ fn dns_provider_rejects_invalid_default_resolver_config_during_initialize() {
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn dns_provider_routes_static_and_dynamic_paths() {
-    let harness = make_initialized_runtime(
+    let harness = RuntimeHarness::new(
         r#"
         {
             "provider": "omnifs_provider_dns.wasm",
@@ -82,7 +82,8 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
             }
         }
     "#,
-    );
+    )
+    .unwrap();
 
     let lookup = harness
         .runtime
@@ -271,7 +272,7 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
 
 #[tokio::test]
 async fn dns_provider_unknown_resolver_read_is_invalid_input() {
-    let harness = make_initialized_runtime(
+    let harness = RuntimeHarness::new(
         r#"
         {
             "provider": "omnifs_provider_dns.wasm",
@@ -281,7 +282,8 @@ async fn dns_provider_unknown_resolver_read_is_invalid_input() {
             }
         }
     "#,
-    );
+    )
+    .unwrap();
 
     let error = harness
         .runtime
@@ -310,7 +312,7 @@ async fn dns_provider_unknown_resolver_read_is_invalid_input() {
 
 #[tokio::test]
 async fn dns_provider_unknown_record_reads_are_not_found() {
-    let harness = make_initialized_runtime(
+    let harness = RuntimeHarness::new(
         r#"
         {
             "provider": "omnifs_provider_dns.wasm",
@@ -320,7 +322,8 @@ async fn dns_provider_unknown_record_reads_are_not_found() {
             }
         }
     "#,
-    );
+    )
+    .unwrap();
 
     let error = harness
         .runtime

@@ -34,118 +34,49 @@ pub struct RuntimeHarness {
     pub runtime: Engine,
 }
 
+/// How a harness answers provider callouts.
+pub enum CalloutSetup {
+    /// Fetch/FetchBlob captured for hand-answering or tape replay. The default.
+    Captured,
+    /// Real executors (network). Used by domain-denial tests and record mode
+    /// without a recorder (not normally needed).
+    Real,
+    /// Real executors plus a tape recorder tee observing every callout.
+    Recorded(Arc<crate::tape::record::TapeRecorder>),
+}
+
+/// A pre-construction hook run against the workspace layout before the engine
+/// is built. See [`HarnessBuilder::prepare`].
+type PrepareHook<'a> = Box<dyn FnOnce(&omnifs_workspace::layout::WorkspaceLayout) + 'a>;
+
+/// Builder for a [`RuntimeHarness`]: selects the wasmtime engine, the callout
+/// wiring, and an optional pre-construction hook.
+pub struct HarnessBuilder<'a> {
+    config_json: &'a str,
+    engine: Option<&'a wasmtime::Engine>,
+    callouts: CalloutSetup,
+    /// Runs after the workspace layout exists on disk and before engine
+    /// construction. Record mode uses it to write credentials into
+    /// `paths.credentials_file`.
+    prepare: Option<PrepareHook<'a>>,
+}
+
 impl RuntimeHarness {
-    pub fn new(config_json: &str) -> Result<Self, BuildError> {
-        let engine = make_engine();
-        Self::with_engine(config_json, &engine)
-    }
-
-    pub fn new_real_callouts(config_json: &str) -> Result<Self, BuildError> {
-        let engine = make_engine();
-        Self::with_engine_real_callouts(config_json, &engine)
-    }
-
-    pub fn with_engine(config_json: &str, engine: &wasmtime::Engine) -> Result<Self, BuildError> {
-        Self::with_engine_and_callouts(config_json, engine, true)
-    }
-
-    pub fn with_engine_real_callouts(
-        config_json: &str,
-        engine: &wasmtime::Engine,
-    ) -> Result<Self, BuildError> {
-        Self::with_engine_and_callouts(config_json, engine, false)
-    }
-
-    fn with_engine_and_callouts(
-        config_json: &str,
-        engine: &wasmtime::Engine,
-        capture_test_callouts: bool,
-    ) -> Result<Self, BuildError> {
-        let clone_dir = tempfile::tempdir().map_err(|source| BuildError::CacheDir {
-            path: std::env::temp_dir(),
-            source,
-        })?;
-        let cache_dir = tempfile::tempdir().map_err(|source| BuildError::CacheDir {
-            path: std::env::temp_dir(),
-            source,
-        })?;
-        let config_dir = tempfile::tempdir().map_err(|source| BuildError::CacheDir {
-            path: std::env::temp_dir(),
-            source,
-        })?;
-        let providers_dir = tempfile::tempdir().map_err(|source| BuildError::CacheDir {
-            path: std::env::temp_dir(),
-            source,
-        })?;
-        let paths = omnifs_workspace::layout::WorkspaceLayout::under_root(config_dir.path());
-
-        // Pin the named provider into this harness's provider store and rewrite
-        // the test config's `provider` field to the resulting `ProviderRef`, so
-        // resolution and serving go through the content-addressed path the host
-        // uses in production.
-        let mut spec = pin_spec_from_json(config_json, providers_dir.path())?;
-
-        // Mirror the CLI's creation-time inheritance: bake the pinned provider's
-        // manifest defaults into the spec before serving, so the harness exercises
-        // the same already-hydrated spec the daemon sees in production.
-        let catalog = Catalog::open(providers_dir.path());
-        if let Some(provider) = catalog
-            .get(&spec.provider.id)
-            .map_err(|error| BuildError::InvalidConfig(error.to_string()))?
-        {
-            let manifest = provider
-                .manifest()
-                .map_err(|error| BuildError::InvalidConfig(error.to_string()))?;
-            spec.apply_provider_metadata(
-                &manifest,
-                omnifs_workspace::mounts::ProviderMetadataInheritance::all(),
-            )
-            .map_err(|error| BuildError::InvalidConfig(error.to_string()))?;
+    /// Start building a harness for `config_json`. Defaults to a shared memoized
+    /// engine and captured callouts.
+    pub fn builder(config_json: &str) -> HarnessBuilder<'_> {
+        HarnessBuilder {
+            config_json,
+            engine: None,
+            callouts: CalloutSetup::Captured,
+            prepare: None,
         }
-        let wasm_path = catalog.provider_path_by_id(&spec.provider.id);
-        let cloner = Arc::new(GitCloner::new(clone_dir.path().to_path_buf()));
-        let caches = Caches::open(cache_dir.path()).map_err(|error| BuildError::CacheDir {
-            path: cache_dir.path().to_path_buf(),
-            source: std::io::Error::other(error.to_string()),
-        })?;
-        let credential_service =
-            omnifs_engine::test_support::auth::credential_service_for_file(&paths.credentials_file);
-        let context = HostContext::new(
-            cache_dir.path(),
-            &paths.config_dir,
-            providers_dir.path(),
-            &paths.credentials_file,
-        );
-        let runtime = if capture_test_callouts {
-            Engine::new_for_callout_tests(
-                engine,
-                &wasm_path,
-                &spec,
-                cloner,
-                &context,
-                &caches,
-                &credential_service,
-            )
-        } else {
-            Engine::new(
-                engine,
-                &wasm_path,
-                &spec,
-                cloner,
-                &context,
-                &caches,
-                &credential_service,
-            )
-        }?;
+    }
 
-        Ok(Self {
-            engine: engine.clone(),
-            clone_dir,
-            cache_dir,
-            config_dir,
-            providers_dir,
-            runtime,
-        })
+    /// Build a captured-callout harness from `config_json`. Sugar for
+    /// `builder(config_json).build()`.
+    pub fn new(config_json: &str) -> Result<Self, BuildError> {
+        Self::builder(config_json).build()
     }
 
     pub fn start_op(&self, op: Op) -> Result<TestOp<'_>, EngineError> {
@@ -208,6 +139,155 @@ impl RuntimeHarness {
 
     pub fn current_generation(&self) -> u64 {
         self.runtime.cache().current_generation()
+    }
+}
+
+impl<'a> HarnessBuilder<'a> {
+    /// Use `engine` instead of the shared memoized engine.
+    #[must_use]
+    pub fn engine(mut self, engine: &'a wasmtime::Engine) -> Self {
+        self.engine = Some(engine);
+        self
+    }
+
+    /// Select how provider callouts are wired.
+    #[must_use]
+    pub fn callouts(mut self, setup: CalloutSetup) -> Self {
+        self.callouts = setup;
+        self
+    }
+
+    /// Run `f` against the workspace layout after it exists on disk and before
+    /// the engine is constructed.
+    #[must_use]
+    pub fn prepare(
+        mut self,
+        f: impl FnOnce(&omnifs_workspace::layout::WorkspaceLayout) + 'a,
+    ) -> Self {
+        self.prepare = Some(Box::new(f));
+        self
+    }
+
+    #[allow(clippy::too_many_lines)]
+    pub fn build(self) -> Result<RuntimeHarness, BuildError> {
+        let HarnessBuilder {
+            config_json,
+            engine,
+            callouts,
+            prepare,
+        } = self;
+
+        // Default to the shared memoized engine when the caller did not pin one.
+        // The owned binding keeps the default alive for the borrow below.
+        let owned_engine;
+        let engine: &wasmtime::Engine = if let Some(engine) = engine {
+            engine
+        } else {
+            owned_engine = make_engine();
+            &owned_engine
+        };
+
+        let clone_dir = tempfile::tempdir().map_err(|source| BuildError::CacheDir {
+            path: std::env::temp_dir(),
+            source,
+        })?;
+        let cache_dir = tempfile::tempdir().map_err(|source| BuildError::CacheDir {
+            path: std::env::temp_dir(),
+            source,
+        })?;
+        let config_dir = tempfile::tempdir().map_err(|source| BuildError::CacheDir {
+            path: std::env::temp_dir(),
+            source,
+        })?;
+        let providers_dir = tempfile::tempdir().map_err(|source| BuildError::CacheDir {
+            path: std::env::temp_dir(),
+            source,
+        })?;
+        let paths = omnifs_workspace::layout::WorkspaceLayout::under_root(config_dir.path());
+
+        // The prepare hook seeds on-disk state (record mode writes credentials
+        // into paths.credentials_file) now that the layout exists but before the
+        // engine reads it during construction.
+        if let Some(prepare) = prepare {
+            prepare(&paths);
+        }
+
+        // Pin the named provider into this harness's provider store and rewrite
+        // the test config's `provider` field to the resulting `ProviderRef`, so
+        // resolution and serving go through the content-addressed path the host
+        // uses in production.
+        let mut spec = pin_spec_from_json(config_json, providers_dir.path())?;
+
+        // Mirror the CLI's creation-time inheritance: bake the pinned provider's
+        // manifest defaults into the spec before serving, so the harness exercises
+        // the same already-hydrated spec the daemon sees in production.
+        let catalog = Catalog::open(providers_dir.path());
+        if let Some(provider) = catalog
+            .get(&spec.provider.id)
+            .map_err(|error| BuildError::InvalidConfig(error.to_string()))?
+        {
+            let manifest = provider
+                .manifest()
+                .map_err(|error| BuildError::InvalidConfig(error.to_string()))?;
+            spec.apply_provider_metadata(
+                &manifest,
+                omnifs_workspace::mounts::ProviderMetadataInheritance::all(),
+            )
+            .map_err(|error| BuildError::InvalidConfig(error.to_string()))?;
+        }
+        let wasm_path = catalog.provider_path_by_id(&spec.provider.id);
+        let cloner = Arc::new(GitCloner::new(clone_dir.path().to_path_buf()));
+        let caches = Caches::open(cache_dir.path()).map_err(|error| BuildError::CacheDir {
+            path: cache_dir.path().to_path_buf(),
+            source: std::io::Error::other(error.to_string()),
+        })?;
+        let credential_service =
+            omnifs_engine::test_support::auth::credential_service_for_file(&paths.credentials_file);
+        let context = HostContext::new(
+            cache_dir.path(),
+            &paths.config_dir,
+            providers_dir.path(),
+            &paths.credentials_file,
+        );
+        let runtime = match callouts {
+            CalloutSetup::Captured => Engine::new_for_callout_tests(
+                engine,
+                &wasm_path,
+                &spec,
+                cloner,
+                &context,
+                &caches,
+                &credential_service,
+            ),
+            CalloutSetup::Real => Engine::new(
+                engine,
+                &wasm_path,
+                &spec,
+                cloner,
+                &context,
+                &caches,
+                &credential_service,
+            ),
+            CalloutSetup::Recorded(recorder) => Engine::new_with_callout_observer(
+                engine,
+                &wasm_path,
+                &spec,
+                cloner,
+                &context,
+                &caches,
+                &credential_service,
+                recorder,
+            ),
+        }?;
+
+        Ok(RuntimeHarness {
+            engine: engine.clone(),
+            clone_dir,
+            cache_dir,
+            config_dir,
+            providers_dir,
+            runtime,
+        })
     }
 }
 
@@ -371,21 +451,10 @@ pub fn make_engine() -> wasmtime::Engine {
 pub const TEST_PROVIDER_CONFIG: &str = r#"{"provider":"test_provider.wasm","mount":"test","capabilities":{"domains":["httpbin.org"]}}"#;
 
 pub fn make_runtime(engine: &wasmtime::Engine) -> RuntimeHarness {
-    RuntimeHarness::with_engine(TEST_PROVIDER_CONFIG, engine).unwrap()
-}
-
-pub fn try_make_runtime_from_config(
-    config_json: &str,
-) -> Result<RuntimeHarness, omnifs_engine::BuildError> {
-    RuntimeHarness::new(config_json)
-}
-
-pub fn make_runtime_from_config(config_json: &str) -> RuntimeHarness {
-    try_make_runtime_from_config(config_json).unwrap()
-}
-
-pub fn make_initialized_runtime(config_json: &str) -> RuntimeHarness {
-    make_runtime_from_config(config_json)
+    RuntimeHarness::builder(TEST_PROVIDER_CONFIG)
+        .engine(engine)
+        .build()
+        .unwrap()
 }
 
 /// Pin the provider named in `config_json`'s `provider` field into the provider

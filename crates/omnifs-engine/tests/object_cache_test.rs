@@ -6,7 +6,7 @@ use omnifs_engine::test_support::cache::{BatchRecord, RecordKind};
 use omnifs_engine::test_support::clock::DYNAMIC_TTL_MILLIS;
 use omnifs_engine::test_support::wit_protocol;
 use omnifs_engine::view::{AttrPayload, FilePayload, LookupPayload};
-use omnifs_itest::make_initialized_runtime;
+use omnifs_itest::RuntimeHarness;
 use omnifs_wit::provider::types::{
     ByteSource, Effects, ErrorKind, FileAttrs, FileOut, FileSize, FsKind, FsWrite, IdCapture,
     Invalidation, LogicalId, PathOrPrefix, Stability,
@@ -79,7 +79,7 @@ fn preload_file_effect(id: &LogicalId, path: &str, inline: &[u8]) -> Effects {
 
 #[test]
 fn canonical_eviction_drops_validator() {
-    let harness = make_initialized_runtime(CONFIG);
+    let harness = RuntimeHarness::new(CONFIG).unwrap();
     let id = issue_id();
     let leaf = "/o/r/issues/all/42/item.json";
     let bytes = br#"{"number":42}"#;
@@ -117,7 +117,7 @@ fn canonical_eviction_drops_validator() {
 
 #[test]
 fn fence_rejects_stale_preload_and_negative() {
-    let harness = make_initialized_runtime(CONFIG);
+    let harness = RuntimeHarness::new(CONFIG).unwrap();
     let id = issue_id();
     let leaf = "/o/r/issues/open/42/title";
     let op_gen0 = harness.runtime.cache().current_generation();
@@ -161,7 +161,7 @@ fn fence_rejects_stale_preload_and_negative() {
 
 #[test]
 fn stale_canonical_fenced_by_midflight_invalidation() {
-    let harness = make_initialized_runtime(CONFIG);
+    let harness = RuntimeHarness::new(CONFIG).unwrap();
     let id = issue_id();
     let leaf = "/o/r/issues/open/42/title";
     let op_gen0 = harness.runtime.cache().current_generation();
@@ -193,7 +193,7 @@ fn stale_canonical_fenced_by_midflight_invalidation() {
 
 #[test]
 fn leaf_records_share_one_deadline() {
-    let harness = make_initialized_runtime(CONFIG);
+    let harness = RuntimeHarness::new(CONFIG).unwrap();
     let path = "/o/r/issues/open/42/title";
     let now = 1_000u64;
     let ttl = 3_000u64;
@@ -273,7 +273,7 @@ fn leaf_records_share_one_deadline() {
 
 #[tokio::test]
 async fn unindexed_path_dispatches_then_indexes() {
-    let harness = make_initialized_runtime(CONFIG);
+    let harness = RuntimeHarness::new(CONFIG).unwrap();
     let path = "/hello/message";
 
     assert!(
@@ -311,7 +311,7 @@ async fn unindexed_path_dispatches_then_indexes() {
 
 #[test]
 fn object_vs_listing_invalidation() {
-    let harness = make_initialized_runtime(CONFIG);
+    let harness = RuntimeHarness::new(CONFIG).unwrap();
     let id = issue_id();
     let open_leaf = "/o/r/issues/open/42/title";
     let all_leaf = "/o/r/issues/all/42/title";
@@ -399,7 +399,7 @@ fn object_vs_listing_invalidation() {
 
 #[test]
 fn negative_returns_enoent_until_deadline_or_invalidate() {
-    let harness = make_initialized_runtime(CONFIG);
+    let harness = RuntimeHarness::new(CONFIG).unwrap();
     let id = issue_id();
     let path = "/o/r/issues/open/42/missing";
     let now = 10_000u64;
@@ -460,7 +460,7 @@ fn negative_returns_enoent_until_deadline_or_invalidate() {
 
 #[tokio::test]
 async fn negative_short_circuits_read_without_provider_dispatch() {
-    let harness = make_initialized_runtime(CONFIG);
+    let harness = RuntimeHarness::new(CONFIG).unwrap();
     let id = issue_id();
     let path = "/no/such/leaf";
     let now = 5_000u64;

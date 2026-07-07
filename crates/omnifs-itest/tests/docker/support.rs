@@ -1,11 +1,11 @@
 //! Docker provider route-test helpers.
 
-use omnifs_itest::{RuntimeHarness, make_initialized_runtime};
+use omnifs_itest::RuntimeHarness;
 
 pub use omnifs_itest::{TestOpExt, project_paths};
 
 pub fn docker_harness() -> RuntimeHarness {
-    make_initialized_runtime(
+    RuntimeHarness::new(
         r#"
         {
             "provider": "omnifs_provider_docker.wasm",
@@ -16,4 +16,5 @@ pub fn docker_harness() -> RuntimeHarness {
         }
     "#,
     )
+    .unwrap()
 }

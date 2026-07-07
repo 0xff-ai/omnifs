@@ -14,7 +14,7 @@
 use omnifs_core::path::Path;
 use omnifs_engine::test_support::cache::RecordKind;
 use omnifs_engine::view::DirentsPayload;
-use omnifs_itest::make_initialized_runtime;
+use omnifs_itest::RuntimeHarness;
 use omnifs_wit::provider::types::{
     ByteSource, CanonicalStore, Effects, FileAttrs, FileOut, FileSize, FsKind, FsWrite,
     Invalidation, LogicalId, Stability,
@@ -99,7 +99,7 @@ fn dirent_names(harness: &omnifs_itest::RuntimeHarness, path: &str) -> Vec<Strin
 /// cached, and the parent directory's dirents merge to carry the new children.
 #[test]
 fn one_batch_applies_canonical_fs_and_dirents_merge() {
-    let harness = make_initialized_runtime(CONFIG);
+    let harness = RuntimeHarness::new(CONFIG).unwrap();
     let id = object_id("canon");
     let effects = Effects {
         canonical: vec![canonical_store(&id, "/o/r/item.json", b"{\"n\":42}")],
@@ -154,7 +154,7 @@ fn one_batch_applies_canonical_fs_and_dirents_merge() {
 /// the writes did land and only the same-batch invalidation removed the target.
 #[test]
 fn invalidations_run_after_writes_in_one_batch() {
-    let harness = make_initialized_runtime(CONFIG);
+    let harness = RuntimeHarness::new(CONFIG).unwrap();
     let target = object_id("target");
     let survivor = object_id("survivor");
 
@@ -213,7 +213,7 @@ fn invalidations_run_after_writes_in_one_batch() {
 /// and index in place while rejecting only stale writes).
 #[test]
 fn object_invalidation_deletes_durable_object_not_just_fences() {
-    let harness = make_initialized_runtime(CONFIG);
+    let harness = RuntimeHarness::new(CONFIG).unwrap();
     let id = object_id("durable");
     let leaf = "/objects/durable/view";
 

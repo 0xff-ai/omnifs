@@ -1,12 +1,12 @@
 //! DNS provider route-test helpers.
 
-use omnifs_itest::{RuntimeHarness, TestOpExt, make_initialized_runtime};
+use omnifs_itest::{RuntimeHarness, TestOpExt};
 use omnifs_wit::provider::types::{Callout, HttpRequest};
 use std::net::Ipv4Addr;
 use std::str::FromStr;
 
 pub fn dns_harness() -> RuntimeHarness {
-    make_initialized_runtime(
+    RuntimeHarness::new(
         r#"
         {
             "provider": "omnifs_provider_dns.wasm",
@@ -17,6 +17,7 @@ pub fn dns_harness() -> RuntimeHarness {
         }
     "#,
     )
+    .unwrap()
 }
 
 pub fn expect_fetches(op: &omnifs_engine::test_support::TestOp<'_>) -> Vec<HttpRequest> {

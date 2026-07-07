@@ -13,7 +13,7 @@ use omnifs_engine::test_support::NamespaceListOutcome;
 use omnifs_engine::test_support::cache::RecordKind;
 use omnifs_engine::test_support::pagination::NextPageOutcome;
 use omnifs_engine::view::{CachedCursor, DirentsPayload};
-use omnifs_itest::{RuntimeHarness, make_initialized_runtime};
+use omnifs_itest::RuntimeHarness;
 
 const CONFIG: &str = r#"
 {
@@ -70,7 +70,7 @@ fn cached_cursor(harness: &RuntimeHarness, path: &str) -> Option<CachedCursor> {
 
 #[tokio::test]
 async fn first_page_carries_cursor_and_caches_it() {
-    let harness = make_initialized_runtime(CONFIG);
+    let harness = RuntimeHarness::new(CONFIG).unwrap();
 
     let result = harness
         .runtime
@@ -100,7 +100,7 @@ async fn first_page_carries_cursor_and_caches_it() {
 
 #[tokio::test]
 async fn lookup_sibling_hints_preserve_paged_parent_state() {
-    let harness = make_initialized_runtime(CONFIG);
+    let harness = RuntimeHarness::new(CONFIG).unwrap();
 
     harness
         .runtime
@@ -150,7 +150,7 @@ async fn lookup_sibling_hints_preserve_paged_parent_state() {
 
 #[tokio::test]
 async fn paginate_next_accumulates_and_advances() {
-    let harness = make_initialized_runtime(CONFIG);
+    let harness = RuntimeHarness::new(CONFIG).unwrap();
 
     // Seed page 0 into the cache.
     harness
@@ -225,7 +225,7 @@ async fn paginate_next_accumulates_and_advances() {
 
 #[tokio::test]
 async fn paginate_all_expands_to_completion() {
-    let harness = make_initialized_runtime(CONFIG);
+    let harness = RuntimeHarness::new(CONFIG).unwrap();
 
     // Seed page 0.
     harness
@@ -257,7 +257,7 @@ async fn paginate_all_expands_to_completion() {
 
 #[tokio::test]
 async fn paginate_next_on_non_paged_directory_is_no_more() {
-    let harness = make_initialized_runtime(CONFIG);
+    let harness = RuntimeHarness::new(CONFIG).unwrap();
 
     // `hello/bundle` is a normal (non-paged) directory; it has no cursor.
     harness

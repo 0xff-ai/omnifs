@@ -5,7 +5,7 @@
 //! Kubernetes API responses. No live cluster is needed.
 
 use omnifs_engine::test_support::TestOp;
-use omnifs_itest::{RuntimeHarness, make_initialized_runtime};
+use omnifs_itest::RuntimeHarness;
 use omnifs_wit::provider::types::{
     ByteSource, CalloutResult, Header, HttpResponse, ListChildrenResult, OpResult, ReadFileOutcome,
 };
@@ -13,7 +13,7 @@ use omnifs_wit::provider::types::{
 pub use omnifs_itest::TestOpExt;
 
 pub fn kube_harness() -> RuntimeHarness {
-    make_initialized_runtime(
+    RuntimeHarness::new(
         r#"
         {
             "provider": "omnifs_provider_kubernetes.wasm",
@@ -24,6 +24,7 @@ pub fn kube_harness() -> RuntimeHarness {
         }
     "#,
     )
+    .unwrap()
 }
 
 // Canned API discovery, shaped to exercise scope, subresource/verb filtering,

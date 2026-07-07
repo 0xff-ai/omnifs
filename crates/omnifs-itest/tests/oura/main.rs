@@ -1,6 +1,6 @@
 #![cfg(not(target_os = "wasi"))]
 
-use omnifs_itest::{RuntimeHarness, TestOpExt, make_initialized_runtime};
+use omnifs_itest::{RuntimeHarness, TestOpExt};
 use omnifs_wit::provider::types::{
     ByteSource, CalloutResult, EntryKind, FileSize, FsKind, Header, HttpResponse,
     ListChildrenResult, LookupChildResult, OpResult, ReadFileOutcome, ReadMode, Stability,
@@ -28,7 +28,7 @@ const COLLECTION_FILES: &[&str] = &[
 ];
 
 fn oura_harness() -> RuntimeHarness {
-    make_initialized_runtime(
+    RuntimeHarness::new(
         r#"
         {
             "provider": "omnifs_provider_oura.wasm",
@@ -39,6 +39,7 @@ fn oura_harness() -> RuntimeHarness {
         }
     "#,
     )
+    .unwrap()
 }
 
 fn resume_json(op: &mut omnifs_engine::test_support::TestOp<'_>, body: &'static [u8]) {

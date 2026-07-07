@@ -1,12 +1,12 @@
 //! arXiv provider route-test helpers.
 
-use omnifs_itest::{RuntimeHarness, make_initialized_runtime};
+use omnifs_itest::RuntimeHarness;
 use omnifs_wit::provider::types::{Callout, Effects, LogicalId};
 
 pub use omnifs_itest::TestOpExt;
 
 pub fn arxiv_harness() -> RuntimeHarness {
-    make_initialized_runtime(
+    RuntimeHarness::new(
         r#"
         {
             "provider": "omnifs_provider_arxiv.wasm",
@@ -17,6 +17,7 @@ pub fn arxiv_harness() -> RuntimeHarness {
         }
     "#,
     )
+    .unwrap()
 }
 
 pub fn canonical_id_string(id: &LogicalId) -> String {

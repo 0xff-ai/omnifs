@@ -1,12 +1,12 @@
 //! GitHub provider route-test helpers.
 
-use omnifs_itest::{RuntimeHarness, create_test_repo, make_initialized_runtime};
+use omnifs_itest::{RuntimeHarness, create_test_repo};
 use omnifs_wit::provider::types::{ByteSource, Effects, FsKind, Stability};
 
 pub use omnifs_itest::{TestOpExt, project_paths};
 
 pub fn github_harness() -> RuntimeHarness {
-    make_initialized_runtime(
+    RuntimeHarness::new(
         r#"
         {
             "provider": "omnifs_provider_github.wasm",
@@ -22,6 +22,7 @@ pub fn github_harness() -> RuntimeHarness {
         }
     "#,
     )
+    .unwrap()
 }
 
 pub fn project_file_stability(effects: &Effects, path: &str) -> Option<Stability> {
