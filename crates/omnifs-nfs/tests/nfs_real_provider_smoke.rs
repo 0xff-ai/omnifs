@@ -1,4 +1,4 @@
-use omnifs_engine::MountRuntimes;
+use omnifs_engine::{MountRuntimes, Namespace, TreeNamespace};
 use omnifs_nfs::{Export, ReadOnlyExport};
 use omnifs_workspace::ids::{ProviderId, ProviderMeta, ProviderName, ProviderRef};
 use omnifs_workspace::provider::ProviderStore;
@@ -187,7 +187,11 @@ impl RealProviders {
             &mounts_dir,
             runtime.handle(),
         ));
-        let export = Arc::new(Export::new(runtime.handle().clone(), Arc::clone(&registry)));
+        let namespace = TreeNamespace::new(Arc::clone(&registry), runtime.handle().clone());
+        let export = Arc::new(Export::new(
+            runtime.handle().clone(),
+            Arc::clone(&namespace) as Arc<dyn Namespace>,
+        ));
         Self {
             export,
             linear_enabled,

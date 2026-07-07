@@ -24,7 +24,10 @@ fn omnifs_export_rejects_current_thread_runtime() {
         .expect("current-thread runtime");
 
     let harness = test_export();
-    let _ = Export::new(runtime.handle().clone(), harness.registry);
+    let _ = Export::new(
+        runtime.handle().clone(),
+        harness.namespace.clone() as std::sync::Arc<dyn omnifs_engine::Namespace>,
+    );
 }
 
 fn hello_dir(export: &Export) -> u64 {

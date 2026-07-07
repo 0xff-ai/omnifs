@@ -1,16 +1,14 @@
 use crate::protocol::consts::{
-    ACCESS4_EXECUTE, ACCESS4_LOOKUP, ACCESS4_READ, MAX_NFS_READ_BYTES, NF4DIR, NF4LNK, NF4REG,
-    NFS4ERR_ACCESS, NFS4ERR_BAD_COOKIE, NFS4ERR_BAD_STATEID, NFS4ERR_BADHANDLE, NFS4ERR_DELAY,
-    NFS4ERR_EXPIRED, NFS4ERR_FHEXPIRED, NFS4ERR_INVAL, NFS4ERR_IO, NFS4ERR_ISDIR,
-    NFS4ERR_LOCK_NOTSUPP, NFS4ERR_MINOR_VERS_MISMATCH, NFS4ERR_NOENT, NFS4ERR_NOFILEHANDLE,
-    NFS4ERR_NOTDIR, NFS4ERR_NOTSUPP, NFS4ERR_OLD_STATEID, NFS4ERR_OP_ILLEGAL, NFS4ERR_OPENMODE,
-    NFS4ERR_RESOURCE, NFS4ERR_ROFS, NFS4ERR_STALE, NFS4ERR_STALE_CLIENTID, NFS4ERR_SYMLINK,
-    NFS4ERR_TOOSMALL, OPEN_STATE_LEASE_SECONDS, OPEN4_SHARE_ACCESS_READ,
+    ACCESS4_EXECUTE, ACCESS4_LOOKUP, ACCESS4_READ, NF4DIR, NF4LNK, NF4REG, NFS4ERR_ACCESS,
+    NFS4ERR_BAD_COOKIE, NFS4ERR_BAD_STATEID, NFS4ERR_BADHANDLE, NFS4ERR_DELAY, NFS4ERR_EXPIRED,
+    NFS4ERR_FHEXPIRED, NFS4ERR_INVAL, NFS4ERR_IO, NFS4ERR_ISDIR, NFS4ERR_LOCK_NOTSUPP,
+    NFS4ERR_MINOR_VERS_MISMATCH, NFS4ERR_NOENT, NFS4ERR_NOFILEHANDLE, NFS4ERR_NOTDIR,
+    NFS4ERR_NOTSUPP, NFS4ERR_OLD_STATEID, NFS4ERR_OP_ILLEGAL, NFS4ERR_OPENMODE, NFS4ERR_RESOURCE,
+    NFS4ERR_ROFS, NFS4ERR_STALE, NFS4ERR_STALE_CLIENTID, NFS4ERR_SYMLINK, NFS4ERR_TOOSMALL,
+    OPEN_STATE_LEASE_SECONDS, OPEN4_SHARE_ACCESS_READ,
 };
 use dashmap::DashMap;
-use omnifs_engine::{RetryClass, TreeError, TreeErrorKind};
-#[cfg(test)]
-use std::collections::HashSet;
+use omnifs_engine::namespace::{NsError, NsRetryClass};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
@@ -77,25 +75,25 @@ impl Status {
     }
 }
 
-/// Reactive NFS status mapping for definitive and transient [`TreeError`] kinds.
+/// Reactive NFS status mapping for definitive and transient [`NsError`] kinds.
 ///
 /// `RateLimited`, `Timeout`, and `Network` map to [`Status::Delay`] so the client
 /// retries. This path does not spawn background work; proactive `READDIR` deferral
 /// is separate (`omnifs_engine::singleflight::Deferred`).
-impl From<&TreeError> for Status {
-    fn from(error: &TreeError) -> Self {
-        match error.kind.retry_class() {
-            RetryClass::Retry => Self::Delay,
-            RetryClass::TooLarge => Self::Resource,
-            RetryClass::Gone => match error.kind {
-                TreeErrorKind::NotFound => Self::NoEnt,
-                TreeErrorKind::NotDirectory => Self::NotDir,
-                TreeErrorKind::IsDirectory => Self::IsDir,
+impl From<&NsError> for Status {
+    fn from(error: &NsError) -> Self {
+        match error.retry_class() {
+            NsRetryClass::Retry => Self::Delay,
+            NsRetryClass::TooLarge => Self::Resource,
+            NsRetryClass::Gone => match error {
+                NsError::NotFound => Self::NoEnt,
+                NsError::NotDirectory => Self::NotDir,
+                NsError::IsDirectory => Self::IsDir,
                 _ => Self::Io,
             },
-            RetryClass::Terminal => match error.kind {
-                TreeErrorKind::PermissionDenied => Self::Access,
-                TreeErrorKind::InvalidInput => Self::Invalid,
+            NsRetryClass::Terminal => match error {
+                NsError::Permission => Self::Access,
+                NsError::Invalid => Self::Invalid,
                 _ => Self::Io,
             },
         }
@@ -248,18 +246,6 @@ pub(crate) struct OpenSeed<B> {
     pub(crate) body: B,
 }
 
-impl<B> OpenSeed<B> {
-    pub(crate) fn with_body<T>(self, body: T) -> OpenSeed<T> {
-        OpenSeed {
-            generation: self.generation,
-            inode: self.inode,
-            clientid: self.clientid,
-            access: self.access,
-            body,
-        }
-    }
-}
-
 impl<B> OpenTable<B> {
     pub(crate) fn new() -> Self {
         Self {
@@ -364,18 +350,6 @@ impl<B> OpenTable<B> {
         }
         removed
     }
-
-    pub(crate) fn any(&self, mut predicate: impl FnMut(&OpenState<B>) -> bool) -> bool {
-        self.states.iter().any(|state| predicate(state.value()))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn active_inodes(&self) -> HashSet<u64> {
-        self.states
-            .iter()
-            .map(|state| state.value().inode)
-            .collect()
-    }
 }
 
 #[cfg(test)]
@@ -393,12 +367,14 @@ impl<B: AsRef<[u8]>> OpenTable<B> {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn open_data_slice(data: &[u8], offset: u64, count: u32) -> (Vec<u8>, bool) {
     let start = usize::try_from(offset).unwrap_or(usize::MAX);
     if start >= data.len() {
         return (Vec::new(), true);
     }
-    let count = usize::try_from(count.min(MAX_NFS_READ_BYTES)).unwrap_or(usize::MAX);
+    let count = usize::try_from(count.min(crate::protocol::consts::MAX_NFS_READ_BYTES))
+        .unwrap_or(usize::MAX);
     let end = start.saturating_add(count).min(data.len());
     (data[start..end].to_vec(), end >= data.len())
 }
@@ -441,22 +417,20 @@ pub trait ReadOnlyExport: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use omnifs_engine::TreeErrorKind;
 
     #[test]
-    fn transient_tree_errors_map_to_delay() {
-        for kind in [
-            TreeErrorKind::RateLimited,
-            TreeErrorKind::Timeout,
-            TreeErrorKind::Network,
+    fn transient_ns_errors_map_to_delay() {
+        for error in [
+            NsError::RateLimited { retry_after: None },
+            NsError::Timeout,
+            NsError::Network,
         ] {
-            let error = TreeError {
-                kind,
-                message: "retry later".to_string(),
-                retryable: true,
-                retry_after: None,
-            };
             assert_eq!(Status::from(&error), Status::Delay);
         }
+    }
+
+    #[test]
+    fn too_large_maps_to_nfs_resource() {
+        assert_eq!(Status::from(&NsError::TooLarge), Status::Resource);
     }
 }

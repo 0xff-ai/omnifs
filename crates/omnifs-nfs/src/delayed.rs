@@ -38,31 +38,29 @@
 //! same directory share the one leader, so a directory is fetched once no matter
 //! how many retransmits arrive.
 
-use omnifs_core::path::Path;
-use omnifs_engine::ListOutcome;
 use omnifs_engine::coalesce::{CoalesceKey, CoverKey};
+use omnifs_engine::namespace::{DirEntry as NsDirEntry, NodeId};
 pub(crate) use omnifs_engine::singleflight::{DeferOutcome, Deferred};
 
 use crate::export::Status;
 
-/// The already-mapped terminal result of a deferred listing. The adapter does
-/// all `TreeError -> Status` conversion before it reaches the table, so this
-/// module never touches protocol state.
-pub(crate) type ListResult = Result<ListOutcome, Status>;
+/// The already-mapped terminal result of a deferred listing: the fully-drained
+/// namespace snapshot for one directory. The adapter does all `NsError -> Status`
+/// conversion before it reaches the table, so this module never touches protocol
+/// state.
+pub(crate) type ListResult = Result<Vec<NsDirEntry>, Status>;
 
-/// Identity of a deferred directory listing: which mount, which directory.
+/// Identity of a deferred directory listing: the namespace node being listed.
+/// One node is one directory, so the node id dedupes concurrent and retried
+/// `READDIR`s of the same directory.
 #[derive(Clone, Eq, Hash, PartialEq)]
 pub(crate) struct Key {
-    mount: String,
-    path: Path,
+    node: NodeId,
 }
 
 impl Key {
-    pub(crate) fn new(mount: &str, path: &Path) -> Self {
-        Self {
-            mount: mount.to_string(),
-            path: path.clone(),
-        }
+    pub(crate) fn new(node: NodeId) -> Self {
+        Self { node }
     }
 }
 
