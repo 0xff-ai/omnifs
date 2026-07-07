@@ -1,3 +1,6 @@
+pub mod live;
+pub mod matrix;
+
 use omnifs_core::path::{Path, Segment};
 use omnifs_engine::GitCloner;
 use omnifs_engine::test_support::cache::{Caches, Record as CacheRecord, RecordKind};
@@ -448,7 +451,7 @@ pub fn project_paths(effects: &Effects) -> Vec<&str> {
     effects.fs.iter().map(|write| write.path.as_str()).collect()
 }
 
-fn workspace_root() -> PathBuf {
+pub(crate) fn workspace_root() -> PathBuf {
     StdPath::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()

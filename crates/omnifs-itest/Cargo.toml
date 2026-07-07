@@ -12,12 +12,14 @@ omnifs-engine = { workspace = true }
 omnifs-wit = { path = "../omnifs-wit", features = ["host-bindings"] }
 omnifs-core = { path = "../omnifs-core" }
 omnifs-workspace = { workspace = true }
+omnifs-nfs = { workspace = true }
 wasmtime = { workspace = true }
 tempfile = { workspace = true }
 http = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+time = { workspace = true, features = ["formatting"] }
 rusqlite = { version = "0.36", features = ["bundled"] }
 base64 = "0.22"
 hickory-proto = "0.26"

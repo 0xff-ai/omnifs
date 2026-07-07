@@ -123,6 +123,18 @@
     "captures": []
   },
   {
+    "template": "/slow/{ms}",
+    "kind": "File",
+    "object_kind": null,
+    "captures": [
+      {
+        "name": "ms",
+        "type_name": "u64",
+        "choices": null
+      }
+    ]
+  },
+  {
     "template": "/hello/ranged",
     "kind": "File",
     "object_kind": null,
@@ -142,6 +154,12 @@
   },
   {
     "template": "/hello/volatile-tail",
+    "kind": "File",
+    "object_kind": null,
+    "captures": []
+  },
+  {
+    "template": "/hello/live-log",
     "kind": "File",
     "object_kind": null,
     "captures": []

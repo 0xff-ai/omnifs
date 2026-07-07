@@ -318,6 +318,80 @@ jobs:
           retention-days: 90
           if-no-files-found: error
 
+  # Runs the frontend conformance matrix against a live kernel-FUSE mount served
+  # by the packaged Linux CLI, and uploads the per-column scorecard. Gated like
+  # cli-linux-x64 (whose binary it consumes); a skipped dependency skips this.
+  conformance-fuse:
+    name: conformance fuse
+    needs: [changes, components, cli-linux-x64]
+    if: >-
+      github.event_name == 'push' ||
+      (github.event_name == 'pull_request' &&
+        (github.event.pull_request.user.login == 'raulk' ||
+         contains(github.event.pull_request.labels.*.name, 'ci-full')))
+    runs-on: *linux_runner
+    env:
+      # Providers come from the components job's omnifs-wasm artifact; the itest
+      # harness must not rebuild them (no wasm toolchain on this runner).
+      OMNIFS_ITEST_SKIP_PROVIDER_BUILD: "1"
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@1.95.0
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: conformance-fuse
+          cache-on-failure: true
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest@0.9.132
+
+      - name: Install fuse3
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends fuse3
+
+      - name: Prepare WASM sidecar directory
+        run: rm -rf target/wasm32-wasip2/release
+
+      - name: Download WASM sidecar inputs
+        uses: actions/download-artifact@v8
+        with:
+          name: omnifs-wasm
+          path: target/wasm32-wasip2/release
+
+      - name: Download Linux x64 CLI archive
+        uses: actions/download-artifact@v8
+        with:
+          name: omnifs-cli-linux-x64
+          path: dist-cli
+
+      - name: Extract Linux x64 CLI binary
+        run: |
+          set -euo pipefail
+          mkdir -p dist-cli/bin
+          tar -C dist-cli/bin -xJf dist-cli/omnifs-cli-linux-x64.tar.xz
+          test -x dist-cli/bin/omnifs
+
+      - name: Run frontend conformance matrix
+        run: |
+          set -euo pipefail
+          OMNIFS_ACCEPTANCE_LIVE=1 \
+          OMNIFS_BIN="$(pwd)/dist-cli/bin/omnifs" \
+          cargo nextest run -p omnifs-itest -E 'binary(frontend_matrix)' --no-capture
+
+      - name: Upload conformance scorecards
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: conformance-scorecards
+          path: target/conformance/*.json
+          retention-days: 90
+          if-no-files-found: warn
+
   cli-linux-arm64:
     name: cli linux arm64
     needs: [preflight, components]
