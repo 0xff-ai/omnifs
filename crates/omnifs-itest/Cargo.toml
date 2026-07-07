@@ -24,6 +24,7 @@ thiserror = { workspace = true }
 url = { workspace = true }
 sha2 = { workspace = true }
 time = { workspace = true, features = ["formatting"] }
+secrecy = "0.10"
 rusqlite = { version = "0.36", features = ["bundled"] }
 base64 = "0.22"
 hickory-proto = "0.26"

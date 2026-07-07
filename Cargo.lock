@@ -3233,6 +3233,7 @@ dependencies = [
  "omnifs-wit",
  "omnifs-workspace",
  "rusqlite",
+ "secrecy",
  "serde",
  "serde_json",
  "sha2",

@@ -1,5 +1,6 @@
 pub mod live;
 pub mod matrix;
+pub mod scenario;
 pub mod tape;
 
 use omnifs_core::path::{Path, Segment};
