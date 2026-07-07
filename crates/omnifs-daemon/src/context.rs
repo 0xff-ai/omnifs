@@ -1,5 +1,7 @@
 //! Daemon-owned startup and control-plane context.
 
+use anyhow::Context as _;
+
 use crate::app::{DaemonArgs, FrontendKind};
 use omnifs_api::{
     API_MAJOR, API_MINOR, DaemonBackend, DaemonHealth, DaemonStatus, DaemonSubsystem, FrontendInfo,
@@ -10,8 +12,13 @@ use omnifs_engine::HostContext;
 use omnifs_nfs::NfsMountOptions;
 use omnifs_workspace::layout::{Daemon, Workspace, WorkspaceLayout};
 use omnifs_workspace::mounts::materialize::MaterializationMode;
+use omnifs_workspace::runtime_record::{
+    Endpoint, FrontendKind as RecordFrontendKind, FrontendRecord, RecordedBackend, RuntimeRecord,
+};
 use std::fmt::Write as _;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
+use std::os::unix::fs::PermissionsExt as _;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug)]
@@ -20,8 +27,14 @@ pub(crate) struct DaemonContext {
     mount_point: PathBuf,
     frontend: FrontendKind,
     backend: DaemonBackend,
+    host_native: bool,
     root_symlinks: bool,
-    listen: SocketAddr,
+    /// TCP control listen address. `Some` for the container (and the debug path
+    /// when `--listen` is passed alongside the UDS); `None` when a host-native
+    /// daemon serves only its Unix socket.
+    listen: Option<SocketAddr>,
+    /// Random per-start id reported in status and written to the runtime record.
+    instance_id: String,
     nfs: NfsContext,
     process: ProcessInfo,
 }
@@ -67,8 +80,10 @@ impl DaemonContext {
             mount_point,
             frontend,
             backend,
+            host_native: args.host_native,
             root_symlinks: args.root_symlinks,
             listen: args.listen,
+            instance_id: generate_instance_id(),
             nfs,
             process,
         })
@@ -81,16 +96,101 @@ impl DaemonContext {
         Ok(())
     }
 
-    pub(crate) fn bind_control_listener(&self) -> anyhow::Result<TcpListener> {
-        TcpListener::bind(self.listen).map_err(|error| {
+    pub(crate) fn is_host_native(&self) -> bool {
+        self.host_native
+    }
+
+    pub(crate) fn listen(&self) -> Option<SocketAddr> {
+        self.listen
+    }
+
+    pub(crate) fn control_socket(&self) -> PathBuf {
+        self.layout.control_socket()
+    }
+
+    pub(crate) fn runtime_record_file(&self) -> PathBuf {
+        self.layout.runtime_record_file()
+    }
+
+    pub(crate) fn bind_control_listener(addr: SocketAddr) -> anyhow::Result<TcpListener> {
+        TcpListener::bind(addr).map_err(|error| {
             anyhow::anyhow!(
-                "cannot bind control API listener on {}: {error}\n\
+                "cannot bind control API listener on {addr}: {error}\n\
                  \n\
                  Likely cause: another omnifs daemon is already running on that port.\n\
-                 Run `omnifs down` to stop it, then try again.",
-                self.listen
+                 Run `omnifs down` to stop it, then try again."
             )
         })
+    }
+
+    /// Bind the host-native control socket at `<config_dir>/control.sock`.
+    ///
+    /// The config dir is forced to `0700` and the socket to `0600` so auth on
+    /// the control plane is filesystem permissions alone. Stale-socket recovery:
+    /// if the path already exists, a successful connect means another omnifs
+    /// daemon is serving this workspace (a hard error pointing at `omnifs down`);
+    /// a refused connection or a missing file means the socket is stale, so it is
+    /// unlinked and rebound.
+    pub(crate) fn bind_control_socket(&self) -> anyhow::Result<UnixListener> {
+        let path = self.control_socket();
+        std::fs::create_dir_all(&self.layout.config_dir)?;
+        std::fs::set_permissions(
+            &self.layout.config_dir,
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .with_context(|| {
+            format!(
+                "restrict config dir {} to 0700",
+                self.layout.config_dir.display()
+            )
+        })?;
+
+        if path.exists() {
+            match UnixStream::connect(&path) {
+                Ok(_) => {
+                    anyhow::bail!(
+                        "another omnifs daemon is already serving this workspace on {}.\n\
+                         Run `omnifs down` to stop it, then try again.",
+                        path.display()
+                    );
+                },
+                // Refused/ENOENT means the previous daemon is gone; the socket
+                // file is a leftover, so unlink and rebind.
+                Err(_) => {
+                    std::fs::remove_file(&path).with_context(|| {
+                        format!("remove stale control socket {}", path.display())
+                    })?;
+                },
+            }
+        }
+
+        let listener = UnixListener::bind(&path)
+            .with_context(|| format!("bind control socket {}", path.display()))?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("restrict control socket {} to 0600", path.display()))?;
+        Ok(listener)
+    }
+
+    /// Assemble the runtime record for a host-native daemon: a unix endpoint,
+    /// the native backend pid, this build's instance id, and the serving
+    /// frontend at its mount point.
+    pub(crate) fn runtime_record(&self) -> RuntimeRecord {
+        RuntimeRecord::new(
+            Endpoint::Unix {
+                path: self.control_socket(),
+            },
+            RecordedBackend::Native {
+                pid: self.process.pid,
+            },
+            self.instance_id.clone(),
+            vec![FrontendRecord {
+                kind: match self.frontend {
+                    FrontendKind::Fuse => RecordFrontendKind::Fuse,
+                    FrontendKind::Nfs => RecordFrontendKind::Nfs,
+                },
+                mount_point: self.mount_point.clone(),
+            }],
+        )
     }
 
     pub(crate) fn host_context(&self) -> HostContext {
@@ -108,10 +208,6 @@ impl DaemonContext {
 
     pub(crate) fn config_dir(&self) -> &Path {
         &self.layout.config_dir
-    }
-
-    pub(crate) fn control_token_file(&self) -> PathBuf {
-        self.layout.control_token_file()
     }
 
     pub(crate) fn mounts_dir(&self) -> &Path {
@@ -170,6 +266,7 @@ impl DaemonContext {
             api_major: API_MAJOR,
             api_minor: API_MINOR,
             pid: self.process.pid,
+            instance_id: self.instance_id.clone(),
             executable: self.process.executable.clone(),
             mount_point: self.mount_point.clone(),
             config_dir: self.layout.config_dir.clone(),
@@ -194,7 +291,13 @@ impl DaemonContext {
             SubsystemHealth::new(
                 DaemonSubsystem::Control,
                 HealthState::Healthy,
-                format!("control API serving on {}", self.listen),
+                match self.listen {
+                    Some(addr) => format!("control API serving on {addr}"),
+                    None => format!(
+                        "control API serving on {}",
+                        self.layout.control_socket().display()
+                    ),
+                },
             ),
             SubsystemHealth::new(
                 DaemonSubsystem::Backend,
@@ -273,6 +376,21 @@ fn mount_health(
         );
     }
     SubsystemHealth::new(DaemonSubsystem::Mounts, state, message)
+}
+
+/// A random 16-lowercase-hex-character id, generated from the same CSPRNG the
+/// control token uses. Identifies one daemon start so the CLI can tell a record
+/// overwritten by a restart from the daemon it is talking to.
+fn generate_instance_id() -> String {
+    let mut bytes = [0_u8; 8];
+    // A failure here would only weaken an id used for equality checks, never for
+    // a security decision, so fall back to a pid/time-derived value rather than
+    // aborting daemon startup.
+    if getrandom::fill(&mut bytes).is_err() {
+        let pid = u64::from(std::process::id());
+        bytes.copy_from_slice(&pid.to_le_bytes());
+    }
+    hex::encode(bytes)
 }
 
 impl ProcessInfo {

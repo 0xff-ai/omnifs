@@ -32,9 +32,7 @@ use omnifs_workspace::mounts::{Name as MountName, Registry, Spec, UpgradePlan};
 use omnifs_workspace::provider::{Catalog, CatalogError, Provider};
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
-use std::io::Write as _;
-use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use time::format_description::well_known::Rfc3339;
 use tokio_stream::StreamExt as _;
@@ -51,39 +49,35 @@ use crate::frontends::Frontend;
 const CONTROL_TOKEN_BYTES: usize = 32;
 const BEARER_PREFIX: &str = "Bearer ";
 
+/// Environment variable the Docker launcher injects to hand the in-container
+/// daemon the token the host CLI already knows. Absent for host-native daemons,
+/// which serve the token-free Unix socket.
+const CONTROL_TOKEN_ENV: &str = "OMNIFS_CONTROL_TOKEN";
+
+/// The bearer token guarding the TCP control listener. It lives in memory only;
+/// the daemon no longer writes a token file. Its value comes from
+/// `OMNIFS_CONTROL_TOKEN` when the launcher injects one, else is generated per
+/// start. The Unix socket does not check it (filesystem permissions gate that
+/// listener).
 #[derive(Clone)]
 pub(crate) struct ControlToken {
-    path: Arc<PathBuf>,
     value: Arc<str>,
 }
 
 impl ControlToken {
-    pub(crate) fn generate(path: PathBuf) -> anyhow::Result<Self> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+    pub(crate) fn resolve() -> anyhow::Result<Self> {
+        if let Ok(value) = std::env::var(CONTROL_TOKEN_ENV) {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                return Ok(Self {
+                    value: Arc::from(trimmed),
+                });
+            }
         }
-
         let mut random = [0_u8; CONTROL_TOKEN_BYTES];
         getrandom::fill(&mut random).context("generate daemon control token")?;
-        let value = hex::encode(random);
-
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .mode(0o600)
-            .open(&path)
-            .with_context(|| format!("create control token file {}", path.display()))?;
-        file.set_permissions(std::fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("set control token file mode {}", path.display()))?;
-        file.write_all(value.as_bytes())
-            .with_context(|| format!("write control token file {}", path.display()))?;
-        file.flush()
-            .with_context(|| format!("flush control token file {}", path.display()))?;
-
         Ok(Self {
-            path: Arc::new(path),
-            value: Arc::from(value),
+            value: Arc::from(hex::encode(random)),
         })
     }
 
@@ -99,20 +93,9 @@ impl ControlToken {
         constant_time_eq::constant_time_eq(presented.as_bytes(), self.value.as_bytes())
     }
 
-    fn remove_file(&self) {
-        match std::fs::remove_file(self.path.as_ref()) {
-            Ok(()) => {},
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
-            Err(error) => {
-                warn!(%error, path = %self.path.display(), "failed to remove control token file");
-            },
-        }
-    }
-
     #[cfg(test)]
     fn from_test_value(value: impl Into<Arc<str>>) -> Self {
         Self {
-            path: Arc::new(PathBuf::from("control-token")),
             value: value.into(),
         }
     }
@@ -192,7 +175,9 @@ impl Daemon {
         self.context.mount_point()
     }
 
-    pub fn spawn_control(
+    /// Serve the control API over TCP with the bearer-token middleware. Used by
+    /// the container and the `--listen` debug path.
+    pub fn spawn_control_tcp(
         self: &Arc<Self>,
         listener: std::net::TcpListener,
         rt: &tokio::runtime::Handle,
@@ -200,8 +185,27 @@ impl Daemon {
         listener.set_nonblocking(true)?;
         let listener = tokio::net::TcpListener::from_std(listener)?;
         let addr = listener.local_addr()?;
-        info!(%addr, "control API listening");
-        let app = Self::router(Arc::clone(self));
+        info!(%addr, "control API listening (tcp, token-authenticated)");
+        let app = Self::router(Arc::clone(self), Auth::BearerToken);
+        rt.spawn(async move {
+            if let Err(error) = axum::serve(listener, app).await {
+                warn!(%error, "control API server exited");
+            }
+        });
+        Ok(())
+    }
+
+    /// Serve the control API over the Unix socket, where auth is filesystem
+    /// permissions and the bearer middleware is omitted.
+    pub fn spawn_control_unix(
+        self: &Arc<Self>,
+        listener: std::os::unix::net::UnixListener,
+        rt: &tokio::runtime::Handle,
+    ) -> std::io::Result<()> {
+        listener.set_nonblocking(true)?;
+        let listener = tokio::net::UnixListener::from_std(listener)?;
+        info!("control API listening (unix socket, filesystem-permission auth)");
+        let app = Self::router(Arc::clone(self), Auth::FilesystemPermissions);
         rt.spawn(async move {
             if let Err(error) = axum::serve(listener, app).await {
                 warn!(%error, "control API server exited");
@@ -212,10 +216,6 @@ impl Daemon {
 
     pub fn serve(&self, rt: &tokio::runtime::Handle) -> anyhow::Result<()> {
         self.frontends.serve(rt)
-    }
-
-    pub fn remove_control_token(&self) {
-        self.control_token.remove_file();
     }
 
     fn control_status(&self) -> DaemonStatus {
@@ -466,17 +466,29 @@ impl Daemon {
             .routes(routes!(events))
     }
 
-    fn router(state: Arc<Self>) -> Router {
+    fn router(state: Arc<Self>, auth: Auth) -> Router {
         let control_token = state.control_token.clone();
         let (router, _) = Self::api_router().with_state(state).split_for_parts();
-        router
+        let router = router
             .fallback(route_not_found)
-            .method_not_allowed_fallback(method_not_allowed)
-            .layer(middleware::from_fn_with_state(
+            .method_not_allowed_fallback(method_not_allowed);
+        match auth {
+            Auth::BearerToken => router.layer(middleware::from_fn_with_state(
                 control_token,
                 authenticate_control_request,
-            ))
+            )),
+            Auth::FilesystemPermissions => router,
+        }
     }
+}
+
+/// Which auth policy a control listener enforces. The TCP listener checks the
+/// bearer token; the Unix socket relies on filesystem permissions and omits the
+/// middleware entirely.
+#[derive(Clone, Copy)]
+enum Auth {
+    BearerToken,
+    FilesystemPermissions,
 }
 
 pub fn openapi() -> utoipa::openapi::OpenApi {
@@ -1242,7 +1254,6 @@ mod tests {
     use axum::middleware;
     use axum::routing::get;
     use omnifs_api::{ApiError, ErrorCode};
-    use std::os::unix::fs::PermissionsExt as _;
     use tower::ServiceExt as _;
 
     #[test]
@@ -1351,26 +1362,21 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
     }
 
+    /// With no `OMNIFS_CONTROL_TOKEN` in the environment the token is generated
+    /// in memory and never touches disk. The env-injection path is covered by
+    /// the launcher/daemon integration, not here, to avoid mutating process env
+    /// under a parallel test runner.
     #[test]
-    fn control_token_file_is_0600_and_regenerated() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("control-token");
-
-        let first = super::ControlToken::generate(path.clone()).unwrap();
-        let first_value = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(first_value.as_str(), first.value.as_ref());
-        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600);
-
-        let second = super::ControlToken::generate(path.clone()).unwrap();
-        let second_value = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(second_value.as_str(), second.value.as_ref());
-        assert_ne!(first_value, second_value);
-        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600);
-
-        second.remove_file();
-        assert!(!path.exists());
+    fn control_token_generates_in_memory_when_env_unset() {
+        // Only assert the no-env behavior; reading a process-global env var here
+        // would race other tests. When unset, `resolve` must synthesize a
+        // non-empty hex token without writing any file.
+        if std::env::var_os(super::CONTROL_TOKEN_ENV).is_some() {
+            return;
+        }
+        let token = super::ControlToken::resolve().unwrap();
+        assert_eq!(token.value.len(), super::CONTROL_TOKEN_BYTES * 2);
+        assert!(token.value.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     #[test]

@@ -12,9 +12,9 @@ use clap::Args;
 
 use crate::error::{ExitCode, WithExitCode};
 use crate::launch_backend::DockerTarget;
-use crate::launch_record::LaunchRecord;
 use crate::runtime::Runtime;
 use crate::workspace::Workspace;
+use omnifs_workspace::runtime_record::RuntimeRecord;
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct LogsArgs {
@@ -32,7 +32,7 @@ impl LogsArgs {
     pub async fn run(self) -> anyhow::Result<()> {
         let workspace = Workspace::resolve()?;
         let paths = workspace.layout();
-        let record = LaunchRecord::read(&paths.config_dir)?;
+        let record = RuntimeRecord::read(&paths.runtime_record_file())?;
 
         // Host-native backend: no container exists; the daemon logs to a host
         // file, so tail that instead of telling the user to start Docker.
@@ -48,7 +48,7 @@ impl LogsArgs {
         let container_name = self.container_name.clone().or_else(|| {
             record
                 .as_ref()
-                .and_then(LaunchRecord::container_name)
+                .and_then(RuntimeRecord::container_name)
                 .map(str::to_owned)
         });
         let target = DockerTarget::resolve(container_name, None, &config)?;

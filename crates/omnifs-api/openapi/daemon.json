@@ -683,7 +683,7 @@
             }
           }
         ],
-        "description": "Backend serving a daemon. The CLI reads this (and the launch record) instead\nof inferring the backend from `[system].runtime`."
+        "description": "Backend serving a daemon. The CLI reads this (and the runtime record)\ninstead of inferring the backend from `[system].runtime`."
       },
       "DaemonHealth": {
         "type": "object",
@@ -757,6 +757,10 @@
           "health": {
             "$ref": "#/components/schemas/DaemonHealth",
             "description": "Daemon-owned health for runtime subsystems. CLI status renders these\nentries instead of reconstructing daemon health from raw fields."
+          },
+          "instance_id": {
+            "type": "string",
+            "description": "Random 16-hex-character id generated per daemon start. The CLI asserts it\nagainst the runtime record it resolved from, so a record overwritten by a\nrestart mid-command is detected instead of silently trusted."
           },
           "mount_point": {
             "type": "string"

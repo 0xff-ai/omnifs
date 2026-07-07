@@ -35,6 +35,10 @@ use common::{
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
+/// Shared bearer token for the debug TCP path. `omnifs up` spawns the daemon
+/// with this in its environment, and every CLI invocation dials with it.
+const CONTROL_TOKEN: &str = "lifecycle-acceptance-token";
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /// A broken spec: pins a content id with no installed artifact.
@@ -96,12 +100,8 @@ impl Fixture {
         self.home_path().join("mounts")
     }
 
-    fn launch_json_path(&self) -> PathBuf {
-        self.home_path().join("launch.json")
-    }
-
-    fn control_token_path(&self) -> PathBuf {
-        self.home_path().join("control-token")
+    fn runtime_record_path(&self) -> PathBuf {
+        self.home_path().join("daemon.json")
     }
 
     /// Write the test mount spec (`test.json`) into `<home>/mounts/`.
@@ -126,6 +126,10 @@ impl Fixture {
             .env("OMNIFS_HOME", self.home_path())
             .env("OMNIFS_MOUNT_POINT", &self.mount_point)
             .env("OMNIFS_DAEMON_ADDR", &self.daemon_addr)
+            // The debug TCP path needs a shared token: the spawned daemon reads
+            // this as its bearer token and every CLI invocation dials with the
+            // same value, so no on-disk token file is involved.
+            .env("OMNIFS_CONTROL_TOKEN", CONTROL_TOKEN)
             .env("RUST_LOG", "warn")
             .output()
             .unwrap_or_else(|e| panic!("spawn omnifs {}: {e}", args.join(" ")))
@@ -158,8 +162,8 @@ impl Fixture {
             String::from_utf8_lossy(&out.stderr),
         );
 
-        // Record daemon PID from launch.json so Drop can kill it.
-        self.update_pid_from_launch_json();
+        // Record daemon PID from the runtime record so Drop can kill it.
+        self.update_pid_from_record();
 
         // Wait for the mount to serve the projected tree.
         let message = self.mount_point.join("test/hello/message");
@@ -180,24 +184,24 @@ impl Fixture {
         }
     }
 
-    /// Update the stored daemon PID by reading `launch.json`. Best-effort.
-    fn update_pid_from_launch_json(&mut self) {
-        let path = self.launch_json_path();
-        if let Ok(bytes) = std::fs::read_to_string(&path)
-            && let Ok(val) = serde_json::from_str::<serde_json::Value>(&bytes)
-            && let Some(pid) = val["daemon_pid"].as_u64()
-        {
-            self.daemon_pid = u32::try_from(pid).ok();
+    /// Update the stored daemon PID by reading the runtime record. Best-effort.
+    /// A native record carries the pid flat at the top level.
+    fn update_pid_from_record(&mut self) {
+        if let Some(pid) = self.record_pid() {
+            self.daemon_pid = Some(pid);
         }
     }
 
-    /// Force-kill the daemon PID recorded in `launch.json`, if one is present.
-    fn kill_daemon_from_launch_json(&self) {
-        let path = self.launch_json_path();
-        if let Ok(bytes) = std::fs::read_to_string(&path)
-            && let Ok(val) = serde_json::from_str::<serde_json::Value>(&bytes)
-            && let Some(pid) = val["daemon_pid"].as_u64()
-        {
+    /// The native pid recorded in `daemon.json`, if present.
+    fn record_pid(&self) -> Option<u32> {
+        let bytes = std::fs::read_to_string(self.runtime_record_path()).ok()?;
+        let val = serde_json::from_str::<serde_json::Value>(&bytes).ok()?;
+        u32::try_from(val["pid"].as_u64()?).ok()
+    }
+
+    /// Force-kill the daemon PID recorded in the runtime record, if present.
+    fn kill_daemon_from_record(&self) {
+        if let Some(pid) = self.record_pid() {
             // SIGKILL so it cannot clean up voluntarily.
             let _ = Command::new("kill").args(["-9", &pid.to_string()]).output();
         }
@@ -261,8 +265,8 @@ impl Drop for Fixture {
         if let Some(pid) = self.daemon_pid {
             let _ = Command::new("kill").args(["-9", &pid.to_string()]).output();
         }
-        // Also try the launch.json in case we didn't capture the PID yet.
-        self.kill_daemon_from_launch_json();
+        // Also try the runtime record in case we didn't capture the PID yet.
+        self.kill_daemon_from_record();
         // Force-unmount.
         self.force_unmount();
     }
@@ -369,10 +373,10 @@ fn scenarios_3_to_6_lifecycle_cycle() {
         "test/hello/message content mismatch"
     );
 
-    // `launch.json` exists.
+    // The runtime record exists.
     assert!(
-        fixture.launch_json_path().exists(),
-        "launch.json must exist after `omnifs up`"
+        fixture.runtime_record_path().exists(),
+        "daemon.json must exist after `omnifs up`"
     );
 
     // ── Scenario 4: status while running ─────────────────────────────────────
@@ -403,11 +407,10 @@ fn scenarios_3_to_6_lifecycle_cycle() {
         "runtime.mounts must include 'test'; got: {mounts:?}"
     );
 
-    // Verify backend is native via the daemon status API directly.
+    // Verify backend is native via the daemon status API directly. The debug
+    // TCP listener is authenticated with the shared token the fixture injects.
     let base = format!("http://{}", fixture.daemon_addr);
-    let token = std::fs::read_to_string(fixture.control_token_path())
-        .expect("daemon control token must exist after up");
-    let auth_header = format!("Authorization: Bearer {}", token.trim());
+    let auth_header = format!("Authorization: Bearer {CONTROL_TOKEN}");
     let status_url = format!("{base}/v1/status");
     let status_resp = Command::new("curl")
         .args(["-fs", "-H", &auth_header, &status_url])
@@ -453,7 +456,7 @@ fn scenarios_3_to_6_lifecycle_cycle() {
     // Use --force so a tardy NFS unmount does not cause `down` to exit
     // non-zero. On macOS the NFS client takes a variable amount of time to
     // acknowledge the server's unmount, which can exceed the 3s grace window
-    // in `wait_unmounted`. The invariant under test (mount gone, launch.json
+    // in `wait_unmounted`. The invariant under test (mount gone, daemon.json
     // removed, daemon exited) is preserved regardless of the --force flag.
     let out = fixture.run(&["down", "--force"]);
     assert!(
@@ -484,10 +487,10 @@ fn scenarios_3_to_6_lifecycle_cycle() {
         fixture.mount_point.display()
     );
 
-    // `launch.json` removed.
+    // The runtime record is removed.
     assert!(
-        !fixture.launch_json_path().exists(),
-        "launch.json must be removed after `omnifs down`"
+        !fixture.runtime_record_path().exists(),
+        "daemon.json must be removed after `omnifs down`"
     );
 
     // Daemon process is gone: the PID recorded in our fixture should no longer
@@ -519,7 +522,7 @@ fn scenarios_3_to_6_lifecycle_cycle() {
 
 // ── Scenario 7: dead-daemon fallback ──────────────────────────────────────────
 
-/// No daemon answers the control port; `down` falls back to the launch record
+/// No daemon answers the control port; `down` falls back to the runtime record
 /// to identify the backend, reclaims, and removes the record, without hanging.
 ///
 /// Uses a synthetic record (dead pid, no live mount) so the test never strands a
@@ -536,26 +539,26 @@ fn scenario_7_dead_daemon_record_fallback() {
 
     let fixture = Fixture::new();
     // A record for a daemon that is gone: a dead pid, and a mount point that is
-    // not actually mounted. No control listener answers the fixture's port, so
-    // `down` takes the record-fallback path.
+    // not actually mounted. No control listener answers, so `down` takes the
+    // record-fallback path and liveness-checks the dead pid before sweeping.
     let record = format!(
-        r#"{{"version":1,"backend":"native","daemon_pid":2000000,"control_addr":"{}","mount_point":"{}"}}"#,
-        fixture.daemon_addr,
+        r#"{{"version":1,"endpoint":{{"kind":"unix","path":"{}"}},"backend":"native","pid":2000000,"instance_id":"deadbeefdeadbeef","frontends":[{{"kind":"nfs","mount_point":"{}"}}],"started_at":"2026-07-07T00:00:00Z"}}"#,
+        fixture.home_path().join("control.sock").display(),
         fixture.mount_point.display(),
     );
-    std::fs::write(fixture.launch_json_path(), record).expect("write synthetic launch record");
+    std::fs::write(fixture.runtime_record_path(), record).expect("write synthetic runtime record");
 
     let out = fixture.run(&["down"]);
     assert!(
         out.status.success(),
-        "omnifs down must consume a stale launch record and exit 0 (exit {})\nstdout: {}\nstderr: {}",
+        "omnifs down must consume a stale runtime record and exit 0 (exit {})\nstdout: {}\nstderr: {}",
         out.status,
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr),
     );
     assert!(
-        !fixture.launch_json_path().exists(),
-        "down must remove the launch record after reclaiming a dead daemon"
+        !fixture.runtime_record_path().exists(),
+        "down must remove the runtime record after reclaiming a dead daemon"
     );
 }
 

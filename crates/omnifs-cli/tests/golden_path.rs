@@ -60,11 +60,11 @@ impl Fixture {
             .unwrap_or_else(|error| panic!("spawn omnifs {}: {error}", args.join(" ")))
     }
 
-    fn update_pid_from_launch_json(&mut self) {
-        let path = self.home_path().join("launch.json");
+    fn update_pid_from_record(&mut self) {
+        let path = self.home_path().join("daemon.json");
         if let Ok(bytes) = std::fs::read_to_string(&path)
             && let Ok(val) = serde_json::from_str::<serde_json::Value>(&bytes)
-            && let Some(pid) = val["daemon_pid"].as_u64()
+            && let Some(pid) = val["pid"].as_u64()
         {
             self.daemon_pid = u32::try_from(pid).ok();
         }
@@ -222,7 +222,7 @@ fn setup_init_up_wait_read_down_golden_path() {
         String::from_utf8_lossy(&up.stdout),
         String::from_utf8_lossy(&up.stderr)
     );
-    fixture.update_pid_from_launch_json();
+    fixture.update_pid_from_record();
 
     assert_eq!(fixture.read_fixture_file(), b"Hello, world!");
 

@@ -106,7 +106,7 @@ impl ResetArgs {
             anstream::eprintln!("Removed mount `{}`", target.name);
         }
 
-        // Best-effort: a non-running daemon or an absent launch record is not a
+        // Best-effort: a non-running daemon or an absent runtime record is not a
         // reset failure. Mount specs were already deleted through the daemon
         // when it was ready, so teardown no longer owns spec mutation.
         DaemonTeardown::new(&workspace).reset_best_effort().await;

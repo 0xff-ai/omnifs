@@ -8,8 +8,13 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use bytes::Bytes;
+use http_body_util::{BodyExt as _, Full};
+use hyper_util::client::legacy::Client as HyperClient;
+use hyper_util::rt::TokioExecutor;
+use hyperlocal::{UnixConnector, Uri as UnixUri};
 
-use crate::client::read_control_token_file;
+use crate::client::EventEndpoint;
 
 /// Outcome of one [`EventsClient::attach`] call.
 pub enum AttachOutcome {
@@ -21,16 +26,16 @@ pub enum AttachOutcome {
 
 /// Blocking line-oriented client for the daemon's `GET /v1/events`
 /// stream. Owns a single-thread tokio runtime so callers can drive the
-/// HTTP stream from plain threads.
+/// HTTP stream from plain threads. Speaks TCP (reqwest) or the host-native
+/// Unix socket (hyper), depending on the resolved endpoint.
 pub struct EventsClient {
     rt: tokio::runtime::Runtime,
     http: reqwest::Client,
-    url: String,
-    token_file: PathBuf,
+    endpoint: EventEndpoint,
 }
 
 impl EventsClient {
-    pub fn new(addr: &str, token_file: PathBuf) -> Result<Self> {
+    pub fn new(endpoint: EventEndpoint) -> Result<Self> {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -39,12 +44,7 @@ impl EventsClient {
             .connect_timeout(Duration::from_millis(500))
             .build()
             .context("build events HTTP client")?;
-        Ok(Self {
-            rt,
-            http,
-            url: format!("http://{addr}/v1/events"),
-            token_file,
-        })
+        Ok(Self { rt, http, endpoint })
     }
 
     /// Try to connect once. On success, call `on_connect`, then `on_line`
@@ -55,32 +55,68 @@ impl EventsClient {
         on_connect: impl FnOnce(),
         mut on_line: impl FnMut(&str) -> std::result::Result<(), E>,
     ) -> std::result::Result<AttachOutcome, E> {
-        use futures_util::StreamExt as _;
         use omnifs_api::events::split_complete_lines;
 
         self.rt.block_on(async {
-            let Ok(token) = read_control_token_file(&self.token_file) else {
-                return Ok(AttachOutcome::Unreachable);
-            };
-            let response = match self.http.get(&self.url).bearer_auth(token).send().await {
-                Ok(response) if response.status().is_success() => response,
-                _ => return Ok(AttachOutcome::Unreachable),
-            };
-            on_connect();
-            let mut stream = response.bytes_stream();
-            let mut buf = String::new();
-            while let Some(chunk) = stream.next().await {
-                let Ok(chunk) = chunk else {
-                    return Ok(AttachOutcome::Ended);
-                };
-                buf.push_str(&String::from_utf8_lossy(&chunk));
-                let (lines, rest) = split_complete_lines(&buf);
-                for line in &lines {
-                    on_line(line)?;
-                }
-                buf = rest.to_string();
+            match &self.endpoint {
+                EventEndpoint::Tcp { base, token } => {
+                    use futures_util::StreamExt as _;
+                    let mut request = self.http.get(format!("{base}/v1/events"));
+                    if let Some(token) = token {
+                        request = request.bearer_auth(token);
+                    }
+                    let response = match request.send().await {
+                        Ok(response) if response.status().is_success() => response,
+                        _ => return Ok(AttachOutcome::Unreachable),
+                    };
+                    on_connect();
+                    let mut stream = response.bytes_stream();
+                    let mut buf = String::new();
+                    while let Some(chunk) = stream.next().await {
+                        let Ok(chunk) = chunk else {
+                            return Ok(AttachOutcome::Ended);
+                        };
+                        buf.push_str(&String::from_utf8_lossy(&chunk));
+                        let (lines, rest) = split_complete_lines(&buf);
+                        for line in &lines {
+                            on_line(line)?;
+                        }
+                        buf = rest.to_string();
+                    }
+                    Ok(AttachOutcome::Ended)
+                },
+                EventEndpoint::Unix { socket } => {
+                    let client: HyperClient<UnixConnector, Full<Bytes>> =
+                        HyperClient::builder(TokioExecutor::new()).build(UnixConnector);
+                    let uri: hyper::Uri = UnixUri::new(socket, "/v1/events").into();
+                    let Ok(request) = hyper::Request::builder()
+                        .uri(uri)
+                        .body(Full::new(Bytes::new()))
+                    else {
+                        return Ok(AttachOutcome::Unreachable);
+                    };
+                    let mut response = match client.request(request).await {
+                        Ok(response) if response.status().is_success() => response,
+                        _ => return Ok(AttachOutcome::Unreachable),
+                    };
+                    on_connect();
+                    let mut buf = String::new();
+                    while let Some(frame) = response.body_mut().frame().await {
+                        let Ok(frame) = frame else {
+                            return Ok(AttachOutcome::Ended);
+                        };
+                        if let Some(chunk) = frame.data_ref() {
+                            buf.push_str(&String::from_utf8_lossy(chunk));
+                            let (lines, rest) = split_complete_lines(&buf);
+                            for line in &lines {
+                                on_line(line)?;
+                            }
+                            buf = rest.to_string();
+                        }
+                    }
+                    Ok(AttachOutcome::Ended)
+                },
             }
-            Ok(AttachOutcome::Ended)
         })
     }
 }
@@ -90,9 +126,8 @@ pub enum SourceKind {
     /// Subscribe to the daemon's event stream. Optional `record` also
     /// appends every line read to a host-side file.
     Socket {
-        addr: String,
+        endpoint: EventEndpoint,
         record: Option<PathBuf>,
-        token_file: PathBuf,
     },
 }
 
@@ -118,15 +153,11 @@ impl EventSource {
         let (tx, rx) = mpsc::channel();
         let handle = match kind {
             SourceKind::Replay(path) => Some(thread::spawn(move || replay_path(&path, &tx))),
-            SourceKind::Socket {
-                addr,
-                record,
-                token_file,
-            } => {
+            SourceKind::Socket { endpoint, record } => {
                 // The live socket source reconnects forever; detach it
                 // so quitting the TUI never waits on the reconnect loop.
                 let handle = thread::spawn(move || {
-                    socket_source(&addr, record.as_deref(), &token_file, &tx);
+                    socket_source(endpoint, record.as_deref(), &tx);
                 });
                 drop(handle);
                 None
@@ -179,7 +210,7 @@ fn replay_path(path: &Path, tx: &Sender<SourceMessage>) {
 /// `just dev`. Connect/disconnect transitions are reported through
 /// `SourceMessage` so the front-end never claims "connected" while the
 /// stream is still failing.
-fn socket_source(addr: &str, record: Option<&Path>, token_file: &Path, tx: &Sender<SourceMessage>) {
+fn socket_source(endpoint: EventEndpoint, record: Option<&Path>, tx: &Sender<SourceMessage>) {
     /// Receiver hung up; stop the source thread.
     struct Hangup;
 
@@ -190,7 +221,7 @@ fn socket_source(addr: &str, record: Option<&Path>, token_file: &Path, tx: &Send
             .open(path)
             .ok()
     });
-    let Ok(client) = EventsClient::new(addr, token_file.to_path_buf()) else {
+    let Ok(client) = EventsClient::new(endpoint) else {
         return;
     };
 

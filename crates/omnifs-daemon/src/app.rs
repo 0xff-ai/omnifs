@@ -10,6 +10,7 @@ use clap::{Args, ValueEnum};
 use omnifs_engine::GitCloner;
 use omnifs_engine::MountRuntimes;
 use omnifs_engine::init_global_from_env;
+use omnifs_workspace::runtime_record::RuntimeRecord;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -30,10 +31,12 @@ pub struct DaemonArgs {
     /// Optional NFS trace log.
     #[arg(long)]
     pub nfs_trace: Option<PathBuf>,
-    /// Control API listen address. The container entrypoint passes
-    /// `0.0.0.0` so Docker can publish the port on the host loopback.
-    #[arg(long, default_value_t = default_listen())]
-    pub listen: SocketAddr,
+    /// Optional TCP control API listen address. The container entrypoint passes
+    /// `0.0.0.0:7878` so Docker can publish the port on the host loopback; a
+    /// host-native daemon serves its Unix socket and only adds a TCP listener
+    /// when this is set (the debug/test path). Absent means UDS-only.
+    #[arg(long)]
+    pub listen: Option<SocketAddr>,
     /// Maintain `/<mount>` → `<mount-point>/<mount>` convenience symlinks
     /// as mounts come and go. Container-image nicety; off by default and
     /// meaningless when running host-native.
@@ -67,12 +70,10 @@ impl FrontendKind {
     }
 }
 
-fn default_listen() -> SocketAddr {
-    omnifs_api::default_listen_addr()
-}
-
 impl DaemonArgs {
-    pub fn host_native(listen: SocketAddr) -> Self {
+    /// A host-native daemon. `listen` adds a TCP control listener alongside the
+    /// Unix socket (the debug/test path); `None` serves only the Unix socket.
+    pub fn host_native(listen: Option<SocketAddr>) -> Self {
         Self {
             listen,
             host_native: true,
@@ -87,8 +88,10 @@ impl DaemonArgs {
     /// token as the first element.
     pub fn to_argv(&self) -> Vec<String> {
         let mut args = vec!["daemon".to_string()];
-        args.push("--listen".to_string());
-        args.push(self.listen.to_string());
+        if let Some(listen) = self.listen {
+            args.push("--listen".to_string());
+            args.push(listen.to_string());
+        }
         if self.nfs_port != 0 {
             args.push("--nfs-port".to_string());
             args.push(self.nfs_port.to_string());
@@ -161,8 +164,28 @@ pub fn run(args: DaemonArgs) -> anyhow::Result<()> {
 
     let frontend = context.frontend();
     let frontends = frontends::Frontend::from_context(&context, Arc::clone(&registry));
-    let listener = context.bind_control_listener()?;
-    let control_token = server::ControlToken::generate(context.control_token_file())?;
+
+    // Host-native serves a Unix socket (auth is filesystem permissions); the
+    // container serves TCP. A host-native daemon additionally serves TCP only
+    // when `--listen` is passed (the debug/test path). Bind before moving the
+    // context into the daemon.
+    let host_native = context.is_host_native();
+    let record_path = context.runtime_record_file();
+    let runtime_record = host_native.then(|| context.runtime_record());
+    let uds_listener = if host_native {
+        Some(context.bind_control_socket()?)
+    } else {
+        None
+    };
+    let tcp_listener = context
+        .listen()
+        .map(crate::context::DaemonContext::bind_control_listener)
+        .transpose()?;
+
+    // The bearer token guards the TCP listener only; the container launcher
+    // injects it via `OMNIFS_CONTROL_TOKEN`, otherwise it is generated in
+    // memory. The Unix socket never checks it.
+    let control_token = server::ControlToken::resolve()?;
     let daemon = Arc::new(server::Daemon::new(
         context,
         Arc::clone(&registry),
@@ -170,7 +193,21 @@ pub fn run(args: DaemonArgs) -> anyhow::Result<()> {
         frontends,
         control_token,
     ));
-    daemon.spawn_control(listener, &rt)?;
+    if let Some(listener) = uds_listener {
+        daemon.spawn_control_unix(listener, &rt)?;
+    }
+    if let Some(listener) = tcp_listener {
+        daemon.spawn_control_tcp(listener, &rt)?;
+    }
+
+    // One artifact, one lifecycle: with the socket bound and routes installed,
+    // publish the record so the CLI can dial this daemon. Only the host-native
+    // daemon owns the record; the Docker launcher writes it host-side.
+    if let Some(record) = &runtime_record
+        && let Err(error) = record.write(&record_path)
+    {
+        warn!(%error, path = %record_path.display(), "failed to write runtime record");
+    }
 
     // Load desired state from `mounts/*.json` before serving, so the tree is
     // populated when the frontend comes up. Both the native and Docker launch
@@ -220,7 +257,12 @@ pub fn run(args: DaemonArgs) -> anyhow::Result<()> {
     refresh_loop.abort();
     registry.shutdown_all();
     telemetry.daemon_event(DaemonEvent::DaemonStop, telemetry_backend, served_mounts);
-    daemon.remove_control_token();
+    // Graceful exit removes the record; a crash leaves it stale and the client
+    // cleans it up on the next connect attempt. Only the host-native daemon owns
+    // the record.
+    if host_native && let Err(error) = RuntimeRecord::remove(&record_path) {
+        warn!(%error, path = %record_path.display(), "failed to remove runtime record");
+    }
     serve_result?;
     Ok(())
 }

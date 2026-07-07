@@ -406,8 +406,10 @@ impl Runtime {
         Ok(())
     }
 
-    pub(crate) async fn wait_for_daemon_ready(&self) -> Result<()> {
-        let client = crate::client::DaemonClient::new();
+    pub(crate) async fn wait_for_daemon_ready(
+        &self,
+        client: &crate::client::DaemonClient,
+    ) -> Result<()> {
         anstream::eprintln!(
             "Waiting for {GUEST_MOUNT} inside `{}`",
             self.container_name()
