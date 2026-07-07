@@ -1,5 +1,6 @@
 pub mod live;
 pub mod matrix;
+pub mod tape;
 
 use omnifs_core::path::{Path, Segment};
 use omnifs_engine::GitCloner;
