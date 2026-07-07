@@ -27,6 +27,10 @@ pub const PROVIDERS_SUBDIR: &str = "providers";
 pub const CACHE_SUBDIR: &str = "cache";
 /// Subdirectory of `cache_dir` holding NFS loopback mount-state files.
 pub const NFS_STATE_SUBDIR: &str = "nfs";
+/// Subdirectory of `config_dir` holding the daemon's per-name namespace attach
+/// sockets (`<config_dir>/frontends/<name>.sock`), served to out-of-process
+/// frontend runners.
+pub const FRONTENDS_SUBDIR: &str = "frontends";
 pub const OMNIFS_HOME_ENV: &str = "OMNIFS_HOME";
 /// Overrides the host-visible mount point the daemon serves at.
 pub const OMNIFS_MOUNT_POINT_ENV: &str = "OMNIFS_MOUNT_POINT";
@@ -127,6 +131,19 @@ impl WorkspaceLayout {
     pub fn control_socket(&self) -> PathBuf {
         self.config_dir
             .join(crate::runtime_record::CONTROL_SOCKET_FILE)
+    }
+
+    /// Directory holding the daemon's namespace attach sockets
+    /// (`<config_dir>/frontends`). The daemon creates it `0700` when it binds an
+    /// attach socket.
+    pub fn frontends_dir(&self) -> PathBuf {
+        self.config_dir.join(FRONTENDS_SUBDIR)
+    }
+
+    /// The attach socket for `name` (`<config_dir>/frontends/<name>.sock`). The
+    /// caller validates `name`; auth on the socket is filesystem permissions.
+    pub fn attach_socket(&self, name: &str) -> PathBuf {
+        self.frontends_dir().join(format!("{name}.sock"))
     }
 
     pub fn provider_path(&self, provider: &str) -> PathBuf {

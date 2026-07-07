@@ -55,6 +55,30 @@ pub struct DaemonArgs {
     /// rejected). This is a daemon surface only; the CLI does not expose it yet.
     #[arg(long = "frontend", value_name = "KIND=MOUNT_POINT", value_parser = parse_frontend_mount)]
     pub frontends: Vec<FrontendMount>,
+    /// Serve the shared namespace over an attach socket at
+    /// `$OMNIFS_HOME/frontends/<name>.sock`, repeatable. An out-of-process
+    /// `omnifs frontend` runner attaches to it. A daemon with an attach socket
+    /// and no `--frontend` serves the namespace only (no in-process mount).
+    /// `<name>` is a bare `[a-z0-9-]+` label.
+    #[arg(long = "attach-socket", value_name = "NAME", value_parser = parse_attach_socket_name)]
+    pub attach_sockets: Vec<String>,
+}
+
+/// Validate a `--attach-socket <name>` value: a non-empty `[a-z0-9-]+` label,
+/// used as the stem of `frontends/<name>.sock`.
+fn parse_attach_socket_name(value: &str) -> Result<String, String> {
+    if value.is_empty() {
+        return Err("attach socket name must not be empty".to_string());
+    }
+    if !value
+        .bytes()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    {
+        return Err(format!(
+            "invalid attach socket name `{value}`; use lowercase letters, digits, and `-`"
+        ));
+    }
+    Ok(value.to_string())
 }
 
 /// One requested frontend: a protocol kind bound to a mount point. Built from the
@@ -131,6 +155,7 @@ impl DaemonArgs {
             nfs_trace: None,
             root_symlinks: false,
             frontends: Vec::new(),
+            attach_sockets: Vec::new(),
         }
     }
 
@@ -161,6 +186,10 @@ impl DaemonArgs {
                 frontend.kind.as_flag(),
                 frontend.mount_point.display()
             ));
+        }
+        for name in &self.attach_sockets {
+            args.push("--attach-socket".to_string());
+            args.push(name.clone());
         }
         args
     }
@@ -237,7 +266,7 @@ pub fn run(args: DaemonArgs) -> anyhow::Result<()> {
     }
 
     let frontend_summary = frontend_summary(&context);
-    let frontends = frontends::Frontends::from_context(&context, Arc::clone(&registry));
+    let frontends = frontends::Frontends::from_context(&context);
 
     // Host-native serves a Unix socket (auth is filesystem permissions); the
     // container serves TCP. A host-native daemon additionally serves TCP only
@@ -251,6 +280,16 @@ pub fn run(args: DaemonArgs) -> anyhow::Result<()> {
     } else {
         None
     };
+
+    // Bind the namespace attach sockets (fail fast on a collision), capturing the
+    // per-start id and socket paths before the context moves into the daemon. The
+    // listeners are spawned post-reconcile so a client sees a populated tree.
+    let attach_sockets = context.bind_attach_sockets()?;
+    let attach_instance_id = context.instance_id().to_string();
+    let attach_socket_paths: Vec<PathBuf> = attach_sockets
+        .iter()
+        .map(|socket| socket.path.clone())
+        .collect();
     let tcp_listener = context
         .listen()
         .map(crate::context::DaemonContext::bind_control_listener)
@@ -287,17 +326,19 @@ pub fn run(args: DaemonArgs) -> anyhow::Result<()> {
     // populated when the frontend comes up. Both the native and Docker launch
     // paths reconcile here; the daemon backend selects host-direct versus
     // container-rewritten preopens.
-    let report = daemon.reconcile_blocking(&rt);
-    for failure in &report.failed {
-        warn!(mount = %failure.mount, reason = %failure.reason, "mount did not converge");
-    }
-    info!(
-        added = report.added.len(),
-        updated = report.updated.len(),
-        removed = report.removed.len(),
-        failed = report.failed.len(),
-        "reconciled mounts on start"
-    );
+    log_reconcile(&daemon.reconcile_blocking(&rt));
+
+    // Build the one shared namespace after reconcile, so its root record reflects
+    // the converged mount set (the identity table's root is installed at
+    // construction). Both the in-process renderers and the attach-socket
+    // listeners serve this same `TreeNamespace`.
+    let namespace = omnifs_engine::TreeNamespace::new(Arc::clone(&registry), rt.clone());
+
+    // Serve every requested attach socket over the shared namespace, before
+    // `serve` (which blocks) so a namespace-only daemon comes up. With the
+    // listeners up and mounts reconciled, report ready.
+    spawn_attach_listeners(attach_sockets, &namespace, &attach_instance_id, &rt)?;
+    daemon.mark_attach_serving();
 
     // Arm signal-driven shutdown for the serving lifetime: a service `stop`, the
     // macOS teardown's `kill -TERM`, or `docker stop` all run the same clean
@@ -315,7 +356,7 @@ pub fn run(args: DaemonArgs) -> anyhow::Result<()> {
         telemetry_backend,
         registry.runtime_entries().len(),
     );
-    let serve_result = daemon.serve(&rt);
+    let serve_result = daemon.serve(&namespace, &rt);
 
     // `serve` returns once the frontend is unmounted (externally, by a signal,
     // or by the daemon's own shutdown path). Drop every provider here so
@@ -337,8 +378,57 @@ pub fn run(args: DaemonArgs) -> anyhow::Result<()> {
     if host_native && let Err(error) = RuntimeRecord::remove(&record_path) {
         warn!(%error, path = %record_path.display(), "failed to remove runtime record");
     }
+    remove_attach_sockets(&attach_socket_paths);
     serve_result?;
     Ok(())
+}
+
+/// Log the outcome of the startup reconcile: a warning per dark mount, then a
+/// one-line summary.
+fn log_reconcile(report: &omnifs_api::ReconcileReport) {
+    for failure in &report.failed {
+        warn!(mount = %failure.mount, reason = %failure.reason, "mount did not converge");
+    }
+    info!(
+        added = report.added.len(),
+        updated = report.updated.len(),
+        removed = report.removed.len(),
+        failed = report.failed.len(),
+        "reconciled mounts on start"
+    );
+}
+
+/// Serve each bound attach socket over the shared namespace on the runtime.
+fn spawn_attach_listeners(
+    sockets: Vec<crate::context::AttachSocket>,
+    namespace: &Arc<omnifs_engine::TreeNamespace>,
+    instance_id: &str,
+    rt: &Handle,
+) -> anyhow::Result<()> {
+    for socket in sockets {
+        socket.listener.set_nonblocking(true)?;
+        let listener = tokio::net::UnixListener::from_std(socket.listener)?;
+        let ns = Arc::clone(namespace) as Arc<dyn omnifs_engine::Namespace>;
+        info!(name = %socket.name, path = %socket.path.display(), "serving namespace attach socket");
+        rt.spawn(omnifs_namespace_wire::serve_listener(
+            ns,
+            listener,
+            instance_id.to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Remove the attach sockets on a graceful exit; a crash leaves them stale and
+/// the next daemon unlinks them after a refused connect probe.
+fn remove_attach_sockets(paths: &[PathBuf]) {
+    for path in paths {
+        if let Err(error) = std::fs::remove_file(path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            warn!(%error, path = %path.display(), "failed to remove attach socket");
+        }
+    }
 }
 
 /// On `SIGTERM`/`SIGINT`, run the same self-unmount the control API's
