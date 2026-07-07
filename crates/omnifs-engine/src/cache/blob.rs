@@ -89,6 +89,46 @@ impl BlobCache {
         self.blobs.get(&id).map(|entry| entry.clone())
     }
 
+    /// Read the raw bytes of a cached blob. Test support for the tape recorder.
+    #[doc(hidden)]
+    pub fn bytes_for_tests(&self, blob_id: u64) -> Option<Vec<u8>> {
+        let record = self.lookup_by_id(blob_id)?;
+        std::fs::read(self.blob_path(&record.cache_key)).ok()
+    }
+
+    /// Insert bytes as a cached blob and return its runtime-local id, registering
+    /// the same on-disk file and `BlobRecord` shape the real fetch path produces,
+    /// so later `read-blob` / `open-archive` callouts against the id behave
+    /// exactly as after a real fetch. Test support for the tape replayer.
+    #[doc(hidden)]
+    pub fn insert_for_tests(
+        &self,
+        cache_key: &str,
+        bytes: &[u8],
+        content_type: Option<String>,
+        etag: Option<String>,
+        status: u16,
+        response_headers: Vec<(String, String)>,
+    ) -> u64 {
+        // Mirror `BlobExecutor::materialize`: write the body under `blob_path`,
+        // persist the rehydration metadata, then register the in-memory record.
+        let blob_path = self.blob_path(cache_key);
+        if let Some(parent) = blob_path.parent() {
+            std::fs::create_dir_all(parent).expect("create blob dir");
+        }
+        let metadata = BlobMetadata {
+            status,
+            content_type,
+            etag,
+            response_headers,
+            size: bytes.len() as u64,
+        };
+        self.store_metadata(cache_key, &metadata)
+            .expect("store blob metadata");
+        std::fs::write(&blob_path, bytes).expect("write blob bytes");
+        self.store(cache_key.to_string(), metadata).id
+    }
+
     /// Return the filesystem path for a provider cache key.
     pub(crate) fn blob_path(&self, cache_key: &str) -> PathBuf {
         self.cache_dir.join(cache_key)
@@ -235,4 +275,55 @@ pub(crate) fn is_safe_path_segment(s: &str) -> bool {
     relative_key::is_safe_relative_key(s, |component| {
         component == BLOB_TMP_DIR || component == BLOB_META_DIR
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::AuthManager;
+    use crate::blob::{BlobExecutor, BlobLimits};
+    use crate::capability::CapabilityChecker;
+    use crate::http::HttpStack;
+    use omnifs_caps::Allowlist;
+    use omnifs_wit::provider::types as wit_types;
+
+    #[test]
+    fn insert_for_tests_round_trips_and_reads_through_executor() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = Arc::new(BlobCache::new(tmp.path().to_path_buf()));
+        let bytes: &[u8] = b"hello blob bytes";
+        let id = cache.insert_for_tests(
+            "pkg/foo.bin",
+            bytes,
+            Some("application/octet-stream".into()),
+            Some("etag-1".into()),
+            200,
+            vec![("x-test".into(), "value".into())],
+        );
+
+        let record = cache.lookup_by_id(id).expect("record present");
+        assert_eq!(record.cache_key, "pkg/foo.bin");
+        assert_eq!(record.size, bytes.len() as u64);
+        assert_eq!(cache.bytes_for_tests(id).as_deref(), Some(bytes));
+
+        // The inserted blob reads back through the real executor exactly as
+        // after a fetch, proving the on-disk naming and record registration match.
+        let capability = CapabilityChecker::new(Allowlist {
+            domains: Vec::new(),
+            git_repos: Vec::new(),
+            needs_git: false,
+            unix_sockets: Vec::new(),
+        });
+        let http =
+            Arc::new(HttpStack::new(Arc::new(AuthManager::none()), Arc::new(capability)).unwrap());
+        let executor = BlobExecutor::new(http, cache.clone(), BlobLimits::default());
+        match executor.read(&wit_types::ReadBlobRequest {
+            blob: id,
+            offset: 0,
+            len: None,
+        }) {
+            wit_types::CalloutResult::BlobRead(read) => assert_eq!(read.as_slice(), bytes),
+            other => panic!("expected BlobRead, got {other:?}"),
+        }
+    }
 }

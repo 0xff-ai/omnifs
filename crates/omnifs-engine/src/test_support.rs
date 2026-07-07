@@ -12,6 +12,7 @@ use crate::log_redaction::{LogUrl as InternalLogUrl, WitHeaders as InternalWitHe
 use omnifs_wit::provider::types as wit_types;
 
 pub use crate::BuildError;
+pub use crate::callouts::CalloutObserver;
 pub use crate::effect_apply::{LookupEntry, LookupOutcome};
 pub use crate::ops::namespace::{
     ChunkOutcome, DirEntry, DirListing, ListOutcome as NamespaceListOutcome, OpenOutcome,
@@ -169,6 +170,14 @@ impl Runtime {
         }
         let ret = futures::executor::block_on(self.instance.start_op(op.clone(), id))?;
         TestOp::from_return(self, op, id, op_gen, ret)
+    }
+
+    /// The blob cache backing this runtime's `fetch-blob`/`read-blob` executors.
+    /// The tape recorder reads recorded blob bytes back out through it, and the
+    /// replayer inserts recorded bytes into it before answering a callout.
+    #[doc(hidden)]
+    pub fn blob_cache_for_tests(&self) -> &std::sync::Arc<crate::blob::BlobCache> {
+        &self.blob_cache
     }
 }
 

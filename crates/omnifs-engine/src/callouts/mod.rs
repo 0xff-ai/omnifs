@@ -248,6 +248,13 @@ pub(crate) fn record_outcome(result: &wit_types::CalloutResult) {
     }
 }
 
+/// Test-support tee observing each completed callout after its real executor
+/// ran. Used by the tape recorder in `omnifs-itest`. Never installed by
+/// production construction paths.
+pub trait CalloutObserver: Send + Sync {
+    fn observe(&self, op_id: u64, callout: &wit_types::Callout, result: &wit_types::CalloutResult);
+}
+
 #[derive(Clone)]
 pub(crate) struct CalloutHost {
     http: Arc<HttpStack>,
@@ -256,6 +263,7 @@ pub(crate) struct CalloutHost {
     archive: Arc<ArchiveExecutor>,
     next_callout_index: Arc<AtomicUsize>,
     test_callouts: Option<TestCallouts>,
+    observer: Option<Arc<dyn CalloutObserver>>,
 }
 
 impl CalloutHost {
@@ -272,11 +280,17 @@ impl CalloutHost {
             archive,
             next_callout_index: Arc::new(AtomicUsize::new(0)),
             test_callouts: None,
+            observer: None,
         }
     }
 
     pub(crate) fn with_test_callouts(mut self, test_callouts: TestCallouts) -> Self {
         self.test_callouts = Some(test_callouts);
+        self
+    }
+
+    pub(crate) fn with_observer(mut self, observer: Arc<dyn CalloutObserver>) -> Self {
+        self.observer = Some(observer);
         self
     }
 
@@ -298,6 +312,11 @@ impl CalloutHost {
                 kind = kind,
             ))
             .await;
+        // Tee to the tape recorder after the real executor ran. Kept off the
+        // production path: `observer` is only set through `with_observer`.
+        if let Some(observer) = &self.observer {
+            observer.observe(op_id, &callout, &result);
+        }
         if let Some(live) = live {
             live.finish(&result);
         }

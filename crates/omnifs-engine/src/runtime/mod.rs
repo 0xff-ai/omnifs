@@ -9,7 +9,7 @@ use crate::auth::AuthManager;
 use crate::blob::{BlobExecutor, BlobLimits};
 use crate::blob_cache::BlobCache;
 use crate::cache::{Caches, Store};
-use crate::callouts::{CalloutHost, TestCallouts, TestSignal};
+use crate::callouts::{CalloutHost, CalloutObserver, TestCallouts, TestSignal};
 use crate::capability::{CapabilityChecker, config_str};
 use crate::cloner::GitCloner;
 use crate::coalesce::Coalesce;
@@ -113,6 +113,18 @@ impl HostContext {
     }
 }
 
+/// How provider callouts are executed for this engine instance.
+pub enum CalloutWiring {
+    /// Production: real executors. `Engine::new`.
+    Real,
+    /// Fetch/FetchBlob captured onto the test channel and answered by the
+    /// test. `Engine::new_for_callout_tests`.
+    Captured,
+    /// Real executors plus a tee observing every (callout, result) pair.
+    /// Used by the tape recorder.
+    Observed(Arc<dyn CalloutObserver>),
+}
+
 /// Runtime for one mounted WASM provider component.
 ///
 /// Manages the Wasmtime instance driver, host callout imports, cache state,
@@ -130,7 +142,7 @@ pub struct Runtime {
     /// poll: the daemon surfaces it in the Mounts subsystem health.
     credential_warning: Option<String>,
     next_operation_id: AtomicU64,
-    blob_cache: Arc<BlobCache>,
+    pub(crate) blob_cache: Arc<BlobCache>,
     trees: Arc<TreeRefs>,
     pub(crate) cache: Store,
     pub(crate) invalidation: InvalidationState,
@@ -339,7 +351,7 @@ impl Runtime {
         caches: &Arc<Caches>,
         credential_service: &Arc<CredentialService>,
     ) -> std::result::Result<Self, BuildError> {
-        Self::build(
+        Self::new_with_wiring(
             engine,
             wasm_path,
             config,
@@ -347,7 +359,7 @@ impl Runtime {
             context,
             caches,
             credential_service,
-            false,
+            CalloutWiring::Real,
         )
     }
 
@@ -361,7 +373,7 @@ impl Runtime {
         caches: &Arc<Caches>,
         credential_service: &Arc<CredentialService>,
     ) -> std::result::Result<Self, BuildError> {
-        Self::build(
+        Self::new_with_wiring(
             engine,
             wasm_path,
             config,
@@ -369,12 +381,13 @@ impl Runtime {
             context,
             caches,
             credential_service,
-            true,
+            CalloutWiring::Captured,
         )
     }
 
+    #[doc(hidden)]
     #[allow(clippy::too_many_arguments)]
-    fn build(
+    pub fn new_with_callout_observer(
         engine: &wasmtime::Engine,
         wasm_path: &StdPath,
         config: &Spec,
@@ -382,13 +395,39 @@ impl Runtime {
         context: &HostContext,
         caches: &Arc<Caches>,
         credential_service: &Arc<CredentialService>,
-        capture_test_callouts: bool,
+        observer: Arc<dyn CalloutObserver>,
     ) -> std::result::Result<Self, BuildError> {
-        let (test_callouts, test_rx) = if capture_test_callouts {
-            let (test_callouts, rx) = TestCallouts::channel();
-            (Some(test_callouts), Some(rx))
-        } else {
-            (None, None)
+        Self::new_with_wiring(
+            engine,
+            wasm_path,
+            config,
+            cloner,
+            context,
+            caches,
+            credential_service,
+            CalloutWiring::Observed(observer),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn new_with_wiring(
+        engine: &wasmtime::Engine,
+        wasm_path: &StdPath,
+        config: &Spec,
+        cloner: Arc<GitCloner>,
+        context: &HostContext,
+        caches: &Arc<Caches>,
+        credential_service: &Arc<CredentialService>,
+        wiring: CalloutWiring,
+    ) -> std::result::Result<Self, BuildError> {
+        // Only the captured wiring installs the test capture channel; real and
+        // observed both run the real executors.
+        let (test_callouts, test_rx) = match &wiring {
+            CalloutWiring::Captured => {
+                let (test_callouts, rx) = TestCallouts::channel();
+                (Some(test_callouts), Some(rx))
+            },
+            CalloutWiring::Real | CalloutWiring::Observed(_) => (None, None),
         };
         let mount_name = config.mount.as_str();
         let config_bytes = config.config_bytes();
@@ -477,6 +516,9 @@ impl Runtime {
         );
         if let Some(test_callouts) = test_callouts {
             callout_host = callout_host.with_test_callouts(test_callouts);
+        }
+        if let CalloutWiring::Observed(observer) = wiring {
+            callout_host = callout_host.with_observer(observer);
         }
         instance
             .set_callouts(callout_host)
