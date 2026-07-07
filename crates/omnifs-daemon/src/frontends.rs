@@ -201,11 +201,15 @@ impl Instance {
                 mount::run_blocking(&frontend.mount_point, namespace, rt, &frontend.notifier)?;
             },
             Instance::Nfs(frontend) => {
+                // The in-process daemon frontend is not a restartable unit (its
+                // mount dies with the daemon), so it neither persists filehandles
+                // nor listens for reattach.
                 omnifs_nfs::mount_blocking(
                     &frontend.mount_point,
                     namespace,
                     rt.clone(),
                     &frontend.options,
+                    None,
                 )?;
             },
         }

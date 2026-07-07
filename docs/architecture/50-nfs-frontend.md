@@ -66,13 +66,16 @@ Deferred by the read-only contract (these arrive with any write path and must be
 - **Write-back and mmap coherence.** Client-side write caching weakens read-after-write visibility across processes; mmap-heavy editors are best effort per the product contract.
 - **Locking.** NFSv4.0 mandatory lock state (and its recovery) is protocol machinery the read-only frontend deliberately keeps narrow.
 
+Structurally addressed for the restartable out-of-process frontend:
+
+- **ESTALE across restarts.** A kernel client holds filehandles across a frontend or daemon restart. The out-of-process runner (`omnifs frontend`) is a restartable unit that keeps them valid two ways. A frontend restart reloads a persisted filehandle-identity table (`crates/omnifs-nfs/src/persist.rs`, one file in the NFS state dir): the same `generation` so old filehandles keep decoding, the resumed `next_ino`, and per-id `{ scope, parent, name, kind }` that re-resolve lazily by walking the parent chain through `namespace.lookup` (no `NodeId` is persisted; ids are meaningless across processes). The runner also pins the NFS server port and serves the export without remounting when the mount is already active. A daemon restart under a live frontend arrives as a wire reattach (`NsAttachEvent::Reattached`): the adapter drops every cached `NodeId` and re-resolves the surviving identity chains lazily, without closing opens or bumping the filehandle generation. Stateids are not persisted; an unknown stateid returns the protocol error that drives the client's transparent re-open against a still-valid filehandle. The write policy is a debounced write-behind plus a synchronous flush on clean shutdown, so a handle allocated within the debounce window immediately before a `SIGKILL` can be lost (`NFS4ERR_STALE` for that handle only); a handle a client actually holds is durable, because it holds one only after observing the op complete. The in-process daemon frontend does not persist (its mount dies with the daemon). Proven by the two-leg `wire_reattach` live acceptance test.
+
 Open, inherent to the transport:
 
-- **ESTALE across daemon restarts.** Client-held filehandles must remain valid across a daemon restart or the client surfaces stale-filehandle errors; FUSE mounts simply die with the process. Filehandle stability is therefore a durability requirement, not an optimization.
 - **Sleep/wake and lease churn.** The v4.0 lease/grace machinery interacts with laptop sleep; live tests serialize for related reasons.
 - **No xattr surface at all** (until v4.2 is on the table), independent of writes: `xattr -l` answers differently than FUSE would.
 
-When comparing frontends or debating defaults, this catalog is the checklist: a quirk is either mitigated (name the mount option), deferred (name the contract gate), or open (name the consequence). The conformance target for both frontends is the same product-contract toolbox; NFS earns default status per platform by passing it, not by assertion.
+When comparing frontends or debating defaults, this catalog is the checklist: a quirk is either mitigated (name the mount option), deferred (name the contract gate), structurally addressed (name the mechanism and its proof), or open (name the consequence). The conformance target for both frontends is the same product-contract toolbox; NFS earns default status per platform by passing it, not by assertion.
 
 ## Rejected shapes
 

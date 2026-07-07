@@ -10,6 +10,7 @@ mod delayed;
 mod error;
 mod export;
 mod mount;
+mod persist;
 mod protocol;
 mod server;
 mod trace;

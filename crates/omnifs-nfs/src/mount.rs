@@ -1,7 +1,9 @@
 use crate::adapter::Export;
 use crate::error::NfsFrontendError;
+use crate::persist::{FH_STATE_FILE, FhState, PersistInit};
+use crate::protocol::consts::EXPORT_ROOT_ID;
 use crate::server::start_server;
-use omnifs_engine::namespace::Namespace;
+use omnifs_engine::namespace::{Namespace, NsAttachEvent};
 #[cfg(target_os = "linux")]
 use omnifs_mtab::proc_mounts;
 use omnifs_mtab::{NfsMountState, Platform, StateError, StateFile, UnmountCommand};
@@ -13,6 +15,7 @@ use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 use tokio::runtime::Handle;
+use tokio::sync::broadcast;
 
 const MOUNT_WAIT_INTERVAL: Duration = Duration::from_millis(500);
 const UNMOUNT_SETTLE_INTERVAL: Duration = Duration::from_millis(100);
@@ -25,6 +28,14 @@ pub struct NfsMountOptions {
     pub bind: SocketAddr,
     pub trace_path: Option<PathBuf>,
     pub state_dir: PathBuf,
+    /// Persist the filehandle-identity table so a restart of this process decodes
+    /// the filehandles a kernel client still holds. Set by the restartable
+    /// out-of-process runner; left `false` for the in-process daemon frontend,
+    /// whose mount dies with the process. When `true` the mount step is also
+    /// skipped if the mount point already carries an active NFS mount (the
+    /// restart case), so the restarted server serves the export the kernel client
+    /// is still connected to instead of remounting.
+    pub persist_filehandles: bool,
 }
 
 impl NfsMountOptions {
@@ -33,6 +44,7 @@ impl NfsMountOptions {
             bind: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
             trace_path: None,
             state_dir,
+            persist_filehandles: false,
         }
     }
 }
@@ -42,16 +54,58 @@ pub fn mount_blocking(
     namespace: Arc<dyn Namespace>,
     rt: Handle,
     options: &NfsMountOptions,
+    attach_events: Option<broadcast::Receiver<NsAttachEvent>>,
 ) -> Result<(), NfsFrontendError> {
     std::fs::create_dir_all(mount_point)?;
     ensure_private_state_dir(&options.state_dir)?;
     sweep_stale_states(&options.state_dir);
     let signal_rx = ctrl_c_receiver(&rt);
-    let export = Arc::new(Export::new(rt, namespace));
-    let server = start_server(export, options.bind, options.trace_path.clone())?;
+
+    // A pinned filehandle generation persists across a restart so a kernel client
+    // never sees `NFS4ERR_FHEXPIRED` for a handle it still holds. Off the runner
+    // path, keep the fresh-per-process random generation.
+    let (generation, persist_init) = filehandle_generation(options)?;
+
+    let export = Arc::new(match persist_init {
+        Some(init) => Export::with_persistence(rt, namespace, init),
+        None => Export::new(rt, namespace),
+    });
+
+    // On a daemon reattach (a wire reconnect onto a restarted daemon), every
+    // cached NodeId is stale; drop them so subsequent ops re-resolve. Opens and
+    // leases survive untouched.
+    if let Some(mut attach_events) = attach_events {
+        let listener = Arc::clone(&export);
+        drop(export.handle().spawn(async move {
+            while let Ok(event) = attach_events.recv().await {
+                match event {
+                    NsAttachEvent::Reattached => listener.on_reattach(),
+                }
+            }
+        }));
+    }
+
+    let server = start_server(
+        Arc::clone(&export) as Arc<dyn crate::export::ReadOnlyExport>,
+        options.bind,
+        generation,
+        options.trace_path.clone(),
+    )?;
     let _state_file =
         StateFile::write(mount_point, server.addr(), &options.state_dir).map_err(state_error)?;
-    mount_client(mount_point, server.addr())?;
+
+    // Restart case: the kernel client still holds the mount, so serve the export
+    // over the same port without remounting. A first start (or a stale, dead
+    // mount) mounts as usual.
+    if options.persist_filehandles && mount_is_active(mount_point) {
+        tracing::info!(
+            mount = %mount_point.display(),
+            addr = %server.addr(),
+            "NFS mount already active; serving the export without remounting (restart path)"
+        );
+    } else {
+        mount_client(mount_point, server.addr())?;
+    }
 
     tracing::info!(
         mount = %mount_point.display(),
@@ -76,6 +130,39 @@ pub fn unmount(mount_point: &Path) -> Result<(), NfsFrontendError> {
     UnmountCommand::graceful(Platform::current(), mount_point)
         .run()
         .map_err(|error| NfsFrontendError::Unmount(error.to_string()))
+}
+
+/// Resolve the filehandle generation and, on the runner path, the persisted
+/// table to seed. Off the runner path there is no state file and the generation
+/// is fresh per process. On the runner path a reloaded table pins the generation
+/// (so old filehandles keep decoding) and resumes the allocation cursor; a first
+/// start mints a fresh generation and writes it out.
+fn filehandle_generation(
+    options: &NfsMountOptions,
+) -> Result<(u64, Option<PersistInit>), NfsFrontendError> {
+    if !options.persist_filehandles {
+        return Ok((crate::protocol::filehandle::generation(), None));
+    }
+    let state_path = options.state_dir.join(FH_STATE_FILE);
+    let (generation, next_ino, entries) = match FhState::load(&state_path)
+        .map_err(|error| NfsFrontendError::State(error.to_string()))?
+    {
+        Some(state) => (state.generation, state.next_ino, state.entries),
+        None => (
+            crate::protocol::filehandle::generation(),
+            EXPORT_ROOT_ID + 1,
+            Vec::new(),
+        ),
+    };
+    Ok((
+        generation,
+        Some(PersistInit {
+            generation,
+            next_ino,
+            entries,
+            state_path,
+        }),
+    ))
 }
 
 fn state_error(error: StateError) -> NfsFrontendError {
@@ -567,6 +654,52 @@ mod tests {
             Path::new("/Volumes/omnifs mount")
         ));
         assert!(!mount_table_contains(&mounts, Path::new("/Volumes/omnifs")));
+    }
+
+    #[test]
+    fn reload_keeps_generation_and_resumes_cursor() {
+        use crate::export::NodeKind;
+        use crate::persist::{FH_STATE_FILE, FhEntry, FhState};
+
+        let dir = tempfile::tempdir().expect("state dir");
+        super::ensure_private_state_dir(dir.path()).expect("state dir perms");
+        let persisted = FhState {
+            version: FhState::VERSION,
+            generation: 0xABCD_1234,
+            next_ino: 512,
+            entries: vec![FhEntry {
+                id: 100,
+                scope: 1,
+                parent: 1,
+                name: "test".to_string(),
+                kind: NodeKind::Directory,
+            }],
+        };
+        std::fs::write(
+            dir.path().join(FH_STATE_FILE),
+            serde_json::to_vec(&persisted).expect("encode"),
+        )
+        .expect("write filehandle state");
+
+        let mut options = super::NfsMountOptions::loopback(dir.path().to_path_buf());
+        options.persist_filehandles = true;
+        let (generation, init) =
+            super::filehandle_generation(&options).expect("resolve generation");
+        let init = init.expect("persist init on the runner path");
+        assert_eq!(generation, 0xABCD_1234, "a reload must keep the generation");
+        assert_eq!(init.generation, generation);
+        assert_eq!(init.next_ino, 512, "a reload resumes the allocation cursor");
+        assert_eq!(init.entries.len(), 1);
+    }
+
+    #[test]
+    fn no_persist_uses_fresh_generation_and_no_init() {
+        let dir = tempfile::tempdir().expect("state dir");
+        let options = super::NfsMountOptions::loopback(dir.path().to_path_buf());
+        let (generation, init) =
+            super::filehandle_generation(&options).expect("resolve generation");
+        assert_ne!(generation, 0, "a fresh generation is non-zero");
+        assert!(init.is_none(), "the daemon path never persists filehandles");
     }
 
     #[test]

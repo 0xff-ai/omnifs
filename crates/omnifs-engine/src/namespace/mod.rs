@@ -230,6 +230,20 @@ pub enum NsEvent {
     },
 }
 
+/// A change in the daemon a frontend is attached to, delivered out of band from
+/// the [`NsEvent`] invalidation stream. It fires when an out-of-process
+/// renderer's wire connection reconnects onto a *restarted* daemon: every
+/// [`NodeId`] the renderer cached is meaningless against the new instance and
+/// must be re-resolved. The out-of-process runner bridges its wire attach events
+/// into this engine-owned type so a frontend crate need not depend on the wire
+/// crate to act on a reattach.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NsAttachEvent {
+    /// The daemon restarted under the renderer; drop every cached `NodeId` and
+    /// re-resolve lazily from the surviving protocol identity chain.
+    Reattached,
+}
+
 /// Retry classification for an [`NsError`], derivable without importing the
 /// engine's tree errors. Mirrors the frontend `retry_class` partition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -45,6 +45,7 @@ fn nfs_tcp_server_lists_reads_and_closes_through_runtime() {
     let server = start_server(
         export,
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+        1,
         Some(trace_path.clone()),
     )
     .expect("start loopback NFS server");
@@ -102,6 +103,7 @@ fn nfs_tcp_server_dispatches_rpcs_concurrently() {
     let server = start_server(
         export,
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+        1,
         None,
     )
     .expect("start loopback NFS server");

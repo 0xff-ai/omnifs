@@ -63,6 +63,7 @@ pub(crate) const NFS4ERR_STALE_CLIENTID: u32 = 10022;
 pub(crate) const NFS4ERR_OLD_STATEID: u32 = 10024;
 pub(crate) const NFS4ERR_BAD_STATEID: u32 = 10025;
 pub(crate) const NFS4ERR_SYMLINK: u32 = 10029;
+pub(crate) const NFS4ERR_NO_GRACE: u32 = 10033;
 pub(crate) const NFS4ERR_OPENMODE: u32 = 10038;
 pub(crate) const NFS4ERR_LOCK_NOTSUPP: u32 = 10043;
 pub(crate) const NFS4ERR_OP_ILLEGAL: u32 = 10044;

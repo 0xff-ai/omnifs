@@ -89,7 +89,7 @@ fn nfs_live_mount_serves_fast_ops_while_provider_read_is_parked() {
         let options = fixture.options.clone();
         move || {
             let namespace = TreeNamespace::new(registry, handle.clone());
-            mount_blocking(&mount_point, namespace, handle, &options)
+            mount_blocking(&mount_point, namespace, handle, &options, None)
         }
     });
 

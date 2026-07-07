@@ -10,12 +10,17 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Args;
-use omnifs_engine::Namespace;
+use omnifs_engine::{Namespace, NsAttachEvent};
 use omnifs_namespace_wire::WireNamespace;
 use tokio::runtime::Handle;
+use tokio::sync::broadcast;
 use tracing::{info, warn};
 
 use crate::app::FrontendKind;
+
+/// Attach-event fan-out capacity. Reattach events are rare; a small ring is
+/// plenty and a lagging consumer re-syncs on the next reattach.
+const ATTACH_CAPACITY: usize = 16;
 
 /// Arguments for the hidden `omnifs frontend` subcommand.
 #[derive(Args, Debug)]
@@ -33,6 +38,11 @@ pub struct FrontendArgs {
     /// NFS mount-state directory. Defaults under the workspace cache dir.
     #[arg(long)]
     pub nfs_state_dir: Option<PathBuf>,
+    /// NFS server port to bind. A restarted runner must rebind the SAME port the
+    /// kernel client is connected to, so a restartable frontend pins it here; `0`
+    /// (the default) binds an ephemeral port.
+    #[arg(long, default_value_t = 0)]
+    pub nfs_port: u16,
 }
 
 /// Attach to the namespace socket and run the requested renderer, blocking until
@@ -52,10 +62,11 @@ pub fn run_frontend(args: FrontendArgs) -> anyhow::Result<()> {
         "attached to namespace socket"
     );
 
-    // Part B teaches the renderers to re-resolve on a daemon restart; here the
-    // reattach receiver is only exposed for observation. Draining it keeps the
-    // broadcast from lagging and logs restarts for the operator.
-    spawn_reattach_logger(&rt, &namespace);
+    // Bridge the wire attach events onto the engine-owned `NsAttachEvent` a
+    // frontend acts on, so the NFS renderer re-resolves on a daemon restart
+    // without omnifs-nfs depending on the wire crate. This also logs every
+    // reattach and keeps the wire broadcast drained.
+    let attach_tx = spawn_reattach_bridge(&rt, &namespace);
 
     let namespace_dyn = Arc::clone(&namespace) as Arc<dyn Namespace>;
     install_signal_handler(&rt, args.kind, args.mount_point.clone());
@@ -73,8 +84,22 @@ pub fn run_frontend(args: FrontendArgs) -> anyhow::Result<()> {
                 Some(dir) => dir,
                 None => omnifs_workspace::layout::WorkspaceLayout::resolve()?.nfs_state_dir(),
             };
-            let options = omnifs_nfs::NfsMountOptions::loopback(state_dir);
-            omnifs_nfs::mount_blocking(&args.mount_point, namespace_dyn, rt.clone(), &options)?;
+            let mut options = omnifs_nfs::NfsMountOptions::loopback(state_dir);
+            // The out-of-process runner is the restartable unit: persist the
+            // filehandle table and pin the server port so a restart decodes the
+            // handles the kernel client still holds.
+            options.persist_filehandles = true;
+            options.bind = std::net::SocketAddr::new(
+                std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                args.nfs_port,
+            );
+            omnifs_nfs::mount_blocking(
+                &args.mount_point,
+                namespace_dyn,
+                rt.clone(),
+                &options,
+                Some(attach_tx.subscribe()),
+            )?;
         },
     }
     info!(mount = %args.mount_point.display(), "frontend exited");
@@ -95,10 +120,17 @@ fn attach_blocking(rt: &Handle, socket: PathBuf) -> anyhow::Result<Arc<WireNames
         .map_err(|error| anyhow::anyhow!("{error}"))
 }
 
-/// Log every reattach (a reconnect that lands on a restarted daemon) and keep the
-/// attach-event broadcast drained.
-fn spawn_reattach_logger(rt: &Handle, namespace: &Arc<WireNamespace>) {
+/// Log every reattach (a reconnect that lands on a restarted daemon), keep the
+/// wire attach-event broadcast drained, and forward each reattach as an engine
+/// [`NsAttachEvent`] a renderer acts on. Returns the sender the renderer
+/// subscribes to.
+fn spawn_reattach_bridge(
+    rt: &Handle,
+    namespace: &Arc<WireNamespace>,
+) -> broadcast::Sender<NsAttachEvent> {
+    let (tx, _) = broadcast::channel(ATTACH_CAPACITY);
     let mut receiver = namespace.subscribe_attach_events();
+    let forward = tx.clone();
     rt.spawn(async move {
         while let Ok(event) = receiver.recv().await {
             let omnifs_namespace_wire::AttachEvent::Reattached {
@@ -107,10 +139,14 @@ fn spawn_reattach_logger(rt: &Handle, namespace: &Arc<WireNamespace>) {
             } = event;
             warn!(
                 %old_instance, %new_instance,
-                "daemon restarted under the frontend; node ids are stale until part B re-resolves them"
+                "daemon restarted under the frontend; re-resolving cached node ids"
             );
+            // A closed channel means the renderer never subscribed (a non-NFS
+            // kind) or has exited; the log above is still useful.
+            let _ = forward.send(NsAttachEvent::Reattached);
         }
     });
+    tx
 }
 
 /// On `SIGTERM`/`SIGINT`, unmount the mount point so the blocking renderer loop

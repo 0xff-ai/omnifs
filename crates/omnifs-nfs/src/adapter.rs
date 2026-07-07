@@ -25,6 +25,7 @@ use crate::export::{
     Attr, DirEntry, DirListing, NodeKind, OpenRead, OpenResult, OpenSeed, OpenTable,
     ReadOnlyExport, StateId, Status, StatusResult, ensure_read_access,
 };
+use crate::persist::{PersistInit, PersistTables, Persister};
 use crate::protocol::consts::{EXPORT_ROOT_ID, MAX_NFS_READ_BYTES, NFS_EXPORT_NAME, ROOT_ID};
 use dashmap::DashMap;
 use omnifs_core::path::Segment;
@@ -56,14 +57,35 @@ const NFS_INLINE_BUDGET: Duration = Duration::from_millis(75);
 /// entry: the stable identity a `(generation, id)` filehandle rehydrates from,
 /// plus what the node projects. It caches no provider bytes; the namespace owns
 /// all projection state.
+///
+/// `scope`, `parent`, `name`, and `kind` are exactly the persistable identity: a
+/// reloaded or reattach-cleared id re-resolves from that chain without a
+/// [`NodeId`], which is meaningless across a process or a daemon instance. The
+/// `body` is the only field a [`NodeId`] lives in, so clearing it turns a live
+/// inode back into a [`ColdEntry`].
 #[derive(Clone)]
-struct Inode {
+pub(crate) struct Inode {
     /// Which export root this inode hangs under (`ROOT_ID` or `EXPORT_ROOT_ID`).
     /// The same node under the two roots gets two distinct inodes.
-    scope: u64,
-    parent: u64,
-    kind: NodeKind,
+    pub(crate) scope: u64,
+    pub(crate) parent: u64,
+    /// The name under `parent` that resolves this inode. Empty for the two export
+    /// roots, which anchor the chain. This is what re-resolution looks up.
+    pub(crate) name: String,
+    pub(crate) kind: NodeKind,
     body: Body,
+}
+
+/// A persisted or reattach-cleared inode whose [`NodeId`] is not yet known. It
+/// carries the same identity chain an [`Inode`] does, minus the resolved body:
+/// the first op that touches its id re-resolves it lazily (see
+/// [`Export::ensure_live`]).
+#[derive(Clone)]
+pub(crate) struct ColdEntry {
+    pub(crate) scope: u64,
+    pub(crate) parent: u64,
+    pub(crate) name: String,
+    pub(crate) kind: NodeKind,
 }
 
 /// What an inode projects.
@@ -100,20 +122,6 @@ impl Body {
     }
 }
 
-/// A live open. A namespace file reads through the namespace on each `READ`; a
-/// backing file streams from its local path. Neither holds a provider resource:
-/// the namespace owns ranged handles and their lifecycle.
-enum OpenBody {
-    Node(NodeId),
-    Backing(BackingOpen),
-}
-
-#[derive(Clone)]
-struct BackingOpen {
-    id: u64,
-    backing_path: PathBuf,
-}
-
 pub struct Export {
     rt: Handle,
     /// The projection surface. Every name resolution, attribute, listing, and
@@ -124,29 +132,61 @@ pub struct Export {
     events: Mutex<EventStream>,
     /// Proactive deferral for provider-backed `READDIR` ([`delayed::Listings`]).
     delayed_lists: Listings,
-    /// NFS inode id -> protocol state.
-    inodes: DashMap<u64, Inode>,
+    /// NFS inode id -> protocol state. `Arc` so the filehandle persister thread
+    /// snapshots the same table the adapter mutates.
+    inodes: Arc<DashMap<u64, Inode>>,
     /// (scope, namespace node) -> inode, so a re-resolved node keeps its inode.
     by_node: DashMap<(u64, NodeId), u64>,
     /// (scope, backing path) -> inode, for subtree-local children.
     by_backing: DashMap<(u64, PathBuf), u64>,
-    next_ino: AtomicU64,
-    opens: OpenTable<OpenBody>,
+    /// Persisted or reattach-cleared inode ids whose `NodeId` is not yet resolved,
+    /// keyed by id. `ensure_live` walks these back to a live [`Inode`]. `Arc` so
+    /// the persister snapshots it alongside `inodes`.
+    cold: Arc<DashMap<u64, ColdEntry>>,
+    /// Allocation cursor for fresh inode ids. `Arc` so a restart resumes it and
+    /// the persister records it.
+    next_ino: Arc<AtomicU64>,
+    /// Open stateid bookkeeping. The body is `()`: an open re-resolves its target
+    /// from its inode on each read, so a reattach that clears `NodeId`s never has
+    /// to touch the open table.
+    opens: OpenTable<()>,
     /// Per-node live-follow size learned from an `AttrsChanged` event. `attr`
     /// reports `max(namespace size, grown[node])`, so a polling `tail -f` over
     /// the `noac` mount re-stats, sees growth, and reads the new bytes.
     grown_sizes: DashMap<NodeId, u64>,
+    /// The filehandle-table persister, present only on the restartable
+    /// out-of-process runner path. `None` for the in-process daemon frontend,
+    /// whose mount dies with the process, so persistence would be pointless.
+    persist: Option<Persister>,
 }
 
 impl Export {
+    /// Build an export over `namespace` with no filehandle persistence: the
+    /// in-process daemon frontend and unit tests, whose mount dies with the
+    /// process.
     pub fn new(rt: Handle, namespace: Arc<dyn Namespace>) -> Self {
+        Self::build(rt, namespace, None)
+    }
+
+    /// Build an export whose filehandle table is persisted (and reloaded from
+    /// `init`) so a restart of this process decodes the handles a kernel client
+    /// still holds. The restartable out-of-process runner path only.
+    pub(crate) fn with_persistence(
+        rt: Handle,
+        namespace: Arc<dyn Namespace>,
+        init: PersistInit,
+    ) -> Self {
+        Self::build(rt, namespace, Some(init))
+    }
+
+    fn build(rt: Handle, namespace: Arc<dyn Namespace>, persist: Option<PersistInit>) -> Self {
         assert!(
             !matches!(rt.runtime_flavor(), RuntimeFlavor::CurrentThread),
             "NFS adapter requires a multi-thread Tokio runtime because sync NFS workers call Handle::block_on"
         );
         let events = Mutex::new(namespace.subscribe());
         let delayed_lists = Listings::new(rt.clone());
-        let inodes = DashMap::new();
+        let inodes = Arc::new(DashMap::new());
         let by_node = DashMap::new();
         // The two export roots both project the namespace root, under distinct
         // scopes, so `/x` and `/omnifs/x` mint distinct scope-stable inodes.
@@ -156,12 +196,50 @@ impl Export {
                 Inode {
                     scope,
                     parent: ROOT_ID,
+                    name: String::new(),
                     kind: NodeKind::Directory,
                     body: Body::Node(NodeId::ROOT),
                 },
             );
             by_node.insert((scope, NodeId::ROOT), scope);
         }
+
+        // Resume the allocation cursor and cold-entry table from a reloaded state
+        // file, so old filehandles decode to the same ids they were minted under.
+        let next_base = persist.as_ref().map_or(EXPORT_ROOT_ID + 1, |init| {
+            init.next_ino.max(EXPORT_ROOT_ID + 1)
+        });
+        let next_ino = Arc::new(AtomicU64::new(next_base));
+        let cold = Arc::new(DashMap::new());
+        if let Some(init) = &persist {
+            for entry in &init.entries {
+                if entry.id == ROOT_ID || entry.id == EXPORT_ROOT_ID {
+                    continue;
+                }
+                cold.insert(
+                    entry.id,
+                    ColdEntry {
+                        scope: entry.scope,
+                        parent: entry.parent,
+                        name: entry.name.clone(),
+                        kind: entry.kind,
+                    },
+                );
+            }
+        }
+
+        let persist = persist.map(|init| {
+            Persister::spawn(
+                init.state_path,
+                PersistTables {
+                    generation: init.generation,
+                    next_ino: Arc::clone(&next_ino),
+                    inodes: Arc::clone(&inodes),
+                    cold: Arc::clone(&cold),
+                },
+            )
+        });
+
         Self {
             rt,
             namespace,
@@ -170,14 +248,130 @@ impl Export {
             inodes,
             by_node,
             by_backing: DashMap::new(),
-            next_ino: AtomicU64::new(EXPORT_ROOT_ID + 1),
+            cold,
+            next_ino,
             opens: OpenTable::new(),
             grown_sizes: DashMap::new(),
+            persist,
         }
     }
 
+    /// The runtime handle this export drives its blocking namespace ops on. The
+    /// runner uses it to spawn the reattach listener on the same runtime.
+    pub(crate) fn handle(&self) -> &Handle {
+        &self.rt
+    }
+
     fn alloc_ino(&self) -> u64 {
-        self.next_ino.fetch_add(1, Ordering::Relaxed)
+        let id = self.next_ino.fetch_add(1, Ordering::Relaxed);
+        // The cursor advanced; a restart must resume past it.
+        self.mark_dirty();
+        id
+    }
+
+    /// Signal the persister (if any) that the filehandle table changed.
+    fn mark_dirty(&self) {
+        if let Some(persist) = &self.persist {
+            persist.mark_dirty();
+        }
+    }
+
+    /// Drop every cached `NodeId` on a daemon reattach: every live non-root inode
+    /// becomes a [`ColdEntry`], so the next op re-resolves it against the restarted
+    /// daemon. Ids, scopes, parent/name chains, opens, and leases all survive; the
+    /// held filehandles keep decoding and the open table is never touched (an open
+    /// re-resolves its target from its inode on read).
+    pub(crate) fn on_reattach(&self) {
+        let live: Vec<(u64, ColdEntry)> = self
+            .inodes
+            .iter()
+            .filter(|entry| *entry.key() != ROOT_ID && *entry.key() != EXPORT_ROOT_ID)
+            .map(|entry| {
+                let inode = entry.value();
+                (
+                    *entry.key(),
+                    ColdEntry {
+                        scope: inode.scope,
+                        parent: inode.parent,
+                        name: inode.name.clone(),
+                        kind: inode.kind,
+                    },
+                )
+            })
+            .collect();
+        for (id, cold) in live {
+            self.cold.insert(id, cold);
+            self.inodes.remove(&id);
+        }
+        // Every `NodeId` mapping is stale; drop the caches keyed by it, then
+        // re-anchor the two export roots (kept live in `inodes`).
+        self.by_node.clear();
+        self.by_backing.clear();
+        self.grown_sizes.clear();
+        for scope in [ROOT_ID, EXPORT_ROOT_ID] {
+            self.by_node.insert((scope, NodeId::ROOT), scope);
+        }
+        self.mark_dirty();
+    }
+
+    /// Ensure `id` names a live inode, re-resolving it from its cold identity
+    /// chain if a restart or a reattach left only `{ scope, parent, name, kind }`.
+    /// The walk anchors at a root scope (`ROOT_ID`/`EXPORT_ROOT_ID` project
+    /// [`NodeId::ROOT`]) and descends, looking each name up through the namespace
+    /// (or joining a backing path) and caching the fresh `NodeId` down the chain.
+    /// A name that no longer resolves returns [`Status::Stale`] for that handle
+    /// only; a genuinely-gone path is allowed to be stale.
+    fn ensure_live(&self, id: u64) -> StatusResult<()> {
+        if self.inodes.contains_key(&id) {
+            return Ok(());
+        }
+        // The roots are always seeded; a missing root means a cleared table mid
+        // re-anchor, which the caller retries.
+        if id == ROOT_ID || id == EXPORT_ROOT_ID {
+            return Ok(());
+        }
+        let cold = self
+            .cold
+            .get(&id)
+            .map(|entry| entry.clone())
+            .ok_or(Status::Stale)?;
+        // Resolve the parent first, then this name under it.
+        self.ensure_live(cold.parent)?;
+        let parent = self.inodes.get(&cold.parent).ok_or(Status::Stale)?;
+        let parent_scope = cold.scope;
+        let parent_body = parent.body.clone();
+        drop(parent);
+
+        if let Some(backing_dir) = parent_body.backing() {
+            let child = backing_dir.join(&cold.name);
+            let metadata = std::fs::symlink_metadata(&child).map_err(|_| Status::Stale)?;
+            let kind = backing_kind(&metadata)?;
+            self.intern_backing(Some(id), parent_scope, cold.parent, &cold.name, child, kind);
+        } else {
+            let parent_node = parent_body.node().ok_or(Status::Stale)?;
+            match self
+                .rt
+                .block_on(self.namespace.lookup(parent_node, &cold.name))
+            {
+                Ok(answer) => {
+                    self.bind_answer(
+                        Some(id),
+                        parent_scope,
+                        cold.parent,
+                        &cold.name,
+                        answer.node,
+                        &answer.kind,
+                    );
+                },
+                Err(NsError::NotFound) => return Err(Status::Stale),
+                Err(error) => {
+                    tracing::warn!(op = "re-resolve", name = %cold.name, error = %error, "NFS filehandle re-resolution failed");
+                    return Err(Status::from(&error));
+                },
+            }
+        }
+        self.cold.remove(&id);
+        Ok(())
     }
 
     // --- events --------------------------------------------------------------
@@ -223,19 +417,33 @@ impl Export {
 
     /// Allocate (or reuse) the inode for a resolved namespace node under `scope`,
     /// preserving a resolved subtree backing over a later plain provider
-    /// resolution of the same node.
+    /// resolution of the same node. `forced` binds to a specific id when
+    /// re-resolving a persisted or reattach-cleared handle; `None` allocates or
+    /// reuses the `by_node` mapping. `name` is the name under `parent` that
+    /// resolves this node, recorded so the id survives a restart.
+    // The arguments are the inode identity plus its resolved body; grouping them
+    // into a struct would only shuffle the same fields behind one more type.
+    #[allow(clippy::too_many_arguments)]
     fn intern_node(
         &self,
+        forced: Option<u64>,
         scope: u64,
         parent: u64,
+        name: &str,
         node: NodeId,
         kind: NodeKind,
         subtree_root: Option<PathBuf>,
     ) -> u64 {
-        let ino = *self
-            .by_node
-            .entry((scope, node))
-            .or_insert_with(|| self.alloc_ino());
+        let ino = match forced {
+            Some(id) => {
+                self.by_node.insert((scope, node), id);
+                id
+            },
+            None => *self
+                .by_node
+                .entry((scope, node))
+                .or_insert_with(|| self.alloc_ino()),
+        };
         // Never rewrite an export root's identity.
         if ino == ROOT_ID || ino == EXPORT_ROOT_ID {
             return ino;
@@ -253,40 +461,74 @@ impl Export {
             Inode {
                 scope,
                 parent,
+                name: name.to_string(),
                 kind,
                 body,
             },
         );
+        self.mark_dirty();
         ino
     }
 
     /// Allocate (or reuse) the inode for a subtree-local backing path under
-    /// `scope`.
-    fn intern_backing(&self, scope: u64, parent: u64, path: PathBuf, kind: NodeKind) -> u64 {
-        let ino = *self
-            .by_backing
-            .entry((scope, path.clone()))
-            .or_insert_with(|| self.alloc_ino());
+    /// `scope`. `forced` binds a re-resolved persisted handle to its id.
+    fn intern_backing(
+        &self,
+        forced: Option<u64>,
+        scope: u64,
+        parent: u64,
+        name: &str,
+        path: PathBuf,
+        kind: NodeKind,
+    ) -> u64 {
+        let ino = match forced {
+            Some(id) => {
+                self.by_backing.insert((scope, path.clone()), id);
+                id
+            },
+            None => *self
+                .by_backing
+                .entry((scope, path.clone()))
+                .or_insert_with(|| self.alloc_ino()),
+        };
         self.inodes.insert(
             ino,
             Inode {
                 scope,
                 parent,
+                name: name.to_string(),
                 kind,
                 body: Body::Backing(path),
             },
         );
+        self.mark_dirty();
         ino
     }
 
     /// Bind a resolved [`NodeAnswer`]-shaped result to an inode, recording a
     /// subtree backing when the namespace reports the node is a resolved treeref.
-    fn bind_answer(&self, scope: u64, parent: u64, node: NodeId, kind: &EntryKind) -> u64 {
+    fn bind_answer(
+        &self,
+        forced: Option<u64>,
+        scope: u64,
+        parent: u64,
+        name: &str,
+        node: NodeId,
+        kind: &EntryKind,
+    ) -> u64 {
         let subtree_root = match kind {
             EntryKind::Subtree { root } => Some(root.clone()),
             _ => None,
         };
-        self.intern_node(scope, parent, node, nfs_kind(kind), subtree_root)
+        self.intern_node(
+            forced,
+            scope,
+            parent,
+            name,
+            node,
+            nfs_kind(kind),
+            subtree_root,
+        )
     }
 
     /// Promote a discovered subtree: a node the listing bound as a plain provider
@@ -349,12 +591,12 @@ impl Export {
     }
 
     fn read_backing_state(
-        backing: &BackingOpen,
+        id: u64,
+        backing_path: &Path,
         offset: u64,
         count: u32,
     ) -> StatusResult<OpenRead> {
-        let metadata =
-            std::fs::symlink_metadata(&backing.backing_path).map_err(|_| Status::Stale)?;
+        let metadata = std::fs::symlink_metadata(backing_path).map_err(|_| Status::Stale)?;
         if metadata.file_type().is_symlink() {
             return Err(Status::Symlink);
         }
@@ -366,7 +608,7 @@ impl Export {
         }
 
         let count = usize::try_from(count.min(MAX_NFS_READ_BYTES)).map_err(|_| Status::Io)?;
-        let mut file = std::fs::File::open(&backing.backing_path).map_err(|_| Status::Io)?;
+        let mut file = std::fs::File::open(backing_path).map_err(|_| Status::Io)?;
         file.seek(SeekFrom::Start(offset)).map_err(|_| Status::Io)?;
         let mut data = vec![0; count];
         let read = file.read(&mut data).map_err(|_| Status::Io)?;
@@ -375,7 +617,7 @@ impl Export {
             .checked_add(u64::try_from(read).map_err(|_| Status::Io)?)
             .ok_or(Status::Io)?;
         Ok(OpenRead {
-            id: backing.id,
+            id,
             data,
             eof: read_end >= metadata.len(),
         })
@@ -422,7 +664,7 @@ impl Export {
             let kind = nfs_kind(&entry.kind);
             // A listing never marks a treeref child; it binds as a plain provider
             // node and is promoted on the lookup that descends into it.
-            let id = self.intern_node(scope, parent, entry.node, kind, None);
+            let id = self.intern_node(None, scope, parent, &entry.name, entry.node, kind, None);
             let mut attr = if kind == NodeKind::File {
                 match self.rt.block_on(self.namespace.getattr_exact(entry.node)) {
                     Ok(attrs) => attr_from_ns(id, parent, &attrs),
@@ -463,7 +705,7 @@ impl Export {
             let Ok(kind) = backing_kind(&metadata) else {
                 continue;
             };
-            let id = self.intern_backing(scope, parent, backing_path, kind);
+            let id = self.intern_backing(None, scope, parent, name, backing_path, kind);
             entries.push(DirEntry {
                 id,
                 name: name.to_string(),
@@ -486,7 +728,7 @@ impl Export {
         let child = dir.join(name);
         let metadata = std::fs::symlink_metadata(&child).map_err(|_| Status::NoEnt)?;
         let kind = backing_kind(&metadata)?;
-        Ok(self.intern_backing(scope, parent, child, kind))
+        Ok(self.intern_backing(None, scope, parent, name, child, kind))
     }
 }
 
@@ -496,6 +738,7 @@ impl ReadOnlyExport for Export {
     }
 
     fn attr(&self, id: u64) -> StatusResult<Attr> {
+        self.ensure_live(id)?;
         let inode = self.inodes.get(&id).ok_or(Status::Stale)?;
         let parent = inode.parent;
         let body = inode.body.clone();
@@ -544,6 +787,7 @@ impl ReadOnlyExport for Export {
     fn lookup(&self, parent: u64, name: &str) -> StatusResult<u64> {
         let name = Segment::try_from(name).map_err(|_| Status::Invalid)?;
         self.apply_pending_events();
+        self.ensure_live(parent)?;
 
         let inode = self.inodes.get(&parent).ok_or(Status::Stale)?;
         if inode.kind != NodeKind::Directory {
@@ -563,7 +807,14 @@ impl ReadOnlyExport for Export {
             .block_on(self.namespace.lookup(parent_node, name.as_str()))
         {
             Ok(answer) => {
-                let id = self.bind_answer(scope, parent, answer.node, &answer.kind);
+                let id = self.bind_answer(
+                    None,
+                    scope,
+                    parent,
+                    name.as_str(),
+                    answer.node,
+                    &answer.kind,
+                );
                 // Eagerly probe a file child's exact size so a bare `stat`/`ls -l`
                 // after the lookup reflects a ranged file's real size; the
                 // namespace caches the learned size for the later `getattr`.
@@ -588,6 +839,7 @@ impl ReadOnlyExport for Export {
 
     fn readdir(&self, id: u64) -> StatusResult<DirListing> {
         self.apply_pending_events();
+        self.ensure_live(id)?;
         let inode = self.inodes.get(&id).ok_or(Status::Stale)?;
         if inode.kind != NodeKind::Directory {
             return Err(Status::NotDir);
@@ -622,6 +874,7 @@ impl ReadOnlyExport for Export {
 
     fn read(&self, id: u64) -> StatusResult<Vec<u8>> {
         self.apply_pending_events();
+        self.ensure_live(id)?;
         let inode = self.inodes.get(&id).ok_or(Status::Stale)?;
         if inode.kind == NodeKind::Directory {
             return Err(Status::IsDir);
@@ -653,6 +906,7 @@ impl ReadOnlyExport for Export {
     }
 
     fn readlink(&self, id: u64) -> StatusResult<Vec<u8>> {
+        self.ensure_live(id)?;
         let inode = self.inodes.get(&id).ok_or(Status::Stale)?;
         if inode.kind != NodeKind::Symlink {
             return Err(Status::Invalid);
@@ -685,11 +939,8 @@ impl ReadOnlyExport for Export {
         let body = inode.body.clone();
         drop(inode);
 
-        let open_body = match body {
-            Body::Backing(path) => OpenBody::Backing(BackingOpen {
-                id,
-                backing_path: path,
-            }),
+        match body {
+            Body::Backing(_) => {},
             Body::Node(node) => {
                 // Learn the exact size before the OPEN reply. Seek-from-end
                 // readers (`tail -n`) trust the size their post-open stat
@@ -702,16 +953,18 @@ impl ReadOnlyExport for Export {
                     self.read_node_chunk(id, node, 0, 1)?;
                     attr = self.attr(id)?;
                 }
-                OpenBody::Node(node)
             },
             Body::Subtree { .. } => return Err(Status::IsDir),
-        };
+        }
+        // The open records only the inode id; each read re-resolves the read
+        // target from the inode, so a reattach that clears `NodeId`s never has to
+        // rewrite the open table.
         let stateid = self.opens.open(OpenSeed {
             generation,
             inode: id,
             clientid,
             access,
-            body: open_body,
+            body: (),
         });
         Ok(OpenResult { stateid, attr })
     }
@@ -730,19 +983,31 @@ impl ReadOnlyExport for Export {
     fn read_state(&self, stateid: StateId, offset: u64, count: u32) -> StatusResult<OpenRead> {
         // Drain first: an invalidation may have closed this open.
         self.apply_pending_events();
-        match self.opens.with_state(stateid, |state| {
-            ensure_read_access(state.access)?;
-            match &state.body {
-                OpenBody::Node(node) => self.read_node_chunk(state.inode, *node, offset, count),
-                OpenBody::Backing(backing) => Self::read_backing_state(backing, offset, count),
-            }
+        // Validate access and lease under the open-table lock, then release it and
+        // do the read (which may re-resolve the inode) without holding the lock.
+        let inode_id = match self.opens.with_state(stateid, |state| {
+            ensure_read_access(state.access).map(|()| state.inode)
         }) {
-            Ok(result) => result,
+            Ok(result) => result?,
             Err(Status::Expired) => {
                 let _ = self.opens.remove_body(stateid);
-                Err(Status::Expired)
+                return Err(Status::Expired);
             },
-            Err(status) => Err(status),
+            Err(status) => return Err(status),
+        };
+        // Re-resolve the read target from the inode: a reattach may have cleared
+        // its `NodeId`, and a subtree may have rebound to a backing path.
+        self.ensure_live(inode_id)?;
+        let body = self
+            .inodes
+            .get(&inode_id)
+            .ok_or(Status::Stale)?
+            .body
+            .clone();
+        match body {
+            Body::Node(node) => self.read_node_chunk(inode_id, node, offset, count),
+            Body::Backing(path) => Self::read_backing_state(inode_id, &path, offset, count),
+            Body::Subtree { .. } => Err(Status::IsDir),
         }
     }
 
@@ -903,9 +1168,14 @@ mod tests {
             .expect("set backing len");
         drop(file);
 
-        let id = harness
-            .export
-            .intern_backing(ROOT_ID, ROOT_ID, backing, NodeKind::File);
+        let id = harness.export.intern_backing(
+            None,
+            ROOT_ID,
+            ROOT_ID,
+            "huge.bin",
+            backing,
+            NodeKind::File,
+        );
 
         let opened = harness
             .export
@@ -929,17 +1199,24 @@ mod tests {
         // A treeref node first resolves as a subtree backing dir...
         let subtree_node = NodeId(5000);
         let id = harness.export.intern_node(
+            None,
             ROOT_ID,
             ROOT_ID,
+            "checkout",
             subtree_node,
             NodeKind::Directory,
             Some(temp.path().to_path_buf()),
         );
         // ...and a later plain provider resolution of the same node keeps it.
-        let rebound =
-            harness
-                .export
-                .intern_node(ROOT_ID, ROOT_ID, subtree_node, NodeKind::Directory, None);
+        let rebound = harness.export.intern_node(
+            None,
+            ROOT_ID,
+            ROOT_ID,
+            "checkout",
+            subtree_node,
+            NodeKind::Directory,
+            None,
+        );
         assert_eq!(rebound, id);
 
         let readme = harness
@@ -950,5 +1227,256 @@ mod tests {
             harness.export.read(readme).expect("backing child read"),
             b"hello from checkout\n".to_vec()
         );
+    }
+
+    // --- re-resolution and stateid recovery ----------------------------------
+
+    use crate::export::StateId;
+    use crate::persist::{FhEntry, PersistInit};
+    use omnifs_engine::namespace::{
+        Attrs, DirPage, NodeAnswer, ReadAnswer, ReadStyle, StabilityClass,
+    };
+    use std::collections::HashMap;
+    use std::sync::atomic::AtomicU64;
+    use std::time::Duration;
+
+    /// A minimal in-memory namespace: a fixed `(parent, name) -> (node, kind)`
+    /// tree, counting lookups so a test can prove the parent chain was walked.
+    struct StubNamespace {
+        children: HashMap<(u64, String), (u64, EntryKind)>,
+        kinds: HashMap<u64, EntryKind>,
+        lookups: AtomicU64,
+    }
+
+    fn stub_attrs(kind: EntryKind) -> Attrs {
+        let size = if matches!(kind, EntryKind::File) {
+            5
+        } else {
+            0
+        };
+        Attrs {
+            kind,
+            size,
+            ttl: Duration::ZERO,
+            change: 1,
+            direct_io: false,
+            stability: StabilityClass::Stable,
+            read_style: ReadStyle::Whole,
+        }
+    }
+
+    impl Namespace for StubNamespace {
+        fn lookup<'a>(
+            &'a self,
+            parent: NodeId,
+            name: &'a str,
+        ) -> Pin<Box<dyn Future<Output = Result<NodeAnswer, NsError>> + Send + 'a>> {
+            self.lookups.fetch_add(1, Ordering::Relaxed);
+            let answer = self
+                .children
+                .get(&(parent.0, name.to_string()))
+                .map(|(node, kind)| NodeAnswer {
+                    node: NodeId(*node),
+                    attrs: stub_attrs(kind.clone()),
+                    kind: kind.clone(),
+                })
+                .ok_or(NsError::NotFound);
+            Box::pin(async move { answer })
+        }
+
+        fn getattr(
+            &self,
+            node: NodeId,
+        ) -> Pin<Box<dyn Future<Output = Result<Attrs, NsError>> + Send + '_>> {
+            let answer = self
+                .kinds
+                .get(&node.0)
+                .map(|kind| stub_attrs(kind.clone()))
+                .ok_or(NsError::NotFound);
+            Box::pin(async move { answer })
+        }
+
+        fn getattr_exact(
+            &self,
+            node: NodeId,
+        ) -> Pin<Box<dyn Future<Output = Result<Attrs, NsError>> + Send + '_>> {
+            self.getattr(node)
+        }
+
+        fn readdir(
+            &self,
+            _node: NodeId,
+            _cursor: DirCursor,
+            _budget: usize,
+        ) -> Pin<Box<dyn Future<Output = Result<DirPage, NsError>> + Send + '_>> {
+            Box::pin(async {
+                Ok(DirPage {
+                    entries: Vec::new(),
+                    next: None,
+                })
+            })
+        }
+
+        fn read(
+            &self,
+            _node: NodeId,
+            offset: u64,
+            _len: u32,
+        ) -> Pin<Box<dyn Future<Output = Result<ReadAnswer, NsError>> + Send + '_>> {
+            Box::pin(async move {
+                let all = b"hello".to_vec();
+                let start = usize::try_from(offset).unwrap_or(all.len()).min(all.len());
+                Ok(ReadAnswer {
+                    bytes: all[start..].to_vec(),
+                    eof: true,
+                    attrs: stub_attrs(EntryKind::File),
+                })
+            })
+        }
+
+        fn readlink(
+            &self,
+            _node: NodeId,
+        ) -> Pin<Box<dyn Future<Output = Result<PathBuf, NsError>> + Send + '_>> {
+            Box::pin(async { Err(NsError::NotFound) })
+        }
+
+        fn subscribe(&self) -> EventStream {
+            EventStream::from_broadcast(tokio::sync::broadcast::channel(4).1)
+        }
+    }
+
+    /// A `/test` dir with a `message` file, plus a persisted cold table for both.
+    fn stub_tree() -> StubNamespace {
+        let mut children = HashMap::new();
+        children.insert(
+            (NodeId::ROOT.0, "test".to_string()),
+            (10, EntryKind::Directory),
+        );
+        children.insert((10, "message".to_string()), (11, EntryKind::File));
+        let mut kinds = HashMap::new();
+        kinds.insert(10, EntryKind::Directory);
+        kinds.insert(11, EntryKind::File);
+        StubNamespace {
+            children,
+            kinds,
+            lookups: AtomicU64::new(0),
+        }
+    }
+
+    fn cold_entries() -> Vec<FhEntry> {
+        vec![
+            FhEntry {
+                id: 100,
+                scope: ROOT_ID,
+                parent: ROOT_ID,
+                name: "test".to_string(),
+                kind: NodeKind::Directory,
+            },
+            FhEntry {
+                id: 101,
+                scope: ROOT_ID,
+                parent: 100,
+                name: "message".to_string(),
+                kind: NodeKind::File,
+            },
+        ]
+    }
+
+    #[test]
+    fn re_resolves_persisted_handle_by_walking_the_parent_chain() {
+        let runtime = TokioRuntime::new().expect("tokio runtime");
+        let namespace = Arc::new(stub_tree());
+        let state_dir = tempfile::tempdir().expect("state dir");
+        let export = Export::with_persistence(
+            runtime.handle().clone(),
+            Arc::clone(&namespace) as Arc<dyn Namespace>,
+            PersistInit {
+                generation: 0x1234,
+                next_ino: 200,
+                entries: cold_entries(),
+                state_path: state_dir.path().join("filehandles.json"),
+            },
+        );
+
+        // The child id 101 arrives with no live inode (a decoded old filehandle).
+        // `attr` must re-resolve it by walking id 100 -> root, and report the
+        // file's stub size.
+        let attr = export.attr(101).expect("re-resolve persisted file handle");
+        assert_eq!(attr.kind, NodeKind::File);
+        assert_eq!(attr.size, 5);
+        assert!(
+            namespace.lookups.load(Ordering::Relaxed) >= 2,
+            "re-resolution must look up each ancestor on the chain"
+        );
+
+        // A held-open read against the same id also re-resolves.
+        let opened = export
+            .open_state(0x1234, 101, 1, 1)
+            .expect("open persisted handle");
+        let chunk = export
+            .read_state(opened.stateid, 0, 8)
+            .expect("read persisted handle");
+        assert_eq!(chunk.data, b"hello".to_vec());
+
+        // A path that no longer resolves is stale for that handle only.
+        let gone = vec![FhEntry {
+            id: 102,
+            scope: ROOT_ID,
+            parent: ROOT_ID,
+            name: "missing".to_string(),
+            kind: NodeKind::Directory,
+        }];
+        let export2 = Export::with_persistence(
+            runtime.handle().clone(),
+            Arc::new(stub_tree()) as Arc<dyn Namespace>,
+            PersistInit {
+                generation: 0x1234,
+                next_ino: 200,
+                entries: gone,
+                state_path: state_dir.path().join("filehandles2.json"),
+            },
+        );
+        assert!(matches!(export2.attr(102), Err(Status::Stale)));
+    }
+
+    #[test]
+    fn reattach_clears_node_ids_and_re_resolves() {
+        let runtime = TokioRuntime::new().expect("tokio runtime");
+        let namespace = Arc::new(stub_tree());
+        let export = Export::new(
+            runtime.handle().clone(),
+            Arc::clone(&namespace) as Arc<dyn Namespace>,
+        );
+
+        // Resolve `/test/message` live, then simulate a daemon reattach.
+        let test_dir = export.lookup(export.root(), "test").expect("lookup test");
+        let message = export.lookup(test_dir, "message").expect("lookup message");
+        let before = namespace.lookups.load(Ordering::Relaxed);
+
+        export.on_reattach();
+
+        // The ids survive; a fresh op re-resolves them (more lookups), and the
+        // held id still answers.
+        let attr = export.attr(message).expect("re-resolve after reattach");
+        assert_eq!(attr.kind, NodeKind::File);
+        assert!(
+            namespace.lookups.load(Ordering::Relaxed) > before,
+            "a reattach must force re-resolution through the namespace again"
+        );
+    }
+
+    #[test]
+    fn unknown_stateid_is_bad_stateid() {
+        let harness = empty_export();
+        let unknown = StateId::new(1, 0xdead_beef, 999);
+        assert_eq!(
+            harness.export.validate_state(unknown),
+            Err(Status::BadStateId)
+        );
+        assert!(matches!(
+            harness.export.read_state(unknown, 0, 8),
+            Err(Status::BadStateId)
+        ));
     }
 }

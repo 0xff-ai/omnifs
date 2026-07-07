@@ -35,6 +35,8 @@ Keep NFS filehandles, stateids, leases, and NFS protocol errors in `omnifs-nfs`.
 
 Keep `/proc/mounts` parsing, NFS mount state-file schema/IO, and shared platform unmount command construction in `omnifs-mtab`. Frontends and lifecycle code call that crate instead of carrying duplicate parsers, state versions, or unmount argv builders.
 
+The `omnifs-mtab` state file is mount *discovery and teardown* state (mount point, address, pid), shared by the CLI and daemon. The NFS filehandle-identity table (`omnifs-nfs/src/persist.rs`, persisted so a restarted out-of-process frontend decodes handles a kernel client still holds) is *protocol identity*, not mount discovery, so it stays in `omnifs-nfs` with the filehandles, stateids, and inode table. It lands in the same NFS state directory next to the mtab mount-state files and mirrors their discipline (version field, unknown version is an error, atomic write, 0600 mode), but its schema and IO are NFS-crate-owned.
+
 ### NFS deferral and `NFS4ERR_DELAY`
 
 `omnifs-nfs` uses `NFS4ERR_DELAY` in two distinct ways. Do not conflate them.

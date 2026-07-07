@@ -32,8 +32,8 @@ pub use inspect::{
 };
 pub use namespace::{
     Attrs, DirCursor, DirEntry, DirPage, EntryKind as NsEntryKind, Epoch, EventStream, Namespace,
-    NodeAnswer, NodeId, NsError, NsEvent, NsRetryClass, ReadAnswer, ReadStyle, StabilityClass,
-    TreeNamespace,
+    NodeAnswer, NodeId, NsAttachEvent, NsError, NsEvent, NsRetryClass, ReadAnswer, ReadStyle,
+    StabilityClass, TreeNamespace,
 };
 pub use runtime::registry::{
     FailureKind, MountFailure, MountRuntimes, ReconcileBusy, ReconcileOutcome, RegistryError,
