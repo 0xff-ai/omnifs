@@ -30,7 +30,7 @@ use std::time::{Duration, Instant};
 
 use common::{
     free_port, install_test_provider, live_acceptance_enabled, nfs_serial_lock, omnifs_bin,
-    platform_can_mount, release_wasm_dir, test_mount_spec,
+    platform_can_mount, test_mount_spec,
 };
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -143,7 +143,7 @@ impl Fixture {
     /// becomes ready but the mount never appears (platform limitation that we
     /// convert to a skip with a clear message).
     fn up_and_wait(&mut self) -> Option<()> {
-        let wasm_dir = release_wasm_dir();
+        let wasm_dir = omnifs_itest::provider_artifact_dir();
         if !wasm_dir.join("test_provider.wasm").exists() {
             eprintln!("skip: test_provider.wasm missing (run `just providers build`)");
             return None;
@@ -334,7 +334,7 @@ fn scenarios_3_to_6_lifecycle_cycle() {
         eprintln!("skip: set OMNIFS_ACCEPTANCE_LIVE=1 to run live-mount acceptance tests");
         return;
     }
-    let wasm_dir = release_wasm_dir();
+    let wasm_dir = omnifs_itest::provider_artifact_dir();
     if !wasm_dir.join("test_provider.wasm").exists() {
         eprintln!("skip: test_provider.wasm missing (run `just providers build`)");
         return;
@@ -572,7 +572,7 @@ fn scenario_8_failed_mount_surfaced() {
         eprintln!("skip: set OMNIFS_ACCEPTANCE_LIVE=1 to run live-mount acceptance tests");
         return;
     }
-    let wasm_dir = release_wasm_dir();
+    let wasm_dir = omnifs_itest::provider_artifact_dir();
     if !wasm_dir.join("test_provider.wasm").exists() {
         eprintln!("skip: test_provider.wasm missing (run `just providers build`)");
         return;

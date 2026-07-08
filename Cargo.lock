@@ -3280,6 +3280,7 @@ dependencies = [
  "getrandom 0.3.4",
  "omnifs-core",
  "omnifs-engine",
+ "omnifs-itest",
  "omnifs-mtab",
  "omnifs-wit",
  "omnifs-workspace",

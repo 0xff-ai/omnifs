@@ -5,8 +5,9 @@ use omnifs_engine::test_support::cache::{Record as CacheRecord, RecordKind};
 use omnifs_engine::view::{
     self as view_types, DirentRecord, DirentsPayload, EntryMeta, FileAttrsCache,
 };
+use omnifs_itest::live::test_provider_spec;
 use omnifs_nfs::{Export, NodeKind, ReadOnlyExport, Status};
-use support::{root_mounted_test_export, test_export, test_export_with_mount, test_provider_spec};
+use support::{root_mounted_test_export, test_export, test_export_with_mount};
 use tokio::runtime::Builder;
 
 const OLD_OPEN_MATERIALIZE_LIMIT_BYTES: u64 = 64 * 1024 * 1024;

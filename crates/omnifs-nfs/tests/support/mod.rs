@@ -1,6 +1,6 @@
 use omnifs_engine::{MountRuntimes, TreeNamespace};
+use omnifs_itest::live::{install_test_provider, test_provider_reference};
 use omnifs_nfs::Export;
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::runtime::Runtime;
@@ -42,7 +42,7 @@ fn test_export_with_mount_options(mount: &str, root_mount: bool) -> TestExport {
     let providers_dir = config_dir.path().join("providers");
     std::fs::create_dir_all(&mounts_dir).expect("mounts dir");
     std::fs::create_dir_all(&providers_dir).expect("providers dir");
-    install_test_provider(&providers_dir);
+    let _ = install_test_provider(&providers_dir);
     let reference = serde_json::to_string(&test_provider_reference()).expect("provider ref json");
     let provider_config = format!(
         r#"{{
@@ -82,63 +82,4 @@ fn test_export_with_mount_options(mount: &str, root_mount: bool) -> TestExport {
         _cache_dir: cache_dir,
         _clone_dir: clone_dir,
     }
-}
-
-/// The pinned reference for the test provider, derived from its built bytes.
-pub fn test_provider_reference() -> omnifs_workspace::ids::ProviderRef {
-    use omnifs_workspace::ids::{ProviderId, ProviderMeta, ProviderName, ProviderRef};
-    let bytes =
-        std::fs::read(provider_wasm_path("test_provider.wasm")).expect("read test provider");
-    ProviderRef {
-        id: ProviderId::from_wasm_bytes(&bytes),
-        meta: ProviderMeta {
-            name: ProviderName::new("test-provider").unwrap(),
-            version: None,
-        },
-    }
-}
-
-/// A mount `Spec` for the test provider, pinned to the provider store any
-/// `TestExport` installs it into.
-#[allow(dead_code)]
-pub fn test_provider_spec(mount: &str) -> omnifs_workspace::mounts::Spec {
-    let value = serde_json::json!({
-        "provider": test_provider_reference(),
-        "mount": mount,
-    });
-    serde_json::from_value(value).expect("build test spec")
-}
-
-/// Install the test provider into the content-addressed store at `providers_dir`.
-fn install_test_provider(providers_dir: &Path) {
-    use omnifs_workspace::provider::ProviderStore;
-    let reference = test_provider_reference();
-    let bytes =
-        std::fs::read(provider_wasm_path("test_provider.wasm")).expect("read test provider");
-    let store = ProviderStore::new(providers_dir);
-    store
-        .put_if_absent(&reference.id, &bytes)
-        .expect("put test provider");
-    store
-        .install(reference.id, reference.meta, "test_provider.wasm".into())
-        .expect("install test provider");
-}
-
-pub fn provider_wasm_path(plugin_name: &str) -> PathBuf {
-    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap();
-    let path = workspace_root
-        .join("target")
-        .join("wasm32-wasip2")
-        .join("release")
-        .join(plugin_name);
-    assert!(
-        path.exists(),
-        "{plugin_name} not found at {path}. Run `just providers build` first.",
-        path = path.display()
-    );
-    path
 }

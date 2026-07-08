@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use common::{
     free_port, install_test_provider_as, live_acceptance_enabled, nfs_serial_lock, omnifs_bin,
-    platform_can_mount, release_wasm_dir,
+    platform_can_mount,
 };
 
 struct Fixture {
@@ -176,7 +176,10 @@ fn setup_init_up_wait_read_down_golden_path() {
         assert!(elapsed < Duration::from_mins(2));
         return;
     }
-    if !release_wasm_dir().join("test_provider.wasm").exists() {
+    if !omnifs_itest::provider_artifact_dir()
+        .join("test_provider.wasm")
+        .exists()
+    {
         eprintln!("skip: test_provider.wasm missing (run `just providers build`)");
         let elapsed = started.elapsed();
         record_wall_clock(fixture.home_path(), elapsed);

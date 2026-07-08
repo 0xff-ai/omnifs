@@ -12,7 +12,8 @@ use std::process::{Child, Command};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use omnifs_workspace::ids::{ProviderId, ProviderMeta, ProviderName};
+use omnifs_workspace::ids::{ProviderId, ProviderMeta, ProviderName, ProviderRef};
+use omnifs_workspace::mounts::Spec;
 use omnifs_workspace::provider::ProviderStore;
 use tempfile::TempDir;
 
@@ -95,6 +96,12 @@ fn ensure_omnifs_built() {
 /// return its content id. The daemon serves by content id, so the provider must
 /// be present in the store before a mount spec pinning it can resolve.
 pub fn install_test_provider(providers_dir: &Path) -> ProviderId {
+    install_test_provider_as(providers_dir, "test-provider")
+}
+
+/// Install the test provider under `provider_name` into the content-addressed
+/// store at `providers_dir`, returning its content id.
+pub fn install_test_provider_as(providers_dir: &Path, provider_name: &str) -> ProviderId {
     let bytes = std::fs::read(crate::provider_wasm_path("test_provider.wasm"))
         .expect("read test provider wasm");
     let id = ProviderId::from_wasm_bytes(&bytes);
@@ -104,13 +111,34 @@ pub fn install_test_provider(providers_dir: &Path) -> ProviderId {
         .install(
             id,
             ProviderMeta {
-                name: ProviderName::new("test-provider").unwrap(),
+                name: ProviderName::new(provider_name).unwrap(),
                 version: None,
             },
             "test_provider.wasm".into(),
         )
         .expect("install test provider");
     id
+}
+
+/// The pinned reference for the test provider, derived from its built bytes.
+#[must_use]
+pub fn test_provider_reference() -> ProviderRef {
+    let bytes =
+        std::fs::read(crate::provider_wasm_path("test_provider.wasm")).expect("read test provider");
+    ProviderRef {
+        id: ProviderId::from_wasm_bytes(&bytes),
+        meta: ProviderMeta {
+            name: ProviderName::new("test-provider").unwrap(),
+            version: None,
+        },
+    }
+}
+
+/// A pinned mount `Spec` for the test provider under `mount`.
+#[must_use]
+pub fn test_provider_spec(mount: &str) -> Spec {
+    let value = serde_json::json!({ "provider": test_provider_reference(), "mount": mount });
+    serde_json::from_value(value).expect("build test spec")
 }
 
 /// No-auth mount spec for the test provider, pinning `id`. Serves the projected

@@ -6,8 +6,13 @@
 #![allow(dead_code)]
 
 use std::net::TcpListener;
-use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Mutex;
+
+#[allow(unused_imports)]
+pub use omnifs_itest::live::{install_test_provider, install_test_provider_as, test_mount_spec};
 
 // Guard for env-mutating tests: env is process-global, so all tests that touch
 // it must hold this lock.
@@ -43,15 +48,6 @@ pub fn with_env<F: FnOnce()>(vars: &[(&str, Option<&str>)], f: F) {
             None => unsafe { std::env::remove_var(key) },
         }
     }
-}
-
-/// `target/wasm32-wasip2/release`, where provider wasm lives.
-pub fn release_wasm_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(2)
-        .expect("workspace root")
-        .join("target/wasm32-wasip2/release")
 }
 
 pub fn free_port() -> u16 {
@@ -93,40 +89,4 @@ pub fn platform_can_mount() -> bool {
 /// conformance matrix so both binaries serialize against the same port.
 pub fn nfs_serial_lock() -> TcpListener {
     omnifs_itest::live::nfs_serial_lock()
-}
-
-/// Install the test provider into the provider store under `providers_dir` and
-/// return its content id.
-pub fn install_test_provider(providers_dir: &Path) -> omnifs_workspace::ids::ProviderId {
-    install_test_provider_as(providers_dir, "test-provider")
-}
-
-pub fn install_test_provider_as(
-    providers_dir: &Path,
-    provider_name: &str,
-) -> omnifs_workspace::ids::ProviderId {
-    let bytes = std::fs::read(release_wasm_dir().join("test_provider.wasm"))
-        .expect("read test provider wasm");
-    let id = omnifs_workspace::ids::ProviderId::from_wasm_bytes(&bytes);
-    let store = omnifs_workspace::provider::ProviderStore::new(providers_dir);
-    store.put_if_absent(&id, &bytes).expect("put test provider");
-    store
-        .install(
-            id,
-            omnifs_workspace::ids::ProviderMeta {
-                name: omnifs_workspace::ids::ProviderName::new(provider_name).unwrap(),
-                version: None,
-            },
-            "test_provider.wasm".into(),
-        )
-        .expect("install test provider");
-    id
-}
-
-/// No-auth mount spec for the test provider, pinning `id`. Serves
-/// `test/hello/message`.
-pub fn test_mount_spec(id: &omnifs_workspace::ids::ProviderId) -> String {
-    format!(
-        r#"{{"provider":{{"id":"{id}","meta":{{"name":"test-provider"}}}},"mount":"test","capabilities":{{"domains":["httpbin.org"]}}}}"#
-    )
 }
