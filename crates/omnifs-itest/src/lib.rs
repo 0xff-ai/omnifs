@@ -7,7 +7,9 @@ use omnifs_core::path::{Path, Segment};
 use omnifs_engine::GitCloner;
 use omnifs_engine::test_support::cache::{Caches, Record as CacheRecord, RecordKind};
 use omnifs_engine::test_support::{ObjectId, Op, TestOp};
-use omnifs_engine::{BuildError, Engine, EngineError, HostContext};
+use omnifs_engine::{
+    BuildError, Engine, EngineError, HostContext, RequestCtx, ServingContext, Tree,
+};
 use omnifs_wit::provider::types::{
     ByteSource, Callout, CanonicalInput, Effects, HttpRequest, ListChildrenResult,
     LookupChildResult, OpResult, ReadFileOutcome, ReadFileResult,
@@ -173,6 +175,45 @@ impl RuntimeHarness {
 
     pub fn current_generation(&self) -> u64 {
         self.runtime.cache().current_generation()
+    }
+}
+
+/// A wasm test-provider loaded into a `Runtime` and wrapped in a `Tree` under
+/// mount "test". Owns the harness temp dirs that must outlive the `Runtime`, plus
+/// an `Arc<Engine>` clone so a suite can drive object invalidations directly. The
+/// RAII owner shared by the tree-conformance, pagination, and live-growth suites.
+pub struct TreeHarness {
+    pub tree: Tree,
+    pub runtime: Arc<Engine>,
+    pub ctx: RequestCtx,
+    _clone_dir: TempDir,
+    _cache_dir: TempDir,
+    _config_dir: TempDir,
+}
+
+/// Load `test_provider.wasm` into a `Runtime` and build a `Tree` over it under
+/// mount "test".
+pub fn tree_harness() -> TreeHarness {
+    let engine = make_engine();
+    let RuntimeHarness {
+        clone_dir,
+        cache_dir,
+        config_dir,
+        runtime,
+        ..
+    } = make_runtime(&engine);
+    let runtime = Arc::new(runtime);
+    let tree = Tree::new(ServingContext::single(
+        "test".to_string(),
+        Arc::clone(&runtime),
+    ));
+    TreeHarness {
+        tree,
+        runtime,
+        ctx: RequestCtx::default(),
+        _clone_dir: clone_dir,
+        _cache_dir: cache_dir,
+        _config_dir: config_dir,
     }
 }
 

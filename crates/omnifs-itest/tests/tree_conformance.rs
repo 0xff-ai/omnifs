@@ -13,7 +13,7 @@
 //!
 //!   (a) load a wasm provider into a `Runtime`             -> `tree_harness`
 //!   (b) build a `Tree` over it                            -> `tree_harness`
-//!   (c) assert resolve/list/read outcomes                 -> `ConformanceTree`
+//!   (c) assert resolve/list/read outcomes                 -> `TreeHarness`
 //!
 //! The conformance set covers: root + nested dir listing, a whole-file read with
 //! exact bytes, a ranged file, a cursored/paginated listing, a not-found, and
@@ -27,162 +27,113 @@
 // Test docs reference protocol acronyms (FUSE, NFS) and type names as prose.
 #![allow(clippy::doc_markdown)]
 
-use std::sync::Arc;
-
 use omnifs_core::path::Path;
-use omnifs_engine::Engine;
 use omnifs_engine::test_support::cache::RecordKind;
 use omnifs_engine::view::{CachedCursor, FileSize, Stability};
-use omnifs_engine::{
-    Cursor, ListOutcome, Listing, Node, ReadResult, RequestCtx, ServingContext, Tree, TreeErrorKind,
-};
-use omnifs_itest::{RuntimeHarness, make_engine, make_runtime};
+use omnifs_engine::{Cursor, ListOutcome, Listing, Node, ReadResult, TreeErrorKind};
+use omnifs_itest::{TreeHarness, tree_harness};
 use omnifs_wit::provider::types::{Effects, Invalidation, PathOrPrefix};
-use tempfile::TempDir;
 
 // ===========================================================================
 // Reusable conformance harness
 // ===========================================================================
 
-/// (a)+(b): a wasm provider loaded into a `Runtime`, wrapped in a `Tree` under a
-/// fixed mount name. Owns the harness temp dirs that must outlive the `Runtime`
-/// plus a second `Arc<Engine>` clone so a conformance test can drive object
-/// invalidations directly (the write-fence/coherence case the `Tree` surface
-/// deliberately hides).
-pub struct ConformanceTree {
-    tree: Tree,
-    runtime: Arc<Engine>,
-    ctx: RequestCtx,
-    _clone_dir: TempDir,
-    _cache_dir: TempDir,
-    _config_dir: TempDir,
-}
-
-/// (a)+(b): load `test_provider.wasm` into a `Runtime` and build a `Tree` over
-/// it under mount "test". The single entry a provider-author test calls before
-/// driving `resolve` / `list` / `read`.
-pub fn tree_harness() -> ConformanceTree {
-    let engine = make_engine();
-    let RuntimeHarness {
-        clone_dir,
-        cache_dir,
-        config_dir,
-        runtime,
-        ..
-    } = make_runtime(&engine);
-    let runtime = Arc::new(runtime);
-    let tree = Tree::new(ServingContext::single(
-        "test".to_string(),
-        Arc::clone(&runtime),
-    ));
-    ConformanceTree {
-        tree,
-        runtime,
-        ctx: RequestCtx::default(),
-        _clone_dir: clone_dir,
-        _cache_dir: cache_dir,
-        _config_dir: config_dir,
-    }
-}
-
 fn path(s: &str) -> Path {
     Path::parse(s).unwrap()
 }
 
-impl ConformanceTree {
-    // --- (c): resolve assertions --------------------------------------------
+// --- (c): resolve assertions ------------------------------------------------
 
-    /// Resolve `path` and assert it is a directory node. Returns the node so the
-    /// caller can list it.
-    pub async fn assert_dir(&self, path_str: &str) -> Node {
-        let node = self
-            .tree
-            .resolve(&path(path_str), &self.ctx)
-            .await
-            .unwrap_or_else(|e| panic!("resolve {path_str} expected a directory: {e}"));
-        assert!(node.is_dir(), "{path_str} must resolve to a directory");
-        assert_eq!(node.mount(), "test");
-        node
+/// Resolve `path` and assert it is a directory node. Returns the node so the
+/// caller can list it.
+async fn assert_dir(t: &TreeHarness, path_str: &str) -> Node {
+    let node = t
+        .tree
+        .resolve(&path(path_str), &t.ctx)
+        .await
+        .unwrap_or_else(|e| panic!("resolve {path_str} expected a directory: {e}"));
+    assert!(node.is_dir(), "{path_str} must resolve to a directory");
+    assert_eq!(node.mount(), "test");
+    node
+}
+
+/// Resolve `path` and assert it is a file node. Returns the node so the
+/// caller can read it.
+async fn assert_file(t: &TreeHarness, path_str: &str) -> Node {
+    let node = t
+        .tree
+        .resolve(&path(path_str), &t.ctx)
+        .await
+        .unwrap_or_else(|e| panic!("resolve {path_str} expected a file: {e}"));
+    assert!(node.is_file(), "{path_str} must resolve to a file");
+    node
+}
+
+/// Resolve `path` and assert it is reported as not-found (a clean ENOENT,
+/// never an internal error). The negative oracle a renderer maps to ENOENT.
+async fn assert_not_found(t: &TreeHarness, path_str: &str) {
+    let err = t
+        .tree
+        .resolve(&path(path_str), &t.ctx)
+        .await
+        .expect_err("missing path must error");
+    assert_eq!(
+        err.kind,
+        TreeErrorKind::NotFound,
+        "{path_str} must surface as NotFound, got {err}"
+    );
+}
+
+// --- (c): list assertions ---------------------------------------------------
+
+/// List `node`, asserting it is a provider listing (not a subtree handoff).
+async fn list(t: &TreeHarness, node: &Node, cursor: Option<Cursor>) -> Listing {
+    match t
+        .tree
+        .list(node, cursor, &t.ctx)
+        .await
+        .unwrap_or_else(|e| panic!("list {} failed: {e}", node.path().as_str()))
+    {
+        ListOutcome::Listing(listing) => listing,
+        ListOutcome::Subtree(dir) => {
+            panic!(
+                "expected a provider listing, got a subtree handoff at {}",
+                dir.display()
+            )
+        },
     }
+}
 
-    /// Resolve `path` and assert it is a file node. Returns the node so the
-    /// caller can read it.
-    pub async fn assert_file(&self, path_str: &str) -> Node {
-        let node = self
-            .tree
-            .resolve(&path(path_str), &self.ctx)
-            .await
-            .unwrap_or_else(|e| panic!("resolve {path_str} expected a file: {e}"));
-        assert!(node.is_file(), "{path_str} must resolve to a file");
-        node
+/// Resolve `path` (which must be a directory) and return its child names.
+async fn list_names(t: &TreeHarness, path_str: &str) -> Vec<String> {
+    let node = assert_dir(t, path_str).await;
+    let listing = list(t, &node, None).await;
+    listing.entries.into_iter().map(|e| e.name).collect()
+}
+
+// --- (c): read assertions ---------------------------------------------------
+
+/// Resolve `path` (a whole-file leaf), read it, and assert the exact bytes.
+/// Returns the read result so the caller can inspect learned attrs.
+async fn assert_read(t: &TreeHarness, path_str: &str, expected: &[u8]) -> ReadResult {
+    let node = assert_file(t, path_str).await;
+    let result = t
+        .tree
+        .read(&node, &t.ctx)
+        .await
+        .unwrap_or_else(|e| panic!("read {path_str} failed: {e}"));
+    match &result {
+        ReadResult::Bytes { data, .. } => {
+            assert_eq!(data, expected, "{path_str} bytes mismatch");
+        },
+        ReadResult::Subtree(dir) => {
+            panic!(
+                "expected provider bytes for {path_str}, got a subtree {}",
+                dir.display()
+            )
+        },
     }
-
-    /// Resolve `path` and assert it is reported as not-found (a clean ENOENT,
-    /// never an internal error). The negative oracle a renderer maps to ENOENT.
-    pub async fn assert_not_found(&self, path_str: &str) {
-        let err = self
-            .tree
-            .resolve(&path(path_str), &self.ctx)
-            .await
-            .expect_err("missing path must error");
-        assert_eq!(
-            err.kind,
-            TreeErrorKind::NotFound,
-            "{path_str} must surface as NotFound, got {err}"
-        );
-    }
-
-    // --- (c): list assertions -----------------------------------------------
-
-    /// List `node`, asserting it is a provider listing (not a subtree handoff).
-    pub async fn list(&self, node: &Node, cursor: Option<Cursor>) -> Listing {
-        match self
-            .tree
-            .list(node, cursor, &self.ctx)
-            .await
-            .unwrap_or_else(|e| panic!("list {} failed: {e}", node.path().as_str()))
-        {
-            ListOutcome::Listing(listing) => listing,
-            ListOutcome::Subtree(dir) => {
-                panic!(
-                    "expected a provider listing, got a subtree handoff at {}",
-                    dir.display()
-                )
-            },
-        }
-    }
-
-    /// Resolve `path` (which must be a directory) and return its child names.
-    pub async fn list_names(&self, path_str: &str) -> Vec<String> {
-        let node = self.assert_dir(path_str).await;
-        let listing = self.list(&node, None).await;
-        listing.entries.into_iter().map(|e| e.name).collect()
-    }
-
-    // --- (c): read assertions -----------------------------------------------
-
-    /// Resolve `path` (a whole-file leaf), read it, and assert the exact bytes.
-    /// Returns the read result so the caller can inspect learned attrs.
-    pub async fn assert_read(&self, path_str: &str, expected: &[u8]) -> ReadResult {
-        let node = self.assert_file(path_str).await;
-        let result = self
-            .tree
-            .read(&node, &self.ctx)
-            .await
-            .unwrap_or_else(|e| panic!("read {path_str} failed: {e}"));
-        match &result {
-            ReadResult::Bytes { data, .. } => {
-                assert_eq!(data, expected, "{path_str} bytes mismatch");
-            },
-            ReadResult::Subtree(dir) => {
-                panic!(
-                    "expected provider bytes for {path_str}, got a subtree {}",
-                    dir.display()
-                )
-            },
-        }
-        result
-    }
+    result
 }
 
 // ===========================================================================
@@ -197,7 +148,7 @@ impl ConformanceTree {
 async fn lists_root_and_nested_directories() {
     let t = tree_harness();
 
-    let root = t.list_names("/").await;
+    let root = list_names(&t, "/").await;
     for expected in [
         "README.md",
         "items",
@@ -212,7 +163,7 @@ async fn lists_root_and_nested_directories() {
         );
     }
 
-    let hello = t.list_names("/hello").await;
+    let hello = list_names(&t, "/hello").await;
     for expected in ["message", "greeting", "ranged", "bundle", "feed"] {
         assert!(
             hello.contains(&expected.to_string()),
@@ -221,7 +172,7 @@ async fn lists_root_and_nested_directories() {
     }
 
     // A nested directory one level deeper still resolves + lists.
-    let items_open = t.list_names("/items/open").await;
+    let items_open = list_names(&t, "/items/open").await;
     for expected in ["7", "8"] {
         assert!(
             items_open.contains(&expected.to_string()),
@@ -234,7 +185,7 @@ async fn lists_root_and_nested_directories() {
 async fn generated_readmes_are_visible_and_hidden_by_root_ignore_patterns() {
     let t = tree_harness();
 
-    let root_readme = t.assert_file("/README.md").await;
+    let root_readme = assert_file(&t, "/README.md").await;
     let root_body = match t.tree.read(&root_readme, &t.ctx).await.unwrap() {
         ReadResult::Bytes { data, .. } => String::from_utf8(data).unwrap(),
         ReadResult::Subtree(dir) => panic!("README.md must be provider bytes, got {dir:?}"),
@@ -242,7 +193,7 @@ async fn generated_readmes_are_visible_and_hidden_by_root_ignore_patterns() {
     assert!(root_body.contains("The keying schema is the path grammar below."));
     assert!(root_body.contains("`/hello/message`"));
 
-    let hello_readme = t.assert_file("/hello/README.md").await;
+    let hello_readme = assert_file(&t, "/hello/README.md").await;
     let hello_body = match t.tree.read(&hello_readme, &t.ctx).await.unwrap() {
         ReadResult::Bytes { data, .. } => String::from_utf8(data).unwrap(),
         ReadResult::Subtree(dir) => panic!("branch README.md must be provider bytes, got {dir:?}"),
@@ -250,7 +201,7 @@ async fn generated_readmes_are_visible_and_hidden_by_root_ignore_patterns() {
     assert!(hello_body.contains("route table for `/hello`"));
     assert!(hello_body.contains("`/hello/message`"));
 
-    let ignore = t.assert_file("/.gitignore").await;
+    let ignore = assert_file(&t, "/.gitignore").await;
     assert!(ignore.is_synthetic(), ".gitignore remains a tree synthetic");
     match t.tree.read(&ignore, &t.ctx).await.unwrap() {
         ReadResult::Bytes { data, .. } => {
@@ -268,8 +219,8 @@ async fn generated_readmes_are_visible_and_hidden_by_root_ignore_patterns() {
 async fn lazy_derived_face_applies_to_the_declared_leaf_only() {
     let t = tree_harness();
 
-    let item = t.assert_dir("/items/open/7").await;
-    let listing = t.list(&item, None).await;
+    let item = assert_dir(&t, "/items/open/7").await;
+    let listing = list(&t, &item, None).await;
     let names = provider_entry_names(&listing);
     for expected in ["body", "state", "title"] {
         assert!(
@@ -304,7 +255,7 @@ async fn lazy_derived_face_applies_to_the_declared_leaf_only() {
 async fn reads_whole_file_exact_bytes() {
     let t = tree_harness();
 
-    let result = t.assert_read("/hello/message", b"Hello, world!").await;
+    let result = assert_read(&t, "/hello/message", b"Hello, world!").await;
     let ReadResult::Bytes { attrs, .. } = result else {
         unreachable!("assert_read already proved Bytes");
     };
@@ -367,10 +318,10 @@ async fn reads_ranged_file_in_chunks() {
 #[tokio::test(flavor = "multi_thread")]
 async fn lists_cursored_pages() {
     let t = tree_harness();
-    let feed = t.assert_dir("/hello/feed").await;
+    let feed = assert_dir(&t, "/hello/feed").await;
 
     // Page 0: item-0, item-1, with a resume cursor to page 1.
-    let page0 = t.list(&feed, None).await;
+    let page0 = list(&t, &feed, None).await;
     assert_eq!(provider_entry_names(&page0), ["item-0", "item-1"]);
     let Some(Cursor(CachedCursor::Page(1))) = page0.next_cursor else {
         panic!(
@@ -380,7 +331,7 @@ async fn lists_cursored_pages() {
     };
 
     // Page 1: item-2, item-3, with a resume cursor to page 2.
-    let page1 = t.list(&feed, Some(Cursor(CachedCursor::Page(1)))).await;
+    let page1 = list(&t, &feed, Some(Cursor(CachedCursor::Page(1)))).await;
     assert_eq!(provider_entry_names(&page1), ["item-2", "item-3"]);
     let Some(Cursor(CachedCursor::Page(2))) = page1.next_cursor else {
         panic!(
@@ -390,7 +341,7 @@ async fn lists_cursored_pages() {
     };
 
     // Page 2 is terminal: item-4, item-5, no resume cursor.
-    let page2 = t.list(&feed, Some(Cursor(CachedCursor::Page(2)))).await;
+    let page2 = list(&t, &feed, Some(Cursor(CachedCursor::Page(2)))).await;
     assert_eq!(provider_entry_names(&page2), ["item-4", "item-5"]);
     assert!(
         page2.next_cursor.is_none(),
@@ -415,9 +366,9 @@ async fn lists_cursored_pages() {
 #[tokio::test(flavor = "multi_thread")]
 async fn resolves_unrouted_path_as_not_found() {
     let t = tree_harness();
-    t.assert_not_found("/hello/nonexistent").await;
-    t.assert_not_found("/no-such-top-level").await;
-    t.assert_not_found("/items/bogus-filter").await;
+    assert_not_found(&t, "/hello/nonexistent").await;
+    assert_not_found(&t, "/no-such-top-level").await;
+    assert_not_found(&t, "/items/bogus-filter").await;
 }
 
 /// Write-fence / invalidation coherence carried by `Tree::read`: a cold read
@@ -437,7 +388,7 @@ async fn invalidation_evicts_cached_read() {
     let t = tree_harness();
 
     // Cold read: durably caches "Hi there!\n" under the immutable (aux None) key.
-    t.assert_read("/hello/greeting", b"Hi there!\n").await;
+    assert_read(&t, "/hello/greeting", b"Hi there!\n").await;
     assert!(
         t.runtime
             .cache()
@@ -463,7 +414,7 @@ async fn invalidation_evicts_cached_read() {
     // The next read re-renders from the provider and re-populates the cache; the
     // bytes are still correct (immutable greeting), proving the read path goes
     // back to the provider on a miss rather than serving evicted bytes.
-    t.assert_read("/hello/greeting", b"Hi there!\n").await;
+    assert_read(&t, "/hello/greeting", b"Hi there!\n").await;
     assert!(
         t.runtime
             .cache()

@@ -14,49 +14,13 @@
 #![cfg(not(target_os = "wasi"))]
 #![allow(clippy::doc_markdown)]
 
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use omnifs_core::path::Path;
-use omnifs_engine::Engine;
+use omnifs_engine::Node;
 use omnifs_engine::test_support::probe_live_growth;
 use omnifs_engine::view::{FileAttrsCache, FileSize, ReadMode, Stability};
-use omnifs_engine::{Node, RequestCtx, ServingContext, Tree};
-use omnifs_itest::{RuntimeHarness, make_engine, make_runtime};
-use tempfile::TempDir;
-
-struct LiveTree {
-    tree: Tree,
-    runtime: Arc<Engine>,
-    ctx: RequestCtx,
-    _clone_dir: TempDir,
-    _cache_dir: TempDir,
-    _config_dir: TempDir,
-}
-
-fn live_tree() -> LiveTree {
-    let engine = make_engine();
-    let RuntimeHarness {
-        clone_dir,
-        cache_dir,
-        config_dir,
-        runtime,
-        ..
-    } = make_runtime(&engine);
-    let runtime = Arc::new(runtime);
-    let tree = Tree::new(ServingContext::single(
-        "test".to_string(),
-        Arc::clone(&runtime),
-    ));
-    LiveTree {
-        tree,
-        runtime,
-        ctx: RequestCtx::default(),
-        _clone_dir: clone_dir,
-        _cache_dir: cache_dir,
-        _config_dir: config_dir,
-    }
-}
+use omnifs_itest::{TreeHarness, tree_harness};
 
 fn path(s: &str) -> Path {
     Path::parse(s).unwrap()
@@ -78,7 +42,7 @@ fn live_node(path_str: &str) -> Node {
 /// the shared growth probe advances the observed end monotonically.
 #[tokio::test(flavor = "multi_thread")]
 async fn live_file_grows_and_follow_read_observes_appended_bytes() {
-    let t = live_tree();
+    let t: TreeHarness = tree_harness();
     let handle = t
         .tree
         .open(&live_node("/hello/volatile-tail"), &t.ctx)

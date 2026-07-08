@@ -23,88 +23,49 @@
 #![cfg(not(target_os = "wasi"))]
 #![allow(clippy::doc_markdown)]
 
-use std::sync::Arc;
-
 use omnifs_core::path::Path;
-use omnifs_engine::{
-    Cursor, Entry, ListOutcome, Node, ReadResult, RequestCtx, ServingContext, Tree,
-};
-use omnifs_itest::{RuntimeHarness, make_engine, make_runtime};
-use tempfile::TempDir;
-
-/// A wasm test-provider loaded into a `Runtime`, wrapped in a `Tree` under mount
-/// "test". Owns the harness temp dirs that must outlive the `Runtime`.
-struct PagedTree {
-    tree: Tree,
-    ctx: RequestCtx,
-    _clone_dir: TempDir,
-    _cache_dir: TempDir,
-    _config_dir: TempDir,
-}
-
-fn paged_tree() -> PagedTree {
-    let engine = make_engine();
-    let RuntimeHarness {
-        clone_dir,
-        cache_dir,
-        config_dir,
-        runtime,
-        ..
-    } = make_runtime(&engine);
-    let tree = Tree::new(ServingContext::single(
-        "test".to_string(),
-        Arc::new(runtime),
-    ));
-    PagedTree {
-        tree,
-        ctx: RequestCtx::default(),
-        _clone_dir: clone_dir,
-        _cache_dir: cache_dir,
-        _config_dir: config_dir,
-    }
-}
+use omnifs_engine::{Cursor, Entry, ListOutcome, Node, ReadResult};
+use omnifs_itest::{TreeHarness, tree_harness};
 
 fn path(s: &str) -> Path {
     Path::parse(s).unwrap()
 }
 
-impl PagedTree {
-    async fn resolve(&self, path_str: &str) -> Node {
-        self.tree
-            .resolve(&path(path_str), &self.ctx)
-            .await
-            .unwrap_or_else(|e| panic!("resolve {path_str}: {e}"))
-    }
+async fn resolve(t: &TreeHarness, path_str: &str) -> Node {
+    t.tree
+        .resolve(&path(path_str), &t.ctx)
+        .await
+        .unwrap_or_else(|e| panic!("resolve {path_str}: {e}"))
+}
 
-    /// List a directory node (browse listing, `cursor = None`) and return the
-    /// listing's entries. Panics on a subtree handoff (the feed is a provider
-    /// directory, never a backing subtree).
-    async fn list(&self, node: &Node) -> Vec<Entry> {
-        match self
-            .tree
-            .list(node, None::<Cursor>, &self.ctx)
-            .await
-            .unwrap_or_else(|e| panic!("list {}: {e}", node.path().as_str()))
-        {
-            ListOutcome::Listing(listing) => listing.entries,
-            ListOutcome::Subtree(dir) => {
-                panic!("expected a provider listing, got subtree {}", dir.display())
-            },
-        }
+/// List a directory node (browse listing, `cursor = None`) and return the
+/// listing's entries. Panics on a subtree handoff (the feed is a provider
+/// directory, never a backing subtree).
+async fn list(t: &TreeHarness, node: &Node) -> Vec<Entry> {
+    match t
+        .tree
+        .list(node, None::<Cursor>, &t.ctx)
+        .await
+        .unwrap_or_else(|e| panic!("list {}: {e}", node.path().as_str()))
+    {
+        ListOutcome::Listing(listing) => listing.entries,
+        ListOutcome::Subtree(dir) => {
+            panic!("expected a provider listing, got subtree {}", dir.display())
+        },
     }
+}
 
-    /// Read a node's bytes, asserting provider/synthetic bytes (never a subtree
-    /// handoff). Returns the produced bytes (a control read returns a status line).
-    async fn read(&self, node: &Node) -> Vec<u8> {
-        match self
-            .tree
-            .read(node, &self.ctx)
-            .await
-            .unwrap_or_else(|e| panic!("read {}: {e}", node.path().as_str()))
-        {
-            ReadResult::Bytes { data, .. } => data,
-            ReadResult::Subtree(dir) => panic!("expected bytes, got subtree {}", dir.display()),
-        }
+/// Read a node's bytes, asserting provider/synthetic bytes (never a subtree
+/// handoff). Returns the produced bytes (a control read returns a status line).
+async fn read(t: &TreeHarness, node: &Node) -> Vec<u8> {
+    match t
+        .tree
+        .read(node, &t.ctx)
+        .await
+        .unwrap_or_else(|e| panic!("read {}: {e}", node.path().as_str()))
+    {
+        ReadResult::Bytes { data, .. } => data,
+        ReadResult::Subtree(dir) => panic!("expected bytes, got subtree {}", dir.display()),
     }
 }
 
@@ -127,12 +88,12 @@ fn has_entry(entries: &[Entry], name: &str) -> bool {
 /// and the controls. The final listing carries every fixture entry exactly once.
 #[tokio::test(flavor = "multi_thread")]
 async fn reading_next_drains_feed_and_drops_controls() {
-    let t = paged_tree();
-    let feed = t.resolve("/hello/feed").await;
+    let t = tree_harness();
+    let feed = resolve(&t, "/hello/feed").await;
     assert!(feed.is_dir(), "/hello/feed resolves to a directory");
 
     // First-page browse listing: two items plus the synthetic controls.
-    let page0 = t.list(&feed).await;
+    let page0 = list(&t, &feed).await;
     assert_eq!(item_names(&page0), ["item-0", "item-1"], "page 0 items");
     assert!(has_entry(&page0, "@next"), "a paged listing carries @next");
     assert!(has_entry(&page0, "@all"), "a paged listing carries @all");
@@ -147,13 +108,13 @@ async fn reading_next_drains_feed_and_drops_controls() {
             reads <= 4,
             "feed must exhaust in a bounded number of @next reads"
         );
-        let next = t.resolve("/hello/feed/@next").await;
+        let next = resolve(&t, "/hello/feed/@next").await;
         assert!(next.is_synthetic(), "@next resolves to a synthetic control");
         // The control read returns a human-readable status line, never provider
         // bytes; its side effect is growing the feed.
-        let status = t.read(&next).await;
+        let status = read(&t, &next).await;
         assert!(!status.is_empty(), "a control read yields a status line");
-        latest = t.list(&feed).await;
+        latest = list(&t, &feed).await;
     }
 
     assert_eq!(
@@ -176,20 +137,20 @@ async fn reading_next_drains_feed_and_drops_controls() {
 /// reaching the same complete set that the `@next` loop reaches page by page.
 #[tokio::test(flavor = "multi_thread")]
 async fn reading_all_materializes_the_complete_set() {
-    let t = paged_tree();
-    let feed = t.resolve("/hello/feed").await;
+    let t = tree_harness();
+    let feed = resolve(&t, "/hello/feed").await;
 
     // Seed page 0 so the parent dirents carry the `@all` control.
-    let page0 = t.list(&feed).await;
+    let page0 = list(&t, &feed).await;
     assert_eq!(item_names(&page0), ["item-0", "item-1"]);
     assert!(has_entry(&page0, "@all"), "a paged listing carries @all");
 
-    let all = t.resolve("/hello/feed/@all").await;
+    let all = resolve(&t, "/hello/feed/@all").await;
     assert!(all.is_synthetic(), "@all resolves to a synthetic control");
-    let status = t.read(&all).await;
+    let status = read(&t, &all).await;
     assert!(!status.is_empty(), "the @all read yields a status line");
 
-    let complete = t.list(&feed).await;
+    let complete = list(&t, &feed).await;
     assert_eq!(
         item_names(&complete),
         ["item-0", "item-1", "item-2", "item-3", "item-4", "item-5"],
@@ -217,22 +178,22 @@ async fn reading_all_materializes_the_complete_set() {
 /// then opens `@all` from that SAME stale snapshot, which must not ENOENT.
 #[tokio::test(flavor = "multi_thread")]
 async fn stale_snapshot_controls_resolve_after_exhaustion() {
-    let t = paged_tree();
-    let feed = t.resolve("/hello/feed").await;
+    let t = tree_harness();
+    let feed = resolve(&t, "/hello/feed").await;
 
     // Capture the page-0 listing snapshot: it names both controls.
-    let stale = t.list(&feed).await;
+    let stale = list(&t, &feed).await;
     assert!(has_entry(&stale, "@next"), "the stale snapshot names @next");
     assert!(has_entry(&stale, "@all"), "the stale snapshot names @all");
 
     // Drive the feed to exhaustion through @all, independent of the captured
     // stale snapshot above (mirrors a consumer resolving @all once the walk
     // that captured `stale` reaches it).
-    let all = t.resolve("/hello/feed/@all").await;
-    let _ = t.read(&all).await;
+    let all = resolve(&t, "/hello/feed/@all").await;
+    let _ = read(&t, &all).await;
 
     // A FRESH listing stops naming either control once the feed exhausts.
-    let fresh = t.list(&feed).await;
+    let fresh = list(&t, &feed).await;
     assert!(
         !has_entry(&fresh, "@next"),
         "a fresh listing hides @next once exhausted"
@@ -246,12 +207,12 @@ async fn stale_snapshot_controls_resolve_after_exhaustion() {
     // the feed has nothing left to load, so each reports the same "no more
     // pages" status any other exhausted directory's control would report.
     for name in ["@next", "@all"] {
-        let node = t.resolve(&format!("/hello/feed/{name}")).await;
+        let node = resolve(&t, &format!("/hello/feed/{name}")).await;
         assert!(
             node.is_synthetic(),
             "{name} resolves to a synthetic control after exhaustion"
         );
-        let status = t.read(&node).await;
+        let status = read(&t, &node).await;
         let status = String::from_utf8(status).expect("control status is utf8");
         assert_eq!(
             status, "no more pages\n",
