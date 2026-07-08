@@ -193,13 +193,13 @@ fn wire_overhead_within_budget() {
 
     // One NFS serial lock for the whole test: both lanes run sequentially under
     // it, so no other test process can interleave a mount between the two
-    // measured bring-ups. The per-lane bring-up uses the `_holding_lock` variants
-    // so neither lane acquires (or, on teardown, drops) its own copy.
+    // measured bring-ups. Each per-lane bring-up receives `None` so neither lane
+    // acquires (or, on teardown, drops) its own copy.
     let _nfs_lock = live::nfs_serial_lock();
 
     // Lane 1 (in-process): the daemon serves the platform-default frontend.
     let inproc = {
-        let Some(daemon) = live::start_native_daemon_holding_lock() else {
+        let Some(daemon) = live::start_native_daemon(None) else {
             eprintln!("skip: in-process lane could not come up");
             return;
         };
@@ -215,7 +215,8 @@ fn wire_overhead_within_budget() {
 
     // Lane 2 (wire): a namespace-only daemon plus an out-of-process nfs frontend.
     let wire = {
-        let Some(wire_daemon) = live::start_wire_frontend_holding_lock("nfs") else {
+        let Some(wire_daemon) = live::start_wire_frontend("nfs", live::AttachTransport::Unix, None)
+        else {
             eprintln!("skip: wire lane could not come up");
             return;
         };

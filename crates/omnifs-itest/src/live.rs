@@ -422,44 +422,24 @@ fn wait_briefly(child: &mut Child) {
 /// Returns `None` (skip) when the platform cannot mount or a surface never comes
 /// up; panics only on a spawn error or a daemon that is alive but never ready
 /// (a real regression in the namespace-only ready path). The caller gates on
-/// `OMNIFS_ACCEPTANCE_LIVE`.
-#[must_use]
-pub fn start_wire_frontend(kind: &str) -> Option<WireFrontendDaemon> {
-    wire_frontend(kind, AttachTransport::Unix, Some(nfs_serial_lock()))
-}
-
-/// Like [`start_wire_frontend`] but the caller already holds the NFS serial lock
-/// and keeps holding it. The perf lane holds one lock across both its sequential
-/// lanes, so it must not let each bring-up acquire (and later drop) its own.
-#[must_use]
-pub fn start_wire_frontend_holding_lock(kind: &str) -> Option<WireFrontendDaemon> {
-    wire_frontend(kind, AttachTransport::Unix, None)
-}
-
-/// Like [`start_wire_frontend`], but the out-of-process runner attaches over
-/// TCP loopback (`OMNIFS_ATTACH_ADDR`/`OMNIFS_ATTACH_TOKEN`) instead of a Unix
-/// socket: the same transport the Docker-hosted frontend uses, minus the
-/// container. Used by the attach-transport perf comparison (TCP vs UDS), which
-/// isolates the transport cost from Docker's own overhead.
-#[must_use]
-pub fn start_wire_frontend_tcp_holding_lock(kind: &str) -> Option<WireFrontendDaemon> {
-    wire_frontend(kind, AttachTransport::Tcp, None)
-}
-
-/// Which transport the out-of-process runner attaches over. `Unix` shares a
-/// socket path with the daemon; `Tcp` is the Docker-hosted frontend's only
-/// option (it cannot share a host Unix socket into its container), reached
-/// here without a container so the perf lane isolates transport cost from
-/// Docker's own overhead.
+/// `OMNIFS_ACCEPTANCE_LIVE`. Pass `Some(nfs_serial_lock())` to hold the
+/// cross-process NFS lock for the lane's lifetime, or `None` when the caller
+/// already holds the NFS serial lock and keeps holding it (the perf lane holds
+/// one lock across both its sequential lanes, so it must not let each bring-up
+/// acquire, and later drop, its own). `transport` selects the out-of-process
+/// runner's attach transport: `Unix` shares a socket path with the daemon;
+/// `Tcp` is the Docker-hosted frontend's only option (it cannot share a host
+/// Unix socket into its container), reached here without a container so the
+/// perf lane isolates transport cost from Docker's own overhead.
 #[derive(Clone, Copy)]
-enum AttachTransport {
+pub enum AttachTransport {
     Unix,
     Tcp,
 }
 
 #[allow(clippy::too_many_lines)] // linear end-to-end bring-up
 #[must_use]
-fn wire_frontend(
+pub fn start_wire_frontend(
     kind: &str,
     transport: AttachTransport,
     nfs_lock: Option<TcpListener>,
@@ -647,25 +627,13 @@ fn curl_ok(url: &str) -> bool {
 /// a real regression in the test or the daemon argument surface, not a skip.
 ///
 /// The caller is responsible for the `OMNIFS_ACCEPTANCE_LIVE` env gate and its
-/// skip message.
-#[must_use]
-pub fn start_native_daemon() -> Option<NativeDaemon> {
-    // Hold the cross-process NFS lock for the whole lane so this binary's mount
-    // never races the CLI lifecycle suite's mounts in a parallel nextest run.
-    native_daemon(Some(nfs_serial_lock()))
-}
-
-/// Like [`start_native_daemon`] but the caller already holds the NFS serial lock
-/// and keeps holding it. The perf lane holds one lock across both its sequential
-/// lanes, so it must not let each bring-up acquire (and later drop) its own.
-#[must_use]
-pub fn start_native_daemon_holding_lock() -> Option<NativeDaemon> {
-    native_daemon(None)
-}
-
+/// skip message. Pass `Some(nfs_serial_lock())` to hold the cross-process NFS
+/// lock for the lane's lifetime so parallel live tests cannot interleave NFS
+/// mounts, or `None` when the caller already holds the NFS serial lock and keeps
+/// holding it.
 #[allow(clippy::too_many_lines)] // linear end-to-end daemon bring-up
 #[must_use]
-fn native_daemon(nfs_lock: Option<TcpListener>) -> Option<NativeDaemon> {
+pub fn start_native_daemon(nfs_lock: Option<TcpListener>) -> Option<NativeDaemon> {
     let test_wasm = crate::provider_artifact_dir().join("test_provider.wasm");
     if !test_wasm.exists() {
         eprintln!(

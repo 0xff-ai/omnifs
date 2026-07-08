@@ -785,9 +785,10 @@ fn kill_and_reattach_fuse_semantics() {
 
 /// (g) TCP-loopback vs. Unix-socket attach, without Docker: isolates the
 /// transport's own cost from the container's. Reuses the wire-frontend
-/// bring-up `live.rs` already owns (`start_wire_frontend_holding_lock` /
-/// `start_wire_frontend_tcp_holding_lock`), and writes its numbers next to
-/// `wire-perf.json` in the same scorecard directory. Recorded, not gated: no
+/// bring-up `live.rs` already owns (`start_wire_frontend` with the `Unix` and
+/// `Tcp` transports, `nfs_lock: None` since this test holds the lock itself),
+/// and writes its numbers next to `wire-perf.json` in the same scorecard
+/// directory. Recorded, not gated: no
 /// budget assertion, matching the wire-perf lane's own escape hatch for a
 /// blown number (a design round for the orchestrator, not a test tuning).
 #[derive(serde::Serialize)]
@@ -835,7 +836,8 @@ fn attach_transport_perf_tcp_vs_uds() {
     let _nfs_lock = live::nfs_serial_lock();
 
     let uds_elapsed = {
-        let Some(daemon) = live::start_wire_frontend_holding_lock("nfs") else {
+        let Some(daemon) = live::start_wire_frontend("nfs", live::AttachTransport::Unix, None)
+        else {
             eprintln!("skip: UDS wire lane could not come up");
             return;
         };
@@ -849,7 +851,8 @@ fn attach_transport_perf_tcp_vs_uds() {
     std::thread::sleep(Duration::from_secs(1));
 
     let tcp_elapsed = {
-        let Some(daemon) = live::start_wire_frontend_tcp_holding_lock("nfs") else {
+        let Some(daemon) = live::start_wire_frontend("nfs", live::AttachTransport::Tcp, None)
+        else {
             eprintln!("skip: TCP wire lane could not come up");
             return;
         };

@@ -166,7 +166,7 @@ fn invalidation_reaches_both_frontends_within_one_op() {
     if !acceptance_gated() {
         return;
     }
-    let Some(daemon) = live::start_native_daemon() else {
+    let Some(daemon) = live::start_native_daemon(Some(live::nfs_serial_lock())) else {
         return;
     };
     assert_live_growth_visible(&daemon.mount_point);
@@ -192,7 +192,11 @@ fn wire_frontend_nfs_parity() {
         return;
     }
 
-    let Some(daemon) = live::start_wire_frontend("nfs") else {
+    let Some(daemon) = live::start_wire_frontend(
+        "nfs",
+        live::AttachTransport::Unix,
+        Some(live::nfs_serial_lock()),
+    ) else {
         return;
     };
 

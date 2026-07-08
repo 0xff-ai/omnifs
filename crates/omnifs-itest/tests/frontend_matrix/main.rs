@@ -48,7 +48,7 @@ fn native_frontend_matrix() {
         eprintln!("skip: set OMNIFS_ACCEPTANCE_LIVE=1 to run live-mount acceptance tests");
         return;
     }
-    let Some(daemon) = live::start_native_daemon() else {
+    let Some(daemon) = live::start_native_daemon(Some(live::nfs_serial_lock())) else {
         return;
     };
 
