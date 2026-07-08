@@ -859,14 +859,7 @@ pub const MACOS_NFS_LOOPBACK: Column = Column {
 pub const LINUX_NFS_LOOPBACK: Column = Column {
     id: "linux-nfs-loopback",
     platform: "linux",
-    expectations: &[
-        GREP_R_PAGINATION_CONTROLS,
-        // Seeded from macOS: bsdtar/GNU tar stats each file before reading and
-        // writes the header from that size; a cold stat reports the sentinel (1)
-        // on the NFS attr path, truncating archived content. Catalogued in
-        // docs/architecture/10-file-attributes.md.
-        ("tar", Expect::Fail),
-    ],
+    expectations: MACOS_NFS_LOOPBACK.expectations,
 };
 
 /// The Docker-hosted FUSE frontend (`omnifs frontend up`), gate 4 (amended):
