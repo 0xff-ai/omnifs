@@ -1,0 +1,34 @@
+---
+source: crates/omnifs-itest/src/scenario.rs
+expression: replayed
+---
+## step 1: list /teams/PNTR/issues/open/PNTR-1
+assignee  file  unknown  stable
+description.md  file  unknown  stable
+item.json  file  470  dynamic
+item.md  file  unknown  stable
+priority  file  unknown  stable
+state  file  unknown  stable
+title  file  unknown  stable
+canonical:
+  /teams/PNTR/issues/all/PNTR-1/assignee  sha256:dc06aba327bcc8731df765caadff5ae8485211bd55fd72b266de3f2be3e959c9
+  /teams/PNTR/issues/all/PNTR-1/description.md  sha256:dc06aba327bcc8731df765caadff5ae8485211bd55fd72b266de3f2be3e959c9
+  /teams/PNTR/issues/all/PNTR-1/item.json  sha256:dc06aba327bcc8731df765caadff5ae8485211bd55fd72b266de3f2be3e959c9
+  /teams/PNTR/issues/all/PNTR-1/item.md  sha256:dc06aba327bcc8731df765caadff5ae8485211bd55fd72b266de3f2be3e959c9
+  /teams/PNTR/issues/all/PNTR-1/priority  sha256:dc06aba327bcc8731df765caadff5ae8485211bd55fd72b266de3f2be3e959c9
+  /teams/PNTR/issues/all/PNTR-1/state  sha256:dc06aba327bcc8731df765caadff5ae8485211bd55fd72b266de3f2be3e959c9
+  /teams/PNTR/issues/all/PNTR-1/title  sha256:dc06aba327bcc8731df765caadff5ae8485211bd55fd72b266de3f2be3e959c9
+  /teams/PNTR/issues/open/PNTR-1/assignee  sha256:dc06aba327bcc8731df765caadff5ae8485211bd55fd72b266de3f2be3e959c9
+  /teams/PNTR/issues/open/PNTR-1/description.md  sha256:dc06aba327bcc8731df765caadff5ae8485211bd55fd72b266de3f2be3e959c9
+  /teams/PNTR/issues/open/PNTR-1/item.json  sha256:dc06aba327bcc8731df765caadff5ae8485211bd55fd72b266de3f2be3e959c9
+  /teams/PNTR/issues/open/PNTR-1/item.md  sha256:dc06aba327bcc8731df765caadff5ae8485211bd55fd72b266de3f2be3e959c9
+  /teams/PNTR/issues/open/PNTR-1/priority  sha256:dc06aba327bcc8731df765caadff5ae8485211bd55fd72b266de3f2be3e959c9
+  /teams/PNTR/issues/open/PNTR-1/state  sha256:dc06aba327bcc8731df765caadff5ae8485211bd55fd72b266de3f2be3e959c9
+  /teams/PNTR/issues/open/PNTR-1/title  sha256:dc06aba327bcc8731df765caadff5ae8485211bd55fd72b266de3f2be3e959c9
+fs:
+  /teams/PNTR/issues/open/PNTR-1/assignee  file dynamic - 20 inline
+  /teams/PNTR/issues/open/PNTR-1/priority  file dynamic - 12 inline
+  /teams/PNTR/issues/open/PNTR-1/state  file dynamic - 20 inline
+  /teams/PNTR/issues/open/PNTR-1/title  file dynamic - 20 inline
+invalidations:
+  (none)

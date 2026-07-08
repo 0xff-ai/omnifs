@@ -1,0 +1,22 @@
+---
+source: crates/omnifs-itest/src/scenario.rs
+expression: replayed
+---
+## step 4: read /teams/PNTR/item.md
+attrs: dynamic <volatile> 60
+bytes (60):
+# <redacted:080342cc>
+
+- **Key:** PNTR
+
+<redacted:74234e98>
+
+canonical:
+  /teams/PNTR/description.md  sha256:832396d8a065d5a08668c1a76fc5233484cd3da821266e18bdb5e134cd3505d5
+  /teams/PNTR/item.json  sha256:832396d8a065d5a08668c1a76fc5233484cd3da821266e18bdb5e134cd3505d5
+  /teams/PNTR/item.md  sha256:832396d8a065d5a08668c1a76fc5233484cd3da821266e18bdb5e134cd3505d5
+  /teams/PNTR/name  sha256:832396d8a065d5a08668c1a76fc5233484cd3da821266e18bdb5e134cd3505d5
+fs:
+  (none)
+invalidations:
+  (none)

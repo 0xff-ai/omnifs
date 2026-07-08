@@ -1,0 +1,13 @@
+---
+source: crates/omnifs-itest/src/scenario.rs
+expression: replayed
+---
+## step 0: list /
+README.md  file  unknown  stable
+teams  dir  -  -
+canonical:
+  (none)
+fs:
+  (none)
+invalidations:
+  (none)

@@ -1,0 +1,44 @@
+---
+source: crates/omnifs-itest/src/scenario.rs
+expression: replayed
+---
+## step 2: read /teams/PNTR/issues/open/PNTR-1/item.json
+attrs: dynamic <volatile> unknown
+bytes (470):
+{
+      "assignee": {
+        "displayName": "<redacted:87cf9b89>",
+        "email": "<redacted:8d11596e>",
+        "name": "<redacted:8baf9796>"
+      },
+      "description": "<redacted:c1afe324>",
+      "id": "<redacted:4d24666d>",
+      "identifier": "PNTR-1",
+      "number": 1,
+      "priority": 0,
+      "state": {
+        "name": "<redacted:ff3db2ef>",
+        "type": "backlog"
+      },
+      "title": "<redacted:abbe98e6>",
+      "updatedAt": "<volatile>"
+    }
+canonical:
+  /teams/PNTR/issues/all/PNTR-1/assignee  sha256:dc06aba327bcc8731df765caadff5ae8485211bd55fd72b266de3f2be3e959c9
+  /teams/PNTR/issues/all/PNTR-1/description.md  sha256:dc06aba327bcc8731df765caadff5ae8485211bd55fd72b266de3f2be3e959c9
+  /teams/PNTR/issues/all/PNTR-1/item.json  sha256:dc06aba327bcc8731df765caadff5ae8485211bd55fd72b266de3f2be3e959c9
+  /teams/PNTR/issues/all/PNTR-1/item.md  sha256:dc06aba327bcc8731df765caadff5ae8485211bd55fd72b266de3f2be3e959c9
+  /teams/PNTR/issues/all/PNTR-1/priority  sha256:dc06aba327bcc8731df765caadff5ae8485211bd55fd72b266de3f2be3e959c9
+  /teams/PNTR/issues/all/PNTR-1/state  sha256:dc06aba327bcc8731df765caadff5ae8485211bd55fd72b266de3f2be3e959c9
+  /teams/PNTR/issues/all/PNTR-1/title  sha256:dc06aba327bcc8731df765caadff5ae8485211bd55fd72b266de3f2be3e959c9
+  /teams/PNTR/issues/open/PNTR-1/assignee  sha256:dc06aba327bcc8731df765caadff5ae8485211bd55fd72b266de3f2be3e959c9
+  /teams/PNTR/issues/open/PNTR-1/description.md  sha256:dc06aba327bcc8731df765caadff5ae8485211bd55fd72b266de3f2be3e959c9
+  /teams/PNTR/issues/open/PNTR-1/item.json  sha256:dc06aba327bcc8731df765caadff5ae8485211bd55fd72b266de3f2be3e959c9
+  /teams/PNTR/issues/open/PNTR-1/item.md  sha256:dc06aba327bcc8731df765caadff5ae8485211bd55fd72b266de3f2be3e959c9
+  /teams/PNTR/issues/open/PNTR-1/priority  sha256:dc06aba327bcc8731df765caadff5ae8485211bd55fd72b266de3f2be3e959c9
+  /teams/PNTR/issues/open/PNTR-1/state  sha256:dc06aba327bcc8731df765caadff5ae8485211bd55fd72b266de3f2be3e959c9
+  /teams/PNTR/issues/open/PNTR-1/title  sha256:dc06aba327bcc8731df765caadff5ae8485211bd55fd72b266de3f2be3e959c9
+fs:
+  (none)
+invalidations:
+  (none)

@@ -1,0 +1,12 @@
+---
+source: crates/omnifs-itest/src/scenario.rs
+expression: replayed
+---
+## step 8: lookup /teams/PNTR/issues :: all
+entry: all dir
+canonical:
+  (none)
+fs:
+  (none)
+invalidations:
+  (none)

@@ -1,0 +1,14 @@
+---
+source: crates/omnifs-itest/src/scenario.rs
+expression: replayed
+---
+## step 9: list /teams/PNTR/issues/open
+PNTR-1  dir  -  -
+PNTR-2  dir  -  -
+PNTR-3  dir  -  -
+canonical:
+  (none)
+fs:
+  (none)
+invalidations:
+  (none)
