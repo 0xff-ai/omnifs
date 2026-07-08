@@ -1,0 +1,17 @@
+---
+source: crates/omnifs-itest/src/scenario.rs
+expression: trace.clone()
+---
+## step 1: list /namespaces
+README.md  file  unknown  stable
+default  dir  -  -
+demo  dir  -  -
+kube-node-lease  dir  -  -
+kube-public  dir  -  -
+kube-system  dir  -  -
+canonical:
+  (none)
+fs:
+  (none)
+invalidations:
+  (none)

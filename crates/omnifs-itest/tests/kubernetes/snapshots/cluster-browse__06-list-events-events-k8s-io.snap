@@ -1,0 +1,18 @@
+---
+source: crates/omnifs-itest/src/scenario.rs
+expression: trace.clone()
+---
+## step 6: list /namespaces/demo/events.events.k8s.io
+ticker-7f784fcdc4-tjcmg.18c052574fb9cfba  dir  -  -
+ticker-7f784fcdc4-tjcmg.18c0525840bf126d  dir  -  -
+ticker-7f784fcdc4-tjcmg.18c052593de12891  dir  -  -
+ticker-7f784fcdc4-tjcmg.18c052593f224405  dir  -  -
+ticker-7f784fcdc4-tjcmg.18c0525940d0b7ef  dir  -  -
+ticker-7f784fcdc4.18c052574f6bc446  dir  -  -
+ticker.18c052573d670074  dir  -  -
+canonical:
+  (none)
+fs:
+  (none)
+invalidations:
+  (none)

@@ -1,0 +1,13 @@
+---
+source: crates/omnifs-itest/src/scenario.rs
+expression: trace.clone()
+---
+## step 4: list /namespaces/demo/configmaps
+greeting  dir  -  -
+kube-root-ca.crt  dir  -  -
+canonical:
+  (none)
+fs:
+  (none)
+invalidations:
+  (none)

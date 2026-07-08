@@ -1,0 +1,15 @@
+---
+source: crates/omnifs-itest/src/scenario.rs
+expression: trace.clone()
+---
+## step 5: read /namespaces/demo/configmaps/greeting/events.txt
+attrs: dynamic - 11
+bytes (11):
+No events.
+
+canonical:
+  (none)
+fs:
+  (none)
+invalidations:
+  (none)

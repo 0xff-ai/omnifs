@@ -1,0 +1,35 @@
+---
+source: crates/omnifs-itest/src/scenario.rs
+expression: trace.clone()
+---
+## step 2: list /cluster
+README.md  file  unknown  stable
+apiservices  dir  -  -
+certificatesigningrequests  dir  -  -
+clusterrolebindings  dir  -  -
+clusterroles  dir  -  -
+componentstatuses  dir  -  -
+csidrivers  dir  -  -
+csinodes  dir  -  -
+customresourcedefinitions  dir  -  -
+etcdsnapshotfiles  dir  -  -
+flowschemas  dir  -  -
+ingressclasses  dir  -  -
+mutatingwebhookconfigurations  dir  -  -
+namespaces  dir  -  -
+nodes  dir  -  -
+persistentvolumes  dir  -  -
+priorityclasses  dir  -  -
+prioritylevelconfigurations  dir  -  -
+runtimeclasses  dir  -  -
+storageclasses  dir  -  -
+validatingadmissionpolicies  dir  -  -
+validatingadmissionpolicybindings  dir  -  -
+validatingwebhookconfigurations  dir  -  -
+volumeattachments  dir  -  -
+canonical:
+  (none)
+fs:
+  (none)
+invalidations:
+  (none)

@@ -1,0 +1,34 @@
+---
+source: crates/omnifs-itest/src/scenario.rs
+expression: trace.clone()
+---
+## step 1: read /namespaces/demo/configmaps/greeting/manifest.yaml
+attrs: dynamic 308 907
+bytes (907):
+apiVersion: v1
+data:
+  message: hello from just dev
+kind: ConfigMap
+metadata:
+  annotations:
+    objectset.rio.cattle.io/applied: H4sIAAAAAAAA/4yPzW6DMBCEXwXtmaQBnKJY6qHqseq194VdwAF7EetQVRHvXlltpF76c7Rn59N8V8DZvfKiTgJYWAvIgTAi2Ct4VsWewcLA0yRZt4jPzheNGfEKWw6jCwQWniR0rn/BGXLwHPHWxxAkYnQSND2lOXMbleN+cbJvMcaJ907uXGJA/mMub4GXXb+OYGGs9FuyFnn27AI9PBJJ+BMR0CcZZaZ/3eqMbSqMl4Z3+q6RfbKesOHpV6MBdQALZKq6MB2X7aGlpjpyTaasm9Ic+HRfVuZUl0dTU5WgX9v6hTm60MPnz20BsRfYto8AAAD//zOKHs+tAQAA
+    objectset.rio.cattle.io/id: ''
+    objectset.rio.cattle.io/owner-gvk: k3s.cattle.io/v1, Kind=Addon
+    objectset.rio.cattle.io/owner-name: seed
+    objectset.rio.cattle.io/owner-namespace: kube-system
+  creationTimestamp: 2026-07-08T13:06:24Z
+  labels:
+    objectset.rio.cattle.io/hash: d43714fe2c0cdb35e7d427b240e96234972547d3
+  name: greeting
+  namespace: demo
+  resourceVersion: '308'
+  uid: e9bf2915-c674-4a1c-8e9d-1f13b1974a8f
+
+canonical:
+  /namespaces/demo/configmaps/greeting/manifest.json  sha256:dffa8c046745d5bfe1c576ac6c0d784c55928c98e2beb6d212c3e812e7577ef5
+  /namespaces/demo/configmaps/greeting/manifest.yaml  sha256:dffa8c046745d5bfe1c576ac6c0d784c55928c98e2beb6d212c3e812e7577ef5
+  /namespaces/demo/configmaps/greeting/status.yaml  sha256:dffa8c046745d5bfe1c576ac6c0d784c55928c98e2beb6d212c3e812e7577ef5
+fs:
+  (none)
+invalidations:
+  (none)

@@ -12,6 +12,13 @@ services:
     image: rancher/k3s:v1.31.5-k3s1
     command: server --disable=traefik --disable=metrics-server
     privileged: true
+    ports:
+      # Host-reachable API server for host-side tooling. Tape recording runs
+      # `kubectl proxy` on the host because a container-created unix socket
+      # does not bridge back out to a macOS host. k3s's serving cert covers
+      # 127.0.0.1, so the admin kubeconfig works after rewriting its server
+      # address to this port (see README.md).
+      - "127.0.0.1:16443:6443"
     environment:
       K3S_KUBECONFIG_OUTPUT: /output/kubeconfig.yaml
       K3S_KUBECONFIG_MODE: "644"

@@ -1,0 +1,17 @@
+---
+source: crates/omnifs-itest/src/scenario.rs
+expression: trace.clone()
+---
+## step 3: read /namespaces/demo/configmaps/greeting/status.yaml
+attrs: dynamic - 5
+bytes (5):
+null
+
+canonical:
+  /namespaces/demo/configmaps/greeting/manifest.json  sha256:dffa8c046745d5bfe1c576ac6c0d784c55928c98e2beb6d212c3e812e7577ef5
+  /namespaces/demo/configmaps/greeting/manifest.yaml  sha256:dffa8c046745d5bfe1c576ac6c0d784c55928c98e2beb6d212c3e812e7577ef5
+  /namespaces/demo/configmaps/greeting/status.yaml  sha256:dffa8c046745d5bfe1c576ac6c0d784c55928c98e2beb6d212c3e812e7577ef5
+fs:
+  (none)
+invalidations:
+  (none)

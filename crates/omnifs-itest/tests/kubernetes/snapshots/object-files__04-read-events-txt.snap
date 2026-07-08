@@ -1,0 +1,16 @@
+---
+source: crates/omnifs-itest/src/scenario.rs
+expression: trace.clone()
+---
+## step 4: read /namespaces/demo/deployments/ticker/events.txt
+attrs: dynamic - 129
+bytes (129):
+LAST SEEN	COUNT	TYPE	REASON	MESSAGE
+2026-07-08T13:06:27Z	1	Normal	ScalingReplicaSet	Scaled up replica set ticker-7f784fcdc4 to 1
+
+canonical:
+  (none)
+fs:
+  (none)
+invalidations:
+  (none)

@@ -1,37 +1,25 @@
 #![cfg(not(target_os = "wasi"))]
 
+mod scenarios;
 mod support;
 
-use serde_json::{Value, json};
 use support::{
     TestOpExt, http_ok, kube_harness, list_type_names, read_bytes, sorted_entry_names,
     warm_discovery,
 };
 
-const CONFIGMAP_JSON: &str = r#"{
-  "apiVersion": "v1",
-  "kind": "ConfigMap",
-  "metadata": {
-    "name": "greeting",
-    "namespace": "demo",
-    "resourceVersion": "12",
-    "uid": "abc",
-    "managedFields": [{"manager": "kubectl"}],
-    "annotations": {
-      "kubectl.kubernetes.io/last-applied-configuration": "{...}",
-      "keep": "me"
-    }
-  },
-  "data": {"message": "hello"}
-}"#;
+// The happy-path projection surface (listings, discovered group-version
+// collections, manifest.json managed-fields stripping, status.yaml both arms,
+// events.txt both arms) is covered by the recorded scenarios in scenarios.rs
+// (`cluster-browse`, `object-files`). The tests kept here assert surfaces the
+// step trace cannot render (request URLs) or catalog shapes the live fixture
+// cannot produce (synthetic multi-version groups).
 
-/// Discovery classifies resources by scope and drops what is not browsable:
-/// subresources (`pods/log`, `pods/status`, `deployments/scale`) and resources
-/// lacking `get`+`list` (`bindings`). Plural collisions are qualified by group
-/// (core `events` keeps the bare name; `events.k8s.io` becomes
-/// `events.events.k8s.io`), and only the preferred group version surfaces
-/// (`bars` from `example.io/v2`, while `legacies`, present only in `v1`, is
-/// still kept).
+/// Discovery classification against a synthetic catalog the live fixture
+/// cannot reproduce: version preference across a multi-version group (`bars`
+/// surfaces from `example.io/v2`; `legacies`, present only in `v1`, is still
+/// kept). The real-catalog aspects (subresource and verb filtering, plural
+/// collisions, scope split) are also covered by the `cluster-browse` scenario.
 #[test]
 fn cluster_and_namespace_listings_classify_scope_and_filter_unreadable() {
     let harness = kube_harness();
@@ -57,7 +45,9 @@ fn cluster_and_namespace_listings_classify_scope_and_filter_unreadable() {
 /// A resource collection is fetched at its discovered group-version root: core
 /// types under `/api/v1`, grouped types under `/apis/<group>/<version>`. A
 /// plural collision's qualified name routes to its own group while the bare
-/// name stays on core.
+/// name stays on core. Kept for the request-URL assertions the step trace
+/// cannot render; the listing outcomes themselves are covered by the
+/// `cluster-browse` scenario.
 #[test]
 fn resource_collections_use_discovered_group_version_paths() {
     let harness = kube_harness();
@@ -102,82 +92,10 @@ fn resource_collections_use_discovered_group_version_paths() {
     );
 }
 
-/// `manifest.json` is the verbatim object minus server-managed noise:
-/// `metadata.managedFields` is stripped, while everything else (the
-/// last-applied-configuration annotation, user annotations, resourceVersion,
-/// uid) survives.
-#[test]
-fn object_manifest_strips_only_managed_fields() {
-    let harness = kube_harness();
-    warm_discovery(&harness);
-
-    let mut op = harness
-        .read("/namespaces/demo/configmaps/greeting/manifest.json")
-        .unwrap();
-    assert!(
-        op.expect_single_fetch()
-            .url
-            .ends_with("/api/v1/namespaces/demo/configmaps/greeting")
-    );
-    op.answer_callouts(vec![http_ok(CONFIGMAP_JSON.as_bytes())])
-        .unwrap();
-
-    let canonical: Value = serde_json::from_slice(&read_bytes(&op)).unwrap();
-    let meta = canonical.get("metadata").expect("metadata present");
-    assert!(
-        meta.get("managedFields").is_none(),
-        "managedFields must be stripped"
-    );
-    assert_eq!(
-        meta.pointer("/annotations/kubectl.kubernetes.io~1last-applied-configuration"),
-        Some(&Value::String("{...}".to_string()))
-    );
-    assert_eq!(meta.pointer("/annotations/keep"), Some(&json!("me")));
-    assert_eq!(meta.pointer("/resourceVersion"), Some(&json!("12")));
-    assert_eq!(meta.pointer("/uid"), Some(&json!("abc")));
-}
-
-/// `status.yaml` renders the object's `.status` as YAML, or `null` when the
-/// object carries no status.
-#[test]
-fn status_yaml_renders_status_or_null() {
-    let harness = kube_harness();
-    warm_discovery(&harness);
-
-    let mut pod = harness
-        .read("/namespaces/demo/pods/web/status.yaml")
-        .unwrap();
-    assert!(
-        pod.expect_single_fetch()
-            .url
-            .ends_with("/api/v1/namespaces/demo/pods/web")
-    );
-    pod.answer_callouts(vec![http_ok(
-        br#"{"apiVersion":"v1","kind":"Pod","metadata":{"name":"web"},"status":{"phase":"Running"}}"#,
-    )])
-    .unwrap();
-    assert_eq!(read_bytes(&pod), b"phase: Running\n");
-
-    let mut configmap = harness
-        .read("/namespaces/demo/configmaps/greeting/status.yaml")
-        .unwrap();
-    assert!(
-        configmap
-            .expect_single_fetch()
-            .url
-            .ends_with("/api/v1/namespaces/demo/configmaps/greeting")
-    );
-    configmap
-        .answer_callouts(vec![http_ok(
-            br#"{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"greeting"},"data":{"k":"v"}}"#,
-        )])
-        .unwrap();
-    assert_eq!(read_bytes(&configmap), b"null\n");
-}
-
 /// `events.txt` first loads the object (for its kind and uid), then queries the
 /// core events collection with a kubectl-shaped `involvedObject` field
-/// selector.
+/// selector. Kept for the field-selector URL assertion the step trace cannot
+/// render; the events.txt read flow is covered by the `object-files` scenario.
 #[test]
 fn events_txt_uses_kubectl_field_selector() {
     let harness = kube_harness();
