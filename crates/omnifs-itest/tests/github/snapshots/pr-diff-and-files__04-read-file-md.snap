@@ -1,0 +1,29 @@
+---
+source: crates/omnifs-itest/src/scenario.rs
+expression: trace.clone()
+---
+## step 4: read /octocat/Hello-World/pulls/all/10194/files/README/file.md
+attrs: dynamic - 72
+bytes (72):
+# README
+
+- Status: modified
+- Additions: 3
+- Deletions: 1
+- Changes: 4
+
+canonical:
+  /octocat/Hello-World/pulls/all/10194/files/README/file.json  sha256:01afd95eb72e367665c33fbd73baf3901f40fed3ed080eddda5b527f83d5589a
+  /octocat/Hello-World/pulls/all/10194/files/README/file.md  sha256:01afd95eb72e367665c33fbd73baf3901f40fed3ed080eddda5b527f83d5589a
+  /octocat/Hello-World/pulls/all/10194/files/README/filename  sha256:01afd95eb72e367665c33fbd73baf3901f40fed3ed080eddda5b527f83d5589a
+  /octocat/Hello-World/pulls/all/10194/files/README/patch.patch  sha256:01afd95eb72e367665c33fbd73baf3901f40fed3ed080eddda5b527f83d5589a
+  /octocat/Hello-World/pulls/all/10194/files/README/status  sha256:01afd95eb72e367665c33fbd73baf3901f40fed3ed080eddda5b527f83d5589a
+  /octocat/Hello-World/pulls/open/10194/files/README/file.json  sha256:01afd95eb72e367665c33fbd73baf3901f40fed3ed080eddda5b527f83d5589a
+  /octocat/Hello-World/pulls/open/10194/files/README/file.md  sha256:01afd95eb72e367665c33fbd73baf3901f40fed3ed080eddda5b527f83d5589a
+  /octocat/Hello-World/pulls/open/10194/files/README/filename  sha256:01afd95eb72e367665c33fbd73baf3901f40fed3ed080eddda5b527f83d5589a
+  /octocat/Hello-World/pulls/open/10194/files/README/patch.patch  sha256:01afd95eb72e367665c33fbd73baf3901f40fed3ed080eddda5b527f83d5589a
+  /octocat/Hello-World/pulls/open/10194/files/README/status  sha256:01afd95eb72e367665c33fbd73baf3901f40fed3ed080eddda5b527f83d5589a
+fs:
+  (none)
+invalidations:
+  (none)

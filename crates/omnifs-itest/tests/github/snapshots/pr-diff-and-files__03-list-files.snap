@@ -1,0 +1,13 @@
+---
+source: crates/omnifs-itest/src/scenario.rs
+expression: trace.clone()
+---
+## step 3: list /octocat/Hello-World/pulls/all/10194/files
+README  dir  -  -
+canonical:
+  (none)
+fs:
+  /octocat/Hello-World/pulls/open/10194/files/README/filename  file dynamic - 6 inline
+  /octocat/Hello-World/pulls/open/10194/files/README/status  file dynamic - 8 inline
+invalidations:
+  (none)

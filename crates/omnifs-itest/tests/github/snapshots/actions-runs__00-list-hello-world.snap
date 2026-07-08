@@ -2,7 +2,7 @@
 source: crates/omnifs-itest/src/scenario.rs
 expression: trace.clone()
 ---
-## step 2: list /octocat/Hello-World
+## step 0: list /octocat/Hello-World
 actions  dir  -  -
 issues  dir  -  -
 pulls  dir  -  -

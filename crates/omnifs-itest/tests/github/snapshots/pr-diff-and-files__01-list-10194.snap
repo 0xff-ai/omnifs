@@ -1,0 +1,35 @@
+---
+source: crates/omnifs-itest/src/scenario.rs
+expression: trace.clone()
+---
+## step 1: list /octocat/Hello-World/pulls/all/10194
+body  file  unknown  stable
+checks  dir  -  -
+comments  dir  -  -
+diff.patch  file  unknown  stable
+files  dir  -  -
+item.json  file  16128  dynamic
+item.md  file  unknown  stable
+reviews  dir  -  -
+state  file  unknown  stable
+title  file  unknown  stable
+user  file  unknown  stable
+canonical:
+  /octocat/Hello-World/pulls/all/10194/body  sha256:cba66f87d76d226c503e59eabc313112b15c7c14ffbcb3a5e6192006603f2c3c
+  /octocat/Hello-World/pulls/all/10194/item.json  sha256:cba66f87d76d226c503e59eabc313112b15c7c14ffbcb3a5e6192006603f2c3c
+  /octocat/Hello-World/pulls/all/10194/item.md  sha256:cba66f87d76d226c503e59eabc313112b15c7c14ffbcb3a5e6192006603f2c3c
+  /octocat/Hello-World/pulls/all/10194/state  sha256:cba66f87d76d226c503e59eabc313112b15c7c14ffbcb3a5e6192006603f2c3c
+  /octocat/Hello-World/pulls/all/10194/title  sha256:cba66f87d76d226c503e59eabc313112b15c7c14ffbcb3a5e6192006603f2c3c
+  /octocat/Hello-World/pulls/all/10194/user  sha256:cba66f87d76d226c503e59eabc313112b15c7c14ffbcb3a5e6192006603f2c3c
+  /octocat/Hello-World/pulls/open/10194/body  sha256:cba66f87d76d226c503e59eabc313112b15c7c14ffbcb3a5e6192006603f2c3c
+  /octocat/Hello-World/pulls/open/10194/item.json  sha256:cba66f87d76d226c503e59eabc313112b15c7c14ffbcb3a5e6192006603f2c3c
+  /octocat/Hello-World/pulls/open/10194/item.md  sha256:cba66f87d76d226c503e59eabc313112b15c7c14ffbcb3a5e6192006603f2c3c
+  /octocat/Hello-World/pulls/open/10194/state  sha256:cba66f87d76d226c503e59eabc313112b15c7c14ffbcb3a5e6192006603f2c3c
+  /octocat/Hello-World/pulls/open/10194/title  sha256:cba66f87d76d226c503e59eabc313112b15c7c14ffbcb3a5e6192006603f2c3c
+  /octocat/Hello-World/pulls/open/10194/user  sha256:cba66f87d76d226c503e59eabc313112b15c7c14ffbcb3a5e6192006603f2c3c
+fs:
+  /octocat/Hello-World/pulls/all/10194/state  file dynamic - 6 inline
+  /octocat/Hello-World/pulls/all/10194/title  file dynamic - 41 inline
+  /octocat/Hello-World/pulls/all/10194/user  file dynamic - 13 inline
+invalidations:
+  (none)

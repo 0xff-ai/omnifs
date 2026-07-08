@@ -1,0 +1,23 @@
+---
+source: crates/omnifs-itest/src/scenario.rs
+expression: trace.clone()
+---
+## step 2: read /octocat/Hello-World/pulls/all/10194/diff.patch
+attrs: stable - 203
+bytes (203):
+diff --git a/README b/README
+index 980a0d5f..5c2144ee 100644
+--- a/README
++++ b/README
+@@ -1 +1,3 @@
+-Hello World!
++Hello, World! 👋
++
++Welcome — thanks for checking out this Hello-World repository.
+
+canonical:
+  (none)
+fs:
+  (none)
+invalidations:
+  (none)

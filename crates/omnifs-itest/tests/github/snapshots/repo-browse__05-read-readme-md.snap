@@ -1,3 +1,10 @@
+---
+source: crates/omnifs-itest/src/scenario.rs
+expression: trace.clone()
+---
+## step 5: read /README.md
+attrs: stable - 4899
+bytes (4899):
 # Omnifs route schema
 
 This README is generated from the sealed provider route table for `/`.
@@ -126,3 +133,10 @@ The keying schema is the path grammar below. Literal segments are written as-is.
 ## Bulk traversal
 
 Mount-root ignore files hide generated README leaves and pagination controls from ignore-respecting recursive tools. Read this file explicitly with `cat README.md` when you need the schema.
+
+canonical:
+  (none)
+fs:
+  (none)
+invalidations:
+  (none)

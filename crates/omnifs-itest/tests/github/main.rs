@@ -18,22 +18,9 @@ fn parse_path(s: &str) -> Path {
     Path::parse(s).unwrap()
 }
 
-#[test]
-fn github_root_readme_snapshot() {
-    let harness = github_harness();
-    let readme = harness
-        .read("/README.md")
-        .unwrap()
-        .into_read_file()
-        .unwrap();
-    let actual = String::from_utf8(omnifs_itest::expect_inline(&readme).to_vec()).unwrap();
-    let expected = include_str!("snapshots/root-readme.md").trim_end();
-    if actual.trim_end() != expected {
-        eprintln!("{actual}");
-    }
-    assert_eq!(actual.trim_end(), expected);
-}
-
+// TODO(tape): fetch URL shaping (the repo-gate URL and the `per_page` query on
+// the runs listing) is not rendered by the step trace; `actions_runs` covers
+// the runs-listing and run-anchor structural-lookup outcomes.
 #[test]
 fn github_provider_routes_namespace_and_numeric_paths() {
     let harness = github_harness();
@@ -121,6 +108,8 @@ fn github_provider_routes_namespace_and_numeric_paths() {
     }
 }
 
+// TODO(tape): the search-API fetch URL (`q=repo:...+is:issue+state:open`) is
+// not rendered by the step trace; no scenario records an issue listing.
 #[test]
 #[allow(clippy::too_many_lines)]
 fn github_issue_list_projects_files() {
@@ -218,6 +207,8 @@ fn github_issue_list_projects_files() {
     }
 }
 
+// TODO(tape): the search-page-1 and REST-page-2 fetch URLs (and the seam
+// between the two pagination sources) are not rendered by the step trace.
 #[test]
 fn github_issue_list_fetches_rest_followup_pages() {
     use omnifs_wit::provider::types::{Callout, CalloutResult, HttpResponse};
@@ -299,6 +290,10 @@ fn github_issue_list_fetches_rest_followup_pages() {
     }
 }
 
+// Kept: the search/REST page-boundary overlap is a contrived edge case (the
+// same issue number appears on both the last search page and the first REST
+// page); no real upstream listing can be forced to reproduce this overlap on
+// demand, so it stays on synthetic pages rather than a recorded tape.
 #[test]
 fn github_issue_list_dedupes_overlap_at_search_rest_seam() {
     use omnifs_wit::provider::types::{Callout, CalloutResult, HttpResponse};
@@ -352,6 +347,9 @@ fn github_issue_list_dedupes_overlap_at_search_rest_seam() {
     }
 }
 
+// TODO(tape): the search-API fetch URL (`q=repo:...+is:pr+state:open`) is not
+// rendered by the step trace; `pr_diff_and_files` covers a single PR's faces
+// but not the search-driven listing itself.
 #[test]
 fn github_pr_list_projects_files() {
     use omnifs_wit::provider::types::{Callout, CalloutResult, HttpResponse};
@@ -444,6 +442,9 @@ fn github_pr_list_projects_files() {
     }
 }
 
+// TODO(tape): the runs-listing fetch URL (`actions/runs?per_page=30`) is not
+// rendered by the step trace; `actions_runs` covers the same op against real
+// data, but the literal query-string assertion stays here.
 #[test]
 fn github_action_run_list_projects_files() {
     use omnifs_wit::provider::types::{Callout, CalloutResult, HttpResponse};
@@ -508,75 +509,8 @@ fn github_action_run_list_projects_files() {
     }
 }
 
-#[test]
-fn github_provider_action_run_lookup_validates_and_listing_validates() {
-    use omnifs_wit::provider::types::{CalloutResult, Header, HttpResponse};
-
-    let harness = github_harness();
-    // lookup_child on a run id is structural (no fetch). The run id path is
-    // an implicit literal-prefix dir (because `/{run_id}/log` is a registered
-    // file route under it), so it resolves immediately as a directory.
-    let lookup = harness
-        .lookup("/octocat/Hello-World/actions/runs", "123")
-        .unwrap();
-    match lookup.result().unwrap() {
-        OpResult::LookupChild(LookupChildResult::Entry(result)) => {
-            let entry = &result.target;
-            assert_eq!(entry.name, "123");
-            assert!(matches!(entry.kind, EntryKind::Directory));
-        },
-        other => panic!("expected structural run dir lookup, got {other:?}"),
-    }
-
-    // Listing the run dir DOES fetch the run to resolve status/conclusion.
-    let mut issued = harness
-        .list("/octocat/Hello-World/actions/runs/123")
-        .unwrap();
-    assert!(
-        issued.is_waiting_for_callouts(),
-        "expected action run listing to dispatch validation, got {issued:?}"
-    );
-
-    issued
-        .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
-            status: 200,
-            headers: Vec::<Header>::new(),
-            body: br#"{"id":123,"status":"completed","conclusion":"success"}"#.to_vec(),
-        })])
-        .unwrap();
-
-    match issued.result().unwrap() {
-        OpResult::ListChildren(ListChildrenResult::Entries(result)) => {
-            let names: Vec<&str> = result
-                .entries
-                .iter()
-                .map(|entry| entry.name.as_str())
-                .collect();
-            assert!(names.contains(&"status"), "missing status in {names:?}");
-            assert!(
-                names.contains(&"conclusion"),
-                "missing conclusion in {names:?}"
-            );
-            assert!(names.contains(&"log"), "missing log in {names:?}");
-            assert!(
-                !names.contains(&"comments"),
-                "unexpected item comments route leaked into action run listing: {names:?}"
-            );
-            // status and conclusion are preloaded via preload_file on the dir listing.
-            let preloaded = project_paths(issued.effects().unwrap());
-            assert!(
-                preloaded.contains(&"/octocat/Hello-World/actions/runs/123/status"),
-                "missing status preload in {preloaded:?}"
-            );
-            assert!(
-                preloaded.contains(&"/octocat/Hello-World/actions/runs/123/conclusion"),
-                "missing conclusion preload in {preloaded:?}"
-            );
-        },
-        other => panic!("expected list entries(123) after 200, got {other:?}"),
-    }
-}
-
+// TODO(tape): the owner-load/classify/repos-listing fetch URL sequence (users
+// probe, orgs fallback, repos page) is not rendered by the step trace.
 #[test]
 fn github_owner_listing_tracks_browsed_repos() {
     // The owner is an OBJECT at `/{owner}`: listing it MERGES the owner's own
@@ -676,6 +610,8 @@ fn github_owner_listing_tracks_browsed_repos() {
     }
 }
 
+// TODO(tape): the per-path repo-gate fetch URLs and the owner-load/classify
+// fetch sequence are not rendered by the step trace.
 #[test]
 fn github_root_and_owner_listings_ignore_unclassified_repo_paths() {
     // listing /{owner}/{repo} triggers repo_gate which fetches /repos/{owner}/{repo}.
@@ -782,6 +718,13 @@ fn github_root_and_owner_listings_ignore_unclassified_repo_paths() {
     }
 }
 
+// Kept: `GitOpenRepo` is never a taped callout (execution-plan section 0
+// non-goal, it always falls through to the real local executor in both
+// record and replay), so the resolved subtree's real file contents (README
+// bytes, `src/main.rs` presence) can only be proven by reading the disowned
+// tree root directly through the async namespace API, not through a step
+// trace. `repo_browse`'s `Step::List("/octocat/Hello-World/repo")` proves the
+// `/repo` route resolves as a subtree at all; it cannot see inside it.
 #[tokio::test]
 async fn github_repo_tree_lists_looks_up_and_reads_from_git_cache() {
     let harness = github_harness();
@@ -831,68 +774,11 @@ async fn github_repo_tree_lists_looks_up_and_reads_from_git_cache() {
     }
 }
 
-#[test]
-fn github_provider_missing_item_resources_validate_on_lookup() {
-    use omnifs_wit::provider::types::{CalloutResult, Header, HttpResponse};
-
-    // Issue item dirs resolve structurally; existence is validated on read.
-    let harness = github_harness();
-
-    let lookup = harness
-        .lookup("/octocat/Hello-World/issues/open", "999999999")
-        .unwrap();
-    match lookup.result().unwrap() {
-        OpResult::LookupChild(LookupChildResult::Entry(result)) => {
-            assert_eq!(result.target.name, "999999999");
-            assert!(
-                matches!(result.target.kind, EntryKind::Directory),
-                "issue anchor should resolve as directory, got {:?}",
-                result.target.kind
-            );
-        },
-        other => panic!("expected immediate Dir entry for issue anchor, got {other:?}"),
-    }
-
-    let diff_lookup = harness
-        .lookup("/octocat/Hello-World/issues/open/999999999", "diff.patch")
-        .unwrap();
-    match diff_lookup.result().unwrap() {
-        OpResult::LookupChild(LookupChildResult::NotFound(_)) => {},
-        other => panic!("expected issue diff.patch lookup to be NotFound, got {other:?}"),
-    }
-
-    // Reading a face under a missing comment object triggers a fetch; a 404
-    // from GitHub propagates as NotFound. A comment is a `{comment_id}` object
-    // dir, so the fetchable leaf is `comments/1/comment.json`, which loads the
-    // standalone comment GET keyed by comment id.
-    let mut issued = harness
-        .read("/octocat/Hello-World/issues/open/999999999/comments/1/comment.json")
-        .unwrap();
-    let fetch = issued.expect_single_fetch();
-    assert!(
-        fetch
-            .url
-            .ends_with("/repos/octocat/Hello-World/issues/comments/1"),
-        "unexpected comment fetch URL: {}",
-        fetch.url
-    );
-
-    issued
-        .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
-            status: 404,
-            headers: Vec::<Header>::new(),
-            body: b"{\"message\":\"Not Found\"}".to_vec(),
-        })])
-        .unwrap();
-
-    // A 404 on the comment object load resolves the object as not-found, keyed
-    // to the comment anchor.
-    match issued.result().unwrap() {
-        OpResult::ReadFile(ReadFileOutcome::NotFound(_)) => {},
-        other => panic!("expected ReadFile NotFound on 404 read, got {other:?}"),
-    }
-}
-
+// TODO(tape): `pr_diff_and_files` exercises `diff.patch` on a real PR, but the
+// structural-lookup-then-fetch sequencing, the exact PR-listing fetch URL, and
+// the diff `Accept` header assertion are not rendered by the step trace, and
+// the trailing network-error refetch is an adversarial case with no scenario
+// analogue.
 #[test]
 #[allow(clippy::too_many_lines)]
 fn github_pr_lookup_validates_and_exposes_diff() {
@@ -1068,6 +954,9 @@ fn github_pr_lookup_validates_and_exposes_diff() {
     }
 }
 
+// TODO(tape): `pr_diff_and_files` reads the same `README` changed-file markdown
+// on a real PR, but the files-listing and changed-file-read fetch URLs are not
+// rendered by the step trace.
 #[test]
 fn github_pr_files_list_and_read_changed_file_objects() {
     use omnifs_wit::provider::types::{CalloutResult, HttpResponse};
@@ -1169,6 +1058,9 @@ fn github_pr_files_list_and_read_changed_file_objects() {
     }
 }
 
+// TODO(tape): the reviews/review/comments/comment fetch URLs are not rendered
+// by the step trace; the fixture PR (`pr_diff_and_files`, PR 10194) has no
+// reviews or review comments, so this stays on synthetic review/comment data.
 #[test]
 #[allow(clippy::too_many_lines)]
 fn github_pr_reviews_and_review_comments_list_and_read_objects() {
@@ -1336,6 +1228,9 @@ fn github_pr_reviews_and_review_comments_list_and_read_objects() {
     }
 }
 
+// TODO(tape): the head-sha and check-runs fetch URLs are not rendered by the
+// step trace; the fixture PR (`pr_diff_and_files`, PR 10194) has no check
+// runs, so this stays on synthetic check-run data.
 #[test]
 fn github_pr_checks_list_from_head_sha_and_read_check_run_objects() {
     use omnifs_wit::provider::types::{CalloutResult, HttpResponse};
@@ -1437,6 +1332,9 @@ fn github_pr_checks_list_from_head_sha_and_read_check_run_objects() {
     }
 }
 
+// TODO(tape): the notifications-listing and thread-read fetch URLs are not
+// rendered by the step trace; no scenario records against `/notifications`
+// (an authenticated per-account inbox, not durable public fixture data).
 #[test]
 fn github_notifications_list_and_read_thread_objects() {
     use omnifs_wit::provider::types::{CalloutResult, HttpResponse};
@@ -1519,6 +1417,9 @@ fn github_notifications_list_and_read_thread_objects() {
     }
 }
 
+// TODO(tape): the run-dir and runs-index fetch URLs are not rendered by the
+// step trace; `actions_runs` covers the same preload-on-listing behavior
+// (status/conclusion preloaded alongside a run-dir listing) against real data.
 #[test]
 fn github_projected_resource_reads_return_all_fetched_siblings() {
     // per-field files (title, body, state, user, status, conclusion) are
@@ -1607,125 +1508,6 @@ fn github_projected_resource_reads_return_all_fetched_siblings() {
     }
 }
 
-#[test]
-#[allow(clippy::too_many_lines)]
-fn github_provider_resource_reads_do_not_fall_back_to_provider_cache() {
-    use omnifs_wit::provider::types::{
-        CalloutError, CalloutResult, ErrorKind, Header, HttpResponse,
-    };
-
-    struct Case {
-        name: &'static str,
-        path: &'static str,
-        ok_headers: Vec<Header>,
-        ok_body: &'static [u8],
-        expected_content: &'static [u8],
-    }
-
-    // PR diff is covered separately by `github_pr_lookup_validates_and_exposes_diff`
-    // because it dispatches a fetch-blob callout (and returns a blob-backed
-    // ReadFileBytes) rather than an inline HttpResponse.
-    //
-    // Object field files are covered by item-specific tests. These structural
-    // file routes must still work from a cold read path without relying on a
-    // previous directory listing to preload content into the host cache.
-    let cases = [
-        Case {
-            // A comment is a `{comment_id}` object dir; `comment.md` renders the
-            // standalone comment GET. Reading it fetches the comment from
-            // upstream rather than serving a provider-side cache.
-            name: "issue comment",
-            path: "/octocat/Hello-World/issues/open/1/comments/1/comment.md",
-            ok_headers: vec![Header {
-                name: "etag".to_string(),
-                value: "\"comment-1\"".to_string(),
-            }],
-            ok_body: br#"{"id":1,"user":{"login":"octocat"},"body":"A comment"}"#,
-            expected_content: b"octocat:\nA comment\n",
-        },
-        Case {
-            name: "action status",
-            path: "/octocat/Hello-World/actions/runs/99/status",
-            ok_headers: Vec::new(),
-            ok_body: br#"{"id":99,"status":"completed","conclusion":"success"}"#,
-            expected_content: b"completed",
-        },
-        Case {
-            name: "action conclusion",
-            path: "/octocat/Hello-World/actions/runs/99/conclusion",
-            ok_headers: Vec::new(),
-            ok_body: br#"{"id":99,"status":"completed","conclusion":"success"}"#,
-            expected_content: b"success",
-        },
-        Case {
-            name: "action log",
-            path: "/octocat/Hello-World/actions/runs/99/log",
-            ok_headers: Vec::new(),
-            // run_log fetches the zip archive; empty body → pass-through raw bytes.
-            ok_body: b"",
-            expected_content: b"",
-        },
-    ];
-
-    let harness = github_harness();
-    for case in &cases {
-        let mut first = harness.read(case.path).unwrap();
-        assert!(
-            first.is_waiting_for_callouts(),
-            "{name}: expected fetch callout on first read, got {first:?}",
-            name = case.name
-        );
-        first
-            .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
-                status: 200,
-                headers: case.ok_headers.clone(),
-                body: case.ok_body.to_vec(),
-            })])
-            .unwrap();
-        match first.result().unwrap() {
-            OpResult::ReadFile(ReadFileOutcome::Found(file)) => {
-                if !case.expected_content.is_empty() {
-                    assert_eq!(
-                        omnifs_itest::expect_inline(file),
-                        case.expected_content,
-                        "{name}: unexpected cached content",
-                        name = case.name
-                    );
-                }
-            },
-            other => panic!("{}: expected ReadFile result, got {other:?}", case.name),
-        }
-
-        let mut second = harness.read(case.path).unwrap();
-        assert!(
-            second.is_waiting_for_callouts(),
-            "{name}: expected fetch callout on second read (no provider cache), got {second:?}",
-            name = case.name
-        );
-        second
-            .answer_callouts(vec![CalloutResult::CalloutError(CalloutError {
-                kind: ErrorKind::Network,
-                message: "network down".to_string(),
-                retryable: true,
-            })])
-            .unwrap();
-        match second.result().unwrap() {
-            OpResult::Error(err) => {
-                assert_eq!(
-                    err.kind,
-                    ErrorKind::Network,
-                    "{}: wrong error kind",
-                    case.name
-                );
-            },
-            other => panic!(
-                "{}: expected Network error on second read, got {other:?}",
-                case.name
-            ),
-        }
-    }
-}
-
 /// Comments are `{comment_id}` object dirs (a DEPARTURE from the old indexed
 /// `comments/{idx}` files; the "zero index" concept no longer exists). The
 /// collection lists each comment as a directory keyed by its own id, and each
@@ -1734,6 +1516,10 @@ fn github_provider_resource_reads_do_not_fall_back_to_provider_cache() {
 /// invariant: a comment face read fetches upstream and a reread refetches
 /// (never serves a provider-side cache), and (c) reject: a face under a missing
 /// comment validates to not-found on read.
+///
+/// TODO(tape): the comment listing/read fetch URLs are not rendered by the
+/// step trace; no scenario visits `/comments` (the fixture PR and issues have
+/// none), so the id-dir model, refetch invariant, and 404 mapping stay here.
 #[test]
 #[allow(clippy::too_many_lines)]
 fn github_provider_comment_routes_id_dirs_and_refetch() {
@@ -1924,6 +1710,11 @@ fn github_provider_comment_routes_id_dirs_and_refetch() {
     }
 }
 
+// Kept: the parallel-page-fetch count (`callouts.len()`) and per-page fetch
+// URLs are not rendered by the step trace, and the 1500-result overflow that
+// forces the search-API page cap cannot be forced against real data (it needs
+// a repo with 1500+ open issues/PRs sitting still across re-records), so this
+// stays on a synthetic paginated feed.
 #[test]
 #[allow(clippy::too_many_lines)]
 fn github_provider_paginates_issue_and_pr_results_in_parallel() {
@@ -2053,6 +1844,9 @@ fn github_provider_paginates_issue_and_pr_results_in_parallel() {
     }
 }
 
+// TODO(tape): the ordered users-probe/orgs-fallback/repos-page fetch URL
+// sequence is not rendered by the step trace; no scenario browses an org
+// owner (the fixture repos all hang off the `octocat` user).
 #[test]
 #[allow(clippy::too_many_lines)]
 fn github_provider_lookup_owner_validates_and_owner_listing_classifies_with_org_fallback() {
@@ -2194,6 +1988,10 @@ fn github_provider_lookup_owner_validates_and_owner_listing_classifies_with_org_
     }
 }
 
+// TODO(tape): the comment fetch URL is not rendered by the step trace; the
+// no-op timer-tick assertions (empty callouts, empty invalidations) could move
+// to a scenario `Step::TimerTick`, but the comment-fetch URL assertion in the
+// same test anchors it here regardless.
 #[test]
 fn github_provider_polls_events_and_invalidates_caches() {
     // the event poller and active-path tracking are removed; State is empty.
@@ -2260,61 +2058,13 @@ fn github_provider_polls_events_and_invalidates_caches() {
     );
 }
 
-#[test]
-fn github_provider_list_routes_preserve_typed_http_errors() {
-    use omnifs_wit::provider::types::{CalloutResult, ErrorKind, Header, HttpResponse};
-
-    fn denied_page() -> Vec<CalloutResult> {
-        vec![CalloutResult::HttpResponse(HttpResponse {
-            status: 403,
-            headers: vec![Header {
-                name: "etag".to_string(),
-                value: "\"denied\"".to_string(),
-            }],
-            body: br#"{"message":"forbidden"}"#.to_vec(),
-        })]
-    }
-
-    fn expect_denied(response: &omnifs_engine::test_support::TestOp<'_>) {
-        match response.result().unwrap() {
-            OpResult::Error(error) => assert_eq!(error.kind, ErrorKind::Denied),
-            other => panic!("expected provider error result, got {other:?}"),
-        }
-    }
-
-    let cases = [
-        (
-            "issues",
-            "/octocat/Hello-World/issues/open",
-            "/search/issues?q=repo:octocat/Hello-World+is:issue+state:open&sort=created&order=desc&per_page=100",
-        ),
-        (
-            "pulls",
-            "/octocat/Hello-World/pulls/open",
-            "/search/issues?q=repo:octocat/Hello-World+is:pr+state:open&sort=created&order=desc&per_page=100",
-        ),
-        (
-            "actions",
-            "/octocat/Hello-World/actions/runs",
-            "/repos/octocat/Hello-World/actions/runs?per_page=30",
-        ),
-    ];
-
-    let harness = github_harness();
-    for (kind, path, suffix) in cases {
-        let mut op = harness.list(path).unwrap();
-        let fetch = op.expect_single_fetch();
-        assert!(
-            fetch.url.ends_with(suffix),
-            "{kind}: unexpected URL {}",
-            fetch.url
-        );
-        op.answer_callouts(denied_page()).unwrap();
-        expect_denied(&op);
-    }
-}
-
 /// Invariant #1: `issues/open/42` and `issues/all/42` share one object load.
+///
+/// TODO(tape): the canonical-collapse property (both alias paths sharing one
+/// `view_leaves` set) would render in a step trace's `canonical:` block, but
+/// the cross-instance warm-read check (a second, fresh harness serving the
+/// alias inline from a manually applied canonical) drives the async namespace
+/// API directly and has no `Step` equivalent, so this stays hand-written.
 #[tokio::test]
 async fn open_then_all_one_load() {
     use omnifs_wit::provider::types::{Callout, CalloutResult, HttpResponse, ReadFileOutcome};
@@ -2401,6 +2151,11 @@ async fn open_then_all_one_load() {
 }
 
 /// Invariant #3: `item.json` bytes equal the single-item GET body verbatim.
+///
+/// TODO(tape): a step trace renders a canonical's content sha256, not its raw
+/// bytes, so the byte-for-byte equality between the list-embedded row and the
+/// standalone GET (the list-vs-GET indentation-class distinction) is not
+/// visible in a snapshot; this stays a direct effects assertion.
 #[test]
 fn item_json_byte_equals_single_get() {
     use omnifs_wit::provider::types::{
@@ -2442,5 +2197,248 @@ fn item_json_byte_equals_single_get() {
         ByteSource::Canonical => {},
         ByteSource::Inline(bytes) => assert_eq!(bytes.as_slice(), issue_json),
         other => panic!("expected canonical or inline item.json bytes, got {other:?}"),
+    }
+}
+
+/// Adversarial cases: 404/403 error mapping and the no-provider-cache refetch
+/// invariant. These stay hand written on synthetic bytes because they assert
+/// error outcomes, callout counts, and request URL shapes that a projection
+/// snapshot cannot render, not recorded happy-path content.
+mod adversarial {
+    use super::*;
+
+    #[test]
+    fn github_provider_missing_item_resources_validate_on_lookup() {
+        use omnifs_wit::provider::types::{CalloutResult, Header, HttpResponse};
+
+        // Issue item dirs resolve structurally; existence is validated on read.
+        let harness = github_harness();
+
+        let lookup = harness
+            .lookup("/octocat/Hello-World/issues/open", "999999999")
+            .unwrap();
+        match lookup.result().unwrap() {
+            OpResult::LookupChild(LookupChildResult::Entry(result)) => {
+                assert_eq!(result.target.name, "999999999");
+                assert!(
+                    matches!(result.target.kind, EntryKind::Directory),
+                    "issue anchor should resolve as directory, got {:?}",
+                    result.target.kind
+                );
+            },
+            other => panic!("expected immediate Dir entry for issue anchor, got {other:?}"),
+        }
+
+        let diff_lookup = harness
+            .lookup("/octocat/Hello-World/issues/open/999999999", "diff.patch")
+            .unwrap();
+        match diff_lookup.result().unwrap() {
+            OpResult::LookupChild(LookupChildResult::NotFound(_)) => {},
+            other => panic!("expected issue diff.patch lookup to be NotFound, got {other:?}"),
+        }
+
+        // Reading a face under a missing comment object triggers a fetch; a 404
+        // from GitHub propagates as NotFound. A comment is a `{comment_id}` object
+        // dir, so the fetchable leaf is `comments/1/comment.json`, which loads the
+        // standalone comment GET keyed by comment id.
+        let mut issued = harness
+            .read("/octocat/Hello-World/issues/open/999999999/comments/1/comment.json")
+            .unwrap();
+        let fetch = issued.expect_single_fetch();
+        assert!(
+            fetch
+                .url
+                .ends_with("/repos/octocat/Hello-World/issues/comments/1"),
+            "unexpected comment fetch URL: {}",
+            fetch.url
+        );
+
+        issued
+            .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
+                status: 404,
+                headers: Vec::<Header>::new(),
+                body: b"{\"message\":\"Not Found\"}".to_vec(),
+            })])
+            .unwrap();
+
+        // A 404 on the comment object load resolves the object as not-found, keyed
+        // to the comment anchor.
+        match issued.result().unwrap() {
+            OpResult::ReadFile(ReadFileOutcome::NotFound(_)) => {},
+            other => panic!("expected ReadFile NotFound on 404 read, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn github_provider_resource_reads_do_not_fall_back_to_provider_cache() {
+        use omnifs_wit::provider::types::{
+            CalloutError, CalloutResult, ErrorKind, Header, HttpResponse,
+        };
+
+        struct Case {
+            name: &'static str,
+            path: &'static str,
+            ok_headers: Vec<Header>,
+            ok_body: &'static [u8],
+            expected_content: &'static [u8],
+        }
+
+        // PR diff is covered separately by `github_pr_lookup_validates_and_exposes_diff`
+        // because it dispatches a fetch-blob callout (and returns a blob-backed
+        // ReadFileBytes) rather than an inline HttpResponse.
+        //
+        // Object field files are covered by item-specific tests. These structural
+        // file routes must still work from a cold read path without relying on a
+        // previous directory listing to preload content into the host cache.
+        let cases = [
+            Case {
+                // A comment is a `{comment_id}` object dir; `comment.md` renders the
+                // standalone comment GET. Reading it fetches the comment from
+                // upstream rather than serving a provider-side cache.
+                name: "issue comment",
+                path: "/octocat/Hello-World/issues/open/1/comments/1/comment.md",
+                ok_headers: vec![Header {
+                    name: "etag".to_string(),
+                    value: "\"comment-1\"".to_string(),
+                }],
+                ok_body: br#"{"id":1,"user":{"login":"octocat"},"body":"A comment"}"#,
+                expected_content: b"octocat:\nA comment\n",
+            },
+            Case {
+                name: "action status",
+                path: "/octocat/Hello-World/actions/runs/99/status",
+                ok_headers: Vec::new(),
+                ok_body: br#"{"id":99,"status":"completed","conclusion":"success"}"#,
+                expected_content: b"completed",
+            },
+            Case {
+                name: "action conclusion",
+                path: "/octocat/Hello-World/actions/runs/99/conclusion",
+                ok_headers: Vec::new(),
+                ok_body: br#"{"id":99,"status":"completed","conclusion":"success"}"#,
+                expected_content: b"success",
+            },
+            Case {
+                name: "action log",
+                path: "/octocat/Hello-World/actions/runs/99/log",
+                ok_headers: Vec::new(),
+                // run_log fetches the zip archive; empty body → pass-through raw bytes.
+                ok_body: b"",
+                expected_content: b"",
+            },
+        ];
+
+        let harness = github_harness();
+        for case in &cases {
+            let mut first = harness.read(case.path).unwrap();
+            assert!(
+                first.is_waiting_for_callouts(),
+                "{name}: expected fetch callout on first read, got {first:?}",
+                name = case.name
+            );
+            first
+                .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
+                    status: 200,
+                    headers: case.ok_headers.clone(),
+                    body: case.ok_body.to_vec(),
+                })])
+                .unwrap();
+            match first.result().unwrap() {
+                OpResult::ReadFile(ReadFileOutcome::Found(file)) => {
+                    if !case.expected_content.is_empty() {
+                        assert_eq!(
+                            omnifs_itest::expect_inline(file),
+                            case.expected_content,
+                            "{name}: unexpected cached content",
+                            name = case.name
+                        );
+                    }
+                },
+                other => panic!("{}: expected ReadFile result, got {other:?}", case.name),
+            }
+
+            let mut second = harness.read(case.path).unwrap();
+            assert!(
+                second.is_waiting_for_callouts(),
+                "{name}: expected fetch callout on second read (no provider cache), got {second:?}",
+                name = case.name
+            );
+            second
+                .answer_callouts(vec![CalloutResult::CalloutError(CalloutError {
+                    kind: ErrorKind::Network,
+                    message: "network down".to_string(),
+                    retryable: true,
+                })])
+                .unwrap();
+            match second.result().unwrap() {
+                OpResult::Error(err) => {
+                    assert_eq!(
+                        err.kind,
+                        ErrorKind::Network,
+                        "{}: wrong error kind",
+                        case.name
+                    );
+                },
+                other => panic!(
+                    "{}: expected Network error on second read, got {other:?}",
+                    case.name
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn github_provider_list_routes_preserve_typed_http_errors() {
+        use omnifs_wit::provider::types::{CalloutResult, ErrorKind, Header, HttpResponse};
+
+        fn denied_page() -> Vec<CalloutResult> {
+            vec![CalloutResult::HttpResponse(HttpResponse {
+                status: 403,
+                headers: vec![Header {
+                    name: "etag".to_string(),
+                    value: "\"denied\"".to_string(),
+                }],
+                body: br#"{"message":"forbidden"}"#.to_vec(),
+            })]
+        }
+
+        fn expect_denied(response: &omnifs_engine::test_support::TestOp<'_>) {
+            match response.result().unwrap() {
+                OpResult::Error(error) => assert_eq!(error.kind, ErrorKind::Denied),
+                other => panic!("expected provider error result, got {other:?}"),
+            }
+        }
+
+        let cases = [
+            (
+                "issues",
+                "/octocat/Hello-World/issues/open",
+                "/search/issues?q=repo:octocat/Hello-World+is:issue+state:open&sort=created&order=desc&per_page=100",
+            ),
+            (
+                "pulls",
+                "/octocat/Hello-World/pulls/open",
+                "/search/issues?q=repo:octocat/Hello-World+is:pr+state:open&sort=created&order=desc&per_page=100",
+            ),
+            (
+                "actions",
+                "/octocat/Hello-World/actions/runs",
+                "/repos/octocat/Hello-World/actions/runs?per_page=30",
+            ),
+        ];
+
+        let harness = github_harness();
+        for (kind, path, suffix) in cases {
+            let mut op = harness.list(path).unwrap();
+            let fetch = op.expect_single_fetch();
+            assert!(
+                fetch.url.ends_with(suffix),
+                "{kind}: unexpected URL {}",
+                fetch.url
+            );
+            op.answer_callouts(denied_page()).unwrap();
+            expect_denied(&op);
+        }
     }
 }

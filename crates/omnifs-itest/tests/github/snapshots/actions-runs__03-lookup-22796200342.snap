@@ -1,0 +1,12 @@
+---
+source: crates/omnifs-itest/src/scenario.rs
+expression: trace.clone()
+---
+## step 3: lookup /octocat/Hello-World/actions/runs :: 22796200342
+entry: 22796200342 dir
+canonical:
+  (none)
+fs:
+  (none)
+invalidations:
+  (none)
