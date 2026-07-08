@@ -1,5 +1,15 @@
 #![cfg(not(target_os = "wasi"))]
 
+mod scenarios;
+
+// None of these tests are adversarial in the established sense (upstream
+// error mapping, retry-on-callout-error, malformed bodies, domain denial):
+// every one drives a canned happy-path response through provider routing, so
+// none is grouped under `mod adversarial`. Each is a candidate for deletion
+// once `scenarios.rs` is recorded and its snapshot is confirmed to exercise
+// the same op + assertion surface (I7); marked below with the scenario that
+// is expected to cover it.
+
 use omnifs_itest::{RuntimeHarness, TestOpExt};
 use omnifs_wit::provider::types::{
     ByteSource, CalloutResult, EntryKind, FileSize, FsKind, Header, HttpResponse,
@@ -132,6 +142,7 @@ fn assert_projected_deferred_file_with_exact_size(
     assert!(matches!(file.bytes, ByteSource::Deferred(ReadMode::Full)));
 }
 
+// TODO(tape): covered by scenarios::listing?
 #[test]
 fn root_is_open_and_date_directories_list_day_files() {
     let harness = oura_harness();
@@ -175,6 +186,7 @@ fn root_is_open_and_date_directories_list_day_files() {
     }
 }
 
+// TODO(tape): covered by scenarios::listing?
 #[test]
 fn non_day_indexed_collections_do_not_resolve_as_day_files() {
     let harness = oura_harness();
@@ -188,6 +200,7 @@ fn non_day_indexed_collections_do_not_resolve_as_day_files() {
     }
 }
 
+// TODO(tape): covered by scenarios::day_file_read?
 #[test]
 fn day_file_reads_one_month_date_range_and_stores_neighbor_days() {
     let harness = oura_harness();
@@ -256,6 +269,7 @@ fn day_file_reads_one_month_date_range_and_stores_neighbor_days() {
     );
 }
 
+// TODO(tape): covered by scenarios::listing?
 #[test]
 fn time_series_day_file_reads_datetime_range_and_groups_by_timestamp_day() {
     let harness = oura_harness();

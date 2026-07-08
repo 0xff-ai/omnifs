@@ -133,6 +133,11 @@ fn run_record(scenario: &Scenario) {
     // Resolve the credential the mount will authenticate with. The prepare hook
     // writes it into `paths.credentials_file` via `omnifs_workspace::creds` so
     // the engine's credential service reads exactly what the CLI writer stores.
+    // The entry SHAPE (static-token vs oauth) follows the mount config's `auth`
+    // block, not `RecordAuth`: `RecordAuth` only ever names the env var holding
+    // the token, so an oauth mount (e.g. oura, which declares only an oauth
+    // scheme) must not be forced through the static-token entry shape the
+    // engine's oauth injection path does not read.
     let secrets = record_secrets(scenario);
     let credential = scenario
         .auth
@@ -142,9 +147,14 @@ fn run_record(scenario: &Scenario) {
     let recorder = TapeRecorder::new();
     let mut builder =
         RuntimeHarness::builder(scenario.config).callouts(CalloutSetup::Recorded(recorder.clone()));
-    if let Some((credential_id, token)) = credential {
+    if let Some((credential_id, config_auth, token)) = credential {
         builder = builder.prepare(move |layout| {
-            write_static_credential(&layout.credentials_file, &credential_id, &token);
+            write_record_credential(
+                &layout.credentials_file,
+                &credential_id,
+                &config_auth,
+                &token,
+            );
         });
     }
     let harness = builder.build().expect("build record harness");
@@ -691,21 +701,47 @@ fn record_token(auth: &RecordAuth) -> String {
 }
 
 /// Derive the credential id the engine will look up for this mount, mirroring
-/// the CLI's `CredentialId::for_mount` keying, and pair it with the token.
+/// the CLI's `CredentialId::for_mount` keying, and pair it with the mount's
+/// declared `Auth` selection (which decides the credential-entry SHAPE) and the
+/// token.
 fn record_credential(
     scenario: &Scenario,
     auth: &RecordAuth,
-) -> (omnifs_workspace::authn::CredentialId, String) {
+) -> (
+    omnifs_workspace::authn::CredentialId,
+    omnifs_workspace::mounts::Auth,
+    String,
+) {
     let token = record_token(auth);
-    let credential_id = credential_id_for_config(scenario.config);
-    (credential_id, token)
+    let config_auth = parse_config_auth(scenario.config);
+    let credential_id = credential_id_for_config(scenario.config, &config_auth);
+    (credential_id, config_auth, token)
+}
+
+/// Parse the mount config's `auth` block into the typed `Auth` selection. The
+/// SAME parse feeds both the credential-id derivation (`credential_id_for_config`)
+/// and the credential-entry shape choice (`write_record_credential`): the kind
+/// comes from the config, never from `RecordAuth`, so a scenario cannot declare
+/// an oauth mount and accidentally record a static-token entry for it.
+fn parse_config_auth(config: &str) -> omnifs_workspace::mounts::Auth {
+    let value: serde_json::Value =
+        serde_json::from_str(config).expect("parse scenario mount config");
+    serde_json::from_value(
+        value
+            .get("auth")
+            .cloned()
+            .expect("an authenticated scenario config declares an `auth` block"),
+    )
+    .expect("parse scenario auth block")
 }
 
 /// Compute the mount's credential id from its config: the provider NAME slug
 /// (read from the pinned artifact's manifest, like the harness does) plus the
 /// config's declared auth scheme and account.
-fn credential_id_for_config(config: &str) -> omnifs_workspace::authn::CredentialId {
-    use omnifs_workspace::mounts::Auth;
+fn credential_id_for_config(
+    config: &str,
+    config_auth: &omnifs_workspace::mounts::Auth,
+) -> omnifs_workspace::authn::CredentialId {
     use omnifs_workspace::provider::Artifact;
 
     let value: serde_json::Value =
@@ -720,35 +756,54 @@ fn credential_id_for_config(config: &str) -> omnifs_workspace::authn::Credential
     let artifact = Artifact::from_bytes(provider_file, bytes).expect("build provider artifact");
     let provider_name = artifact.meta().name.clone();
 
-    let auth: Auth = serde_json::from_value(
-        value
-            .get("auth")
-            .cloned()
-            .expect("an authenticated scenario config declares an `auth` block"),
-    )
-    .expect("parse scenario auth block");
-    let scheme = auth
+    let scheme = config_auth
         .scheme()
         .expect("an authenticated record scenario must declare its auth scheme");
-    omnifs_workspace::authn::CredentialId::for_mount(&provider_name, &auth, scheme)
+    omnifs_workspace::authn::CredentialId::for_mount(&provider_name, config_auth, scheme)
         .expect("derive credential id")
 }
 
-/// Write a static-token credential into the store the engine reads, exactly as
-/// the CLI's static-token import does (`CredentialEntry::static_token` + store
-/// `put`), so the mount authenticates during recording.
-fn write_static_credential(
+/// Write the record-mode credential in the shape the mount's declared auth kind
+/// expects, mirroring how the CLI writes it, so the engine's credential service
+/// (`crates/omnifs-engine/src/auth_inject.rs`) reads exactly what a real CLI
+/// flow would have stored:
+///
+/// - `Auth::StaticToken` writes `CredentialEntry::static_token`, exactly as the
+///   CLI's static-token import does.
+/// - `Auth::OAuth` writes `CredentialEntry::oauth`, exactly as the CLI's login
+///   flow does (`crates/omnifs-cli/src/auth/login.rs` stores the entry the
+///   OAuth exchange returns via `CredentialService::store_entry`); the engine's
+///   oauth injection path (`build_oauth` in `auth_inject.rs`) only ever resolves
+///   an oauth-kind entry, so a mount that declares only an oauth scheme (e.g.
+///   oura, `providers/oura/src/lib.rs`) cannot authenticate from a static-token
+///   entry. Record mode has no refresh token to offer (it holds a bare access
+///   token from the `OMNIFS_RECORD_*` env var, not a full OAuth exchange), so
+///   the entry is written non-refreshable: sufficient for a recording session,
+///   which only needs the access token to reach the wire once.
+fn write_record_credential(
     credentials_file: &StdPath,
     credential_id: &omnifs_workspace::authn::CredentialId,
+    config_auth: &omnifs_workspace::mounts::Auth,
     token: &str,
 ) {
     use omnifs_workspace::creds::{CredentialEntry, CredentialStore, FileStore};
+    use omnifs_workspace::mounts::Auth;
 
     let store = FileStore::new(credentials_file);
-    let entry = CredentialEntry::static_token(
-        secrecy::SecretString::from(token.to_owned()),
-        time::OffsetDateTime::now_utc(),
-    );
+    let entry = match config_auth {
+        Auth::StaticToken(_) => CredentialEntry::static_token(
+            secrecy::SecretString::from(token.to_owned()),
+            time::OffsetDateTime::now_utc(),
+        ),
+        Auth::OAuth(_) => CredentialEntry::oauth(
+            secrecy::SecretString::from(token.to_owned()),
+            None,
+            None,
+            "Bearer",
+            Vec::new(),
+            time::OffsetDateTime::now_utc(),
+        ),
+    };
     store
         .put(credential_id, &entry)
         .expect("write record-mode credential");
@@ -830,5 +885,52 @@ mod tests {
             ),
             "revalidation__01-revalidate-repo-json"
         );
+    }
+
+    #[test]
+    fn parse_config_auth_reads_the_declared_kind_not_record_auth() {
+        use omnifs_workspace::mounts::Auth;
+
+        let static_config =
+            r#"{"provider": "x.wasm", "auth": {"type": "static-token", "scheme": "pat"}}"#;
+        assert!(matches!(
+            parse_config_auth(static_config),
+            Auth::StaticToken(_)
+        ));
+
+        let oauth_config =
+            r#"{"provider": "x.wasm", "auth": {"type": "oauth", "scheme": "oauth"}}"#;
+        assert!(matches!(parse_config_auth(oauth_config), Auth::OAuth(_)));
+    }
+
+    #[test]
+    fn write_record_credential_matches_the_config_auth_kind() {
+        use omnifs_workspace::authn::{AuthKind, CredentialId};
+        use omnifs_workspace::creds::{CredentialStore, FileStore};
+        use omnifs_workspace::mounts::Auth;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let credentials_file = dir.path().join("credentials.json");
+        let credential_id = CredentialId::new("test-provider", "scheme", "default").unwrap();
+
+        let static_auth: Auth =
+            serde_json::from_str(r#"{"type": "static-token", "scheme": "pat"}"#).unwrap();
+        write_record_credential(
+            &credentials_file,
+            &credential_id,
+            &static_auth,
+            "tok-static",
+        );
+        let store = FileStore::new(&credentials_file);
+        let entry = store.get(&credential_id).unwrap().expect("entry written");
+        assert_eq!(entry.kind(), AuthKind::StaticToken);
+        assert!(entry.refresh_token().is_none());
+
+        let oauth_auth: Auth =
+            serde_json::from_str(r#"{"type": "oauth", "scheme": "oauth"}"#).unwrap();
+        write_record_credential(&credentials_file, &credential_id, &oauth_auth, "tok-oauth");
+        let entry = store.get(&credential_id).unwrap().expect("entry written");
+        assert_eq!(entry.kind(), AuthKind::OAuth);
+        assert!(entry.refresh_token().is_none());
     }
 }
