@@ -21,7 +21,7 @@ use omnifs_wit::provider::types as wit;
 
 use crate::tape::record::TapeRecorder;
 use crate::tape::replay::TapePlayer;
-use crate::tape::scrub::TapeRules;
+use crate::tape::scrub::{BodyPolicy, TapeRules};
 use crate::tape::{TapeError, sha256_hex};
 use crate::{CalloutSetup, RuntimeHarness};
 
@@ -164,22 +164,17 @@ fn run_record(scenario: &Scenario) {
     }
 
     // Record mode runs real executors, so each op returns without a callout
-    // burst to answer. Snapshots regenerate here because the recipe sets
-    // INSTA_UPDATE=always; the rendered traces are kept for record-then-verify.
-    let settings = snapshot_settings(scenario);
-    let recorded_traces = settings.bind(|| {
-        scenario
-            .steps
-            .iter()
-            .enumerate()
-            .map(|(index, step)| {
-                let trace = record_step_trace(&harness, index, step);
-                let name = snapshot_name(scenario.name, index, step);
-                insta::assert_snapshot!(name.clone(), trace.clone());
-                trace
-            })
-            .collect::<Vec<_>>()
-    });
+    // burst to answer. The live traces stay IN MEMORY ONLY: live bytes are
+    // pre-scrub, so nothing derived from them may be persisted (under
+    // RewrittenJson they contain exactly the private data the policy removes).
+    // Snapshots are written by the verify-replay pass below, from the
+    // post-scrub replay view.
+    let live_traces: Vec<String> = scenario
+        .steps
+        .iter()
+        .enumerate()
+        .map(|(index, step)| record_step_trace(&harness, index, step))
+        .collect();
 
     let tape_path = tape_path(scenario);
     let sidecar_dir = sidecar_dir(scenario);
@@ -195,16 +190,23 @@ fn run_record(scenario: &Scenario) {
         .unwrap_or_else(|error| panic!("finalize tape {}: {error}", tape_path.display()));
 
     // Record-then-verify: a recording that does not replay is not a recording.
-    // The fresh replay must reproduce byte-identical traces; a divergence fails
-    // the recording. The comparison is a direct string equality rather than an
-    // insta assertion, because INSTA_UPDATE=always is in force for record mode
-    // and would otherwise silently overwrite the snapshot with a divergent
-    // replay instead of failing.
-    verify_replay(scenario, &recorded_traces);
+    verify_replay(scenario, &live_traces);
 }
 
-/// Replay the just-written tape and require byte-identical traces, else fail.
-fn verify_replay(scenario: &Scenario, recorded: &[String]) {
+/// Replay the just-written tape and snapshot the replayed traces.
+///
+/// This pass is the snapshot writer: the checked-in snapshots are always the
+/// replay view, what the hermetic lane asserts, containing only post-scrub
+/// bytes (the record recipe's `INSTA_UPDATE=always` regenerates them here).
+///
+/// Under [`BodyPolicy::Verbatim`] each replayed trace must additionally
+/// byte-equal the corresponding in-memory live trace: that is the executable
+/// check on invariant I3 (tape bodies round-trip byte-identically), and a
+/// divergence means a recorder bug. Under [`BodyPolicy::RewrittenJson`]
+/// live-vs-replay divergence is the policy working as designed, so the
+/// equality assert is skipped; verification is the replay completing without
+/// a tape miss plus the snapshot asserts.
+fn verify_replay(scenario: &Scenario, live: &[String]) {
     let harness = RuntimeHarness::builder(scenario.config)
         .callouts(CalloutSetup::Captured)
         .build()
@@ -217,17 +219,24 @@ fn verify_replay(scenario: &Scenario, recorded: &[String]) {
         setup(&harness);
     }
 
-    for (index, step) in scenario.steps.iter().enumerate() {
-        let replayed = replay_step_trace(&harness, &mut player, index, step);
-        let expected = &recorded[index];
-        assert!(
-            &replayed == expected,
-            "record-then-verify: replay of scenario {} step {index} diverged from the \
-             recording. A recording that does not replay is not a recording.\n\
-             --- recorded ---\n{expected}\n--- replayed ---\n{replayed}\n",
-            scenario.name,
-        );
-    }
+    let require_live_equality = matches!(scenario.rules.body, BodyPolicy::Verbatim);
+    let settings = snapshot_settings(scenario);
+    settings.bind(|| {
+        for (index, step) in scenario.steps.iter().enumerate() {
+            let replayed = replay_step_trace(&harness, &mut player, index, step);
+            if require_live_equality {
+                let expected = &live[index];
+                assert!(
+                    &replayed == expected,
+                    "record-then-verify: replay of scenario {} step {index} diverged from the \
+                     recording. A recording that does not replay is not a recording.\n\
+                     --- recorded ---\n{expected}\n--- replayed ---\n{replayed}\n",
+                    scenario.name,
+                );
+            }
+            insta::assert_snapshot!(snapshot_name(scenario.name, index, step), replayed);
+        }
+    });
 }
 
 // --- step driving ---
