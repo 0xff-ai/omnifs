@@ -399,10 +399,6 @@ pub fn expect_inline(result: &ReadFileResult) -> &[u8] {
     }
 }
 
-pub fn inline_content(result: &ReadFileResult) -> &[u8] {
-    expect_inline(result)
-}
-
 pub fn into_inline(result: ReadFileResult) -> Vec<u8> {
     match result.bytes {
         ByteSource::Inline(bytes) => bytes,
