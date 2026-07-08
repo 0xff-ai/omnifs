@@ -53,7 +53,7 @@ const DOCKER_CONFIG: &str = r#"
 fn container_faces() {
     run(&Scenario {
         name: "container-faces",
-        dir: "docker",
+        manifest_dir: env!("CARGO_MANIFEST_DIR"),
         config: DOCKER_CONFIG,
         auth: None,
         rules: TapeRules::default(),

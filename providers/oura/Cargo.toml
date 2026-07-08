@@ -8,9 +8,14 @@ homepage.workspace = true
 description = "omnifs provider for browsing Oura API v2 user data"
 categories = ["filesystem", "wasm"]
 keywords = ["omnifs", "oura", "filesystem", "wasm"]
+autotests = false
 
 [lib]
 crate-type = ["cdylib", "lib"]
+
+[[test]]
+name = "main"
+path = "tests/main.rs"
 
 [package.metadata.docs.rs]
 default-target = "wasm32-wasip2"
@@ -22,6 +27,12 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 strum = { workspace = true }
 time = { workspace = true, features = ["formatting"] }
+
+[dev-dependencies]
+omnifs-engine = { workspace = true }
+omnifs-itest = { path = "../../crates/omnifs-itest" }
+omnifs-wit = { workspace = true, features = ["host-bindings"] }
+serde_json = { workspace = true }
 
 [lints.rust]
 unsafe_code = "allow"

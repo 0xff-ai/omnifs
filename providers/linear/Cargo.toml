@@ -8,9 +8,14 @@ homepage.workspace = true
 description = "omnifs provider for browsing Linear teams, issues, and projects"
 categories = ["filesystem", "wasm"]
 keywords = ["omnifs", "linear", "filesystem", "wasm"]
+autotests = false
 
 [lib]
 crate-type = ["cdylib", "lib"]
+
+[[test]]
+name = "main"
+path = "tests/main.rs"
 
 [package.metadata.docs.rs]
 default-target = "wasm32-wasip2"
@@ -22,6 +27,10 @@ omnifs-sdk = { workspace = true }
 hashbrown = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["raw_value"] }
+
+[dev-dependencies]
+omnifs-itest = { path = "../../crates/omnifs-itest" }
+
 [lints.rust]
 unsafe_code = "allow"
 

@@ -8,9 +8,14 @@ homepage.workspace = true
 description = "omnifs provider for DNS record browsing via DNS-over-HTTPS"
 categories = ["filesystem", "wasm", "network-programming"]
 keywords = ["omnifs", "dns", "doh", "filesystem", "wasm"]
+autotests = false
 
 [lib]
 crate-type = ["cdylib", "lib"]
+
+[[test]]
+name = "main"
+path = "tests/main.rs"
 
 [package.metadata.docs.rs]
 default-target = "wasm32-wasip2"
@@ -21,6 +26,16 @@ base64 = "0.22"
 omnifs-sdk = { workspace = true }
 serde = { workspace = true }
 hickory-proto = "0.26"
+
+[dev-dependencies]
+base64 = "0.22"
+hickory-proto = "0.26"
+omnifs-core = { workspace = true }
+omnifs-engine = { workspace = true }
+omnifs-itest = { path = "../../crates/omnifs-itest" }
+omnifs-wit = { workspace = true, features = ["host-bindings"] }
+tokio = { workspace = true }
+
 [lints.rust]
 unsafe_code = "allow"
 

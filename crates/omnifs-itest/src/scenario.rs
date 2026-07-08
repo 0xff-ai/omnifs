@@ -30,9 +30,10 @@ use crate::{CalloutSetup, RuntimeHarness};
 pub struct Scenario {
     /// Kebab-case; becomes the tape filename and the snapshot-name prefix.
     pub name: &'static str,
-    /// The provider test directory (e.g. `"github"`). Tapes and snapshots live
-    /// under `tests/<dir>/`, next to the scenario's `#[test]` fns.
-    pub dir: &'static str,
+    /// The provider crate's manifest directory, set from the scenario file's own
+    /// `env!("CARGO_MANIFEST_DIR")`. Tapes and snapshots live under
+    /// `<manifest_dir>/tests/{tapes,snapshots}/`.
+    pub manifest_dir: &'static str,
     /// Mount config JSON, the same shape the harness takes today.
     pub config: &'static str,
     /// `None` for unauthenticated providers (dns, web, arxiv public APIs).
@@ -647,30 +648,23 @@ fn sanitize(input: &str) -> String {
 
 // --- paths and settings ---
 
-fn manifest_dir() -> &'static StdPath {
-    StdPath::new(env!("CARGO_MANIFEST_DIR"))
-}
-
 fn tape_path(scenario: &Scenario) -> PathBuf {
-    manifest_dir()
+    StdPath::new(scenario.manifest_dir)
         .join("tests")
-        .join(scenario.dir)
         .join("tapes")
         .join(format!("{}.jsonl", scenario.name))
 }
 
 fn sidecar_dir(scenario: &Scenario) -> PathBuf {
-    manifest_dir()
+    StdPath::new(scenario.manifest_dir)
         .join("tests")
-        .join(scenario.dir)
         .join("tapes")
         .join("blobs")
 }
 
 fn snapshots_dir(scenario: &Scenario) -> PathBuf {
-    manifest_dir()
+    StdPath::new(scenario.manifest_dir)
         .join("tests")
-        .join(scenario.dir)
         .join("snapshots")
 }
 

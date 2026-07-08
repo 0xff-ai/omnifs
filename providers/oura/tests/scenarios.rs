@@ -112,7 +112,7 @@ fn oura_rules() -> TapeRules {
 fn day_file_read() {
     run(&Scenario {
         name: "day-file-read",
-        dir: "oura",
+        manifest_dir: env!("CARGO_MANIFEST_DIR"),
         config: OURA_CONFIG,
         auth: Some(RecordAuth {
             token_env: "OMNIFS_RECORD_OURA_TOKEN",
@@ -153,7 +153,7 @@ fn day_file_read() {
 fn listing() {
     run(&Scenario {
         name: "listing",
-        dir: "oura",
+        manifest_dir: env!("CARGO_MANIFEST_DIR"),
         config: OURA_CONFIG,
         auth: Some(RecordAuth {
             token_env: "OMNIFS_RECORD_OURA_TOKEN",

@@ -19,6 +19,8 @@ Provider runtime changes must validate both binding surfaces separately: `omnifs
 
 Provider component validation must enable the component-model async validation features used by provider exports.
 
+Provider behavior is verified host-driven through the engine as scenario replay tests. Provider-specific scenarios live beside each provider under `providers/<p>/tests/`, not as guest-side `#[cfg(test)]` unit modules. Provider crates must stay clippy-clean under host `--all-targets`, and their scenario replay tests run as part of the host test lane.
+
 ### Generated OpenAPI and schemas
 
 OpenAPI is generated from daemon implementation, and provider manifest schema is generated from provider model types. Keep generated artifacts synchronized with code.
@@ -81,6 +83,7 @@ CI builds and pushes the frontend image per architecture in the PR lane (`fronte
 - `crates/omnifs-api/openapi/daemon.json`
 - `crates/omnifs-workspace/schema/omnifs.provider.schema.json`
 - `crates/omnifs-itest/src/lib.rs`
+- `providers/<p>/tests/`
 - `crates/omnifs-cli/src/provider_bundle.rs`
 - `Dockerfile`
 - `scripts/ci/common.sh`

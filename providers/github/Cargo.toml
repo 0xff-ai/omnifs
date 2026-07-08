@@ -8,9 +8,14 @@ homepage.workspace = true
 description = "omnifs provider for browsing GitHub repositories, issues, and pull requests"
 categories = ["filesystem", "wasm"]
 keywords = ["omnifs", "github", "filesystem", "wasm", "git"]
+autotests = false
 
 [lib]
 crate-type = ["cdylib", "lib"]
+
+[[test]]
+name = "main"
+path = "tests/main.rs"
 
 [package.metadata.docs.rs]
 default-target = "wasm32-wasip2"
@@ -24,6 +29,13 @@ http = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 rc-zip-sync = { version = "4", default-features = false, features = ["deflate"] }
+
+[dev-dependencies]
+omnifs-core = { workspace = true }
+omnifs-engine = { workspace = true }
+omnifs-itest = { path = "../../crates/omnifs-itest" }
+omnifs-wit = { workspace = true, features = ["host-bindings"] }
+tokio = { workspace = true }
 
 [lints.rust]
 unsafe_code = "allow"

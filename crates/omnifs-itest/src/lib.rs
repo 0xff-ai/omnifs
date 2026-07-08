@@ -467,8 +467,43 @@ pub fn provider_artifact_dir() -> PathBuf {
         .join("release")
 }
 
+fn provider_store_bundle_dir() -> PathBuf {
+    workspace_root()
+        .join("target")
+        .join("omnifs-provider-store")
+}
+
+fn provider_store_wasm_path(provider_name: &str) -> Option<PathBuf> {
+    let store_dir = provider_store_bundle_dir();
+    if !store_dir.join("index.json").exists() {
+        return None;
+    }
+
+    let store = ProviderStore::new(&store_dir);
+    let index = store.read_index().unwrap_or_else(|error| {
+        panic!(
+            "read provider store index at {}: {error}",
+            store_dir.display()
+        )
+    });
+    let entry = index
+        .providers
+        .iter()
+        .find(|entry| entry.file == provider_name)?;
+    let path = store.artifact_path(&entry.id);
+    assert!(
+        path.exists(),
+        "provider store entry for {provider_name} points at missing artifact {}",
+        path.display()
+    );
+    Some(path)
+}
+
 pub fn provider_wasm_path(provider_name: &str) -> PathBuf {
     ensure_providers_built();
+    if let Some(path) = provider_store_wasm_path(provider_name) {
+        return path;
+    }
     let path = provider_artifact_dir().join(provider_name);
     assert!(
         path.exists(),

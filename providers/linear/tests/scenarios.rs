@@ -127,7 +127,7 @@ const LINEAR_RULES: TapeRules = TapeRules {
 fn team_browse() {
     run(&Scenario {
         name: "team-browse",
-        dir: "linear",
+        manifest_dir: env!("CARGO_MANIFEST_DIR"),
         config: LINEAR_CONFIG,
         auth: Some(RecordAuth {
             token_env: "OMNIFS_RECORD_LINEAR_TOKEN",
@@ -170,7 +170,7 @@ fn team_browse() {
 fn issue_read() {
     run(&Scenario {
         name: "issue-read",
-        dir: "linear",
+        manifest_dir: env!("CARGO_MANIFEST_DIR"),
         config: LINEAR_CONFIG,
         auth: Some(RecordAuth {
             token_env: "OMNIFS_RECORD_LINEAR_TOKEN",
@@ -207,7 +207,7 @@ fn issue_read() {
 fn revalidation() {
     run(&Scenario {
         name: "revalidation",
-        dir: "linear",
+        manifest_dir: env!("CARGO_MANIFEST_DIR"),
         config: LINEAR_CONFIG,
         auth: Some(RecordAuth {
             token_env: "OMNIFS_RECORD_LINEAR_TOKEN",

@@ -58,7 +58,7 @@ const KUBERNETES_CONFIG: &str = r#"
 fn cluster_browse() {
     run(&Scenario {
         name: "cluster-browse",
-        dir: "kubernetes",
+        manifest_dir: env!("CARGO_MANIFEST_DIR"),
         config: KUBERNETES_CONFIG,
         auth: None,
         rules: TapeRules::default(),
@@ -85,7 +85,7 @@ fn cluster_browse() {
 fn object_files() {
     run(&Scenario {
         name: "object-files",
-        dir: "kubernetes",
+        manifest_dir: env!("CARGO_MANIFEST_DIR"),
         config: KUBERNETES_CONFIG,
         auth: None,
         rules: TapeRules::default(),

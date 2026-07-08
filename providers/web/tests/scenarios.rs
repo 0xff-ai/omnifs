@@ -42,7 +42,7 @@ const WEB_CONFIG: &str = r#"
 fn read_markdown() {
     run(&Scenario {
         name: "read-markdown",
-        dir: "web",
+        manifest_dir: env!("CARGO_MANIFEST_DIR"),
         config: WEB_CONFIG,
         auth: None,
         rules: TapeRules::default(),
@@ -62,7 +62,7 @@ fn read_markdown() {
 fn read_raw() {
     run(&Scenario {
         name: "read-raw",
-        dir: "web",
+        manifest_dir: env!("CARGO_MANIFEST_DIR"),
         config: WEB_CONFIG,
         auth: None,
         rules: TapeRules::default(),

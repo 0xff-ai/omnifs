@@ -46,7 +46,7 @@ const DNS_CONFIG: &str = r#"
 fn routing() {
     run(&Scenario {
         name: "routing",
-        dir: "dns",
+        manifest_dir: env!("CARGO_MANIFEST_DIR"),
         config: DNS_CONFIG,
         auth: None,
         rules: TapeRules::default(),
@@ -127,7 +127,7 @@ fn routing() {
 fn records() {
     run(&Scenario {
         name: "records",
-        dir: "dns",
+        manifest_dir: env!("CARGO_MANIFEST_DIR"),
         config: DNS_CONFIG,
         auth: None,
         rules: TapeRules::default(),

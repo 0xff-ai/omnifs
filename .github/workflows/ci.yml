@@ -199,7 +199,6 @@ jobs:
           mkdir -p dist/host-tests
           just host clippy
           cargo nextest archive --profile ci --workspace \
-            --exclude 'omnifs-provider-*' \
             --exclude test-provider \
             --exclude omnifs-embed-metadata \
             --archive-file dist/host-tests/host-tests.tar.zst

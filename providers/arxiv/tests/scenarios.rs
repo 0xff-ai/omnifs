@@ -37,7 +37,7 @@ const ARXIV_CONFIG: &str = r#"
 fn paper_read() {
     run(&Scenario {
         name: "paper-read",
-        dir: "arxiv",
+        manifest_dir: env!("CARGO_MANIFEST_DIR"),
         config: ARXIV_CONFIG,
         auth: None,
         rules: TapeRules::default(),
@@ -60,7 +60,7 @@ fn paper_read() {
 fn attach_symmetry() {
     run(&Scenario {
         name: "attach-symmetry",
-        dir: "arxiv",
+        manifest_dir: env!("CARGO_MANIFEST_DIR"),
         config: ARXIV_CONFIG,
         auth: None,
         rules: TapeRules::default(),
@@ -80,7 +80,7 @@ fn attach_symmetry() {
 fn old_style_paper() {
     run(&Scenario {
         name: "old-style-paper",
-        dir: "arxiv",
+        manifest_dir: env!("CARGO_MANIFEST_DIR"),
         config: ARXIV_CONFIG,
         auth: None,
         rules: TapeRules::default(),

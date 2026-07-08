@@ -990,19 +990,24 @@ pub(crate) fn provider_impl(args: &ProviderArgs, input: ItemImpl) -> syn::Result
     let notify = generate_notify(&type_name, state_type, args.timer.as_ref());
 
     Ok(quote! {
+        #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
         struct #type_name;
         #[doc(hidden)]
         pub(crate) type __OmnifsProviderState = #state_type;
 
         #state_management
 
+        #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
         impl #type_name {
             #(#methods)*
         }
 
         #provider_metadata
+        #[cfg(target_arch = "wasm32")]
         #lifecycle
+        #[cfg(target_arch = "wasm32")]
         #namespace
+        #[cfg(target_arch = "wasm32")]
         #notify
 
         #[cfg(target_arch = "wasm32")]

@@ -54,7 +54,7 @@ fn seed_repo_browse_cache(harness: &RuntimeHarness) {
 fn repo_browse() {
     run(&Scenario {
         name: "repo-browse",
-        dir: "github",
+        manifest_dir: env!("CARGO_MANIFEST_DIR"),
         config: GITHUB_CONFIG,
         auth: Some(RecordAuth {
             token_env: "OMNIFS_RECORD_GITHUB_TOKEN",
@@ -82,7 +82,7 @@ fn repo_browse() {
 fn revalidation() {
     run(&Scenario {
         name: "revalidation",
-        dir: "github",
+        manifest_dir: env!("CARGO_MANIFEST_DIR"),
         config: GITHUB_CONFIG,
         auth: Some(RecordAuth {
             token_env: "OMNIFS_RECORD_GITHUB_TOKEN",
@@ -109,7 +109,7 @@ fn revalidation() {
 fn actions_runs() {
     run(&Scenario {
         name: "actions-runs",
-        dir: "github",
+        manifest_dir: env!("CARGO_MANIFEST_DIR"),
         config: GITHUB_CONFIG,
         auth: Some(RecordAuth {
             token_env: "OMNIFS_RECORD_GITHUB_TOKEN",
@@ -147,7 +147,7 @@ fn actions_runs() {
 fn pr_diff_and_files() {
     run(&Scenario {
         name: "pr-diff-and-files",
-        dir: "github",
+        manifest_dir: env!("CARGO_MANIFEST_DIR"),
         config: GITHUB_CONFIG,
         auth: Some(RecordAuth {
             token_env: "OMNIFS_RECORD_GITHUB_TOKEN",

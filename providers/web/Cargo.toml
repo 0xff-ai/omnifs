@@ -8,9 +8,14 @@ homepage.workspace = true
 description = "omnifs provider for projecting allowed web pages as Markdown and raw files"
 categories = ["filesystem", "wasm", "web-programming"]
 keywords = ["omnifs", "web", "readability", "filesystem", "wasm"]
+autotests = false
 
 [lib]
 crate-type = ["cdylib", "lib"]
+
+[[test]]
+name = "main"
+path = "tests/main.rs"
 
 [package.metadata.docs.rs]
 default-target = "wasm32-wasip2"
@@ -20,6 +25,13 @@ targets = []
 dom_smoothie = "0.18.0"
 omnifs-sdk = { workspace = true }
 serde = { workspace = true }
+
+[dev-dependencies]
+omnifs-core = { workspace = true }
+omnifs-engine = { workspace = true }
+omnifs-itest = { path = "../../crates/omnifs-itest" }
+omnifs-wit = { workspace = true, features = ["host-bindings"] }
+tokio = { workspace = true }
 
 [lints.rust]
 unsafe_code = "allow"

@@ -6,9 +6,14 @@ description = "omnifs provider for browsing a Kubernetes cluster (read-only)"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/0xff-ai/omnifs"
 homepage = "https://github.com/0xff-ai/omnifs"
+autotests = false
 
 [lib]
 crate-type = ["cdylib", "lib"]
+
+[[test]]
+name = "main"
+path = "tests/main.rs"
 
 [dependencies]
 omnifs-sdk = { workspace = true }
@@ -19,6 +24,10 @@ k8s-openapi = { version = "0.27.1", default-features = false, features = ["v1_35
 # Pure-Rust YAML (via `unsafe-libyaml`, no C); builds for wasm32-wasip2.
 # Used to render manifest/status leaves as YAML from the API server's JSON.
 serde_yaml = "0.9"
+
+[dev-dependencies]
+omnifs-itest = { path = "../../crates/omnifs-itest" }
+omnifs-wit = { workspace = true, features = ["host-bindings"] }
 
 [lints.rust]
 unsafe_code = "allow"

@@ -3296,7 +3296,10 @@ dependencies = [
 name = "omnifs-provider-arxiv"
 version = "0.2.1"
 dependencies = [
+ "omnifs-engine",
+ "omnifs-itest",
  "omnifs-sdk",
+ "omnifs-wit",
  "percent-encoding",
  "quick-xml",
  "serde",
@@ -3324,8 +3327,13 @@ version = "0.2.1"
 dependencies = [
  "base64",
  "hickory-proto",
+ "omnifs-core",
+ "omnifs-engine",
+ "omnifs-itest",
  "omnifs-sdk",
+ "omnifs-wit",
  "serde",
+ "tokio",
 ]
 
 [[package]]
@@ -3334,7 +3342,10 @@ version = "0.2.1"
 dependencies = [
  "bollard-stubs",
  "hashbrown 0.15.5",
+ "omnifs-engine",
+ "omnifs-itest",
  "omnifs-sdk",
+ "omnifs-wit",
  "serde",
  "serde_json",
 ]
@@ -3346,10 +3357,14 @@ dependencies = [
  "hashbrown 0.15.5",
  "http",
  "omnifs-core",
+ "omnifs-engine",
+ "omnifs-itest",
  "omnifs-sdk",
+ "omnifs-wit",
  "rc-zip-sync",
  "serde",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -3358,7 +3373,9 @@ version = "0.2.1"
 dependencies = [
  "hashbrown 0.15.5",
  "k8s-openapi",
+ "omnifs-itest",
  "omnifs-sdk",
+ "omnifs-wit",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -3370,6 +3387,7 @@ version = "0.2.1"
 dependencies = [
  "hashbrown 0.15.5",
  "omnifs-core",
+ "omnifs-itest",
  "omnifs-sdk",
  "serde",
  "serde_json",
@@ -3379,7 +3397,10 @@ dependencies = [
 name = "omnifs-provider-oura"
 version = "0.2.1"
 dependencies = [
+ "omnifs-engine",
+ "omnifs-itest",
  "omnifs-sdk",
+ "omnifs-wit",
  "serde",
  "serde_json",
  "strum 0.27.2",
@@ -3391,8 +3412,13 @@ name = "omnifs-provider-web"
 version = "0.2.1"
 dependencies = [
  "dom_smoothie",
+ "omnifs-core",
+ "omnifs-engine",
+ "omnifs-itest",
  "omnifs-sdk",
+ "omnifs-wit",
  "serde",
+ "tokio",
 ]
 
 [[package]]

@@ -81,9 +81,9 @@ Allowed, but never as a side effect. Surface the tradeoff and get sign-off in th
 - `crates/omnifs-mtab`: `/proc/mounts` parsing, NFS mount state files, and shared platform unmount command construction.
 - `crates/omnifs-daemon`: control server, app context, frontend startup, and daemon runtime.
 - `crates/omnifs-cli`: setup, lifecycle, auth commands, dev sessions, and control-plane UX.
-- `crates/omnifs-itest`: host-driven provider and tree conformance tests.
+- `crates/omnifs-itest`: host-driven cross-provider suites, including `tree_conformance`, `pagination_exhaustive`, `live_growth`, `frontend_matrix`, `multi_frontend`, `wire_*`, `control_plane`, and `db`.
 - `scripts/ci/*` and `just/*.just`: maintainer command surface, CI orchestration, runtime image assembly, and generated-artifact checks.
-- `providers/*`: product providers. Read `providers/DESIGN.md` and `skills/omnifs-provider-sdk/SKILL.md` before changing provider shape.
+- `providers/*`: product providers and their host-driven scenario replay tests under `providers/<p>/tests/`. Read `providers/DESIGN.md` and `skills/omnifs-provider-sdk/SKILL.md` before changing provider shape.
 
 ## Vocabulary
 
@@ -121,6 +121,7 @@ Allowed, but never as a side effect. Surface the tradeoff and get sign-off in th
 - The daemon runs on the host, not in a container: `omnifs status`, `omnifs down`, and the daemon log (`~/.omnifs-dev/cache/daemon.log`) all work directly, no `docker exec` needed. The frontend container is discoverable by its `ai.0xff.omnifs.home` label (`docker ps --filter label=ai.0xff.omnifs.home=~/.omnifs-dev`); reach its mount with `docker exec -it -w /omnifs <name> /bin/sh` (it ships no zsh) and tear it down with `omnifs frontend down`.
 - `Dockerfile`'s `frontend-dev` stage is the contributor image path for `just dev` (the same target `just frontend-image` builds). There is no daemon-in-a-container image or stage: the daemon only ever runs host-native. The frontend image consumes the host-built provider-store bundle from `target/omnifs-provider-store` instead of compiling providers inside the image. Release frontend image assembly uses `scripts/ci/build-frontend-image.sh`; release CLI binaries embed the provider bundle and unpack it into `OMNIFS_HOME/providers`, and default their frontend image to the pinned `ghcr.io/0xff-ai/omnifs-frontend:<version>` tag, whereas a locally built binary defaults to the never-pulled `omnifs-frontend:dev` image.
 - A provider is one `#[omnifs_sdk::provider]` impl with synchronous `fn start` registering routes on a `Router`. `r.object::<O>` and `r.file_object::<O>` bind objects; `r.alias` mounts the same object at another template; `r.dir`, `r.file`, and `r.treeref` are the path-oriented face for non-object routes.
+- Provider scenario tests live in `providers/<p>/tests/` and replay through `omnifs-itest::scenario` against the engine. Cross-provider suites stay in `crates/omnifs-itest/tests/`: `tree_conformance`, `pagination_exhaustive`, `live_growth`, `frontend_matrix`, `multi_frontend`, `wire_*`, `control_plane`, and `db`.
 - Provider namespace and notify exports are async component functions. SDK callout futures await host imports directly; the host uses Wasmtime component async with `run_concurrent` so one provider instance can have multiple filesystem operations in flight.
 
 ## Product contract
