@@ -1,7 +1,7 @@
 //! arXiv provider route-test helpers.
 
 use omnifs_itest::RuntimeHarness;
-use omnifs_wit::provider::types::{Callout, Effects, LogicalId};
+use omnifs_wit::provider::types::{Effects, LogicalId};
 
 pub use omnifs_itest::TestOpExt;
 
@@ -31,16 +31,13 @@ pub fn canonical_id_string(id: &LogicalId) -> String {
     out
 }
 
+/// The canonical logical id of the first emitted canonical store, rendered as
+/// `kind|name=value...`. Scenario snapshots render canonical view-leaf paths and
+/// content shas but not the logical id, so identity assertions stay hand
+/// written on this helper.
 pub fn first_canonical_id(effects: &Effects) -> Option<String> {
     effects
         .canonical
         .first()
         .map(|store| canonical_id_string(&store.id))
-}
-
-pub fn count_fetch_callouts(ops: &[&omnifs_engine::test_support::TestOp<'_>]) -> usize {
-    ops.iter()
-        .flat_map(|op| op.callouts().iter())
-        .filter(|callout| matches!(callout, Callout::Fetch(_)))
-        .count()
 }

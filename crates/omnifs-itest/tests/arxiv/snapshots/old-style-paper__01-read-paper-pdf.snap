@@ -1,0 +1,14 @@
+---
+source: crates/omnifs-itest/src/scenario.rs
+expression: trace.clone()
+---
+## step 1: read /papers/hep-th%2F9711200/v1/paper.pdf
+attrs: stable - 226806
+bytes (226806):
+sha256:a8e40f9a46a684739e24a423282d7c686c14a05e87fd9c81a9bae9b340efe33c (226806 bytes)
+canonical:
+  (none)
+fs:
+  (none)
+invalidations:
+  (none)

@@ -1,0 +1,49 @@
+---
+source: crates/omnifs-itest/src/scenario.rs
+expression: trace.clone()
+---
+## step 1: read /papers/0704.0001/@latest/paper.json
+attrs: dynamic - 1827
+bytes (1827):
+{
+  "abstract": "A fully differential calculation in perturbative quantum chromodynamics is presented for the production of massive photon pairs at hadron colliders. All next-to-leading order perturbative contributions from quark-antiquark, gluon-(anti)quark, and gluon-gluon subprocesses are included, as well as all-orders resummation of initial-state gluon radiation valid at next-to-next-to-leading logarithmic accuracy. The region of phase space is specified in which the calculation is most reliable. Good agreement is demonstrated with data from the Fermilab Tevatron, and predictions are made for more detailed tests with CDF and DO data. Predictions are shown for distributions of diphoton pairs produced at the energy of the Large Hadron Collider (LHC). Distributions of the diphoton pairs from the decay of a Higgs boson are contrasted with those produced from QCD processes at the LHC, showing that enhanced sensitivity to the signal can be obtained with judicious selection of events.",
+  "abstract_url": "https://arxiv.org/abs/0704.0001",
+  "authors": [
+    "C. Balázs",
+    "E. L. Berger",
+    "P. M. Nadolsky",
+    "C. -P. Yuan"
+  ],
+  "categories": [
+    "hep-ph"
+  ],
+  "comment": [
+    "37 pages, 15 figures; published version"
+  ],
+  "current_version": "v2",
+  "doi": [
+    "10.1103/PhysRevD.76.013009"
+  ],
+  "doi_urls": [
+    "https://doi.org/10.1103/PhysRevD.76.013009"
+  ],
+  "journal_ref": [
+    "Phys.Rev.D76:013009,2007"
+  ],
+  "latest_version": "v2",
+  "pdf_url": "https://arxiv.org/pdf/0704.0001.pdf",
+  "primary_category": "hep-ph",
+  "published": "2007-04-02T19:18:42Z",
+  "raw_arxiv_id": "0704.0001",
+  "source_url": "https://arxiv.org/e-print/0704.0001",
+  "title": "Calculation of prompt diphoton production cross sections at Tevatron and LHC energies",
+  "updated": "2007-07-24T20:10:27Z"
+}
+
+canonical:
+  /papers/0704.0001/@latest/paper.atom  sha256:a8f0d9ac967c549e3e0c212484c5b00eaf08546d2f8f7d43b0aa7ccc8d4ef9b1
+  /papers/0704.0001/@latest/paper.json  sha256:a8f0d9ac967c549e3e0c212484c5b00eaf08546d2f8f7d43b0aa7ccc8d4ef9b1
+fs:
+  (none)
+invalidations:
+  (none)
