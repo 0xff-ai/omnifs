@@ -505,18 +505,31 @@ pub fn provider_wasm_path(provider_name: &str) -> PathBuf {
 /// artifact, with no wasm toolchain on the test runner).
 fn ensure_providers_built() {
     static BUILT: OnceLock<()> = OnceLock::new();
-    BUILT.get_or_init(|| {
-        if std::env::var_os("OMNIFS_ITEST_SKIP_PROVIDER_BUILD").is_some() {
-            return;
-        }
-        let status = Command::new("just")
-            .args(["providers", "build"])
+    if std::env::var_os("OMNIFS_ITEST_SKIP_PROVIDER_BUILD").is_some() {
+        return;
+    }
+    build_once(&BUILT, "just", &["providers", "build"]);
+}
+
+/// Run a workspace build command once per process, asserting success with a
+/// message that names the command to run by hand. `guard` makes every call after
+/// the first a sub-second no-op; pass a distinct `static OnceLock` per build
+/// target so each target builds exactly once.
+fn build_once(guard: &OnceLock<()>, program: &str, args: &[&str]) {
+    guard.get_or_init(|| {
+        let label = if args.is_empty() {
+            program.to_string()
+        } else {
+            format!("{program} {}", args.join(" "))
+        };
+        let status = Command::new(program)
+            .args(args)
             .current_dir(workspace_root())
             .status()
-            .expect("spawn `just providers build`");
+            .unwrap_or_else(|error| panic!("spawn `{label}`: {error}"));
         assert!(
             status.success(),
-            "`just providers build` failed; run it directly to see the error",
+            "`{label}` failed; run it directly to see the error",
         );
     });
 }

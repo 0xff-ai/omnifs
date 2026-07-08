@@ -84,17 +84,11 @@ pub fn omnifs_bin() -> PathBuf {
 /// `OMNIFS_BIN` to skip it.
 fn ensure_omnifs_built() {
     static BUILT: OnceLock<()> = OnceLock::new();
-    BUILT.get_or_init(|| {
-        let status = Command::new("cargo")
-            .args(["build", "-p", "omnifs-cli", "--bin", "omnifs"])
-            .current_dir(crate::workspace_root())
-            .status()
-            .expect("spawn `cargo build -p omnifs-cli`");
-        assert!(
-            status.success(),
-            "`cargo build -p omnifs-cli --bin omnifs` failed; run it directly to see the error",
-        );
-    });
+    crate::build_once(
+        &BUILT,
+        "cargo",
+        &["build", "-p", "omnifs-cli", "--bin", "omnifs"],
+    );
 }
 
 /// Install the test provider into the provider store under `providers_dir` and
