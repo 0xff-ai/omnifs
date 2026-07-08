@@ -1,0 +1,22 @@
+---
+source: crates/omnifs-itest/src/scenario.rs
+expression: trace.clone()
+---
+## step 7: list /example.com
+A  file  unknown  stable
+AAAA  file  unknown  stable
+CAA  file  unknown  stable
+CNAME  file  unknown  stable
+MX  file  unknown  stable
+NS  file  unknown  stable
+SOA  file  unknown  stable
+SRV  file  unknown  stable
+TXT  file  unknown  stable
+all  file  unknown  stable
+raw  file  unknown  stable
+canonical:
+  (none)
+fs:
+  (none)
+invalidations:
+  (none)

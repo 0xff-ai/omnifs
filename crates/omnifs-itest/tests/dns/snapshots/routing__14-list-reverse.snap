@@ -1,0 +1,11 @@
+---
+source: crates/omnifs-itest/src/scenario.rs
+expression: trace.clone()
+---
+## step 14: list /@cloudflare/reverse
+canonical:
+  (none)
+fs:
+  (none)
+invalidations:
+  (none)

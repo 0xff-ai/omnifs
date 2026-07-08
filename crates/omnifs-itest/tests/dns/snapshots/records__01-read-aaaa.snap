@@ -1,0 +1,16 @@
+---
+source: crates/omnifs-itest/src/scenario.rs
+expression: trace.clone()
+---
+## step 1: read /example.com/AAAA
+attrs: dynamic - 58
+bytes (58):
+AAAA	2606:4700:10::6814:179a
+AAAA	2606:4700:10::ac42:93f3
+
+canonical:
+  (none)
+fs:
+  (none)
+invalidations:
+  (none)

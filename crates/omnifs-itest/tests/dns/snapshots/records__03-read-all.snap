@@ -1,0 +1,24 @@
+---
+source: crates/omnifs-itest/src/scenario.rs
+expression: trace.clone()
+---
+## step 3: read /example.com/all
+attrs: dynamic - 293
+bytes (293):
+A	104.20.23.154
+A	172.66.147.243
+AAAA	2606:4700:10::6814:179a
+AAAA	2606:4700:10::ac42:93f3
+MX	0 .
+NS	hera.ns.cloudflare.com.
+NS	elliott.ns.cloudflare.com.
+TXT	v=spf1 -all
+TXT	_k2n1y4vw3qtb4skdx9e7dxt97qrmmq9
+SOA	elliott.ns.cloudflare.com. dns.cloudflare.com. 2407636105 10000 2400 604800 1800
+
+canonical:
+  (none)
+fs:
+  (none)
+invalidations:
+  (none)

@@ -1,0 +1,16 @@
+---
+source: crates/omnifs-itest/src/scenario.rs
+expression: trace.clone()
+---
+## step 0: list /
+@cloudflare  dir  -  -
+@google  dir  -  -
+README.md  file  unknown  stable
+resolvers  file  unknown  stable
+reverse  dir  -  -
+canonical:
+  (none)
+fs:
+  (none)
+invalidations:
+  (none)

@@ -1,0 +1,16 @@
+---
+source: crates/omnifs-itest/src/scenario.rs
+expression: trace.clone()
+---
+## step 4: read /@cloudflare/example.com/A
+attrs: dynamic - 33
+bytes (33):
+A	104.20.23.154
+A	172.66.147.243
+
+canonical:
+  (none)
+fs:
+  (none)
+invalidations:
+  (none)

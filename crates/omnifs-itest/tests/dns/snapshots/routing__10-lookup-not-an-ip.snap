@@ -1,0 +1,12 @@
+---
+source: crates/omnifs-itest/src/scenario.rs
+expression: trace.clone()
+---
+## step 10: lookup /reverse :: not-an-ip
+not-found
+canonical:
+  (none)
+fs:
+  (none)
+invalidations:
+  (none)

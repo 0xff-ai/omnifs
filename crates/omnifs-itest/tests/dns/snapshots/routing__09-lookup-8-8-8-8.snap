@@ -1,0 +1,12 @@
+---
+source: crates/omnifs-itest/src/scenario.rs
+expression: trace.clone()
+---
+## step 9: lookup /reverse :: 8.8.8.8
+entry: 8.8.8.8 file
+canonical:
+  (none)
+fs:
+  (none)
+invalidations:
+  (none)

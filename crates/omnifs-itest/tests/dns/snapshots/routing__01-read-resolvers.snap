@@ -1,0 +1,16 @@
+---
+source: crates/omnifs-itest/src/scenario.rs
+expression: trace.clone()
+---
+## step 1: read /resolvers
+attrs: stable - 127
+bytes (127):
+cloudflare	1.1.1.1,1.0.0.1	https://cloudflare-dns.com/dns-query
+google	8.8.8.8,8.8.4.4,dns.google	https://dns.google/dns-query
+
+canonical:
+  (none)
+fs:
+  (none)
+invalidations:
+  (none)

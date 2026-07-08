@@ -1,0 +1,22 @@
+---
+source: crates/omnifs-itest/src/scenario.rs
+expression: trace.clone()
+---
+## step 2: read /example.com/raw
+attrs: dynamic - 143
+bytes (143):
+;; QUESTION SECTION:
+;example.com.		IN	A
+
+;; ANSWER SECTION:
+example.com.		IN	A	104.20.23.154
+example.com.		IN	A	172.66.147.243
+
+;; RECORDS: 2
+
+canonical:
+  (none)
+fs:
+  (none)
+invalidations:
+  (none)
