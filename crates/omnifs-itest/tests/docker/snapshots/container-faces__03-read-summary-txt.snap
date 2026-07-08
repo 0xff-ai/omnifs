@@ -1,0 +1,19 @@
+---
+source: crates/omnifs-itest/src/scenario.rs
+expression: trace.clone()
+---
+## step 3: read /containers/by-name/omnifs-itest-docker-fixture/summary.txt
+attrs: dynamic - 101
+bytes (101):
+id     bca3b9668811
+name   omnifs-itest-docker-fixture
+image  alpine:3.20
+state  running
+status true
+
+canonical:
+  (none)
+fs:
+  /state  file dynamic - 8 inline
+invalidations:
+  (none)

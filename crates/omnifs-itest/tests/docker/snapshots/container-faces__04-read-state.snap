@@ -1,0 +1,15 @@
+---
+source: crates/omnifs-itest/src/scenario.rs
+expression: trace.clone()
+---
+## step 4: read /compose/omnifs-itest-fixture/services/web/containers/omnifs-itest-docker-fixture/state
+attrs: dynamic - 8
+bytes (8):
+running
+
+canonical:
+  (none)
+fs:
+  /summary.txt  file dynamic - 101 inline
+invalidations:
+  (none)
