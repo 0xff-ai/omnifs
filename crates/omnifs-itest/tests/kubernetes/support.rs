@@ -4,13 +4,11 @@
 //! `list`/`lookup`/`read` ops whose HTTP callouts are answered with canned
 //! Kubernetes API responses. No live cluster is needed.
 
-use omnifs_engine::test_support::TestOp;
 use omnifs_itest::RuntimeHarness;
-use omnifs_wit::provider::types::{
-    ByteSource, CalloutResult, Header, HttpResponse, ListChildrenResult, OpResult, ReadFileOutcome,
-};
+use omnifs_wit::provider::types::{CalloutResult, Header, HttpResponse, ListChildrenResult};
 
 pub use omnifs_itest::TestOpExt;
+pub use omnifs_itest::read_bytes;
 
 pub fn kube_harness() -> RuntimeHarness {
     RuntimeHarness::new(
@@ -146,18 +144,5 @@ pub fn sorted_entry_names(result: ListChildrenResult) -> Vec<String> {
             names
         },
         other => panic!("expected an entries listing, got {other:?}"),
-    }
-}
-
-/// The served bytes of a completed read, whether the terminal serves the
-/// canonical store (identity representations) or inline bytes (projections).
-pub fn read_bytes(op: &TestOp<'_>) -> Vec<u8> {
-    match op.result().unwrap() {
-        OpResult::ReadFile(ReadFileOutcome::Found(file)) => match &file.bytes {
-            ByteSource::Canonical => op.effects().unwrap().canonical[0].bytes.clone(),
-            ByteSource::Inline(bytes) => bytes.clone(),
-            other => panic!("expected canonical or inline read bytes, got {other:?}"),
-        },
-        other => panic!("expected a found read, got {other:?}"),
     }
 }

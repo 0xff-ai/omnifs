@@ -4,9 +4,10 @@ mod scenarios;
 mod support;
 
 use omnifs_engine::test_support::TestOp;
+use omnifs_itest::read_bytes;
 use omnifs_wit::provider::types::{
-    ByteSource, Callout, CalloutResult, Cursor, ErrorKind, HttpResponse, ListChildrenResult,
-    LookupChildResult, OpResult, ReadFileOutcome, Stability,
+    Callout, CalloutResult, Cursor, ErrorKind, HttpResponse, ListChildrenResult, LookupChildResult,
+    OpResult, ReadFileOutcome, Stability,
 };
 use support::{TestOpExt, arxiv_harness, canonical_id_string, first_canonical_id};
 
@@ -55,20 +56,6 @@ fn resume_blob(op: &mut TestOp<'_>, blob: u64) {
         },
     )])
     .unwrap();
-}
-
-fn read_file_bytes(op: &TestOp<'_>) -> Vec<u8> {
-    match op.result().unwrap() {
-        OpResult::ReadFile(ReadFileOutcome::Found(file)) => match &file.bytes {
-            ByteSource::Inline(bytes) => bytes.clone(),
-            ByteSource::Canonical => op.effects().unwrap().canonical.first().map_or_else(
-                || panic!("expected canonical bytes in effects"),
-                |store| store.bytes.clone(),
-            ),
-            other => panic!("expected inline or canonical file content, got {other:?}"),
-        },
-        other => panic!("expected found read, got {other:?}"),
-    }
 }
 
 // TODO(tape): projection snapshots render canonical view-leaf paths and content
@@ -309,7 +296,7 @@ mod adversarial {
             .read(&format!("/papers/{PAPER_ID}/@latest/paper.atom"))
             .unwrap();
         resume_paper_atom(&mut raw);
-        let raw_bytes = read_file_bytes(&raw);
+        let raw_bytes = read_bytes(&raw);
         assert_eq!(raw_bytes, SAMPLE_PAPER_ATOM);
 
         let md = harness

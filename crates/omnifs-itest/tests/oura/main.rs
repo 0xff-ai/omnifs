@@ -18,8 +18,8 @@ mod scenarios;
 
 use omnifs_itest::{RuntimeHarness, TestOpExt};
 use omnifs_wit::provider::types::{
-    ByteSource, CalloutResult, EntryKind, Header, HttpResponse, ListChildrenResult,
-    LookupChildResult, OpResult, ReadFileOutcome, Stability,
+    CalloutResult, EntryKind, Header, HttpResponse, ListChildrenResult, LookupChildResult,
+    OpResult, ReadFileOutcome, Stability,
 };
 use serde_json::{Value, json};
 
@@ -75,14 +75,10 @@ fn read_query_body(op: &omnifs_engine::test_support::TestOp<'_>) -> Vec<u8> {
         OpResult::ReadFile(ReadFileOutcome::Found(file)) => {
             assert_eq!(file.attrs.stability, Stability::Dynamic);
             assert_eq!(file.attrs.version_token.as_deref(), Some("\"v1\""));
-            match &file.bytes {
-                ByteSource::Canonical => op.effects().unwrap().canonical[0].bytes.clone(),
-                ByteSource::Inline(bytes) => bytes.clone(),
-                other => panic!("expected canonical or inline read, got {other:?}"),
-            }
         },
         other => panic!("expected found read, got {other:?}"),
     }
+    omnifs_itest::read_bytes(op)
 }
 
 fn read_json(op: &omnifs_engine::test_support::TestOp<'_>) -> Value {

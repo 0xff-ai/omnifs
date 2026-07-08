@@ -406,6 +406,19 @@ pub fn into_inline(result: ReadFileResult) -> Vec<u8> {
     }
 }
 
+/// The served bytes of a completed read, whether the terminal serves the
+/// canonical store (identity representations) or inline bytes (projections).
+pub fn read_bytes(op: &TestOp<'_>) -> Vec<u8> {
+    match op.result().unwrap() {
+        OpResult::ReadFile(ReadFileOutcome::Found(file)) => match &file.bytes {
+            ByteSource::Canonical => op.effects().unwrap().canonical[0].bytes.clone(),
+            ByteSource::Inline(bytes) => bytes.clone(),
+            other => panic!("expected canonical or inline read bytes, got {other:?}"),
+        },
+        other => panic!("expected a found read, got {other:?}"),
+    }
+}
+
 pub fn provider_artifact_dir() -> PathBuf {
     workspace_root()
         .join("target")
