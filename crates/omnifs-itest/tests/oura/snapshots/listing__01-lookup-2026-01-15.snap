@@ -1,0 +1,12 @@
+---
+source: crates/omnifs-itest/src/scenario.rs
+expression: replayed
+---
+## step 1: lookup / :: 2026-01-15
+entry: 2026-01-15 dir
+canonical:
+  (none)
+fs:
+  (none)
+invalidations:
+  (none)

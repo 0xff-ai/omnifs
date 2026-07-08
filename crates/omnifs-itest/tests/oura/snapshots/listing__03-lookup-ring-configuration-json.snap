@@ -1,0 +1,12 @@
+---
+source: crates/omnifs-itest/src/scenario.rs
+expression: replayed
+---
+## step 3: lookup /2026-01-15 :: ring_configuration.json
+not-found
+canonical:
+  (none)
+fs:
+  (none)
+invalidations:
+  (none)

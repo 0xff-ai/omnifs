@@ -1,0 +1,105 @@
+---
+source: crates/omnifs-itest/src/scenario.rs
+expression: replayed
+---
+## step 0: read /2026-01-15/daily_sleep.json
+attrs: dynamic - unknown
+bytes (160):
+{"data":[{"contributors":"<redacted:8f0489f0>","day":"2026-01-15","id":"<volatile>","score":"<redacted:49d180ec>","timestamp":"2026-01-15T00:00:00.000+00:00"}]}
+canonical:
+  /2025-12-31/daily_sleep.json  sha256:3860816f6db706a633a62f61cf240dd49c2938faf33f558a366103c659b328d8
+  /2026-01-01/daily_sleep.json  sha256:770a5d2cb3cd3c08b8ca4ac16be2f6edc336ef0bafb0f9368ab102c09dec42e6
+  /2026-01-02/daily_sleep.json  sha256:8e2b94f3ffbd7417a45b9cd11e08ea127f13192a94fb541810a423fc9335b0e4
+  /2026-01-03/daily_sleep.json  sha256:8cca39a36fadfd949ca1aed845376d088af3c1c7f6d5223c6183e500f422d0cd
+  /2026-01-04/daily_sleep.json  sha256:6de306bca9880daacf962067b84c7d9d812fd64bcded2f2765962fd1f8ad79e4
+  /2026-01-05/daily_sleep.json  sha256:b5cc5f633064a675e2db31ce7bd66421ffd16bdc886f40e0f9a31b7674a97fa3
+  /2026-01-06/daily_sleep.json  sha256:0e05a31e7730d77622620ecbfb2029aab270f5ea3912a0da3a5c88c741c299eb
+  /2026-01-07/daily_sleep.json  sha256:21d9a9e578e498c4d2faa0af64fda257df948c0320fc6aa2fad3df0dbdcb70aa
+  /2026-01-08/daily_sleep.json  sha256:b383d47b057064ec0cf91f48b056619b12be0d4acbb36c523474fe667ccf912c
+  /2026-01-09/daily_sleep.json  sha256:c9c5d0cb23a853aa68bcbabf9a18ec51f1e21ee0676b9ce4e4931e849e30ee8e
+  /2026-01-10/daily_sleep.json  sha256:9be8f009dd4b9189b8e59f3d2dd7ba70b782d59f42d187689260bfb41f09f6e5
+  /2026-01-11/daily_sleep.json  sha256:af4220a5ea27c6161df2082ef9b51a597460dd6d9bdda0ce45b099e0467b4666
+  /2026-01-12/daily_sleep.json  sha256:e63fff95ba2b7910dc39395fcd942540f38c52bfbe5a69612897a0b5e93bbf64
+  /2026-01-13/daily_sleep.json  sha256:e6bf4c286d6bce82e0f52f21f088c1c363f7627a35a073047a1e9b55075f7ae0
+  /2026-01-14/daily_sleep.json  sha256:e13dc5834ef7f9fca21da57b615521c3f03f296099f2197261bfbb825f95a0e9
+  /2026-01-15/daily_sleep.json  sha256:f1cc5f589a18c8096a5d50e1ee213eefdb7d16890743ae7153cbe95670cb7766
+  /2026-01-16/daily_sleep.json  sha256:a988cbfae2e68272a6e35e362c21eedc33aeb7e57f02ee1f6c1f003b6f15af94
+  /2026-01-17/daily_sleep.json  sha256:fe3211fe9dbcbb0684719800c4fea7b6446879886f00407f8f72cfe9e8d9eb0b
+  /2026-01-18/daily_sleep.json  sha256:71cd4a0aed606dd26e03ad96d5a038e76b77f13c4f6eed6badb54a433037a4d3
+  /2026-01-19/daily_sleep.json  sha256:d472c40cc7b60af7dcd747e31618f73eb8a687ddcf8a12a61752464b86a4356c
+  /2026-01-20/daily_sleep.json  sha256:a9db4def6bdb9e92f12c410515e44a55c829fdfa3743bb24a531cefb599e50f7
+  /2026-01-21/daily_sleep.json  sha256:b1d187617f510d0a25147f3b5d9cd78a458c0b28bd0a1e9458046c16251d09f5
+  /2026-01-22/daily_sleep.json  sha256:a6d07275249a04a74062c1998304b2ea8308aaf2651cd7f735f33b40d75d9ac8
+  /2026-01-23/daily_sleep.json  sha256:4292a50536e2ea0e545f55e6c7acf2aa133b6ed0bf22be4af8dbcf201a7bd825
+  /2026-01-24/daily_sleep.json  sha256:e2ed1a98a3baea3e92df04245abf1b07c98c7083d0c5ffa5e5149d89736e5f30
+  /2026-01-25/daily_sleep.json  sha256:ae2167401dec8bbdd88f30a14723d976f049c0f219930b7a834f25a3019d7467
+  /2026-01-26/daily_sleep.json  sha256:f5c998625d0065d7176e42a3dbb6d7c2e6ad28184b9fc6d776af457223e9f8d4
+  /2026-01-27/daily_sleep.json  sha256:b557582596a541d837ad36553774114b49b43ce01b5343fff713a3a7fef08a7b
+  /2026-01-28/daily_sleep.json  sha256:a9c38e313bbc618ae6fb671354699a936bc3a4caf758a59777a9ab4b0d0912de
+  /2026-01-29/daily_sleep.json  sha256:f468cde4c7611c8bfac33ea9bd94fb3a0ef5db5f5ede892a38883d8ca4dcab57
+  /2026-01-30/daily_sleep.json  sha256:43b8f49c7de67b07f7ac74083586e5411f24875caeb712a1dc14e58a9830caca
+fs:
+  /2025-12-31  dir(exhaustive=false)
+  /2025-12-31/daily_sleep.json  file dynamic - 160 deferred(full)
+  /2026-01-01  dir(exhaustive=false)
+  /2026-01-01/daily_sleep.json  file dynamic - 160 deferred(full)
+  /2026-01-02  dir(exhaustive=false)
+  /2026-01-02/daily_sleep.json  file dynamic - 160 deferred(full)
+  /2026-01-03  dir(exhaustive=false)
+  /2026-01-03/daily_sleep.json  file dynamic - 160 deferred(full)
+  /2026-01-04  dir(exhaustive=false)
+  /2026-01-04/daily_sleep.json  file dynamic - 160 deferred(full)
+  /2026-01-05  dir(exhaustive=false)
+  /2026-01-05/daily_sleep.json  file dynamic - 160 deferred(full)
+  /2026-01-06  dir(exhaustive=false)
+  /2026-01-06/daily_sleep.json  file dynamic - 160 deferred(full)
+  /2026-01-07  dir(exhaustive=false)
+  /2026-01-07/daily_sleep.json  file dynamic - 160 deferred(full)
+  /2026-01-08  dir(exhaustive=false)
+  /2026-01-08/daily_sleep.json  file dynamic - 160 deferred(full)
+  /2026-01-09  dir(exhaustive=false)
+  /2026-01-09/daily_sleep.json  file dynamic - 160 deferred(full)
+  /2026-01-10  dir(exhaustive=false)
+  /2026-01-10/daily_sleep.json  file dynamic - 160 deferred(full)
+  /2026-01-11  dir(exhaustive=false)
+  /2026-01-11/daily_sleep.json  file dynamic - 160 deferred(full)
+  /2026-01-12  dir(exhaustive=false)
+  /2026-01-12/daily_sleep.json  file dynamic - 160 deferred(full)
+  /2026-01-13  dir(exhaustive=false)
+  /2026-01-13/daily_sleep.json  file dynamic - 160 deferred(full)
+  /2026-01-14  dir(exhaustive=false)
+  /2026-01-14/daily_sleep.json  file dynamic - 160 deferred(full)
+  /2026-01-15  dir(exhaustive=false)
+  /2026-01-15/daily_sleep.json  file dynamic - 160 deferred(full)
+  /2026-01-16  dir(exhaustive=false)
+  /2026-01-16/daily_sleep.json  file dynamic - 160 deferred(full)
+  /2026-01-17  dir(exhaustive=false)
+  /2026-01-17/daily_sleep.json  file dynamic - 160 deferred(full)
+  /2026-01-18  dir(exhaustive=false)
+  /2026-01-18/daily_sleep.json  file dynamic - 160 deferred(full)
+  /2026-01-19  dir(exhaustive=false)
+  /2026-01-19/daily_sleep.json  file dynamic - 160 deferred(full)
+  /2026-01-20  dir(exhaustive=false)
+  /2026-01-20/daily_sleep.json  file dynamic - 160 deferred(full)
+  /2026-01-21  dir(exhaustive=false)
+  /2026-01-21/daily_sleep.json  file dynamic - 160 deferred(full)
+  /2026-01-22  dir(exhaustive=false)
+  /2026-01-22/daily_sleep.json  file dynamic - 160 deferred(full)
+  /2026-01-23  dir(exhaustive=false)
+  /2026-01-23/daily_sleep.json  file dynamic - 160 deferred(full)
+  /2026-01-24  dir(exhaustive=false)
+  /2026-01-24/daily_sleep.json  file dynamic - 160 deferred(full)
+  /2026-01-25  dir(exhaustive=false)
+  /2026-01-25/daily_sleep.json  file dynamic - 160 deferred(full)
+  /2026-01-26  dir(exhaustive=false)
+  /2026-01-26/daily_sleep.json  file dynamic - 160 deferred(full)
+  /2026-01-27  dir(exhaustive=false)
+  /2026-01-27/daily_sleep.json  file dynamic - 160 deferred(full)
+  /2026-01-28  dir(exhaustive=false)
+  /2026-01-28/daily_sleep.json  file dynamic - 160 deferred(full)
+  /2026-01-29  dir(exhaustive=false)
+  /2026-01-29/daily_sleep.json  file dynamic - 160 deferred(full)
+  /2026-01-30  dir(exhaustive=false)
+  /2026-01-30/daily_sleep.json  file dynamic - 160 deferred(full)
+invalidations:
+  (none)

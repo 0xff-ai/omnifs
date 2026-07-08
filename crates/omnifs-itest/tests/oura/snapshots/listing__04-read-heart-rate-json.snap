@@ -1,0 +1,105 @@
+---
+source: crates/omnifs-itest/src/scenario.rs
+expression: replayed
+---
+## step 4: read /2026-01-15/heart_rate.json
+attrs: dynamic - unknown
+bytes (11):
+{"data":[]}
+canonical:
+  /2025-12-31/heart_rate.json  sha256:f749089299311eeecbb2ae90e9d49b57b9fd4eff6ba36088a1ce9e9d11441db7
+  /2026-01-01/heart_rate.json  sha256:8fe32e407a1038ee38753b70e5374b3a46d6ae9d5f16cd5b73c53abaca8f5ed0
+  /2026-01-02/heart_rate.json  sha256:8fe32e407a1038ee38753b70e5374b3a46d6ae9d5f16cd5b73c53abaca8f5ed0
+  /2026-01-03/heart_rate.json  sha256:8fe32e407a1038ee38753b70e5374b3a46d6ae9d5f16cd5b73c53abaca8f5ed0
+  /2026-01-04/heart_rate.json  sha256:8fe32e407a1038ee38753b70e5374b3a46d6ae9d5f16cd5b73c53abaca8f5ed0
+  /2026-01-05/heart_rate.json  sha256:8fe32e407a1038ee38753b70e5374b3a46d6ae9d5f16cd5b73c53abaca8f5ed0
+  /2026-01-06/heart_rate.json  sha256:8fe32e407a1038ee38753b70e5374b3a46d6ae9d5f16cd5b73c53abaca8f5ed0
+  /2026-01-07/heart_rate.json  sha256:8fe32e407a1038ee38753b70e5374b3a46d6ae9d5f16cd5b73c53abaca8f5ed0
+  /2026-01-08/heart_rate.json  sha256:8fe32e407a1038ee38753b70e5374b3a46d6ae9d5f16cd5b73c53abaca8f5ed0
+  /2026-01-09/heart_rate.json  sha256:8fe32e407a1038ee38753b70e5374b3a46d6ae9d5f16cd5b73c53abaca8f5ed0
+  /2026-01-10/heart_rate.json  sha256:8fe32e407a1038ee38753b70e5374b3a46d6ae9d5f16cd5b73c53abaca8f5ed0
+  /2026-01-11/heart_rate.json  sha256:8fe32e407a1038ee38753b70e5374b3a46d6ae9d5f16cd5b73c53abaca8f5ed0
+  /2026-01-12/heart_rate.json  sha256:8fe32e407a1038ee38753b70e5374b3a46d6ae9d5f16cd5b73c53abaca8f5ed0
+  /2026-01-13/heart_rate.json  sha256:8fe32e407a1038ee38753b70e5374b3a46d6ae9d5f16cd5b73c53abaca8f5ed0
+  /2026-01-14/heart_rate.json  sha256:8fe32e407a1038ee38753b70e5374b3a46d6ae9d5f16cd5b73c53abaca8f5ed0
+  /2026-01-15/heart_rate.json  sha256:8fe32e407a1038ee38753b70e5374b3a46d6ae9d5f16cd5b73c53abaca8f5ed0
+  /2026-01-16/heart_rate.json  sha256:8fe32e407a1038ee38753b70e5374b3a46d6ae9d5f16cd5b73c53abaca8f5ed0
+  /2026-01-17/heart_rate.json  sha256:8fe32e407a1038ee38753b70e5374b3a46d6ae9d5f16cd5b73c53abaca8f5ed0
+  /2026-01-18/heart_rate.json  sha256:8fe32e407a1038ee38753b70e5374b3a46d6ae9d5f16cd5b73c53abaca8f5ed0
+  /2026-01-19/heart_rate.json  sha256:8fe32e407a1038ee38753b70e5374b3a46d6ae9d5f16cd5b73c53abaca8f5ed0
+  /2026-01-20/heart_rate.json  sha256:8fe32e407a1038ee38753b70e5374b3a46d6ae9d5f16cd5b73c53abaca8f5ed0
+  /2026-01-21/heart_rate.json  sha256:8fe32e407a1038ee38753b70e5374b3a46d6ae9d5f16cd5b73c53abaca8f5ed0
+  /2026-01-22/heart_rate.json  sha256:8fe32e407a1038ee38753b70e5374b3a46d6ae9d5f16cd5b73c53abaca8f5ed0
+  /2026-01-23/heart_rate.json  sha256:8fe32e407a1038ee38753b70e5374b3a46d6ae9d5f16cd5b73c53abaca8f5ed0
+  /2026-01-24/heart_rate.json  sha256:8fe32e407a1038ee38753b70e5374b3a46d6ae9d5f16cd5b73c53abaca8f5ed0
+  /2026-01-25/heart_rate.json  sha256:8fe32e407a1038ee38753b70e5374b3a46d6ae9d5f16cd5b73c53abaca8f5ed0
+  /2026-01-26/heart_rate.json  sha256:8fe32e407a1038ee38753b70e5374b3a46d6ae9d5f16cd5b73c53abaca8f5ed0
+  /2026-01-27/heart_rate.json  sha256:8fe32e407a1038ee38753b70e5374b3a46d6ae9d5f16cd5b73c53abaca8f5ed0
+  /2026-01-28/heart_rate.json  sha256:8fe32e407a1038ee38753b70e5374b3a46d6ae9d5f16cd5b73c53abaca8f5ed0
+  /2026-01-29/heart_rate.json  sha256:8fe32e407a1038ee38753b70e5374b3a46d6ae9d5f16cd5b73c53abaca8f5ed0
+  /2026-01-30/heart_rate.json  sha256:8fe32e407a1038ee38753b70e5374b3a46d6ae9d5f16cd5b73c53abaca8f5ed0
+fs:
+  /2025-12-31  dir(exhaustive=false)
+  /2025-12-31/heart_rate.json  file dynamic - 134010 deferred(full)
+  /2026-01-01  dir(exhaustive=false)
+  /2026-01-01/heart_rate.json  file dynamic - 11 deferred(full)
+  /2026-01-02  dir(exhaustive=false)
+  /2026-01-02/heart_rate.json  file dynamic - 11 deferred(full)
+  /2026-01-03  dir(exhaustive=false)
+  /2026-01-03/heart_rate.json  file dynamic - 11 deferred(full)
+  /2026-01-04  dir(exhaustive=false)
+  /2026-01-04/heart_rate.json  file dynamic - 11 deferred(full)
+  /2026-01-05  dir(exhaustive=false)
+  /2026-01-05/heart_rate.json  file dynamic - 11 deferred(full)
+  /2026-01-06  dir(exhaustive=false)
+  /2026-01-06/heart_rate.json  file dynamic - 11 deferred(full)
+  /2026-01-07  dir(exhaustive=false)
+  /2026-01-07/heart_rate.json  file dynamic - 11 deferred(full)
+  /2026-01-08  dir(exhaustive=false)
+  /2026-01-08/heart_rate.json  file dynamic - 11 deferred(full)
+  /2026-01-09  dir(exhaustive=false)
+  /2026-01-09/heart_rate.json  file dynamic - 11 deferred(full)
+  /2026-01-10  dir(exhaustive=false)
+  /2026-01-10/heart_rate.json  file dynamic - 11 deferred(full)
+  /2026-01-11  dir(exhaustive=false)
+  /2026-01-11/heart_rate.json  file dynamic - 11 deferred(full)
+  /2026-01-12  dir(exhaustive=false)
+  /2026-01-12/heart_rate.json  file dynamic - 11 deferred(full)
+  /2026-01-13  dir(exhaustive=false)
+  /2026-01-13/heart_rate.json  file dynamic - 11 deferred(full)
+  /2026-01-14  dir(exhaustive=false)
+  /2026-01-14/heart_rate.json  file dynamic - 11 deferred(full)
+  /2026-01-15  dir(exhaustive=false)
+  /2026-01-15/heart_rate.json  file dynamic - 11 deferred(full)
+  /2026-01-16  dir(exhaustive=false)
+  /2026-01-16/heart_rate.json  file dynamic - 11 deferred(full)
+  /2026-01-17  dir(exhaustive=false)
+  /2026-01-17/heart_rate.json  file dynamic - 11 deferred(full)
+  /2026-01-18  dir(exhaustive=false)
+  /2026-01-18/heart_rate.json  file dynamic - 11 deferred(full)
+  /2026-01-19  dir(exhaustive=false)
+  /2026-01-19/heart_rate.json  file dynamic - 11 deferred(full)
+  /2026-01-20  dir(exhaustive=false)
+  /2026-01-20/heart_rate.json  file dynamic - 11 deferred(full)
+  /2026-01-21  dir(exhaustive=false)
+  /2026-01-21/heart_rate.json  file dynamic - 11 deferred(full)
+  /2026-01-22  dir(exhaustive=false)
+  /2026-01-22/heart_rate.json  file dynamic - 11 deferred(full)
+  /2026-01-23  dir(exhaustive=false)
+  /2026-01-23/heart_rate.json  file dynamic - 11 deferred(full)
+  /2026-01-24  dir(exhaustive=false)
+  /2026-01-24/heart_rate.json  file dynamic - 11 deferred(full)
+  /2026-01-25  dir(exhaustive=false)
+  /2026-01-25/heart_rate.json  file dynamic - 11 deferred(full)
+  /2026-01-26  dir(exhaustive=false)
+  /2026-01-26/heart_rate.json  file dynamic - 11 deferred(full)
+  /2026-01-27  dir(exhaustive=false)
+  /2026-01-27/heart_rate.json  file dynamic - 11 deferred(full)
+  /2026-01-28  dir(exhaustive=false)
+  /2026-01-28/heart_rate.json  file dynamic - 11 deferred(full)
+  /2026-01-29  dir(exhaustive=false)
+  /2026-01-29/heart_rate.json  file dynamic - 11 deferred(full)
+  /2026-01-30  dir(exhaustive=false)
+  /2026-01-30/heart_rate.json  file dynamic - 11 deferred(full)
+invalidations:
+  (none)

@@ -1,0 +1,28 @@
+---
+source: crates/omnifs-itest/src/scenario.rs
+expression: replayed
+---
+## step 2: list /2026-01-15
+daily_activity.json  file  unknown  stable
+daily_cardiovascular_age.json  file  unknown  stable
+daily_readiness.json  file  unknown  stable
+daily_resilience.json  file  unknown  stable
+daily_sleep.json  file  unknown  stable
+daily_spo2.json  file  unknown  stable
+daily_stress.json  file  unknown  stable
+enhanced_tag.json  file  unknown  stable
+heart_rate.json  file  unknown  stable
+rest_mode_period.json  file  unknown  stable
+ring_battery_level.json  file  unknown  stable
+session.json  file  unknown  stable
+sleep.json  file  unknown  stable
+sleep_time.json  file  unknown  stable
+tag.json  file  unknown  stable
+vo2_max.json  file  unknown  stable
+workout.json  file  unknown  stable
+canonical:
+  (none)
+fs:
+  (none)
+invalidations:
+  (none)
