@@ -106,7 +106,6 @@ pub mod provider {
                 domains: Vec::new(),
                 unix_sockets: Vec::new(),
                 auth_types: Vec::new(),
-                max_memory_mb: 0,
                 needs_git: false,
                 needs_websocket: false,
                 needs_streaming: false,

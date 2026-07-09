@@ -475,7 +475,6 @@ interface types {
         /// sockets.
         unix-sockets: list<string>,
         auth-types: list<string>,
-        max-memory-mb: u32,
         needs-git: bool,
         needs-websocket: bool,
         needs-streaming: bool,
