@@ -636,9 +636,33 @@ async function waitForReady() {
 }
 
 async function reconcile() {
-  const report = await fetchJson<ReconcileReport>("/v1/reconcile", { method: "POST" });
+  const token = await waitForControlToken();
+  const report = await fetchJson<ReconcileReport>("/v1/reconcile", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
+  });
   for (const failure of report.failed || []) {
     console.error(`warning: mount \`${failure.mount}\` did not load: ${failure.reason}`);
+  }
+}
+
+async function waitForControlToken(): Promise<string> {
+  // The daemon writes the token file 0600 inside the container, so the host
+  // user cannot read it through the bind mount; read it through the container.
+  const deadline = Date.now() + 15_000;
+  for (;;) {
+    const token = (
+      await awaitText($`docker exec ${CONTAINER_NAME} cat ${GUEST_HOME}/control-token`.quiet().nothrow())
+    ).trim();
+    if (token) {
+      return token;
+    }
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `control token not readable from ${CONTAINER_NAME}:${GUEST_HOME}/control-token after 15s; check \`docker logs ${CONTAINER_NAME}\``,
+      );
+    }
+    await sleep(250);
   }
 }
 
