@@ -3045,7 +3045,6 @@ dependencies = [
  "clap_complete",
  "crossterm 0.28.1",
  "futures-util",
- "getrandom 0.3.4",
  "hex",
  "http",
  "http-body-util",
@@ -3057,7 +3056,6 @@ dependencies = [
  "omnifs-api",
  "omnifs-auth",
  "omnifs-caps",
- "omnifs-core",
  "omnifs-daemon",
  "omnifs-engine",
  "omnifs-itest",
@@ -3068,7 +3066,6 @@ dependencies = [
  "ratatui",
  "reqwest 0.13.4",
  "secrecy",
- "semver",
  "serde",
  "serde_json",
  "sha2",
@@ -3089,7 +3086,6 @@ name = "omnifs-core"
 version = "0.2.1"
 dependencies = [
  "mime",
- "postcard",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -3115,7 +3111,6 @@ dependencies = [
  "omnifs-nfs",
  "omnifs-workspace",
  "serde_json",
- "tempfile",
  "time",
  "tokio",
  "tokio-stream",
@@ -3129,7 +3124,6 @@ dependencies = [
 name = "omnifs-embed-metadata"
 version = "0.2.1"
 dependencies = [
- "omnifs-caps",
  "omnifs-provider-arxiv",
  "omnifs-provider-db",
  "omnifs-provider-dns",
@@ -3139,7 +3133,6 @@ dependencies = [
  "omnifs-provider-linear",
  "omnifs-provider-oura",
  "omnifs-provider-web",
- "omnifs-sdk",
  "omnifs-workspace",
  "serde_json",
  "test-provider",
@@ -3177,7 +3170,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "strum 0.27.2",
  "tar",
  "tempfile",
  "thiserror 2.0.18",
@@ -3203,6 +3195,7 @@ dependencies = [
  "fuser",
  "libc",
  "omnifs-engine",
+ "omnifs-mtab",
  "omnifs-namespace-wire",
  "omnifs-wit",
  "omnifs-workspace",
@@ -3264,7 +3257,6 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
- "tokio-stream",
  "tokio-vsock",
  "tracing",
 ]
@@ -3304,7 +3296,6 @@ dependencies = [
 name = "omnifs-provider-db"
 version = "0.2.1"
 dependencies = [
- "hashbrown 0.15.5",
  "hex",
  "omnifs-sdk",
  "rusqlite",
@@ -3321,7 +3312,6 @@ dependencies = [
  "base64",
  "hickory-proto",
  "omnifs-sdk",
- "serde",
 ]
 
 [[package]]
@@ -3329,7 +3319,6 @@ name = "omnifs-provider-docker"
 version = "0.2.1"
 dependencies = [
  "bollard-stubs",
- "hashbrown 0.15.5",
  "omnifs-sdk",
  "serde",
  "serde_json",
@@ -3339,7 +3328,6 @@ dependencies = [
 name = "omnifs-provider-github"
 version = "0.2.1"
 dependencies = [
- "hashbrown 0.15.5",
  "http",
  "omnifs-core",
  "omnifs-sdk",
@@ -3352,7 +3340,6 @@ dependencies = [
 name = "omnifs-provider-kubernetes"
 version = "0.2.1"
 dependencies = [
- "hashbrown 0.15.5",
  "k8s-openapi",
  "omnifs-sdk",
  "serde",
@@ -3364,7 +3351,6 @@ dependencies = [
 name = "omnifs-provider-linear"
 version = "0.2.1"
 dependencies = [
- "hashbrown 0.15.5",
  "omnifs-core",
  "omnifs-sdk",
  "serde",
@@ -3388,7 +3374,6 @@ version = "0.2.1"
 dependencies = [
  "dom_smoothie",
  "omnifs-sdk",
- "serde",
 ]
 
 [[package]]
@@ -3398,7 +3383,6 @@ dependencies = [
  "hashbrown 0.15.5",
  "hex",
  "http",
- "mime",
  "omnifs-caps",
  "omnifs-core",
  "omnifs-sdk-macros",
@@ -3438,10 +3422,8 @@ dependencies = [
  "blake3",
  "fs2",
  "hex",
- "indexmap",
  "jsonschema",
  "omnifs-caps",
- "omnifs-core",
  "schemars",
  "secrecy",
  "serde",
