@@ -32,6 +32,7 @@
 //! callers even when the server answers out of order. Events carry
 //! `request_id = 0` and `kind = KIND_EVENT`.
 
+mod beacon;
 mod cache;
 mod client;
 mod frame;
@@ -44,7 +45,12 @@ use std::path::PathBuf;
 use omnifs_engine::{Attrs, DirCursor, NodeAnswer, NodeId, NsError, ReadAnswer};
 use serde::{Deserialize, Serialize};
 
-pub use client::{AttachTarget, WireNamespace};
+#[cfg(target_os = "linux")]
+pub use beacon::spawn_ready_signal;
+pub use beacon::{ReadyPortError, ready_vsock_port_from_env, resolve_ready_vsock_port};
+pub use client::{
+    AttachTarget, AttachTargetError, WireNamespace, attach_target_from_env, resolve_attach_target,
+};
 pub use server::{serve_connection, serve_listener, serve_listener_tcp};
 
 /// The wire protocol version. Bumped on any incompatible change to the frame

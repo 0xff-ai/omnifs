@@ -11,6 +11,11 @@ keywords = ["omnifs", "namespace", "wire", "postcard", "filesystem"]
 
 [dependencies]
 omnifs-engine = { workspace = true }
+# Owns the attach env var names (`OMNIFS_ATTACH_ADDR_ENV` and friends) that
+# `AttachTarget` resolution and the readiness beacon parse. No cycle:
+# omnifs-engine already depends on omnifs-api, so this is a diamond, not a
+# new cycle, and omnifs-api depends on neither this crate nor omnifs-engine.
+omnifs-api = { workspace = true }
 postcard = { workspace = true }
 serde = { workspace = true }
 tokio = { workspace = true }
@@ -20,9 +25,10 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 constant_time_eq = "0.4"
 
-# The guest-side vsock dial for the krunkit frontend backend. Linux-only: the
-# krunkit guest is Linux, and the crate's socket(AF_VSOCK, ...) call does not
-# build on a non-Linux host in the first place.
+# The guest-side vsock dial for the krunkit frontend backend, and the
+# readiness beacon's own vsock dial back to the host. Linux-only: the krunkit
+# guest is Linux, and the crate's socket(AF_VSOCK, ...) call does not build on
+# a non-Linux host in the first place.
 [target.'cfg(target_os = "linux")'.dependencies]
 tokio-vsock = "0.7.2"
 
@@ -31,9 +37,6 @@ tempfile = { workspace = true }
 # For a real engine-backed `TreeNamespace` in the trace-propagation test: no
 # cycle, omnifs-itest does not depend on omnifs-namespace-wire.
 omnifs-itest = { path = "../omnifs-itest" }
-# For InspectorEvent/InspectorRecord in the same test: the inspector wire
-# types live in omnifs-api, not re-exported by omnifs-engine.
-omnifs-api = { workspace = true }
 
 [lints]
 workspace = true
