@@ -109,15 +109,7 @@ impl Path {
     }
 
     pub fn parent(&self) -> Option<Self> {
-        if self.is_root() {
-            return None;
-        }
-        let (parent, _) = self.0.rsplit_once('/')?;
-        if parent.is_empty() {
-            Some(Self::root())
-        } else {
-            Some(Self::from_validated(parent))
-        }
+        self.parent_and_name().map(|(parent, _)| parent)
     }
 
     pub fn parent_and_name(&self) -> Option<(Self, &str)> {
