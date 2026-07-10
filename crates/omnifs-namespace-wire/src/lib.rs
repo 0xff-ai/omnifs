@@ -50,7 +50,7 @@ pub const PROTOCOL: u32 = 1;
 /// trait methods. `budget` is a `u64` on the wire (the trait takes `usize`); the
 /// server narrows it back per platform.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum WireRequest {
+pub(crate) enum WireRequest {
     Lookup {
         parent: NodeId,
         name: String,
@@ -81,7 +81,7 @@ pub enum WireRequest {
 /// client verbatim. The variant selects which method the answer is for; the
 /// client matches it against the request it multiplexed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum WireResponse {
+pub(crate) enum WireResponse {
     Lookup(Result<NodeAnswer, NsError>),
     Getattr(Result<Attrs, NsError>),
     GetattrExact(Result<Attrs, NsError>),
