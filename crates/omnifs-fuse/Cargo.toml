@@ -9,6 +9,11 @@ description = "Linux FUSE frontend adapter for omnifs"
 categories = ["filesystem"]
 keywords = ["omnifs", "fuse", "filesystem"]
 
+[[bin]]
+name = "omnifs-fuse"
+path = "src/bin/omnifs_fuse.rs"
+required-features = ["bin"]
+
 [dependencies]
 dashmap = { workspace = true }
 fuser = { version = "0.17", features = ["macos-no-mount"] }
@@ -18,6 +23,20 @@ parking_lot = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+
+# Bin-only: the `omnifs-fuse` runner binary's own arg parsing, wire attach
+# client, and startup logging. Optional and gated behind the `bin` feature
+# (on by default) so a library consumer that opts out of default features
+# (the daemon, for its in-process FUSE mount; see its Cargo.toml) never pulls
+# these in, keeping the daemon's dependency surface unchanged.
+anyhow = { workspace = true, optional = true }
+clap = { workspace = true, optional = true }
+omnifs-namespace-wire = { workspace = true, optional = true }
+tracing-subscriber = { workspace = true, optional = true }
+
+[features]
+default = ["bin"]
+bin = ["dep:anyhow", "dep:clap", "dep:omnifs-namespace-wire", "dep:tracing-subscriber"]
 
 [dev-dependencies]
 omnifs-wit = { workspace = true, features = ["host-bindings"] }
