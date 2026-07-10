@@ -102,9 +102,12 @@ impl Tree {
         }
 
         // A pagination control (`@next`/`@all`) resolves ONLY from the parent's
-        // cached dirents (a resume cursor remains). A reserved control name is
-        // never a real provider entry, so once the control is gone (feed
-        // exhausted) the lookup is NotFound; we never consult the provider for it.
+        // cached dirents, and does so for the directory's whole paginated
+        // lifetime: the record persists past exhaustion so a name a consumer
+        // already resolved from an earlier listing snapshot keeps resolving.
+        // A reserved control name is never a real provider entry, so a
+        // directory that never paged (no cached record) is NotFound; we never
+        // consult the provider for it.
         if synthetic::is_control_name(name) {
             return match synthetic::resolve_synthetic_child(runtime, parent, name, false) {
                 Some((meta, syn)) => Ok(Node::synthetic(mount, rel, meta, syn)),
