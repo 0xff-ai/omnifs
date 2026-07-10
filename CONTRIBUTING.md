@@ -39,7 +39,7 @@ WASM tests compile but cannot execute on the host because there is no WASM runti
 
 CI builds Rust artifacts natively and uses Docker only to assemble the runtime image. Linux CLI artifacts use `cargo-zigbuild` with a GNU glibc 2.17 baseline; Darwin CLI artifacts are cross-linked from Linux through the pinned `rust-cross/cargo-zigbuild` container. Provider and tool WASM artifacts are built by `just providers build`; WASI SDK pins live at their install sites, such as `just/providers.just` for local builds and `Dockerfile` for container stages.
 
-`Dockerfile`'s `frontend-dev` stage is the contributor image path for `just dev` (built by `scripts/dev.ts`, same as `just frontend-image`). `just providers build` emits `target/omnifs-provider-store` containing content-addressed provider WASM plus `index.json`; `scripts/dev.ts` passes that store as the `provider-wasm` build context, so the image embeds those bytes into the compiled `omnifs` binary instead of compiling providers again inside Docker. Release frontend image assembly uses `scripts/ci/build-frontend-image.sh`, which stages a prebuilt Linux CLI binary rather than compiling in Docker. Release CLI binaries embed the compressed provider bundle and unpack it into the host `OMNIFS_HOME/providers`; do not make the image the owner of `/root/.omnifs/providers`. Keep `just dev` working when changing Docker-related files.
+`Dockerfile`'s `frontend-dev` stage is the contributor image path for `just dev` (built by `scripts/dev.ts`, same as `just frontend-image`). It runs the slim `omnifs-fuse` binary (built by the `fuse-builder` stage), which needs no engine, no Wasmtime, and no provider bundle, so unlike the full `omnifs` CLI/daemon binary (`OMNIFS_PROVIDER_BUNDLE_DIR` embeds `just providers build`'s `target/omnifs-provider-store` output into that binary at compile time), the frontend image needs no provider-wasm build context at all. Release frontend image assembly uses `scripts/ci/build-frontend-image.sh`, which stages a prebuilt Linux `omnifs-fuse` binary rather than compiling in Docker. Release CLI binaries embed the compressed provider bundle and unpack it into the host `OMNIFS_HOME/providers`; do not make the image the owner of `/root/.omnifs/providers`. Keep `just dev` working when changing Docker-related files.
 
 CI orchestration shells live in `scripts/ci/`, with `scripts/ci/common.sh` factoring out repo-root discovery. Npm version sync and OpenAPI generation are just recipes. The release flow is git-cliff plus the `release-pr.yml` coordinator (see `RELEASING.md`); the repo carries no Bun.
 
@@ -62,7 +62,7 @@ For provider path-surface changes, test the whole shell traversal, not only the 
 ## Runtime debugging
 
 - The daemon is host-native: its log is `~/.omnifs-dev/cache/daemon.log` on the host, not inside any container.
-- `docker logs "$FRONTEND"` shows the frontend container's own stdout/stderr; it only ever runs `omnifs frontend run`, so a mount-serving failure is almost always in the daemon log instead.
+- `docker logs "$FRONTEND"` shows the frontend container's own stdout/stderr; it only ever runs `omnifs-fuse`, so a mount-serving failure is almost always in the daemon log instead.
 - Clone failures should surface in the daemon log with `git clone` stderr.
 - FUSE `access(...)` warnings are expected noise unless they correlate with a real failure.
 - Use `omnifs status` directly (host-native, no `docker exec` needed) for fast mount/config/provider/cache triage.
@@ -80,7 +80,7 @@ When debugging hangs or slow paths, start with user-visible probes before theory
 2. `cat /dns/@google/<domain>/MX`
 3. `tail -n 80 ~/.omnifs-dev/cache/daemon.log`
 
-The frontend image is a minimal `debian:trixie-slim` (GNU coreutils/findutils, fuse3, jq, rsync, tar, xxd; `Dockerfile`'s `frontend-base`), deliberately without zsh, gum, or any shell rc customization: it only ever runs `omnifs frontend run`, and an interactive session there is `/bin/sh`. Do not add interactive-shell tooling to it; that belongs to the host shell the contributor already has.
+The frontend image is a minimal `debian:trixie-slim` (GNU coreutils/findutils, fuse3, jq, rsync, tar, xxd; `Dockerfile`'s `frontend-base`), deliberately without zsh, gum, or any shell rc customization: it only ever runs `omnifs-fuse`, and an interactive session there is `/bin/sh`. Do not add interactive-shell tooling to it; that belongs to the host shell the contributor already has.
 
 ## Code conventions
 
