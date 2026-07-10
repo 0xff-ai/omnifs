@@ -175,7 +175,18 @@ impl OAuthRequest {
         if let Some(redirect_uri) =
             non_empty_config_value(config.redirect_uri.as_deref(), "auth.redirectUri")?
         {
-            override_redirect_uri(&mut scheme, redirect_uri.to_owned());
+            match &mut scheme.flow {
+                OAuthFlow::PkceLoopback(flow) => {
+                    redirect_uri.clone_into(&mut flow.redirect_uri_template);
+                },
+                OAuthFlow::PkceManualCode(flow) => {
+                    redirect_uri.clone_into(&mut flow.redirect_uri);
+                },
+                OAuthFlow::ClientSideToken(flow) => {
+                    redirect_uri.clone_into(&mut flow.redirect_uri_template);
+                },
+                OAuthFlow::DeviceCode(_) => {},
+            }
         }
 
         let mut request = OAuthRequest::new(scheme);
@@ -188,21 +199,6 @@ impl OAuthRequest {
             request.client_secret = Some(client_secret);
         }
         Ok(request)
-    }
-}
-
-fn override_redirect_uri(scheme: &mut OauthScheme, redirect_uri: String) {
-    match &mut scheme.flow {
-        OAuthFlow::PkceLoopback(flow) => {
-            flow.redirect_uri_template = redirect_uri;
-        },
-        OAuthFlow::PkceManualCode(flow) => {
-            flow.redirect_uri = redirect_uri;
-        },
-        OAuthFlow::ClientSideToken(flow) => {
-            flow.redirect_uri_template = redirect_uri;
-        },
-        OAuthFlow::DeviceCode(_) => {},
     }
 }
 

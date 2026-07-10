@@ -811,13 +811,14 @@ fn stored_satisfies(
 }
 
 fn same_oauth_token(left: &CredentialEntry, right: &CredentialEntry) -> bool {
-    left.access_token().expose_secret() == right.access_token().expose_secret()
-        && left
-            .refresh_token()
-            .map(|token| token.expose_secret().to_owned())
-            == right
-                .refresh_token()
-                .map(|token| token.expose_secret().to_owned())
+    if left.access_token().expose_secret() != right.access_token().expose_secret() {
+        return false;
+    }
+    match (left.refresh_token(), right.refresh_token()) {
+        (Some(left), Some(right)) => left.expose_secret() == right.expose_secret(),
+        (None, None) => true,
+        (Some(_), None) | (None, Some(_)) => false,
+    }
 }
 
 fn bearer_invalid_token(challenges: &str) -> bool {
