@@ -1,0 +1,13 @@
+[Unit]
+Description=omnifs krunkit guest ssh session (vsock, per-connection)
+
+[Service]
+# Inetd mode: dropbear reads/writes the accepted connection on stdin/stdout
+# instead of listening itself (omnifs-ssh.socket already did the listening).
+# -s: pubkey auth only, no password logins — the seed-installed key
+# (crates/omnifs-cli/src/krunkit_backend.rs) is the only credential this
+# guest ever accepts.
+ExecStart=/usr/sbin/dropbear -i -s
+StandardInput=socket
+StandardOutput=socket
+StandardError=journal
