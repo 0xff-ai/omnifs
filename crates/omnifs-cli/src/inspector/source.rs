@@ -30,7 +30,6 @@ pub enum AttachOutcome {
 /// Unix socket (hyper), depending on the resolved endpoint.
 pub struct EventsClient {
     rt: tokio::runtime::Runtime,
-    http: reqwest::Client,
     endpoint: EventEndpoint,
 }
 
@@ -40,11 +39,7 @@ impl EventsClient {
             .enable_all()
             .build()
             .context("build events client runtime")?;
-        let http = reqwest::Client::builder()
-            .connect_timeout(Duration::from_millis(500))
-            .build()
-            .context("build events HTTP client")?;
-        Ok(Self { rt, http, endpoint })
+        Ok(Self { rt, endpoint })
     }
 
     /// Try to connect once. On success, call `on_connect`, then `on_line`
@@ -61,7 +56,20 @@ impl EventsClient {
             match &self.endpoint {
                 EventEndpoint::Tcp { base, token } => {
                     use futures_util::StreamExt as _;
-                    let mut request = self.http.get(format!("{base}/v1/events"));
+                    // Built lazily, only for this TCP override path: this
+                    // initializes the TLS backend (system CA probe), which
+                    // must not block the unix-socket production path (the
+                    // `EventEndpoint::Unix` arm below never touches it). A
+                    // CA-less build failure here degrades the same as an
+                    // unreachable daemon: the caller's reconnect loop
+                    // retries.
+                    let Ok(http) = reqwest::Client::builder()
+                        .connect_timeout(Duration::from_millis(500))
+                        .build()
+                    else {
+                        return Ok(AttachOutcome::Unreachable);
+                    };
+                    let mut request = http.get(format!("{base}/v1/events"));
                     if let Some(token) = token {
                         request = request.bearer_auth(token);
                     }
