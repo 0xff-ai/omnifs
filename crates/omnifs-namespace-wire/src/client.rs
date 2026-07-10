@@ -9,7 +9,8 @@
 //! on a different daemon instance fires an [`AttachEvent::Reattached`].
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -18,7 +19,8 @@ use omnifs_engine::{
     Attrs, DirCursor, DirPage, EventStream, Namespace, NodeAnswer, NodeId, NsError, NsEvent,
     ReadAnswer,
 };
-use tokio::net::UnixStream;
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::net::{TcpStream, UnixStream};
 use tokio::runtime::Handle;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::time::sleep;
@@ -41,6 +43,28 @@ const EVENT_CAPACITY: usize = 1024;
 /// Attach-event broadcast capacity. Reattach events are rare; a small ring is
 /// plenty.
 const ATTACH_CAPACITY: usize = 16;
+
+/// Where a [`WireNamespace`] dials the daemon it attaches to.
+///
+/// `Unix` is the host-native path: auth is filesystem permissions on the
+/// socket, so no token is sent. `Tcp` is the Docker Desktop path: the
+/// containerized frontend cannot share a host Unix socket into the Linux VM it
+/// runs in, so it dials TCP loopback instead and proves itself with the
+/// daemon's per-instance attach token.
+#[derive(Debug, Clone)]
+pub enum AttachTarget {
+    Unix(PathBuf),
+    Tcp { addr: SocketAddr, token: String },
+}
+
+impl std::fmt::Display for AttachTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unix(path) => write!(f, "{}", path.display()),
+            Self::Tcp { addr, .. } => write!(f, "{addr}"),
+        }
+    }
+}
 
 /// One caller request queued to the manager, with the slot its answer returns on.
 struct Outgoing {
@@ -67,17 +91,18 @@ pub struct WireNamespace {
 }
 
 impl WireNamespace {
-    /// Connect to the namespace socket, perform the handshake, and return a
+    /// Connect to the namespace target, perform the handshake, and return a
     /// namespace multiplexed over the connection. Retries the initial connect
     /// with backoff up to a 30s deadline; a later disconnect reconnects forever.
     ///
     /// # Errors
     ///
-    /// Fails when the socket cannot be reached within the deadline (naming the
-    /// socket), or when the server speaks an incompatible protocol version.
-    pub async fn attach(socket: PathBuf, rt: Handle) -> Result<Arc<Self>, WireError> {
+    /// Fails when the target cannot be reached within the deadline (naming it),
+    /// when the server speaks an incompatible protocol version, or (`Tcp`) when
+    /// the attach token is rejected.
+    pub async fn attach(target: AttachTarget, rt: Handle) -> Result<Arc<Self>, WireError> {
         let deadline = Instant::now() + INITIAL_CONNECT_DEADLINE;
-        let (connection, instance_id) = connect_with_backoff(&socket, Some(deadline)).await?;
+        let (connection, instance_id) = connect_with_backoff(&target, Some(deadline)).await?;
 
         let (outgoing_tx, outgoing_rx) = mpsc::unbounded_channel::<Outgoing>();
         let (events_tx, _) = broadcast::channel(EVENT_CAPACITY);
@@ -86,7 +111,7 @@ impl WireNamespace {
         let cache = Arc::new(WireCache::new());
 
         let manager = rt.spawn(manager_loop(ManagerState {
-            socket,
+            target,
             connection,
             instance: instance_id,
             instance_slot: Arc::clone(&instance_slot),
@@ -317,7 +342,7 @@ impl Namespace for WireNamespace {
 
 /// The manager's owned state, threaded into [`manager_loop`].
 struct ManagerState {
-    socket: PathBuf,
+    target: AttachTarget,
     connection: Connection,
     instance: String,
     instance_slot: Arc<Mutex<String>>,
@@ -348,7 +373,7 @@ async fn manager_loop(mut state: ManagerState) {
                     for (_, reply) in pending.drain() {
                         let _ = reply.send(Err(NsError::Network));
                     }
-                    match connect_with_backoff(&state.socket, None).await {
+                    match connect_with_backoff(&state.target, None).await {
                         Ok((connection, new_instance)) => {
                             if new_instance != state.instance {
                                 // A restarted daemon renumbered every NodeId, so
@@ -463,16 +488,16 @@ impl Drop for Connection {
 }
 
 /// Retry [`connect_once`] with backoff. With a `deadline`, a transient failure
-/// past the deadline surfaces as [`WireError::ConnectTimeout`] naming the socket;
-/// without one, transient failures retry forever. A non-retriable failure (a
-/// version mismatch) returns immediately.
+/// past the deadline surfaces as [`WireError::ConnectTimeout`] naming the
+/// target; without one, transient failures retry forever. A non-retriable
+/// failure (a version mismatch, a rejected token) returns immediately.
 async fn connect_with_backoff(
-    socket: &Path,
+    target: &AttachTarget,
     deadline: Option<Instant>,
 ) -> Result<(Connection, String), WireError> {
     let mut backoff = INITIAL_BACKOFF;
     loop {
-        match connect_once(socket).await {
+        match connect_once(target).await {
             Ok(value) => return Ok(value),
             Err(error) if !error.is_retriable() => return Err(error),
             Err(error) => {
@@ -484,7 +509,7 @@ async fn connect_with_backoff(
                         other => std::io::Error::other(other.to_string()),
                     };
                     return Err(WireError::ConnectTimeout {
-                        socket: socket.to_path_buf(),
+                        target: target.to_string(),
                         source,
                     });
                 }
@@ -495,12 +520,33 @@ async fn connect_with_backoff(
     }
 }
 
-/// Connect once: open the socket, spawn the reader/writer pumps, and complete
+/// Connect once: open the target, spawn the reader/writer pumps, and complete
 /// the `Hello`/`Welcome` handshake. Returns the connection and the server's
 /// instance id.
-async fn connect_once(socket: &Path) -> Result<(Connection, String), WireError> {
-    let stream = UnixStream::connect(socket).await?;
-    let (mut read_half, mut write_half) = stream.into_split();
+async fn connect_once(target: &AttachTarget) -> Result<(Connection, String), WireError> {
+    match target {
+        AttachTarget::Unix(path) => {
+            let stream = UnixStream::connect(path).await?;
+            handshake_over(stream, None).await
+        },
+        AttachTarget::Tcp { addr, token } => {
+            let stream = TcpStream::connect(addr).await?;
+            handshake_over(stream, Some(token.clone())).await
+        },
+    }
+}
+
+/// Spawn the reader/writer pumps over `stream` and complete the handshake,
+/// sending `token` in the Hello (`None` for a Unix socket, `Some` for TCP).
+/// Generic over the stream type so both transports share one handshake path.
+async fn handshake_over<S>(
+    stream: S,
+    token: Option<String>,
+) -> Result<(Connection, String), WireError>
+where
+    S: AsyncRead + AsyncWrite + Send + 'static,
+{
+    let (mut read_half, mut write_half) = tokio::io::split(stream);
 
     let (frame_tx, mut writer_rx) = mpsc::unbounded_channel::<Frame>();
     let (reader_tx, mut frame_rx) = mpsc::unbounded_channel::<Frame>();
@@ -520,48 +566,59 @@ async fn connect_once(socket: &Path) -> Result<(Connection, String), WireError> 
         }
     });
 
-    // Handshake: send Hello, expect Welcome as the first inbound frame.
-    let hello = postcard::to_allocvec(&Handshake::Hello { protocol: PROTOCOL })?;
+    // Handshake: send Hello, expect Welcome or Rejected as the first inbound
+    // frame.
+    let hello = postcard::to_allocvec(&Handshake::Hello {
+        protocol: PROTOCOL,
+        token,
+    })?;
     frame_tx
         .send(Frame::new(0, KIND_REQUEST, hello))
         .map_err(|_| WireError::HandshakeClosed)?;
     let welcome_frame = frame_rx.recv().await.ok_or(WireError::HandshakeClosed)?;
     let welcome: Handshake = postcard::from_bytes(&welcome_frame.body)?;
-    let Handshake::Welcome {
-        protocol,
-        instance_id,
-    } = welcome
-    else {
-        reader.abort();
-        writer.abort();
-        return Err(WireError::HandshakeUnexpected {
-            expected: "welcome",
-        });
-    };
-    if protocol != PROTOCOL {
-        reader.abort();
-        writer.abort();
-        return Err(WireError::VersionMismatch {
-            ours: PROTOCOL,
-            theirs: protocol,
-        });
-    }
-
-    Ok((
-        Connection {
-            frame_tx,
-            frame_rx,
-            reader,
-            writer,
+    match welcome {
+        Handshake::Welcome {
+            protocol,
+            instance_id,
+        } => {
+            if protocol != PROTOCOL {
+                reader.abort();
+                writer.abort();
+                return Err(WireError::VersionMismatch {
+                    ours: PROTOCOL,
+                    theirs: protocol,
+                });
+            }
+            Ok((
+                Connection {
+                    frame_tx,
+                    frame_rx,
+                    reader,
+                    writer,
+                },
+                instance_id,
+            ))
         },
-        instance_id,
-    ))
+        Handshake::Rejected { reason } => {
+            reader.abort();
+            writer.abort();
+            Err(WireError::Rejected(reason))
+        },
+        Handshake::Hello { .. } => {
+            reader.abort();
+            writer.abort();
+            Err(WireError::HandshakeUnexpected {
+                expected: "welcome",
+            })
+        },
+    }
 }
 
 impl WireError {
     /// Whether retrying the connect can plausibly succeed. A refused socket or a
-    /// mid-handshake close is transient; a version mismatch or a decode fault is
-    /// not (the server is up but incompatible).
+    /// mid-handshake close is transient; a version mismatch, a rejected token,
+    /// or a decode fault is not (the server is up but refuses this client).
     fn is_retriable(&self) -> bool {
         matches!(self, WireError::Io(_) | WireError::HandshakeClosed)
     }

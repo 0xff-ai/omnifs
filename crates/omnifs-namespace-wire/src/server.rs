@@ -1,8 +1,11 @@
 //! The wire server: it adapts a [`Namespace`] onto a byte stream.
 //!
 //! [`serve_connection`] runs one attached client; [`serve_listener`] accepts
-//! clients on a Unix socket and serves each concurrently. A connection dispatches
-//! every request onto the namespace on its own task, so one slow op (a provider
+//! clients on a Unix socket (auth is filesystem permissions, so `token` is
+//! never checked) and [`serve_listener_tcp`] accepts clients on a TCP loopback
+//! listener (auth is the per-instance attach token, checked on every connect).
+//! Both serve the same namespace concurrently: a connection dispatches every
+//! request onto the namespace on its own task, so one slow op (a provider
 //! callout) never head-of-line-blocks the reads behind it, and a background task
 //! forwards the namespace's invalidation events as event frames.
 
@@ -10,7 +13,7 @@ use std::sync::Arc;
 
 use omnifs_engine::Namespace;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::UnixListener;
+use tokio::net::{TcpListener, UnixListener};
 use tokio::sync::mpsc;
 
 use crate::frame::{Frame, KIND_EVENT, KIND_REQUEST, KIND_RESPONSE, read_frame, write_frame};
@@ -18,15 +21,18 @@ use crate::{Handshake, PROTOCOL, WireError, WireRequest, WireResponse};
 
 /// Serve one attached client over `stream` until it disconnects. `instance_id`
 /// is the daemon's per-start id, reported in the handshake so the client can
-/// detect a restart on reconnect.
+/// detect a restart on reconnect. `expected_token` is `None` for a Unix-socket
+/// listener (the field is ignored) and `Some(token)` for a TCP attach listener,
+/// which rejects a Hello whose token does not match.
 ///
 /// Returns `Ok(())` on an orderly client disconnect and a [`WireError`] on a
 /// protocol fault (an oversized frame, a malformed handshake, a version
-/// mismatch); a fault drops the connection.
+/// mismatch, a bad token); a fault drops the connection.
 pub async fn serve_connection<S>(
     namespace: Arc<dyn Namespace>,
     stream: S,
     instance_id: String,
+    expected_token: Option<&str>,
 ) -> Result<(), WireError>
 where
     S: AsyncRead + AsyncWrite + Send + 'static,
@@ -46,11 +52,18 @@ where
         }
     });
 
-    // Handshake: read the client's Hello, validate, answer with Welcome. A
-    // version mismatch is a clean error that drops the connection.
-    let handshake_result = server_handshake(&mut reader, &outbound_tx, &instance_id).await;
+    // Handshake: read the client's Hello, validate, answer with Welcome or
+    // Rejected. A version mismatch or a bad token is a clean, named error that
+    // drops the connection.
+    let handshake_result =
+        server_handshake(&mut reader, &outbound_tx, &instance_id, expected_token).await;
     if let Err(error) = handshake_result {
-        writer_task.abort();
+        // A rejection queues a `Handshake::Rejected` frame on `outbound_tx`
+        // before returning; drop the sender and let the writer task drain that
+        // frame and exit on its own, rather than aborting it and racing the
+        // flush (the same drain-on-drop pattern the end of this function uses).
+        drop(outbound_tx);
+        let _ = writer_task.await;
         return Err(error);
     }
 
@@ -87,6 +100,8 @@ where
 
 /// Accept and serve connections on `listener` until it errors. Each connection
 /// is served on its own task, so a stalled client cannot block new attaches.
+/// Filesystem permissions are this listener's auth: every connection's Hello
+/// token is ignored.
 pub async fn serve_listener(
     namespace: Arc<dyn Namespace>,
     listener: UnixListener,
@@ -98,7 +113,8 @@ pub async fn serve_listener(
                 let namespace = Arc::clone(&namespace);
                 let instance_id = instance_id.clone();
                 tokio::spawn(async move {
-                    if let Err(error) = serve_connection(namespace, stream, instance_id).await {
+                    if let Err(error) = serve_connection(namespace, stream, instance_id, None).await
+                    {
                         tracing::debug!(%error, "wire: connection ended with a protocol error");
                     }
                 });
@@ -111,11 +127,46 @@ pub async fn serve_listener(
     }
 }
 
-/// Read the client's `Hello`, check the protocol, and answer with `Welcome`.
+/// Accept and serve connections on a TCP loopback `listener` until it errors,
+/// same shape as [`serve_listener`]. This is the Docker Desktop path: a
+/// containerized frontend cannot share a host Unix socket into the Linux VM it
+/// runs in, so it dials TCP instead and proves itself with `token` (the
+/// listener's only auth) in every connection's Hello.
+pub async fn serve_listener_tcp(
+    namespace: Arc<dyn Namespace>,
+    listener: TcpListener,
+    instance_id: String,
+    token: String,
+) {
+    loop {
+        match listener.accept().await {
+            Ok((stream, _addr)) => {
+                let namespace = Arc::clone(&namespace);
+                let instance_id = instance_id.clone();
+                let token = token.clone();
+                tokio::spawn(async move {
+                    if let Err(error) =
+                        serve_connection(namespace, stream, instance_id, Some(&token)).await
+                    {
+                        tracing::debug!(%error, "wire: tcp connection ended with a protocol error");
+                    }
+                });
+            },
+            Err(error) => {
+                tracing::warn!(%error, "wire: accept failed; the tcp attach listener is stopping");
+                break;
+            },
+        }
+    }
+}
+
+/// Read the client's `Hello`, check the protocol and (when `expected_token` is
+/// set) the token, and answer with `Welcome` or `Rejected`.
 async fn server_handshake<R>(
     reader: &mut R,
     outbound_tx: &mpsc::UnboundedSender<Frame>,
     instance_id: &str,
+    expected_token: Option<&str>,
 ) -> Result<(), WireError>
 where
     R: AsyncRead + Unpin,
@@ -127,14 +178,23 @@ where
         return Err(WireError::HandshakeUnexpected { expected: "hello" });
     }
     let hello: Handshake = postcard::from_bytes(&frame.body)?;
-    let Handshake::Hello { protocol } = hello else {
+    let Handshake::Hello { protocol, token } = hello else {
         return Err(WireError::HandshakeUnexpected { expected: "hello" });
     };
     if protocol != PROTOCOL {
-        return Err(WireError::VersionMismatch {
+        let error = WireError::VersionMismatch {
             ours: PROTOCOL,
             theirs: protocol,
-        });
+        };
+        send_rejected(outbound_tx, error.to_string());
+        return Err(error);
+    }
+    if let Some(expected) = expected_token {
+        let presented = token.as_deref().unwrap_or_default();
+        if !constant_time_eq::constant_time_eq(presented.as_bytes(), expected.as_bytes()) {
+            send_rejected(outbound_tx, "attach token rejected".to_string());
+            return Err(WireError::TokenRejected);
+        }
     }
     let welcome = Handshake::Welcome {
         protocol: PROTOCOL,
@@ -146,6 +206,15 @@ where
         .send(Frame::new(0, KIND_RESPONSE, body))
         .map_err(|_| WireError::HandshakeClosed)?;
     Ok(())
+}
+
+/// Queue a `Handshake::Rejected` frame naming `reason`, best-effort: the caller
+/// is already on its way to returning an error regardless of whether the frame
+/// lands (the writer task may already be gone).
+fn send_rejected(outbound_tx: &mpsc::UnboundedSender<Frame>, reason: String) {
+    if let Ok(body) = postcard::to_allocvec(&Handshake::Rejected { reason }) {
+        let _ = outbound_tx.send(Frame::new(0, KIND_RESPONSE, body));
+    }
 }
 
 /// The per-connection read loop: decode each request frame and dispatch it onto
