@@ -378,22 +378,17 @@ fn classify_impl(items: Vec<ImplItem>) -> syn::Result<ClassifiedImpl> {
 }
 
 fn classify_start(func: &ImplItemFn) -> syn::Result<StartSpec> {
-    let inputs: Vec<_> = func
-        .sig
-        .inputs
-        .iter()
-        .filter_map(|arg| match arg {
-            FnArg::Typed(input) => Some(input),
-            FnArg::Receiver(_) => None,
-        })
-        .collect();
-    match inputs.as_slice() {
-        [router] => Ok(StartSpec {
+    let mut inputs = func.sig.inputs.iter().filter_map(|arg| match arg {
+        FnArg::Typed(input) => Some(input),
+        FnArg::Receiver(_) => None,
+    });
+    match (inputs.next(), inputs.next(), inputs.next()) {
+        (Some(router), None, None) => Ok(StartSpec {
             kind: StartKind::RouterOnly,
             config_type: None,
             state_type: router_state_type(router.ty.as_ref()),
         }),
-        [config, router] => Ok(StartSpec {
+        (Some(config), Some(router), None) => Ok(StartSpec {
             kind: StartKind::ConfigAndRouter,
             config_type: Some(config.ty.as_ref().clone()),
             state_type: router_state_type(router.ty.as_ref()),
@@ -545,7 +540,7 @@ fn metadata_tokens(
 fn capability_tokens(need: &omnifs_caps::AccessNeed) -> TokenStream2 {
     // A dynamic socket/preopen need resolves its concrete value from a config
     // field at mount-start; the placeholder mirrors the host's marker.
-    let dynamic_placeholder = "resolved from config at mount-start";
+    let dynamic_placeholder = DYNAMIC_PLACEHOLDER;
     match need {
         omnifs_caps::AccessNeed::Domain {
             value,
@@ -600,7 +595,7 @@ fn optional_limit_tokens<T>(limit: Option<&omnifs_caps::ResourceLimit<T>>) -> To
 where
     T: quote::ToTokens,
 {
-    limit.as_ref().map_or_else(
+    limit.map_or_else(
         || quote! { None },
         |limit| {
             let value = &limit.value;
@@ -934,8 +929,7 @@ fn generate_notify(
                         omnifs_sdk::error::ProviderError::internal("provider not initialized")
                     );
                 };
-                let cx = omnifs_sdk::__internal::Cx::<#state_type>::new(id, state);
-                let future_cx = cx.clone();
+                let future_cx = omnifs_sdk::__internal::Cx::<#state_type>::new(id, state);
                 #dispatch
             }
         }
