@@ -243,15 +243,13 @@ async fn readdir_budget_buffers_overflow() {
     );
 }
 
-// Pre-existing gap, documented, not introduced by the NFS port: the SDK's
-// lookup meta for an object STREAM face (`o.file("log").stream(...)`) does not
-// carry the `Deferred(Ranged)` placeholder, so every `is_deferred_ranged`
-// consumer (this namespace's read path, and previously the FUSE/NFS adapters'
-// identical check on the same resolved meta) routes the read to `read_file`,
-// which the provider rejects with InvalidInput. Fixing it means projecting the
-// ranged placeholder from the SDK's stream-leaf meta, a provider-surface change
-// with its own gates. Un-ignore when that lands.
-#[ignore = "object stream faces lack the Deferred(Ranged) lookup placeholder (pre-existing SDK gap)"]
+// An object STREAM face (`o.file("log").stream(...)`) now stamps its
+// lookup/listing placeholder with `Deferred(Ranged)`
+// (`omnifs-sdk` `object_dir_listing`, `ListingLeaf::is_stream`), so every
+// `is_deferred_ranged` consumer (this namespace's read path, and the FUSE/NFS
+// adapters' identical check on the same resolved meta) opens it through
+// `open-file` instead of routing a whole-file `read-file` the provider
+// rejects with InvalidInput.
 #[tokio::test(flavor = "multi_thread")]
 async fn stream_face_reads_through_open_file() {
     let t = test_ns();
