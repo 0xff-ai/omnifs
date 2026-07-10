@@ -47,7 +47,6 @@ omnifs-mtab = { workspace = true }
 nix = { version = "0.30", features = ["net"] }
 
 [dev-dependencies]
-tempfile = { workspace = true }
 tower = { version = "0.5", features = ["util"] }
 
 [lints]

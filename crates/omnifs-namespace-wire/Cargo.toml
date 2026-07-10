@@ -20,7 +20,6 @@ postcard = { workspace = true }
 serde = { workspace = true }
 tokio = { workspace = true }
 futures = "0.3"
-tokio-stream = { version = "0.1", features = ["sync"] }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 constant_time_eq = "0.4"

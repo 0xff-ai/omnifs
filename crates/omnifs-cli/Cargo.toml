@@ -22,7 +22,6 @@ omnifs-nfs = { workspace = true, optional = true }
 omnifs-mtab = { workspace = true }
 omnifs-workspace = { workspace = true }
 omnifs-auth = { workspace = true }
-omnifs-core = { workspace = true }
 clap = { workspace = true }
 clap_complete = "4"
 tokio = { workspace = true }
@@ -39,7 +38,6 @@ http-body-util = "0.1"
 hyperlocal = "0.9"
 http = { workspace = true }
 bytes = "1"
-getrandom = "0.3"
 hex = { workspace = true }
 blake3 = { workspace = true }
 sha2 = { workspace = true }
@@ -55,7 +53,6 @@ arboard = { version = "3", default-features = false }
 time = { workspace = true }
 bollard = { workspace = true }
 futures-util = "0.3"
-semver = "1"
 webbrowser = { workspace = true }
 ratatui = "0.29"
 crossterm = "0.28"
