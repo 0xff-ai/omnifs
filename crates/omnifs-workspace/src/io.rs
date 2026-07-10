@@ -9,6 +9,28 @@ use std::path::Path;
 
 use atomic_write_file::OpenOptions as AtomicOpenOptions;
 
+/// Create `path` and restrict it to the owning user on Unix. Re-asserts the
+/// mode for an existing directory so callers cannot inherit stale permissive
+/// workspace state.
+#[cfg(unix)]
+pub(crate) fn ensure_private_dir(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
+
+    if path.exists() {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+        return Ok(());
+    }
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(path)
+}
+
+#[cfg(not(unix))]
+pub(crate) fn ensure_private_dir(path: &Path) -> io::Result<()> {
+    std::fs::create_dir_all(path)
+}
+
 /// Write `bytes` to `path` atomically: stage into a temporary file in the
 /// same directory, then rename over the destination. On unix the file is
 /// created with `mode` permission bits (an existing file's mode is not

@@ -6,12 +6,11 @@
 
 use crate::authn::CredentialId;
 use crate::creds::{CredStoreError, CredentialEntry, CredentialStore};
-use atomic_write_file::OpenOptions as AtomicOpenOptions;
+use crate::io::{ensure_private_dir, write_atomic};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 #[derive(Serialize, Deserialize)]
@@ -81,11 +80,7 @@ impl FileStore {
             ensure_private_dir(parent)?;
         }
         let json = serde_json::to_vec_pretty(data)?;
-        let mut options = AtomicOpenOptions::new();
-        configure_private_file(&mut options);
-        let mut file = options.open(&self.path)?;
-        file.write_all(&json)?;
-        file.commit()?;
+        write_atomic(&self.path, &json, 0o600)?;
         Ok(())
     }
 
@@ -116,34 +111,6 @@ impl FileStore {
             (Ok(()), Err(e)) => Err(e.into()),
         }
     }
-}
-
-fn ensure_private_dir(path: &Path) -> Result<(), CredStoreError> {
-    std::fs::create_dir_all(path)?;
-    set_private_dir(path)
-}
-
-#[cfg_attr(not(unix), allow(unused_variables))]
-fn configure_private_file(options: &mut AtomicOpenOptions) {
-    #[cfg(unix)]
-    {
-        use atomic_write_file::unix::OpenOptionsExt as AtomicOpenOptionsExt;
-        use std::os::unix::fs::OpenOptionsExt;
-
-        options.preserve_mode(false).mode(0o600);
-    }
-}
-
-/// Sets directory permissions to 0700 on Unix. No-op on other platforms.
-#[cfg_attr(not(unix), allow(unused_variables))]
-fn set_private_dir(path: &Path) -> Result<(), CredStoreError> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = std::fs::Permissions::from_mode(0o700);
-        std::fs::set_permissions(path, perms)?;
-    }
-    Ok(())
 }
 
 impl CredentialStore for FileStore {

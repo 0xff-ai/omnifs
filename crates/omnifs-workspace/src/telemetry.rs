@@ -21,6 +21,8 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use tracing::debug;
 
+use crate::io::ensure_private_dir;
+
 /// Subdirectory of `config_dir` that holds the telemetry JSONL files. The Bun
 /// reporter (`scripts/bench/dogfood-report.ts`) hardcodes the same relative
 /// path; keep the two in sync.
@@ -170,20 +172,6 @@ fn now_rfc3339() -> String {
 }
 
 #[cfg(unix)]
-fn ensure_private_dir(dir: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
-    if dir.exists() {
-        // Re-assert 0700 in case a prior version created it more permissively.
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
-        return Ok(());
-    }
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(dir)
-}
-
-#[cfg(unix)]
 fn open_private_append(path: &Path) -> std::io::Result<std::fs::File> {
     use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
     let handle = std::fs::OpenOptions::new()
@@ -195,11 +183,6 @@ fn open_private_append(path: &Path) -> std::io::Result<std::fs::File> {
     // append to a pre-existing, more-permissive file still tightens it.
     handle.set_permissions(std::fs::Permissions::from_mode(0o600))?;
     Ok(handle)
-}
-
-#[cfg(not(unix))]
-fn ensure_private_dir(dir: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dir)
 }
 
 #[cfg(not(unix))]
