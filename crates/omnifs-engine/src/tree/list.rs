@@ -349,46 +349,35 @@ fn listing_from_dirents(node: &Node, dirents: &DirentsPayload) -> Listing {
 /// exhausted-but-complete). A plain non-exhaustive record is a partial
 /// prefetched snapshot (e.g. from a Lookup that merged route-derived structural
 /// children) and must NOT be returned as authoritative; the caller falls through
-/// to the provider. `mem` first, then the unified cache. Mirrors
-/// `Frontend::opendir_check_caches` + rate-limit serve-stale.
+/// to the provider. Mirrors `Frontend::opendir_check_caches` + rate-limit
+/// serve-stale.
 fn consult_authoritative_listing(
     runtime: &Runtime,
     path: &omnifs_core::path::Path,
 ) -> Option<DirentsPayload> {
-    if let Some(record) = runtime.cache().mem_get(path, RecordKind::Dirents, None)
-        && let Some(dirents) = DirentsPayload::deserialize(&record.payload)
-        && dirents.is_authoritative_listing()
+    let dirents = cached_dirents_for_revalidation(runtime, path);
+    if dirents
+        .as_ref()
+        .is_some_and(DirentsPayload::is_authoritative_listing)
     {
-        return Some(dirents);
-    }
-    if let Some(record) = runtime.cache().cache_get(path, RecordKind::Dirents, None)
-        && let Some(dirents) = DirentsPayload::deserialize(&record.payload)
-        && dirents.is_authoritative_listing()
-    {
-        return Some(dirents);
+        return dirents;
     }
     // Serve-stale-while-rate-limited: while the mount's window is open, serve the
     // last-known listing (even a non-authoritative prefix) rather than calling
     // the provider and getting EAGAIN.
     if runtime.rate_limited_until().is_some() {
-        return cached_dirents_for_revalidation(runtime, path);
+        return dirents;
     }
     None
 }
 
 /// The cached dirents record for `path`, exhaustive or not, used to recover the
 /// listing validator for revalidation and to serve an `unchanged` result.
-/// `mem` first, then the unified cache. Mirrors
-/// `Frontend::cached_dirents_for_revalidation`.
+/// Mirrors `Frontend::cached_dirents_for_revalidation`.
 fn cached_dirents_for_revalidation(
     runtime: &Runtime,
     path: &omnifs_core::path::Path,
 ) -> Option<DirentsPayload> {
-    if let Some(record) = runtime.cache().mem_get(path, RecordKind::Dirents, None)
-        && let Some(dirents) = DirentsPayload::deserialize(&record.payload)
-    {
-        return Some(dirents);
-    }
     let record = runtime.cache().cache_get(path, RecordKind::Dirents, None)?;
     DirentsPayload::deserialize(&record.payload)
 }

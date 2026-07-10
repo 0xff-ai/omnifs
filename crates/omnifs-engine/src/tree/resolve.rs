@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use crate::Runtime;
-use crate::cache::{Record, RecordKind};
+use crate::cache::RecordKind;
 use crate::effect_apply::LookupOutcome;
 use crate::view::{DirentsPayload, EntryMeta};
 use omnifs_core::path::Path;
@@ -155,21 +155,9 @@ impl Tree {
 }
 
 fn cached_dirent_child(runtime: &Runtime, parent: &Path, name: &str) -> Option<EntryMeta> {
-    runtime
+    let record = runtime
         .cache()
-        .mem_get(parent, RecordKind::Dirents, None)
-        .as_ref()
-        .and_then(|record| dirent_child(record, name))
-        .or_else(|| {
-            runtime
-                .cache()
-                .cache_get(parent, RecordKind::Dirents, None)
-                .as_ref()
-                .and_then(|record| dirent_child(record, name))
-        })
-}
-
-fn dirent_child(record: &Record, name: &str) -> Option<EntryMeta> {
+        .cache_get(parent, RecordKind::Dirents, None)?;
     let dirents = DirentsPayload::deserialize(&record.payload)?;
     dirents
         .entries

@@ -213,11 +213,11 @@ pub(crate) fn resolve_synthetic_child(
     None
 }
 
-/// Find a `@next`/`@all` dirent in the parent directory's cached dirents record
-/// (mem then unified cache). `None` when the parent has never paged (its cached
-/// dirents, if any, never carried a control record); a directory that has ever
-/// paged keeps the record regardless of cursor state, so this does NOT go
-/// `None` merely because the feed exhausted.
+/// Find a `@next`/`@all` dirent in the parent directory's cached dirents record.
+/// `None` when the parent has never paged (its cached dirents, if any, never
+/// carried a control record); a directory that has ever paged keeps the record
+/// regardless of cursor state, so this does NOT go `None` merely because the
+/// feed exhausted.
 fn cached_control_dirent(
     runtime: &Runtime,
     parent: &Path,
@@ -226,13 +226,9 @@ fn cached_control_dirent(
     use crate::cache::RecordKind;
     use crate::view::DirentsPayload;
 
-    let dirents = if let Some(record) = runtime.cache().mem_get(parent, RecordKind::Dirents, None) {
-        DirentsPayload::deserialize(&record.payload)?
-    } else {
-        let record = runtime
-            .cache()
-            .cache_get(parent, RecordKind::Dirents, None)?;
-        DirentsPayload::deserialize(&record.payload)?
-    };
+    let record = runtime
+        .cache()
+        .cache_get(parent, RecordKind::Dirents, None)?;
+    let dirents = DirentsPayload::deserialize(&record.payload)?;
     dirents.entries.into_iter().find(|e| e.name == name)
 }
