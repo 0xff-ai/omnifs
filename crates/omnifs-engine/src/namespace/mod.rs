@@ -208,6 +208,31 @@ impl DirCursor {
     }
 }
 
+impl DirPage {
+    /// Apply the frontend's per-page budget, carrying any overflow in the next
+    /// cursor ahead of the tree's own continuation.
+    fn with_budget(
+        mut entries: Vec<DirEntry>,
+        then: Option<view_types::CachedCursor>,
+        budget: usize,
+    ) -> Self {
+        if budget == 0 || entries.len() <= budget {
+            return Self {
+                entries,
+                next: then.map(DirCursor::Tree),
+            };
+        }
+        let overflow = entries.split_off(budget);
+        Self {
+            entries,
+            next: Some(DirCursor::Buffered {
+                entries: overflow,
+                then,
+            }),
+        }
+    }
+}
+
 /// The answer for one byte read. `attrs` lets a caller promote a learned size
 /// without a second `getattr`: the learned-size writeback that FUSE/NFS did per
 /// protocol is engine-internal here.
@@ -1034,7 +1059,7 @@ impl TreeNamespace {
         // A buffered cursor is pure overflow the previous page held back; serve
         // it without touching the tree.
         if let DirCursor::Buffered { entries, then } = cursor {
-            return Ok(page_from_buffer(entries, then, budget));
+            return Ok(DirPage::with_budget(entries, then, budget));
         }
 
         let (full_path, mount) = self.record(id)?;
@@ -1063,18 +1088,15 @@ impl TreeNamespace {
 
             let mount = node.mount().to_string();
             let parent_full = full_path;
-            let mut entries = Vec::with_capacity(listing.entries.len());
-            for entry in &listing.entries {
-                entries.push(self.dir_entry(
-                    &mount,
-                    &parent_full,
-                    node.path(),
-                    &entry.name,
-                    &entry.meta,
-                ));
-            }
+            let entries = listing
+                .entries
+                .iter()
+                .map(|entry| {
+                    self.dir_entry(&mount, &parent_full, node.path(), &entry.name, &entry.meta)
+                })
+                .collect();
             let tree_next = listing.next_cursor.map(|c| c.0);
-            Ok(page_split(entries, tree_next, budget))
+            Ok(DirPage::with_budget(entries, tree_next, budget))
         }
         .await;
         Self::record_outcome(span.as_ref(), &result);
@@ -1365,51 +1387,5 @@ fn hash_attr_facts(hasher: &mut DefaultHasher, attrs: Option<&FileAttrsCache>, e
         std::mem::discriminant(&attrs.size()).hash(hasher);
         std::mem::discriminant(&attrs.byte_source()).hash(hasher);
         std::mem::discriminant(&attrs.stability()).hash(hasher);
-    }
-}
-
-/// Split a freshly listed page against a per-page `budget`: return at most
-/// `budget` entries, carrying the overflow into a `Buffered` cursor chained
-/// before the tree's own continuation.
-fn page_split(
-    mut entries: Vec<DirEntry>,
-    tree_next: Option<view_types::CachedCursor>,
-    budget: usize,
-) -> DirPage {
-    if budget == 0 || entries.len() <= budget {
-        return DirPage {
-            entries,
-            next: tree_next.map(DirCursor::Tree),
-        };
-    }
-    let overflow = entries.split_off(budget);
-    DirPage {
-        entries,
-        next: Some(DirCursor::Buffered {
-            entries: overflow,
-            then: tree_next,
-        }),
-    }
-}
-
-/// Serve buffered overflow entries against a `budget`.
-fn page_from_buffer(
-    mut entries: Vec<DirEntry>,
-    then: Option<view_types::CachedCursor>,
-    budget: usize,
-) -> DirPage {
-    if budget == 0 || entries.len() <= budget {
-        return DirPage {
-            entries,
-            next: then.map(DirCursor::Tree),
-        };
-    }
-    let overflow = entries.split_off(budget);
-    DirPage {
-        entries,
-        next: Some(DirCursor::Buffered {
-            entries: overflow,
-            then,
-        }),
     }
 }
