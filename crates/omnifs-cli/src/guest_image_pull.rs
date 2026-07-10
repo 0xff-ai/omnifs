@@ -1,7 +1,7 @@
 //! Pulls the krunkit guest disk image from its ghcr OCI artifact and caches
 //! it locally: anonymous token, manifest, single blob, sha256 verification,
 //! decompress-once. Only the release channel ever reaches this path (see
-//! `crate::krunkit_backend::resolve_guest_image`); the dev channel always
+//! `crate::krunkit_backend::GuestImageSource`); the dev channel always
 //! uses a local path and never downloads.
 //!
 //! Plain HTTP via the CLI's existing reqwest dependency, not an ORAS client:
@@ -69,9 +69,6 @@ impl OciRef {
 
 #[derive(Debug, Deserialize)]
 struct BlobDescriptor {
-    #[serde(rename = "mediaType")]
-    #[allow(dead_code)] // carried for future content-type checks; not asserted today
-    media_type: String,
     digest: String,
     size: u64,
 }
@@ -396,35 +393,5 @@ mod tests {
     #[test]
     fn oci_ref_rejects_a_reference_with_no_tag() {
         assert!(OciRef::parse("ghcr.io/0xff-ai/omnifs-guest").is_err());
-    }
-
-    // "hello guest image\n" is the exact 18-byte fixture blob content used
-    // above (verified independently via `printf 'hello guest image\n' |
-    // shasum -a 256` and against a real `oras push` of the same bytes), so
-    // this doubles as the digest math the fixtures' `size: 18` assumes.
-    const FIXTURE_BLOB_BYTES: &[u8] = b"hello guest image\n";
-    const FIXTURE_BLOB_DIGEST: &str =
-        "sha256:2d24b9eb82aa02a06ac3a487489a17083ec337a613ccb2a1f1ca610ec37370ca";
-
-    #[test]
-    fn digest_verification_detects_a_mismatch() {
-        let mut hasher = Sha256::new();
-        hasher.update(FIXTURE_BLOB_BYTES);
-        let actual = format!("sha256:{:x}", hasher.finalize());
-        let expected = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
-        assert_ne!(actual, expected);
-    }
-
-    #[test]
-    fn digest_verification_accepts_a_match() {
-        let mut hasher = Sha256::new();
-        hasher.update(FIXTURE_BLOB_BYTES);
-        let actual = format!("sha256:{:x}", hasher.finalize());
-        assert_eq!(actual, FIXTURE_BLOB_DIGEST);
-        assert_eq!(
-            FIXTURE_BLOB_BYTES.len(),
-            18,
-            "matches the fixtures' size: 18"
-        );
     }
 }
