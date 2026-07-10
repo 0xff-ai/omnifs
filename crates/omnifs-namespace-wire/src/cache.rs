@@ -299,6 +299,16 @@ struct Inner {
     window_inflight: HashSet<NodeId>,
 }
 
+impl Inner {
+    fn insert_lookup(&mut self, parent: NodeId, name: String, answer: NodeAnswer) {
+        let ttl = answer.attrs.ttl;
+        self.attrs
+            .insert(answer.node, MemoEntry::new(answer.attrs.clone(), ttl));
+        self.lookups
+            .insert(parent, name, MemoEntry::new(answer, ttl));
+    }
+}
+
 /// The client-side batching cache. Cheap clone-out reads under a single mutex;
 /// shared between the [`WireNamespace`](crate::WireNamespace) call paths and the
 /// connection manager (which applies invalidation events to it).
@@ -380,16 +390,8 @@ impl WireCache {
         if answer.attrs.ttl.is_zero() {
             return;
         }
-        let mut inner = self.lock();
-        inner.attrs.insert(
-            answer.node,
-            MemoEntry::new(answer.attrs.clone(), answer.attrs.ttl),
-        );
-        inner.lookups.insert(
-            parent,
-            name.to_string(),
-            MemoEntry::new(answer.clone(), answer.attrs.ttl),
-        );
+        self.lock()
+            .insert_lookup(parent, name.to_string(), answer.clone());
     }
 
     /// Seed the memo from a readdir page's children: every `ttl > 0` entry
@@ -402,20 +404,12 @@ impl WireCache {
             if entry.attrs.ttl.is_zero() {
                 continue;
             }
-            inner.attrs.insert(
-                entry.node,
-                MemoEntry::new(entry.attrs.clone(), entry.attrs.ttl),
-            );
             let answer = NodeAnswer {
                 node: entry.node,
                 attrs: entry.attrs.clone(),
                 kind: entry.kind.clone(),
             };
-            inner.lookups.insert(
-                parent,
-                entry.name.clone(),
-                MemoEntry::new(answer, entry.attrs.ttl),
-            );
+            inner.insert_lookup(parent, entry.name.clone(), answer);
         }
     }
 
