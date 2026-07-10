@@ -20,11 +20,12 @@
 //!   backend binds and accepts on in a loop before spawning krunkit — a
 //!   `,listen` device requires the host side already listening, since krunkit
 //!   dials it once per guest connection rather than the reverse.
-//! - port 22 (ssh): host-initiated (no `,listen`): krunkit itself creates and
-//!   listens on the unix socket, relaying each accepted connection into the
-//!   guest's vsock-listening dropbear (`ListenStream=vsock::22` in the guest
-//!   image). `omnifs shell` dials it through `ssh -o
-//!   ProxyCommand='socat - UNIX-CONNECT:<path>'`.
+//! - port 22 (ssh): host-initiated (`,connect`, krunkit's explicit
+//!   host-to-guest mode; omitting both keywords means guest-initiated):
+//!   krunkit itself creates and listens on the unix socket, relaying each
+//!   accepted connection into the guest's vsock-listening dropbear
+//!   (`ListenStream=vsock::22` in the guest image). `omnifs shell` dials it
+//!   through `ssh -o ProxyCommand='socat - UNIX-CONNECT:<path>'`.
 //!
 //! No `virtio-net` device is ever configured: the frontend carries no
 //! credentials and needs no egress, so it gets no network authority at all.
@@ -522,7 +523,7 @@ fn assert_krunkit_locked_down(
         return Err("missing the expected readiness vsock device".to_string());
     }
     let expected_ssh = format!(
-        "virtio-vsock,port={SSH_VSOCK_PORT},socketURL={}",
+        "virtio-vsock,port={SSH_VSOCK_PORT},socketURL={},connect",
         ssh_socket.display()
     );
     if !argv.contains(&expected_ssh) {
@@ -606,7 +607,7 @@ impl FrontendBackend for KrunkitBackend {
             ))
             .arg("--device")
             .arg(format!(
-                "virtio-vsock,port={SSH_VSOCK_PORT},socketURL={}",
+                "virtio-vsock,port={SSH_VSOCK_PORT},socketURL={},connect",
                 self.ssh_socket().display()
             ))
             .arg("--device")
@@ -750,7 +751,7 @@ mod tests {
          --device virtio-blk,path=/img/seed.iso,format=raw \
          --device virtio-vsock,port=1024,socketURL=/h/attach.sock,listen \
          --device virtio-vsock,port=1025,socketURL=/h/ready.sock,listen \
-         --device virtio-vsock,port=22,socketURL=/h/ssh.sock \
+         --device virtio-vsock,port=22,socketURL=/h/ssh.sock,connect \
          --device virtio-serial,logFilePath=/h/serial.log \
          --restful-uri unix:///h/restful.sock --pidfile /h/krunkit.pid"
     }

@@ -1,0 +1,15 @@
+[Unit]
+Description=omnifs krunkit guest dropbear (loopback, reached only via the vsock proxy)
+
+[Service]
+# -F: stay in the foreground under systemd.
+# -E: log to stderr (the journal) instead of syslog (not running here).
+# -s: pubkey auth only, no password logins — the seed-installed key
+# (crates/omnifs-cli/src/krunkit_backend.rs) is the only credential this
+# guest ever accepts.
+# -R: generate host keys under /etc/dropbear on first use; dropbear-bin ships
+# none.
+# -p 127.0.0.1:2222: guest loopback only. The guest has no network device at
+# all, and the only route to this listener is the omnifs-ssh.socket vsock
+# proxy.
+ExecStart=/usr/sbin/dropbear -F -E -s -R -p 127.0.0.1:2222
