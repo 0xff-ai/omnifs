@@ -11,7 +11,7 @@ pub(crate) fn fixture_paths(root: &std::path::Path) -> omnifs_workspace::layout:
 /// A `ProviderRef` JSON value pinned to a placeholder id, for building mount
 /// spec fixtures whose serving path is never resolved.
 #[cfg(test)]
-pub(crate) fn provider_ref_value(name: &str) -> serde_json::Value {
+fn provider_ref_value(name: &str) -> serde_json::Value {
     use omnifs_workspace::ids::ProviderId;
     serde_json::json!({
         "id": ProviderId::from_wasm_bytes(name.as_bytes()).to_string(),
@@ -125,7 +125,7 @@ pub(crate) fn wasm_with_metadata_section(data: &[u8]) -> Vec<u8> {
 }
 
 #[cfg(test)]
-pub(crate) fn push_uleb(mut value: usize, out: &mut Vec<u8>) {
+fn push_uleb(mut value: usize, out: &mut Vec<u8>) {
     loop {
         let mut byte = u8::try_from(value & 0x7f).unwrap();
         value >>= 7;
