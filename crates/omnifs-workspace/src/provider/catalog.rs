@@ -36,20 +36,15 @@ pub enum CatalogError {
 /// A read-only view over the providers installed under one store root.
 #[derive(Debug, Clone)]
 pub struct Catalog {
-    providers_dir: PathBuf,
+    store: ProviderStore,
 }
 
 impl Catalog {
     #[must_use]
     pub fn open(providers_dir: impl AsRef<Path>) -> Self {
         Self {
-            providers_dir: providers_dir.as_ref().to_path_buf(),
+            store: ProviderStore::new(providers_dir.as_ref()),
         }
-    }
-
-    /// The content-addressed store backing this catalog.
-    fn store(&self) -> ProviderStore {
-        ProviderStore::new(&self.providers_dir)
     }
 
     fn provider_from_entry(&self, entry: &IndexEntry) -> Provider {
@@ -59,14 +54,14 @@ impl Catalog {
                 name: entry.name.clone(),
                 version: entry.version.clone(),
             },
-            wasm_path: self.store().artifact_path(&entry.id),
+            wasm_path: self.store.artifact_path(&entry.id),
         }
     }
 
     /// Resolve a pinned id to its retained artifact. `None` means the artifact is
     /// not retained (the use site raises `ArtifactMissing`).
     pub fn get(&self, id: &ProviderId) -> Result<Option<Provider>, CatalogError> {
-        let index = self.store().read_index()?;
+        let index = self.store.read_index()?;
         let Some(entry) = index.providers.iter().find(|entry| &entry.id == id) else {
             return Ok(None);
         };
@@ -77,7 +72,7 @@ impl Catalog {
     /// The most recently installed artifact for a name. Init and upgrade only,
     /// never serving.
     pub fn latest_by_name(&self, name: &ProviderName) -> Result<Option<Provider>, CatalogError> {
-        let index = self.store().read_index()?;
+        let index = self.store.read_index()?;
         let Some(id) = index.latest.get(name.as_str()) else {
             return Ok(None);
         };
@@ -92,7 +87,7 @@ impl Catalog {
     /// authoring/selection view (one selectable provider per name; older
     /// retained versions are upgrade history).
     pub fn installable(&self) -> Result<Vec<Provider>, CatalogError> {
-        let index = self.store().read_index()?;
+        let index = self.store.read_index()?;
         Ok(index
             .latest
             .values()
@@ -104,7 +99,7 @@ impl Catalog {
     /// Every retained installed artifact, including older versions kept for
     /// mounted specs and upgrade history.
     pub fn installed(&self) -> Result<Vec<Provider>, CatalogError> {
-        let index = self.store().read_index()?;
+        let index = self.store.read_index()?;
         Ok(index
             .providers
             .iter()
@@ -115,17 +110,17 @@ impl Catalog {
     /// `<hex>.wasm` for a pinned id (the serving path).
     #[must_use]
     pub fn provider_path_by_id(&self, id: &ProviderId) -> PathBuf {
-        self.store().artifact_path(id)
+        self.store.artifact_path(id)
     }
 
     /// The state of the backing providers directory: absent, present with a
     /// retained-artifact count, or present but with an unreadable index.
     #[must_use]
     pub fn dir_status(&self) -> DirStatus {
-        if !self.providers_dir.exists() {
+        if !self.store.root().exists() {
             return DirStatus::Missing;
         }
-        match self.store().read_index() {
+        match self.store.read_index() {
             Ok(index) => DirStatus::Present {
                 wasm_count: index.providers.len(),
             },
