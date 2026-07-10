@@ -683,8 +683,7 @@ async function tagFloatingFrontendImage(image: string): Promise<void> {
 function buildFrontendImage(image: string): Promise<void> {
   // No `provider-wasm` build context: the frontend image runs the slim
   // `omnifs-fuse` binary (`fuse-builder` stage), which needs no engine, no
-  // Wasmtime, and no provider bundle, unlike the full `omnifs` CLI/daemon
-  // binary this same Dockerfile's `builder` stage produces above.
+  // Wasmtime, and no provider bundle.
   return run($`docker build -t ${image} --target frontend-dev .`);
 }
 
