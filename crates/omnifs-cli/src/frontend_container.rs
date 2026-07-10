@@ -1,11 +1,10 @@
 //! The Docker-hosted FUSE frontend container: naming, image resolution, and
 //! the container body it launches with.
 //!
-//! Kept apart from `runtime.rs` because the frontend container is a distinct
-//! artifact from the daemon's own Docker container: no home bind mount, no
-//! credentials, no control API exposure. It attaches to a host-native
-//! daemon's TCP namespace listener instead of running the daemon itself. See
-//! `docs/contracts/50-control-plane.md`.
+//! Kept apart from `runtime.rs` because the frontend container is a separate
+//! delivery mechanism: no home bind mount, no credentials, no control API
+//! exposure. It attaches to a host-native daemon's TCP namespace listener
+//! instead of running the daemon itself. See `docs/contracts/50-control-plane.md`.
 
 use std::collections::HashMap;
 use std::path::Path;

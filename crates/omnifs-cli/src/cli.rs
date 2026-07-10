@@ -97,10 +97,9 @@ pub enum Commands {
     #[command(hide = true)]
     Debug(commands::debug::DebugArgs),
 
-    /// Run the runtime daemon. Internal: launched by the container
-    /// entrypoint (and, later, the host-native launcher), not invoked
-    /// directly. The daemon still runs as its own process over the
-    /// control API; this is the same binary, not a separate entrypoint.
+    /// Run the runtime daemon. Internal: launched by the host-native lifecycle
+    /// command, not invoked directly. The daemon still runs as its own process
+    /// over the control API; this is the same binary, not a separate entrypoint.
     #[command(hide = true)]
     #[cfg(feature = "daemon")]
     Daemon(omnifs_daemon::DaemonArgs),
