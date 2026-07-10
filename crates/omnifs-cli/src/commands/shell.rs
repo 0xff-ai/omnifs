@@ -145,8 +145,8 @@ impl ShellArgs {
     }
 
     /// Attach to the Docker-hosted FUSE frontend by `docker exec`'ing into its
-    /// container, landing in the projected tree. The container ships its own
-    /// omnifs-tuned zsh rc, so no host rc plumbing applies here; `--shell`
+    /// container, landing in the projected tree. The minimal frontend image
+    /// ships only `/bin/sh`, so no host rc plumbing applies here; `--shell`
     /// overrides the default and a trailing command runs non-interactively.
     fn exec_in_container(&self, container: &str) -> Result<()> {
         let mut cmd = Command::new("docker");
@@ -157,7 +157,7 @@ impl ShellArgs {
         cmd.arg("-w").arg(GUEST_MOUNT);
         cmd.arg(container);
         if self.command.is_empty() {
-            cmd.arg(self.shell.as_deref().unwrap_or("/bin/zsh"));
+            cmd.arg(self.shell.as_deref().unwrap_or("/bin/sh"));
             anstream::eprintln!("omnifs shell (container) at {GUEST_MOUNT} (type `exit` to leave)");
         } else {
             cmd.args(&self.command);
