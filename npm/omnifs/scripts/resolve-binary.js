@@ -2,50 +2,21 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
+const { optionalDependencies = {} } = require("../package.json");
 
 function packageForPlatform(platform = process.platform, arch = process.arch) {
-  const packageJson = require("../package.json");
-  const dependencies = Object.keys(packageJson.optionalDependencies || {});
-
-  for (const packageName of dependencies) {
-    const metadata = packageMetadata(packageName);
-    if (!metadata) {
-      continue;
-    }
-    const os = Array.isArray(metadata.os) ? metadata.os : [];
-    const cpu = Array.isArray(metadata.cpu) ? metadata.cpu : [];
-    if (os.includes(platform) && cpu.includes(arch)) {
-      return packageName;
-    }
-  }
-
-  return null;
-}
-
-function binaryName() {
-  return process.platform === "win32" ? "omnifs.exe" : "omnifs";
+  const packageName = `@0xff-ai/omnifs-cli-${platform}-${arch}`;
+  return Object.prototype.hasOwnProperty.call(optionalDependencies, packageName)
+    ? packageName
+    : null;
 }
 
 function existingExecutable(file) {
   try {
     const stat = fs.statSync(file);
     return stat.isFile();
-  } catch (_) {
+  } catch {
     return false;
-  }
-}
-
-function resolveFromPackage(packageName) {
-  const packageJson = require.resolve(`${packageName}/package.json`);
-  const packageRoot = path.dirname(packageJson);
-  return path.join(packageRoot, "bin", binaryName());
-}
-
-function packageMetadata(packageName) {
-  try {
-    return require(`${packageName}/package.json`);
-  } catch (_) {
-    return null;
   }
 }
 
@@ -69,7 +40,8 @@ function resolveBinary() {
   }
 
   try {
-    const binary = resolveFromPackage(packageName);
+    const packageJson = require.resolve(`${packageName}/package.json`);
+    const binary = path.join(path.dirname(packageJson), "bin", "omnifs");
     if (existingExecutable(binary)) {
       return { ok: true, path: binary };
     }
@@ -83,7 +55,7 @@ function resolveBinary() {
         "  npm install -g @0xff-ai/omnifs@dev    # or @latest"
       ].join("\n")
     };
-  } catch (error) {
+  } catch {
     return {
       ok: false,
       message: [
