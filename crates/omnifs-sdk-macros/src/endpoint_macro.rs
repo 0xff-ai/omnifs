@@ -10,7 +10,7 @@ pub(crate) fn endpoint_derive_impl(input: &syn::DeriveInput) -> syn::Result<Toke
 
 #[derive(Default)]
 struct EndpointArgs {
-    base: Option<(String, proc_macro2::Span)>,
+    base: Option<String>,
     default_headers: Vec<(String, String)>,
     rate_limit: Option<RateLimitArg>,
     hooks: bool,
@@ -105,7 +105,7 @@ impl EndpointArgs {
                         "`base` may only be specified once",
                     ));
                 }
-                self.base = Some((value_str, mnv.path.span()));
+                self.base = Some(value_str);
             },
             "default_header" => {
                 // Split on the first occurrence of ": " to separate header
@@ -153,15 +153,12 @@ impl EndpointArgs {
     }
 
     fn expand(&self, input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
-        let (base_url, base_span) = self
-            .base
-            .as_ref()
-            .map_or((None, proc_macro2::Span::call_site()), |(base, span)| {
-                (Some(base), *span)
-            });
-        let base_url = base_url
-            .ok_or_else(|| syn::Error::new(base_span, "#[endpoint(base = \"...\")] is required"))?;
-        let base_url = base_url.as_str();
+        let base_url = self.base.as_deref().ok_or_else(|| {
+            syn::Error::new(
+                proc_macro2::Span::call_site(),
+                "#[endpoint(base = \"...\")] is required",
+            )
+        })?;
 
         let type_name = &input.ident;
         if !input.generics.params.is_empty() {
