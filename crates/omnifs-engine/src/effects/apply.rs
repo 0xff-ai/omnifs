@@ -165,37 +165,24 @@ impl<'a> EffectApplier<'a> {
             }
 
             if admit_view {
+                let meta = match &write.kind {
+                    wit_types::FsKind::Directory(_) => EntryMeta::directory(),
+                    wit_types::FsKind::File(file) => {
+                        EntryMeta::file(file_attrs_from_file_out(file))
+                    },
+                };
                 if let Some((parent, name)) = split_projected_path(&write_path) {
-                    let meta = match &write.kind {
-                        wit_types::FsKind::Directory(_) => EntryMeta::directory(),
-                        wit_types::FsKind::File(file) => {
-                            EntryMeta::file(file_attrs_from_file_out(file))
+                    records.children.entry(parent).or_default().insert(
+                        name.clone(),
+                        DirentRecord {
+                            name,
+                            meta: meta.clone(),
                         },
-                    };
-                    records
-                        .children
-                        .entry(parent)
-                        .or_default()
-                        .insert(name.clone(), DirentRecord { name, meta });
+                    );
                 }
 
                 let mut leaf_records = Vec::new();
-                match &write.kind {
-                    wit_types::FsKind::Directory(_) => {
-                        push_projected_entry(
-                            &mut leaf_records,
-                            &write_path,
-                            &wit_types::EntryKind::Directory,
-                        );
-                    },
-                    wit_types::FsKind::File(file) => {
-                        push_projected_entry(
-                            &mut leaf_records,
-                            &write_path,
-                            &wit_types::EntryKind::File(file.clone()),
-                        );
-                    },
-                }
+                push_projected_entry(&mut leaf_records, &write_path, meta);
                 if let wit_types::FsKind::File(file) = &write.kind {
                     push_projected_file_content(&mut leaf_records, &write_path, file);
                     if write.id.is_some() {
@@ -446,9 +433,8 @@ fn freshness_expiry(stability: Stability, now_millis: u64) -> Option<u64> {
     }
 }
 
-/// Push lookup + attr records for a projected path/kind pair.
-fn push_projected_entry(batch: &mut Vec<BatchRecord>, path: &Path, kind: &wit_types::EntryKind) {
-    let meta = entry_meta_from_kind(kind);
+/// Push lookup + attr records for a projected path and its translated metadata.
+fn push_projected_entry(batch: &mut Vec<BatchRecord>, path: &Path, meta: EntryMeta) {
     let lookup = LookupPayload::Positive(meta.clone());
     if let Some(payload) = lookup.serialize() {
         batch.push(BatchRecord::new(
@@ -547,31 +533,30 @@ fn cache_projection_batch<'a, I>(
 ) where
     I: IntoIterator<Item = &'a wit_types::DirEntry>,
 {
-    let entries: Vec<&wit_types::DirEntry> = entries
+    let entries: Vec<(&wit_types::DirEntry, EntryMeta)> = entries
         .into_iter()
-        .filter(|entry| {
+        .filter_map(|entry| {
             if synthetic::is_reserved_provider_leaf(&entry.name) {
                 warn!(
                     name = entry.name.as_str(),
                     parent = parent_path.as_str(),
                     "provider listing yielded a reserved '@'-prefixed entry; skipping"
                 );
-                return false;
+                return None;
             }
-            true
+            Some((entry, entry_meta_from_kind(&entry.kind)))
         })
         .collect();
 
     let mut batch = Vec::new();
     let dirent_map = entries
         .iter()
-        .map(|entry| {
-            let meta = entry_meta_from_kind(&entry.kind);
+        .map(|(entry, meta)| {
             (
                 entry.name.clone(),
                 DirentRecord {
                     name: entry.name.clone(),
-                    meta,
+                    meta: meta.clone(),
                 },
             )
         })
@@ -587,11 +572,11 @@ fn cache_projection_batch<'a, I>(
         ));
     }
 
-    for entry in &entries {
+    for (entry, meta) in entries {
         let path = parent_path
             .join(&entry.name)
             .expect("protocol path segment");
-        push_projected_entry(&mut batch, &path, &entry.kind);
+        push_projected_entry(&mut batch, &path, meta);
         if let wit_types::EntryKind::File(file) = &entry.kind {
             push_projected_file_content(&mut batch, &path, file);
         }
