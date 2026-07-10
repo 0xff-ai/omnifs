@@ -342,60 +342,26 @@ impl RangeResponse {
     /// hit. Every day's slice is materialized exactly once from the partitioned
     /// rows.
     fn into_load(self, requested: Day) -> Result<Load<DailyCollection>> {
-        let mut grouping = self.group_by_day();
-        let (value, canonical) = self.day_canonical(&mut grouping, requested)?;
+        let Self {
+            collection,
+            range,
+            validator,
+            body,
+        } = self;
+        let mut grouping = DayGrouping::from_body(body);
+        let (value, canonical) = grouping.take_canonical(requested, validator.as_ref())?;
         let mut load = Load::fresh(value, canonical);
-        for day in self.range.start().through(*self.range.end()) {
+        for day in range.start().through(*range.end()) {
             if day == requested {
                 continue;
             }
-            let (_, canonical) = self.day_canonical(&mut grouping, day)?;
+            let (_, canonical) = grouping.take_canonical(day, validator.as_ref())?;
             load = load.preload_object(ObjectEntry::fresh(
-                DailyCollectionKey {
-                    day,
-                    collection: self.collection,
-                },
+                DailyCollectionKey { day, collection },
                 canonical,
             ));
         }
         Ok(load)
-    }
-
-    /// Materialize one day's slice and its verbatim canonical bytes.
-    fn day_canonical(
-        &self,
-        grouping: &mut DayGrouping,
-        day: Day,
-    ) -> Result<(DailyCollection, Canonical)> {
-        let value = grouping.take(day);
-        let canonical = self.canonical(&value)?;
-        Ok((DailyCollection(value), canonical))
-    }
-
-    fn canonical(&self, value: &Value) -> Result<Canonical> {
-        let bytes = serde_json::to_vec(value)
-            .map_err(|error| ProviderError::internal(format!("Oura JSON encode error: {error}")))?;
-        Ok(Canonical {
-            bytes,
-            validator: self.validator.clone(),
-        })
-    }
-
-    /// Partition the response's `data` rows by day in a single pass, so each
-    /// row's date is parsed once instead of re-scanning the whole array per day
-    /// across the preload window. Responses without a `data` array re-serve the
-    /// whole body for every day.
-    fn group_by_day(&self) -> DayGrouping {
-        let Some(items) = self.body.get("data").and_then(Value::as_array) else {
-            return DayGrouping::Whole(self.body.clone());
-        };
-        let mut rows: HashMap<Day, Vec<Value>> = HashMap::new();
-        for item in items {
-            if let Some(day) = item_day(item) {
-                rows.entry(day).or_default().push(item.clone());
-            }
-        }
-        DayGrouping::Partitioned(rows)
     }
 }
 
@@ -407,6 +373,39 @@ enum DayGrouping {
 }
 
 impl DayGrouping {
+    /// Partition owned response rows without cloning the full range payload.
+    /// Responses without a `data` array re-serve the whole body for every day.
+    fn from_body(mut body: Value) -> Self {
+        let items = match body.get_mut("data").and_then(Value::as_array_mut) {
+            Some(items) => std::mem::take(items),
+            None => return Self::Whole(body),
+        };
+        let mut rows: HashMap<Day, Vec<Value>> = HashMap::new();
+        for item in items {
+            if let Some(day) = item_day(&item) {
+                rows.entry(day).or_default().push(item);
+            }
+        }
+        Self::Partitioned(rows)
+    }
+
+    fn take_canonical(
+        &mut self,
+        day: Day,
+        validator: Option<&Validator>,
+    ) -> Result<(DailyCollection, Canonical)> {
+        let value = self.take(day);
+        let bytes = serde_json::to_vec(&value)
+            .map_err(|error| ProviderError::internal(format!("Oura JSON encode error: {error}")))?;
+        Ok((
+            DailyCollection(value),
+            Canonical {
+                bytes,
+                validator: validator.cloned(),
+            },
+        ))
+    }
+
     fn take(&mut self, day: Day) -> Value {
         match self {
             Self::Partitioned(rows) => {
@@ -426,10 +425,6 @@ fn item_day(item: &Value) -> Option<Day> {
 }
 
 fn date_value(value: &str) -> Option<Day> {
-    let date = if value.len() == 10 {
-        Date::parse(value, &Iso8601::DATE).ok()?
-    } else {
-        Date::parse(value.get(..10)?, &Iso8601::DATE).ok()?
-    };
+    let date = Date::parse(value.get(..10)?, &Iso8601::DATE).ok()?;
     Day::from_date(date)
 }
