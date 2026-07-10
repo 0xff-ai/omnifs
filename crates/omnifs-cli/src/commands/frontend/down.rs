@@ -3,9 +3,10 @@
 //! microVM).
 //!
 //! Neither backend's attach listener has a close route on the daemon side
-//! (`POST /v1/attach-listeners`/`/v1/attach-listeners/vsock` only ever bind,
-//! idempotently): the listener stays bound until the daemon itself restarts.
-//! This command says so rather than implying it closed something it did not.
+//! (`POST /v1/frontend/attach-target`/`/v1/frontend/attach-target/vsock` only
+//! ever bind, idempotently): the listener stays bound until the daemon itself
+//! restarts. This command says so rather than implying it closed something it
+//! did not.
 //!
 //! [`teardown`] is shared with `omnifs down`, which tears down a running
 //! frontend before stopping the daemon.

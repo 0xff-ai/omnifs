@@ -13,13 +13,13 @@ use axum::http::{Method, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Json, Response};
 use omnifs_api::{
-    AddedField, ApiError, AttachListenersReport, AttachListenersRequest, AttachVsockListenerReport,
-    AuthDelta, AuthSchemeSurface, AuthSurface, CapabilityChange, CapabilityDirection,
-    CredentialHealth, CredentialStatus, DaemonBackend, DaemonHealth, DaemonStatus, DaemonSubsystem,
-    ErrorCode, FieldChange, FrontendInfo, FsType, HealthState, LimitChange, LimitDirection,
-    MountFailure, MountInfo, MountOutcome, MountReport, MountUpdateRequest, ProviderArtifact,
-    ProviderSummary, ReadyInfo, ReconcileReport, ReconcileRequest, StopReport, SubsystemHealth,
-    UpgradeDelta,
+    AddedField, ApiError, AuthDelta, AuthSchemeSurface, AuthSurface, CapabilityChange,
+    CapabilityDirection, CredentialHealth, CredentialStatus, DaemonBackend, DaemonHealth,
+    DaemonStatus, DaemonSubsystem, ErrorCode, FieldChange, FrontendAttachTargetReport,
+    FrontendAttachTargetRequest, FrontendAttachTargetVsockReport, FrontendInfo, FsType,
+    HealthState, LimitChange, LimitDirection, MountFailure, MountInfo, MountOutcome, MountReport,
+    MountUpdateRequest, ProviderArtifact, ProviderSummary, ReadyInfo, ReconcileReport,
+    ReconcileRequest, StopReport, SubsystemHealth, UpgradeDelta,
 };
 use omnifs_auth::{
     CredentialHealth as AuthCredentialHealth, CredentialStatus as AuthCredentialStatus,
@@ -64,7 +64,7 @@ const ATTACH_TOKEN_BYTES: usize = 16;
 
 /// A random 32-lowercase-hex-character attach token, generated once per daemon
 /// start the first time TCP attach is requested (`--attach-tcp` or
-/// `POST /v1/attach-listeners`). Unlike the daemon's per-start instance id, a
+/// `POST /v1/frontend/attach-target`). Unlike the daemon's per-start instance id, a
 /// failure here is security-relevant (a weak or predictable token would defeat
 /// the TCP listener's only auth), so it bails rather than silently downgrading.
 fn generate_attach_token() -> anyhow::Result<String> {
@@ -157,9 +157,9 @@ impl ControlToken {
         ReconcileReport,
         ReconcileRequest,
         StopReport,
-        AttachListenersRequest,
-        AttachListenersReport,
-        AttachVsockListenerReport,
+        FrontendAttachTargetRequest,
+        FrontendAttachTargetReport,
+        FrontendAttachTargetVsockReport,
     ))
 )]
 struct ApiDoc;
@@ -251,16 +251,16 @@ pub struct Daemon {
     /// The shared namespace every in-process frontend and attach listener
     /// serves. Set once via [`Self::set_namespace`], right after startup
     /// reconcile builds it (see `run` in `app.rs`); read by
-    /// [`Self::ensure_attach_tcp`] so a `POST /v1/attach-listeners` call can
+    /// [`Self::ensure_attach_tcp`] so a `POST /v1/frontend/attach-target` call can
     /// bind a TCP attach listener on a running daemon without a restart.
     namespace: OnceLock<Arc<omnifs_engine::TreeNamespace>>,
     /// The bound TCP attach listener, if any: bound eagerly at start via
-    /// `--attach-tcp`, or later via `POST /v1/attach-listeners`. A listener
+    /// `--attach-tcp`, or later via `POST /v1/frontend/attach-target`. A listener
     /// cannot be re-pointed once serving, so a repeat request returns the
     /// existing binding rather than rebinding.
     attach_tcp: Mutex<Option<AttachTcpState>>,
     /// The bound token-checking UDS attach listener, if any: bound on demand
-    /// via `POST /v1/attach-listeners/vsock` for the krunkit vsock-proxy path.
+    /// via `POST /v1/frontend/attach-target/vsock` for the krunkit vsock-proxy path.
     /// Same idempotency as `attach_tcp`.
     attach_uds: Mutex<Option<AttachUdsState>>,
 }
@@ -302,7 +302,7 @@ impl Daemon {
     /// unless one is already bound, in which case the existing binding is
     /// returned unchanged (idempotent: a listener cannot be re-pointed once
     /// serving). Used both by the eager `--attach-tcp` startup path and by the
-    /// `POST /v1/attach-listeners` route on an already-running daemon.
+    /// `POST /v1/frontend/attach-target` route on an already-running daemon.
     ///
     /// Persists the binding into the on-disk runtime record when this daemon
     /// owns that record (host-native); the Docker launcher owns its record
@@ -688,8 +688,8 @@ impl Daemon {
             .routes(routes!(reconcile))
             .routes(routes!(shutdown))
             .routes(routes!(events))
-            .routes(routes!(attach_listeners))
-            .routes(routes!(attach_listeners_vsock))
+            .routes(routes!(frontend_attach_target))
+            .routes(routes!(frontend_attach_target_vsock))
     }
 
     fn router(state: Arc<Self>, auth: Auth) -> Router {
@@ -1213,7 +1213,7 @@ async fn shutdown(State(daemon): State<Arc<Daemon>>) -> Json<StopReport> {
     Json(report)
 }
 
-/// `POST /v1/attach-listeners`: bind the TCP namespace attach listener on a
+/// `POST /v1/frontend/attach-target`: bind the TCP namespace attach listener on a
 /// running daemon, so a containerized frontend (the Docker Desktop path, which
 /// cannot share a host Unix socket into its Linux VM) can be started later
 /// without restarting the daemon. Docker Desktop uses loopback; native Linux
@@ -1223,19 +1223,19 @@ async fn shutdown(State(daemon): State<Arc<Daemon>>) -> Json<StopReport> {
 /// unchanged, since a listener cannot be re-pointed once serving.
 #[utoipa::path(
     post,
-    path = "/v1/attach-listeners",
-    operation_id = "attach_listeners",
-    request_body = Option<AttachListenersRequest>,
+    path = "/v1/frontend/attach-target",
+    operation_id = "frontend_attach_target",
+    request_body = Option<FrontendAttachTargetRequest>,
     responses(
-        (status = 200, description = "the TCP attach listener's address and per-instance token", body = AttachListenersReport),
+        (status = 200, description = "the TCP attach listener's address and per-instance token", body = FrontendAttachTargetReport),
         (status = 400, description = "the requested address is not an approved attach boundary", body = ApiError),
         (status = 503, description = "the namespace is not ready yet", body = ApiError),
         (status = 500, description = "failed to bind the attach listener", body = ApiError),
     ),
 )]
-async fn attach_listeners(
+async fn frontend_attach_target(
     State(daemon): State<Arc<Daemon>>,
-    request: Option<Json<AttachListenersRequest>>,
+    request: Option<Json<FrontendAttachTargetRequest>>,
 ) -> Response {
     let request = request.map(|Json(request)| request).unwrap_or_default();
     let bind_addr = match AttachBindAddr::requested(request.bind_ip) {
@@ -1250,7 +1250,7 @@ async fn attach_listeners(
     };
     let rt = tokio::runtime::Handle::current();
     match daemon.ensure_attach_tcp(bind_addr, 0, &rt) {
-        Ok(AttachTcpOutcome::Bound(state)) => Json(AttachListenersReport {
+        Ok(AttachTcpOutcome::Bound(state)) => Json(FrontendAttachTargetReport {
             addr: state.addr.to_string(),
             token: state.token,
         })
@@ -1268,7 +1268,7 @@ async fn attach_listeners(
     }
 }
 
-/// `POST /v1/attach-listeners/vsock`: bind the token-checking UDS namespace
+/// `POST /v1/frontend/attach-target/vsock`: bind the token-checking UDS namespace
 /// attach listener on a running daemon, for the krunkit vsock-proxy path (a
 /// macOS guest VM with no shared host Unix socket and no Docker-style loopback
 /// either; it dials host vsock instead, and krunkit proxies every connection
@@ -1278,18 +1278,18 @@ async fn attach_listeners(
 /// token unchanged, since a listener cannot be re-pointed once serving.
 #[utoipa::path(
     post,
-    path = "/v1/attach-listeners/vsock",
-    operation_id = "attach_listeners_vsock",
+    path = "/v1/frontend/attach-target/vsock",
+    operation_id = "frontend_attach_target_vsock",
     responses(
-        (status = 200, description = "the UDS attach listener's socket path and per-instance token", body = AttachVsockListenerReport),
+        (status = 200, description = "the UDS attach listener's socket path and per-instance token", body = FrontendAttachTargetVsockReport),
         (status = 503, description = "the namespace is not ready yet", body = ApiError),
         (status = 500, description = "failed to bind the attach listener", body = ApiError),
     ),
 )]
-async fn attach_listeners_vsock(State(daemon): State<Arc<Daemon>>) -> Response {
+async fn frontend_attach_target_vsock(State(daemon): State<Arc<Daemon>>) -> Response {
     let rt = tokio::runtime::Handle::current();
     match daemon.ensure_attach_uds(&rt) {
-        Ok(AttachUdsOutcome::Bound(state)) => Json(AttachVsockListenerReport {
+        Ok(AttachUdsOutcome::Bound(state)) => Json(FrontendAttachTargetVsockReport {
             socket_path: state.socket_path.display().to_string(),
             token: state.token,
         })

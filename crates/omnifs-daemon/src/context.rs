@@ -63,7 +63,7 @@ pub(crate) struct DaemonContext {
     attach_sockets: Vec<String>,
     /// `--attach-tcp <port>`: bind a TCP namespace attach listener eagerly at
     /// start (`0` = ephemeral). `None` when the flag was not passed; a TCP
-    /// attach listener can still be bound later via `POST /v1/attach-listeners`.
+    /// attach listener can still be bound later via `POST /v1/frontend/attach-target`.
     attach_tcp: Option<u16>,
     nfs: NfsContext,
     process: ProcessInfo,

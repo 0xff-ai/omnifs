@@ -1,5 +1,5 @@
 //! The TCP namespace-attach transport: `--attach-tcp` and
-//! `POST /v1/attach-listeners`.
+//! `POST /v1/frontend/attach-target`.
 //!
 //! Both entry points converge on one binding: the daemon runs namespace-only
 //! (an attach socket, no `--frontend`), so no OS mount is ever served here and
@@ -89,11 +89,11 @@ fn wait_ready(ctrl_socket: &Path, deadline: Duration) {
     }
 }
 
-/// `POST /v1/attach-listeners` over the Unix control socket, with an optional
+/// `POST /v1/frontend/attach-target` over the Unix control socket, with an optional
 /// JSON body, returning the parsed response. Panics on a non-2xx status (the
 /// namespace-not-ready 503 included) since every call in this suite happens
 /// after `wait_ready`.
-fn post_attach_listeners(ctrl_socket: &Path, body: Option<&str>) -> serde_json::Value {
+fn post_frontend_attach_target(ctrl_socket: &Path, body: Option<&str>) -> serde_json::Value {
     let mut cmd = Command::new("curl");
     cmd.args(["-fsS", "--unix-socket"]).arg(ctrl_socket);
     if let Some(body) = body {
@@ -101,14 +101,14 @@ fn post_attach_listeners(ctrl_socket: &Path, body: Option<&str>) -> serde_json::
     } else {
         cmd.args(["-X", "POST"]);
     }
-    cmd.arg("http://localhost/v1/attach-listeners");
+    cmd.arg("http://localhost/v1/frontend/attach-target");
     let output = cmd.output().expect("spawn curl");
     assert!(
         output.status.success(),
-        "POST /v1/attach-listeners failed: {}",
+        "POST /v1/frontend/attach-target failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    serde_json::from_slice(&output.stdout).expect("attach-listeners response is JSON")
+    serde_json::from_slice(&output.stdout).expect("attach-target response is JSON")
 }
 
 fn assert_looks_like_a_token(token: &str) {
@@ -153,7 +153,7 @@ fn no_attach_tcp_flag_means_no_attach_in_the_record() {
 }
 
 #[test]
-fn attach_listeners_route_binds_on_demand_and_is_idempotent() {
+fn frontend_attach_target_route_binds_on_demand_and_is_idempotent() {
     let daemon = spawn_namespace_only(&[]);
     let ctrl_socket = daemon.control_socket();
     wait_ready(&ctrl_socket, Duration::from_secs(30));
@@ -162,7 +162,7 @@ fn attach_listeners_route_binds_on_demand_and_is_idempotent() {
         "no attach listener before the route is ever called"
     );
 
-    let first = post_attach_listeners(&ctrl_socket, Some(r#"{"bind_ip":"127.0.0.1"}"#));
+    let first = post_frontend_attach_target(&ctrl_socket, Some(r#"{"bind_ip":"127.0.0.1"}"#));
     let addr = first["addr"].as_str().expect("addr").to_string();
     let token = first["token"].as_str().expect("token").to_string();
     assert_looks_like_a_token(&token);
@@ -173,7 +173,7 @@ fn attach_listeners_route_binds_on_demand_and_is_idempotent() {
 
     // A listener cannot be re-pointed once serving: a repeat call (even with a
     // another request returns the same binding rather than rebinding.
-    let second = post_attach_listeners(&ctrl_socket, Some("{}"));
+    let second = post_frontend_attach_target(&ctrl_socket, Some("{}"));
     assert_eq!(
         second["addr"], first["addr"],
         "a repeat call must not rebind"
@@ -187,7 +187,7 @@ fn attach_listeners_route_binds_on_demand_and_is_idempotent() {
     // about it (notably started_at) shifted just because attach bound later.
     let before = daemon.record();
     std::thread::sleep(Duration::from_millis(50));
-    post_attach_listeners(&ctrl_socket, None);
+    post_frontend_attach_target(&ctrl_socket, None);
     let after = daemon.record();
     assert_eq!(before["started_at"], after["started_at"]);
     assert_eq!(after["attach"]["addr"], addr);

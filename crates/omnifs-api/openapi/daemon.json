@@ -10,108 +10,6 @@
     "version": "0.2.1"
   },
   "paths": {
-    "/v1/attach-listeners": {
-      "post": {
-        "summary": "`POST /v1/attach-listeners`: bind the TCP namespace attach listener on a\nrunning daemon, so a containerized frontend (the Docker Desktop path, which\ncannot share a host Unix socket into its Linux VM) can be started later\nwithout restarting the daemon. Docker Desktop uses loopback; native Linux\nasks for the Docker bridge gateway so the container can cross network\nnamespaces without exposing the listener on every host interface.\nIdempotent: a repeat call returns the already-bound address and token\nunchanged, since a listener cannot be re-pointed once serving.",
-        "operationId": "attach_listeners",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "oneOf": [
-                  {
-                    "type": "null"
-                  },
-                  {
-                    "$ref": "#/components/schemas/AttachListenersRequest"
-                  }
-                ]
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "the TCP attach listener's address and per-instance token",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AttachListenersReport"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "the requested address is not an approved attach boundary",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "failed to bind the attach listener",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "503": {
-            "description": "the namespace is not ready yet",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/v1/attach-listeners/vsock": {
-      "post": {
-        "summary": "`POST /v1/attach-listeners/vsock`: bind the token-checking UDS namespace\nattach listener on a running daemon, for the krunkit vsock-proxy path (a\nmacOS guest VM with no shared host Unix socket and no Docker-style loopback\neither; it dials host vsock instead, and krunkit proxies every connection\nonto this socket). Takes no request body: unlike the TCP listener there is\nno bind address to choose, only the daemon-picked path under the\nworkspace. Idempotent: a repeat call returns the already-bound path and\ntoken unchanged, since a listener cannot be re-pointed once serving.",
-        "operationId": "attach_listeners_vsock",
-        "responses": {
-          "200": {
-            "description": "the UDS attach listener's socket path and per-instance token",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AttachVsockListenerReport"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "failed to bind the attach listener",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "503": {
-            "description": "the namespace is not ready yet",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/v1/credentials": {
       "get": {
         "operationId": "credentials_list",
@@ -197,6 +95,108 @@
           },
           "404": {
             "description": "inspector stream disabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/frontend/attach-target": {
+      "post": {
+        "summary": "`POST /v1/frontend/attach-target`: bind the TCP namespace attach listener on a\nrunning daemon, so a containerized frontend (the Docker Desktop path, which\ncannot share a host Unix socket into its Linux VM) can be started later\nwithout restarting the daemon. Docker Desktop uses loopback; native Linux\nasks for the Docker bridge gateway so the container can cross network\nnamespaces without exposing the listener on every host interface.\nIdempotent: a repeat call returns the already-bound address and token\nunchanged, since a listener cannot be re-pointed once serving.",
+        "operationId": "frontend_attach_target",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/FrontendAttachTargetRequest"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "the TCP attach listener's address and per-instance token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FrontendAttachTargetReport"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "the requested address is not an approved attach boundary",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "failed to bind the attach listener",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "the namespace is not ready yet",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/frontend/attach-target/vsock": {
+      "post": {
+        "summary": "`POST /v1/frontend/attach-target/vsock`: bind the token-checking UDS namespace\nattach listener on a running daemon, for the krunkit vsock-proxy path (a\nmacOS guest VM with no shared host Unix socket and no Docker-style loopback\neither; it dials host vsock instead, and krunkit proxies every connection\nonto this socket). Takes no request body: unlike the TCP listener there is\nno bind address to choose, only the daemon-picked path under the\nworkspace. Idempotent: a repeat call returns the already-bound path and\ntoken unchanged, since a listener cannot be re-pointed once serving.",
+        "operationId": "frontend_attach_target_vsock",
+        "responses": {
+          "200": {
+            "description": "the UDS attach listener's socket path and per-instance token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FrontendAttachTargetVsockReport"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "failed to bind the attach listener",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "the namespace is not ready yet",
             "content": {
               "application/json": {
                 "schema": {
@@ -606,50 +606,6 @@
           }
         }
       },
-      "AttachListenersReport": {
-        "type": "object",
-        "description": "`POST /v1/attach-listeners`: the TCP namespace attach listener's address and\nper-instance attach token, whether just bound or already serving from an\nearlier call (or from `--attach-tcp` at daemon start).",
-        "required": [
-          "addr",
-          "token"
-        ],
-        "properties": {
-          "addr": {
-            "type": "string"
-          },
-          "token": {
-            "type": "string"
-          }
-        }
-      },
-      "AttachListenersRequest": {
-        "type": "object",
-        "description": "Optional request body for `POST /v1/attach-listeners`. The address is\nhonored only on the first bind (the listener is idempotent thereafter).\nAn absent `bind_ip` selects loopback; native Linux may request the default\nDocker bridge gateway, which the daemon validates before binding.",
-        "properties": {
-          "bind_ip": {
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        }
-      },
-      "AttachVsockListenerReport": {
-        "type": "object",
-        "description": "`POST /v1/attach-listeners/vsock`: the token-checking UDS namespace attach\nlistener's socket path and per-instance attach token, whether just bound or\nalready serving from an earlier call. This is the krunkit-on-macOS path: a\nguest VM has no shared host Unix socket and no Docker-style loopback\neither, so it dials host vsock instead, and krunkit proxies every vsock\nconnection onto `socket_path`. Every connection krunkit forwards looks like\nthe same trusted local peer to that socket, so `token` (not filesystem\npermissions) is this listener's real auth, checked the same way the TCP\nlistener's is. Takes no request body: unlike the TCP listener, there is no\nbind address to choose, only the daemon-picked path under the workspace.\nIdempotent, same as [`AttachListenersReport`]: a repeat call returns the\nalready-bound path and token unchanged.",
-        "required": [
-          "socket_path",
-          "token"
-        ],
-        "properties": {
-          "socket_path": {
-            "type": "string"
-          },
-          "token": {
-            "type": "string"
-          }
-        }
-      },
       "AuthDelta": {
         "type": "object",
         "properties": {
@@ -1030,6 +986,50 @@
             }
           }
         ]
+      },
+      "FrontendAttachTargetReport": {
+        "type": "object",
+        "description": "`POST /v1/frontend/attach-target`: the TCP attach target a frontend dials\n(address plus per-instance attach token), whether just bound or already\nserving from an earlier call (or from `--attach-tcp` at daemon start).\nNamed after what it returns: the wire client's `AttachTarget::Tcp`.",
+        "required": [
+          "addr",
+          "token"
+        ],
+        "properties": {
+          "addr": {
+            "type": "string"
+          },
+          "token": {
+            "type": "string"
+          }
+        }
+      },
+      "FrontendAttachTargetRequest": {
+        "type": "object",
+        "description": "Optional request body for `POST /v1/frontend/attach-target`. The address is\nhonored only on the first bind (the listener is idempotent thereafter).\nAn absent `bind_ip` selects loopback; native Linux may request the default\nDocker bridge gateway, which the daemon validates before binding.",
+        "properties": {
+          "bind_ip": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "FrontendAttachTargetVsockReport": {
+        "type": "object",
+        "description": "`POST /v1/frontend/attach-target/vsock`: the vsock attach target's host\nside, a token-checking UDS listener's socket path plus the per-instance\nattach token the guest presents (the wire client's `AttachTarget::Vsock`).\nThis is the krunkit-on-macOS path: a guest VM has no shared host Unix\nsocket and no Docker-style loopback either, so it dials host vsock instead,\nand krunkit proxies every vsock connection onto `socket_path`. Every\nconnection krunkit forwards looks like the same trusted local peer to that\nsocket, so `token` (not filesystem permissions) is this listener's real\nauth, checked the same way the TCP listener's is. Takes no request body:\nunlike the TCP listener, there is no bind address to choose, only the\ndaemon-picked path under the workspace. Idempotent, same as\n[`FrontendAttachTargetReport`]: a repeat call returns the already-bound\npath and token unchanged.",
+        "required": [
+          "socket_path",
+          "token"
+        ],
+        "properties": {
+          "socket_path": {
+            "type": "string"
+          },
+          "token": {
+            "type": "string"
+          }
+        }
       },
       "FrontendInfo": {
         "type": "object",

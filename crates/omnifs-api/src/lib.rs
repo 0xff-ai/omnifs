@@ -513,40 +513,42 @@ pub struct StopReport {
     pub providers_dropped: usize,
 }
 
-/// Optional request body for `POST /v1/attach-listeners`. The address is
+/// Optional request body for `POST /v1/frontend/attach-target`. The address is
 /// honored only on the first bind (the listener is idempotent thereafter).
 /// An absent `bind_ip` selects loopback; native Linux may request the default
 /// Docker bridge gateway, which the daemon validates before binding.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
-pub struct AttachListenersRequest {
+pub struct FrontendAttachTargetRequest {
     #[serde(default)]
     #[schema(value_type = Option<String>)]
     pub bind_ip: Option<std::net::Ipv4Addr>,
 }
 
-/// `POST /v1/attach-listeners`: the TCP namespace attach listener's address and
-/// per-instance attach token, whether just bound or already serving from an
-/// earlier call (or from `--attach-tcp` at daemon start).
+/// `POST /v1/frontend/attach-target`: the TCP attach target a frontend dials
+/// (address plus per-instance attach token), whether just bound or already
+/// serving from an earlier call (or from `--attach-tcp` at daemon start).
+/// Named after what it returns: the wire client's `AttachTarget::Tcp`.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct AttachListenersReport {
+pub struct FrontendAttachTargetReport {
     pub addr: String,
     pub token: String,
 }
 
-/// `POST /v1/attach-listeners/vsock`: the token-checking UDS namespace attach
-/// listener's socket path and per-instance attach token, whether just bound or
-/// already serving from an earlier call. This is the krunkit-on-macOS path: a
-/// guest VM has no shared host Unix socket and no Docker-style loopback
-/// either, so it dials host vsock instead, and krunkit proxies every vsock
-/// connection onto `socket_path`. Every connection krunkit forwards looks like
-/// the same trusted local peer to that socket, so `token` (not filesystem
-/// permissions) is this listener's real auth, checked the same way the TCP
-/// listener's is. Takes no request body: unlike the TCP listener, there is no
-/// bind address to choose, only the daemon-picked path under the workspace.
-/// Idempotent, same as [`AttachListenersReport`]: a repeat call returns the
-/// already-bound path and token unchanged.
+/// `POST /v1/frontend/attach-target/vsock`: the vsock attach target's host
+/// side, a token-checking UDS listener's socket path plus the per-instance
+/// attach token the guest presents (the wire client's `AttachTarget::Vsock`).
+/// This is the krunkit-on-macOS path: a guest VM has no shared host Unix
+/// socket and no Docker-style loopback either, so it dials host vsock instead,
+/// and krunkit proxies every vsock connection onto `socket_path`. Every
+/// connection krunkit forwards looks like the same trusted local peer to that
+/// socket, so `token` (not filesystem permissions) is this listener's real
+/// auth, checked the same way the TCP listener's is. Takes no request body:
+/// unlike the TCP listener, there is no bind address to choose, only the
+/// daemon-picked path under the workspace. Idempotent, same as
+/// [`FrontendAttachTargetReport`]: a repeat call returns the already-bound
+/// path and token unchanged.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct AttachVsockListenerReport {
+pub struct FrontendAttachTargetVsockReport {
     pub socket_path: String,
     pub token: String,
 }
