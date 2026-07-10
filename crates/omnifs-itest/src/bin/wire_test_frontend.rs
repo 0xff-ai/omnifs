@@ -17,7 +17,7 @@ use std::sync::Arc;
 use anyhow::Context as _;
 use clap::Parser;
 use omnifs_engine::{Namespace, NsAttachEvent};
-use omnifs_namespace_wire::{AttachEvent, AttachTarget, WireNamespace, resolve_attach_target};
+use omnifs_namespace_wire::{AttachEvent, WireNamespace, resolve_attach_target};
 use tokio::runtime::Handle;
 use tokio::sync::broadcast;
 use tracing::{info, warn};
@@ -66,7 +66,9 @@ fn main() -> anyhow::Result<()> {
         .context("build the tokio runtime")?;
     let handle = rt.handle().clone();
 
-    let namespace = attach_blocking(&handle, target)?;
+    let namespace = rt
+        .block_on(WireNamespace::attach(target, handle.clone()))
+        .context("attach to the namespace")?;
     info!(
         target = %target_label,
         instance = %namespace.instance_id(),
@@ -120,20 +122,6 @@ fn init_tracing() {
         .with_target(false)
         .with_env_filter(filter)
         .init();
-}
-
-/// Attach on the runtime, blocking this thread on the result: the attach
-/// future runs on a worker while `main`'s thread waits, so no nested runtime
-/// is created.
-fn attach_blocking(rt: &Handle, target: AttachTarget) -> anyhow::Result<Arc<WireNamespace>> {
-    let (tx, rx) = std::sync::mpsc::channel();
-    let rt_for_task = rt.clone();
-    rt.spawn(async move {
-        let _ = tx.send(WireNamespace::attach(target, rt_for_task).await);
-    });
-    rx.recv()
-        .map_err(|_| anyhow::anyhow!("attach task dropped before completing"))?
-        .map_err(|error| anyhow::anyhow!("{error}"))
 }
 
 /// Log every reattach (a reconnect that lands on a restarted daemon), keep the
