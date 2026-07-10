@@ -13,12 +13,13 @@ use axum::http::{Method, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Json, Response};
 use omnifs_api::{
-    AddedField, ApiError, AttachListenersReport, AttachListenersRequest, AuthDelta,
-    AuthSchemeSurface, AuthSurface, CapabilityChange, CapabilityDirection, CredentialHealth,
-    CredentialStatus, DaemonBackend, DaemonHealth, DaemonStatus, DaemonSubsystem, ErrorCode,
-    FieldChange, FrontendInfo, FsType, HealthState, LimitChange, LimitDirection, MountFailure,
-    MountInfo, MountOutcome, MountReport, MountUpdateRequest, ProviderArtifact, ProviderSummary,
-    ReadyInfo, ReconcileReport, ReconcileRequest, StopReport, SubsystemHealth, UpgradeDelta,
+    AddedField, ApiError, AttachListenersReport, AttachListenersRequest, AttachVsockListenerReport,
+    AuthDelta, AuthSchemeSurface, AuthSurface, CapabilityChange, CapabilityDirection,
+    CredentialHealth, CredentialStatus, DaemonBackend, DaemonHealth, DaemonStatus, DaemonSubsystem,
+    ErrorCode, FieldChange, FrontendInfo, FsType, HealthState, LimitChange, LimitDirection,
+    MountFailure, MountInfo, MountOutcome, MountReport, MountUpdateRequest, ProviderArtifact,
+    ProviderSummary, ReadyInfo, ReconcileReport, ReconcileRequest, StopReport, SubsystemHealth,
+    UpgradeDelta,
 };
 use omnifs_auth::{
     CredentialHealth as AuthCredentialHealth, CredentialStatus as AuthCredentialStatus,
@@ -34,7 +35,7 @@ use omnifs_workspace::runtime_record::{AttachRecord, RuntimeRecord};
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
 use std::net::{Ipv4Addr, SocketAddr};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use time::format_description::well_known::Rfc3339;
 use tokio_stream::StreamExt as _;
@@ -158,6 +159,7 @@ impl ControlToken {
         StopReport,
         AttachListenersRequest,
         AttachListenersReport,
+        AttachVsockListenerReport,
     ))
 )]
 struct ApiDoc;
@@ -168,6 +170,15 @@ struct ApiDoc;
 #[derive(Debug, Clone)]
 pub(crate) struct AttachTcpState {
     addr: SocketAddr,
+    token: String,
+}
+
+/// A bound token-checking UDS namespace attach listener (the krunkit
+/// vsock-proxy path): its socket path and per-instance token, handed back
+/// verbatim by [`Daemon::ensure_attach_uds`] on a repeat call.
+#[derive(Debug, Clone)]
+pub(crate) struct AttachUdsState {
+    socket_path: PathBuf,
     token: String,
 }
 
@@ -218,6 +229,12 @@ pub(crate) enum AttachTcpOutcome {
     NamespaceNotReady,
 }
 
+/// The outcome of [`Daemon::ensure_attach_uds`], mirroring [`AttachTcpOutcome`].
+pub(crate) enum AttachUdsOutcome {
+    Bound(AttachUdsState),
+    NamespaceNotReady,
+}
+
 pub struct Daemon {
     context: DaemonContext,
     registry: Arc<MountRuntimes>,
@@ -242,6 +259,10 @@ pub struct Daemon {
     /// cannot be re-pointed once serving, so a repeat request returns the
     /// existing binding rather than rebinding.
     attach_tcp: Mutex<Option<AttachTcpState>>,
+    /// The bound token-checking UDS attach listener, if any: bound on demand
+    /// via `POST /v1/attach-listeners/vsock` for the krunkit vsock-proxy path.
+    /// Same idempotency as `attach_tcp`.
+    attach_uds: Mutex<Option<AttachUdsState>>,
 }
 
 impl Daemon {
@@ -262,6 +283,7 @@ impl Daemon {
             attach_serving: std::sync::atomic::AtomicBool::new(false),
             namespace: OnceLock::new(),
             attach_tcp: Mutex::new(None),
+            attach_uds: Mutex::new(None),
         }
     }
 
@@ -331,6 +353,61 @@ impl Daemon {
         drop(guard);
         self.persist_attach_record(&state);
         Ok(AttachTcpOutcome::Bound(state))
+    }
+
+    /// Bind the token-checking UDS namespace attach listener at
+    /// `frontends/vsock-attach.sock` unless one is already bound, in which case
+    /// the existing binding is returned unchanged (idempotent, mirroring
+    /// [`Self::ensure_attach_tcp`]). This is the krunkit vsock-proxy path: the
+    /// guest has no shared host Unix socket and no Docker-style loopback
+    /// either, so it dials host vsock and krunkit proxies every connection onto
+    /// this socket, looking like the same trusted local peer each time, so
+    /// `token` (not filesystem permissions) is the real auth here, checked the
+    /// same way [`Self::ensure_attach_tcp`]'s token is.
+    ///
+    /// Unlike the TCP listener, this binding is not persisted into the runtime
+    /// record: the socket path is self-healing (a stale leftover from a crashed
+    /// daemon is detected and unlinked on the next bind, same as
+    /// [`crate::context::DaemonContext::bind_attach_sockets`]), and the krunkit
+    /// launcher that will consume this listener is Phase 4 scope.
+    pub fn ensure_attach_uds(
+        self: &Arc<Self>,
+        rt: &tokio::runtime::Handle,
+    ) -> anyhow::Result<AttachUdsOutcome> {
+        let mut guard = self
+            .attach_uds
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(state) = guard.as_ref() {
+            return Ok(AttachUdsOutcome::Bound(state.clone()));
+        }
+        let Some(namespace) = self.namespace.get() else {
+            return Ok(AttachUdsOutcome::NamespaceNotReady);
+        };
+
+        let (std_listener, socket_path) = self.context.bind_vsock_attach_socket()?;
+        std_listener
+            .set_nonblocking(true)
+            .context("set attach UDS listener non-blocking")?;
+        let listener = tokio::net::UnixListener::from_std(std_listener)
+            .context("hand the attach UDS listener to tokio")?;
+        let token = generate_attach_token()?;
+
+        let ns = Arc::clone(namespace) as Arc<dyn omnifs_engine::Namespace>;
+        let instance_id = self.context.instance_id().to_string();
+        let serve_token = token.clone();
+        info!(path = %socket_path.display(), "serving namespace attach listener (uds, token-authenticated)");
+        rt.spawn(omnifs_namespace_wire::serve_listener(
+            ns,
+            listener,
+            instance_id,
+            Some(serve_token),
+        ));
+
+        let state = AttachUdsState { socket_path, token };
+        *guard = Some(state.clone());
+        drop(guard);
+        Ok(AttachUdsOutcome::Bound(state))
     }
 
     /// Read-modify-write the on-disk runtime record to add `attach`, preserving
@@ -612,6 +689,7 @@ impl Daemon {
             .routes(routes!(shutdown))
             .routes(routes!(events))
             .routes(routes!(attach_listeners))
+            .routes(routes!(attach_listeners_vsock))
     }
 
     fn router(state: Arc<Self>, auth: Auth) -> Router {
@@ -1178,6 +1256,45 @@ async fn attach_listeners(
         })
         .into_response(),
         Ok(AttachTcpOutcome::NamespaceNotReady) => error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            ErrorCode::Internal,
+            "the namespace is not ready yet",
+        ),
+        Err(error) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            ErrorCode::Internal,
+            error.to_string(),
+        ),
+    }
+}
+
+/// `POST /v1/attach-listeners/vsock`: bind the token-checking UDS namespace
+/// attach listener on a running daemon, for the krunkit vsock-proxy path (a
+/// macOS guest VM with no shared host Unix socket and no Docker-style loopback
+/// either; it dials host vsock instead, and krunkit proxies every connection
+/// onto this socket). Takes no request body: unlike the TCP listener there is
+/// no bind address to choose, only the daemon-picked path under the
+/// workspace. Idempotent: a repeat call returns the already-bound path and
+/// token unchanged, since a listener cannot be re-pointed once serving.
+#[utoipa::path(
+    post,
+    path = "/v1/attach-listeners/vsock",
+    operation_id = "attach_listeners_vsock",
+    responses(
+        (status = 200, description = "the UDS attach listener's socket path and per-instance token", body = AttachVsockListenerReport),
+        (status = 503, description = "the namespace is not ready yet", body = ApiError),
+        (status = 500, description = "failed to bind the attach listener", body = ApiError),
+    ),
+)]
+async fn attach_listeners_vsock(State(daemon): State<Arc<Daemon>>) -> Response {
+    let rt = tokio::runtime::Handle::current();
+    match daemon.ensure_attach_uds(&rt) {
+        Ok(AttachUdsOutcome::Bound(state)) => Json(AttachVsockListenerReport {
+            socket_path: state.socket_path.display().to_string(),
+            token: state.token,
+        })
+        .into_response(),
+        Ok(AttachUdsOutcome::NamespaceNotReady) => error_response(
             StatusCode::SERVICE_UNAVAILABLE,
             ErrorCode::Internal,
             "the namespace is not ready yet",

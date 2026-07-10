@@ -476,7 +476,7 @@ async fn unix_listener_end_to_end() {
     let socket = dir.path().join("ns.sock");
     let listener = tokio::net::UnixListener::bind(&socket).unwrap();
     let stub = StubNamespace::new();
-    tokio::spawn(serve_listener(stub, listener, "inst-e2e".to_string()));
+    tokio::spawn(serve_listener(stub, listener, "inst-e2e".to_string(), None));
 
     let namespace = WireNamespace::attach(
         AttachTarget::Unix(socket),
@@ -552,6 +552,76 @@ async fn tcp_listener_rejects_wrong_token() {
         Err(WireError::Rejected(_)) => {},
         Ok(_) => panic!("a wrong token must be rejected, not accepted"),
         Err(other) => panic!("expected Rejected, got {other:?}"),
+    }
+}
+
+/// The krunkit vsock-proxy path's host-side shape: a real `UnixListener` served
+/// by [`serve_listener`] with `Some(token)`, so a connecting peer must present
+/// it exactly like [`serve_listener_tcp`]'s TCP listener does. Driven with the
+/// raw frame helpers (not `WireNamespace::attach`/`AttachTarget::Unix`, which
+/// by design never sends a token) since production reaches this socket through
+/// krunkit's vsock proxy, not a bare Unix dial.
+#[tokio::test]
+async fn unix_listener_with_token_end_to_end() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("ns.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let stub = StubNamespace::new();
+    tokio::spawn(serve_listener(
+        stub,
+        listener,
+        "inst-uds-token".to_string(),
+        Some("secret-token".to_string()),
+    ));
+
+    let mut stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
+    let hello = postcard::to_allocvec(&Handshake::Hello {
+        protocol: PROTOCOL,
+        token: Some("secret-token".to_string()),
+    })
+    .unwrap();
+    write_frame(&mut stream, &Frame::new(0, KIND_REQUEST, hello))
+        .await
+        .unwrap();
+    let welcome = read_frame(&mut stream)
+        .await
+        .unwrap()
+        .expect("welcome frame");
+    match postcard::from_bytes::<Handshake>(&welcome.body).unwrap() {
+        Handshake::Welcome { instance_id, .. } => assert_eq!(instance_id, "inst-uds-token"),
+        other => panic!("expected Welcome, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn unix_listener_with_token_rejects_wrong_token() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("ns.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let stub = StubNamespace::new();
+    tokio::spawn(serve_listener(
+        stub,
+        listener,
+        "inst-uds-reject".to_string(),
+        Some("secret-token".to_string()),
+    ));
+
+    let mut stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
+    let hello = postcard::to_allocvec(&Handshake::Hello {
+        protocol: PROTOCOL,
+        token: Some("wrong-token".to_string()),
+    })
+    .unwrap();
+    write_frame(&mut stream, &Frame::new(0, KIND_REQUEST, hello))
+        .await
+        .unwrap();
+    let response = read_frame(&mut stream)
+        .await
+        .unwrap()
+        .expect("response frame");
+    match postcard::from_bytes::<Handshake>(&response.body).unwrap() {
+        Handshake::Rejected { .. } => {},
+        other => panic!("expected Rejected, got {other:?}"),
     }
 }
 
@@ -827,7 +897,12 @@ async fn attach_stub(stub: Arc<dyn Namespace>) -> (Arc<WireNamespace>, tempfile:
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("ns.sock");
     let listener = tokio::net::UnixListener::bind(&socket).unwrap();
-    tokio::spawn(serve_listener(stub, listener, "memo-inst".to_string()));
+    tokio::spawn(serve_listener(
+        stub,
+        listener,
+        "memo-inst".to_string(),
+        None,
+    ));
     let ns = WireNamespace::attach(
         AttachTarget::Unix(socket),
         tokio::runtime::Handle::current(),

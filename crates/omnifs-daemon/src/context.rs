@@ -19,6 +19,28 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 
+/// Conservative `sockaddr_un.sun_path` byte budget: Linux allows 108 bytes,
+/// macOS 104; this stays under both with margin rather than chasing the exact
+/// per-platform figure.
+const UDS_PATH_BYTE_LIMIT: usize = 100;
+
+/// Fail loudly, naming the path and the limit, when `path` would not fit in a
+/// `sockaddr_un` on either Linux or macOS. The kernel would otherwise accept
+/// only the bind call's first N bytes, corrupting the path silently; a long
+/// `OMNIFS_HOME` must be shortened by the operator, not truncated for them.
+fn check_uds_path_length(path: &Path) -> anyhow::Result<()> {
+    use std::os::unix::ffi::OsStrExt as _;
+    let len = path.as_os_str().as_bytes().len();
+    anyhow::ensure!(
+        len < UDS_PATH_BYTE_LIMIT,
+        "attach socket path {} is {len} bytes, at or beyond the {UDS_PATH_BYTE_LIMIT}-byte \
+         sockaddr_un budget (Linux allows 108, macOS 104); shorten OMNIFS_HOME or move it closer \
+         to the filesystem root",
+        path.display()
+    );
+    Ok(())
+}
+
 #[derive(Debug)]
 pub(crate) struct DaemonContext {
     layout: WorkspaceLayout,
@@ -315,6 +337,48 @@ impl DaemonContext {
             });
         }
         Ok(bound)
+    }
+
+    /// Bind the token-checking UDS namespace attach listener at
+    /// `frontends/vsock-attach.sock` for the krunkit vsock-proxy path (see
+    /// [`crate::server::Daemon::ensure_attach_uds`]). Mirrors
+    /// [`bind_attach_sockets`](Self::bind_attach_sockets): the `frontends/` dir
+    /// is forced to `0700` and the socket to `0600`, and a stale socket (a
+    /// refused connect probe) is unlinked and rebound before the fresh one is
+    /// created. Unlike that listener, this path is fixed rather than
+    /// caller-named, so it also guards the `sockaddr_un` byte budget: a path
+    /// that would not fit fails loudly instead of being silently truncated by
+    /// the kernel.
+    pub(crate) fn bind_vsock_attach_socket(&self) -> anyhow::Result<(UnixListener, PathBuf)> {
+        let dir = self.layout.frontends_dir();
+        std::fs::create_dir_all(&dir)
+            .with_context(|| format!("create attach socket dir {}", dir.display()))?;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("restrict attach socket dir {} to 0700", dir.display()))?;
+
+        let path = self.layout.vsock_attach_socket();
+        check_uds_path_length(&path)?;
+        if path.exists() {
+            match UnixStream::connect(&path) {
+                Ok(_) => anyhow::bail!(
+                    "another omnifs daemon is already serving the vsock attach socket {}.\n\
+                     Run `omnifs down` to stop it, then try again.",
+                    path.display()
+                ),
+                // Refused/ENOENT means the previous daemon is gone; unlink the
+                // leftover and rebind.
+                Err(_) => {
+                    std::fs::remove_file(&path).with_context(|| {
+                        format!("remove stale attach socket {}", path.display())
+                    })?;
+                },
+            }
+        }
+        let listener = UnixListener::bind(&path)
+            .with_context(|| format!("bind attach socket {}", path.display()))?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("restrict attach socket {} to 0600", path.display()))?;
+        Ok((listener, path))
     }
 
     /// Every requested frontend, in order. The registry builds one renderer per

@@ -74,6 +74,44 @@
         }
       }
     },
+    "/v1/attach-listeners/vsock": {
+      "post": {
+        "summary": "`POST /v1/attach-listeners/vsock`: bind the token-checking UDS namespace\nattach listener on a running daemon, for the krunkit vsock-proxy path (a\nmacOS guest VM with no shared host Unix socket and no Docker-style loopback\neither; it dials host vsock instead, and krunkit proxies every connection\nonto this socket). Takes no request body: unlike the TCP listener there is\nno bind address to choose, only the daemon-picked path under the\nworkspace. Idempotent: a repeat call returns the already-bound path and\ntoken unchanged, since a listener cannot be re-pointed once serving.",
+        "operationId": "attach_listeners_vsock",
+        "responses": {
+          "200": {
+            "description": "the UDS attach listener's socket path and per-instance token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AttachVsockListenerReport"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "failed to bind the attach listener",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "the namespace is not ready yet",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/credentials": {
       "get": {
         "operationId": "credentials_list",
@@ -593,6 +631,22 @@
               "string",
               "null"
             ]
+          }
+        }
+      },
+      "AttachVsockListenerReport": {
+        "type": "object",
+        "description": "`POST /v1/attach-listeners/vsock`: the token-checking UDS namespace attach\nlistener's socket path and per-instance attach token, whether just bound or\nalready serving from an earlier call. This is the krunkit-on-macOS path: a\nguest VM has no shared host Unix socket and no Docker-style loopback\neither, so it dials host vsock instead, and krunkit proxies every vsock\nconnection onto `socket_path`. Every connection krunkit forwards looks like\nthe same trusted local peer to that socket, so `token` (not filesystem\npermissions) is this listener's real auth, checked the same way the TCP\nlistener's is. Takes no request body: unlike the TCP listener, there is no\nbind address to choose, only the daemon-picked path under the workspace.\nIdempotent, same as [`AttachListenersReport`]: a repeat call returns the\nalready-bound path and token unchanged.",
+        "required": [
+          "socket_path",
+          "token"
+        ],
+        "properties": {
+          "socket_path": {
+            "type": "string"
+          },
+          "token": {
+            "type": "string"
           }
         }
       },

@@ -20,6 +20,12 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 constant_time_eq = "0.4"
 
+# The guest-side vsock dial for the krunkit frontend backend. Linux-only: the
+# krunkit guest is Linux, and the crate's socket(AF_VSOCK, ...) call does not
+# build on a non-Linux host in the first place.
+[target.'cfg(target_os = "linux")'.dependencies]
+tokio-vsock = "0.7.2"
+
 [dev-dependencies]
 tempfile = { workspace = true }
 # For a real engine-backed `TreeNamespace` in the trace-propagation test: no

@@ -1,13 +1,16 @@
 //! The wire server: it adapts a [`Namespace`] onto a byte stream.
 //!
 //! [`serve_connection`] runs one attached client; [`serve_listener`] accepts
-//! clients on a Unix socket (auth is filesystem permissions, so `token` is
-//! never checked) and [`serve_listener_tcp`] accepts clients on a TCP loopback
-//! listener (auth is the per-instance attach token, checked on every connect).
-//! Both serve the same namespace concurrently: a connection dispatches every
-//! request onto the namespace on its own task, so one slow op (a provider
-//! callout) never head-of-line-blocks the reads behind it, and a background task
-//! forwards the namespace's invalidation events as event frames.
+//! clients on a Unix socket, optionally checking a per-instance attach token
+//! same as [`serve_listener_tcp`]'s TCP loopback listener does (`None` for the
+//! plain host-native attach socket, whose whole auth is filesystem
+//! permissions; `Some` for the krunkit vsock-proxy path, where krunkit
+//! terminates every guest vsock dial on the socket as the same local peer, so
+//! filesystem permissions alone cannot distinguish callers). Both serve the
+//! same namespace concurrently: a connection dispatches every request onto the
+//! namespace on its own task, so one slow op (a provider callout) never
+//! head-of-line-blocks the reads behind it, and a background task forwards the
+//! namespace's invalidation events as event frames.
 
 use std::sync::Arc;
 
@@ -100,20 +103,28 @@ where
 
 /// Accept and serve connections on `listener` until it errors. Each connection
 /// is served on its own task, so a stalled client cannot block new attaches.
-/// Filesystem permissions are this listener's auth: every connection's Hello
-/// token is ignored.
+/// `token`: `None` when filesystem permissions on the socket are this
+/// listener's whole auth (every connection's Hello token is ignored, the
+/// plain host-native attach socket's shape); `Some` when the connecting peer
+/// identity is not trustworthy on its own and every Hello must match it,
+/// checked exactly like [`serve_listener_tcp`]'s (the krunkit vsock-proxy
+/// path's shape, where krunkit terminates every guest vsock dial on this
+/// socket as the same local peer).
 pub async fn serve_listener(
     namespace: Arc<dyn Namespace>,
     listener: UnixListener,
     instance_id: String,
+    token: Option<String>,
 ) {
     loop {
         match listener.accept().await {
             Ok((stream, _addr)) => {
                 let namespace = Arc::clone(&namespace);
                 let instance_id = instance_id.clone();
+                let token = token.clone();
                 tokio::spawn(async move {
-                    if let Err(error) = serve_connection(namespace, stream, instance_id, None).await
+                    if let Err(error) =
+                        serve_connection(namespace, stream, instance_id, token.as_deref()).await
                     {
                         tracing::debug!(%error, "wire: connection ended with a protocol error");
                     }
