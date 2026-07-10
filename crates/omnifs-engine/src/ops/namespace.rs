@@ -168,17 +168,16 @@ impl Namespace<'_> {
         // live check) and the CanonicalInput (byte buffer for the provider).
         let (warm_id, cached_canonical) = match self.runtime.cache.cached_canonical_for(path) {
             Some(crate::cache::CachedCanonical {
-                id: host_id,
+                id,
                 bytes,
                 validator,
             }) => {
-                let canonical = ObjectId::from_bytes(host_id.clone()).to_wit().map(|id| {
-                    wit_types::CanonicalInput {
-                        id,
-                        validator,
-                        bytes,
-                        revalidate: mode.revalidates(),
-                    }
+                let host_id = ObjectId::from_bytes(id);
+                let canonical = host_id.to_wit().map(|id| wit_types::CanonicalInput {
+                    id,
+                    validator,
+                    bytes,
+                    revalidate: mode.revalidates(),
                 });
                 (Some(host_id), canonical)
             },
@@ -208,20 +207,20 @@ impl Namespace<'_> {
         // because a normal warm read may serve pushed bytes without reloading.
         // Cold reads have no known id yet, so they key on the path.
         let coalesce_key = match &warm_id {
-            Some(host_id) => mode.coalesce_key(ObjectId::from_bytes(host_id.clone())),
+            Some(host_id) => mode.coalesce_key(host_id.clone()),
             None => NsKey::Path(path.clone()),
         };
         let result = if live {
             self.runtime.run_op(op, fuse_trace).await?
         } else {
-            self.coalesced(coalesce_key, || self.runtime.run_op(op.clone(), fuse_trace))
+            self.coalesced(coalesce_key, || self.runtime.run_op(op, fuse_trace))
                 .await?
         };
 
         match Self::run_op_expect(op_for_error, result, expect_read_file)? {
             wit_types::ReadFileOutcome::Found(result) => {
                 match warm_id {
-                    Some(host_id) => self.runtime.note_read_object(ObjectId::from_bytes(host_id)),
+                    Some(host_id) => self.runtime.note_read_object(host_id),
                     None => {
                         if let Some(canonical) = self.runtime.cache.cached_canonical_for(path) {
                             self.runtime
@@ -265,14 +264,14 @@ impl Namespace<'_> {
 
     async fn coalesced<F, Fu>(&self, key: NsKey, op: F) -> Result<wit_types::OpResult>
     where
-        F: Fn() -> Fu,
+        F: FnOnce() -> Fu,
         Fu: std::future::Future<Output = Result<wit_types::OpResult>>,
     {
         let shared: Arc<SharedOutcome> = self
             .runtime
             .coalesce
             .run(&key, RunConfig::NAMESPACE, || async {
-                share_outcome(&op().await)
+                share_outcome(op().await)
             })
             .await;
         unshare_outcome((*shared).clone(), EngineError::ProviderProtocol)
