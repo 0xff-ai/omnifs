@@ -1051,3 +1051,129 @@ async fn concurrent_reads_do_not_deadlock_or_double_fetch() {
         .unwrap();
     assert_eq!(stub.read_calls.load(Ordering::SeqCst) - before, 0);
 }
+
+// ---------------------------------------------------------------------------
+// F7: inspector trace propagation across the wire
+// ---------------------------------------------------------------------------
+//
+// A real, engine-backed `TreeNamespace` (over the in-tree `test_provider`),
+// served over a real TCP loopback listener and dialed by a real
+// `WireNamespace` - the same out-of-process topology the Docker-hosted FUSE
+// frontend uses in production. `TreeNamespace` is the sole trace-minting
+// authority (see `omnifs_engine::namespace`'s inspector-tracing section), so
+// a wire-relayed op needs no protocol change to produce engine-side spans:
+// the server-side dispatch already calls straight into `TreeNamespace`.
+
+mod trace_propagation {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use omnifs_api::events::InspectorEvent;
+    use omnifs_engine::{Namespace, NodeId, TreeNamespace};
+    use tokio::runtime::Handle;
+
+    use crate::{AttachTarget, WireNamespace, serve_listener_tcp};
+
+    /// Drain up to `max` records from `live` within a generous per-record
+    /// timeout, returning what arrived. Bounded so a missing event fails the
+    /// test instead of hanging it.
+    async fn drain(
+        live: &mut tokio::sync::broadcast::Receiver<Arc<omnifs_api::events::InspectorRecord>>,
+        max: usize,
+    ) -> Vec<Arc<omnifs_api::events::InspectorRecord>> {
+        let mut records = Vec::new();
+        for _ in 0..max {
+            match tokio::time::timeout(Duration::from_secs(5), live.recv()).await {
+                Ok(Ok(record)) => records.push(record),
+                _ => break,
+            }
+        }
+        records
+    }
+
+    /// A read served through a wire-attached namespace produces engine-side
+    /// trace records spanning the whole causal chain: the wire dispatch's
+    /// "namespace request" (`FuseStart`/`FuseEnd`, named for the frontend the
+    /// event predates) and the provider callout underneath it
+    /// (`ProviderStart`/`ProviderEnd`), all tagged with the one id
+    /// `TreeNamespace` minted for this call. Before this fix, `RequestCtx`'s
+    /// `trace` was always `None` (severed at the namespace port), so none of
+    /// this ever fired for any caller, wire-relayed or in-process.
+    #[tokio::test(flavor = "multi_thread")]
+    #[allow(unsafe_code)] // env::remove_var requires unsafe; see SAFETY below.
+    async fn wire_relayed_read_produces_engine_side_trace_records() {
+        // SAFETY: cargo-nextest isolates each test into its own process, and
+        // this runs before any other task in the process could read the var
+        // concurrently.
+        unsafe {
+            std::env::remove_var("OMNIFS_INSPECTOR");
+        }
+        let sink =
+            omnifs_engine::init_global_from_env().expect("inspector sink enabled by default");
+        let mut live = sink.subscribe().live;
+
+        let engine = omnifs_itest::make_engine();
+        let harness = omnifs_itest::make_runtime(&engine);
+        let runtime = Arc::new(harness.runtime);
+        let tree_ns =
+            TreeNamespace::single("test".to_string(), Arc::clone(&runtime), Handle::current());
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(serve_listener_tcp(
+            tree_ns,
+            listener,
+            "inst-trace".to_string(),
+            "secret".to_string(),
+        ));
+
+        let client = WireNamespace::attach(
+            AttachTarget::Tcp {
+                addr: addr.to_string(),
+                token: "secret".to_string(),
+            },
+            Handle::current(),
+        )
+        .await
+        .expect("attach");
+
+        // Mirrors what a frontend does to serve `cat /hello/message`: resolve
+        // through two lookups, then read the whole (fresh, uncached) file, so
+        // the read triggers a real provider callout underneath.
+        let hello = client.lookup(NodeId::ROOT, "hello").await.unwrap();
+        let message = client.lookup(hello.node, "message").await.unwrap();
+        let read = client.read(message.node, 0, 4096).await.unwrap();
+        assert_eq!(read.bytes, b"Hello, world!");
+
+        let records = drain(&mut live, 64).await;
+        let read_end = records
+            .iter()
+            .find(|r| matches!(&r.event, InspectorEvent::FuseEnd { op, .. } if op == "read"));
+        let Some(read_end) = read_end else {
+            panic!(
+                "expected a read span from the wire-relayed read; got: {:?}",
+                records.iter().map(|r| &r.event).collect::<Vec<_>>()
+            );
+        };
+        let trace_id = read_end.trace_id;
+
+        // The same id also tags a provider-callout event underneath it: the
+        // "engine -> provider callout" hop of the restored chain, not just an
+        // isolated frontend-facing span.
+        let has_provider_event = records.iter().any(|r| {
+            r.trace_id == trace_id
+                && matches!(
+                    &r.event,
+                    InspectorEvent::ProviderStart { .. } | InspectorEvent::ProviderEnd { .. }
+                )
+        });
+        assert!(
+            has_provider_event,
+            "expected a provider-op event sharing the read's trace id {trace_id}; got: {:?}",
+            records
+                .iter()
+                .map(|r| (r.trace_id, &r.event))
+                .collect::<Vec<_>>()
+        );
+    }
+}

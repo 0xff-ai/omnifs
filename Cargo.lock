@@ -3233,7 +3233,9 @@ version = "0.2.1"
 dependencies = [
  "constant_time_eq",
  "futures",
+ "omnifs-api",
  "omnifs-engine",
+ "omnifs-itest",
  "postcard",
  "serde",
  "tempfile",
