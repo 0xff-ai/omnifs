@@ -4,15 +4,13 @@
 
 mod common;
 
-#[cfg(target_os = "linux")]
-use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{Duration, Instant};
 
 use common::{
-    free_port, install_test_provider_as, live_acceptance_enabled, nfs_serial_lock, omnifs_bin,
-    platform_can_mount, release_wasm_dir,
+    force_unmount, free_port, install_test_provider_as, live_acceptance_enabled, nfs_serial_lock,
+    omnifs_bin, platform_can_mount, recorded_pid, release_wasm_dir,
 };
 
 struct Fixture {
@@ -61,13 +59,7 @@ impl Fixture {
     }
 
     fn update_pid_from_record(&mut self) {
-        let path = self.home_path().join("daemon.json");
-        if let Ok(bytes) = std::fs::read_to_string(&path)
-            && let Ok(val) = serde_json::from_str::<serde_json::Value>(&bytes)
-            && let Some(pid) = val["pid"].as_u64()
-        {
-            self.daemon_pid = u32::try_from(pid).ok();
-        }
+        self.daemon_pid = recorded_pid(self.home_path());
     }
 
     fn read_fixture_file(&self) -> Vec<u8> {
@@ -81,44 +73,6 @@ impl Fixture {
             )
         })
     }
-
-    fn force_unmount(&self) {
-        #[cfg(target_os = "macos")]
-        {
-            if !omnifs_nfs::mount_is_active(&self.mount_point) {
-                return;
-            }
-            if let Some(canonical) = self
-                .mount_point
-                .parent()
-                .and_then(|parent| std::fs::canonicalize(parent).ok())
-                .and_then(|parent| self.mount_point.file_name().map(|leaf| parent.join(leaf)))
-            {
-                let _ = Command::new("sudo")
-                    .args(["-n", "umount", "-f"])
-                    .arg(&canonical)
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .output();
-            }
-        }
-        #[cfg(target_os = "linux")]
-        {
-            let _ = Command::new("fusermount")
-                .args([OsStr::new("-uz"), self.mount_point.as_os_str()])
-                .output();
-            let _ = Command::new("umount").arg(&self.mount_point).output();
-        }
-        #[cfg(all(not(target_os = "linux"), not(target_os = "macos")))]
-        {
-            if omnifs_nfs::mount_is_active(&self.mount_point) {
-                let _ = Command::new("umount")
-                    .arg("-f")
-                    .arg(&self.mount_point)
-                    .output();
-            }
-        }
-    }
 }
 
 impl Drop for Fixture {
@@ -126,7 +80,7 @@ impl Drop for Fixture {
         if let Some(pid) = self.daemon_pid {
             let _ = Command::new("kill").args(["-9", &pid.to_string()]).output();
         }
-        self.force_unmount();
+        force_unmount(&self.mount_point);
     }
 }
 

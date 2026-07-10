@@ -22,15 +22,13 @@
 
 mod common;
 
-#[cfg(target_os = "linux")]
-use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{Duration, Instant};
 
 use common::{
-    free_port, install_test_provider, live_acceptance_enabled, nfs_serial_lock, omnifs_bin,
-    platform_can_mount, release_wasm_dir, test_mount_spec,
+    force_unmount, free_port, install_test_provider, live_acceptance_enabled, nfs_serial_lock,
+    omnifs_bin, platform_can_mount, recorded_pid, release_wasm_dir, test_mount_spec,
 };
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -187,21 +185,12 @@ impl Fixture {
     /// Update the stored daemon PID by reading the runtime record. Best-effort.
     /// A native record carries the pid flat at the top level.
     fn update_pid_from_record(&mut self) {
-        if let Some(pid) = self.record_pid() {
-            self.daemon_pid = Some(pid);
-        }
-    }
-
-    /// The native pid recorded in `daemon.json`, if present.
-    fn record_pid(&self) -> Option<u32> {
-        let bytes = std::fs::read_to_string(self.runtime_record_path()).ok()?;
-        let val = serde_json::from_str::<serde_json::Value>(&bytes).ok()?;
-        u32::try_from(val["pid"].as_u64()?).ok()
+        self.daemon_pid = recorded_pid(self.home_path());
     }
 
     /// Force-kill the daemon PID recorded in the runtime record, if present.
     fn kill_daemon_from_record(&self) {
-        if let Some(pid) = self.record_pid() {
+        if let Some(pid) = recorded_pid(self.home_path()) {
             // SIGKILL so it cannot clean up voluntarily.
             let _ = Command::new("kill").args(["-9", &pid.to_string()]).output();
         }
@@ -210,52 +199,6 @@ impl Fixture {
     /// True when the mount point is active in the OS mount table.
     fn mount_is_active(&self) -> bool {
         omnifs_nfs::mount_is_active(&self.mount_point)
-    }
-
-    /// Force-unmount the mount point. Best-effort, non-blocking, and safe to call
-    /// even when nothing is mounted, so a `Drop` during a panicking test never
-    /// wedges the suite.
-    ///
-    /// On macOS this mirrors production teardown: `sudo -n umount -f` clears a
-    /// dead-server NFS mount instantly, where `diskutil unmount force` would block
-    /// in an uninterruptible NFS syscall. The path is resolved via the parent so
-    /// the dead mount itself is never stat-ed.
-    fn force_unmount(&self) {
-        #[cfg(target_os = "macos")]
-        {
-            if !omnifs_nfs::mount_is_active(&self.mount_point) {
-                return;
-            }
-            if let Some(canonical) = self
-                .mount_point
-                .parent()
-                .and_then(|parent| std::fs::canonicalize(parent).ok())
-                .and_then(|parent| self.mount_point.file_name().map(|leaf| parent.join(leaf)))
-            {
-                let _ = Command::new("sudo")
-                    .args(["-n", "umount", "-f"])
-                    .arg(&canonical)
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .output();
-            }
-        }
-        #[cfg(all(not(target_os = "linux"), not(target_os = "macos")))]
-        {
-            if omnifs_nfs::mount_is_active(&self.mount_point) {
-                let _ = Command::new("umount")
-                    .arg("-f")
-                    .arg(&self.mount_point)
-                    .output();
-            }
-        }
-        #[cfg(target_os = "linux")]
-        {
-            let _ = Command::new("fusermount")
-                .args([OsStr::new("-uz"), self.mount_point.as_os_str()])
-                .output();
-            let _ = Command::new("umount").arg(&self.mount_point).output();
-        }
     }
 }
 
@@ -268,7 +211,7 @@ impl Drop for Fixture {
         // Also try the runtime record in case we didn't capture the PID yet.
         self.kill_daemon_from_record();
         // Force-unmount.
-        self.force_unmount();
+        force_unmount(&self.mount_point);
     }
 }
 
