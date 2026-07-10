@@ -111,11 +111,8 @@ impl Container {
             .state
             .as_ref()
             .and_then(|state| state.status.as_ref())
-            .map_or_else(
-                || "unknown".to_string(),
-                |status| status.as_ref().to_string(),
-            );
-        let mut bytes = status.into_bytes();
+            .map_or("unknown", AsRef::as_ref);
+        let mut bytes = status.as_bytes().to_vec();
         bytes.push(b'\n');
         bytes
     }
@@ -136,14 +133,12 @@ impl Container {
             .state
             .as_ref()
             .and_then(|state| state.status.as_ref())
-            .map(|status| status.as_ref().to_string())
-            .unwrap_or_default();
+            .map_or("", AsRef::as_ref);
         let status = inspect
             .state
             .as_ref()
             .and_then(|state| state.running)
-            .map(|running| running.to_string())
-            .unwrap_or_default();
+            .map_or("", |running| if running { "true" } else { "false" });
         let mut text = String::new();
         let _ = writeln!(text, "id     {short_id}");
         let _ = writeln!(text, "name   {name}");
@@ -151,6 +146,20 @@ impl Container {
         let _ = writeln!(text, "state  {state}");
         let _ = writeln!(text, "status {status}");
         text.into_bytes()
+    }
+
+    fn state_leaf(&self) -> FileProjection {
+        FileProjection::inline(self.state_bytes())
+            .dynamic()
+            .content_type(ContentType::Text)
+            .build()
+    }
+
+    fn summary_leaf(&self) -> FileProjection {
+        FileProjection::inline(self.summary_bytes())
+            .dynamic()
+            .content_type(ContentType::Text)
+            .build()
     }
 }
 
@@ -164,8 +173,8 @@ async fn container_inspect(cx: Cx<State>, key: ContainerKey) -> Result<FileProje
     Ok(FileProjection::body(bytes)
         .dynamic()
         .content_type(ContentType::Json)
-        .preload_file("state", state_leaf(&container))
-        .preload_file("summary.txt", summary_leaf(&container))
+        .preload_file("state", container.state_leaf())
+        .preload_file("summary.txt", container.summary_leaf())
         .build())
 }
 
@@ -175,7 +184,7 @@ async fn container_state(cx: Cx<State>, key: ContainerKey) -> Result<FileProject
     Ok(FileProjection::body(container.state_bytes())
         .dynamic()
         .content_type(ContentType::Text)
-        .preload_file("summary.txt", summary_leaf(&container))
+        .preload_file("summary.txt", container.summary_leaf())
         .build())
 }
 
@@ -185,7 +194,7 @@ async fn container_summary(cx: Cx<State>, key: ContainerKey) -> Result<FileProje
     Ok(FileProjection::body(container.summary_bytes())
         .dynamic()
         .content_type(ContentType::Text)
-        .preload_file("state", state_leaf(&container))
+        .preload_file("state", container.state_leaf())
         .build())
 }
 
@@ -401,24 +410,6 @@ async fn compose_listing(cx: Cx<State>) -> Result<FileProjection> {
         pretty_json(&listing)?,
         ContentType::Json,
     ))
-}
-
-// `state` and `summary.txt` are derived from the same container inspect and are
-// tiny, so whichever container-file read fetched the inspect preloads the other
-// two as siblings. `inspect.json` is never preloaded: it can exceed the 64 KiB
-// inline cap, and its own read is a raw passthrough anyway.
-fn state_leaf(container: &Container) -> FileProjection {
-    FileProjection::inline(container.state_bytes())
-        .dynamic()
-        .content_type(ContentType::Text)
-        .build()
-}
-
-fn summary_leaf(container: &Container) -> FileProjection {
-    FileProjection::inline(container.summary_bytes())
-        .dynamic()
-        .content_type(ContentType::Text)
-        .build()
 }
 
 async fn fetch_inspect(cx: &Cx<State>, reference: &ContainerRef) -> Result<(Vec<u8>, Container)> {
