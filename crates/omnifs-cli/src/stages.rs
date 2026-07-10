@@ -10,7 +10,7 @@ use std::time::Duration;
 use anyhow::{Context, anyhow};
 use omnifs_caps::{Grants, Limits};
 use omnifs_workspace::layout::WorkspaceLayout;
-use omnifs_workspace::mounts::{Name as MountName, Registry, Spec, UpgradePlan};
+use omnifs_workspace::mounts::{Name as MountName, Spec, UpgradePlan};
 use omnifs_workspace::provider::{Catalog, ProviderManifest};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -592,7 +592,6 @@ async fn persist_mount_spec(
     workspace: &Workspace,
     plan: &MountInitPlan,
 ) -> anyhow::Result<Option<omnifs_api::MountReport>> {
-    let paths = workspace.layout();
     let report = match if plan.existing_mount {
         workspace
             .daemon()
@@ -603,11 +602,11 @@ async fn persist_mount_spec(
     } {
         Ok(Some(report)) => Some(report),
         Ok(None) => {
-            Registry::load(&paths.mounts_dir)?.put(&plan.spec)?;
+            workspace.put_mount(&plan.spec)?;
             None
         },
         Err(error) => {
-            Registry::load(&paths.mounts_dir)?.put(&plan.spec)?;
+            workspace.put_mount(&plan.spec)?;
             anstream::eprintln!(
                 "{}",
                 crate::ui::warn_row(

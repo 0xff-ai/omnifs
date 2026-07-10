@@ -11,7 +11,6 @@
 use anyhow::Context;
 use clap::Args;
 use omnifs_auth::{CredentialService, OAuthClient};
-use omnifs_workspace::mounts::Registry;
 
 use crate::commands::mounts::delete_credentials;
 use crate::credential_target::CredentialTarget;
@@ -99,8 +98,8 @@ impl ResetArgs {
             if daemon_delete.is_none() {
                 let name = omnifs_workspace::mounts::Name::new(target.name.clone())
                     .with_context(|| format!("invalid mount name `{}`", target.name))?;
-                Registry::load(&layout.mounts_dir)?
-                    .remove(&name)
+                workspace
+                    .remove_mount(&name)
                     .with_context(|| format!("remove {}", target.path.display()))?;
             }
             anstream::eprintln!("Removed mount `{}`", target.name);

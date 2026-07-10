@@ -5,7 +5,6 @@ use clap::{Args, Subcommand};
 use omnifs_auth::{CredentialService, OAuthClient};
 use omnifs_workspace::creds::{CredentialStore, FileStore};
 use omnifs_workspace::mounts::Name as MountName;
-use omnifs_workspace::mounts::Registry;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -324,7 +323,7 @@ pub async fn rm(
         },
     };
     if daemon_delete.is_none() {
-        Registry::load(&layout.mounts_dir)?.remove(&name)?;
+        workspace.remove_mount(&name)?;
     }
     anstream::eprintln!(
         "Removed mount `{name}` ({})",
