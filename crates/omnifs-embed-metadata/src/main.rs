@@ -12,7 +12,6 @@
 //!
 //! Usage: `omnifs-embed-metadata <wasm-dir>`.
 
-use std::collections::HashSet;
 use std::path::Path;
 
 use omnifs_workspace::provider::{
@@ -21,48 +20,21 @@ use omnifs_workspace::provider::{
 
 type DynError = Box<dyn std::error::Error>;
 
-/// A provider's wasm filename paired with its metadata accessor.
-type ProviderEntry = (&'static str, fn() -> ProviderManifest);
+/// A provider metadata accessor linked from its native library.
+type MetadataAccessor = fn() -> ProviderManifest;
 
 /// The providers to embed metadata into. Adding a provider is one line here.
-const PROVIDERS: &[ProviderEntry] = &[
-    (
-        "omnifs_provider_arxiv.wasm",
-        omnifs_provider_arxiv::provider_metadata,
-    ),
-    (
-        "omnifs_provider_db.wasm",
-        omnifs_provider_db::provider_metadata,
-    ),
-    (
-        "omnifs_provider_dns.wasm",
-        omnifs_provider_dns::provider_metadata,
-    ),
-    (
-        "omnifs_provider_docker.wasm",
-        omnifs_provider_docker::provider_metadata,
-    ),
-    (
-        "omnifs_provider_github.wasm",
-        omnifs_provider_github::provider_metadata,
-    ),
-    (
-        "omnifs_provider_kubernetes.wasm",
-        omnifs_provider_kubernetes::provider_metadata,
-    ),
-    (
-        "omnifs_provider_linear.wasm",
-        omnifs_provider_linear::provider_metadata,
-    ),
-    (
-        "omnifs_provider_oura.wasm",
-        omnifs_provider_oura::provider_metadata,
-    ),
-    (
-        "omnifs_provider_web.wasm",
-        omnifs_provider_web::provider_metadata,
-    ),
-    ("test_provider.wasm", test_provider::provider_metadata),
+const PROVIDERS: &[MetadataAccessor] = &[
+    omnifs_provider_arxiv::provider_metadata,
+    omnifs_provider_db::provider_metadata,
+    omnifs_provider_dns::provider_metadata,
+    omnifs_provider_docker::provider_metadata,
+    omnifs_provider_github::provider_metadata,
+    omnifs_provider_kubernetes::provider_metadata,
+    omnifs_provider_linear::provider_metadata,
+    omnifs_provider_oura::provider_metadata,
+    omnifs_provider_web::provider_metadata,
+    test_provider::provider_metadata,
 ];
 
 fn main() -> Result<(), DynError> {
@@ -71,11 +43,12 @@ fn main() -> Result<(), DynError> {
         .ok_or("usage: omnifs-embed-metadata <wasm-dir>")?;
     let dir = Path::new(&dir);
 
-    for (file, metadata) in PROVIDERS {
-        let path = dir.join(file);
+    let manifests: Vec<_> = PROVIDERS.iter().map(|metadata| metadata()).collect();
+    for manifest in &manifests {
+        let path = dir.join(&manifest.provider);
         let wasm =
             std::fs::read(&path).map_err(|error| format!("read {}: {error}", path.display()))?;
-        let json = serde_json::to_vec(&metadata())
+        let json = serde_json::to_vec(manifest)
             .map_err(|error| format!("{}: serialize manifest: {error}", path.display()))?;
         let rewritten = embed_provider_metadata_section(&wasm, &json)?;
         // Validate the embedded artifact exactly as the host will read it: this
@@ -96,7 +69,6 @@ fn main() -> Result<(), DynError> {
     // Guard against the PROVIDERS registry drifting from the built wasm set: any
     // provider component in the dir we did not embed would ship metadata-less and
     // only fail at host load, with no build-time signal. Fail here instead.
-    let embedded: HashSet<&str> = PROVIDERS.iter().map(|(file, _)| *file).collect();
     for entry in
         std::fs::read_dir(dir).map_err(|error| format!("scan {}: {error}", dir.display()))?
     {
@@ -111,7 +83,7 @@ fn main() -> Result<(), DynError> {
         };
         let is_provider_component =
             name.starts_with("omnifs_provider_") || name == "test_provider.wasm";
-        if is_provider_component && !embedded.contains(name) {
+        if is_provider_component && !manifests.iter().any(|manifest| manifest.provider == name) {
             return Err(format!(
                 "{name} is a provider component but is not in the embed registry; \
                  add it to PROVIDERS in omnifs-embed-metadata"
@@ -131,8 +103,9 @@ mod tests {
     /// the wire shape a provider constructs is exactly what the host reads back.
     #[test]
     fn every_provider_metadata_round_trips_through_host_validation() {
-        for (file, metadata) in PROVIDERS {
+        for metadata in PROVIDERS {
             let manifest = metadata();
+            let file = &manifest.provider;
             let json = serde_json::to_vec(&manifest).expect("serialize manifest");
             let parsed = omnifs_workspace::provider::ProviderManifest::from_bytes(&json)
                 .unwrap_or_else(|err| {
@@ -141,17 +114,7 @@ mod tests {
                         String::from_utf8_lossy(&json)
                     )
                 });
-            assert_eq!(parsed.id, manifest.id, "{file}: id round-trip");
-            assert_eq!(
-                parsed.auth.is_some(),
-                manifest.auth.is_some(),
-                "{file}: auth round-trip"
-            );
-            assert_eq!(
-                parsed.config.is_some(),
-                manifest.config.is_some(),
-                "{file}: config round-trip"
-            );
+            assert_eq!(parsed, manifest, "{file}: manifest round-trip");
         }
     }
 }
