@@ -7,9 +7,6 @@ use dom_smoothie::{Config as ReadabilityConfig, Readability, TextMode};
 use omnifs_sdk::http::ResponseExt;
 use omnifs_sdk::prelude::*;
 
-#[derive(Clone, Debug)]
-struct State;
-
 #[omnifs_sdk::config]
 struct Config {
     #[serde(default)]
@@ -44,7 +41,7 @@ struct WebKey {
     ),)
 )]
 impl WebProvider {
-    fn start(config: Config, r: &mut Router<State>) -> Result<State> {
+    fn start(config: Config, r: &mut Router) -> Result<()> {
         for domain in &config.domains {
             let _: Host = domain.parse().map_err(|()| {
                 ProviderError::invalid_input(format!(
@@ -54,22 +51,31 @@ impl WebProvider {
         }
         r.file("/https/{host}/{*rest}").handler(markdown)?;
         r.file("/raw/https/{host}/{*rest}").handler(raw)?;
-        Ok(State)
+        Ok(())
     }
 }
 
-async fn markdown(cx: Cx<State>, key: WebKey) -> Result<FileProjection> {
+async fn markdown(cx: Cx, key: WebKey) -> Result<FileProjection> {
     let url = key.url();
     let response = cx.http().get(&url).send().await?.error_for_status()?;
     let html = String::from_utf8_lossy(response.body());
-    let markdown = WebKey::markdown(&html, &url)?;
+    let config = ReadabilityConfig {
+        text_mode: TextMode::Markdown,
+        ..Default::default()
+    };
+    let mut readability = Readability::new(html.as_ref(), Some(&url), Some(config))
+        .map_err(|error| ProviderError::invalid_input(format!("readability setup: {error}")))?;
+    let article = readability
+        .parse()
+        .map_err(|error| ProviderError::invalid_input(format!("readability parse: {error}")))?;
+    let markdown = format_markdown(&article.title, article.text_content.as_ref());
     Ok(FileProjection::dynamic_body_with_type(
         markdown.into_bytes(),
         ContentType::Markdown,
     ))
 }
 
-async fn raw(cx: Cx<State>, key: WebKey) -> Result<FileProjection> {
+async fn raw(cx: Cx, key: WebKey) -> Result<FileProjection> {
     let response = cx.http().get(key.url()).send().await?.error_for_status()?;
     Ok(FileProjection::dynamic_body_with_type(
         response.into_body(),
@@ -80,22 +86,6 @@ async fn raw(cx: Cx<State>, key: WebKey) -> Result<FileProjection> {
 impl WebKey {
     fn url(&self) -> String {
         self.rest.url(&self.host)
-    }
-
-    fn markdown(html: &str, url: &str) -> Result<String> {
-        let config = ReadabilityConfig {
-            text_mode: TextMode::Markdown,
-            ..Default::default()
-        };
-        let mut readability = Readability::new(html, Some(url), Some(config))
-            .map_err(|error| ProviderError::invalid_input(format!("readability setup: {error}")))?;
-        let article = readability
-            .parse()
-            .map_err(|error| ProviderError::invalid_input(format!("readability parse: {error}")))?;
-        Ok(format_markdown(
-            &article.title,
-            article.text_content.as_ref(),
-        ))
     }
 }
 
