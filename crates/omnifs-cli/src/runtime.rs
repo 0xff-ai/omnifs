@@ -325,7 +325,7 @@ impl Runtime {
     /// `docker exec test -e <path>`. Used to wait for the FUSE mount to come
     /// up inside the frontend container after start.
     pub(crate) async fn exec_path_exists(&self, path: &str) -> Result<bool> {
-        use bollard::exec::CreateExecOptions;
+        use bollard::exec::{CreateExecOptions, StartExecResults};
 
         let exec = self
             .docker
@@ -338,10 +338,20 @@ impl Runtime {
             )
             .await
             .with_context(|| format!("create exec probe in `{}`", self.container_name()))?;
-        self.docker
+        // Drain the attached stream to completion before inspecting: dockerd
+        // does not reliably finalize an exec whose attach client disconnects
+        // early, so dropping the stream leaves the exit code unobservable.
+        match self
+            .docker
             .start_exec(&exec.id, None)
             .await
-            .with_context(|| format!("start exec probe in `{}`", self.container_name()))?;
+            .with_context(|| format!("start exec probe in `{}`", self.container_name()))?
+        {
+            StartExecResults::Attached { mut output, .. } => {
+                while output.try_next().await.unwrap_or(None).is_some() {}
+            },
+            StartExecResults::Detached => {},
+        }
         let inspect = self
             .docker
             .inspect_exec(&exec.id)
