@@ -3228,6 +3228,7 @@ dependencies = [
 name = "omnifs-namespace-wire"
 version = "0.2.1"
 dependencies = [
+ "constant_time_eq",
  "futures",
  "omnifs-engine",
  "postcard",

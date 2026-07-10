@@ -13,10 +13,13 @@
 //!
 //! # Handshake
 //!
-//! On connect the client sends one `Hello { protocol }` request frame
-//! (`request_id = 0`) and the server replies with one `Welcome { protocol,
-//! instance_id }` response frame (`request_id = 0`). A protocol mismatch is a
-//! clean error that closes the connection. `instance_id` is the daemon's
+//! On connect the client sends one `Hello { protocol, token }` request frame
+//! (`request_id = 0`). The server replies with either `Welcome { protocol,
+//! instance_id }` or `Rejected { reason }` (both response frames, `request_id =
+//! 0`), then closes the connection in the rejected case. A Unix-socket listener
+//! ignores `token` (filesystem permissions are that transport's auth); a TCP
+//! attach listener requires it to match its per-instance attach token. A
+//! protocol mismatch is rejected the same way. `instance_id` is the daemon's
 //! per-start id: a reconnect that lands on a different id means the daemon
 //! restarted and every [`NodeId`] the client holds is stale.
 //!
@@ -39,12 +42,14 @@ use std::path::PathBuf;
 use omnifs_engine::{Attrs, DirCursor, NodeAnswer, NodeId, NsError, ReadAnswer};
 use serde::{Deserialize, Serialize};
 
-pub use client::WireNamespace;
-pub use server::{serve_connection, serve_listener};
+pub use client::{AttachTarget, WireNamespace};
+pub use server::{serve_connection, serve_listener, serve_listener_tcp};
 
 /// The wire protocol version. Bumped on any incompatible change to the frame
-/// payloads or the handshake. A client and server that disagree refuse to serve.
-pub const PROTOCOL: u32 = 1;
+/// payloads or the handshake. A client and server that disagree refuse to
+/// serve: there is no negotiation ceremony (alpha, ratified D4), so v2 rejects
+/// a v1 peer outright rather than falling back.
+pub const PROTOCOL: u32 = 2;
 
 /// One namespace call, mirroring the [`Namespace`](omnifs_engine::Namespace)
 /// trait methods. `budget` is a `u64` on the wire (the trait takes `usize`); the
@@ -93,10 +98,26 @@ pub(crate) enum WireResponse {
 /// The handshake payloads, carried in the `request_id = 0` frames each side
 /// sends first. The frame `kind` (request vs response) already distinguishes the
 /// direction; the enum keeps a wrong-direction message detectable.
+///
+/// `token` is `None` over a Unix socket (the client has nothing to prove
+/// beyond the filesystem permissions that let it open the socket); a TCP
+/// attach listener requires it and rejects a mismatch via `Rejected`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) enum Handshake {
-    Hello { protocol: u32 },
-    Welcome { protocol: u32, instance_id: String },
+    Hello {
+        protocol: u32,
+        token: Option<String>,
+    },
+    Welcome {
+        protocol: u32,
+        instance_id: String,
+    },
+    /// The server refused the handshake (a protocol mismatch or a bad attach
+    /// token) and is about to close the connection. Sent so the client gets a
+    /// terminal, named reason instead of an ambiguous closed pipe.
+    Rejected {
+        reason: String,
+    },
 }
 
 /// A change in the server the client is attached to. Fires only when a reconnect
@@ -132,9 +153,21 @@ pub enum WireError {
     HandshakeClosed,
     #[error("expected a {expected} handshake frame")]
     HandshakeUnexpected { expected: &'static str },
-    #[error("could not reach the namespace socket {socket} within the connect deadline: {source}")]
+    /// The TCP attach listener's token did not match. Not retriable: unlike a
+    /// refused or dropped connection, presenting the same token again cannot
+    /// succeed.
+    #[error("attach token rejected")]
+    TokenRejected,
+    /// The server sent [`Handshake::Rejected`] naming why (a version mismatch
+    /// or a bad token). Not retriable for the same reason as
+    /// [`WireError::TokenRejected`].
+    #[error("attach rejected by the daemon: {0}")]
+    Rejected(String),
+    #[error(
+        "could not reach the namespace attach target {target} within the connect deadline: {source}"
+    )]
     ConnectTimeout {
-        socket: PathBuf,
+        target: String,
         source: std::io::Error,
     },
 }

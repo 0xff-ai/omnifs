@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use clap::Args;
 use omnifs_engine::{Namespace, NsAttachEvent};
-use omnifs_namespace_wire::WireNamespace;
+use omnifs_namespace_wire::{AttachTarget, WireNamespace};
 use tokio::runtime::Handle;
 use tokio::sync::broadcast;
 use tracing::{info, warn};
@@ -113,7 +113,7 @@ fn attach_blocking(rt: &Handle, socket: PathBuf) -> anyhow::Result<Arc<WireNames
     let (tx, rx) = std::sync::mpsc::channel();
     let rt_for_task = rt.clone();
     rt.spawn(async move {
-        let _ = tx.send(WireNamespace::attach(socket, rt_for_task).await);
+        let _ = tx.send(WireNamespace::attach(AttachTarget::Unix(socket), rt_for_task).await);
     });
     rx.recv()
         .map_err(|_| anyhow::anyhow!("attach task dropped before completing"))?

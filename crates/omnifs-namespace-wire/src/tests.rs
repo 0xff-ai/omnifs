@@ -21,8 +21,8 @@ use crate::frame::{
     Frame, KIND_EVENT, KIND_REQUEST, KIND_RESPONSE, MAX_FRAME, read_frame, write_frame,
 };
 use crate::{
-    Handshake, PROTOCOL, WireError, WireNamespace, WireRequest, WireResponse, serve_connection,
-    serve_listener,
+    AttachTarget, Handshake, PROTOCOL, WireError, WireNamespace, WireRequest, WireResponse,
+    serve_connection, serve_listener, serve_listener_tcp,
 };
 
 // ---------------------------------------------------------------------------
@@ -132,15 +132,34 @@ impl Namespace for StubNamespace {
 // Frame-level client helpers over a duplex
 // ---------------------------------------------------------------------------
 
-/// Perform the client side of the handshake, returning the server's instance id.
-async fn client_handshake(io: &mut DuplexStream, protocol: u32) -> Result<String, WireError> {
-    let hello = postcard::to_allocvec(&Handshake::Hello { protocol }).unwrap();
-    write_frame(io, &Frame::new(0, KIND_REQUEST, hello)).await?;
-    let welcome = read_frame(io).await?.expect("welcome frame");
+/// Perform the client side of the handshake, returning the server's instance id
+/// on `Welcome` or the rejection reason (as an error string) on `Rejected`.
+async fn client_handshake_with_token(
+    io: &mut DuplexStream,
+    protocol: u32,
+    token: Option<String>,
+) -> Result<String, String> {
+    let hello = postcard::to_allocvec(&Handshake::Hello { protocol, token }).unwrap();
+    write_frame(io, &Frame::new(0, KIND_REQUEST, hello))
+        .await
+        .map_err(|error| error.to_string())?;
+    let welcome = read_frame(io)
+        .await
+        .map_err(|error| error.to_string())?
+        .expect("welcome frame");
     match postcard::from_bytes::<Handshake>(&welcome.body).unwrap() {
         Handshake::Welcome { instance_id, .. } => Ok(instance_id),
+        Handshake::Rejected { reason } => Err(reason),
         Handshake::Hello { .. } => panic!("server sent a hello"),
     }
+}
+
+/// Perform the client side of the handshake with no token, returning the
+/// server's instance id.
+async fn client_handshake(io: &mut DuplexStream, protocol: u32) -> Result<String, WireError> {
+    client_handshake_with_token(io, protocol, None)
+        .await
+        .map_err(WireError::Rejected)
 }
 
 async fn send_request(io: &mut DuplexStream, request_id: u64, request: &WireRequest) {
@@ -156,16 +175,28 @@ async fn recv_response(io: &mut DuplexStream) -> (u64, WireResponse) {
     (frame.request_id, postcard::from_bytes(&frame.body).unwrap())
 }
 
-/// Spawn a server over the server half of a fresh duplex; return the client half
-/// and the server's join handle.
+/// Spawn a server over the server half of a fresh duplex, with no expected
+/// token (mirroring a Unix-socket listener); return the client half and the
+/// server's join handle.
 fn serve_over_duplex(
     namespace: Arc<dyn Namespace>,
+) -> (DuplexStream, tokio::task::JoinHandle<Result<(), WireError>>) {
+    serve_over_duplex_with_token(namespace, None)
+}
+
+/// Like [`serve_over_duplex`], but with an expected attach token (mirroring a
+/// TCP attach listener). `expected_token: None` still serves (a Unix-socket
+/// listener never checks it), so the same helper covers both transports.
+fn serve_over_duplex_with_token(
+    namespace: Arc<dyn Namespace>,
+    expected_token: Option<&'static str>,
 ) -> (DuplexStream, tokio::task::JoinHandle<Result<(), WireError>>) {
     let (client_io, server_io) = tokio::io::duplex(1024 * 1024);
     let handle = tokio::spawn(serve_connection(
         namespace,
         server_io,
         "inst-server".to_string(),
+        expected_token,
     ));
     (client_io, handle)
 }
@@ -334,7 +365,11 @@ async fn handshake_version_mismatch_is_rejected() {
     let stub = StubNamespace::new();
     let (mut io, server) = serve_over_duplex(stub);
     // The client offers a version the server does not speak.
-    let hello = postcard::to_allocvec(&Handshake::Hello { protocol: 999 }).unwrap();
+    let hello = postcard::to_allocvec(&Handshake::Hello {
+        protocol: 999,
+        token: None,
+    })
+    .unwrap();
     write_frame(&mut io, &Frame::new(0, KIND_REQUEST, hello))
         .await
         .unwrap();
@@ -346,6 +381,80 @@ async fn handshake_version_mismatch_is_rejected() {
         },
         other => panic!("expected VersionMismatch, got {other:?}"),
     }
+}
+
+/// v1 (the pre-attach-token protocol) is rejected outright by a v2 server, with
+/// no negotiation fallback (alpha, ratified D4): the client-visible error names
+/// the mismatch instead of leaving an ambiguous closed connection.
+#[tokio::test]
+async fn v1_client_is_rejected_outright() {
+    let stub = StubNamespace::new();
+    let (mut io, server) = serve_over_duplex(stub);
+    assert_eq!(PROTOCOL, 2, "this test assumes the v1-rejection bump to v2");
+
+    let client_result = client_handshake_with_token(&mut io, 1, None).await;
+    assert_eq!(
+        client_result,
+        Err("protocol version mismatch: this build speaks 2, the peer speaks 1".to_string())
+    );
+
+    match server.await.unwrap() {
+        Err(WireError::VersionMismatch { ours: 2, theirs: 1 }) => {},
+        other => panic!("expected VersionMismatch, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn tcp_style_token_is_accepted_when_it_matches() {
+    let stub = StubNamespace::new();
+    let (mut io, _server) = serve_over_duplex_with_token(stub, Some("right-token"));
+
+    let instance = client_handshake_with_token(&mut io, PROTOCOL, Some("right-token".to_string()))
+        .await
+        .unwrap();
+    assert_eq!(instance, "inst-server");
+}
+
+#[tokio::test]
+async fn tcp_style_wrong_token_is_rejected() {
+    let stub = StubNamespace::new();
+    let (mut io, server) = serve_over_duplex_with_token(stub, Some("right-token"));
+
+    let client_result =
+        client_handshake_with_token(&mut io, PROTOCOL, Some("wrong-token".to_string())).await;
+    assert_eq!(client_result, Err("attach token rejected".to_string()));
+
+    match server.await.unwrap() {
+        Err(WireError::TokenRejected) => {},
+        other => panic!("expected TokenRejected, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn tcp_style_missing_token_is_rejected() {
+    let stub = StubNamespace::new();
+    let (mut io, server) = serve_over_duplex_with_token(stub, Some("right-token"));
+
+    let client_result = client_handshake_with_token(&mut io, PROTOCOL, None).await;
+    assert_eq!(client_result, Err("attach token rejected".to_string()));
+
+    match server.await.unwrap() {
+        Err(WireError::TokenRejected) => {},
+        other => panic!("expected TokenRejected, got {other:?}"),
+    }
+}
+
+/// A Unix-socket listener (`expected_token: None`) ignores whatever the client
+/// sends in `token`, matching or not.
+#[tokio::test]
+async fn unix_style_listener_ignores_any_token() {
+    let stub = StubNamespace::new();
+    let (mut io, _server) = serve_over_duplex(stub);
+
+    let instance = client_handshake_with_token(&mut io, PROTOCOL, Some("whatever".to_string()))
+        .await
+        .unwrap();
+    assert_eq!(instance, "inst-server");
 }
 
 #[tokio::test]
@@ -369,9 +478,12 @@ async fn unix_listener_end_to_end() {
     let stub = StubNamespace::new();
     tokio::spawn(serve_listener(stub, listener, "inst-e2e".to_string()));
 
-    let namespace = WireNamespace::attach(socket, tokio::runtime::Handle::current())
-        .await
-        .expect("attach");
+    let namespace = WireNamespace::attach(
+        AttachTarget::Unix(socket),
+        tokio::runtime::Handle::current(),
+    )
+    .await
+    .expect("attach");
     assert_eq!(namespace.instance_id(), "inst-e2e");
 
     let answer = namespace.lookup(NodeId::ROOT, "message").await.unwrap();
@@ -385,6 +497,148 @@ async fn unix_listener_end_to_end() {
 
     let err = namespace.readlink(NodeId(1)).await.unwrap_err();
     assert_eq!(err, NsError::Invalid);
+}
+
+/// The Docker Desktop path end to end: a real TCP loopback listener, a real
+/// [`WireNamespace`] dialing it with the matching attach token.
+#[tokio::test]
+async fn tcp_listener_end_to_end() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let stub = StubNamespace::new();
+    tokio::spawn(serve_listener_tcp(
+        stub,
+        listener,
+        "inst-tcp-e2e".to_string(),
+        "secret-token".to_string(),
+    ));
+
+    let namespace = WireNamespace::attach(
+        AttachTarget::Tcp {
+            addr,
+            token: "secret-token".to_string(),
+        },
+        tokio::runtime::Handle::current(),
+    )
+    .await
+    .expect("attach");
+    assert_eq!(namespace.instance_id(), "inst-tcp-e2e");
+
+    let answer = namespace.lookup(NodeId::ROOT, "message").await.unwrap();
+    assert_eq!(answer.node, NodeId(42));
+}
+
+#[tokio::test]
+async fn tcp_listener_rejects_wrong_token() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let stub = StubNamespace::new();
+    tokio::spawn(serve_listener_tcp(
+        stub,
+        listener,
+        "inst-tcp-reject".to_string(),
+        "secret-token".to_string(),
+    ));
+
+    let result = WireNamespace::attach(
+        AttachTarget::Tcp {
+            addr,
+            token: "wrong-token".to_string(),
+        },
+        tokio::runtime::Handle::current(),
+    )
+    .await;
+    match result {
+        Err(WireError::Rejected(_)) => {},
+        Ok(_) => panic!("a wrong token must be rejected, not accepted"),
+        Err(other) => panic!("expected Rejected, got {other:?}"),
+    }
+}
+
+/// The manager's reconnect-forever loop, exercised over a real TCP socket:
+/// answer the handshake once as `inst-a`, sever the connection (a stand-in for
+/// the daemon dying), then answer a second dial to the same address as
+/// `inst-b`. The client must reconnect on its own and fire `Reattached`.
+///
+/// The server side is hand-rolled with the frame primitives instead of
+/// [`serve_listener_tcp`] so the test can close the connection deterministically
+/// right after the handshake; `serve_connection`'s own background tasks
+/// (writer, event forwarder) would otherwise keep the socket's write half open
+/// past an abort of the top-level task.
+#[tokio::test]
+async fn tcp_reconnect_fires_reattached_on_new_instance() {
+    let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = std_listener.local_addr().unwrap();
+    std_listener.set_nonblocking(true).unwrap();
+    let listener = tokio::net::TcpListener::from_std(std_listener).unwrap();
+    let rt = tokio::runtime::Handle::current();
+    let token = "secret-token".to_string();
+
+    let attach_target = AttachTarget::Tcp {
+        addr,
+        token: token.clone(),
+    };
+    let attach_task = rt.spawn(WireNamespace::attach(attach_target, rt.clone()));
+
+    // Phase A: answer the handshake as "inst-a", checking the presented token,
+    // then drop the stream outright to sever the connection.
+    {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let hello_frame = read_frame(&mut stream).await.unwrap().expect("hello frame");
+        let Handshake::Hello {
+            token: presented, ..
+        } = postcard::from_bytes(&hello_frame.body).unwrap()
+        else {
+            panic!("expected a hello frame");
+        };
+        assert_eq!(presented.as_deref(), Some(token.as_str()));
+        let welcome = postcard::to_allocvec(&Handshake::Welcome {
+            protocol: PROTOCOL,
+            instance_id: "inst-a".to_string(),
+        })
+        .unwrap();
+        write_frame(&mut stream, &Frame::new(0, KIND_RESPONSE, welcome))
+            .await
+            .unwrap();
+        // Dropping `stream` here closes the socket.
+    }
+
+    let ns = attach_task.await.unwrap().expect("initial attach");
+    assert_eq!(ns.instance_id(), "inst-a");
+    let mut attach_events = ns.subscribe_attach_events();
+
+    // Phase B: the manager reconnects to the same address on its own; answer as
+    // "inst-b" this time and keep the connection open.
+    let (mut stream_b, _) = listener.accept().await.unwrap();
+    let hello_frame = read_frame(&mut stream_b)
+        .await
+        .unwrap()
+        .expect("second hello frame");
+    let Handshake::Hello { .. } = postcard::from_bytes(&hello_frame.body).unwrap() else {
+        panic!("expected a hello frame");
+    };
+    let welcome = postcard::to_allocvec(&Handshake::Welcome {
+        protocol: PROTOCOL,
+        instance_id: "inst-b".to_string(),
+    })
+    .unwrap();
+    write_frame(&mut stream_b, &Frame::new(0, KIND_RESPONSE, welcome))
+        .await
+        .unwrap();
+
+    let event = tokio::time::timeout(Duration::from_secs(5), attach_events.recv())
+        .await
+        .expect("reattach event must fire within the timeout")
+        .unwrap();
+    assert_eq!(
+        event,
+        crate::AttachEvent::Reattached {
+            old_instance: "inst-a".to_string(),
+            new_instance: "inst-b".to_string(),
+        }
+    );
+    assert_eq!(ns.instance_id(), "inst-b");
+    drop(stream_b);
 }
 
 // ===========================================================================
@@ -574,9 +828,12 @@ async fn attach_stub(stub: Arc<dyn Namespace>) -> (Arc<WireNamespace>, tempfile:
     let socket = dir.path().join("ns.sock");
     let listener = tokio::net::UnixListener::bind(&socket).unwrap();
     tokio::spawn(serve_listener(stub, listener, "memo-inst".to_string()));
-    let ns = WireNamespace::attach(socket, tokio::runtime::Handle::current())
-        .await
-        .expect("attach");
+    let ns = WireNamespace::attach(
+        AttachTarget::Unix(socket),
+        tokio::runtime::Handle::current(),
+    )
+    .await
+    .expect("attach");
     (ns, dir)
 }
 
