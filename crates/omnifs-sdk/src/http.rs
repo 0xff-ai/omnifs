@@ -26,7 +26,6 @@ use crate::error::{ProviderError, Result};
 use core::future::Future;
 use core::pin::Pin;
 use core::task::{Context, Poll};
-use core::time::Duration;
 use http::{HeaderMap, HeaderName, HeaderValue, Method, Response, StatusCode};
 #[cfg(target_arch = "wasm32")]
 use omnifs_wit::provider::omnifs::provider::callouts;
@@ -363,9 +362,7 @@ fn status_error(resp: &Response<Vec<u8>>) -> ProviderError {
     // `Retry-After` is either delta-seconds or an HTTP-date. Honor the common
     // delta-seconds form as structured backoff; an HTTP-date stays in the
     // human-readable message only (no guest wall-clock math on the error path).
-    let retry_after_secs = retry_after
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .map(Duration::from_secs);
+    let retry_after_secs = retry_after.and_then(crate::rate_limit::parse_retry_after_secs);
     ProviderError::rate_limited(message).with_retry_after(retry_after_secs)
 }
 
@@ -473,6 +470,7 @@ mod tests {
     use core::task::Waker;
     use std::cell::RefCell;
     use std::rc::Rc;
+    use std::time::Duration;
 
     fn drive_once<F: Future>(future: &mut Pin<Box<F>>) -> Poll<F::Output> {
         let waker = Waker::noop();
@@ -598,37 +596,26 @@ impl HttpEndpoint {
     /// query string (no leading `?`; the helper adds it).
     pub fn build_url(&self, path: &str, query: &[(&str, &str)]) -> String {
         let qs = render_query(query);
-        match self {
-            Self::Tcp(base) => {
-                let mut url = base.trim_end_matches('/').to_string();
-                if !path.is_empty() && !path.starts_with('/') {
-                    url.push('/');
-                }
-                url.push_str(path);
-                if !qs.is_empty() {
-                    url.push('?');
-                    url.push_str(&qs);
-                }
-                url
-            },
+        let mut url = match self {
+            Self::Tcp(base) => base.trim_end_matches('/').to_string(),
             Self::Unix(socket) => {
                 // Encode the absolute socket path as hex bytes so the
                 // URL has a stable host segment and the host's
                 // executor decodes it the same way `hyperlocal` does.
                 let socket_str = socket.to_string_lossy();
                 let host = hex::encode(socket_str.as_bytes());
-                let mut url = format!("unix://{host}");
-                if !path.is_empty() && !path.starts_with('/') {
-                    url.push('/');
-                }
-                url.push_str(path);
-                if !qs.is_empty() {
-                    url.push('?');
-                    url.push_str(&qs);
-                }
-                url
+                format!("unix://{host}")
             },
+        };
+        if !path.is_empty() && !path.starts_with('/') {
+            url.push('/');
         }
+        url.push_str(path);
+        if !qs.is_empty() {
+            url.push('?');
+            url.push_str(&qs);
+        }
+        url
     }
 }
 
