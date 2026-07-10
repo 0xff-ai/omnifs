@@ -41,12 +41,14 @@ use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use futures::future::{BoxFuture, FutureExt};
+use omnifs_api::events::{InspectorOutcome, TraceId};
 use omnifs_core::path::Path;
 use serde::{Deserialize, Serialize};
 use tokio::runtime::Handle;
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
 
+use crate::inspect::{self, InspectorRequestScope};
 use crate::registry::MountRuntimes;
 use crate::tree::{ListOutcome, RangedHandle, ReadResult, RequestCtx};
 use crate::view::{self as view_types, EntryMeta, FileAttrsCache, FileSize};
@@ -590,6 +592,62 @@ impl TreeNamespace {
             .ok_or(NsError::NotFound)
     }
 
+    // --- inspector tracing ---------------------------------------------------
+    //
+    // `TreeNamespace` is the sole trace-id minting authority for `RequestCtx`.
+    // The `Namespace` trait deliberately keeps a `NodeId` opaque to callers (an
+    // engine-owned handle, not a (mount, path) pair), so FUSE, NFS, and the wire
+    // server dispatching on a remote frontend's behalf cannot derive the mount
+    // and path an inspector span needs to display; only this id table (via
+    // `record`) can. Minting here, once per `Namespace` call, restores the
+    // trace id every downstream engine/provider span (`Runtime::run_op`,
+    // callouts) already knows how to thread once `RequestCtx::trace` is
+    // `Some`, without re-coupling any frontend to tree internals.
+
+    /// Begin an inspector span for one `Namespace` call, when the process-wide
+    /// sink is attached. `None` when the inspector is disabled (the default),
+    /// in which case `RequestCtx::trace` stays `None` exactly as before this
+    /// restoration.
+    fn begin_span(op: &'static str, mount: &str, path: &str) -> Option<InspectorRequestScope> {
+        inspect::global().map(|sink| InspectorRequestScope::begin(sink, op, mount, path))
+    }
+
+    /// The trace id a span minted, for threading into `RequestCtx`.
+    fn span_trace(span: Option<&InspectorRequestScope>) -> Option<TraceId> {
+        span.map(InspectorRequestScope::trace_id)
+    }
+
+    /// Record `result`'s outcome on `span`, if there is a live one and the call
+    /// failed. A live span always reports `Ok` on `Drop` unless this overrides
+    /// it, so the `Ok` path needs no explicit call.
+    ///
+    /// Takes `span` only after the traced future has already been awaited (see
+    /// call sites), never while it is in flight: `InspectorRequestScope` holds
+    /// a `Cell`, so a live `&InspectorRequestScope` is `!Sync` and cannot be
+    /// held across an `.await` inside a `BoxFuture: Send` (the `Namespace`
+    /// trait's bound).
+    fn record_outcome<T>(span: Option<&InspectorRequestScope>, result: &Result<T, NsError>) {
+        if let Err(error) = result
+            && let Some(span) = span
+        {
+            span.set_outcome(Self::outcome_for(error));
+        }
+    }
+
+    fn outcome_for(error: &NsError) -> InspectorOutcome {
+        match error {
+            NsError::NotFound => InspectorOutcome::NotFound,
+            NsError::NotDirectory | NsError::IsDirectory | NsError::Invalid => {
+                InspectorOutcome::InvalidInput
+            },
+            NsError::Permission => InspectorOutcome::Denied,
+            NsError::TooLarge => InspectorOutcome::TooLarge,
+            NsError::RateLimited { .. } | NsError::Timeout => InspectorOutcome::Timeout,
+            NsError::Network => InspectorOutcome::Network,
+            NsError::Internal { .. } => InspectorOutcome::Internal,
+        }
+    }
+
     /// Allocate (or reuse) the id for a resolved node, and refresh its record,
     /// preserving a learned size across placeholder refreshes.
     fn intern(&self, node: &crate::Node) -> NodeId {
@@ -643,8 +701,12 @@ impl TreeNamespace {
 
     /// Re-resolve a node to a fresh [`crate::Node`]. `Tree::resolve` round-trips
     /// the full protocol path across every backing (single, rooted, enumeration).
-    async fn resolve_node(&self, full_path: &Path) -> Result<crate::Node, NsError> {
-        let ctx = RequestCtx::default();
+    async fn resolve_node(
+        &self,
+        full_path: &Path,
+        trace: Option<TraceId>,
+    ) -> Result<crate::Node, NsError> {
+        let ctx = RequestCtx { trace };
         self.tree.resolve(full_path, &ctx).await.map_err(Into::into)
     }
 
@@ -767,33 +829,44 @@ impl TreeNamespace {
 
     async fn read_inner(&self, id: NodeId, offset: u64, len: u32) -> Result<ReadAnswer, NsError> {
         // A live ranged handle already open on this node serves the read without
-        // re-resolving, so a follow read reuses the single open.
+        // re-resolving, so a follow read reuses the single open. It bypasses
+        // tracing (same as before this fix): the handle is a raw provider
+        // handle, not driven through `Tree`/`Runtime::run_op`, so there is
+        // nothing here for a trace id to attach to.
         if let Some(handle) = self.take_cached_handle(id.0) {
             return self.read_ranged(id.0, &handle, offset, len).await;
         }
 
         let (full_path, mount) = self.record(id)?;
         self.process_invalidations(&mount);
-        let node = self.resolve_node(&full_path).await?;
+        let span = Self::begin_span("read", &mount, full_path.as_str());
+        let trace = Self::span_trace(span.as_ref());
+        let result = async {
+            let node = self.resolve_node(&full_path, trace).await?;
 
-        if node.is_dir() {
-            return Err(NsError::IsDirectory);
-        }
-
-        // A ranged route projects a `Deferred(Ranged)` placeholder, so open a
-        // provider handle and cache it; a full/whole file takes the whole-read
-        // path. `Tree::open` returning `None` means the route declared ranged but
-        // the handler answered full: fall through to the full read.
-        if node.attrs().is_some_and(FileAttrsCache::is_deferred_ranged) {
-            let ctx = RequestCtx::default();
-            if let Some(handle) = self.tree.open(&node, &ctx).await? {
-                self.open_count.fetch_add(1, Ordering::Relaxed);
-                let handle = self.cache_handle(id.0, &node, handle);
-                return self.read_ranged(id.0, &handle, offset, len).await;
+            if node.is_dir() {
+                return Err(NsError::IsDirectory);
             }
-        }
 
-        self.read_full(id.0, &node, offset, len).await
+            // A ranged route projects a `Deferred(Ranged)` placeholder, so open a
+            // provider handle and cache it; a full/whole file takes the
+            // full-read path. `Tree::open` returning `None` means the route
+            // declared ranged but the handler answered full: fall through to
+            // the full read.
+            if node.attrs().is_some_and(FileAttrsCache::is_deferred_ranged) {
+                let ctx = RequestCtx { trace };
+                if let Some(handle) = self.tree.open(&node, &ctx).await? {
+                    self.open_count.fetch_add(1, Ordering::Relaxed);
+                    let handle = self.cache_handle(id.0, &node, handle);
+                    return self.read_ranged(id.0, &handle, offset, len).await;
+                }
+            }
+
+            self.read_full(id.0, &node, offset, len, trace).await
+        }
+        .await;
+        Self::record_outcome(span.as_ref(), &result);
+        result
     }
 
     async fn read_ranged(
@@ -826,8 +899,9 @@ impl TreeNamespace {
         node: &crate::Node,
         offset: u64,
         len: u32,
+        trace: Option<TraceId>,
     ) -> Result<ReadAnswer, NsError> {
-        let ctx = RequestCtx::default();
+        let ctx = RequestCtx { trace };
         match self.tree.read(node, &ctx).await? {
             ReadResult::Bytes { data, attrs, .. } => {
                 if let Some(a) = &attrs {
@@ -965,38 +1039,46 @@ impl TreeNamespace {
 
         let (full_path, mount) = self.record(id)?;
         self.process_invalidations(&mount);
-        let node = self.resolve_node(&full_path).await?;
-        if !node.is_dir() {
-            return Err(NsError::NotDirectory);
-        }
+        let span = Self::begin_span("readdir", &mount, full_path.as_str());
+        let trace = Self::span_trace(span.as_ref());
+        let result = async {
+            let node = self.resolve_node(&full_path, trace).await?;
+            if !node.is_dir() {
+                return Err(NsError::NotDirectory);
+            }
 
-        let tree_cursor = match cursor {
-            DirCursor::Start => None,
-            DirCursor::Tree(c) => Some(crate::Cursor(c)),
-            DirCursor::Buffered { .. } => unreachable!("buffered handled above"),
-        };
-        let ctx = RequestCtx::default();
-        let listing = match self.tree.list(&node, tree_cursor, &ctx).await? {
-            ListOutcome::Listing(listing) => listing,
-            // A subtree node's children are served by the in-process frontend
-            // from the backing dir; this listing path does not enumerate them.
-            ListOutcome::Subtree(_) => return Err(NsError::NotDirectory),
-        };
+            let tree_cursor = match cursor {
+                DirCursor::Start => None,
+                DirCursor::Tree(c) => Some(crate::Cursor(c)),
+                DirCursor::Buffered { .. } => unreachable!("buffered handled above"),
+            };
+            let ctx = RequestCtx { trace };
+            let listing = match self.tree.list(&node, tree_cursor, &ctx).await? {
+                ListOutcome::Listing(listing) => listing,
+                // A subtree node's children are served by the in-process
+                // frontend from the backing dir; this listing path does not
+                // enumerate them.
+                ListOutcome::Subtree(_) => return Err(NsError::NotDirectory),
+            };
 
-        let mount = node.mount().to_string();
-        let parent_full = full_path;
-        let mut entries = Vec::with_capacity(listing.entries.len());
-        for entry in &listing.entries {
-            entries.push(self.dir_entry(
-                &mount,
-                &parent_full,
-                node.path(),
-                &entry.name,
-                &entry.meta,
-            ));
+            let mount = node.mount().to_string();
+            let parent_full = full_path;
+            let mut entries = Vec::with_capacity(listing.entries.len());
+            for entry in &listing.entries {
+                entries.push(self.dir_entry(
+                    &mount,
+                    &parent_full,
+                    node.path(),
+                    &entry.name,
+                    &entry.meta,
+                ));
+            }
+            let tree_next = listing.next_cursor.map(|c| c.0);
+            Ok(page_split(entries, tree_next, budget))
         }
-        let tree_next = listing.next_cursor.map(|c| c.0);
-        Ok(page_split(entries, tree_next, budget))
+        .await;
+        Self::record_outcome(span.as_ref(), &result);
+        result
     }
 
     /// Turn a listing child into a `DirEntry`, allocating its id.
@@ -1073,28 +1155,37 @@ impl TreeNamespace {
     async fn getattr_inner(&self, id: NodeId, exact: bool) -> Result<Attrs, NsError> {
         let (full_path, mount) = self.record(id)?;
         self.process_invalidations(&mount);
-        let node = self.resolve_node(&full_path).await?;
-        let refreshed = self.refresh_record(id.0, &node);
+        let op = if exact { "getattr_exact" } else { "getattr" };
+        let span = Self::begin_span(op, &mount, full_path.as_str());
+        let trace = Self::span_trace(span.as_ref());
+        let result = async {
+            let node = self.resolve_node(&full_path, trace).await?;
+            let refreshed = self.refresh_record(id.0, &node);
 
-        // The exact-size flavor probes provider I/O for a deferred ranged file so
-        // the NFS renderer can flatten a directory with real child sizes.
-        if exact
-            && refreshed
-                .as_ref()
-                .is_some_and(FileAttrsCache::is_deferred_ranged)
-            && !refreshed
-                .as_ref()
-                .is_some_and(FileAttrsCache::has_exact_size)
-            && let Some(probed) = self
-                .tree
-                .probe_ranged_attrs(node.mount(), node.path())
-                .await?
-        {
-            self.store_learned(id.0, probed.clone());
-            return Ok(self.attrs_from_parts(id.0, &node, Some(&probed)));
+            // The exact-size flavor probes provider I/O for a deferred ranged
+            // file so the NFS renderer can flatten a directory with real child
+            // sizes.
+            if exact
+                && refreshed
+                    .as_ref()
+                    .is_some_and(FileAttrsCache::is_deferred_ranged)
+                && !refreshed
+                    .as_ref()
+                    .is_some_and(FileAttrsCache::has_exact_size)
+                && let Some(probed) = self
+                    .tree
+                    .probe_ranged_attrs(node.mount(), node.path())
+                    .await?
+            {
+                self.store_learned(id.0, probed.clone());
+                return Ok(self.attrs_from_parts(id.0, &node, Some(&probed)));
+            }
+
+            Ok(self.attrs_from_parts(id.0, &node, refreshed.as_ref()))
         }
-
-        Ok(self.attrs_from_parts(id.0, &node, refreshed.as_ref()))
+        .await;
+        Self::record_outcome(span.as_ref(), &result);
+        result
     }
 
     /// Refresh a record's stored attrs from a fresh resolve, preserving a learned
@@ -1123,14 +1214,21 @@ impl Namespace for TreeNamespace {
             let (parent_full, mount) = self.record(parent)?;
             self.process_invalidations(&mount);
             let child_full = parent_full.join(name).map_err(|_| NsError::Invalid)?;
-            let node = self.resolve_node(&child_full).await?;
-            let id = self.intern(&node);
-            let attrs = self.attrs_for(id.0, &node);
-            Ok(NodeAnswer {
-                node: id,
-                kind: attrs.kind.clone(),
-                attrs,
-            })
+            let span = Self::begin_span("lookup", &mount, child_full.as_str());
+            let trace = Self::span_trace(span.as_ref());
+            let result = async {
+                let node = self.resolve_node(&child_full, trace).await?;
+                let id = self.intern(&node);
+                let attrs = self.attrs_for(id.0, &node);
+                Ok(NodeAnswer {
+                    node: id,
+                    kind: attrs.kind.clone(),
+                    attrs,
+                })
+            }
+            .await;
+            Self::record_outcome(span.as_ref(), &result);
+            result
         }
         .boxed()
     }
