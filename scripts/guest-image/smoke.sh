@@ -30,7 +30,6 @@ fi
 work="$(mktemp -d)"
 seed_iso="$work/seed.iso"
 serial_log="$work/serial.log"
-pidfile="$work/krunkit.pid"
 
 # TEST-NET-1 (RFC 5737): guaranteed non-routable from a guest with no network
 # device attached, so the connect fails/keeps retrying instead of accidentally
@@ -39,7 +38,6 @@ pidfile="$work/krunkit.pid"
   --out "$seed_iso" \
   --attach-addr "192.0.2.1:9999" \
   --attach-token "smoke-placeholder-token" \
-  --ready-vsock-port "0" \
   || exit 1
 
 krunkit_pid=""
@@ -47,7 +45,7 @@ krunkit_pid=""
 cleanup() {
   if [[ -n "$krunkit_pid" ]] && kill -0 "$krunkit_pid" 2>/dev/null; then
     kill "$krunkit_pid" 2>/dev/null
-    for _ in $(seq 1 20); do
+    for ((attempt = 0; attempt < 20; attempt++)); do
       kill -0 "$krunkit_pid" 2>/dev/null || break
       sleep 0.25
     done
@@ -56,6 +54,10 @@ cleanup() {
   rm -rf "$work"
 }
 trap cleanup EXIT
+
+strip_ansi() {
+  sed -E 's/\x1b\[[0-9;]*[a-zA-Z]//g' "$serial_log" 2>/dev/null
+}
 
 start_epoch=$(date +%s)
 
@@ -66,7 +68,6 @@ krunkit \
   --device "virtio-blk,path=${seed_iso},format=raw" \
   --device "virtio-serial,logFilePath=${serial_log}" \
   --restful-uri none:// \
-  --pidfile "$pidfile" \
   >"$work/krunkit.stdout" 2>&1 &
 krunkit_pid=$!
 
@@ -84,7 +85,7 @@ while [[ $(date +%s) -lt $deadline ]]; do
   # The console log interleaves ANSI color codes into status lines (e.g. an
   # escape sequence lands mid-word inside "multi-user.target"), so strip them
   # before matching instead of trying to pattern-match around them.
-  stripped="$(sed -E 's/\x1b\[[0-9;]*[a-zA-Z]//g' "$serial_log" 2>/dev/null || true)"
+  stripped="$(strip_ansi || true)"
   if [[ -z "$reached_multi_user" ]] && grep -qiE "Reached target multi-user\.target" <<<"$stripped"; then
     reached_multi_user="$(date +%s)"
   fi
@@ -98,7 +99,7 @@ while [[ $(date +%s) -lt $deadline ]]; do
 done
 
 echo "== serial log tail (ANSI stripped) =="
-sed -E 's/\x1b\[[0-9;]*[a-zA-Z]//g' "$serial_log" 2>/dev/null | tail -n 80
+strip_ansi | tail -n 80
 
 status=0
 if [[ -z "$reached_multi_user" ]]; then
