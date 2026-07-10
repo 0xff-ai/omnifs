@@ -519,30 +519,26 @@ impl TreeNamespace {
     /// Production constructor: build the [`Tree`] over the mount registry and
     /// start the background invalidation drain, so a later step can hand a
     /// frontend a `dyn Namespace` and nothing else.
-    // The public constructors take an owned `Handle` (callers pass
-    // `Handle::current()`); the runtime handle is cloned into the background tick.
-    #[allow(clippy::needless_pass_by_value)]
     pub fn new(registry: Arc<MountRuntimes>, rt: Handle) -> Arc<Self> {
         let ctx = ServingContext::from_runtimes(Arc::clone(&registry));
-        Self::assemble(Tree::new(ctx), Some(registry), &rt)
+        Self::assemble(Tree::new(ctx), Some(registry), rt)
     }
 
     /// Single-mount constructor for the kernel-free test harness and any
     /// single-mount embedding. The live-follow pump is unavailable in this form
     /// (it needs the mount registry).
-    #[allow(clippy::needless_pass_by_value)]
     pub fn single(mount: String, runtime: Arc<Engine>, rt: Handle) -> Arc<Self> {
         let ctx = ServingContext::single(mount, runtime);
-        Self::assemble(Tree::new(ctx), None, &rt)
+        Self::assemble(Tree::new(ctx), None, rt)
     }
 
-    fn assemble(tree: Tree, registry: Option<Arc<MountRuntimes>>, rt: &Handle) -> Arc<Self> {
+    fn assemble(tree: Tree, registry: Option<Arc<MountRuntimes>>, rt: Handle) -> Arc<Self> {
         let tree = Arc::new(tree);
         let (events, _) = broadcast::channel(EVENT_CAPACITY);
         let this = Arc::new(Self {
             tree,
             registry,
-            rt: rt.clone(),
+            rt,
             ids: DashMap::new(),
             by_path: DashMap::new(),
             next_id: AtomicU64::new(ROOT_ID + 1),
@@ -554,7 +550,7 @@ impl TreeNamespace {
             tick: std::sync::Mutex::new(None),
         });
         this.install_root();
-        this.spawn_drain_tick(rt);
+        this.spawn_drain_tick();
         this
     }
 
@@ -574,9 +570,9 @@ impl TreeNamespace {
         self.ids.insert(ROOT_ID, root);
     }
 
-    fn spawn_drain_tick(self: &Arc<Self>, rt: &Handle) {
+    fn spawn_drain_tick(self: &Arc<Self>) {
         let weak = Arc::downgrade(self);
-        let handle = rt.spawn(async move {
+        let handle = self.rt.spawn(async move {
             loop {
                 tokio::time::sleep(DRAIN_TICK).await;
                 let Some(this) = weak.upgrade() else {
