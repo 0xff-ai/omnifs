@@ -45,11 +45,19 @@ impl Runtime {
         })
     }
 
-    fn container_name(&self) -> &ContainerName {
+    /// This runtime's own container identity, e.g. so
+    /// [`crate::frontend_backend::DockerBackend`] can probe/remove/shell into
+    /// the container it was constructed for without threading the name back
+    /// in from the caller.
+    pub(crate) fn container_name(&self) -> &ContainerName {
         self.target.container_name()
     }
 
-    fn image(&self) -> &ImageRef {
+    /// This runtime's own image, e.g. so
+    /// [`crate::frontend_backend::DockerBackend::launch`] can embed it in the
+    /// container body without duplicating it in
+    /// [`crate::frontend_backend::FrontendLaunchSpec`].
+    pub(crate) fn image(&self) -> &ImageRef {
         self.target.image()
     }
 

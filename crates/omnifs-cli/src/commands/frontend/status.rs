@@ -6,6 +6,7 @@ use omnifs_workspace::layout::OMNIFS_HOME_ENV;
 use omnifs_workspace::runtime_record::RuntimeRecord;
 
 use crate::error::ExitCode;
+use crate::frontend_backend::{DockerBackend, FrontendBackend};
 use crate::frontend_container::{FRONTEND_DEV_IMAGE, frontend_container_name};
 use crate::launch_backend::DockerTarget;
 use crate::runtime::Runtime;
@@ -28,7 +29,7 @@ impl FrontendStatusArgs {
             FRONTEND_DEV_IMAGE.to_string(),
         )?;
         let running = match Runtime::connect_for(&target) {
-            Ok(runtime) => runtime.container_running(&container_name).await?,
+            Ok(runtime) => DockerBackend::new(runtime).is_running().await?,
             Err(_) => None,
         };
 

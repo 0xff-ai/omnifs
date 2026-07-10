@@ -17,7 +17,6 @@
 //! surface on macOS, so `omnifs shell` prefers it when running and execs into
 //! the container instead of the host subshell.
 
-use std::io::IsTerminal as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -25,7 +24,10 @@ use anyhow::{Context, Result};
 use clap::Args;
 use omnifs_api::MountInfo;
 
-use crate::launch_backend::GUEST_MOUNT;
+use crate::frontend_backend::{DockerBackend, FrontendBackend};
+use crate::frontend_container::FRONTEND_DEV_IMAGE;
+use crate::launch_backend::{ContainerName, DockerTarget, GUEST_MOUNT};
+use crate::runtime::Runtime;
 use crate::workspace::Workspace;
 use omnifs_workspace::layout::{OMNIFS_HOME_ENV, OMNIFS_MOUNT_POINT_ENV, WorkspaceLayout};
 use omnifs_workspace::runtime_record::{RuntimeRecord, Via};
@@ -70,7 +72,7 @@ impl ShellArgs {
         });
         if frontend_attached {
             let container_name = frontend_container_name(paths)?;
-            return self.exec_in_container(container_name.as_str());
+            return self.exec_in_container(&container_name);
         }
 
         let Some(record) = record else {
@@ -144,33 +146,32 @@ impl ShellArgs {
         spawn_and_propagate(cmd, "launch omnifs shell".to_string())
     }
 
-    /// Attach to the Docker-hosted FUSE frontend by `docker exec`'ing into its
-    /// container, landing in the projected tree. The minimal frontend image
-    /// ships only `/bin/sh`, so no host rc plumbing applies here; `--shell`
-    /// overrides the default and a trailing command runs non-interactively.
-    fn exec_in_container(&self, container: &str) -> Result<()> {
-        let mut cmd = Command::new("docker");
-        cmd.arg("exec").arg("-i");
-        if std::io::stdin().is_terminal() {
-            cmd.arg("-t");
-        }
-        cmd.arg("-w").arg(GUEST_MOUNT);
-        cmd.arg(container);
+    /// Attach to the optional FUSE frontend by execing into it, landing in
+    /// the projected tree. The minimal frontend image ships only `/bin/sh`,
+    /// so no host rc plumbing applies here; `--shell` overrides the default
+    /// and a trailing command runs non-interactively.
+    ///
+    /// Goes through the [`FrontendBackend`] seam (today: `DockerBackend`)
+    /// only for command construction; the image field of its `DockerTarget`
+    /// is unused here, so the dev placeholder is fine regardless of build
+    /// channel, mirroring `frontend down`/`frontend status`.
+    fn exec_in_container(&self, container_name: &ContainerName) -> Result<()> {
+        let target = DockerTarget::new(
+            container_name.as_str().to_string(),
+            FRONTEND_DEV_IMAGE.to_string(),
+        )?;
+        let backend = DockerBackend::new(Runtime::connect_for(&target)?);
+        let cmd = backend.shell_command(self.shell.as_deref(), &self.command);
         if self.command.is_empty() {
-            cmd.arg(self.shell.as_deref().unwrap_or("/bin/sh"));
             anstream::eprintln!("omnifs shell (container) at {GUEST_MOUNT} (type `exit` to leave)");
-        } else {
-            cmd.args(&self.command);
         }
-        spawn_and_propagate(cmd, format!("open shell in container `{container}`"))
+        spawn_and_propagate(cmd, format!("open shell in container `{container_name}`"))
     }
 }
 
 /// The Docker-hosted FUSE frontend's container name for this workspace,
 /// mirroring the naming `omnifs frontend up|down|status` use.
-fn frontend_container_name(
-    paths: &WorkspaceLayout,
-) -> Result<crate::launch_backend::ContainerName> {
+fn frontend_container_name(paths: &WorkspaceLayout) -> Result<ContainerName> {
     let is_default_home = std::env::var_os(OMNIFS_HOME_ENV).is_none();
     crate::frontend_container::frontend_container_name(&paths.config_dir, is_default_home)
 }

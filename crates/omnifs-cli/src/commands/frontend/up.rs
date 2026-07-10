@@ -16,10 +16,8 @@ use clap::Args;
 use omnifs_workspace::layout::OMNIFS_HOME_ENV;
 use omnifs_workspace::runtime_record::{FrontendKind, FrontendRecord, RuntimeRecord, Via};
 
-use crate::frontend_container::{
-    FrontendContainerSpec, build_frontend_container_body, frontend_container_name,
-    resolve_frontend_image,
-};
+use crate::frontend_backend::{DockerBackend, FrontendBackend, FrontendLaunchSpec};
+use crate::frontend_container::{frontend_container_name, resolve_frontend_image};
 use crate::launch::Launcher;
 use crate::launch_backend::{DockerTarget, GUEST_MOUNT};
 use crate::runtime::Runtime;
@@ -69,19 +67,16 @@ impl FrontendUpArgs {
         );
         let attach_port = attach_addr.port();
 
-        let body = build_frontend_container_body(&FrontendContainerSpec {
-            image: target.image(),
-            home: &paths.config_dir,
+        let backend = DockerBackend::new(runtime);
+        let spec = FrontendLaunchSpec {
+            home: paths.config_dir.clone(),
             attach_port,
-            attach_token: &attach.token,
-            add_host_gateway: cfg!(target_os = "linux"),
-        });
-        runtime.launch_frontend_container(body).await?;
-
-        assert_container_locked_down(&runtime).await?;
+            attach_token: attach.token.clone(),
+        };
+        backend.launch(&spec).await?;
 
         let mount_name = first_mount_name(&workspace)?;
-        wait_for_mount(&runtime, &mount_name).await?;
+        wait_for_mount(&backend, &mount_name).await?;
 
         record_frontend_via_docker(&paths.runtime_record_file());
 
@@ -118,19 +113,6 @@ fn attach_addr(addr: &str) -> anyhow::Result<SocketAddr> {
         .with_context(|| format!("attach listener address `{addr}` is invalid"))
 }
 
-/// Immediately after start, assert the no-credentials contract: no mounts of
-/// any kind, and an env set that is exactly the attach vars plus the image's
-/// own defaults. On violation, kill the container rather than leave a
-/// misconfigured frontend running.
-async fn assert_container_locked_down(runtime: &Runtime) -> anyhow::Result<()> {
-    let (mounts, env) = runtime.inspect_mounts_and_env().await?;
-    if let Err(violation) = crate::frontend_container::assert_locked_down(&mounts, &env) {
-        let _ = runtime.remove().await;
-        anyhow::bail!("refusing to run the frontend container: {violation}");
-    }
-    Ok(())
-}
-
 fn first_mount_name(workspace: &Workspace) -> anyhow::Result<String> {
     workspace
         .mounts()?
@@ -142,12 +124,12 @@ fn first_mount_name(workspace: &Workspace) -> anyhow::Result<String> {
 
 /// Poll `docker exec test -e /omnifs/<mount>` until it succeeds or the
 /// timeout elapses.
-async fn wait_for_mount(runtime: &Runtime, mount_name: &str) -> anyhow::Result<()> {
+async fn wait_for_mount(backend: &impl FrontendBackend, mount_name: &str) -> anyhow::Result<()> {
     let probe_path = format!("{GUEST_MOUNT}/{mount_name}");
     anstream::eprintln!("Waiting for {probe_path} inside the frontend container");
     let deadline = tokio::time::Instant::now() + MOUNT_PROBE_TIMEOUT;
     loop {
-        if runtime.exec_path_exists(&probe_path).await.unwrap_or(false) {
+        if backend.mount_ready(&probe_path).await.unwrap_or(false) {
             return Ok(());
         }
         if tokio::time::Instant::now() >= deadline {

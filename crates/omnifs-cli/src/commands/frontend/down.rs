@@ -13,6 +13,7 @@ use clap::Args;
 use omnifs_workspace::layout::{OMNIFS_HOME_ENV, WorkspaceLayout};
 use omnifs_workspace::runtime_record::{RuntimeRecord, Via};
 
+use crate::frontend_backend::{DockerBackend, FrontendBackend};
 use crate::frontend_container::{FRONTEND_DEV_IMAGE, frontend_container_name};
 use crate::launch_backend::DockerTarget;
 use crate::runtime::Runtime;
@@ -53,9 +54,10 @@ pub(crate) async fn teardown(paths: &WorkspaceLayout) -> anyhow::Result<bool> {
     )?;
     let found = match Runtime::connect_for(&target) {
         Ok(runtime) => {
-            let running = runtime.container_running(&container_name).await?;
+            let backend = DockerBackend::new(runtime);
+            let running = backend.is_running().await?;
             if running.is_some() {
-                runtime.remove_existing(&container_name).await?;
+                backend.tear_down().await?;
                 anstream::println!("✓ Frontend container `{container_name}` removed");
             }
             running.is_some()

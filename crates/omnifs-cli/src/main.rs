@@ -13,6 +13,7 @@ mod config;
 mod credential_target;
 mod daemon_teardown;
 mod error;
+mod frontend_backend;
 mod frontend_container;
 #[cfg(feature = "daemon")]
 mod host_teardown;
