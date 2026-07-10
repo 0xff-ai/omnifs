@@ -16,12 +16,14 @@
 //! On connect the client sends one `Hello { protocol, token }` request frame
 //! (`request_id = 0`). The server replies with either `Welcome { protocol,
 //! instance_id }` or `Rejected { reason }` (both response frames, `request_id =
-//! 0`), then closes the connection in the rejected case. A Unix-socket listener
-//! ignores `token` (filesystem permissions are that transport's auth); a TCP
-//! attach listener requires it to match its per-instance attach token. A
-//! protocol mismatch is rejected the same way. `instance_id` is the daemon's
-//! per-start id: a reconnect that lands on a different id means the daemon
-//! restarted and every [`NodeId`] the client holds is stale.
+//! 0`), then closes the connection in the rejected case. A plain UDS listener
+//! ignores `token` (filesystem permissions are that transport's whole auth); a
+//! TCP attach listener, and a UDS listener bound with a token (the krunkit
+//! vsock-proxy path, where every guest dial looks like the same trusted local
+//! peer to the socket), both require it to match the per-instance attach
+//! token. A protocol mismatch is rejected the same way. `instance_id` is the
+//! daemon's per-start id: a reconnect that lands on a different id means the
+//! daemon restarted and every [`NodeId`] the client holds is stale.
 //!
 //! # Identity
 //!
@@ -170,4 +172,9 @@ pub enum WireError {
         target: String,
         source: std::io::Error,
     },
+    /// A [`crate::AttachTarget::Vsock`] attach was attempted on a build that
+    /// cannot dial vsock (only the Linux krunkit guest can). Not retriable:
+    /// the platform will not change mid-run.
+    #[error("vsock attach is not supported on this platform")]
+    VsockUnsupported,
 }

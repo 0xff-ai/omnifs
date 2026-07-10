@@ -54,10 +54,22 @@ const ATTACH_CAPACITY: usize = 16;
 /// `host.docker.internal` name Docker injects into the container's DNS, not a
 /// literal address the CLI could resolve ahead of time; `TcpStream::connect`
 /// resolves it same as any other socket address type.
+///
+/// `Vsock` is the krunkit-on-macOS path: the guest VM has no shared host Unix
+/// socket and no Docker-style loopback either, but krunkit gives it a virtio
+/// socket device, so it dials host CID 2 (`VMADDR_CID_HOST`) on `port` instead.
+/// krunkit proxies that vsock connection onto a host Unix socket
+/// (`--device virtio-vsock,port=N,socketURL=<path>,listen`), and every
+/// connection krunkit forwards looks like the same trusted local peer to that
+/// socket, so `token` proves the guest's identity the same way it does over
+/// TCP. The dial itself only builds on Linux (the guest OS); on any other
+/// target it fails at attach time with a named, non-retriable error rather
+/// than being a compile-time option.
 #[derive(Debug, Clone)]
 pub enum AttachTarget {
     Unix(PathBuf),
     Tcp { addr: String, token: String },
+    Vsock { port: u32, token: String },
 }
 
 impl std::fmt::Display for AttachTarget {
@@ -65,6 +77,7 @@ impl std::fmt::Display for AttachTarget {
         match self {
             Self::Unix(path) => write!(f, "{}", path.display()),
             Self::Tcp { addr, .. } => write!(f, "{addr}"),
+            Self::Vsock { port, .. } => write!(f, "vsock:{port}"),
         }
     }
 }
@@ -535,6 +548,26 @@ async fn connect_once(target: &AttachTarget) -> Result<(Connection, String), Wir
         AttachTarget::Tcp { addr, token } => {
             let stream = TcpStream::connect(addr.as_str()).await?;
             handshake_over(stream, Some(token.clone())).await
+        },
+        // The vsock dial only builds on Linux, the krunkit guest's OS; any
+        // other target fails with a named, non-retriable error instead of
+        // silently hanging in the reconnect-forever loop. Inlined (rather than
+        // a separate `#[cfg(not(target_os = "linux"))]` async fn) so the
+        // never-awaits stub does not trip `clippy::unused_async`: it is a
+        // match arm inside this already-async function, not a function of its
+        // own.
+        AttachTarget::Vsock { port, token } => {
+            #[cfg(target_os = "linux")]
+            {
+                let addr = tokio_vsock::VsockAddr::new(tokio_vsock::VMADDR_CID_HOST, *port);
+                let stream = tokio_vsock::VsockStream::connect(addr).await?;
+                handshake_over(stream, Some(token.clone())).await
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = (port, token);
+                Err(WireError::VsockUnsupported)
+            }
         },
     }
 }

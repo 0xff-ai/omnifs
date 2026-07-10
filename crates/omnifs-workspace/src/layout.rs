@@ -31,6 +31,14 @@ pub const NFS_STATE_SUBDIR: &str = "nfs";
 /// sockets (`<config_dir>/frontends/<name>.sock`), served to out-of-process
 /// frontend runners.
 pub const FRONTENDS_SUBDIR: &str = "frontends";
+/// Filename of the token-checking UDS namespace attach listener under
+/// `frontends/` (`<config_dir>/frontends/vsock-attach.sock`). Bound on demand
+/// via `POST /v1/attach-listeners/vsock`, one per daemon instance; unlike a
+/// `frontends/<name>.sock` attach socket, whose auth is filesystem
+/// permissions, a connection here proves itself with a per-instance token,
+/// because the krunkit vsock-proxy path terminates every guest vsock dial on
+/// this socket as the same local peer.
+pub const VSOCK_ATTACH_SOCKET_NAME: &str = "vsock-attach.sock";
 pub const OMNIFS_HOME_ENV: &str = "OMNIFS_HOME";
 /// Overrides the host-visible mount point the daemon serves at.
 pub const OMNIFS_MOUNT_POINT_ENV: &str = "OMNIFS_MOUNT_POINT";
@@ -144,6 +152,13 @@ impl WorkspaceLayout {
     /// caller validates `name`; auth on the socket is filesystem permissions.
     pub fn attach_socket(&self, name: &str) -> PathBuf {
         self.frontends_dir().join(format!("{name}.sock"))
+    }
+
+    /// The token-checking UDS namespace attach listener
+    /// (`<config_dir>/frontends/vsock-attach.sock`). See
+    /// [`VSOCK_ATTACH_SOCKET_NAME`].
+    pub fn vsock_attach_socket(&self) -> PathBuf {
+        self.frontends_dir().join(VSOCK_ATTACH_SOCKET_NAME)
     }
 
     pub fn provider_path(&self, provider: &str) -> PathBuf {

@@ -417,6 +417,7 @@ fn spawn_attach_listeners(
             ns,
             listener,
             instance_id.to_string(),
+            None,
         ));
     }
     Ok(())
