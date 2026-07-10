@@ -62,6 +62,20 @@ pub enum RecordedBackend {
     },
 }
 
+/// A bound TCP namespace attach listener: the Docker Desktop path, where a
+/// containerized frontend cannot share this host's Unix socket into the Linux
+/// VM it runs in, so it dials TCP loopback with `token` instead. Bound eagerly
+/// at daemon start (`--attach-tcp`) or later via `POST /v1/attach-listeners`;
+/// absent when TCP attach was never requested, matching the other UDS-only
+/// attach transport, which needs no record entry at all (filesystem
+/// permissions are its whole auth story).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AttachRecord {
+    pub addr: String,
+    pub token: String,
+}
+
 /// One serving frontend and where it is mounted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -94,11 +108,18 @@ pub struct RuntimeRecord {
     pub frontends: Vec<FrontendRecord>,
     /// RFC3339 UTC timestamp of when the daemon started serving.
     pub started_at: String,
+    /// The bound TCP attach listener, if one was ever requested this start.
+    /// Absent (not merely empty) when TCP attach was never bound, so an older
+    /// reader sees no field at all rather than a spurious `null`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attach: Option<AttachRecord>,
 }
 
 impl RuntimeRecord {
     /// Assemble a record stamped with the current schema version and an
-    /// `started_at` of now.
+    /// `started_at` of now. `attach` starts absent; a running daemon that later
+    /// binds the TCP attach listener patches it in with a read-modify-write
+    /// (see the daemon's `ensure_attach_tcp`), preserving this `started_at`.
     #[must_use]
     pub fn new(
         endpoint: Endpoint,
@@ -116,6 +137,7 @@ impl RuntimeRecord {
             instance_id,
             frontends,
             started_at,
+            attach: None,
         }
     }
 
@@ -241,6 +263,57 @@ mod tests {
         assert_eq!(json["pid"], 4321);
         assert_eq!(json["endpoint"]["kind"], "unix");
         assert_eq!(json["frontends"][0]["kind"], "nfs");
+    }
+
+    #[test]
+    fn attach_is_absent_by_default_and_not_serialized() {
+        let record = sample_native();
+        assert_eq!(record.attach, None);
+        let json = serde_json::to_value(&record).unwrap();
+        assert!(
+            json.get("attach").is_none(),
+            "an absent attach must not serialize as a null field: {json}"
+        );
+    }
+
+    #[test]
+    fn attach_round_trips_through_disk_when_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(RUNTIME_RECORD_FILE);
+        let mut record = sample_native();
+        record.attach = Some(AttachRecord {
+            addr: "127.0.0.1:54321".to_string(),
+            token: "a".repeat(32),
+        });
+        record.write(&path).unwrap();
+
+        let read = RuntimeRecord::read(&path).unwrap().unwrap();
+        assert_eq!(read.attach, record.attach);
+
+        let json = serde_json::to_value(&record).unwrap();
+        assert_eq!(json["attach"]["addr"], "127.0.0.1:54321");
+        assert_eq!(json["attach"]["token"], "a".repeat(32));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "the attach token must stay behind 0600 too");
+        }
+    }
+
+    #[test]
+    fn a_record_written_without_attach_reads_back_as_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(RUNTIME_RECORD_FILE);
+        // An older writer's JSON shape: no `attach` key at all.
+        std::fs::write(
+            &path,
+            r#"{"version":1,"endpoint":{"kind":"unix","path":"/x"},"backend":"native","pid":1,"instance_id":"x","frontends":[],"started_at":"2026-07-07T00:00:00Z"}"#,
+        )
+        .unwrap();
+        let read = RuntimeRecord::read(&path).unwrap().unwrap();
+        assert_eq!(read.attach, None);
     }
 
     #[test]
