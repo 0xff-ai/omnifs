@@ -117,12 +117,13 @@ impl ServingContext {
                     )));
                 };
                 let mount = mount.to_string();
-                if !registry.mounts().iter().any(|m| m == &mount) {
+                if registry.get(&mount).is_none() {
                     return Err(TreeError::not_found(format!("no such mount: {mount}")));
                 }
                 let rest = path
                     .as_str()
-                    .strip_prefix(&format!("/{mount}"))
+                    .strip_prefix('/')
+                    .and_then(|path| path.strip_prefix(&mount))
                     .filter(|s| !s.is_empty())
                     .unwrap_or("/");
                 let rel = Path::parse(rest).map_err(|e| {
