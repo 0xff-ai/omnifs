@@ -31,7 +31,7 @@ impl<S> Router<S> {
         &self,
         cx: &Cx<S>,
         path: &str,
-        content_type: &str,
+        _content_type: &str,
         cached: Option<CachedCanonical>,
     ) -> Result<ReadOutcome> {
         debug_assert!(path.starts_with('/'), "read_file expects an absolute path");
@@ -39,7 +39,6 @@ impl<S> Router<S> {
             Path::parse(path).map_err(|error| ProviderError::invalid_input(error.to_string()))?;
         let shape = self.shape();
 
-        let _ = content_type;
         match shape.read_route(&abs) {
             Some(ReadRoute::File(route)) => {
                 let proj = super::route_future(

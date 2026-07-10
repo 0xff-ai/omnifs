@@ -27,13 +27,9 @@ pub(super) struct Readme<'a> {
 }
 
 impl Scope {
-    pub fn root_path() -> String {
-        format!("/{README_FILE}")
-    }
-
     pub fn readme_path(&self) -> String {
         match self {
-            Self::Root => Self::root_path(),
+            Self::Root => format!("/{README_FILE}"),
             Self::Branch(branch) => format!("/{branch}/{README_FILE}"),
         }
     }

@@ -34,14 +34,13 @@ impl<S> Router<S> {
         &self,
         cx: &Cx<S>,
         path: &str,
-        cached_validator: Option<String>,
+        _cached_validator: Option<String>,
         cursor: Option<Cursor>,
     ) -> Result<List> {
         debug_assert!(
             path.starts_with('/'),
             "list_children expects an absolute path"
         );
-        let _ = cached_validator;
         let abs =
             Path::parse(path).map_err(|error| ProviderError::invalid_input(error.to_string()))?;
         let shape = self.shape();
