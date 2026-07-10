@@ -757,6 +757,11 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  # Smokes the contributor dev flow's CI-relevant halves: a host-native daemon
+  # on this runner (kernel FUSE) plus the omnifs-frontend image `frontend-amd64`
+  # built, attached over TCP. Needs the CLI on PATH (host-native, not
+  # containerized) and fuse3 on the runner itself, unlike the old
+  # daemon-in-a-container smoke lane it replaces.
   smoke-amd64:
     name: smoke amd64
     if: >-
@@ -765,14 +770,13 @@ jobs:
         (github.event.pull_request.user.login == 'raulk' ||
          contains(github.event.pull_request.labels.*.name, 'ci-full')))
     runs-on: *linux_runner
-    needs: [docker-amd64, cli-linux-x64]
+    needs: [frontend-amd64, cli-linux-x64]
     timeout-minutes: 30
     permissions:
       contents: read
       packages: read
     env:
-      CONTAINER: omnifs
-      IMAGE: ghcr.io/${{ github.repository }}:smoke
+      FRONTEND_IMAGE: ghcr.io/${{ github.repository }}-frontend:smoke
     steps:
       - uses: actions/checkout@v6
 
@@ -780,10 +784,16 @@ jobs:
 
       - uses: oven-sh/setup-bun@v2
 
-      - name: Download amd64 image digest
+      - name: Install fuse3
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends fuse3
+
+      - name: Download amd64 frontend image digest
         uses: actions/download-artifact@v8
         with:
-          name: docker-digest-amd64
+          name: frontend-digest-amd64
           path: /tmp/digests
 
       - name: Download provider store bundle
@@ -796,20 +806,20 @@ jobs:
         with:
           arch: x64
 
-      - name: Pull the amd64 image and tag it for smoke
+      - name: Pull the amd64 frontend image and tag it for smoke
         run: |
           set -euo pipefail
           digest_path=$(find /tmp/digests -mindepth 1 -maxdepth 1 -type f | head -n 1)
           test -n "$digest_path"
           digest_file="${digest_path##*/}"
-          ref="${REGISTRY}/${IMAGE_NAME}@sha256:${digest_file}"
+          ref="${REGISTRY}/${FRONTEND_IMAGE_NAME}@sha256:${digest_file}"
           docker pull "$ref"
-          docker tag "$ref" "$IMAGE"
+          docker tag "$ref" "$FRONTEND_IMAGE"
 
-      - name: Run container smoke test
+      - name: Run native+frontend smoke test
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: scripts/ci/smoke-container.sh
+        run: scripts/ci/smoke-native-frontend.sh
 
   smoke-arm64:
     name: smoke arm64
@@ -819,14 +829,13 @@ jobs:
         (github.event.pull_request.user.login == 'raulk' ||
          contains(github.event.pull_request.labels.*.name, 'ci-full')))
     runs-on: *arm_runner
-    needs: [docker-arm64, cli-linux-arm64]
+    needs: [frontend-arm64, cli-linux-arm64]
     timeout-minutes: 30
     permissions:
       contents: read
       packages: read
     env:
-      CONTAINER: omnifs
-      IMAGE: ghcr.io/${{ github.repository }}:smoke
+      FRONTEND_IMAGE: ghcr.io/${{ github.repository }}-frontend:smoke
     steps:
       - uses: actions/checkout@v6
 
@@ -834,10 +843,16 @@ jobs:
 
       - uses: oven-sh/setup-bun@v2
 
-      - name: Download arm64 image digest
+      - name: Install fuse3
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends fuse3
+
+      - name: Download arm64 frontend image digest
         uses: actions/download-artifact@v8
         with:
-          name: docker-digest-arm64
+          name: frontend-digest-arm64
           path: /tmp/digests
 
       - name: Download provider store bundle
@@ -850,20 +865,20 @@ jobs:
         with:
           arch: arm64
 
-      - name: Pull the arm64 image and tag it for smoke
+      - name: Pull the arm64 frontend image and tag it for smoke
         run: |
           set -euo pipefail
           digest_path=$(find /tmp/digests -mindepth 1 -maxdepth 1 -type f | head -n 1)
           test -n "$digest_path"
           digest_file="${digest_path##*/}"
-          ref="${REGISTRY}/${IMAGE_NAME}@sha256:${digest_file}"
+          ref="${REGISTRY}/${FRONTEND_IMAGE_NAME}@sha256:${digest_file}"
           docker pull "$ref"
-          docker tag "$ref" "$IMAGE"
+          docker tag "$ref" "$FRONTEND_IMAGE"
 
-      - name: Run container smoke test
+      - name: Run native+frontend smoke test
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: scripts/ci/smoke-container.sh
+        run: scripts/ci/smoke-native-frontend.sh
 
   # The frontend image needs no daemon, no dev home, and no provider store: it
   # only ever runs `omnifs frontend run`, so its smoke test is the three
