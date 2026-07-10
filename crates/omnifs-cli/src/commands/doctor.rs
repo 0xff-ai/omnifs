@@ -16,7 +16,7 @@ use crate::runtime::Runtime;
 use crate::status::UserMountStatus;
 use crate::workspace::Workspace;
 use omnifs_workspace::layout::WorkspaceLayout;
-use omnifs_workspace::provider::{Catalog, DirStatus};
+use omnifs_workspace::provider::DirStatus;
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct DoctorArgs {
@@ -51,8 +51,6 @@ impl DoctorArgs {
             .map_err(|error: anyhow::Error| format!("resolve target: {error:#}"));
         Doctor {
             workspace: &workspace,
-            paths: workspace.layout(),
-            catalog: workspace.catalog(),
             mounts,
             docker_target,
             output: OutputFormat::from(self.json),
@@ -78,8 +76,6 @@ fn resolve_frontend_target(workspace: &Workspace) -> anyhow::Result<DockerTarget
 
 struct Doctor<'a> {
     workspace: &'a Workspace,
-    paths: &'a WorkspaceLayout,
-    catalog: &'a Catalog,
     mounts: Vec<crate::mount_config::MountConfig>,
     /// The frontend's Docker target, or the error resolving it.
     docker_target: Result<DockerTarget, String>,
@@ -193,6 +189,14 @@ enum ProbeResult {
 }
 
 impl ProbeResult {
+    fn from_auth_summary(summary: AuthProbeSummary) -> Self {
+        match summary.severity {
+            AuthProbeSeverity::Ok => Self::Ok(summary.message),
+            AuthProbeSeverity::Warn => Self::Warn(summary.message),
+            AuthProbeSeverity::Err => Self::Err(summary.message),
+        }
+    }
+
     fn glyph(&self) -> &'static str {
         match self {
             Self::Ok(_) => "✓",
@@ -235,13 +239,17 @@ impl Doctor<'_> {
     async fn run(self) -> anyhow::Result<DoctorVerdict> {
         let mut report = DoctorReport::new(self.output);
 
-        let (runtime, docker_target, docker_result) = self.probe_docker_reachable().await;
+        let (runtime, docker_result) = self.probe_docker_reachable().await;
         let docker_ok = matches!(docker_result, ProbeResult::Ok(_));
         report.record("docker reachable", docker_result);
 
         report.record("fuse", self.probe_fuse());
 
-        let image_result = match (docker_ok, runtime.as_ref(), docker_target.as_ref()) {
+        let image_result = match (
+            docker_ok,
+            runtime.as_ref(),
+            self.docker_target.as_ref().ok(),
+        ) {
             (true, Some(runtime), Some(target)) => {
                 self.probe_image_cached(runtime, target.image()).await
             },
@@ -268,28 +276,23 @@ impl Doctor<'_> {
         report.finish(live)
     }
 
-    async fn probe_docker_reachable(&self) -> (Option<Runtime>, Option<DockerTarget>, ProbeResult) {
+    async fn probe_docker_reachable(&self) -> (Option<Runtime>, ProbeResult) {
         use crate::runtime::DockerProbeOutcome;
 
-        let target = match self.docker_target.clone() {
+        let target = match &self.docker_target {
             Ok(target) => target,
-            Err(error) => return (None, None, ProbeResult::Err(error)),
+            Err(error) => return (None, ProbeResult::Err(error.clone())),
         };
 
-        match Runtime::probe_docker(&target).await {
+        match Runtime::probe_docker(target).await {
             DockerProbeOutcome::Reachable(runtime) => (
                 Some(runtime),
-                Some(target),
                 ProbeResult::Ok("docker daemon responds".into()),
             ),
-            DockerProbeOutcome::ConnectFailed(e) => (
-                None,
-                Some(target),
-                ProbeResult::Err(format!("connect: {e}")),
-            ),
-            DockerProbeOutcome::PingFailed(e) => {
-                (None, Some(target), ProbeResult::Err(format!("ping: {e}")))
+            DockerProbeOutcome::ConnectFailed(e) => {
+                (None, ProbeResult::Err(format!("connect: {e}")))
             },
+            DockerProbeOutcome::PingFailed(e) => (None, ProbeResult::Err(format!("ping: {e}"))),
         }
     }
 
@@ -337,7 +340,7 @@ impl Doctor<'_> {
     }
 
     fn probe_providers_discovered(&self) -> ProbeResult {
-        match self.catalog.dir_status() {
+        match self.workspace.catalog().dir_status() {
             DirStatus::Present { wasm_count } if wasm_count > 0 => {
                 ProbeResult::Ok(format!("{wasm_count} provider(s) installed"))
             },
@@ -351,16 +354,17 @@ impl Doctor<'_> {
     }
 
     fn probe_credential_store(&self) -> ProbeResult {
-        let Some(parent) = self.paths.credentials_file.parent() else {
+        let credentials_file = &self.workspace.layout().credentials_file;
+        let Some(parent) = credentials_file.parent() else {
             return ProbeResult::Err(format!(
                 "credential file has no parent: {}",
-                self.paths.credentials_file.display()
+                credentials_file.display()
             ));
         };
         if parent.exists() {
             ProbeResult::Ok(format!(
                 "file {}",
-                WorkspaceLayout::display(&self.paths.credentials_file)
+                WorkspaceLayout::display(credentials_file)
             ))
         } else {
             ProbeResult::Warn(format!(
@@ -382,29 +386,24 @@ impl Doctor<'_> {
     }
 
     fn probe_config_file(&self) -> ProbeResult {
-        if self.paths.config_file.exists() {
-            ProbeResult::Ok(WorkspaceLayout::display(&self.paths.config_file))
+        let config_file = &self.workspace.layout().config_file;
+        if config_file.exists() {
+            ProbeResult::Ok(WorkspaceLayout::display(config_file))
         } else {
             ProbeResult::Ok(format!(
                 "(default; {} absent)",
-                WorkspaceLayout::display(&self.paths.config_file)
+                WorkspaceLayout::display(config_file)
             ))
         }
     }
 
-    #[allow(clippy::unused_self)] // Kept as a Doctor probe method for a uniform probe surface.
-    fn probe_result_from_summary(&self, summary: AuthProbeSummary) -> ProbeResult {
-        match summary.severity {
-            AuthProbeSeverity::Ok => ProbeResult::Ok(summary.message),
-            AuthProbeSeverity::Warn => ProbeResult::Warn(summary.message),
-            AuthProbeSeverity::Err => ProbeResult::Err(summary.message),
-        }
-    }
-
     fn probe_mount_configs(&self) -> (ProbeResult, Vec<(String, ProbeResult)>) {
-        let store = FileStore::new(&self.paths.credentials_file);
-        let mounts =
-            crate::mount_report::scan_user_mount_configs(self.catalog, self.mounts.clone(), &store);
+        let store = FileStore::new(&self.workspace.layout().credentials_file);
+        let mounts = crate::mount_report::scan_user_mount_configs(
+            self.workspace.catalog(),
+            &self.mounts,
+            &store,
+        );
         let invalid: Vec<_> = mounts
             .iter()
             .filter_map(|m| match m {
@@ -443,7 +442,7 @@ impl Doctor<'_> {
                 let UserMountStatus::Ready(mount) = mount else {
                     return None;
                 };
-                let result = self.probe_result_from_summary(mount.auth.probe_summary());
+                let result = ProbeResult::from_auth_summary(mount.auth.probe_summary());
                 Some((mount.mount.clone(), result))
             })
             .collect();
