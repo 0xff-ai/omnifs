@@ -28,7 +28,6 @@ pub fn is_sensitive_query_param(name: &str) -> bool {
         || name.contains("password")
         || name == "key"
         || name.ends_with("_key")
-        || name == "access_token"
 }
 
 /// Redact a URL for the inspector stream: no credentials, no query string.
@@ -46,8 +45,7 @@ pub fn redact_url_for_live(raw: &str) -> String {
 
 /// Build a compact HTTP callout summary: `GET host/path` without query secrets.
 pub fn redact_http_url_for_summary(method: &str, raw_url: &str) -> String {
-    let redacted = redact_url_for_live(raw_url);
-    let Ok(parsed) = url::Url::parse(&redacted) else {
+    let Ok(parsed) = url::Url::parse(raw_url) else {
         return format!("{method} {raw_url}");
     };
     let host = parsed.host_str().unwrap_or("unknown");
@@ -172,7 +170,7 @@ mod tests {
     fn http_summary_uses_method_host_path() {
         let summary = redact_http_url_for_summary(
             "GET",
-            "https://api.github.com/repos/raulk/omnifs?access_token=secret",
+            "https://user:pass@api.github.com/repos/raulk/omnifs?access_token=secret",
         );
         assert_eq!(summary, "GET api.github.com/repos/raulk/omnifs");
     }
