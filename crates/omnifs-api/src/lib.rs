@@ -21,7 +21,7 @@ pub const API_MAJOR: u16 = 3;
 
 /// Control API minor version. The CLI warns but proceeds when the daemon's
 /// minor differs. Bump for additive, backward-compatible additions.
-pub const API_MINOR: u16 = 4;
+pub const API_MINOR: u16 = 5;
 
 /// Docker container name environment variable set by launchers and read by the
 /// daemon when reporting backend identity.
@@ -510,6 +510,25 @@ pub struct StopReport {
     #[schema(value_type = String)]
     pub mount_point: PathBuf,
     pub providers_dropped: usize,
+}
+
+/// Optional request body for `POST /v1/attach-listeners`. `port` is honored
+/// only on the first bind (the listener is idempotent thereafter); `0` (the
+/// default) asks for an ephemeral port, matching the daemon's `--attach-tcp`
+/// flag.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
+pub struct AttachListenersRequest {
+    #[serde(default)]
+    pub port: u16,
+}
+
+/// `POST /v1/attach-listeners`: the TCP namespace attach listener's address and
+/// per-instance attach token, whether just bound or already serving from an
+/// earlier call (or from `--attach-tcp` at daemon start).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct AttachListenersReport {
+    pub addr: String,
+    pub token: String,
 }
 
 #[cfg(test)]

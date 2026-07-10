@@ -42,6 +42,10 @@ pub(crate) struct DaemonContext {
     /// `frontends/<name>.sock` and served over the shared namespace. Empty for a
     /// daemon that only mounts in-process frontends.
     attach_sockets: Vec<String>,
+    /// `--attach-tcp <port>`: bind a TCP namespace attach listener eagerly at
+    /// start (`0` = ephemeral). `None` when the flag was not passed; a TCP
+    /// attach listener can still be bound later via `POST /v1/attach-listeners`.
+    attach_tcp: Option<u16>,
     nfs: NfsContext,
     process: ProcessInfo,
 }
@@ -99,6 +103,7 @@ impl DaemonContext {
             listen: args.listen,
             instance_id: generate_instance_id(),
             attach_sockets,
+            attach_tcp: args.attach_tcp,
             nfs,
             process,
         })
@@ -267,6 +272,12 @@ impl DaemonContext {
     /// and the namespace-wire handshake.
     pub(crate) fn instance_id(&self) -> &str {
         &self.instance_id
+    }
+
+    /// The `--attach-tcp` port request, if the flag was passed. `Some(0)` asks
+    /// for an ephemeral port.
+    pub(crate) fn attach_tcp_port(&self) -> Option<u16> {
+        self.attach_tcp
     }
 
     /// Bind every requested attach socket under `frontends/`, returning the bound
