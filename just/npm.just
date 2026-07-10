@@ -19,9 +19,7 @@ sync version='':
       packages+=("$(jq -er '.name' "$package_json")")
     done < <(find npm/platform -mindepth 2 -maxdepth 2 -name package.json | sort)
 
-    while IFS= read -r package; do
-      npm pkg delete "optionalDependencies[${package}]" --prefix npm --workspace @0xff-ai/omnifs
-    done < <(jq -r '(.optionalDependencies // {}) | keys[]' npm/omnifs/package.json)
+    npm pkg delete optionalDependencies --prefix npm --workspace @0xff-ai/omnifs
 
     optional_dependencies=()
     for package in "${packages[@]}"; do
