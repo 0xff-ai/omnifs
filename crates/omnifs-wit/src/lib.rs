@@ -36,9 +36,6 @@ pub mod provider {
         additional_derives: [Clone, serde::Serialize, serde::Deserialize],
     });
 
-    #[cfg(not(feature = "host-bindings"))]
-    pub use omnifs::provider::types;
-
     #[cfg(feature = "host-bindings")]
     wasmtime::component::bindgen!({
         path: "wit",
@@ -46,7 +43,6 @@ pub mod provider {
         additional_derives: [Clone, serde::Serialize, serde::Deserialize],
     });
 
-    #[cfg(feature = "host-bindings")]
     pub use omnifs::provider::types;
 
     #[cfg(feature = "host-bindings")]
