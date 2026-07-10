@@ -5,8 +5,6 @@ source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
 target_dir="${CARGO_TARGET_DIR:-$root/target/zigbuild-darwin}"
 cargo_home="${CARGO_HOME:-$HOME/.cargo}"
-package="${OMNIFS_PACKAGE:-omnifs-cli}"
-bin="${OMNIFS_BIN:-omnifs}"
 
 # rust-toolchain.toml pins the exact Rust release, so cargo auto-installs that
 # toolchain plus apple-darwin std libs into RUSTUP_HOME on first run. Persist
@@ -31,8 +29,6 @@ docker run --rm \
   -e RUSTUP_HOME=/cargo-rustup \
   -e HOST_UID="$(id -u)" \
   -e HOST_GID="$(id -g)" \
-  -e OMNIFS_PACKAGE="$package" \
-  -e OMNIFS_BIN="$bin" \
   -e OMNIFS_RELEASE \
   "$image" \
   bash -lc '
@@ -49,18 +45,18 @@ docker run --rm \
     ulimit -n 4096 2>/dev/null || true
 
     cargo zigbuild --release \
-      -p "$OMNIFS_PACKAGE" \
+      -p omnifs-cli \
       --target x86_64-apple-darwin \
       --target aarch64-apple-darwin \
-      --bin "$OMNIFS_BIN"
+      --bin omnifs
   '
 
 if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
   {
-    echo "x64_artifact=$target_dir/x86_64-apple-darwin/release/$bin"
-    echo "arm64_artifact=$target_dir/aarch64-apple-darwin/release/$bin"
+    echo "x64_artifact=$target_dir/x86_64-apple-darwin/release/omnifs"
+    echo "arm64_artifact=$target_dir/aarch64-apple-darwin/release/omnifs"
   } >>"$GITHUB_OUTPUT"
 fi
 
-file "$target_dir/x86_64-apple-darwin/release/$bin"
-file "$target_dir/aarch64-apple-darwin/release/$bin"
+file "$target_dir/x86_64-apple-darwin/release/omnifs"
+file "$target_dir/aarch64-apple-darwin/release/omnifs"

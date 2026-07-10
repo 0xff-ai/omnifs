@@ -6,7 +6,6 @@ source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 target="${1:-x86_64-unknown-linux-gnu.2.17}"
 package="${OMNIFS_PACKAGE:-omnifs-cli}"
 bin="${OMNIFS_BIN:-omnifs}"
-build_daemon="${OMNIFS_BUILD_DAEMON:-0}"
 target_root="${CARGO_TARGET_DIR:-$root/target}"
 case "$target_root" in
   /*) ;;
@@ -37,11 +36,6 @@ rustup target add "$base_target"
 
 cd "$root"
 
-# The repo currently configures Linux GNU targets with `-fuse-ld=mold`.
-# cargo-zigbuild replaces the linker with Zig, so carrying the mold flag into
-# this build is both unnecessary and can exceed the low macOS fd limit.
-target_env="$(printf '%s\n' "$base_target" | tr '[:lower:].-' '[:upper:]__')"
-export "CARGO_TARGET_${target_env}_RUSTFLAGS=${CARGO_ZIGBUILD_RUSTFLAGS:-}"
 ulimit -n 4096 2>/dev/null || true
 
 find_artifact() {
@@ -122,21 +116,9 @@ inspect_linux_artifacts() {
   rm -rf "$inspect_dir"
 }
 
-if [[ "$build_daemon" == "1" ]]; then
-  # The single `omnifs` binary contains the daemon (`omnifs daemon`); there is
-  # no separate `omnifsd` artifact.
-  cargo zigbuild --release --target "$target" \
-    -p omnifs-cli --bin omnifs
+cargo zigbuild --release -p "$package" --target "$target" --bin "$bin"
 
-  artifact="$(find_artifact omnifs)"
-  emit_output artifact "$artifact"
-  file "$artifact"
-  inspect_linux_artifacts "$artifact"
-else
-  cargo zigbuild --release -p "$package" --target "$target" --bin "$bin"
-
-  artifact="$(find_artifact "$bin")"
-  emit_output artifact "$artifact"
-  file "$artifact"
-  inspect_linux_artifacts "$artifact"
-fi
+artifact="$(find_artifact "$bin")"
+emit_output artifact "$artifact"
+file "$artifact"
+inspect_linux_artifacts "$artifact"
