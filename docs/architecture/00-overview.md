@@ -79,7 +79,7 @@ Neither frontend owns projection semantics, provider WIT calls, cache schema, ro
 
 There is one `omnifs` binary. The runtime loop lives behind hidden `omnifs daemon`. The CLI owns setup, credentials, lifecycle commands, and user-facing UX. The daemon owns runtime serving and exposes a REST API whose DTOs live in `omnifs-api`.
 
-Mount delivery is disk reconcile today. The CLI writes specs under `mounts/`; the daemon loads them from disk on startup and converges the running set through `/v1/reconcile`. New non-secret interactions should prefer REST API extensions over new direct workspace coupling.
+Mount delivery uses the control API while a compatible daemon is running and the on-disk registry while it is not. Online create, update, and delete requests go through the daemon; offline changes write specs under `mounts/`, and startup or `/v1/reconcile` converges them. New non-secret interactions should prefer REST API extensions over new direct workspace coupling.
 
 The daemon has one runtime mode: host-native. Docker delivers only the optional FUSE frontend, attached to the host-native daemon; it is not a daemon runtime mode. Contributor dev sessions run through `scripts/dev.ts`, which writes a dedicated `~/.omnifs-dev` home and starts the daemon on the host directly.
 
