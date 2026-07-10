@@ -547,7 +547,7 @@ pub fn record_clone_end(operation_id: u64, cache_key: &str, elapsed: Duration, o
 /// observability classification (`kind`) and redacted `summary`. A
 /// newtype is used because orphan rules block adding inherent methods
 /// to the bindgen-generated enum.
-struct WitCalloutView<'a>(&'a wit_types::Callout);
+pub(crate) struct WitCalloutView<'a>(pub(crate) &'a wit_types::Callout);
 
 impl WitCalloutView<'_> {
     fn kind(&self) -> CalloutKind {
@@ -557,6 +557,17 @@ impl WitCalloutView<'_> {
             wit_types::Callout::GitOpenRepo(_) => CalloutKind::GitOpenRepo,
             wit_types::Callout::OpenArchive(_) => CalloutKind::OpenArchive,
             wit_types::Callout::ReadBlob(_) => CalloutKind::ReadBlob,
+        }
+    }
+
+    /// Stable dotted label used by the outer tracing span.
+    pub(crate) fn span_kind(&self) -> &'static str {
+        match self.kind() {
+            CalloutKind::Fetch => "http.fetch",
+            CalloutKind::FetchBlob => "blob.fetch",
+            CalloutKind::GitOpenRepo => "git.open_repo",
+            CalloutKind::OpenArchive => "archive.open",
+            CalloutKind::ReadBlob => "blob.read",
         }
     }
 

@@ -7,7 +7,8 @@ use crate::Runtime;
 use crate::cache::{
     CachedCanonical, Caches, Record, RecordKind, SCHEMA_VERSION, Store, object, view as cache_view,
 };
-use crate::callouts::{CalloutKind, TestCallout, TestSignal, record_outcome as inner_record};
+use crate::callouts::{TestCallout, TestSignal, record_outcome as inner_record};
+use crate::inspector::WitCalloutView;
 use crate::log_redaction::{LogUrl as InternalLogUrl, WitHeaders as InternalWitHeaders};
 use omnifs_wit::provider::types as wit_types;
 
@@ -421,10 +422,9 @@ impl fmt::Debug for TestOp<'_> {
     }
 }
 
-/// Stable kind labels used by the outer dispatch span. Kept in lockstep
-/// with the internal `CalloutKind` strum labels.
+/// Stable kind labels used by the outer dispatch span.
 pub fn kind_label(callout: &wit_types::Callout) -> &'static str {
-    CalloutKind::of(callout).into()
+    WitCalloutView(callout).span_kind()
 }
 
 /// Public re-display wrapper for redacting URLs in log output.

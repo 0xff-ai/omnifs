@@ -46,14 +46,14 @@
 //! # Adding a callout
 //!
 //! 1. Add the WIT `callout` variant and `callout-result` arm.
-//! 2. Add a new `CalloutKind` variant + strum label in this file.
-//! 3. Extend `CalloutKind::of` exhaustively (no wildcard arm).
-//! 4. Add the executor public method with
+//! 2. Extend `WitCalloutView` in `inspect.rs` with the callout's inspector kind,
+//!    tracing label, and redacted summary.
+//! 3. Add the executor public method with
 //!    `#[tracing::instrument(target = "omnifs_callout", skip_all,
 //!    fields(...))]` listing all fields (use `field::Empty` for
 //!    late-bound ones) and calling `record_outcome(&result)` before
 //!    return.
-//! 5. Add a `CalloutHost::run` arm dispatching to it.
+//! 4. Add a `CalloutHost::run` arm dispatching to it.
 
 pub(crate) mod archive;
 pub(crate) mod blob;
@@ -66,39 +66,13 @@ use crate::archive::ArchiveExecutor;
 use crate::blob::BlobExecutor;
 use crate::git::GitExecutor;
 use crate::http::HttpStack;
-use crate::inspector::InspectorCallout;
+use crate::inspector::{InspectorCallout, WitCalloutView};
 use crate::log_redaction::WitHeaders;
 use omnifs_wit::provider::types as wit_types;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use tracing::Instrument;
-
-#[derive(Debug, Clone, Copy, strum::IntoStaticStr)]
-pub(crate) enum CalloutKind {
-    #[strum(serialize = "http.fetch")]
-    HttpFetch,
-    #[strum(serialize = "git.open_repo")]
-    GitOpenRepo,
-    #[strum(serialize = "blob.fetch")]
-    BlobFetch,
-    #[strum(serialize = "archive.open")]
-    OpenArchive,
-    #[strum(serialize = "blob.read")]
-    ReadBlob,
-}
-
-impl CalloutKind {
-    pub(crate) fn of(callout: &wit_types::Callout) -> Self {
-        match callout {
-            wit_types::Callout::Fetch(_) => Self::HttpFetch,
-            wit_types::Callout::GitOpenRepo(_) => Self::GitOpenRepo,
-            wit_types::Callout::FetchBlob(_) => Self::BlobFetch,
-            wit_types::Callout::OpenArchive(_) => Self::OpenArchive,
-            wit_types::Callout::ReadBlob(_) => Self::ReadBlob,
-        }
-    }
-}
 
 pub(crate) fn callout_error(
     kind: wit_types::ErrorKind,
@@ -287,7 +261,7 @@ impl CalloutHost {
     ) -> wit_types::CalloutResult {
         let index = self.next_callout_index.fetch_add(1, Ordering::Relaxed);
         let live = InspectorCallout::begin(&callout, op_id, index);
-        let kind: &'static str = CalloutKind::of(&callout).into();
+        let kind = WitCalloutView(&callout).span_kind();
         let result = self
             .run(&callout, op_id)
             .instrument(tracing::info_span!(
