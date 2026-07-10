@@ -1,4 +1,4 @@
-use omnifs_engine::{MountRuntimes, Namespace, TreeNamespace};
+use omnifs_engine::{Namespace, TreeNamespace};
 use omnifs_nfs::{Export, ReadOnlyExport};
 use omnifs_workspace::ids::{ProviderId, ProviderMeta, ProviderName, ProviderRef};
 use omnifs_workspace::provider::ProviderStore;
@@ -143,18 +143,11 @@ fn smoke_linear(export: &Export, linear_enabled: bool) {
 struct RealProviders {
     export: Arc<Export>,
     linear_enabled: bool,
-    #[allow(dead_code)]
-    runtime: Runtime,
-    #[allow(dead_code)]
-    registry: Arc<MountRuntimes>,
-    #[allow(dead_code)]
-    config_dir: TempDir,
-    #[allow(dead_code)]
-    cache_dir: TempDir,
-    #[allow(dead_code)]
-    clone_dir: TempDir,
-    #[allow(dead_code)]
-    db_dir: TempDir,
+    _runtime: Runtime,
+    _config_dir: TempDir,
+    _cache_dir: TempDir,
+    _clone_dir: TempDir,
+    _db_dir: TempDir,
 }
 
 impl RealProviders {
@@ -195,12 +188,11 @@ impl RealProviders {
         Self {
             export,
             linear_enabled,
-            runtime,
-            registry,
-            config_dir,
-            cache_dir,
-            clone_dir,
-            db_dir,
+            _runtime: runtime,
+            _config_dir: config_dir,
+            _cache_dir: cache_dir,
+            _clone_dir: clone_dir,
+            _db_dir: db_dir,
         }
     }
 }
