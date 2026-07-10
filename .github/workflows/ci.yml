@@ -16,6 +16,7 @@ permissions:
 env:
   REGISTRY: ghcr.io
   FRONTEND_IMAGE_NAME: ${{ github.repository }}-frontend
+  GUEST_IMAGE_NAME: ${{ github.repository }}-guest
   CI_MAIN_PUSH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
 jobs:
@@ -33,6 +34,7 @@ jobs:
     runs-on: &linux_runner ${{ vars.CI_RUNNER_FAMILY == 'blacksmith' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     outputs:
       code: ${{ steps.decide.outputs.code }}
+      guest_image: ${{ steps.decide.outputs.guest_image }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -54,10 +56,16 @@ jobs:
             code:
               - '**'
               - '!CHANGELOG.md'
+            guest_image:
+              - 'scripts/guest-image/**'
+              - 'crates/omnifs-fuse/**'
+              - 'crates/omnifs-namespace-wire/**'
+              - '.github/workflows/ci.yml'
       - id: decide
         env:
           FILTER_OUTCOME: ${{ steps.filter.outcome }}
           CODE_CHANGED: ${{ steps.filter.outputs.code }}
+          GUEST_IMAGE_CHANGED: ${{ steps.filter.outputs.guest_image }}
         run: |
           set -euo pipefail
           # Skip the matrix only when the filter ran and saw nothing but
@@ -69,6 +77,18 @@ jobs:
           fi
           echo "code=$code" >> "$GITHUB_OUTPUT"
           echo "filter_outcome=$FILTER_OUTCOME code_changed=${CODE_CHANGED:-<none>} -> code=$code"
+
+          # guest-image-arm64 is heavier than the rest of the matrix (a full
+          # mkosi build), so it gets its own narrower path gate rather than
+          # riding the blanket `code` filter: skip only when the filter ran
+          # and saw no guest-image-relevant change in the latest push.
+          if [ "$FILTER_OUTCOME" = "success" ] && [ "$GUEST_IMAGE_CHANGED" = "false" ]; then
+            guest_image=false
+          else
+            guest_image=true
+          fi
+          echo "guest_image=$guest_image" >> "$GITHUB_OUTPUT"
+          echo "filter_outcome=$FILTER_OUTCOME guest_image_changed=${GUEST_IMAGE_CHANGED:-<none>} -> guest_image=$guest_image"
 
   preflight:
     name: preflight
@@ -622,6 +642,85 @@ jobs:
           path: ${{ steps.build.outputs.artifact }}
           retention-days: 90
           if-no-files-found: error
+
+  # Builds the krunkit guest disk image (scripts/guest-image/), asserts its
+  # static shape, and publishes it as a ghcr OCI artifact sha-keyed on this
+  # commit; `release`'s `promote` job retags it to the version on ship. The
+  # krunkit BOOT smoke and conformance lanes stay local-only (GH runners
+  # cannot nest virtualization; see docs/contracts/60-build-validation.md),
+  # so this job only proves the image's static shape, never a live boot.
+  guest-image-arm64:
+    name: guest image arm64
+    needs: [changes, fuse-linux-arm64]
+    if: >-
+      github.event_name == 'push' ||
+      (github.event_name == 'pull_request' && needs.changes.outputs.guest_image == 'true')
+    runs-on: *arm_runner
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: ./.github/actions/omnifs-docker
+
+      - name: Download Linux arm64 omnifs-fuse binary
+        uses: actions/download-artifact@v8
+        with:
+          name: omnifs-fuse-linux-arm64
+          path: dist-fuse
+
+      - name: Mark omnifs-fuse binary executable
+        run: chmod 0755 dist-fuse/omnifs-fuse
+
+      # Hosted arm64 runners can run privileged containers with loop
+      # devices, but the loop module is not always pre-loaded; make sure
+      # /dev/loop-control exists before mkosi (inside its container) and
+      # check-guest-image.sh (also containerized) both need it.
+      - name: Ensure loop device support
+        run: |
+          set -euo pipefail
+          sudo modprobe loop || true
+          test -e /dev/loop-control
+
+      - name: Build the release-profile guest image
+        env:
+          OMNIFS_FUSE_BIN: ${{ github.workspace }}/dist-fuse/omnifs-fuse
+          OUT_DIR: ${{ github.workspace }}/target/guest-image
+        run: scripts/guest-image/build.sh --profile release
+
+      - name: Assert the release-profile static guarantees
+        run: scripts/ci/check-guest-image.sh target/guest-image/omnifs-guest.raw release
+
+      - name: Compress the guest image
+        run: zstd -19 -T0 -f target/guest-image/omnifs-guest.raw -o target/guest-image/omnifs-guest.raw.zst
+
+      - uses: oras-project/setup-oras@v1
+        with:
+          version: 1.3.3
+
+      # A PR from a fork gets a read-only GITHUB_TOKEN regardless of the
+      # `packages: write` requested above (a hard GitHub security boundary),
+      # so it cannot push; build and assert still ran above, and this step
+      # says so loudly instead of failing on a 403.
+      - name: Push the guest image to ghcr
+        if: >-
+          github.event_name != 'pull_request' ||
+          github.event.pull_request.head.repo.fork == false
+        env:
+          TAG: sha-${{ github.sha }}
+        run: |
+          set -euo pipefail
+          oras push "${REGISTRY}/${GUEST_IMAGE_NAME}:${TAG}" \
+            --artifact-type application/vnd.omnifs.guest-image.v1+zstd \
+            target/guest-image/omnifs-guest.raw.zst:application/vnd.omnifs.guest-image.v1+zstd
+
+      - name: Skip ghcr push (fork PR has no registry write access)
+        if: >-
+          github.event_name == 'pull_request' &&
+          github.event.pull_request.head.repo.fork == true
+        run: |
+          echo "::warning::skipping ghcr push for the guest image: this PR is from a fork and has no registry write access"
 
   # Builds the omnifs-frontend image (the Docker-hosted FUSE frontend, `omnifs
   # frontend up`): the Dockerfile's `frontend-release` target. See
