@@ -8,6 +8,14 @@
 //! re-listing reflects the grown feed until the controls disappear at exhaustion.
 //! `@all` reaches the same complete set in one read.
 //!
+//! `stale_snapshot_controls_resolve_after_exhaustion` covers the converse: a
+//! `@next`/`@all` name a consumer already captured from an earlier (non-exhausted)
+//! listing keeps resolving and reading (as a no-op) even after a FRESH listing
+//! has stopped naming it. Presence in an already-served listing must never
+//! regress to ENOENT, mirroring the existing rule that absence from a
+//! non-exhaustive listing is never ENOENT either
+//! (`docs/architecture/20-route-dispatch-and-listing.md`).
+//!
 //! The test-provider's `/hello/feed` route yields two `item-*` entries per page
 //! across three pages (pages 0 and 1 carry a resume cursor, page 2 is terminal),
 //! so the exhaustive set is `item-0 .. item-5`.
@@ -195,4 +203,59 @@ async fn reading_all_materializes_the_complete_set() {
         !has_entry(&complete, "@all"),
         "a fully expanded feed has no @all"
     );
+}
+
+/// A consumer that captured `@next`/`@all` from an earlier (non-exhausted)
+/// listing snapshot, then drives the feed to exhaustion through a DIFFERENT
+/// path (here `@all`), must still be able to resolve, open, and read both
+/// names afterward: presence in an already-served listing must never regress
+/// to ENOENT. A fresh re-listing, meanwhile, keeps hiding both controls
+/// (unchanged from `reading_next_drains_feed_and_drops_controls` and
+/// `reading_all_materializes_the_complete_set` above). This is the exact shape
+/// of the real-world regression: a recursive `grep -r` walk captures a paged
+/// directory's readdir snapshot once, opens `@next` (which advances the feed),
+/// then opens `@all` from that SAME stale snapshot, which must not ENOENT.
+#[tokio::test(flavor = "multi_thread")]
+async fn stale_snapshot_controls_resolve_after_exhaustion() {
+    let t = paged_tree();
+    let feed = t.resolve("/hello/feed").await;
+
+    // Capture the page-0 listing snapshot: it names both controls.
+    let stale = t.list(&feed).await;
+    assert!(has_entry(&stale, "@next"), "the stale snapshot names @next");
+    assert!(has_entry(&stale, "@all"), "the stale snapshot names @all");
+
+    // Drive the feed to exhaustion through @all, independent of the captured
+    // stale snapshot above (mirrors a consumer resolving @all once the walk
+    // that captured `stale` reaches it).
+    let all = t.resolve("/hello/feed/@all").await;
+    let _ = t.read(&all).await;
+
+    // A FRESH listing stops naming either control once the feed exhausts.
+    let fresh = t.list(&feed).await;
+    assert!(
+        !has_entry(&fresh, "@next"),
+        "a fresh listing hides @next once exhausted"
+    );
+    assert!(
+        !has_entry(&fresh, "@all"),
+        "a fresh listing hides @all once exhausted"
+    );
+
+    // The STALE snapshot's names still resolve, open, and read as a no-op:
+    // the feed has nothing left to load, so each reports the same "no more
+    // pages" status any other exhausted directory's control would report.
+    for name in ["@next", "@all"] {
+        let node = t.resolve(&format!("/hello/feed/{name}")).await;
+        assert!(
+            node.is_synthetic(),
+            "{name} resolves to a synthetic control after exhaustion"
+        );
+        let status = t.read(&node).await;
+        let status = String::from_utf8(status).expect("control status is utf8");
+        assert_eq!(
+            status, "no more pages\n",
+            "{name} read after exhaustion is a no-op, not an error"
+        );
+    }
 }

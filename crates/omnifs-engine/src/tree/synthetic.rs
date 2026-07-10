@@ -180,13 +180,16 @@ impl Synthetic {
 /// - a mount-root ignore file ONLY at the mount root, and ONLY when the provider
 ///   does not project a real one (`provider_has_real` is the caller's signal that
 ///   a provider lookup already resolved the name positively);
-/// - a pagination control ONLY when `parent`'s cached dirents still carry it (a
-///   resume cursor remains), looked up from the host view cache.
+/// - a pagination control whenever `parent`'s cached dirents have EVER carried
+///   it, looked up from the host view cache.
 ///
-/// The control branch reads the parent's cached dirents directly so a control is
-/// never resurrected after the feed exhausts (the FUSE `cached_control_dirent`
-/// semantics: a control name absent from the cached dirents is ENOENT, never a
-/// stale dedup-table hit).
+/// The control branch reads the parent's cached dirents directly. `pagination.rs`
+/// never strips a `@next`/`@all` record back out once accumulated, even after
+/// the cursor clears, so the control keeps resolving for the directory's whole
+/// cached lifetime: a name a consumer captured from an earlier (non-exhausted)
+/// listing snapshot never regresses to ENOENT. Only a directory that never
+/// paged (no cached dirents, or cached dirents that never carried a control)
+/// surfaces `None` here.
 pub(crate) fn resolve_synthetic_child(
     runtime: &Runtime,
     parent: &Path,
@@ -195,10 +198,10 @@ pub(crate) fn resolve_synthetic_child(
 ) -> Option<(EntryMeta, Synthetic)> {
     if is_control_name(name) {
         let action = PaginationControl::from_name(name)?;
-        // A control resolves only while the parent's accumulated dirents still
-        // carry it (a resume cursor remains). Probe the view cache for the
-        // control dirent; absent => the feed is exhausted and the control is
-        // gone, so the caller surfaces NotFound.
+        // Probe the view cache for the control dirent; absent => this
+        // directory never paged (or its cached dirents were evicted), so the
+        // caller surfaces NotFound. Present => resolves regardless of whether
+        // a resume cursor remains (the record outlives exhaustion).
         let dirent = cached_control_dirent(runtime, parent, name)?;
         return Some((dirent.meta, Synthetic::pagination_control(action)));
     }
@@ -211,8 +214,10 @@ pub(crate) fn resolve_synthetic_child(
 }
 
 /// Find a `@next`/`@all` dirent in the parent directory's cached dirents record
-/// (mem then unified cache). `None` when the parent is not paged or the control
-/// is absent (feed exhausted). Mirrors the FUSE `cached_control_dirent`.
+/// (mem then unified cache). `None` when the parent has never paged (its cached
+/// dirents, if any, never carried a control record); a directory that has ever
+/// paged keeps the record regardless of cursor state, so this does NOT go
+/// `None` merely because the feed exhausted.
 fn cached_control_dirent(
     runtime: &Runtime,
     parent: &Path,

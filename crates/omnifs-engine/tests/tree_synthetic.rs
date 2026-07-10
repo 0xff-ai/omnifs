@@ -205,11 +205,11 @@ async fn list_paginates_with_cursor() {
     );
 }
 
-/// A pagination control resolves to a synthetic node ONLY while the parent's
-/// cached dirents still carry it, and reading it runs the accumulating
-/// pagination: `@next` advances exactly one page, growing the parent's cached
-/// dirents, and the control read returns a one-line status with a learned exact
-/// size so `cat` reads the whole message.
+/// A pagination control resolves to a synthetic node whenever the parent's
+/// cached dirents carry it, and reading it runs the accumulating pagination:
+/// `@next` advances exactly one page, growing the parent's cached dirents, and
+/// the control read returns a one-line status with a learned exact size so
+/// `cat` reads the whole message.
 #[tokio::test(flavor = "multi_thread")]
 async fn read_next_control_advances_one_page() {
     let t = test_tree();
@@ -256,11 +256,15 @@ async fn read_next_control_advances_one_page() {
     }
 }
 
-/// `@all` advances the feed to exhaustion, after which the control is gone:
-/// the cached dirents no longer carry it and a fresh resolve of `@next` / `@all`
-/// is NotFound (never a stale dedup hit).
+/// `@all` advances the feed to exhaustion. The cursor clears, and a FRESH
+/// listing stops naming either control, but the control names themselves keep
+/// resolving and reading (as a no-op): presence in an already-served listing
+/// must never regress to ENOENT. This is the converse of the documented
+/// listing-authority rule (absence from a non-exhaustive listing is never
+/// ENOENT either), covered at the itest/Tree level in
+/// `omnifs-itest`'s `pagination_exhaustive::stale_snapshot_controls_resolve_after_exhaustion`.
 #[tokio::test(flavor = "multi_thread")]
-async fn read_all_control_exhausts_then_control_is_gone() {
+async fn read_all_control_exhausts_then_control_still_resolves() {
     let t = test_tree();
     let ctx = RequestCtx::default();
     let feed = t.tree.resolve(&path("/hello/feed"), &ctx).await.unwrap();
@@ -280,19 +284,37 @@ async fn read_all_control_exhausts_then_control_is_gone() {
         "@all drains to completion"
     );
 
-    // The feed is exhausted: the cached dirents have no cursor and no controls.
+    // The feed is exhausted (no cursor), but the accumulated dirents keep the
+    // control records so a name already resolved keeps resolving.
     let dirents = cached_dirents(&t.runtime, "/hello/feed").expect("feed dirents present");
     assert!(dirents.next_cursor.is_none());
-    assert!(!dirents.entries.iter().any(|e| e.name == "@next"));
-    assert!(!dirents.entries.iter().any(|e| e.name == "@all"));
+    assert!(dirents.entries.iter().any(|e| e.name == "@next"));
+    assert!(dirents.entries.iter().any(|e| e.name == "@all"));
 
-    // The control is no longer a resolvable file.
-    let err = t
+    // A FRESH listing stops naming either control.
+    let fresh = listing(&t, &feed, None, &ctx).await;
+    assert!(
+        synthetic_entries(&fresh).is_empty(),
+        "a fresh listing hides the controls once exhausted, got {:?}",
+        synthetic_names(&fresh)
+    );
+
+    // The control name still resolves and reads as a no-op, not NotFound.
+    let next = t
         .tree
         .resolve(&path("/hello/feed/@next"), &ctx)
         .await
-        .expect_err("an exhausted control must not resolve");
-    assert_eq!(err.kind, TreeErrorKind::NotFound);
+        .expect("an exhausted control still resolves");
+    assert!(next.is_synthetic());
+    let result = t.tree.read(&next, &ctx).await.expect("read @next");
+    let ReadResult::Bytes { data, .. } = result else {
+        panic!("a control read returns bytes");
+    };
+    assert_eq!(
+        String::from_utf8(data).unwrap(),
+        "no more pages\n",
+        "reading an exhausted control is a no-op, not an error"
+    );
 }
 
 // --- Root ignore files -------------------------------------------------------

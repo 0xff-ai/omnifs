@@ -222,8 +222,9 @@ impl Tree {
 
 /// Build a `Listing` from a fresh provider listing, owning the cache-populate
 /// half: drop reserved-`@` provider entries, write the dirents record (controls
-/// included when paged so they survive a later cached serve), and surface the
-/// synthetic control / ignore entries.
+/// included when paged, and never stripped back out even after the feed later
+/// exhausts, so they survive a later cached serve and control-name resolution),
+/// and surface the synthetic control / ignore entries.
 fn snapshot_from_provider_listing(
     node: &Node,
     runtime: &Runtime,
@@ -311,27 +312,24 @@ fn provider_entries(entries: &[ProviderEntry]) -> Vec<Entry> {
 
 /// Build a `Listing` from an accumulated/cached dirents record (the
 /// serve-cached, `Unchanged`, and rate-limit-stale paths). The cached record
-/// already carries the `@next`/`@all` control records when paged, so they are
-/// split back out as synthetic entries and never double-listed in `entries`.
+/// keeps the `@next`/`@all` control records for the directory's whole
+/// paginated lifetime (`pagination.rs` never strips them, even at
+/// exhaustion, so a name a consumer resolved from an earlier listing keeps
+/// resolving); they are dropped from `entries` here and re-surfaced as
+/// synthetic entries ONLY while `next_cursor` is still `Some`, so a FRESH
+/// listing stops naming them the moment the feed exhausts even though the
+/// persisted records outlive that moment.
 fn listing_from_dirents(node: &Node, dirents: &DirentsPayload) -> Listing {
     let mut entries = Vec::with_capacity(dirents.entries.len());
-    let mut has_control = false;
     for record in &dirents.entries {
         if synthetic::is_reserved_provider_leaf(&record.name) {
-            // A persisted control record; surfaced as a synthetic entry below.
-            if PaginationControl::from_name(&record.name).is_some() {
-                has_control = true;
-            }
             continue;
         }
         entries.push(Entry::provider(record.name.clone(), record.meta.clone()));
     }
 
     let mut synthetic_entries = Vec::new();
-    // Controls come from the live host source-of-truth, gated on the cached
-    // record still carrying a control (a resume cursor remains, or the persisted
-    // control records are present for an in-progress accumulation).
-    if has_control || dirents.next_cursor.is_some() {
+    if dirents.next_cursor.is_some() {
         synthetic_entries.extend(PaginationControl::entries());
     }
     if node.path().is_root() {

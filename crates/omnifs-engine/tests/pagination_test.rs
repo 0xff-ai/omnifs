@@ -53,7 +53,12 @@ fn cached_item_names(harness: &RuntimeHarness, path: &str) -> Vec<String> {
 }
 
 /// True when the accumulated dirents carry the synthetic `@next`/`@all`
-/// controls (the host appends them only while a resume cursor remains).
+/// controls. The host appends them on the first page a directory pages and
+/// never strips them back out, even once the resume cursor clears, so a name
+/// already resolved from an earlier listing snapshot keeps resolving after
+/// exhaustion; a FRESH listing separately stops naming them once the cursor
+/// clears (`tree::list::listing_from_dirents`), which this raw-cache helper
+/// does not observe.
 fn has_control_entries(harness: &RuntimeHarness, path: &str) -> bool {
     let names = cached_dirent_names(harness, path);
     names.iter().any(|n| n == "@next") && names.iter().any(|n| n == "@all")
@@ -183,7 +188,10 @@ async fn paginate_next_accumulates_and_advances() {
     );
 
     // @next loads the terminal page 2; the cursor is cleared (feed complete)
-    // and the controls drop out of the accumulated dirents.
+    // but the controls persist in the accumulated dirents so a name already
+    // resolved from an earlier listing snapshot keeps resolving. A fresh
+    // listing separately stops naming them once the cursor clears (exercised
+    // at the Tree level in `omnifs-itest`'s `pagination_exhaustive`).
     match harness.runtime.paginate_next(&p("/hello/feed"), None).await {
         NextPageOutcome::Loaded { added, more } => {
             assert_eq!(added, 2);
@@ -196,13 +204,13 @@ async fn paginate_next_accumulates_and_advances() {
         vec!["item-0", "item-1", "item-2", "item-3", "item-4", "item-5"]
     );
     assert!(
-        !has_control_entries(&harness, "/hello/feed"),
-        "controls drop out once the feed is exhausted"
+        has_control_entries(&harness, "/hello/feed"),
+        "controls persist past exhaustion so a stale-snapshot @next/@all keeps resolving"
     );
     assert_eq!(
         cached_cursor(&harness, "/hello/feed"),
         None,
-        "/the feed is exhausted: no cursor, so FUSE drops @next/@all"
+        "the feed is exhausted: no cursor, so a fresh listing hides @next/@all"
     );
 
     // A further @next on the exhausted feed reports no more pages.
@@ -237,8 +245,8 @@ async fn paginate_all_expands_to_completion() {
         vec!["item-0", "item-1", "item-2", "item-3", "item-4", "item-5"]
     );
     assert!(
-        !has_control_entries(&harness, "/hello/feed"),
-        "a fully-expanded feed has no controls"
+        has_control_entries(&harness, "/hello/feed"),
+        "a fully-expanded feed keeps its controls so a stale-snapshot @next/@all keeps resolving"
     );
     assert_eq!(cached_cursor(&harness, "/hello/feed"), None);
 
