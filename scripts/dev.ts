@@ -302,17 +302,17 @@ async function checkPrerequisites(options: DevOptions): Promise<void> {
   }
 
   for (const command of commands) {
-    if (!(await commandExists(command))) {
+    if (!commandExists(command)) {
       throw new Error(`missing prerequisite: ${command}`);
     }
   }
-  if (!(await commandSucceeds($`docker info`.quiet().nothrow()))) {
+  if ((await $`docker info`.quiet().nothrow()).exitCode !== 0) {
     throw new Error("Docker daemon did not respond; start Docker and rerun");
   }
 }
 
-async function commandExists(command: string): Promise<boolean> {
-  return commandSucceeds($`${command} --version`.quiet().nothrow());
+function commandExists(command: string): boolean {
+  return Bun.which(command) !== null;
 }
 
 /// Resolve the `omnifs` binary this script drives: a fresh local build first,
@@ -462,7 +462,7 @@ async function resolveToken(
     return fromEnv;
   }
 
-  if (providerName !== "github" || !(await commandExists("gh"))) {
+  if (providerName !== "github" || !commandExists("gh")) {
     return null;
   }
 
@@ -754,11 +754,6 @@ async function run(command: ShellCommand): Promise<void> {
 
 async function awaitText(command: ShellCommand): Promise<string> {
   return command.quiet().text();
-}
-
-async function commandSucceeds(command: ShellCommand): Promise<boolean> {
-  const output = await command;
-  return output.exitCode === 0;
 }
 
 async function runInteractive(args: string[]): Promise<void> {
