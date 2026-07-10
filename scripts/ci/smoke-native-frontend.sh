@@ -28,6 +28,17 @@ cleanup() {
     omnifs status --detail >&2 || true
     echo "== daemon.log (tail) ==" >&2
     tail -n 200 "$OMNIFS_HOME/cache/daemon.log" >&2 || true
+    # ci-debug: frontend container logs + in-container attach probe.
+    local dbg_frontend
+    dbg_frontend="$(docker ps -a --filter "label=ai.0xff.omnifs.home=$OMNIFS_HOME" --format '{{.Names}}' 2>/dev/null || true)"
+    if [[ -n "$dbg_frontend" ]]; then
+      echo "== docker logs $dbg_frontend ==" >&2
+      docker logs "$dbg_frontend" >&2 || true
+      echo "== attach probe ==" >&2
+      docker exec "$dbg_frontend" sh -c 'echo "attach=$OMNIFS_ATTACH_ADDR"; curl -sv --max-time 3 "telnet://$OMNIFS_ATTACH_ADDR" </dev/null 2>&1 | head -20' >&2 || true
+      echo "== container inspect (env/entrypoint/state) ==" >&2
+      docker inspect "$dbg_frontend" --format '{{json .State}} {{json .Config.Env}} {{json .Config.Entrypoint}}' >&2 || true
+    fi
   fi
   local frontend
   frontend="$(docker ps --filter "label=ai.0xff.omnifs.home=$OMNIFS_HOME" --format '{{.Names}}' 2>/dev/null || true)"

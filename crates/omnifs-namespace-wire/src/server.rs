@@ -140,15 +140,20 @@ pub async fn serve_listener_tcp(
 ) {
     loop {
         match listener.accept().await {
-            Ok((stream, _addr)) => {
+            Ok((stream, addr)) => {
+                // ci-debug: accept visibility for the attach diagnosis.
+                tracing::info!(peer = %addr, "wire: tcp attach connection accepted");
                 let namespace = Arc::clone(&namespace);
                 let instance_id = instance_id.clone();
                 let token = token.clone();
                 tokio::spawn(async move {
-                    if let Err(error) =
-                        serve_connection(namespace, stream, instance_id, Some(&token)).await
-                    {
-                        tracing::debug!(%error, "wire: tcp connection ended with a protocol error");
+                    match serve_connection(namespace, stream, instance_id, Some(&token)).await {
+                        Ok(()) => {
+                            tracing::info!(peer = %addr, "wire: tcp connection closed cleanly");
+                        },
+                        Err(error) => {
+                            tracing::warn!(peer = %addr, %error, "wire: tcp connection ended with a protocol error");
+                        },
                     }
                 });
             },
