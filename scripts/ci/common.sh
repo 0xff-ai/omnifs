@@ -8,8 +8,8 @@
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 # Build the top-level Dockerfile's `frontend-release` stage for one platform:
-# a minimal image with a prebuilt Linux `omnifs` binary injected as the
-# `omnifs-bin` build context, never compiling inside Docker.
+# a minimal image with a prebuilt Linux `omnifs-fuse` binary injected as the
+# `omnifs-fuse-bin` build context, never compiling inside Docker.
 #
 # $1: the Dockerfile stage to build (`frontend-release`).
 #
@@ -42,7 +42,7 @@ build_release_stage_image() {
     *) echo "unsupported runtime platform: $platform" >&2; return 1 ;;
   esac
 
-  local binary="${OMNIFS_BINARY:-$root/target/$target/release/omnifs}"
+  local binary="${OMNIFS_BINARY:-$root/target/$target/release/omnifs-fuse}"
   if [[ ! -x "$binary" ]]; then
     echo "missing native Linux binary: $binary" >&2
     return 1
@@ -52,7 +52,7 @@ build_release_stage_image() {
   bindir="$(mktemp -d)"
   trap 'rm -rf "$bindir"' RETURN
 
-  cp "$binary" "$bindir/omnifs"
+  cp "$binary" "$bindir/omnifs-fuse"
 
   if [[ -z "$metadata_file" ]]; then
     metadata_file="$bindir/build-metadata.json"
@@ -67,7 +67,7 @@ build_release_stage_image() {
     --metadata-file "$metadata_file" \
     --platform "$platform" \
     --target "$dockerfile_target" \
-    --build-context "omnifs-bin=$bindir" \
+    --build-context "omnifs-fuse-bin=$bindir" \
     -t "$image" \
     -f "$root/Dockerfile" \
     "$root"

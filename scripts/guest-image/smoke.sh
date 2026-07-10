@@ -5,7 +5,7 @@
 # actually worked) and the omnifs-frontend.service runner starting (the seed
 # was found, mounted, and the unit execed the binary). A successful attach is
 # not expected: the placeholder address has no route from inside the guest,
-# so `omnifs frontend run` retries its connect for up to 30s
+# so `omnifs-fuse` retries its connect for up to 30s
 # (INITIAL_CONNECT_DEADLINE in crates/omnifs-namespace-wire/src/client.rs)
 # before giving up. Proving the daemon side of a real attach is a later
 # phase's krunkit driver work, not this smoke.

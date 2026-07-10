@@ -3118,7 +3118,6 @@ dependencies = [
  "time",
  "tokio",
  "tokio-stream",
- "tokio-vsock",
  "tower",
  "tracing",
  "utoipa",
@@ -3197,10 +3196,13 @@ dependencies = [
 name = "omnifs-fuse"
 version = "0.2.1"
 dependencies = [
+ "anyhow",
+ "clap",
  "dashmap",
  "fuser",
  "libc",
  "omnifs-engine",
+ "omnifs-namespace-wire",
  "omnifs-wit",
  "omnifs-workspace",
  "parking_lot",
@@ -3208,6 +3210,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

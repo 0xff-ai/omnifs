@@ -54,24 +54,21 @@ dev *args:
     bun scripts/dev.ts {{ args }}
 
 # Build the omnifs-frontend:dev image from the working tree. Compiles inside
-# Docker via the `builder` stage `just dev` also uses, so this works on macOS
-# too. Needs a provider-store bundle first (`just providers build`): that
-# shared stage always embeds one into the omnifs binary, even though the
-# frontend image itself never runs a provider.
+# Docker via the `fuse-builder` stage `just dev` never touches: the slim
+# `omnifs-fuse` binary needs no engine or Wasmtime, so unlike the full `omnifs`
+# binary's `builder` stage, no provider-store build context is needed here.
 [group('dev')]
-frontend-image provider_store='target/omnifs-provider-store':
-    docker build -t omnifs-frontend:dev --target frontend-dev \
-        --build-context provider-wasm={{ provider_store }} .
+frontend-image:
+    docker build -t omnifs-frontend:dev --target frontend-dev .
 
 # Build the krunkit guest disk image: an EFI-bootable Debian trixie arm64 raw
-# disk with fuse3 and the linux/arm64 `omnifs` binary baked in, whose init
+# disk with fuse3 and the linux/arm64 `omnifs-fuse` binary baked in, whose init
 # starts the FUSE frontend runner once a per-launch seed volume delivers the
-# attach parameters. Mirrors `frontend-image`'s reuse of the shared `builder`
-# Dockerfile stage; needs a provider-store bundle first (`just providers
-# build`), same reason `frontend-image` does. See scripts/guest-image/build.sh.
+# attach parameters. Mirrors `frontend-image`'s reuse of the shared
+# `fuse-builder` Dockerfile stage; see scripts/guest-image/build.sh.
 [group('dev')]
-guest-image provider_store='target/omnifs-provider-store':
-    PROVIDER_STORE={{ provider_store }} bash scripts/guest-image/build.sh
+guest-image:
+    bash scripts/guest-image/build.sh
 
 # Boot the guest image once with a throwaway seed ISO and check the serial
 # console for a successful boot and the frontend runner starting. See
