@@ -1,6 +1,6 @@
 # omnifs-cli
 
-The `omnifs` command-line tool: mount [omnifs](https://github.com/0xff-ai/omnifs) providers as a FUSE filesystem so external services (GitHub, arXiv, DNS, your own) appear as ordinary files and directories.
+The `omnifs` command-line tool and host-native daemon. It mounts [omnifs](https://github.com/0xff-ai/omnifs) providers so external services such as GitHub, arXiv, and DNS appear as ordinary files and directories.
 
 ## Install
 
@@ -8,7 +8,9 @@ The `omnifs` command-line tool: mount [omnifs](https://github.com/0xff-ai/omnifs
 npm install -g @0xff-ai/omnifs
 ```
 
-The npm package installs the native host CLI for Linux and macOS. The CLI then pulls the version-matched runtime image from `ghcr.io/0xff-ai/omnifs` when you run `omnifs up`.
+The npm package installs the native `omnifs` binary for Linux and macOS. `omnifs up` starts its hidden host-native daemon mode; providers, credentials, and caching never run in a container.
+
+The optional Docker frontend uses the version-matched `ghcr.io/0xff-ai/omnifs-frontend:<version>` image. Local development uses `omnifs-frontend:dev` and never pulls it.
 
 Binary releases for Linux and macOS are also attached to each [GitHub Release](https://github.com/0xff-ai/omnifs/releases).
 
@@ -26,11 +28,11 @@ omnifs up
 omnifs shell
 ```
 
-The CLI stores credentials and thin mount configs on the host, starts the Docker runtime container, and opens a shell where `/omnifs` is mounted.
+The CLI stores credentials and self-contained mount specs under `OMNIFS_HOME`. The daemon runs on the host. `omnifs frontend up` optionally attaches a credential-free virtualized FUSE frontend, and `omnifs shell` enters it at `/omnifs`.
 
 ## Platform
 
-The host CLI ships for Linux and macOS. The runtime filesystem is Linux FUSE inside Docker. On macOS, `omnifs shell` is the supported access path; omnifs does not install a native macOS Finder mount.
+Linux defaults to native FUSE. macOS defaults to read-only NFSv4.0 loopback. The optional virtualized FUSE frontend uses Docker by default; macOS also supports `--driver krunkit`. Both attach to the same host-native daemon namespace.
 
 ## Status
 
@@ -38,14 +40,7 @@ Pre-1.0. CLI surface and config format may evolve before v1.
 
 ## Configuration file
 
-Optional. Lives at `~/.omnifs/config.toml` by default, or `$OMNIFS_HOME/config.toml` when `OMNIFS_HOME` is set.
-
-Precedence: CLI flag > config file > built-in default.
-
-```toml
-container_name = "omnifs"
-image = "ghcr.io/0xff-ai/omnifs:0.4"
-```
+Optional. Lives at `~/.omnifs/config.toml` by default, or `$OMNIFS_HOME/config.toml` when `OMNIFS_HOME` is set. Run `omnifs setup` to create it; use command help for current overrides rather than copying version-specific runtime settings.
 
 ## License
 

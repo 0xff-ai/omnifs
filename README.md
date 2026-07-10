@@ -12,7 +12,7 @@ omnifs projects external systems into local filesystem paths. GitHub, DNS, arXiv
 
 The goal is simple: if a tool can read files, it can read the outside world without learning another SDK, auth flow, pagination model, or response schema.
 
-> Alpha status: omnifs is real and usable, but the read surface is still early. The filesystem is exposed through FUSE, and omnifs runs in a Docker container in supported environments for compatibility, rootless execution, and simpler setup across Linux, macOS, and Windows. NFSv4 and FSKit support are planned, and we will remove the Docker requirement when native mounts are ready.
+> Alpha status: omnifs is real and usable, but the read surface is still early. The daemon runs natively on Linux and macOS. Linux uses FUSE by default; macOS uses read-only NFSv4 loopback. An optional virtualized FUSE frontend, delivered through Docker or krunkit, provides an isolated `/omnifs` shell without owning providers or credentials.
 
 <p align="center">
   <img src="https://github.com/user-attachments/assets/b9598ece-e772-4fdc-b5c7-8ad5ba26d39d" alt="omnifs demo" width="960">
@@ -20,22 +20,23 @@ The goal is simple: if a tool can read files, it can read the outside world with
 
 ## Quickstart
 
-omnifs is written in Rust. We build prebuilt binaries for all platforms and ship them through the npm registry. During alpha, you need Node.js, npm, and a Docker-compatible container engine such as Docker, OrbStack, or Podman.
+omnifs is written in Rust. We ship prebuilt Linux and macOS binaries through the npm registry, so the npm installation path needs Node.js and npm. Docker or OrbStack is needed only for the default virtualized FUSE frontend and `omnifs shell`; macOS can use krunkit instead.
 
 ```bash
 npm install -g @0xff-ai/omnifs
 omnifs setup
+omnifs init github
 omnifs up
 omnifs shell
 ```
 
-`omnifs setup` is interactive. It pulls the Docker image and walks you through provider selection and auth.
+`omnifs setup` prepares the workspace and mount point. `omnifs init <provider>` creates a self-contained mount spec and completes any required authentication. `omnifs up` starts the host-native daemon.
 
-`omnifs shell` opens an omnifs-aware shell for exploring the mounted tree. It keeps your shell customizations but installs a fast prompt that shows your current mount and provider and never stalls on the lazy filesystem.
+`omnifs frontend up` is optional; it starts the selected virtualized FUSE frontend (`docker` by default). `omnifs shell` opens an omnifs-aware shell inside it. Native mounts remain available without either command.
 
 ---
 
-For a direct, scriptable path, initialize providers one at a time with `omnifs init <provider>`. Each command writes a mount config under `~/.omnifs/config/mounts/`; `omnifs up` then materializes those mounts, credentials, and capability grants into the runtime container.
+For a direct, scriptable path, initialize providers one at a time with `omnifs init <provider>`. Each command writes a mount spec under `~/.omnifs/mounts/`; `omnifs up` starts the daemon and reconciles those specs into the shared projected tree.
 
 ```bash
 omnifs init github
@@ -51,9 +52,9 @@ Useful commands:
 
 ```bash
 omnifs status      # runtime, mount, and auth state
-omnifs logs -f     # follow container and daemon logs
-omnifs inspect     # live TUI for FUSE, provider, cache, and callout activity
-omnifs down        # stop the container and clean up the session
+omnifs logs -f     # follow daemon logs
+omnifs inspect     # live TUI for namespace, provider, cache, and callout activity
+omnifs down        # stop frontends and the daemon, then unmount
 ```
 
 ## Things to try
@@ -197,12 +198,12 @@ The current surface is read-only. Write-back is designed around explicit staged 
 
 ## How it works
 
-omnifs runs a Linux FUSE filesystem in a runtime container. The host CLI owns setup, credentials, container lifecycle, and the user-facing commands.
+The host-native daemon owns providers, credentials, caching, callouts, and one shared namespace. Native FUSE on Linux, NFSv4 loopback on macOS, and optional virtualized FUSE frontends all expose that same tree.
 
 ```text
                                                                   +----------------+
 +-------------+          +-----------------------------+          | github.wasm    | -> GitHub
-| shell, app, |   FUSE   |        omnifs host          | callouts | dns.wasm       | -> DoH
+| shell, app, | FUSE/NFS |        omnifs daemon        | callouts | dns.wasm       | -> DoH
 | CI, agent   | <------> | /github /dns /arxiv ...     | <------> | docker.wasm    | -> Docker socket
 |             |  files   | cache, auth, git, network   |          | linear.wasm    | -> Linear
 +-------------+          +-----------------------------+          +----------------+
@@ -216,13 +217,13 @@ The cache is host-owned plain byte storage. Providers can return canonical upstr
 
 ## Development workflows
 
-Use `just dev` when working from this repository. It runs `scripts/dev.ts`, builds provider WASM into a content-addressed provider-store bundle, renders the built-in dev mounts and credentials into a dedicated `~/.omnifs-dev` home, builds the dev image from that bundle, starts fixtures, and launches the container. Nothing is written into the checkout.
+Use `just dev` when working from this repository. It builds provider WASM and the native CLI, renders the built-in dev mounts and credentials under `~/.omnifs-dev`, starts the host-native daemon and fixtures, attaches the slim Docker-hosted FUSE frontend, and opens a shell at `/omnifs`.
 
 ```bash
 git clone https://github.com/0xff-ai/omnifs
 cd omnifs
 just dev -y
-# opens a shell at /omnifs inside the container
+# opens the attached frontend shell at /omnifs
 ```
 
 Refresh generated and formatted artifacts:
@@ -231,7 +232,7 @@ Refresh generated and formatted artifacts:
 just refresh
 ```
 
-For runtime behavior, validate through the container:
+For runtime behavior, validate through the host daemon and attached frontend:
 
 ```bash
 just dev -y
@@ -243,7 +244,7 @@ tail -n 80 ~/.omnifs-dev/cache/daemon.log
 
 ### ✅ Working today
 
-- A Linux FUSE runtime you reach from macOS and Windows too, through the container and `omnifs shell`.
+- Native FUSE on Linux, read-only NFSv4 loopback on macOS, and an optional Docker- or krunkit-hosted FUSE frontend for `omnifs shell`.
 - A host CLI on npm that handles setup, auth, lifecycle, logs, status, and inspection.
 - Sandboxed Wasm providers that can only reach the network, Git, sockets, and files the host hands them.
 - Host-held credentials, layered caching, and `omnifs inspect` for a live view of what the runtime is doing.
@@ -255,7 +256,7 @@ tail -n 80 ~/.omnifs-dev/cache/daemon.log
 - Letting providers build paths from their registered routes instead of hand-formatting strings.
 - Caching polish: clearer traces, bounded disk usage, and identities that survive a remount.
 - Better behavior under stuck reads and aggressive directory walkers (shells, prompt tools, crawlers).
-- Smoother setup, auth, status, and `doctor` output, plus a hardened container test suite.
+- Smoother setup, auth, status, and `doctor` output, plus stronger frontend acceptance tests.
 - Provider reference docs generated straight from each provider's manifest and routes.
 
 ### 🔭 Planned
@@ -263,8 +264,8 @@ tail -n 80 ~/.omnifs-dev/cache/daemon.log
 - Write support: stage your intent first, then apply it upstream.
 - Many more providers, including object stores, Kubernetes, Postgres, Redis, Slack, Discord, Google Drive, Gmail, Notion, Stripe, Cloudflare, Vercel, and Telegram.
 - A real provider ecosystem: standalone packaging, a community catalog, authoring docs, and sidecars for providers that need native dependencies.
-- Mount surfaces beyond Linux FUSE for environments where FUSE isn't the right fit, plus passthrough for host-backed subtrees.
-- Easier install and slimmer packaging: multi-arch runtime images, Homebrew or shell installers, and a cleaner split between the CLI and the runtime binary.
+- Additional mount surfaces beyond Linux FUSE and macOS NFSv4, plus passthrough for host-backed subtrees.
+- Easier install and slimmer packaging: Homebrew or shell installers and smaller virtualized frontend artifacts.
 - Going further than warm cache reads: offline snapshots, background indexing, semantic search, and DNS prefetch.
 - Trust and safety: signed provider manifests, tighter sandboxing for host-run tools, and metered filesystem access.
 
