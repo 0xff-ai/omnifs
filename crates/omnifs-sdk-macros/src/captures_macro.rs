@@ -14,18 +14,22 @@ fn option_inner_type(ty: &Type) -> Option<&Type> {
     }
     let segment = type_path.path.segments.last()?;
     let inner = generic_type_arg(segment, 0)?;
-    let idents: Vec<String> = type_path
-        .path
-        .segments
-        .iter()
-        .map(|seg| seg.ident.to_string())
-        .collect();
-    let path: Vec<&str> = idents.iter().map(String::as_str).collect();
-    matches!(
-        path.as_slice(),
-        ["Option"] | ["std" | "core", "option", "Option"]
-    )
-    .then_some(inner)
+    let mut segments = type_path.path.segments.iter();
+    let is_option = match (
+        segments.next(),
+        segments.next(),
+        segments.next(),
+        segments.next(),
+    ) {
+        (Some(option), None, None, None) => option.ident == "Option",
+        (Some(root), Some(module), Some(option), None) => {
+            (root.ident == "std" || root.ident == "core")
+                && module.ident == "option"
+                && option.ident == "Option"
+        },
+        _ => false,
+    };
+    is_option.then_some(inner)
 }
 
 fn facet_inner_type(ty: &Type) -> Option<&Type> {
@@ -63,16 +67,17 @@ pub(crate) fn path_captures_impl(item: &ItemStruct) -> syn::Result<TokenStream2>
             let ident = field.ident.as_ref().expect("named field has ident").clone();
             let name_lit = LitStr::new(&ident.to_string(), ident.span());
             let facet_inner_ty = facet_inner_type(&field.ty).cloned();
+            let option_inner_ty = option_inner_type(&field.ty).cloned();
             let descriptor_ty = facet_inner_ty
                 .clone()
-                .or_else(|| option_inner_type(&field.ty).cloned())
+                .or_else(|| option_inner_ty.clone())
                 .unwrap_or_else(|| field.ty.clone());
             Ok(FieldSpec {
                 ident,
                 name_lit,
                 ty: field.ty.clone(),
                 descriptor_ty,
-                is_option: option_inner_type(&field.ty).is_some(),
+                is_option: option_inner_ty.is_some(),
                 facet_inner_ty,
             })
         })
