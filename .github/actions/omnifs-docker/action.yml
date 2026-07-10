@@ -1,10 +1,5 @@
 name: omnifs-docker
 description: Docker Buildx and GHCR login for omnifs CI
-inputs:
-  registry:
-    description: Container registry host
-    required: false
-    default: ghcr.io
 runs:
   using: composite
   steps:
@@ -14,6 +9,6 @@ runs:
     - name: Log in to GHCR
       uses: docker/login-action@v4.1.0
       with:
-        registry: ${{ inputs.registry }}
+        registry: ghcr.io
         username: ${{ github.actor }}
         password: ${{ github.token }}
