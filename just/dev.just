@@ -62,3 +62,21 @@ dev *args:
 frontend-image provider_store='target/omnifs-provider-store':
     docker build -t omnifs-frontend:dev --target frontend-dev \
         --build-context provider-wasm={{ provider_store }} .
+
+# Build the krunkit guest disk image: an EFI-bootable Debian trixie arm64 raw
+# disk with fuse3 and the linux/arm64 `omnifs` binary baked in, whose init
+# starts the FUSE frontend runner once a per-launch seed volume delivers the
+# attach parameters. Mirrors `frontend-image`'s reuse of the shared `builder`
+# Dockerfile stage; needs a provider-store bundle first (`just providers
+# build`), same reason `frontend-image` does. See scripts/guest-image/build.sh.
+[group('dev')]
+guest-image provider_store='target/omnifs-provider-store':
+    PROVIDER_STORE={{ provider_store }} bash scripts/guest-image/build.sh
+
+# Boot the guest image once with a throwaway seed ISO and check the serial
+# console for a successful boot and the frontend runner starting. See
+# scripts/guest-image/smoke.sh for what "success" means at this phase (no
+# live daemon to attach to yet).
+[group('dev')]
+guest-image-smoke:
+    bash scripts/guest-image/smoke.sh

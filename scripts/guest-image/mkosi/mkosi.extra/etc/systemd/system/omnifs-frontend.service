@@ -1,0 +1,20 @@
+[Unit]
+Description=omnifs FUSE frontend runner
+Requires=omnifs-seed-mount.service
+After=omnifs-seed-mount.service systemd-modules-load.service
+
+[Service]
+Type=exec
+# The seed conf is EnvironmentFile-shaped (KEY=VALUE lines): OMNIFS_ATTACH_ADDR,
+# OMNIFS_ATTACH_TOKEN (crates/omnifs-api/src/lib.rs) and OMNIFS_READY_VSOCK_PORT
+# (reserved for the krunkit vsock readiness signal a later phase wires up; the
+# runner does not read it yet). No leading '-': a missing or unreadable file
+# fails this unit's start with a clear journal message instead of running the
+# frontend with no attach target.
+EnvironmentFile=/mnt/seed/omnifs-seed.conf
+ExecStart=/usr/local/bin/omnifs frontend run --kind fuse --mount-point /omnifs
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target
