@@ -127,7 +127,12 @@ async fn run_krunkit(
     config: &crate::config::Config,
     mount_name: &str,
 ) -> anyhow::Result<()> {
-    let guest_image = krunkit_backend::resolve_guest_image(None, config);
+    let guest_image = match krunkit_backend::resolve_guest_image(None, config)? {
+        krunkit_backend::GuestImageSource::Local(path) => path,
+        krunkit_backend::GuestImageSource::Registry(image) => {
+            crate::guest_image_pull::ensure_guest_image(&image, &paths.cache_dir).await?
+        },
+    };
 
     anstream::eprintln!("Requesting the daemon's vsock namespace attach listener");
     let attach = workspace.daemon().frontend_attach_target_vsock().await?;

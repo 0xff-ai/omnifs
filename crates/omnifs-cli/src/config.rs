@@ -50,9 +50,11 @@ pub struct ConfigSystem {
 #[serde(default, deny_unknown_fields)]
 pub struct ConfigFrontend {
     pub driver: crate::frontend_backend::Driver,
-    /// Override for the krunkit driver's guest disk image
-    /// (`target/guest-image/omnifs-guest.raw` by default; see `just
-    /// guest-image`). Irrelevant to the Docker driver.
+    /// Override for the krunkit driver's guest disk image. A dev binary
+    /// defaults to the local `target/guest-image/omnifs-guest.raw` (see
+    /// `just guest-image`) and never downloads; a release binary defaults to
+    /// the pinned ghcr OCI artifact tag and pulls it on first use (see
+    /// `crate::guest_image_pull`). Irrelevant to the Docker driver.
     pub guest_image: Option<String>,
 }
 

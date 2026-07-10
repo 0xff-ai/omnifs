@@ -46,7 +46,7 @@ use anyhow::{Context as _, Result};
 
 use crate::config::Config;
 use crate::frontend_backend::{AttachEndpoint, FrontendBackend, FrontendLaunchSpec};
-use crate::launch_backend::GUEST_MOUNT;
+use crate::launch_backend::{BUILD_CHANNEL, BuildChannel, GUEST_MOUNT, ImageRef};
 
 const KRUNKIT_SUBDIR: &str = "krunkit";
 const SSH_KEY_NAME: &str = "id_ed25519";
@@ -73,18 +73,33 @@ const SSH_GUEST_TARGET: &str = "root@omnifs-guest";
 const ENV_GUEST_IMAGE: &str = "OMNIFS_GUEST_IMAGE";
 /// The `just guest-image` recipe's default output path
 /// (`scripts/guest-image/build.sh`'s `OUT_DIR` default), resolved relative to
-/// the current working directory. This backend is dev-channel only (the
-/// release channel arrives in a later phase per the phase-4 brief), so a
-/// repo-root-relative default matches every other dev-only default in this
-/// crate (e.g. `omnifs-frontend:dev`) rather than trying to locate the repo
-/// from an installed binary.
+/// the current working directory. A repo-root-relative default matches every
+/// other dev-only default in this crate (e.g. `omnifs-frontend:dev`) rather
+/// than trying to locate the repo from an installed binary.
 const DEFAULT_GUEST_IMAGE: &str = "target/guest-image/omnifs-guest.raw";
+/// Release channel default: the pinned ghcr OCI artifact tag the
+/// guest-image-arm64 CI job publishes and `release`'s `promote` job retags
+/// to this version (mirrors `FRONTEND_RELEASE_IMAGE`'s version pinning).
+const GUEST_RELEASE_IMAGE: &str =
+    concat!("ghcr.io/0xff-ai/omnifs-guest:", env!("CARGO_PKG_VERSION"));
 
 /// Image path used to construct a backend for a non-launch dispatch
 /// (`down`/`shell`/`status`), which never reads it. Mirrors
 /// `FRONTEND_DEV_IMAGE`'s use as an unused placeholder in the Docker backend's
 /// own non-launch call sites.
 pub(crate) const UNUSED_GUEST_IMAGE_PLACEHOLDER: &str = "unused";
+
+/// Where the krunkit driver's guest disk image comes from, gated purely by
+/// [`BuildChannel`] (never by the shape of an override string): a dev binary
+/// never downloads, so its resolution always yields [`Self::Local`], even
+/// for an explicit override; a release binary always pulls from ghcr, so its
+/// resolution always yields [`Self::Registry`]. See
+/// `crate::guest_image_pull` for the [`Self::Registry`] pull-and-cache path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum GuestImageSource {
+    Local(PathBuf),
+    Registry(ImageRef),
+}
 
 const SEED_VOLUME_LABEL: &str = "OMNIFS-SEED";
 const SEED_CONF_NAME: &str = "omnifs-seed.conf";
@@ -124,16 +139,36 @@ fn check_uds_path_length(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The default guest image setting for each build channel: a local path for
+/// dev, the pinned ghcr tag for release. Mirrors
+/// `default_frontend_image_for`.
+pub(crate) const fn default_guest_image_for(channel: BuildChannel) -> &'static str {
+    match channel {
+        BuildChannel::Release => GUEST_RELEASE_IMAGE,
+        BuildChannel::Dev => DEFAULT_GUEST_IMAGE,
+    }
+}
+
 /// Resolve the krunkit driver's guest disk image through the same
 /// flag > env > config > default precedence chain as
-/// `resolve_frontend_image`.
-pub(crate) fn resolve_guest_image(image: Option<PathBuf>, config: &Config) -> PathBuf {
-    crate::config::resolve_setting(
+/// `resolve_frontend_image`, gated on the build channel: a release binary
+/// always resolves to a ghcr artifact to pull (see `crate::guest_image_pull`),
+/// a dev binary always resolves to a local path and never downloads, even if
+/// an override happens to look like a registry reference.
+pub(crate) fn resolve_guest_image(
+    image: Option<String>,
+    config: &Config,
+) -> Result<GuestImageSource> {
+    let resolved = crate::config::resolve_setting(
         image,
         ENV_GUEST_IMAGE,
-        || config.frontend.guest_image.clone().map(PathBuf::from),
-        PathBuf::from(DEFAULT_GUEST_IMAGE),
-    )
+        || config.frontend.guest_image.clone(),
+        default_guest_image_for(BUILD_CHANNEL).to_string(),
+    );
+    match BUILD_CHANNEL {
+        BuildChannel::Dev => Ok(GuestImageSource::Local(PathBuf::from(resolved))),
+        BuildChannel::Release => Ok(GuestImageSource::Registry(ImageRef::new(resolved)?)),
+    }
 }
 
 /// A truthful, actionable error naming the install command, rather than a
@@ -737,12 +772,38 @@ mod tests {
 
     #[test]
     fn guest_image_resolution_precedence() {
+        // Tests run under a dev build (no OMNIFS_RELEASE at compile time), so
+        // BUILD_CHANNEL is always Dev here; the release branch is covered by
+        // `default_guest_image_for` directly, mirroring how
+        // `frontend_container.rs` tests its own two channel defaults.
         let config = Config::default();
-        let image = resolve_guest_image(None, &config);
-        assert_eq!(image, PathBuf::from(DEFAULT_GUEST_IMAGE));
+        let image = resolve_guest_image(None, &config).unwrap();
+        assert_eq!(
+            image,
+            GuestImageSource::Local(PathBuf::from(DEFAULT_GUEST_IMAGE))
+        );
 
-        let flag = resolve_guest_image(Some(PathBuf::from("/custom/guest.raw")), &config);
-        assert_eq!(flag, PathBuf::from("/custom/guest.raw"));
+        let flag = resolve_guest_image(Some("/custom/guest.raw".to_string()), &config).unwrap();
+        assert_eq!(
+            flag,
+            GuestImageSource::Local(PathBuf::from("/custom/guest.raw"))
+        );
+    }
+
+    #[test]
+    fn dev_channel_defaults_to_local_guest_image_path() {
+        assert_eq!(
+            default_guest_image_for(BuildChannel::Dev),
+            DEFAULT_GUEST_IMAGE
+        );
+    }
+
+    #[test]
+    fn release_channel_defaults_to_pinned_guest_image_registry_tag() {
+        assert!(
+            default_guest_image_for(BuildChannel::Release)
+                .starts_with("ghcr.io/0xff-ai/omnifs-guest:")
+        );
     }
 
     fn sample_argv() -> &'static str {
