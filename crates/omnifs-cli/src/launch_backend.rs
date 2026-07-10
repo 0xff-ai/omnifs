@@ -26,6 +26,22 @@ pub(crate) enum BuildChannel {
     Dev,
 }
 
+impl BuildChannel {
+    pub(crate) const fn word(self) -> &'static str {
+        match self {
+            Self::Dev => "dev",
+            Self::Release => "release",
+        }
+    }
+
+    pub(crate) const fn version_suffix(self) -> &'static str {
+        match self {
+            Self::Dev => " (dev build)",
+            Self::Release => "",
+        }
+    }
+}
+
 pub(crate) const BUILD_CHANNEL: BuildChannel = match option_env!("OMNIFS_RELEASE") {
     Some(_) => BuildChannel::Release,
     None => BuildChannel::Dev,
@@ -49,14 +65,13 @@ pub(crate) enum RunMode {
     Spawned,
 }
 
-/// The default `RUST_LOG` level for each run mode, and the one place the level
-/// strings live. Every default-level site (the CLI's own tracing filter and the
-/// spawned daemon's `RUST_LOG`) selects through here instead of spelling a
-/// literal.
-pub(crate) const fn default_daemon_log_level(mode: RunMode) -> &'static str {
-    match mode {
-        RunMode::Foreground => "warn",
-        RunMode::Spawned => "info",
+impl RunMode {
+    /// The default `RUST_LOG` level for this run mode.
+    pub(crate) const fn default_log_level(self) -> &'static str {
+        match self {
+            Self::Foreground => "warn",
+            Self::Spawned => "info",
+        }
     }
 }
 
@@ -245,7 +260,7 @@ pub(crate) async fn launch_native(
     // RUST_LOG. The CLI's own foreground tracing is quieter, which would
     // otherwise hide the daemon's startup diagnostics in daemon.log.
     if std::env::var_os("RUST_LOG").is_none() {
-        command.env("RUST_LOG", default_daemon_log_level(RunMode::Spawned));
+        command.env("RUST_LOG", RunMode::Spawned.default_log_level());
     }
 
     // Carry the telemetry off-switch into the daemon child. Only set it when

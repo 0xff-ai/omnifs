@@ -5,7 +5,7 @@ use clap::Args;
 use serde::Serialize;
 
 use crate::error::ExitCode;
-use crate::launch_backend::{BUILD_CHANNEL, BuildChannel};
+use crate::launch_backend::BUILD_CHANNEL;
 use crate::workspace::Workspace;
 use omnifs_workspace::layout::WorkspaceLayout;
 use omnifs_workspace::provider::{Catalog, DirStatus};
@@ -29,7 +29,11 @@ impl VersionArgs {
             return Ok(ExitCode::Success);
         }
         if !self.detail {
-            anstream::println!("omnifs {}{}", env!("CARGO_PKG_VERSION"), channel_suffix());
+            anstream::println!(
+                "omnifs {}{}",
+                env!("CARGO_PKG_VERSION"),
+                BUILD_CHANNEL.version_suffix()
+            );
             return Ok(ExitCode::Success);
         }
 
@@ -38,7 +42,7 @@ impl VersionArgs {
         let daemon = workspace.daemon().status_optional().await?;
         let provider_status = provider_dir_summary(workspace.catalog());
 
-        anstream::println!("CLI:        omnifs {cli}{}", channel_suffix());
+        anstream::println!("CLI:        omnifs {cli}{}", BUILD_CHANNEL.version_suffix());
         match daemon {
             Some(status) => {
                 anstream::println!(
@@ -129,7 +133,7 @@ impl VersionJson {
         let paths = workspace.layout();
         Ok(Self {
             cli: env!("CARGO_PKG_VERSION").to_string(),
-            channel: channel_word(),
+            channel: BUILD_CHANNEL.word(),
             daemon,
             store: "file".to_string(),
             providers: provider_dir_summary(workspace.catalog()),
@@ -142,24 +146,6 @@ impl VersionJson {
                 config_file: paths.config_file.clone(),
             },
         })
-    }
-}
-
-/// Machine-readable build channel: `dev` for local builds, `release` for the
-/// release packaging lane (`OMNIFS_RELEASE` set at compile time).
-fn channel_word() -> &'static str {
-    match BUILD_CHANNEL {
-        BuildChannel::Dev => "dev",
-        BuildChannel::Release => "release",
-    }
-}
-
-/// Human-output suffix that marks a dev build; empty on the release channel so
-/// released output is unchanged.
-fn channel_suffix() -> &'static str {
-    match BUILD_CHANNEL {
-        BuildChannel::Dev => " (dev build)",
-        BuildChannel::Release => "",
     }
 }
 

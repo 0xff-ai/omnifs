@@ -86,12 +86,12 @@ async fn main() {
 fn init_tracing(verbose: u8) {
     use tracing_subscriber::{EnvFilter, fmt::format::FmtSpan};
 
-    use launch_backend::{RunMode, default_daemon_log_level};
+    use launch_backend::RunMode;
     // `-v` raises the foreground filter to the same baseline the spawned
     // daemon logs at; `-vv` turns on debug.
     let verbosity = match verbose {
-        0 => default_daemon_log_level(RunMode::Foreground),
-        1 => default_daemon_log_level(RunMode::Spawned),
+        0 => RunMode::Foreground.default_log_level(),
+        1 => RunMode::Spawned.default_log_level(),
         _ => "debug",
     };
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(verbosity));
