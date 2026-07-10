@@ -828,8 +828,7 @@ jobs:
   # Smokes the contributor dev flow's CI-relevant halves: a host-native daemon
   # on this runner (kernel FUSE) plus the omnifs-frontend image `frontend-amd64`
   # built, attached over TCP. Needs the CLI on PATH (host-native, not
-  # containerized) and fuse3 on the runner itself, unlike the old
-  # daemon-in-a-container smoke lane it replaces.
+  # containerized) and fuse3 on the runner itself.
   smoke-amd64:
     name: smoke amd64
     if: >-
@@ -858,12 +857,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends fuse3
 
-      - name: Download amd64 frontend image digest
-        uses: actions/download-artifact@v8
-        with:
-          name: frontend-digest-amd64
-          path: /tmp/digests
-
       - name: Download provider store bundle
         uses: actions/download-artifact@v8
         with:
@@ -874,15 +867,10 @@ jobs:
         with:
           arch: x64
 
-      - name: Pull the amd64 frontend image and tag it for smoke
-        run: |
-          set -euo pipefail
-          digest_path=$(find /tmp/digests -mindepth 1 -maxdepth 1 -type f | head -n 1)
-          test -n "$digest_path"
-          digest_file="${digest_path##*/}"
-          ref="${REGISTRY}/${FRONTEND_IMAGE_NAME}@sha256:${digest_file}"
-          docker pull "$ref"
-          docker tag "$ref" "$FRONTEND_IMAGE"
+      - uses: ./.github/actions/omnifs-load-frontend
+        with:
+          arch: amd64
+          image: ${{ env.FRONTEND_IMAGE }}
 
       - name: Run native+frontend smoke test
         env:
@@ -917,12 +905,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends fuse3
 
-      - name: Download arm64 frontend image digest
-        uses: actions/download-artifact@v8
-        with:
-          name: frontend-digest-arm64
-          path: /tmp/digests
-
       - name: Download provider store bundle
         uses: actions/download-artifact@v8
         with:
@@ -933,15 +915,10 @@ jobs:
         with:
           arch: arm64
 
-      - name: Pull the arm64 frontend image and tag it for smoke
-        run: |
-          set -euo pipefail
-          digest_path=$(find /tmp/digests -mindepth 1 -maxdepth 1 -type f | head -n 1)
-          test -n "$digest_path"
-          digest_file="${digest_path##*/}"
-          ref="${REGISTRY}/${FRONTEND_IMAGE_NAME}@sha256:${digest_file}"
-          docker pull "$ref"
-          docker tag "$ref" "$FRONTEND_IMAGE"
+      - uses: ./.github/actions/omnifs-load-frontend
+        with:
+          arch: arm64
+          image: ${{ env.FRONTEND_IMAGE }}
 
       - name: Run native+frontend smoke test
         env:
@@ -973,21 +950,10 @@ jobs:
 
       - uses: ./.github/actions/omnifs-docker
 
-      - name: Download amd64 frontend image digest
-        uses: actions/download-artifact@v8
+      - uses: ./.github/actions/omnifs-load-frontend
         with:
-          name: frontend-digest-amd64
-          path: /tmp/digests
-
-      - name: Pull the amd64 frontend image and tag it for smoke
-        run: |
-          set -euo pipefail
-          digest_path=$(find /tmp/digests -mindepth 1 -maxdepth 1 -type f | head -n 1)
-          test -n "$digest_path"
-          digest_file="${digest_path##*/}"
-          ref="${REGISTRY}/${FRONTEND_IMAGE_NAME}@sha256:${digest_file}"
-          docker pull "$ref"
-          docker tag "$ref" "$IMAGE"
+          arch: amd64
+          image: ${{ env.IMAGE }}
 
       - name: Run frontend image smoke test
         run: scripts/ci/smoke-frontend-image.sh
@@ -1012,21 +978,10 @@ jobs:
 
       - uses: ./.github/actions/omnifs-docker
 
-      - name: Download arm64 frontend image digest
-        uses: actions/download-artifact@v8
+      - uses: ./.github/actions/omnifs-load-frontend
         with:
-          name: frontend-digest-arm64
-          path: /tmp/digests
-
-      - name: Pull the arm64 frontend image and tag it for smoke
-        run: |
-          set -euo pipefail
-          digest_path=$(find /tmp/digests -mindepth 1 -maxdepth 1 -type f | head -n 1)
-          test -n "$digest_path"
-          digest_file="${digest_path##*/}"
-          ref="${REGISTRY}/${FRONTEND_IMAGE_NAME}@sha256:${digest_file}"
-          docker pull "$ref"
-          docker tag "$ref" "$IMAGE"
+          arch: arm64
+          image: ${{ env.IMAGE }}
 
       - name: Run frontend image smoke test
         run: scripts/ci/smoke-frontend-image.sh
@@ -1093,21 +1048,10 @@ jobs:
           tar -C dist-cli/bin -xJf dist-cli/omnifs-cli-linux-x64.tar.xz
           test -x dist-cli/bin/omnifs
 
-      - name: Download amd64 frontend image digest
-        uses: actions/download-artifact@v8
+      - uses: ./.github/actions/omnifs-load-frontend
         with:
-          name: frontend-digest-amd64
-          path: /tmp/digests
-
-      - name: Pull the amd64 frontend image and tag it for the acceptance gate
-        run: |
-          set -euo pipefail
-          digest_path=$(find /tmp/digests -mindepth 1 -maxdepth 1 -type f | head -n 1)
-          test -n "$digest_path"
-          digest_file="${digest_path##*/}"
-          ref="${REGISTRY}/${FRONTEND_IMAGE_NAME}@sha256:${digest_file}"
-          docker pull "$ref"
-          docker tag "$ref" "$OMNIFS_FRONTEND_IMAGE"
+          arch: amd64
+          image: ${{ env.OMNIFS_FRONTEND_IMAGE }}
 
       - name: Run the fuse-docker acceptance gate
         run: |

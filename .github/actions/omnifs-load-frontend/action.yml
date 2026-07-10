@@ -1,0 +1,30 @@
+name: omnifs-load-frontend
+description: Load a CI-built frontend image under a local tag
+inputs:
+  arch:
+    description: Frontend image architecture (amd64 or arm64)
+    required: true
+  image:
+    description: Local image tag to create
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Download ${{ inputs.arch }} frontend image digest
+      uses: actions/download-artifact@v8
+      with:
+        name: frontend-digest-${{ inputs.arch }}
+        path: ${{ runner.temp }}/frontend-digest
+
+    - name: Pull and tag the frontend image
+      shell: bash
+      env:
+        TARGET_IMAGE: ${{ inputs.image }}
+      run: |
+        set -euo pipefail
+        digest_path="$(find "$RUNNER_TEMP/frontend-digest" -mindepth 1 -maxdepth 1 -type f -print -quit)"
+        test -n "$digest_path"
+        digest_file="${digest_path##*/}"
+        ref="${REGISTRY}/${FRONTEND_IMAGE_NAME}@sha256:${digest_file}"
+        docker pull "$ref"
+        docker tag "$ref" "$TARGET_IMAGE"
