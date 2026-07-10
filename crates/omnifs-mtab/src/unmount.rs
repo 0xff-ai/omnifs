@@ -53,18 +53,6 @@ impl UnmountCommand {
         }
     }
 
-    pub fn program(&self) -> &'static str {
-        self.program
-    }
-
-    pub fn args(&self) -> &[OsString] {
-        &self.args
-    }
-
-    pub fn fallback(&self) -> Option<&Self> {
-        self.fallback.as_deref()
-    }
-
     pub fn run(&self) -> Result<(), UnmountError> {
         self.run_with_output(CommandOutput::Inherit)
     }
@@ -143,7 +131,7 @@ impl UnmountCommand {
     fn run_with_output(&self, output: CommandOutput) -> Result<(), UnmountError> {
         match self.run_once(output) {
             Ok(()) => Ok(()),
-            Err(error) => match self.fallback() {
+            Err(error) => match self.fallback.as_deref() {
                 Some(fallback) => fallback.run_with_output(output),
                 None => Err(error),
             },
@@ -199,7 +187,7 @@ mod tests {
 
     fn args_as_strings(command: &UnmountCommand) -> Vec<String> {
         command
-            .args()
+            .args
             .iter()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect()
@@ -208,29 +196,29 @@ mod tests {
     #[test]
     fn linux_unmount_commands_use_fusermount_with_forced_fallback() {
         let graceful = UnmountCommand::graceful(Platform::Linux, Path::new("/mnt/omnifs"));
-        assert_eq!(graceful.program(), "fusermount");
+        assert_eq!(graceful.program, "fusermount");
         assert_eq!(args_as_strings(&graceful), vec!["-u", "/mnt/omnifs"]);
-        assert!(graceful.fallback().is_none());
+        assert!(graceful.fallback.is_none());
 
         let forced = UnmountCommand::forced(Platform::Linux, Path::new("/mnt/omnifs"));
-        assert_eq!(forced.program(), "fusermount");
+        assert_eq!(forced.program, "fusermount");
         assert_eq!(args_as_strings(&forced), vec!["-uz", "/mnt/omnifs"]);
-        let fallback = forced.fallback().expect("forced fallback");
-        assert_eq!(fallback.program(), "umount");
+        let fallback = forced.fallback.as_deref().expect("forced fallback");
+        assert_eq!(fallback.program, "umount");
         assert_eq!(args_as_strings(fallback), vec!["-f", "/mnt/omnifs"]);
     }
 
     #[test]
     fn macos_unmount_commands_use_diskutil() {
         let graceful = UnmountCommand::graceful(Platform::Macos, Path::new("/Volumes/omnifs"));
-        assert_eq!(graceful.program(), "diskutil");
+        assert_eq!(graceful.program, "diskutil");
         assert_eq!(
             args_as_strings(&graceful),
             vec!["unmount", "/Volumes/omnifs"]
         );
 
         let forced = UnmountCommand::forced(Platform::Macos, Path::new("/Volumes/omnifs"));
-        assert_eq!(forced.program(), "diskutil");
+        assert_eq!(forced.program, "diskutil");
         assert_eq!(
             args_as_strings(&forced),
             vec!["unmount", "force", "/Volumes/omnifs"]
