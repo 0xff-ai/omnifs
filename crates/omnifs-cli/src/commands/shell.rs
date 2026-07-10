@@ -69,7 +69,7 @@ impl ShellArgs {
         // the backend named by the recorded `via`.
         let recorded_via = record
             .as_ref()
-            .and_then(|record| record.frontends.iter().find_map(|frontend| frontend.via));
+            .and_then(|record| record.virtualized_frontend().map(|(via, _mount_point)| via));
         match recorded_via {
             Some(Via::Docker) => {
                 let container_name = frontend_container_name(paths)?;

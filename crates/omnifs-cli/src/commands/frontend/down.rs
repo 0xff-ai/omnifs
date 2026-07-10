@@ -50,7 +50,7 @@ pub(crate) async fn teardown(paths: &WorkspaceLayout) -> anyhow::Result<bool> {
     let recorded_via = RuntimeRecord::read(&paths.runtime_record_file())
         .ok()
         .flatten()
-        .and_then(|record| record.frontends.iter().find_map(|frontend| frontend.via));
+        .and_then(|record| record.virtualized_frontend().map(|(via, _mount_point)| via));
 
     if recorded_via == Some(Via::Krunkit) {
         let backend = KrunkitBackend::new(paths.config_dir.clone());

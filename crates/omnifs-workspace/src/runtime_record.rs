@@ -234,6 +234,17 @@ impl RuntimeRecord {
             .first()
             .map(|frontend| frontend.mount_point.as_path())
     }
+
+    /// The first separately launched frontend attached to this daemon.
+    /// Host-native frontends have no delivery marker and are skipped.
+    #[must_use]
+    pub fn virtualized_frontend(&self) -> Option<(Via, &Path)> {
+        self.frontends.iter().find_map(|frontend| {
+            frontend
+                .via
+                .map(|via| (via, frontend.mount_point.as_path()))
+        })
+    }
 }
 
 /// The file name of the runtime record under the config directory.
@@ -382,6 +393,28 @@ mod tests {
         let json = serde_json::to_value(&record).unwrap();
         assert_eq!(json["frontends"][1]["via"], "krunkit");
         assert_eq!(Via::Krunkit.label(), "krunkit");
+    }
+
+    #[test]
+    fn virtualized_frontend_skips_native_frontends_and_selects_the_first_attachment() {
+        let mut record = sample_native();
+        record.frontends.extend([
+            FrontendRecord {
+                kind: FrontendKind::Fuse,
+                mount_point: PathBuf::from("/docker-omnifs"),
+                via: Some(Via::Docker),
+            },
+            FrontendRecord {
+                kind: FrontendKind::Fuse,
+                mount_point: PathBuf::from("/krunkit-omnifs"),
+                via: Some(Via::Krunkit),
+            },
+        ]);
+
+        assert_eq!(
+            record.virtualized_frontend(),
+            Some((Via::Docker, Path::new("/docker-omnifs")))
+        );
     }
 
     /// An older writer's JSON shape (no `via` key on a frontend entry) must

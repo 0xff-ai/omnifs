@@ -26,7 +26,7 @@ impl FrontendStatusArgs {
             .flatten();
         let recorded_via = record
             .as_ref()
-            .and_then(|record| record.frontends.iter().find_map(|frontend| frontend.via));
+            .and_then(|record| record.virtualized_frontend().map(|(via, _mount_point)| via));
         if recorded_via == Some(Via::Krunkit) {
             return Self::krunkit_status(&paths).await;
         }

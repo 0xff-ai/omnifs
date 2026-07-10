@@ -43,9 +43,8 @@ impl StatusReport {
             .flatten()
             .and_then(|record| {
                 record
-                    .frontends
-                    .into_iter()
-                    .find_map(|frontend| frontend.via.map(|via| (via, frontend.mount_point)))
+                    .virtualized_frontend()
+                    .map(|(via, mount_point)| (via, mount_point.to_path_buf()))
             });
         Self {
             runtime,
