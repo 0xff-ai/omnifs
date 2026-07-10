@@ -340,13 +340,7 @@ fn lazy_excluded_eager_leaves_inherit_object_stability() {
         name: "id".into(),
         value: "42".into(),
     }]);
-    let mut list = (mounted.entry.list)(&cx, caps, "/items/42".to_string());
-    let waker = Waker::noop();
-    let mut ctx = Context::from_waker(waker);
-    let listing = match list.as_mut().poll(&mut ctx) {
-        Poll::Ready(result) => result.unwrap(),
-        Poll::Pending => panic!("object listing should complete without callouts"),
-    };
+    let listing = poll_ready((mounted.entry.list)(&cx, caps, "/items/42".to_string())).unwrap();
     let mut fs: Vec<_> = listing.effects.into_wit().fs;
     fs.sort_by(|a, b| a.path.cmp(&b.path));
 
@@ -536,13 +530,7 @@ fn object_dir_child_lookup_carries_all_sibling_leaves() {
     router.seal().unwrap();
 
     let cx = Cx::new(1, Rc::new(RefCell::new(())));
-    let mut fut = Box::pin(router.lookup_child(&cx, "/items/42", "body"));
-    let waker = Waker::noop();
-    let mut ctx = Context::from_waker(waker);
-    let lookup = match fut.as_mut().poll(&mut ctx) {
-        Poll::Ready(result) => result.unwrap(),
-        Poll::Pending => panic!("an object-dir leaf lookup resolves without callouts"),
-    };
+    let lookup = poll_ready(router.lookup_child(&cx, "/items/42", "body")).unwrap();
 
     let (wire, _effects) = lookup.into_result_and_effects();
     let wit_types::LookupChildResult::Entry(entry) = wire else {
@@ -578,13 +566,7 @@ fn dynamic_capture_prefix_lists_route_table_children_without_stub_dir() {
 
     let cx = Cx::new(1, Rc::new(RefCell::new(())));
 
-    let mut lookup = Box::pin(router.lookup_child(&cx, "/items", "42"));
-    let waker = Waker::noop();
-    let mut ctx = Context::from_waker(waker);
-    let lookup = match lookup.as_mut().poll(&mut ctx) {
-        Poll::Ready(result) => result.unwrap(),
-        Poll::Pending => panic!("implicit dynamic directory lookup resolves without callouts"),
-    };
+    let lookup = poll_ready(router.lookup_child(&cx, "/items", "42")).unwrap();
     let (wire, _effects) = lookup.into_result_and_effects();
     let wit_types::LookupChildResult::Entry(entry) = wire else {
         panic!("dynamic capture prefix should resolve as a directory");
@@ -592,11 +574,7 @@ fn dynamic_capture_prefix_lists_route_table_children_without_stub_dir() {
     assert_eq!(entry.target.name, "42");
     assert!(matches!(entry.target.kind, wit_types::EntryKind::Directory));
 
-    let mut list = Box::pin(router.list_children(&cx, "/items/42", None, None));
-    let listing = match list.as_mut().poll(&mut ctx) {
-        Poll::Ready(result) => result.unwrap(),
-        Poll::Pending => panic!("implicit dynamic directory listing resolves without callouts"),
-    };
+    let listing = poll_ready(router.list_children(&cx, "/items/42", None, None)).unwrap();
     let (wire, _effects) = listing.into_result_and_effects();
     let wit_types::ListChildrenResult::Entries(listing) = wire else {
         panic!("dynamic capture prefix should list static route-table children");
@@ -772,13 +750,7 @@ fn direct_face_resolves_and_reads() {
     router.seal().unwrap();
 
     let cx = Cx::new(1, Rc::new(RefCell::new(())));
-    let mut fut = Box::pin(router.read_file(&cx, "/items/42/live", "", None));
-    let waker = Waker::noop();
-    let mut ctx = Context::from_waker(waker);
-    let outcome = match fut.as_mut().poll(&mut ctx) {
-        Poll::Ready(result) => result.unwrap(),
-        Poll::Pending => panic!("a direct face read resolves without callouts"),
-    };
+    let outcome = poll_ready(router.read_file(&cx, "/items/42/live", "", None)).unwrap();
     let crate::browse::ReadOutcome::Found(content) = outcome else {
         panic!("direct face must serve bytes");
     };
@@ -800,13 +772,7 @@ fn file_object_anchor_reads_canonical() {
     router.seal().unwrap();
 
     let cx = Cx::new(1, Rc::new(RefCell::new(())));
-    let mut fut = Box::pin(router.read_file(&cx, "/items/42", "", None));
-    let waker = Waker::noop();
-    let mut ctx = Context::from_waker(waker);
-    let outcome = match fut.as_mut().poll(&mut ctx) {
-        Poll::Ready(result) => result.unwrap(),
-        Poll::Pending => panic!("a file-object anchor read resolves without callouts"),
-    };
+    let outcome = poll_ready(router.read_file(&cx, "/items/42", "", None)).unwrap();
     assert!(
         matches!(outcome, crate::browse::ReadOutcome::Found(_)),
         "file-object anchor must serve its canonical face"
