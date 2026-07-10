@@ -15,7 +15,6 @@ use omnifs_core::path::Path;
 use super::super::handlers::{DirEntry, FileEntry, TreeRefEntry};
 use super::super::object::{ObjectReadTarget, ObjectRouteEntry, SourceLeafAttrs};
 use super::super::pattern::best_match;
-use super::super::projection::merge_entries;
 use super::super::register::Router;
 
 /// A borrowed dispatch view over the sealed route tables.
@@ -99,12 +98,7 @@ impl<S> Shape<'_, S> {
     /// round trip warms the whole directory) and is exhaustive only when no
     /// capture sibling can bind further names at this depth.
     pub(super) fn static_dir_lookup(&self, parent_abs: &Path, name: &str) -> Lookup {
-        let mut siblings = self.static_entries_for_parent(parent_abs);
-        siblings.retain(|entry| entry.name() != name);
-        let exhaustive = !self.has_capture_child_under(parent_abs);
-        Lookup::entry(BrowseEntry::dir(name))
-            .with_siblings(siblings)
-            .exhaustive(exhaustive)
+        self.static_lookup(parent_abs, name, BrowseEntry::dir(name))
     }
 
     /// The file analog of [`Self::static_dir_lookup`]; the entry carries the
@@ -112,17 +106,22 @@ impl<S> Shape<'_, S> {
     /// declared `ranged` projects `ReadMode::Ranged` so the host dispatches
     /// `open` straight to `open-file`.
     pub(super) fn static_file_lookup(&self, parent_abs: &Path, name: &str, ranged: bool) -> Lookup {
-        let mut siblings = self.static_entries_for_parent(parent_abs);
-        siblings.retain(|entry| entry.name() != name);
-        let exhaustive = !self.has_capture_child_under(parent_abs);
         let shape = if ranged {
             FileProj::ranged_listing_shape()
         } else {
             FileProj::listing_shape()
         };
-        Lookup::entry(BrowseEntry::file(name, shape))
+        self.static_lookup(parent_abs, name, BrowseEntry::file(name, shape))
+    }
+
+    fn static_lookup(&self, parent_abs: &Path, name: &str, target: BrowseEntry) -> Lookup {
+        let siblings = self
+            .static_entries_for_parent(parent_abs)
+            .into_iter()
+            .filter(|entry| entry.name() != name);
+        Lookup::entry(target)
             .with_siblings(siblings)
-            .exhaustive(exhaustive)
+            .exhaustive(!self.has_capture_child_under(parent_abs))
     }
 
     /// Resolve `name` against the visible children of an object anchored at
@@ -176,16 +175,11 @@ impl<S> Shape<'_, S> {
         projection: &DirProjection,
     ) -> Result<Lookup> {
         if let DirOutcome::Entries { entries, .. } = projection.outcome() {
-            let static_entries = self.static_entries_for_parent(parent_abs);
-            let merged = merge_entries(
-                entries.iter().map(crate::projection::Entry::name),
-                |n| {
-                    entries
-                        .iter()
-                        .find(|entry| entry.name() == n)
-                        .map(crate::projection::Entry::to_browse_entry)
-                },
-                static_entries,
+            let merged = self.merge_entries(
+                parent_abs,
+                entries
+                    .iter()
+                    .map(crate::projection::Entry::to_browse_entry),
             );
             let target = merged.iter().find(|entry| entry.name() == name).cloned();
             let exhaustive = matches!(
@@ -221,16 +215,11 @@ impl<S> Shape<'_, S> {
                 cursor,
                 entries,
             } => {
-                let static_entries = self.static_entries_for_parent(abs);
-                let merged = merge_entries(
-                    entries.iter().map(crate::projection::Entry::name),
-                    |name| {
-                        entries
-                            .iter()
-                            .find(|entry| entry.name() == name)
-                            .map(crate::projection::Entry::to_browse_entry)
-                    },
-                    static_entries,
+                let merged = self.merge_entries(
+                    abs,
+                    entries
+                        .iter()
+                        .map(crate::projection::Entry::to_browse_entry),
                 );
 
                 let mut listing = if *exhaustive {
@@ -267,7 +256,6 @@ impl<S> Shape<'_, S> {
         anchor_abs: &Path,
         source: Option<&SourceLeafAttrs>,
     ) -> Listing {
-        let static_entries = self.static_entries_for_parent(anchor_abs);
         let object_entries = entry.leaves.iter().map(|leaf| {
             if leaf.is_canonical()
                 && let Some(source) = source
@@ -279,14 +267,28 @@ impl<S> Shape<'_, S> {
                 BrowseEntry::file(&leaf.name, FileProj::listing_shape())
             }
         });
-        let mut entries = static_entries
+        Listing::complete(self.merge_entries(anchor_abs, object_entries))
+    }
+
+    /// Merge dynamic entries over literal route-table siblings at the same
+    /// depth. Dynamic entries win name collisions and the result is name
+    /// ordered.
+    fn merge_entries(
+        &self,
+        parent_abs: &Path,
+        dynamic_entries: impl IntoIterator<Item = BrowseEntry>,
+    ) -> Vec<BrowseEntry> {
+        let mut entries = self
+            .static_entries_for_parent(parent_abs)
             .into_iter()
             .map(|entry| (entry.name().to_string(), entry))
             .collect::<std::collections::BTreeMap<_, _>>();
-        for entry in object_entries {
-            entries.insert(entry.name().to_string(), entry);
-        }
-        Listing::complete(entries.into_values())
+        entries.extend(
+            dynamic_entries
+                .into_iter()
+                .map(|entry| (entry.name().to_string(), entry)),
+        );
+        entries.into_values().collect()
     }
 }
 

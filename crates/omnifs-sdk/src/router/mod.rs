@@ -43,7 +43,6 @@ mod dispatch;
 mod handlers;
 mod object;
 pub(crate) mod pattern;
-mod projection;
 mod readme;
 mod register;
 
