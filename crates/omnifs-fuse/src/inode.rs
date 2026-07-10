@@ -8,7 +8,7 @@
 
 use crate::Frontend;
 use crate::common::{Body, Inode, NodeKind, ROOT_INO};
-use fuser::{FileAttr, FileType, INodeNo};
+use fuser::{FileAttr, INodeNo};
 use omnifs_engine::{Attrs, NodeId, NsEntryKind};
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
@@ -122,75 +122,38 @@ impl Frontend {
         node: NodeId,
         attrs: &Attrs,
     ) -> (FileAttr, Duration) {
-        let attr = match attrs.kind {
-            NsEntryKind::Directory | NsEntryKind::Subtree { .. } => self.dir_attr(ino),
+        let size = match attrs.kind {
+            NsEntryKind::Directory | NsEntryKind::Subtree { .. } | NsEntryKind::Symlink => {
+                attrs.size
+            },
             NsEntryKind::File => {
                 let grown = self.grown_sizes.get(&node).map_or(0, |g| *g);
-                self.file_attr(ino, attrs.size.max(grown))
+                attrs.size.max(grown)
             },
-            NsEntryKind::Symlink => self.symlink_attr(ino, attrs.size),
         };
-        (attr, attrs.ttl)
+        (NodeKind::from(&attrs.kind).attr(ino, size), attrs.ttl)
     }
+}
 
-    #[allow(clippy::unused_self)]
-    pub(crate) fn dir_attr(&self, ino: u64) -> FileAttr {
+impl NodeKind {
+    pub(crate) fn attr(self, ino: u64, size: u64) -> FileAttr {
         let now = SystemTime::now();
-        FileAttr {
-            ino: INodeNo(ino),
-            size: 0,
-            blocks: 0,
-            atime: now,
-            mtime: now,
-            ctime: now,
-            crtime: now,
-            kind: FileType::Directory,
-            perm: 0o555,
-            nlink: 2,
-            uid: current_uid(),
-            gid: current_gid(),
-            rdev: 0,
-            blksize: 512,
-            flags: 0,
-        }
-    }
-
-    #[allow(clippy::unused_self)]
-    pub(crate) fn file_attr(&self, ino: u64, size: u64) -> FileAttr {
-        let now = SystemTime::now();
+        let (size, blocks, perm, nlink) = match self {
+            Self::Directory => (0, 0, 0o555, 2),
+            Self::File => (size, size.div_ceil(512), 0o444, 1),
+            Self::Symlink => (size, size.div_ceil(512), 0o777, 1),
+        };
         FileAttr {
             ino: INodeNo(ino),
             size,
-            blocks: size.div_ceil(512),
+            blocks,
             atime: now,
             mtime: now,
             ctime: now,
             crtime: now,
-            kind: FileType::RegularFile,
-            perm: 0o444,
-            nlink: 1,
-            uid: current_uid(),
-            gid: current_gid(),
-            rdev: 0,
-            blksize: 512,
-            flags: 0,
-        }
-    }
-
-    #[allow(clippy::unused_self)]
-    pub(crate) fn symlink_attr(&self, ino: u64, size: u64) -> FileAttr {
-        let now = SystemTime::now();
-        FileAttr {
-            ino: INodeNo(ino),
-            size,
-            blocks: size.div_ceil(512),
-            atime: now,
-            mtime: now,
-            ctime: now,
-            crtime: now,
-            kind: FileType::Symlink,
-            perm: 0o777,
-            nlink: 1,
+            kind: self.file_type(),
+            perm,
+            nlink,
             uid: current_uid(),
             gid: current_gid(),
             rdev: 0,
@@ -202,17 +165,8 @@ impl Frontend {
     /// Build a `FileAttr` from a backing path's `std::fs` metadata. The subtree
     /// children of a resolved treeref are pure local files; the byte boundary
     /// keeps their real metadata off the provider surface.
-    #[allow(clippy::unused_self)]
-    pub(crate) fn attr_from_metadata(&self, ino: u64, meta: &std::fs::Metadata) -> FileAttr {
+    pub(crate) fn attr_from_metadata(self, ino: u64, meta: &std::fs::Metadata) -> FileAttr {
         use std::os::unix::fs::MetadataExt;
-        let file_type = meta.file_type();
-        let kind = if file_type.is_dir() {
-            FileType::Directory
-        } else if file_type.is_symlink() {
-            FileType::Symlink
-        } else {
-            FileType::RegularFile
-        };
         let now = SystemTime::now();
         FileAttr {
             ino: INodeNo(ino),
@@ -222,7 +176,7 @@ impl Frontend {
             mtime: meta.modified().unwrap_or(now),
             ctime: meta.modified().unwrap_or(now),
             crtime: meta.created().unwrap_or(now),
-            kind,
+            kind: self.file_type(),
             perm: u16::try_from(meta.mode() & 0o7777).unwrap_or(0o444),
             nlink: u32::try_from(meta.nlink()).unwrap_or(1),
             uid: current_uid(),
@@ -234,15 +188,14 @@ impl Frontend {
     }
 
     /// The kernel `NodeKind` of a backing path, from a `std::fs` stat.
-    #[allow(clippy::unused_self)]
-    pub(crate) fn backing_kind(&self, meta: &std::fs::Metadata) -> NodeKind {
+    pub(crate) fn from_metadata(meta: &std::fs::Metadata) -> Self {
         let file_type = meta.file_type();
         if file_type.is_dir() {
-            NodeKind::Directory
+            Self::Directory
         } else if file_type.is_symlink() {
-            NodeKind::Symlink
+            Self::Symlink
         } else {
-            NodeKind::File
+            Self::File
         }
     }
 }

@@ -49,9 +49,9 @@ impl Frontend {
         if let Some(backing) = body.backing() {
             let child = backing.join(name);
             let meta = std::fs::symlink_metadata(&child).map_err(|_| Errno::ENOENT)?;
-            let kind = self.backing_kind(&meta);
+            let kind = NodeKind::from_metadata(&meta);
             let ino = self.intern_backing(parent_ino, name, child, kind);
-            return Ok((ino, self.attr_from_metadata(ino, &meta), TTL));
+            return Ok((ino, kind.attr_from_metadata(ino, &meta), TTL));
         }
 
         let parent_node = body.node().ok_or(Errno::ENOENT)?;
@@ -75,7 +75,7 @@ impl Frontend {
     pub(crate) async fn do_getattr(&self, ino: u64) -> Result<(FileAttr, Duration), Errno> {
         self.apply_pending_events();
         if ino == ROOT_INO {
-            return Ok((self.dir_attr(ROOT_INO), TTL));
+            return Ok((NodeKind::Directory.attr(ROOT_INO, 0), TTL));
         }
         let inode = self.inodes.get(&ino).ok_or(Errno::ENOENT)?;
         let body = inode.body.clone();
@@ -83,7 +83,8 @@ impl Frontend {
 
         if let Some(backing) = body.backing() {
             let meta = std::fs::symlink_metadata(backing).map_err(|_| Errno::ENOENT)?;
-            return Ok((self.attr_from_metadata(ino, &meta), TTL));
+            let kind = NodeKind::from_metadata(&meta);
+            return Ok((kind.attr_from_metadata(ino, &meta), TTL));
         }
 
         let node = body.node().ok_or(Errno::ENOENT)?;
@@ -105,7 +106,8 @@ impl Frontend {
         if let NsEntryKind::Subtree { root } = &attrs.kind {
             self.rebind_subtree(ino, node, root.clone());
             let meta = std::fs::symlink_metadata(root).map_err(|_| Errno::ENOENT)?;
-            return Ok((self.attr_from_metadata(ino, &meta), TTL));
+            let kind = NodeKind::from_metadata(&meta);
+            return Ok((kind.attr_from_metadata(ino, &meta), TTL));
         }
         Ok(self.ns_file_attr(ino, node, &attrs))
     }
@@ -170,7 +172,7 @@ impl Frontend {
             let Ok(meta) = std::fs::symlink_metadata(&child) else {
                 continue;
             };
-            let kind = self.backing_kind(&meta);
+            let kind = NodeKind::from_metadata(&meta);
             let ino = self.intern_backing(parent_ino, name, child, kind);
             snapshot.push((ino, name.to_string(), kind));
         }
