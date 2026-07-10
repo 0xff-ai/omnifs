@@ -1,0 +1,11 @@
+[Unit]
+Description=omnifs krunkit guest ssh vsock-to-loopback proxy
+Requires=omnifs-dropbear.service
+After=omnifs-dropbear.service
+
+# Dropbear's inetd mode exits on an AF_VSOCK peer ("Failed lookup: ai_family
+# not supported": its peer-address lookup only understands inet families), so
+# the vsock listener is bridged onto dropbear's loopback TCP listener instead
+# of handing dropbear the vsock connection directly.
+[Service]
+ExecStart=/usr/lib/systemd/systemd-socket-proxyd 127.0.0.1:2222

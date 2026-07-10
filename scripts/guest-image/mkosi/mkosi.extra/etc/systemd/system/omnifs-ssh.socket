@@ -6,6 +6,8 @@ Description=omnifs krunkit guest ssh (vsock)
 # installed. A seed with no key means ssh access is disabled for that launch;
 # an always-enabled socket would accept connections into a guest with no
 # authorized_keys at all, which is a confusing hang, not a clean refusal.
+#
+# No Accept=yes: the activated omnifs-ssh.service is systemd-socket-proxyd,
+# which owns the listening socket and accepts every connection itself.
 [Socket]
 ListenStream=vsock::22
-Accept=yes
