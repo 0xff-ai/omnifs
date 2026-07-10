@@ -1,17 +1,16 @@
 #!/usr/bin/env bash
 # Merge per-arch image digests into one multi-platform manifest tag and
-# verify both platforms are present. Shared by the runtime-image and
-# frontend-image publish steps in ci.yml: same imagetools mechanics, a
-# different image repo and digest set per caller.
+# verify both platforms are present. Used by the frontend-image publish step
+# in ci.yml.
 #
 # Usage: publish-manifest.sh <image-repo> <tag> <digests-dir> <out-prefix>
 #
 # <image-repo> is the registry-qualified repo with no tag (e.g.
-# ghcr.io/0xff-ai/omnifs or ghcr.io/0xff-ai/omnifs-frontend). <digests-dir>
-# holds one file per platform, named by its sha256 digest (hex, no prefix),
-# as `actions/download-artifact` lays out `docker-digest-*`/`frontend-digest-*`
-# artifacts with merge-multiple. Writes <out-prefix>-manifest.txt and
-# <out-prefix>-manifest-digest.txt in the current directory.
+# ghcr.io/0xff-ai/omnifs-frontend). <digests-dir> holds one file per platform,
+# named by its sha256 digest (hex, no prefix), as `actions/download-artifact`
+# lays out `frontend-digest-*` artifacts with merge-multiple. Writes
+# <out-prefix>-manifest.txt and <out-prefix>-manifest-digest.txt in the
+# current directory.
 set -euo pipefail
 
 if [[ $# -ne 4 ]]; then

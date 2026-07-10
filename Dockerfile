@@ -139,95 +139,19 @@ RUN --mount=type=cache,id=omnifs-cargo-registry,target=/usr/local/cargo/registry
     cargo test -p 'omnifs-provider-*' -p test-provider \
         --target wasm32-wasip2 --no-run
 
-# --- Runtime ---
-
-# --- Runtime base ---
-#
-# The single runtime setup for both images. `runtime-dev` (contributor, built
-# by `just dev`) copies the binary compiled in this Dockerfile; `runtime-release`
-# (built by `scripts/ci/build-runtime-image.sh`) injects a prebuilt binary as a
-# named build context. Because both descend from `runtime-base`, the apt/setup
-# block below has one owner — targeting `runtime-release` never builds the
-# compile toolchain, so no base image needs publishing.
-
-FROM ubuntu:25.10 AS runtime-base
-
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-        bash ca-certificates curl fuse3 gnupg jq \
-        zsh git openssh-client procps nfs-common netbase \
-        bat git-delta ripgrep util-linux \
-    && rm -rf /var/lib/apt/lists/* \
-    && mkdir -p /etc/apt/keyrings \
-    && curl -fsSL https://repo.charm.sh/apt/gpg.key \
-        | gpg --dearmor -o /etc/apt/keyrings/charm.gpg \
-    && echo "deb [signed-by=/etc/apt/keyrings/charm.gpg] https://repo.charm.sh/apt/ * *" \
-        > /etc/apt/sources.list.d/charm.list \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends gum \
-    && rm -rf /var/lib/apt/lists/*
-
-COPY scripts/container-zshrc.zsh /etc/zsh/zshrc
-
-COPY scripts/demo.sh /tmp/demo.sh
-COPY scripts/container-entrypoint.sh /usr/local/bin/omnifs-container-entrypoint
-# The container owns its guest paths. Declaring them as image ENV means the
-# entrypoint, the daemon (which resolves OMNIFS_HOME / OMNIFS_MOUNT_POINT from
-# the environment), interactive `docker exec` shells, and the welcome banner all
-# read one value, with no in-image file to source.
-ENV SHELL=/bin/zsh \
-    OMNIFS_HOME=/root/.omnifs \
-    OMNIFS_MOUNT_POINT=/omnifs
-RUN chmod 0755 /tmp/demo.sh /usr/local/bin/omnifs-container-entrypoint \
-    && mkdir -p "$OMNIFS_HOME/cache" /tmp/omnifs-provider-manifests
-
-SHELL ["/bin/zsh", "-c"]
-WORKDIR /
-ENTRYPOINT ["/usr/local/bin/omnifs-container-entrypoint"]
-
-# Launcher↔image version handshake. The launcher inspects these labels
-# before `docker create` and refuses to start the container if it is
-# older than the value here — catches the footgun where a
-# contributor's `omnifs` on PATH (e.g. an old npm-installed release)
-# is used to launch an image built from a newer source tree that
-# wires new capabilities (ports, env vars, mounts) the old launcher
-# doesn't know about. `scripts/dev.ts`, `scripts/ci/build-runtime-image.sh`,
-# and CI all pass the workspace version as the build arg. Set on `runtime-base`
-# so both final stages inherit the labels.
-#
-# OMNIFS_LAUNCH_PROTOCOL is set to `daemon-control-v<API_MAJOR>` and must
-# match the `EXPECTED_LAUNCH_PROTOCOL` constant in `crates/omnifs-cli/src/runtime.rs`.
-# Both are derived from the same API major version; when API_MAJOR bumps, update
-# this arg default and the constant together.
-ARG OMNIFS_MIN_LAUNCHER_VERSION=unknown
-ARG OMNIFS_LAUNCH_PROTOCOL=daemon-control-v3
-LABEL ai.0xff.omnifs.min-launcher-version=${OMNIFS_MIN_LAUNCHER_VERSION}
-LABEL ai.0xff.omnifs.launch-protocol=${OMNIFS_LAUNCH_PROTOCOL}
-
-# Contributor image: the binary compiled in this Dockerfile's `builder` stage.
-FROM runtime-base AS runtime-dev
-COPY --from=builder /omnifs /usr/local/bin/
-RUN chmod 0755 /usr/local/bin/omnifs
-
-# Release image: a prebuilt binary injected as the `omnifs-bin` build context by
-# `scripts/ci/build-runtime-image.sh`, so no compile toolchain is built.
-FROM runtime-base AS runtime-release
-COPY --from=omnifs-bin omnifs /usr/local/bin/omnifs
-
 # --- Docker-hosted FUSE frontend ---
 #
 # `omnifs frontend up` (see `crates/omnifs-cli/src/frontend_container.rs`,
 # `crates/omnifs-daemon/src/frontend.rs`) launches a separate, credential-free
 # container that only ever runs `omnifs frontend run --kind fuse`, attached over
 # TCP to a host-native daemon's shared namespace. It never runs a provider, so
-# it gets its own minimal base rather than extending `runtime-base`: no
-# `OMNIFS_HOME`, no provider store, no control API, none of the runtime image's
-# interactive-shell toolbox (zsh, gum, git, ripgrep, nfs-common...).
+# it gets its own minimal base: no `OMNIFS_HOME`, no provider store, no control
+# API, none of an interactive-shell toolbox (zsh, gum, git, ripgrep, nfs-common...).
 #
-# Debian, not the Ubuntu `runtime-base` family: this is the same Debian family
-# the compile `toolchain` stage above already uses, and Debian's default
-# coreutils/findutils are GNU (uutils is opt-in, not the default `tail`), which
-# is what the frontend conformance matrix's `tail -f` case requires.
+# Debian, not Ubuntu: this is the same Debian family the compile `toolchain`
+# stage above already uses, and Debian's default coreutils/findutils are GNU
+# (uutils is opt-in, not the default `tail`), which is what the frontend
+# conformance matrix's `tail -f` case requires.
 FROM debian:trixie-slim AS frontend-base
 
 RUN apt-get update \
@@ -238,14 +162,13 @@ RUN apt-get update \
 
 ENTRYPOINT ["/usr/local/bin/omnifs", "frontend", "run", "--kind", "fuse", "--mount-point", "/omnifs"]
 
-# Contributor image: the binary compiled in this Dockerfile's `builder` stage,
-# same source as `runtime-dev`. `just frontend-image` builds this target.
+# Contributor image: the binary compiled in this Dockerfile's `builder` stage.
+# `just frontend-image` builds this target.
 FROM frontend-base AS frontend-dev
 COPY --from=builder /omnifs /usr/local/bin/
 RUN chmod 0755 /usr/local/bin/omnifs
 
-# Release image: a prebuilt binary injected as the `omnifs-bin` build context,
-# same mechanism as `runtime-release`. `scripts/ci/build-frontend-image.sh`
-# builds this target.
+# Release image: a prebuilt binary injected as the `omnifs-bin` build context.
+# `scripts/ci/build-frontend-image.sh` builds this target.
 FROM frontend-base AS frontend-release
 COPY --from=omnifs-bin omnifs /usr/local/bin/omnifs
