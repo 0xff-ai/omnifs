@@ -3202,6 +3202,7 @@ dependencies = [
  "base64",
  "hickory-proto",
  "http",
+ "omnifs-api",
  "omnifs-core",
  "omnifs-engine",
  "omnifs-nfs",
