@@ -164,6 +164,22 @@ pub struct Attrs {
     pub read_style: ReadStyle,
 }
 
+impl Attrs {
+    fn from_cache(kind: EntryKind, attrs: Option<&FileAttrsCache>, change: u64) -> Self {
+        Self {
+            kind,
+            size: attrs.map_or(0, FileAttrsCache::st_size),
+            ttl: ttl_for(attrs),
+            change,
+            direct_io: attrs.is_some_and(FileAttrsCache::should_direct_io),
+            stability: attrs.map_or(StabilityClass::Stable, |attrs| {
+                stability_class(attrs.stability())
+            }),
+            read_style: read_style_of(attrs),
+        }
+    }
+}
+
 /// The resolved answer for a lookup.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeAnswer {
@@ -464,13 +480,9 @@ struct NodeRecord {
     mount: String,
     /// Mount-relative path (the invalidation-match key).
     rel: Path,
-    /// Last-known kind.
-    kind: view_types::EntryKind,
     /// Best-known file attrs, preserving a learned size across placeholder
     /// refreshes (the engine-internal learned-size writeback).
     attrs: Option<FileAttrsCache>,
-    /// Backing dir when this node is a resolved treeref subtree.
-    subtree_root: Option<PathBuf>,
 }
 
 /// A cached ranged read handle, its live-follow pump, and its idle clock.
@@ -562,9 +574,7 @@ impl TreeNamespace {
             full_path: Path::root(),
             mount: mount.clone(),
             rel: Path::root(),
-            kind: view_types::EntryKind::Directory,
             attrs: None,
-            subtree_root: None,
         };
         self.by_path.insert((mount, "/".to_string()), ROOT_ID);
         self.ids.insert(ROOT_ID, root);
@@ -682,9 +692,7 @@ impl TreeNamespace {
                 full_path,
                 mount,
                 rel,
-                kind: node.kind(),
                 attrs: merged,
-                subtree_root: node.subtree_path().cloned(),
             },
         );
         NodeId(id)
@@ -783,12 +791,12 @@ impl TreeNamespace {
 
     /// Build the policied [`Attrs`] for a node from its best-known file attrs.
     fn attrs_for(&self, id: u64, node: &crate::Node) -> Attrs {
-        let attrs = self
-            .ids
-            .get(&id)
-            .and_then(|r| r.attrs.clone())
-            .or_else(|| node.attrs().cloned());
-        self.attrs_from_parts(id, node, attrs.as_ref())
+        let record = self.ids.get(&id);
+        let attrs = record
+            .as_ref()
+            .and_then(|record| record.attrs.as_ref())
+            .or_else(|| node.attrs());
+        self.attrs_from_parts(id, node, attrs)
     }
 
     fn attrs_from_parts(
@@ -797,17 +805,12 @@ impl TreeNamespace {
         node: &crate::Node,
         attrs: Option<&FileAttrsCache>,
     ) -> Attrs {
-        let kind = ns_kind(node);
         let epoch = self.node_epochs.get(&id).map_or(0, |e| *e);
-        Attrs {
-            size: attrs.map_or(0, FileAttrsCache::st_size),
-            ttl: ttl_for(attrs),
-            direct_io: attrs.is_some_and(FileAttrsCache::should_direct_io),
-            stability: attrs.map_or(StabilityClass::Stable, |a| stability_class(a.stability())),
-            change: self.root_aware_change(id, node, attrs, epoch),
-            kind,
-            read_style: read_style_of(attrs),
-        }
+        Attrs::from_cache(
+            ns_kind(node),
+            attrs,
+            self.root_aware_change(id, node, attrs, epoch),
+        )
     }
 
     /// The change counter for a node, folding the served-mount set into the
@@ -888,15 +891,13 @@ impl TreeNamespace {
         len: u32,
     ) -> Result<ReadAnswer, NsError> {
         let chunk = handle.read(offset, len).await?;
-        // Learn the exact size the chunk observed, if any, and rebuild attrs.
+        // Learn the exact size the chunk observed, falling back to the handle's
+        // declared attrs when the read did not refine them.
         let learned = chunk
             .learned_attrs
-            .clone()
-            .or_else(|| Some(handle.attrs().clone()));
-        if let Some(attrs) = &learned {
-            self.store_learned(id, attrs.clone());
-        }
-        let attrs = self.attrs_for_learned(id, view_types::EntryKind::File, None, learned.as_ref());
+            .unwrap_or_else(|| handle.attrs().clone());
+        self.store_learned(id, learned.clone());
+        let attrs = self.attrs_for_read(id, EntryKind::File, Some(&learned));
         Ok(ReadAnswer {
             bytes: chunk.bytes,
             eof: chunk.eof,
@@ -915,8 +916,8 @@ impl TreeNamespace {
         let ctx = RequestCtx { trace };
         match self.tree.read(node, &ctx).await? {
             ReadResult::Bytes { data, attrs, .. } => {
-                if let Some(a) = &attrs {
-                    self.store_learned(id, a.clone());
+                if let Some(attrs) = &attrs {
+                    self.store_learned(id, attrs.clone());
                 }
                 let start = usize::try_from(offset)
                     .unwrap_or(usize::MAX)
@@ -924,7 +925,7 @@ impl TreeNamespace {
                 let end = start.saturating_add(len as usize).min(data.len());
                 let bytes = data[start..end].to_vec();
                 let eof = end >= data.len();
-                let attrs = self.attrs_for_learned(id, node.kind(), Some(node), attrs.as_ref());
+                let attrs = self.attrs_for_read(id, ns_kind(node), attrs.as_ref());
                 Ok(ReadAnswer { bytes, eof, attrs })
             },
             // A subtree node is a directory; its files are served by the
@@ -934,29 +935,9 @@ impl TreeNamespace {
     }
 
     /// Compute `Attrs` for a read answer, folding in the size the read learned.
-    fn attrs_for_learned(
-        &self,
-        id: u64,
-        kind: view_types::EntryKind,
-        node: Option<&crate::Node>,
-        attrs: Option<&FileAttrsCache>,
-    ) -> Attrs {
+    fn attrs_for_read(&self, id: u64, kind: EntryKind, attrs: Option<&FileAttrsCache>) -> Attrs {
         let epoch = self.node_epochs.get(&id).map_or(0, |e| *e);
-        Attrs {
-            kind: node.map_or(
-                match kind {
-                    view_types::EntryKind::Directory => EntryKind::Directory,
-                    view_types::EntryKind::File => EntryKind::File,
-                },
-                ns_kind,
-            ),
-            size: attrs.map_or(0, FileAttrsCache::st_size),
-            ttl: ttl_for(attrs),
-            direct_io: attrs.is_some_and(FileAttrsCache::should_direct_io),
-            stability: attrs.map_or(StabilityClass::Stable, |a| stability_class(a.stability())),
-            change: change_counter_parts(id, attrs, epoch),
-            read_style: read_style_of(attrs),
-        }
+        Attrs::from_cache(kind, attrs, change_counter_parts(id, attrs, epoch))
     }
 
     fn store_learned(&self, id: u64, learned: FileAttrsCache) {
@@ -1009,15 +990,11 @@ impl TreeNamespace {
         // pieces it needs (no back-reference to `self`).
         let record_growth = move |new_end: u64| {
             let grown = base.clone().with_exact_size(new_end);
-            let attrs = Attrs {
-                kind: EntryKind::File,
-                size: grown.st_size(),
-                ttl: ttl_for(Some(&grown)),
-                direct_io: grown.should_direct_io(),
-                stability: stability_class(grown.stability()),
-                change: change_counter_parts(id, Some(&grown), node_epoch),
-                read_style: read_style_of(Some(&grown)),
-            };
+            let attrs = Attrs::from_cache(
+                EntryKind::File,
+                Some(&grown),
+                change_counter_parts(id, Some(&grown), node_epoch),
+            );
             let _ = events.send(NsEvent::AttrsChanged {
                 node: NodeId(id),
                 attrs,
@@ -1131,27 +1108,18 @@ impl TreeNamespace {
                 full_path: full,
                 mount: child_mount,
                 rel: child_rel,
-                kind: meta.kind(),
                 attrs: merged.clone(),
-                subtree_root: None,
             },
         );
         let epoch = self.node_epochs.get(&id).map_or(0, |e| *e);
         let kind = ns_kind_from_meta(meta);
+        let attrs = Attrs::from_cache(
+            kind.clone(),
+            merged.as_ref(),
+            change_counter_parts(id, merged.as_ref(), epoch),
+        );
         DirEntry {
-            attrs: Attrs {
-                size: merged.as_ref().map_or(0, FileAttrsCache::st_size),
-                ttl: ttl_for(merged.as_ref()),
-                direct_io: merged
-                    .as_ref()
-                    .is_some_and(FileAttrsCache::should_direct_io),
-                stability: merged
-                    .as_ref()
-                    .map_or(StabilityClass::Stable, |a| stability_class(a.stability())),
-                change: change_counter_parts(id, merged.as_ref(), epoch),
-                kind: kind.clone(),
-                read_style: read_style_of(merged.as_ref()),
-            },
+            attrs,
             kind,
             name: name.to_string(),
             node: NodeId(id),
@@ -1205,8 +1173,6 @@ impl TreeNamespace {
         );
         if let Some(mut record) = self.ids.get_mut(&id) {
             record.attrs.clone_from(&merged);
-            record.kind = node.kind();
-            record.subtree_root = node.subtree_path().cloned();
         }
         merged
     }
