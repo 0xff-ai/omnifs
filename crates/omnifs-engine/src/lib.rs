@@ -58,6 +58,6 @@ pub(crate) use omnifs_wit::provider::Provider;
 pub(crate) use ops::op;
 pub(crate) use ops::op::Op;
 pub(crate) use ops::validate as op_validate;
-pub(crate) use runtime::wasm::{component_engine, provider_compiler_strategy};
+pub(crate) use runtime::wasm::component_engine;
 pub(crate) use runtime::{ProviderErrorClass, Runtime};
 pub(crate) use runtime::{instance, registry, wasi, wasm};

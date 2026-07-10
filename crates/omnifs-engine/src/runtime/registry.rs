@@ -56,12 +56,8 @@ impl MountRuntimes {
         // Compiled component artifacts live with the rest of the host's state,
         // under `<cache>/wasm`, rather than a global per-user wasmtime cache.
         let wasm_cache = context.wasm_cache_dir();
-        let engine = component_engine(Some(&wasm_cache), |config| {
-            if let Some(strategy) = crate::provider_compiler_strategy() {
-                config.strategy(strategy);
-            }
-        })
-        .map_err(|e| RegistryError::RuntimeError(format!("provider engine init: {e}")))?;
+        let engine = component_engine(Some(&wasm_cache), |_| {})
+            .map_err(|e| RegistryError::RuntimeError(format!("provider engine init: {e}")))?;
 
         // Global cache handles: a durable object database and a disposable view
         // database cleared + reopened on startup (Codex #5). Shared across all

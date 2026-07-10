@@ -5,7 +5,7 @@
 
 use std::path::Path;
 
-use wasmtime::{Cache, CacheConfig, Config, Engine, Strategy};
+use wasmtime::{Cache, CacheConfig, Config, Engine};
 use wasmtime_wasi::WasiView;
 
 /// Build a Wasmtime engine configured for the component model.
@@ -42,31 +42,6 @@ pub fn component_engine(
     }
     configure(&mut config);
     Engine::new(&config)
-}
-
-/// Compiler strategy for the *provider* engine, read from
-/// `OMNIFS_WASM_COMPILER`: `winch` selects the single-pass baseline compiler
-/// (fast compile, slower execution), `cranelift` forces the optimizing
-/// compiler, and unset leaves the wasmtime default (Cranelift). Returns `None`
-/// when no override applies so the caller leaves `Config` untouched.
-///
-/// Providers suspend on host callouts rather than running hot loops, so Winch's
-/// execution penalty barely touches them while its compile speed unblocks cold
-/// startup.
-pub fn provider_compiler_strategy() -> Option<Strategy> {
-    let raw = std::env::var("OMNIFS_WASM_COMPILER").ok()?;
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "" => None,
-        "winch" => Some(Strategy::Winch),
-        "cranelift" => Some(Strategy::Cranelift),
-        other => {
-            tracing::warn!(
-                value = other,
-                "ignoring unrecognized OMNIFS_WASM_COMPILER (expected 'winch' or 'cranelift')"
-            );
-            None
-        },
-    }
 }
 
 /// Add async WASI Preview 2 imports to a component linker.

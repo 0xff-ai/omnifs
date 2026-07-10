@@ -38,7 +38,7 @@ omnifs-nfs = { version = "0.2.1", path = "crates/omnifs-nfs" }
 omnifs-sdk = { version = "0.2.1", path = "crates/omnifs-sdk" }
 omnifs-sdk-macros = { version = "0.2.1", path = "crates/omnifs-sdk-macros" }
 omnifs-wit = { version = "0.2.1", path = "crates/omnifs-wit" }
-wasmtime = { version = "46.0.1", default-features = false, features = ["async", "cache", "component-model", "component-model-async", "cranelift", "winch", "runtime"] }
+wasmtime = { version = "46.0.1", default-features = false, features = ["async", "cache", "component-model", "component-model-async", "cranelift", "runtime"] }
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "stream", "rustls"] }
 blake3 = "1"
