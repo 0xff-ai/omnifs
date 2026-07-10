@@ -407,7 +407,6 @@ impl MountRuntimes {
             spec,
             mount,
             wasm_path,
-            fingerprint,
             running,
             reason,
         } = work;
@@ -416,7 +415,6 @@ impl MountRuntimes {
             Ok(built) => LoadResult::Ready {
                 mount,
                 wasm_path,
-                fingerprint,
                 running,
                 reason,
                 duration: started.elapsed(),
@@ -447,10 +445,6 @@ impl MountRuntimes {
 
     fn fingerprint(&self, mount: &str) -> Option<u64> {
         self.fingerprints.read().get(mount).copied()
-    }
-
-    fn remove_fingerprint(&self, mount: &str) {
-        self.fingerprints.write().remove(mount);
     }
 
     fn start_timer(
@@ -605,9 +599,7 @@ impl<'a> ReconcilePass<'a> {
             .mounts_dir()
             .join(format!("{}.json", spec.mount));
         if let Some(work) = self.plan_spec(spec, &path) {
-            for result in self.load_in_parallel(vec![work]) {
-                self.record_load(result);
-            }
+            self.record_load(self.registry.build_work(work));
         }
         self.outcome
     }
@@ -665,7 +657,6 @@ impl<'a> ReconcilePass<'a> {
             spec: materialized,
             mount,
             wasm_path,
-            fingerprint,
             running,
             reason,
         })
@@ -777,7 +768,6 @@ impl<'a> ReconcilePass<'a> {
             LoadResult::Ready {
                 mount,
                 wasm_path,
-                fingerprint,
                 running,
                 reason,
                 duration,
@@ -793,10 +783,6 @@ impl<'a> ReconcilePass<'a> {
                 };
                 match applied {
                     Ok(()) => {
-                        self.registry
-                            .fingerprints
-                            .write()
-                            .insert(mount.clone(), fingerprint);
                         if running {
                             info!(
                                 mount = mount.as_str(),
@@ -854,7 +840,6 @@ impl<'a> ReconcilePass<'a> {
                     );
                     self.outcome.removed.push(mount.clone());
                 }
-                self.registry.remove_fingerprint(&mount);
             }
         }
     }
@@ -898,7 +883,6 @@ struct LoadWork {
     spec: Spec,
     mount: String,
     wasm_path: PathBuf,
-    fingerprint: u64,
     /// Whether a prior instance is being replaced (update) versus a fresh add.
     running: bool,
     reason: &'static str,
@@ -919,7 +903,6 @@ enum LoadResult {
     Ready {
         mount: String,
         wasm_path: PathBuf,
-        fingerprint: u64,
         running: bool,
         reason: &'static str,
         duration: Duration,
