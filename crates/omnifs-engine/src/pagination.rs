@@ -94,7 +94,7 @@ impl Runtime {
         let Some(mut dirents) = DirentsPayload::deserialize(&record.payload) else {
             return NextPageOutcome::NoMore;
         };
-        let Some(cursor) = dirents.next_cursor.clone() else {
+        let Some(cursor) = dirents.next_cursor.take() else {
             return NextPageOutcome::NoMore;
         };
         // This record is, by construction, a host-accumulated paginated
