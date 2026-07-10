@@ -208,7 +208,6 @@ pub struct ObjectBlock<O: Object> {
     canonical_ct: Option<ContentType>,
     renders: Vec<(ContentType, crate::repr::RenderFn)>,
     leaves: Vec<ObjectLeaf<O>>,
-    leaf_claims: Vec<Pattern>,
     /// Boxed live-face handlers (direct/blob/stream/object), keyed by leaf
     /// name; moved into the mounted entry.
     face_handlers: std::collections::BTreeMap<String, FaceHandler<O::State>>,
@@ -227,7 +226,6 @@ pub struct ObjectBlock<O: Object> {
     choices_faces: Vec<ChoicesFace>,
     /// The single allowed file-object face name (file shape only).
     file_face_seen: bool,
-    error: Option<ProviderError>,
 }
 
 /// A collection face declaration captured at registration time. The child
@@ -255,14 +253,12 @@ impl<O: Object> ObjectBlock<O> {
             canonical_ct: None,
             renders: Vec::new(),
             leaves: Vec::new(),
-            leaf_claims: Vec::new(),
             face_handlers: std::collections::BTreeMap::new(),
             collections: Vec::new(),
             collection_handlers: Vec::new(),
             tree_faces: Vec::new(),
             choices_faces: Vec::new(),
             file_face_seen: false,
-            error: None,
         })
     }
 
@@ -377,20 +373,11 @@ impl<O: Object> ObjectBlock<O> {
         if self.shape == AnchorShape::File {
             return Ok(());
         }
-        let pattern = Pattern::parse(&format!("{}/{}", self.template.trim_end_matches('/'), name))?;
-        self.leaf_claims.push(pattern);
+        Pattern::parse(&format!("{}/{}", self.template.trim_end_matches('/'), name))?;
         Ok(())
     }
 
-    fn finish(mut self) -> Result<ObjectSpec<O>> {
-        if let Some(error) = self.error.take() {
-            return Err(error);
-        }
-        let face_handlers = std::mem::take(&mut self.face_handlers);
-        let collections = std::mem::take(&mut self.collections);
-        let collection_handlers = std::mem::take(&mut self.collection_handlers);
-        let tree_faces = std::mem::take(&mut self.tree_faces);
-        let choices_faces = std::mem::take(&mut self.choices_faces);
+    fn finish(self) -> Result<ObjectSpec<O>> {
         let stability = self.stability.ok_or_else(|| {
             ProviderError::invalid_input(
                 "object block requires a stability declaration: stability(|key| ..) or stable()/dynamic()/live()",
@@ -422,11 +409,11 @@ impl<O: Object> ObjectBlock<O> {
             render_table,
             has_canonical,
             leaves: self.leaves,
-            face_handlers: std::rc::Rc::new(face_handlers),
-            collections: std::rc::Rc::new(collections),
-            collection_handlers: std::rc::Rc::new(collection_handlers),
-            tree_faces: std::rc::Rc::new(tree_faces),
-            choices_faces: std::rc::Rc::new(choices_faces),
+            face_handlers: std::rc::Rc::new(self.face_handlers),
+            collections: std::rc::Rc::new(self.collections),
+            collection_handlers: std::rc::Rc::new(self.collection_handlers),
+            tree_faces: std::rc::Rc::new(self.tree_faces),
+            choices_faces: std::rc::Rc::new(self.choices_faces),
         })
     }
 }
