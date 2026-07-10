@@ -168,7 +168,9 @@ impl Commands {
             Self::Debug(_) => "debug",
             #[cfg(feature = "daemon")]
             Self::Daemon(_) => return None,
-            Self::Frontend(args) => return args.telemetry_label(),
+            // Every `frontend` subcommand shares one telemetry label; there is
+            // no longer a hidden internal one (like `daemon`'s) to exclude.
+            Self::Frontend(_) => "frontend",
         })
     }
 

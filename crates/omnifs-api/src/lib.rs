@@ -24,8 +24,8 @@ pub const API_MAJOR: u16 = 4;
 pub const API_MINOR: u16 = 1;
 
 /// TCP namespace attach address, injected by the frontend container launcher
-/// and read by the out-of-process `omnifs frontend run` runner when no
-/// `--attach` unix path is given. Carries `host.docker.internal:<port>` so a
+/// and read by the out-of-process `omnifs-fuse` runner when no `--attach`
+/// unix path is given. Carries `host.docker.internal:<port>` so a
 /// containerized frontend reaches the host-native daemon's TCP attach
 /// listener.
 pub const OMNIFS_ATTACH_ADDR_ENV: &str = "OMNIFS_ATTACH_ADDR";
