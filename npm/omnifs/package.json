@@ -2,7 +2,7 @@
   "bin": {
     "omnifs": "bin/omnifs.js"
   },
-  "description": "Host CLI for omnifs, a Docker-backed virtual filesystem for external services",
+  "description": "Native CLI for omnifs, a filesystem for external services",
   "engines": {
     "node": ">=16"
   },
