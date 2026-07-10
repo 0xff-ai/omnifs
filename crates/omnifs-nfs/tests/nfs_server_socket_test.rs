@@ -37,11 +37,8 @@ const LARGE_RANGED_TAIL_OFFSET: u64 = 64 * 1024 * 1024;
 fn nfs_tcp_server_lists_reads_and_closes_through_runtime() {
     let harness = support::test_export();
     let export: Arc<dyn ReadOnlyExport> = harness.export.clone();
-    let trace_path = std::env::temp_dir().join(format!(
-        "omnifs-nfs-socket-test-{}.trace",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_file(&trace_path);
+    let trace_dir = tempfile::tempdir().expect("trace dir");
+    let trace_path = trace_dir.path().join("server.trace");
     let server = start_server(
         export,
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
@@ -88,7 +85,6 @@ fn nfs_tcp_server_lists_reads_and_closes_through_runtime() {
     assert_eq!(data, b"L".to_vec());
     assert!(eof);
     client.close(&large);
-    let _ = std::fs::remove_file(trace_path);
 }
 
 #[test]
