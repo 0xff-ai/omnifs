@@ -174,7 +174,6 @@ impl<T: Object, C: Cursor> Collection<T, C> {
     pub fn page(entries: impl IntoIterator<Item = CollectionEntry<T>>) -> CollectionPage<T, C> {
         CollectionPage {
             entries: entries.into_iter().collect(),
-            validator: None,
             _cursor: std::marker::PhantomData,
         }
     }
@@ -209,7 +208,6 @@ impl<T: Object, C: Cursor> Collection<T, C> {
 /// A pending paged collection awaiting its resume cursor.
 pub struct CollectionPage<T: Object, C> {
     entries: Vec<CollectionEntry<T>>,
-    validator: Option<VersionToken>,
     _cursor: std::marker::PhantomData<C>,
 }
 
@@ -220,7 +218,7 @@ impl<T: Object, C: Cursor> CollectionPage<T, C> {
         Collection::Page {
             entries: self.entries,
             next: cursor,
-            validator: self.validator,
+            validator: None,
         }
     }
 }
