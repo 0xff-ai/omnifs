@@ -91,7 +91,6 @@ pub(crate) struct DaemonClient {
     /// Layout for record-based resolution. `None` only when the ambient
     /// workspace could not be resolved (then the client behaves as absent).
     record_path: Option<PathBuf>,
-    http: reqwest::Client,
     unix: OnceLock<HyperClient<UnixConnector, Full<Bytes>>>,
     /// Set once a stale unix socket has been cleaned, so the unavailable error
     /// can report the record was removed.
@@ -113,18 +112,43 @@ impl DaemonClient {
     fn with_record_path(record_path: Option<PathBuf>) -> Self {
         Self {
             record_path,
-            http: Self::http_client(),
             unix: OnceLock::new(),
             cleaned_stale: AtomicBool::new(false),
         }
     }
 
-    fn http_client() -> reqwest::Client {
-        reqwest::Client::builder()
-            .connect_timeout(CONNECT_TIMEOUT)
-            .timeout(REQUEST_TIMEOUT)
-            .build()
-            .expect("reqwest client with static config")
+    /// Build the TCP control-client, on demand, only for the
+    /// `OMNIFS_DAEMON_ADDR` override path. The host-native daemon's only
+    /// production transport is the unix socket (`unix_client`, no TLS
+    /// backend involved), so this is never constructed for `status`,
+    /// `down`, `shell`, or any other command that resolves the daemon
+    /// through the runtime record.
+    ///
+    /// Building a `reqwest::Client` initializes its TLS backend, which
+    /// probes the system certificate store; on a CA-less minimal Linux that
+    /// probe can fail. Building it here, lazily, turns that failure into an
+    /// actionable error at the one call site that actually needs TLS,
+    /// instead of a startup panic for every command.
+    fn http_client() -> Result<reqwest::Client> {
+        Self::build_http_client(
+            reqwest::Client::builder()
+                .connect_timeout(CONNECT_TIMEOUT)
+                .timeout(REQUEST_TIMEOUT),
+        )
+    }
+
+    /// The `.build()` call this wraps is where a CA-less system fails: it
+    /// constructs the TLS backend (rustls-platform-verifier loads the
+    /// system root store), and `build()` returns `Err` rather than
+    /// panicking when that store is empty. Split out from `http_client` so
+    /// the failure path is exercisable with an arbitrary builder in tests,
+    /// without depending on an actually CA-less host.
+    fn build_http_client(builder: reqwest::ClientBuilder) -> Result<reqwest::Client> {
+        builder.build().context(
+            "build TLS-capable HTTP client for OMNIFS_DAEMON_ADDR; \
+             no system certificate authorities found, install ca-certificates \
+             (the host-native daemon's unix-socket transport does not need this)",
+        )
     }
 
     fn unix_client(&self) -> &HyperClient<UnixConnector, Full<Bytes>> {
@@ -193,8 +217,8 @@ impl DaemonClient {
         body: Option<&serde_json::Value>,
         timeout: Duration,
     ) -> Result<Option<RawResponse>> {
-        let mut builder = self
-            .http
+        let http = Self::http_client()?;
+        let mut builder = http
             .request(method.clone(), format!("{base}{path}"))
             .timeout(timeout);
         if let Some(token) = token {
@@ -987,6 +1011,46 @@ mod tests {
             client.probe().await,
             DaemonControlState::Compatible(_)
         ));
+    }
+
+    /// F6: a CA-less Linux fails inside `ClientBuilder::build()` before any
+    /// network I/O (rustls-platform-verifier's `Verifier::new` returns
+    /// `rustls::Error::General("No CA certificates were loaded from the
+    /// system")` when the native root store comes back empty). An empty
+    /// root store isn't reproducible on this platform, so this forces the
+    /// sibling rejection `build()` makes at the same step (hostname
+    /// verification requires `tls_certs_only()`) to prove `build_http_client`
+    /// turns a `build()` failure into a `Result`, never a panic, and that the
+    /// error is actionable.
+    #[test]
+    fn build_http_client_surfaces_tls_backend_failure_as_error_not_panic() {
+        let builder = reqwest::Client::builder().danger_accept_invalid_hostnames(true);
+        let error = DaemonClient::build_http_client(builder).unwrap_err();
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains("build TLS-capable HTTP client"),
+            "got: {rendered}"
+        );
+        assert!(
+            rendered.contains("ca-certificates"),
+            "error should hint at installing ca-certificates: {rendered}"
+        );
+    }
+
+    /// F6: constructing a `DaemonClient` must never touch the TLS-capable
+    /// HTTP client, so a CA-less host can still run `status`/`down`/`shell`
+    /// against the unix-socket production transport. `with_record_path` (via
+    /// `new`/`for_layout`) only stores the record path and lazy unix-socket
+    /// state; nothing here can fail or panic, unlike the removed eager
+    /// `http: reqwest::Client` field.
+    #[test]
+    fn constructing_a_client_never_builds_the_tls_backend() {
+        let home = tempfile::tempdir().unwrap();
+        let record = home.path().join("daemon.json");
+        // Construction alone (no request made) must succeed even though no
+        // daemon and no CA store are involved.
+        let _client = DaemonClient::with_record_path(Some(record));
+        let _client = DaemonClient::with_record_path(None);
     }
 
     /// With no record and no override, the client is absent and require exits 3.
