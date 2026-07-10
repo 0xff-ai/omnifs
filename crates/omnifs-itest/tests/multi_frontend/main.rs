@@ -179,10 +179,11 @@ fn invalidation_reaches_both_frontends_within_one_op() {
 
 /// The first live proof of gate 3: a renderer serving the projected tree from a
 /// different process than the projection owner, over the namespace wire. A
-/// namespace-only daemon serves an attach socket; an `omnifs frontend run` child
-/// mounts NFS over a wire-backed namespace. The full conformance row table runs
-/// against that out-of-process mount with the same expectations as the in-process
-/// macOS NFS loopback lane, scored as column `macos-nfs-wire`.
+/// namespace-only daemon serves an attach socket; a `wire-test-frontend` child
+/// (this crate's out-of-process NFS wire-protocol test double) mounts NFS over
+/// a wire-backed namespace. The full conformance row table runs against that
+/// out-of-process mount with the same expectations as the in-process macOS NFS
+/// loopback lane, scored as column `macos-nfs-wire`.
 #[cfg(not(target_os = "linux"))]
 #[test]
 fn wire_frontend_nfs_parity() {
@@ -192,7 +193,7 @@ fn wire_frontend_nfs_parity() {
         return;
     }
 
-    let Some(daemon) = live::start_wire_frontend("nfs") else {
+    let Some(daemon) = live::start_wire_frontend() else {
         return;
     };
 

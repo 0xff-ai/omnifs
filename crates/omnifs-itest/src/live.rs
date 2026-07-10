@@ -97,6 +97,37 @@ fn ensure_omnifs_built() {
     });
 }
 
+/// Resolve the `wire-test-frontend` binary the wire lanes spawn: this crate's
+/// own out-of-process NFS wire-protocol test double
+/// (`src/bin/wire_test_frontend.rs`).
+///
+/// `CARGO_BIN_EXE_wire-test-frontend` is only set when compiling this
+/// package's integration tests, not this library, so the path is resolved the
+/// same build-on-demand way [`omnifs_bin`] resolves the CLI.
+#[must_use]
+pub fn wire_test_frontend_bin() -> PathBuf {
+    ensure_wire_test_frontend_built();
+    crate::workspace_root().join("target/debug/wire-test-frontend")
+}
+
+/// Build the `wire-test-frontend` test double once per process at test
+/// runtime. Same pattern and rationale as [`ensure_omnifs_built`].
+fn ensure_wire_test_frontend_built() {
+    static BUILT: OnceLock<()> = OnceLock::new();
+    BUILT.get_or_init(|| {
+        let status = Command::new("cargo")
+            .args(["build", "-p", "omnifs-itest", "--bin", "wire-test-frontend"])
+            .current_dir(crate::workspace_root())
+            .status()
+            .expect("spawn `cargo build -p omnifs-itest --bin wire-test-frontend`");
+        assert!(
+            status.success(),
+            "`cargo build -p omnifs-itest --bin wire-test-frontend` failed; run it directly to \
+             see the error",
+        );
+    });
+}
+
 /// Install the test provider into the provider store under `providers_dir` and
 /// return its content id. The daemon serves by content id, so the provider must
 /// be present in the store before a mount spec pinning it can resolve.
@@ -359,8 +390,8 @@ pub fn start_multi_frontend_daemon(kinds: &[&str]) -> Option<MultiFrontendDaemon
 }
 
 /// A namespace-only `omnifs daemon` (one attach socket, no in-process frontend)
-/// plus an out-of-process `omnifs frontend run` runner attached to it. Torn down on
-/// drop: the frontend first (it owns the mount), then the daemon.
+/// plus an out-of-process `wire-test-frontend` runner attached to it. Torn down
+/// on drop: the frontend first (it owns the mount), then the daemon.
 pub struct WireFrontendDaemon {
     daemon: Child,
     frontend: Child,
@@ -415,8 +446,8 @@ fn wait_briefly(child: &mut Child) {
     }
 }
 
-/// Bring up a namespace-only daemon serving one attach socket, then an
-/// out-of-process `omnifs frontend run --kind <kind>` attached to it. Proves the
+/// Bring up a namespace-only daemon serving one attach socket, then the
+/// out-of-process `wire-test-frontend` NFS runner attached to it. Proves the
 /// projected tree serves out of process over the namespace wire.
 ///
 /// Returns `None` (skip) when the platform cannot mount or a surface never comes
@@ -424,16 +455,16 @@ fn wait_briefly(child: &mut Child) {
 /// (a real regression in the namespace-only ready path). The caller gates on
 /// `OMNIFS_ACCEPTANCE_LIVE`.
 #[must_use]
-pub fn start_wire_frontend(kind: &str) -> Option<WireFrontendDaemon> {
-    wire_frontend(kind, AttachTransport::Unix, Some(nfs_serial_lock()))
+pub fn start_wire_frontend() -> Option<WireFrontendDaemon> {
+    wire_frontend(AttachTransport::Unix, Some(nfs_serial_lock()))
 }
 
 /// Like [`start_wire_frontend`] but the caller already holds the NFS serial lock
 /// and keeps holding it. The perf lane holds one lock across both its sequential
 /// lanes, so it must not let each bring-up acquire (and later drop) its own.
 #[must_use]
-pub fn start_wire_frontend_holding_lock(kind: &str) -> Option<WireFrontendDaemon> {
-    wire_frontend(kind, AttachTransport::Unix, None)
+pub fn start_wire_frontend_holding_lock() -> Option<WireFrontendDaemon> {
+    wire_frontend(AttachTransport::Unix, None)
 }
 
 /// Like [`start_wire_frontend`], but the out-of-process runner attaches over
@@ -442,8 +473,8 @@ pub fn start_wire_frontend_holding_lock(kind: &str) -> Option<WireFrontendDaemon
 /// container. Used by the attach-transport perf comparison (TCP vs UDS), which
 /// isolates the transport cost from Docker's own overhead.
 #[must_use]
-pub fn start_wire_frontend_tcp_holding_lock(kind: &str) -> Option<WireFrontendDaemon> {
-    wire_frontend(kind, AttachTransport::Tcp, None)
+pub fn start_wire_frontend_tcp_holding_lock() -> Option<WireFrontendDaemon> {
+    wire_frontend(AttachTransport::Tcp, None)
 }
 
 /// Which transport the out-of-process runner attaches over. `Unix` shares a
@@ -460,7 +491,6 @@ enum AttachTransport {
 #[allow(clippy::too_many_lines)] // linear end-to-end bring-up
 #[must_use]
 fn wire_frontend(
-    kind: &str,
     transport: AttachTransport,
     nfs_lock: Option<TcpListener>,
 ) -> Option<WireFrontendDaemon> {
@@ -552,9 +582,9 @@ fn wire_frontend(
     // The out-of-process renderer attaches over the requested transport and
     // mounts the tree: `--attach <socket>` for Unix, or the TCP env pair the
     // Docker-hosted frontend also uses.
-    let mut frontend_cmd = Command::new(omnifs_bin());
+    let mut frontend_cmd = Command::new(wire_test_frontend_bin());
     frontend_cmd
-        .args(["frontend", "run", "--kind", kind, "--mount-point"])
+        .arg("--mount-point")
         .arg(&mount_point)
         .env("OMNIFS_HOME", &home_path)
         .env("RUST_LOG", "warn");
@@ -586,7 +616,7 @@ fn wire_frontend(
     let mut frontend = match frontend {
         Ok(child) => child,
         Err(error) => {
-            eprintln!("skip: spawn omnifs frontend run failed: {error}");
+            eprintln!("skip: spawn wire-test-frontend failed: {error}");
             let _ = daemon.kill();
             let _ = daemon.wait();
             return None;

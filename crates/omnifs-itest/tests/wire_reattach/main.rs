@@ -3,7 +3,8 @@
 //! This is the structural answer to the ESTALE row in the NFS quirk catalog. Two
 //! legs, run in order against one live mount:
 //!
-//! - **Leg A (frontend kill).** SIGKILL the `omnifs frontend run` runner mid-workload
+//! - **Leg A (frontend kill).** SIGKILL the `wire-test-frontend` runner (this
+//!   crate's out-of-process NFS wire-protocol test double) mid-workload
 //!   and relaunch it with the same argv (same pinned NFS port, same state dir).
 //!   The kernel client keeps the mount and its filehandles; the restarted runner
 //!   reloads the persisted filehandle table (same generation) and serves without
@@ -194,12 +195,8 @@ fn wire_reattach_survives_frontend_and_daemon_restart() {
     // Same argv every launch: a restart must rebind the same NFS port and reload
     // the same filehandle state directory, or scenario A is impossible.
     let frontend_argv: Vec<String> = vec![
-        "frontend".into(),
-        "run".into(),
         "--attach".into(),
         socket.to_str().expect("socket utf-8").into(),
-        "--kind".into(),
-        "nfs".into(),
         "--mount-point".into(),
         mount_point.to_str().expect("mount utf-8").into(),
         "--nfs-port".into(),
@@ -208,7 +205,7 @@ fn wire_reattach_survives_frontend_and_daemon_restart() {
         state_dir.to_str().expect("state dir utf-8").into(),
     ];
     let spawn_frontend = || {
-        Command::new(live::omnifs_bin())
+        Command::new(live::wire_test_frontend_bin())
             .args(&frontend_argv)
             .env("OMNIFS_HOME", &home)
             .env(
@@ -216,7 +213,7 @@ fn wire_reattach_survives_frontend_and_daemon_restart() {
                 std::env::var("REATTACH_FRONTEND_LOG").unwrap_or_else(|_| "warn".into()),
             )
             .spawn()
-            .expect("spawn omnifs frontend run")
+            .expect("spawn wire-test-frontend")
     };
 
     let mut guard = Cleanup {

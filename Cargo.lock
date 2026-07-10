@@ -3217,12 +3217,15 @@ dependencies = [
 name = "omnifs-itest"
 version = "0.2.1"
 dependencies = [
+ "anyhow",
  "base64",
+ "clap",
  "hickory-proto",
  "http",
  "omnifs-api",
  "omnifs-core",
  "omnifs-engine",
+ "omnifs-namespace-wire",
  "omnifs-nfs",
  "omnifs-wit",
  "omnifs-workspace",
@@ -3232,6 +3235,8 @@ dependencies = [
  "tempfile",
  "time",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
  "wasmtime",
 ]
 
