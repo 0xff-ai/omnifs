@@ -1,6 +1,6 @@
 # omnifs-provider-arxiv
 
-[omnifs](https://github.com/0xff-ai/omnifs) provider that projects [arXiv](https://arxiv.org) papers into a FUSE-visible tree. Address a paper by id; each paper is a version family whose `@latest` alias and numbered `vN` directories expose metadata, the raw Atom feed, the PDF, and the e-print source blob.
+[omnifs](https://github.com/0xff-ai/omnifs) provider that projects [arXiv](https://arxiv.org) papers into a filesystem tree. Address a paper by id; each paper is a version family whose `@latest` alias and numbered `vN` directories expose metadata, the raw Atom feed, the PDF, and the e-print source blob.
 
 ## Mount layout
 
@@ -40,7 +40,7 @@ This is a wasm component. Build with:
 cargo build --target wasm32-wasip2 --release -p omnifs-provider-arxiv
 ```
 
-Release CLI binaries embed this provider and unpack it into `OMNIFS_HOME/providers`. Configure it in your omnifs mount config under the `arxiv` key.
+Release CLI binaries embed this provider and unpack it into `OMNIFS_HOME/providers`. Run `omnifs init arxiv` to create its mount spec.
 
 ## Status
 

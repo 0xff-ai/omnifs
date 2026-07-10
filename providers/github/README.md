@@ -1,6 +1,6 @@
 # omnifs-provider-github
 
-[omnifs](https://github.com/0xff-ai/omnifs) provider that projects GitHub repositories, issues, pull requests, and CI runs into a FUSE-visible tree. Source trees are bind-mounted clones (cloned on demand via SSH); issues and PRs are per-item directories with title, body, state, and comments as separate files.
+[omnifs](https://github.com/0xff-ai/omnifs) provider that projects GitHub repositories, issues, pull requests, and CI runs into a filesystem tree. Source trees are bind-mounted clones (cloned on demand via SSH); issues and PRs are per-item directories with title, body, state, and comments as separate files.
 
 ## Mount layout
 

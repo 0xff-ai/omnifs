@@ -35,23 +35,21 @@ kubectl proxy \
 `--reject-methods` keeps the proxy read-only (defense in depth — this provider
 only ever issues `GET`). `kubectl proxy` already rejects pod `exec`/`attach`.
 
-### Mount config
+### Mount setup
+
+Run `omnifs init kubernetes` and enter the proxy endpoint when prompted. The
+provider-owned config is:
 
 ```json
 {
-  "provider": "omnifs_provider_kubernetes.wasm",
-  "mount": "k8s",
-  "config": {
-    "endpoint": "unix:///run/omnifs/k8s.sock",
-    "hide_empty_types": false
-  }
+  "endpoint": "unix:///run/omnifs/k8s.sock",
+  "hide_empty_types": false
 }
 ```
 
-The host grants the socket automatically from `config.endpoint` (no separate
-`capabilities.unix_sockets` entry needed). One mount targets one cluster/
-context; to browse another cluster, add another mount pointed at a second
-proxy socket.
+The generated mount spec inherits the provider's dynamic socket grant and
+resolves it from `config.endpoint`. One mount targets one cluster/context; to
+browse another cluster, add another mount pointed at a second proxy socket.
 
 `hide_empty_types` (default `false`): when `true`, listing a namespace or
 `/cluster` shows only resource types that currently have at least one instance,

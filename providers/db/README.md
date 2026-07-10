@@ -22,10 +22,8 @@ change. For a developer browsing a snapshot, that is acceptable;
 if the file does change underneath, the read-only retry path
 without `immutable=1` kicks in.
 
-The provider opens **read-only by default**. The application-layer
-`"read_only": false` escape hatch flips both the open flags and
-the URI mode, but the host still needs `"mode": "rw"` on the
-preopen for the kernel to allow writes through. Use it sparingly.
+The provider opens **read-only**. The host grants only a read-only preopen, so
+the sandbox cannot write through the SQLite connection.
 
 Table metadata and database info are **path-shaped**. The SQLite file is
 already the local source of truth, so this provider does not emit canonical
@@ -62,38 +60,26 @@ Metadata leaves are direct read projections. `sample.json` is a **`Dynamic`**
 ranged projection (the route is declared `ranged`) with a content hash version
 token, so a sample of any size is served through one ranged session.
 
-## Example config
+## Setup
+
+Run `omnifs init db` and enter the host path to the SQLite file. The
+provider-owned config is:
 
 ```json
 {
-  "provider": "omnifs_provider_db.wasm",
-  "mount": "db",
-  "capabilities": {
-    "preopened_paths": [
-      { "host": "/data", "guest": "/data", "mode": "ro" }
-    ]
-  },
-  "limits": {
-    "max_memory_mb": 128
-  },
-  "config": {
-    "path": "/data/test.db",
-    "read_only": true,
-    "sample_limit": 20
-  }
+  "path": "/data/test.db",
+  "read_only": true,
+  "sample_limit": 20
 }
 ```
 
-`capabilities.preopened_paths` is the host capability. Each entry
-maps an absolute host path to an absolute guest path. The host
-validates that neither contains `..` segments before passing them
-to Wasmtime. `mode: "ro"` uses `DirPerms::READ + FilePerms::READ`;
-`mode: "rw"` uses `READ | MUTATE` for both.
+The generated mount spec inherits the provider's memory limit and dynamic
+preopen grant. At mount start the host resolves `path` as a read-only WASI
+preopen; the provider never receives general host filesystem access.
 
 ## Swapping in your own database
 
-Drop a SQLite file onto the host, mount it through the preopened
-directory, and point `config.path` at the guest-side location.
+Drop a SQLite file onto the host and point `config.path` at it.
 The smoke harness uses Chinook:
 
 ```bash
@@ -103,26 +89,18 @@ curl -sL -o providers/db/testdata/chinook.sqlite \
 
 # Contributor path: just dev mounts the db provider with this fixture.
 just dev -y
-docker exec omnifs /bin/zsh -lc 'ls /omnifs/db/tables'
-docker exec omnifs /bin/zsh -lc 'cat /omnifs/db/tables/Album/table.json'
-docker exec omnifs /bin/zsh -lc 'cat /omnifs/db/tables/Album/schema.sql'
+# In the shell opened at /omnifs:
+ls /omnifs/db/tables
+cat /omnifs/db/tables/Album/table.json
+cat /omnifs/db/tables/Album/schema.sql
 ```
 
 ## Build notes
 
-The `bundled` feature compiles the C SQLite source against
-`wasi-libc`. That needs a wasi-sysroot with headers, which the Rust
-`wasm32-wasip2` toolchain does not ship. The repo's Dockerfile
-downloads `wasi-sdk` and points `cc-rs` at it via:
-
-```
-WASI_SYSROOT=/opt/wasi-sdk/share/wasi-sysroot
-CC_wasm32_wasip2=/opt/wasi-sdk/bin/clang
-CFLAGS_wasm32_wasip2=--sysroot=/opt/wasi-sdk/share/wasi-sysroot
-```
-
-For local builds outside Docker, set the same variables before
-calling `cargo build --target wasm32-wasip2`.
+The `bundled` feature compiles SQLite against `wasi-libc`, which needs the
+wasi-sdk sysroot absent from the Rust `wasm32-wasip2` toolchain. Use `just
+providers build`; it installs the pinned wasi-sdk and supplies the compiler and
+sysroot settings.
 
 ## What's deferred
 
@@ -131,6 +109,4 @@ calling `cargo build --target wasm32-wasip2`.
   non-integer, and missing-PK tables.
 - PostgreSQL backend (a network callout, plus a connection-pool
   story).
-- Write paths. Read-only is the only flow exercised; the `read_only:
-  false` escape hatch exists but is mostly there for journal-mode
-  quirks.
+- Write paths.
