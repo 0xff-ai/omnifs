@@ -11,6 +11,7 @@ use std::path::Path;
 
 use bollard::models::{ContainerCreateBody, DeviceMapping, HostConfig, MountPoint};
 use omnifs_api::{OMNIFS_ATTACH_ADDR_ENV, OMNIFS_ATTACH_TOKEN_ENV};
+use omnifs_workspace::layout::{OMNIFS_HOME_ENV, WorkspaceLayout};
 
 use crate::config::{Config, resolve_setting};
 use crate::launch_backend::{BUILD_CHANNEL, BuildChannel, ContainerName, ImageRef};
@@ -59,13 +60,14 @@ pub(crate) fn resolve_frontend_image(
 /// The frontend container's name: the bare base name for the default
 /// workspace (no `OMNIFS_HOME` override), else the base name suffixed with an
 /// 8-hex-char hash of the config dir so multiple workspaces never collide.
-/// `is_default_home` is the caller's own `OMNIFS_HOME` read, kept as an
-/// explicit parameter so the naming rule itself is testable without an env
-/// var dependency.
-pub(crate) fn frontend_container_name(
-    config_dir: &Path,
-    is_default_home: bool,
-) -> anyhow::Result<ContainerName> {
+pub(crate) fn frontend_container_name(paths: &WorkspaceLayout) -> anyhow::Result<ContainerName> {
+    container_name_for(
+        &paths.config_dir,
+        std::env::var_os(OMNIFS_HOME_ENV).is_none(),
+    )
+}
+
+fn container_name_for(config_dir: &Path, is_default_home: bool) -> anyhow::Result<ContainerName> {
     let name = if is_default_home {
         FRONTEND_CONTAINER_BASE.to_string()
     } else {
@@ -261,16 +263,15 @@ mod tests {
 
     #[test]
     fn default_home_uses_bare_container_name() {
-        let name = frontend_container_name(Path::new("/home/u/.omnifs"), true).unwrap();
+        let name = container_name_for(Path::new("/home/u/.omnifs"), true).unwrap();
         assert_eq!(name.as_str(), FRONTEND_CONTAINER_BASE);
     }
 
     #[test]
     fn non_default_home_gets_a_stable_hashed_suffix() {
-        let name_a = frontend_container_name(Path::new("/home/u/.omnifs-dev"), false).unwrap();
-        let name_b = frontend_container_name(Path::new("/home/u/.omnifs-dev"), false).unwrap();
-        let name_other =
-            frontend_container_name(Path::new("/home/u/.omnifs-other"), false).unwrap();
+        let name_a = container_name_for(Path::new("/home/u/.omnifs-dev"), false).unwrap();
+        let name_b = container_name_for(Path::new("/home/u/.omnifs-dev"), false).unwrap();
+        let name_other = container_name_for(Path::new("/home/u/.omnifs-other"), false).unwrap();
 
         assert_eq!(name_a, name_b, "the same home must hash to the same name");
         assert_ne!(

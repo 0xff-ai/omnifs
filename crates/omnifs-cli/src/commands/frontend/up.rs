@@ -15,7 +15,6 @@ use std::time::Duration;
 
 use anyhow::{Context as _, ensure};
 use clap::Args;
-use omnifs_workspace::layout::OMNIFS_HOME_ENV;
 use omnifs_workspace::runtime_record::{FrontendKind, FrontendRecord, RuntimeRecord, Via};
 
 use crate::frontend_backend::{DockerBackend, Driver, FrontendBackend, FrontendLaunchSpec};
@@ -79,8 +78,7 @@ async fn run_docker(
     mount_name: &str,
 ) -> anyhow::Result<()> {
     let image = resolve_frontend_image(None, config)?;
-    let is_default_home = std::env::var_os(OMNIFS_HOME_ENV).is_none();
-    let container_name = frontend_container_name(&paths.config_dir, is_default_home)?;
+    let container_name = frontend_container_name(paths)?;
     let target = DockerTarget::new(
         container_name.as_str().to_string(),
         image.as_str().to_string(),

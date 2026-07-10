@@ -2,7 +2,6 @@
 //! health, whichever backend it was launched with.
 
 use clap::Args;
-use omnifs_workspace::layout::OMNIFS_HOME_ENV;
 use omnifs_workspace::runtime_record::{RuntimeRecord, Via};
 
 use crate::error::ExitCode;
@@ -31,8 +30,7 @@ impl FrontendStatusArgs {
             return Self::krunkit_status(&paths).await;
         }
 
-        let is_default_home = std::env::var_os(OMNIFS_HOME_ENV).is_none();
-        let container_name = frontend_container_name(&paths.config_dir, is_default_home)?;
+        let container_name = frontend_container_name(&paths)?;
 
         // The image field is unused by inspection; a valid placeholder is fine.
         let target = DockerTarget::new(

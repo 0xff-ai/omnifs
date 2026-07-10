@@ -31,7 +31,7 @@ use crate::krunkit_backend::{self, KrunkitBackend};
 use crate::launch_backend::{ContainerName, DockerTarget, GUEST_MOUNT};
 use crate::runtime::Runtime;
 use crate::workspace::Workspace;
-use omnifs_workspace::layout::{OMNIFS_HOME_ENV, OMNIFS_MOUNT_POINT_ENV, WorkspaceLayout};
+use omnifs_workspace::layout::{OMNIFS_MOUNT_POINT_ENV, WorkspaceLayout};
 use omnifs_workspace::runtime_record::{RuntimeRecord, Via};
 
 #[derive(Args, Debug, Clone, Default)]
@@ -72,7 +72,7 @@ impl ShellArgs {
             .and_then(|record| record.virtualized_frontend().map(|(via, _mount_point)| via));
         match recorded_via {
             Some(Via::Docker) => {
-                let container_name = frontend_container_name(paths)?;
+                let container_name = crate::frontend_container::frontend_container_name(paths)?;
                 return self.exec_in_container(&container_name);
             },
             Some(Via::Krunkit) => return self.exec_in_krunkit_guest(paths),
@@ -185,13 +185,6 @@ impl ShellArgs {
         }
         spawn_and_propagate(cmd, "open shell in the krunkit guest".to_string())
     }
-}
-
-/// The Docker-hosted FUSE frontend's container name for this workspace,
-/// mirroring the naming `omnifs frontend up|down|status` use.
-fn frontend_container_name(paths: &WorkspaceLayout) -> Result<ContainerName> {
-    let is_default_home = std::env::var_os(OMNIFS_HOME_ENV).is_none();
-    crate::frontend_container::frontend_container_name(&paths.config_dir, is_default_home)
 }
 
 /// Which rc lever, if any, omnifs can use to inject its prompt.

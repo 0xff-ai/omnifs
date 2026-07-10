@@ -12,7 +12,7 @@
 //! frontend before stopping the daemon.
 
 use clap::Args;
-use omnifs_workspace::layout::{OMNIFS_HOME_ENV, WorkspaceLayout};
+use omnifs_workspace::layout::WorkspaceLayout;
 use omnifs_workspace::runtime_record::{RuntimeRecord, Via};
 
 use crate::frontend_backend::{DockerBackend, FrontendBackend};
@@ -63,8 +63,7 @@ pub(crate) async fn teardown(paths: &WorkspaceLayout) -> anyhow::Result<bool> {
         return Ok(running.is_some());
     }
 
-    let is_default_home = std::env::var_os(OMNIFS_HOME_ENV).is_none();
-    let container_name = frontend_container_name(&paths.config_dir, is_default_home)?;
+    let container_name = frontend_container_name(paths)?;
 
     // The image field is unused by removal; it only needs to be a valid
     // reference, so the dev placeholder is fine regardless of build channel.

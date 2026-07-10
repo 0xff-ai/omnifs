@@ -15,7 +15,7 @@ use crate::launch_backend::{DockerTarget, ImageRef, names_registry};
 use crate::runtime::Runtime;
 use crate::status::UserMountStatus;
 use crate::workspace::Workspace;
-use omnifs_workspace::layout::{OMNIFS_HOME_ENV, WorkspaceLayout};
+use omnifs_workspace::layout::WorkspaceLayout;
 use omnifs_workspace::provider::{Catalog, DirStatus};
 
 #[derive(Args, Debug, Clone, Default)]
@@ -69,8 +69,7 @@ fn resolve_frontend_target(workspace: &Workspace) -> anyhow::Result<DockerTarget
     let config = workspace.config()?;
     let paths = workspace.layout();
     let image = resolve_frontend_image(None, &config)?;
-    let is_default_home = std::env::var_os(OMNIFS_HOME_ENV).is_none();
-    let container_name = frontend_container_name(&paths.config_dir, is_default_home)?;
+    let container_name = frontend_container_name(paths)?;
     DockerTarget::new(
         container_name.as_str().to_string(),
         image.as_str().to_string(),
