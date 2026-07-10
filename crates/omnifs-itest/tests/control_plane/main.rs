@@ -56,7 +56,7 @@ impl Daemon {
         let hermetic = hermetic_home();
         let mount_point = hermetic.mount_point.clone();
         let child = Command::new(omnifs_bin())
-            .args(["daemon", "--host-native"])
+            .arg("daemon")
             .env("OMNIFS_HOME", hermetic.home.path())
             .env("OMNIFS_MOUNT_POINT", &mount_point)
             .env_remove("OMNIFS_DAEMON_ADDR")

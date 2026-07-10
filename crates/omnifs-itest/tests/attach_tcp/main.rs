@@ -51,7 +51,7 @@ fn spawn_namespace_only(extra_args: &[&str]) -> NamespaceOnlyDaemon {
     let home = tempfile::tempdir().expect("home tempdir");
     std::fs::create_dir_all(home.path().join("mounts")).expect("mounts dir");
 
-    let mut args = vec!["daemon", "--host-native", "--attach-socket", "dummy"];
+    let mut args = vec!["daemon", "--attach-socket", "dummy"];
     args.extend_from_slice(extra_args);
     let child = Command::new(omnifs_bin())
         .args(&args)

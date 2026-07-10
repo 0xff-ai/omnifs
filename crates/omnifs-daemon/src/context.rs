@@ -47,13 +47,10 @@ pub(crate) struct DaemonContext {
     /// The requested frontend set, each with its own mount point. Never empty:
     /// an absent `--frontend` flag resolves to the single platform default at the
     /// resolved mount point. The first entry is the primary, so a single-mount
-    /// caller (the container and CLI launcher paths) keeps today's behavior.
+    /// caller keeps today's behavior.
     frontends: Vec<FrontendMount>,
     backend: DaemonBackend,
-    host_native: bool,
-    /// TCP control listen address. `Some` for the container (and the debug path
-    /// when `--listen` is passed alongside the UDS); `None` when a host-native
-    /// daemon serves only its Unix socket.
+    /// Optional debug/test TCP control listener beside the always-on Unix socket.
     listen: Option<SocketAddr>,
     /// Random per-start id reported in status and written to the runtime record.
     instance_id: String,
@@ -110,7 +107,6 @@ impl DaemonContext {
             layout,
             frontends,
             backend,
-            host_native: args.host_native,
             listen: args.listen,
             instance_id: generate_instance_id(),
             attach_sockets,
@@ -127,10 +123,6 @@ impl DaemonContext {
         }
         std::fs::create_dir_all(&self.layout.cache_dir)?;
         Ok(())
-    }
-
-    pub(crate) fn is_host_native(&self) -> bool {
-        self.host_native
     }
 
     pub(crate) fn listen(&self) -> Option<SocketAddr> {

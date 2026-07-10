@@ -304,10 +304,7 @@ impl Daemon {
     /// serving). Used both by the eager `--attach-tcp` startup path and by the
     /// `POST /v1/frontend/attach-target` route on an already-running daemon.
     ///
-    /// Persists the binding into the on-disk runtime record when this daemon
-    /// owns that record (host-native); the Docker launcher owns its record
-    /// host-side and this is a no-op there, matching the record-write gating
-    /// elsewhere in `app.rs`.
+    /// Persists the binding into the daemon's on-disk runtime record.
     pub fn ensure_attach_tcp(
         self: &Arc<Self>,
         bind_addr: AttachBindAddr,
@@ -412,13 +409,8 @@ impl Daemon {
 
     /// Read-modify-write the on-disk runtime record to add `attach`, preserving
     /// every other field (notably `started_at`, which must not shift just
-    /// because the TCP listener bound after the initial write). No-op for a
-    /// backend that does not own the record (the Docker launcher writes its
-    /// record host-side; see `app.rs`).
+    /// because the TCP listener bound after the initial write).
     fn persist_attach_record(&self, state: &AttachTcpState) {
-        if !self.context.is_host_native() {
-            return;
-        }
         let path = self.context.runtime_record_file();
         let patched = RuntimeRecord::update(&path, |record| {
             record.attach = Some(AttachRecord {

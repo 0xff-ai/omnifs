@@ -177,7 +177,6 @@ fn wire_reattach_survives_frontend_and_daemon_restart() {
         Command::new(live::omnifs_bin())
             .args([
                 "daemon",
-                "--host-native",
                 "--listen",
                 &ctrl_addr,
                 "--attach-socket",

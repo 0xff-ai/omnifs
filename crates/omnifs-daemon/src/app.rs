@@ -2,9 +2,7 @@
 //!
 //! These are invoked by the `omnifs daemon` subcommand (the single-binary
 //! entrypoint); there is no standalone `omnifsd` binary. The daemon still
-//! runs as its own process and speaks the HTTP control API; it must stay
-//! free of container assumptions so it can later run host-native (see
-//! `docs/contracts/50-control-plane.md`).
+//! runs as its own host-native process and speaks the HTTP control API.
 
 use clap::{Args, ValueEnum};
 use omnifs_engine::GitCloner;
@@ -31,23 +29,15 @@ pub struct DaemonArgs {
     /// Optional NFS trace log.
     #[arg(long)]
     pub nfs_trace: Option<PathBuf>,
-    /// Optional TCP control API listen address. The container entrypoint passes
-    /// `0.0.0.0:7878` so Docker can publish the port on the host loopback; a
-    /// host-native daemon serves its Unix socket and only adds a TCP listener
-    /// when this is set (the debug/test path). Absent means UDS-only.
+    /// Optional TCP control API listen address. The daemon always serves its
+    /// Unix socket and adds TCP only for this debug/test path.
     #[arg(long)]
     pub listen: Option<SocketAddr>,
-    /// Serve a host-native mount: open preopen directories directly instead of
-    /// rewriting them to container bind paths. The native launcher sets this;
-    /// the container entrypoint does not (it runs in container/rewrite mode).
-    #[arg(long)]
-    pub host_native: bool,
     /// Serve a specific frontend at a mount point, as `<kind>=<mount_point>`
     /// (`fuse` or `nfs`), repeatable. Absent: the platform-default frontend at
-    /// the resolved mount point (today's behavior end to end; the container
-    /// entrypoint and CLI launcher pass nothing here). Present: serve exactly the
-    /// listed set, each at its own mount point (duplicate mount points are
-    /// rejected). This is a daemon surface only; the CLI does not expose it yet.
+    /// the resolved mount point. Present: serve exactly the listed set, each at
+    /// its own mount point (duplicate mount points are rejected). This is a
+    /// daemon surface only; the CLI does not expose it yet.
     #[arg(long = "frontend", value_name = "KIND=MOUNT_POINT", value_parser = parse_frontend_mount)]
     pub frontends: Vec<FrontendMount>,
     /// Serve the shared namespace over an attach socket at
@@ -147,59 +137,6 @@ impl FrontendKind {
     }
 }
 
-impl DaemonArgs {
-    /// A host-native daemon. `listen` adds a TCP control listener alongside the
-    /// Unix socket (the debug/test path); `None` serves only the Unix socket.
-    pub fn host_native(listen: Option<SocketAddr>) -> Self {
-        Self {
-            listen,
-            host_native: true,
-            nfs_port: 0,
-            nfs_state_dir: None,
-            nfs_trace: None,
-            frontends: Vec::new(),
-            attach_sockets: Vec::new(),
-            attach_tcp: None,
-        }
-    }
-
-    /// Serialize to argv for `omnifs daemon …`. Includes the `daemon` subcommand
-    /// token as the first element.
-    pub fn to_argv(&self) -> Vec<String> {
-        let mut args = vec!["daemon".to_string()];
-        if let Some(listen) = self.listen {
-            args.push("--listen".to_string());
-            args.push(listen.to_string());
-        }
-        if self.nfs_port != 0 {
-            args.push("--nfs-port".to_string());
-            args.push(self.nfs_port.to_string());
-        }
-        push_option_path(&mut args, "--nfs-state-dir", self.nfs_state_dir.as_ref());
-        push_option_path(&mut args, "--nfs-trace", self.nfs_trace.as_ref());
-        if self.host_native {
-            args.push("--host-native".to_string());
-        }
-        for frontend in &self.frontends {
-            args.push("--frontend".to_string());
-            args.push(format!(
-                "{}={}",
-                frontend.kind.as_flag(),
-                frontend.mount_point.display()
-            ));
-        }
-        for name in &self.attach_sockets {
-            args.push("--attach-socket".to_string());
-            args.push(name.clone());
-        }
-        if let Some(port) = self.attach_tcp {
-            args.push("--attach-tcp".to_string());
-            args.push(port.to_string());
-        }
-        args
-    }
-}
-
 /// A `fuse=/a, nfs=/b` rendering of the served frontend set for the startup log.
 fn frontend_summary(context: &DaemonContext) -> String {
     context
@@ -214,13 +151,6 @@ fn frontend_summary(context: &DaemonContext) -> String {
         })
         .collect::<Vec<_>>()
         .join(", ")
-}
-
-fn push_option_path(args: &mut Vec<String>, flag: &str, value: Option<&PathBuf>) {
-    if let Some(path) = value {
-        args.push(flag.to_string());
-        args.push(path.display().to_string());
-    }
 }
 
 /// Bring up the registry, control API, and filesystem frontend, then serve
@@ -273,18 +203,11 @@ pub fn run(args: DaemonArgs) -> anyhow::Result<()> {
     let frontend_summary = frontend_summary(&context);
     let frontends = frontends::Frontends::from_context(&context);
 
-    // Host-native serves a Unix socket (auth is filesystem permissions); the
-    // container serves TCP. A host-native daemon additionally serves TCP only
-    // when `--listen` is passed (the debug/test path). Bind before moving the
-    // context into the daemon.
-    let host_native = context.is_host_native();
+    // The Unix socket is always present; `--listen` adds the debug/test TCP
+    // listener. Bind before moving the context into the daemon.
     let record_path = context.runtime_record_file();
-    let runtime_record = host_native.then(|| context.runtime_record());
-    let uds_listener = if host_native {
-        Some(context.bind_control_socket()?)
-    } else {
-        None
-    };
+    let runtime_record = context.runtime_record();
+    let uds_listener = context.bind_control_socket()?;
 
     // Bind the namespace attach sockets (fail fast on a collision), capturing the
     // per-start id and socket paths before the context moves into the daemon. The
@@ -301,9 +224,8 @@ pub fn run(args: DaemonArgs) -> anyhow::Result<()> {
         .map(crate::context::DaemonContext::bind_control_listener)
         .transpose()?;
 
-    // The bearer token guards the TCP listener only; the container launcher
-    // injects it via `OMNIFS_CONTROL_TOKEN`, otherwise it is generated in
-    // memory. The Unix socket never checks it.
+    // The bearer token guards the optional TCP listener only. The Unix socket
+    // relies on filesystem permissions and never checks it.
     let control_token = server::ControlToken::resolve()?;
     let daemon = Arc::new(server::Daemon::new(
         context,
@@ -312,19 +234,17 @@ pub fn run(args: DaemonArgs) -> anyhow::Result<()> {
         frontends,
         control_token,
     ));
-    if let Some(listener) = uds_listener {
-        daemon.spawn_control_unix(listener, &rt)?;
-    }
+    daemon.spawn_control_unix(uds_listener, &rt)?;
     if let Some(listener) = tcp_listener {
         daemon.spawn_control_tcp(listener, &rt)?;
     }
 
-    publish_runtime_record(runtime_record.as_ref(), &record_path);
+    if let Err(error) = runtime_record.write(&record_path) {
+        warn!(%error, path = %record_path.display(), "failed to write runtime record");
+    }
 
     // Load desired state from `mounts/*.json` before serving, so the tree is
-    // populated when the frontend comes up. Both the native and Docker launch
-    // paths reconcile here; the daemon backend selects host-direct versus
-    // container-rewritten preopens.
+    // populated when the frontend comes up.
     log_reconcile(&daemon.reconcile_blocking(&rt));
 
     // Build the one shared namespace after reconcile, so its root record reflects
@@ -376,9 +296,8 @@ pub fn run(args: DaemonArgs) -> anyhow::Result<()> {
     registry.shutdown_all();
     telemetry.daemon_event(DaemonEvent::DaemonStop, telemetry_backend, served_mounts);
     // Graceful exit removes the record; a crash leaves it stale and the client
-    // cleans it up on the next connect attempt. Only the host-native daemon owns
-    // the record.
-    if host_native && let Err(error) = RuntimeRecord::remove(&record_path) {
+    // cleans it up on the next connect attempt.
+    if let Err(error) = RuntimeRecord::remove(&record_path) {
         warn!(%error, path = %record_path.display(), "failed to remove runtime record");
     }
     remove_attach_sockets(&attach_socket_paths);
@@ -421,18 +340,6 @@ fn spawn_attach_listeners(
         ));
     }
     Ok(())
-}
-
-/// One artifact, one lifecycle: with the socket bound and routes installed,
-/// publish the record so the CLI can dial this daemon. Only the host-native
-/// daemon owns the record (`record` is `None` otherwise); the Docker launcher
-/// writes it host-side.
-fn publish_runtime_record(record: Option<&RuntimeRecord>, path: &std::path::Path) {
-    if let Some(record) = record
-        && let Err(error) = record.write(path)
-    {
-        warn!(%error, path = %path.display(), "failed to write runtime record");
-    }
 }
 
 /// Bind the TCP namespace attach listener eagerly when `--attach-tcp` was

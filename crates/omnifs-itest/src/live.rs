@@ -320,7 +320,7 @@ pub fn start_multi_frontend_daemon(kinds: &[&str]) -> Option<MultiFrontendDaemon
     let nfs_lock = nfs_serial_lock();
     let HermeticHome { home, .. } = hermetic_home();
 
-    let mut args = vec!["daemon".to_string(), "--host-native".to_string()];
+    let mut args = vec!["daemon".to_string()];
     let mut mount_points = Vec::with_capacity(kinds.len());
     for (index, kind) in kinds.iter().enumerate() {
         let mount_point = home.path().join(format!("mnt-{index}-{kind}"));
@@ -517,11 +517,10 @@ fn wire_frontend(
     // Namespace-only: at least one attach socket named, no `--frontend`
     // (`resolve_frontends` only suppresses the default frontend when the named
     // attach-socket list is non-empty, so the Tcp lane still names one even
-    // though the runner never dials it). host-native + --listen gives a UDS
-    // record and a TCP control API to poll for readiness.
+    // though the runner never dials it). --listen adds a TCP control API to
+    // poll beside the daemon's UDS record.
     let mut daemon_args = vec![
         "daemon".to_string(),
-        "--host-native".to_string(),
         "--listen".to_string(),
         listen_addr.clone(),
         "--attach-socket".to_string(),
@@ -719,9 +718,9 @@ fn native_daemon(nfs_lock: Option<TcpListener>) -> Option<NativeDaemon> {
 
     // The daemon picks the platform-default frontend automatically; no
     // --frontend flag. Mount point comes from OMNIFS_MOUNT_POINT; config and
-    // providers come from OMNIFS_HOME. --host-native opens preopens directly.
+    // providers come from OMNIFS_HOME.
     let child = Command::new(omnifs_bin())
-        .args(["daemon", "--listen", &listen_addr, "--host-native"])
+        .args(["daemon", "--listen", &listen_addr])
         .env("OMNIFS_HOME", hermetic.home.path())
         .env("OMNIFS_MOUNT_POINT", &mount_point)
         .env("OMNIFS_DAEMON_ADDR", &listen_addr)

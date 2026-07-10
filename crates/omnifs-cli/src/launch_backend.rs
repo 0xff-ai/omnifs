@@ -14,8 +14,6 @@ use std::path::Path;
 use anyhow::Context as _;
 use anyhow::Result;
 use omnifs_api::DaemonBackend;
-#[cfg(feature = "daemon")]
-use omnifs_daemon::DaemonArgs;
 
 /// Whether this binary was produced by the release packaging lane
 /// (`OMNIFS_RELEASE` set at compile time) or a local/dev build. Release
@@ -233,11 +231,10 @@ pub(crate) async fn launch_native(
         .try_clone()
         .with_context(|| format!("clone daemon log handle {}", log_path.display()))?;
 
-    let daemon_args = DaemonArgs::host_native(tcp_addr);
-    let argv = daemon_args.to_argv();
     let mut command = Command::new(&binary);
-    for arg in &argv {
-        command.arg(arg);
+    command.arg("daemon");
+    if let Some(tcp_addr) = tcp_addr {
+        command.arg("--listen").arg(tcp_addr.to_string());
     }
     command
         .stdin(Stdio::null())
