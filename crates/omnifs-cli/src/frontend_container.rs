@@ -148,7 +148,8 @@ pub(crate) fn build_frontend_container_body(
 /// `Dockerfile` `ENV`/base-image defaults), beyond the two attach vars this
 /// launcher injects. Anything else on a freshly started container means
 /// something leaked onto this credential-free container.
-const IMAGE_DEFAULT_ENV_NAMES: [&str; 2] = ["PATH", "HOME"];
+// ci-debug: RUST_LOG is an image default on this branch only.
+const IMAGE_DEFAULT_ENV_NAMES: [&str; 3] = ["PATH", "HOME", "RUST_LOG"];
 
 /// Fail-closed structural assertion, run immediately after `docker inspect`
 /// on a just-started frontend container: no mounts of any kind, and an env

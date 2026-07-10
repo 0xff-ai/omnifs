@@ -226,8 +226,21 @@ impl Fixture {
             return;
         }
         for name in self.containers() {
-            let logs = docker_output(&["logs", "--tail", "60", &name]).unwrap_or_default();
-            eprintln!("--- docker logs {name} (tail) ---\n{logs}\n---");
+            let logs = docker_output(&["logs", &name]).unwrap_or_default();
+            eprintln!("--- docker logs {name} ---\n{logs}\n---");
+            // ci-debug: can the container even reach the daemon's attach
+            // listener? curl prints the connect outcome; env comes from the
+            // container (docker exec inherits it).
+            let probe = docker_output(&[
+                "exec",
+                &name,
+                "sh",
+                "-c",
+                "echo \"attach=$OMNIFS_ATTACH_ADDR\"; ip route 2>/dev/null; \
+                 curl -sv --max-time 3 \"telnet://$OMNIFS_ATTACH_ADDR\" </dev/null 2>&1 | head -20",
+            ])
+            .unwrap_or_default();
+            eprintln!("--- attach probe {name} ---\n{probe}\n---");
         }
         panic!(
             "omnifs frontend up failed ({context}, exit {})\nstdout: {}\nstderr: {}",

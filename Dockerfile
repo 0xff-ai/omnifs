@@ -156,9 +156,12 @@ FROM debian:trixie-slim AS frontend-base
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        coreutils findutils fuse3 jq rsync tar xxd \
+        coreutils curl findutils fuse3 jq rsync tar xxd \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir /omnifs
+
+# ci-debug only: make the runner log its attach attempts.
+ENV RUST_LOG=debug
 
 ENTRYPOINT ["/usr/local/bin/omnifs", "frontend", "run", "--kind", "fuse", "--mount-point", "/omnifs"]
 

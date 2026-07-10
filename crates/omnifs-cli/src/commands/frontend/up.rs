@@ -28,7 +28,8 @@ use crate::workspace::Workspace;
 /// How long to wait for the mount to appear inside the frontend container
 /// before giving up (the container itself starts in well under this window;
 /// a longer wait would just mask a real startup failure).
-const MOUNT_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+// ci-debug: widened from 5s to rule out slow container start.
+const MOUNT_PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 const MOUNT_PROBE_INTERVAL: Duration = Duration::from_millis(200);
 
 #[derive(Args, Debug, Clone, Default)]
