@@ -180,29 +180,23 @@ async fn wait_for_mount(runtime: &Runtime, mount_name: &str) -> anyhow::Result<(
 /// unwind the already-running frontend, since the daemon owns the record's
 /// lifecycle and will rewrite it wholesale on its next restart anyway.
 fn record_frontend_via_docker(record_path: &std::path::Path) {
-    let record = match RuntimeRecord::read(record_path) {
-        Ok(Some(record)) => record,
-        Ok(None) => {
-            anstream::eprintln!(
-                "warning: runtime record missing; cannot record the frontend container"
-            );
-            return;
-        },
-        Err(error) => {
-            anstream::eprintln!("warning: could not read the runtime record: {error:#}");
-            return;
-        },
-    };
-    let mut record = record;
-    record
-        .frontends
-        .retain(|frontend| frontend.via != Some(Via::Docker));
-    record.frontends.push(FrontendRecord {
-        kind: FrontendKind::Fuse,
-        mount_point: std::path::PathBuf::from(GUEST_MOUNT),
-        via: Some(Via::Docker),
+    let patched = RuntimeRecord::update(record_path, |record| {
+        record
+            .frontends
+            .retain(|frontend| frontend.via != Some(Via::Docker));
+        record.frontends.push(FrontendRecord {
+            kind: FrontendKind::Fuse,
+            mount_point: std::path::PathBuf::from(GUEST_MOUNT),
+            via: Some(Via::Docker),
+        });
     });
-    if let Err(error) = record.write(record_path) {
-        anstream::eprintln!("warning: could not persist the frontend container: {error:#}");
+    match patched {
+        Ok(true) => {},
+        Ok(false) => anstream::eprintln!(
+            "warning: runtime record missing; cannot record the frontend container"
+        ),
+        Err(error) => {
+            anstream::eprintln!("warning: could not persist the frontend container: {error:#}");
+        },
     }
 }

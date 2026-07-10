@@ -207,6 +207,22 @@ impl RuntimeRecord {
         }
     }
 
+    /// Read the record at `path`, apply `patch`, and write it back atomically,
+    /// preserving every field the closure leaves untouched. Returns `Ok(true)`
+    /// when a record existed and was rewritten, `Ok(false)` when no record was
+    /// present (nothing to patch). The read-modify-write is not serialized
+    /// against a concurrent writer: it is for best-effort field patches (the
+    /// attach binding, the frontend list) that the daemon rewrites wholesale on
+    /// its next restart.
+    pub fn update(path: &Path, edit: impl FnOnce(&mut Self)) -> io::Result<bool> {
+        let Some(mut record) = Self::read(path)? else {
+            return Ok(false);
+        };
+        edit(&mut record);
+        record.write(path)?;
+        Ok(true)
+    }
+
     /// The container name when the daemon runs under Docker, whose mount lives
     /// inside the container. `None` for the host-native backend.
     #[must_use]
@@ -426,6 +442,40 @@ mod tests {
         RuntimeRecord::remove(&path).unwrap();
         sample_native().write(&path).unwrap();
         RuntimeRecord::remove(&path).unwrap();
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn update_patches_in_place_and_preserves_untouched_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(RUNTIME_RECORD_FILE);
+        let record = sample_native();
+        let started_at = record.started_at.clone();
+        record.write(&path).unwrap();
+
+        let existed = RuntimeRecord::update(&path, |r| {
+            r.attach = Some(AttachRecord {
+                addr: "127.0.0.1:7979".to_string(),
+                token: "cafef00d".to_string(),
+            });
+        })
+        .unwrap();
+        assert!(existed);
+
+        let read = RuntimeRecord::read(&path).unwrap().unwrap();
+        assert_eq!(read.attach.as_ref().unwrap().addr, "127.0.0.1:7979");
+        // fields the closure did not touch survive verbatim.
+        assert_eq!(read.started_at, started_at);
+        assert_eq!(read.instance_id, "b1946ac92492d234");
+    }
+
+    #[test]
+    fn update_on_absent_record_is_a_reported_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(RUNTIME_RECORD_FILE);
+        let existed =
+            RuntimeRecord::update(&path, |_| panic!("must not run on an absent record")).unwrap();
+        assert!(!existed);
         assert!(!path.exists());
     }
 }

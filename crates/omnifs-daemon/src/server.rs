@@ -342,22 +342,20 @@ impl Daemon {
             return;
         }
         let path = self.context.runtime_record_file();
-        match RuntimeRecord::read(&path) {
-            Ok(Some(mut record)) => {
-                record.attach = Some(AttachRecord {
-                    addr: state.addr.to_string(),
-                    token: state.token.clone(),
-                });
-                if let Err(error) = record.write(&path) {
-                    warn!(%error, path = %path.display(), "failed to persist the attach listener into the runtime record");
-                }
-            },
-            Ok(None) => warn!(
+        let patched = RuntimeRecord::update(&path, |record| {
+            record.attach = Some(AttachRecord {
+                addr: state.addr.to_string(),
+                token: state.token.clone(),
+            });
+        });
+        match patched {
+            Ok(true) => {},
+            Ok(false) => warn!(
                 path = %path.display(),
                 "runtime record missing; cannot persist the attach listener"
             ),
             Err(error) => {
-                warn!(%error, path = %path.display(), "failed to read the runtime record before persisting the attach listener");
+                warn!(%error, path = %path.display(), "failed to persist the attach listener into the runtime record");
             },
         }
     }
