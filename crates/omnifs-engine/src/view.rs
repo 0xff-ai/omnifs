@@ -372,13 +372,12 @@ impl FileAttrsCache {
         &self,
         content_len: usize,
     ) -> Result<FileAttrsCache, String> {
-        self.validate_complete_content(content_len)?;
+        let observed_size = u64::try_from(content_len)
+            .map_err(|_| "content length does not fit u64".to_string())?;
+        self.validate_observed_size(observed_size)?;
         let mut attrs = self.clone();
         if attrs.can_publish_learned_size() && !matches!(attrs.size(), FileSize::Exact(_)) {
-            attrs = attrs.with_exact_size(
-                u64::try_from(content_len)
-                    .map_err(|_| "content length does not fit u64".to_string())?,
-            );
+            attrs = attrs.with_exact_size(observed_size);
         }
         Ok(attrs)
     }
@@ -504,11 +503,7 @@ impl Freshness {
     }
 
     fn validate(&self) -> Result<(), String> {
-        match self {
-            Self::Stable { version_token } | Self::Dynamic { version_token } => {
-                validate_version_token(version_token.as_deref())
-            },
-        }
+        validate_version_token(self.version_token())
     }
 }
 
@@ -539,11 +534,7 @@ impl RangedFreshness {
     }
 
     fn validate(&self) -> Result<(), String> {
-        match self {
-            Self::Stable { version_token }
-            | Self::Dynamic { version_token }
-            | Self::Live { version_token } => validate_version_token(version_token.as_deref()),
-        }
+        validate_version_token(self.version_token())
     }
 }
 
