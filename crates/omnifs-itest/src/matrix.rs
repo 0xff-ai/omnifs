@@ -797,27 +797,24 @@ ls "$ROOT/hello/bundle" >/dev/null 2>&1 || true
 /// sub-collection, and opens whatever `@next`/`@all` pagination controls its
 /// single readdir snapshot named (the mount-root ignore files shield
 /// ignore-respecting walkers like `rg`/`fd`/git from ever reaching a control
-/// at all, but plain `grep -r` is not one).
+/// at all, but plain `grep -r` is not one). It also walks into
+/// `items/open/7/log`, an object stream face (`.stream(Item::log)`).
 ///
-/// The pagination-controls half of this row is FIXED: the parent's
-/// accumulated dirents no longer strip a control record back out once the
-/// directory has paged, even past exhaustion (`omnifs-engine/src/pagination.rs`,
-/// `tree/synthetic.rs::resolve_synthetic_child`), so the SAME stale readdir
-/// snapshot's `@all` name still resolves and reads as a no-op instead of
-/// ENOENT (proved by `omnifs-itest`'s
-/// `pagination_exhaustive::stale_snapshot_controls_resolve_after_exhaustion`,
-/// and live by isolating `grep -r` to `items/open/7/comments` alone, which now
-/// exits 0). The row stays expected-fail for an UNRELATED, still-open reason:
-/// `items/open/7/log` is an object stream face (`.stream(Item::log)`), and a
-/// whole-file `read-file` against it is rejected with
-/// `ErrorKind::InvalidInput` ("stream face ... must be read through
-/// open-file, not read-file"). `grep -r`'s recursive walk opens `log` like any
-/// other regular file and gets that error, so it still exits 2 independent of
-/// pagination. Reproduced identically on the `fuse-docker` and
-/// `macos-nfs-wire` live lanes, so it is not a frontend-specific quirk; it is
-/// a namespace/dispatch gap in how a stream face answers a non-ranged read,
-/// out of scope for the pagination-visibility fix and tracked separately.
-const GREP_R_PAGINATION_CONTROLS: (&str, Expect) = ("grep-r", Expect::Fail);
+/// Both of this row's historical failure causes are now fixed:
+///
+/// - Pagination-control visibility: the parent's accumulated dirents no
+///   longer strip a control record back out once the directory has paged,
+///   even past exhaustion (`omnifs-engine/src/pagination.rs`,
+///   `tree/synthetic.rs::resolve_synthetic_child`), so the same stale readdir
+///   snapshot's `@all` name still resolves and reads as a no-op instead of
+///   ENOENT (proved by `omnifs-itest`'s
+///   `pagination_exhaustive::stale_snapshot_controls_resolve_after_exhaustion`).
+/// - Stream-face shape: an object stream leaf's lookup/listing placeholder
+///   now carries `Deferred(Ranged)` (`omnifs-sdk`'s `object_dir_listing`,
+///   `ListingLeaf::is_stream`), so `grep -r`'s recursive walk opens `log`
+///   through `open-file` instead of a whole-file `read-file` the provider
+///   rejected with `ErrorKind::InvalidInput`. The row genuinely passes now.
+const GREP_R_PAGINATION_CONTROLS: (&str, Expect) = ("grep-r", Expect::Pass);
 
 /// fuse-in-docker lane expectation, scoped to the product runtime container's
 /// userland: `tail -f` on `hello/live-log` delivers only the initial content
@@ -837,16 +834,18 @@ const TAIL_F_CONTAINER_USERLAND_GAP: (&str, Expect) = ("tail-f-growing", Expect:
 
 /// Linux kernel-FUSE native lane. CI's conformance-fuse job runs this on a
 /// GitHub Ubuntu runner with GNU coreutils, where GNU `tail -f` sees the follow
-/// pump's out-of-band growth; that lane observed `tail-f-growing` PASS, so only
-/// the cross-frontend `grep -r` row remains expected-fail here (the
-/// stream-face `log` gap, not pagination-control visibility, which is fixed).
+/// pump's out-of-band growth; that lane observed `tail-f-growing` PASS, and
+/// `grep -r` now passes here too (both its historical causes are fixed; see
+/// [`GREP_R_PAGINATION_CONTROLS`]).
 pub const LINUX_FUSE_NATIVE: Column = Column {
     id: "linux-fuse-native",
     platform: "linux",
     expectations: &[GREP_R_PAGINATION_CONTROLS],
 };
 
-/// macOS NFSv4.0 loopback lane.
+/// macOS NFSv4.0 loopback lane. `grep -r` passes here (see
+/// [`GREP_R_PAGINATION_CONTROLS`]); `tar c` stays expected-fail for an
+/// unrelated, NFS-attr-path-specific reason (below).
 pub const MACOS_NFS_LOOPBACK: Column = Column {
     id: "macos-nfs-loopback",
     platform: "macos",
@@ -867,11 +866,12 @@ pub const MACOS_NFS_LOOPBACK: Column = Column {
 /// (`tests/multi_frontend`) alongside a FUSE mount over one shared namespace.
 ///
 /// Seeded from [`MACOS_NFS_LOOPBACK`]: the NFS renderer is platform-neutral, so
-/// the same two rows are expected-fail here (`grep -r`'s stream-face `log` gap,
-/// and `tar c`'s not-yet-learned size sentinel on the NFS attr path). CI's
-/// conformance-fuse job runs this on Linux and is the authority; if a live
-/// Linux run disagrees with a seeded expectation, adjust it here (that is a
-/// fix round, not a design change).
+/// the same expectations apply here: `grep -r` passes (see
+/// [`GREP_R_PAGINATION_CONTROLS`]), and `tar c` stays expected-fail for its
+/// not-yet-learned size sentinel on the NFS attr path. CI's conformance-fuse
+/// job runs this on Linux and is the authority; if a live Linux run disagrees
+/// with a seeded expectation, adjust it here (that is a fix round, not a
+/// design change).
 pub const LINUX_NFS_LOOPBACK: Column = Column {
     id: "linux-nfs-loopback",
     platform: "linux",
@@ -901,8 +901,8 @@ pub const FUSE_IN_DOCKER: Column = Column {
 /// own minimal `debian:trixie-slim` image (`Dockerfile`'s `frontend-base`)
 /// chosen specifically because Debian's default coreutils/findutils are GNU,
 /// so both `tar` and `tail -f` pass here where the runtime-image lane pins
-/// them xfail. Only the cross-frontend `grep -r` row (the stream-face `log`
-/// gap) stays expected-fail.
+/// them xfail. `grep -r` passes here too (see
+/// [`GREP_R_PAGINATION_CONTROLS`]).
 pub const FUSE_DOCKER_FRONTEND: Column = Column {
     id: "fuse-docker",
     platform: "linux",

@@ -258,6 +258,9 @@ impl<S> Shape<'_, S> {
     /// representation leaf is stamped with them so a cold `ls -l` reports its
     /// real size. Rendered leaves stay size-unknown (their length needs a
     /// render) and lookups remain placeholder until a listing or read fills in.
+    /// A stream leaf (`o.file(..).stream(..)`) gets the ranged placeholder so
+    /// the namespace read path opens it through `open-file` instead of routing
+    /// a whole-file `read-file` the provider rejects.
     pub(super) fn object_dir_listing(
         &self,
         entry: &ObjectRouteEntry<S>,
@@ -270,6 +273,8 @@ impl<S> Shape<'_, S> {
                 && let Some(source) = source
             {
                 BrowseEntry::file(&leaf.name, source_leaf_shape(source))
+            } else if leaf.is_stream() {
+                BrowseEntry::file(&leaf.name, FileProj::ranged_listing_shape())
             } else {
                 BrowseEntry::file(&leaf.name, FileProj::listing_shape())
             }
