@@ -80,7 +80,7 @@ impl ProviderWasm {
 
     pub fn manifest_records(&self) -> Result<Vec<ManifestRecord>, ProviderWasmError> {
         let section_bytes = self.manifest_section()?;
-        Ok(collect_manifest_records(&section_bytes)?)
+        Ok(ManifestRecordIter::new(&section_bytes).collect::<Result<_, _>>()?)
     }
 }
 
@@ -146,14 +146,6 @@ impl Artifact {
             meta: self.meta.clone(),
         }
     }
-}
-
-fn collect_manifest_records(section: &[u8]) -> Result<Vec<ManifestRecord>, DecodeError> {
-    let mut records = Vec::new();
-    for record in ManifestRecordIter::new(section) {
-        records.push(record?);
-    }
-    Ok(records)
 }
 
 #[cfg(test)]

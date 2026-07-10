@@ -185,7 +185,8 @@ pub fn read_from_wasm(path: &Path) -> Result<MountTreeData> {
         })
         .collect();
 
-    let resolved = mts::resolve_manifest(records).context("resolving provider manifest")?;
+    let resolved =
+        mts::ResolvedManifest::resolve(records).context("resolving provider manifest")?;
 
     if resolved.handlers.is_empty() && resolved.mutations.is_empty() {
         bail!(

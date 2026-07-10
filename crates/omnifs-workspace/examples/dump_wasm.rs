@@ -42,7 +42,7 @@ fn main() -> Result<()> {
         raw_records.push(record);
     }
 
-    let resolved = mts::resolve_manifest(raw_records)
+    let resolved = mts::ResolvedManifest::resolve(raw_records)
         .map_err(|error| anyhow!("resolving manifest: {error}"))?;
     for handler in &resolved.handlers {
         println!(

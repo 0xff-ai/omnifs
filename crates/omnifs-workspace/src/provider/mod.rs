@@ -27,7 +27,7 @@ pub use records::{
     ManifestRecordIter, MutationRecord, SubtreeRouteRecord, TAG_HANDLER, TAG_MUTATION,
     TAG_SUBTREE_ROUTE, encode_handler, encode_mutation, encode_subtree_route, frame_record,
 };
-pub use resolve::{ResolveError, ResolvedManifest, resolve_manifest};
+pub use resolve::{ResolveError, ResolvedManifest};
 pub use sections::{
     MANIFEST_SECTION_NAME, ManifestSectionError, PROVIDER_METADATA_SECTION_NAME,
     ProviderMetadataError, embed_provider_metadata_section, provider_manifest_json,

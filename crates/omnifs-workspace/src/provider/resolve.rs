@@ -37,81 +37,83 @@ pub enum ResolveError {
     },
 }
 
-/// Resolve raw manifest records into a flat list of absolute handler
-/// records. Bind sites are paired with subtree routes by `subtree_type`;
-/// each pair produces one absolute `HandlerRecord` with the templates
-/// concatenated (bind + relative) and capture schemas appended in that
-/// order.
-pub fn resolve_manifest(records: Vec<ManifestRecord>) -> Result<ResolvedManifest, ResolveError> {
-    use std::collections::{BTreeMap, BTreeSet};
+impl ResolvedManifest {
+    /// Resolve raw manifest records into a flat list of absolute handler
+    /// records. Bind sites are paired with subtree routes by `subtree_type`;
+    /// each pair produces one absolute `HandlerRecord` with the templates
+    /// concatenated (bind + relative) and capture schemas appended in that
+    /// order.
+    pub fn resolve(records: Vec<ManifestRecord>) -> Result<Self, ResolveError> {
+        use std::collections::{BTreeMap, BTreeSet};
 
-    let mut handlers: Vec<HandlerRecord> = Vec::new();
-    let mut mutations: Vec<MutationRecord> = Vec::new();
-    let mut binds: Vec<HandlerRecord> = Vec::new();
-    let mut subtree_routes: BTreeMap<String, Vec<SubtreeRouteRecord>> = BTreeMap::new();
+        let mut handlers: Vec<HandlerRecord> = Vec::new();
+        let mut mutations: Vec<MutationRecord> = Vec::new();
+        let mut binds: Vec<HandlerRecord> = Vec::new();
+        let mut subtree_routes: BTreeMap<String, Vec<SubtreeRouteRecord>> = BTreeMap::new();
 
-    for record in records {
-        match record {
-            ManifestRecord::Handler(handler) => {
-                if handler.handler_kind == HandlerKindRecord::Subtree {
-                    binds.push(handler.clone());
-                }
-                handlers.push(handler);
-            },
-            ManifestRecord::Mutation(mutation) => mutations.push(mutation),
-            ManifestRecord::SubtreeRoute(route) => {
-                subtree_routes
-                    .entry(route.subtree_type.clone())
-                    .or_default()
-                    .push(route);
-            },
-            ManifestRecord::Unknown { .. } => {},
+        for record in records {
+            match record {
+                ManifestRecord::Handler(handler) => {
+                    if handler.handler_kind == HandlerKindRecord::Subtree {
+                        binds.push(handler.clone());
+                    }
+                    handlers.push(handler);
+                },
+                ManifestRecord::Mutation(mutation) => mutations.push(mutation),
+                ManifestRecord::SubtreeRoute(route) => {
+                    subtree_routes
+                        .entry(route.subtree_type.clone())
+                        .or_default()
+                        .push(route);
+                },
+                ManifestRecord::Unknown { .. } => {},
+            }
         }
-    }
 
-    let mut referenced: BTreeSet<String> = BTreeSet::new();
-    for bind in binds {
-        let Some(subtree_type) = bind.subtree_type.as_deref() else {
-            return Err(ResolveError::BindMissingSubtreeType {
-                path_template: bind.path_template,
-            });
-        };
-        let Some(routes) = subtree_routes.get(subtree_type) else {
-            return Err(ResolveError::UnresolvedBind {
-                path_template: bind.path_template,
-                subtree_type: subtree_type.to_string(),
-            });
-        };
-        referenced.insert(subtree_type.to_string());
+        let mut referenced: BTreeSet<String> = BTreeSet::new();
+        for bind in binds {
+            let Some(subtree_type) = bind.subtree_type.as_deref() else {
+                return Err(ResolveError::BindMissingSubtreeType {
+                    path_template: bind.path_template,
+                });
+            };
+            let Some(routes) = subtree_routes.get(subtree_type) else {
+                return Err(ResolveError::UnresolvedBind {
+                    path_template: bind.path_template,
+                    subtree_type: subtree_type.to_string(),
+                });
+            };
+            referenced.insert(subtree_type.to_string());
 
-        for route in routes {
-            let mut capture_schema = bind.capture_schema.clone();
-            capture_schema.extend(route.capture_schema.iter().cloned());
-            handlers.push(HandlerRecord {
-                path_template: join_template(&bind.path_template, &route.path_template),
-                handler_name: route.handler_name.clone(),
-                handler_kind: route.handler_kind.clone(),
-                capture_schema,
-                subtree_type: None,
+            for route in routes {
+                let mut capture_schema = bind.capture_schema.clone();
+                capture_schema.extend(route.capture_schema.iter().cloned());
+                handlers.push(HandlerRecord {
+                    path_template: join_template(&bind.path_template, &route.path_template),
+                    handler_name: route.handler_name.clone(),
+                    handler_kind: route.handler_kind.clone(),
+                    capture_schema,
+                    subtree_type: None,
+                });
+            }
+        }
+
+        if let Some((subtree_type, mut routes)) = subtree_routes
+            .into_iter()
+            .find(|(ty, _)| !referenced.contains(ty))
+        {
+            let representative = routes.remove(0);
+            return Err(ResolveError::OrphanedSubtreeRoute {
+                subtree_type,
+                path_template: representative.path_template,
             });
         }
-    }
 
-    if let Some((subtree_type, mut routes)) = subtree_routes
-        .into_iter()
-        .find(|(ty, _)| !referenced.contains(ty))
-    {
-        let representative = routes.remove(0);
-        return Err(ResolveError::OrphanedSubtreeRoute {
-            subtree_type,
-            path_template: representative.path_template,
-        });
+        Ok(Self {
+            handlers,
+            mutations,
+        })
     }
-
-    Ok(ResolvedManifest {
-        handlers,
-        mutations,
-    })
 }
 
 /// Concatenate a bind path template with a subtree-relative template.
@@ -130,7 +132,7 @@ pub(crate) fn join_template(bind: &str, relative: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_manifest;
+    use super::ResolvedManifest;
     use crate::provider::records::{
         HandlerKindRecord, HandlerRecord, ManifestCaptureRecord, ManifestRecord, SubtreeRouteRecord,
     };
@@ -189,7 +191,7 @@ mod tests {
             )),
         ];
 
-        let resolved = resolve_manifest(records).unwrap();
+        let resolved = ResolvedManifest::resolve(records).unwrap();
         assert_eq!(resolved.handlers.len(), 8);
 
         let templates: Vec<&str> = resolved
@@ -229,7 +231,7 @@ mod tests {
             ManifestRecord::SubtreeRoute(route("/", HandlerKindRecord::Dir, Vec::new())),
             ManifestRecord::SubtreeRoute(route("/inner", HandlerKindRecord::File, Vec::new())),
         ];
-        let resolved = resolve_manifest(records).unwrap();
+        let resolved = ResolvedManifest::resolve(records).unwrap();
         let templates: Vec<&str> = resolved
             .handlers
             .iter()
@@ -242,7 +244,7 @@ mod tests {
     #[test]
     fn resolve_manifest_unresolved_bind_errors() {
         let records = vec![ManifestRecord::Handler(bind("/papers/{paper}", Vec::new()))];
-        let error = resolve_manifest(records).unwrap_err();
+        let error = ResolvedManifest::resolve(records).unwrap_err();
         assert!(matches!(
             error,
             ResolveError::UnresolvedBind { ref subtree_type, .. } if subtree_type == "PaperSubtree"
@@ -256,7 +258,7 @@ mod tests {
             HandlerKindRecord::Dir,
             Vec::new(),
         ))];
-        let error = resolve_manifest(records).unwrap_err();
+        let error = ResolvedManifest::resolve(records).unwrap_err();
         assert!(matches!(error, ResolveError::OrphanedSubtreeRoute { .. }));
     }
 
@@ -271,7 +273,7 @@ mod tests {
             ManifestRecord::SubtreeRoute(route("/", HandlerKindRecord::Dir, Vec::new())),
             ManifestRecord::SubtreeRoute(route("/paper.pdf", HandlerKindRecord::File, Vec::new())),
         ];
-        let resolved = resolve_manifest(records).unwrap();
+        let resolved = ResolvedManifest::resolve(records).unwrap();
         let templates: Vec<&str> = resolved
             .handlers
             .iter()
