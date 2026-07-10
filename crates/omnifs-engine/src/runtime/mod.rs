@@ -252,7 +252,7 @@ impl EngineError {
         let Self::ProviderError(error) = self else {
             return None;
         };
-        Some(provider_error_class(error.kind))
+        Some(error.kind.into())
     }
 
     pub(crate) fn is_provider_rate_limited(&self) -> bool {
@@ -267,22 +267,24 @@ impl EngineError {
     }
 }
 
-fn provider_error_class(kind: wit_types::ErrorKind) -> ProviderErrorClass {
-    match kind {
-        wit_types::ErrorKind::NotFound => ProviderErrorClass::NotFound,
-        wit_types::ErrorKind::NotADirectory => ProviderErrorClass::NotDirectory,
-        wit_types::ErrorKind::NotAFile => ProviderErrorClass::IsDirectory,
-        wit_types::ErrorKind::PermissionDenied | wit_types::ErrorKind::Denied => {
-            ProviderErrorClass::PermissionDenied
-        },
-        wit_types::ErrorKind::InvalidInput => ProviderErrorClass::InvalidInput,
-        wit_types::ErrorKind::TooLarge => ProviderErrorClass::TooLarge,
-        wit_types::ErrorKind::RateLimited => ProviderErrorClass::RateLimited,
-        wit_types::ErrorKind::Network => ProviderErrorClass::Network,
-        wit_types::ErrorKind::Timeout => ProviderErrorClass::Timeout,
-        wit_types::ErrorKind::VersionMismatch | wit_types::ErrorKind::Internal => {
-            ProviderErrorClass::Internal
-        },
+impl From<wit_types::ErrorKind> for ProviderErrorClass {
+    fn from(kind: wit_types::ErrorKind) -> Self {
+        match kind {
+            wit_types::ErrorKind::NotFound => Self::NotFound,
+            wit_types::ErrorKind::NotADirectory => Self::NotDirectory,
+            wit_types::ErrorKind::NotAFile => Self::IsDirectory,
+            wit_types::ErrorKind::PermissionDenied | wit_types::ErrorKind::Denied => {
+                Self::PermissionDenied
+            },
+            wit_types::ErrorKind::InvalidInput => Self::InvalidInput,
+            wit_types::ErrorKind::TooLarge => Self::TooLarge,
+            wit_types::ErrorKind::RateLimited => Self::RateLimited,
+            wit_types::ErrorKind::Network => Self::Network,
+            wit_types::ErrorKind::Timeout => Self::Timeout,
+            wit_types::ErrorKind::VersionMismatch | wit_types::ErrorKind::Internal => {
+                Self::Internal
+            },
+        }
     }
 }
 
