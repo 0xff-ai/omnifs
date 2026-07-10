@@ -274,6 +274,7 @@ pub(crate) async fn launch_native(
     cache_dir: &Path,
     control_addr: SocketAddr,
     telemetry_enabled: bool,
+    worldview: Option<String>,
 ) -> Result<()> {
     use std::process::Stdio;
     use std::time::Duration;
@@ -296,7 +297,7 @@ pub(crate) async fn launch_native(
         .try_clone()
         .with_context(|| format!("clone daemon log handle {}", log_path.display()))?;
 
-    let daemon_args = DaemonArgs::host_native(control_addr);
+    let daemon_args = DaemonArgs::host_native(control_addr, worldview);
     let argv = daemon_args.to_argv();
     let mut command = Command::new(&binary);
     for arg in &argv {
@@ -372,6 +373,7 @@ pub(crate) async fn launch_native(
     _cache_dir: &Path,
     _control_addr: SocketAddr,
     _telemetry_enabled: bool,
+    _worldview: Option<String>,
 ) -> Result<()> {
     anyhow::bail!(
         "this omnifs binary was built without host-native daemon support; \

@@ -250,7 +250,7 @@ impl Runtime {
         // Non-destructive callers can reuse a matching running container and
         // let reconcile handle config changes. Dev launches force recreation so
         // env vars and fixture binds always match the requested session.
-        if reuse_existing && self.running_container_matches_image().await? {
+        if reuse_existing && self.running_container_matches_image(&extra_env).await? {
             anstream::eprintln!(
                 "Container `{}` is already running on image `{}`; skipping recreate",
                 self.container_name(),
@@ -310,7 +310,7 @@ impl Runtime {
     /// Returns `true` when the container with our name is running and was
     /// created from the desired image. Used by [`Self::launch_container`] to
     /// skip remove+recreate when the healthy setup is already in place.
-    async fn running_container_matches_image(&self) -> Result<bool> {
+    async fn running_container_matches_image(&self, required_env: &[String]) -> Result<bool> {
         match self
             .docker
             .inspect_container(
@@ -336,7 +336,12 @@ impl Runtime {
                     .as_ref()
                     .and_then(|c| c.image.as_deref())
                     .unwrap_or("");
-                Ok(container_image == self.image().as_str())
+                let env_matches = container
+                    .config
+                    .as_ref()
+                    .and_then(|config| config.env.as_ref())
+                    .is_some_and(|env| required_env.iter().all(|entry| env.contains(entry)));
+                Ok(container_image == self.image().as_str() && env_matches)
             },
             Err(bollard::errors::Error::DockerResponseServerError {
                 status_code: 404, ..

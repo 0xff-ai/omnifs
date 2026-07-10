@@ -6,10 +6,11 @@ use omnifs_api::{
     HealthState, MountFailure, MountInfo, OMNIFS_CONTAINER_NAME_ENV, OMNIFS_IMAGE_ENV,
     SubsystemHealth,
 };
-use omnifs_engine::HostContext;
+use omnifs_engine::{HostContext, MountRuntimes, ServingContext};
 use omnifs_nfs::NfsMountOptions;
 use omnifs_workspace::layout::{Daemon, Workspace, WorkspaceLayout};
 use omnifs_workspace::mounts::materialize::MaterializationMode;
+use omnifs_workspace::worldviews::Worldview;
 use std::fmt::Write as _;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
@@ -24,6 +25,7 @@ pub(crate) struct DaemonContext {
     listen: SocketAddr,
     nfs: NfsContext,
     process: ProcessInfo,
+    worldview: Option<Worldview>,
 }
 
 #[derive(Debug)]
@@ -61,6 +63,12 @@ impl DaemonContext {
             state_dir: args.nfs_state_dir.unwrap_or_else(|| layout.nfs_state_dir()),
             trace_path: args.nfs_trace,
         };
+        let worldview = args
+            .worldview
+            .as_deref()
+            .map(|name| Worldview::load(&layout.worldviews_dir, name))
+            .transpose()
+            .map_err(|error| anyhow::anyhow!("failed to load worldview: {error}"))?;
 
         Ok(Self {
             layout,
@@ -71,6 +79,7 @@ impl DaemonContext {
             listen: args.listen,
             nfs,
             process,
+            worldview,
         })
     }
 
@@ -150,6 +159,16 @@ impl DaemonContext {
         }
     }
 
+    pub(crate) fn serving_context(
+        &self,
+        registry: std::sync::Arc<MountRuntimes>,
+    ) -> ServingContext {
+        match &self.worldview {
+            Some(worldview) => ServingContext::from_worldview(registry, worldview),
+            None => ServingContext::from_runtimes(registry),
+        }
+    }
+
     pub(crate) fn nfs_mount_options(&self) -> NfsMountOptions {
         let mut options = NfsMountOptions::loopback(self.nfs.state_dir.clone());
         options.bind = self.nfs.bind;
@@ -175,6 +194,10 @@ impl DaemonContext {
             config_dir: self.layout.config_dir.clone(),
             cache_dir: self.layout.cache_dir.clone(),
             providers_dir: self.layout.providers_dir.clone(),
+            worldview: self
+                .worldview
+                .as_ref()
+                .map(|worldview| worldview.name.clone()),
             frontend,
             backend: self.backend.clone(),
             mounts,

@@ -1,7 +1,7 @@
 //! Filesystem frontends managed by the daemon.
 
 use omnifs_api::{FrontendInfo, FsType};
-use omnifs_engine::MountRuntimes;
+use omnifs_engine::{MountRuntimes, ServingContext};
 #[cfg(target_os = "linux")]
 use omnifs_fuse::NotifierHandle;
 #[cfg(target_os = "linux")]
@@ -27,22 +27,29 @@ pub(crate) struct Fuse {
     mount_point: PathBuf,
     registry: Arc<MountRuntimes>,
     notifier: NotifierHandle,
+    serving: ServingContext,
 }
 
 pub(crate) struct Nfs {
     mount_point: PathBuf,
     registry: Arc<MountRuntimes>,
     options: NfsMountOptions,
+    serving: ServingContext,
 }
 
 impl Frontend {
-    pub(crate) fn from_context(context: &DaemonContext, registry: Arc<MountRuntimes>) -> Self {
+    pub(crate) fn from_context(
+        context: &DaemonContext,
+        registry: Arc<MountRuntimes>,
+        serving: ServingContext,
+    ) -> Self {
         match context.frontend() {
             #[cfg(target_os = "linux")]
             FrontendKind::Fuse => Self::fuse(
                 context.mount_point().to_path_buf(),
                 registry,
                 omnifs_fuse::new_notifier_handle(),
+                serving,
             ),
             #[cfg(not(target_os = "linux"))]
             FrontendKind::Fuse => {
@@ -52,24 +59,37 @@ impl Frontend {
                 context.mount_point().to_path_buf(),
                 registry,
                 context.nfs_mount_options(),
+                serving,
             ),
         }
     }
 
     #[cfg(target_os = "linux")]
-    fn fuse(mount_point: PathBuf, registry: Arc<MountRuntimes>, notifier: NotifierHandle) -> Self {
+    fn fuse(
+        mount_point: PathBuf,
+        registry: Arc<MountRuntimes>,
+        notifier: NotifierHandle,
+        serving: ServingContext,
+    ) -> Self {
         Self::Fuse(Fuse {
             mount_point,
             registry,
             notifier,
+            serving,
         })
     }
 
-    fn nfs(mount_point: PathBuf, registry: Arc<MountRuntimes>, options: NfsMountOptions) -> Self {
+    fn nfs(
+        mount_point: PathBuf,
+        registry: Arc<MountRuntimes>,
+        options: NfsMountOptions,
+        serving: ServingContext,
+    ) -> Self {
         Self::Nfs(Nfs {
             mount_point,
             registry,
             options,
+            serving,
         })
     }
 
@@ -77,19 +97,21 @@ impl Frontend {
         match self {
             #[cfg(target_os = "linux")]
             Frontend::Fuse(frontend) => {
-                mount::run_blocking(
+                mount::run_blocking_with_context(
                     &frontend.mount_point,
                     &frontend.registry,
                     rt,
                     &frontend.notifier,
+                    frontend.serving.clone(),
                 )?;
             },
             Frontend::Nfs(frontend) => {
-                omnifs_nfs::mount_blocking(
+                omnifs_nfs::mount_blocking_with_context(
                     &frontend.mount_point,
                     &frontend.registry,
                     rt.clone(),
                     &frontend.options,
+                    frontend.serving.clone(),
                 )?;
             },
         }

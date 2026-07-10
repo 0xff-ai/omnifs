@@ -60,6 +60,13 @@ impl StatusReport {
             "runtime",
             format_runtime(self.runtime.as_ref())
         );
+        if let Some(worldview) = self
+            .runtime
+            .as_ref()
+            .and_then(|runtime| runtime.worldview.as_deref())
+        {
+            let _ = writeln!(out, "  {:<7} │ {}", "worldview", worldview);
+        }
         let _ = writeln!(out, "  {:<7} │ {}", "mount", self.format_mount());
         let _ = writeln!(
             out,
@@ -347,12 +354,13 @@ pub(crate) enum RuntimeJson {
         mount_point: std::path::PathBuf,
         config_dir: std::path::PathBuf,
         cache_dir: std::path::PathBuf,
-        health: DaemonHealth,
+        worldview: Option<String>,
+        health: Box<DaemonHealth>,
         /// Mount names loaded in the daemon's registry.
-        mounts: Vec<String>,
+        mounts: Box<[String]>,
         /// Mounts that did not converge at the last reconcile. Empty when every
         /// desired mount is serving; a dark mount appears here with its reason.
-        failed_mounts: Vec<FailedMountJson>,
+        failed_mounts: Box<[FailedMountJson]>,
     },
     NotRunning,
 }
@@ -384,8 +392,14 @@ impl StatusReport {
                     mount_point: r.mount_point.clone(),
                     config_dir: r.config_dir.clone(),
                     cache_dir: r.cache_dir.clone(),
-                    health: r.health.clone(),
-                    mounts: r.mounts.iter().map(|mount| mount.mount.clone()).collect(),
+                    worldview: r.worldview.clone(),
+                    health: Box::new(r.health.clone()),
+                    mounts: r
+                        .mounts
+                        .iter()
+                        .map(|mount| mount.mount.clone())
+                        .collect::<Vec<_>>()
+                        .into_boxed_slice(),
                     failed_mounts: r
                         .failed
                         .iter()
@@ -393,7 +407,8 @@ impl StatusReport {
                             mount: f.mount.clone(),
                             reason: f.reason.clone(),
                         })
-                        .collect(),
+                        .collect::<Vec<_>>()
+                        .into_boxed_slice(),
                 });
         StatusJson {
             version: env!("CARGO_PKG_VERSION").to_string(),

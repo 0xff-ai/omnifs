@@ -1,7 +1,7 @@
 use crate::adapter::Export;
 use crate::error::NfsFrontendError;
 use crate::server::start_server;
-use omnifs_engine::MountRuntimes;
+use omnifs_engine::{MountRuntimes, ServingContext};
 #[cfg(target_os = "linux")]
 use omnifs_mtab::proc_mounts;
 use omnifs_mtab::{NfsMountState, Platform, StateError, StateFile, UnmountCommand};
@@ -43,11 +43,27 @@ pub fn mount_blocking(
     rt: Handle,
     options: &NfsMountOptions,
 ) -> Result<(), NfsFrontendError> {
+    mount_blocking_with_context(
+        mount_point,
+        registry,
+        rt,
+        options,
+        ServingContext::from_runtimes(Arc::clone(registry)),
+    )
+}
+
+pub fn mount_blocking_with_context(
+    mount_point: &Path,
+    registry: &Arc<MountRuntimes>,
+    rt: Handle,
+    options: &NfsMountOptions,
+    serving: ServingContext,
+) -> Result<(), NfsFrontendError> {
     std::fs::create_dir_all(mount_point)?;
     ensure_private_state_dir(&options.state_dir)?;
     sweep_stale_states(&options.state_dir);
     let signal_rx = ctrl_c_receiver(&rt);
-    let export = Arc::new(Export::new(rt, Arc::clone(registry)));
+    let export = Arc::new(Export::new_with_context(rt, Arc::clone(registry), serving));
     let server = start_server(export, options.bind, options.trace_path.clone())?;
     let _state_file =
         StateFile::write(mount_point, server.addr(), &options.state_dir).map_err(state_error)?;

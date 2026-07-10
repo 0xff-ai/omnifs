@@ -30,6 +30,9 @@ pub const OMNIFS_CONTAINER_NAME_ENV: &str = "OMNIFS_CONTAINER_NAME";
 /// when reporting backend identity.
 pub const OMNIFS_IMAGE_ENV: &str = "OMNIFS_IMAGE";
 
+/// Optional Worldview name passed by launchers to the container entrypoint.
+pub const OMNIFS_WORLDVIEW_ENV: &str = "OMNIFS_WORLDVIEW";
+
 /// Default control port. The container publishes it on the host loopback;
 /// both binaries default to it so `omnifs` finds the daemon with zero config.
 pub const DEFAULT_PORT: u16 = 7878;
@@ -94,6 +97,9 @@ pub struct DaemonStatus {
     pub cache_dir: PathBuf,
     #[schema(value_type = String)]
     pub providers_dir: PathBuf,
+    /// Active read-only worldview scope, if the daemon was launched with one.
+    #[serde(default)]
+    pub worldview: Option<String>,
     /// The serving filesystem frontend (FUSE today; the protocol stays
     /// frontend-agnostic for future NFSv4/FSKit modes), when one is up.
     pub frontend: Option<FrontendInfo>,

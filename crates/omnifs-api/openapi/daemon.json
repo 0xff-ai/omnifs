@@ -778,6 +778,13 @@
           },
           "version": {
             "type": "string"
+          },
+          "worldview": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Active read-only worldview scope, if the daemon was launched with one."
           }
         }
       },

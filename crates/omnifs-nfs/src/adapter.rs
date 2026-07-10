@@ -213,9 +213,19 @@ pub struct Export {
 
 impl Export {
     pub fn new(rt: Handle, registry: Arc<MountRuntimes>) -> Self {
-        let tree = Arc::new(Tree::new(ServingContext::from_runtimes(Arc::clone(
-            &registry,
-        ))));
+        Self::new_with_context(
+            rt,
+            Arc::clone(&registry),
+            ServingContext::from_runtimes(registry),
+        )
+    }
+
+    pub fn new_with_context(
+        rt: Handle,
+        registry: Arc<MountRuntimes>,
+        serving: ServingContext,
+    ) -> Self {
+        let tree = Arc::new(Tree::new(serving));
         assert!(
             !matches!(rt.runtime_flavor(), RuntimeFlavor::CurrentThread),
             "NFS adapter requires a multi-thread Tokio runtime because sync NFS workers call Handle::block_on"

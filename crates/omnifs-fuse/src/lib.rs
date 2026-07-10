@@ -120,11 +120,23 @@ impl Frontend {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn new_with_path_map_and_notifier(
         rt: Handle,
         registry: Arc<MountRuntimes>,
         path_to_inode: Arc<PathToInode<InodeBody>>,
         notifier: NotifierHandle,
+    ) -> Self {
+        let serving = ServingContext::from_runtimes(Arc::clone(&registry));
+        Self::new_with_context(rt, registry, path_to_inode, notifier, serving)
+    }
+
+    pub(crate) fn new_with_context(
+        rt: Handle,
+        registry: Arc<MountRuntimes>,
+        path_to_inode: Arc<PathToInode<InodeBody>>,
+        notifier: NotifierHandle,
+        serving: ServingContext,
     ) -> Self {
         let inodes = Arc::clone(&path_to_inode);
 
@@ -140,7 +152,7 @@ impl Frontend {
         };
         inodes.insert_entry(ROOT_INO, root_entry);
 
-        let tree = Tree::new(ServingContext::from_runtimes(Arc::clone(&registry)));
+        let tree = Tree::new(serving);
 
         Self {
             rt,

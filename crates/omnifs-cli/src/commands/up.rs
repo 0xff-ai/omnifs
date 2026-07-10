@@ -17,6 +17,9 @@ pub struct UpArgs {
     /// Wait until /v1/ready answers, failing with exit code 3 on timeout.
     #[arg(long, value_name = "DURATION")]
     pub wait: Option<String>,
+    /// Serve only the named read-only worldview from `<OMNIFS_HOME>/worldviews`.
+    #[arg(long, value_name = "NAME")]
+    pub worldview: Option<String>,
 }
 
 impl UpArgs {
@@ -27,7 +30,9 @@ impl UpArgs {
             .as_deref()
             .map(crate::stages::parse_wait_duration)
             .transpose()?;
-        let launcher = Launcher::new(&workspace, "omnifs up").with_runtime_override(self.runtime);
+        let launcher = Launcher::new(&workspace, "omnifs up")
+            .with_runtime_override(self.runtime)
+            .with_worldview(self.worldview);
         match launcher.launch().await? {
             LaunchOutcome::Native { mount_point } => {
                 anstream::eprintln!();

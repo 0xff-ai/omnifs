@@ -1,17 +1,15 @@
 //! The `Tree::resolve` / `Tree::resolve_child` bodies.
 
-use std::sync::Arc;
-
-use crate::Runtime;
 use crate::cache::{Record, RecordKind};
 use crate::effect_apply::LookupOutcome;
+use crate::serving::ScopeChildResolution;
 use crate::view::{DirentsPayload, EntryMeta};
 use omnifs_core::path::Path;
 
 use super::error::{Result, TreeError};
 use super::node::{Node, NodeBody};
 use super::synthetic;
-use crate::{RequestCtx, Tree};
+use crate::{RequestCtx, Runtime, Tree};
 
 impl Tree {
     /// Resolve a full protocol path to a `Node`. Splits the path into
@@ -34,7 +32,6 @@ impl Tree {
             ));
         }
 
-        let runtime = self.ctx.runtime_for(&mount)?;
         let Some((parent, name)) = rel.parent_and_name() else {
             return Err(TreeError::invalid_input(format!(
                 "resolve: path has no parent: {}",
@@ -42,8 +39,7 @@ impl Tree {
             )));
         };
 
-        self.resolve_child_in(mount, &runtime, &parent, name, ctx)
-            .await
+        self.resolve_child_in(mount, &parent, name, ctx).await
     }
 
     /// Resolve a child of an already-resolved parent directory `Node` to a
@@ -61,15 +57,8 @@ impl Tree {
     /// result (a real provider `.gitignore` wins). Subtree outcomes resolve
     /// through `Runtime::resolve_tree_ref` into `NodeBody::Subtree`.
     pub async fn resolve_child(&self, parent: &Node, name: &str, ctx: &RequestCtx) -> Result<Node> {
-        let runtime = self.ctx.runtime_for(parent.mount())?;
-        self.resolve_child_in(
-            parent.mount().to_string(),
-            &runtime,
-            parent.path(),
-            name,
-            ctx,
-        )
-        .await
+        self.resolve_child_in(parent.mount().to_string(), parent.path(), name, ctx)
+            .await
     }
 
     /// Shared body for [`resolve`](Self::resolve) and
@@ -78,7 +67,6 @@ impl Tree {
     async fn resolve_child_in(
         &self,
         mount: String,
-        runtime: &Arc<Runtime>,
         parent: &Path,
         name: &str,
         ctx: &RequestCtx,
@@ -101,18 +89,32 @@ impl Tree {
             ));
         }
 
+        match self.ctx.scope_child_resolution(&mount, &rel)? {
+            ScopeChildResolution::Provider => {},
+            ScopeChildResolution::SyntheticDirectory => {
+                return Ok(Node::new(
+                    mount,
+                    rel,
+                    EntryMeta::directory(),
+                    NodeBody::Provider,
+                ));
+            },
+        }
+
+        let runtime = self.ctx.runtime_for(&mount, &rel)?;
+
         // A pagination control (`@next`/`@all`) resolves ONLY from the parent's
         // cached dirents (a resume cursor remains). A reserved control name is
         // never a real provider entry, so once the control is gone (feed
         // exhausted) the lookup is NotFound; we never consult the provider for it.
         if synthetic::is_control_name(name) {
-            return match synthetic::resolve_synthetic_child(runtime, parent, name, false) {
+            return match synthetic::resolve_synthetic_child(&runtime, parent, name, false) {
                 Some((meta, syn)) => Ok(Node::synthetic(mount, rel, meta, syn)),
                 None => Err(TreeError::not_found(rel.as_str())),
             };
         }
 
-        if let Some(meta) = cached_dirent_child(runtime, parent, name) {
+        if let Some(meta) = cached_dirent_child(&runtime, parent, name) {
             return Ok(Node::new(mount, rel, meta, NodeBody::Provider));
         }
 
@@ -142,7 +144,7 @@ impl Tree {
             // only now, never shadowing a real one (the provider was consulted
             // and returned negative). Otherwise surface NotFound.
             LookupOutcome::NotFound => {
-                match synthetic::resolve_synthetic_child(runtime, parent, name, false) {
+                match synthetic::resolve_synthetic_child(&runtime, parent, name, false) {
                     Some((meta, syn)) => Ok(Node::synthetic(mount, rel, meta, syn)),
                     None => Err(TreeError::not_found(rel.as_str())),
                 }

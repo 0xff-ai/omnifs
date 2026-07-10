@@ -11,7 +11,8 @@ fi
 : "${RUST_LOG:=info}"
 : "${OMNIFS_CONTAINER_NAME:=}"
 : "${OMNIFS_IMAGE:=}"
-export OMNIFS_HOME RUST_LOG OMNIFS_MOUNT_POINT OMNIFS_CONTAINER_NAME OMNIFS_IMAGE
+: "${OMNIFS_WORLDVIEW:=}"
+export OMNIFS_HOME RUST_LOG OMNIFS_MOUNT_POINT OMNIFS_CONTAINER_NAME OMNIFS_IMAGE OMNIFS_WORLDVIEW
 omnifs_cache_dir="$OMNIFS_HOME/cache"
 
 mkdir -p \
@@ -29,6 +30,8 @@ rm -f "$log_pipe"
 
 # The daemon resolves its own mount point; it reads OMNIFS_MOUNT_POINT (exported
 # above) and falls back to $HOME/omnifs host-native.
-exec omnifs daemon \
-  --listen "$OMNIFS_LISTEN" \
-  --root-symlinks
+daemon_args=(omnifs daemon --listen "$OMNIFS_LISTEN" --root-symlinks)
+if [ -n "$OMNIFS_WORLDVIEW" ]; then
+  daemon_args+=(--worldview "$OMNIFS_WORLDVIEW")
+fi
+exec "${daemon_args[@]}"
