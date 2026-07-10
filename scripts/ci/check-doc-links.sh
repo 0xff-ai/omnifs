@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Fail if any docs/ markdown file links to or names a docs path that does not exist.
+# Fail if any tracked docs/ markdown file links to or names a docs path that does not exist.
 #
 # This catches the cheap, self-maintaining slice of documentation drift: dangling
 # doc-to-doc references (deleted or renamed docs). It checks markdown link targets
@@ -35,7 +35,7 @@ while IFS= read -r -d '' f; do
     esac
     [ -e "$p" ] || report+="  DANGLING  $f  ->  $raw"$'\n'
   done <<< "$targets"
-done < <(find docs -name '*.md' -print0)
+done < <(git ls-files -z -- 'docs/*.md')
 
 if [ -n "$report" ]; then
   echo "Doc link check FAILED: docs reference nonexistent docs paths."
