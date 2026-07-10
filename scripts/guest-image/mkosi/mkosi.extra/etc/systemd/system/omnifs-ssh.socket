@@ -1,0 +1,11 @@
+[Unit]
+Description=omnifs krunkit guest ssh (vsock)
+
+# Deliberately not enabled (no sockets.target.wants symlink): omnifs-ssh-setup.service
+# starts this on demand, only once the seed's OMNIFS_SSH_PUBKEY has been
+# installed. A seed with no key means ssh access is disabled for that launch;
+# an always-enabled socket would accept connections into a guest with no
+# authorized_keys at all, which is a confusing hang, not a clean refusal.
+[Socket]
+ListenStream=vsock::22
+Accept=yes

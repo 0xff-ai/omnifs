@@ -1,0 +1,12 @@
+[Unit]
+Description=Install the seed's ssh public key and start the vsock ssh socket
+Requires=omnifs-seed-mount.service
+After=omnifs-seed-mount.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/lib/omnifs/setup-ssh.sh
+
+[Install]
+WantedBy=multi-user.target
