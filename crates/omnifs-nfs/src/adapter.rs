@@ -345,7 +345,7 @@ impl Export {
         if let Some(backing_dir) = parent_body.backing() {
             let child = backing_dir.join(&cold.name);
             let metadata = std::fs::symlink_metadata(&child).map_err(|_| Status::Stale)?;
-            let kind = backing_kind(&metadata)?;
+            let kind = NodeKind::try_from(&metadata)?;
             self.intern_backing(Some(id), parent_scope, cold.parent, &cold.name, child, kind);
         } else {
             let parent_node = parent_body.node().ok_or(Status::Stale)?;
@@ -526,7 +526,7 @@ impl Export {
             parent,
             name,
             node,
-            nfs_kind(kind),
+            NodeKind::from(kind),
             subtree_root,
         )
     }
@@ -661,7 +661,7 @@ impl Export {
     fn snapshot(&self, scope: u64, parent: u64, entries: &[NsDirEntry]) -> DirListing {
         let mut out = Vec::with_capacity(entries.len());
         for entry in entries {
-            let kind = nfs_kind(&entry.kind);
+            let kind = NodeKind::from(&entry.kind);
             // A listing never marks a treeref child; it binds as a plain provider
             // node and is promoted on the lookup that descends into it.
             let id = self.intern_node(None, scope, parent, &entry.name, entry.node, kind, None);
@@ -702,7 +702,7 @@ impl Export {
             };
             let backing_path = entry.path();
             let metadata = std::fs::symlink_metadata(&backing_path).map_err(|_| Status::Io)?;
-            let Ok(kind) = backing_kind(&metadata) else {
+            let Ok(kind) = NodeKind::try_from(&metadata) else {
                 continue;
             };
             let id = self.intern_backing(None, scope, parent, name, backing_path, kind);
@@ -727,7 +727,7 @@ impl Export {
     ) -> StatusResult<u64> {
         let child = dir.join(name);
         let metadata = std::fs::symlink_metadata(&child).map_err(|_| Status::NoEnt)?;
-        let kind = backing_kind(&metadata)?;
+        let kind = NodeKind::try_from(&metadata)?;
         Ok(self.intern_backing(None, scope, parent, name, child, kind))
     }
 }
@@ -818,7 +818,7 @@ impl ReadOnlyExport for Export {
                 // Eagerly probe a file child's exact size so a bare `stat`/`ls -l`
                 // after the lookup reflects a ranged file's real size; the
                 // namespace caches the learned size for the later `getattr`.
-                if matches!(nfs_kind(&answer.kind), NodeKind::File) {
+                if matches!(NodeKind::from(&answer.kind), NodeKind::File) {
                     let _ = self.rt.block_on(self.namespace.getattr_exact(answer.node));
                 }
                 self.apply_pending_events();
@@ -1032,16 +1032,35 @@ impl ReadOnlyExport for Export {
 // Free helpers
 // -----------------------------------------------------------------------------
 
-fn nfs_kind(kind: &EntryKind) -> NodeKind {
-    match kind {
-        EntryKind::Directory | EntryKind::Subtree { .. } => NodeKind::Directory,
-        EntryKind::File => NodeKind::File,
-        EntryKind::Symlink => NodeKind::Symlink,
+impl From<&EntryKind> for NodeKind {
+    fn from(kind: &EntryKind) -> Self {
+        match kind {
+            EntryKind::Directory | EntryKind::Subtree { .. } => Self::Directory,
+            EntryKind::File => Self::File,
+            EntryKind::Symlink => Self::Symlink,
+        }
+    }
+}
+
+impl TryFrom<&std::fs::Metadata> for NodeKind {
+    type Error = Status;
+
+    fn try_from(metadata: &std::fs::Metadata) -> StatusResult<Self> {
+        let file_type = metadata.file_type();
+        if file_type.is_dir() {
+            Ok(Self::Directory)
+        } else if file_type.is_symlink() {
+            Ok(Self::Symlink)
+        } else if file_type.is_file() {
+            Ok(Self::File)
+        } else {
+            Err(Status::Invalid)
+        }
     }
 }
 
 fn attr_from_ns(id: u64, parent: u64, attrs: &Attrs) -> Attr {
-    let kind = nfs_kind(&attrs.kind);
+    let kind = NodeKind::from(&attrs.kind);
     Attr {
         id,
         parent,
@@ -1053,27 +1072,11 @@ fn attr_from_ns(id: u64, parent: u64, attrs: &Attrs) -> Attr {
     }
 }
 
-/// Classify a local filesystem node (a resolved treeref subtree's contents).
-/// Mirrors the minimal backing-kind mapping the byte boundary keeps off the
-/// frontend.
-fn backing_kind(metadata: &std::fs::Metadata) -> StatusResult<NodeKind> {
-    let file_type = metadata.file_type();
-    if file_type.is_dir() {
-        Ok(NodeKind::Directory)
-    } else if file_type.is_symlink() {
-        Ok(NodeKind::Symlink)
-    } else if file_type.is_file() {
-        Ok(NodeKind::File)
-    } else {
-        Err(Status::Invalid)
-    }
-}
-
 /// Build a `fattr4`-shaped answer from local filesystem metadata. The read-only
 /// mode follows the node kind (`0o555`/`0o444`/`0o777`), matching the byte
 /// boundary's backing-metadata mapping.
 fn attr_from_metadata(id: u64, parent: u64, metadata: &std::fs::Metadata) -> StatusResult<Attr> {
-    let kind = backing_kind(metadata)?;
+    let kind = NodeKind::try_from(metadata)?;
     let mtime_sec = metadata
         .modified()
         .ok()
