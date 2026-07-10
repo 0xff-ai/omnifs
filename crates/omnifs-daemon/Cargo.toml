@@ -39,6 +39,10 @@ time = { workspace = true, features = ["formatting"] }
 omnifs-fuse = { workspace = true }
 omnifs-mtab = { workspace = true }
 nix = { version = "0.30", features = ["net"] }
+# The krunkit guest's readiness beacon (crates/omnifs-daemon/src/frontend.rs):
+# dials host vsock once the FUSE mount is serving. Linux-only, same as
+# omnifs-namespace-wire's vsock dependency (the krunkit guest's OS).
+tokio-vsock = "0.7.2"
 
 [dev-dependencies]
 tempfile = { workspace = true }
