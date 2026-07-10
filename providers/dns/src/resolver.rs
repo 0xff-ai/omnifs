@@ -143,32 +143,6 @@ const BUILTIN_RESOLVERS: &[(&str, &str, &[&str])] = &[
     ),
 ];
 
-struct RawResolver {
-    url: String,
-    aliases: Vec<String>,
-}
-
-fn build_resolver_entries(
-    raw_resolvers: BTreeMap<String, RawResolver>,
-) -> Result<Vec<ResolverEntry>> {
-    raw_resolvers
-        .into_iter()
-        .map(|(name, raw)| {
-            name.parse::<ResolverName>().map_err(|()| {
-                ProviderError::invalid_input(format!("invalid resolver name: {name}"))
-            })?;
-            let url = Endpoint::new(raw.url).map_err(|error| {
-                ProviderError::invalid_input(format!("invalid resolver {name:?}: {error}"))
-            })?;
-            Ok(ResolverEntry {
-                name,
-                url,
-                aliases: raw.aliases,
-            })
-        })
-        .collect()
-}
-
 fn builtin_resolver_entries() -> Result<Vec<ResolverEntry>> {
     BUILTIN_RESOLVERS
         .iter()
@@ -260,34 +234,36 @@ impl ResolverConfig {
     }
 
     /// Build from already-deserialized config maps (called from `init`).
-    pub(super) fn from_config<I>(default_resolver: String, raw_resolvers: I) -> Result<Self>
-    where
-        I: IntoIterator<Item = (String, crate::ConfigResolver)>,
-    {
-        let resolvers: BTreeMap<_, _> = raw_resolvers
-            .into_iter()
-            .map(|(name, resolver)| {
-                (
-                    name,
-                    RawResolver {
-                        url: resolver.url,
-                        aliases: resolver.aliases,
-                    },
-                )
-            })
-            .collect();
-
+    pub(super) fn from_config(
+        default_resolver: String,
+        resolvers: BTreeMap<String, crate::ConfigResolver>,
+    ) -> Result<Self> {
         let resolvers = if resolvers.is_empty() {
             builtin_resolver_entries()?
         } else {
-            build_resolver_entries(resolvers)?
+            resolvers
+                .into_iter()
+                .map(|(name, resolver)| {
+                    name.parse::<ResolverName>().map_err(|()| {
+                        ProviderError::invalid_input(format!("invalid resolver name: {name}"))
+                    })?;
+                    let url = Endpoint::new(resolver.url).map_err(|error| {
+                        ProviderError::invalid_input(format!("invalid resolver {name:?}: {error}"))
+                    })?;
+                    Ok(ResolverEntry {
+                        name,
+                        url,
+                        aliases: resolver.aliases,
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?
         };
 
         let config = Self {
             default_name: default_resolver,
             resolvers,
         };
-        let _ = config.default_endpoint()?;
+        config.default_endpoint()?;
         Ok(config)
     }
 
@@ -381,7 +357,7 @@ fn query_with_name(
     let sep = if ep.contains('?') { '&' } else { '?' };
 
     let mut message = Message::new(0, MessageType::Query, OpCode::Query);
-    message.add_query(DnsQuery::query(name.clone(), rtype.as_hickory()));
+    message.add_query(DnsQuery::query(name, rtype.as_hickory()));
     message.metadata.recursion_desired = true;
     let wire = message
         .to_vec()

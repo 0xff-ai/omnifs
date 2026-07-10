@@ -199,13 +199,15 @@ async fn root_list(cx: DirCx<State>) -> Result<DirListing> {
             .resolvers
             .entries()
             .iter()
-            .map(|entry| entry.name.clone())
-            .map(|name| {
-                name.parse::<ResolverName>()
+            .map(|entry| {
+                entry
+                    .name
+                    .parse::<ResolverName>()
                     .map(|resolver| format!("@{resolver}"))
                     .map_err(|()| {
                         ProviderError::internal(format!(
-                            "configured resolver name is invalid: {name}"
+                            "configured resolver name is invalid: {}",
+                            entry.name
                         ))
                     })
             })
@@ -217,13 +219,12 @@ async fn root_list(cx: DirCx<State>) -> Result<DirListing> {
 
 /// The exhaustive record-type listing for a domain directory.
 fn record_projection() -> DirListing {
-    let mut names: Vec<String> = SupportedRecordType::all()
-        .iter()
-        .map(|record_type| record_type.as_ref().to_string())
-        .collect();
-    names.push("all".to_string());
-    names.push("raw".to_string());
-    DirListing::exhaustive(names.into_iter().map(Entry::file))
+    DirListing::exhaustive(
+        SupportedRecordType::all()
+            .iter()
+            .map(|record_type| Entry::file(record_type.as_str()))
+            .chain(["all", "raw"].into_iter().map(Entry::file)),
+    )
 }
 
 /// An open (dynamic, non-exhaustive) directory with no statically-listed
