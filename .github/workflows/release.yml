@@ -22,6 +22,7 @@ permissions:
 env:
   REGISTRY: ghcr.io
   FRONTEND_IMAGE_NAME: ${{ github.repository }}-frontend
+  GUEST_IMAGE_NAME: ${{ github.repository }}-guest
 
 jobs:
   plan:
@@ -168,6 +169,10 @@ jobs:
 
       - uses: ./.github/actions/omnifs-docker
 
+      - uses: oras-project/setup-oras@v1
+        with:
+          version: 1.3.3
+
       - name: Promote CI frontend image to release tags
         id: promote_frontend
         env:
@@ -189,6 +194,33 @@ jobs:
         with:
           subject-name: ${{ env.REGISTRY }}/${{ env.FRONTEND_IMAGE_NAME }}
           subject-digest: ${{ steps.promote_frontend.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: false
+
+      # The krunkit guest disk image: a non-container OCI artifact (see
+      # guest-image-arm64 in ci.yml), so promotion retags via `oras tag`
+      # rather than `docker buildx imagetools create`.
+      - name: Promote CI guest image to release tags
+        id: promote_guest_image
+        env:
+          TAG: ${{ needs.plan.outputs.tag }}
+          VERSION: ${{ needs.plan.outputs.version }}
+          RELEASE_COMMIT_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+        run: |
+          set -euo pipefail
+          digest="$(scripts/ci/promote-guest-image.sh \
+            "${{ env.REGISTRY }}" \
+            "${{ env.GUEST_IMAGE_NAME }}" \
+            "$RELEASE_COMMIT_SHA" \
+            "$TAG" \
+            "$VERSION")"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Attest guest image build provenance
+        uses: actions/attest-build-provenance@v4.1.0
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.GUEST_IMAGE_NAME }}
+          subject-digest: ${{ steps.promote_guest_image.outputs.digest }}
           push-to-registry: true
           create-storage-record: false
 
