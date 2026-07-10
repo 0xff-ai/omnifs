@@ -16,6 +16,7 @@ permissions:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
+  FRONTEND_IMAGE_NAME: ${{ github.repository }}-frontend
   CI_MAIN_PUSH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
 jobs:
@@ -642,6 +643,120 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  # Builds the omnifs-frontend image (the Docker-hosted FUSE frontend, `omnifs
+  # frontend up`): the same Dockerfile's `frontend-release` target, mirroring
+  # docker-amd64/arm64's build+push shape with a different stage and image
+  # name. See docs/contracts/60-build-validation.md.
+  frontend-amd64:
+    name: frontend amd64
+    if: >-
+      github.event_name == 'push' ||
+      (github.event_name == 'pull_request' &&
+        (github.event.pull_request.user.login == 'raulk' ||
+         contains(github.event.pull_request.labels.*.name, 'ci-full')))
+    runs-on: *linux_runner
+    needs: cli-linux-x64
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: ./.github/actions/omnifs-docker
+
+      - name: Download Linux x64 CLI archive
+        uses: actions/download-artifact@v8
+        with:
+          name: omnifs-cli-linux-x64
+          path: dist-cli
+
+      - name: Extract Linux x64 CLI binary
+        run: |
+          set -euo pipefail
+          mkdir -p dist-cli/bin
+          tar -C dist-cli/bin -xJf dist-cli/omnifs-cli-linux-x64.tar.xz
+          test -x dist-cli/bin/omnifs
+
+      - name: Build and push amd64 frontend image
+        id: docker
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ env.FRONTEND_IMAGE_NAME }}:docker-amd64-${{ github.sha }}
+          PLATFORM: linux/amd64
+          PUSH: "true"
+          OMNIFS_BINARY: ${{ github.workspace }}/dist-cli/bin/omnifs
+        run: scripts/ci/build-frontend-image.sh
+
+      - name: Export amd64 image digest
+        run: |
+          set -euo pipefail
+          digest="${{ steps.docker.outputs.digest }}"
+          test -n "$digest"
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload amd64 image digest
+        uses: actions/upload-artifact@v7
+        with:
+          name: frontend-digest-amd64
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  frontend-arm64:
+    name: frontend arm64
+    if: >-
+      github.event_name == 'push' ||
+      (github.event_name == 'pull_request' &&
+        (github.event.pull_request.user.login == 'raulk' ||
+         contains(github.event.pull_request.labels.*.name, 'ci-full')))
+    runs-on: *arm_runner
+    needs: cli-linux-arm64
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: ./.github/actions/omnifs-docker
+
+      - name: Download Linux arm64 CLI archive
+        uses: actions/download-artifact@v8
+        with:
+          name: omnifs-cli-linux-arm64
+          path: dist-cli
+
+      - name: Extract Linux arm64 CLI binary
+        run: |
+          set -euo pipefail
+          mkdir -p dist-cli/bin
+          tar -C dist-cli/bin -xJf dist-cli/omnifs-cli-linux-arm64.tar.xz
+          test -x dist-cli/bin/omnifs
+
+      - name: Build and push arm64 frontend image
+        id: docker
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ env.FRONTEND_IMAGE_NAME }}:docker-arm64-${{ github.sha }}
+          PLATFORM: linux/arm64
+          PUSH: "true"
+          OMNIFS_BINARY: ${{ github.workspace }}/dist-cli/bin/omnifs
+        run: scripts/ci/build-frontend-image.sh
+
+      - name: Export arm64 image digest
+        run: |
+          set -euo pipefail
+          digest="${{ steps.docker.outputs.digest }}"
+          test -n "$digest"
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload arm64 image digest
+        uses: actions/upload-artifact@v7
+        with:
+          name: frontend-digest-arm64
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
   smoke-amd64:
     name: smoke amd64
     if: >-
@@ -750,6 +865,89 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: scripts/ci/smoke-container.sh
 
+  # The frontend image needs no daemon, no dev home, and no provider store: it
+  # only ever runs `omnifs frontend run`, so its smoke test is the three
+  # structural checks in scripts/ci/smoke-frontend-image.sh, not the
+  # scripts/dev.ts launch path smoke-amd64/arm64 use. The live attach/mount
+  # path is a later slice's fuse-docker itest gate.
+  smoke-frontend-amd64:
+    name: smoke frontend amd64
+    if: >-
+      github.event_name == 'push' ||
+      (github.event_name == 'pull_request' &&
+        (github.event.pull_request.user.login == 'raulk' ||
+         contains(github.event.pull_request.labels.*.name, 'ci-full')))
+    runs-on: *linux_runner
+    needs: frontend-amd64
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: read
+    env:
+      IMAGE: ghcr.io/${{ github.repository }}-frontend:smoke
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: ./.github/actions/omnifs-docker
+
+      - name: Download amd64 frontend image digest
+        uses: actions/download-artifact@v8
+        with:
+          name: frontend-digest-amd64
+          path: /tmp/digests
+
+      - name: Pull the amd64 frontend image and tag it for smoke
+        run: |
+          set -euo pipefail
+          digest_path=$(find /tmp/digests -mindepth 1 -maxdepth 1 -type f | head -n 1)
+          test -n "$digest_path"
+          digest_file="${digest_path##*/}"
+          ref="${REGISTRY}/${FRONTEND_IMAGE_NAME}@sha256:${digest_file}"
+          docker pull "$ref"
+          docker tag "$ref" "$IMAGE"
+
+      - name: Run frontend image smoke test
+        run: scripts/ci/smoke-frontend-image.sh
+
+  smoke-frontend-arm64:
+    name: smoke frontend arm64
+    if: >-
+      github.event_name == 'push' ||
+      (github.event_name == 'pull_request' &&
+        (github.event.pull_request.user.login == 'raulk' ||
+         contains(github.event.pull_request.labels.*.name, 'ci-full')))
+    runs-on: *arm_runner
+    needs: frontend-arm64
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: read
+    env:
+      IMAGE: ghcr.io/${{ github.repository }}-frontend:smoke
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: ./.github/actions/omnifs-docker
+
+      - name: Download arm64 frontend image digest
+        uses: actions/download-artifact@v8
+        with:
+          name: frontend-digest-arm64
+          path: /tmp/digests
+
+      - name: Pull the arm64 frontend image and tag it for smoke
+        run: |
+          set -euo pipefail
+          digest_path=$(find /tmp/digests -mindepth 1 -maxdepth 1 -type f | head -n 1)
+          test -n "$digest_path"
+          digest_file="${digest_path##*/}"
+          ref="${REGISTRY}/${FRONTEND_IMAGE_NAME}@sha256:${digest_file}"
+          docker pull "$ref"
+          docker tag "$ref" "$IMAGE"
+
+      - name: Run frontend image smoke test
+        run: scripts/ci/smoke-frontend-image.sh
+
   publish:
     name: publish
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -763,8 +961,12 @@ jobs:
       - cli-darwin
       - docker-amd64
       - docker-arm64
+      - frontend-amd64
+      - frontend-arm64
       - smoke-amd64
       - smoke-arm64
+      - smoke-frontend-amd64
+      - smoke-frontend-arm64
     permissions:
       contents: read
       packages: write
@@ -773,35 +975,48 @@ jobs:
 
       - uses: ./.github/actions/omnifs-docker
 
-      - name: Download image digests
+      - name: Download runtime image digests
         uses: actions/download-artifact@v8
         with:
           pattern: docker-digest-*
           path: /tmp/digests
           merge-multiple: true
 
-      - name: Publish multi-platform manifest
+      - name: Publish runtime multi-platform manifest
         run: |
           set -euo pipefail
-          refs=()
-          for digest_file in /tmp/digests/*; do
-            digest="${digest_file##*/}"
-            refs+=("${REGISTRY}/${IMAGE_NAME}@sha256:${digest}")
-          done
-          test "${#refs[@]}" -ge 2
-          tag="${REGISTRY}/${IMAGE_NAME}:sha-${GITHUB_SHA}"
-          docker buildx imagetools create -t "$tag" "${refs[@]}"
-          docker buildx imagetools inspect "$tag" > manifest.txt
-          grep -q 'Platform:.*linux/amd64' manifest.txt
-          grep -q 'Platform:.*linux/arm64' manifest.txt
-          awk '/^Digest:/ { print $2; exit }' manifest.txt > manifest-digest.txt
+          scripts/ci/publish-manifest.sh \
+            "${REGISTRY}/${IMAGE_NAME}" "sha-${GITHUB_SHA}" /tmp/digests docker
 
-      - name: Upload manifest digest
+      - name: Upload runtime manifest digest
         uses: actions/upload-artifact@v7
         with:
           name: docker-manifest-digest
           path: |
-            manifest.txt
-            manifest-digest.txt
+            docker-manifest.txt
+            docker-manifest-digest.txt
+          retention-days: 90
+          if-no-files-found: error
+
+      - name: Download frontend image digests
+        uses: actions/download-artifact@v8
+        with:
+          pattern: frontend-digest-*
+          path: /tmp/frontend-digests
+          merge-multiple: true
+
+      - name: Publish frontend multi-platform manifest
+        run: |
+          set -euo pipefail
+          scripts/ci/publish-manifest.sh \
+            "${REGISTRY}/${FRONTEND_IMAGE_NAME}" "sha-${GITHUB_SHA}" /tmp/frontend-digests frontend
+
+      - name: Upload frontend manifest digest
+        uses: actions/upload-artifact@v7
+        with:
+          name: frontend-manifest-digest
+          path: |
+            frontend-manifest.txt
+            frontend-manifest-digest.txt
           retention-days: 90
           if-no-files-found: error

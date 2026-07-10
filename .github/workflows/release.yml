@@ -22,6 +22,7 @@ permissions:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
+  FRONTEND_IMAGE_NAME: ${{ github.repository }}-frontend
 
 jobs:
   plan:
@@ -189,6 +190,30 @@ jobs:
         with:
           subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           subject-digest: ${{ steps.promote.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: false
+
+      - name: Promote CI frontend image to release tags
+        id: promote_frontend
+        env:
+          TAG: ${{ needs.plan.outputs.tag }}
+          VERSION: ${{ needs.plan.outputs.version }}
+          RELEASE_COMMIT_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+        run: |
+          set -euo pipefail
+          digest="$(scripts/ci/promote-image.sh \
+            "${{ env.REGISTRY }}" \
+            "${{ env.FRONTEND_IMAGE_NAME }}" \
+            "$RELEASE_COMMIT_SHA" \
+            "$TAG" \
+            "$VERSION")"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Attest frontend image build provenance
+        uses: actions/attest-build-provenance@v4.1.0
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.FRONTEND_IMAGE_NAME }}
+          subject-digest: ${{ steps.promote_frontend.outputs.digest }}
           push-to-registry: true
           create-storage-record: false
 
