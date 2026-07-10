@@ -19,6 +19,7 @@ dashmap = { workspace = true }
 fuser = { version = "0.17", features = ["macos-no-mount"] }
 libc = { workspace = true }
 omnifs-engine = { workspace = true }
+omnifs-mtab = { workspace = true }
 parking_lot = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }

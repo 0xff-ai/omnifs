@@ -7,8 +7,8 @@
 use crate::{Frontend, NotifierHandle};
 use fuser::Session;
 use omnifs_engine::Namespace;
+use omnifs_mtab::{Platform, UnmountCommand};
 use std::path::Path;
-use std::process::Command;
 use std::sync::Arc;
 use tokio::runtime::Handle;
 use tracing::info;
@@ -52,7 +52,7 @@ pub fn run_blocking(
         .join()
         .map_err(|e| Error::FuseFailed(e.to_string()));
 
-    // Drop the notifier before joining the session.
+    // Drop the notifier after the session exits.
     notifier.lock().take();
 
     info!("FUSE mount exited");
@@ -60,18 +60,9 @@ pub fn run_blocking(
 }
 
 pub fn unmount(mount_point: &Path) -> Result<(), Error> {
-    let status = Command::new("fusermount")
-        .args(["-u", &mount_point.display().to_string()])
-        .status()
-        .map_err(|e| Error::UnmountFailed(e.to_string()))?;
-
-    if status.success() {
-        Ok(())
-    } else {
-        Err(Error::UnmountFailed(format!(
-            "fusermount exited with {status}"
-        )))
-    }
+    UnmountCommand::graceful(Platform::Linux, mount_point)
+        .run()
+        .map_err(|error| Error::UnmountFailed(error.to_string()))
 }
 
 #[derive(Debug, thiserror::Error)]
