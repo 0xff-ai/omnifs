@@ -49,9 +49,6 @@ where
         F: FnOnce() -> Fut + Send + 'static,
         Fut: Future<Output = V> + Send + 'static,
     {
-        match self.coalesce.resolve(key, budget, make) {
-            ResolveOutcome::Ready(value) => DeferOutcome::Ready(value),
-            ResolveOutcome::Pending => DeferOutcome::Pending,
-        }
+        self.coalesce.resolve(key, budget, make)
     }
 }

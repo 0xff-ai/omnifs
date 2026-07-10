@@ -206,7 +206,7 @@ impl<K: CoverKey, V> Coalesce<K, V> {
                 receiver
             },
             Claim::Join(slot) => slot.result,
-            Claim::Covered { .. } => {
+            Claim::Covered(_) => {
                 panic!("resolve() uses exact-key budgets only; cover waits are unsupported")
             },
         };
@@ -222,8 +222,8 @@ impl<K: CoverKey, V> Coalesce<K, V> {
         match self.claim(key) {
             Claim::Run { guard, receiver: _ } => Acquired::Run { guard },
             Claim::Join(slot) => self.wait_exact(slot, cfg.exact).await,
-            Claim::Covered(slot) => Acquired::Covered {
-                notifier: slot.notifier.subscribe(),
+            Claim::Covered(notifier) => Acquired::Covered {
+                notifier: notifier.subscribe(),
             },
         }
     }
@@ -243,11 +243,7 @@ impl<K: CoverKey, V> Coalesce<K, V> {
         }
 
         if let Some(slot) = best_cover_slot(key, &slots) {
-            return Claim::Covered(SlotRef {
-                key_id: slot.key.exact_id(),
-                result: slot.result.subscribe(),
-                notifier: slot.notifier.clone(),
-            });
+            return Claim::Covered(slot.notifier.clone());
         }
 
         let (result_tx, result_rx) = watch::channel(None);
@@ -329,7 +325,7 @@ enum Claim<'a, K: CoverKey, V> {
         receiver: watch::Receiver<Option<Arc<V>>>,
     },
     Join(SlotRef<K, V>),
-    Covered(SlotRef<K, V>),
+    Covered(broadcast::Sender<()>),
 }
 
 fn best_cover_slot<'a, K, V>(
@@ -436,12 +432,9 @@ pub mod ns {
     }
 
     pub fn share_outcome<E: std::fmt::Display>(
-        result: &std::result::Result<wit_types::OpResult, E>,
+        result: std::result::Result<wit_types::OpResult, E>,
     ) -> SharedOutcome {
-        match result {
-            Ok(v) => Ok(v.clone()),
-            Err(e) => Err(e.to_string()),
-        }
+        result.map_err(|error| error.to_string())
     }
 
     pub fn unshare_outcome<E>(
