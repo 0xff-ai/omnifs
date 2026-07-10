@@ -103,7 +103,7 @@ fn ls(args: &LsArgs) -> anyhow::Result<ExitCode> {
     let mounts = workspace.mounts()?;
     let store = FileStore::new(&layout.credentials_file);
     let statuses =
-        crate::mount_report::scan_user_mount_configs(workspace.catalog(), mounts, &store);
+        crate::mount_report::scan_user_mount_configs(workspace.catalog(), &mounts, &store);
     let exit_code = if statuses.iter().any(|status| match status {
         crate::status::UserMountStatus::Ready(mount) => matches!(
             mount.auth.terminal_row().kind,

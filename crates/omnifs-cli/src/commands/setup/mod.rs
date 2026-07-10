@@ -650,7 +650,7 @@ async fn render_review_ledger(
     let store = omnifs_workspace::creds::FileStore::new(&workspace.layout().credentials_file);
     let mounts = workspace.mounts()?;
     let summaries =
-        crate::mount_report::scan_user_mount_configs(workspace.catalog(), mounts, &store);
+        crate::mount_report::scan_user_mount_configs(workspace.catalog(), &mounts, &store);
     if summaries.is_empty() {
         anstream::eprintln!("{}", ui::warn_row("mounts", "none configured"));
     } else {

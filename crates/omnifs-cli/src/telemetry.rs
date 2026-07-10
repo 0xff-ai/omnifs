@@ -93,7 +93,7 @@ async fn health_nudge(workspace: &Workspace) -> Option<String> {
     let mounts = workspace.mounts().ok()?;
     let store = FileStore::new(&workspace.layout().credentials_file);
     let statuses =
-        crate::mount_report::scan_user_mount_configs(workspace.catalog(), mounts, &store);
+        crate::mount_report::scan_user_mount_configs(workspace.catalog(), &mounts, &store);
     for status in statuses {
         match status {
             crate::status::UserMountStatus::Ready(mount) => match mount.auth.terminal_row().kind {

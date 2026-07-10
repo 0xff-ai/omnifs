@@ -35,7 +35,7 @@ impl StatusReport {
         catalog: &Catalog,
         paths: WorkspaceLayout,
         runtime: Option<DaemonStatus>,
-        mounts: Vec<crate::mount_config::MountConfig>,
+        mounts: &[crate::mount_config::MountConfig],
     ) -> Self {
         let store = FileStore::new(&paths.credentials_file);
         let virtualized_frontend = RuntimeRecord::read(&paths.runtime_record_file())
@@ -48,11 +48,7 @@ impl StatusReport {
             });
         Self {
             runtime,
-            user_mounts: crate::mount_report::scan_user_mount_configs(
-                catalog,
-                mounts.clone(),
-                &store,
-            ),
+            user_mounts: crate::mount_report::scan_user_mount_configs(catalog, mounts, &store),
             providers: crate::mount_report::scan_provider_configs(catalog, mounts),
             paths,
             virtualized_frontend,
@@ -412,50 +408,49 @@ pub(crate) struct VirtualizedFrontendJson {
 }
 
 impl StatusReport {
-    pub(crate) fn to_json(&self) -> StatusJson {
-        let runtime_json =
-            self.runtime
-                .as_ref()
-                .map_or(RuntimeJson::NotRunning, |r| RuntimeJson::Running {
-                    version: r.version.clone(),
-                    api_major: r.api_major,
-                    api_minor: r.api_minor,
-                    pid: r.pid,
-                    executable: r.executable.clone(),
-                    mount_point: r.mount_point.clone(),
-                    config_dir: r.config_dir.clone(),
-                    cache_dir: r.cache_dir.clone(),
-                    health: r.health.clone(),
-                    mounts: r.mounts.iter().map(|mount| mount.mount.clone()).collect(),
-                    failed_mounts: r
-                        .failed
-                        .iter()
-                        .map(|f| FailedMountJson {
-                            mount: f.mount.clone(),
-                            reason: f.reason.clone(),
-                        })
-                        .collect(),
-                });
+    pub(crate) fn into_json(self) -> StatusJson {
+        let mount = self.runtime.as_ref().and_then(|runtime| {
+            runtime.frontends.first().map(|frontend| MountJson {
+                source: frontend.source.clone(),
+                mount_point: runtime.mount_point.clone(),
+                fs_type: frontend.fs_type,
+            })
+        });
+        let runtime_json = self
+            .runtime
+            .map_or(RuntimeJson::NotRunning, |r| RuntimeJson::Running {
+                version: r.version,
+                api_major: r.api_major,
+                api_minor: r.api_minor,
+                pid: r.pid,
+                executable: r.executable,
+                mount_point: r.mount_point,
+                config_dir: r.config_dir,
+                cache_dir: r.cache_dir,
+                health: r.health,
+                mounts: r.mounts.into_iter().map(|mount| mount.mount).collect(),
+                failed_mounts: r
+                    .failed
+                    .into_iter()
+                    .map(|f| FailedMountJson {
+                        mount: f.mount,
+                        reason: f.reason,
+                    })
+                    .collect(),
+            });
         StatusJson {
             version: env!("CARGO_PKG_VERSION").to_string(),
             runtime: runtime_json,
-            mount: self.runtime.as_ref().and_then(|r| {
-                r.frontends.first().map(|frontend| MountJson {
-                    source: frontend.source.clone(),
-                    mount_point: r.mount_point.clone(),
-                    fs_type: frontend.fs_type,
-                })
-            }),
-            virtualized_frontend: self
-                .virtualized_frontend
-                .as_ref()
-                .map(|(via, mount_point)| VirtualizedFrontendJson {
+            mount,
+            virtualized_frontend: self.virtualized_frontend.map(|(via, mount_point)| {
+                VirtualizedFrontendJson {
                     driver: via.label().to_string(),
-                    mount_point: mount_point.clone(),
-                }),
-            paths: self.paths.clone(),
-            mounts: self.user_mounts.clone(),
-            providers: self.providers.clone(),
+                    mount_point,
+                }
+            }),
+            paths: self.paths,
+            mounts: self.user_mounts,
+            providers: self.providers,
         }
     }
 }

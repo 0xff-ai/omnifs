@@ -65,7 +65,7 @@ fn artifact_present(catalog: &Catalog, spec: &Spec) -> anyhow::Result<bool> {
 
 pub(crate) fn scan_provider_configs(
     catalog: &Catalog,
-    mounts: Vec<MountConfig>,
+    mounts: &[MountConfig],
 ) -> Vec<ProviderConfigStatus> {
     let mut providers = Vec::with_capacity(mounts.len());
     for configured in mounts {
@@ -106,13 +106,13 @@ pub(crate) fn scan_provider_configs(
 
 pub(crate) fn scan_user_mount_configs(
     catalog: &Catalog,
-    mounts: Vec<MountConfig>,
+    mounts: &[MountConfig],
     store: &dyn CredentialStore,
 ) -> Vec<UserMountStatus> {
     let mut statuses = Vec::with_capacity(mounts.len());
     for configured in mounts {
         let config_path = configured.source.clone();
-        match read_user_mount_status(catalog, &configured, store) {
+        match read_user_mount_status(catalog, configured, store) {
             Ok(status) => statuses.push(UserMountStatus::Ready(status)),
             Err(error) => statuses.push(UserMountStatus::Invalid {
                 config_path,

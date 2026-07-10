@@ -26,11 +26,12 @@ impl StatusArgs {
             workspace.catalog(),
             workspace.layout().clone(),
             runtime,
-            mounts,
+            &mounts,
         );
+        let exit_code = report.exit_code();
         match OutputFormat::from(self.json) {
             OutputFormat::Json => {
-                let payload = report.to_json();
+                let payload = report.into_json();
                 let serialized =
                     serde_json::to_string(&payload).context("serialize status JSON")?;
                 anstream::println!("{serialized}");
@@ -39,6 +40,6 @@ impl StatusArgs {
                 anstream::print!("{}", report.render(self.detail));
             },
         }
-        Ok(report.exit_code())
+        Ok(exit_code)
     }
 }
