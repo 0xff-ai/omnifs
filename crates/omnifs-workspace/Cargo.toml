@@ -10,7 +10,6 @@ categories = ["filesystem"]
 keywords = ["omnifs", "filesystem", "paths"]
 
 [dependencies]
-omnifs-core = { workspace = true }
 omnifs-caps = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
@@ -22,7 +21,6 @@ fs2 = { workspace = true }
 atomic-write-file = "0.3"
 schemars = { workspace = true, features = ["indexmap2"] }
 jsonschema = { workspace = true }
-indexmap = { workspace = true }
 wasmparser = "0.246"
 hex = { workspace = true }
 blake3 = { workspace = true }
