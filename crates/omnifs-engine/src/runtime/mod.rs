@@ -407,21 +407,20 @@ impl Runtime {
             .map_err(BuildError::InvalidConfig)?;
         let config_metadata = manifest
             .as_ref()
-            .and_then(|manifest| manifest.config.as_ref())
-            .cloned();
+            .and_then(|manifest| manifest.config.as_ref());
 
-        let preopens = resolve_preopens(config, config_metadata.as_ref());
+        let preopens = resolve_preopens(config, config_metadata);
         let park_signal = test_callouts.as_ref().map(TestCallouts::park_signal);
         let instance = Instance::new(engine, wasm_path, config_bytes, &preopens, park_signal)?;
 
-        validate_instance_config(config_metadata.as_ref(), config, mount_name)?;
+        validate_instance_config(config_metadata, config, mount_name)?;
 
         let init_return = instance.initialize().map_err(BuildError::from)?;
         let initialize_result = finish_initialize_return(init_return)?;
         let capability = Arc::new(CapabilityChecker::from_config(
             config,
             &initialize_result.capabilities,
-            config_metadata.as_ref(),
+            config_metadata,
         ));
 
         let auth_manifest = manifest
