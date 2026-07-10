@@ -220,18 +220,12 @@ impl AttachBindAddr {
     }
 }
 
-/// The outcome of [`Daemon::ensure_attach_tcp`]. `NamespaceNotReady` is not an
+/// The outcome of binding either attach transport. `NamespaceNotReady` is not an
 /// error: it is the same transient window `/v1/ready` already reports before
 /// startup reconcile finishes, so the caller renders it as a 503 rather than a
 /// 500.
-pub(crate) enum AttachTcpOutcome {
-    Bound(AttachTcpState),
-    NamespaceNotReady,
-}
-
-/// The outcome of [`Daemon::ensure_attach_uds`], mirroring [`AttachTcpOutcome`].
-pub(crate) enum AttachUdsOutcome {
-    Bound(AttachUdsState),
+pub(crate) enum AttachOutcome<T> {
+    Bound(T),
     NamespaceNotReady,
 }
 
@@ -310,16 +304,16 @@ impl Daemon {
         bind_addr: AttachBindAddr,
         port: u16,
         rt: &tokio::runtime::Handle,
-    ) -> anyhow::Result<AttachTcpOutcome> {
+    ) -> anyhow::Result<AttachOutcome<AttachTcpState>> {
         let mut guard = self
             .attach_tcp
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(state) = guard.as_ref() {
-            return Ok(AttachTcpOutcome::Bound(state.clone()));
+            return Ok(AttachOutcome::Bound(state.clone()));
         }
         let Some(namespace) = self.namespace.get() else {
-            return Ok(AttachTcpOutcome::NamespaceNotReady);
+            return Ok(AttachOutcome::NamespaceNotReady);
         };
 
         let std_listener = std::net::TcpListener::bind((bind_addr.0, port))
@@ -349,7 +343,7 @@ impl Daemon {
         *guard = Some(state.clone());
         drop(guard);
         self.persist_attach_record(&state);
-        Ok(AttachTcpOutcome::Bound(state))
+        Ok(AttachOutcome::Bound(state))
     }
 
     /// Bind the token-checking UDS namespace attach listener at
@@ -370,16 +364,16 @@ impl Daemon {
     pub fn ensure_attach_uds(
         self: &Arc<Self>,
         rt: &tokio::runtime::Handle,
-    ) -> anyhow::Result<AttachUdsOutcome> {
+    ) -> anyhow::Result<AttachOutcome<AttachUdsState>> {
         let mut guard = self
             .attach_uds
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(state) = guard.as_ref() {
-            return Ok(AttachUdsOutcome::Bound(state.clone()));
+            return Ok(AttachOutcome::Bound(state.clone()));
         }
         let Some(namespace) = self.namespace.get() else {
-            return Ok(AttachUdsOutcome::NamespaceNotReady);
+            return Ok(AttachOutcome::NamespaceNotReady);
         };
 
         let (std_listener, socket_path) = self.context.bind_vsock_attach_socket()?;
@@ -404,7 +398,7 @@ impl Daemon {
         let state = AttachUdsState { socket_path, token };
         *guard = Some(state.clone());
         drop(guard);
-        Ok(AttachUdsOutcome::Bound(state))
+        Ok(AttachOutcome::Bound(state))
     }
 
     /// Read-modify-write the on-disk runtime record to add `attach`, preserving
@@ -1242,12 +1236,12 @@ async fn frontend_attach_target(
     };
     let rt = tokio::runtime::Handle::current();
     match daemon.ensure_attach_tcp(bind_addr, 0, &rt) {
-        Ok(AttachTcpOutcome::Bound(state)) => Json(FrontendAttachTargetReport {
+        Ok(AttachOutcome::Bound(state)) => Json(FrontendAttachTargetReport {
             addr: state.addr.to_string(),
             token: state.token,
         })
         .into_response(),
-        Ok(AttachTcpOutcome::NamespaceNotReady) => error_response(
+        Ok(AttachOutcome::NamespaceNotReady) => error_response(
             StatusCode::SERVICE_UNAVAILABLE,
             ErrorCode::Internal,
             "the namespace is not ready yet",
@@ -1281,12 +1275,12 @@ async fn frontend_attach_target(
 async fn frontend_attach_target_vsock(State(daemon): State<Arc<Daemon>>) -> Response {
     let rt = tokio::runtime::Handle::current();
     match daemon.ensure_attach_uds(&rt) {
-        Ok(AttachUdsOutcome::Bound(state)) => Json(FrontendAttachTargetVsockReport {
+        Ok(AttachOutcome::Bound(state)) => Json(FrontendAttachTargetVsockReport {
             socket_path: state.socket_path.display().to_string(),
             token: state.token,
         })
         .into_response(),
-        Ok(AttachUdsOutcome::NamespaceNotReady) => error_response(
+        Ok(AttachOutcome::NamespaceNotReady) => error_response(
             StatusCode::SERVICE_UNAVAILABLE,
             ErrorCode::Internal,
             "the namespace is not ready yet",

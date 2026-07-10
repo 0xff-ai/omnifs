@@ -214,10 +214,6 @@ pub fn run(args: DaemonArgs) -> anyhow::Result<()> {
     // listeners are spawned post-reconcile so a client sees a populated tree.
     let attach_sockets = context.bind_attach_sockets()?;
     let attach_instance_id = context.instance_id().to_string();
-    let attach_socket_paths: Vec<PathBuf> = attach_sockets
-        .iter()
-        .map(|socket| socket.path.clone())
-        .collect();
     let attach_tcp_port = context.attach_tcp_port();
     let tcp_listener = context
         .listen()
@@ -259,8 +255,13 @@ pub fn run(args: DaemonArgs) -> anyhow::Result<()> {
     // Serve every requested attach socket over the shared namespace, before
     // `serve` (which blocks) so a namespace-only daemon comes up. With the
     // listeners up and mounts reconciled, report ready.
-    spawn_attach_listeners(attach_sockets, &namespace, &attach_instance_id, &rt)?;
-    bind_startup_attach_tcp(&daemon, attach_tcp_port, &rt);
+    let attach_socket_paths =
+        spawn_attach_listeners(attach_sockets, &namespace, &attach_instance_id, &rt)?;
+    if let Some(port) = attach_tcp_port
+        && let Err(error) = daemon.ensure_attach_tcp(server::AttachBindAddr::loopback(), port, &rt)
+    {
+        warn!(%error, "failed to bind the requested TCP attach listener");
+    }
     daemon.mark_attach_serving();
 
     // Arm signal-driven shutdown for the serving lifetime: a service `stop`, the
@@ -326,34 +327,27 @@ fn spawn_attach_listeners(
     namespace: &Arc<omnifs_engine::TreeNamespace>,
     instance_id: &str,
     rt: &Handle,
-) -> anyhow::Result<()> {
-    for socket in sockets {
-        socket.listener.set_nonblocking(true)?;
-        let listener = tokio::net::UnixListener::from_std(socket.listener)?;
+) -> anyhow::Result<Vec<PathBuf>> {
+    let mut paths = Vec::with_capacity(sockets.len());
+    for crate::context::AttachSocket {
+        name,
+        path,
+        listener,
+    } in sockets
+    {
+        listener.set_nonblocking(true)?;
+        let listener = tokio::net::UnixListener::from_std(listener)?;
         let ns = Arc::clone(namespace) as Arc<dyn omnifs_engine::Namespace>;
-        info!(name = %socket.name, path = %socket.path.display(), "serving namespace attach socket");
+        info!(%name, path = %path.display(), "serving namespace attach socket");
         rt.spawn(omnifs_namespace_wire::serve_listener(
             ns,
             listener,
             instance_id.to_string(),
             None,
         ));
+        paths.push(path);
     }
-    Ok(())
-}
-
-/// Bind the TCP namespace attach listener eagerly when `--attach-tcp` was
-/// passed. Goes through the same idempotent `ensure_attach_tcp` path
-/// `POST /v1/frontend/attach-target` uses later, so both entry points converge on one
-/// binding and one runtime-record update. A bind failure is logged rather than
-/// fatal: the daemon still serves its other requested surfaces.
-fn bind_startup_attach_tcp(daemon: &Arc<server::Daemon>, port: Option<u16>, rt: &Handle) {
-    let Some(port) = port else {
-        return;
-    };
-    if let Err(error) = daemon.ensure_attach_tcp(server::AttachBindAddr::loopback(), port, rt) {
-        warn!(%error, "failed to bind the requested TCP attach listener");
-    }
+    Ok(paths)
 }
 
 /// Remove the attach sockets on a graceful exit; a crash leaves them stale and
