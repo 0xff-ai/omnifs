@@ -7,18 +7,15 @@ use clap::Args;
 
 use crate::client::resolve_event_endpoint;
 use crate::inspector::{ConnectionMode, SourceKind, run_plain, run_tui};
-use crate::launch_backend::{ContainerName, DockerTarget};
 use crate::workspace::Workspace;
+
+/// The inspector's connection label for a live daemon. The daemon always runs
+/// host-native and is addressed through the workspace's runtime record, so
+/// there is no container identity to display here.
+const LIVE_LABEL: &str = "daemon";
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct InspectArgs {
-    /// Container name.
-    ///
-    /// Defaults to `OMNIFS_CONTAINER_NAME`, then configured session name, then
-    /// `omnifs`.
-    #[arg(long)]
-    pub container_name: Option<String>,
-
     /// Replay a captured JSONL file instead of attaching live.
     #[arg(long, value_name = "FILE")]
     pub replay: Option<PathBuf>,
@@ -38,7 +35,7 @@ impl InspectArgs {
             return self.run_plain().await;
         }
 
-        let (mode, source, container) = if let Some(path) = self.replay.clone() {
+        let (mode, source, label) = if let Some(path) = self.replay.clone() {
             (
                 ConnectionMode::Replay,
                 SourceKind::Replay(path),
@@ -50,22 +47,20 @@ impl InspectArgs {
             // (DaemonUnavailable) the same as the `--plain` path, instead of
             // opening an empty canvas and exiting 0.
             workspace.daemon().require_compatible().await?;
-            let container = self.resolve_container(&workspace)?;
             check_record_path(self.record.as_deref())?;
             let endpoint =
                 resolve_event_endpoint(workspace.layout())?.context("daemon is not running")?;
-            let label = container.as_str().to_string();
             (
                 ConnectionMode::Inspector,
                 SourceKind::Socket {
                     endpoint,
                     record: self.record.clone(),
                 },
-                label,
+                LIVE_LABEL.to_string(),
             )
         };
 
-        tokio::task::spawn_blocking(move || run_tui(mode, container, source))
+        tokio::task::spawn_blocking(move || run_tui(mode, label, source))
             .await
             .context("inspector TUI task")??;
         Ok(())
@@ -77,7 +72,6 @@ impl InspectArgs {
         }
         let workspace = Workspace::resolve()?;
         workspace.daemon().require_compatible().await?;
-        let _container = self.resolve_container(&workspace)?;
         check_record_path(self.record.as_deref())?;
         let endpoint =
             resolve_event_endpoint(workspace.layout())?.context("daemon is not running")?;
@@ -85,11 +79,6 @@ impl InspectArgs {
         tokio::task::spawn_blocking(move || run_plain(SourceKind::Socket { endpoint, record }))
             .await
             .context("inspector plain task")?
-    }
-
-    fn resolve_container(&self, workspace: &Workspace) -> anyhow::Result<ContainerName> {
-        let config = workspace.config()?;
-        DockerTarget::resolve_container_name(self.container_name.clone(), &config)
     }
 }
 

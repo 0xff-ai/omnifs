@@ -750,32 +750,9 @@
                 "minimum": 0
               }
             }
-          },
-          {
-            "type": "object",
-            "description": "Daemon running inside a Docker container.",
-            "required": [
-              "container_name",
-              "image",
-              "kind"
-            ],
-            "properties": {
-              "container_name": {
-                "type": "string"
-              },
-              "image": {
-                "type": "string"
-              },
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "docker"
-                ]
-              }
-            }
           }
         ],
-        "description": "Backend serving a daemon. The CLI reads this (and the runtime record)\ninstead of inferring the backend from `[system].runtime`."
+        "description": "Backend serving a daemon. The daemon always runs host-native; the CLI reads\nthis (and the runtime record) rather than assuming it."
       },
       "DaemonHealth": {
         "type": "object",
@@ -834,17 +811,6 @@
               "$ref": "#/components/schemas/MountFailure"
             },
             "description": "Mounts that did not converge at the last reconcile, with reasons. Empty\nwhen every desired mount is serving; a dark mount appears here, not as a\nsilent absence from `mounts`."
-          },
-          "frontend": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/FrontendInfo",
-                "description": "The first serving filesystem frontend, when one is up. Kept for\npre-registry clients that read a single frontend; `frontends` reports the\nwhole served set. Removing this singular field is phase-5 (API-major)\nscope."
-              }
-            ]
           },
           "frontends": {
             "type": "array",

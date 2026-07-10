@@ -4,71 +4,36 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
-use omnifs_api::{API_MAJOR, API_MINOR, DaemonStatus, DaemonSubsystem, FsType};
+use omnifs_api::{API_MAJOR, API_MINOR, DaemonStatus, DaemonSubsystem};
 use omnifs_workspace::creds::{CredentialStore, FileStore};
 use omnifs_workspace::layout::WorkspaceLayout;
-use omnifs_workspace::mounts::materialize::{self, MaterializationMode, MaterializedMount};
-use omnifs_workspace::runtime_record::{
-    Endpoint, FrontendKind as RecordFrontendKind, FrontendRecord, RecordedBackend, RuntimeRecord,
-};
+use omnifs_workspace::mounts::materialize;
+use omnifs_workspace::provider::Catalog;
 
 use crate::client::{DaemonClient, env_daemon_addr};
-use crate::config::ConfiguredBackend;
-use crate::launch_backend::{BackendOverrides, DockerTarget, LaunchBackend};
 use crate::mount_config::MountConfig;
-use crate::runtime::Runtime;
 use crate::workspace::Workspace;
-use omnifs_workspace::provider::Catalog;
 
 /// Command-owned daemon launcher.
 ///
-/// `Launcher` is the policy boundary for `omnifs up`: setup state, backend
-/// resolution, mount discovery, provider bundle installation, contract
-/// preflight, runtime launch, and user-facing next steps stay behind this
-/// interface instead of being reassembled by the command.
+/// `Launcher` is the policy boundary for `omnifs up`: mount discovery,
+/// provider bundle installation, contract preflight, credential preflight,
+/// daemon launch, and user-facing next steps stay behind this interface
+/// instead of being reassembled by the command.
 pub(crate) struct Launcher<'a> {
     workspace: &'a Workspace,
     verb: &'static str,
-    /// Per-launch runtime override from `omnifs up --runtime`. When set it wins
-    /// over the persisted `[system].runtime` and is never written back.
-    runtime_override: Option<ConfiguredBackend>,
 }
 
 impl<'a> Launcher<'a> {
     pub(crate) fn new(workspace: &'a Workspace, verb: &'static str) -> Self {
-        Self {
-            workspace,
-            verb,
-            runtime_override: None,
-        }
-    }
-
-    /// Override the runtime for this launch only (not persisted to config).
-    pub(crate) fn with_runtime_override(mut self, runtime: Option<ConfiguredBackend>) -> Self {
-        self.runtime_override = runtime;
-        self
+        Self { workspace, verb }
     }
 
     pub(crate) async fn launch(self) -> anyhow::Result<LaunchOutcome> {
         let paths = self.workspace.layout();
         let config = self.workspace.config()?;
         let telemetry_enabled = config.telemetry_enabled();
-        // An explicit `--runtime` chooses the backend for this launch and skips
-        // the setup gate; otherwise the persisted default decides, and a missing
-        // one means setup never ran.
-        let backend = if self.runtime_override.is_none() && config.system.runtime.is_none() {
-            anyhow::bail!(
-                "`{}` requires setup to choose a daemon backend; run `omnifs setup` first, or pass `--runtime <docker|native>`",
-                self.verb
-            );
-        } else {
-            LaunchBackend::resolve(
-                BackendOverrides {
-                    runtime: self.runtime_override,
-                },
-                &config,
-            )?
-        };
 
         let configs = self.workspace.mounts()?;
         if configs.is_empty() {
@@ -79,178 +44,46 @@ impl<'a> Launcher<'a> {
         }
 
         crate::provider_bundle::ensure_providers_installed(&paths.providers_dir)?;
-
         crate::upgrade::run_upgrade_check(&paths.providers_dir, &configs)?;
 
+        // Fail fast, before the daemon spawns, when a configured mount's
+        // host-managed credential is missing or its spec under-grants the
+        // pinned provider's declared needs. A daemon spawned anyway would
+        // only surface this later as a silent reconcile warning.
+        let store = FileStore::new(&paths.credentials_file);
+        preflight_mounts(&configs, self.workspace.catalog(), &store)?;
+
         anstream::eprintln!("Using mount configs from {}", paths.mounts_dir.display());
-        launch_runtime(
-            LaunchSpec {
-                backend,
-                paths,
-                store: Box::new(FileStore::new(&paths.credentials_file)),
-                verb: self.verb,
-                configs,
-                extra_binds: Vec::new(),
-                extra_env: Vec::new(),
-                reuse_existing_container: true,
-                telemetry_enabled,
-            },
-            self.workspace.catalog(),
-        )
-        .await
+        launch_host_native(paths, self.verb, telemetry_enabled).await
     }
+}
+
+/// Validate every configured mount before the daemon spawns: materialize its
+/// spec (capability satisfaction, dynamic-grant resolution) and confirm its
+/// host-managed credential, if any, is present. Mirrors the checks the
+/// daemon's own reconcile performs per mount, but aborts the whole launch on
+/// the first failure instead of recording it and continuing.
+fn preflight_mounts(
+    configs: &[MountConfig],
+    catalog: &Catalog,
+    store: &dyn CredentialStore,
+) -> anyhow::Result<()> {
+    for config in configs {
+        let materialized = materialize::materialize(config.config.clone(), catalog)
+            .with_context(|| format!("materialize mount {}", config.source.display()))?;
+        let mount_auth = crate::auth::MountAuth::from_spec(catalog, materialized);
+        config.validate_host_managed_credentials(&mount_auth, store)?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
-pub(crate) enum LaunchOutcome {
-    Native { mount_point: Option<PathBuf> },
-    Docker { target: DockerTarget },
+pub(crate) struct LaunchOutcome {
+    pub mount_point: Option<PathBuf>,
 }
 
-/// Everything a caller must supply to run the full launch sequence.
-pub(crate) struct LaunchSpec<'a> {
-    pub backend: LaunchBackend,
-    pub paths: &'a WorkspaceLayout,
-    pub store: Box<dyn CredentialStore>,
-    /// Command name shown in Docker-readiness diagnostics, e.g. `"omnifs up"`.
-    pub verb: &'static str,
-    /// Mount configs to materialize and push to the daemon.
-    pub configs: Vec<MountConfig>,
-    /// Extra binds layered on top of materialized preopens.
-    pub extra_binds: Vec<String>,
-    /// Extra environment variables for the runtime container.
-    pub extra_env: Vec<String>,
-    /// Whether a same-image running container may be reused.
-    pub reuse_existing_container: bool,
-    /// Effective telemetry state, propagated to the launched daemon so the
-    /// CLI's `[telemetry] enabled = false` off-switch reaches it (the daemon
-    /// has no strict-config channel and reads `OMNIFS_TELEMETRY`).
-    pub telemetry_enabled: bool,
-}
-
-/// Docker-specific mount spec builder for launch-time container binds.
-///
-/// The daemon still reads specs from `mounts/` and reconciles them itself. This
-/// builder exists only for the container invariant Docker imposes: host
-/// preopen directories must be known before `docker create`, while credential
-/// failures should still surface before the daemon starts.
-pub(crate) struct DockerMountSpecBuilder<'a> {
-    catalog: &'a Catalog,
-    store: &'a dyn CredentialStore,
-}
-
-impl<'a> DockerMountSpecBuilder<'a> {
-    pub(crate) fn new(catalog: &'a Catalog, store: &'a dyn CredentialStore) -> Self {
-        Self { catalog, store }
-    }
-
-    pub(crate) fn materialize(&self, config: &MountConfig) -> anyhow::Result<MaterializedMount> {
-        let materialized = materialize::materialize(
-            config.config.clone(),
-            self.catalog,
-            MaterializationMode::Docker,
-        )
-        .with_context(|| format!("materialize mount {}", config.source.display()))?;
-
-        let mount_auth =
-            crate::auth::MountAuth::from_spec(self.catalog, materialized.spec().clone());
-        config.validate_host_managed_credentials(&mount_auth, self.store)?;
-
-        Ok(materialized)
-    }
-
-    fn materialize_bind_specs<'configs>(
-        &self,
-        configs: impl IntoIterator<Item = &'configs MountConfig>,
-    ) -> anyhow::Result<Vec<String>> {
-        Ok(configs
-            .into_iter()
-            .map(|config| self.materialize(config))
-            .collect::<anyhow::Result<Vec<_>>>()?
-            .into_iter()
-            .flat_map(|mount| mount.into_preopen_binds().into_docker_bind_specs())
-            .collect())
-    }
-}
-
-/// Run the full materialize → connect → launch → wait → push sequence.
-pub(crate) async fn launch_runtime(
-    spec: LaunchSpec<'_>,
-    catalog: &Catalog,
-) -> anyhow::Result<LaunchOutcome> {
-    let LaunchSpec {
-        backend,
-        paths,
-        store,
-        verb,
-        configs,
-        extra_binds,
-        mut extra_env,
-        reuse_existing_container,
-        telemetry_enabled,
-    } = spec;
-
-    std::fs::create_dir_all(&paths.config_dir)
-        .with_context(|| format!("create runtime home {}", paths.config_dir.display()))?;
-
-    let target = match backend {
-        LaunchBackend::Native => return launch_host_native(paths, verb, telemetry_enabled).await,
-        LaunchBackend::Docker(target) => target,
-    };
-
-    // Carry the off-switch into the container's daemon. Only push it when
-    // disabled: an unset `OMNIFS_TELEMETRY` reads as enabled.
-    if !telemetry_enabled {
-        extra_env.push(format!("{}=0", omnifs_workspace::telemetry::ENV_SWITCH));
-    }
-
-    // The container daemon serves TCP, so it needs the bearer token. Generate it
-    // host-side and inject it by name; the host CLI then dials with the same
-    // value, and it is written into the record host-side once the daemon serves.
-    let token = generate_control_token();
-    extra_env.push(format!("OMNIFS_CONTROL_TOKEN={token}"));
-
-    anstream::eprintln!("Computing container binds for {} mount(s)", configs.len());
-    let preopen_binds =
-        DockerMountSpecBuilder::new(catalog, store.as_ref()).materialize_bind_specs(&configs)?;
-    let all_binds: Vec<String> = preopen_binds.into_iter().chain(extra_binds).collect();
-
-    let rt = Runtime::connect_ready(&target, verb).await?;
-    rt.launch_container(
-        &paths.config_dir,
-        all_binds,
-        extra_env,
-        reuse_existing_container,
-    )
-    .await?;
-
-    match finish_docker_launch(&rt, paths, &target, &token).await {
-        Ok(outcome) => Ok(outcome),
-        Err(error) => {
-            if let Err(teardown) = rt.remove().await {
-                anstream::eprintln!("also failed to remove the container: {teardown:#}");
-            }
-            Err(error)
-        },
-    }
-}
-
-/// The loopback address the Docker container publishes its control port on,
-/// honoring an `OMNIFS_DAEMON_ADDR` override for non-default setups.
-fn published_control_addr() -> String {
-    env_daemon_addr().unwrap_or_else(|| omnifs_api::default_listen_addr().to_string())
-}
-
-/// A fresh 16-byte hex control token. Failure to draw randomness is fatal: a
-/// predictable token would weaken the only guard on the TCP control port.
-fn generate_control_token() -> String {
-    let mut bytes = [0_u8; 16];
-    getrandom::fill(&mut bytes).expect("draw control token randomness");
-    hex::encode(bytes)
-}
-
-/// Parse an `OMNIFS_DAEMON_ADDR` override into a `SocketAddr`, erroring on a
-/// malformed value rather than silently falling back to a default port.
+/// The loopback address the debug `OMNIFS_DAEMON_ADDR` TCP path serves on,
+/// honoring the env override.
 fn env_control_addr() -> anyhow::Result<Option<SocketAddr>> {
     match env_daemon_addr() {
         None => Ok(None),
@@ -288,7 +121,7 @@ async fn launch_host_native(
     if let Some(status) = &status {
         report_launch_status(status);
     }
-    Ok(LaunchOutcome::Native {
+    Ok(LaunchOutcome {
         mount_point: status.map(|status| status.mount_point),
     })
 }
@@ -429,73 +262,6 @@ fn report_reconcile_failures(report: &omnifs_api::ReconcileReport) {
             failure.mount,
             failure.reason
         );
-    }
-}
-
-/// Docker path: wait for the in-container daemon to serve (it reconciles from
-/// `mounts/` on start), then converge once more over the control API to surface
-/// any per-mount failure, and write the runtime record host-side (the container
-/// cannot reliably own a Unix socket on a macOS bind mount). No spec crosses the
-/// wire.
-async fn finish_docker_launch(
-    rt: &Runtime,
-    paths: &WorkspaceLayout,
-    target: &DockerTarget,
-    token: &str,
-) -> anyhow::Result<LaunchOutcome> {
-    let addr = published_control_addr();
-    let client = DaemonClient::for_tcp(&addr, token.to_string());
-    rt.wait_for_daemon_ready(&client).await?;
-    client.require_compatible().await?;
-    let report = client.reconcile().await?;
-    report_reconcile_failures(&report);
-    if let Ok(status) = client.status().await {
-        report_launch_status(&status);
-        write_docker_runtime_record(&paths.runtime_record_file(), &status, target, &addr, token);
-    }
-    Ok(LaunchOutcome::Docker {
-        target: target.clone(),
-    })
-}
-
-/// Build and persist the host-side runtime record for the Docker bridge.
-/// Best-effort: a failure here is logged but does not abort the launch, since
-/// the daemon is already serving.
-fn write_docker_runtime_record(
-    path: &Path,
-    status: &DaemonStatus,
-    target: &DockerTarget,
-    addr: &str,
-    token: &str,
-) {
-    let frontends = status
-        .frontend
-        .as_ref()
-        .map(|frontend| {
-            vec![FrontendRecord {
-                kind: match frontend.fs_type {
-                    FsType::Fuse => RecordFrontendKind::Fuse,
-                    FsType::Nfs => RecordFrontendKind::Nfs,
-                },
-                mount_point: status.mount_point.clone(),
-                via: None,
-            }]
-        })
-        .unwrap_or_default();
-    let record = RuntimeRecord::new(
-        Endpoint::Tcp {
-            addr: addr.to_string(),
-            token: token.to_string(),
-        },
-        RecordedBackend::Docker {
-            container_name: target.container_name().as_str().to_string(),
-            image: target.image().as_str().to_string(),
-        },
-        status.instance_id.clone(),
-        frontends,
-    );
-    if let Err(error) = record.write(path) {
-        anstream::eprintln!("warning: could not write runtime record: {error:#}");
     }
 }
 

@@ -7,7 +7,7 @@ use std::path::PathBuf;
 #[cfg(feature = "daemon")]
 use std::time::Duration;
 
-use crate::launch_backend::{DockerTarget, LaunchBackend};
+use crate::launch_backend::LaunchBackend;
 use crate::workspace::Workspace;
 use anyhow::Context as _;
 use omnifs_workspace::runtime_record::{RecordedBackend, RuntimeRecord};
@@ -48,9 +48,7 @@ impl<'a> DaemonTeardown<'a> {
                         anstream::println!("Daemon exited before shutdown completed; sweeping...");
                     },
                 }
-                backend
-                    .reclaim(Some(status.mount_point.as_path()), &nfs_state_dir)
-                    .await?;
+                backend.reclaim(Some(status.mount_point.as_path()), &nfs_state_dir)?;
                 RuntimeRecord::remove(&record_path)?;
             },
             Some(RunningBackend::Cached {
@@ -60,9 +58,7 @@ impl<'a> DaemonTeardown<'a> {
             }) => {
                 anstream::println!("No live daemon found; sweeping from runtime record...");
                 Self::signal_stale_native_daemon(native_pid);
-                backend
-                    .reclaim(mount_point.as_deref(), &nfs_state_dir)
-                    .await?;
+                backend.reclaim(mount_point.as_deref(), &nfs_state_dir)?;
                 RuntimeRecord::remove(&record_path)?;
             },
             None => {
@@ -164,10 +160,7 @@ impl<'a> DaemonTeardown<'a> {
             fallback_mount_point
         };
 
-        if let Err(error) = backend
-            .reclaim(mount_point.as_deref(), &nfs_state_dir)
-            .await
-        {
+        if let Err(error) = backend.reclaim(mount_point.as_deref(), &nfs_state_dir) {
             anstream::eprintln!("⚠  Backend reclaim failed: {error:#}");
         }
 
@@ -205,12 +198,10 @@ impl<'a> DaemonTeardown<'a> {
 
         if let Some(record) = RuntimeRecord::read(&record_path)? {
             let mount_point = record.mount_point().map(Path::to_path_buf);
-            let native_pid = match &record.backend {
-                RecordedBackend::Native { pid } => Some(*pid),
-                RecordedBackend::Docker { .. } => None,
-            };
+            let RecordedBackend::Native { pid } = &record.backend;
+            let native_pid = Some(*pid);
             return Ok(Some(RunningBackend::Cached {
-                backend: launch_backend_from_record(&record.backend)?,
+                backend: launch_backend_from_record(&record.backend),
                 mount_point,
                 native_pid,
             }));
@@ -221,18 +212,10 @@ impl<'a> DaemonTeardown<'a> {
 }
 
 /// Convert the record's backend identity into the CLI's reclaim-capable
-/// backend, validating the Docker container/image identity.
-fn launch_backend_from_record(backend: &RecordedBackend) -> anyhow::Result<LaunchBackend> {
-    match backend {
-        RecordedBackend::Native { .. } => Ok(LaunchBackend::Native),
-        RecordedBackend::Docker {
-            container_name,
-            image,
-        } => Ok(LaunchBackend::Docker(DockerTarget::new(
-            container_name.clone(),
-            image.clone(),
-        )?)),
-    }
+/// backend.
+fn launch_backend_from_record(backend: &RecordedBackend) -> LaunchBackend {
+    let RecordedBackend::Native { .. } = backend;
+    LaunchBackend::Native
 }
 
 /// True when `pid` names a live process (`kill -0` succeeds, or fails for a

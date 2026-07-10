@@ -1,14 +1,13 @@
-//! The launch backend: native-vs-Docker target types and the spawn/reclaim
-//! operations behind them.
+//! The launch backend: the host-native daemon spawn/reclaim primitives, and
+//! the `DockerTarget`/`ContainerName`/`ImageRef` naming types the optional
+//! Docker-hosted FUSE frontend (`omnifs frontend up`) builds on.
 //!
-//! `LaunchBackend` is the one type callers branch on. Native spawn builds
-//! typed [`omnifs_daemon::DaemonArgs`] so flag knowledge stays next to the
-//! daemon argument surface. `LaunchBackend::reclaim` tears down
-//! backend-specific resources after a control-API shutdown; callers (down.rs,
-//! reset.rs) never branch on native-vs-docker themselves.
+//! `LaunchBackend` is the daemon's one reclaimable identity. The daemon always
+//! runs host-native; `LaunchBackend::reclaim` tears down its stale mount after
+//! a control-API shutdown. Callers (down.rs, reset.rs) never branch on backend
+//! themselves.
 
 use std::fmt;
-use std::net::SocketAddr;
 use std::path::Path;
 
 #[cfg(feature = "daemon")]
@@ -18,14 +17,11 @@ use omnifs_api::DaemonBackend;
 #[cfg(feature = "daemon")]
 use omnifs_daemon::DaemonArgs;
 
-use crate::config::{Config, ConfiguredBackend, resolve_setting};
-
-pub(crate) const CONTAINER_NAME: &str = "omnifs";
-
 /// Whether this binary was produced by the release packaging lane
 /// (`OMNIFS_RELEASE` set at compile time) or a local/dev build. Release
 /// binaries default to the registry image for their version; dev binaries
-/// default to the locally built dev image and never pull.
+/// default to the locally built dev image and never pull. Used by the
+/// optional Docker-hosted FUSE frontend's image resolution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BuildChannel {
     Release,
@@ -37,26 +33,11 @@ pub(crate) const BUILD_CHANNEL: BuildChannel = match option_env!("OMNIFS_RELEASE
     None => BuildChannel::Dev,
 };
 
-pub(crate) const RELEASE_IMAGE: &str =
-    concat!("ghcr.io/0xff-ai/omnifs:", env!("CARGO_PKG_VERSION"));
-pub(crate) const DEV_IMAGE: &str = "omnifs:dev";
-
-pub(crate) const fn default_image_for(channel: BuildChannel) -> &'static str {
-    match channel {
-        BuildChannel::Release => RELEASE_IMAGE,
-        BuildChannel::Dev => DEV_IMAGE,
-    }
-}
-
-pub(crate) const ENV_IMAGE: &str = omnifs_api::OMNIFS_IMAGE_ENV;
-pub(crate) const ENV_CONTAINER_NAME: &str = omnifs_api::OMNIFS_CONTAINER_NAME_ENV;
-
-// The guest-container paths the launcher targets. The container declares the
-// same values as image ENV (see `Dockerfile`), and the daemon resolves them
-// from the `OMNIFS_HOME` / `OMNIFS_MOUNT_POINT` env vars; these consts are the
-// host launcher's view of that boundary, used to build bind mounts, set the
-// `docker exec` working directory, and wait for the mount.
-pub(crate) const GUEST_HOME: &str = "/root/.omnifs";
+// The frontend container's mount path inside the container. The daemon
+// resolves its own host-native mount point independently; this is the
+// launcher's view of the frontend's guest boundary, used to build the
+// `docker exec` working directory and wait for the mount. See
+// `frontend_container.rs` and `commands/shell.rs`.
 pub(crate) const GUEST_MOUNT: &str = "/omnifs";
 
 /// How the omnifs process is running, which sets its default tracing level.
@@ -147,12 +128,13 @@ impl fmt::Display for ImageRef {
 
 /// omnifs only pulls images whose reference names a registry host
 /// (first path segment contains `.` or `:`, or is `localhost`). Bare
-/// references like `omnifs:dev` are local build products: a Docker Hub
-/// `library/omnifs` would never be a legitimate runtime image, so treating
-/// registry-less references as local-only can't hide a real image.
+/// references like `omnifs-frontend:dev` are local build products: a Docker
+/// Hub `library/omnifs-frontend` would never be a legitimate frontend image,
+/// so treating registry-less references as local-only can't hide a real
+/// image.
 pub(crate) fn names_registry(image: &str) -> bool {
     // Per docker's reference grammar the registry, if present, is the first
-    // path segment before the first `/`. A reference with no `/` (`omnifs:dev`)
+    // path segment before the first `/`. A reference with no `/` (`omnifs-frontend:dev`)
     // has no registry component. A first segment is a registry iff it carries a
     // host marker: a dot, a port colon, or the literal `localhost`.
     match image.split_once('/') {
@@ -161,6 +143,10 @@ pub(crate) fn names_registry(image: &str) -> bool {
     }
 }
 
+/// A Docker container's name and image, addressed together. Built directly by
+/// the frontend commands (`omnifs frontend up|down|status`); the daemon no
+/// longer runs in a container, so there is no resolution chain here to guess
+/// its identity from config or environment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DockerTarget {
     container_name: ContainerName,
@@ -168,51 +154,11 @@ pub(crate) struct DockerTarget {
 }
 
 impl DockerTarget {
-    pub(crate) fn default_target() -> anyhow::Result<Self> {
-        Self::new(
-            CONTAINER_NAME.to_string(),
-            default_image_for(BUILD_CHANNEL).to_string(),
-        )
-    }
-
     pub(crate) fn new(container_name: String, image: String) -> anyhow::Result<Self> {
         Ok(Self {
             container_name: ContainerName::new(container_name)?,
             image: ImageRef::new(image)?,
         })
-    }
-
-    pub(crate) fn resolve(
-        container_name: Option<String>,
-        image: Option<String>,
-        config: &Config,
-    ) -> anyhow::Result<Self> {
-        let container_name = Self::resolve_container_name(container_name, config)?;
-        let image = Self::resolve_image(image, config)?;
-        Ok(Self {
-            container_name,
-            image,
-        })
-    }
-
-    pub(crate) fn from_config(config: &Config) -> anyhow::Result<Self> {
-        Ok(Self {
-            container_name: Self::container_name_from_config(config)?,
-            image: Self::image_from_config(config)?,
-        })
-    }
-
-    pub(crate) fn resolve_container_name(
-        container_name: Option<String>,
-        config: &Config,
-    ) -> anyhow::Result<ContainerName> {
-        let name = resolve_setting(
-            container_name,
-            ENV_CONTAINER_NAME,
-            || config.system.container_name.clone(),
-            CONTAINER_NAME.to_string(),
-        );
-        ContainerName::new(name)
     }
 
     pub(crate) fn container_name(&self) -> &ContainerName {
@@ -222,76 +168,29 @@ impl DockerTarget {
     pub(crate) fn image(&self) -> &ImageRef {
         &self.image
     }
-
-    fn resolve_image(image: Option<String>, config: &Config) -> anyhow::Result<ImageRef> {
-        let image = resolve_setting(
-            image,
-            ENV_IMAGE,
-            || config.system.image.clone(),
-            default_image_for(BUILD_CHANNEL).to_string(),
-        );
-        ImageRef::new(image)
-    }
-
-    fn container_name_from_config(config: &Config) -> anyhow::Result<ContainerName> {
-        let container_name = config
-            .system
-            .container_name
-            .clone()
-            .unwrap_or_else(|| CONTAINER_NAME.to_string());
-        ContainerName::new(container_name)
-    }
-
-    fn image_from_config(config: &Config) -> anyhow::Result<ImageRef> {
-        let image = config
-            .system
-            .image
-            .clone()
-            .unwrap_or_else(|| default_image_for(BUILD_CHANNEL).to_string());
-        ImageRef::new(image)
-    }
 }
 
+/// The daemon's reclaimable backend identity. The daemon always runs
+/// host-native; this stays a named type (rather than a bare function) because
+/// `daemon_teardown.rs` builds it from both a live daemon's reported backend
+/// and a cached runtime record before choosing how to reclaim.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum LaunchBackend {
     Native,
-    Docker(DockerTarget),
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct BackendOverrides {
-    pub(crate) runtime: Option<ConfiguredBackend>,
 }
 
 impl LaunchBackend {
-    /// Resolve the launch backend from CLI overrides and persisted config.
-    /// An empty override set reproduces the configured backend behavior.
-    pub(crate) fn resolve(overrides: BackendOverrides, config: &Config) -> anyhow::Result<Self> {
-        let backend = overrides.runtime.unwrap_or_else(|| config.backend());
-        match backend {
-            ConfiguredBackend::Native => Ok(Self::Native),
-            ConfiguredBackend::Docker => Ok(Self::Docker(DockerTarget::from_config(config)?)),
-        }
-    }
-
     /// Reclaim backend-specific resources after a graceful control-API shutdown
-    /// has been attempted. For native: sweep any stale mount. For Docker: stop
-    /// and remove the container.
+    /// has been attempted: sweep any stale mount.
     ///
     /// `mount_point` is the mount to sweep if the daemon is already dead and
     /// left a stale mount behind. `nfs_state_dir` is where the non-Linux daemon
     /// records its mount-state files (derived from the caller's resolved paths,
     /// so it honors `OMNIFS_HOME`/cache overrides). The unmount is always forced,
     /// since reclaim runs only after the daemon stopped managing its own mount.
-    pub(crate) async fn reclaim(
-        &self,
-        mount_point: Option<&Path>,
-        nfs_state_dir: &Path,
-    ) -> Result<()> {
-        match self {
-            LaunchBackend::Native => reclaim_native(mount_point, nfs_state_dir),
-            LaunchBackend::Docker(target) => reclaim_docker(target.container_name()).await,
-        }
+    pub(crate) fn reclaim(&self, mount_point: Option<&Path>, nfs_state_dir: &Path) -> Result<()> {
+        let Self::Native = self;
+        reclaim_native(mount_point, nfs_state_dir)
     }
 }
 
@@ -299,16 +198,8 @@ impl TryFrom<&DaemonBackend> for LaunchBackend {
     type Error = anyhow::Error;
 
     fn try_from(backend: &DaemonBackend) -> Result<Self> {
-        match backend {
-            DaemonBackend::Native { .. } => Ok(Self::Native),
-            DaemonBackend::Docker {
-                container_name,
-                image,
-            } => Ok(Self::Docker(DockerTarget::new(
-                container_name.clone(),
-                image.clone(),
-            )?)),
-        }
+        let DaemonBackend::Native { .. } = backend;
+        Ok(Self::Native)
     }
 }
 
@@ -317,7 +208,7 @@ impl TryFrom<&DaemonBackend> for LaunchBackend {
 #[cfg(feature = "daemon")]
 pub(crate) async fn launch_native(
     paths: &omnifs_workspace::layout::WorkspaceLayout,
-    tcp_addr: Option<SocketAddr>,
+    tcp_addr: Option<std::net::SocketAddr>,
     telemetry_enabled: bool,
 ) -> Result<()> {
     use std::process::Stdio;
@@ -437,12 +328,12 @@ pub(crate) async fn launch_native(
 #[cfg(not(feature = "daemon"))]
 pub(crate) async fn launch_native(
     _paths: &omnifs_workspace::layout::WorkspaceLayout,
-    _tcp_addr: Option<SocketAddr>,
+    _tcp_addr: Option<std::net::SocketAddr>,
     _telemetry_enabled: bool,
 ) -> Result<()> {
     anyhow::bail!(
         "this omnifs binary was built without host-native daemon support; \
-         configure the Docker runtime or rebuild with the `daemon` feature"
+         rebuild with the `daemon` feature"
     )
 }
 
@@ -532,83 +423,22 @@ fn sweep_nfs_state_dir(state_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-// --- Docker reclaim ----------------------------------------------------------
-
-async fn reclaim_docker(container_name: &ContainerName) -> Result<()> {
-    let runtime = DockerTarget::default_target()
-        .and_then(|target| crate::runtime::Runtime::connect_for(&target));
-    match runtime {
-        Ok(runtime) => {
-            runtime.remove_existing(container_name).await?;
-            anstream::println!("✓ Container `{container_name}` removed");
-            Ok(())
-        },
-        Err(error) => {
-            anstream::eprintln!(
-                "⚠  Docker not reachable; could not remove container `{container_name}`: {error}"
-            );
-            Ok(())
-        },
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
-
     use super::*;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    #[allow(unsafe_code)] // env::set_var/remove_var require unsafe; guarded by ENV_LOCK.
-    fn with_env<F: FnOnce()>(vars: &[(&str, Option<&str>)], f: F) {
-        let _guard = ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-
-        let saved: Vec<(&str, Option<String>)> = vars
-            .iter()
-            .map(|(key, _)| (*key, std::env::var(*key).ok()))
-            .collect();
-
-        // SAFETY: ENV_LOCK is held for the entire duration of this call,
-        // so no other thread is reading or writing the environment concurrently.
-        for (key, value) in vars {
-            match value {
-                Some(v) => unsafe { std::env::set_var(key, v) },
-                None => unsafe { std::env::remove_var(key) },
-            }
-        }
-
-        f();
-
-        // SAFETY: ENV_LOCK is still held; restoring the saved values is subject
-        // to the same serialization guarantee as the writes above.
-        for (key, original) in &saved {
-            match original {
-                Some(v) => unsafe { std::env::set_var(key, v) },
-                None => unsafe { std::env::remove_var(key) },
-            }
-        }
-    }
-
-    #[test]
-    fn dev_channel_defaults_to_local_dev_image() {
-        assert_eq!(default_image_for(BuildChannel::Dev), "omnifs:dev");
-    }
 
     #[test]
     fn names_registry_table() {
         // (reference, expects a registry host, note)
         let cases = [
-            ("omnifs:dev", false),
-            ("omnifs:abc123-dev", false),
+            ("omnifs-frontend:dev", false),
+            ("omnifs-frontend:abc123-dev", false),
             // A Docker Hub org path is a pull target in docker semantics, but
             // NOT for us: its first segment carries no host marker.
-            ("myorg/omnifs:1.0", false),
-            ("ghcr.io/0xff-ai/omnifs:0.2.1", true),
-            ("localhost:5000/omnifs:x", true),
-            ("registry.local/omnifs", true),
+            ("myorg/omnifs-frontend:1.0", false),
+            ("ghcr.io/0xff-ai/omnifs-frontend:0.2.1", true),
+            ("localhost:5000/omnifs-frontend:x", true),
+            ("registry.local/omnifs-frontend", true),
         ];
         for (image, expected) in cases {
             assert_eq!(
@@ -617,93 +447,5 @@ mod tests {
                 "names_registry({image:?}) should be {expected}"
             );
         }
-    }
-
-    #[test]
-    fn docker_image_resolution_precedence() {
-        with_env(&[(ENV_IMAGE, None), (ENV_CONTAINER_NAME, None)], || {
-            let config = Config {
-                system: crate::config::ConfigSystem {
-                    image: Some("ghcr.io/example/custom:1.2.3".into()),
-                    ..Default::default()
-                },
-                ..Default::default()
-            };
-            let target = DockerTarget::resolve(None, None, &config).unwrap();
-            assert_eq!(target.image().as_str(), "ghcr.io/example/custom:1.2.3");
-        });
-
-        with_env(
-            &[
-                (ENV_IMAGE, Some("ghcr.io/example/env:9.9.9")),
-                (ENV_CONTAINER_NAME, None),
-            ],
-            || {
-                let config = Config {
-                    system: crate::config::ConfigSystem {
-                        image: Some("ghcr.io/example/config:1.0.0".into()),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                };
-                let target = DockerTarget::resolve(None, None, &config).unwrap();
-                assert_eq!(target.image().as_str(), "ghcr.io/example/env:9.9.9");
-
-                let target =
-                    DockerTarget::resolve(None, Some("ghcr.io/example/cli:2.0.0".into()), &config)
-                        .unwrap();
-                assert_eq!(target.image().as_str(), "ghcr.io/example/cli:2.0.0");
-            },
-        );
-    }
-
-    #[test]
-    fn from_config_ignores_env_docker_target_overrides() {
-        with_env(
-            &[
-                (ENV_IMAGE, Some("ghcr.io/example/env:9.9.9")),
-                (ENV_CONTAINER_NAME, Some("omnifs-env")),
-            ],
-            || {
-                let config = Config {
-                    system: crate::config::ConfigSystem {
-                        runtime: Some(ConfiguredBackend::Docker),
-                        image: Some("ghcr.io/example/config:1.0.0".into()),
-                        container_name: Some("omnifs-config".into()),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                };
-                let backend = LaunchBackend::resolve(BackendOverrides::default(), &config).unwrap();
-                let LaunchBackend::Docker(target) = backend else {
-                    panic!("expected docker backend");
-                };
-                assert_eq!(target.image().as_str(), "ghcr.io/example/config:1.0.0");
-                assert_eq!(target.container_name().as_str(), "omnifs-config");
-            },
-        );
-    }
-
-    #[test]
-    fn docker_container_name_resolution_precedence() {
-        with_env(
-            &[(ENV_IMAGE, None), (ENV_CONTAINER_NAME, Some("omnifs-env"))],
-            || {
-                let config = Config {
-                    system: crate::config::ConfigSystem {
-                        container_name: Some("omnifs-config".into()),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                };
-                let container_name = DockerTarget::resolve_container_name(None, &config).unwrap();
-                assert_eq!(container_name.as_str(), "omnifs-env");
-
-                let container_name =
-                    DockerTarget::resolve_container_name(Some("omnifs-cli".into()), &config)
-                        .unwrap();
-                assert_eq!(container_name.as_str(), "omnifs-cli");
-            },
-        );
     }
 }

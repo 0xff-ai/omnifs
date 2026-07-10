@@ -7,12 +7,12 @@
 //!
 //! Resolution (per request, so the launcher can poll for the record to appear):
 //! - `OMNIFS_DAEMON_ADDR` set: dial TCP, bearer token from `OMNIFS_CONTROL_TOKEN`
-//!   when set (the bridge/debug path).
+//!   when set (the debug/test path; the ordinary host-native daemon never sets
+//!   this).
 //! - else read the record:
 //!   - absent -> the daemon is not running (exit 3).
 //!   - unix endpoint -> connect the socket; a refused/missing socket is a stale
 //!     record, which is removed and reported.
-//!   - tcp endpoint -> dial with the record's token.
 //! - the instance id echoed by `/v1/status` is asserted equal to the record's,
 //!   so a record overwritten by a restart mid-command is caught.
 
@@ -49,18 +49,11 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 enum Target {
     /// No runtime record and no `OMNIFS_DAEMON_ADDR`: the daemon is not running.
     Absent,
-    /// `OMNIFS_DAEMON_ADDR` override (bridge/debug). Foreign-daemon copy applies
-    /// only on this path.
+    /// `OMNIFS_DAEMON_ADDR` override (debug/test path). Foreign-daemon copy
+    /// applies only on this path.
     Env { base: String, token: Option<String> },
-    /// TCP endpoint read from the record (Docker bridge), or forced for the
-    /// launcher's bring-up (`instance` is `None` there, before the record
-    /// exists).
-    Tcp {
-        base: String,
-        token: String,
-        instance: Option<String>,
-    },
-    /// Unix-socket endpoint read from the record (host-native).
+    /// Unix-socket endpoint read from the record (the daemon's only production
+    /// transport).
     Unix {
         socket: PathBuf,
         instance: Option<String>,
@@ -72,7 +65,7 @@ impl Target {
     fn label(&self) -> String {
         match self {
             Self::Absent => "the daemon".to_string(),
-            Self::Env { base, .. } | Self::Tcp { base, .. } => base.clone(),
+            Self::Env { base, .. } => base.clone(),
             Self::Unix { socket, .. } => format!("unix:{}", socket.display()),
         }
     }
@@ -80,7 +73,7 @@ impl Target {
     /// The record's instance id, for the mid-flight-overwrite assertion.
     fn instance(&self) -> Option<&str> {
         match self {
-            Self::Tcp { instance, .. } | Self::Unix { instance, .. } => instance.as_deref(),
+            Self::Unix { instance, .. } => instance.as_deref(),
             Self::Absent | Self::Env { .. } => None,
         }
     }
@@ -98,9 +91,6 @@ pub(crate) struct DaemonClient {
     /// Layout for record-based resolution. `None` only when the ambient
     /// workspace could not be resolved (then the client behaves as absent).
     record_path: Option<PathBuf>,
-    /// A forced TCP target for the Docker launcher's bring-up before the record
-    /// exists. Wins over env and record resolution.
-    forced: Option<(String, String)>,
     http: reqwest::Client,
     unix: OnceLock<HyperClient<UnixConnector, Full<Bytes>>>,
     /// Set once a stale unix socket has been cleaned, so the unavailable error
@@ -120,22 +110,9 @@ impl DaemonClient {
         Self::with_record_path(Some(layout.runtime_record_file()))
     }
 
-    /// A client forced onto a TCP endpoint with a token, used by the Docker
-    /// launcher during bring-up before the record exists.
-    pub(crate) fn for_tcp(addr: &str, token: impl Into<String>) -> Self {
-        Self {
-            record_path: None,
-            forced: Some((format!("http://{addr}"), token.into())),
-            http: Self::http_client(),
-            unix: OnceLock::new(),
-            cleaned_stale: AtomicBool::new(false),
-        }
-    }
-
     fn with_record_path(record_path: Option<PathBuf>) -> Self {
         Self {
             record_path,
-            forced: None,
             http: Self::http_client(),
             unix: OnceLock::new(),
             cleaned_stale: AtomicBool::new(false),
@@ -158,13 +135,6 @@ impl DaemonClient {
     /// Resolve the endpoint to dial for this request. `OMNIFS_DAEMON_ADDR` wins
     /// over the record; an unparseable record is a hard error.
     fn resolve(&self) -> Result<Target> {
-        if let Some((base, token)) = &self.forced {
-            return Ok(Target::Tcp {
-                base: base.clone(),
-                token: token.clone(),
-                instance: None,
-            });
-        }
         if let Some(addr) = env_daemon_addr() {
             let token = std::env::var("OMNIFS_CONTROL_TOKEN")
                 .ok()
@@ -181,16 +151,12 @@ impl DaemonClient {
             .with_context(|| format!("read runtime record {}", record_path.display()))?
         {
             None => Ok(Target::Absent),
-            Some(record) => match record.endpoint {
-                Endpoint::Unix { path } => Ok(Target::Unix {
+            Some(record) => {
+                let Endpoint::Unix { path } = record.endpoint;
+                Ok(Target::Unix {
                     socket: path,
                     instance: Some(record.instance_id),
-                }),
-                Endpoint::Tcp { addr, token } => Ok(Target::Tcp {
-                    base: format!("http://{addr}"),
-                    token,
-                    instance: Some(record.instance_id),
-                }),
+                })
             },
         }
     }
@@ -210,10 +176,6 @@ impl DaemonClient {
             Target::Absent => Ok(None),
             Target::Env { base, token } => {
                 self.request_tcp(base, token.as_deref(), method, path, body, timeout)
-                    .await
-            },
-            Target::Tcp { base, token, .. } => {
-                self.request_tcp(base, Some(token), method, path, body, timeout)
                     .await
             },
             Target::Unix { socket, .. } => {
@@ -677,13 +639,8 @@ pub(crate) fn resolve_event_endpoint(layout: &WorkspaceLayout) -> Result<Option<
     else {
         return Ok(None);
     };
-    Ok(Some(match record.endpoint {
-        Endpoint::Unix { path } => EventEndpoint::Unix { socket: path },
-        Endpoint::Tcp { addr, token } => EventEndpoint::Tcp {
-            base: format!("http://{addr}"),
-            token: Some(token),
-        },
-    }))
+    let Endpoint::Unix { path } = record.endpoint;
+    Ok(Some(EventEndpoint::Unix { socket: path }))
 }
 
 #[derive(Debug)]
@@ -810,8 +767,72 @@ fn incompatible_daemon_error(status: &DaemonStatus) -> anyhow::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tokio::net::TcpListener;
+
+    /// Serializes tests that set `OMNIFS_DAEMON_ADDR`/`OMNIFS_CONTROL_TOKEN`
+    /// (process-global state) and restores their prior values on drop. This is
+    /// the only transport a test can force onto without a real runtime record:
+    /// the daemon's production transport is a Unix socket a live daemon binds,
+    /// which these unit tests don't spin up.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        saved: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        #[allow(unsafe_code)] // env::set_var requires unsafe; guarded by ENV_LOCK.
+        fn set(vars: &[(&'static str, &str)]) -> Self {
+            let vars: Vec<(&'static str, Option<&str>)> = vars
+                .iter()
+                .map(|(key, value)| (*key, Some(*value)))
+                .collect();
+            Self::apply(&vars)
+        }
+
+        /// Force `OMNIFS_DAEMON_ADDR`/`OMNIFS_CONTROL_TOKEN` unset for the
+        /// guard's lifetime, so a test asserting on the record-only path is not
+        /// racing another test's env-forced target.
+        #[allow(unsafe_code)] // env::remove_var requires unsafe; guarded by ENV_LOCK.
+        fn unset_daemon_addr() -> Self {
+            Self::apply(&[("OMNIFS_DAEMON_ADDR", None), ("OMNIFS_CONTROL_TOKEN", None)])
+        }
+
+        #[allow(unsafe_code)] // env::set_var/remove_var require unsafe; guarded by ENV_LOCK.
+        fn apply(vars: &[(&'static str, Option<&str>)]) -> Self {
+            let lock = ENV_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let saved = vars
+                .iter()
+                .map(|(key, _)| (*key, std::env::var(*key).ok()))
+                .collect();
+            // SAFETY: ENV_LOCK is held for the guard's whole lifetime.
+            for (key, value) in vars {
+                match value {
+                    Some(value) => unsafe { std::env::set_var(key, value) },
+                    None => unsafe { std::env::remove_var(key) },
+                }
+            }
+            Self { _lock: lock, saved }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        #[allow(unsafe_code)] // env::set_var/remove_var require unsafe; guarded by ENV_LOCK.
+        fn drop(&mut self) {
+            // SAFETY: ENV_LOCK is still held (it is a field on `self`).
+            for (key, original) in &self.saved {
+                match original {
+                    Some(value) => unsafe { std::env::set_var(key, value) },
+                    None => unsafe { std::env::remove_var(key) },
+                }
+            }
+        }
+    }
 
     #[tokio::test]
     async fn status_optional_attaches_control_token_header() {
@@ -829,7 +850,11 @@ mod tests {
             stream.write_all(response.as_bytes()).await.unwrap();
         });
 
-        let client = DaemonClient::for_tcp(&addr.to_string(), "test-token");
+        let _env = EnvGuard::set(&[
+            ("OMNIFS_DAEMON_ADDR", &addr.to_string()),
+            ("OMNIFS_CONTROL_TOKEN", "test-token"),
+        ]);
+        let client = DaemonClient::with_record_path(None);
         let status = client.status_optional().await.unwrap().unwrap();
         assert_eq!(status.version, "test-daemon");
         server.await.unwrap();
@@ -866,7 +891,11 @@ mod tests {
             stream.write_all(response.as_bytes()).await.unwrap();
         });
 
-        let client = DaemonClient::for_tcp(&addr.to_string(), "test-token");
+        let _env = EnvGuard::set(&[
+            ("OMNIFS_DAEMON_ADDR", &addr.to_string()),
+            ("OMNIFS_CONTROL_TOKEN", "test-token"),
+        ]);
+        let client = DaemonClient::with_record_path(None);
 
         let error = client.status_optional().await.unwrap_err();
         let rendered = crate::error::render(&error);
@@ -922,7 +951,11 @@ mod tests {
             stream.write_all(response.as_bytes()).await.unwrap();
         });
 
-        let client = DaemonClient::for_tcp(&addr.to_string(), "test-token");
+        let _env = EnvGuard::set(&[
+            ("OMNIFS_DAEMON_ADDR", &addr.to_string()),
+            ("OMNIFS_CONTROL_TOKEN", "test-token"),
+        ]);
+        let client = DaemonClient::with_record_path(None);
         let err = client.require_compatible().await.unwrap_err();
         let msg = format!("{err}");
         assert!(
@@ -945,7 +978,11 @@ mod tests {
             stream.write_all(response.as_bytes()).await.unwrap();
         });
 
-        let client = DaemonClient::for_tcp(&addr.to_string(), "test-token");
+        let _env = EnvGuard::set(&[
+            ("OMNIFS_DAEMON_ADDR", &addr.to_string()),
+            ("OMNIFS_CONTROL_TOKEN", "test-token"),
+        ]);
+        let client = DaemonClient::with_record_path(None);
         assert!(matches!(
             client.probe().await,
             DaemonControlState::Compatible(_)
@@ -955,6 +992,7 @@ mod tests {
     /// With no record and no override, the client is absent and require exits 3.
     #[tokio::test]
     async fn absent_record_is_daemon_unavailable() {
+        let _env = EnvGuard::unset_daemon_addr();
         let home = tempfile::tempdir().unwrap();
         let record = home.path().join("daemon.json");
         let client = DaemonClient::with_record_path(Some(record));

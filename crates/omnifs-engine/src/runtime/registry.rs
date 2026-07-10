@@ -10,7 +10,7 @@ use crate::cloner::GitCloner;
 use crate::snapshot::MountSnapshot;
 use crate::{BuildError, HostContext, Runtime, component_engine};
 use omnifs_auth::CredentialService;
-use omnifs_workspace::mounts::materialize::{MaterializationMode, materialize};
+use omnifs_workspace::mounts::materialize::materialize;
 use omnifs_workspace::mounts::{Registry, Spec, UpgradePlan, pinned_manifest};
 use omnifs_workspace::provider::Catalog;
 use std::collections::{HashMap, HashSet};
@@ -358,33 +358,26 @@ impl MountRuntimes {
     /// `<config_dir>/mounts/*.json`.
     ///
     /// Desired specs are materialized (metadata, runtime capabilities, preopen
-    /// rewriting) and fingerprinted; a spec that is new is added, one whose
-    /// fingerprint changed is replaced, one that disappeared is removed, and one
-    /// that fails to materialize or instantiate is recorded in
-    /// [`ReconcileOutcome::failed`] without aborting the pass. `mode` selects
-    /// host-direct preopens versus container-rewritten preopens.
-    pub fn reconcile(
-        self: &Arc<Self>,
-        handle: &tokio::runtime::Handle,
-        mode: MaterializationMode,
-    ) -> ReconcileOutcome {
-        self.reconcile_with_approvals(handle, mode, UpgradeApprovals::default())
+    /// canonicalization) and fingerprinted; a spec that is new is added, one
+    /// whose fingerprint changed is replaced, one that disappeared is removed,
+    /// and one that fails to materialize or instantiate is recorded in
+    /// [`ReconcileOutcome::failed`] without aborting the pass.
+    pub fn reconcile(self: &Arc<Self>, handle: &tokio::runtime::Handle) -> ReconcileOutcome {
+        self.reconcile_with_approvals(handle, UpgradeApprovals::default())
     }
 
     pub fn reconcile_with_approvals(
         self: &Arc<Self>,
         handle: &tokio::runtime::Handle,
-        mode: MaterializationMode,
         approvals: UpgradeApprovals,
     ) -> ReconcileOutcome {
         let _guard = self.reconcile_lock.lock();
-        ReconcilePass::new(self, handle, mode, approvals, ReconcileScope::all()).run()
+        ReconcilePass::new(self, handle, approvals, ReconcileScope::all()).run()
     }
 
     pub fn try_reconcile_scoped(
         self: &Arc<Self>,
         handle: &tokio::runtime::Handle,
-        mode: MaterializationMode,
         mounts: Option<Vec<String>>,
     ) -> Result<ReconcileOutcome, ReconcileBusy> {
         let Some(_guard) = self.reconcile_lock.try_lock() else {
@@ -393,7 +386,6 @@ impl MountRuntimes {
         Ok(ReconcilePass::new(
             self,
             handle,
-            mode,
             UpgradeApprovals::default(),
             ReconcileScope::from_mounts(mounts),
         )
@@ -403,7 +395,6 @@ impl MountRuntimes {
     pub fn converge_spec(
         self: &Arc<Self>,
         handle: &tokio::runtime::Handle,
-        mode: MaterializationMode,
         spec: Spec,
         approved: Option<UpgradePlan>,
     ) -> ReconcileOutcome {
@@ -412,7 +403,7 @@ impl MountRuntimes {
         if let Some(plan) = approved {
             approvals.approve(spec.mount.clone(), plan);
         }
-        ReconcilePass::new(self, handle, mode, approvals, ReconcileScope::all()).run_one(spec)
+        ReconcilePass::new(self, handle, approvals, ReconcileScope::all()).run_one(spec)
     }
 
     fn build_work(&self, work: LoadWork) -> LoadResult {
@@ -521,7 +512,6 @@ impl MountRuntimes {
 struct ReconcilePass<'a> {
     registry: &'a Arc<MountRuntimes>,
     handle: &'a tokio::runtime::Handle,
-    mode: MaterializationMode,
     providers: Catalog,
     approvals: UpgradeApprovals,
     scope: ReconcileScope,
@@ -534,14 +524,12 @@ impl<'a> ReconcilePass<'a> {
     fn new(
         registry: &'a Arc<MountRuntimes>,
         handle: &'a tokio::runtime::Handle,
-        mode: MaterializationMode,
         approvals: UpgradeApprovals,
         scope: ReconcileScope,
     ) -> Self {
         Self {
             registry,
             handle,
-            mode,
             providers: Catalog::open(registry.context.providers_dir()),
             approvals,
             scope,
@@ -633,8 +621,8 @@ impl<'a> ReconcilePass<'a> {
     /// `LoadWork` only for mounts that must be (re)compiled. `path` is the
     /// spec's on-disk file, used only for failure messages.
     fn plan_spec(&mut self, spec: Spec, path: &Path) -> Option<LoadWork> {
-        let materialized = match materialize(spec, &self.providers, self.mode) {
-            Ok(materialized) => materialized.into_spec(),
+        let materialized = match materialize(spec, &self.providers) {
+            Ok(materialized) => materialized,
             Err(error) => {
                 self.outcome.failed.push(MountFailure {
                     mount: path.display().to_string(),
@@ -1055,7 +1043,6 @@ mod tests {
     use omnifs_core::path::Path as OmnifsPath;
     use omnifs_wit::provider::types::{Callout, CalloutResult, Header, HttpResponse};
     use omnifs_workspace::ids::{ProviderId, ProviderMeta, ProviderName};
-    use omnifs_workspace::mounts::materialize::MaterializationMode;
     use omnifs_workspace::mounts::{Spec, UpgradePlan};
     use omnifs_workspace::provider::ProviderStore;
     use std::path::{Path, PathBuf};
@@ -1280,10 +1267,7 @@ mod tests {
             .expect("registry init"),
         );
 
-        let outcome = registry.reconcile(
-            &tokio::runtime::Handle::current(),
-            MaterializationMode::Docker,
-        );
+        let outcome = registry.reconcile(&tokio::runtime::Handle::current());
 
         assert!(
             registry.mounts().is_empty(),
@@ -1354,10 +1338,7 @@ mod tests {
             .expect("registry init"),
         );
 
-        let first = registry.reconcile(
-            &tokio::runtime::Handle::current(),
-            MaterializationMode::Docker,
-        );
+        let first = registry.reconcile(&tokio::runtime::Handle::current());
         assert_eq!(first.added, ["test"], "first reconcile: {first:?}");
         let running = registry.get("test").expect("mount should be running");
 
@@ -1375,10 +1356,7 @@ mod tests {
         )
         .expect("write broken replacement spec");
 
-        let second = registry.reconcile(
-            &tokio::runtime::Handle::current(),
-            MaterializationMode::Docker,
-        );
+        let second = registry.reconcile(&tokio::runtime::Handle::current());
         assert!(second.updated.is_empty());
         assert!(second.failed.iter().any(|failure| failure.mount == "test"));
         let still_running = registry
@@ -1577,7 +1555,7 @@ mod tests {
         std::fs::write(&spec_path, serde_json::to_vec_pretty(&spec).unwrap()).expect("write spec");
 
         let handle = tokio::runtime::Handle::current();
-        let first = fx.registry.reconcile(&handle, MaterializationMode::Docker);
+        let first = fx.registry.reconcile(&handle);
         assert_eq!(
             first.added,
             ["test"],
@@ -1593,7 +1571,7 @@ mod tests {
         std::fs::write(&spec_path, serde_json::to_vec_pretty(&changed).unwrap())
             .expect("write changed spec");
 
-        let second = fx.registry.reconcile(&handle, MaterializationMode::Docker);
+        let second = fx.registry.reconcile(&handle);
         assert_eq!(
             second.updated,
             ["test"],
@@ -1637,7 +1615,7 @@ mod tests {
         std::fs::write(&spec_path, serde_json::to_vec_pretty(&spec).unwrap()).expect("write spec");
 
         let handle = tokio::runtime::Handle::current();
-        let first = fx.registry.reconcile(&handle, MaterializationMode::Docker);
+        let first = fx.registry.reconcile(&handle);
         assert_eq!(first.added, ["test"], "first reconcile: {first:?}");
         let running = fx.registry.get("test").expect("mount should be running");
 
@@ -1654,7 +1632,7 @@ mod tests {
         std::fs::write(&spec_path, serde_json::to_vec_pretty(&widened).unwrap())
             .expect("write widened spec");
 
-        let refused = fx.registry.reconcile(&handle, MaterializationMode::Docker);
+        let refused = fx.registry.reconcile(&handle);
         assert!(
             refused.updated.is_empty(),
             "unapproved widening must not update: {refused:?}"
@@ -1672,9 +1650,7 @@ mod tests {
 
         let mut approvals = super::UpgradeApprovals::default();
         approvals.approve("test", actual);
-        let approved =
-            fx.registry
-                .reconcile_with_approvals(&handle, MaterializationMode::Docker, approvals);
+        let approved = fx.registry.reconcile_with_approvals(&handle, approvals);
         assert_eq!(
             approved.updated,
             ["test"],
@@ -1706,7 +1682,7 @@ mod tests {
         std::fs::write(&spec_path, serde_json::to_vec_pretty(&spec).unwrap()).expect("write spec");
 
         let handle = tokio::runtime::Handle::current();
-        let first = fx.registry.reconcile(&handle, MaterializationMode::Docker);
+        let first = fx.registry.reconcile(&handle);
         assert_eq!(first.added, ["test"]);
         assert!(
             fx.registry.get("test").is_some(),
@@ -1714,7 +1690,7 @@ mod tests {
         );
 
         std::fs::remove_file(&spec_path).expect("delete spec");
-        let second = fx.registry.reconcile(&handle, MaterializationMode::Docker);
+        let second = fx.registry.reconcile(&handle);
         assert_eq!(
             second.removed,
             ["test"],
@@ -1758,7 +1734,7 @@ mod tests {
             .expect("write other spec");
 
         let handle = tokio::runtime::Handle::current();
-        let first = fx.registry.reconcile(&handle, MaterializationMode::Docker);
+        let first = fx.registry.reconcile(&handle);
         assert_eq!(
             first.added,
             ["other", "test"],
@@ -1769,11 +1745,7 @@ mod tests {
         std::fs::remove_file(&other_path).expect("delete out-of-scope spec");
         let scoped = fx
             .registry
-            .try_reconcile_scoped(
-                &handle,
-                MaterializationMode::Docker,
-                Some(vec!["test".to_string()]),
-            )
+            .try_reconcile_scoped(&handle, Some(vec!["test".to_string()]))
             .expect("scoped reconcile must acquire lock");
 
         assert!(
@@ -1805,7 +1777,7 @@ mod tests {
         let handle = tokio::runtime::Handle::current();
         let _guard = registry.reconcile_lock.lock();
 
-        let result = registry.try_reconcile_scoped(&handle, MaterializationMode::Docker, None);
+        let result = registry.try_reconcile_scoped(&handle, None);
 
         assert!(matches!(result, Err(super::ReconcileBusy)));
     }

@@ -209,7 +209,7 @@ async function main() {
   const fixtures = await startFixtures(render.mounts, fixturePaths);
   try {
     console.log("Starting the host-native daemon");
-    await run($`${omnifsCli} up --runtime native`.env(cliEnv(devHome)));
+    await run($`${omnifsCli} up --no-frontend`.env(cliEnv(devHome)));
 
     console.log("Starting the Docker-hosted FUSE frontend");
     await run($`${omnifsCli} frontend up`.env(cliEnv(devHome)));
@@ -532,11 +532,9 @@ async function writeDevHome(
   mkdirSync(mountsDir, { recursive: true });
   cpSync(providerStore, providersDir, { recursive: true });
 
-  // No `[system].runtime`: host-native is the default, and this script always
-  // passes `--runtime native` explicitly on `omnifs up` rather than persisting
-  // a choice `omnifs setup` never made for this throwaway dev home. The only
-  // setting the native flow needs is where to find the frontend image `omnifs
-  // frontend up` attaches.
+  // The daemon always runs host-native; there is no runtime choice to
+  // persist for this throwaway dev home. The only setting the native flow
+  // needs is where to find the frontend image `omnifs frontend up` attaches.
   writeFileSync(
     join(devHome, "config.toml"),
     `[system]\nfrontend_image = ${JSON.stringify(frontendImage)}\n`,

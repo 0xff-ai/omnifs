@@ -17,19 +17,11 @@ pub mod events;
 
 /// Control API major version. The CLI refuses to talk to a daemon with a
 /// different major. Bump when routes or payloads change incompatibly.
-pub const API_MAJOR: u16 = 3;
+pub const API_MAJOR: u16 = 4;
 
 /// Control API minor version. The CLI warns but proceeds when the daemon's
 /// minor differs. Bump for additive, backward-compatible additions.
-pub const API_MINOR: u16 = 5;
-
-/// Docker container name environment variable set by launchers and read by the
-/// daemon when reporting backend identity.
-pub const OMNIFS_CONTAINER_NAME_ENV: &str = "OMNIFS_CONTAINER_NAME";
-
-/// Docker image environment variable set by launchers and read by the daemon
-/// when reporting backend identity.
-pub const OMNIFS_IMAGE_ENV: &str = "OMNIFS_IMAGE";
+pub const API_MINOR: u16 = 0;
 
 /// TCP namespace attach address, injected by the frontend container launcher
 /// and read by the out-of-process `omnifs frontend run` runner when no
@@ -112,11 +104,6 @@ pub struct DaemonStatus {
     pub cache_dir: PathBuf,
     #[schema(value_type = String)]
     pub providers_dir: PathBuf,
-    /// The first serving filesystem frontend, when one is up. Kept for
-    /// pre-registry clients that read a single frontend; `frontends` reports the
-    /// whole served set. Removing this singular field is phase-5 (API-major)
-    /// scope.
-    pub frontend: Option<FrontendInfo>,
     /// Every filesystem frontend currently serving. A daemon serves one renderer
     /// per requested frontend over a single shared namespace (FUSE and NFS can
     /// run concurrently on Linux); the default is the single platform frontend.
@@ -145,7 +132,7 @@ impl DaemonStatus {
     pub fn ready(&self) -> bool {
         self.health
             .frontend_ready()
-            .unwrap_or_else(|| self.frontend.is_some())
+            .unwrap_or(!self.frontends.is_empty())
     }
 }
 
@@ -235,26 +222,18 @@ pub enum HealthState {
     Unhealthy,
 }
 
-/// Backend serving a daemon. The CLI reads this (and the runtime record)
-/// instead of inferring the backend from `[system].runtime`.
+/// Backend serving a daemon. The daemon always runs host-native; the CLI reads
+/// this (and the runtime record) rather than assuming it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DaemonBackend {
     /// Daemon spawned as a host-native child process.
     Native { pid: u32 },
-    /// Daemon running inside a Docker container.
-    Docker {
-        container_name: String,
-        image: String,
-    },
 }
 
 impl Default for DaemonBackend {
     fn default() -> Self {
-        Self::Docker {
-            container_name: String::new(),
-            image: String::new(),
-        }
+        Self::Native { pid: 0 }
     }
 }
 
@@ -263,7 +242,6 @@ impl DaemonBackend {
     pub fn label(&self) -> &'static str {
         match self {
             Self::Native { .. } => "native",
-            Self::Docker { .. } => "container",
         }
     }
 }

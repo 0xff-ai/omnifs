@@ -29,7 +29,7 @@ Run `just openapi` after daemon API changes. Run `just schema` after provider ma
 
 Mount, provider, clone, traversal, frontend, or runtime behavior changes need live runtime validation. Rust checks alone are not enough.
 
-Use `just dev -y` for the supported contributor runtime path. Check status inside the container. Exercise shell traversal and real file tools for path-surface changes.
+Use `just dev -y` for the supported contributor runtime path. Check status with `omnifs status` directly (host-native, no `docker exec` needed). Exercise shell traversal and real file tools for path-surface changes.
 
 ### CI gates
 
@@ -39,15 +39,13 @@ Run the relevant CI-shaped lanes before a push or PR handoff. Use `just fmt-chec
 
 ### Cross-language facts on the container boundary
 
-The guest-container paths `/root/.omnifs` (guest `OMNIFS_HOME`) and `/omnifs` (guest mount point) are env-var-driven. The daemon and host-native CLI resolve them from `OMNIFS_HOME` / `OMNIFS_MOUNT_POINT` (name consts `OMNIFS_HOME_ENV` / `OMNIFS_MOUNT_POINT_ENV` in `omnifs-home`), and the layout under the home has one owner (`omnifs-home::under_root`). Only the Docker boundary names the literal paths, at the three parties that sit on it: the container image declares them as ENV (`Dockerfile`), and each host launcher (`crates/omnifs-cli/src/session.rs` for production, `scripts/dev.ts` for dev) carries its own consts to build bind mounts and wait for the mount. The values are frozen; a change breaks `just dev` and the integration tests loudly.
-
-The two runtime images share one Dockerfile. `runtime-base` owns the apt/setup block; `runtime-dev` (contributor, built by `just dev`) copies the binary from the in-Docker `builder` stage, and `runtime-release` (built by `scripts/ci/build-runtime-image.sh`) injects a prebuilt binary as the `omnifs-bin` build context. Targeting `runtime-release` builds only `ubuntu -> runtime-base -> runtime-release`, so the compile toolchain never runs and no base image is published.
+The daemon always runs host-native, so `OMNIFS_HOME` and `OMNIFS_MOUNT_POINT` resolve directly from the host environment on every platform (name consts `OMNIFS_HOME_ENV` / `OMNIFS_MOUNT_POINT_ENV` in `omnifs-home`), and the layout under the home has one owner (`omnifs-home::under_root`). The only remaining guest-container path is the optional Docker-hosted FUSE frontend's fixed mount point, `/omnifs`: it is not env-var-driven (the frontend container is credential-free and gets no `OMNIFS_HOME`), so the literal is hardcoded at its owners instead — the frontend image's `ENTRYPOINT` (`Dockerfile`) and each host launcher that targets it (`crates/omnifs-cli/src/launch_backend.rs`'s `GUEST_MOUNT` for production, `scripts/dev.ts`'s `GUEST_MOUNT` for dev). The value is frozen; a change breaks `just dev` and the integration tests loudly.
 
 ### Frontend image artifact
 
-The Docker-hosted FUSE frontend (`omnifs frontend up`) ships a second, minimal image from the same `Dockerfile`: `frontend-base` (`debian:trixie-slim`, not the runtime image's Ubuntu family, chosen because Debian's default coreutils/findutils are GNU, which `tail -f` fidelity requires), `frontend-dev` (contributor, built by `just frontend-image`, copies the binary from the same `builder` stage `runtime-dev` uses), and `frontend-release` (built by `scripts/ci/build-frontend-image.sh`, injects the same prebuilt Linux binary the runtime release build uses via the `omnifs-bin` build context). `build-runtime-image.sh` and `build-frontend-image.sh` share their buildx invocation through `build_release_stage_image` in `scripts/ci/common.sh`; only the target stage, image default, and whether the launcher-version label is baked in differ. The frontend image carries no launch-protocol/min-launcher-version label: `launch_frontend_container` (`crates/omnifs-cli/src/frontend_container.rs`) never checks one, unlike the daemon runtime image's launch path.
+The Docker-hosted FUSE frontend (`omnifs frontend up`) ships a minimal image from `Dockerfile`: `frontend-base` (`debian:trixie-slim`, chosen because Debian's default coreutils/findutils are GNU, which `tail -f` fidelity requires), `frontend-dev` (contributor, built by `just frontend-image`, copies the binary from the shared `builder` stage), and `frontend-release` (built by `scripts/ci/build-frontend-image.sh`, injects a prebuilt Linux binary as the `omnifs-bin` build context). The frontend image carries no launch-protocol/min-launcher-version label: `launch_frontend_container` (`crates/omnifs-cli/src/frontend_container.rs`) never checks one.
 
-CI builds and pushes the frontend image per architecture in the PR lane (`frontend-amd64`/`frontend-arm64`), smokes it directly with `scripts/ci/smoke-frontend-image.sh` (version, GNU `tail`, fails loudly with no `OMNIFS_ATTACH_ADDR`), and on a `main` push merges the per-arch digests into one multi-platform manifest via `scripts/ci/publish-manifest.sh` (shared with the runtime image's own manifest publish step). Release promotes that manifest to `ghcr.io/0xff-ai/omnifs-frontend:<version>` through the same `scripts/ci/promote-image.sh` the runtime image uses. The `fuse-docker` job (needs `frontend-amd64`'s image digest and the packaged Linux CLI, mirroring `conformance-fuse`'s input shape) runs `crates/omnifs-itest/tests/frontend_docker` against a live host-native daemon and the real amd64 image: the `fuse-docker` conformance column, `omnifs frontend {up,down,status}` lifecycle, `omnifs down` teardown ordering, a cold-start budget, cross-mount byte identity, kill/reattach behavior, and the no-credentials contract. Its scorecards upload as `conformance-scorecards-fuse-docker`, next to `conformance-fuse`'s own artifact.
+CI builds and pushes the frontend image per architecture in the PR lane (`frontend-amd64`/`frontend-arm64`), smokes it directly with `scripts/ci/smoke-frontend-image.sh` (version, GNU `tail`, fails loudly with no `OMNIFS_ATTACH_ADDR`), and on a `main` push merges the per-arch digests into one multi-platform manifest via `scripts/ci/publish-manifest.sh`. Release promotes that manifest to `ghcr.io/0xff-ai/omnifs-frontend:<version>` through `scripts/ci/promote-image.sh`. The `fuse-docker` job (needs `frontend-amd64`'s image digest and the packaged Linux CLI, mirroring `conformance-fuse`'s input shape) runs `crates/omnifs-itest/tests/frontend_docker` against a live host-native daemon and the real amd64 image: the `fuse-docker` conformance column, `omnifs frontend {up,down,status}` lifecycle, `omnifs down` teardown ordering, a cold-start budget, cross-mount byte identity, kill/reattach behavior, and the no-credentials contract. Its scorecards upload as `conformance-scorecards-fuse-docker`, next to `conformance-fuse`'s own artifact.
 
 ### Documentation checks
 
@@ -66,8 +64,9 @@ CI builds and pushes the frontend image per architecture in the PR lane (`fronte
 - Treat a local aggregate command as the source of truth when CI runs the lanes directly.
 - Run host tests that rebuild providers in parallel without prebuilding providers when contention matters.
 - Treat `just docs-check` as code-symbol validation.
-- Reintroduce a second copy of the runtime apt block; edit `runtime-base` instead. Read a guest-container path from the environment (`OMNIFS_HOME` / `OMNIFS_MOUNT_POINT`) rather than adding a fourth literal off the Docker boundary.
-- Give the frontend image an `OMNIFS_HOME`, a provider store, or the runtime image's interactive-shell toolbox. It only ever runs `omnifs frontend run`.
+- Reintroduce a second copy of the frontend apt block; edit `frontend-base` instead.
+- Add a fourth literal for the frontend's fixed `/omnifs` guest mount point instead of updating its three existing owners together.
+- Give the frontend image an `OMNIFS_HOME` or a provider store. It only ever runs `omnifs frontend run`.
 
 ## Code
 
@@ -85,7 +84,6 @@ CI builds and pushes the frontend image per architecture in the PR lane (`fronte
 - `crates/omnifs-cli/src/provider_bundle.rs`
 - `Dockerfile`
 - `scripts/ci/common.sh`
-- `scripts/ci/build-runtime-image.sh`
 - `scripts/ci/build-frontend-image.sh`
 - `scripts/ci/smoke-frontend-image.sh`
 - `scripts/ci/publish-manifest.sh`
@@ -105,13 +103,14 @@ CI builds and pushes the frontend image per architecture in the PR lane (`fronte
 - `just openapi`
 - `just docs-check`
 
-Live runtime path:
+Live runtime path (the daemon runs host-native; only the frontend needs `docker exec`):
 
 ```bash
 just dev -y
-docker exec omnifs /bin/zsh -lc 'omnifs status'
-docker exec omnifs /bin/zsh -lc 'OMNIFS_DEMO_MODE=smoke /tmp/demo.sh'
-docker exec omnifs /bin/zsh -lc 'tail -n 80 /tmp/omnifs.log'
+omnifs status
+FRONTEND=$(docker ps --filter label=ai.0xff.omnifs.home="$HOME/.omnifs-dev" --format '{{.Names}}')
+docker exec -it -w /omnifs "$FRONTEND" /bin/sh
+tail -n 80 ~/.omnifs-dev/cache/daemon.log
 ```
 
 Frontend image, built standalone (no daemon, no attach):

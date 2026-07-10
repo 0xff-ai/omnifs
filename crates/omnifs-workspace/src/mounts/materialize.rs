@@ -1,116 +1,22 @@
 //! Mount materialization: turn an authored `Spec` into a runtime-ready one.
 //!
-//! Shared by the CLI (to compute Docker preopen binds before `docker create`)
-//! and the daemon (to reconcile `mounts/*.json` into the registry). The steps,
-//! in order: read the pinned manifest's capability needs, check that the spec's
-//! grants satisfy them, then rewrite preopens. The spec already carries its
-//! provider-manifest defaults (baked in at creation), so materialization reads
-//! the manifest but never mutates the spec's auth or config. A preopen whose host
-//! equals its guest is container-native (provided in the runtime's own
-//! filesystem, e.g. a dev fixture bind) and passes through untouched. Otherwise,
-//! on the host the preopen host path is canonicalized in place and no binds are
-//! emitted; for a container each preopen is rewritten to a stable guest path
-//! under [`GUEST_PREOPENS_DIR`] and the corresponding host bind is returned for
-//! the launcher to pass to `docker create`.
+//! Shared by the CLI (for the pre-launch credential/capability preflight) and
+//! the daemon (to reconcile `mounts/*.json` into the registry). The steps, in
+//! order: read the pinned manifest's capability needs, check that the spec's
+//! grants satisfy them, then canonicalize preopens. The spec already carries
+//! its provider-manifest defaults (baked in at creation), so materialization
+//! reads the manifest but never mutates the spec's auth or config. A preopen
+//! whose host equals its guest is runtime-native (provided in the runtime's
+//! own filesystem, e.g. a dev fixture bind) and passes through untouched.
+//! Otherwise the preopen host path is canonicalized in place: the runtime
+//! (daemon or provider sandbox) opens the real host directory directly.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::provider::{Catalog, ConfigMetadata};
-use omnifs_caps::{Grant, PreopenMode};
+use omnifs_caps::Grant;
 
 use crate::mounts::{Spec, SpecError, pinned_manifest};
-
-/// Guest directory each container preopen is rewritten under, as
-/// `<GUEST_PREOPENS_DIR>/<mount>/<index>`.
-pub const GUEST_PREOPENS_DIR: &str = "/run/omnifs/preopens";
-
-/// A host directory to bind into the container, paired with the guest path the
-/// provider sandbox will preopen. Internal to materialization: callers consume
-/// the rendered docker bind specs via [`ContainerPreopenBinds`], never a
-/// `PreopenBind` directly.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PreopenBind {
-    pub host: PathBuf,
-    pub container: String,
-    pub mode: PreopenMode,
-}
-
-impl PreopenBind {
-    fn docker_bind_spec(&self) -> String {
-        let mode = match self.mode {
-            PreopenMode::Ro => "ro",
-            PreopenMode::Rw => "rw",
-        };
-        format!("{}:{}:{}", self.host.display(), self.container, mode)
-    }
-}
-
-/// Container bind mounts derived from user-authored preopens.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ContainerPreopenBinds {
-    binds: Vec<PreopenBind>,
-}
-
-impl ContainerPreopenBinds {
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.binds.is_empty()
-    }
-
-    #[must_use]
-    pub fn into_docker_bind_specs(self) -> Vec<String> {
-        self.binds
-            .into_iter()
-            .map(|bind| bind.docker_bind_spec())
-            .collect()
-    }
-
-    fn push(&mut self, bind: PreopenBind) {
-        self.binds.push(bind);
-    }
-}
-
-/// A materialized mount: the runtime-ready spec plus any container preopen
-/// binds required before Docker creates the daemon container.
-#[derive(Debug, Clone)]
-pub struct MaterializedMount {
-    spec: Spec,
-    preopen_binds: ContainerPreopenBinds,
-}
-
-impl MaterializedMount {
-    #[must_use]
-    pub fn spec(&self) -> &Spec {
-        &self.spec
-    }
-
-    #[must_use]
-    pub fn into_spec(self) -> Spec {
-        self.spec
-    }
-
-    #[must_use]
-    pub fn preopen_binds(&self) -> &ContainerPreopenBinds {
-        &self.preopen_binds
-    }
-
-    #[must_use]
-    pub fn into_preopen_binds(self) -> ContainerPreopenBinds {
-        self.preopen_binds
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MaterializationMode {
-    HostNative,
-    Docker,
-}
-
-impl MaterializationMode {
-    fn opens_host_paths(self) -> bool {
-        matches!(self, Self::HostNative)
-    }
-}
 
 #[derive(Debug, thiserror::Error)]
 pub enum MaterializeError {
@@ -157,17 +63,10 @@ pub enum MaterializeError {
     UnresolvedDynamicDomains { mount: String, detail: String },
 }
 
-/// Materialize `spec` against `catalog`.
-///
-/// In [`MaterializationMode::HostNative`] the daemon opens preopen directories
-/// directly, so host paths are canonicalized in place and no binds are
-/// returned. In [`MaterializationMode::Docker`] each user preopen is rewritten
-/// to a container path and its host bind is collected for the launcher.
-pub fn materialize(
-    mut spec: Spec,
-    catalog: &Catalog,
-    mode: MaterializationMode,
-) -> Result<MaterializedMount, MaterializeError> {
+/// Materialize `spec` against `catalog`: check its grants against the pinned
+/// manifest's declared needs, then canonicalize preopen host paths in place so
+/// the runtime can open them directly.
+pub fn materialize(mut spec: Spec, catalog: &Catalog) -> Result<Spec, MaterializeError> {
     // Required-capabilities check: the spec's grants must satisfy every
     // capability the pinned manifest declares the provider needs, so an
     // under-granted mount fails here rather than at the provider's first denied
@@ -194,12 +93,9 @@ pub fn materialize(
         check_dynamic_socket(&spec, manifest.config.as_ref())?;
     }
 
-    let preopen_binds = rewrite_preopens(&mut spec, mode)?;
+    canonicalize_preopens(&mut spec)?;
 
-    Ok(MaterializedMount {
-        spec,
-        preopen_binds,
-    })
+    Ok(spec)
 }
 
 /// Verify that a dynamic unix-socket grant resolves from the config field the
@@ -369,28 +265,21 @@ mod dynamic_socket_tests {
     }
 }
 
-fn rewrite_preopens(
-    spec: &mut Spec,
-    mode: MaterializationMode,
-) -> Result<ContainerPreopenBinds, MaterializeError> {
-    let mount = spec.mount.clone();
+/// Canonicalize every literal preopen's host path in place, so the runtime
+/// (daemon or provider sandbox) can open it directly. A preopen whose host
+/// already equals its guest is runtime-native: the path is provided in the
+/// runtime's own filesystem (a dev fixture bind such as the db provider's
+/// `/data`), not by materialization, so it passes through unrewritten.
+fn canonicalize_preopens(spec: &mut Spec) -> Result<(), MaterializeError> {
     let Some(Grant::Literal(preopens)) = spec
         .capabilities
         .as_mut()
         .and_then(|capabilities| capabilities.preopened_paths.as_mut())
     else {
-        return Ok(ContainerPreopenBinds::default());
+        return Ok(());
     };
 
-    let mut binds = ContainerPreopenBinds::default();
-    for (index, preopen) in preopens.iter_mut().enumerate() {
-        // A preopen whose host already equals its guest is container-native: the
-        // path is provided in the runtime's own filesystem (a dev fixture bind
-        // such as the db provider's `/data`, or the daemon's host in
-        // host-native mode), not by the launcher. Materialization runs both on
-        // the host (to compute Docker binds) and inside the container (the
-        // daemon reconciling `mounts/`); the host has no such path, so neither
-        // canonicalize it nor emit a bind. The runtime opens it directly.
+    for preopen in preopens.iter_mut() {
         if preopen.host == preopen.guest {
             continue;
         }
@@ -405,21 +294,9 @@ fn rewrite_preopens(
                 host_path.display().to_string(),
             ));
         }
-        if mode.opens_host_paths() {
-            // The daemon opens the real host directory directly through
-            // wasmtime, so the spec keeps the canonical host path.
-            preopen.host = host_path.display().to_string();
-            continue;
-        }
-        let container = format!("{GUEST_PREOPENS_DIR}/{mount}/{index}");
-        preopen.host.clone_from(&container);
-        binds.push(PreopenBind {
-            host: host_path,
-            container,
-            mode: preopen.mode,
-        });
+        preopen.host = host_path.display().to_string();
     }
-    Ok(binds)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -450,7 +327,7 @@ mod tests {
     }
 
     #[test]
-    fn container_rewrites_user_preopen_and_emits_bind() {
+    fn canonicalizes_host_preopen_in_place() {
         let tmp = tempfile::tempdir().unwrap();
         let db_dir = tmp.path().join("db");
         std::fs::create_dir_all(&db_dir).unwrap();
@@ -469,66 +346,9 @@ mod tests {
             ),
         );
 
-        let out = materialize(
-            spec,
-            &builtin_catalog(tmp.path()),
-            MaterializationMode::Docker,
-        )
-        .unwrap();
+        let out = materialize(spec, &builtin_catalog(tmp.path())).unwrap();
 
-        // The spec's preopen host is rewritten to the stable guest path.
         let preopen = &out
-            .spec()
-            .capabilities
-            .as_ref()
-            .unwrap()
-            .preopened_paths
-            .as_ref()
-            .unwrap()
-            .literal()[0];
-        assert_eq!(preopen.host, format!("{GUEST_PREOPENS_DIR}/db/0"));
-        assert_eq!(preopen.guest, "/data");
-
-        // The launcher receives the canonical host directory bound at that path.
-        assert_eq!(
-            out.into_preopen_binds().into_docker_bind_specs(),
-            vec![format!(
-                "{}:{GUEST_PREOPENS_DIR}/db/0:ro",
-                canonical.display()
-            )],
-        );
-    }
-
-    #[test]
-    fn host_native_keeps_canonical_host_and_emits_no_bind() {
-        let tmp = tempfile::tempdir().unwrap();
-        let db_dir = tmp.path().join("db");
-        std::fs::create_dir_all(&db_dir).unwrap();
-        let canonical = db_dir.canonicalize().unwrap();
-        let spec = spec_with_provider(
-            "db",
-            &format!(
-                r#"{{
-                "mount": "db",
-                "config": {{"path": "/data/chinook.sqlite"}},
-                "capabilities": {{
-                    "preopened_paths": [{{"host": "{}", "guest": "/data", "mode": "ro"}}]
-                }}
-            }}"#,
-                db_dir.display()
-            ),
-        );
-
-        let out = materialize(
-            spec,
-            &builtin_catalog(tmp.path()),
-            MaterializationMode::HostNative,
-        )
-        .unwrap();
-
-        assert!(out.preopen_binds().is_empty());
-        let preopen = &out
-            .spec()
             .capabilities
             .as_ref()
             .unwrap()
@@ -537,41 +357,38 @@ mod tests {
             .unwrap()
             .literal()[0];
         assert_eq!(preopen.host, canonical.display().to_string());
+        assert_eq!(preopen.guest, "/data");
     }
 
-    /// A container-native preopen (host == guest) is provided by a fixture bind
-    /// in the runtime's own filesystem, so it must pass through without being
+    /// A runtime-native preopen (host == guest) is provided by a fixture bind in
+    /// the runtime's own filesystem, so it must pass through without being
     /// canonicalized against the materializing host (where `/data` need not
-    /// exist) and without emitting a launcher bind. Holds in both modes.
+    /// exist).
     #[test]
-    fn container_native_preopen_passes_through() {
-        for mode in [MaterializationMode::Docker, MaterializationMode::HostNative] {
-            let tmp = tempfile::tempdir().unwrap();
-            let spec = spec_with_provider(
-                "db",
-                r#"{
-                "mount": "db",
-                "config": {"path": "/data/test.db"},
-                "capabilities": {
-                    "preopened_paths": [{"host": "/data", "guest": "/data", "mode": "ro"}]
-                }
-            }"#,
-            );
+    fn runtime_native_preopen_passes_through() {
+        let tmp = tempfile::tempdir().unwrap();
+        let spec = spec_with_provider(
+            "db",
+            r#"{
+            "mount": "db",
+            "config": {"path": "/data/test.db"},
+            "capabilities": {
+                "preopened_paths": [{"host": "/data", "guest": "/data", "mode": "ro"}]
+            }
+        }"#,
+        );
 
-            let out = materialize(spec, &builtin_catalog(tmp.path()), mode).unwrap();
+        let out = materialize(spec, &builtin_catalog(tmp.path())).unwrap();
 
-            assert!(out.preopen_binds().is_empty(), "mode {mode:?}");
-            let preopen = &out
-                .spec()
-                .capabilities
-                .as_ref()
-                .unwrap()
-                .preopened_paths
-                .as_ref()
-                .unwrap()
-                .literal()[0];
-            assert_eq!(preopen.host, "/data", "mode {mode:?}");
-            assert_eq!(preopen.guest, "/data", "mode {mode:?}");
-        }
+        let preopen = &out
+            .capabilities
+            .as_ref()
+            .unwrap()
+            .preopened_paths
+            .as_ref()
+            .unwrap()
+            .literal()[0];
+        assert_eq!(preopen.host, "/data");
+        assert_eq!(preopen.guest, "/data");
     }
 }
