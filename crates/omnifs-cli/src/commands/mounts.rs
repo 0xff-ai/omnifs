@@ -103,7 +103,7 @@ fn ls(args: &LsArgs) -> anyhow::Result<ExitCode> {
     let mounts = workspace.mounts()?;
     let store = FileStore::new(&layout.credentials_file);
     let statuses =
-        crate::mount_report::scan_user_mount_configs(workspace.catalog(), mounts.clone(), &store);
+        crate::mount_report::scan_user_mount_configs(workspace.catalog(), mounts, &store);
     let exit_code = if statuses.iter().any(|status| match status {
         crate::status::UserMountStatus::Ready(mount) => matches!(
             mount.auth.terminal_row().kind,
@@ -239,18 +239,8 @@ impl ReauthArgs {
             )
             .await?
         };
-        self.reload_live_credentials(&target).await;
-
-        anstream::eprintln!();
-        anstream::eprintln!("✓ Re-authenticated `{mount_name}`.");
-        crate::telemetry::maybe_print_health_nudge(workspace).await;
-        Ok(())
-    }
-
-    async fn reload_live_credentials(&self, target: &CredentialTarget) {
-        let client = crate::client::DaemonClient::new();
         for key in target.keys() {
-            match client.reload_credential_if_ready(key).await {
+            match workspace.daemon().reload_credential_if_ready(key).await {
                 Ok(Some(_)) => {
                     anstream::eprintln!("✓ Reloaded `{key}` in the running daemon.");
                 },
@@ -263,6 +253,11 @@ impl ReauthArgs {
                 },
             }
         }
+
+        anstream::eprintln!();
+        anstream::eprintln!("✓ Re-authenticated `{mount_name}`.");
+        crate::telemetry::maybe_print_health_nudge(workspace).await;
+        Ok(())
     }
 }
 

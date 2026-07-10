@@ -98,13 +98,6 @@ pub(crate) struct DaemonClient {
 }
 
 impl DaemonClient {
-    pub(crate) fn new() -> Self {
-        let record_path = WorkspaceLayout::resolve()
-            .ok()
-            .map(|layout| layout.runtime_record_file());
-        Self::with_record_path(record_path)
-    }
-
     pub(crate) fn for_layout(layout: &WorkspaceLayout) -> Self {
         Self::with_record_path(Some(layout.runtime_record_file()))
     }
