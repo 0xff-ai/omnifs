@@ -8,13 +8,14 @@ use tokio::runtime::Runtime;
 mod registry;
 use registry::load_registry_from_mount_dir;
 
+// This module is compiled into two integration-test binaries. The socket test
+// only reads `export`; the protocol export tests also drive the retained
+// runtime, registry, and namespace directly.
+#[allow(dead_code)]
 pub struct TestExport {
     pub export: Arc<Export>,
-    #[allow(dead_code)]
     pub runtime: Runtime,
-    #[allow(dead_code)]
     pub registry: Arc<MountRuntimes>,
-    #[allow(dead_code)]
     pub namespace: Arc<TreeNamespace>,
     _config_dir: TempDir,
     _cache_dir: TempDir,
@@ -22,19 +23,10 @@ pub struct TestExport {
 }
 
 pub fn test_export() -> TestExport {
-    test_export_with_mount("test")
+    test_export_with_mount("test", false)
 }
 
-pub fn test_export_with_mount(mount: &str) -> TestExport {
-    test_export_with_mount_options(mount, false)
-}
-
-#[allow(dead_code)]
-pub fn root_mounted_test_export() -> TestExport {
-    test_export_with_mount_options("test", true)
-}
-
-fn test_export_with_mount_options(mount: &str, root_mount: bool) -> TestExport {
+pub fn test_export_with_mount(mount: &str, root_mount: bool) -> TestExport {
     let config_dir = tempfile::tempdir().expect("config dir");
     let cache_dir = tempfile::tempdir().expect("cache dir");
     let clone_dir = tempfile::tempdir().expect("clone dir");
@@ -96,17 +88,6 @@ pub fn test_provider_reference() -> omnifs_workspace::ids::ProviderRef {
             version: None,
         },
     }
-}
-
-/// A mount `Spec` for the test provider, pinned to the provider store any
-/// `TestExport` installs it into.
-#[allow(dead_code)]
-pub fn test_provider_spec(mount: &str) -> omnifs_workspace::mounts::Spec {
-    let value = serde_json::json!({
-        "provider": test_provider_reference(),
-        "mount": mount,
-    });
-    serde_json::from_value(value).expect("build test spec")
 }
 
 /// Install the test provider into the content-addressed store at `providers_dir`.

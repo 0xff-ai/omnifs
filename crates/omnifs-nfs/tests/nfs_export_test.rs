@@ -6,7 +6,7 @@ use omnifs_engine::view::{
     self as view_types, DirentRecord, DirentsPayload, EntryMeta, FileAttrsCache,
 };
 use omnifs_nfs::{Export, NodeKind, ReadOnlyExport, Status};
-use support::{root_mounted_test_export, test_export, test_export_with_mount, test_provider_spec};
+use support::{test_export, test_export_with_mount, test_provider_reference};
 use tokio::runtime::Builder;
 
 const OLD_OPEN_MATERIALIZE_LIMIT_BYTES: u64 = 64 * 1024 * 1024;
@@ -144,9 +144,14 @@ fn mount_enumeration_root_change_tracks_loaded_mounts() {
         .expect("root attr before mount add")
         .change;
 
+    let spec = serde_json::from_value(serde_json::json!({
+        "provider": test_provider_reference(),
+        "mount": "other",
+    }))
+    .expect("build test spec");
     harness
         .registry
-        .add_mount(&test_provider_spec("other"), harness.runtime.handle())
+        .add_mount(&spec, harness.runtime.handle())
         .expect("load second test mount");
 
     let after = export.attr(root).expect("root attr after mount add").change;
@@ -166,7 +171,7 @@ fn mount_enumeration_root_change_tracks_loaded_mounts() {
 
 #[test]
 fn omnifs_export_treats_omnifs_as_a_normal_provider_mount_name() {
-    let harness = test_export_with_mount("omnifs");
+    let harness = test_export_with_mount("omnifs", false);
     let export = &harness.export;
 
     let omnifs_dir = export
@@ -243,7 +248,7 @@ fn omnifs_export_does_not_synthesize_top_level_omnifs_alias() {
 
 #[test]
 fn omnifs_export_root_mount_projects_provider_at_volume_root() {
-    let harness = root_mounted_test_export();
+    let harness = test_export_with_mount("test", true);
     let export = &harness.export;
 
     let root_listing = export.readdir(export.root()).expect("root listing");
