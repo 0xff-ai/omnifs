@@ -12,10 +12,8 @@ after="$3"
 
 omnifs snapshot "$mount" --out "$before"
 
-cat >&2 <<'MSG'
-Apply an upstream change for this mount, then press Enter to take the second snapshot.
-MSG
-read -r _
+echo "Apply an upstream change for this mount, then press Enter to take the second snapshot." >&2
+read -r
 
 omnifs snapshot "$mount" --out "$after"
 
