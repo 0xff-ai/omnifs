@@ -213,4 +213,39 @@ RUN chmod 0755 /usr/local/bin/omnifs
 # `scripts/ci/build-runtime-image.sh`, so no compile toolchain is built.
 FROM runtime-base AS runtime-release
 COPY --from=omnifs-bin omnifs /usr/local/bin/omnifs
+
+# --- Docker-hosted FUSE frontend ---
+#
+# `omnifs frontend up` (see `crates/omnifs-cli/src/frontend_container.rs`,
+# `crates/omnifs-daemon/src/frontend.rs`) launches a separate, credential-free
+# container that only ever runs `omnifs frontend run --kind fuse`, attached over
+# TCP to a host-native daemon's shared namespace. It never runs a provider, so
+# it gets its own minimal base rather than extending `runtime-base`: no
+# `OMNIFS_HOME`, no provider store, no control API, none of the runtime image's
+# interactive-shell toolbox (zsh, gum, git, ripgrep, nfs-common...).
+#
+# Debian, not the Ubuntu `runtime-base` family: this is the same Debian family
+# the compile `toolchain` stage above already uses, and Debian's default
+# coreutils/findutils are GNU (uutils is opt-in, not the default `tail`), which
+# is what the frontend conformance matrix's `tail -f` case requires.
+FROM debian:trixie-slim AS frontend-base
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        coreutils findutils fuse3 jq rsync tar xxd \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir /omnifs
+
+ENTRYPOINT ["/usr/local/bin/omnifs", "frontend", "run", "--kind", "fuse", "--mount-point", "/omnifs"]
+
+# Contributor image: the binary compiled in this Dockerfile's `builder` stage,
+# same source as `runtime-dev`. `just frontend-image` builds this target.
+FROM frontend-base AS frontend-dev
+COPY --from=builder /omnifs /usr/local/bin/
 RUN chmod 0755 /usr/local/bin/omnifs
+
+# Release image: a prebuilt binary injected as the `omnifs-bin` build context,
+# same mechanism as `runtime-release`. `scripts/ci/build-frontend-image.sh`
+# builds this target.
+FROM frontend-base AS frontend-release
+COPY --from=omnifs-bin omnifs /usr/local/bin/omnifs
