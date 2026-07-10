@@ -425,7 +425,7 @@ fn wait_briefly(child: &mut Child) {
 /// `OMNIFS_ACCEPTANCE_LIVE`.
 #[must_use]
 pub fn start_wire_frontend(kind: &str) -> Option<WireFrontendDaemon> {
-    wire_frontend(kind, Some(nfs_serial_lock()))
+    wire_frontend(kind, AttachTransport::Unix, Some(nfs_serial_lock()))
 }
 
 /// Like [`start_wire_frontend`] but the caller already holds the NFS serial lock
@@ -433,12 +433,37 @@ pub fn start_wire_frontend(kind: &str) -> Option<WireFrontendDaemon> {
 /// lanes, so it must not let each bring-up acquire (and later drop) its own.
 #[must_use]
 pub fn start_wire_frontend_holding_lock(kind: &str) -> Option<WireFrontendDaemon> {
-    wire_frontend(kind, None)
+    wire_frontend(kind, AttachTransport::Unix, None)
+}
+
+/// Like [`start_wire_frontend`], but the out-of-process runner attaches over
+/// TCP loopback (`OMNIFS_ATTACH_ADDR`/`OMNIFS_ATTACH_TOKEN`) instead of a Unix
+/// socket: the same transport the Docker-hosted frontend uses, minus the
+/// container. Used by the attach-transport perf comparison (TCP vs UDS), which
+/// isolates the transport cost from Docker's own overhead.
+#[must_use]
+pub fn start_wire_frontend_tcp_holding_lock(kind: &str) -> Option<WireFrontendDaemon> {
+    wire_frontend(kind, AttachTransport::Tcp, None)
+}
+
+/// Which transport the out-of-process runner attaches over. `Unix` shares a
+/// socket path with the daemon; `Tcp` is the Docker-hosted frontend's only
+/// option (it cannot share a host Unix socket into its container), reached
+/// here without a container so the perf lane isolates transport cost from
+/// Docker's own overhead.
+#[derive(Clone, Copy)]
+enum AttachTransport {
+    Unix,
+    Tcp,
 }
 
 #[allow(clippy::too_many_lines)] // linear end-to-end bring-up
 #[must_use]
-fn wire_frontend(kind: &str, nfs_lock: Option<TcpListener>) -> Option<WireFrontendDaemon> {
+fn wire_frontend(
+    kind: &str,
+    transport: AttachTransport,
+    nfs_lock: Option<TcpListener>,
+) -> Option<WireFrontendDaemon> {
     let test_wasm = crate::provider_artifact_dir().join("test_provider.wasm");
     if !test_wasm.exists() {
         eprintln!(
@@ -459,17 +484,25 @@ fn wire_frontend(kind: &str, nfs_lock: Option<TcpListener>) -> Option<WireFronte
     let listen_addr = format!("127.0.0.1:{port}");
     let base = format!("http://{listen_addr}");
 
-    // Namespace-only: one attach socket, no `--frontend`. host-native + --listen
-    // gives a UDS record and a TCP control API to poll for readiness.
+    // Namespace-only: at least one attach socket named, no `--frontend`
+    // (`resolve_frontends` only suppresses the default frontend when the named
+    // attach-socket list is non-empty, so the Tcp lane still names one even
+    // though the runner never dials it). host-native + --listen gives a UDS
+    // record and a TCP control API to poll for readiness.
+    let mut daemon_args = vec![
+        "daemon".to_string(),
+        "--host-native".to_string(),
+        "--listen".to_string(),
+        listen_addr.clone(),
+        "--attach-socket".to_string(),
+        "nfs-wire".to_string(),
+    ];
+    if matches!(transport, AttachTransport::Tcp) {
+        daemon_args.push("--attach-tcp".to_string());
+        daemon_args.push("0".to_string());
+    }
     let daemon = Command::new(omnifs_bin())
-        .args([
-            "daemon",
-            "--host-native",
-            "--listen",
-            &listen_addr,
-            "--attach-socket",
-            "nfs-wire",
-        ])
+        .args(&daemon_args)
         .env("OMNIFS_HOME", &home_path)
         .env("OMNIFS_DAEMON_ADDR", &listen_addr)
         .env_remove("OMNIFS_MOUNT_POINT")
@@ -513,31 +546,43 @@ fn wire_frontend(kind: &str, nfs_lock: Option<TcpListener>) -> Option<WireFronte
          the attach-socket ready path regressed. Check the daemon log."
     );
 
-    let socket = home_path.join("frontends/nfs-wire.sock");
-    assert!(
-        socket.exists(),
-        "attach socket {} absent after the daemon reported ready",
-        socket.display()
-    );
-
     let mount_point = home_path.join("mnt-wire");
     std::fs::create_dir_all(&mount_point).expect("frontend mount point");
 
-    // The out-of-process renderer attaches to the socket and mounts the tree.
-    let frontend = Command::new(omnifs_bin())
-        .args([
-            "frontend",
-            "run",
-            "--attach",
-            socket.to_str().expect("socket path utf-8"),
-            "--kind",
-            kind,
-            "--mount-point",
-            mount_point.to_str().expect("mount point utf-8"),
-        ])
+    // The out-of-process renderer attaches over the requested transport and
+    // mounts the tree: `--attach <socket>` for Unix, or the TCP env pair the
+    // Docker-hosted frontend also uses.
+    let mut frontend_cmd = Command::new(omnifs_bin());
+    frontend_cmd
+        .args(["frontend", "run", "--kind", kind, "--mount-point"])
+        .arg(&mount_point)
         .env("OMNIFS_HOME", &home_path)
-        .env("RUST_LOG", "warn")
-        .spawn();
+        .env("RUST_LOG", "warn");
+    match transport {
+        AttachTransport::Unix => {
+            let socket = home_path.join("frontends/nfs-wire.sock");
+            assert!(
+                socket.exists(),
+                "attach socket {} absent after the daemon reported ready",
+                socket.display()
+            );
+            frontend_cmd.arg("--attach").arg(&socket);
+        },
+        AttachTransport::Tcp => {
+            let record = omnifs_workspace::runtime_record::RuntimeRecord::read(
+                &home_path.join("daemon.json"),
+            )
+            .expect("read daemon.json")
+            .expect("daemon.json present once ready");
+            let attach = record
+                .attach
+                .expect("daemon.json must carry `attach` after --attach-tcp");
+            frontend_cmd
+                .env(omnifs_api::OMNIFS_ATTACH_ADDR_ENV, &attach.addr)
+                .env(omnifs_api::OMNIFS_ATTACH_TOKEN_ENV, &attach.token);
+        },
+    }
+    let frontend = frontend_cmd.spawn();
     let mut frontend = match frontend {
         Ok(child) => child,
         Err(error) => {

@@ -874,3 +874,19 @@ pub const FUSE_IN_DOCKER: Column = Column {
     platform: "linux",
     expectations: &[GREP_R_PAGINATION_CONTROLS, TAIL_F_CONTAINER_USERLAND_GAP],
 };
+
+/// The Docker-hosted FUSE frontend (`omnifs frontend up`), gate 4 (amended):
+/// a separate, credential-free container attached to a host-native daemon's
+/// shared namespace over TCP, running kernel FUSE inside the container. Not to
+/// be confused with [`FUSE_IN_DOCKER`], the older whole-daemon-in-a-container
+/// runtime lane on the Ubuntu/uutils runtime image: this frontend ships its
+/// own minimal `debian:trixie-slim` image (`Dockerfile`'s `frontend-base`)
+/// chosen specifically because Debian's default coreutils/findutils are GNU,
+/// so both `tar` and `tail -f` pass here where the runtime-image lane pins
+/// them xfail. Only the cross-frontend pagination-controls property (a tree
+/// design decision, not a frontend quirk) stays expected-fail.
+pub const FUSE_DOCKER_FRONTEND: Column = Column {
+    id: "fuse-docker",
+    platform: "linux",
+    expectations: &[GREP_R_PAGINATION_CONTROLS],
+};
