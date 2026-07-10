@@ -37,11 +37,6 @@ pub struct DaemonArgs {
     /// when this is set (the debug/test path). Absent means UDS-only.
     #[arg(long)]
     pub listen: Option<SocketAddr>,
-    /// Maintain `/<mount>` → `<mount-point>/<mount>` convenience symlinks
-    /// as mounts come and go. Container-image nicety; off by default and
-    /// meaningless when running host-native.
-    #[arg(long)]
-    pub root_symlinks: bool,
     /// Serve a host-native mount: open preopen directories directly instead of
     /// rewriting them to container bind paths. The native launcher sets this;
     /// the container entrypoint does not (it runs in container/rewrite mode).
@@ -162,7 +157,6 @@ impl DaemonArgs {
             nfs_port: 0,
             nfs_state_dir: None,
             nfs_trace: None,
-            root_symlinks: false,
             frontends: Vec::new(),
             attach_sockets: Vec::new(),
             attach_tcp: None,
@@ -183,9 +177,6 @@ impl DaemonArgs {
         }
         push_option_path(&mut args, "--nfs-state-dir", self.nfs_state_dir.as_ref());
         push_option_path(&mut args, "--nfs-trace", self.nfs_trace.as_ref());
-        if self.root_symlinks {
-            args.push("--root-symlinks".to_string());
-        }
         if self.host_native {
             args.push("--host-native".to_string());
         }

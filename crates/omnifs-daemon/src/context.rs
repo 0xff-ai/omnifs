@@ -31,7 +31,6 @@ pub(crate) struct DaemonContext {
     frontends: Vec<FrontendMount>,
     backend: DaemonBackend,
     host_native: bool,
-    root_symlinks: bool,
     /// TCP control listen address. `Some` for the container (and the debug path
     /// when `--listen` is passed alongside the UDS); `None` when a host-native
     /// daemon serves only its Unix socket.
@@ -99,7 +98,6 @@ impl DaemonContext {
             frontends,
             backend,
             host_native: args.host_native,
-            root_symlinks: args.root_symlinks,
             listen: args.listen,
             instance_id: generate_instance_id(),
             attach_sockets,
@@ -335,10 +333,6 @@ impl DaemonContext {
     /// entry over one shared namespace.
     pub(crate) fn frontends(&self) -> &[FrontendMount] {
         &self.frontends
-    }
-
-    pub(crate) fn root_symlinks(&self) -> bool {
-        self.root_symlinks
     }
 
     pub(crate) fn materialization_mode(&self) -> MaterializationMode {
