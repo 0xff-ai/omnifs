@@ -1,7 +1,7 @@
 //! The krunkit (libkrun) frontend backend: a macOS microVM hosting the same
-//! `omnifs frontend run --kind fuse` binary and wire protocol the Docker
-//! backend runs in a container, attached to the host-native daemon's
-//! namespace over vsock instead of TCP.
+//! `omnifs-fuse` binary and wire protocol the Docker backend runs in a
+//! container, attached to the host-native daemon's namespace over vsock
+//! instead of TCP.
 //!
 //! State lives under `<config_dir>/krunkit/`: a persistent per-workspace ed25519
 //! keypair (survives across launches, since it authenticates guest ssh access

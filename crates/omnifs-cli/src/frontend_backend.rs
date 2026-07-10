@@ -4,12 +4,12 @@
 //!
 //! Two backends implement the seam: `DockerBackend` (this module) and
 //! `KrunkitBackend` (`crate::krunkit_backend`), a libkrun microVM on macOS.
-//! Both run the same `omnifs frontend run --kind fuse` binary and wire
-//! protocol; only the attach transport differs (Docker: TCP via
-//! `host.docker.internal`; krunkit: vsock, bridged onto a unix socket by
-//! krunkit itself). Keeping the seam here, rather than letting the frontend
-//! commands call bollard or krunkit directly, is what let the second backend
-//! land without touching them beyond a driver-selected constructor.
+//! Both run the same `omnifs-fuse` binary and wire protocol; only the attach
+//! transport differs (Docker: TCP via `host.docker.internal`; krunkit: vsock,
+//! bridged onto a unix socket by krunkit itself). Keeping the seam here,
+//! rather than letting the frontend commands call bollard or krunkit
+//! directly, is what let the second backend land without touching them
+//! beyond a driver-selected constructor.
 //!
 //! [`Driver`] is the user-facing selector (`--driver` / `[frontend]
 //! driver`); [`Via`] is the on-disk record of which backend a running
