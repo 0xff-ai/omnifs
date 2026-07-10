@@ -10,7 +10,6 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
@@ -29,6 +28,7 @@ type ShellTag = (strings: TemplateStringsArray, ...values: unknown[]) => ShellCo
 declare const Bun: {
   argv: string[];
   $: ShellTag;
+  which(command: string): string | null;
   spawn(
     args: string[],
     options: {
@@ -43,7 +43,7 @@ declare const Bun: {
 
 type DevOptions = {
   profile: string;
-  image: string | null;
+  frontendImage: string | null;
   yes: boolean;
   detach: boolean;
   noShell: boolean;
@@ -65,7 +65,7 @@ type DevMountTemplate = {
     type?: string;
     scheme?: string;
   };
-  config?: unknown;
+  config?: Record<string, unknown>;
   capabilities?: unknown;
   limits?: unknown;
 };
@@ -88,34 +88,36 @@ type TemplateEntry = {
   template: DevMountTemplate;
 };
 
-type Fixtures = {
-  k8s: boolean;
-  k8sSockDir: string | null;
-  dbContainerId: string | null;
-  binds: string[];
+/// Host paths the db/k8s dev fixtures seed into, computed once from `devHome`
+/// so the rendered mount config and the fixture containers agree on where the
+/// data actually lands. See `renderDevHomePlan` and `startFixtures`.
+type FixturePaths = {
+  dbPath: string;
+  k8sSockPath: string;
 };
 
-type ReconcileReport = {
-  failed?: Array<{ mount: string; reason: string }>;
+type Fixtures = {
+  k8s: boolean;
+  dbContainerId: string | null;
 };
 
 const $ = Bun.$;
-const CONTAINER_NAME = process.env.OMNIFS_CONTAINER_NAME || "omnifs";
 const DB_IMAGE = "omnifs-dev-db:local";
 const DB_CONTAINER = "omnifs-dev-db";
 const K8S_COMPOSE_PROJECT = "omnifs-devcluster";
-const CONTROL_ADDR = "127.0.0.1:7878";
-// The daemon no longer writes a control-token file; the container reads its
-// bearer token from OMNIFS_CONTROL_TOKEN. Generate one per dev session and put
-// it in this process's environment so `docker run -e OMNIFS_CONTROL_TOKEN`
-// (by name) forwards the value without it ever appearing on the command line.
-const CONTROL_TOKEN = randomBytes(16).toString("hex");
-process.env.OMNIFS_CONTROL_TOKEN = CONTROL_TOKEN;
-// The dev launcher's view of the container's guest paths (declared as image ENV
-// in Dockerfile). Used for the home bind mount and the mount-readiness wait.
-const GUEST_HOME = "/root/.omnifs";
+const FRONTEND_DEV_IMAGE = "omnifs-frontend:dev";
+// The daemon's own guest-mount constant (`crates/omnifs-cli/src/launch_backend.rs`
+// `GUEST_MOUNT`); the frontend container always mounts here.
 const GUEST_MOUNT = "/omnifs";
-const GUEST_SHELL = "/bin/zsh";
+// The frontend image ships a minimal Debian base (fuse3, coreutils, findutils,
+// jq, rsync, tar, xxd) with no bash/zsh (`Dockerfile`'s `frontend-base`), so
+// the interactive dev shell and any container-side probe use POSIX `/bin/sh`.
+const GUEST_SHELL = "/bin/sh";
+// Label `crates/omnifs-cli/src/frontend_container.rs` stamps on the frontend
+// container with the workspace's config dir (== `OMNIFS_HOME`): the single
+// owner of the home->container-name mapping, so this script discovers the
+// container by label instead of re-deriving its hashed name.
+const FRONTEND_HOME_LABEL = "ai.0xff.omnifs.home";
 
 // Dev mounts whose provider needs a static token, and the host env var that
 // holds it. Dev orchestration, not provider or mount data, so it lives here
@@ -138,7 +140,7 @@ async function main() {
   const devHome =
     options.home || process.env.OMNIFS_HOME || join(homedir(), ".omnifs-dev");
   const profileMounts = readProfile(options.profile);
-  const image = options.image || `omnifs:${await gitShortHead()}-dev`;
+  const frontendImage = options.frontendImage || `omnifs-frontend:${await gitShortHead()}-dev`;
   const providerStore = resolve(
     options.providerStore || join(workspace, "target/omnifs-provider-store"),
   );
@@ -151,32 +153,39 @@ async function main() {
 
   const builds: Promise<void>[] = [];
   if (!options.skipCliBuild) {
+    // Default features (not `--no-default-features`): the `daemon` feature
+    // pulls in `omnifs-daemon`/`omnifs-nfs`, without which `omnifs up` cannot
+    // launch a host-native daemon at all (`launch_backend.rs`'s non-daemon
+    // stub always bails).
     builds.push(
-      run($`cargo build -p omnifs-cli --no-default-features`.env({
+      run($`cargo build -p omnifs-cli`.env({
         ...process.env,
         OMNIFS_PROVIDER_BUNDLE_DIR: providerStore,
       })),
     );
   }
-  if (!options.image) {
-    // Build the image, then move the floating `omnifs:dev` tag onto it so a
-    // locally built dev binary (which defaults to `omnifs:dev`) always runs the
-    // newest image. An explicit `--image` is the user's own tag; leave the
-    // floating tag alone.
-    builds.push(buildImage(image, providerStore).then(() => tagFloatingDevImage(image)));
+  if (!options.frontendImage) {
+    builds.push(buildFrontendImage(frontendImage, providerStore).then(() => tagFloatingFrontendImage(frontendImage)));
   }
   await Promise.all(builds);
 
   if (options.buildOnly) {
-    const tags = [image];
-    if (!options.image && image !== "omnifs:dev") {
-      tags.push("omnifs:dev");
+    const built = [];
+    if (!options.skipCliBuild) {
+      built.push("the omnifs CLI");
     }
-    console.log(`✓ Built ${tags.join(" and ")}`);
+    if (!options.frontendImage) {
+      const tags = frontendImage === FRONTEND_DEV_IMAGE ? [frontendImage] : [frontendImage, FRONTEND_DEV_IMAGE];
+      built.push(`the frontend image (${tags.join(" and ")})`);
+    }
+    console.log(`✓ Built ${built.join(" and ")}`);
     return;
   }
 
-  const render = await renderDevHomePlan(profileMounts, providerStore, options);
+  const omnifsCli = resolveCli();
+  const fixturePaths = fixturePathsFor(devHome);
+
+  const render = await renderDevHomePlan(profileMounts, providerStore, fixturePaths, options);
   if (render.mounts.length === 0) {
     throw new Error(`profile ${options.profile} rendered no usable mounts`);
   }
@@ -184,7 +193,7 @@ async function main() {
   if (!options.yes) {
     printPlan({
       devHome,
-      image,
+      frontendImage,
       profile: options.profile,
       render,
       keepRunning: keepRunning(options),
@@ -195,37 +204,40 @@ async function main() {
     }
   }
 
-  await writeDevHome(devHome, providerStore, image, render);
+  await writeDevHome(devHome, providerStore, frontendImage, omnifsCli, render);
 
-  const fixtures = await startFixtures(render.mounts, devHome);
+  const fixtures = await startFixtures(render.mounts, fixturePaths);
   try {
-    await launchContainer({ devHome, image, fixtures });
-    await waitForReady();
-    await reconcile(devHome);
+    console.log("Starting the host-native daemon");
+    await run($`${omnifsCli} up --runtime native`.env(cliEnv(devHome)));
 
-    console.log(`✓ ${GUEST_MOUNT} is ready inside \`${CONTAINER_NAME}\``);
+    console.log("Starting the Docker-hosted FUSE frontend");
+    await run($`${omnifsCli} frontend up`.env(cliEnv(devHome)));
+
+    const frontendContainer = await discoverFrontendContainer(devHome);
     if (keepRunning(options)) {
       if (options.detach) {
-        console.log(`Detached. Stop with \`docker rm -f ${CONTAINER_NAME}\`.`);
+        console.log(`Detached. Stop with \`${omnifsCli} frontend down && ${omnifsCli} down\`.`);
       }
       return;
     }
 
     try {
+      console.log(`Opening a shell in \`${frontendContainer}\` at ${GUEST_MOUNT}`);
       await runInteractive([
         "docker",
         "exec",
         "-it",
         "-w",
         GUEST_MOUNT,
-        CONTAINER_NAME,
+        frontendContainer,
         GUEST_SHELL,
       ]);
     } finally {
-      await teardownSession(fixtures);
+      await teardownSession(devHome, omnifsCli, fixturePaths, fixtures);
     }
   } catch (error) {
-    await teardownSession(fixtures);
+    await teardownSession(devHome, omnifsCli, fixturePaths, fixtures);
     throw error;
   }
 }
@@ -233,7 +245,7 @@ async function main() {
 function parseArgs(args: string[]): DevOptions {
   const options: DevOptions = {
     profile: "default",
-    image: null,
+    frontendImage: null,
     yes: false,
     detach: false,
     noShell: false,
@@ -248,8 +260,8 @@ function parseArgs(args: string[]): DevOptions {
       options.yes = true;
     } else if (arg === "--profile") {
       options.profile = requireValue(args, ++i, "--profile");
-    } else if (arg === "--image") {
-      options.image = requireValue(args, ++i, "--image");
+    } else if (arg === "--frontend-image") {
+      options.frontendImage = requireValue(args, ++i, "--frontend-image");
     } else if (arg === "--home") {
       options.home = requireValue(args, ++i, "--home");
     } else if (arg === "--provider-store") {
@@ -285,7 +297,7 @@ async function checkPrerequisites(options: DevOptions): Promise<void> {
   if (!options.skipCliBuild) {
     commands.push("cargo");
   }
-  if (!options.image) {
+  if (!options.frontendImage) {
     commands.push("git");
   }
 
@@ -301,6 +313,24 @@ async function checkPrerequisites(options: DevOptions): Promise<void> {
 
 async function commandExists(command: string): Promise<boolean> {
   return commandSucceeds($`${command} --version`.quiet().nothrow());
+}
+
+/// Resolve the `omnifs` binary this script drives: a fresh local build first,
+/// else whatever `omnifs` is on `PATH` (the CI smoke lane installs a prebuilt
+/// release CLI there via the `omnifs-install-cli` action and passes
+/// `--skip-cli-build`).
+function resolveCli(): string {
+  const built = join(workspace, "target/debug/omnifs");
+  if (existsSync(built)) {
+    return built;
+  }
+  const onPath = Bun.which("omnifs");
+  if (onPath) {
+    return onPath;
+  }
+  throw new Error(
+    "no omnifs CLI found: build one (drop --skip-cli-build) or put a prebuilt `omnifs` on PATH",
+  );
 }
 
 function readProfile(profile: string): string[] {
@@ -327,9 +357,17 @@ function discoverTemplates(): Map<string, TemplateEntry> {
   return templates;
 }
 
+function fixturePathsFor(devHome: string): FixturePaths {
+  return {
+    dbPath: join(devHome, "fixtures/db/test.db"),
+    k8sSockPath: join(devHome, "fixtures/k8s/k8s.sock"),
+  };
+}
+
 async function renderDevHomePlan(
   profileMounts: string[],
   providerStore: string,
+  fixturePaths: FixturePaths,
   options: DevOptions,
 ): Promise<DevHomeRender> {
   const index = JSON.parse(readFileSync(join(providerStore, "index.json"), "utf8")) as ProviderStoreIndex;
@@ -342,6 +380,44 @@ async function renderDevHomePlan(
     const found = templates.get(mountName);
     if (!found) {
       skipped.push(`${mountName}: no providers/*/dev/mount.json template`);
+      continue;
+    }
+
+    // The db/k8s fixtures write to a host-native `devHome`-relative path (the
+    // daemon is host-native now: no daemon container, no bind mount, so the
+    // checked-in templates' container-shaped paths (`/data/test.db`,
+    // `unix:///run/omnifs/k8s.sock`) never resolve). Render the real host path
+    // per session instead of baking a devHome-dependent value into the
+    // checked-in template.
+    if (mountName === "db") {
+      const spec = structuredClone(found.template);
+      spec.config = { ...spec.config, path: fixturePaths.dbPath };
+      assertProviderInStore(index, spec.provider);
+      mounts.push({ name: mountName, provider: spec.provider, template: spec });
+      continue;
+    }
+    if (mountName === "k8s") {
+      // Docker Desktop for macOS does not proxy a live AF_UNIX connection
+      // through a bind mount: a socket file created inside a container shows
+      // up on the host side of the bind as a regular (unconnectable) file, so
+      // a host-native daemon on macOS cannot dial it. Linux bind mounts are
+      // same-kernel, so the socket is real there. A TCP-published
+      // `kubectl proxy` endpoint would work on both, but the kubernetes
+      // provider's `endpoint` config is currently `HostSocket`-typed
+      // (unix-only); widening it is a provider capability change, out of
+      // scope here. Named limitation, not a silent drop.
+      if (process.platform === "darwin") {
+        skipped.push(
+          `${mountName}: host-native daemon on macOS cannot reach a Docker bind-mounted unix ` +
+            "socket (Docker Desktop does not proxy AF_UNIX connections across its VM boundary); " +
+            "a TCP-proxy endpoint is a follow-up",
+        );
+        continue;
+      }
+      const spec = structuredClone(found.template);
+      spec.config = { ...spec.config, endpoint: `unix://${fixturePaths.k8sSockPath}` };
+      assertProviderInStore(index, spec.provider);
+      mounts.push({ name: mountName, provider: spec.provider, template: spec });
       continue;
     }
 
@@ -403,40 +479,45 @@ async function resolveToken(
 
 function printPlan({
   devHome,
-  image,
+  frontendImage,
   profile,
   render,
   keepRunning,
 }: {
   devHome: string;
-  image: string;
+  frontendImage: string;
   profile: string;
   render: DevHomeRender;
   keepRunning: boolean;
 }): void {
   console.log("");
   console.log("omnifs contributor dev session");
-  console.log(`  Profile     ${profile}`);
-  console.log(`  Mounts      ${render.mounts.map((mount) => mount.name).join(", ")}`);
+  console.log(`  Profile         ${profile}`);
+  console.log(`  Mounts          ${render.mounts.map((mount) => mount.name).join(", ")}`);
   if (render.skipped.length > 0) {
-    console.log(`  Skipped     ${render.skipped.join("; ")}`);
+    console.log(`  Skipped         ${render.skipped.join("; ")}`);
   }
-  console.log(`  Image       ${image}`);
-  console.log(`  Container   ${CONTAINER_NAME}`);
-  console.log(`  Dev home    ${devHome}`);
+  console.log(`  Frontend image  ${frontendImage}`);
+  console.log(`  Dev home        ${devHome}`);
   console.log("");
   if (keepRunning) {
-    console.log("Bootstrap fixtures and runtime, then return.");
+    console.log("Start the native daemon and the frontend container, then return.");
   } else {
-    console.log(`Bootstrap fixtures and runtime, then open a shell at ${GUEST_MOUNT}.`);
+    console.log(`Start the native daemon and the frontend container, then open a shell at ${GUEST_MOUNT}.`);
   }
   console.log("");
+}
+
+/// Env for every `omnifsCli` invocation against this session's dev home.
+function cliEnv(devHome: string, extra: Record<string, string | undefined> = {}): Record<string, string | undefined> {
+  return { ...process.env, ...extra, OMNIFS_HOME: devHome };
 }
 
 async function writeDevHome(
   devHome: string,
   providerStore: string,
-  image: string,
+  frontendImage: string,
+  omnifsCli: string,
   render: DevHomeRender,
 ): Promise<void> {
   mkdirSync(devHome, { recursive: true });
@@ -451,13 +532,18 @@ async function writeDevHome(
   mkdirSync(mountsDir, { recursive: true });
   cpSync(providerStore, providersDir, { recursive: true });
 
+  // No `[system].runtime`: host-native is the default, and this script always
+  // passes `--runtime native` explicitly on `omnifs up` rather than persisting
+  // a choice `omnifs setup` never made for this throwaway dev home. The only
+  // setting the native flow needs is where to find the frontend image `omnifs
+  // frontend up` attaches.
   writeFileSync(
     join(devHome, "config.toml"),
-    `[system]\nruntime = "docker"\nimage = ${JSON.stringify(image)}\ncontainer_name = ${JSON.stringify(CONTAINER_NAME)}\n`,
+    `[system]\nfrontend_image = ${JSON.stringify(frontendImage)}\n`,
   );
 
   for (const mount of render.mounts) {
-    await runInitMount(devHome, image, mount, render.credentialEnv);
+    await runInitMount(devHome, omnifsCli, mount, render.credentialEnv);
   }
   if (existsSync(credentialsPath)) {
     chmodPrivateFile(credentialsPath);
@@ -466,7 +552,7 @@ async function writeDevHome(
 
 async function runInitMount(
   devHome: string,
-  image: string,
+  omnifsCli: string,
   mount: DevMountRender,
   credentialEnv: Record<string, string>,
 ): Promise<void> {
@@ -506,193 +592,77 @@ async function runInitMount(
     args.push("--limits-json", JSON.stringify(mount.template.limits));
   }
 
-  const hostCli = hostCliBinary();
-  if (hostCli) {
-    await run(
-      $`${hostCli} ${args}`.env({
-        ...process.env,
-        ...credentialEnv,
-        OMNIFS_HOME: devHome,
-        OMNIFS_DAEMON_ADDR: "127.0.0.1:9",
-      }),
-    );
-    return;
-  }
-
-  // No host-built CLI (the CI smoke lane passes --skip-cli-build and only has
-  // the prebuilt image): render through the image's own binary in a one-shot
-  // container against the same dev home. Token env vars pass by name only, so
-  // their values never appear in the docker command line.
-  const dockerArgs = [
-    "run",
-    "--rm",
-    "--entrypoint",
-    "/usr/local/bin/omnifs",
-    "-v",
-    `${devHome}:${GUEST_HOME}`,
-    "-e",
-    `OMNIFS_HOME=${GUEST_HOME}`,
-    "-e",
-    "OMNIFS_DAEMON_ADDR=127.0.0.1:9",
-  ];
-  if (mount.tokenEnv && credentialEnv[mount.tokenEnv] !== undefined) {
-    dockerArgs.push("-e", mount.tokenEnv);
-  }
-  dockerArgs.push(image, ...args);
   await run(
-    $`docker ${dockerArgs}`.env({
-      ...process.env,
-      ...credentialEnv,
-    }),
+    $`${omnifsCli} ${args}`.env(
+      // `init` never needs a live daemon; point at the discard port so an
+      // accidental daemon touch fails fast instead of hanging.
+      cliEnv(devHome, { ...credentialEnv, OMNIFS_DAEMON_ADDR: "127.0.0.1:9" }),
+    ),
   );
 }
 
-async function startFixtures(mounts: DevMountRender[], devHome: string): Promise<Fixtures> {
+async function startFixtures(mounts: DevMountRender[], fixturePaths: FixturePaths): Promise<Fixtures> {
   const mountNames = new Set(mounts.map((mount) => mount.name));
   const fixtures: Fixtures = {
     k8s: false,
-    k8sSockDir: null,
     dbContainerId: null,
-    binds: [],
   };
 
   if (mountNames.has("db")) {
-    const dbDir = join(devHome, "fixtures/db");
+    const dbDir = dirname(fixturePaths.dbPath);
     mkdirSync(dbDir, { recursive: true });
     await run($`docker build -t ${DB_IMAGE} .`.cwd(join(workspace, "providers/db/dev")));
     await removeContainer(DB_CONTAINER);
     fixtures.dbContainerId = (await awaitText(
       $`docker run -d --name ${DB_CONTAINER} -v ${`${dbDir}:/data`} ${DB_IMAGE}`,
     )).trim();
-    fixtures.binds.push(`${dbDir}:/data:ro`);
+    await waitForFile(fixturePaths.dbPath, "db fixture seed");
   }
 
   if (mountNames.has("k8s")) {
-    const sockDir = join(devHome, "fixtures/k8s");
+    const sockDir = dirname(fixturePaths.k8sSockPath);
     mkdirSync(sockDir, { recursive: true });
     await run($`docker compose -p ${K8S_COMPOSE_PROJECT} -f ${join(
       workspace,
       "providers/kubernetes/dev/compose.yaml",
     )} up -d --wait`.env({ ...process.env, OMNIFS_K8S_SOCK_DIR: sockDir }));
     fixtures.k8s = true;
-    fixtures.k8sSockDir = sockDir;
-    fixtures.binds.push(`${sockDir}:/run/omnifs`);
+    await waitForFile(fixturePaths.k8sSockPath, "k8s proxy socket");
   }
 
   return fixtures;
 }
 
-async function launchContainer({
-  devHome,
-  image,
-  fixtures,
-}: {
-  devHome: string;
-  image: string;
-  fixtures: Fixtures;
-}): Promise<void> {
-  await removeContainer(CONTAINER_NAME);
-
-  const args = [
-    "run",
-    "-d",
-    "--name",
-    CONTAINER_NAME,
-    "-p",
-    `${CONTROL_ADDR}:7878`,
-    "-v",
-    `${devHome}:${GUEST_HOME}`,
-    "--device",
-    "/dev/fuse",
-    "--cap-add",
-    "SYS_ADMIN",
-    "--security-opt",
-    "apparmor:unconfined",
-    "-e",
-    `OMNIFS_HOME=${GUEST_HOME}`,
-    "-e",
-    `OMNIFS_CONTAINER_NAME=${CONTAINER_NAME}`,
-    "-e",
-    `OMNIFS_IMAGE=${image}`,
-    "-e",
-    // Passed by name: docker reads the value from this process's environment,
-    // so it stays off the command line.
-    "OMNIFS_CONTROL_TOKEN",
-    "-e",
-    "SSH_AUTH_SOCK=/ssh-agent",
-    "-e",
-    "GIT_SSH_COMMAND=ssh -F /dev/null -o StrictHostKeyChecking=accept-new",
-  ];
-
-  if (process.env.SSH_AUTH_SOCK && existsSync(process.env.SSH_AUTH_SOCK)) {
-    args.push("-v", `${process.env.SSH_AUTH_SOCK}:/ssh-agent`);
+/// Discover the running frontend container by the workspace-home label
+/// `crates/omnifs-cli/src/frontend_container.rs` stamps on it, rather than
+/// re-deriving its (possibly hashed) name in this script.
+async function discoverFrontendContainer(devHome: string): Promise<string> {
+  const name = (await awaitText(
+    $`docker ps --filter ${`label=${FRONTEND_HOME_LABEL}=${devHome}`} --format {{.Names}}`.quiet(),
+  )).trim();
+  if (!name) {
+    throw new Error(
+      `no frontend container found for home ${devHome}; \`omnifs frontend up\` may have exited without one`,
+    );
   }
-  for (const bind of fixtures.binds) {
-    args.push("-v", bind);
-  }
-  args.push(image);
-
-  await run($`docker ${args}`);
+  return name;
 }
 
-async function waitForReady() {
-  console.log(`Waiting for ${GUEST_MOUNT} inside \`${CONTAINER_NAME}\``);
-  for (let attempt = 0; attempt < 60; attempt += 1) {
-    try {
-      const response = await fetch(`http://${CONTROL_ADDR}/v1/ready`);
-      if (response.ok) {
-        console.log("✓ FUSE mount is ready");
-        return;
-      }
-    } catch {
-      // Keep polling; Docker may not have published the port yet.
-    }
-
-    const state = (await awaitText(
-      $`docker inspect -f "{{.State.Running}} {{.State.Status}} {{.State.ExitCode}}" ${CONTAINER_NAME}`
-        .quiet()
-        .nothrow(),
-    )).trim();
-    if (state && !state.startsWith("true ")) {
-      throw new Error(
-        `container \`${CONTAINER_NAME}\` exited before ${GUEST_MOUNT} became available (${state}); run \`docker logs ${CONTAINER_NAME}\``,
-      );
-    }
-    await sleep(1000);
-  }
-  throw new Error(`${GUEST_MOUNT} did not become available inside \`${CONTAINER_NAME}\` within 60s`);
-}
-
-async function reconcile(_devHome: string) {
-  // The container's TCP control port requires the bearer token on everything but
-  // `/v1/ready`; we injected it into the container as OMNIFS_CONTROL_TOKEN, so
-  // use the same in-memory value here.
-  const report = await fetchJson<ReconcileReport>("/v1/reconcile", {
-    method: "POST",
-    headers: { Authorization: `Bearer ${CONTROL_TOKEN}` },
-  });
-  for (const failure of report.failed || []) {
-    console.error(`warning: mount \`${failure.mount}\` did not load: ${failure.reason}`);
-  }
-}
-
-async function fetchJson<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const response = await fetch(`http://${CONTROL_ADDR}${path}`, init);
-  if (!response.ok) {
-    throw new Error(`${init.method || "GET"} ${path} failed with HTTP ${response.status}`);
-  }
-  return response.json() as Promise<T>;
-}
-
-async function teardownSession(fixtures: Fixtures): Promise<void> {
-  await removeContainer(CONTAINER_NAME);
-  if (fixtures.k8s && fixtures.k8sSockDir) {
+async function teardownSession(
+  devHome: string,
+  omnifsCli: string,
+  fixturePaths: FixturePaths,
+  fixtures: Fixtures,
+): Promise<void> {
+  await $`${omnifsCli} frontend down`.env(cliEnv(devHome)).quiet().nothrow();
+  await $`${omnifsCli} down --force`.env(cliEnv(devHome)).quiet().nothrow();
+  if (fixtures.k8s) {
     await run(
       $`docker compose -p ${K8S_COMPOSE_PROJECT} -f ${join(
         workspace,
         "providers/kubernetes/dev/compose.yaml",
       )} down -v`
-        .env({ ...process.env, OMNIFS_K8S_SOCK_DIR: fixtures.k8sSockDir })
+        .env({ ...process.env, OMNIFS_K8S_SOCK_DIR: dirname(fixturePaths.k8sSockPath) })
         .nothrow(),
     );
   }
@@ -705,23 +675,17 @@ async function removeContainer(name: string): Promise<void> {
   await run($`docker rm -f ${name}`.quiet().nothrow());
 }
 
-async function tagFloatingDevImage(image: string): Promise<void> {
-  if (image === "omnifs:dev") {
+async function tagFloatingFrontendImage(image: string): Promise<void> {
+  if (image === FRONTEND_DEV_IMAGE) {
     return;
   }
-  await run($`docker tag ${image} omnifs:dev`);
+  await run($`docker tag ${image} ${FRONTEND_DEV_IMAGE}`);
 }
 
-function buildImage(image: string, providerStore: string): Promise<void> {
+function buildFrontendImage(image: string, providerStore: string): Promise<void> {
   return run(
-    $`docker build -t ${image} --target runtime-dev --build-context ${`provider-wasm=${providerStore}`} --build-arg ${`OMNIFS_MIN_LAUNCHER_VERSION=${workspaceVersion()}`} .`,
+    $`docker build -t ${image} --target frontend-dev --build-context ${`provider-wasm=${providerStore}`} .`,
   );
-}
-
-function workspaceVersion() {
-  const raw = readFileSync(join(workspace, "Cargo.toml"), "utf8");
-  const match = raw.match(/\[workspace\.package\][\s\S]*?\nversion\s*=\s*"([^"]+)"/m);
-  return match?.[1] || "unknown";
 }
 
 async function gitShortHead(): Promise<string> {
@@ -730,11 +694,6 @@ async function gitShortHead(): Promise<string> {
 
 function keepRunning(options: DevOptions): boolean {
   return options.detach || options.noShell;
-}
-
-function hostCliBinary(): string | null {
-  const path = join(workspace, "target/debug/omnifs");
-  return existsSync(path) ? path : null;
 }
 
 function chmodPrivateDir(path: string): void {
@@ -756,6 +715,19 @@ function chmodPrivateFile(path: string): void {
 function assertFile(path: string, label: string): void {
   if (!existsSync(path)) {
     throw new Error(`missing ${label} at ${path}`);
+  }
+}
+
+/// Poll for `path` to appear (a fixture container seeding a file or a socket
+/// coming up), bailing with a clear error instead of letting a later daemon
+/// reconcile fail with a confusing "no such file" deep in its own log.
+async function waitForFile(path: string, label: string, timeoutMs = 15000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!existsSync(path)) {
+    if (Date.now() >= deadline) {
+      throw new Error(`${label} did not appear at ${path} within ${timeoutMs}ms`);
+    }
+    await sleep(200);
   }
 }
 
