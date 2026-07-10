@@ -52,7 +52,7 @@ impl Driver {
 /// The attach transport a [`FrontendLaunchSpec`] carries. Docker dials a TCP
 /// port on the host bridge; krunkit proxies guest-initiated vsock
 /// connections onto a unix socket the daemon already bound (`POST
-/// /v1/attach-listeners/vsock`). Each backend's `launch` asserts it received
+/// /v1/frontend/attach-target/vsock`). Each backend's `launch` asserts it received
 /// the variant its own transport needs; a mismatch is an internal dispatch
 /// bug (the wrong daemon call was made), not a user-reachable error.
 #[derive(Debug, Clone)]

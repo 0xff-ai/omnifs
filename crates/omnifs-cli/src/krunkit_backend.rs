@@ -14,7 +14,7 @@
 //! Three vsock devices bridge the guest to the host, each on its own
 //! `virtio-vsock` device (krunkit multiplexes by port, not by socket):
 //! - port 1024 (attach): guest-initiated (`,listen`) onto the daemon's own
-//!   vsock-attach unix socket (bound by `POST /v1/attach-listeners/vsock`;
+//!   vsock-attach unix socket (bound by `POST /v1/frontend/attach-target/vsock`;
 //!   this backend never creates or removes that socket).
 //! - port 1025 (ready): guest-initiated (`,listen`) onto a unix socket this
 //!   backend binds and accepts on in a loop before spawning krunkit — a
