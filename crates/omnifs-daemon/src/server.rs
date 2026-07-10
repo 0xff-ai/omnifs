@@ -546,16 +546,11 @@ impl Daemon {
     }
 
     fn apply_reconcile_outcome(&self, outcome: ReconcileOutcome) -> ReconcileReport {
-        for name in &outcome.added {
-            self.update_root_symlink(name, true);
-        }
         for name in &outcome.updated {
             self.frontends.invalidate_root_child(name);
-            self.update_root_symlink(name, true);
         }
         for name in &outcome.removed {
             self.frontends.invalidate_root_child(name);
-            self.update_root_symlink(name, false);
         }
         let failed: Vec<MountFailure> = outcome.failed.into_iter().map(api_mount_failure).collect();
         if let Ok(mut last) = self.last_failed.lock() {
@@ -608,43 +603,6 @@ impl Daemon {
             .header(header::CONTENT_TYPE, "application/x-ndjson")
             .body(body)
             .expect("static response parts are valid")
-    }
-
-    /// Maintain the container-image convenience symlink `/<mount>` →
-    /// `<mount-point>/<mount>`. Best-effort: failures are logged, never fatal.
-    /// Only entries that are symlinks into the mount point are ever removed,
-    /// so a mount named `bin` or `lib` cannot clobber real root entries.
-    fn update_root_symlink(&self, mount: &str, present: bool) {
-        if !self.context.root_symlinks() {
-            return;
-        }
-        let mount_point = self.context.mount_point();
-        let link = std::path::Path::new("/").join(mount);
-        let target = mount_point.join(mount);
-        let ours =
-            std::fs::read_link(&link).is_ok_and(|existing| existing.starts_with(mount_point));
-        match (present, ours) {
-            (true, _) => {
-                if ours {
-                    let _ = std::fs::remove_file(&link);
-                } else if link.exists() || link.is_symlink() {
-                    warn!(link = %link.display(), "not replacing existing root entry with mount symlink");
-                    return;
-                }
-                #[cfg(unix)]
-                if let Err(error) = std::os::unix::fs::symlink(&target, &link) {
-                    warn!(%error, link = %link.display(), "failed to create root symlink");
-                }
-            },
-            (false, true) => {
-                if let Err(error) = std::fs::remove_file(&link)
-                    && error.kind() != std::io::ErrorKind::NotFound
-                {
-                    warn!(%error, link = %link.display(), "failed to remove root symlink");
-                }
-            },
-            (false, false) => {},
-        }
     }
 
     fn api_router() -> OpenApiRouter<Arc<Self>> {
