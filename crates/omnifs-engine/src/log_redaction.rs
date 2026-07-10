@@ -1,3 +1,4 @@
+use omnifs_api::events::{is_sensitive_header, is_sensitive_query_param, write_truncated};
 use omnifs_wit::provider::types as wit_types;
 use std::fmt::{self, Write as _};
 
@@ -44,48 +45,11 @@ impl fmt::Display for WitHeaders<'_> {
             if is_sensitive_header(&header.name) {
                 f.write_str("<redacted>")?;
             } else {
-                write_truncated_for_log(f, &header.value, 256)?;
+                write_truncated(f, &header.value, 256)?;
             }
         }
         Ok(())
     }
-}
-
-pub(crate) fn write_truncated_for_log(
-    f: &mut fmt::Formatter<'_>,
-    value: &str,
-    max: usize,
-) -> fmt::Result {
-    for (index, ch) in value.chars().enumerate() {
-        if index == max {
-            f.write_str("...")?;
-            return Ok(());
-        }
-        f.write_char(ch)?;
-    }
-    Ok(())
-}
-
-pub(crate) fn is_sensitive_header(name: &str) -> bool {
-    const SENSITIVE: &[&str] = &[
-        "authorization",
-        "proxy-authorization",
-        "cookie",
-        "set-cookie",
-        "x-api-key",
-    ];
-    SENSITIVE
-        .iter()
-        .any(|candidate| candidate.eq_ignore_ascii_case(name))
-}
-
-pub(crate) fn is_sensitive_query_param(name: &str) -> bool {
-    let name = name.to_ascii_lowercase();
-    name.contains("token")
-        || name.contains("secret")
-        || name.contains("password")
-        || name == "key"
-        || name.ends_with("_key")
 }
 
 #[cfg(test)]
