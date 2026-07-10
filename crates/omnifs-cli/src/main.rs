@@ -18,6 +18,7 @@ mod frontend_container;
 #[cfg(feature = "daemon")]
 mod host_teardown;
 mod inspector;
+mod krunkit_backend;
 mod launch;
 mod launch_backend;
 mod mount_config;

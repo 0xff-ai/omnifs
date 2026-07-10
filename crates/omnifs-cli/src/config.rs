@@ -50,6 +50,10 @@ pub struct ConfigSystem {
 #[serde(default, deny_unknown_fields)]
 pub struct ConfigFrontend {
     pub driver: crate::frontend_backend::Driver,
+    /// Override for the krunkit driver's guest disk image
+    /// (`target/guest-image/omnifs-guest.raw` by default; see `just
+    /// guest-image`). Irrelevant to the Docker driver.
+    pub guest_image: Option<String>,
 }
 
 impl Config {

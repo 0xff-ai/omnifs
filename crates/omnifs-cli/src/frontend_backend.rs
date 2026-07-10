@@ -2,19 +2,18 @@
 //! `omnifs shell` launch, probe, tear down, and shell into the optional FUSE
 //! frontend, independent of which runtime hosts it.
 //!
-//! Docker (`DockerBackend`) is the only backend today. A libkrun/krunkit
-//! microVM is the designated macOS successor (see
-//! `docs/contracts/40-frontends.md`): keeping the seam here, rather than
-//! letting the frontend commands call bollard directly, is what lets that
-//! second backend land without touching them.
+//! Two backends implement the seam: `DockerBackend` (this module) and
+//! `KrunkitBackend` (`crate::krunkit_backend`), a libkrun microVM on macOS.
+//! Both run the same `omnifs frontend run --kind fuse` binary and wire
+//! protocol; only the attach transport differs (Docker: TCP via
+//! `host.docker.internal`; krunkit: vsock, bridged onto a unix socket by
+//! krunkit itself). Keeping the seam here, rather than letting the frontend
+//! commands call bollard or krunkit directly, is what let the second backend
+//! land without touching them beyond a driver-selected constructor.
 //!
 //! [`Driver`] is the user-facing selector (`--driver` / `[frontend]
 //! driver`); [`Via`] is the on-disk record of which backend a running
-//! frontend was launched with. Krunkit is recognized by both today, but has
-//! no [`FrontendBackend`] implementation yet: [`Driver::require_implemented`]
-//! and [`krunkit_unimplemented`] are the one seam every dispatch site funnels
-//! through, so Phase 4 only has to drop a `KrunkitBackend` into the match arms
-//! that call them.
+//! frontend was launched with.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -48,35 +47,31 @@ impl Driver {
             Self::Krunkit => Via::Krunkit,
         }
     }
-
-    /// Fail truthfully and immediately for a driver with no backend
-    /// implementation yet, rather than silently falling back to Docker or
-    /// panicking on a user-reachable path.
-    pub(crate) fn require_implemented(self) -> Result<()> {
-        match self {
-            Self::Docker => Ok(()),
-            Self::Krunkit => Err(krunkit_unimplemented()),
-        }
-    }
 }
 
-/// The one error every krunkit selection or dispatch site raises until
-/// `KrunkitBackend` exists.
-pub(crate) fn krunkit_unimplemented() -> anyhow::Error {
-    anyhow::anyhow!("the krunkit driver is not implemented yet; use --driver docker")
+/// The attach transport a [`FrontendLaunchSpec`] carries. Docker dials a TCP
+/// port on the host bridge; krunkit proxies guest-initiated vsock
+/// connections onto a unix socket the daemon already bound (`POST
+/// /v1/attach-listeners/vsock`). Each backend's `launch` asserts it received
+/// the variant its own transport needs; a mismatch is an internal dispatch
+/// bug (the wrong daemon call was made), not a user-reachable error.
+#[derive(Debug, Clone)]
+pub(crate) enum AttachEndpoint {
+    Tcp(u16),
+    Unix(PathBuf),
 }
 
 /// Launch-time parameters for the frontend, independent of backend.
-/// Identity (container/instance name, image) lives on the backend instance
-/// itself, constructed by the caller before [`FrontendBackend::launch`] is
-/// invoked, so it is not duplicated here.
+/// Identity (container/instance name, image, guest disk) lives on the
+/// backend instance itself, constructed by the caller before
+/// [`FrontendBackend::launch`] is invoked, so it is not duplicated here.
 pub(crate) struct FrontendLaunchSpec {
-    /// The workspace's config dir, recorded as a label only (never bind-mounted).
+    /// The workspace's config dir, recorded as a label only (never bind-mounted
+    /// by Docker; read for path derivation by krunkit).
     pub home: PathBuf,
-    /// The host-native daemon's attach listener port. How the frontend dials
-    /// it varies by backend transport (Docker: TCP via
-    /// `host.docker.internal`; the designated krunkit successor: vsock).
-    pub attach_port: u16,
+    /// The host-native daemon's attach listener, in whichever transport this
+    /// backend dials.
+    pub attach: AttachEndpoint,
     pub attach_token: String,
 }
 
@@ -124,10 +119,13 @@ impl DockerBackend {
 
 impl FrontendBackend for DockerBackend {
     async fn launch(&self, spec: &FrontendLaunchSpec) -> Result<()> {
+        let AttachEndpoint::Tcp(attach_port) = spec.attach else {
+            anyhow::bail!("internal: the docker backend requires a tcp attach endpoint");
+        };
         let body = build_frontend_container_body(&FrontendContainerSpec {
             image: self.runtime.image(),
             home: &spec.home,
-            attach_port: spec.attach_port,
+            attach_port,
             attach_token: &spec.attach_token,
             // Docker Desktop (macOS) resolves `host.docker.internal` on its
             // own; native Linux does not predefine the name, so the

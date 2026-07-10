@@ -30,8 +30,8 @@ use hyper_util::rt::TokioExecutor;
 use hyperlocal::{UnixConnector, Uri as UnixUri};
 use omnifs_api::{
     API_MAJOR, API_MINOR, ApiError, AttachListenersReport, AttachListenersRequest,
-    CredentialStatus, DaemonStatus, ErrorCode, MountReport, MountUpdateRequest, ProviderSummary,
-    ReconcileReport, StopReport, UpgradeDelta,
+    AttachVsockListenerReport, CredentialStatus, DaemonStatus, ErrorCode, MountReport,
+    MountUpdateRequest, ProviderSummary, ReconcileReport, StopReport, UpgradeDelta,
 };
 use omnifs_workspace::authn::CredentialId;
 use omnifs_workspace::layout::WorkspaceLayout;
@@ -476,6 +476,25 @@ impl DaemonClient {
             .await?
             .ok_or_else(|| self.unavailable_error())?;
         Self::parse_ok_json(&raw, "daemon attach-listeners request failed")
+    }
+
+    /// Ensure the daemon's token-checking UDS namespace attach listener is
+    /// bound (idempotent: a repeat call returns the already-bound path and
+    /// token). This is the krunkit-on-macOS path: the guest dials host vsock
+    /// and krunkit proxies every connection onto this socket, so `token` (not
+    /// filesystem permissions) authenticates every attach handshake it
+    /// carries.
+    pub(crate) async fn attach_listeners_vsock(&self) -> Result<AttachVsockListenerReport> {
+        let raw = self
+            .request(
+                Method::POST,
+                "/v1/attach-listeners/vsock",
+                None,
+                REQUEST_TIMEOUT,
+            )
+            .await?
+            .ok_or_else(|| self.unavailable_error())?;
+        Self::parse_ok_json(&raw, "daemon attach-listeners vsock request failed")
     }
 
     pub(crate) async fn create_mount_if_ready(&self, spec: &Spec) -> Result<Option<MountReport>> {
