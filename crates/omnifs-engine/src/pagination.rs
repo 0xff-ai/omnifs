@@ -7,6 +7,17 @@
 //! reflects the grown listing. Reading `@all` repeats `@next` to exhaustion or
 //! the [`MAX_PAGINATION_PAGES`] safety cap.
 //!
+//! The `@next`/`@all` dirent records are never stripped back out of the
+//! accumulated payload once a directory pages, even after the cursor clears.
+//! That is what lets a name a consumer already captured from an earlier
+//! listing snapshot keep resolving and reading (as a no-op) after the feed
+//! exhausts: presence in an already-served listing must never regress to
+//! ENOENT (the converse of the listing-authority rule that absence from a
+//! non-exhaustive listing is never ENOENT either). A FRESH listing still stops
+//! naming the controls once `next_cursor` clears (`tree::list::listing_from_dirents`),
+//! so the two facts stay separate: `next_cursor` gates what a new `readdir`
+//! shows, the persisted control records gate what a name resolves to.
+//!
 //! `tree::synthetic` owns the names, attrs, ignore files, and reserved-name
 //! predicates for those projection entries. This module owns only the runtime
 //! action and cache-backed accumulation once a control file is read.
@@ -58,10 +69,12 @@ impl Runtime {
     /// Reads the directory's accumulated `DirentsPayload` from the view cache;
     /// if it has no `next_cursor`, returns [`NextPageOutcome::NoMore`].
     /// Otherwise echoes the cursor to `list_children` (with no validator: this
-    /// is pagination, not revalidation), strips any existing `@next`/`@all`,
-    /// appends the new entries (and fresh control entries iff the new page
-    /// still has a cursor), re-stores the payload, and invalidates `path` so
-    /// the kernel re-lists.
+    /// is pagination, not revalidation), strips the existing `@next`/`@all`
+    /// records, appends the new entries plus a fresh pair of control records
+    /// (the records persist regardless of whether the new page still has a
+    /// cursor, so a name already resolved from an earlier snapshot keeps
+    /// resolving after exhaustion), re-stores the payload, and invalidates
+    /// `path` so the kernel re-lists.
     ///
     /// On a provider error the stored dirents are left untouched.
     pub async fn paginate_next(&self, path: &Path, trace: Option<TraceId>) -> NextPageOutcome {
@@ -99,11 +112,10 @@ impl Runtime {
             Ok(ListOutcome::Unchanged) => {
                 // A continuation that resolves to `unchanged` means the feed is
                 // stable; treat as exhausted. Mirror the terminal branch: clear
-                // the cursor, strip the now-dead `@next`/`@all` controls, mark
-                // the accumulation complete, re-store, and notify the kernel so
-                // a subsequent `ls` reflects the control-free listing.
+                // the cursor (the `@next`/`@all` records already stored stay put,
+                // so they keep resolving), re-store, and notify the kernel so a
+                // subsequent `ls` reflects the now-control-free fresh listing.
                 dirents.next_cursor = None;
-                strip_control_entries(&mut dirents.entries);
                 self.store_paginated_dirents(path, &dirents);
                 // The feed is complete (no cursor); drop the per-path lock so the
                 // map stays bounded. Safe: a later `paginate_next` finds no cursor
@@ -136,9 +148,11 @@ impl Runtime {
         dirents.next_cursor.clone_from(&listing.next_cursor);
         // The accumulated listing is exhaustive only once the feed completes.
         dirents.exhaustive = !more && listing.exhaustive;
-        if more {
-            dirents.entries.extend(control_entries());
-        }
+        // Re-add the control records unconditionally, even on the terminal
+        // page: they must persist so a name a consumer already resolved from
+        // an earlier (non-exhausted) listing snapshot keeps resolving. A FRESH
+        // listing separately stops naming them once `next_cursor` clears.
+        dirents.entries.extend(control_entries());
 
         self.store_paginated_dirents(path, &dirents);
         if !more {

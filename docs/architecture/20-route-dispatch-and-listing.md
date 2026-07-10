@@ -30,6 +30,8 @@ This is what lets providers model adjacent typed paths without read-time hacks. 
 
 Absence from a non-exhaustive listing is not ENOENT. A valid child can be reachable by lookup even if it did not appear in a previous directory listing.
 
+The converse holds too: presence in an already-served listing must never regress to ENOENT. A host pagination control (`@next`/`@all`) a consumer resolved from an earlier listing snapshot keeps resolving, and its read stays a no-op, even after the feed exhausts and a fresh listing stops naming the control.
+
 ## Exhaustive listings
 
 A listing is exhaustive only when every child name currently knowable by that route surface was enumerated.
