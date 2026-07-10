@@ -10,7 +10,7 @@ set -euo pipefail
 : "${IMAGE:?IMAGE must be set to the frontend image ref}"
 
 echo "== version =="
-docker run --rm --entrypoint /usr/local/bin/omnifs "$IMAGE" --version
+docker run --rm --entrypoint /usr/local/bin/omnifs-fuse "$IMAGE" --version
 
 echo "== GNU tail, not uutils (tail -f fidelity) =="
 docker run --rm --entrypoint tail "$IMAGE" --version | head -1 | grep -q 'GNU coreutils'

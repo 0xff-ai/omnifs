@@ -54,6 +54,23 @@ RUN --mount=type=cache,id=omnifs-cargo-registry,target=/usr/local/cargo/registry
     --mount=type=cache,id=omnifs-host-target,target=/src/target,sharing=locked \
     cargo chef cook --release --recipe-path recipe.json
 
+# --- Build the slim omnifs-fuse frontend runner ---
+#
+# `omnifs-fuse` is a dedicated `[[bin]]` target of the `omnifs-fuse` crate: it
+# attaches a wire-backed namespace and serves a FUSE mount, and needs no
+# engine, no Wasmtime, and no provider bundle. This stage builds it alone, so
+# the frontend images below never need the `provider-wasm` build context the
+# full `omnifs` binary (the `builder` stage) requires.
+
+FROM deps AS fuse-builder
+WORKDIR /src
+COPY . .
+RUN --mount=type=cache,id=omnifs-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=omnifs-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=omnifs-host-target,target=/src/target,sharing=locked \
+    cargo build --release -p omnifs-fuse --bin omnifs-fuse \
+    && cp /src/target/release/omnifs-fuse /omnifs-fuse
+
 # --- Build providers for explicit artifact export ---
 #
 # Discovers every crate under `providers/` whose package name starts
@@ -141,12 +158,14 @@ RUN --mount=type=cache,id=omnifs-cargo-registry,target=/usr/local/cargo/registry
 
 # --- Docker-hosted FUSE frontend ---
 #
-# `omnifs frontend up` (see `crates/omnifs-cli/src/frontend_container.rs`,
-# `crates/omnifs-daemon/src/frontend.rs`) launches a separate, credential-free
-# container that only ever runs `omnifs frontend run --kind fuse`, attached over
-# TCP to a host-native daemon's shared namespace. It never runs a provider, so
-# it gets its own minimal base: no `OMNIFS_HOME`, no provider store, no control
-# API, none of an interactive-shell toolbox (zsh, gum, git, ripgrep, nfs-common...).
+# `omnifs frontend up` (see `crates/omnifs-cli/src/frontend_container.rs`)
+# launches a separate, credential-free container that only ever runs the slim
+# `omnifs-fuse` binary, attached over TCP to a host-native daemon's shared
+# namespace. It never runs a provider, so it gets its own minimal base: no
+# `OMNIFS_HOME`, no provider store, no control API, none of an
+# interactive-shell toolbox (zsh, gum, git, ripgrep, nfs-common...) — and,
+# since `omnifs-fuse` needs no engine or Wasmtime either, no provider-store
+# build context at all (contrast the full `omnifs` binary's `builder` stage).
 #
 # Debian, not Ubuntu: this is the same Debian family the compile `toolchain`
 # stage above already uses, and Debian's default coreutils/findutils are GNU
@@ -160,15 +179,15 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir /omnifs
 
-ENTRYPOINT ["/usr/local/bin/omnifs", "frontend", "run", "--kind", "fuse", "--mount-point", "/omnifs"]
+ENTRYPOINT ["/usr/local/bin/omnifs-fuse", "--mount-point", "/omnifs"]
 
-# Contributor image: the binary compiled in this Dockerfile's `builder` stage.
-# `just frontend-image` builds this target.
+# Contributor image: the binary compiled in this Dockerfile's `fuse-builder`
+# stage. `just frontend-image` builds this target.
 FROM frontend-base AS frontend-dev
-COPY --from=builder /omnifs /usr/local/bin/
-RUN chmod 0755 /usr/local/bin/omnifs
+COPY --from=fuse-builder /omnifs-fuse /usr/local/bin/
+RUN chmod 0755 /usr/local/bin/omnifs-fuse
 
-# Release image: a prebuilt binary injected as the `omnifs-bin` build context.
-# `scripts/ci/build-frontend-image.sh` builds this target.
+# Release image: a prebuilt binary injected as the `omnifs-fuse-bin` build
+# context. `scripts/ci/build-frontend-image.sh` builds this target.
 FROM frontend-base AS frontend-release
-COPY --from=omnifs-bin omnifs /usr/local/bin/omnifs
+COPY --from=omnifs-fuse-bin omnifs-fuse /usr/local/bin/omnifs-fuse

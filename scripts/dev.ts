@@ -165,7 +165,7 @@ async function main() {
     );
   }
   if (!options.frontendImage) {
-    builds.push(buildFrontendImage(frontendImage, providerStore).then(() => tagFloatingFrontendImage(frontendImage)));
+    builds.push(buildFrontendImage(frontendImage).then(() => tagFloatingFrontendImage(frontendImage)));
   }
   await Promise.all(builds);
 
@@ -680,10 +680,12 @@ async function tagFloatingFrontendImage(image: string): Promise<void> {
   await run($`docker tag ${image} ${FRONTEND_DEV_IMAGE}`);
 }
 
-function buildFrontendImage(image: string, providerStore: string): Promise<void> {
-  return run(
-    $`docker build -t ${image} --target frontend-dev --build-context ${`provider-wasm=${providerStore}`} .`,
-  );
+function buildFrontendImage(image: string): Promise<void> {
+  // No `provider-wasm` build context: the frontend image runs the slim
+  // `omnifs-fuse` binary (`fuse-builder` stage), which needs no engine, no
+  // Wasmtime, and no provider bundle, unlike the full `omnifs` CLI/daemon
+  // binary this same Dockerfile's `builder` stage produces above.
+  return run($`docker build -t ${image} --target frontend-dev .`);
 }
 
 async function gitShortHead(): Promise<string> {

@@ -530,6 +530,99 @@ jobs:
           retention-days: 90
           if-no-files-found: error
 
+  # Builds the standalone `omnifs-fuse` binary the frontend images run: it
+  # needs no provider WASM (no `components` dependency, unlike `cli-linux-*`)
+  # since it links no engine and no Wasmtime.
+  fuse-linux-x64:
+    name: fuse linux x64
+    needs: preflight
+    if: >-
+      github.event_name == 'push' ||
+      (github.event_name == 'pull_request' &&
+        (github.event.pull_request.user.login == 'raulk' ||
+         contains(github.event.pull_request.labels.*.name, 'ci-full')))
+    runs-on: *linux_runner
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/fuse-linux-x64
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: ./.github/actions/omnifs-just
+
+      - uses: dtolnay/rust-toolchain@1.95.0
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: fuse-linux-x64
+          cache-on-failure: true
+
+      - uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Build Linux x64 omnifs-fuse
+        id: build
+        env:
+          OMNIFS_PACKAGE: omnifs-fuse
+          OMNIFS_BIN: omnifs-fuse
+        run: scripts/ci/build-linux-zigbuild.sh x86_64-unknown-linux-gnu.2.17
+
+      - name: Upload Linux x64 omnifs-fuse binary
+        uses: actions/upload-artifact@v7
+        with:
+          name: omnifs-fuse-linux-x64
+          path: ${{ steps.build.outputs.artifact }}
+          retention-days: 90
+          if-no-files-found: error
+
+  fuse-linux-arm64:
+    name: fuse linux arm64
+    needs: preflight
+    if: >-
+      github.event_name == 'push' ||
+      (github.event_name == 'pull_request' &&
+        (github.event.pull_request.user.login == 'raulk' ||
+         contains(github.event.pull_request.labels.*.name, 'ci-full')))
+    runs-on: *arm_runner
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/fuse-linux-arm64
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: ./.github/actions/omnifs-just
+
+      - uses: dtolnay/rust-toolchain@1.95.0
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: fuse-linux-arm64
+          cache-on-failure: true
+
+      - uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Build Linux arm64 omnifs-fuse
+        id: build
+        env:
+          OMNIFS_PACKAGE: omnifs-fuse
+          OMNIFS_BIN: omnifs-fuse
+        run: scripts/ci/build-linux-zigbuild.sh aarch64-unknown-linux-gnu.2.17
+
+      - name: Upload Linux arm64 omnifs-fuse binary
+        uses: actions/upload-artifact@v7
+        with:
+          name: omnifs-fuse-linux-arm64
+          path: ${{ steps.build.outputs.artifact }}
+          retention-days: 90
+          if-no-files-found: error
+
   # Builds the omnifs-frontend image (the Docker-hosted FUSE frontend, `omnifs
   # frontend up`): the Dockerfile's `frontend-release` target. See
   # docs/contracts/60-build-validation.md.
@@ -541,7 +634,7 @@ jobs:
         (github.event.pull_request.user.login == 'raulk' ||
          contains(github.event.pull_request.labels.*.name, 'ci-full')))
     runs-on: *linux_runner
-    needs: cli-linux-x64
+    needs: fuse-linux-x64
     permissions:
       contents: read
       packages: write
@@ -550,18 +643,14 @@ jobs:
 
       - uses: ./.github/actions/omnifs-docker
 
-      - name: Download Linux x64 CLI archive
+      - name: Download Linux x64 omnifs-fuse binary
         uses: actions/download-artifact@v8
         with:
-          name: omnifs-cli-linux-x64
-          path: dist-cli
+          name: omnifs-fuse-linux-x64
+          path: dist-fuse
 
-      - name: Extract Linux x64 CLI binary
-        run: |
-          set -euo pipefail
-          mkdir -p dist-cli/bin
-          tar -C dist-cli/bin -xJf dist-cli/omnifs-cli-linux-x64.tar.xz
-          test -x dist-cli/bin/omnifs
+      - name: Mark omnifs-fuse binary executable
+        run: chmod 0755 dist-fuse/omnifs-fuse
 
       - name: Build and push amd64 frontend image
         id: docker
@@ -569,7 +658,7 @@ jobs:
           IMAGE: ${{ env.REGISTRY }}/${{ env.FRONTEND_IMAGE_NAME }}:docker-amd64-${{ github.sha }}
           PLATFORM: linux/amd64
           PUSH: "true"
-          OMNIFS_BINARY: ${{ github.workspace }}/dist-cli/bin/omnifs
+          OMNIFS_BINARY: ${{ github.workspace }}/dist-fuse/omnifs-fuse
         run: scripts/ci/build-frontend-image.sh
 
       - name: Export amd64 image digest
@@ -596,7 +685,7 @@ jobs:
         (github.event.pull_request.user.login == 'raulk' ||
          contains(github.event.pull_request.labels.*.name, 'ci-full')))
     runs-on: *arm_runner
-    needs: cli-linux-arm64
+    needs: fuse-linux-arm64
     permissions:
       contents: read
       packages: write
@@ -605,18 +694,14 @@ jobs:
 
       - uses: ./.github/actions/omnifs-docker
 
-      - name: Download Linux arm64 CLI archive
+      - name: Download Linux arm64 omnifs-fuse binary
         uses: actions/download-artifact@v8
         with:
-          name: omnifs-cli-linux-arm64
-          path: dist-cli
+          name: omnifs-fuse-linux-arm64
+          path: dist-fuse
 
-      - name: Extract Linux arm64 CLI binary
-        run: |
-          set -euo pipefail
-          mkdir -p dist-cli/bin
-          tar -C dist-cli/bin -xJf dist-cli/omnifs-cli-linux-arm64.tar.xz
-          test -x dist-cli/bin/omnifs
+      - name: Mark omnifs-fuse binary executable
+        run: chmod 0755 dist-fuse/omnifs-fuse
 
       - name: Build and push arm64 frontend image
         id: docker
@@ -624,7 +709,7 @@ jobs:
           IMAGE: ${{ env.REGISTRY }}/${{ env.FRONTEND_IMAGE_NAME }}:docker-arm64-${{ github.sha }}
           PLATFORM: linux/arm64
           PUSH: "true"
-          OMNIFS_BINARY: ${{ github.workspace }}/dist-cli/bin/omnifs
+          OMNIFS_BINARY: ${{ github.workspace }}/dist-fuse/omnifs-fuse
         run: scripts/ci/build-frontend-image.sh
 
       - name: Export arm64 image digest
@@ -767,7 +852,7 @@ jobs:
         run: scripts/ci/smoke-native-frontend.sh
 
   # The frontend image needs no daemon, no dev home, and no provider store: it
-  # only ever runs `omnifs frontend run`, so its smoke test is the three
+  # only ever runs `omnifs-fuse`, so its smoke test is the three
   # structural checks in scripts/ci/smoke-frontend-image.sh, not the
   # scripts/dev.ts launch path smoke-amd64/arm64 use. The live attach/mount
   # path is a later slice's fuse-docker itest gate.
