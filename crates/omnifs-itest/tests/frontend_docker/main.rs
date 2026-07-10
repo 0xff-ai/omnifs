@@ -835,7 +835,7 @@ fn attach_transport_perf_tcp_vs_uds() {
     let _nfs_lock = live::nfs_serial_lock();
 
     let uds_elapsed = {
-        let Some(daemon) = live::start_wire_frontend_holding_lock("nfs") else {
+        let Some(daemon) = live::start_wire_frontend_holding_lock() else {
             eprintln!("skip: UDS wire lane could not come up");
             return;
         };
@@ -849,7 +849,7 @@ fn attach_transport_perf_tcp_vs_uds() {
     std::thread::sleep(Duration::from_secs(1));
 
     let tcp_elapsed = {
-        let Some(daemon) = live::start_wire_frontend_tcp_holding_lock("nfs") else {
+        let Some(daemon) = live::start_wire_frontend_tcp_holding_lock() else {
             eprintln!("skip: TCP wire lane could not come up");
             return;
         };
