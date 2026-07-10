@@ -10,12 +10,12 @@
 //! the user exactly where they were with nothing to undo; their real dotfiles
 //! are never touched.
 //!
-//! Backend-aware: the daemon's mode and mount point come from the runtime
-//! record `omnifs up` writes (`<config_dir>/daemon.json`). The host-native
-//! backend's mount is host-visible, so the subshell above runs on the
-//! host pointed at it. The Docker backend's mount lives inside the container at
-//! the guest mount path and is invisible on the host, so there `omnifs shell`
-//! execs into the running container instead.
+//! Surface-aware: the daemon always runs host-native, so its own mount is
+//! always host-visible. But when the optional Docker-hosted FUSE frontend is
+//! attached (`omnifs frontend up`), its mount lives inside the container and
+//! is invisible on the host; that frontend is also the primary consumption
+//! surface on macOS, so `omnifs shell` prefers it when running and execs into
+//! the container instead of the host subshell.
 
 use std::io::IsTerminal as _;
 use std::path::{Path, PathBuf};
@@ -27,8 +27,8 @@ use omnifs_api::MountInfo;
 
 use crate::launch_backend::GUEST_MOUNT;
 use crate::workspace::Workspace;
-use omnifs_workspace::layout::OMNIFS_MOUNT_POINT_ENV;
-use omnifs_workspace::runtime_record::{RecordedBackend, RuntimeRecord};
+use omnifs_workspace::layout::{OMNIFS_HOME_ENV, OMNIFS_MOUNT_POINT_ENV, WorkspaceLayout};
+use omnifs_workspace::runtime_record::{RuntimeRecord, Via};
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct ShellArgs {
@@ -55,25 +55,29 @@ impl ShellArgs {
         let paths = workspace.layout();
 
         // The runtime record is the source of truth for whether a daemon was
-        // started and how (native vs container) plus its mount point — no live
-        // daemon required to discover the mode.
-        let record = RuntimeRecord::read(&paths.runtime_record_file())?.ok_or_else(|| {
-            anyhow::anyhow!(
-                "no omnifs daemon record in {}; start the daemon with `omnifs up`, \
-                 then `omnifs shell`",
-                paths.config_dir.display()
-            )
-        })?;
-        // The Docker backend's mount lives inside the container, not on the
-        // host, so a host subshell can never see it; exec into the container.
-        // The host-native backend falls through to the host subshell below.
-        if let Some(container) = record.container_name() {
-            return self.exec_in_container(container);
+        // started and whether a Docker-hosted frontend is attached — no live
+        // daemon required to discover either.
+        let record = RuntimeRecord::read(&paths.runtime_record_file())?;
+
+        // The Docker-hosted FUSE frontend's mount lives inside the container,
+        // not on the host, so a host subshell can never see it; prefer it when
+        // attached (it is macOS's primary consumption surface).
+        let frontend_attached = record.as_ref().is_some_and(|record| {
+            record
+                .frontends
+                .iter()
+                .any(|frontend| frontend.via == Some(Via::Docker))
+        });
+        if frontend_attached {
+            let container_name = frontend_container_name(paths)?;
+            return self.exec_in_container(container_name.as_str());
         }
 
-        let mode = match record.backend {
-            RecordedBackend::Native { .. } => "native",
-            RecordedBackend::Docker { .. } => "container",
+        let Some(record) = record else {
+            anyhow::bail!(
+                "no omnifs daemon record in {}; start it with `omnifs frontend up`",
+                paths.config_dir.display()
+            );
         };
 
         // A live status call, when the daemon answers, supplies the mount→provider
@@ -90,7 +94,7 @@ impl ShellArgs {
             .map(|status| status.mount_point.clone())
             .or_else(|| record.mount_point().map(Path::to_path_buf))
             .ok_or_else(|| {
-                anyhow::anyhow!("run-state file has no mount point; rerun `omnifs up`")
+                anyhow::anyhow!("no host mount is available; start it with `omnifs frontend up`")
             })?;
         let mounts = live.map(|status| status.mounts).unwrap_or_default();
 
@@ -134,13 +138,13 @@ impl ShellArgs {
         set_cwd_to_mount(&mut cmd, &mount_point);
 
         anstream::eprintln!(
-            "omnifs shell ({mode}) at {} (type `exit` to leave)",
+            "omnifs shell (native) at {} (type `exit` to leave)",
             mount_point.display()
         );
         spawn_and_propagate(cmd, "launch omnifs shell".to_string())
     }
 
-    /// Attach to the Docker-backend daemon by `docker exec`'ing into its
+    /// Attach to the Docker-hosted FUSE frontend by `docker exec`'ing into its
     /// container, landing in the projected tree. The container ships its own
     /// omnifs-tuned zsh rc, so no host rc plumbing applies here; `--shell`
     /// overrides the default and a trailing command runs non-interactively.
@@ -160,6 +164,15 @@ impl ShellArgs {
         }
         spawn_and_propagate(cmd, format!("open shell in container `{container}`"))
     }
+}
+
+/// The Docker-hosted FUSE frontend's container name for this workspace,
+/// mirroring the naming `omnifs frontend up|down|status` use.
+fn frontend_container_name(
+    paths: &WorkspaceLayout,
+) -> Result<crate::launch_backend::ContainerName> {
+    let is_default_home = std::env::var_os(OMNIFS_HOME_ENV).is_none();
+    crate::frontend_container::frontend_container_name(&paths.config_dir, is_default_home)
 }
 
 /// Which rc lever, if any, omnifs can use to inject its prompt.

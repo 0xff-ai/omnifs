@@ -167,10 +167,8 @@ impl Fixture {
     }
 
     fn daemon_pid_from_record(&self) -> Option<u32> {
-        match self.record()?.backend {
-            RecordedBackend::Native { pid } => Some(pid),
-            RecordedBackend::Docker { .. } => None,
-        }
+        let RecordedBackend::Native { pid } = self.record()?.backend;
+        Some(pid)
     }
 
     /// Run a CLI subcommand with the hermetic env, including the frontend
@@ -193,10 +191,10 @@ impl Fixture {
     /// environment gap (missing wasm, unmountable platform) was already
     /// checked by [`preconditions`] before the fixture was built.
     fn up_native(&mut self) {
-        let out = self.run(&["up", "--runtime", "native"]);
+        let out = self.run(&["up", "--no-frontend"]);
         assert!(
             out.status.success(),
-            "omnifs up --runtime native failed (exit {})\nstdout: {}\nstderr: {}",
+            "omnifs up --no-frontend failed (exit {})\nstdout: {}\nstderr: {}",
             out.status,
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr),

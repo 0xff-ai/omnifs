@@ -31,14 +31,14 @@ pub enum Commands {
 
     /// Start the daemon and serve configured mounts
     ///
-    /// Materializes host credentials into a session dir, hands them to the
-    /// runtime backend, and launches it. Under Docker this bind-mounts the
-    /// session dir into the container.
+    /// Spawns the host-native daemon over configured mounts. On macOS this
+    /// also auto-starts the optional Docker-hosted FUSE frontend
+    /// (`--no-frontend` to skip it).
     Up(commands::up::UpArgs),
     /// Stop the daemon and clean up
     ///
-    /// Tears down the running backend and removes its session dir. Under
-    /// Docker this also removes the container.
+    /// Tears down the running daemon, its mount, and (if attached) the
+    /// Docker-hosted FUSE frontend.
     Down(commands::down::DownArgs),
     /// Tail the daemon log
     Logs(commands::logs::LogsArgs),
@@ -46,17 +46,17 @@ pub enum Commands {
     Inspect(commands::inspect::InspectArgs),
     /// Open a shell at the projected tree
     ///
-    /// The daemon mode and mount point come from the run-state file
-    /// `omnifs up` wrote.
+    /// The mount surface (Docker-hosted frontend or host-native mount) comes
+    /// from the runtime record `omnifs up` wrote.
     Shell(commands::shell::ShellArgs),
 
     /// Export a mount's canonical cache to a directory
     Snapshot(commands::snapshot::SnapshotArgs),
 
-    /// Guided setup: runtime, providers, auth, launch
+    /// Guided setup: environment, providers, auth, launch
     ///
-    /// First-run wizard: detect the OS, explain the runtime, pick several
-    /// providers, authenticate each, and launch in one pass.
+    /// First-run wizard: detect the OS, pick several providers, authenticate
+    /// each, and launch in one pass.
     ///
     /// Run this once to get started; use `omnifs init` to add a single
     /// provider later. Re-runnable: already-configured providers are listed
@@ -183,7 +183,7 @@ impl Commands {
             Self::Init(args) => args.run().await.map(|()| ExitCode::Success),
             Self::Up(args) => args.run().await.map(|()| ExitCode::Success),
             Self::Down(args) => args.run().await.map(|()| ExitCode::Success),
-            Self::Logs(args) => args.run().await.map(|()| ExitCode::Success),
+            Self::Logs(args) => args.run().map(|()| ExitCode::Success),
             Self::Inspect(args) => args.run().await.map(|()| ExitCode::Success),
             Self::Shell(args) => args.run().await.map(|()| ExitCode::Success),
             Self::Snapshot(args) => args.run().await.map(|()| ExitCode::Success),
@@ -206,10 +206,7 @@ impl Commands {
 
 async fn run_bare() -> anyhow::Result<ExitCode> {
     let workspace = Workspace::resolve()?;
-    let configured = workspace
-        .config()
-        .is_ok_and(|config| config.system.runtime.is_some())
-        || workspace.mounts().is_ok_and(|mounts| !mounts.is_empty());
+    let configured = workspace.mounts().is_ok_and(|mounts| !mounts.is_empty());
 
     if configured {
         commands::status::StatusArgs::default().run().await
@@ -239,7 +236,6 @@ mod tests {
         let table = [
             ("setup orientation", "setup", "yes"),
             ("setup environment check", "setup", "no-input"),
-            ("setup runtime selection", "setup", "runtime"),
             ("setup mount point", "setup", "mount-point"),
             ("setup provider picker", "setup", "providers"),
             ("setup provider confirmation", "setup", "yes"),

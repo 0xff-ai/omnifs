@@ -1,13 +1,10 @@
 //! The daemon-owned runtime record written at `<config_dir>/daemon.json`.
 //!
-//! One artifact, one lifecycle: a host-native daemon writes this the moment it
-//! has bound its control socket and installed its routes, and removes it on a
-//! graceful exit. The Docker launcher writes it host-side once the in-container
-//! daemon is serving (the container home is a bind mount and a UDS on a macOS
-//! Docker bind mount is unreliable, so the container daemon speaks TCP and does
-//! not own the record). It replaces both the old `launch.json` and the
+//! One artifact, one lifecycle: the host-native daemon writes this the moment
+//! it has bound its control socket and installed its routes, and removes it on
+//! a graceful exit. It replaces both the old `launch.json` and the
 //! `control-token` file: the endpoint the CLI dials, the backend identity
-//! teardown needs, and the bearer token for the TCP transport all live here.
+//! teardown needs, and (on the debug TCP path) the bearer token all live here.
 //!
 //! The CLI only ever dials an endpoint it read from this record (or from
 //! `OMNIFS_DAEMON_ADDR`), so a foreign daemon in another workspace is
@@ -30,36 +27,25 @@ use crate::io::write_atomic;
 /// reported rather than silently reinterpreted.
 pub const RUNTIME_RECORD_VERSION: u32 = 1;
 
-/// How a client reaches the daemon's control API.
-///
-/// The `tcp` variant carries the bearer token, which is why the whole record is
-/// written mode `0600`: filesystem permissions are the only thing keeping the
-/// token off other users on a shared host.
+/// How a client reaches the daemon's control API. The daemon always serves a
+/// Unix domain socket; kept as a named type (rather than a bare path) for the
+/// same reason [`RecordedBackend`] stays an enum: the on-disk schema's `kind`
+/// tag is a stable wire contract, not a Rust-only convenience.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum Endpoint {
     /// Host-native daemon serving a Unix domain socket. Auth is filesystem
     /// permissions on the socket, so there is no token here.
     Unix { path: PathBuf },
-    /// Docker (or `OMNIFS_DAEMON_ADDR`) daemon serving TCP loopback. The bearer
-    /// token authenticates every request but `GET /v1/ready`.
-    Tcp { addr: String, token: String },
 }
 
 /// The backend serving the daemon, mirroring `omnifs_api::DaemonBackend` but
 /// owned here so the workspace crate does not depend on the control-API crate.
-/// `logs`, `shell`, and teardown read the container identity from the Docker
-/// variant; the native variant carries the pid for a liveness-checked sweep.
+/// The native variant carries the pid for a liveness-checked sweep.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "backend", rename_all = "lowercase")]
 pub enum RecordedBackend {
-    Native {
-        pid: u32,
-    },
-    Docker {
-        container_name: String,
-        image: String,
-    },
+    Native { pid: u32 },
 }
 
 /// A bound TCP namespace attach listener: the Docker Desktop path, where a
@@ -207,16 +193,6 @@ impl RuntimeRecord {
         }
     }
 
-    /// The container name when the daemon runs under Docker, whose mount lives
-    /// inside the container. `None` for the host-native backend.
-    #[must_use]
-    pub fn container_name(&self) -> Option<&str> {
-        match &self.backend {
-            RecordedBackend::Docker { container_name, .. } => Some(container_name),
-            RecordedBackend::Native { .. } => None,
-        }
-    }
-
     /// The mount point of the first serving frontend, if any.
     #[must_use]
     pub fn mount_point(&self) -> Option<&Path> {
@@ -260,7 +236,6 @@ mod tests {
 
         let read = RuntimeRecord::read(&path).unwrap().unwrap();
         assert_eq!(read, record);
-        assert_eq!(read.container_name(), None);
         assert_eq!(read.mount_point(), Some(Path::new("/home/u/omnifs")));
 
         #[cfg(unix)]
@@ -368,35 +343,6 @@ mod tests {
         .unwrap();
         let read = RuntimeRecord::read(&path).unwrap().unwrap();
         assert_eq!(read.frontends[0].via, None);
-    }
-
-    #[test]
-    fn docker_round_trips_and_reports_container() {
-        let record = RuntimeRecord::new(
-            Endpoint::Tcp {
-                addr: "127.0.0.1:7878".to_string(),
-                token: "deadbeef".to_string(),
-            },
-            RecordedBackend::Docker {
-                container_name: "omnifs".to_string(),
-                image: "ghcr.io/0xff-ai/omnifs:0.2.1".to_string(),
-            },
-            "aaaa1111bbbb2222".to_string(),
-            vec![FrontendRecord {
-                kind: FrontendKind::Fuse,
-                mount_point: PathBuf::from("/omnifs"),
-                via: None,
-            }],
-        );
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(RUNTIME_RECORD_FILE);
-        record.write(&path).unwrap();
-        let read = RuntimeRecord::read(&path).unwrap().unwrap();
-        assert_eq!(read.container_name(), Some("omnifs"));
-        match read.endpoint {
-            Endpoint::Tcp { token, .. } => assert_eq!(token, "deadbeef"),
-            Endpoint::Unix { .. } => panic!("expected tcp endpoint"),
-        }
     }
 
     #[test]

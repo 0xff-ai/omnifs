@@ -6,7 +6,8 @@
 //! credentials (`token_file` / `token_env`) are left untouched.
 //!
 //! Backend-transparent: probes the control port then falls back to the launch
-//! record, never branches on `[system].runtime`.
+//! record; the daemon always runs host-native, so there is nothing to branch
+//! on.
 
 use anyhow::Context;
 use clap::Args;

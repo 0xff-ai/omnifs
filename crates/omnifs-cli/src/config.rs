@@ -2,11 +2,11 @@
 //!
 //! Resolution order is: CLI flag > env var > config file > built-in default.
 //! Missing file is not an error; malformed file is. Commands load it from
-//! their resolved workspace when they need launch or Docker policy.
+//! their resolved workspace when they need the optional frontend's image.
 
 use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use serde::Deserialize;
+use std::path::Path;
 use std::str::FromStr;
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -34,28 +34,11 @@ impl Default for ConfigTelemetry {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ConfigSystem {
-    pub container_name: Option<String>,
-    pub image: Option<String>,
-    /// Daemon launch backend, recorded by `omnifs setup`. Unset falls back to
-    /// the platform default (host-native).
-    pub runtime: Option<ConfiguredBackend>,
-    /// Override for the optional Docker-hosted FUSE frontend's image.
-    /// `[system].runtime` never references the frontend: it is an opt-in
-    /// attachment to a host-native daemon, not a daemon runtime mode.
+    /// Override for the optional Docker-hosted FUSE frontend's image. The
+    /// daemon itself always runs host-native, so there is no daemon runtime
+    /// mode to configure here; this is an opt-in attachment
+    /// (`omnifs frontend up`), not a daemon launch policy.
     pub frontend_image: Option<String>,
-}
-
-/// Daemon launch backend. `omnifs setup` records the default choice; `omnifs up`
-/// reads it, and `omnifs up --runtime` overrides it for one launch. The
-/// `ValueEnum` derive makes `docker`/`native` valid `--runtime` values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
-#[serde(rename_all = "lowercase")]
-pub enum ConfiguredBackend {
-    /// Daemon runs inside a Docker container; the CLI owns the container
-    /// lifecycle.
-    Docker,
-    /// Daemon runs host-native as a child process serving the platform frontend.
-    Native,
 }
 
 impl Config {
@@ -70,12 +53,6 @@ impl Config {
             },
         };
         toml::from_str(&bytes).with_context(|| format!("parse {}", path.display()))
-    }
-
-    /// Daemon launch backend: the recorded `[system].runtime`, or the platform
-    /// default when `setup` has not chosen one.
-    pub fn backend(&self) -> ConfiguredBackend {
-        self.system.runtime.unwrap_or(ConfiguredBackend::Native)
     }
 
     /// Effective telemetry state for this process: the persistent
@@ -110,78 +87,9 @@ pub(crate) fn env_string(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|value| !value.is_empty())
 }
 
-pub struct ConfigFile {
-    path: PathBuf,
-    doc: toml::Value,
-}
-
-impl ConfigFile {
-    pub fn load(path: impl AsRef<Path>) -> Result<Self> {
-        let path = path.as_ref().to_path_buf();
-        let doc = match std::fs::read_to_string(&path) {
-            Ok(raw) => raw
-                .parse::<toml::Value>()
-                .with_context(|| format!("parse {}", path.display()))?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                toml::Value::Table(toml::map::Map::new())
-            },
-            Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
-        };
-        Ok(Self { path, doc })
-    }
-
-    /// Set `[system].runtime`, preserving the rest of the config. `omnifs setup`
-    /// records the launch backend here so `omnifs up` reads it.
-    pub fn set_system_backend(&mut self, backend: ConfiguredBackend) -> Result<()> {
-        let root = self
-            .doc
-            .as_table_mut()
-            .ok_or_else(|| anyhow::anyhow!("{} is not a TOML table", self.path.display()))?;
-        let system = root
-            .entry("system".to_string())
-            .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
-        let system = system.as_table_mut().ok_or_else(|| {
-            anyhow::anyhow!("{} has a non-table [system] value", self.path.display())
-        })?;
-        let value = toml::Value::try_from(backend).context("serialize backend as TOML")?;
-        system.insert("runtime".to_string(), value);
-        Ok(())
-    }
-
-    pub fn save(&self) -> Result<()> {
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("create {}", parent.display()))?;
-        }
-        let rendered = toml::to_string_pretty(&self.doc).context("serialize config TOML")?;
-        omnifs_workspace::io::write_atomic(&self.path, rendered.as_bytes(), 0o644)
-            .with_context(|| format!("write {}", self.path.display()))?;
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn config_file_round_trips() {
-        // Guards the on-disk `[system].runtime` token: `setup` writes it and `up`
-        // reads it, so a rename of the serialized form would silently break the
-        // runtime selection across a CLI upgrade.
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("config.toml");
-        let mut file = ConfigFile::load(&path).unwrap();
-        file.set_system_backend(ConfiguredBackend::Native).unwrap();
-        file.save().unwrap();
-
-        let raw = std::fs::read_to_string(&path).unwrap();
-        assert!(raw.contains("runtime = \"native\""), "got:\n{raw}");
-
-        let config = Config::load(&path).unwrap();
-        assert_eq!(config.system.runtime, Some(ConfiguredBackend::Native));
-        assert_eq!(config.backend(), ConfiguredBackend::Native);
-    }
 
     #[test]
     fn telemetry_defaults_on_and_parses_off_switch() {

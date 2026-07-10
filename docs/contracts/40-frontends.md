@@ -21,7 +21,7 @@ The daemon is a frontend registry: it constructs one `TreeNamespace` over the sh
 
 ### FUSE
 
-FUSE is the Linux frontend, including native Linux, the optional Docker runtime container, and the optional Docker-hosted out-of-process frontend (`omnifs frontend up`), which ships its own minimal image distinct from the runtime container; see `docs/contracts/60-build-validation.md` for that image's build/publish contract.
+FUSE is the Linux frontend, including native Linux and the optional Docker-hosted out-of-process frontend (`omnifs frontend up`), which ships its own minimal image; see `docs/contracts/60-build-validation.md` for that image's build/publish contract.
 
 The Docker-hosted FUSE frontend's mount lives entirely inside the container's own mount namespace, so killing the container is an accepted, clean failure mode: the mount disappears with it, with nothing left to unmount host-side, and `omnifs frontend up` creates a fresh container that serves again.
 
@@ -59,7 +59,7 @@ The `omnifs-mtab` state file is mount *discovery and teardown* state (mount poin
 - Put provider policy or cache schema knowledge in FUSE or NFS.
 - Add macOS-specific FUSE behavior.
 - Reintroduce macFUSE, `diskutil`, or macOS-specific FUSE mounting.
-- Treat container FUSE as the architecture; Docker is one launch mechanism.
+- Treat container FUSE as the architecture; the Docker-hosted frontend is one optional delivery mechanism attached to a host-native daemon.
 - Remove live NFS test serialization casually.
 - Claim NFS gives FUSE-equivalent permission isolation.
 - Put wait budgets or `DELAY` policy in `omnifs-tree`.

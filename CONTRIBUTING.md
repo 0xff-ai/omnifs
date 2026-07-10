@@ -4,7 +4,7 @@ Reference for the contributor workflow, build and validation commands, runtime d
 
 ## Getting started
 
-The primary contributor workflow is `just dev`, which runs `scripts/dev.ts`. The script checks prerequisites, builds provider WASM into a content-addressed provider-store bundle, builds the omnifs CLI natively, starts a host-native daemon (`omnifs up --runtime native`) with dev mounts and credentials rendered into `~/.omnifs-dev`, attaches the Docker-hosted FUSE frontend (`omnifs frontend up`) to it, and opens a shell inside that frontend container at `/omnifs`.
+The primary contributor workflow is `just dev`, which runs `scripts/dev.ts`. The script checks prerequisites, builds provider WASM into a content-addressed provider-store bundle, builds the omnifs CLI natively, starts a host-native daemon (`omnifs up --no-frontend`) with dev mounts and credentials rendered into `~/.omnifs-dev`, attaches the Docker-hosted FUSE frontend (`omnifs frontend up`) to it, and opens a shell inside that frontend container at `/omnifs`.
 
 ```bash
 just dev            # build providers and the CLI, start the native daemon, attach the frontend, open /omnifs
@@ -14,7 +14,7 @@ docker exec -it -w /omnifs "$FRONTEND" /bin/sh # reattach to the browsing shell
 omnifs frontend down && omnifs down            # tear both down
 ```
 
-`scripts/dev.ts` is contributor-only and requires a source checkout. It resolves a dedicated dev home at `~/.omnifs-dev`, copies the provider-store bundle into `~/.omnifs-dev/providers`, writes pinned mount specs under `~/.omnifs-dev/mounts`, interpolates host tokens into the `contrib/dev-credentials.json` template to produce `~/.omnifs-dev/credentials.json`, and pins `[system].frontend_image` in `~/.omnifs-dev/config.toml` at an image tagged `omnifs-frontend:<short-sha>-dev`. The daemon itself is host-native, not containerized: no `[system].runtime` is persisted, no home bind mount, no daemon container. Dev auth uses host tokens: set `GITHUB_TOKEN` or `LINEAR_API_KEY`, or allow the script to read `gh auth token` for GitHub when prompted. Authenticated mounts without a token are skipped rather than started broken.
+`scripts/dev.ts` is contributor-only and requires a source checkout. It resolves a dedicated dev home at `~/.omnifs-dev`, copies the provider-store bundle into `~/.omnifs-dev/providers`, writes pinned mount specs under `~/.omnifs-dev/mounts`, interpolates host tokens into the `contrib/dev-credentials.json` template to produce `~/.omnifs-dev/credentials.json`, and pins `[system].frontend_image` in `~/.omnifs-dev/config.toml` at an image tagged `omnifs-frontend:<short-sha>-dev`. The daemon itself is host-native, not containerized: no home bind mount, no daemon container. Dev auth uses host tokens: set `GITHUB_TOKEN` or `LINEAR_API_KEY`, or allow the script to read `gh auth token` for GitHub when prompted. Authenticated mounts without a token are skipped rather than started broken.
 
 A locally built `omnifs` binary targets the `omnifs-frontend:dev` image by default and never pulls; produce that image with `just dev --build-only`, which builds providers, the CLI, and the frontend image, tags it `omnifs-frontend:dev`, and exits without starting a session.
 

@@ -75,8 +75,8 @@ mod tests {
     use secrecy::SecretString;
     use time::OffsetDateTime;
 
-    use crate::launch::DockerMountSpecBuilder;
     use crate::test_support::{install_fixture_provider, spec_with_provider, spec_with_reference};
+    use omnifs_workspace::mounts::materialize;
     use omnifs_workspace::provider::Catalog;
 
     fn sample_entry(value: &str) -> CredentialEntry {
@@ -102,6 +102,19 @@ mod tests {
         Catalog::open(paths.providers_dir)
     }
 
+    /// Materialize `config`'s spec, then validate its host-managed credential.
+    /// Mirrors the preflight `Launcher::launch` runs before spawning the
+    /// daemon.
+    fn materialize_and_validate(
+        config: &MountConfig,
+        catalog: &Catalog,
+        store: &dyn CredentialStore,
+    ) -> anyhow::Result<()> {
+        let materialized = materialize::materialize(config.config.clone(), catalog)?;
+        let mount_auth = MountAuth::from_spec(catalog, materialized);
+        config.validate_host_managed_credentials(&mount_auth, store)
+    }
+
     #[test]
     fn materialize_validates_host_managed_static_token() {
         let tmp = tempfile::tempdir().unwrap();
@@ -123,12 +136,7 @@ mod tests {
         };
 
         let catalog = test_catalog(tmp.path());
-        // Validation accepts the present host-managed token; no preopens, so no
-        // container binds.
-        let mount = DockerMountSpecBuilder::new(&catalog, &store)
-            .materialize(&config)
-            .unwrap();
-        assert!(mount.preopen_binds().is_empty());
+        materialize_and_validate(&config, &catalog, &store).unwrap();
     }
 
     #[test]
@@ -152,9 +160,7 @@ mod tests {
             ),
             source: PathBuf::from("/dev/null"),
         };
-        DockerMountSpecBuilder::new(&catalog, &store)
-            .materialize(&with_scheme)
-            .unwrap();
+        materialize_and_validate(&with_scheme, &catalog, &store).unwrap();
 
         let metadata_only = MountConfig {
             name: MountName::try_from("github").unwrap(),
@@ -164,66 +170,58 @@ mod tests {
             ),
             source: PathBuf::from("/dev/null"),
         };
-        DockerMountSpecBuilder::new(&catalog, &store)
-            .materialize(&metadata_only)
-            .unwrap();
+        materialize_and_validate(&metadata_only, &catalog, &store).unwrap();
     }
 
     #[test]
-    fn materialize_rewrites_preopens_to_container_bind_paths() {
+    fn materialize_canonicalizes_host_preopen() {
         let tmp = tempfile::tempdir().unwrap();
         let db_dir = tmp.path().join("db");
         std::fs::create_dir_all(&db_dir).unwrap();
         std::fs::write(db_dir.join("chinook.sqlite"), "").unwrap();
 
-        let store = MemoryStore::new();
-        let config = MountConfig {
-            name: MountName::try_from("db").unwrap(),
-            config: spec_with_provider(
-                "db",
-                &format!(
-                    r#"{{
-                    "mount": "db",
-                    "config": {{"path": "/data/chinook.sqlite"}},
-                    "capabilities": {{
-                        "preopened_paths": [
-                            {{"host": "{}", "guest": "/data", "mode": "ro"}}
-                        ]
-                    }}
-                }}"#,
-                    db_dir.display()
-                ),
+        let config = spec_with_provider(
+            "db",
+            &format!(
+                r#"{{
+                "mount": "db",
+                "config": {{"path": "/data/chinook.sqlite"}},
+                "capabilities": {{
+                    "preopened_paths": [
+                        {{"host": "{}", "guest": "/data", "mode": "ro"}}
+                    ]
+                }}
+            }}"#,
+                db_dir.display()
             ),
-            source: PathBuf::from("/dev/null"),
-        };
+        );
 
         let catalog = test_catalog(tmp.path());
-        let binds = DockerMountSpecBuilder::new(&catalog, &store)
-            .materialize(&config)
+        let materialized = materialize::materialize(config, &catalog).unwrap();
+        let preopen = &materialized
+            .capabilities
+            .as_ref()
             .unwrap()
-            .into_preopen_binds()
-            .into_docker_bind_specs();
-
+            .preopened_paths
+            .as_ref()
+            .and_then(|grant| match grant {
+                omnifs_caps::Grant::Literal(paths) => Some(paths),
+                omnifs_caps::Grant::Dynamic(_) => None,
+            })
+            .unwrap()[0];
         assert_eq!(
-            binds,
-            vec![format!(
-                "{}:{}/db/0:ro",
-                db_dir.canonicalize().unwrap().display(),
-                omnifs_workspace::mounts::materialize::GUEST_PREOPENS_DIR,
-            )],
-            "the CLI formats the container preopen bind for docker create"
+            preopen.host,
+            db_dir.canonicalize().unwrap().display().to_string()
         );
+        assert_eq!(preopen.guest, "/data");
     }
 
     #[test]
-    fn materialize_leaves_manifest_preopens_container_native() {
+    fn materialize_leaves_runtime_native_preopens_untouched() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = MemoryStore::new();
-        let config = MountConfig {
-            name: MountName::try_from("db").unwrap(),
-            config: spec_with_provider(
-                "db",
-                r#"{
+        let config = spec_with_provider(
+            "db",
+            r#"{
                     "mount": "db",
                     "config": {"path": "/data/test.db"},
                     "capabilities": {
@@ -232,16 +230,11 @@ mod tests {
                         ]
                     }
                 }"#,
-            ),
-            source: PathBuf::from("/dev/null"),
-        };
+        );
 
         let catalog = test_catalog(tmp.path());
-        let mount = DockerMountSpecBuilder::new(&catalog, &store)
-            .materialize(&config)
-            .unwrap();
-        let spec = mount.spec();
-        let preopen = &spec
+        let materialized = materialize::materialize(config, &catalog).unwrap();
+        let preopen = &materialized
             .capabilities
             .as_ref()
             .unwrap()
@@ -255,11 +248,7 @@ mod tests {
         assert_eq!(
             (preopen.host.as_str(), preopen.guest.as_str()),
             ("/data", "/data"),
-            "a container-native preopen (host == guest) passes through unrewritten"
-        );
-        assert!(
-            mount.preopen_binds().is_empty(),
-            "container-native preopens are fixture-provided, so no host bind is emitted"
+            "a runtime-native preopen (host == guest) passes through unrewritten"
         );
     }
 
@@ -280,9 +269,7 @@ mod tests {
             source: PathBuf::from("/dev/null"),
         };
         let catalog = test_catalog(tmp.path());
-        let err = DockerMountSpecBuilder::new(&catalog, &store)
-            .materialize(&config)
-            .unwrap_err();
+        let err = materialize_and_validate(&config, &catalog, &store).unwrap_err();
         let chain = format!("{err:#}");
         assert!(
             chain.contains("no stored credential"),

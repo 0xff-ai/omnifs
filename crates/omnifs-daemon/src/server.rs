@@ -51,9 +51,10 @@ use crate::frontends::Frontends;
 const CONTROL_TOKEN_BYTES: usize = 32;
 const BEARER_PREFIX: &str = "Bearer ";
 
-/// Environment variable the Docker launcher injects to hand the in-container
-/// daemon the token the host CLI already knows. Absent for host-native daemons,
-/// which serve the token-free Unix socket.
+/// Environment variable that hands a TCP-serving daemon a token the caller
+/// already knows, instead of generating one in memory. Set only on the debug
+/// `OMNIFS_DAEMON_ADDR` path; the ordinary host-native daemon serves the
+/// token-free Unix socket and never sees this variable.
 const CONTROL_TOKEN_ENV: &str = "OMNIFS_CONTROL_TOKEN";
 
 /// Attach-token byte length: 16 raw bytes, hex-encoded to the 32 hex characters
@@ -421,9 +422,7 @@ impl Daemon {
     /// mounts invalidate the root child so a torn-down mount does not linger as
     /// a phantom directory. Callable directly from the blocking startup path.
     pub fn reconcile_blocking(&self, handle: &tokio::runtime::Handle) -> ReconcileReport {
-        let outcome = self
-            .registry
-            .reconcile(handle, self.context.materialization_mode());
+        let outcome = self.registry.reconcile(handle);
         self.apply_reconcile_outcome(outcome)
     }
 
@@ -434,11 +433,7 @@ impl Daemon {
         let daemon = Arc::clone(self);
         let handle = tokio::runtime::Handle::current();
         tokio::task::spawn_blocking(move || {
-            let outcome = daemon.registry.try_reconcile_scoped(
-                &handle,
-                daemon.context.materialization_mode(),
-                mounts,
-            )?;
+            let outcome = daemon.registry.try_reconcile_scoped(&handle, mounts)?;
             Ok(daemon.apply_reconcile_outcome(outcome))
         })
         .await
@@ -456,12 +451,7 @@ impl Daemon {
         let daemon = Arc::clone(self);
         let handle = tokio::runtime::Handle::current();
         tokio::task::spawn_blocking(move || {
-            let outcome = daemon.registry.converge_spec(
-                &handle,
-                daemon.context.materialization_mode(),
-                spec,
-                approved,
-            );
+            let outcome = daemon.registry.converge_spec(&handle, spec, approved);
             daemon.apply_reconcile_outcome(outcome)
         })
         .await
@@ -497,7 +487,7 @@ impl Daemon {
 
     fn validate_spec(&self, spec: &Spec) -> Result<(), Box<Response>> {
         let catalog = Catalog::open(self.context.providers_dir());
-        materialize(spec.clone(), &catalog, self.context.materialization_mode())
+        materialize(spec.clone(), &catalog)
             .map(|_| ())
             .map_err(|error| {
                 Box::new(error_response(
@@ -1100,7 +1090,7 @@ async fn reconcile(
 async fn shutdown(State(daemon): State<Arc<Daemon>>) -> Json<StopReport> {
     let status = daemon.control_status();
     let report = StopReport {
-        frontend: status.frontend,
+        frontend: status.frontends.into_iter().next(),
         mount_point: status.mount_point,
         providers_dropped: status.mounts.len(),
     };

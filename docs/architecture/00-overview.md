@@ -69,7 +69,7 @@ Unknown and non-zero sizes use truthful sentinel behavior until exact size is le
 
 FUSE and NFS are protocol adapters over the same projected tree.
 
-FUSE is the Linux frontend, including native Linux and the Docker runtime container. It owns inode tables, kernel notifications, mount/unmount mechanics, and FUSE reply construction.
+FUSE is the Linux frontend, including native Linux and the optional Docker-hosted out-of-process frontend (`omnifs frontend up`). It owns inode tables, kernel notifications, mount/unmount mechanics, and FUSE reply construction.
 
 NFSv4.0 loopback is the macOS host-native frontend. It is read-only today and owns filehandles, stateids, leases, NFS protocol errors, mount state, and macOS mount readiness/teardown.
 
@@ -81,7 +81,7 @@ There is one `omnifs` binary. The runtime loop lives behind hidden `omnifs daemo
 
 Mount delivery is disk reconcile today. The CLI writes specs under `mounts/`; the daemon loads them from disk on startup and converges the running set through `/v1/reconcile`. New non-secret interactions should prefer REST API extensions over new direct workspace coupling.
 
-Runtime modes are host-native and Docker. Docker is one launch mechanism, not the daemon architecture. Contributor dev sessions run through `scripts/dev.ts`, which writes a dedicated `~/.omnifs-dev` home for the container.
+The daemon has one runtime mode: host-native. Docker delivers only the optional FUSE frontend, attached to the host-native daemon; it is not a daemon runtime mode. Contributor dev sessions run through `scripts/dev.ts`, which writes a dedicated `~/.omnifs-dev` home and starts the daemon on the host directly.
 
 ## Auth and sandbox
 

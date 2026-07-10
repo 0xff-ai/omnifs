@@ -2,17 +2,15 @@
 //!
 //! The frontend is a separate, credential-free container attached to a
 //! host-native daemon's shared namespace over TCP; it is not a daemon runtime
-//! mode; `[system].runtime` never references it.
+//! mode.
 
 use std::time::Duration;
 
 use anyhow::Context as _;
 use clap::Args;
-use omnifs_api::DaemonBackend;
 use omnifs_workspace::layout::OMNIFS_HOME_ENV;
 use omnifs_workspace::runtime_record::{FrontendKind, FrontendRecord, RuntimeRecord, Via};
 
-use crate::config::ConfiguredBackend;
 use crate::frontend_container::{
     FrontendContainerSpec, build_frontend_container_body, frontend_container_name,
     resolve_frontend_image,
@@ -82,26 +80,15 @@ impl FrontendUpArgs {
     }
 }
 
-/// Ensure a host-native daemon is serving, reusing the same launch machinery
-/// `omnifs up` uses. A running Docker-backend daemon is refused: the
-/// Docker-hosted frontend attaches over the host-native TCP namespace
-/// listener, which a containerized daemon has no reason to serve (its
-/// in-process frontend already renders FUSE).
+/// Ensure the host-native daemon is serving, reusing the same launch
+/// machinery `omnifs up` uses. A no-op when one is already running (the
+/// daemon only ever runs host-native, so any running daemon qualifies).
 async fn ensure_native_daemon(workspace: &Workspace) -> anyhow::Result<()> {
-    if let Some(status) = workspace.daemon().status_optional().await? {
-        return match status.backend {
-            DaemonBackend::Native { .. } => Ok(()),
-            DaemonBackend::Docker { container_name, .. } => Err(anyhow::anyhow!(
-                "the running daemon is a Docker-backend daemon (container `{container_name}`); \
-                 the Docker-hosted FUSE frontend attaches to a host-native daemon instead.\n\
-                 Run `omnifs down` to stop it, then `omnifs up --runtime native` before \
-                 `omnifs frontend up`."
-            )),
-        };
+    if workspace.daemon().status_optional().await?.is_some() {
+        return Ok(());
     }
 
-    let launcher = Launcher::new(workspace, "omnifs frontend up")
-        .with_runtime_override(Some(ConfiguredBackend::Native));
+    let launcher = Launcher::new(workspace, "omnifs frontend up");
     launcher.launch().await?;
     Ok(())
 }

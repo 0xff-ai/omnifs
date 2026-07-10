@@ -1,9 +1,13 @@
 //! `omnifs setup`: guided onboarding walkthrough.
 //!
-//! A single ledger drives the whole wizard: an environment summary, a runtime
-//! choice, a provider picker, a per-provider block for each selection, and a
-//! launch. Every human line prints on stderr through the `crate::ui` design
-//! system; stdout is reserved for machine output.
+//! A single ledger drives the whole wizard: an environment summary, a mount
+//! point question, a provider picker, a per-provider block for each
+//! selection, and a launch. Every human line prints on stderr through the
+//! `crate::ui` design system; stdout is reserved for machine output. The
+//! daemon always runs host-native, so there is no runtime-backend stage: on
+//! macOS `omnifs up` additionally auto-starts the optional Docker-hosted FUSE
+//! frontend, which is why this wizard still surfaces Docker reachability
+//! there.
 
 pub mod host_os;
 
@@ -16,9 +20,7 @@ use omnifs_workspace::layout::WorkspaceLayout;
 use omnifs_workspace::provider::{Provider, ProviderManifest};
 
 use crate::commands::init;
-use crate::config::ConfiguredBackend;
 use crate::launch::{LaunchOutcome, Launcher};
-use crate::launch_backend::GUEST_MOUNT;
 use crate::stages::PromptMode;
 use crate::ui;
 use crate::ui::picker::PickerRow;
@@ -38,10 +40,7 @@ pub struct SetupArgs {
     /// Fail instead of prompting. Use flags or --yes for every answer.
     #[arg(long)]
     pub no_input: bool,
-    /// Runtime to persist as the default.
-    #[arg(long, value_enum)]
-    pub runtime: Option<ConfiguredBackend>,
-    /// Mount point for the native runtime (ignored for docker).
+    /// Mount point for the daemon's native mount.
     #[arg(long, value_name = "PATH")]
     pub mount_point: Option<PathBuf>,
     /// Preselect providers and skip the picker.
@@ -53,8 +52,8 @@ pub struct SetupArgs {
 }
 
 /// How the shared configure tail titles its sections: the fresh wizard counts
-/// its stages (`── 4/6 first mount ──`), while the review hub is not a
-/// six-stage walk, so its actions print plain rules without counters.
+/// its stages (`── 3/5 first mount ──`), while the review hub is not a
+/// five-stage walk, so its actions print plain rules without counters.
 #[derive(Clone, Copy)]
 enum StageStyle {
     Wizard,
@@ -64,7 +63,7 @@ enum StageStyle {
 impl StageStyle {
     fn banner(self, n: usize, title: &str) -> String {
         match self {
-            Self::Wizard => ui::stage_rule(n, 6, title),
+            Self::Wizard => ui::stage_rule(n, 5, title),
             Self::Hub => ui::rule(title),
         }
     }
@@ -112,38 +111,29 @@ impl SetupArgs {
         if installed.is_empty() {
             anyhow::bail!("no built-in or plugin providers are available");
         }
-        anstream::eprintln!("{}", ui::stage_rule(1, 6, "environment"));
+        anstream::eprintln!("{}", ui::stage_rule(1, 5, "environment"));
         anstream::eprintln!("{}", ui::ok("environment", os.name()));
         anstream::eprintln!(
             "{}",
             ui::ok("providers", format!("{} installed", installed.len()))
         );
-        Self::render_docker_row(&config).await;
-
-        anstream::eprintln!();
-        anstream::eprintln!("{}", ui::stage_rule(2, 6, "runtime"));
-        let backend =
-            crate::stages::runtime_selection(os, config.system.runtime, self.runtime, mode)?;
-        crate::stages::persist_runtime(paths, backend)?;
-        // When the prompt was skipped (--runtime or --yes) the answered line
-        // the picker prints never appears, so state the fact in the ledger.
-        if self.runtime.is_some() || mode.yes {
-            anstream::eprintln!(
-                "{}",
-                ui::ok("runtime", crate::stages::runtime_word(backend))
-            );
+        // Docker reachability matters only on macOS, where `omnifs up`
+        // auto-starts the Docker-hosted FUSE frontend; Linux's native FUSE
+        // mount needs no container.
+        if os == HostOs::MacOs {
+            Self::render_docker_row(&config).await;
         }
 
         anstream::eprintln!();
-        anstream::eprintln!("{}", ui::stage_rule(3, 6, "mount point"));
-        let mount_point = self.resolve_mount_point(backend, mode)?;
+        anstream::eprintln!("{}", ui::stage_rule(2, 5, "mount point"));
+        let mount_point = self.resolve_mount_point(mode)?;
 
         self.configure_and_launch(&workspace, mount_point, mode, StageStyle::Wizard)
             .await
     }
 
     /// The informational Docker reachability row for the environment stage. It
-    /// never fails setup; an unreachable daemon just notes the native fallback.
+    /// never fails setup; an unreachable daemon just notes the retry hint.
     async fn render_docker_row(config: &crate::config::Config) {
         let mut live = ui::LiveRow::start("docker", "checking");
         live.update("connecting");
@@ -155,60 +145,37 @@ impl SetupArgs {
                 live.settle_warn("not reachable");
                 anstream::eprintln!(
                     "{}",
-                    ui::note("start Docker Desktop, or choose the native runtime")
+                    ui::note(
+                        "start Docker Desktop so `omnifs up` can start the FUSE frontend; native NFS keeps working without it"
+                    )
                 );
             },
         }
     }
 
-    /// Resolve the mount point and print the post-answer runtime note. The
-    /// mount-point question is asked ONLY for the native runtime; under docker
-    /// files always appear at `GUEST_MOUNT`.
-    fn resolve_mount_point(
-        &self,
-        backend: ConfiguredBackend,
-        mode: PromptMode,
-    ) -> anyhow::Result<PathBuf> {
-        if backend == ConfiguredBackend::Native {
-            let mount_point =
-                crate::stages::mount_point_resolution(self.mount_point.clone(), mode)?;
-            let display = WorkspaceLayout::display(&mount_point);
-            // State the fact when the prompt was skipped (--mount-point or --yes).
-            if self.mount_point.is_some() || mode.yes {
-                anstream::eprintln!("{}", ui::ok("mount point", &display));
-            }
-            anstream::eprintln!("{}", ui::note(format!("files appear at {display}")));
-            // Launch reads OMNIFS_MOUNT_POINT; a typed/flagged value only previews
-            // unless it is exported.
-            let already = crate::config::env_string("OMNIFS_MOUNT_POINT")
-                .is_some_and(|env| WorkspaceLayout::display(&PathBuf::from(env)) == display);
-            if !already {
-                anstream::eprintln!(
-                    "{}",
-                    ui::note(format!(
-                        "`export OMNIFS_MOUNT_POINT={display}` to persist it"
-                    ))
-                );
-            }
-            Ok(mount_point)
-        } else {
-            if self.mount_point.is_some() {
-                anstream::eprintln!(
-                    "{}",
-                    ui::warn_row(
-                        "mount point",
-                        "--mount-point applies to the native runtime; ignored for docker"
-                    )
-                );
-            }
+    /// Resolve the mount point and print the post-answer note. The daemon
+    /// always runs host-native, so this question always applies.
+    fn resolve_mount_point(&self, mode: PromptMode) -> anyhow::Result<PathBuf> {
+        let mount_point = crate::stages::mount_point_resolution(self.mount_point.clone(), mode)?;
+        let display = WorkspaceLayout::display(&mount_point);
+        // State the fact when the prompt was skipped (--mount-point or --yes).
+        if self.mount_point.is_some() || mode.yes {
+            anstream::eprintln!("{}", ui::ok("mount point", &display));
+        }
+        anstream::eprintln!("{}", ui::note(format!("files appear at {display}")));
+        // Launch reads OMNIFS_MOUNT_POINT; a typed/flagged value only previews
+        // unless it is exported.
+        let already = crate::config::env_string("OMNIFS_MOUNT_POINT")
+            .is_some_and(|env| WorkspaceLayout::display(&PathBuf::from(env)) == display);
+        if !already {
             anstream::eprintln!(
                 "{}",
                 ui::note(format!(
-                    "files appear at {GUEST_MOUNT} inside the container"
+                    "`export OMNIFS_MOUNT_POINT={display}` to persist it"
                 ))
             );
-            Ok(PathBuf::from(GUEST_MOUNT))
         }
+        Ok(mount_point)
     }
 
     /// Shared tail: pick providers, configure each, launch, and close.
@@ -224,7 +191,7 @@ impl SetupArgs {
         let configured = crate::catalog::configured_mounts(workspace.catalog(), &mounts)?;
 
         anstream::eprintln!();
-        anstream::eprintln!("{}", style.banner(4, "first mount"));
+        anstream::eprintln!("{}", style.banner(3, "first mount"));
         let selected = self.resolve_selection(&installed, &configured, mode)?;
 
         // Nothing new to configure (all providers already configured, or the
@@ -236,7 +203,7 @@ impl SetupArgs {
         }
 
         anstream::eprintln!();
-        anstream::eprintln!("{}", style.banner(5, "auth + grants"));
+        anstream::eprintln!("{}", style.banner(4, "auth + grants"));
         let results = self.run_init_loop(&selected, &installed, workspace).await;
 
         let any_ready = results
@@ -275,7 +242,7 @@ impl SetupArgs {
         style: StageStyle,
     ) -> anyhow::Result<LaunchOutcome> {
         anstream::eprintln!();
-        anstream::eprintln!("{}", style.banner(6, "launch"));
+        anstream::eprintln!("{}", style.banner(5, "launch"));
         // `Launcher::launch` writes its own stderr progress lines; a spinner
         // here would be overwritten mid-line by them. Print a plain note before
         // and settle into a static row after, as the pre-LiveRow design did.
@@ -288,13 +255,11 @@ impl SetupArgs {
             },
         };
 
-        let daemon = match &outcome {
-            LaunchOutcome::Docker { .. } => "running in docker".to_string(),
-            LaunchOutcome::Native { mount_point: mp } => {
-                let mp = mp.clone().unwrap_or_else(|| mount_point.to_path_buf());
-                format!("running natively at {}", WorkspaceLayout::display(&mp))
-            },
-        };
+        let mp = outcome
+            .mount_point
+            .clone()
+            .unwrap_or_else(|| mount_point.to_path_buf());
+        let daemon = format!("running natively at {}", WorkspaceLayout::display(&mp));
         anstream::eprintln!("{}", ui::ok("daemon", daemon));
 
         if let Some(mount) = results
@@ -530,36 +495,26 @@ fn print_header() {
 }
 
 /// Mount point for the review-mode add-a-provider path, derived without any
-/// prompt: docker always serves at [`GUEST_MOUNT`]; native uses the resolved
-/// default (`OMNIFS_MOUNT_POINT` or the home-derived path).
-fn add_provider_mount_point(runtime: Option<ConfiguredBackend>) -> anyhow::Result<PathBuf> {
-    match runtime.unwrap_or(ConfiguredBackend::Docker) {
-        ConfiguredBackend::Docker => Ok(PathBuf::from(GUEST_MOUNT)),
-        ConfiguredBackend::Native => {
-            omnifs_workspace::layout::resolve_mount_point().ok_or_else(|| {
-                anyhow::anyhow!("cannot resolve host mount point: set HOME or OMNIFS_MOUNT_POINT")
-            })
-        },
-    }
+/// prompt: the resolved default (`OMNIFS_MOUNT_POINT` or the home-derived
+/// path), since the daemon always runs host-native.
+fn add_provider_mount_point() -> anyhow::Result<PathBuf> {
+    omnifs_workspace::layout::resolve_mount_point().ok_or_else(|| {
+        anyhow::anyhow!("cannot resolve host mount point: set HOME or OMNIFS_MOUNT_POINT")
+    })
 }
 
 fn one_line(error: &anyhow::Error) -> String {
     error.to_string().lines().next().unwrap_or("").to_string()
 }
 
-/// Where a Ready mount's files live for the graduation card: the in-container
-/// path under docker, or the resolved host path under native.
+/// Where a Ready mount's files live for the graduation card.
 fn ready_mount_location(outcome: &LaunchOutcome, mount: &str) -> String {
-    match outcome {
-        LaunchOutcome::Docker { .. } => format!("{GUEST_MOUNT}/{mount}"),
-        LaunchOutcome::Native { mount_point } => {
-            let base = mount_point
-                .clone()
-                .or_else(omnifs_workspace::layout::resolve_mount_point)
-                .unwrap_or_else(|| PathBuf::from(GUEST_MOUNT));
-            WorkspaceLayout::display(&base.join(mount))
-        },
-    }
+    let base = outcome
+        .mount_point
+        .clone()
+        .or_else(omnifs_workspace::layout::resolve_mount_point)
+        .unwrap_or_else(|| PathBuf::from("/"));
+    WorkspaceLayout::display(&base.join(mount))
 }
 
 fn validate_preselected(
@@ -611,12 +566,12 @@ impl SetupArgs {
             // Non-interactive review keeps its verbatim bail messages.
             if mode.no_input {
                 anyhow::bail!(
-                    "`omnifs setup --no-input` is in review mode; pass --providers <provider> to add one, --runtime <docker|native> to change runtime, or --yes"
+                    "`omnifs setup --no-input` is in review mode; pass --providers <provider> to add one, or --yes"
                 );
             }
             if !mode.interactive {
                 anyhow::bail!(
-                    "`omnifs setup` is in review mode and needs a terminal; pass --providers <provider>, --runtime <docker|native>, or --yes"
+                    "`omnifs setup` is in review mode and needs a terminal; pass --providers <provider> or --yes"
                 );
             }
 
@@ -630,11 +585,9 @@ impl SetupArgs {
 
             match choice.as_str() {
                 "add a provider" => {
-                    // Jump straight to the shared configure tail: runtime is
-                    // already persisted and the mount point derives from it.
-                    // Esc at the provider picker returns to the hub, not out
-                    // of setup.
-                    let mount_point = add_provider_mount_point(workspace.config()?.system.runtime)?;
+                    // Jump straight to the shared configure tail. Esc at the
+                    // provider picker returns to the hub, not out of setup.
+                    let mount_point = add_provider_mount_point()?;
                     match self
                         .configure_and_launch(workspace, mount_point, mode, StageStyle::Hub)
                         .await
@@ -643,22 +596,6 @@ impl SetupArgs {
                         Err(error) if crate::ui::picker::is_canceled(&error) => {},
                         Err(error) => return Err(error),
                     }
-                },
-                "change runtime" => match crate::stages::runtime_selection(
-                    HostOs::detect(),
-                    workspace.config()?.system.runtime,
-                    None,
-                    mode,
-                ) {
-                    Ok(runtime) => {
-                        crate::stages::persist_runtime(workspace.layout(), runtime)?;
-                        anstream::eprintln!(
-                            "{}",
-                            ui::ok("runtime", crate::stages::runtime_word(runtime))
-                        );
-                    },
-                    Err(error) if crate::ui::picker::is_canceled(&error) => {},
-                    Err(error) => return Err(error),
                 },
                 "run checks" => {
                     anstream::eprintln!("{}", ui::note("running `omnifs doctor`"));
@@ -705,20 +642,11 @@ impl SetupArgs {
     }
 }
 
-/// Render the review status ledger (runtime, mounts, daemon) and return the
-/// mount summaries the menu needs. Re-run each hub iteration for fresh facts.
+/// Render the review status ledger (mounts, daemon) and return the mount
+/// summaries the menu needs. Re-run each hub iteration for fresh facts.
 async fn render_review_ledger(
     workspace: &Workspace,
 ) -> anyhow::Result<Vec<crate::mount_report::UserMountStatus>> {
-    let config = workspace.config()?;
-    match config.system.runtime {
-        Some(runtime) => anstream::eprintln!(
-            "{}",
-            ui::ok("runtime", crate::stages::runtime_word(runtime))
-        ),
-        None => anstream::eprintln!("{}", ui::warn_row("runtime", "unset")),
-    }
-
     let store = omnifs_workspace::creds::FileStore::new(&workspace.layout().credentials_file);
     let mounts = workspace.mounts()?;
     let summaries =
@@ -836,17 +764,6 @@ fn review_menu_rows(candidates: &[String]) -> Vec<PickerRow> {
     }
 
     rows.push(menu_row(
-        "change runtime",
-        "switch docker or native",
-        vec![
-            line("change runtime", PanelRole::Head),
-            line(
-                "choose how the daemon runs; takes effect on the next omnifs up",
-                PanelRole::Plain,
-            ),
-        ],
-    ));
-    rows.push(menu_row(
         "run checks",
         "diagnose with omnifs doctor",
         vec![
@@ -903,38 +820,22 @@ mod tests {
     use super::*;
 
     /// The review-mode add-a-provider path must never prompt for a mount
-    /// point: docker (explicit or defaulted) derives the in-container path.
+    /// point: it derives the resolved host default without asking.
     #[test]
-    fn add_provider_mount_point_is_prompt_free_under_docker() {
+    fn add_provider_mount_point_is_prompt_free() {
         assert_eq!(
-            add_provider_mount_point(Some(ConfiguredBackend::Docker)).unwrap(),
-            PathBuf::from(GUEST_MOUNT)
-        );
-        assert_eq!(
-            add_provider_mount_point(None).unwrap(),
-            PathBuf::from(GUEST_MOUNT)
+            add_provider_mount_point().unwrap(),
+            omnifs_workspace::layout::resolve_mount_point().unwrap()
         );
     }
 
     #[test]
-    fn ready_mount_location_uses_container_or_host_path() {
-        let docker = LaunchOutcome::Docker {
-            target: crate::launch_backend::DockerTarget::new(
-                "omnifs".to_string(),
-                "omnifs:dev".to_string(),
-            )
-            .unwrap(),
-        };
-        assert_eq!(
-            ready_mount_location(&docker, "github"),
-            format!("{GUEST_MOUNT}/github")
-        );
-
-        let native = LaunchOutcome::Native {
+    fn ready_mount_location_uses_host_path() {
+        let outcome = LaunchOutcome {
             mount_point: Some(PathBuf::from("/mnt/omnifs")),
         };
         assert_eq!(
-            ready_mount_location(&native, "github"),
+            ready_mount_location(&outcome, "github"),
             "/mnt/omnifs/github"
         );
     }

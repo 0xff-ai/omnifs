@@ -186,7 +186,7 @@ impl StatusReport {
                 ),
             Some(runtime) => {
                 let mp = WorkspaceLayout::display(&runtime.mount_point);
-                match &runtime.frontend {
+                match runtime.frontends.first() {
                     Some(frontend) => format!("{mp} ({})", frontend.fs_type),
                     None => format!("{mp} (not mounted)"),
                 }
@@ -435,7 +435,7 @@ impl StatusReport {
             version: env!("CARGO_PKG_VERSION").to_string(),
             runtime: runtime_json,
             mount: self.runtime.as_ref().and_then(|r| {
-                r.frontend.as_ref().map(|frontend| MountJson {
+                r.frontends.first().map(|frontend| MountJson {
                     source: frontend.source.clone(),
                     mount_point: r.mount_point.clone(),
                     fs_type: frontend.fs_type,
