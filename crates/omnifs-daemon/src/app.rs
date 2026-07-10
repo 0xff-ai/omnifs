@@ -235,7 +235,7 @@ pub fn run(args: DaemonArgs) -> anyhow::Result<()> {
     // Local-only dogfood counters. No config channel reaches the daemon today,
     // so the off-switch is the `OMNIFS_TELEMETRY` env var (the CLI propagates
     // its `[telemetry] enabled = false` into it when launching the daemon).
-    let telemetry_backend = context.telemetry_backend();
+    let telemetry_backend = telemetry::Backend::Native;
     let telemetry = TelemetrySink::new(context.config_dir(), telemetry::enabled_from_env());
     telemetry.daemon_event(DaemonEvent::DaemonStart, telemetry_backend, 0);
 

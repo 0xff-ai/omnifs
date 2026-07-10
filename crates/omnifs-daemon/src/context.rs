@@ -260,13 +260,6 @@ impl DaemonContext {
         &self.layout.providers_dir
     }
 
-    /// The launch backend mapped to the telemetry vocabulary, recorded on every
-    /// daemon lifecycle event. The daemon only ever runs host-native.
-    #[allow(clippy::unused_self)] // kept as a DaemonContext method for a uniform call site
-    pub(crate) fn telemetry_backend(&self) -> omnifs_workspace::telemetry::Backend {
-        omnifs_workspace::telemetry::Backend::Native
-    }
-
     /// The primary (first) frontend's mount point. Status and the shutdown
     /// report key on this; a single-frontend daemon has exactly one.
     ///
