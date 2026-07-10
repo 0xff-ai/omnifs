@@ -47,10 +47,8 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(target_os = "linux")]
 pub use beacon::spawn_ready_signal;
-pub use beacon::{ReadyPortError, ready_vsock_port_from_env, resolve_ready_vsock_port};
-pub use client::{
-    AttachTarget, AttachTargetError, WireNamespace, attach_target_from_env, resolve_attach_target,
-};
+pub use beacon::{ReadyPortError, resolve_ready_vsock_port};
+pub use client::{AttachTarget, AttachTargetError, WireNamespace, resolve_attach_target};
 pub use server::{serve_connection, serve_listener, serve_listener_tcp};
 
 /// The wire protocol version. Bumped on any incompatible change to the frame

@@ -53,9 +53,8 @@ pub fn resolve_ready_vsock_port() -> Result<Option<u32>, ReadyPortError> {
 
 /// The env-driven half of [`resolve_ready_vsock_port`], pulled out as a pure
 /// function of its one input so the parse/platform-check logic is
-/// unit-testable without mutating process environment (mirrors
-/// [`crate::attach_target_from_env`]).
-pub fn ready_vsock_port_from_env(value: Option<String>) -> Result<Option<u32>, ReadyPortError> {
+/// unit-testable without mutating process environment.
+fn ready_vsock_port_from_env(value: Option<String>) -> Result<Option<u32>, ReadyPortError> {
     let Some(value) = value else {
         return Ok(None);
     };

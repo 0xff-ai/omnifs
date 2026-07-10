@@ -134,7 +134,7 @@ pub fn resolve_attach_target(attach: Option<PathBuf>) -> Result<AttachTarget, At
 /// (vanishingly unlikely, and never how Docker names its bridge) resolves to
 /// the vsock form; there is no way to address a real host by that name that
 /// this grammar would rather preserve.
-pub fn attach_target_from_env(
+fn attach_target_from_env(
     addr: Option<String>,
     token: Option<String>,
 ) -> Result<AttachTarget, AttachTargetError> {
