@@ -100,7 +100,7 @@ fn enum_impl(args: &PathSegmentArgs, mut item: ItemEnum) -> syn::Result<TokenStr
 
     let enum_ident = &item.ident;
     let (impl_generics, ty_generics, where_clause) = item.generics.split_for_impl();
-    let from_str_impl = (!strum_derives.enum_string()).then(|| {
+    let from_str_impl = (!strum_derives.enum_string).then(|| {
         let match_arms = variants.iter().map(|(ident, name)| {
             quote! { #name => ::core::result::Result::Ok(Self::#ident), }
         });
@@ -119,7 +119,7 @@ fn enum_impl(args: &PathSegmentArgs, mut item: ItemEnum) -> syn::Result<TokenStr
             }
         }
     });
-    let display_impl = (!strum_derives.display()).then(|| {
+    let display_impl = (!strum_derives.display).then(|| {
         let match_arms = variants.iter().map(|(ident, name)| {
             quote! { Self::#ident => #name, }
         });
@@ -135,7 +135,7 @@ fn enum_impl(args: &PathSegmentArgs, mut item: ItemEnum) -> syn::Result<TokenStr
             }
         }
     });
-    let as_ref_impl = (!strum_derives.as_ref_str()).then(|| {
+    let as_ref_impl = (!strum_derives.as_ref_str).then(|| {
         let match_arms = variants.iter().map(|(ident, name)| {
             quote! { Self::#ident => #name, }
         });
@@ -267,18 +267,6 @@ impl StrumDerives {
         self.enum_string || self.display || self.as_ref_str
     }
 
-    fn enum_string(&self) -> bool {
-        self.enum_string
-    }
-
-    fn display(&self) -> bool {
-        self.display
-    }
-
-    fn as_ref_str(&self) -> bool {
-        self.as_ref_str
-    }
-
     fn from_attrs(attrs: &[Attribute]) -> Self {
         let mut out = Self::default();
         for attr in attrs.iter().filter(|attr| attr.path().is_ident("derive")) {
@@ -287,18 +275,15 @@ impl StrumDerives {
                 continue;
             };
             for path in paths {
-                let Some(ident) = path
-                    .segments
-                    .last()
-                    .map(|segment| segment.ident.to_string())
-                else {
+                let Some(ident) = path.segments.last().map(|segment| &segment.ident) else {
                     continue;
                 };
-                match ident.as_str() {
-                    "EnumString" => out.enum_string = true,
-                    "Display" => out.display = true,
-                    "AsRefStr" => out.as_ref_str = true,
-                    _ => {},
+                if ident == "EnumString" {
+                    out.enum_string = true;
+                } else if ident == "Display" {
+                    out.display = true;
+                } else if ident == "AsRefStr" {
+                    out.as_ref_str = true;
                 }
             }
         }
@@ -385,11 +370,13 @@ fn segment_name(ident: &Ident, serialize_all: Option<&str>) -> syn::Result<Strin
 fn words(name: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut current = String::new();
-    let chars: Vec<char> = name.chars().collect();
-    for (idx, ch) in chars.iter().copied().enumerate() {
-        if idx > 0 && ch.is_ascii_uppercase() {
-            let prev = chars[idx - 1];
-            let next = chars.get(idx + 1).copied();
+    let mut chars = name.chars().peekable();
+    let mut previous: Option<char> = None;
+    while let Some(ch) = chars.next() {
+        if let Some(prev) = previous
+            && ch.is_ascii_uppercase()
+        {
+            let next = chars.peek().copied();
             if (prev.is_ascii_lowercase()
                 || prev.is_ascii_digit()
                 || next.is_some_and(|next| next.is_ascii_lowercase()))
@@ -400,6 +387,7 @@ fn words(name: &str) -> Vec<String> {
             }
         }
         current.push(ch);
+        previous = Some(ch);
     }
     if !current.is_empty() {
         out.push(current.to_ascii_lowercase());
@@ -411,19 +399,21 @@ fn is_string_type(ty: &Type) -> bool {
     let Type::Path(TypePath { qself: None, path }) = ty else {
         return false;
     };
-    let idents: Vec<String> = path
-        .segments
-        .iter()
-        .map(|segment| segment.ident.to_string())
-        .collect();
-    matches!(
-        idents.as_slice(),
-        [ident] if ident == "String"
-    ) || matches!(
-        idents.as_slice(),
-        [root, string, ident]
-            if (root == "std" || root == "alloc") && string == "string" && ident == "String"
-    )
+    let mut segments = path.segments.iter();
+    match (
+        segments.next(),
+        segments.next(),
+        segments.next(),
+        segments.next(),
+    ) {
+        (Some(string), None, None, None) => string.ident == "String",
+        (Some(root), Some(module), Some(string), None) => {
+            (root.ident == "std" || root.ident == "alloc")
+                && module.ident == "string"
+                && string.ident == "String"
+        },
+        _ => false,
+    }
 }
 
 fn method_vis(struct_vis: &Visibility) -> TokenStream2 {
