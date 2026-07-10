@@ -344,13 +344,10 @@ impl<B> OpenTable<B> {
             .iter()
             .filter_map(|entry| should_remove(entry.value()).then(|| *entry.key()))
             .collect::<Vec<_>>();
-        let mut removed = Vec::with_capacity(stale.len());
-        for key in stale {
-            if let Some((_, state)) = self.states.remove(&key) {
-                removed.push(state.body);
-            }
-        }
-        removed
+        stale
+            .into_iter()
+            .filter_map(|key| self.states.remove(&key).map(|(_, state)| state.body))
+            .collect()
     }
 }
 

@@ -92,7 +92,12 @@ pub fn mount_blocking(
         options.trace_path.clone(),
     )?;
     let _state_file =
-        StateFile::write(mount_point, server.addr(), &options.state_dir).map_err(state_error)?;
+        StateFile::write(mount_point, server.addr(), &options.state_dir).map_err(|error| {
+            match error {
+                StateError::Io(error) => error.into(),
+                StateError::Json(error) => NfsFrontendError::State(error.to_string()),
+            }
+        })?;
 
     // Restart case: the kernel client still holds the mount, so serve the export
     // over the same port without remounting. A first start (or a stale, dead
@@ -113,14 +118,7 @@ pub fn mount_blocking(
         "NFS loopback mount established"
     );
 
-    match wait_for_mount_exit(mount_point, signal_rx)? {
-        MountExit::Unmounted => {
-            tracing::info!("NFS mount exited");
-        },
-        MountExit::Interrupted => {
-            tracing::info!("NFS mount interrupted and unmounted");
-        },
-    }
+    wait_for_mount_exit(mount_point, signal_rx)?;
 
     drop(server);
     Ok(())
@@ -163,13 +161,6 @@ fn filehandle_generation(
             state_path,
         }),
     ))
-}
-
-fn state_error(error: StateError) -> NfsFrontendError {
-    match error {
-        StateError::Io(error) => error.into(),
-        StateError::Json(error) => NfsFrontendError::State(error.to_string()),
-    }
 }
 
 fn mount_client(mount_point: &Path, addr: SocketAddr) -> Result<(), NfsFrontendError> {
@@ -449,11 +440,6 @@ fn normalize_mount_path(path: &Path) -> PathBuf {
     path.components().collect()
 }
 
-enum MountExit {
-    Unmounted,
-    Interrupted,
-}
-
 fn ctrl_c_receiver(rt: &Handle) -> mpsc::Receiver<()> {
     let (tx, rx) = mpsc::channel();
     std::mem::drop(rt.spawn(async move {
@@ -472,12 +458,13 @@ fn ctrl_c_receiver(rt: &Handle) -> mpsc::Receiver<()> {
 fn wait_for_mount_exit(
     mount_point: &Path,
     signal_rx: mpsc::Receiver<()>,
-) -> Result<MountExit, NfsFrontendError> {
+) -> Result<(), NfsFrontendError> {
     let mut signal_rx = Some(signal_rx);
 
     loop {
         if !mount_is_active(mount_point) {
-            return Ok(MountExit::Unmounted);
+            tracing::info!("NFS mount exited");
+            return Ok(());
         }
 
         if wait_interval_or_signal(&mut signal_rx) {
@@ -487,7 +474,8 @@ fn wait_for_mount_exit(
             );
             unmount(mount_point)?;
             wait_until_inactive(mount_point)?;
-            return Ok(MountExit::Interrupted);
+            tracing::info!("NFS mount interrupted and unmounted");
+            return Ok(());
         }
     }
 }
