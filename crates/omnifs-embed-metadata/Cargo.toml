@@ -13,9 +13,7 @@ name = "omnifs-embed-metadata"
 path = "src/main.rs"
 
 [dependencies]
-omnifs-sdk = { workspace = true }
 omnifs-workspace = { workspace = true }
-omnifs-caps = { workspace = true }
 serde_json = { workspace = true }
 omnifs-provider-arxiv = { version = "0.2.1", path = "../../providers/arxiv" }
 omnifs-provider-db = { version = "0.2.1", path = "../../providers/db" }

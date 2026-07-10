@@ -15,7 +15,6 @@ omnifs-sdk-macros = { workspace = true }
 omnifs-wit = { workspace = true }
 hashbrown = { workspace = true }
 http = { workspace = true }
-mime = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 hex = { workspace = true }
