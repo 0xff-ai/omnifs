@@ -3025,6 +3025,7 @@ dependencies = [
  "anstream",
  "anyhow",
  "arboard",
+ "blake3",
  "bollard",
  "bytes",
  "clap",

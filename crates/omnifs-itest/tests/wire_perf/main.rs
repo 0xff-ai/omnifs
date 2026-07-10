@@ -7,7 +7,7 @@
 //! - **Lane 1 (in-process).** The daemon serves the platform-default host-native
 //!   frontend itself (the native path the conformance matrix uses).
 //! - **Lane 2 (wire).** A namespace-only daemon (`--attach-socket`) plus an
-//!   out-of-process `omnifs frontend --kind nfs` runner attached to it, so every
+//!   out-of-process `omnifs frontend run --kind nfs` runner attached to it, so every
 //!   filesystem op crosses the namespace wire.
 //!
 //! The lanes run sequentially, never two mounts at once, under one held NFS

@@ -39,6 +39,10 @@ pub struct ConfigSystem {
     /// Daemon launch backend, recorded by `omnifs setup`. Unset falls back to
     /// the platform default (host-native).
     pub runtime: Option<ConfiguredBackend>,
+    /// Override for the optional Docker-hosted FUSE frontend's image.
+    /// `[system].runtime` never references the frontend: it is an opt-in
+    /// attachment to a host-native daemon, not a daemon runtime mode.
+    pub frontend_image: Option<String>,
 }
 
 /// Daemon launch backend. `omnifs setup` records the default choice; `omnifs up`

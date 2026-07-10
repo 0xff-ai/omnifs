@@ -670,6 +670,7 @@ mod tests {
                         runtime: Some(ConfiguredBackend::Docker),
                         image: Some("ghcr.io/example/config:1.0.0".into()),
                         container_name: Some("omnifs-config".into()),
+                        ..Default::default()
                     },
                     ..Default::default()
                 };

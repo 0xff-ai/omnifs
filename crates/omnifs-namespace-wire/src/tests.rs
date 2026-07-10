@@ -515,7 +515,7 @@ async fn tcp_listener_end_to_end() {
 
     let namespace = WireNamespace::attach(
         AttachTarget::Tcp {
-            addr,
+            addr: addr.to_string(),
             token: "secret-token".to_string(),
         },
         tokio::runtime::Handle::current(),
@@ -542,7 +542,7 @@ async fn tcp_listener_rejects_wrong_token() {
 
     let result = WireNamespace::attach(
         AttachTarget::Tcp {
-            addr,
+            addr: addr.to_string(),
             token: "wrong-token".to_string(),
         },
         tokio::runtime::Handle::current(),
@@ -575,7 +575,7 @@ async fn tcp_reconnect_fires_reattached_on_new_instance() {
     let token = "secret-token".to_string();
 
     let attach_target = AttachTarget::Tcp {
-        addr,
+        addr: addr.to_string(),
         token: token.clone(),
     };
     let attach_task = rt.spawn(WireNamespace::attach(attach_target, rt.clone()));

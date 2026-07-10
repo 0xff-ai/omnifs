@@ -23,10 +23,18 @@ impl<'a> DaemonTeardown<'a> {
 
     /// Stop the daemon and reclaim its backend. The backend is identified from
     /// the live daemon or the runtime record, never from `[system].runtime`.
+    ///
+    /// Tears down a running Docker-hosted FUSE frontend first: it attaches to
+    /// the daemon's namespace, so stopping the daemon out from under it would
+    /// leave an orphaned, non-functional container.
     pub(crate) async fn down(&self, force: bool) -> anyhow::Result<()> {
         let layout = self.workspace.layout();
         let record_path = layout.runtime_record_file();
         let nfs_state_dir = layout.nfs_state_dir();
+
+        if let Err(error) = crate::commands::frontend::down::teardown(layout).await {
+            anstream::eprintln!("⚠  Frontend container teardown failed: {error:#}");
+        }
 
         match self.resolve_running_backend().await? {
             Some(RunningBackend::Live { status, backend }) => {

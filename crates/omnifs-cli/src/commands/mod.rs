@@ -2,6 +2,7 @@ pub mod completions;
 pub mod debug;
 pub mod doctor;
 pub mod down;
+pub mod frontend;
 pub mod init;
 pub mod inspect;
 pub mod logs;

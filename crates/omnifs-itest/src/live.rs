@@ -359,7 +359,7 @@ pub fn start_multi_frontend_daemon(kinds: &[&str]) -> Option<MultiFrontendDaemon
 }
 
 /// A namespace-only `omnifs daemon` (one attach socket, no in-process frontend)
-/// plus an out-of-process `omnifs frontend` runner attached to it. Torn down on
+/// plus an out-of-process `omnifs frontend run` runner attached to it. Torn down on
 /// drop: the frontend first (it owns the mount), then the daemon.
 pub struct WireFrontendDaemon {
     daemon: Child,
@@ -416,7 +416,7 @@ fn wait_briefly(child: &mut Child) {
 }
 
 /// Bring up a namespace-only daemon serving one attach socket, then an
-/// out-of-process `omnifs frontend --kind <kind>` attached to it. Proves the
+/// out-of-process `omnifs frontend run --kind <kind>` attached to it. Proves the
 /// projected tree serves out of process over the namespace wire.
 ///
 /// Returns `None` (skip) when the platform cannot mount or a surface never comes
@@ -527,6 +527,7 @@ fn wire_frontend(kind: &str, nfs_lock: Option<TcpListener>) -> Option<WireFronte
     let frontend = Command::new(omnifs_bin())
         .args([
             "frontend",
+            "run",
             "--attach",
             socket.to_str().expect("socket path utf-8"),
             "--kind",
@@ -540,7 +541,7 @@ fn wire_frontend(kind: &str, nfs_lock: Option<TcpListener>) -> Option<WireFronte
     let mut frontend = match frontend {
         Ok(child) => child,
         Err(error) => {
-            eprintln!("skip: spawn omnifs frontend failed: {error}");
+            eprintln!("skip: spawn omnifs frontend run failed: {error}");
             let _ = daemon.kill();
             let _ = daemon.wait();
             return None;

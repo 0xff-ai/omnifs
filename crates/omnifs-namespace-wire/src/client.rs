@@ -9,7 +9,6 @@
 //! on a different daemon instance fires an [`AttachEvent::Reattached`].
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -49,12 +48,16 @@ const ATTACH_CAPACITY: usize = 16;
 /// `Unix` is the host-native path: auth is filesystem permissions on the
 /// socket, so no token is sent. `Tcp` is the Docker Desktop path: the
 /// containerized frontend cannot share a host Unix socket into the Linux VM it
-/// runs in, so it dials TCP loopback instead and proves itself with the
-/// daemon's per-instance attach token.
+/// runs in, so it dials TCP instead and proves itself with the daemon's
+/// per-instance attach token. `addr` is a `host:port` string rather than a
+/// pre-resolved `SocketAddr` because the Docker-hosted frontend dials the
+/// `host.docker.internal` name Docker injects into the container's DNS, not a
+/// literal address the CLI could resolve ahead of time; `TcpStream::connect`
+/// resolves it same as any other socket address type.
 #[derive(Debug, Clone)]
 pub enum AttachTarget {
     Unix(PathBuf),
-    Tcp { addr: SocketAddr, token: String },
+    Tcp { addr: String, token: String },
 }
 
 impl std::fmt::Display for AttachTarget {
@@ -530,7 +533,7 @@ async fn connect_once(target: &AttachTarget) -> Result<(Connection, String), Wir
             handshake_over(stream, None).await
         },
         AttachTarget::Tcp { addr, token } => {
-            let stream = TcpStream::connect(addr).await?;
+            let stream = TcpStream::connect(addr.as_str()).await?;
             handshake_over(stream, Some(token.clone())).await
         },
     }

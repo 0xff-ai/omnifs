@@ -29,8 +29,9 @@ use hyper_util::client::legacy::Client as HyperClient;
 use hyper_util::rt::TokioExecutor;
 use hyperlocal::{UnixConnector, Uri as UnixUri};
 use omnifs_api::{
-    API_MAJOR, API_MINOR, ApiError, CredentialStatus, DaemonStatus, ErrorCode, MountReport,
-    MountUpdateRequest, ProviderSummary, ReconcileReport, StopReport, UpgradeDelta,
+    API_MAJOR, API_MINOR, ApiError, AttachListenersReport, AttachListenersRequest,
+    CredentialStatus, DaemonStatus, ErrorCode, MountReport, MountUpdateRequest, ProviderSummary,
+    ReconcileReport, StopReport, UpgradeDelta,
 };
 use omnifs_workspace::authn::CredentialId;
 use omnifs_workspace::layout::WorkspaceLayout;
@@ -467,6 +468,25 @@ impl DaemonClient {
             .await?
             .ok_or_else(|| self.unavailable_error())?;
         Self::parse_ok_json(&raw, "daemon reconcile request failed")
+    }
+
+    /// Ensure the daemon's TCP namespace attach listener is bound (idempotent:
+    /// a repeat call, with any port, returns the already-bound address and
+    /// token). This is the addr+token the Docker-hosted FUSE frontend dials
+    /// at `host.docker.internal:<port>`.
+    pub(crate) async fn attach_listeners(&self, port: u16) -> Result<AttachListenersReport> {
+        let body = serde_json::to_value(AttachListenersRequest { port })
+            .context("serialize attach-listeners request")?;
+        let raw = self
+            .request(
+                Method::POST,
+                "/v1/attach-listeners",
+                Some(&body),
+                REQUEST_TIMEOUT,
+            )
+            .await?
+            .ok_or_else(|| self.unavailable_error())?;
+        Self::parse_ok_json(&raw, "daemon attach-listeners request failed")
     }
 
     pub(crate) async fn create_mount_if_ready(&self, spec: &Spec) -> Result<Option<MountReport>> {

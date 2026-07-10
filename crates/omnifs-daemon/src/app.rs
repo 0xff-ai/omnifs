@@ -57,7 +57,7 @@ pub struct DaemonArgs {
     pub frontends: Vec<FrontendMount>,
     /// Serve the shared namespace over an attach socket at
     /// `$OMNIFS_HOME/frontends/<name>.sock`, repeatable. An out-of-process
-    /// `omnifs frontend` runner attaches to it. A daemon with an attach socket
+    /// `omnifs frontend run` runner attaches to it. A daemon with an attach socket
     /// and no `--frontend` serves the namespace only (no in-process mount).
     /// `<name>` is a bare `[a-z0-9-]+` label.
     #[arg(long = "attach-socket", value_name = "NAME", value_parser = parse_attach_socket_name)]

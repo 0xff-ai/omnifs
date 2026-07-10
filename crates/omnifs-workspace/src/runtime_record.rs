@@ -82,6 +82,20 @@ pub struct AttachRecord {
 pub struct FrontendRecord {
     pub kind: FrontendKind,
     pub mount_point: PathBuf,
+    /// How this frontend is delivered. Absent for a host-native frontend
+    /// (today's only shape); `Some(Via::Docker)` for the opt-in Docker-hosted
+    /// FUSE frontend attached to a host-native daemon's TCP namespace listener.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via: Option<Via>,
+}
+
+/// How a frontend reaches the shared namespace. Distinct from `RecordedBackend`,
+/// which names the daemon's own delivery: a host-native daemon can still host a
+/// Docker-delivered frontend attached over the TCP namespace listener.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Via {
+    Docker,
 }
 
 /// Frontend protocol, owned here so the record does not depend on the daemon or
@@ -232,6 +246,7 @@ mod tests {
             vec![FrontendRecord {
                 kind: FrontendKind::Nfs,
                 mount_point: PathBuf::from("/home/u/omnifs"),
+                via: None,
             }],
         )
     }
@@ -317,6 +332,45 @@ mod tests {
     }
 
     #[test]
+    fn frontend_via_docker_round_trips_and_omits_when_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(RUNTIME_RECORD_FILE);
+        let mut record = sample_native();
+        record.frontends.push(FrontendRecord {
+            kind: FrontendKind::Fuse,
+            mount_point: PathBuf::from("/omnifs"),
+            via: Some(Via::Docker),
+        });
+        record.write(&path).unwrap();
+
+        let read = RuntimeRecord::read(&path).unwrap().unwrap();
+        assert_eq!(read.frontends[1].via, Some(Via::Docker));
+        assert_eq!(read.frontends[0].via, None);
+
+        let json = serde_json::to_value(&record).unwrap();
+        assert_eq!(json["frontends"][1]["via"], "docker");
+        assert!(
+            json["frontends"][0].get("via").is_none(),
+            "an absent via must not serialize as a null field: {json}"
+        );
+    }
+
+    /// An older writer's JSON shape (no `via` key on a frontend entry) must
+    /// still parse, reading back as `None`.
+    #[test]
+    fn frontend_without_via_reads_back_as_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(RUNTIME_RECORD_FILE);
+        std::fs::write(
+            &path,
+            r#"{"version":1,"endpoint":{"kind":"unix","path":"/x"},"backend":"native","pid":1,"instance_id":"x","frontends":[{"kind":"fuse","mount_point":"/omnifs"}],"started_at":"2026-07-07T00:00:00Z"}"#,
+        )
+        .unwrap();
+        let read = RuntimeRecord::read(&path).unwrap().unwrap();
+        assert_eq!(read.frontends[0].via, None);
+    }
+
+    #[test]
     fn docker_round_trips_and_reports_container() {
         let record = RuntimeRecord::new(
             Endpoint::Tcp {
@@ -331,6 +385,7 @@ mod tests {
             vec![FrontendRecord {
                 kind: FrontendKind::Fuse,
                 mount_point: PathBuf::from("/omnifs"),
+                via: None,
             }],
         );
         let dir = tempfile::tempdir().unwrap();
