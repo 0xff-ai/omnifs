@@ -235,9 +235,8 @@ For runtime behavior, validate through the container:
 
 ```bash
 just dev -y
-docker exec omnifs /bin/zsh -lc 'omnifs status'
-docker exec omnifs /bin/zsh -lc 'OMNIFS_DEMO_MODE=smoke /tmp/demo.sh'
-docker exec omnifs /bin/zsh -lc 'tail -n 80 /tmp/omnifs.log'
+omnifs status
+tail -n 80 ~/.omnifs-dev/cache/daemon.log
 ```
 
 ## Roadmap

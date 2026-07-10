@@ -7,25 +7,18 @@
 # shellcheck disable=SC2034
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
-# Build one of the top-level Dockerfile's release-style final stages for one
-# platform: a minimal image with a prebuilt Linux `omnifs` binary injected as
-# the `omnifs-bin` build context, never compiling inside Docker. Shared by
-# build-runtime-image.sh and build-frontend-image.sh so the buildx mechanics
-# have one owner; only the target stage, image default, and launcher-version
-# label differ between the two callers.
+# Build the top-level Dockerfile's `frontend-release` stage for one platform:
+# a minimal image with a prebuilt Linux `omnifs` binary injected as the
+# `omnifs-bin` build context, never compiling inside Docker.
 #
-# $1: the Dockerfile stage to build (`runtime-release` or `frontend-release`).
-# $2: "true" to bake OMNIFS_MIN_LAUNCHER_VERSION as a build arg (the runtime
-#     image's launcher-compat label; the frontend image carries no such label,
-#     since `launch_frontend_container` never checks one), default "true".
+# $1: the Dockerfile stage to build (`frontend-release`).
 #
 # Reads IMAGE (required), PLATFORM, PUSH, METADATA_FILE, OMNIFS_BINARY,
-# OMNIFS_LINUX_TARGET, OMNIFS_MIN_LAUNCHER_VERSION from the environment (all
-# optional beyond IMAGE). Writes image/platform/digest to $GITHUB_OUTPUT when
-# set, and to stdout unconditionally.
+# OMNIFS_LINUX_TARGET from the environment (all optional beyond IMAGE). Writes
+# image/platform/digest to $GITHUB_OUTPUT when set, and to stdout
+# unconditionally.
 build_release_stage_image() {
   local dockerfile_target="$1"
-  local with_launcher_version="${2:-true}"
 
   local image="${IMAGE:?IMAGE must be set}"
   local platform="${PLATFORM:-}"
@@ -70,20 +63,11 @@ build_release_stage_image() {
     output_arg=(--push)
   fi
 
-  local build_args=()
-  if [[ "$with_launcher_version" == "true" ]]; then
-    if [[ -z "${OMNIFS_MIN_LAUNCHER_VERSION:-}" ]]; then
-      OMNIFS_MIN_LAUNCHER_VERSION="$(awk -F'"' '/^version = / {print $2; exit}' "$root/Cargo.toml")"
-    fi
-    build_args+=(--build-arg "OMNIFS_MIN_LAUNCHER_VERSION=${OMNIFS_MIN_LAUNCHER_VERSION}")
-  fi
-
   docker buildx build "${output_arg[@]}" \
     --metadata-file "$metadata_file" \
     --platform "$platform" \
     --target "$dockerfile_target" \
     --build-context "omnifs-bin=$bindir" \
-    "${build_args[@]}" \
     -t "$image" \
     -f "$root/Dockerfile" \
     "$root"

@@ -175,7 +175,7 @@ Gates that must be in place:
 | `.github/actions/omnifs-just` | Installs the pinned `just` version in CI |
 | `scripts/ci/build-linux-zigbuild.sh` | Native Linux CLI build helper for the glibc baseline |
 | `scripts/ci/build-darwin-zigbuild.sh` | Linux-hosted Darwin cross-link helper |
-| `scripts/ci/build-runtime-image.sh` | Runtime image assembly from prebuilt CLI and WASM artifacts |
+| `scripts/ci/build-frontend-image.sh` | Frontend image assembly from a prebuilt CLI binary |
 | `.github/workflows/release-pr.yml` | Release coordinator: standing PR + tag |
 | `.github/workflows/release.yml` | Post-CI ship |
 | `scripts/ci/promote-image.sh` | `sha-*` → semver GHCR tags |

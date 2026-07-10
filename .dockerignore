@@ -22,12 +22,6 @@
 !wit/
 !wit/**
 
-# Runtime scripts copied by the Dockerfile.
-!scripts/
-!scripts/demo.sh
-!scripts/container-entrypoint.sh
-!scripts/container-zshrc.zsh
-
 # Docker metadata needed for rebuilds, but not for image contents.
 !Dockerfile
 !.dockerignore
