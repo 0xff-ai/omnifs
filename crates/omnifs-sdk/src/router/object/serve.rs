@@ -13,7 +13,6 @@ use crate::error::{ProviderError, Result};
 use crate::file_attrs::{FileAttrs, FileProj, ProjBytes, ReadMode, Size, Stability, VersionToken};
 use crate::object::{FacetMetadata, Key, Load, Object};
 use crate::repr::RenderTable;
-use omnifs_core::ContentType;
 
 /// The typed runtime side of a mounted object.
 pub(super) struct ObjectRoute<O: Object> {
@@ -164,6 +163,11 @@ where
             return Ok(ReadOutcome::NotFound(None));
         }
         let stability = (self.stability)(&key);
+        let serve = ServeCtx {
+            render_table: &self.render_table,
+            leaves: &self.leaves,
+            stability,
+        };
 
         let anchor = key.anchor(O::kind());
         let matched_cached = cached.as_ref().filter(|push| push.matches_anchor(&anchor));
@@ -171,12 +175,7 @@ where
         if let Some(push) = matched_cached
             && !push.revalidate
         {
-            return ServeCtx {
-                render_table: &self.render_table,
-                leaves: &self.leaves,
-                stability,
-            }
-            .serve_warm(&key, target, &push.bytes, push.validator.clone());
+            return serve.serve_warm(&key, target, &push.bytes, push.validator.clone());
         }
 
         let since = matched_cached.and_then(|p| p.validator.clone());
@@ -193,12 +192,7 @@ where
                     )
                 })?;
                 let validator = matched_cached.and_then(|p| p.validator.clone());
-                return ServeCtx {
-                    render_table: &self.render_table,
-                    leaves: &self.leaves,
-                    stability,
-                }
-                .serve_warm(&key, target, bytes, validator);
+                return serve.serve_warm(&key, target, bytes, validator);
             },
             Load::NotFound => return Ok(ReadOutcome::NotFound(Some(anchor))),
         };
@@ -244,12 +238,7 @@ where
             }
         }
         self.lower_preloads(&mut effects, preloads, &anchor_base, stability)?;
-        ServeCtx {
-            render_table: &self.render_table,
-            leaves: &self.leaves,
-            stability,
-        }
-        .serve_fresh(
+        serve.serve_fresh(
             &value,
             &key,
             target,
@@ -486,8 +475,11 @@ impl<O: Object> ServeCtx<'_, O> {
                     ));
                 }
                 let rendered = self.render_table.serve(ct, bytes)?;
+                let size = Size::Exact(u64::try_from(rendered.len()).unwrap_or(u64::MAX));
                 Ok(ReadOutcome::Found(
-                    body_file_content(rendered, ct, self.stability, validator)
+                    FileContent::new(rendered)
+                        .with_attrs(representation_attrs(size, self.stability, validator))
+                        .with_content_type(ct)
                         .with_effects(effects),
                 ))
             },
@@ -519,23 +511,15 @@ impl<O: Object> ServeCtx<'_, O> {
                 && leaf_name == name
             {
                 let content = computed(value, key)?.to_browse_content()?;
-                let size = content_size(&content);
+                let size = content
+                    .content()
+                    .map_or(0, |bytes| u64::try_from(bytes.len()).unwrap_or(u64::MAX));
                 let content = content.with_attrs(FileAttrs::new(Size::Exact(size), self.stability));
                 return Ok(ReadOutcome::Found(content.with_effects(effects)));
             }
         }
         Err(ProviderError::not_found(format!("field {name} not found")))
     }
-}
-
-// ===========================================================================
-// Small lowering helpers
-// ===========================================================================
-
-fn content_size(content: &FileContent) -> u64 {
-    content
-        .content()
-        .map_or(0, |b| u64::try_from(b.len()).unwrap_or(u64::MAX))
 }
 
 fn representation_attrs(
@@ -549,16 +533,4 @@ fn representation_attrs(
     } else {
         attrs
     }
-}
-
-pub(super) fn body_file_content(
-    bytes: Vec<u8>,
-    ct: ContentType,
-    stability: Stability,
-    validator: Option<VersionToken>,
-) -> FileContent {
-    let size = Size::Exact(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
-    FileContent::new(bytes)
-        .with_attrs(representation_attrs(size, stability, validator))
-        .with_content_type(ct)
 }
