@@ -46,7 +46,7 @@ See the [provider SDK contract](https://github.com/0xff-ai/omnifs/blob/main/docs
 
 ```toml
 [dependencies]
-omnifs-sdk = "0.1"
+omnifs-sdk = "0.2"
 ```
 
 Add `crate-type = ["cdylib", "lib"]` and target `wasm32-wasip2`.
