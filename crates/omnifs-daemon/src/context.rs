@@ -44,12 +44,12 @@ fn check_uds_path_length(path: &Path) -> anyhow::Result<()> {
 #[derive(Debug)]
 pub(crate) struct DaemonContext {
     layout: WorkspaceLayout,
-    /// The requested frontend set, each with its own mount point. Never empty:
-    /// an absent `--frontend` flag resolves to the single platform default at the
-    /// resolved mount point. The first entry is the primary, so a single-mount
-    /// caller keeps today's behavior.
+    /// The requested frontend set, each with its own mount point. An absent
+    /// `--frontend` flag resolves to the single platform default at the resolved
+    /// mount point, unless attach sockets make this a namespace-only daemon with
+    /// an empty set. The first entry is the primary, so a single-mount caller
+    /// keeps today's behavior.
     frontends: Vec<FrontendMount>,
-    backend: DaemonBackend,
     /// Optional debug/test TCP control listener beside the always-on Unix socket.
     listen: Option<SocketAddr>,
     /// Random per-start id reported in status and written to the runtime record.
@@ -89,28 +89,35 @@ struct ProcessInfo {
 
 impl DaemonContext {
     pub(crate) fn resolve(args: DaemonArgs) -> anyhow::Result<Self> {
+        let DaemonArgs {
+            nfs_port,
+            nfs_state_dir,
+            nfs_trace,
+            listen,
+            frontends,
+            attach_sockets,
+            attach_tcp,
+        } = args;
         let workspace: Workspace<Daemon> = Workspace::resolve()?;
         let layout = workspace.into_layout();
-        let attach_sockets = resolve_attach_sockets(&args.attach_sockets)?;
+        let attach_sockets = resolve_attach_sockets(attach_sockets)?;
         // A daemon asked for an attach socket but no `--frontend` serves the
         // namespace only: do not inject the platform default in-process frontend.
-        let frontends = resolve_frontends(args.frontends.clone(), attach_sockets.is_empty())?;
+        let frontends = resolve_frontends(frontends, attach_sockets.is_empty())?;
         let process = ProcessInfo::current();
-        let backend = DaemonBackend::Native { pid: process.pid };
         let nfs = NfsContext {
-            bind: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), args.nfs_port),
-            state_dir: args.nfs_state_dir.unwrap_or_else(|| layout.nfs_state_dir()),
-            trace_path: args.nfs_trace,
+            bind: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), nfs_port),
+            state_dir: nfs_state_dir.unwrap_or_else(|| layout.nfs_state_dir()),
+            trace_path: nfs_trace,
         };
 
         Ok(Self {
             layout,
             frontends,
-            backend,
-            listen: args.listen,
+            listen,
             instance_id: generate_instance_id(),
             attach_sockets,
-            attach_tcp: args.attach_tcp,
+            attach_tcp,
             nfs,
             process,
         })
@@ -409,7 +416,9 @@ impl DaemonContext {
             cache_dir: self.layout.cache_dir.clone(),
             providers_dir: self.layout.providers_dir.clone(),
             frontends: serving,
-            backend: self.backend.clone(),
+            backend: DaemonBackend::Native {
+                pid: self.process.pid,
+            },
             mounts,
             failed,
             health,
@@ -439,7 +448,7 @@ impl DaemonContext {
             SubsystemHealth::new(
                 DaemonSubsystem::Backend,
                 HealthState::Healthy,
-                backend_health_message(&self.backend),
+                format!("native daemon pid {}", self.process.pid),
             ),
             self.frontend_health(serving, attach_serving),
             mount_health(mounts, failed, credential_degraded),
@@ -491,11 +500,6 @@ impl DaemonContext {
         };
         SubsystemHealth::new(DaemonSubsystem::Frontend, state, message)
     }
-}
-
-fn backend_health_message(backend: &DaemonBackend) -> String {
-    let DaemonBackend::Native { pid } = backend;
-    format!("native daemon pid {pid}")
 }
 
 /// `credential_degraded` is `(mount, reason)` for a mount whose auth was not
@@ -574,7 +578,7 @@ fn resolve_frontends(
 
     let mut seen = std::collections::HashSet::new();
     for frontend in &requested {
-        if !seen.insert(frontend.mount_point.clone()) {
+        if !seen.insert(frontend.mount_point.as_path()) {
             anyhow::bail!(
                 "duplicate frontend mount point {}",
                 frontend.mount_point.display()
@@ -591,14 +595,14 @@ fn resolve_frontends(
 /// Validate the requested attach-socket names: each is a bare `[a-z0-9-]+` label
 /// (the CLI parser already enforces the charset; this rejects duplicates, which
 /// would collide on one socket path).
-fn resolve_attach_sockets(requested: &[String]) -> anyhow::Result<Vec<String>> {
+fn resolve_attach_sockets(requested: Vec<String>) -> anyhow::Result<Vec<String>> {
     let mut seen = std::collections::HashSet::new();
-    for name in requested {
-        if !seen.insert(name.clone()) {
+    for name in &requested {
+        if !seen.insert(name.as_str()) {
             anyhow::bail!("duplicate attach socket name `{name}`");
         }
     }
-    Ok(requested.to_vec())
+    Ok(requested)
 }
 
 impl ProcessInfo {
