@@ -104,12 +104,18 @@ fn daemon_required_command_exits_3_when_control_port_is_unreachable() {
     assert!(stderr.contains("daemon not running"));
 }
 
+/// `omnifs up` validates every configured mount's host-managed credential
+/// before spawning the daemon (see `Launcher::launch`'s `preflight_mounts`),
+/// so a missing credential fails fast with exit code 4 and never reaches
+/// `launch_native` — this fixture's `OMNIFS_DAEMON_ADDR=127.0.0.1:9` would
+/// make a real spawn attempt hang/fail loudly, which is exactly what this
+/// test must not trigger.
 #[test]
 fn missing_mount_credential_exits_4() {
     let fixture = Fixture::new();
     fixture.write_static_token_mount_without_credential();
 
-    let output = fixture.run(&["up", "--runtime", "docker"]);
+    let output = fixture.run(&["up"]);
 
     assert_eq!(exit_code(&output), 4);
     let stderr = String::from_utf8_lossy(&output.stderr);

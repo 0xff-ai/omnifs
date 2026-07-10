@@ -10,11 +10,12 @@ use omnifs_workspace::creds::FileStore;
 
 use crate::auth::{AuthProbeSeverity, AuthProbeSummary};
 use crate::cli::OutputFormat;
+use crate::frontend_container::{frontend_container_name, resolve_frontend_image};
 use crate::launch_backend::{DockerTarget, ImageRef, names_registry};
 use crate::runtime::Runtime;
 use crate::status::UserMountStatus;
 use crate::workspace::Workspace;
-use omnifs_workspace::layout::WorkspaceLayout;
+use omnifs_workspace::layout::{OMNIFS_HOME_ENV, WorkspaceLayout};
 use omnifs_workspace::provider::{Catalog, DirStatus};
 
 #[derive(Args, Debug, Clone, Default)]
@@ -46,10 +47,8 @@ impl DoctorArgs {
     pub async fn run(self) -> anyhow::Result<DoctorVerdict> {
         let workspace = Workspace::resolve()?;
         let mounts = workspace.mounts()?;
-        let docker_target = workspace
-            .config()
-            .and_then(|config| DockerTarget::resolve(None, None, &config))
-            .map_err(|error| format!("resolve target: {error:#}"));
+        let docker_target = resolve_frontend_target(&workspace)
+            .map_err(|error: anyhow::Error| format!("resolve target: {error:#}"));
         Doctor {
             workspace: &workspace,
             paths: workspace.layout(),
@@ -63,11 +62,27 @@ impl DoctorArgs {
     }
 }
 
+/// The optional Docker-hosted FUSE frontend's target, probed by the
+/// `docker reachable`/`image cached` diagnostics. The daemon itself always
+/// runs host-native, so there is no daemon Docker target to resolve here.
+fn resolve_frontend_target(workspace: &Workspace) -> anyhow::Result<DockerTarget> {
+    let config = workspace.config()?;
+    let paths = workspace.layout();
+    let image = resolve_frontend_image(None, &config)?;
+    let is_default_home = std::env::var_os(OMNIFS_HOME_ENV).is_none();
+    let container_name = frontend_container_name(&paths.config_dir, is_default_home)?;
+    DockerTarget::new(
+        container_name.as_str().to_string(),
+        image.as_str().to_string(),
+    )
+}
+
 struct Doctor<'a> {
     workspace: &'a Workspace,
     paths: &'a WorkspaceLayout,
     catalog: &'a Catalog,
     mounts: Vec<crate::mount_config::MountConfig>,
+    /// The frontend's Docker target, or the error resolving it.
     docker_target: Result<DockerTarget, String>,
     output: OutputFormat,
 }
@@ -298,7 +313,9 @@ impl Doctor<'_> {
         }
         #[cfg(not(target_os = "linux"))]
         {
-            ProbeResult::Skipped("macOS: containerized FUSE")
+            ProbeResult::Skipped(
+                "macOS: native mount is NFS loopback; FUSE runs only inside the optional frontend container",
+            )
         }
     }
 
@@ -307,14 +324,14 @@ impl Doctor<'_> {
             Ok(_) => ProbeResult::Ok(format!("{image} cached")),
             Err(bollard::errors::Error::DockerResponseServerError {
                 status_code: 404, ..
-            }) if names_registry(image.as_str()) => {
-                ProbeResult::Warn(format!("{image} not cached (will pull on `omnifs up`)"))
-            },
+            }) if names_registry(image.as_str()) => ProbeResult::Warn(format!(
+                "{image} not cached (will pull on `omnifs frontend up`)"
+            )),
             Err(bollard::errors::Error::DockerResponseServerError {
                 status_code: 404, ..
             }) => ProbeResult::Err(format!(
-                "{image} not present locally; a dev image is never pulled, so `omnifs up` \
-                 cannot start (build it with `just dev --build-only`)"
+                "{image} not present locally; a dev image is never pulled, so `omnifs frontend up` \
+                 cannot start (build it with `just frontend-image`)"
             )),
             Err(error) => ProbeResult::Err(format!("inspect: {error}")),
         }

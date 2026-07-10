@@ -40,12 +40,10 @@ pub(crate) const fn default_frontend_image_for(channel: BuildChannel) -> &'stati
     }
 }
 
-/// Resolve the frontend image through the same flag > env > config > default
-/// precedence chain as the daemon's own runtime image (`DockerTarget::resolve_image`),
-/// gated on the same build channel: a release binary defaults to the pinned
-/// registry tag, a dev binary defaults to the local `omnifs-frontend:dev` tag
-/// and never pulls. The image itself is built in a later slice; this
-/// resolution is exercised without Docker.
+/// Resolve the frontend image through the flag > env > config > default
+/// precedence chain (see [`crate::config::resolve_setting`]), gated on the
+/// build channel: a release binary defaults to the pinned registry tag, a dev
+/// binary defaults to the local `omnifs-frontend:dev` tag and never pulls.
 pub(crate) fn resolve_frontend_image(
     image: Option<String>,
     config: &Config,
@@ -237,7 +235,6 @@ mod tests {
             let config = Config {
                 system: ConfigSystem {
                     frontend_image: Some("ghcr.io/example/frontend-config:1.0.0".into()),
-                    ..Default::default()
                 },
                 ..Default::default()
             };

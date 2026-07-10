@@ -5,13 +5,11 @@ use anyhow::Context as _;
 use crate::app::{DaemonArgs, FrontendKind, FrontendMount};
 use omnifs_api::{
     API_MAJOR, API_MINOR, DaemonBackend, DaemonHealth, DaemonStatus, DaemonSubsystem, FrontendInfo,
-    HealthState, MountFailure, MountInfo, OMNIFS_CONTAINER_NAME_ENV, OMNIFS_IMAGE_ENV,
-    SubsystemHealth,
+    HealthState, MountFailure, MountInfo, SubsystemHealth,
 };
 use omnifs_engine::HostContext;
 use omnifs_nfs::NfsMountOptions;
 use omnifs_workspace::layout::{Daemon, Workspace, WorkspaceLayout};
-use omnifs_workspace::mounts::materialize::MaterializationMode;
 use omnifs_workspace::runtime_record::{
     Endpoint, FrontendKind as RecordFrontendKind, FrontendRecord, RecordedBackend, RuntimeRecord,
 };
@@ -79,14 +77,7 @@ impl DaemonContext {
         // namespace only: do not inject the platform default in-process frontend.
         let frontends = resolve_frontends(args.frontends.clone(), attach_sockets.is_empty())?;
         let process = ProcessInfo::current();
-        let backend = if args.host_native {
-            DaemonBackend::Native { pid: process.pid }
-        } else {
-            DaemonBackend::Docker {
-                container_name: std::env::var(OMNIFS_CONTAINER_NAME_ENV).unwrap_or_default(),
-                image: std::env::var(OMNIFS_IMAGE_ENV).unwrap_or_default(),
-            }
-        };
+        let backend = DaemonBackend::Native { pid: process.pid };
         let nfs = NfsContext {
             bind: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), args.nfs_port),
             state_dir: args.nfs_state_dir.unwrap_or_else(|| layout.nfs_state_dir()),
@@ -248,17 +239,14 @@ impl DaemonContext {
     }
 
     /// The launch backend mapped to the telemetry vocabulary, recorded on every
-    /// daemon lifecycle event.
+    /// daemon lifecycle event. The daemon only ever runs host-native.
+    #[allow(clippy::unused_self)] // kept as a DaemonContext method for a uniform call site
     pub(crate) fn telemetry_backend(&self) -> omnifs_workspace::telemetry::Backend {
-        match &self.backend {
-            DaemonBackend::Native { .. } => omnifs_workspace::telemetry::Backend::Native,
-            DaemonBackend::Docker { .. } => omnifs_workspace::telemetry::Backend::Docker,
-        }
+        omnifs_workspace::telemetry::Backend::Native
     }
 
-    /// The primary (first) frontend's mount point. Status, the shutdown report,
-    /// and the container root-symlink nicety key on this; a single-frontend
-    /// daemon has exactly one.
+    /// The primary (first) frontend's mount point. Status and the shutdown
+    /// report key on this; a single-frontend daemon has exactly one.
     ///
     /// Smallest defensible interpretation for a namespace-only daemon (attach
     /// sockets, no in-process frontend): it has no OS mount point, so this
@@ -335,13 +323,6 @@ impl DaemonContext {
         &self.frontends
     }
 
-    pub(crate) fn materialization_mode(&self) -> MaterializationMode {
-        match &self.backend {
-            DaemonBackend::Native { .. } => MaterializationMode::HostNative,
-            DaemonBackend::Docker { .. } => MaterializationMode::Docker,
-        }
-    }
-
     pub(crate) fn nfs_mount_options(&self) -> NfsMountOptions {
         let mut options = NfsMountOptions::loopback(self.nfs.state_dir.clone());
         options.bind = self.nfs.bind;
@@ -378,7 +359,6 @@ impl DaemonContext {
             config_dir: self.layout.config_dir.clone(),
             cache_dir: self.layout.cache_dir.clone(),
             providers_dir: self.layout.providers_dir.clone(),
-            frontend: serving.first().cloned(),
             frontends: serving,
             backend: self.backend.clone(),
             mounts,
@@ -465,16 +445,8 @@ impl DaemonContext {
 }
 
 fn backend_health_message(backend: &DaemonBackend) -> String {
-    match backend {
-        DaemonBackend::Native { pid } => format!("native daemon pid {pid}"),
-        DaemonBackend::Docker {
-            container_name,
-            image,
-        } if !container_name.is_empty() && !image.is_empty() => {
-            format!("docker container {container_name} from {image}")
-        },
-        DaemonBackend::Docker { .. } => "docker container identity unavailable".to_string(),
-    }
+    let DaemonBackend::Native { pid } = backend;
+    format!("native daemon pid {pid}")
 }
 
 /// `credential_degraded` is `(mount, reason)` for a mount whose auth was not

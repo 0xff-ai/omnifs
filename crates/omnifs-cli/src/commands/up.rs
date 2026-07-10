@@ -2,18 +2,15 @@
 
 use clap::Args;
 
-use crate::config::ConfiguredBackend;
-use crate::launch::{LaunchOutcome, Launcher};
-use crate::launch_backend::GUEST_MOUNT;
+use crate::launch::Launcher;
 use crate::workspace::Workspace;
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct UpArgs {
-    /// Runtime for this launch only, overriding the default chosen during
-    /// `omnifs setup`. Not persisted: the next bare `omnifs up` uses the
-    /// configured default again.
-    #[arg(long, value_enum)]
-    pub runtime: Option<ConfiguredBackend>,
+    /// Skip auto-starting the Docker-hosted FUSE frontend on macOS. No effect
+    /// on Linux, where the frontend stays manual (`omnifs frontend up`).
+    #[arg(long)]
+    pub no_frontend: bool,
     /// Wait until /v1/ready answers, failing with exit code 3 on timeout.
     #[arg(long, value_name = "DURATION")]
     pub wait: Option<String>,
@@ -27,34 +24,50 @@ impl UpArgs {
             .as_deref()
             .map(crate::stages::parse_wait_duration)
             .transpose()?;
-        let launcher = Launcher::new(&workspace, "omnifs up").with_runtime_override(self.runtime);
-        match launcher.launch().await? {
-            LaunchOutcome::Native { mount_point } => {
-                anstream::eprintln!();
-                if let Some(mount_point) = mount_point {
-                    anstream::eprintln!(
-                        "Browse it directly: `{}`",
-                        crate::style::bold(format!("ls {}", mount_point.display())),
-                    );
-                }
-            },
-            LaunchOutcome::Docker { target } => {
-                anstream::eprintln!(
-                    "✓ {GUEST_MOUNT} is mounted inside `{}`",
-                    target.container_name()
-                );
-                anstream::eprintln!();
-                anstream::eprintln!(
-                    "Run `{}` to open a shell inside the container and browse {GUEST_MOUNT}.",
-                    crate::style::bold("omnifs shell"),
-                );
-            },
+        let outcome = Launcher::new(&workspace, "omnifs up").launch().await?;
+        anstream::eprintln!();
+        if let Some(mount_point) = &outcome.mount_point {
+            anstream::eprintln!(
+                "Browse it directly: `{}`",
+                crate::style::bold(format!("ls {}", mount_point.display())),
+            );
         }
+
+        // macOS's primary consumption surface is the Docker-hosted FUSE
+        // frontend; the native NFS mount above stays available either way.
+        // Linux never auto-starts it: the native FUSE host mount is already
+        // the primary surface there, and the frontend stays opt-in.
+        if cfg!(target_os = "macos") && !self.no_frontend {
+            start_frontend().await;
+        }
+
         if let Some(timeout) = wait {
             crate::stages::wait_until_ready(&workspace, timeout).await?;
             anstream::eprintln!("Daemon is ready.");
         }
         crate::telemetry::maybe_print_health_nudge(&workspace).await;
         Ok(())
+    }
+}
+
+/// Auto-start the Docker-hosted FUSE frontend. The daemon's own native mount
+/// has already succeeded by the time this runs, so a failure here (most
+/// commonly: Docker is not running) is reported plainly and does not fail
+/// `omnifs up` — the native mount stays usable, and `omnifs frontend up` can
+/// be retried once Docker is available.
+async fn start_frontend() {
+    anstream::eprintln!();
+    anstream::eprintln!("Starting the Docker-hosted FUSE frontend...");
+    if let Err(error) = crate::commands::frontend::up::FrontendUpArgs::default()
+        .run()
+        .await
+    {
+        anstream::eprintln!("⚠  Could not start the Docker-hosted FUSE frontend: {error:#}");
+        anstream::eprintln!(
+            "{}",
+            crate::ui::note(
+                "the native mount above is still available; run `omnifs frontend up` to retry, or pass --no-frontend to skip it"
+            )
+        );
     }
 }

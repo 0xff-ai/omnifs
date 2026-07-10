@@ -71,35 +71,15 @@ impl Fixture {
     }
 
     fn read_fixture_file(&self) -> Vec<u8> {
+        // The daemon always runs host-native, so the mount is always
+        // host-visible; there is no container fallback to fall back to.
         let host_path = self.mount_point.join("test/hello/message");
-        if host_path.is_file() {
-            return std::fs::read(&host_path).expect("read fixture file through host mount");
-        }
-
-        let status = self.run(&["status", "--json"]);
-        assert_eq!(
-            exit_code(&status),
-            0,
-            "status --json must succeed before docker fallback\nstderr: {}",
-            String::from_utf8_lossy(&status.stderr)
-        );
-        let json: serde_json::Value =
-            serde_json::from_slice(&status.stdout).expect("status stdout json");
-        let container = json["runtime"]["backend"]["container_name"]
-            .as_str()
-            .or_else(|| json["runtime"]["container_name"].as_str())
-            .unwrap_or("omnifs");
-        let output = Command::new("docker")
-            .args(["exec", container, "cat", "/omnifs/test/hello/message"])
-            .output()
-            .expect("docker exec cat fixture file");
-        assert!(
-            output.status.success(),
-            "docker read failed\nstdout: {}\nstderr: {}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        output.stdout
+        std::fs::read(&host_path).unwrap_or_else(|error| {
+            panic!(
+                "read fixture file through host mount {}: {error}",
+                host_path.display()
+            )
+        })
     }
 
     fn force_unmount(&self) {

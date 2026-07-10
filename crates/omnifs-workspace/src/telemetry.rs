@@ -64,12 +64,13 @@ pub enum DaemonEvent {
     DaemonStop,
 }
 
-/// The launch backend the daemon is running under, recorded alongside events so
-/// the reporter can split sessions by runtime.
+/// The launch backend the daemon is running under, recorded alongside events.
+/// The daemon only ever runs host-native; kept as a named type (rather than
+/// dropped from the record) so the on-disk schema stays stable and the
+/// reporter script does not need a shape change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Backend {
-    Docker,
     Native,
 }
 
@@ -235,8 +236,8 @@ mod tests {
     fn daemon_event_appends_one_json_line_per_call() {
         let tmp = tempfile::tempdir().unwrap();
         let sink = TelemetrySink::new(tmp.path(), true);
-        sink.daemon_event(DaemonEvent::DaemonStart, Backend::Docker, 0);
-        sink.daemon_event(DaemonEvent::FrontendServing, Backend::Docker, 3);
+        sink.daemon_event(DaemonEvent::DaemonStart, Backend::Native, 0);
+        sink.daemon_event(DaemonEvent::FrontendServing, Backend::Native, 3);
 
         let path = tmp.path().join(TELEMETRY_SUBDIR).join(DAEMON_FILE);
         let contents = std::fs::read_to_string(&path).unwrap();
@@ -245,7 +246,7 @@ mod tests {
 
         let first: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
         assert_eq!(first["event"], "daemon_start");
-        assert_eq!(first["backend"], "docker");
+        assert_eq!(first["backend"], "native");
         assert_eq!(first["mounts"], 0);
         assert!(first["ts"].as_str().unwrap().contains('T'), "ts is rfc3339");
 
