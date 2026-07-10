@@ -94,7 +94,7 @@ impl MountSnapshot {
     }
 
     fn from_mount_objects(mount: &str, objects: &object::MountObjects) -> Result<Self> {
-        let files = SnapshotFiles::from_entries(objects.canonical_entries()?)?.into_inner();
+        let files = SnapshotFiles::from_entries(objects.canonical_entries()?)?.files;
         let index = SnapshotIndex::new(mount.to_string(), &files);
         Ok(Self { index, files })
     }
@@ -204,10 +204,11 @@ impl SnapshotFiles {
         let mut paths = BTreeSet::new();
 
         for entry in entries {
-            let Some(wit_id) = ObjectId::from_bytes(entry.id.clone()).to_wit() else {
+            let object_id = ObjectId::from_bytes(entry.id);
+            let Some(wit_id) = object_id.to_wit() else {
                 bail!(
                     "object cache row has an undecodable logical id: {}",
-                    hex::encode(&entry.id)
+                    hex::encode(object_id.as_bytes())
                 );
             };
             let logical_id = SnapshotLogicalId::from_wit(wit_id);
@@ -234,10 +235,6 @@ impl SnapshotFiles {
 
         files.sort_by(|a, b| a.path.cmp(&b.path));
         Ok(Self { files })
-    }
-
-    fn into_inner(self) -> Vec<SnapshotFile> {
-        self.files
     }
 }
 
