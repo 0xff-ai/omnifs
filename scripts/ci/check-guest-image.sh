@@ -1,39 +1,7 @@
 #!/usr/bin/env bash
 # Static, fail-closed assertions against a built krunkit guest disk image.
-# Runs entirely inside a throwaway privileged Linux container regardless of
-# host OS: loop-mounting a GPT disk image needs losetup and kernel ext4/vfat
-# drivers, which macOS has no native equivalent for, so this behaves
-# identically on a contributor's macOS workstation and on the
-# guest-image-arm64 CI runner (ubuntu-24.04-arm).
-#
-# Checks common to every profile:
-#   - /usr/local/bin/omnifs-fuse is present and executable.
-#   - The six omnifs-*.service/.socket unit files are present under
-#     /etc/systemd/system, and the three that declare [Install] are enabled
-#     (symlinked under multi-user.target.wants/): omnifs-seed-mount.service,
-#     omnifs-frontend.service, omnifs-ssh-setup.service. The other three
-#     (omnifs-dropbear.service, omnifs-ssh.service, omnifs-ssh.socket) are
-#     present but deliberately not statically enabled — see
-#     omnifs-ssh.socket's own header comment for why an always-on listener
-#     would be a footgun with no seed-installed key. This script therefore
-#     checks presence for all six and enablement for exactly the three that
-#     declare it, not "four enabled" as a single number.
-#   - No cloud-init anywhere (no /etc/cloud, no *cloud-init* path in the
-#     image): this guest is a plain config-drive consumer
-#     (scripts/guest-image/make-seed-iso.sh), never a NoCloud datasource.
-#
-# Additional checks for the release profile:
-#   - /etc/shadow's root entry is locked (`*` or `!` password field, or
-#     empty entirely absent — mkosi never writes the field when
-#     RootPassword= is unset, leaving Debian's own locked default).
-#   - No autologin drop-in on console-getty.service, getty@tty1.service, or
-#     serial-getty@hvc0.service (mkosi only ever writes these three; see
-#     configure_autologin() in mkosi's own source).
-#
+# The privileged container makes the loop-mount checks portable to macOS.
 # Usage: check-guest-image.sh IMAGE_PATH PROFILE
-#   IMAGE_PATH  the built omnifs-guest.raw, or a .raw.zst (decompressed to a
-#               scratch file first)
-#   PROFILE     dev | release — selects which assertions apply
 set -euo pipefail
 
 image_path="${1:?usage: check-guest-image.sh IMAGE_PATH PROFILE}"
@@ -141,7 +109,7 @@ note "checking for cloud-init"
 if [[ -d /mnt/root/etc/cloud ]]; then
   violation "found /etc/cloud; this guest must never carry cloud-init"
 fi
-if find /mnt/root -iname '*cloud-init*' 2>/dev/null | grep -q .; then
+if find /mnt/root -iname '*cloud-init*' -print -quit 2>/dev/null | grep -q .; then
   violation "found a cloud-init-named path in the image"
 fi
 

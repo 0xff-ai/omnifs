@@ -49,12 +49,10 @@ bun scripts/dev.ts \
 # mount actually talks to GitHub, not just that a frontend booted.
 read_first_open_issue_title() {
   local issues_dir="$1/0xff-ai/omnifs/issues/open"
-  local first_issue
-  first_issue="$(ls -1 "$issues_dir" | head -n 1)"
-  test -n "$first_issue"
-  test -f "$issues_dir/$first_issue/title"
+  local issues=("$issues_dir"/*)
+  test -f "${issues[0]}/title"
   local title
-  title="$(cat "$issues_dir/$first_issue/title")"
+  title="$(cat "${issues[0]}/title")"
   test -n "$title"
   echo "$title"
 }
@@ -70,8 +68,8 @@ test -n "$frontend"
 title_in_container="$(docker exec "$frontend" sh -c '
   set -eu
   dir=/omnifs/github/0xff-ai/omnifs/issues/open
-  first=$(ls "$dir" | head -n 1)
-  cat "$dir/$first/title"
+  set -- "$dir"/*
+  cat "$1/title"
 ')"
 test -n "$title_in_container"
 
