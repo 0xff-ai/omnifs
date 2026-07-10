@@ -29,9 +29,9 @@ use hyper_util::client::legacy::Client as HyperClient;
 use hyper_util::rt::TokioExecutor;
 use hyperlocal::{UnixConnector, Uri as UnixUri};
 use omnifs_api::{
-    API_MAJOR, API_MINOR, ApiError, AttachListenersReport, AttachListenersRequest,
-    AttachVsockListenerReport, CredentialStatus, DaemonStatus, ErrorCode, MountReport,
-    MountUpdateRequest, ProviderSummary, ReconcileReport, StopReport, UpgradeDelta,
+    API_MAJOR, API_MINOR, ApiError, CredentialStatus, DaemonStatus, ErrorCode,
+    FrontendAttachTargetReport, FrontendAttachTargetRequest, FrontendAttachTargetVsockReport,
+    MountReport, MountUpdateRequest, ProviderSummary, ReconcileReport, StopReport, UpgradeDelta,
 };
 use omnifs_workspace::authn::CredentialId;
 use omnifs_workspace::layout::WorkspaceLayout;
@@ -456,45 +456,47 @@ impl DaemonClient {
         Self::parse_ok_json(&raw, "daemon reconcile request failed")
     }
 
-    /// Ensure the daemon's TCP namespace attach listener is bound (idempotent:
-    /// a repeat call returns the already-bound address and token). Native
-    /// Linux supplies its Docker bridge gateway; Docker Desktop uses the
-    /// default loopback bind.
-    pub(crate) async fn attach_listeners(
+    /// Fetch the TCP attach target a frontend dials, binding the daemon's
+    /// listener if needed (idempotent: a repeat call returns the already-bound
+    /// address and token). Native Linux supplies its Docker bridge gateway;
+    /// Docker Desktop uses the default loopback bind.
+    pub(crate) async fn frontend_attach_target(
         &self,
         bind_ip: Option<std::net::Ipv4Addr>,
-    ) -> Result<AttachListenersReport> {
-        let body = serde_json::to_value(AttachListenersRequest { bind_ip })
-            .context("serialize attach-listeners request")?;
+    ) -> Result<FrontendAttachTargetReport> {
+        let body = serde_json::to_value(FrontendAttachTargetRequest { bind_ip })
+            .context("serialize attach-target request")?;
         let raw = self
             .request(
                 Method::POST,
-                "/v1/attach-listeners",
+                "/v1/frontend/attach-target",
                 Some(&body),
                 REQUEST_TIMEOUT,
             )
             .await?
             .ok_or_else(|| self.unavailable_error())?;
-        Self::parse_ok_json(&raw, "daemon attach-listeners request failed")
+        Self::parse_ok_json(&raw, "daemon attach-target request failed")
     }
 
-    /// Ensure the daemon's token-checking UDS namespace attach listener is
-    /// bound (idempotent: a repeat call returns the already-bound path and
-    /// token). This is the krunkit-on-macOS path: the guest dials host vsock
-    /// and krunkit proxies every connection onto this socket, so `token` (not
-    /// filesystem permissions) authenticates every attach handshake it
-    /// carries.
-    pub(crate) async fn attach_listeners_vsock(&self) -> Result<AttachVsockListenerReport> {
+    /// Fetch the vsock attach target a frontend dials, binding the daemon's
+    /// token-checking UDS namespace attach listener if needed (idempotent: a
+    /// repeat call returns the already-bound path and token). This is the
+    /// krunkit-on-macOS path: the guest dials host vsock and krunkit proxies
+    /// every connection onto this socket, so `token` (not filesystem
+    /// permissions) authenticates every attach handshake it carries.
+    pub(crate) async fn frontend_attach_target_vsock(
+        &self,
+    ) -> Result<FrontendAttachTargetVsockReport> {
         let raw = self
             .request(
                 Method::POST,
-                "/v1/attach-listeners/vsock",
+                "/v1/frontend/attach-target/vsock",
                 None,
                 REQUEST_TIMEOUT,
             )
             .await?
             .ok_or_else(|| self.unavailable_error())?;
-        Self::parse_ok_json(&raw, "daemon attach-listeners vsock request failed")
+        Self::parse_ok_json(&raw, "daemon attach-target vsock request failed")
     }
 
     pub(crate) async fn create_mount_if_ready(&self, spec: &Spec) -> Result<Option<MountReport>> {

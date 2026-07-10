@@ -51,7 +51,7 @@ pub enum RecordedBackend {
 /// A bound TCP namespace attach listener: the Docker Desktop path, where a
 /// containerized frontend cannot share this host's Unix socket into the Linux
 /// VM it runs in, so it dials TCP loopback with `token` instead. Bound eagerly
-/// at daemon start (`--attach-tcp`) or later via `POST /v1/attach-listeners`;
+/// at daemon start (`--attach-tcp`) or later via `POST /v1/frontend/attach-target`;
 /// absent when TCP attach was never requested, matching the other UDS-only
 /// attach transport, which needs no record entry at all (filesystem
 /// permissions are its whole auth story).

@@ -63,7 +63,7 @@ pub struct DaemonArgs {
     /// Docker Desktop path: a containerized frontend cannot share a host Unix
     /// socket into the Linux VM it runs in, so it dials TCP instead. Absent:
     /// no TCP attach listener at start (one can still be bound later on a
-    /// running daemon via `POST /v1/attach-listeners`).
+    /// running daemon via `POST /v1/frontend/attach-target`).
     #[arg(long = "attach-tcp", value_name = "PORT")]
     pub attach_tcp: Option<u16>,
 }
@@ -332,7 +332,7 @@ pub fn run(args: DaemonArgs) -> anyhow::Result<()> {
     // construction). Both the in-process renderers and the attach-socket
     // listeners serve this same `TreeNamespace`.
     let namespace = omnifs_engine::TreeNamespace::new(Arc::clone(&registry), rt.clone());
-    // Give the daemon a handle to the namespace so `POST /v1/attach-listeners`
+    // Give the daemon a handle to the namespace so `POST /v1/frontend/attach-target`
     // can bind a TCP attach listener on a running daemon without a restart.
     daemon.set_namespace(Arc::clone(&namespace));
 
@@ -437,7 +437,7 @@ fn publish_runtime_record(record: Option<&RuntimeRecord>, path: &std::path::Path
 
 /// Bind the TCP namespace attach listener eagerly when `--attach-tcp` was
 /// passed. Goes through the same idempotent `ensure_attach_tcp` path
-/// `POST /v1/attach-listeners` uses later, so both entry points converge on one
+/// `POST /v1/frontend/attach-target` uses later, so both entry points converge on one
 /// binding and one runtime-record update. A bind failure is logged rather than
 /// fatal: the daemon still serves its other requested surfaces.
 fn bind_startup_attach_tcp(daemon: &Arc<server::Daemon>, port: Option<u16>, rt: &Handle) {
