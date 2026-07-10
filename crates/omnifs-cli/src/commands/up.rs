@@ -7,7 +7,7 @@ use crate::workspace::Workspace;
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct UpArgs {
-    /// Skip auto-starting the Docker-hosted FUSE frontend on macOS. No effect
+    /// Skip auto-starting the virtualized FUSE frontend on macOS. No effect
     /// on Linux, where the frontend stays manual (`omnifs frontend up`).
     #[arg(long)]
     pub no_frontend: bool,
@@ -33,12 +33,12 @@ impl UpArgs {
             );
         }
 
-        // macOS's primary consumption surface is the Docker-hosted FUSE
+        // macOS's primary consumption surface is the virtualized FUSE
         // frontend; the native NFS mount above stays available either way.
         // Linux never auto-starts it: the native FUSE host mount is already
         // the primary surface there, and the frontend stays opt-in.
         if cfg!(target_os = "macos") && !self.no_frontend {
-            start_frontend().await;
+            start_frontend(&workspace).await;
         }
 
         if let Some(timeout) = wait {
@@ -50,19 +50,26 @@ impl UpArgs {
     }
 }
 
-/// Auto-start the Docker-hosted FUSE frontend. The daemon's own native mount
-/// has already succeeded by the time this runs, so a failure here (most
-/// commonly: Docker is not running) is reported plainly and does not fail
-/// `omnifs up` — the native mount stays usable, and `omnifs frontend up` can
-/// be retried once Docker is available.
-async fn start_frontend() {
+/// Auto-start the virtualized FUSE frontend, under the configured `[frontend]
+/// driver` (docker by default; `FrontendUpArgs::default()` carries no
+/// explicit `--driver` override, so it resolves the same config value
+/// `omnifs frontend up` would). The daemon's own native mount has already
+/// succeeded by the time this runs, so a failure here (most commonly: the
+/// driver's runtime is not available, or an unimplemented driver was
+/// configured) is reported plainly and does not fail `omnifs up` — the
+/// native mount stays usable, and `omnifs frontend up` can be retried once
+/// the driver is available.
+async fn start_frontend(workspace: &Workspace) {
     anstream::eprintln!();
-    anstream::eprintln!("Starting the Docker-hosted FUSE frontend...");
+    let driver_label = workspace
+        .config()
+        .map_or("docker", |config| config.frontend.driver.as_via().label());
+    anstream::eprintln!("Starting the {driver_label} frontend...");
     if let Err(error) = crate::commands::frontend::up::FrontendUpArgs::default()
         .run()
         .await
     {
-        anstream::eprintln!("⚠  Could not start the Docker-hosted FUSE frontend: {error:#}");
+        anstream::eprintln!("⚠  Could not start the {driver_label} frontend: {error:#}");
         anstream::eprintln!(
             "{}",
             crate::ui::note(

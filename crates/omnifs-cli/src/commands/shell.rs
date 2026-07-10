@@ -24,7 +24,7 @@ use anyhow::{Context, Result};
 use clap::Args;
 use omnifs_api::MountInfo;
 
-use crate::frontend_backend::{DockerBackend, FrontendBackend};
+use crate::frontend_backend::{DockerBackend, FrontendBackend, krunkit_unimplemented};
 use crate::frontend_container::FRONTEND_DEV_IMAGE;
 use crate::launch_backend::{ContainerName, DockerTarget, GUEST_MOUNT};
 use crate::runtime::Runtime;
@@ -61,18 +61,20 @@ impl ShellArgs {
         // daemon required to discover either.
         let record = RuntimeRecord::read(&paths.runtime_record_file())?;
 
-        // The Docker-hosted FUSE frontend's mount lives inside the container,
-        // not on the host, so a host subshell can never see it; prefer it when
-        // attached (it is macOS's primary consumption surface).
-        let frontend_attached = record.as_ref().is_some_and(|record| {
-            record
-                .frontends
-                .iter()
-                .any(|frontend| frontend.via == Some(Via::Docker))
-        });
-        if frontend_attached {
-            let container_name = frontend_container_name(paths)?;
-            return self.exec_in_container(&container_name);
+        // The virtualized FUSE frontend's mount lives inside its guest, not on
+        // the host, so a host subshell can never see it; prefer it when
+        // attached (it is macOS's primary consumption surface). Dispatches to
+        // the backend named by the recorded `via`.
+        let recorded_via = record
+            .as_ref()
+            .and_then(|record| record.frontends.iter().find_map(|frontend| frontend.via));
+        match recorded_via {
+            Some(Via::Docker) => {
+                let container_name = frontend_container_name(paths)?;
+                return self.exec_in_container(&container_name);
+            },
+            Some(Via::Krunkit) => return Err(krunkit_unimplemented()),
+            None => {},
         }
 
         let Some(record) = record else {

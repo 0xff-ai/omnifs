@@ -16,7 +16,7 @@ use clap::Args;
 use omnifs_workspace::layout::OMNIFS_HOME_ENV;
 use omnifs_workspace::runtime_record::{FrontendKind, FrontendRecord, RuntimeRecord, Via};
 
-use crate::frontend_backend::{DockerBackend, FrontendBackend, FrontendLaunchSpec};
+use crate::frontend_backend::{DockerBackend, Driver, FrontendBackend, FrontendLaunchSpec};
 use crate::frontend_container::{frontend_container_name, resolve_frontend_image};
 use crate::launch::Launcher;
 use crate::launch_backend::{DockerTarget, GUEST_MOUNT};
@@ -30,16 +30,26 @@ const MOUNT_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const MOUNT_PROBE_INTERVAL: Duration = Duration::from_millis(200);
 
 #[derive(Args, Debug, Clone, Default)]
-pub struct FrontendUpArgs {}
+pub struct FrontendUpArgs {
+    /// Which virtualized runtime hosts the frontend. Defaults to the
+    /// `[frontend] driver` config value, or docker if that is unset too.
+    #[arg(long, value_enum)]
+    pub driver: Option<Driver>,
+}
 
 impl FrontendUpArgs {
     pub async fn run(self) -> anyhow::Result<()> {
         let workspace = Workspace::resolve()?;
         let paths = workspace.layout().clone();
+        let config = workspace.config()?;
+
+        // Fail fast on an unimplemented driver selection, before touching
+        // the daemon or Docker at all.
+        let driver = self.driver.unwrap_or(config.frontend.driver);
+        driver.require_implemented()?;
 
         ensure_native_daemon(&workspace).await?;
 
-        let config = workspace.config()?;
         let image = resolve_frontend_image(None, &config)?;
         let is_default_home = std::env::var_os(OMNIFS_HOME_ENV).is_none();
         let container_name = frontend_container_name(&paths.config_dir, is_default_home)?;
@@ -78,7 +88,7 @@ impl FrontendUpArgs {
         let mount_name = first_mount_name(&workspace)?;
         wait_for_mount(&backend, &mount_name).await?;
 
-        record_frontend_via_docker(&paths.runtime_record_file());
+        record_frontend(&paths.runtime_record_file(), driver.as_via());
 
         anstream::eprintln!(
             "✓ {GUEST_MOUNT} is mounted inside `{}`",
@@ -142,21 +152,22 @@ async fn wait_for_mount(backend: &impl FrontendBackend, mount_name: &str) -> any
     }
 }
 
-/// Append (or replace) the Docker-hosted frontend's entry in the host-native
+/// Append (or replace) the virtualized frontend's entry in the host-native
 /// daemon's on-disk runtime record with a read-modify-write, mirroring how
 /// the daemon itself patches in its TCP attach binding
 /// (`Daemon::persist_attach_record`). Best-effort: a failure here does not
 /// unwind the already-running frontend, since the daemon owns the record's
 /// lifecycle and will rewrite it wholesale on its next restart anyway.
-fn record_frontend_via_docker(record_path: &std::path::Path) {
+///
+/// Drops any prior virtualized frontend entry regardless of which backend it
+/// was delivered by: at most one virtualized frontend is recorded at a time.
+fn record_frontend(record_path: &std::path::Path, via: Via) {
     let patched = RuntimeRecord::update(record_path, |record| {
-        record
-            .frontends
-            .retain(|frontend| frontend.via != Some(Via::Docker));
+        record.frontends.retain(|frontend| frontend.via.is_none());
         record.frontends.push(FrontendRecord {
             kind: FrontendKind::Fuse,
             mount_point: std::path::PathBuf::from(GUEST_MOUNT),
-            via: Some(Via::Docker),
+            via: Some(via),
         });
     });
     match patched {

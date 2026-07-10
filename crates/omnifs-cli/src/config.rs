@@ -14,6 +14,7 @@ use std::str::FromStr;
 pub struct Config {
     pub system: ConfigSystem,
     pub telemetry: ConfigTelemetry,
+    pub frontend: ConfigFrontend,
 }
 
 /// Local-only dogfood telemetry policy. On by default; `[telemetry] enabled =
@@ -39,6 +40,16 @@ pub struct ConfigSystem {
     /// mode to configure here; this is an opt-in attachment
     /// (`omnifs frontend up`), not a daemon launch policy.
     pub frontend_image: Option<String>,
+}
+
+/// Driver selection for the optional virtualized FUSE frontend
+/// (`omnifs frontend up`). Kept apart from [`ConfigSystem`] since it names a
+/// choice of frontend delivery, not the daemon's own (always host-native)
+/// runtime.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ConfigFrontend {
+    pub driver: crate::frontend_backend::Driver,
 }
 
 impl Config {
@@ -107,6 +118,27 @@ mod tests {
 
         // A typo'd key is rejected by the strict parser.
         std::fs::write(&path, "[telemetry]\nenabbled = false\n").unwrap();
+        assert!(Config::load(&path).is_err());
+    }
+
+    #[test]
+    fn frontend_driver_defaults_docker_and_parses_krunkit() {
+        use crate::frontend_backend::Driver;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+
+        // Absent config: the frontend driver defaults to docker.
+        let default = Config::load(&path).unwrap();
+        assert_eq!(default.frontend.driver, Driver::Docker);
+
+        // Explicit krunkit selection parses, even with no implementation yet.
+        std::fs::write(&path, "[frontend]\ndriver = \"krunkit\"\n").unwrap();
+        let krunkit = Config::load(&path).unwrap();
+        assert_eq!(krunkit.frontend.driver, Driver::Krunkit);
+
+        // A typo'd key is rejected by the strict parser.
+        std::fs::write(&path, "[frontend]\ndrver = \"docker\"\n").unwrap();
         assert!(Config::load(&path).is_err());
     }
 }

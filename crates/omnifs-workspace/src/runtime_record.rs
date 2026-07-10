@@ -69,19 +69,37 @@ pub struct FrontendRecord {
     pub kind: FrontendKind,
     pub mount_point: PathBuf,
     /// How this frontend is delivered. Absent for a host-native frontend
-    /// (today's only shape); `Some(Via::Docker)` for the opt-in Docker-hosted
-    /// FUSE frontend attached to a host-native daemon's TCP namespace listener.
+    /// (today's only shape); `Some(Via::Docker)` or `Some(Via::Krunkit)` for
+    /// the opt-in virtualized FUSE frontend attached to a host-native
+    /// daemon's TCP namespace listener.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub via: Option<Via>,
 }
 
 /// How a frontend reaches the shared namespace. Distinct from `RecordedBackend`,
 /// which names the daemon's own delivery: a host-native daemon can still host a
-/// Docker-delivered frontend attached over the TCP namespace listener.
+/// virtualized-delivered frontend attached over the TCP namespace listener.
+/// `Docker` is the only backend implemented today; `Krunkit` (a libkrun
+/// microVM on macOS, see `docs/contracts/40-frontends.md`) is a designated
+/// second backend with no implementation yet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Via {
     Docker,
+    Krunkit,
+}
+
+impl Via {
+    /// The lowercase name this variant serializes as, for user-facing
+    /// messages that need to name the backend without round-tripping through
+    /// JSON.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Docker => "docker",
+            Self::Krunkit => "krunkit",
+        }
+    }
 }
 
 /// Frontend protocol, owned here so the record does not depend on the daemon or
@@ -344,6 +362,26 @@ mod tests {
             json["frontends"][0].get("via").is_none(),
             "an absent via must not serialize as a null field: {json}"
         );
+    }
+
+    #[test]
+    fn frontend_via_krunkit_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(RUNTIME_RECORD_FILE);
+        let mut record = sample_native();
+        record.frontends.push(FrontendRecord {
+            kind: FrontendKind::Fuse,
+            mount_point: PathBuf::from("/omnifs"),
+            via: Some(Via::Krunkit),
+        });
+        record.write(&path).unwrap();
+
+        let read = RuntimeRecord::read(&path).unwrap().unwrap();
+        assert_eq!(read.frontends[1].via, Some(Via::Krunkit));
+
+        let json = serde_json::to_value(&record).unwrap();
+        assert_eq!(json["frontends"][1]["via"], "krunkit");
+        assert_eq!(Via::Krunkit.label(), "krunkit");
     }
 
     /// An older writer's JSON shape (no `via` key on a frontend entry) must

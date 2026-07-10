@@ -7,17 +7,64 @@
 //! `docs/contracts/40-frontends.md`): keeping the seam here, rather than
 //! letting the frontend commands call bollard directly, is what lets that
 //! second backend land without touching them.
+//!
+//! [`Driver`] is the user-facing selector (`--driver` / `[frontend]
+//! driver`); [`Via`] is the on-disk record of which backend a running
+//! frontend was launched with. Krunkit is recognized by both today, but has
+//! no [`FrontendBackend`] implementation yet: [`Driver::require_implemented`]
+//! and [`krunkit_unimplemented`] are the one seam every dispatch site funnels
+//! through, so Phase 4 only has to drop a `KrunkitBackend` into the match arms
+//! that call them.
 
 use std::path::PathBuf;
 use std::process::Command;
 
 use anyhow::Result;
+use omnifs_workspace::runtime_record::Via;
+use serde::Deserialize;
 
 use crate::frontend_container::{
     FrontendContainerSpec, assert_locked_down, build_frontend_container_body,
 };
 use crate::launch_backend::GUEST_MOUNT;
 use crate::runtime::Runtime;
+
+/// Which virtualized runtime hosts the optional FUSE frontend. Selected by
+/// `--driver` (CLI flag) or `[frontend] driver` (config), defaulting to
+/// docker in both.
+#[derive(clap::ValueEnum, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Driver {
+    #[default]
+    Docker,
+    Krunkit,
+}
+
+impl Driver {
+    /// The [`Via`] this choice records once a frontend launches under it.
+    pub(crate) const fn as_via(self) -> Via {
+        match self {
+            Self::Docker => Via::Docker,
+            Self::Krunkit => Via::Krunkit,
+        }
+    }
+
+    /// Fail truthfully and immediately for a driver with no backend
+    /// implementation yet, rather than silently falling back to Docker or
+    /// panicking on a user-reachable path.
+    pub(crate) fn require_implemented(self) -> Result<()> {
+        match self {
+            Self::Docker => Ok(()),
+            Self::Krunkit => Err(krunkit_unimplemented()),
+        }
+    }
+}
+
+/// The one error every krunkit selection or dispatch site raises until
+/// `KrunkitBackend` exists.
+pub(crate) fn krunkit_unimplemented() -> anyhow::Error {
+    anyhow::anyhow!("the krunkit driver is not implemented yet; use --driver docker")
+}
 
 /// Launch-time parameters for the frontend, independent of backend.
 /// Identity (container/instance name, image) lives on the backend instance

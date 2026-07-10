@@ -27,13 +27,17 @@ The Docker-hosted FUSE frontend's mount lives entirely inside the container's ow
 
 Keep FUSE inode tables, kernel notifications, mount/unmount mechanics, and FUSE reply types in `omnifs-fuse`. Keep shared projection behavior in `omnifs-engine/src/tree`.
 
+### Native versus virtualized frontends
+
+Frontends split into two classes. **Native** frontends are served in-process by the daemon: FUSE on Linux, NFSv4 loopback on macOS. They have no driver, no attach transport, and no seam; the daemon owns them directly. **Virtualized** frontends run the same `omnifs frontend run --kind fuse --mount-point <path>` binary and wire protocol inside a guest, attached to the host-native daemon's namespace listener over its TCP attach transport. Which class serves a given OS is a daemon/CLI concern, not a frontend-crate one.
+
 ### Frontend delivery backend seam
 
-Frontend delivery sits behind the CLI's `FrontendBackend` seam (`crates/omnifs-cli/src/frontend_backend.rs`): the frontend commands (`omnifs frontend up|down|status`, `omnifs shell`) launch, probe, tear down, and shell into the frontend through that trait, never against a specific runtime's client library directly. Docker (`DockerBackend`) is the only backend today.
+Virtualized frontend delivery sits behind the CLI's `FrontendBackend` seam (`crates/omnifs-cli/src/frontend_backend.rs`): the frontend commands (`omnifs frontend up|down|status`, `omnifs shell`) launch, probe, tear down, and shell into the frontend through that trait, never against a specific runtime's client library directly. Two drivers name which backend implements the seam: `docker` (the default, implemented as `DockerBackend`) and `krunkit` (in progress, no backend implementation yet). `--driver <docker|krunkit>` on `omnifs frontend up` and the `[frontend] driver` config key select between them; both resolve to `docker` when unset. Selecting or dispatching to a driver with no backend fails immediately with a plain error naming the gap — never a silent fallback to Docker, never a panic on a user-reachable path.
 
-A libkrun/krunkit microVM is the designated successor backend on macOS. It ships the same frontend binary and wire protocol as the Docker backend; only the attach transport changes, from TCP to vsock, bridged by krunkit onto the daemon's attach listener as a Unix domain socket. Its purpose is dropping the Docker Desktop dependency, not changing mount semantics: the guest FUSE mount stays reachable only from inside the guest, exactly as it is inside a Docker container today. The host-visible macOS surface remains the NFSv4 loopback frontend; a backend must never claim host visibility for its guest FUSE mount.
+Krunkit is a libkrun microVM on macOS. It ships the same frontend binary and wire protocol as the Docker driver; only the attach transport changes, from TCP to vsock, bridged by krunkit onto the daemon's attach listener as a Unix domain socket. Its purpose is dropping the Docker Desktop dependency, not changing mount semantics: the guest FUSE mount stays reachable only from inside the guest, exactly as it is inside a Docker container today. The host-visible macOS surface remains the NFSv4 loopback frontend; a backend must never claim host visibility for its guest FUSE mount.
 
-The fail-closed lockdown check that the Docker backend runs immediately after start (asserting no mounts and an env set of exactly the two attach vars plus the image's own defaults, killing the container on violation) is part of the backend contract, not a Docker particular: every backend's launch path must verify its own confinement before reporting success.
+The fail-closed lockdown check that the Docker backend runs immediately after start (asserting no mounts and an env set of exactly the two attach vars plus the image's own defaults, killing the container on violation) is part of the backend contract, not a Docker particular: every backend's launch path must verify its own confinement before reporting success. Docker remains the default driver until krunkit matures past this same bar.
 
 ### NFSv4 loopback
 

@@ -13,7 +13,7 @@ use clap::Args;
 use omnifs_workspace::layout::{OMNIFS_HOME_ENV, WorkspaceLayout};
 use omnifs_workspace::runtime_record::{RuntimeRecord, Via};
 
-use crate::frontend_backend::{DockerBackend, FrontendBackend};
+use crate::frontend_backend::{DockerBackend, FrontendBackend, krunkit_unimplemented};
 use crate::frontend_container::{FRONTEND_DEV_IMAGE, frontend_container_name};
 use crate::launch_backend::DockerTarget;
 use crate::runtime::Runtime;
@@ -43,6 +43,14 @@ impl FrontendDownArgs {
 /// found. Docker being unreachable is a warning, not an error: the container
 /// (and this workspace) may simply have no Docker frontend attached.
 pub(crate) async fn teardown(paths: &WorkspaceLayout) -> anyhow::Result<bool> {
+    let recorded_via = RuntimeRecord::read(&paths.runtime_record_file())
+        .ok()
+        .flatten()
+        .and_then(|record| record.frontends.iter().find_map(|frontend| frontend.via));
+    if recorded_via == Some(Via::Krunkit) {
+        return Err(krunkit_unimplemented());
+    }
+
     let is_default_home = std::env::var_os(OMNIFS_HOME_ENV).is_none();
     let container_name = frontend_container_name(&paths.config_dir, is_default_home)?;
 
@@ -74,18 +82,17 @@ pub(crate) async fn teardown(paths: &WorkspaceLayout) -> anyhow::Result<bool> {
     Ok(found)
 }
 
-/// Drop the Docker-hosted frontend's entry from the on-disk runtime record
-/// (a read-modify-write, mirroring `frontend up`'s append). Best-effort: a
+/// Drop the virtualized frontend's entry from the on-disk runtime record (a
+/// read-modify-write, mirroring `frontend up`'s append). Best-effort: a
 /// missing or unreadable record is not an error, since the daemon may already
-/// be down.
+/// be down. Drops any virtualized entry regardless of which backend
+/// delivered it, mirroring `frontend up`'s "at most one" invariant.
 fn clear_frontend_record(record_path: &std::path::Path) {
     let Ok(Some(mut record)) = RuntimeRecord::read(record_path) else {
         return;
     };
     let before = record.frontends.len();
-    record
-        .frontends
-        .retain(|frontend| frontend.via != Some(Via::Docker));
+    record.frontends.retain(|frontend| frontend.via.is_none());
     if record.frontends.len() != before
         && let Err(error) = record.write(record_path)
     {

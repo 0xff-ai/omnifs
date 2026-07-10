@@ -23,11 +23,11 @@ pub(crate) struct StatusReport {
     pub(crate) runtime: Option<DaemonStatus>,
     pub(crate) user_mounts: Vec<UserMountStatus>,
     pub(crate) providers: Vec<ProviderConfigStatus>,
-    /// Mount point of the Docker-hosted FUSE frontend, read from the runtime
-    /// record's `via: docker` entry; `None` when none is attached. This is a
-    /// record fact only (no Docker connection), so `omnifs status` stays fast;
-    /// `omnifs frontend status` reports live container health.
-    pub(crate) docker_frontend: Option<std::path::PathBuf>,
+    /// Backend and mount point of the virtualized FUSE frontend, read from
+    /// the runtime record's `via` entry; `None` when none is attached. This
+    /// is a record fact only (no backend connection), so `omnifs status`
+    /// stays fast; `omnifs frontend status` reports live container health.
+    pub(crate) virtualized_frontend: Option<(Via, std::path::PathBuf)>,
 }
 
 impl StatusReport {
@@ -38,16 +38,15 @@ impl StatusReport {
         mounts: Vec<crate::mount_config::MountConfig>,
     ) -> Self {
         let store = FileStore::new(&paths.credentials_file);
-        let docker_frontend = RuntimeRecord::read(&paths.runtime_record_file())
+        let virtualized_frontend = RuntimeRecord::read(&paths.runtime_record_file())
             .ok()
             .flatten()
             .and_then(|record| {
                 record
                     .frontends
                     .into_iter()
-                    .find(|frontend| frontend.via == Some(Via::Docker))
-            })
-            .map(|frontend| frontend.mount_point);
+                    .find_map(|frontend| frontend.via.map(|via| (via, frontend.mount_point)))
+            });
         Self {
             runtime,
             user_mounts: crate::mount_report::scan_user_mount_configs(
@@ -57,7 +56,7 @@ impl StatusReport {
             ),
             providers: crate::mount_report::scan_provider_configs(catalog, mounts),
             paths,
-            docker_frontend,
+            virtualized_frontend,
         }
     }
 
@@ -73,11 +72,12 @@ impl StatusReport {
             format_runtime(self.runtime.as_ref())
         );
         let _ = writeln!(out, "  {:<7} │ {}", "mount", self.format_mount());
-        if let Some(mount_point) = &self.docker_frontend {
+        if let Some((via, mount_point)) = &self.virtualized_frontend {
             let _ = writeln!(
                 out,
-                "  {:<7} │ docker frontend at {} (see `omnifs frontend status`)",
+                "  {:<7} │ {} frontend at {} (see `omnifs frontend status`)",
                 "frontend",
+                via.label(),
                 WorkspaceLayout::display(mount_point)
             );
         }
@@ -364,7 +364,7 @@ pub(crate) struct StatusJson {
     pub version: String,
     pub runtime: RuntimeJson,
     pub mount: Option<MountJson>,
-    pub docker_frontend: Option<std::path::PathBuf>,
+    pub virtualized_frontend: Option<VirtualizedFrontendJson>,
     pub paths: WorkspaceLayout,
     pub mounts: Vec<UserMountStatus>,
     pub providers: Vec<ProviderConfigStatus>,
@@ -406,6 +406,12 @@ pub(crate) struct MountJson {
     pub fs_type: FsType,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct VirtualizedFrontendJson {
+    pub driver: String,
+    pub mount_point: std::path::PathBuf,
+}
+
 impl StatusReport {
     pub(crate) fn to_json(&self) -> StatusJson {
         let runtime_json =
@@ -441,7 +447,13 @@ impl StatusReport {
                     fs_type: frontend.fs_type,
                 })
             }),
-            docker_frontend: self.docker_frontend.clone(),
+            virtualized_frontend: self
+                .virtualized_frontend
+                .as_ref()
+                .map(|(via, mount_point)| VirtualizedFrontendJson {
+                    driver: via.label().to_string(),
+                    mount_point: mount_point.clone(),
+                }),
             paths: self.paths.clone(),
             mounts: self.user_mounts.clone(),
             providers: self.providers.clone(),
