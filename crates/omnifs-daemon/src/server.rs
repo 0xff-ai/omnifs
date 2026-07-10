@@ -1322,16 +1322,12 @@ async fn authenticate_control_request(
     if control_token.authorizes(request.headers()) {
         next.run(request).await
     } else {
-        unauthorized_response()
+        error_response(
+            StatusCode::UNAUTHORIZED,
+            ErrorCode::Unauthorized,
+            "control API authorization required",
+        )
     }
-}
-
-fn unauthorized_response() -> Response {
-    error_response(
-        StatusCode::UNAUTHORIZED,
-        ErrorCode::Unauthorized,
-        "control API authorization required",
-    )
 }
 
 async fn route_not_found() -> Response {
