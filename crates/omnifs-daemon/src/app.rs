@@ -62,6 +62,15 @@ pub struct DaemonArgs {
     /// `<name>` is a bare `[a-z0-9-]+` label.
     #[arg(long = "attach-socket", value_name = "NAME", value_parser = parse_attach_socket_name)]
     pub attach_sockets: Vec<String>,
+    /// Additionally serve the shared namespace over a TCP loopback listener at
+    /// `127.0.0.1:<port>` (`0` asks the OS for an ephemeral port), guarded by a
+    /// per-instance attach token instead of filesystem permissions. This is the
+    /// Docker Desktop path: a containerized frontend cannot share a host Unix
+    /// socket into the Linux VM it runs in, so it dials TCP instead. Absent:
+    /// no TCP attach listener at start (one can still be bound later on a
+    /// running daemon via `POST /v1/attach-listeners`).
+    #[arg(long = "attach-tcp", value_name = "PORT")]
+    pub attach_tcp: Option<u16>,
 }
 
 /// Validate a `--attach-socket <name>` value: a non-empty `[a-z0-9-]+` label,
@@ -156,6 +165,7 @@ impl DaemonArgs {
             root_symlinks: false,
             frontends: Vec::new(),
             attach_sockets: Vec::new(),
+            attach_tcp: None,
         }
     }
 
@@ -190,6 +200,10 @@ impl DaemonArgs {
         for name in &self.attach_sockets {
             args.push("--attach-socket".to_string());
             args.push(name.clone());
+        }
+        if let Some(port) = self.attach_tcp {
+            args.push("--attach-tcp".to_string());
+            args.push(port.to_string());
         }
         args
     }
@@ -290,6 +304,7 @@ pub fn run(args: DaemonArgs) -> anyhow::Result<()> {
         .iter()
         .map(|socket| socket.path.clone())
         .collect();
+    let attach_tcp_port = context.attach_tcp_port();
     let tcp_listener = context
         .listen()
         .map(crate::context::DaemonContext::bind_control_listener)
@@ -313,14 +328,7 @@ pub fn run(args: DaemonArgs) -> anyhow::Result<()> {
         daemon.spawn_control_tcp(listener, &rt)?;
     }
 
-    // One artifact, one lifecycle: with the socket bound and routes installed,
-    // publish the record so the CLI can dial this daemon. Only the host-native
-    // daemon owns the record; the Docker launcher writes it host-side.
-    if let Some(record) = &runtime_record
-        && let Err(error) = record.write(&record_path)
-    {
-        warn!(%error, path = %record_path.display(), "failed to write runtime record");
-    }
+    publish_runtime_record(runtime_record.as_ref(), &record_path);
 
     // Load desired state from `mounts/*.json` before serving, so the tree is
     // populated when the frontend comes up. Both the native and Docker launch
@@ -333,11 +341,15 @@ pub fn run(args: DaemonArgs) -> anyhow::Result<()> {
     // construction). Both the in-process renderers and the attach-socket
     // listeners serve this same `TreeNamespace`.
     let namespace = omnifs_engine::TreeNamespace::new(Arc::clone(&registry), rt.clone());
+    // Give the daemon a handle to the namespace so `POST /v1/attach-listeners`
+    // can bind a TCP attach listener on a running daemon without a restart.
+    daemon.set_namespace(Arc::clone(&namespace));
 
     // Serve every requested attach socket over the shared namespace, before
     // `serve` (which blocks) so a namespace-only daemon comes up. With the
     // listeners up and mounts reconciled, report ready.
     spawn_attach_listeners(attach_sockets, &namespace, &attach_instance_id, &rt)?;
+    bind_startup_attach_tcp(&daemon, attach_tcp_port, &rt);
     daemon.mark_attach_serving();
 
     // Arm signal-driven shutdown for the serving lifetime: a service `stop`, the
@@ -417,6 +429,32 @@ fn spawn_attach_listeners(
         ));
     }
     Ok(())
+}
+
+/// One artifact, one lifecycle: with the socket bound and routes installed,
+/// publish the record so the CLI can dial this daemon. Only the host-native
+/// daemon owns the record (`record` is `None` otherwise); the Docker launcher
+/// writes it host-side.
+fn publish_runtime_record(record: Option<&RuntimeRecord>, path: &std::path::Path) {
+    if let Some(record) = record
+        && let Err(error) = record.write(path)
+    {
+        warn!(%error, path = %path.display(), "failed to write runtime record");
+    }
+}
+
+/// Bind the TCP namespace attach listener eagerly when `--attach-tcp` was
+/// passed. Goes through the same idempotent `ensure_attach_tcp` path
+/// `POST /v1/attach-listeners` uses later, so both entry points converge on one
+/// binding and one runtime-record update. A bind failure is logged rather than
+/// fatal: the daemon still serves its other requested surfaces.
+fn bind_startup_attach_tcp(daemon: &Arc<server::Daemon>, port: Option<u16>, rt: &Handle) {
+    let Some(port) = port else {
+        return;
+    };
+    if let Err(error) = daemon.ensure_attach_tcp(port, rt) {
+        warn!(%error, "failed to bind the requested TCP attach listener");
+    }
 }
 
 /// Remove the attach sockets on a graceful exit; a crash leaves them stale and

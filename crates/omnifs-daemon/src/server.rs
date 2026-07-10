@@ -13,12 +13,12 @@ use axum::http::{Method, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Json, Response};
 use omnifs_api::{
-    AddedField, ApiError, AuthDelta, AuthSchemeSurface, AuthSurface, CapabilityChange,
-    CapabilityDirection, CredentialHealth, CredentialStatus, DaemonBackend, DaemonHealth,
-    DaemonStatus, DaemonSubsystem, ErrorCode, FieldChange, FrontendInfo, FsType, HealthState,
-    LimitChange, LimitDirection, MountFailure, MountInfo, MountOutcome, MountReport,
-    MountUpdateRequest, ProviderArtifact, ProviderSummary, ReadyInfo, ReconcileReport,
-    ReconcileRequest, StopReport, SubsystemHealth, UpgradeDelta,
+    AddedField, ApiError, AttachListenersReport, AttachListenersRequest, AuthDelta,
+    AuthSchemeSurface, AuthSurface, CapabilityChange, CapabilityDirection, CredentialHealth,
+    CredentialStatus, DaemonBackend, DaemonHealth, DaemonStatus, DaemonSubsystem, ErrorCode,
+    FieldChange, FrontendInfo, FsType, HealthState, LimitChange, LimitDirection, MountFailure,
+    MountInfo, MountOutcome, MountReport, MountUpdateRequest, ProviderArtifact, ProviderSummary,
+    ReadyInfo, ReconcileReport, ReconcileRequest, StopReport, SubsystemHealth, UpgradeDelta,
 };
 use omnifs_auth::{
     CredentialHealth as AuthCredentialHealth, CredentialStatus as AuthCredentialStatus,
@@ -30,10 +30,12 @@ use omnifs_workspace::authn::CredentialId;
 use omnifs_workspace::mounts::materialize::materialize;
 use omnifs_workspace::mounts::{Name as MountName, Registry, Spec, UpgradePlan};
 use omnifs_workspace::provider::{Catalog, CatalogError, Provider};
+use omnifs_workspace::runtime_record::{AttachRecord, RuntimeRecord};
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use time::format_description::well_known::Rfc3339;
 use tokio_stream::StreamExt as _;
 use tokio_stream::wrappers::BroadcastStream;
@@ -53,6 +55,21 @@ const BEARER_PREFIX: &str = "Bearer ";
 /// daemon the token the host CLI already knows. Absent for host-native daemons,
 /// which serve the token-free Unix socket.
 const CONTROL_TOKEN_ENV: &str = "OMNIFS_CONTROL_TOKEN";
+
+/// Attach-token byte length: 16 raw bytes, hex-encoded to the 32 hex characters
+/// the spec calls for.
+const ATTACH_TOKEN_BYTES: usize = 16;
+
+/// A random 32-lowercase-hex-character attach token, generated once per daemon
+/// start the first time TCP attach is requested (`--attach-tcp` or
+/// `POST /v1/attach-listeners`). Unlike the daemon's per-start instance id, a
+/// failure here is security-relevant (a weak or predictable token would defeat
+/// the TCP listener's only auth), so it bails rather than silently downgrading.
+fn generate_attach_token() -> anyhow::Result<String> {
+    let mut bytes = [0_u8; ATTACH_TOKEN_BYTES];
+    getrandom::fill(&mut bytes).context("generate attach token")?;
+    Ok(hex::encode(bytes))
+}
 
 /// The bearer token guarding the TCP control listener. It lives in memory only;
 /// the daemon no longer writes a token file. Its value comes from
@@ -138,9 +155,29 @@ impl ControlToken {
         ReconcileReport,
         ReconcileRequest,
         StopReport,
+        AttachListenersRequest,
+        AttachListenersReport,
     ))
 )]
 struct ApiDoc;
+
+/// A bound TCP namespace attach listener: its address and per-instance token,
+/// handed back verbatim by [`Daemon::ensure_attach_tcp`] on a repeat call
+/// (binding is a one-time, idempotent action).
+#[derive(Debug, Clone)]
+pub(crate) struct AttachTcpState {
+    addr: SocketAddr,
+    token: String,
+}
+
+/// The outcome of [`Daemon::ensure_attach_tcp`]. `NamespaceNotReady` is not an
+/// error: it is the same transient window `/v1/ready` already reports before
+/// startup reconcile finishes, so the caller renders it as a 503 rather than a
+/// 500.
+pub(crate) enum AttachTcpOutcome {
+    Bound(AttachTcpState),
+    NamespaceNotReady,
+}
 
 pub struct Daemon {
     context: DaemonContext,
@@ -155,6 +192,17 @@ pub struct Daemon {
     /// frontend health so a namespace-only daemon reports ready only after its
     /// sockets are up (and mounts reconciled, which precedes the spawn).
     attach_serving: std::sync::atomic::AtomicBool,
+    /// The shared namespace every in-process frontend and attach listener
+    /// serves. Set once via [`Self::set_namespace`], right after startup
+    /// reconcile builds it (see `run` in `app.rs`); read by
+    /// [`Self::ensure_attach_tcp`] so a `POST /v1/attach-listeners` call can
+    /// bind a TCP attach listener on a running daemon without a restart.
+    namespace: OnceLock<Arc<omnifs_engine::TreeNamespace>>,
+    /// The bound TCP attach listener, if any: bound eagerly at start via
+    /// `--attach-tcp`, or later via `POST /v1/attach-listeners`. A listener
+    /// cannot be re-pointed once serving, so a repeat request returns the
+    /// existing binding rather than rebinding.
+    attach_tcp: Mutex<Option<AttachTcpState>>,
 }
 
 impl Daemon {
@@ -173,11 +221,106 @@ impl Daemon {
             control_token,
             last_failed: std::sync::Mutex::new(Vec::new()),
             attach_serving: std::sync::atomic::AtomicBool::new(false),
+            namespace: OnceLock::new(),
+            attach_tcp: Mutex::new(None),
         }
     }
 
     pub fn mount_point(&self) -> &Path {
         self.context.mount_point()
+    }
+
+    /// Record the shared namespace once it is built (after startup reconcile).
+    /// A second call is a no-op: the namespace is built exactly once per daemon
+    /// start.
+    pub fn set_namespace(&self, namespace: Arc<omnifs_engine::TreeNamespace>) {
+        let _ = self.namespace.set(namespace);
+    }
+
+    /// Bind the TCP namespace attach listener at `port` (`0` = ephemeral)
+    /// unless one is already bound, in which case the existing binding is
+    /// returned unchanged (idempotent: a listener cannot be re-pointed once
+    /// serving). Used both by the eager `--attach-tcp` startup path and by the
+    /// `POST /v1/attach-listeners` route on an already-running daemon.
+    ///
+    /// Persists the binding into the on-disk runtime record when this daemon
+    /// owns that record (host-native); the Docker launcher owns its record
+    /// host-side and this is a no-op there, matching the record-write gating
+    /// elsewhere in `app.rs`.
+    pub fn ensure_attach_tcp(
+        self: &Arc<Self>,
+        port: u16,
+        rt: &tokio::runtime::Handle,
+    ) -> anyhow::Result<AttachTcpOutcome> {
+        let mut guard = self
+            .attach_tcp
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(state) = guard.as_ref() {
+            return Ok(AttachTcpOutcome::Bound(state.clone()));
+        }
+        let Some(namespace) = self.namespace.get() else {
+            return Ok(AttachTcpOutcome::NamespaceNotReady);
+        };
+
+        let std_listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, port))
+            .with_context(|| format!("bind attach TCP listener on 127.0.0.1:{port}"))?;
+        std_listener
+            .set_nonblocking(true)
+            .context("set attach TCP listener non-blocking")?;
+        let addr = std_listener
+            .local_addr()
+            .context("read attach TCP listener address")?;
+        let listener = tokio::net::TcpListener::from_std(std_listener)
+            .context("hand the attach TCP listener to tokio")?;
+        let token = generate_attach_token()?;
+
+        let ns = Arc::clone(namespace) as Arc<dyn omnifs_engine::Namespace>;
+        let instance_id = self.context.instance_id().to_string();
+        let serve_token = token.clone();
+        info!(%addr, "serving namespace attach listener (tcp, token-authenticated)");
+        rt.spawn(omnifs_namespace_wire::serve_listener_tcp(
+            ns,
+            listener,
+            instance_id,
+            serve_token,
+        ));
+
+        let state = AttachTcpState { addr, token };
+        *guard = Some(state.clone());
+        drop(guard);
+        self.persist_attach_record(&state);
+        Ok(AttachTcpOutcome::Bound(state))
+    }
+
+    /// Read-modify-write the on-disk runtime record to add `attach`, preserving
+    /// every other field (notably `started_at`, which must not shift just
+    /// because the TCP listener bound after the initial write). No-op for a
+    /// backend that does not own the record (the Docker launcher writes its
+    /// record host-side; see `app.rs`).
+    fn persist_attach_record(&self, state: &AttachTcpState) {
+        if !self.context.is_host_native() {
+            return;
+        }
+        let path = self.context.runtime_record_file();
+        match RuntimeRecord::read(&path) {
+            Ok(Some(mut record)) => {
+                record.attach = Some(AttachRecord {
+                    addr: state.addr.to_string(),
+                    token: state.token.clone(),
+                });
+                if let Err(error) = record.write(&path) {
+                    warn!(%error, path = %path.display(), "failed to persist the attach listener into the runtime record");
+                }
+            },
+            Ok(None) => warn!(
+                path = %path.display(),
+                "runtime record missing; cannot persist the attach listener"
+            ),
+            Err(error) => {
+                warn!(%error, path = %path.display(), "failed to read the runtime record before persisting the attach listener");
+            },
+        }
     }
 
     /// Mark the namespace attach-socket listeners as serving. Called once, after
@@ -483,6 +626,7 @@ impl Daemon {
             .routes(routes!(reconcile))
             .routes(routes!(shutdown))
             .routes(routes!(events))
+            .routes(routes!(attach_listeners))
     }
 
     fn router(state: Arc<Self>, auth: Auth) -> Router {
@@ -1004,6 +1148,48 @@ async fn shutdown(State(daemon): State<Arc<Daemon>>) -> Json<StopReport> {
     };
     daemon.trigger_shutdown();
     Json(report)
+}
+
+/// `POST /v1/attach-listeners`: bind the TCP namespace attach listener on a
+/// running daemon, so a containerized frontend (the Docker Desktop path, which
+/// cannot share a host Unix socket into its Linux VM) can be started later
+/// without restarting the daemon. Idempotent: a repeat call (with any `port`)
+/// returns the already-bound address and token unchanged, since a listener
+/// cannot be re-pointed once serving.
+#[utoipa::path(
+    post,
+    path = "/v1/attach-listeners",
+    operation_id = "attach_listeners",
+    request_body = Option<AttachListenersRequest>,
+    responses(
+        (status = 200, description = "the TCP attach listener's address and per-instance token", body = AttachListenersReport),
+        (status = 503, description = "the namespace is not ready yet", body = ApiError),
+        (status = 500, description = "failed to bind the attach listener", body = ApiError),
+    ),
+)]
+async fn attach_listeners(
+    State(daemon): State<Arc<Daemon>>,
+    request: Option<Json<AttachListenersRequest>>,
+) -> Response {
+    let port = request.map_or(0, |Json(request)| request.port);
+    let rt = tokio::runtime::Handle::current();
+    match daemon.ensure_attach_tcp(port, &rt) {
+        Ok(AttachTcpOutcome::Bound(state)) => Json(AttachListenersReport {
+            addr: state.addr.to_string(),
+            token: state.token,
+        })
+        .into_response(),
+        Ok(AttachTcpOutcome::NamespaceNotReady) => error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            ErrorCode::Internal,
+            "the namespace is not ready yet",
+        ),
+        Err(error) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            ErrorCode::Internal,
+            error.to_string(),
+        ),
+    }
 }
 
 /// Stream the inspector history snapshot followed by live records as

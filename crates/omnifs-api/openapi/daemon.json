@@ -10,6 +10,60 @@
     "version": "0.2.1"
   },
   "paths": {
+    "/v1/attach-listeners": {
+      "post": {
+        "summary": "`POST /v1/attach-listeners`: bind the TCP namespace attach listener on a\nrunning daemon, so a containerized frontend (the Docker Desktop path, which\ncannot share a host Unix socket into its Linux VM) can be started later\nwithout restarting the daemon. Idempotent: a repeat call (with any `port`)\nreturns the already-bound address and token unchanged, since a listener\ncannot be re-pointed once serving.",
+        "operationId": "attach_listeners",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/AttachListenersRequest"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "the TCP attach listener's address and per-instance token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AttachListenersReport"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "failed to bind the attach listener",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "the namespace is not ready yet",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/credentials": {
       "get": {
         "operationId": "credentials_list",
@@ -501,6 +555,33 @@
           "detail": {},
           "message": {
             "type": "string"
+          }
+        }
+      },
+      "AttachListenersReport": {
+        "type": "object",
+        "description": "`POST /v1/attach-listeners`: the TCP namespace attach listener's address and\nper-instance attach token, whether just bound or already serving from an\nearlier call (or from `--attach-tcp` at daemon start).",
+        "required": [
+          "addr",
+          "token"
+        ],
+        "properties": {
+          "addr": {
+            "type": "string"
+          },
+          "token": {
+            "type": "string"
+          }
+        }
+      },
+      "AttachListenersRequest": {
+        "type": "object",
+        "description": "Optional request body for `POST /v1/attach-listeners`. `port` is honored\nonly on the first bind (the listener is idempotent thereafter); `0` (the\ndefault) asks for an ephemeral port, matching the daemon's `--attach-tcp`\nflag.",
+        "properties": {
+          "port": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
           }
         }
       },
