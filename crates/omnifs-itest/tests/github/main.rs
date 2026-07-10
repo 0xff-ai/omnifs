@@ -2,8 +2,8 @@
 
 mod support;
 
-use omnifs_core::path::Path;
 use omnifs_engine::test_support::{LookupOutcome, NamespaceListOutcome, ReadBytes};
+use omnifs_itest::parse_path;
 use omnifs_wit::provider::types::{
     CalloutResult, EntryKind, Header, HttpResponse, ListChildrenResult, LookupChildResult,
     OpResult, ReadFileOutcome, Stability,
@@ -12,10 +12,6 @@ use support::{
     TestOpExt, github_harness, project_file_inline_bytes, project_file_stability, project_paths,
     seed_github_repo_cache,
 };
-
-fn parse_path(s: &str) -> Path {
-    Path::parse(s).unwrap()
-}
 
 #[test]
 fn github_root_readme_snapshot() {
@@ -2380,15 +2376,13 @@ async fn open_then_all_one_load() {
     assert!(harness.cached_canonical_for(open_title).is_some());
     assert!(harness.cached_canonical_for(all_title).is_some());
 
+    let all_title_path = parse_path(all_title);
     let warm = harness
         .runtime
         .namespace()
         .read_file(
-            &parse_path(all_title),
-            Path::parse(all_title)
-                .unwrap()
-                .content_type_mime(None)
-                .to_string(),
+            &all_title_path,
+            all_title_path.content_type_mime(None).to_string(),
             None,
         )
         .await

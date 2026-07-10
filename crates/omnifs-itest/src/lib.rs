@@ -60,22 +60,16 @@ impl RuntimeHarness {
         engine: &wasmtime::Engine,
         capture_test_callouts: bool,
     ) -> Result<Self, BuildError> {
-        let clone_dir = tempfile::tempdir().map_err(|source| BuildError::CacheDir {
-            path: std::env::temp_dir(),
-            source,
-        })?;
-        let cache_dir = tempfile::tempdir().map_err(|source| BuildError::CacheDir {
-            path: std::env::temp_dir(),
-            source,
-        })?;
-        let config_dir = tempfile::tempdir().map_err(|source| BuildError::CacheDir {
-            path: std::env::temp_dir(),
-            source,
-        })?;
-        let providers_dir = tempfile::tempdir().map_err(|source| BuildError::CacheDir {
-            path: std::env::temp_dir(),
-            source,
-        })?;
+        let tempdir = || {
+            tempfile::tempdir().map_err(|source| BuildError::CacheDir {
+                path: std::env::temp_dir(),
+                source,
+            })
+        };
+        let clone_dir = tempdir()?;
+        let cache_dir = tempdir()?;
+        let config_dir = tempdir()?;
+        let providers_dir = tempdir()?;
         let paths = omnifs_workspace::layout::WorkspaceLayout::under_root(config_dir.path());
 
         // Pin the named provider into this harness's provider store and rewrite
@@ -284,10 +278,6 @@ pub fn expect_inline(result: &ReadFileResult) -> &[u8] {
     }
 }
 
-pub fn inline_content(result: &ReadFileResult) -> &[u8] {
-    expect_inline(result)
-}
-
 pub fn into_inline(result: ReadFileResult) -> Vec<u8> {
     match result.bytes {
         ByteSource::Inline(bytes) => bytes,
@@ -379,12 +369,8 @@ pub fn try_make_runtime_from_config(
     RuntimeHarness::new(config_json)
 }
 
-pub fn make_runtime_from_config(config_json: &str) -> RuntimeHarness {
-    try_make_runtime_from_config(config_json).unwrap()
-}
-
 pub fn make_initialized_runtime(config_json: &str) -> RuntimeHarness {
-    make_runtime_from_config(config_json)
+    RuntimeHarness::new(config_json).unwrap()
 }
 
 /// Pin the provider named in `config_json`'s `provider` field into the provider
@@ -460,7 +446,7 @@ pub(crate) fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
-fn parse_path(path: &str) -> Path {
+pub fn parse_path(path: &str) -> Path {
     Path::parse(path).unwrap_or_else(|error| panic!("test path must be absolute: {path}: {error}"))
 }
 

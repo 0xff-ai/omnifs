@@ -2,18 +2,13 @@
 
 mod support;
 
-use omnifs_core::path::Path;
 use omnifs_engine::EngineError;
 use omnifs_engine::test_support::{LookupOutcome, NamespaceListOutcome, ReadBytes};
-use omnifs_itest::{make_initialized_runtime, try_make_runtime_from_config};
+use omnifs_itest::{make_initialized_runtime, parse_path, try_make_runtime_from_config};
 use omnifs_wit::provider::types::{
     CalloutResult, ErrorKind, HttpResponse, OpResult, ReadFileOutcome, Stability,
 };
 use support::{canned_a_response, dns_harness, expect_fetch as dns_expect_fetch, expect_fetches};
-
-fn parse_path(s: &str) -> Path {
-    Path::parse(s).unwrap()
-}
 
 fn assert_materialized_lookup(
     lookup: LookupOutcome,
@@ -92,15 +87,13 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
         .unwrap();
     assert_materialized_lookup(lookup, "/resolvers", false);
 
+    let resolvers_path = parse_path("/resolvers");
     let resolvers_file = harness
         .runtime
         .namespace()
         .read_file(
-            &parse_path("/resolvers"),
-            Path::parse("/resolvers")
-                .unwrap()
-                .content_type_mime(None)
-                .to_string(),
+            &resolvers_path,
+            resolvers_path.content_type_mime(None).to_string(),
             None,
         )
         .await
@@ -283,17 +276,11 @@ async fn dns_provider_unknown_resolver_read_is_invalid_input() {
     "#,
     );
 
+    let path = parse_path("/@missing/example.com/A");
     let error = harness
         .runtime
         .namespace()
-        .read_file(
-            &parse_path("/@missing/example.com/A"),
-            Path::parse("/@missing/example.com/A")
-                .unwrap()
-                .content_type_mime(None)
-                .to_string(),
-            None,
-        )
+        .read_file(&path, path.content_type_mime(None).to_string(), None)
         .await
         .unwrap_err();
     match error {
@@ -322,17 +309,11 @@ async fn dns_provider_unknown_record_reads_are_not_found() {
     "#,
     );
 
+    let path = parse_path("/example.com/BOGUS");
     let error = harness
         .runtime
         .namespace()
-        .read_file(
-            &parse_path("/example.com/BOGUS"),
-            Path::parse("/example.com/BOGUS")
-                .unwrap()
-                .content_type_mime(None)
-                .to_string(),
-            None,
-        )
+        .read_file(&path, path.content_type_mime(None).to_string(), None)
         .await
         .unwrap_err();
     match error {
@@ -342,17 +323,11 @@ async fn dns_provider_unknown_record_reads_are_not_found() {
         other => panic!("expected unknown-record NotFound, got {other:?}"),
     }
 
+    let path = parse_path("/@cloudflare/example.com/BOGUS");
     let error = harness
         .runtime
         .namespace()
-        .read_file(
-            &parse_path("/@cloudflare/example.com/BOGUS"),
-            Path::parse("/@cloudflare/example.com/BOGUS")
-                .unwrap()
-                .content_type_mime(None)
-                .to_string(),
-            None,
-        )
+        .read_file(&path, path.content_type_mime(None).to_string(), None)
         .await
         .unwrap_err();
     match error {

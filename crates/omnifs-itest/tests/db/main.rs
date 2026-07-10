@@ -2,16 +2,11 @@
 
 mod db_fixture;
 
-use omnifs_core::path::Path;
 use omnifs_engine::EngineError;
 use omnifs_engine::test_support::{LookupOutcome, NamespaceListOutcome, ReadBytes};
-use omnifs_itest::{RuntimeHarness, make_runtime_from_config};
+use omnifs_itest::{RuntimeHarness, make_initialized_runtime, parse_path};
 use omnifs_wit::provider::types::ErrorKind;
 use serde::Deserialize;
-
-fn parse_path(s: &str) -> Path {
-    Path::parse(s).unwrap()
-}
 
 fn assert_lookup_not_found(lookup: &LookupOutcome) {
     assert!(
@@ -40,29 +35,29 @@ fn db_config(host_file: &str) -> String {
 fn db_harness() -> (tempfile::TempDir, RuntimeHarness) {
     let dir = tempfile::tempdir().unwrap();
     let db_path = db_fixture::write_chinook_fixture(dir.path());
-    let harness = make_runtime_from_config(&db_config(&db_path.display().to_string()));
+    let harness = make_initialized_runtime(&db_config(&db_path.display().to_string()));
     (dir, harness)
 }
 
 async fn read_bytes(harness: &RuntimeHarness, path: &str) -> Vec<u8> {
+    let path = parse_path(path);
     let result = harness
         .runtime
         .namespace()
-        .read_file(
-            &parse_path(path),
-            Path::parse(path)
-                .unwrap()
-                .content_type_mime(None)
-                .to_string(),
-            None,
-        )
+        .read_file(&path, path.content_type_mime(None).to_string(), None)
         .await
         .unwrap();
     match &result.bytes {
         ReadBytes::Inline(bytes) => bytes.clone(),
-        ReadBytes::Canonical => panic!("db provider must not use canonical cache for {path}"),
+        ReadBytes::Canonical => panic!(
+            "db provider must not use canonical cache for {}",
+            path.as_str()
+        ),
         other @ ReadBytes::Blob(_) => {
-            panic!("expected inline file content for {path}, got {other:?}")
+            panic!(
+                "expected inline file content for {}, got {other:?}",
+                path.as_str()
+            )
         },
     }
 }
@@ -255,17 +250,11 @@ async fn db_missing_table_negative_record() {
         .unwrap();
     assert_lookup_not_found(&lookup);
 
+    let path = parse_path("/tables/NoSuchTable/schema.sql");
     let read_err = harness
         .runtime
         .namespace()
-        .read_file(
-            &parse_path("/tables/NoSuchTable/schema.sql"),
-            Path::parse("/tables/NoSuchTable/schema.sql")
-                .unwrap()
-                .content_type_mime(None)
-                .to_string(),
-            None,
-        )
+        .read_file(&path, path.content_type_mime(None).to_string(), None)
         .await
         .unwrap_err();
     match read_err {

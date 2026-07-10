@@ -1,13 +1,8 @@
 #![cfg(not(target_os = "wasi"))]
 
-use omnifs_core::path::Path;
 use omnifs_engine::EngineError;
-use omnifs_itest::{RuntimeHarness, TestOpExt, into_inline, make_initialized_runtime};
+use omnifs_itest::{RuntimeHarness, TestOpExt, into_inline, make_initialized_runtime, parse_path};
 use omnifs_wit::provider::types::{CalloutResult, ErrorKind, Header, HttpResponse};
-
-fn p(path: &str) -> Path {
-    Path::parse(path).unwrap()
-}
 
 fn web_harness() -> RuntimeHarness {
     make_initialized_runtime(
@@ -123,16 +118,11 @@ async fn web_provider_denies_domains_outside_mount_config() {
     )
     .unwrap();
 
+    let path = parse_path("/https/denied.test/articles/readable");
     let error = harness
         .runtime
         .namespace()
-        .read_file(
-            &p("/https/denied.test/articles/readable"),
-            p("/https/denied.test/articles/readable")
-                .content_type_mime(None)
-                .to_string(),
-            None,
-        )
+        .read_file(&path, path.content_type_mime(None).to_string(), None)
         .await
         .unwrap_err();
 
