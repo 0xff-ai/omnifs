@@ -44,14 +44,8 @@ pub struct DynamicMarker {
 
 impl DynamicMarker {
     #[must_use]
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self { dynamic: true }
-    }
-}
-
-impl Default for DynamicMarker {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

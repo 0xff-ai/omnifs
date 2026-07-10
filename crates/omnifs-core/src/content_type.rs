@@ -77,39 +77,6 @@ impl ContentType {
             Self::Custom(s) => s,
         }
     }
-
-    /// Parse this content type into the standard Rust [`mime::Mime`] type.
-    pub fn to_mime(self) -> Result<mime::Mime, mime::FromStrError> {
-        self.try_into()
-    }
-
-    /// Recover a [`ContentType`] from a MIME string.
-    pub fn from_mime(mime: &str) -> Option<Self> {
-        match mime {
-            "text/markdown" => Some(Self::Markdown),
-            "application/json" => Some(Self::Json),
-            "application/yaml" | "application/x-yaml" | "text/yaml" => Some(Self::Yaml),
-            "application/xml" => Some(Self::Xml),
-            "application/octet-stream" => Some(Self::Octet),
-            "application/atom+xml" => Some(Self::Atom),
-            "text/plain" => Some(Self::Text),
-            _ => None,
-        }
-    }
-
-    /// Recover a [`ContentType`] from a parsed MIME value. Parameters are not
-    /// part of representation identity, so matching uses the MIME essence.
-    pub fn from_mime_type(mime: &mime::Mime) -> Option<Self> {
-        Self::from_mime(mime.essence_str())
-    }
-}
-
-impl TryFrom<ContentType> for mime::Mime {
-    type Error = mime::FromStrError;
-
-    fn try_from(value: ContentType) -> Result<Self, Self::Error> {
-        value.as_mime().parse()
-    }
 }
 
 #[cfg(test)]

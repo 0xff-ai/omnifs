@@ -51,10 +51,6 @@ pub struct Shared;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Daemon;
 
-/// Role marker for CLI-side workspace use.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Cli;
-
 /// A resolved omnifs workspace, parameterized by the capability set using it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Workspace<Role = Shared> {
@@ -213,11 +209,6 @@ impl<Role> Workspace<Role> {
         Ok(Self::from_layout(WorkspaceLayout::resolve()?))
     }
 
-    /// Assemble a role-specific workspace under a single root.
-    pub fn under_root(root: &Path) -> Self {
-        Self::from_layout(WorkspaceLayout::under_root(root))
-    }
-
     /// Wrap an already-resolved layout.
     pub fn from_layout(layout: WorkspaceLayout) -> Self {
         Self {
@@ -256,21 +247,5 @@ impl<Role> Workspace<Role> {
 
     pub fn config_file(&self) -> &Path {
         &self.layout.config_file
-    }
-
-    pub fn nfs_state_dir(&self) -> PathBuf {
-        self.layout.nfs_state_dir()
-    }
-
-    pub fn runtime_record_file(&self) -> PathBuf {
-        self.layout.runtime_record_file()
-    }
-
-    pub fn control_socket(&self) -> PathBuf {
-        self.layout.control_socket()
-    }
-
-    pub fn display_path(&self, path: &Path) -> String {
-        WorkspaceLayout::display(path)
     }
 }

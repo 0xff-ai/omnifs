@@ -72,7 +72,7 @@ impl Path {
         paths.iter().map(|path| Self::parse(path)).collect()
     }
 
-    pub fn validate_str(path: &str) -> Result<(), ParseError> {
+    fn validate_str(path: &str) -> Result<(), ParseError> {
         if path.is_empty() {
             return Err(ParseError::Empty);
         }
