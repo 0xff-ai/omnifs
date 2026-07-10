@@ -89,16 +89,13 @@ impl<T: Send + 'static> CalloutsHostWithStore<T> for HostState {
 
 impl CalloutsHost for HostState {}
 
-fn callouts<T>(accessor: &Accessor<T, HostState>) -> Option<CalloutHost> {
-    accessor.with(|mut access| access.get().callouts.clone())
-}
-
 async fn dispatch_callout<T>(
     accessor: &Accessor<T, HostState>,
     id: u64,
     callout: wit_types::Callout,
 ) -> wit_types::CalloutResult {
-    match callouts(accessor) {
+    let callouts = accessor.with(|mut access| access.get().callouts.clone());
+    match callouts {
         Some(callouts) => callouts.dispatch(id, callout).await,
         None => callout_internal("provider callouts are not initialized"),
     }
