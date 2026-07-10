@@ -57,8 +57,8 @@ impl FrontendUpArgs {
         #[cfg(not(target_os = "linux"))]
         let (bind_ip, expected_bind_ip) = (None, Ipv4Addr::LOCALHOST);
 
-        anstream::eprintln!("Requesting the daemon's TCP namespace attach listener");
-        let attach = workspace.daemon().attach_listeners(bind_ip).await?;
+        anstream::eprintln!("Requesting the daemon's TCP namespace attach target");
+        let attach = workspace.daemon().frontend_attach_target(bind_ip).await?;
         let attach_addr = attach_addr(&attach.addr)?;
         ensure!(
             attach_addr.ip() == IpAddr::V4(expected_bind_ip),

@@ -33,7 +33,7 @@ pub const NFS_STATE_SUBDIR: &str = "nfs";
 pub const FRONTENDS_SUBDIR: &str = "frontends";
 /// Filename of the token-checking UDS namespace attach listener under
 /// `frontends/` (`<config_dir>/frontends/vsock-attach.sock`). Bound on demand
-/// via `POST /v1/attach-listeners/vsock`, one per daemon instance; unlike a
+/// via `POST /v1/frontend/attach-target/vsock`, one per daemon instance; unlike a
 /// `frontends/<name>.sock` attach socket, whose auth is filesystem
 /// permissions, a connection here proves itself with a per-instance token,
 /// because the krunkit vsock-proxy path terminates every guest vsock dial on

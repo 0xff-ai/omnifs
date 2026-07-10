@@ -2,7 +2,7 @@
 //! container.
 //!
 //! The daemon's TCP attach listener has no close route (`POST
-//! /v1/attach-listeners` only ever binds, idempotently): the listener stays
+//! /v1/frontend/attach-target` only ever binds, idempotently): the listener stays
 //! bound until the daemon itself restarts. This command says so rather than
 //! implying it closed something it did not.
 //!
