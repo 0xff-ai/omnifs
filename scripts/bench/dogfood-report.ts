@@ -74,35 +74,32 @@ function dayKey(ms) {
  */
 export function computeReport(daemonRecords, cliRecords, now = Date.now()) {
   const events = daemonRecords
-    .map((r) => ({ t: tsMs(r), event: r.event, backend: r.backend }))
+    .map((r) => ({ t: tsMs(r), event: r.event }))
     .filter((e) => e.t !== null && typeof e.event === "string")
     .sort((a, b) => a.t - b.t);
 
-  const sessions = events.filter((e) => e.event === "daemon_start").length;
-
+  let sessions = 0;
   const durations = [];
-  for (let i = 0; i < events.length; i++) {
-    if (events[i].event !== "daemon_start") continue;
-    for (let j = i + 1; j < events.length; j++) {
-      if (events[j].event === "daemon_start") break; // next session; no stop seen
-      if (events[j].event === "daemon_stop") {
-        durations.push(events[j].t - events[i].t);
-        break;
-      }
+  let sessionStart = null;
+  for (const event of events) {
+    if (event.event === "daemon_start") {
+      sessions++;
+      sessionStart = event.t;
+    } else if (event.event === "daemon_stop" && sessionStart !== null) {
+      durations.push(event.t - sessionStart);
+      sessionStart = null;
     }
   }
 
   let recoveries = 0;
   for (let i = 0; i < events.length; i++) {
     if (events[i].event !== "frontend_stopped") continue;
-    let cleanStop = false;
     for (let j = i + 1; j < events.length; j++) {
       if (events[j].event === "daemon_stop") {
-        cleanStop = true;
         break;
       }
       if (events[j].event === "daemon_start") {
-        if (!cleanStop && events[j].t - events[i].t <= RECOVERY_WINDOW_MS) {
+        if (events[j].t - events[i].t <= RECOVERY_WINDOW_MS) {
           recoveries++;
         }
         break;

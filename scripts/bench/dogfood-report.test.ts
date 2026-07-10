@@ -46,6 +46,9 @@ test("computeReport detects an unclean restart as a recovery", () => {
     { ts: "2026-07-02T10:10:00Z", event: "daemon_stop" },
   ];
   const report = computeReport(daemon, [], Date.parse("2026-07-02T11:00:00Z"));
+  expect(report.sessions).toBe(2);
+  expect(report.completedSessions).toBe(1);
+  expect(report.medianSessionMs).toBe(3 * 60 * 1000);
   expect(report.recoveries).toBe(1);
 });
 
