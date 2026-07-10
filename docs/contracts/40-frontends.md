@@ -27,6 +27,14 @@ The Docker-hosted FUSE frontend's mount lives entirely inside the container's ow
 
 Keep FUSE inode tables, kernel notifications, mount/unmount mechanics, and FUSE reply types in `omnifs-fuse`. Keep shared projection behavior in `omnifs-engine/src/tree`.
 
+### Frontend delivery backend seam
+
+Frontend delivery sits behind the CLI's `FrontendBackend` seam (`crates/omnifs-cli/src/frontend_backend.rs`): the frontend commands (`omnifs frontend up|down|status`, `omnifs shell`) launch, probe, tear down, and shell into the frontend through that trait, never against a specific runtime's client library directly. Docker (`DockerBackend`) is the only backend today.
+
+A libkrun/krunkit microVM is the designated successor backend on macOS. It ships the same frontend binary and wire protocol as the Docker backend; only the attach transport changes, from TCP to vsock, bridged by krunkit onto the daemon's attach listener as a Unix domain socket. Its purpose is dropping the Docker Desktop dependency, not changing mount semantics: the guest FUSE mount stays reachable only from inside the guest, exactly as it is inside a Docker container today. The host-visible macOS surface remains the NFSv4 loopback frontend; a backend must never claim host visibility for its guest FUSE mount.
+
+The fail-closed lockdown check that the Docker backend runs immediately after start (asserting no mounts and an env set of exactly the two attach vars plus the image's own defaults, killing the container on violation) is part of the backend contract, not a Docker particular: every backend's launch path must verify its own confinement before reporting success.
+
 ### NFSv4 loopback
 
 macOS host-native integration uses read-only NFSv4.0 loopback. NFS is a frontend protocol boundary, not a provider protocol.
@@ -73,6 +81,7 @@ The `omnifs-mtab` state file is mount *discovery and teardown* state (mount poin
 - `crates/omnifs-engine/src/namespace` (the surface frontends consume)
 - `crates/omnifs-engine/src/tree`
 - `crates/omnifs-daemon/src/frontends.rs`
+- `crates/omnifs-cli/src/frontend_backend.rs`
 - `crates/omnifs-cli/src/runtime.rs`
 - `crates/omnifs-cli/src/host_teardown.rs`
 - `crates/omnifs-cli/tests/lifecycle_acceptance.rs`
