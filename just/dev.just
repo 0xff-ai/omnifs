@@ -52,3 +52,13 @@ openapi:
 [group('dev')]
 dev *args:
     bun scripts/dev.ts {{ args }}
+
+# Build the omnifs-frontend:dev image from the working tree. Compiles inside
+# Docker via the `builder` stage `just dev` also uses, so this works on macOS
+# too. Needs a provider-store bundle first (`just providers build`): that
+# shared stage always embeds one into the omnifs binary, even though the
+# frontend image itself never runs a provider.
+[group('dev')]
+frontend-image provider_store='target/omnifs-provider-store':
+    docker build -t omnifs-frontend:dev --target frontend-dev \
+        --build-context provider-wasm={{ provider_store }} .
