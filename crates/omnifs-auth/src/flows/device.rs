@@ -54,7 +54,7 @@ impl OAuthClient {
         for param in &request.oauth.scheme.extra_token_params {
             token_request = token_request.add_extra_param(&param.key, &param.value);
         }
-        let polling_http = device_polling_http(&self.http, request.flow.device_poll_compat);
+        let polling_http = DevicePollingHttp(self.http.clone(), request.flow.device_poll_compat);
         let token = token_request
             .request_async(
                 &polling_http,
@@ -62,8 +62,7 @@ impl OAuthClient {
                 Some(details.expires_in()),
             )
             .await?;
-        let entry = credential_entry_from_token(&token);
-        Ok(entry)
+        Ok(credential_entry_from_token(&token))
     }
 }
 
@@ -76,10 +75,6 @@ impl OAuthClient {
 /// loop bails on the first iteration with `Failed to parse server response`.
 /// A no-op for [`DevicePollCompat::Rfc8628`] (the default), since a
 /// conformant token endpoint never returns 200 while pending.
-fn device_polling_http(http: &reqwest::Client, compat: DevicePollCompat) -> DevicePollingHttp {
-    DevicePollingHttp(http.clone(), compat)
-}
-
 struct DevicePollingHttp(reqwest::Client, DevicePollCompat);
 
 impl<'c> oauth2::AsyncHttpClient<'c> for DevicePollingHttp {

@@ -25,18 +25,15 @@ pub struct OAuthClient {
 impl OAuthClient {
     pub fn new() -> Result<Self, AuthError> {
         Ok(Self {
-            http: oauth_http_client()?,
+            http: reqwest::ClientBuilder::new()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()?,
             opener: None,
         })
     }
 
     pub fn from_http_client(http: reqwest::Client) -> Self {
         Self { http, opener: None }
-    }
-
-    pub fn with_http_client(mut self, http: reqwest::Client) -> Self {
-        self.http = http;
-        self
     }
 
     pub fn with_opener(mut self, opener: Arc<dyn UrlOpener>) -> Self {
@@ -62,8 +59,7 @@ impl OAuthClient {
         }
 
         let token = exchange.request_async(&self.http).await?;
-        let entry = credential_entry_from_token(&token);
-        Ok(entry)
+        Ok(credential_entry_from_token(&token))
     }
 
     pub async fn revoke_access_token(
@@ -71,7 +67,7 @@ impl OAuthClient {
         request: OAuthRequest,
         access_token: SecretString,
     ) -> Result<OAuthRevokeOutcome, AuthError> {
-        if !request.supports_revocation() {
+        if request.scheme.revocation_endpoint.is_none() {
             return Ok(OAuthRevokeOutcome::Unsupported);
         }
         let client = request.token_client()?;
@@ -97,10 +93,4 @@ impl UrlOpener for SystemBrowser {
             webbrowser::open(url.as_str()).map_err(|err| AuthError::BrowserOpen(err.to_string()))
         })
     }
-}
-
-fn oauth_http_client() -> Result<reqwest::Client, AuthError> {
-    Ok(reqwest::ClientBuilder::new()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()?)
 }

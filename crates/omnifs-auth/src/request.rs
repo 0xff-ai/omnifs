@@ -35,55 +35,8 @@ impl OAuthRequest {
     }
 
     #[must_use]
-    pub fn from_config(mut scheme: OauthScheme, config: OAuthRequestConfig) -> Self {
-        if let Some(scopes) = config.scopes {
-            scheme.default_scopes = scopes;
-        }
-        if let Some(domain) = config.inject_domain {
-            scheme.inject_domains = vec![domain];
-        }
-        if let Some(header) = config.inject_header {
-            scheme.inject_header_name = Some(header);
-        }
-        if let Some(redirect_uri) = config.redirect_uri {
-            override_redirect_uri(&mut scheme, redirect_uri);
-        }
-
-        let mut request = Self::new(scheme);
-        if let Some(client_id) = config.client_id {
-            request = request.with_client_id(client_id);
-        }
-        if let Some(client_secret) = config.client_secret {
-            request = request.with_client_secret(client_secret);
-        }
-        request
-    }
-
-    #[must_use]
-    pub fn with_client_id(mut self, client_id: impl Into<String>) -> Self {
-        self.client_id = Some(client_id.into());
-        self
-    }
-
-    #[must_use]
-    pub fn with_client_secret(mut self, client_secret: SecretString) -> Self {
-        self.client_secret = Some(client_secret);
-        self
-    }
-
-    #[must_use]
     pub fn scheme(&self) -> &OauthScheme {
         &self.scheme
-    }
-
-    #[must_use]
-    pub fn client_id(&self) -> Option<&str> {
-        self.client_id.as_deref()
-    }
-
-    #[must_use]
-    pub fn supports_revocation(&self) -> bool {
-        self.scheme.revocation_endpoint.is_some()
     }
 
     pub fn override_default_scopes(&mut self, scopes: Vec<String>) {
@@ -204,84 +157,37 @@ impl OAuthRequest {
     /// scope, injection, redirect, and client credential overrides.
     pub fn from_mount_config(
         config: Option<&OAuth>,
-        scheme: OauthScheme,
+        mut scheme: OauthScheme,
     ) -> Result<OAuthRequest, AuthError> {
         let Some(config) = config else {
             return Ok(OAuthRequest::new(scheme));
         };
 
-        let mut request_config = OAuthRequestConfig::default();
         if let Some(scopes) = &config.scopes {
-            request_config = request_config.with_scopes(scopes.clone());
+            scheme.default_scopes.clone_from(scopes);
         }
         if let Some(domain) = non_empty_config_value(config.domain.as_deref(), "auth.domain")? {
-            request_config = request_config.with_inject_domain(domain);
+            scheme.inject_domains = vec![domain.to_owned()];
         }
         if let Some(header) = non_empty_config_value(config.header.as_deref(), "auth.header")? {
-            request_config = request_config.with_inject_header(header);
+            scheme.inject_header_name = Some(header.to_owned());
         }
         if let Some(redirect_uri) =
             non_empty_config_value(config.redirect_uri.as_deref(), "auth.redirectUri")?
         {
-            request_config = request_config.with_redirect_uri(redirect_uri);
+            override_redirect_uri(&mut scheme, redirect_uri.to_owned());
         }
+
+        let mut request = OAuthRequest::new(scheme);
         if let Some(client_id) =
             non_empty_config_value(config.client_id.as_deref(), "auth.clientId")?
         {
-            request_config = request_config.with_client_id(client_id);
+            request.client_id = Some(client_id.to_owned());
         }
         if let Some(client_secret) = read_oauth_client_secret(config)? {
-            request_config = request_config.with_client_secret(client_secret);
+            request.client_secret = Some(client_secret);
         }
-        Ok(OAuthRequest::from_config(scheme, request_config))
-    }
-}
-
-#[derive(Default)]
-pub struct OAuthRequestConfig {
-    scopes: Option<Vec<String>>,
-    inject_domain: Option<String>,
-    inject_header: Option<String>,
-    redirect_uri: Option<String>,
-    client_id: Option<String>,
-    client_secret: Option<SecretString>,
-}
-
-impl OAuthRequestConfig {
-    #[must_use]
-    pub fn with_scopes(mut self, scopes: Vec<String>) -> Self {
-        self.scopes = Some(scopes);
-        self
-    }
-
-    #[must_use]
-    pub fn with_inject_domain(mut self, domain: impl Into<String>) -> Self {
-        self.inject_domain = Some(domain.into());
-        self
-    }
-
-    #[must_use]
-    pub fn with_inject_header(mut self, header: impl Into<String>) -> Self {
-        self.inject_header = Some(header.into());
-        self
-    }
-
-    #[must_use]
-    pub fn with_redirect_uri(mut self, redirect_uri: impl Into<String>) -> Self {
-        self.redirect_uri = Some(redirect_uri.into());
-        self
-    }
-
-    #[must_use]
-    pub fn with_client_id(mut self, client_id: impl Into<String>) -> Self {
-        self.client_id = Some(client_id.into());
-        self
-    }
-
-    #[must_use]
-    pub fn with_client_secret(mut self, client_secret: SecretString) -> Self {
-        self.client_secret = Some(client_secret);
-        self
+        Ok(request)
     }
 }
 

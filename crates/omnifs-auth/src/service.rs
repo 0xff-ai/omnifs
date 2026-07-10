@@ -57,7 +57,7 @@ const REFRESH_LOOP_SEED: u64 = 0x5EED_1E55_0A57_0000;
 /// The one expiry predicate. Every credential expiry decision (emit, refresh,
 /// health) routes through here. A credential with no expiry is always fresh.
 #[must_use]
-pub fn is_fresh(entry: &CredentialEntry, now: OffsetDateTime) -> bool {
+fn is_fresh(entry: &CredentialEntry, now: OffsetDateTime) -> bool {
     let window =
         time::Duration::try_from(REFRESH_WINDOW).expect("REFRESH_WINDOW fits in time::Duration");
     entry

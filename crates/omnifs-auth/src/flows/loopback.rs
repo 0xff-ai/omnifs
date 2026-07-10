@@ -25,14 +25,13 @@ impl OAuthClient {
             return Err(AuthError::StateMismatch);
         }
 
-        let entry = exchange_code(
+        exchange_code(
             &client,
             &self.http,
             AuthorizationCode::new(callback.code),
             pkce_verifier,
             &request.oauth.scheme,
         )
-        .await?;
-        Ok(entry)
+        .await
     }
 }

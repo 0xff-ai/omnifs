@@ -299,7 +299,7 @@ async fn optional_revocation_endpoint_works_without_builder_type_branching() {
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .unwrap();
-    let client = OAuthClient::new().unwrap().with_http_client(http);
+    let client = OAuthClient::from_http_client(http);
 
     let revoked = client
         .revoke_access_token(

@@ -10,11 +10,11 @@ pub use error::AuthError;
 pub use flows::{DeviceCodePrompt, ManualCode};
 pub use request::{
     DeviceCodeLoginRequest, LoginRequest, LoopbackLoginRequest, ManualCodeLoginRequest,
-    OAuthRequest, OAuthRequestConfig,
+    OAuthRequest,
 };
 pub use service::{
     AuthUnavailable, CredentialHealth, CredentialService, CredentialStatus, HeaderMaterial,
-    REFRESH_WINDOW, RefreshOutcome, RejectionEvidence, RevokeOutcome, is_fresh,
+    REFRESH_WINDOW, RefreshOutcome, RejectionEvidence, RevokeOutcome,
 };
 
 #[cfg(test)]
