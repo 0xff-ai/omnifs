@@ -56,12 +56,10 @@ pub fn split_complete_lines(buffer: &str) -> (Vec<&str>, &str) {
 /// Deserialize every complete line; skip empty lines; return partial tail.
 pub fn parse_complete_lines(buffer: &str) -> (Vec<InspectorRecord>, &str) {
     let (lines, remainder) = split_complete_lines(buffer);
-    let mut records = Vec::with_capacity(lines.len());
-    for line in lines {
-        if let Ok(record) = InspectorRecord::parse_line(line) {
-            records.push(record);
-        }
-    }
+    let records = lines
+        .into_iter()
+        .filter_map(|line| InspectorRecord::parse_line(line).ok())
+        .collect();
     (records, remainder)
 }
 
