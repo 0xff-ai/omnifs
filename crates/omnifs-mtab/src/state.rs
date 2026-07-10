@@ -53,16 +53,11 @@ impl NfsMountState {
             .collect::<Vec<_>>();
         paths.sort();
 
-        let mut states = Vec::new();
-        for path in paths {
-            let Ok(state) = Self::read_file(&path) else {
-                continue;
-            };
-            if state.version == Self::VERSION {
-                states.push(state);
-            }
-        }
-        Ok(states)
+        Ok(paths
+            .into_iter()
+            .filter_map(|path| Self::read_file(&path).ok())
+            .filter(|state| state.version == Self::VERSION)
+            .collect())
     }
 
     pub fn read_file(path: &Path) -> Result<Self, StateError> {
