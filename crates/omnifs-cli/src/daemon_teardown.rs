@@ -51,14 +51,10 @@ impl<'a> DaemonTeardown<'a> {
                 backend.reclaim(Some(status.mount_point.as_path()), &nfs_state_dir)?;
                 RuntimeRecord::remove(&record_path)?;
             },
-            Some(RunningBackend::Cached {
-                backend,
-                mount_point,
-                native_pid,
-            }) => {
+            Some(RunningBackend::Cached { mount_point, pid }) => {
                 anstream::println!("No live daemon found; sweeping from runtime record...");
-                Self::signal_stale_native_daemon(native_pid);
-                backend.reclaim(mount_point.as_deref(), &nfs_state_dir)?;
+                Self::signal_stale_native_daemon(pid);
+                LaunchBackend::Native.reclaim(mount_point.as_deref(), &nfs_state_dir)?;
                 RuntimeRecord::remove(&record_path)?;
             },
             None => {
@@ -76,10 +72,7 @@ impl<'a> DaemonTeardown<'a> {
     /// A live pid means the daemon is wedged (it did not answer the probe): send
     /// it a SIGTERM so it unmounts before the sweep. A dead pid (the common
     /// crash case) is left alone; the sweep reclaims its stranded mount.
-    fn signal_stale_native_daemon(native_pid: Option<u32>) {
-        let Some(pid) = native_pid else {
-            return;
-        };
+    fn signal_stale_native_daemon(pid: u32) {
         if pid_is_alive(pid) {
             anstream::println!("Signalling wedged daemon (pid {pid}) to stop...");
             let _ = std::process::Command::new("kill")
@@ -140,24 +133,26 @@ impl<'a> DaemonTeardown<'a> {
             },
         };
 
-        let (backend, fallback_mount_point, live) = running.into_parts();
-        let mount_point = if live {
-            match self.workspace.daemon().shutdown().await {
-                Ok(Some(report)) => {
-                    anstream::println!("✓ Daemon stopped");
-                    Some(report.mount_point)
-                },
-                Ok(None) => {
-                    anstream::println!("No daemon answered shutdown; sweeping...");
-                    fallback_mount_point
-                },
-                Err(error) => {
-                    anstream::eprintln!("⚠  Daemon shutdown call failed: {error:#}");
-                    fallback_mount_point
-                },
-            }
-        } else {
-            fallback_mount_point
+        let (backend, mount_point) = match running {
+            RunningBackend::Live { status, backend } => {
+                let fallback_mount_point = Some(status.mount_point);
+                let mount_point = match self.workspace.daemon().shutdown().await {
+                    Ok(Some(report)) => {
+                        anstream::println!("✓ Daemon stopped");
+                        Some(report.mount_point)
+                    },
+                    Ok(None) => {
+                        anstream::println!("No daemon answered shutdown; sweeping...");
+                        fallback_mount_point
+                    },
+                    Err(error) => {
+                        anstream::eprintln!("⚠  Daemon shutdown call failed: {error:#}");
+                        fallback_mount_point
+                    },
+                };
+                (backend, mount_point)
+            },
+            RunningBackend::Cached { mount_point, .. } => (LaunchBackend::Native, mount_point),
         };
 
         if let Err(error) = backend.reclaim(mount_point.as_deref(), &nfs_state_dir) {
@@ -177,17 +172,19 @@ impl<'a> DaemonTeardown<'a> {
     /// Probe the control port for teardown. Any status error is treated as
     /// "not reachable" so a sick-but-present daemon falls through to the
     /// record sweep instead of failing `omnifs down` hard.
-    async fn live_status_for_sweep(&self) -> anyhow::Result<Option<omnifs_api::DaemonStatus>> {
-        match self.workspace.daemon().status_optional().await {
-            Ok(status) => Ok(status),
-            Err(_) => Ok(None),
-        }
+    async fn live_status_for_sweep(&self) -> Option<omnifs_api::DaemonStatus> {
+        self.workspace
+            .daemon()
+            .status_optional()
+            .await
+            .ok()
+            .flatten()
     }
 
     /// Identify the backend from the live daemon or the runtime record.
     async fn resolve_running_backend(&self) -> anyhow::Result<Option<RunningBackend>> {
         let record_path = self.workspace.layout().runtime_record_file();
-        if let Some(status) = self.live_status_for_sweep().await? {
+        if let Some(status) = self.live_status_for_sweep().await {
             let backend = LaunchBackend::try_from(&status.backend)
                 .context("unknown backend: daemon did not report reclaimable identity")?;
             return Ok(Some(RunningBackend::Live {
@@ -198,24 +195,12 @@ impl<'a> DaemonTeardown<'a> {
 
         if let Some(record) = RuntimeRecord::read(&record_path)? {
             let mount_point = record.mount_point().map(Path::to_path_buf);
-            let RecordedBackend::Native { pid } = &record.backend;
-            let native_pid = Some(*pid);
-            return Ok(Some(RunningBackend::Cached {
-                backend: launch_backend_from_record(&record.backend),
-                mount_point,
-                native_pid,
-            }));
+            let RecordedBackend::Native { pid } = record.backend;
+            return Ok(Some(RunningBackend::Cached { mount_point, pid }));
         }
 
         Ok(None)
     }
-}
-
-/// Convert the record's backend identity into the CLI's reclaim-capable
-/// backend.
-fn launch_backend_from_record(backend: &RecordedBackend) -> LaunchBackend {
-    let RecordedBackend::Native { .. } = backend;
-    LaunchBackend::Native
 }
 
 /// True when `pid` names a live process (`kill -0` succeeds, or fails for a
@@ -236,23 +221,9 @@ enum RunningBackend {
         backend: LaunchBackend,
     },
     Cached {
-        backend: LaunchBackend,
         mount_point: Option<PathBuf>,
-        native_pid: Option<u32>,
+        pid: u32,
     },
-}
-
-impl RunningBackend {
-    fn into_parts(self) -> (LaunchBackend, Option<PathBuf>, bool) {
-        match self {
-            Self::Live { status, backend } => (backend, Some(status.mount_point), true),
-            Self::Cached {
-                backend,
-                mount_point,
-                ..
-            } => (backend, mount_point, false),
-        }
-    }
 }
 
 /// Poll until `mount_point` leaves the OS mount table (the daemon unmounts
