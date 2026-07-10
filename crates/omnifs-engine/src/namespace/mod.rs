@@ -368,14 +368,7 @@ impl EventStream {
     /// Await the next event, or `None` when the sender is gone.
     pub async fn recv(&mut self) -> Option<NsEvent> {
         use futures::StreamExt;
-        loop {
-            match self.inner.next().await {
-                Some(Ok(event)) => return Some(event),
-                // A lagged receiver skips the gap and keeps going.
-                Some(Err(_)) => {},
-                None => return None,
-            }
-        }
+        self.next().await
     }
 
     /// Non-blocking drain of one buffered event, `None` when none is ready.
@@ -390,12 +383,9 @@ impl EventStream {
     pub fn try_recv(&mut self) -> Option<NsEvent> {
         use futures::Stream;
         let mut cx = Context::from_waker(futures::task::noop_waker_ref());
-        loop {
-            match Stream::poll_next(Pin::new(&mut self.inner), &mut cx) {
-                Poll::Ready(Some(Ok(event))) => return Some(event),
-                Poll::Ready(Some(Err(_))) => {},
-                Poll::Ready(None) | Poll::Pending => return None,
-            }
+        match Stream::poll_next(Pin::new(self), &mut cx) {
+            Poll::Ready(event) => event,
+            Poll::Pending => None,
         }
     }
 }
@@ -1256,11 +1246,11 @@ impl Namespace for TreeNamespace {
     }
 
     fn getattr(&self, node: NodeId) -> BoxFuture<'_, Result<Attrs, NsError>> {
-        async move { self.getattr_inner(node, false).await }.boxed()
+        self.getattr_inner(node, false).boxed()
     }
 
     fn getattr_exact(&self, node: NodeId) -> BoxFuture<'_, Result<Attrs, NsError>> {
-        async move { self.getattr_inner(node, true).await }.boxed()
+        self.getattr_inner(node, true).boxed()
     }
 
     fn readdir(
@@ -1269,7 +1259,7 @@ impl Namespace for TreeNamespace {
         cursor: DirCursor,
         budget: usize,
     ) -> BoxFuture<'_, Result<DirPage, NsError>> {
-        async move { self.readdir_inner(node, cursor, budget).await }.boxed()
+        self.readdir_inner(node, cursor, budget).boxed()
     }
 
     fn read(
@@ -1278,7 +1268,7 @@ impl Namespace for TreeNamespace {
         offset: u64,
         len: u32,
     ) -> BoxFuture<'_, Result<ReadAnswer, NsError>> {
-        async move { self.read_inner(node, offset, len).await }.boxed()
+        self.read_inner(node, offset, len).boxed()
     }
 
     fn readlink(&self, node: NodeId) -> BoxFuture<'_, Result<PathBuf, NsError>> {
@@ -1292,9 +1282,7 @@ impl Namespace for TreeNamespace {
     }
 
     fn subscribe(&self) -> EventStream {
-        EventStream {
-            inner: BroadcastStream::new(self.events.subscribe()),
-        }
+        EventStream::from_broadcast(self.events.subscribe())
     }
 }
 
