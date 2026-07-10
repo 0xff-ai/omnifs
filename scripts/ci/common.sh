@@ -1,3 +1,4 @@
+#!/usr/bin/env bash
 # Helpers sourced by scripts/ci/*.sh. Source with:
 #
 #   source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
@@ -6,6 +7,26 @@
 
 # shellcheck disable=SC2034
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
+# Wait for a CI artifact to become visible in the registry. Release workflows
+# start immediately after CI, so registry propagation can briefly lag.
+wait_for_registry_artifact() {
+  local source="$1"
+  shift
+
+  local attempt max_attempts=12
+  for ((attempt = 1; attempt <= max_attempts; attempt++)); do
+    if "$@" >/dev/null 2>&1; then
+      return
+    fi
+    if ((attempt == max_attempts)); then
+      echo "timed out waiting for CI artifact $source" >&2
+      return 1
+    fi
+    printf 'waiting for %s (%s/%s)...\n' "$source" "$attempt" "$max_attempts" >&2
+    sleep 10
+  done
+}
 
 # Build the top-level Dockerfile's `frontend-release` stage for one platform:
 # a minimal image with a prebuilt Linux `omnifs-fuse` binary injected as the
