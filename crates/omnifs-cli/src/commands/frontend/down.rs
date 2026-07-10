@@ -17,7 +17,7 @@ use omnifs_workspace::runtime_record::{RuntimeRecord, Via};
 
 use crate::frontend_backend::{DockerBackend, FrontendBackend};
 use crate::frontend_container::{FRONTEND_DEV_IMAGE, frontend_container_name};
-use crate::krunkit_backend::{KrunkitBackend, UNUSED_GUEST_IMAGE_PLACEHOLDER};
+use crate::krunkit_backend::KrunkitBackend;
 use crate::launch_backend::DockerTarget;
 use crate::runtime::Runtime;
 use crate::workspace::Workspace;
@@ -53,10 +53,7 @@ pub(crate) async fn teardown(paths: &WorkspaceLayout) -> anyhow::Result<bool> {
         .and_then(|record| record.frontends.iter().find_map(|frontend| frontend.via));
 
     if recorded_via == Some(Via::Krunkit) {
-        let backend = KrunkitBackend::new(
-            paths.config_dir.clone(),
-            UNUSED_GUEST_IMAGE_PLACEHOLDER.into(),
-        );
+        let backend = KrunkitBackend::new(paths.config_dir.clone());
         let running = backend.is_running().await?;
         if running.is_some() {
             backend.tear_down().await?;

@@ -18,11 +18,9 @@ use clap::Args;
 use omnifs_workspace::layout::OMNIFS_HOME_ENV;
 use omnifs_workspace::runtime_record::{FrontendKind, FrontendRecord, RuntimeRecord, Via};
 
-use crate::frontend_backend::{
-    AttachEndpoint, DockerBackend, Driver, FrontendBackend, FrontendLaunchSpec,
-};
+use crate::frontend_backend::{DockerBackend, Driver, FrontendBackend, FrontendLaunchSpec};
 use crate::frontend_container::{frontend_container_name, resolve_frontend_image};
-use crate::krunkit_backend::{self, KrunkitBackend};
+use crate::krunkit_backend::{GuestImageSource, KrunkitBackend};
 use crate::launch::Launcher;
 use crate::launch_backend::{DockerTarget, GUEST_MOUNT};
 use crate::runtime::Runtime;
@@ -99,9 +97,9 @@ async fn run_docker(
     );
 
     let backend = DockerBackend::new(runtime);
-    let spec = FrontendLaunchSpec {
+    let spec = FrontendLaunchSpec::Docker {
         home: paths.config_dir.clone(),
-        attach: AttachEndpoint::Tcp(attach_addr.port()),
+        attach_port: attach_addr.port(),
         attach_token: attach.token.clone(),
     };
     backend.launch(&spec).await?;
@@ -127,21 +125,18 @@ async fn run_krunkit(
     config: &crate::config::Config,
     mount_name: &str,
 ) -> anyhow::Result<()> {
-    let guest_image = match krunkit_backend::resolve_guest_image(None, config)? {
-        krunkit_backend::GuestImageSource::Local(path) => path,
-        krunkit_backend::GuestImageSource::Registry(image) => {
-            crate::guest_image_pull::ensure_guest_image(&image, &paths.cache_dir).await?
-        },
-    };
+    let guest_image = GuestImageSource::resolve(None, config)?
+        .into_local_path(&paths.cache_dir)
+        .await?;
 
     anstream::eprintln!("Requesting the daemon's vsock namespace attach listener");
     let attach = workspace.daemon().frontend_attach_target_vsock().await?;
 
-    let backend = KrunkitBackend::new(paths.config_dir.clone(), guest_image);
-    let spec = FrontendLaunchSpec {
-        home: paths.config_dir.clone(),
-        attach: AttachEndpoint::Unix(std::path::PathBuf::from(attach.socket_path)),
+    let backend = KrunkitBackend::new(paths.config_dir.clone());
+    let spec = FrontendLaunchSpec::Krunkit {
+        attach_socket: std::path::PathBuf::from(attach.socket_path),
         attach_token: attach.token.clone(),
+        guest_image,
     };
     anstream::eprintln!("Starting the krunkit guest");
     backend.launch(&spec).await?;
@@ -234,11 +229,11 @@ fn record_frontend(record_path: &std::path::Path, via: Via) {
     });
     match patched {
         Ok(true) => {},
-        Ok(false) => anstream::eprintln!(
-            "warning: runtime record missing; cannot record the frontend container"
-        ),
+        Ok(false) => {
+            anstream::eprintln!("warning: runtime record missing; cannot record the frontend");
+        },
         Err(error) => {
-            anstream::eprintln!("warning: could not persist the frontend container: {error:#}");
+            anstream::eprintln!("warning: could not persist the frontend: {error:#}");
         },
     }
 }

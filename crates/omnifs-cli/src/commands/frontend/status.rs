@@ -8,7 +8,7 @@ use omnifs_workspace::runtime_record::{RuntimeRecord, Via};
 use crate::error::ExitCode;
 use crate::frontend_backend::{DockerBackend, FrontendBackend};
 use crate::frontend_container::{FRONTEND_DEV_IMAGE, frontend_container_name};
-use crate::krunkit_backend::{KrunkitBackend, UNUSED_GUEST_IMAGE_PLACEHOLDER};
+use crate::krunkit_backend::KrunkitBackend;
 use crate::launch_backend::DockerTarget;
 use crate::runtime::Runtime;
 use crate::workspace::Workspace;
@@ -21,9 +21,11 @@ impl FrontendStatusArgs {
         let workspace = Workspace::resolve()?;
         let paths = workspace.layout().clone();
 
-        let recorded_via = RuntimeRecord::read(&paths.runtime_record_file())
+        let record = RuntimeRecord::read(&paths.runtime_record_file())
             .ok()
-            .flatten()
+            .flatten();
+        let recorded_via = record
+            .as_ref()
             .and_then(|record| record.frontends.iter().find_map(|frontend| frontend.via));
         if recorded_via == Some(Via::Krunkit) {
             return Self::krunkit_status(&paths).await;
@@ -42,9 +44,7 @@ impl FrontendStatusArgs {
             Err(_) => None,
         };
 
-        let attach_addr = RuntimeRecord::read(&paths.runtime_record_file())
-            .ok()
-            .flatten()
+        let attach_addr = record
             .and_then(|record| record.attach)
             .map(|attach| attach.addr);
 
@@ -79,10 +79,7 @@ impl FrontendStatusArgs {
     async fn krunkit_status(
         paths: &omnifs_workspace::layout::WorkspaceLayout,
     ) -> anyhow::Result<ExitCode> {
-        let backend = KrunkitBackend::new(
-            paths.config_dir.clone(),
-            UNUSED_GUEST_IMAGE_PLACEHOLDER.into(),
-        );
+        let backend = KrunkitBackend::new(paths.config_dir.clone());
         let running = backend.is_running().await?;
         let exit_code = match running {
             Some(true) => {

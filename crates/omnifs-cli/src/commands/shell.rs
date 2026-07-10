@@ -27,7 +27,7 @@ use omnifs_api::MountInfo;
 
 use crate::frontend_backend::{DockerBackend, FrontendBackend};
 use crate::frontend_container::FRONTEND_DEV_IMAGE;
-use crate::krunkit_backend::{self, KrunkitBackend, UNUSED_GUEST_IMAGE_PLACEHOLDER};
+use crate::krunkit_backend::{self, KrunkitBackend};
 use crate::launch_backend::{ContainerName, DockerTarget, GUEST_MOUNT};
 use crate::runtime::Runtime;
 use crate::workspace::Workspace;
@@ -178,10 +178,7 @@ impl ShellArgs {
     /// to actually run it.
     fn exec_in_krunkit_guest(&self, paths: &WorkspaceLayout) -> Result<()> {
         krunkit_backend::ensure_socat_available()?;
-        let backend = KrunkitBackend::new(
-            paths.config_dir.clone(),
-            UNUSED_GUEST_IMAGE_PLACEHOLDER.into(),
-        );
+        let backend = KrunkitBackend::new(paths.config_dir.clone());
         let cmd = backend.shell_command(self.shell.as_deref(), &self.command);
         if self.command.is_empty() {
             anstream::eprintln!("omnifs shell (krunkit) at {GUEST_MOUNT} (type `exit` to leave)");

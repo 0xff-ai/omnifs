@@ -45,7 +45,7 @@ use std::time::Duration;
 use anyhow::{Context as _, Result};
 
 use crate::config::Config;
-use crate::frontend_backend::{AttachEndpoint, FrontendBackend, FrontendLaunchSpec};
+use crate::frontend_backend::{FrontendBackend, FrontendLaunchSpec};
 use crate::launch_backend::{BUILD_CHANNEL, BuildChannel, GUEST_MOUNT, ImageRef};
 
 const KRUNKIT_SUBDIR: &str = "krunkit";
@@ -83,12 +83,6 @@ const DEFAULT_GUEST_IMAGE: &str = "target/guest-image/omnifs-guest.raw";
 const GUEST_RELEASE_IMAGE: &str =
     concat!("ghcr.io/0xff-ai/omnifs-guest:", env!("CARGO_PKG_VERSION"));
 
-/// Image path used to construct a backend for a non-launch dispatch
-/// (`down`/`shell`/`status`), which never reads it. Mirrors
-/// `FRONTEND_DEV_IMAGE`'s use as an unused placeholder in the Docker backend's
-/// own non-launch call sites.
-pub(crate) const UNUSED_GUEST_IMAGE_PLACEHOLDER: &str = "unused";
-
 /// Where the krunkit driver's guest disk image comes from, gated purely by
 /// [`BuildChannel`] (never by the shape of an override string): a dev binary
 /// never downloads, so its resolution always yields [`Self::Local`], even
@@ -99,6 +93,33 @@ pub(crate) const UNUSED_GUEST_IMAGE_PLACEHOLDER: &str = "unused";
 pub(crate) enum GuestImageSource {
     Local(PathBuf),
     Registry(ImageRef),
+}
+
+impl GuestImageSource {
+    /// Resolve the configured source, then turn it into the local disk path
+    /// krunkit needs. Dev images are already local; release images are pulled
+    /// into the workspace cache on first use.
+    pub(crate) fn resolve(image: Option<String>, config: &Config) -> Result<Self> {
+        let resolved = crate::config::resolve_setting(
+            image,
+            ENV_GUEST_IMAGE,
+            || config.frontend.guest_image.clone(),
+            default_guest_image_for(BUILD_CHANNEL).to_string(),
+        );
+        match BUILD_CHANNEL {
+            BuildChannel::Dev => Ok(Self::Local(PathBuf::from(resolved))),
+            BuildChannel::Release => Ok(Self::Registry(ImageRef::new(resolved)?)),
+        }
+    }
+
+    pub(crate) async fn into_local_path(self, cache_dir: &Path) -> Result<PathBuf> {
+        match self {
+            Self::Local(path) => Ok(path),
+            Self::Registry(image) => {
+                crate::guest_image_pull::ensure_guest_image(&image, cache_dir).await
+            },
+        }
+    }
 }
 
 const SEED_VOLUME_LABEL: &str = "OMNIFS-SEED";
@@ -149,28 +170,6 @@ pub(crate) const fn default_guest_image_for(channel: BuildChannel) -> &'static s
     }
 }
 
-/// Resolve the krunkit driver's guest disk image through the same
-/// flag > env > config > default precedence chain as
-/// `resolve_frontend_image`, gated on the build channel: a release binary
-/// always resolves to a ghcr artifact to pull (see `crate::guest_image_pull`),
-/// a dev binary always resolves to a local path and never downloads, even if
-/// an override happens to look like a registry reference.
-pub(crate) fn resolve_guest_image(
-    image: Option<String>,
-    config: &Config,
-) -> Result<GuestImageSource> {
-    let resolved = crate::config::resolve_setting(
-        image,
-        ENV_GUEST_IMAGE,
-        || config.frontend.guest_image.clone(),
-        default_guest_image_for(BUILD_CHANNEL).to_string(),
-    );
-    match BUILD_CHANNEL {
-        BuildChannel::Dev => Ok(GuestImageSource::Local(PathBuf::from(resolved))),
-        BuildChannel::Release => Ok(GuestImageSource::Registry(ImageRef::new(resolved)?)),
-    }
-}
-
 /// A truthful, actionable error naming the install command, rather than a
 /// bare "command not found" surfaced from the failed spawn.
 fn ensure_krunkit_available() -> Result<()> {
@@ -216,11 +215,10 @@ fn process_alive(pid: u32) -> bool {
         .is_ok_and(|status| status.success())
 }
 
-/// The libkrun microVM frontend backend. `guest_image` is only read by
-/// `launch`; every other method derives its paths from `home` alone.
+/// The libkrun microVM frontend backend. Instance state is workspace-scoped;
+/// launch-only inputs such as the guest image live in `FrontendLaunchSpec`.
 pub(crate) struct KrunkitBackend {
     home: PathBuf,
-    guest_image: PathBuf,
     /// Flipped by the readiness accept-loop thread `launch` spawns, once the
     /// guest's frontend runner has dialed in with its `ready\n` line.
     /// `Arc` so the loop thread (which outlives the async `launch` call) and
@@ -230,10 +228,9 @@ pub(crate) struct KrunkitBackend {
 }
 
 impl KrunkitBackend {
-    pub(crate) fn new(home: PathBuf, guest_image: PathBuf) -> Self {
+    pub(crate) fn new(home: PathBuf) -> Self {
         Self {
             home,
-            guest_image,
             ready: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -579,14 +576,19 @@ fn assert_krunkit_locked_down(
 impl FrontendBackend for KrunkitBackend {
     async fn launch(&self, spec: &FrontendLaunchSpec) -> Result<()> {
         ensure_krunkit_available()?;
-        let AttachEndpoint::Unix(daemon_attach_socket) = &spec.attach else {
-            anyhow::bail!("internal: the krunkit backend requires a unix-socket attach endpoint");
+        let FrontendLaunchSpec::Krunkit {
+            attach_socket: daemon_attach_socket,
+            attach_token,
+            guest_image,
+        } = spec
+        else {
+            anyhow::bail!("internal: the krunkit backend received a docker launch spec");
         };
         anyhow::ensure!(
-            self.guest_image.is_file(),
+            guest_image.is_file(),
             "guest image not found at {}; build it with `just guest-image` \
              (see docs/contracts/60-build-validation.md)",
-            self.guest_image.display()
+            guest_image.display()
         );
 
         // Replace any prior instance before laying down fresh launch state.
@@ -609,47 +611,34 @@ impl FrontendBackend for KrunkitBackend {
         }
 
         let ssh_pubkey = self.ensure_ssh_keypair()?;
-        self.write_seed_iso(&spec.attach_token, &ssh_pubkey)?;
+        self.write_seed_iso(attach_token, &ssh_pubkey)?;
         self.spawn_ready_accept_loop()?;
         let _ = std::fs::remove_file(self.ssh_socket());
 
         let pidfile = self.pidfile();
-        let mut command = Command::new("krunkit");
-        command
-            .arg("--cpus")
-            .arg("2")
-            .arg("--memory")
-            .arg("2048")
-            .arg("--device")
-            .arg(format!(
-                "virtio-blk,path={},format=raw",
-                self.guest_image.display()
-            ))
-            .arg("--device")
-            .arg(format!(
-                "virtio-blk,path={},format=raw",
-                self.seed_iso().display()
-            ))
-            .arg("--device")
-            .arg(format!(
+        let devices = [
+            format!("virtio-blk,path={},format=raw", guest_image.display()),
+            format!("virtio-blk,path={},format=raw", self.seed_iso().display()),
+            format!(
                 "virtio-vsock,port={ATTACH_VSOCK_PORT},socketURL={},listen",
                 daemon_attach_socket.display()
-            ))
-            .arg("--device")
-            .arg(format!(
+            ),
+            format!(
                 "virtio-vsock,port={READY_VSOCK_PORT},socketURL={},listen",
                 self.ready_socket().display()
-            ))
-            .arg("--device")
-            .arg(format!(
+            ),
+            format!(
                 "virtio-vsock,port={SSH_VSOCK_PORT},socketURL={},connect",
                 self.ssh_socket().display()
-            ))
-            .arg("--device")
-            .arg(format!(
-                "virtio-serial,logFilePath={}",
-                self.serial_log().display()
-            ))
+            ),
+            format!("virtio-serial,logFilePath={}", self.serial_log().display()),
+        ];
+        let mut command = Command::new("krunkit");
+        command.args(["--cpus", "2", "--memory", "2048"]);
+        for device in devices {
+            command.arg("--device").arg(device);
+        }
+        command
             .arg("--restful-uri")
             .arg(format!("unix://{}", self.restful_socket().display()))
             .arg("--pidfile")
@@ -777,13 +766,14 @@ mod tests {
         // `default_guest_image_for` directly, mirroring how
         // `frontend_container.rs` tests its own two channel defaults.
         let config = Config::default();
-        let image = resolve_guest_image(None, &config).unwrap();
+        let image = GuestImageSource::resolve(None, &config).unwrap();
         assert_eq!(
             image,
             GuestImageSource::Local(PathBuf::from(DEFAULT_GUEST_IMAGE))
         );
 
-        let flag = resolve_guest_image(Some("/custom/guest.raw".to_string()), &config).unwrap();
+        let flag =
+            GuestImageSource::resolve(Some("/custom/guest.raw".to_string()), &config).unwrap();
         assert_eq!(
             flag,
             GuestImageSource::Local(PathBuf::from("/custom/guest.raw"))

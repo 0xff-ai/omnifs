@@ -49,36 +49,27 @@ impl Driver {
     }
 }
 
-/// The attach transport a [`FrontendLaunchSpec`] carries. Docker dials a TCP
-/// port on the host bridge; krunkit proxies guest-initiated vsock
-/// connections onto a unix socket the daemon already bound (`POST
-/// /v1/frontend/attach-target/vsock`). Each backend's `launch` asserts it received
-/// the variant its own transport needs; a mismatch is an internal dispatch
-/// bug (the wrong daemon call was made), not a user-reachable error.
-#[derive(Debug, Clone)]
-pub(crate) enum AttachEndpoint {
-    Tcp(u16),
-    Unix(PathBuf),
-}
-
-/// Launch-time parameters for the frontend, independent of backend.
-/// Identity (container/instance name, image, guest disk) lives on the
-/// backend instance itself, constructed by the caller before
-/// [`FrontendBackend::launch`] is invoked, so it is not duplicated here.
-pub(crate) struct FrontendLaunchSpec {
-    /// The workspace's config dir, recorded as a label only (never bind-mounted
-    /// by Docker; read for path derivation by krunkit).
-    pub home: PathBuf,
-    /// The host-native daemon's attach listener, in whichever transport this
-    /// backend dials.
-    pub attach: AttachEndpoint,
-    pub attach_token: String,
+/// Backend-specific launch inputs. Keeping the variants whole prevents
+/// impossible combinations such as a Docker launch with a Unix attach socket
+/// or a krunkit launch without a guest disk image.
+pub(crate) enum FrontendLaunchSpec {
+    Docker {
+        /// Recorded as a label only; it is never bind-mounted.
+        home: PathBuf,
+        attach_port: u16,
+        attach_token: String,
+    },
+    Krunkit {
+        /// Daemon-owned socket onto which krunkit proxies guest vsock traffic.
+        attach_socket: PathBuf,
+        attach_token: String,
+        guest_image: PathBuf,
+    },
 }
 
 /// How the CLI launches, probes, tears down, and shells into the optional
-/// FUSE frontend. Docker (`DockerBackend`) is the only implementation today;
-/// a future libkrun/krunkit backend on macOS implements the same contract
-/// over a vsock transport instead of Docker's TCP bridge.
+/// FUSE frontend. Docker uses the host bridge; krunkit implements the same
+/// contract over a vsock transport.
 pub(crate) trait FrontendBackend {
     /// Ensure the runnable artifact is present, replace any existing
     /// frontend of this backend's identity, start it, and verify the
@@ -119,14 +110,19 @@ impl DockerBackend {
 
 impl FrontendBackend for DockerBackend {
     async fn launch(&self, spec: &FrontendLaunchSpec) -> Result<()> {
-        let AttachEndpoint::Tcp(attach_port) = spec.attach else {
-            anyhow::bail!("internal: the docker backend requires a tcp attach endpoint");
+        let FrontendLaunchSpec::Docker {
+            home,
+            attach_port,
+            attach_token,
+        } = spec
+        else {
+            anyhow::bail!("internal: the docker backend received a krunkit launch spec");
         };
         let body = build_frontend_container_body(&FrontendContainerSpec {
             image: self.runtime.image(),
-            home: &spec.home,
-            attach_port,
-            attach_token: &spec.attach_token,
+            home,
+            attach_port: *attach_port,
+            attach_token,
             // Docker Desktop (macOS) resolves `host.docker.internal` on its
             // own; native Linux does not predefine the name, so the
             // container needs the extra `--add-host` mapping. A pure
