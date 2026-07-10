@@ -38,8 +38,7 @@ impl FileStore {
         Self { path, lock_path }
     }
 
-    /// Returns the sidecar lock path used by [`FileStore::new`].
-    pub fn lock_path_for(path: &Path) -> PathBuf {
+    fn lock_path_for(path: &Path) -> PathBuf {
         let mut lock = path.as_os_str().to_owned();
         lock.push(".lock");
         PathBuf::from(lock)
@@ -47,7 +46,8 @@ impl FileStore {
 
     /// Creates a `FileStore` with an explicit lock path. Tests use this to
     /// keep the lock sentinel inside the temporary directory under test.
-    pub fn with_lock_path(path: impl Into<PathBuf>, lock_path: impl Into<PathBuf>) -> Self {
+    #[cfg(test)]
+    fn with_lock_path(path: impl Into<PathBuf>, lock_path: impl Into<PathBuf>) -> Self {
         Self {
             path: path.into(),
             lock_path: lock_path.into(),
@@ -142,10 +142,6 @@ impl CredentialStore for FileStore {
             .collect::<Result<Vec<_>, _>>()
             .map_err(CredStoreError::from)?;
         Ok(Some(keys))
-    }
-
-    fn backend_label(&self) -> String {
-        format!("file store ({})", self.path.display())
     }
 }
 

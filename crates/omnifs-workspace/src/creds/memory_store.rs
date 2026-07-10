@@ -14,9 +14,7 @@ pub struct MemoryStore {
 
 impl MemoryStore {
     pub fn new() -> Self {
-        Self {
-            entries: Mutex::new(BTreeMap::new()),
-        }
+        Self::default()
     }
 
     fn entries(&self) -> Result<MutexGuard<'_, BTreeMap<String, CredentialEntry>>, CredStoreError> {
@@ -49,9 +47,5 @@ impl CredentialStore for MemoryStore {
             .collect::<Result<Vec<_>, _>>()
             .map_err(CredStoreError::from)?;
         Ok(Some(keys))
-    }
-
-    fn backend_label(&self) -> String {
-        "in-memory (test only)".into()
     }
 }

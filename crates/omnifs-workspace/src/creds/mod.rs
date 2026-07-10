@@ -127,10 +127,6 @@ impl CredentialEntry {
         self.stored_at
     }
 
-    pub fn last_validated(&self) -> Option<OffsetDateTime> {
-        self.last_validated
-    }
-
     pub fn set_last_validated(&mut self, last_validated: Option<OffsetDateTime>) {
         self.last_validated = last_validated;
     }
@@ -143,16 +139,8 @@ impl CredentialEntry {
         self.scopes
     }
 
-    pub fn upstream_identity(&self) -> Option<&str> {
-        self.upstream_identity.as_deref()
-    }
-
     pub fn set_upstream_identity(&mut self, upstream_identity: Option<String>) {
         self.upstream_identity = upstream_identity;
-    }
-
-    pub fn extras(&self) -> &BTreeMap<String, String> {
-        &self.extras
     }
 
     pub fn set_extras(&mut self, extras: BTreeMap<String, String>) {
@@ -261,8 +249,6 @@ pub trait CredentialStore: Send + Sync {
     /// Lists known credential ids. Backends that cannot enumerate return
     /// `Ok(None)`.
     fn list(&self) -> Result<Option<Vec<CredentialId>>, CredStoreError>;
-    /// Human-readable backend name shown in UX.
-    fn backend_label(&self) -> String;
 }
 
 #[derive(Debug, thiserror::Error)]
