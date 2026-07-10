@@ -22,7 +22,7 @@ use omnifs_sdk::serde::{Deserialize, Serialize};
 
 mod backend;
 
-use backend::{FileInfo, SqliteBackend};
+use backend::{ColumnInfo, FileInfo, IndexInfo, SqliteBackend};
 
 #[derive(Clone)]
 #[omnifs_sdk::config]
@@ -96,8 +96,8 @@ struct TableKey {
 pub(crate) struct TableDoc {
     pub name: String,
     pub create_sql: Option<String>,
-    pub columns: serde_json::Value,
-    pub indexes: serde_json::Value,
+    pub columns: Vec<ColumnInfo>,
+    pub indexes: Vec<IndexInfo>,
     pub row_count: i64,
 }
 
@@ -245,10 +245,8 @@ fn read_table_doc(cx: &Cx<State>, key: &TableKey) -> Result<TableDoc> {
         Ok(TableDoc {
             name: name.to_string(),
             create_sql,
-            columns: serde_json::to_value(&columns)
-                .map_err(|e| ProviderError::internal(format!("encode columns: {e}")))?,
-            indexes: serde_json::to_value(&indexes)
-                .map_err(|e| ProviderError::internal(format!("encode indexes: {e}")))?,
+            columns,
+            indexes,
             row_count,
         })
     })

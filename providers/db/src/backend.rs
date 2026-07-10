@@ -19,8 +19,6 @@ pub(crate) enum BackendError {
 
 // rusqlite connection wrapper and query helpers.
 
-use std::path::Path;
-
 use rusqlite::{Connection, OpenFlags, types::ValueRef};
 use serde::{Deserialize, Serialize};
 use serde_json::{Number, Value as JsonValue, json};
@@ -44,11 +42,6 @@ impl SqliteBackend {
             path: path.to_string(),
             read_only,
         })
-    }
-
-    pub fn library_version(&self) -> &'static str {
-        let _ = self;
-        rusqlite::version()
     }
 
     /// File-level metadata: size, page count/size, app id, user
@@ -76,7 +69,7 @@ impl SqliteBackend {
         Ok(FileInfo {
             path: self.path.clone(),
             read_only: self.read_only,
-            sqlite_version: self.library_version().to_string(),
+            sqlite_version: rusqlite::version().to_string(),
             size_bytes,
             page_size,
             page_count,
@@ -279,7 +272,6 @@ fn open_connection(path: &str, read_only: bool) -> Result<Connection, BackendErr
     // with URI mode.
     conn.query_row("SELECT 1", [], |_| Ok(()))
         .map_err(|e| BackendError::Open(e.to_string()))?;
-    let _ = Path::new(path);
     Ok(conn)
 }
 
