@@ -1,0 +1,14 @@
+[Unit]
+Description=Mount the omnifs attach-parameter seed volume (label OMNIFS-SEED)
+DefaultDependencies=no
+Conflicts=shutdown.target
+Before=omnifs-frontend.service shutdown.target
+After=local-fs-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/lib/omnifs/mount-seed.sh
+
+[Install]
+WantedBy=multi-user.target
