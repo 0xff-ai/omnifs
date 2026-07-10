@@ -169,7 +169,7 @@ jobs:
 
       - uses: ./.github/actions/omnifs-docker
 
-      - uses: oras-project/setup-oras@v1
+      - uses: oras-project/setup-oras@v2
         with:
           version: 1.3.3
 
