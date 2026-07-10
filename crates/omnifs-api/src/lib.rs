@@ -21,7 +21,7 @@ pub const API_MAJOR: u16 = 4;
 
 /// Control API minor version. The CLI warns but proceeds when the daemon's
 /// minor differs. Bump for additive, backward-compatible additions.
-pub const API_MINOR: u16 = 0;
+pub const API_MINOR: u16 = 1;
 
 /// TCP namespace attach address, injected by the frontend container launcher
 /// and read by the out-of-process `omnifs frontend run` runner when no
@@ -519,6 +519,24 @@ pub struct AttachListenersRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct AttachListenersReport {
     pub addr: String,
+    pub token: String,
+}
+
+/// `POST /v1/attach-listeners/vsock`: the token-checking UDS namespace attach
+/// listener's socket path and per-instance attach token, whether just bound or
+/// already serving from an earlier call. This is the krunkit-on-macOS path: a
+/// guest VM has no shared host Unix socket and no Docker-style loopback
+/// either, so it dials host vsock instead, and krunkit proxies every vsock
+/// connection onto `socket_path`. Every connection krunkit forwards looks like
+/// the same trusted local peer to that socket, so `token` (not filesystem
+/// permissions) is this listener's real auth, checked the same way the TCP
+/// listener's is. Takes no request body: unlike the TCP listener, there is no
+/// bind address to choose, only the daemon-picked path under the workspace.
+/// Idempotent, same as [`AttachListenersReport`]: a repeat call returns the
+/// already-bound path and token unchanged.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct AttachVsockListenerReport {
+    pub socket_path: String,
     pub token: String,
 }
 

@@ -55,9 +55,10 @@ pub struct FrontendArgs {
 }
 
 /// Resolve the attach target: the explicit `--attach <socket>` when given,
-/// otherwise the TCP target named by `OMNIFS_ATTACH_ADDR`/`OMNIFS_ATTACH_TOKEN`
-/// (the Docker frontend launcher sets both). Neither present is a hard error:
-/// there is no default to fall back to silently.
+/// otherwise the target named by `OMNIFS_ATTACH_ADDR`/`OMNIFS_ATTACH_TOKEN`
+/// (the Docker frontend launcher sets both for TCP; the krunkit launcher will
+/// set both for `vsock:<port>`). Neither present is a hard error: there is no
+/// default to fall back to silently.
 fn resolve_attach_target(attach: Option<PathBuf>) -> anyhow::Result<AttachTarget> {
     if let Some(socket) = attach {
         return Ok(AttachTarget::Unix(socket));
@@ -72,11 +73,16 @@ fn resolve_attach_target(attach: Option<PathBuf>) -> anyhow::Result<AttachTarget
 /// function of its two inputs so the parse/validation logic is unit-testable
 /// without mutating process environment.
 ///
-/// `addr` stays a plain `host:port` string rather than a pre-parsed
-/// `SocketAddr`: the Docker-hosted frontend dials `host.docker.internal`, a
-/// name Docker injects into the container's DNS that only resolves inside
-/// the container, so the runner cannot validate it any earlier than
-/// `TcpStream::connect` does.
+/// `addr` is `vsock:<port>` for the krunkit guest (there is no host name to
+/// resolve: the guest always dials `VMADDR_CID_HOST`, so only the port varies)
+/// or a plain `host:port` string for TCP, kept unparsed rather than a
+/// pre-resolved `SocketAddr`: the Docker-hosted frontend dials
+/// `host.docker.internal`, a name Docker injects into the container's DNS
+/// that only resolves inside the container, so the runner cannot validate it
+/// any earlier than `TcpStream::connect` does. A literal host named `vsock`
+/// (vanishingly unlikely, and never how Docker names its bridge) resolves to
+/// the vsock form; there is no way to address a real host by that name that
+/// this grammar would rather preserve.
 fn attach_target_from_env(
     addr: Option<String>,
     token: Option<String>,
@@ -90,6 +96,12 @@ fn attach_target_from_env(
     let token = token.with_context(|| {
         format!("{OMNIFS_ATTACH_ADDR_ENV} is set but {OMNIFS_ATTACH_TOKEN_ENV} is not")
     })?;
+    if let Some(port) = addr.strip_prefix("vsock:") {
+        let port: u32 = port.parse().with_context(|| {
+            format!("{OMNIFS_ATTACH_ADDR_ENV} `{addr}` has an invalid vsock port")
+        })?;
+        return Ok(AttachTarget::Vsock { port, token });
+    }
     anyhow::ensure!(
         addr.rsplit_once(':')
             .is_some_and(|(_, port)| port.parse::<u16>().is_ok()),
@@ -275,7 +287,7 @@ mod tests {
                 assert_eq!(addr, "host.docker.internal:54321");
                 assert_eq!(token, "secret");
             },
-            AttachTarget::Unix(_) => panic!("expected a tcp target"),
+            other => panic!("expected a tcp target, got {other:?}"),
         }
     }
 
@@ -295,5 +307,51 @@ mod tests {
             Some("secret".to_string()),
         )
         .expect_err("an address with no port must fail");
+    }
+
+    #[test]
+    fn attach_falls_back_to_vsock_env_vars() {
+        let target =
+            attach_target_from_env(Some("vsock:9000".to_string()), Some("secret".to_string()))
+                .unwrap();
+        match target {
+            AttachTarget::Vsock { port, token } => {
+                assert_eq!(port, 9000);
+                assert_eq!(token, "secret");
+            },
+            other => panic!("expected a vsock target, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn attach_env_rejects_vsock_with_no_port() {
+        attach_target_from_env(Some("vsock:".to_string()), Some("secret".to_string()))
+            .expect_err("a vsock address with no port must fail");
+    }
+
+    #[test]
+    fn attach_env_rejects_vsock_with_a_bad_port() {
+        attach_target_from_env(
+            Some("vsock:not-a-port".to_string()),
+            Some("secret".to_string()),
+        )
+        .expect_err("a non-numeric vsock port must fail");
+        attach_target_from_env(
+            Some("vsock:99999999999".to_string()),
+            Some("secret".to_string()),
+        )
+        .expect_err("a vsock port that overflows u32 must fail");
+    }
+
+    #[test]
+    fn attach_vsock_takes_precedence_over_a_host_literally_named_vsock() {
+        // `vsock:8080` is ambiguous between "a host named vsock on port 8080"
+        // and the vsock transport; the grammar resolves it to vsock, since
+        // there is no other way to address the vsock transport at all, while a
+        // host named `vsock` is a name a caller could always change.
+        let target =
+            attach_target_from_env(Some("vsock:8080".to_string()), Some("secret".to_string()))
+                .unwrap();
+        assert!(matches!(target, AttachTarget::Vsock { port: 8080, .. }));
     }
 }
