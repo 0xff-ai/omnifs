@@ -1,8 +1,10 @@
-//! `omnifs frontend up`: bring up the Docker-hosted FUSE frontend.
+//! `omnifs frontend up`: bring up the optional virtualized FUSE frontend,
+//! either the Docker-hosted container (`--driver docker`, the default) or the
+//! krunkit microVM (`--driver krunkit`, macOS only).
 //!
-//! The frontend is a separate, credential-free container attached to a
-//! host-native daemon's shared namespace over TCP; it is not a daemon runtime
-//! mode.
+//! The frontend is a separate, credential-free surface attached to a
+//! host-native daemon's shared namespace over its attach transport (TCP for
+//! Docker, vsock for krunkit); it is not a daemon runtime mode.
 
 // On Linux the expected bind address comes from the Docker bridge probe, so
 // `Ipv4Addr` is only named on the non-Linux (loopback) arm.
@@ -16,17 +18,25 @@ use clap::Args;
 use omnifs_workspace::layout::OMNIFS_HOME_ENV;
 use omnifs_workspace::runtime_record::{FrontendKind, FrontendRecord, RuntimeRecord, Via};
 
-use crate::frontend_backend::{DockerBackend, Driver, FrontendBackend, FrontendLaunchSpec};
+use crate::frontend_backend::{
+    AttachEndpoint, DockerBackend, Driver, FrontendBackend, FrontendLaunchSpec,
+};
 use crate::frontend_container::{frontend_container_name, resolve_frontend_image};
+use crate::krunkit_backend::{self, KrunkitBackend};
 use crate::launch::Launcher;
 use crate::launch_backend::{DockerTarget, GUEST_MOUNT};
 use crate::runtime::Runtime;
 use crate::workspace::Workspace;
 
-/// How long to wait for the mount to appear inside the frontend container
-/// before giving up (the container itself starts in well under this window;
-/// a longer wait would just mask a real startup failure).
-const MOUNT_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long to wait for the mount to appear inside the Docker-hosted frontend
+/// container before giving up (the container itself starts in well under
+/// this window; a longer wait would just mask a real startup failure).
+const DOCKER_MOUNT_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+/// A krunkit microVM boots a kernel and reaches multi-user systemd before its
+/// frontend runner can even attach, which takes far longer than a container
+/// start; the readiness beacon (`crates/omnifs-daemon/src/frontend.rs`) only
+/// fires once that whole chain has completed and the FUSE mount is serving.
+const KRUNKIT_MOUNT_PROBE_TIMEOUT: Duration = Duration::from_secs(90);
 const MOUNT_PROBE_INTERVAL: Duration = Duration::from_millis(200);
 
 #[derive(Args, Debug, Clone, Default)]
@@ -43,64 +53,103 @@ impl FrontendUpArgs {
         let paths = workspace.layout().clone();
         let config = workspace.config()?;
 
-        // Fail fast on an unimplemented driver selection, before touching
-        // the daemon or Docker at all.
         let driver = self.driver.unwrap_or(config.frontend.driver);
-        driver.require_implemented()?;
-
         ensure_native_daemon(&workspace).await?;
 
-        let image = resolve_frontend_image(None, &config)?;
-        let is_default_home = std::env::var_os(OMNIFS_HOME_ENV).is_none();
-        let container_name = frontend_container_name(&paths.config_dir, is_default_home)?;
-        let target = DockerTarget::new(
-            container_name.as_str().to_string(),
-            image.as_str().to_string(),
-        )?;
-
-        let runtime = Runtime::connect_ready(&target, "omnifs frontend up").await?;
-        #[cfg(target_os = "linux")]
-        let (bind_ip, expected_bind_ip) = {
-            let bind_ip = runtime.frontend_attach_bind_ip().await?;
-            (Some(bind_ip), bind_ip)
-        };
-        #[cfg(not(target_os = "linux"))]
-        let (bind_ip, expected_bind_ip) = (None, Ipv4Addr::LOCALHOST);
-
-        anstream::eprintln!("Requesting the daemon's TCP namespace attach listener");
-        let attach = workspace.daemon().attach_listeners(bind_ip).await?;
-        let attach_addr = attach_addr(&attach.addr)?;
-        ensure!(
-            attach_addr.ip() == IpAddr::V4(expected_bind_ip),
-            "daemon already serves its attach listener on {}; restart it with `omnifs down`, then re-run `omnifs frontend up`",
-            attach_addr.ip()
-        );
-        let attach_port = attach_addr.port();
-
-        let backend = DockerBackend::new(runtime);
-        let spec = FrontendLaunchSpec {
-            home: paths.config_dir.clone(),
-            attach_port,
-            attach_token: attach.token.clone(),
-        };
-        backend.launch(&spec).await?;
-
         let mount_name = first_mount_name(&workspace)?;
-        wait_for_mount(&backend, &mount_name).await?;
 
-        record_frontend(&paths.runtime_record_file(), driver.as_via());
-
-        anstream::eprintln!(
-            "✓ {GUEST_MOUNT} is mounted inside `{}`",
-            target.container_name()
-        );
-        anstream::eprintln!();
-        anstream::eprintln!(
-            "Run `{}` to open a shell inside the container and browse {GUEST_MOUNT}.",
-            crate::style::bold("omnifs shell")
-        );
-        Ok(())
+        match driver {
+            Driver::Docker => run_docker(&workspace, &paths, &config, &mount_name).await,
+            Driver::Krunkit => run_krunkit(&workspace, &paths, &config, &mount_name).await,
+        }
     }
+}
+
+async fn run_docker(
+    workspace: &Workspace,
+    paths: &omnifs_workspace::layout::WorkspaceLayout,
+    config: &crate::config::Config,
+    mount_name: &str,
+) -> anyhow::Result<()> {
+    let image = resolve_frontend_image(None, config)?;
+    let is_default_home = std::env::var_os(OMNIFS_HOME_ENV).is_none();
+    let container_name = frontend_container_name(&paths.config_dir, is_default_home)?;
+    let target = DockerTarget::new(
+        container_name.as_str().to_string(),
+        image.as_str().to_string(),
+    )?;
+
+    let runtime = Runtime::connect_ready(&target, "omnifs frontend up").await?;
+    #[cfg(target_os = "linux")]
+    let (bind_ip, expected_bind_ip) = {
+        let bind_ip = runtime.frontend_attach_bind_ip().await?;
+        (Some(bind_ip), bind_ip)
+    };
+    #[cfg(not(target_os = "linux"))]
+    let (bind_ip, expected_bind_ip) = (None, Ipv4Addr::LOCALHOST);
+
+    anstream::eprintln!("Requesting the daemon's TCP namespace attach listener");
+    let attach = workspace.daemon().attach_listeners(bind_ip).await?;
+    let attach_addr = attach_addr(&attach.addr)?;
+    ensure!(
+        attach_addr.ip() == IpAddr::V4(expected_bind_ip),
+        "daemon already serves its attach listener on {}; restart it with `omnifs down`, then re-run `omnifs frontend up`",
+        attach_addr.ip()
+    );
+
+    let backend = DockerBackend::new(runtime);
+    let spec = FrontendLaunchSpec {
+        home: paths.config_dir.clone(),
+        attach: AttachEndpoint::Tcp(attach_addr.port()),
+        attach_token: attach.token.clone(),
+    };
+    backend.launch(&spec).await?;
+
+    wait_for_mount(&backend, mount_name, DOCKER_MOUNT_PROBE_TIMEOUT).await?;
+    record_frontend(&paths.runtime_record_file(), Driver::Docker.as_via());
+
+    anstream::eprintln!(
+        "✓ {GUEST_MOUNT} is mounted inside `{}`",
+        target.container_name()
+    );
+    anstream::eprintln!();
+    anstream::eprintln!(
+        "Run `{}` to open a shell inside the container and browse {GUEST_MOUNT}.",
+        crate::style::bold("omnifs shell")
+    );
+    Ok(())
+}
+
+async fn run_krunkit(
+    workspace: &Workspace,
+    paths: &omnifs_workspace::layout::WorkspaceLayout,
+    config: &crate::config::Config,
+    mount_name: &str,
+) -> anyhow::Result<()> {
+    let guest_image = krunkit_backend::resolve_guest_image(None, config);
+
+    anstream::eprintln!("Requesting the daemon's vsock namespace attach listener");
+    let attach = workspace.daemon().attach_listeners_vsock().await?;
+
+    let backend = KrunkitBackend::new(paths.config_dir.clone(), guest_image);
+    let spec = FrontendLaunchSpec {
+        home: paths.config_dir.clone(),
+        attach: AttachEndpoint::Unix(std::path::PathBuf::from(attach.socket_path)),
+        attach_token: attach.token.clone(),
+    };
+    anstream::eprintln!("Starting the krunkit guest");
+    backend.launch(&spec).await?;
+
+    wait_for_mount(&backend, mount_name, KRUNKIT_MOUNT_PROBE_TIMEOUT).await?;
+    record_frontend(&paths.runtime_record_file(), Driver::Krunkit.as_via());
+
+    anstream::eprintln!("✓ {GUEST_MOUNT} is mounted inside the krunkit guest");
+    anstream::eprintln!();
+    anstream::eprintln!(
+        "Run `{}` to open a shell inside the guest and browse {GUEST_MOUNT}.",
+        crate::style::bold("omnifs shell")
+    );
+    Ok(())
 }
 
 /// Ensure the host-native daemon is serving, reusing the same launch
@@ -132,20 +181,27 @@ fn first_mount_name(workspace: &Workspace) -> anyhow::Result<String> {
         .context("no mounts configured; run `omnifs init <provider>` before `omnifs frontend up`")
 }
 
-/// Poll `docker exec test -e /omnifs/<mount>` until it succeeds or the
-/// timeout elapses.
-async fn wait_for_mount(backend: &impl FrontendBackend, mount_name: &str) -> anyhow::Result<()> {
+/// Poll `backend.mount_ready` until it reports the mount is live or
+/// `timeout` elapses. Docker polls a specific path inside the container;
+/// krunkit has no equivalent exec channel and instead observes the guest's
+/// whole-VM readiness beacon, ignoring the path (see
+/// `KrunkitBackend::mount_ready`).
+async fn wait_for_mount(
+    backend: &impl FrontendBackend,
+    mount_name: &str,
+    timeout: Duration,
+) -> anyhow::Result<()> {
     let probe_path = format!("{GUEST_MOUNT}/{mount_name}");
-    anstream::eprintln!("Waiting for {probe_path} inside the frontend container");
-    let deadline = tokio::time::Instant::now() + MOUNT_PROBE_TIMEOUT;
+    anstream::eprintln!("Waiting for {probe_path} inside the frontend");
+    let deadline = tokio::time::Instant::now() + timeout;
     loop {
         if backend.mount_ready(&probe_path).await.unwrap_or(false) {
             return Ok(());
         }
         if tokio::time::Instant::now() >= deadline {
             anyhow::bail!(
-                "{probe_path} did not appear inside the frontend container within {}s",
-                MOUNT_PROBE_TIMEOUT.as_secs()
+                "{probe_path} did not appear inside the frontend within {}s",
+                timeout.as_secs()
             );
         }
         tokio::time::sleep(MOUNT_PROBE_INTERVAL).await;

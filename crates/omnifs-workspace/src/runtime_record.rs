@@ -79,9 +79,9 @@ pub struct FrontendRecord {
 /// How a frontend reaches the shared namespace. Distinct from `RecordedBackend`,
 /// which names the daemon's own delivery: a host-native daemon can still host a
 /// virtualized-delivered frontend attached over the TCP namespace listener.
-/// `Docker` is the only backend implemented today; `Krunkit` (a libkrun
-/// microVM on macOS, see `docs/contracts/40-frontends.md`) is a designated
-/// second backend with no implementation yet.
+/// `Docker` runs a container attached over TCP; `Krunkit` (a libkrun microVM
+/// on macOS, see `docs/contracts/40-frontends.md`) runs the same frontend
+/// binary in a guest attached over vsock.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Via {

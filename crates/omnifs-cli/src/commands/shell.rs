@@ -11,11 +11,12 @@
 //! are never touched.
 //!
 //! Surface-aware: the daemon always runs host-native, so its own mount is
-//! always host-visible. But when the optional Docker-hosted FUSE frontend is
-//! attached (`omnifs frontend up`), its mount lives inside the container and
-//! is invisible on the host; that frontend is also the primary consumption
-//! surface on macOS, so `omnifs shell` prefers it when running and execs into
-//! the container instead of the host subshell.
+//! always host-visible. But when the optional virtualized FUSE frontend is
+//! attached (`omnifs frontend up`, Docker container or krunkit microVM), its
+//! mount lives inside the guest and is invisible on the host; that frontend
+//! is also the primary consumption surface on macOS, so `omnifs shell`
+//! prefers it when running and execs into the guest (`docker exec` or
+//! ssh-over-vsock) instead of the host subshell.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -24,8 +25,9 @@ use anyhow::{Context, Result};
 use clap::Args;
 use omnifs_api::MountInfo;
 
-use crate::frontend_backend::{DockerBackend, FrontendBackend, krunkit_unimplemented};
+use crate::frontend_backend::{DockerBackend, FrontendBackend};
 use crate::frontend_container::FRONTEND_DEV_IMAGE;
+use crate::krunkit_backend::{self, KrunkitBackend, UNUSED_GUEST_IMAGE_PLACEHOLDER};
 use crate::launch_backend::{ContainerName, DockerTarget, GUEST_MOUNT};
 use crate::runtime::Runtime;
 use crate::workspace::Workspace;
@@ -73,7 +75,7 @@ impl ShellArgs {
                 let container_name = frontend_container_name(paths)?;
                 return self.exec_in_container(&container_name);
             },
-            Some(Via::Krunkit) => return Err(krunkit_unimplemented()),
+            Some(Via::Krunkit) => return self.exec_in_krunkit_guest(paths),
             None => {},
         }
 
@@ -168,6 +170,23 @@ impl ShellArgs {
             anstream::eprintln!("omnifs shell (container) at {GUEST_MOUNT} (type `exit` to leave)");
         }
         spawn_and_propagate(cmd, format!("open shell in container `{container_name}`"))
+    }
+
+    /// Attach to the krunkit guest over ssh-over-vsock, landing in the
+    /// projected tree. `shell_command` is pure construction (no I/O), so the
+    /// `socat` probe (an I/O check) happens here, at the one call site about
+    /// to actually run it.
+    fn exec_in_krunkit_guest(&self, paths: &WorkspaceLayout) -> Result<()> {
+        krunkit_backend::ensure_socat_available()?;
+        let backend = KrunkitBackend::new(
+            paths.config_dir.clone(),
+            UNUSED_GUEST_IMAGE_PLACEHOLDER.into(),
+        );
+        let cmd = backend.shell_command(self.shell.as_deref(), &self.command);
+        if self.command.is_empty() {
+            anstream::eprintln!("omnifs shell (krunkit) at {GUEST_MOUNT} (type `exit` to leave)");
+        }
+        spawn_and_propagate(cmd, "open shell in the krunkit guest".to_string())
     }
 }
 

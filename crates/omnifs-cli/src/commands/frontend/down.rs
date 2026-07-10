@@ -1,20 +1,22 @@
-//! `omnifs frontend down`: tear down the Docker-hosted FUSE frontend
-//! container.
+//! `omnifs frontend down`: tear down the optional virtualized FUSE frontend,
+//! whichever backend it was launched with (Docker container or krunkit
+//! microVM).
 //!
-//! The daemon's TCP attach listener has no close route (`POST
-//! /v1/attach-listeners` only ever binds, idempotently): the listener stays
-//! bound until the daemon itself restarts. This command says so rather than
-//! implying it closed something it did not.
+//! Neither backend's attach listener has a close route on the daemon side
+//! (`POST /v1/attach-listeners`/`/v1/attach-listeners/vsock` only ever bind,
+//! idempotently): the listener stays bound until the daemon itself restarts.
+//! This command says so rather than implying it closed something it did not.
 //!
 //! [`teardown`] is shared with `omnifs down`, which tears down a running
-//! frontend container before stopping the daemon.
+//! frontend before stopping the daemon.
 
 use clap::Args;
 use omnifs_workspace::layout::{OMNIFS_HOME_ENV, WorkspaceLayout};
 use omnifs_workspace::runtime_record::{RuntimeRecord, Via};
 
-use crate::frontend_backend::{DockerBackend, FrontendBackend, krunkit_unimplemented};
+use crate::frontend_backend::{DockerBackend, FrontendBackend};
 use crate::frontend_container::{FRONTEND_DEV_IMAGE, frontend_container_name};
+use crate::krunkit_backend::{KrunkitBackend, UNUSED_GUEST_IMAGE_PLACEHOLDER};
 use crate::launch_backend::DockerTarget;
 use crate::runtime::Runtime;
 use crate::workspace::Workspace;
@@ -28,27 +30,39 @@ impl FrontendDownArgs {
         let found = teardown(workspace.layout()).await?;
         if found {
             anstream::eprintln!(
-                "note: the daemon's TCP namespace attach listener is not closed by this command; \
+                "note: the daemon's namespace attach listener is not closed by this command; \
                  it stays bound until the daemon restarts"
             );
         } else {
-            anstream::println!("No frontend container found.");
+            anstream::println!("No frontend found.");
         }
         Ok(())
     }
 }
 
-/// Remove the Docker-hosted frontend container for `paths`'s workspace, if
-/// one exists, and clear its record entry. Returns whether a container was
-/// found. Docker being unreachable is a warning, not an error: the container
-/// (and this workspace) may simply have no Docker frontend attached.
+/// Remove the virtualized frontend for `paths`'s workspace, if one exists,
+/// dispatching to whichever backend the runtime record names, and clear its
+/// record entry. Returns whether a frontend was found. An unreachable backend
+/// (Docker daemon down, or a leftover pidfile) is a warning, not an error:
+/// this workspace may simply have no frontend attached.
 pub(crate) async fn teardown(paths: &WorkspaceLayout) -> anyhow::Result<bool> {
     let recorded_via = RuntimeRecord::read(&paths.runtime_record_file())
         .ok()
         .flatten()
         .and_then(|record| record.frontends.iter().find_map(|frontend| frontend.via));
+
     if recorded_via == Some(Via::Krunkit) {
-        return Err(krunkit_unimplemented());
+        let backend = KrunkitBackend::new(
+            paths.config_dir.clone(),
+            UNUSED_GUEST_IMAGE_PLACEHOLDER.into(),
+        );
+        let running = backend.is_running().await?;
+        if running.is_some() {
+            backend.tear_down().await?;
+            anstream::println!("✓ krunkit frontend removed");
+        }
+        clear_frontend_record(&paths.runtime_record_file());
+        return Ok(running.is_some());
     }
 
     let is_default_home = std::env::var_os(OMNIFS_HOME_ENV).is_none();
