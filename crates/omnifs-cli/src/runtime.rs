@@ -360,6 +360,30 @@ impl Runtime {
         self.remove_existing(self.container_name()).await
     }
 
+    /// `Some(running)` when a container named `name` exists, `None` when it
+    /// does not. Generic over `name` (unlike [`Self::running_container_matches_image`],
+    /// which checks `self`'s own target) so `omnifs frontend status` can probe
+    /// the frontend container through any connected `Runtime`.
+    pub(crate) async fn container_running(&self, name: &ContainerName) -> Result<Option<bool>> {
+        match self
+            .docker
+            .inspect_container(name.as_str(), None::<InspectContainerOptions>)
+            .await
+        {
+            Ok(container) => Ok(Some(
+                container
+                    .state
+                    .as_ref()
+                    .and_then(|state| state.running)
+                    .unwrap_or(false),
+            )),
+            Err(bollard::errors::Error::DockerResponseServerError {
+                status_code: 404, ..
+            }) => Ok(None),
+            Err(error) => Err(error).with_context(|| format!("inspect container `{name}`")),
+        }
+    }
+
     pub(crate) async fn remove_existing(&self, name: &ContainerName) -> Result<()> {
         anstream::eprint!("Checking for existing container `{name}` ");
         std::io::stderr().flush().ok();
@@ -404,6 +428,91 @@ impl Runtime {
             },
         }
         Ok(())
+    }
+
+    /// Launch the frontend container from `body`, replacing any existing
+    /// container of the same name first (one frontend container per
+    /// workspace, matching `launch_container`'s daemon-container semantics).
+    /// Reuses [`Self::ensure_image`]'s dev/release pull gating: the frontend
+    /// image is resolved and checked exactly like the daemon runtime image.
+    pub(crate) async fn launch_frontend_container(&self, body: ContainerCreateBody) -> Result<()> {
+        self.ensure_image().await?;
+        self.remove().await?;
+
+        anstream::eprintln!(
+            "Creating frontend container `{}` from image `{}`",
+            self.container_name(),
+            self.image()
+        );
+        self.docker
+            .create_container(
+                Some(CreateContainerOptions {
+                    name: Some(self.container_name().as_str().to_string()),
+                    ..Default::default()
+                }),
+                body,
+            )
+            .await
+            .with_context(|| format!("create frontend container `{}`", self.container_name()))?;
+        anstream::eprintln!("Starting frontend container `{}`", self.container_name());
+        self.docker
+            .start_container(
+                self.container_name().as_str(),
+                None::<StartContainerOptions>,
+            )
+            .await
+            .with_context(|| format!("start frontend container `{}`", self.container_name()))?;
+        Ok(())
+    }
+
+    /// Mounts and env of the running container, for the fail-closed lockdown
+    /// check run immediately after a frontend container starts.
+    pub(crate) async fn inspect_mounts_and_env(
+        &self,
+    ) -> Result<(Vec<bollard::models::MountPoint>, Vec<String>)> {
+        let inspect = self
+            .docker
+            .inspect_container(
+                self.container_name().as_str(),
+                None::<InspectContainerOptions>,
+            )
+            .await
+            .with_context(|| format!("inspect container `{}`", self.container_name()))?;
+        let mounts = inspect.mounts.unwrap_or_default();
+        let env = inspect
+            .config
+            .and_then(|config| config.env)
+            .unwrap_or_default();
+        Ok((mounts, env))
+    }
+
+    /// True when `path` exists inside the running container, probed with
+    /// `docker exec test -e <path>`. Used to wait for the FUSE mount to come
+    /// up inside the frontend container after start.
+    pub(crate) async fn exec_path_exists(&self, path: &str) -> Result<bool> {
+        use bollard::exec::CreateExecOptions;
+
+        let exec = self
+            .docker
+            .create_exec(
+                self.container_name().as_str(),
+                CreateExecOptions::<&str> {
+                    cmd: Some(vec!["test", "-e", path]),
+                    ..Default::default()
+                },
+            )
+            .await
+            .with_context(|| format!("create exec probe in `{}`", self.container_name()))?;
+        self.docker
+            .start_exec(&exec.id, None)
+            .await
+            .with_context(|| format!("start exec probe in `{}`", self.container_name()))?;
+        let inspect = self
+            .docker
+            .inspect_exec(&exec.id)
+            .await
+            .with_context(|| format!("inspect exec probe in `{}`", self.container_name()))?;
+        Ok(inspect.exit_code == Some(0))
     }
 
     pub(crate) async fn wait_for_daemon_ready(

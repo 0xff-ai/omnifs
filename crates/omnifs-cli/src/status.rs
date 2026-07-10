@@ -9,6 +9,7 @@ use omnifs_api::{
 };
 use omnifs_workspace::layout::WorkspaceLayout;
 use omnifs_workspace::provider::Catalog;
+use omnifs_workspace::runtime_record::{RuntimeRecord, Via};
 
 use crate::auth::AuthTerminalKind;
 use crate::error::ExitCode;
@@ -22,6 +23,11 @@ pub(crate) struct StatusReport {
     pub(crate) runtime: Option<DaemonStatus>,
     pub(crate) user_mounts: Vec<UserMountStatus>,
     pub(crate) providers: Vec<ProviderConfigStatus>,
+    /// Mount point of the Docker-hosted FUSE frontend, read from the runtime
+    /// record's `via: docker` entry; `None` when none is attached. This is a
+    /// record fact only (no Docker connection), so `omnifs status` stays fast;
+    /// `omnifs frontend status` reports live container health.
+    pub(crate) docker_frontend: Option<std::path::PathBuf>,
 }
 
 impl StatusReport {
@@ -32,6 +38,16 @@ impl StatusReport {
         mounts: Vec<crate::mount_config::MountConfig>,
     ) -> Self {
         let store = FileStore::new(&paths.credentials_file);
+        let docker_frontend = RuntimeRecord::read(&paths.runtime_record_file())
+            .ok()
+            .flatten()
+            .and_then(|record| {
+                record
+                    .frontends
+                    .into_iter()
+                    .find(|frontend| frontend.via == Some(Via::Docker))
+            })
+            .map(|frontend| frontend.mount_point);
         Self {
             runtime,
             user_mounts: crate::mount_report::scan_user_mount_configs(
@@ -41,6 +57,7 @@ impl StatusReport {
             ),
             providers: crate::mount_report::scan_provider_configs(catalog, mounts),
             paths,
+            docker_frontend,
         }
     }
 
@@ -56,6 +73,14 @@ impl StatusReport {
             format_runtime(self.runtime.as_ref())
         );
         let _ = writeln!(out, "  {:<7} │ {}", "mount", self.format_mount());
+        if let Some(mount_point) = &self.docker_frontend {
+            let _ = writeln!(
+                out,
+                "  {:<7} │ docker frontend at {} (see `omnifs frontend status`)",
+                "frontend",
+                WorkspaceLayout::display(mount_point)
+            );
+        }
         let _ = writeln!(
             out,
             "  {:<7} │ {}",
@@ -339,6 +364,7 @@ pub(crate) struct StatusJson {
     pub version: String,
     pub runtime: RuntimeJson,
     pub mount: Option<MountJson>,
+    pub docker_frontend: Option<std::path::PathBuf>,
     pub paths: WorkspaceLayout,
     pub mounts: Vec<UserMountStatus>,
     pub providers: Vec<ProviderConfigStatus>,
@@ -415,6 +441,7 @@ impl StatusReport {
                     fs_type: frontend.fs_type,
                 })
             }),
+            docker_frontend: self.docker_frontend.clone(),
             paths: self.paths.clone(),
             mounts: self.user_mounts.clone(),
             providers: self.providers.clone(),

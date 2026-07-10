@@ -478,6 +478,7 @@ fn write_docker_runtime_record(
                     FsType::Nfs => RecordFrontendKind::Nfs,
                 },
                 mount_point: status.mount_point.clone(),
+                via: None,
             }]
         })
         .unwrap_or_default();

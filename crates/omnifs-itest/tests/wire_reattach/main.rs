@@ -3,7 +3,7 @@
 //! This is the structural answer to the ESTALE row in the NFS quirk catalog. Two
 //! legs, run in order against one live mount:
 //!
-//! - **Leg A (frontend kill).** SIGKILL the `omnifs frontend` runner mid-workload
+//! - **Leg A (frontend kill).** SIGKILL the `omnifs frontend run` runner mid-workload
 //!   and relaunch it with the same argv (same pinned NFS port, same state dir).
 //!   The kernel client keeps the mount and its filehandles; the restarted runner
 //!   reloads the persisted filehandle table (same generation) and serves without
@@ -195,6 +195,7 @@ fn wire_reattach_survives_frontend_and_daemon_restart() {
     // the same filehandle state directory, or scenario A is impossible.
     let frontend_argv: Vec<String> = vec![
         "frontend".into(),
+        "run".into(),
         "--attach".into(),
         socket.to_str().expect("socket utf-8").into(),
         "--kind".into(),
@@ -215,7 +216,7 @@ fn wire_reattach_survives_frontend_and_daemon_restart() {
                 std::env::var("REATTACH_FRONTEND_LOG").unwrap_or_else(|_| "warn".into()),
             )
             .spawn()
-            .expect("spawn omnifs frontend")
+            .expect("spawn omnifs frontend run")
     };
 
     let mut guard = Cleanup {

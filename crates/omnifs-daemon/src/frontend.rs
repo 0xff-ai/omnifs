@@ -1,15 +1,20 @@
-//! The out-of-process frontend runner: `omnifs frontend`.
+//! The out-of-process frontend runner: `omnifs frontend run`.
 //!
-//! It attaches a [`WireNamespace`] to a daemon-served namespace socket and runs
-//! the same renderer entry the daemon uses (`omnifs_fuse::mount::run_blocking` /
+//! It attaches a [`WireNamespace`] to a daemon-served namespace (a Unix socket
+//! for a bare-metal runner, or TCP loopback for the Docker-hosted FUSE frontend,
+//! which cannot share a host Unix socket into its container) and runs the same
+//! renderer entry the daemon uses (`omnifs_fuse::mount::run_blocking` /
 //! `omnifs_nfs::mount_blocking`) over it, blocking until unmount. This is the
 //! runtime-redesign phase-3 proof that a renderer can serve the projected tree
-//! from a different process than the one that owns the projection.
+//! from a different process than the one that owns the projection; the Docker
+//! frontend (phase 4) is its first real caller.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use anyhow::Context as _;
 use clap::Args;
+use omnifs_api::{OMNIFS_ATTACH_ADDR_ENV, OMNIFS_ATTACH_TOKEN_ENV};
 use omnifs_engine::{Namespace, NsAttachEvent};
 use omnifs_namespace_wire::{AttachTarget, WireNamespace};
 use tokio::runtime::Handle;
@@ -22,13 +27,17 @@ use crate::app::FrontendKind;
 /// plenty and a lagging consumer re-syncs on the next reattach.
 const ATTACH_CAPACITY: usize = 16;
 
-/// Arguments for the hidden `omnifs frontend` subcommand.
+/// Arguments for the hidden `omnifs frontend run` subcommand.
 #[derive(Args, Debug)]
 pub struct FrontendArgs {
     /// Path to the daemon's namespace attach socket to connect to
-    /// (`$OMNIFS_HOME/frontends/<name>.sock`).
+    /// (`$OMNIFS_HOME/frontends/<name>.sock`). Mutually exclusive with the TCP
+    /// attach path: when absent, `OMNIFS_ATTACH_ADDR`/`OMNIFS_ATTACH_TOKEN` in
+    /// the environment select the TCP attach listener instead (the
+    /// Docker-hosted frontend's only option, since it cannot share a host Unix
+    /// socket into its container).
     #[arg(long)]
-    pub attach: PathBuf,
+    pub attach: Option<PathBuf>,
     /// Renderer protocol to mount: `fuse` (Linux only) or `nfs`.
     #[arg(long, value_enum)]
     pub kind: FrontendKind,
@@ -45,8 +54,52 @@ pub struct FrontendArgs {
     pub nfs_port: u16,
 }
 
-/// Attach to the namespace socket and run the requested renderer, blocking until
-/// the mount is torn down. Expects to run on a tokio runtime (the CLI's), like
+/// Resolve the attach target: the explicit `--attach <socket>` when given,
+/// otherwise the TCP target named by `OMNIFS_ATTACH_ADDR`/`OMNIFS_ATTACH_TOKEN`
+/// (the Docker frontend launcher sets both). Neither present is a hard error:
+/// there is no default to fall back to silently.
+fn resolve_attach_target(attach: Option<PathBuf>) -> anyhow::Result<AttachTarget> {
+    if let Some(socket) = attach {
+        return Ok(AttachTarget::Unix(socket));
+    }
+    attach_target_from_env(
+        std::env::var(OMNIFS_ATTACH_ADDR_ENV).ok(),
+        std::env::var(OMNIFS_ATTACH_TOKEN_ENV).ok(),
+    )
+}
+
+/// The env-driven half of [`resolve_attach_target`], pulled out as a pure
+/// function of its two inputs so the parse/validation logic is unit-testable
+/// without mutating process environment.
+///
+/// `addr` stays a plain `host:port` string rather than a pre-parsed
+/// `SocketAddr`: the Docker-hosted frontend dials `host.docker.internal`, a
+/// name Docker injects into the container's DNS that only resolves inside
+/// the container, so the runner cannot validate it any earlier than
+/// `TcpStream::connect` does.
+fn attach_target_from_env(
+    addr: Option<String>,
+    token: Option<String>,
+) -> anyhow::Result<AttachTarget> {
+    let addr = addr.with_context(|| {
+        format!(
+            "neither --attach nor {OMNIFS_ATTACH_ADDR_ENV} is set; the frontend runner needs one \
+             attach target"
+        )
+    })?;
+    let token = token.with_context(|| {
+        format!("{OMNIFS_ATTACH_ADDR_ENV} is set but {OMNIFS_ATTACH_TOKEN_ENV} is not")
+    })?;
+    anyhow::ensure!(
+        addr.rsplit_once(':')
+            .is_some_and(|(_, port)| port.parse::<u16>().is_ok()),
+        "{OMNIFS_ATTACH_ADDR_ENV} `{addr}` is not a `host:port` address"
+    );
+    Ok(AttachTarget::Tcp { addr, token })
+}
+
+/// Attach to the namespace and run the requested renderer, blocking until the
+/// mount is torn down. Expects to run on a tokio runtime (the CLI's), like
 /// [`run`](crate::run); it never nests a runtime.
 pub fn run_frontend(args: FrontendArgs) -> anyhow::Result<()> {
     #[cfg(not(target_os = "linux"))]
@@ -54,12 +107,14 @@ pub fn run_frontend(args: FrontendArgs) -> anyhow::Result<()> {
         anyhow::bail!("the fuse frontend is only available on Linux");
     }
 
+    let target = resolve_attach_target(args.attach.clone())?;
+    let target_label = target.to_string();
     let rt = Handle::current();
-    let namespace = attach_blocking(&rt, args.attach.clone())?;
+    let namespace = attach_blocking(&rt, target)?;
     info!(
-        socket = %args.attach.display(),
+        target = %target_label,
         instance = %namespace.instance_id(),
-        "attached to namespace socket"
+        "attached to namespace"
     );
 
     // Bridge the wire attach events onto the engine-owned `NsAttachEvent` a
@@ -109,11 +164,11 @@ pub fn run_frontend(args: FrontendArgs) -> anyhow::Result<()> {
 /// Attach on the runtime, blocking this thread on the result. Mirrors the
 /// daemon's blocking-thread pattern: the attach future runs on a worker while the
 /// calling thread waits, so no nested runtime is created.
-fn attach_blocking(rt: &Handle, socket: PathBuf) -> anyhow::Result<Arc<WireNamespace>> {
+fn attach_blocking(rt: &Handle, target: AttachTarget) -> anyhow::Result<Arc<WireNamespace>> {
     let (tx, rx) = std::sync::mpsc::channel();
     let rt_for_task = rt.clone();
     rt.spawn(async move {
-        let _ = tx.send(WireNamespace::attach(AttachTarget::Unix(socket), rt_for_task).await);
+        let _ = tx.send(WireNamespace::attach(target, rt_for_task).await);
     });
     rx.recv()
         .map_err(|_| anyhow::anyhow!("attach task dropped before completing"))?
@@ -195,3 +250,50 @@ fn install_signal_handler(rt: &Handle, kind: FrontendKind, mount_point: PathBuf)
 
 #[cfg(not(unix))]
 fn install_signal_handler(_rt: &Handle, _kind: FrontendKind, _mount_point: PathBuf) {}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::*;
+
+    #[test]
+    fn attach_prefers_explicit_unix_socket() {
+        let target = resolve_attach_target(Some(PathBuf::from("/tmp/x.sock"))).unwrap();
+        assert!(matches!(target, AttachTarget::Unix(path) if path == Path::new("/tmp/x.sock")));
+    }
+
+    #[test]
+    fn attach_falls_back_to_tcp_env_vars() {
+        let target = attach_target_from_env(
+            Some("host.docker.internal:54321".to_string()),
+            Some("secret".to_string()),
+        )
+        .unwrap();
+        match target {
+            AttachTarget::Tcp { addr, token } => {
+                assert_eq!(addr, "host.docker.internal:54321");
+                assert_eq!(token, "secret");
+            },
+            AttachTarget::Unix(_) => panic!("expected a tcp target"),
+        }
+    }
+
+    #[test]
+    fn attach_env_requires_both_addr_and_token() {
+        attach_target_from_env(None, None).expect_err("neither var set must fail");
+        attach_target_from_env(Some("host.docker.internal:1".to_string()), None)
+            .expect_err("addr without token must fail");
+        attach_target_from_env(None, Some("secret".to_string()))
+            .expect_err("token without addr must fail");
+    }
+
+    #[test]
+    fn attach_env_rejects_a_portless_address() {
+        attach_target_from_env(
+            Some("host.docker.internal".to_string()),
+            Some("secret".to_string()),
+        )
+        .expect_err("an address with no port must fail");
+    }
+}

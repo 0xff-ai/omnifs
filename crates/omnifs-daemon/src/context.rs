@@ -206,6 +206,10 @@ impl DaemonContext {
                     FrontendKind::Nfs => RecordFrontendKind::Nfs,
                 },
                 mount_point: frontend.mount_point.clone(),
+                // Every frontend a daemon builds from `--frontend` runs
+                // in-process (host-native); `via` is only set for the
+                // separately CLI-launched Docker frontend container.
+                via: None,
             })
             .collect();
         RuntimeRecord::new(

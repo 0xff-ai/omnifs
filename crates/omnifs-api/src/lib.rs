@@ -31,6 +31,18 @@ pub const OMNIFS_CONTAINER_NAME_ENV: &str = "OMNIFS_CONTAINER_NAME";
 /// when reporting backend identity.
 pub const OMNIFS_IMAGE_ENV: &str = "OMNIFS_IMAGE";
 
+/// TCP namespace attach address, injected by the frontend container launcher
+/// and read by the out-of-process `omnifs frontend run` runner when no
+/// `--attach` unix path is given. Carries `host.docker.internal:<port>` so a
+/// containerized frontend reaches the host-native daemon's TCP attach
+/// listener.
+pub const OMNIFS_ATTACH_ADDR_ENV: &str = "OMNIFS_ATTACH_ADDR";
+
+/// The per-instance attach token paired with [`OMNIFS_ATTACH_ADDR_ENV`],
+/// authenticating the TCP namespace attach handshake in place of filesystem
+/// permissions.
+pub const OMNIFS_ATTACH_TOKEN_ENV: &str = "OMNIFS_ATTACH_TOKEN";
+
 /// Default control port. The container publishes it on the host loopback;
 /// both binaries default to it so `omnifs` finds the daemon with zero config.
 pub const DEFAULT_PORT: u16 = 7878;
