@@ -35,6 +35,17 @@ pub const OMNIFS_ATTACH_ADDR_ENV: &str = "OMNIFS_ATTACH_ADDR";
 /// permissions.
 pub const OMNIFS_ATTACH_TOKEN_ENV: &str = "OMNIFS_ATTACH_TOKEN";
 
+/// Guest vsock port the frontend runner dials on host CID (`VMADDR_CID_HOST`)
+/// once its FUSE mount is serving, writing a single `ready\n` line so the
+/// krunkit backend's `launch` can observe guest readiness without an
+/// external probe into the guest (the Docker backend instead polls the
+/// mount path via `docker exec` from outside the container). Set only by the
+/// krunkit backend's seed (`omnifs-seed.conf`); absent on the Docker path.
+/// The runner treats this env being set on a non-Linux target as a hard
+/// error rather than silently ignoring it, since only the Linux krunkit
+/// guest can dial vsock.
+pub const OMNIFS_READY_VSOCK_PORT_ENV: &str = "OMNIFS_READY_VSOCK_PORT";
+
 /// Default control port. The container publishes it on the host loopback;
 /// both binaries default to it so `omnifs` finds the daemon with zero config.
 pub const DEFAULT_PORT: u16 = 7878;

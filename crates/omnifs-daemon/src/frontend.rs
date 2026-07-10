@@ -11,10 +11,12 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+#[cfg(target_os = "linux")]
+use std::time::Duration;
 
 use anyhow::Context as _;
 use clap::Args;
-use omnifs_api::{OMNIFS_ATTACH_ADDR_ENV, OMNIFS_ATTACH_TOKEN_ENV};
+use omnifs_api::{OMNIFS_ATTACH_ADDR_ENV, OMNIFS_ATTACH_TOKEN_ENV, OMNIFS_READY_VSOCK_PORT_ENV};
 use omnifs_engine::{Namespace, NsAttachEvent};
 use omnifs_namespace_wire::{AttachTarget, WireNamespace};
 use tokio::runtime::Handle;
@@ -22,6 +24,17 @@ use tokio::sync::broadcast;
 use tracing::{info, warn};
 
 use crate::app::FrontendKind;
+
+/// How often [`wait_until_mounted`] polls for the mount point becoming a
+/// distinct filesystem from its parent.
+#[cfg(target_os = "linux")]
+const MOUNT_POLL_INTERVAL: Duration = Duration::from_millis(100);
+/// Bound on [`wait_until_mounted`]'s wait: if the mount never comes up in this
+/// window, `run_blocking`'s own error path has almost certainly already fired
+/// and the process is exiting anyway, so this just stops polling rather than
+/// leaking the task forever.
+#[cfg(target_os = "linux")]
+const MOUNT_POLL_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Attach-event fan-out capacity. Reattach events are rare; a small ring is
 /// plenty and a lagging consumer re-syncs on the next reattach.
@@ -119,6 +132,10 @@ pub fn run_frontend(args: FrontendArgs) -> anyhow::Result<()> {
         anyhow::bail!("the fuse frontend is only available on Linux");
     }
 
+    // Parsed (and platform-checked) before the attach dial, so a
+    // misconfigured seed fails fast rather than after a 30s connect attempt.
+    let ready_port = resolve_ready_vsock_port()?;
+
     let target = resolve_attach_target(args.attach.clone())?;
     let target_label = target.to_string();
     let rt = Handle::current();
@@ -137,6 +154,13 @@ pub fn run_frontend(args: FrontendArgs) -> anyhow::Result<()> {
 
     let namespace_dyn = Arc::clone(&namespace) as Arc<dyn Namespace>;
     install_signal_handler(&rt, args.kind, args.mount_point.clone());
+
+    #[cfg(target_os = "linux")]
+    if let Some(port) = ready_port {
+        spawn_ready_signal(&rt, args.mount_point.clone(), port);
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = ready_port;
 
     match args.kind {
         #[cfg(target_os = "linux")]
@@ -170,6 +194,102 @@ pub fn run_frontend(args: FrontendArgs) -> anyhow::Result<()> {
         },
     }
     info!(mount = %args.mount_point.display(), "frontend exited");
+    Ok(())
+}
+
+/// Parse `OMNIFS_READY_VSOCK_PORT` if set (only the krunkit guest's seed ever
+/// sets it). Absence is not an error — today's behavior for every other
+/// runner — but presence on a non-Linux target is: only the Linux krunkit
+/// guest can dial vsock at all.
+fn resolve_ready_vsock_port() -> anyhow::Result<Option<u32>> {
+    ready_vsock_port_from_env(std::env::var(OMNIFS_READY_VSOCK_PORT_ENV).ok())
+}
+
+/// The env-driven half of [`resolve_ready_vsock_port`], pulled out as a pure
+/// function of its one input so the parse/platform-check logic is
+/// unit-testable without mutating process environment (mirrors
+/// [`attach_target_from_env`]).
+fn ready_vsock_port_from_env(value: Option<String>) -> anyhow::Result<Option<u32>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = value;
+        anyhow::bail!(
+            "{OMNIFS_READY_VSOCK_PORT_ENV} is set but vsock is only available on Linux \
+             (the krunkit guest)"
+        );
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let port: u32 = value.parse().with_context(|| {
+            format!("{OMNIFS_READY_VSOCK_PORT_ENV} `{value}` is not a valid port")
+        })?;
+        Ok(Some(port))
+    }
+}
+
+/// Spawn the krunkit readiness beacon: wait for `mount_point` to become a
+/// live mount, then dial host vsock on `port` and write a single `ready\n`
+/// line. Non-fatal end to end: the FUSE mount is served either way, so a
+/// timed-out wait or a failed dial only logs a warning instead of failing
+/// the frontend runner.
+#[cfg(target_os = "linux")]
+fn spawn_ready_signal(rt: &Handle, mount_point: PathBuf, port: u32) {
+    rt.spawn(async move {
+        if !wait_until_mounted(&mount_point).await {
+            warn!(
+                mount = %mount_point.display(),
+                "timed out waiting for the mount to become live; readiness signal not sent"
+            );
+            return;
+        }
+        match signal_guest_ready(port).await {
+            Ok(()) => info!(port, "sent the krunkit readiness signal"),
+            Err(error) => warn!(%error, port, "failed to send the krunkit readiness signal"),
+        }
+    });
+}
+
+/// Poll until `path` is a distinct filesystem from its parent (i.e. is
+/// mounted), or [`MOUNT_POLL_TIMEOUT`] elapses. A generic "is this a mount
+/// point" check rather than a FUSE-specific one: by construction only the
+/// frontend this process itself mounts will ever change `path`'s device.
+#[cfg(target_os = "linux")]
+async fn wait_until_mounted(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    let deadline = tokio::time::Instant::now() + MOUNT_POLL_TIMEOUT;
+    loop {
+        if let (Ok(mount), Ok(parent_meta)) = (std::fs::metadata(path), std::fs::metadata(parent))
+            && mount.dev() != parent_meta.dev()
+        {
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(MOUNT_POLL_INTERVAL).await;
+    }
+}
+
+/// Dial host vsock (`VMADDR_CID_HOST`) on `port` and write `ready\n`. Mirrors
+/// the attach client's vsock dial (`omnifs_namespace_wire::client`'s
+/// `AttachTarget::Vsock` arm): same CID, same crate.
+#[cfg(target_os = "linux")]
+async fn signal_guest_ready(port: u32) -> anyhow::Result<()> {
+    use tokio::io::AsyncWriteExt as _;
+    let addr = tokio_vsock::VsockAddr::new(tokio_vsock::VMADDR_CID_HOST, port);
+    let mut stream = tokio_vsock::VsockStream::connect(addr)
+        .await
+        .with_context(|| format!("dial host vsock port {port} for the readiness signal"))?;
+    stream
+        .write_all(b"ready\n")
+        .await
+        .context("write readiness line")?;
     Ok(())
 }
 
@@ -268,6 +388,33 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+
+    #[test]
+    fn ready_vsock_port_absent_is_none() {
+        assert!(ready_vsock_port_from_env(None).unwrap().is_none());
+    }
+
+    #[test]
+    fn ready_vsock_port_rejects_a_non_numeric_value() {
+        ready_vsock_port_from_env(Some("not-a-port".to_string()))
+            .expect_err("a non-numeric port must fail");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn ready_vsock_port_parses_on_linux() {
+        let port = ready_vsock_port_from_env(Some("1025".to_string()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(port, 1025);
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn ready_vsock_port_is_rejected_off_linux() {
+        let error = ready_vsock_port_from_env(Some("1025".to_string())).unwrap_err();
+        assert!(error.to_string().contains("only available on Linux"));
+    }
 
     #[test]
     fn attach_prefers_explicit_unix_socket() {

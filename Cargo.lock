@@ -3118,6 +3118,7 @@ dependencies = [
  "time",
  "tokio",
  "tokio-stream",
+ "tokio-vsock",
  "tower",
  "tracing",
  "utoipa",
