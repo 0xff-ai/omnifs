@@ -948,6 +948,100 @@ jobs:
       - name: Run frontend image smoke test
         run: scripts/ci/smoke-frontend-image.sh
 
+  # Gate 4 (amended): the Docker-hosted FUSE frontend end to end, against a
+  # real host-native daemon and the real amd64 frontend image. Mirrors
+  # conformance-fuse's input-consumption shape (wasm sidecar, packaged Linux
+  # CLI) and additionally needs frontend-amd64's image digest. One job, no
+  # per-arch matrix: the frontend image build already covers arm64 separately
+  # in smoke-frontend-arm64, which does not need a live daemon.
+  fuse-docker:
+    name: fuse docker
+    needs: [changes, components, cli-linux-x64, frontend-amd64]
+    if: >-
+      github.event_name == 'push' ||
+      (github.event_name == 'pull_request' &&
+        (github.event.pull_request.user.login == 'raulk' ||
+         contains(github.event.pull_request.labels.*.name, 'ci-full')))
+    runs-on: *linux_runner
+    env:
+      OMNIFS_ITEST_SKIP_PROVIDER_BUILD: "1"
+      OMNIFS_FRONTEND_IMAGE: "omnifs-frontend:ci"
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@1.95.0
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: fuse-docker
+          cache-on-failure: true
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest@0.9.132
+
+      - uses: ./.github/actions/omnifs-docker
+
+      - name: Install fuse3
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends fuse3
+
+      - name: Prepare WASM sidecar directory
+        run: rm -rf target/wasm32-wasip2/release
+
+      - name: Download WASM sidecar inputs
+        uses: actions/download-artifact@v8
+        with:
+          name: omnifs-wasm
+          path: target/wasm32-wasip2/release
+
+      - name: Download Linux x64 CLI archive
+        uses: actions/download-artifact@v8
+        with:
+          name: omnifs-cli-linux-x64
+          path: dist-cli
+
+      - name: Extract Linux x64 CLI binary
+        run: |
+          set -euo pipefail
+          mkdir -p dist-cli/bin
+          tar -C dist-cli/bin -xJf dist-cli/omnifs-cli-linux-x64.tar.xz
+          test -x dist-cli/bin/omnifs
+
+      - name: Download amd64 frontend image digest
+        uses: actions/download-artifact@v8
+        with:
+          name: frontend-digest-amd64
+          path: /tmp/digests
+
+      - name: Pull the amd64 frontend image and tag it for the acceptance gate
+        run: |
+          set -euo pipefail
+          digest_path=$(find /tmp/digests -mindepth 1 -maxdepth 1 -type f | head -n 1)
+          test -n "$digest_path"
+          digest_file="${digest_path##*/}"
+          ref="${REGISTRY}/${FRONTEND_IMAGE_NAME}@sha256:${digest_file}"
+          docker pull "$ref"
+          docker tag "$ref" "$OMNIFS_FRONTEND_IMAGE"
+
+      - name: Run the fuse-docker acceptance gate
+        run: |
+          set -euo pipefail
+          OMNIFS_ACCEPTANCE_LIVE=1 \
+          OMNIFS_BIN="$(pwd)/dist-cli/bin/omnifs" \
+          cargo nextest run -p omnifs-itest -E 'binary(frontend_docker)' --no-capture
+
+      - name: Upload fuse-docker scorecards
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: conformance-scorecards-fuse-docker
+          path: target/conformance/*.json
+          retention-days: 90
+          if-no-files-found: warn
+
   publish:
     name: publish
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
