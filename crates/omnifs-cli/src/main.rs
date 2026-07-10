@@ -15,6 +15,7 @@ mod daemon_teardown;
 mod error;
 mod frontend_backend;
 mod frontend_container;
+mod guest_image_pull;
 #[cfg(feature = "daemon")]
 mod host_teardown;
 mod inspector;
