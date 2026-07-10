@@ -162,14 +162,18 @@ fn attach_listeners_route_binds_on_demand_and_is_idempotent() {
         "no attach listener before the route is ever called"
     );
 
-    let first = post_attach_listeners(&ctrl_socket, None);
+    let first = post_attach_listeners(&ctrl_socket, Some(r#"{"bind_ip":"127.0.0.1"}"#));
     let addr = first["addr"].as_str().expect("addr").to_string();
     let token = first["token"].as_str().expect("token").to_string();
     assert_looks_like_a_token(&token);
+    assert!(
+        addr.starts_with("127.0.0.1:"),
+        "the requested bind address must be honored: {addr}"
+    );
 
     // A listener cannot be re-pointed once serving: a repeat call (even with a
-    // different requested port) returns the same binding rather than rebinding.
-    let second = post_attach_listeners(&ctrl_socket, Some(r#"{"port":0}"#));
+    // another request returns the same binding rather than rebinding.
+    let second = post_attach_listeners(&ctrl_socket, Some("{}"));
     assert_eq!(
         second["addr"], first["addr"],
         "a repeat call must not rebind"

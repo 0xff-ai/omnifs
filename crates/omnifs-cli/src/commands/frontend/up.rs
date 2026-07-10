@@ -4,9 +4,14 @@
 //! host-native daemon's shared namespace over TCP; it is not a daemon runtime
 //! mode; `[system].runtime` never references it.
 
+// On Linux the expected bind address comes from the Docker bridge probe, so
+// `Ipv4Addr` is only named on the non-Linux (loopback) arm.
+#[cfg(not(target_os = "linux"))]
+use std::net::Ipv4Addr;
+use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
-use anyhow::Context as _;
+use anyhow::{Context as _, ensure};
 use clap::Args;
 use omnifs_api::DaemonBackend;
 use omnifs_workspace::layout::OMNIFS_HOME_ENV;
@@ -38,10 +43,6 @@ impl FrontendUpArgs {
 
         ensure_native_daemon(&workspace).await?;
 
-        anstream::eprintln!("Requesting the daemon's TCP namespace attach listener");
-        let attach = workspace.daemon().attach_listeners(0).await?;
-        let attach_port = attach_port(&attach.addr)?;
-
         let config = workspace.config()?;
         let image = resolve_frontend_image(None, &config)?;
         let is_default_home = std::env::var_os(OMNIFS_HOME_ENV).is_none();
@@ -52,6 +53,23 @@ impl FrontendUpArgs {
         )?;
 
         let runtime = Runtime::connect_ready(&target, "omnifs frontend up").await?;
+        #[cfg(target_os = "linux")]
+        let (bind_ip, expected_bind_ip) = {
+            let bind_ip = runtime.frontend_attach_bind_ip().await?;
+            (Some(bind_ip), bind_ip)
+        };
+        #[cfg(not(target_os = "linux"))]
+        let (bind_ip, expected_bind_ip) = (None, Ipv4Addr::LOCALHOST);
+
+        anstream::eprintln!("Requesting the daemon's TCP namespace attach listener");
+        let attach = workspace.daemon().attach_listeners(bind_ip).await?;
+        let attach_addr = attach_addr(&attach.addr)?;
+        ensure!(
+            attach_addr.ip() == IpAddr::V4(expected_bind_ip),
+            "daemon already serves its attach listener on {}; restart it with `omnifs down`, then re-run `omnifs frontend up`",
+            attach_addr.ip()
+        );
+        let attach_port = attach_addr.port();
 
         let body = build_frontend_container_body(&FrontendContainerSpec {
             image: target.image(),
@@ -106,12 +124,11 @@ async fn ensure_native_daemon(workspace: &Workspace) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Parse the port out of the attach listener's `addr` (`"127.0.0.1:PORT"`),
-/// which is what the container dials at `host.docker.internal:<port>`.
-fn attach_port(addr: &str) -> anyhow::Result<u16> {
-    addr.rsplit_once(':')
-        .and_then(|(_, port)| port.parse().ok())
-        .with_context(|| format!("attach listener address `{addr}` has no parseable port"))
+/// Parse the attach listener address returned by the daemon. The container
+/// reaches the same port through `host.docker.internal` on every platform.
+fn attach_addr(addr: &str) -> anyhow::Result<SocketAddr> {
+    addr.parse()
+        .with_context(|| format!("attach listener address `{addr}` is invalid"))
 }
 
 /// Immediately after start, assert the no-credentials contract: no mounts of

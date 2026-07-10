@@ -452,7 +452,7 @@ fn bind_startup_attach_tcp(daemon: &Arc<server::Daemon>, port: Option<u16>, rt: 
     let Some(port) = port else {
         return;
     };
-    if let Err(error) = daemon.ensure_attach_tcp(port, rt) {
+    if let Err(error) = daemon.ensure_attach_tcp(server::AttachBindAddr::loopback(), port, rt) {
         warn!(%error, "failed to bind the requested TCP attach listener");
     }
 }

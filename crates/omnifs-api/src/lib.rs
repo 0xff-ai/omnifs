@@ -524,14 +524,15 @@ pub struct StopReport {
     pub providers_dropped: usize,
 }
 
-/// Optional request body for `POST /v1/attach-listeners`. `port` is honored
-/// only on the first bind (the listener is idempotent thereafter); `0` (the
-/// default) asks for an ephemeral port, matching the daemon's `--attach-tcp`
-/// flag.
+/// Optional request body for `POST /v1/attach-listeners`. The address is
+/// honored only on the first bind (the listener is idempotent thereafter).
+/// An absent `bind_ip` selects loopback; native Linux may request the default
+/// Docker bridge gateway, which the daemon validates before binding.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
 pub struct AttachListenersRequest {
     #[serde(default)]
-    pub port: u16,
+    #[schema(value_type = Option<String>)]
+    pub bind_ip: Option<std::net::Ipv4Addr>,
 }
 
 /// `POST /v1/attach-listeners`: the TCP namespace attach listener's address and

@@ -39,6 +39,10 @@ Keep credentials out of WIT payloads and daemon REST payloads. Route provider au
 
 OAuth client ids in provider declarations are public application identifiers, not secrets. User access tokens, refresh tokens, and client secrets remain sensitive host-side values. `omnifs init` owns first-run OAuth mount generation; `omnifs init --reauth <mount>` owns repair and re-authentication. Credentials live only in the host credential store: a mount's auth declares identity (scheme, account) and never a sourcing mechanism, so there is no read-from-env or read-from-file path at serve time.
 
+### Frontend attach authority
+
+The Docker-hosted frontend receives no credentials or host filesystem mounts. Its only host authority is the token-authenticated namespace wire. Docker Desktop reaches a loopback listener through its host forwarder; native Linux reaches a listener bound specifically to the address assigned to the default `docker0` bridge. The daemon validates that interface assignment rather than trusting a caller-supplied address. Do not bind the attach listener on every host interface or give the frontend host networking merely to cross the container boundary.
+
 ## Must not
 
 - Put provider-specific behavior in `omnifs-engine`, `omnifs-fuse`, or `omnifs-nfs`.

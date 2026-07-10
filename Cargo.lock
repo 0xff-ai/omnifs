@@ -3091,6 +3091,7 @@ dependencies = [
  "constant_time_eq",
  "getrandom 0.3.4",
  "hex",
+ "nix",
  "omnifs-api",
  "omnifs-auth",
  "omnifs-engine",

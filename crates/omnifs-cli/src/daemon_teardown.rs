@@ -32,9 +32,7 @@ impl<'a> DaemonTeardown<'a> {
         let record_path = layout.runtime_record_file();
         let nfs_state_dir = layout.nfs_state_dir();
 
-        if let Err(error) = crate::commands::frontend::down::teardown(layout).await {
-            anstream::eprintln!("⚠  Frontend container teardown failed: {error:#}");
-        }
+        self.teardown_frontend().await;
 
         match self.resolve_running_backend().await? {
             Some(RunningBackend::Live { status, backend }) => {
@@ -130,6 +128,8 @@ impl<'a> DaemonTeardown<'a> {
         let record_path = layout.runtime_record_file();
         let nfs_state_dir = layout.nfs_state_dir();
 
+        self.teardown_frontend().await;
+
         let running = match self.resolve_running_backend().await {
             Ok(Some(running)) => running,
             Ok(None) => {
@@ -172,6 +172,13 @@ impl<'a> DaemonTeardown<'a> {
         }
 
         let _ = RuntimeRecord::remove(&record_path);
+    }
+
+    async fn teardown_frontend(&self) {
+        if let Err(error) = crate::commands::frontend::down::teardown(self.workspace.layout()).await
+        {
+            anstream::eprintln!("⚠  Frontend container teardown failed: {error:#}");
+        }
     }
 
     /// Probe the control port for teardown. Any status error is treated as

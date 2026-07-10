@@ -38,6 +38,7 @@ time = { workspace = true, features = ["formatting"] }
 [target.'cfg(target_os = "linux")'.dependencies]
 omnifs-fuse = { workspace = true }
 omnifs-mtab = { workspace = true }
+nix = { version = "0.30", features = ["net"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

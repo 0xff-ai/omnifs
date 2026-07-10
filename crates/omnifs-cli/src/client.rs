@@ -471,11 +471,14 @@ impl DaemonClient {
     }
 
     /// Ensure the daemon's TCP namespace attach listener is bound (idempotent:
-    /// a repeat call, with any port, returns the already-bound address and
-    /// token). This is the addr+token the Docker-hosted FUSE frontend dials
-    /// at `host.docker.internal:<port>`.
-    pub(crate) async fn attach_listeners(&self, port: u16) -> Result<AttachListenersReport> {
-        let body = serde_json::to_value(AttachListenersRequest { port })
+    /// a repeat call returns the already-bound address and token). Native
+    /// Linux supplies its Docker bridge gateway; Docker Desktop uses the
+    /// default loopback bind.
+    pub(crate) async fn attach_listeners(
+        &self,
+        bind_ip: Option<std::net::Ipv4Addr>,
+    ) -> Result<AttachListenersReport> {
+        let body = serde_json::to_value(AttachListenersRequest { bind_ip })
             .context("serialize attach-listeners request")?;
         let raw = self
             .request(

@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 use std::io::Write as _;
+#[cfg(target_os = "linux")]
+use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -88,6 +90,29 @@ impl Runtime {
     /// for the informational reachability row in `omnifs setup`.
     pub(crate) async fn server_version(&self) -> Option<String> {
         self.docker.version().await.ok()?.version
+    }
+
+    /// Address on which the host daemon must accept the frontend container's
+    /// attach connection. Docker Desktop forwards `host.docker.internal` to
+    /// host loopback. Native Linux maps that name to the default bridge
+    /// gateway instead, so the daemon must bind that gateway explicitly.
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn frontend_attach_bind_ip(&self) -> Result<Ipv4Addr> {
+        let network = self
+            .docker
+            .inspect_network("bridge", None)
+            .await
+            .context("inspect Docker's default bridge network")?;
+        let gateway = network
+            .ipam
+            .and_then(|ipam| ipam.config)
+            .into_iter()
+            .flatten()
+            .find_map(|config| config.gateway)
+            .context("Docker's default bridge network has no gateway")?;
+        gateway
+            .parse()
+            .with_context(|| format!("Docker bridge gateway `{gateway}` is not IPv4"))
     }
 
     /// Probe Docker daemon reachability without requiring a pre-connected client.

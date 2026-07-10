@@ -170,6 +170,44 @@ pub(crate) struct AttachTcpState {
     token: String,
 }
 
+/// A host address approved for the namespace attach listener. Loopback is
+/// always valid. On native Linux, the only additional authority is the IPv4
+/// address assigned to Docker's default `docker0` bridge.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct AttachBindAddr(Ipv4Addr);
+
+impl AttachBindAddr {
+    pub(crate) const fn loopback() -> Self {
+        Self(Ipv4Addr::LOCALHOST)
+    }
+
+    fn requested(candidate: Option<Ipv4Addr>) -> anyhow::Result<Self> {
+        let candidate = candidate.unwrap_or(Ipv4Addr::LOCALHOST);
+        if candidate == Ipv4Addr::LOCALHOST {
+            return Ok(Self::loopback());
+        }
+
+        #[cfg(target_os = "linux")]
+        if nix::ifaddrs::getifaddrs()
+            .context("enumerate host network interfaces")?
+            .any(|interface| {
+                interface.interface_name == "docker0"
+                    && interface
+                        .address
+                        .as_ref()
+                        .and_then(nix::sys::socket::SockaddrStorage::as_sockaddr_in)
+                        .is_some_and(|address| address.ip() == candidate)
+            })
+        {
+            return Ok(Self(candidate));
+        }
+
+        anyhow::bail!(
+            "attach listener may bind only to loopback or Linux's default Docker bridge gateway, not {candidate}"
+        )
+    }
+}
+
 /// The outcome of [`Daemon::ensure_attach_tcp`]. `NamespaceNotReady` is not an
 /// error: it is the same transient window `/v1/ready` already reports before
 /// startup reconcile finishes, so the caller renders it as a 503 rather than a
@@ -237,7 +275,7 @@ impl Daemon {
         let _ = self.namespace.set(namespace);
     }
 
-    /// Bind the TCP namespace attach listener at `port` (`0` = ephemeral)
+    /// Bind the TCP namespace attach listener at `bind_ip:port` (`0` = ephemeral)
     /// unless one is already bound, in which case the existing binding is
     /// returned unchanged (idempotent: a listener cannot be re-pointed once
     /// serving). Used both by the eager `--attach-tcp` startup path and by the
@@ -249,6 +287,7 @@ impl Daemon {
     /// elsewhere in `app.rs`.
     pub fn ensure_attach_tcp(
         self: &Arc<Self>,
+        bind_addr: AttachBindAddr,
         port: u16,
         rt: &tokio::runtime::Handle,
     ) -> anyhow::Result<AttachTcpOutcome> {
@@ -263,8 +302,8 @@ impl Daemon {
             return Ok(AttachTcpOutcome::NamespaceNotReady);
         };
 
-        let std_listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, port))
-            .with_context(|| format!("bind attach TCP listener on 127.0.0.1:{port}"))?;
+        let std_listener = std::net::TcpListener::bind((bind_addr.0, port))
+            .with_context(|| format!("bind attach TCP listener on {}:{port}", bind_addr.0))?;
         std_listener
             .set_nonblocking(true)
             .context("set attach TCP listener non-blocking")?;
@@ -1153,9 +1192,11 @@ async fn shutdown(State(daemon): State<Arc<Daemon>>) -> Json<StopReport> {
 /// `POST /v1/attach-listeners`: bind the TCP namespace attach listener on a
 /// running daemon, so a containerized frontend (the Docker Desktop path, which
 /// cannot share a host Unix socket into its Linux VM) can be started later
-/// without restarting the daemon. Idempotent: a repeat call (with any `port`)
-/// returns the already-bound address and token unchanged, since a listener
-/// cannot be re-pointed once serving.
+/// without restarting the daemon. Docker Desktop uses loopback; native Linux
+/// asks for the Docker bridge gateway so the container can cross network
+/// namespaces without exposing the listener on every host interface.
+/// Idempotent: a repeat call returns the already-bound address and token
+/// unchanged, since a listener cannot be re-pointed once serving.
 #[utoipa::path(
     post,
     path = "/v1/attach-listeners",
@@ -1163,6 +1204,7 @@ async fn shutdown(State(daemon): State<Arc<Daemon>>) -> Json<StopReport> {
     request_body = Option<AttachListenersRequest>,
     responses(
         (status = 200, description = "the TCP attach listener's address and per-instance token", body = AttachListenersReport),
+        (status = 400, description = "the requested address is not an approved attach boundary", body = ApiError),
         (status = 503, description = "the namespace is not ready yet", body = ApiError),
         (status = 500, description = "failed to bind the attach listener", body = ApiError),
     ),
@@ -1171,9 +1213,19 @@ async fn attach_listeners(
     State(daemon): State<Arc<Daemon>>,
     request: Option<Json<AttachListenersRequest>>,
 ) -> Response {
-    let port = request.map_or(0, |Json(request)| request.port);
+    let request = request.map(|Json(request)| request).unwrap_or_default();
+    let bind_addr = match AttachBindAddr::requested(request.bind_ip) {
+        Ok(bind_addr) => bind_addr,
+        Err(error) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                ErrorCode::SpecInvalid,
+                error.to_string(),
+            );
+        },
+    };
     let rt = tokio::runtime::Handle::current();
-    match daemon.ensure_attach_tcp(port, &rt) {
+    match daemon.ensure_attach_tcp(bind_addr, 0, &rt) {
         Ok(AttachTcpOutcome::Bound(state)) => Json(AttachListenersReport {
             addr: state.addr.to_string(),
             token: state.token,
@@ -1598,5 +1650,17 @@ mod tests {
         let response = super::parse_spec_json(spec).expect_err("spec must be rejected");
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn attach_bind_accepts_only_loopback_without_a_verified_bridge() {
+        assert_eq!(
+            super::AttachBindAddr::requested(None).unwrap().0,
+            std::net::Ipv4Addr::LOCALHOST
+        );
+        assert!(super::AttachBindAddr::requested(Some(std::net::Ipv4Addr::UNSPECIFIED)).is_err());
+        assert!(
+            super::AttachBindAddr::requested(Some(std::net::Ipv4Addr::new(192, 0, 2, 1))).is_err()
+        );
     }
 }
