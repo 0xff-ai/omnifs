@@ -82,6 +82,91 @@ impl std::fmt::Display for AttachTarget {
     }
 }
 
+/// Failure resolving an [`AttachTarget`] from `--attach` or the
+/// `OMNIFS_ATTACH_ADDR`/`OMNIFS_ATTACH_TOKEN` env vars, before any connection
+/// is attempted.
+#[derive(Debug, thiserror::Error)]
+pub enum AttachTargetError {
+    #[error("neither --attach nor {env} is set; the frontend runner needs one attach target")]
+    Missing { env: &'static str },
+    #[error("{addr_env} is set but {token_env} is not")]
+    MissingToken {
+        addr_env: &'static str,
+        token_env: &'static str,
+    },
+    #[error("{env} `{addr}` is not a `host:port` address")]
+    InvalidAddr { env: &'static str, addr: String },
+    #[error("{env} `{addr}` has an invalid vsock port")]
+    InvalidVsockPort {
+        env: &'static str,
+        addr: String,
+        #[source]
+        source: std::num::ParseIntError,
+    },
+}
+
+/// Resolve the attach target: the explicit `--attach <socket>` when given,
+/// otherwise the target named by `OMNIFS_ATTACH_ADDR`/`OMNIFS_ATTACH_TOKEN`
+/// (the Docker frontend launcher sets both for TCP; the krunkit launcher sets
+/// both for `vsock:<port>`). Neither present is a hard error: there is no
+/// default to fall back to silently.
+pub fn resolve_attach_target(attach: Option<PathBuf>) -> Result<AttachTarget, AttachTargetError> {
+    if let Some(socket) = attach {
+        return Ok(AttachTarget::Unix(socket));
+    }
+    attach_target_from_env(
+        std::env::var(omnifs_api::OMNIFS_ATTACH_ADDR_ENV).ok(),
+        std::env::var(omnifs_api::OMNIFS_ATTACH_TOKEN_ENV).ok(),
+    )
+}
+
+/// The env-driven half of [`resolve_attach_target`], pulled out as a pure
+/// function of its two inputs so the parse/validation logic is unit-testable
+/// without mutating process environment.
+///
+/// `addr` is `vsock:<port>` for the krunkit guest (there is no host name to
+/// resolve: the guest always dials `VMADDR_CID_HOST`, so only the port varies)
+/// or a plain `host:port` string for TCP, kept unparsed rather than a
+/// pre-resolved `SocketAddr`: the Docker-hosted frontend dials
+/// `host.docker.internal`, a name Docker injects into the container's DNS
+/// that only resolves inside the container, so the runner cannot validate it
+/// any earlier than `TcpStream::connect` does. A literal host named `vsock`
+/// (vanishingly unlikely, and never how Docker names its bridge) resolves to
+/// the vsock form; there is no way to address a real host by that name that
+/// this grammar would rather preserve.
+pub fn attach_target_from_env(
+    addr: Option<String>,
+    token: Option<String>,
+) -> Result<AttachTarget, AttachTargetError> {
+    let addr = addr.ok_or(AttachTargetError::Missing {
+        env: omnifs_api::OMNIFS_ATTACH_ADDR_ENV,
+    })?;
+    let token = token.ok_or(AttachTargetError::MissingToken {
+        addr_env: omnifs_api::OMNIFS_ATTACH_ADDR_ENV,
+        token_env: omnifs_api::OMNIFS_ATTACH_TOKEN_ENV,
+    })?;
+    if let Some(port) = addr.strip_prefix("vsock:") {
+        let port: u32 = port
+            .parse()
+            .map_err(|source| AttachTargetError::InvalidVsockPort {
+                env: omnifs_api::OMNIFS_ATTACH_ADDR_ENV,
+                addr: addr.clone(),
+                source,
+            })?;
+        return Ok(AttachTarget::Vsock { port, token });
+    }
+    if addr
+        .rsplit_once(':')
+        .is_none_or(|(_, port)| port.parse::<u16>().is_err())
+    {
+        return Err(AttachTargetError::InvalidAddr {
+            env: omnifs_api::OMNIFS_ATTACH_ADDR_ENV,
+            addr,
+        });
+    }
+    Ok(AttachTarget::Tcp { addr, token })
+}
+
 /// One caller request queued to the manager, with the slot its answer returns on.
 struct Outgoing {
     request: WireRequest,
@@ -667,5 +752,98 @@ struct AbortOnDrop(tokio::task::JoinHandle<()>);
 impl Drop for AbortOnDrop {
     fn drop(&mut self) {
         self.0.abort();
+    }
+}
+
+#[cfg(test)]
+mod attach_target_tests {
+    use std::path::Path;
+
+    use super::*;
+
+    #[test]
+    fn attach_prefers_explicit_unix_socket() {
+        let target = resolve_attach_target(Some(PathBuf::from("/tmp/x.sock"))).unwrap();
+        assert!(matches!(target, AttachTarget::Unix(path) if path == Path::new("/tmp/x.sock")));
+    }
+
+    #[test]
+    fn attach_falls_back_to_tcp_env_vars() {
+        let target = attach_target_from_env(
+            Some("host.docker.internal:54321".to_string()),
+            Some("secret".to_string()),
+        )
+        .unwrap();
+        match target {
+            AttachTarget::Tcp { addr, token } => {
+                assert_eq!(addr, "host.docker.internal:54321");
+                assert_eq!(token, "secret");
+            },
+            other => panic!("expected a tcp target, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn attach_env_requires_both_addr_and_token() {
+        attach_target_from_env(None, None).expect_err("neither var set must fail");
+        attach_target_from_env(Some("host.docker.internal:1".to_string()), None)
+            .expect_err("addr without token must fail");
+        attach_target_from_env(None, Some("secret".to_string()))
+            .expect_err("token without addr must fail");
+    }
+
+    #[test]
+    fn attach_env_rejects_a_portless_address() {
+        attach_target_from_env(
+            Some("host.docker.internal".to_string()),
+            Some("secret".to_string()),
+        )
+        .expect_err("an address with no port must fail");
+    }
+
+    #[test]
+    fn attach_falls_back_to_vsock_env_vars() {
+        let target =
+            attach_target_from_env(Some("vsock:9000".to_string()), Some("secret".to_string()))
+                .unwrap();
+        match target {
+            AttachTarget::Vsock { port, token } => {
+                assert_eq!(port, 9000);
+                assert_eq!(token, "secret");
+            },
+            other => panic!("expected a vsock target, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn attach_env_rejects_vsock_with_no_port() {
+        attach_target_from_env(Some("vsock:".to_string()), Some("secret".to_string()))
+            .expect_err("a vsock address with no port must fail");
+    }
+
+    #[test]
+    fn attach_env_rejects_vsock_with_a_bad_port() {
+        attach_target_from_env(
+            Some("vsock:not-a-port".to_string()),
+            Some("secret".to_string()),
+        )
+        .expect_err("a non-numeric vsock port must fail");
+        attach_target_from_env(
+            Some("vsock:99999999999".to_string()),
+            Some("secret".to_string()),
+        )
+        .expect_err("a vsock port that overflows u32 must fail");
+    }
+
+    #[test]
+    fn attach_vsock_takes_precedence_over_a_host_literally_named_vsock() {
+        // `vsock:8080` is ambiguous between "a host named vsock on port 8080"
+        // and the vsock transport; the grammar resolves it to vsock, since
+        // there is no other way to address the vsock transport at all, while a
+        // host named `vsock` is a name a caller could always change.
+        let target =
+            attach_target_from_env(Some("vsock:8080".to_string()), Some("secret".to_string()))
+                .unwrap();
+        assert!(matches!(target, AttachTarget::Vsock { port: 8080, .. }));
     }
 }
