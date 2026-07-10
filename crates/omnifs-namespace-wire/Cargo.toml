@@ -22,6 +22,12 @@ constant_time_eq = "0.4"
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# For a real engine-backed `TreeNamespace` in the trace-propagation test: no
+# cycle, omnifs-itest does not depend on omnifs-namespace-wire.
+omnifs-itest = { path = "../omnifs-itest" }
+# For InspectorEvent/InspectorRecord in the same test: the inspector wire
+# types live in omnifs-api, not re-exported by omnifs-engine.
+omnifs-api = { workspace = true }
 
 [lints]
 workspace = true
