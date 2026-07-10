@@ -1,5 +1,4 @@
 #![cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
-#![allow(clippy::needless_pass_by_value)]
 
 //! `omnifs-provider-db`: relational database provider for omnifs.
 //!
@@ -13,11 +12,11 @@
 //! `immutable=1` so databases left in WAL mode and shipped as
 //! snapshots open without their `-wal` / `-shm` sidecars.
 
-use hashbrown::HashSet;
 use std::cell::RefCell;
 use std::rc::Rc;
 
 use omnifs_sdk::handler::DirIntent;
+use omnifs_sdk::hashbrown::HashSet;
 use omnifs_sdk::prelude::*;
 use omnifs_sdk::serde::{Deserialize, Serialize};
 
@@ -167,21 +166,17 @@ impl TableDoc {
     }
 
     fn schema_json(&self) -> Result<FileProjection> {
-        let mut bytes = serde_json::to_vec_pretty(&self.columns)
-            .map_err(|e| ProviderError::internal(format!("encode schema: {e}")))?;
-        bytes.push(b'\n');
-        Ok(FileProjection::body(bytes)
-            .content_type(ContentType::Json)
-            .build())
+        Ok(FileProjection::body_with_type(
+            pretty_json(&self.columns)?,
+            ContentType::Json,
+        ))
     }
 
     fn indexes_json(&self) -> Result<FileProjection> {
-        let mut bytes = serde_json::to_vec_pretty(&self.indexes)
-            .map_err(|e| ProviderError::internal(format!("encode indexes: {e}")))?;
-        bytes.push(b'\n');
-        Ok(FileProjection::body(bytes)
-            .content_type(ContentType::Json)
-            .build())
+        Ok(FileProjection::body_with_type(
+            pretty_json(&self.indexes)?,
+            ContentType::Json,
+        ))
     }
 
     fn count(&self) -> FileProjection {
@@ -209,21 +204,20 @@ fn read_file_info(cx: &Cx<State>) -> Result<FileInfo> {
 
 async fn meta_info_json(cx: Cx<State>) -> Result<FileProjection> {
     let info = read_file_info(&cx)?;
-    let bytes = pretty_json(&info)?;
-    Ok(FileProjection::body(bytes)
-        .content_type(ContentType::Json)
-        .dynamic()
-        .build())
+    Ok(FileProjection::dynamic_body_with_type(
+        pretty_json(&info)?,
+        ContentType::Json,
+    ))
 }
 
 async fn meta_version(cx: Cx<State>) -> Result<FileProjection> {
     let info = read_file_info(&cx)?;
-    FileInfo::version(&info)
+    Ok(info.version())
 }
 
 async fn meta_path(cx: Cx<State>) -> Result<FileProjection> {
     let info = read_file_info(&cx)?;
-    FileInfo::path(&info)
+    Ok(info.path())
 }
 
 fn read_table_doc(cx: &Cx<State>, key: &TableKey) -> Result<TableDoc> {
@@ -262,11 +256,10 @@ fn read_table_doc(cx: &Cx<State>, key: &TableKey) -> Result<TableDoc> {
 
 async fn table_json(cx: Cx<State>, key: TableKey) -> Result<FileProjection> {
     let doc = read_table_doc(&cx, &key)?;
-    let bytes = pretty_json(&doc)?;
-    Ok(FileProjection::body(bytes)
-        .content_type(ContentType::Json)
-        .dynamic()
-        .build())
+    Ok(FileProjection::dynamic_body_with_type(
+        pretty_json(&doc)?,
+        ContentType::Json,
+    ))
 }
 
 async fn table_schema_sql(cx: Cx<State>, key: TableKey) -> Result<FileProjection> {
@@ -290,18 +283,12 @@ async fn table_count_txt(cx: Cx<State>, key: TableKey) -> Result<FileProjection>
 }
 
 impl FileInfo {
-    fn version(info: &Self) -> Result<FileProjection> {
-        Ok(FileProjection::body_with_type(
-            format!("{}\n", info.sqlite_version),
-            ContentType::Text,
-        ))
+    fn version(&self) -> FileProjection {
+        FileProjection::body_with_type(format!("{}\n", self.sqlite_version), ContentType::Text)
     }
 
-    fn path(info: &Self) -> Result<FileProjection> {
-        Ok(FileProjection::body_with_type(
-            format!("{}\n", info.path),
-            ContentType::Text,
-        ))
+    fn path(&self) -> FileProjection {
+        FileProjection::body_with_type(format!("{}\n", self.path), ContentType::Text)
     }
 }
 
@@ -347,9 +334,7 @@ async fn table_sample(cx: Cx<State>, key: TableKey) -> Result<FileProjection> {
         let rows = backend
             .table_sample(name, limit)
             .map_err(|e| ProviderError::internal(format!("sample: {e}")))?;
-        let mut bytes = serde_json::to_vec_pretty(&rows)
-            .map_err(|e| ProviderError::internal(format!("encode sample: {e}")))?;
-        bytes.push(b'\n');
+        let bytes = pretty_json(&rows)?;
         let version = backend.table_version(name).ok();
         Ok((bytes, version))
     })?;

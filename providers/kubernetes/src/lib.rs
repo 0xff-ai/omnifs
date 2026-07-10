@@ -1,5 +1,4 @@
 #![cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
-#![allow(clippy::needless_pass_by_value)]
 
 //! `omnifs-provider-kubernetes`: a read-only projected filesystem over a
 //! Kubernetes cluster.

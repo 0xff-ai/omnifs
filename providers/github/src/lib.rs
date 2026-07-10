@@ -1,9 +1,8 @@
 #![cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
-#![allow(clippy::needless_pass_by_value)]
 
 //! github-provider: GitHub virtual filesystem provider for omnifs.
 
-use hashbrown::HashSet;
+use omnifs_sdk::hashbrown::HashSet;
 use omnifs_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 

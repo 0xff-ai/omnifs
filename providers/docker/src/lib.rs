@@ -1,5 +1,4 @@
 #![cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
-#![allow(clippy::needless_pass_by_value)]
 
 //! docker-provider: Docker daemon virtual filesystem provider for omnifs.
 
@@ -8,7 +7,7 @@ pub(crate) use omnifs_sdk::prelude::Result;
 use core::fmt;
 use core::str::FromStr;
 
-use hashbrown::HashMap;
+use omnifs_sdk::hashbrown::{HashMap, HashSet};
 use omnifs_sdk::prelude::*;
 use serde::Serialize;
 
@@ -466,7 +465,7 @@ fn label<'a>(summary: &'a ContainerSummary, key: &str) -> Option<&'a str> {
 }
 
 fn services_for_project(summaries: &[ContainerSummary], project: &str) -> Vec<String> {
-    let mut services: hashbrown::HashSet<String> = hashbrown::HashSet::new();
+    let mut services: HashSet<String> = HashSet::new();
     for summary in summaries {
         if label(summary, PROJECT_LABEL) != Some(project) {
             continue;

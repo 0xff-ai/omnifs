@@ -19,7 +19,6 @@ targets = []
 [dependencies]
 base64 = "0.22"
 omnifs-sdk = { workspace = true }
-serde = { workspace = true }
 hickory-proto = "0.26"
 [lints.rust]
 unsafe_code = "allow"

@@ -19,7 +19,6 @@ targets = []
 [dependencies]
 dom_smoothie = "0.18.0"
 omnifs-sdk = { workspace = true }
-serde = { workspace = true }
 
 [lints.rust]
 unsafe_code = "allow"

@@ -1,5 +1,4 @@
 #![cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
-#![allow(clippy::needless_pass_by_value)]
 
 //! linear-provider: Linear virtual filesystem provider for omnifs.
 
@@ -10,7 +9,7 @@ mod objects;
 
 use core::str::FromStr;
 
-use hashbrown::HashSet;
+use omnifs_sdk::hashbrown::HashSet;
 use omnifs_sdk::prelude::*;
 #[cfg(not(target_arch = "wasm32"))]
 use omnifs_sdk::{

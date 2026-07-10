@@ -19,7 +19,7 @@ impl KubeManifest {
     }
 
     pub(crate) fn canonical_json_bytes(&self) -> Result<Vec<u8>> {
-        json_bytes(&self.0)
+        pretty_json(&self.0)
     }
 
     pub(crate) fn resource_version(&self) -> Option<&str> {
@@ -185,13 +185,6 @@ fn clean_manifest(mut value: Value) -> Value {
         metadata.remove("managedFields");
     }
     value
-}
-
-fn json_bytes(value: &Value) -> Result<Vec<u8>> {
-    let mut bytes = serde_json::to_vec_pretty(value)
-        .map_err(|error| ProviderError::internal(format!("kubernetes: render json: {error}")))?;
-    bytes.push(b'\n');
-    Ok(bytes)
 }
 
 fn yaml_bytes(value: &Value) -> Result<Vec<u8>> {

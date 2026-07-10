@@ -2,11 +2,11 @@
 
 use core::fmt::Write as _;
 
-use hashbrown::HashMap;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{
     APIGroup, APIGroupList, APIResource as K8sApiResource, APIResourceList,
 };
 use omnifs_sdk::error::ProviderErrorKind;
+use omnifs_sdk::hashbrown::HashMap;
 use omnifs_sdk::prelude::*;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
