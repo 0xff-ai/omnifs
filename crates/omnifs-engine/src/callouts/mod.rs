@@ -301,11 +301,7 @@ impl CalloutHost {
             wit_types::Callout::GitOpenRepo(req) => {
                 let git = self.git.clone();
                 let req = req.clone();
-                let span = tracing::Span::current();
-                spawn_blocking_callout("git.open_repo", move || {
-                    span.in_scope(|| git.open_repo(&req, op_id))
-                })
-                .await
+                spawn_blocking_callout("git.open_repo", move || git.open_repo(&req, op_id)).await
             },
             wit_types::Callout::OpenArchive(req) => self.archive.open(req).await,
             // Synchronous bounded disk read; offloaded for the same reason as
@@ -313,8 +309,7 @@ impl CalloutHost {
             wit_types::Callout::ReadBlob(req) => {
                 let blob = self.blob.clone();
                 let req = *req;
-                let span = tracing::Span::current();
-                spawn_blocking_callout("blob.read", move || span.in_scope(|| blob.read(&req))).await
+                spawn_blocking_callout("blob.read", move || blob.read(&req)).await
             },
         }
     }
@@ -327,7 +322,8 @@ async fn spawn_blocking_callout(
     label: &'static str,
     f: impl FnOnce() -> wit_types::CalloutResult + Send + 'static,
 ) -> wit_types::CalloutResult {
-    match tokio::task::spawn_blocking(f).await {
+    let span = tracing::Span::current();
+    match tokio::task::spawn_blocking(move || span.in_scope(f)).await {
         Ok(result) => result,
         Err(join_error) => callout_internal(format!("{label} task failed: {join_error}")),
     }
