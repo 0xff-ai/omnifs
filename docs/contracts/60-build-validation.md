@@ -53,6 +53,12 @@ The krunkit driver's guest ships as a bootable raw disk image, not a container: 
 
 Attach parameters (`OMNIFS_ATTACH_ADDR`, `OMNIFS_ATTACH_TOKEN`, `OMNIFS_READY_VSOCK_PORT`, `OMNIFS_SSH_PUBKEY`) reach the guest through a per-launch seed ISO, not cloud-init: `KrunkitBackend::launch` (`crates/omnifs-cli/src/krunkit_backend.rs`) builds an ISO9660+Joliet volume labeled `OMNIFS-SEED` with `hdiutil makehybrid`, auditing the staging directory against the exact expected key set before burning it (only the attach token among them is sensitive). The guest's `omnifs-seed-mount.service` mounts it by label before `omnifs-frontend.service` and `omnifs-ssh-setup.service` source it via `EnvironmentFile=`/a plain read. A missing seed volume or config file fails both units loudly in the journal; neither hangs silently, and an omitted `OMNIFS_SSH_PUBKEY` leaves the guest's vsock ssh socket un-started (logged, not silent) rather than accepting into a guest with no `authorized_keys`. `scripts/guest-image/make-seed-iso.sh` is the standalone bash equivalent `just guest-image-smoke` (`scripts/guest-image/smoke.sh`) uses to boot the image under `krunkit` with a throwaway seed carrying an unreachable placeholder address (and no ssh key), checking the serial console log for the guest reaching `multi-user.target` and `omnifs-frontend.service` starting; it does not exercise a real attach or ssh session, which is the live krunkit driver's job (`KrunkitBackend`, this contract's own device-set lockdown assertion, and `omnifs shell`). This is a local dev-only pipeline today: there is no CI lane or release publishing for the guest image yet, unlike the frontend image above.
 
+### Krunkit conformance lane (local-only, never CI)
+
+`crates/omnifs-itest/tests/frontend_krunkit` runs the `fuse-krunkit` conformance column (the same shared row table and scorecard machinery `tests/frontend_docker` uses for the Docker-hosted frontend) against a live krunkit guest: `omnifs up --no-frontend`, `omnifs frontend up --driver krunkit`, the matrix over ssh-over-vsock via `omnifs shell -- <cmd>`, then `omnifs down` with a teardown-cleanliness assertion (no leftover krunkit process, pidfile, or socket). Run it with `just krunkit-conformance` (builds the guest image first if missing, then sets `OMNIFS_ACCEPTANCE_LIVE=1` and runs the suite). Gated on `cfg(target_os = "macos")` plus the `OMNIFS_ACCEPTANCE_LIVE` opt-in, mirroring the live NFS lanes' skip-not-pass convention, and serialized against every other live-mount lane through this crate's one cross-process lock (`omnifs_itest::live::nfs_serial_lock`).
+
+This lane can **never** run in GitHub-hosted CI: krunkit boots a libkrun microVM, and GitHub's hosted macOS runners do not support nested virtualization. It stays a declared local-only gate a contributor runs by hand before a krunkit-affecting change, not a lane that silently skips in CI and reads green.
+
 ### Documentation checks
 
 `just docs-check` verifies doc-to-doc links and the contract file template. It does not validate code symbols or code paths. It is a local convenience recipe only; CI does not run it, so it never blocks a merge.
@@ -73,6 +79,7 @@ Attach parameters (`OMNIFS_ATTACH_ADDR`, `OMNIFS_ATTACH_TOKEN`, `OMNIFS_READY_VS
 - Reintroduce a second copy of the frontend apt block; edit `frontend-base` instead.
 - Add a fourth literal for the frontend's fixed `/omnifs` guest mount point instead of updating its three existing owners together.
 - Give the frontend image an `OMNIFS_HOME` or a provider store. It only ever runs `omnifs-fuse`.
+- Expect `crates/omnifs-itest/tests/frontend_krunkit` to ever run in GitHub-hosted CI, or weaken its skip-when-not-opted-in behavior into a silent pass.
 
 ## Code
 
@@ -87,6 +94,8 @@ Attach parameters (`OMNIFS_ATTACH_ADDR`, `OMNIFS_ATTACH_TOKEN`, `OMNIFS_READY_VS
 - `crates/omnifs-api/openapi/daemon.json`
 - `crates/omnifs-workspace/schema/omnifs.provider.schema.json`
 - `crates/omnifs-itest/src/lib.rs`
+- `crates/omnifs-itest/src/matrix.rs`
+- `crates/omnifs-itest/tests/frontend_krunkit/main.rs`
 - `crates/omnifs-cli/src/provider_bundle.rs`
 - `Dockerfile`
 - `scripts/ci/common.sh`
@@ -108,6 +117,7 @@ Attach parameters (`OMNIFS_ATTACH_ADDR`, `OMNIFS_ATTACH_TOKEN`, `OMNIFS_READY_VS
 - `just schema`
 - `just openapi`
 - `just docs-check`
+- `just krunkit-conformance` (macOS Apple Silicon only, local-only, never CI: see "Krunkit conformance lane" above)
 
 Live runtime path (the daemon runs host-native; only the frontend needs `docker exec`):
 

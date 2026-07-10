@@ -97,3 +97,4 @@ The `omnifs-mtab` state file is mount *discovery and teardown* state (mount poin
 - Frontend changes should include protocol-specific tests plus shared tree tests when behavior is semantic.
 - FUSE-visible behavior changes need targeted FUSE tests and live runtime checks.
 - NFS protocol mechanics need NFS protocol/unit tests. Host-native behavior changes need live mount tests.
+- Krunkit driver changes need the local-only `just krunkit-conformance` lane (`docs/contracts/60-build-validation.md`); it can never run in GitHub-hosted CI.

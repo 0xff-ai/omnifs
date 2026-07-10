@@ -156,8 +156,12 @@ pub fn is_mismatch(outcome: &Outcome, expect: Expect) -> bool {
 // Executor
 // ===========================================================================
 
-/// Where and how a row's script runs. Both variants run the script through
-/// `sh -c` with `ROOT`/`SCRATCH` in the environment and `cwd=$SCRATCH`.
+/// Where and how a row's script runs. `Local` and `DockerExec` run the script
+/// through `sh -c` with `ROOT`/`SCRATCH` in the environment and
+/// `cwd=$SCRATCH`; `SshKrunkit` sets `ROOT`/`SCRATCH` too but does not set a
+/// remote cwd (ssh has no working-directory concept independent of the
+/// remote command itself, and every row script already fully qualifies its
+/// paths under `$ROOT`/`$SCRATCH` rather than relying on an implicit pwd).
 pub enum Exec {
     /// A local shell against a host-visible mount.
     Local { root: PathBuf, scratch: PathBuf },
@@ -168,20 +172,33 @@ pub enum Exec {
         root: String,
         scratch: String,
     },
+    /// `omnifs shell -- <cmd>` into a krunkit guest, the real CLI path
+    /// `omnifs shell` uses for the krunkit backend (ssh over a vsock-to-unix
+    /// bridge via `socat`, built by `KrunkitBackend::shell_command`). `root`
+    /// and `scratch` are guest paths, matching `DockerExec`'s shape.
+    /// `omnifs_bin`/`home` select which workspace's krunkit guest to reach:
+    /// `omnifs shell` resolves the running frontend from `OMNIFS_HOME`'s
+    /// runtime record, so no attach-socket path is threaded through here.
+    SshKrunkit {
+        omnifs_bin: PathBuf,
+        home: PathBuf,
+        root: String,
+        scratch: String,
+    },
 }
 
 impl Exec {
     fn root(&self) -> &str {
         match self {
             Exec::Local { root, .. } => root.to_str().expect("root path is utf-8"),
-            Exec::DockerExec { root, .. } => root,
+            Exec::DockerExec { root, .. } | Exec::SshKrunkit { root, .. } => root,
         }
     }
 
     fn scratch(&self) -> &str {
         match self {
             Exec::Local { scratch, .. } => scratch.to_str().expect("scratch path is utf-8"),
-            Exec::DockerExec { scratch, .. } => scratch,
+            Exec::DockerExec { scratch, .. } | Exec::SshKrunkit { scratch, .. } => scratch,
         }
     }
 
@@ -214,6 +231,34 @@ impl Exec {
                     "-c",
                     script,
                 ]);
+                cmd
+            },
+            Exec::SshKrunkit {
+                omnifs_bin, home, ..
+            } => {
+                // ssh has no argv-array remote exec: everything after the
+                // hostname is space-joined into one remote command string
+                // (`KrunkitBackend::shell_command`'s own doc comment), and
+                // that backend already wraps every trailing command in
+                // `cd $GUEST_MOUNT && exec <trailing>`. So `remote` must be
+                // exactly the one command `exec` replaces the login shell
+                // with, shipped as ONE already-shell-quoted argv element:
+                // passing `root`/`scratch`/`script` as separate trailing
+                // elements (the way `DockerExec` passes separate `-e` flags)
+                // would let ssh's naive space-join re-split the script body
+                // on whitespace. `env` (not a bare `ROOT=.. sh -c ..`
+                // prefix) because after `exec` an assignment-shaped word is
+                // exec's first operand, not a shell assignment: `exec ROOT=x
+                // sh` fails with "exec: ROOT=x: not found".
+                let remote = format!(
+                    "env ROOT={root} SCRATCH={scratch} sh -c {}",
+                    shell_single_quote(script)
+                );
+                let mut cmd = Command::new(omnifs_bin);
+                cmd.arg("shell")
+                    .arg("--")
+                    .arg(remote)
+                    .env("OMNIFS_HOME", home);
                 cmd
             },
         }
@@ -356,6 +401,15 @@ fn first_error_line(stderr: &[u8], code: Option<i32>) -> String {
         Some(code) => format!("exit status {code}"),
         None => "terminated by signal".to_string(),
     }
+}
+
+/// Wrap `s` in single quotes for a POSIX shell, escaping any embedded single
+/// quote as `'\''`. Used by [`Exec::SshKrunkit`] to ship a whole multi-line
+/// row script as one already-quoted remote command: ssh's own trailing-argv
+/// concatenation does no quoting of its own, so the string handed to it must
+/// already be safe to re-parse as shell syntax on the other end.
+fn shell_single_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
 }
 
 // ===========================================================================
@@ -879,5 +933,24 @@ pub const LINUX_NFS_LOOPBACK: Column = Column {
 pub const FUSE_DOCKER_FRONTEND: Column = Column {
     id: "fuse-docker",
     platform: "linux",
+    expectations: &[GREP_R_PAGINATION_CONTROLS],
+};
+
+/// The krunkit driver's guest FUSE frontend (`omnifs frontend up --driver
+/// krunkit`), a libkrun microVM on Apple Silicon macOS, reached over
+/// ssh-over-vsock via the real `omnifs shell -- <cmd>` CLI path
+/// (`crates/omnifs-itest/tests/frontend_krunkit`). LOCAL-ONLY: GitHub-hosted
+/// macOS runners cannot nest virtualization, so this column never runs in CI
+/// (see `docs/contracts/60-build-validation.md`).
+///
+/// Seeded from [`FUSE_DOCKER_FRONTEND`]'s expectations and confirmed against
+/// a live run on this guest image: the guest's `dropbear`/ssh remote-exec
+/// path runs the row script as `sh -c '<script>'` (the guest's own `/bin/sh`,
+/// not bash), and its package set (`scripts/guest-image/mkosi/mkosi.conf`)
+/// has no `rsync`/`jq`/`xxd`/`python3`, all of which already degrade to
+/// `Outcome::ToolMissing` (never a mismatch) rather than a real failure.
+pub const FUSE_KRUNKIT_FRONTEND: Column = Column {
+    id: "fuse-krunkit",
+    platform: "macos",
     expectations: &[GREP_R_PAGINATION_CONTROLS],
 };
