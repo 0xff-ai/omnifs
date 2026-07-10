@@ -816,22 +816,6 @@ ls "$ROOT/hello/bundle" >/dev/null 2>&1 || true
 ///   rejected with `ErrorKind::InvalidInput`. The row genuinely passes now.
 const GREP_R_PAGINATION_CONTROLS: (&str, Expect) = ("grep-r", Expect::Pass);
 
-/// fuse-in-docker lane expectation, scoped to the product runtime container's
-/// userland: `tail -f` on `hello/live-log` delivers only the initial content
-/// (one line) and never the appended bytes. This is not a FUSE-frontend gap.
-/// The follow pump does publish growth (`omnifs-fuse/src/read.rs` spawns
-/// `spawn_live_follow_pump` and getattr reports the grown size), and the same
-/// fixture over the same kernel-FUSE frontend delivers growth to GNU `tail` on
-/// native Linux (the conformance-fuse CI lane observed this row PASS) and to
-/// BSD `tail` over the NFS lane. What differs is the container's `tail`: the
-/// runtime image is Ubuntu 25.10 whose `/usr/bin/tail` symlinks to uutils
-/// coreutils 0.2.2 (`/usr/lib/cargo/bin/coreutils/tail`), a Rust coreutils
-/// reimplementation, not GNU tail. (Empirically the container is not busybox
-/// and has no busybox at all.) That `tail` follows the file but surfaces none
-/// of the out-of-band pump growth. This row flipping green is the signal that
-/// the container-userland gap is closed.
-const TAIL_F_CONTAINER_USERLAND_GAP: (&str, Expect) = ("tail-f-growing", Expect::Fail);
-
 /// Linux kernel-FUSE native lane. CI's conformance-fuse job runs this on a
 /// GitHub Ubuntu runner with GNU coreutils, where GNU `tail -f` sees the follow
 /// pump's out-of-band growth; that lane observed `tail-f-growing` PASS, and
@@ -885,24 +869,13 @@ pub const LINUX_NFS_LOOPBACK: Column = Column {
     ],
 };
 
-/// FUSE-in-the-product-container lane. Same kernel FUSE frontend as the native
-/// Linux lane.
-pub const FUSE_IN_DOCKER: Column = Column {
-    id: "fuse-in-docker",
-    platform: "linux",
-    expectations: &[GREP_R_PAGINATION_CONTROLS, TAIL_F_CONTAINER_USERLAND_GAP],
-};
-
 /// The Docker-hosted FUSE frontend (`omnifs frontend up`), gate 4 (amended):
 /// a separate, credential-free container attached to a host-native daemon's
-/// shared namespace over TCP, running kernel FUSE inside the container. Not to
-/// be confused with [`FUSE_IN_DOCKER`], the older whole-daemon-in-a-container
-/// runtime lane on the Ubuntu/uutils runtime image: this frontend ships its
-/// own minimal `debian:trixie-slim` image (`Dockerfile`'s `frontend-base`)
-/// chosen specifically because Debian's default coreutils/findutils are GNU,
-/// so both `tar` and `tail -f` pass here where the runtime-image lane pins
-/// them xfail. `grep -r` passes here too (see
-/// [`GREP_R_PAGINATION_CONTROLS`]).
+/// shared namespace over TCP, running kernel FUSE inside the container. This
+/// frontend ships its own minimal `debian:trixie-slim` image (`Dockerfile`'s
+/// `frontend-base`) chosen specifically because Debian's default
+/// coreutils/findutils are GNU, so both `tar` and `tail -f` pass here.
+/// `grep -r` passes here too (see [`GREP_R_PAGINATION_CONTROLS`]).
 pub const FUSE_DOCKER_FRONTEND: Column = Column {
     id: "fuse-docker",
     platform: "linux",
