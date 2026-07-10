@@ -49,17 +49,25 @@ pub struct FrontendUpArgs {
 impl FrontendUpArgs {
     pub async fn run(self) -> anyhow::Result<()> {
         let workspace = Workspace::resolve()?;
+        self.run_in(&workspace).await
+    }
+
+    /// Start a frontend in an already-resolved command workspace. `omnifs up`
+    /// uses this path so the frontend launch shares its mount registry and
+    /// daemon client instead of constructing a second command context midway
+    /// through the lifecycle operation.
+    pub(crate) async fn run_in(self, workspace: &Workspace) -> anyhow::Result<()> {
         let paths = workspace.layout().clone();
         let config = workspace.config()?;
 
         let driver = self.driver.unwrap_or(config.frontend.driver);
-        ensure_native_daemon(&workspace).await?;
+        ensure_native_daemon(workspace).await?;
 
-        let mount_name = first_mount_name(&workspace)?;
+        let mount_name = first_mount_name(workspace)?;
 
         match driver {
-            Driver::Docker => run_docker(&workspace, &paths, &config, &mount_name).await,
-            Driver::Krunkit => run_krunkit(&workspace, &paths, &config, &mount_name).await,
+            Driver::Docker => run_docker(workspace, &paths, &config, &mount_name).await,
+            Driver::Krunkit => run_krunkit(workspace, &paths, &config, &mount_name).await,
         }
     }
 }

@@ -66,7 +66,7 @@ async fn start_frontend(workspace: &Workspace) {
         .map_or("docker", |config| config.frontend.driver.as_via().label());
     anstream::eprintln!("Starting the {driver_label} frontend...");
     if let Err(error) = crate::commands::frontend::up::FrontendUpArgs::default()
-        .run()
+        .run_in(workspace)
         .await
     {
         anstream::eprintln!("⚠  Could not start the {driver_label} frontend: {error:#}");
