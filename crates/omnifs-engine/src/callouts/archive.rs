@@ -47,17 +47,6 @@ struct ExtractKey {
 }
 
 impl ExtractKey {
-    fn new(
-        cache_key: impl Into<String>,
-        format: ArchiveFormat,
-        strip_prefix: Option<String>,
-    ) -> Self {
-        Self {
-            cache_key: cache_key.into(),
-            format,
-            strip_prefix,
-        }
-    }
     fn dir_name(&self) -> String {
         let mut hasher = Sha256::new();
         hasher.update(self.cache_key.as_bytes());
@@ -91,8 +80,6 @@ enum ArchiveError {
     NotFound(String),
     #[error("{0}")]
     Internal(String),
-    #[error("{0}")]
-    JoinFailed(String),
 }
 
 impl From<ArchiveError> for wit_types::CalloutResult {
@@ -102,7 +89,7 @@ impl From<ArchiveError> for wit_types::CalloutResult {
                 callout_error(wit_types::ErrorKind::from(&e), e.to_string(), false)
             },
             ArchiveError::NotFound(msg) => callout_not_found(msg),
-            ArchiveError::Internal(msg) | ArchiveError::JoinFailed(msg) => callout_internal(msg),
+            ArchiveError::Internal(msg) => callout_internal(msg),
         }
     }
 }
@@ -148,7 +135,7 @@ impl ArchiveExecutor {
             },
             Ok(Err(e)) => e.into(),
             Err(join_err) => {
-                ArchiveError::JoinFailed(format!("extract task join: {join_err}")).into()
+                ArchiveError::Internal(format!("extract task join: {join_err}")).into()
             },
         };
         record_outcome(&result);
@@ -166,7 +153,11 @@ impl ArchiveExecutor {
             .cache
             .lookup_by_id(blob_id)
             .ok_or_else(|| ArchiveError::NotFound(format!("blob {blob_id} not found")))?;
-        let key = ExtractKey::new(record.cache_key.clone(), format, strip_prefix);
+        let key = ExtractKey {
+            cache_key: record.cache_key.clone(),
+            format,
+            strip_prefix,
+        };
 
         let tree = match self.materialize(&key, &record)? {
             ArchiveMaterialized::Cached { tree } => tree,
