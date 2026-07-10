@@ -455,14 +455,15 @@ fn load_from_response<T>(
             // The canonical is the raw response body verbatim (JSON, Atom, XML,
             // or opaque). `parse` only produces the in-memory value for
             // rendering; it does not define the stored bytes.
-            let value = parse(resp.body())?;
             let version = resp
                 .headers()
                 .get("etag")
                 .and_then(|v| v.to_str().ok())
                 .map(VersionToken::from);
+            let bytes = resp.into_body();
+            let value = parse(&bytes)?;
             let canonical = Canonical {
-                bytes: resp.body().clone(),
+                bytes,
                 validator: version,
             };
             Ok(Load::fresh(value, canonical))
@@ -511,7 +512,7 @@ impl<'a, E: EndpointHooks, S> BlobRequestBuilder<'a, E, S> {
     /// same 4xx/5xx mapping as the structural terminals, so a `BlobHandle`
     /// always refers to a successful response body.
     pub async fn fetch(self) -> Result<BlobHandle> {
-        let cache_key = self.cache_key.clone();
+        let cache_key = self.cache_key;
         let (request, _policy) = self.inner.into_http_request()?;
         let mut blob: BlobRequest<'a, S> = request.into_blob();
         if let Some(key) = cache_key {
