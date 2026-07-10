@@ -84,11 +84,15 @@ impl Item {
     }
 
     /// Object-level stream face (R6): a live ranged leaf under the item anchor.
-    /// It opens through `open-file` and serves volatile tail chunks (`tail -f`),
-    /// exercising the object Stream dispatch the conformance fixture must cover.
+    /// It opens through `open-file`, exercising the object Stream dispatch the
+    /// conformance fixture must cover. Unlike `hello/ranged` (`LiveTailReader`,
+    /// probed only at fixed offsets), a recursive walk (`grep -r`) opens every
+    /// leaf under the item anchor including this one and reads it to
+    /// completion, so its reader must actually reach EOF (`ItemLogReader`)
+    /// rather than fabricate bytes forever.
     #[allow(clippy::unused_async)]
     async fn log(_cx: Cx<State>, _key: ItemKey) -> Result<StreamFile> {
-        Ok(StreamFile::new(LiveTailReader).live())
+        Ok(StreamFile::new(ItemLogReader).live())
     }
 
     /// The hand-written load `#[object]` forwards `Object::load` to. Item 404 is
@@ -723,6 +727,41 @@ impl RangeReader for LiveTailReader {
             let mut bytes = body.into_bytes();
             bytes.truncate(length as usize);
             Ok(FileChunk::new(bytes, false))
+        })
+    }
+}
+
+/// Finite content for the `Item::log` object stream face.
+///
+/// Unlike [`LiveTailReader`] (fixed-offset probes only), a recursive walk
+/// (`grep -r "$ROOT/items/open/7"`) opens this leaf like any other file and
+/// reads it to completion, so it must actually signal EOF once its small,
+/// fixed content is exhausted rather than fabricate bytes forever.
+const ITEM_LOG_CONTENT: &str = "log line 0\nlog line 1\nlog line 2\n";
+
+#[derive(Clone, Debug)]
+struct ItemLogReader;
+
+impl RangeReader for ItemLogReader {
+    fn read_chunk<'a>(
+        &'a self,
+        _cx: &'a Cx<()>,
+        offset: u64,
+        length: u32,
+    ) -> BoxFuture<'a, FileChunk> {
+        Box::pin(async move {
+            let content = ITEM_LOG_CONTENT.as_bytes();
+            let total = content.len() as u64;
+            if offset >= total {
+                return Ok(FileChunk::new(Vec::new(), true));
+            }
+            let start = usize::try_from(offset).expect("log offset fits usize");
+            let end = offset.saturating_add(u64::from(length)).min(total);
+            let end_usize = usize::try_from(end).expect("log end fits usize");
+            Ok(FileChunk::new(
+                content[start..end_usize].to_vec(),
+                end >= total,
+            ))
         })
     }
 }

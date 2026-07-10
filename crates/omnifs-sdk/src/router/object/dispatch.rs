@@ -219,6 +219,14 @@ impl ListingLeaf {
     pub(in crate::router) fn is_canonical(&self) -> bool {
         matches!(self.kind, LeafKind::Canonical)
     }
+
+    /// Whether this leaf is a stream face (`o.file(..).stream(..)`): it opens
+    /// through `open-file`/`read-chunk`, so its listing/lookup placeholder must
+    /// carry `ReadMode::Ranged`, not the whole-file `ReadMode::Full` every other
+    /// leaf kind uses.
+    pub(in crate::router) fn is_stream(&self) -> bool {
+        matches!(self.kind, LeafKind::Stream)
+    }
 }
 
 /// What mounting an object spec yields: the dispatchable entry and the leaf
