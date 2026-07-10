@@ -21,7 +21,7 @@ The daemon is a frontend registry: it constructs one `TreeNamespace` over the sh
 
 ### FUSE
 
-FUSE is the Linux frontend, including native Linux and the optional Docker runtime container.
+FUSE is the Linux frontend, including native Linux, the optional Docker runtime container, and the optional Docker-hosted out-of-process frontend (`omnifs frontend up`), which ships its own minimal image distinct from the runtime container; see `docs/contracts/60-build-validation.md` for that image's build/publish contract.
 
 Keep FUSE inode tables, kernel notifications, mount/unmount mechanics, and FUSE reply types in `omnifs-fuse`. Keep shared projection behavior in `omnifs-engine/src/tree`.
 

@@ -43,6 +43,12 @@ The guest-container paths `/root/.omnifs` (guest `OMNIFS_HOME`) and `/omnifs` (g
 
 The two runtime images share one Dockerfile. `runtime-base` owns the apt/setup block; `runtime-dev` (contributor, built by `just dev`) copies the binary from the in-Docker `builder` stage, and `runtime-release` (built by `scripts/ci/build-runtime-image.sh`) injects a prebuilt binary as the `omnifs-bin` build context. Targeting `runtime-release` builds only `ubuntu -> runtime-base -> runtime-release`, so the compile toolchain never runs and no base image is published.
 
+### Frontend image artifact
+
+The Docker-hosted FUSE frontend (`omnifs frontend up`) ships a second, minimal image from the same `Dockerfile`: `frontend-base` (`debian:trixie-slim`, not the runtime image's Ubuntu family, chosen because Debian's default coreutils/findutils are GNU, which `tail -f` fidelity requires), `frontend-dev` (contributor, built by `just frontend-image`, copies the binary from the same `builder` stage `runtime-dev` uses), and `frontend-release` (built by `scripts/ci/build-frontend-image.sh`, injects the same prebuilt Linux binary the runtime release build uses via the `omnifs-bin` build context). `build-runtime-image.sh` and `build-frontend-image.sh` share their buildx invocation through `build_release_stage_image` in `scripts/ci/common.sh`; only the target stage, image default, and whether the launcher-version label is baked in differ. The frontend image carries no launch-protocol/min-launcher-version label: `launch_frontend_container` (`crates/omnifs-cli/src/frontend_container.rs`) never checks one, unlike the daemon runtime image's launch path.
+
+CI builds and pushes the frontend image per architecture in the PR lane (`frontend-amd64`/`frontend-arm64`), smokes it directly with `scripts/ci/smoke-frontend-image.sh` (version, GNU `tail`, fails loudly with no `OMNIFS_ATTACH_ADDR`), and on a `main` push merges the per-arch digests into one multi-platform manifest via `scripts/ci/publish-manifest.sh` (shared with the runtime image's own manifest publish step). Release promotes that manifest to `ghcr.io/0xff-ai/omnifs-frontend:<version>` through the same `scripts/ci/promote-image.sh` the runtime image uses. Full attach/mount validation against a live daemon is a later slice's fuse-docker itest gate; the CI smoke here only proves the image's own structural guarantees.
+
 ### Documentation checks
 
 `just docs-check` verifies doc-to-doc links and the contract file template. It does not validate code symbols or code paths. It is a local convenience recipe only; CI does not run it, so it never blocks a merge.
@@ -61,6 +67,7 @@ The two runtime images share one Dockerfile. `runtime-base` owns the apt/setup b
 - Run host tests that rebuild providers in parallel without prebuilding providers when contention matters.
 - Treat `just docs-check` as code-symbol validation.
 - Reintroduce a second copy of the runtime apt block; edit `runtime-base` instead. Read a guest-container path from the environment (`OMNIFS_HOME` / `OMNIFS_MOUNT_POINT`) rather than adding a fourth literal off the Docker boundary.
+- Give the frontend image an `OMNIFS_HOME`, a provider store, or the runtime image's interactive-shell toolbox. It only ever runs `omnifs frontend run`.
 
 ## Code
 
@@ -77,7 +84,12 @@ The two runtime images share one Dockerfile. `runtime-base` owns the apt/setup b
 - `crates/omnifs-itest/src/lib.rs`
 - `crates/omnifs-cli/src/provider_bundle.rs`
 - `Dockerfile`
+- `scripts/ci/common.sh`
 - `scripts/ci/build-runtime-image.sh`
+- `scripts/ci/build-frontend-image.sh`
+- `scripts/ci/smoke-frontend-image.sh`
+- `scripts/ci/publish-manifest.sh`
+- `scripts/ci/promote-image.sh`
 - `CONTRIBUTING.md`
 
 ## Validation
@@ -100,4 +112,13 @@ just dev -y
 docker exec omnifs /bin/zsh -lc 'omnifs status'
 docker exec omnifs /bin/zsh -lc 'OMNIFS_DEMO_MODE=smoke /tmp/demo.sh'
 docker exec omnifs /bin/zsh -lc 'tail -n 80 /tmp/omnifs.log'
+```
+
+Frontend image, built standalone (no daemon, no attach):
+
+```bash
+just frontend-image
+docker run --rm --entrypoint /usr/local/bin/omnifs omnifs-frontend:dev --version
+docker run --rm --entrypoint tail omnifs-frontend:dev --version | head -1
+docker run --rm omnifs-frontend:dev # fails loudly: OMNIFS_ATTACH_ADDR is unset
 ```
