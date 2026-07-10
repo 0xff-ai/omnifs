@@ -472,8 +472,8 @@ pub(crate) async fn wait_until_ready(
         }
         if started.elapsed() >= timeout {
             return Err(anyhow!(
-                "daemon did not become ready within {}",
-                format_duration(timeout)
+                "daemon did not become ready within {}s",
+                timeout.as_secs()
             ))
             .with_exit_code(ExitCode::DaemonUnavailable);
         }
@@ -591,13 +591,7 @@ fn run_host_ls(path: &Path) -> anyhow::Result<FirstRead> {
         .arg(path)
         .output()
         .with_context(|| format!("run ls {}", path.display()))?;
-    first_read_from_output(format!("ls {}", path.display()), &output)
-}
-
-fn first_read_from_output(
-    command: String,
-    output: &std::process::Output,
-) -> anyhow::Result<FirstRead> {
+    let command = format!("ls {}", path.display());
     if !output.status.success() {
         anyhow::bail!(
             "first read failed: `{command}` exited with {}\n{}",
@@ -624,10 +618,6 @@ fn expand_tilde_path(raw: &str) -> PathBuf {
         return PathBuf::from(home).join(stripped);
     }
     PathBuf::from(raw)
-}
-
-fn format_duration(duration: Duration) -> String {
-    format!("{}s", duration.as_secs())
 }
 
 fn approved_upgrade_for_existing_mount(
