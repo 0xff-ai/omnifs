@@ -52,7 +52,6 @@ pub struct CredentialEntry {
     /// Human-readable identity reported by the upstream API at validation time.
     upstream_identity: Option<String>,
     refresh_token: Option<SecretString>,
-    refreshability: Refreshability,
     expires_at: Option<OffsetDateTime>,
     token_type: String,
     extras: BTreeMap<String, String>,
@@ -68,7 +67,6 @@ impl CredentialEntry {
             scopes: vec![],
             upstream_identity: None,
             refresh_token: None,
-            refreshability: Refreshability::NotApplicable,
             expires_at: None,
             token_type: "Bearer".to_owned(),
             extras: BTreeMap::new(),
@@ -83,9 +81,6 @@ impl CredentialEntry {
         scopes: Vec<String>,
         stored_at: OffsetDateTime,
     ) -> Self {
-        let token_type = token_type.into();
-        let refreshability =
-            Refreshability::for_entry(AuthKind::OAuth, refresh_token.as_ref().is_some());
         Self {
             kind: AuthKind::OAuth,
             value: access_token,
@@ -94,13 +89,8 @@ impl CredentialEntry {
             scopes,
             upstream_identity: None,
             refresh_token,
-            refreshability,
             expires_at,
-            token_type: if token_type.is_empty() {
-                "Bearer".to_owned()
-            } else {
-                token_type
-            },
+            token_type: Self::normalize_token_type(token_type.into()),
             extras: BTreeMap::new(),
         }
     }
@@ -118,7 +108,7 @@ impl CredentialEntry {
     }
 
     pub fn refreshability(&self) -> Refreshability {
-        self.refreshability
+        Refreshability::for_entry(self.kind, self.refresh_token.is_some())
     }
 
     pub fn expires_at(&self) -> Option<OffsetDateTime> {
@@ -168,6 +158,14 @@ impl CredentialEntry {
     pub fn set_extras(&mut self, extras: BTreeMap<String, String>) {
         self.extras = extras;
     }
+
+    fn normalize_token_type(token_type: String) -> String {
+        if token_type.is_empty() {
+            "Bearer".to_owned()
+        } else {
+            token_type
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -177,8 +175,8 @@ struct CredentialEntryWire {
     access_token: SecretString,
     #[serde(default, with = "secret_string_serde::option")]
     refresh_token: Option<SecretString>,
-    #[serde(default)]
-    refreshability: Option<Refreshability>,
+    #[serde(default, rename = "refreshability")]
+    _refreshability: Option<Refreshability>,
     #[serde(default, with = "time::serde::rfc3339::option")]
     expires_at: Option<OffsetDateTime>,
     #[serde(default)]
@@ -195,37 +193,19 @@ struct CredentialEntryWire {
     extras: BTreeMap<String, String>,
 }
 
-impl From<&CredentialEntry> for CredentialEntryWire {
-    fn from(entry: &CredentialEntry) -> Self {
-        Self {
-            kind: entry.kind,
-            access_token: entry.value.clone(),
-            refresh_token: entry.refresh_token.clone(),
-            refreshability: Some(entry.refreshability),
-            expires_at: entry.expires_at,
-            token_type: entry.token_type.clone(),
-            stored_at: entry.stored_at,
-            last_validated: entry.last_validated,
-            scopes: entry.scopes.clone(),
-            upstream_identity: entry.upstream_identity.clone(),
-            extras: entry.extras.clone(),
-        }
-    }
-}
-
-impl Serialize for CredentialEntryWire {
+impl Serialize for CredentialEntry {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use secrecy::ExposeSecret;
         use serde::ser::SerializeStruct;
 
         let mut state = serializer.serialize_struct("CredentialEntry", 11)?;
         state.serialize_field("kind", &self.kind)?;
-        state.serialize_field("access_token", self.access_token.expose_secret())?;
+        state.serialize_field("access_token", self.value.expose_secret())?;
         state.serialize_field(
             "refresh_token",
             &self.refresh_token.as_ref().map(ExposeSecret::expose_secret),
         )?;
-        state.serialize_field("refreshability", &self.refreshability)?;
+        state.serialize_field("refreshability", &self.refreshability())?;
         let expires_at = self.expires_at.map(|value| {
             value
                 .format(&time::format_description::well_known::Rfc3339)
@@ -253,18 +233,9 @@ impl Serialize for CredentialEntryWire {
     }
 }
 
-impl Serialize for CredentialEntry {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        CredentialEntryWire::from(self).serialize(serializer)
-    }
-}
-
 impl<'de> Deserialize<'de> for CredentialEntry {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let wire = CredentialEntryWire::deserialize(deserializer)?;
-        let refreshability = wire
-            .refreshability
-            .unwrap_or_else(|| Refreshability::for_entry(wire.kind, wire.refresh_token.is_some()));
         let entry = Self {
             kind: wire.kind,
             value: wire.access_token,
@@ -273,13 +244,8 @@ impl<'de> Deserialize<'de> for CredentialEntry {
             scopes: wire.scopes,
             upstream_identity: wire.upstream_identity,
             refresh_token: wire.refresh_token,
-            refreshability,
             expires_at: wire.expires_at,
-            token_type: if wire.token_type.is_empty() {
-                "Bearer".to_owned()
-            } else {
-                wire.token_type
-            },
+            token_type: Self::normalize_token_type(wire.token_type),
             extras: wire.extras,
         };
         Ok(entry)
@@ -385,6 +351,23 @@ mod tests {
                     "extras": {}
                 }"#,
                 Refreshability::NotRefreshable,
+            ),
+            (
+                "refreshability follows the token material",
+                r#"{
+                    "kind": "oauth",
+                    "access_token": "access",
+                    "refresh_token": "refresh",
+                    "refreshability": "not-refreshable",
+                    "expires_at": null,
+                    "token_type": "bearer",
+                    "stored_at": "1970-01-01T00:00:00Z",
+                    "last_validated": null,
+                    "scopes": [],
+                    "upstream_identity": null,
+                    "extras": {}
+                }"#,
+                Refreshability::Refreshable,
             ),
         ] {
             let entry: CredentialEntry = serde_json::from_str(json).unwrap();
