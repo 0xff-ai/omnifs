@@ -148,25 +148,8 @@ fn decode_unix_socket(parsed: &Url) -> Result<PathBuf, Error> {
 
 fn is_private_or_link_local(ip: &IpAddr) -> bool {
     match ip {
-        IpAddr::V4(v4) => {
-            v4.is_loopback()
-                || v4.is_private()
-                || v4.is_link_local()
-                || (v4.octets()[0] == 169 && v4.octets()[1] == 254)
-        },
-        IpAddr::V6(v6) => {
-            v6.is_loopback()
-                || {
-                    // Link-local: fe80::/10
-                    let segments = v6.segments();
-                    (segments[0] & 0xffc0) == 0xfe80
-                }
-                || {
-                    // Unique local: fc00::/7
-                    let segments = v6.segments();
-                    (segments[0] & 0xfe00) == 0xfc00
-                }
-        },
+        IpAddr::V4(v4) => v4.is_loopback() || v4.is_private() || v4.is_link_local(),
+        IpAddr::V6(v6) => v6.is_loopback() || v6.is_unicast_link_local() || v6.is_unique_local(),
     }
 }
 
