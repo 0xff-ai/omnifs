@@ -222,20 +222,20 @@ impl ProviderError {
 
 impl fmt::Display for ProviderError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let message = if matches!(
+        if matches!(
             self.kind,
             ProviderErrorKind::Internal | ProviderErrorKind::Unimplemented
         ) {
-            self.message.clone()
+            f.write_str(&self.message)
         } else {
-            format!(
+            write!(
+                f,
                 "[{}; retryable={}] {}",
                 self.kind.kind_tag(),
                 self.retryable,
                 self.message
             )
-        };
-        f.write_str(&message)
+        }
     }
 }
 

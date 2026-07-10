@@ -726,10 +726,10 @@ impl From<FileContent> for wit_types::ReadFileResult {
 /// slash, then validate through `Path::parse` so malformed paths surface
 /// as invalid-input here instead of corrupting the view cache.
 fn wire_path(path: &str) -> Result<Path> {
-    let absolute = if path.starts_with('/') {
-        path.to_string()
+    let parsed = if path.starts_with('/') {
+        Path::parse(path)
     } else {
-        format!("/{path}")
+        Path::parse(&format!("/{path}"))
     };
-    Path::parse(&absolute).map_err(|error| ProviderError::invalid_input(error.to_string()))
+    parsed.map_err(|error| ProviderError::invalid_input(error.to_string()))
 }
