@@ -6,10 +6,6 @@ cd "$(dirname "$0")/../.."
 report=""
 
 index="docs/contracts/00-index.md"
-if [[ ! -f "$index" ]]; then
-  report+="  MISSING  $index"$'\n'
-fi
-
 expected=(
   docs/contracts/00-index.md
   docs/contracts/10-system.md
