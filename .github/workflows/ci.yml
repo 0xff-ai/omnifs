@@ -697,7 +697,7 @@ jobs:
 
       - uses: oras-project/setup-oras@v2
         with:
-          version: 1.3.3
+          version: 1.3.2
 
       # A PR from a fork gets a read-only GITHUB_TOKEN regardless of the
       # `packages: write` requested above (a hard GitHub security boundary),
