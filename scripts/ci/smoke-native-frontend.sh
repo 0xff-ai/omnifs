@@ -21,6 +21,10 @@ fi
 OMNIFS_HOME="$(mktemp -d)"
 export OMNIFS_HOME
 
+# ci-debug: is AppArmor confining docker on this runner?
+docker info --format 'docker security options: {{.SecurityOptions}}' || true
+sudo aa-status 2>/dev/null | head -3 || true
+
 cleanup() {
   local exit_code=$?
   if [[ "$exit_code" != 0 ]]; then

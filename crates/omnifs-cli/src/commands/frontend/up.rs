@@ -82,7 +82,12 @@ impl FrontendUpArgs {
         assert_container_locked_down(&runtime).await?;
 
         let mount_name = first_mount_name(&workspace)?;
-        wait_for_mount(&runtime, &mount_name).await?;
+        if let Err(error) = wait_for_mount(&runtime, &mount_name).await {
+            // ci-debug: capture the runner's state before anything removes
+            // the container.
+            dump_frontend_debug(target.container_name().as_str());
+            return Err(error);
+        }
 
         record_frontend_via_docker(&paths.runtime_record_file());
 
@@ -130,6 +135,29 @@ async fn assert_container_locked_down(runtime: &Runtime) -> anyhow::Result<()> {
         anyhow::bail!("refusing to run the frontend container: {violation}");
     }
     Ok(())
+}
+
+// ci-debug only: dump the frontend container's logs and mount table at the
+// moment the mount probe gives up.
+fn dump_frontend_debug(container: &str) {
+    let probes: [&[&str]; 4] = [
+        &["logs", container],
+        &["exec", container, "cat", "/proc/mounts"],
+        &["exec", container, "ls", "-la", "/omnifs"],
+        &["exec", container, "cat", "/proc/1/status"],
+    ];
+    for args in probes {
+        let out = std::process::Command::new("docker").args(args).output();
+        match out {
+            Ok(out) => anstream::eprintln!(
+                "--- docker {} ---\n{}{}",
+                args.join(" "),
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            ),
+            Err(error) => anstream::eprintln!("--- docker {} failed: {error}", args.join(" ")),
+        }
+    }
 }
 
 fn first_mount_name(workspace: &Workspace) -> anyhow::Result<String> {
