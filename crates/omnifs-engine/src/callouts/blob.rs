@@ -164,7 +164,7 @@ impl BlobExecutor {
                     .await
                 {
                     Ok(response) => match self.materialize(&req.cache_key, response).await {
-                        Ok(record) => wit_types::CalloutResult::BlobFetched((&record).into()),
+                        Ok(record) => wit_types::CalloutResult::BlobFetched(record.as_ref().into()),
                         Err(e) => e.into(),
                     },
                     Err(early) => early,
@@ -185,7 +185,7 @@ impl BlobExecutor {
         &self,
         cache_key: &str,
         response: reqwest::Response,
-    ) -> Result<BlobRecord, BlobError> {
+    ) -> Result<Arc<BlobRecord>, BlobError> {
         let status = response.status().as_u16();
         let response_headers = decode_response_headers(response.headers());
         let etag = lookup_header(&response_headers, "etag");
@@ -220,9 +220,7 @@ impl BlobExecutor {
             let _ = std::fs::remove_file(self.cache.metadata_path(cache_key));
             return Err(io_context_into("publish blob", error));
         }
-        let record = self.cache.store(cache_key.to_string(), metadata);
-
-        Ok((*record).clone())
+        Ok(self.cache.store(cache_key.to_string(), metadata))
     }
 
     /// Read a range from a cached blob back into provider memory.
@@ -323,39 +321,36 @@ async fn stream_response_body(
     }
     let cache_dir = cache_root.join(BLOB_TMP_DIR);
     tokio::fs::create_dir_all(&cache_dir).await?;
-    async {
-        let mut tmp = tempfile::Builder::new()
-            .prefix("fetch-")
-            .suffix(".tmp")
-            .tempfile_in(cache_dir)
-            .map_err(BlobError::Io)?;
-        let mut stream = response.bytes_stream();
-        let mut total = 0_u64;
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|e| BlobError::Network(e.to_string()))?;
-            let chunk_len = u64::try_from(chunk.len()).map_err(|_| BlobError::TooLarge {
+    let mut tmp = tempfile::Builder::new()
+        .prefix("fetch-")
+        .suffix(".tmp")
+        .tempfile_in(cache_dir)
+        .map_err(BlobError::Io)?;
+    let mut stream = response.bytes_stream();
+    let mut total = 0_u64;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| BlobError::Network(e.to_string()))?;
+        let chunk_len = u64::try_from(chunk.len()).map_err(|_| BlobError::TooLarge {
+            operation: "fetch blob",
+            max: max_bytes,
+            actual: u64::MAX,
+        })?;
+        total = total.checked_add(chunk_len).ok_or(BlobError::TooLarge {
+            operation: "fetch blob",
+            max: max_bytes,
+            actual: u64::MAX,
+        })?;
+        if total > max_bytes {
+            return Err(BlobError::TooLarge {
                 operation: "fetch blob",
                 max: max_bytes,
-                actual: u64::MAX,
-            })?;
-            total = total.checked_add(chunk_len).ok_or(BlobError::TooLarge {
-                operation: "fetch blob",
-                max: max_bytes,
-                actual: u64::MAX,
-            })?;
-            if total > max_bytes {
-                return Err(BlobError::TooLarge {
-                    operation: "fetch blob",
-                    max: max_bytes,
-                    actual: total,
-                });
-            }
-            tmp.as_file_mut().write_all(&chunk).map_err(BlobError::Io)?;
+                actual: total,
+            });
         }
-        tmp.flush().map_err(BlobError::Io)?;
-        Ok(StagedBlob { tmp, size: total })
+        tmp.as_file_mut().write_all(&chunk).map_err(BlobError::Io)?;
     }
-    .await
+    tmp.flush().map_err(BlobError::Io)?;
+    Ok(StagedBlob { tmp, size: total })
 }
 
 fn read_range(
