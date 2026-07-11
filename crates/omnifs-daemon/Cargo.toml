@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "omnifs runtime daemon: provider registry and FUSE mount loop"
+description = "omnifs runtime daemon: provider registry and namespace server"
 categories = ["filesystem"]
 keywords = ["omnifs", "fuse", "filesystem", "wasm", "daemon"]
 
@@ -19,7 +19,6 @@ omnifs-auth = { workspace = true }
 omnifs-workspace = { workspace = true }
 omnifs-engine = { workspace = true, features = ["runtime"] }
 omnifs-vfs-wire = { workspace = true }
-omnifs-nfs = { workspace = true }
 anyhow = { workspace = true }
 axum = "0.8"
 clap = { workspace = true }
@@ -34,11 +33,7 @@ utoipa-axum = { workspace = true }
 serde_json = { workspace = true }
 time = { workspace = true, features = ["formatting"] }
 
-# FUSE links fuser, which is Linux-only; the host-native NFS frontend builds on macOS without it.
 [target.'cfg(target_os = "linux")'.dependencies]
-# Workspace dependency defaults keep runner-only features out of the daemon.
-omnifs-fuse = { workspace = true }
-omnifs-mtab = { workspace = true }
 nix = { version = "0.30", features = ["net"] }
 
 [dev-dependencies]

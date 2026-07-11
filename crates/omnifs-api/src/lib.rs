@@ -68,7 +68,8 @@ pub enum ErrorCode {
     Internal,
 }
 
-/// `GET /v1/ready`: 200 with `ready: true` once the filesystem is serving.
+/// `GET /v1/ready`: 200 with `ready: true` once startup reconcile completes
+/// and every requested namespace listener is serving.
 /// Non-ready responses use [`ApiError`].
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ReadyInfo {
@@ -96,9 +97,8 @@ pub struct DaemonStatus {
     #[serde(default)]
     #[schema(value_type = String)]
     pub executable: PathBuf,
-    /// Derived, not authoritative: the first native frontend's mount point,
-    /// or empty for a namespace-only daemon (no in-process mount). `frontends`
-    /// is the authoritative list of every serving and attached frontend.
+    /// Derived, not authoritative: the first local attached frontend's mount
+    /// point, or empty when none is connected. `frontends` is authoritative.
     #[schema(value_type = String)]
     pub mount_point: PathBuf,
     #[schema(value_type = String)]
@@ -107,9 +107,7 @@ pub struct DaemonStatus {
     pub cache_dir: PathBuf,
     #[schema(value_type = String)]
     pub providers_dir: PathBuf,
-    /// Every filesystem frontend currently serving. A daemon serves one renderer
-    /// per requested frontend over a single shared namespace (FUSE and NFS can
-    /// run concurrently on Linux); the default is the single platform frontend.
+    /// Every filesystem frontend currently attached to the shared namespace.
     #[serde(default)]
     pub frontends: Vec<FrontendInfo>,
     /// Backend serving this daemon, so the CLI tears down and reports the right
@@ -256,29 +254,25 @@ impl std::fmt::Display for FsType {
 pub struct FrontendInfo {
     pub source: String,
     pub fs_type: FsType,
-    /// The host-visible mount point for a native frontend, or the
-    /// guest-reported mount point (display-only) for an attached one.
+    /// The frontend-reported mount point. It is host-visible for the local
+    /// driver and display-only for Docker and krunkit guests.
     #[serde(default)]
     #[schema(value_type = String)]
     pub mount_point: PathBuf,
     /// How this frontend reaches the shared namespace. The host assigns this
     /// from which listener the connection arrived on, never from anything a
     /// connecting guest claims about itself.
-    #[serde(default)]
+    #[serde(default = "FrontendDelivery::default_local")]
     pub delivery: FrontendDelivery,
 }
 
 /// How a frontend is delivered to the shared namespace. Assigned by the host
-/// at bind time (per listener for a virtualized frontend), never
+/// at bind time per listener, never
 /// self-reported by the connecting guest.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum FrontendDelivery {
-    /// Served in-process by the daemon (no attach transport, no seam).
-    #[default]
-    Native,
-    /// Attached over a Unix domain socket under `frontends/<name>.sock`
-    /// (`--attach-socket <name>`).
+    /// Attached over the fixed `frontends/local.sock` Unix domain socket.
     Local,
     /// Attached over the TCP namespace listener (`POST
     /// /v1/frontend/attach-target`), the Docker Desktop delivery path. The
@@ -291,6 +285,10 @@ pub enum FrontendDelivery {
 }
 
 impl FrontendDelivery {
+    const fn default_local() -> Self {
+        Self::Local
+    }
+
     fn default_attach() -> Self {
         Self::Docker
     }
@@ -299,7 +297,6 @@ impl FrontendDelivery {
 impl std::fmt::Display for FrontendDelivery {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            Self::Native => "native",
             Self::Local => "local",
             Self::Docker => "docker",
             Self::Krunkit => "krunkit",
@@ -561,10 +558,10 @@ pub struct ReconcileRequest {
     pub mounts: Vec<String>,
 }
 
-/// `POST /v1/shutdown`: what the daemon tore down before exiting.
+/// `POST /v1/shutdown`: daemon state immediately before exit.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct StopReport {
-    /// Every serving and attached frontend at the moment of shutdown.
+    /// Every attached frontend at the moment of shutdown.
     pub frontends: Vec<FrontendInfo>,
     #[schema(value_type = String)]
     pub mount_point: PathBuf,
@@ -636,18 +633,22 @@ mod tests {
     };
 
     #[test]
-    fn frontend_defaults_preserve_version_diagnostics() {
-        let old: FrontendInfo = serde_json::from_value(serde_json::json!({
-            "source": "omnifs",
-            "fs_type": "nfs"
-        }))
-        .unwrap();
-        assert!(old.mount_point.as_os_str().is_empty());
-        assert_eq!(old.delivery, FrontendDelivery::Native);
-
+    fn frontend_attach_request_defaults_to_docker() {
         let request: FrontendAttachTargetRequest =
             serde_json::from_value(serde_json::json!({})).unwrap();
         assert_eq!(request.driver, FrontendDelivery::Docker);
+    }
+
+    #[test]
+    fn legacy_frontend_info_defaults_to_local_delivery() {
+        let frontend: FrontendInfo = serde_json::from_value(serde_json::json!({
+            "source": "native",
+            "fs_type": "nfs"
+        }))
+        .unwrap();
+
+        assert!(frontend.mount_point.as_os_str().is_empty());
+        assert_eq!(frontend.delivery, FrontendDelivery::Local);
     }
 
     #[test]

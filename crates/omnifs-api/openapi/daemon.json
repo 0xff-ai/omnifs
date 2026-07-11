@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "omnifs daemon control API",
-    "description": "omnifs runtime daemon: provider registry and FUSE mount loop",
+    "description": "omnifs runtime daemon: provider registry and namespace server",
     "license": {
       "name": "MIT OR Apache-2.0",
       "identifier": "MIT OR Apache-2.0"
@@ -474,7 +474,7 @@
         "operationId": "ready",
         "responses": {
           "200": {
-            "description": "filesystem frontend is serving",
+            "description": "namespace listeners are serving",
             "content": {
               "application/json": {
                 "schema": {
@@ -484,7 +484,7 @@
             }
           },
           "503": {
-            "description": "filesystem frontend is not serving yet",
+            "description": "namespace listeners are not serving yet",
             "content": {
               "application/json": {
                 "schema": {
@@ -542,11 +542,11 @@
     },
     "/v1/shutdown": {
       "post": {
-        "summary": "`POST /v1/shutdown`: unmount the frontend and exit. The daemon holds the\nfrontend handle, so it tears itself down; `omnifs down` no longer infers the\nteardown from configuration.",
+        "summary": "`POST /v1/shutdown`: release the daemon's serving latch and exit. Frontend\nprocesses have independent lifetimes and are torn down by the CLI.",
         "operationId": "shutdown",
         "responses": {
           "200": {
-            "description": "what the daemon tore down before exiting",
+            "description": "daemon state at shutdown",
             "content": {
               "application/json": {
                 "schema": {
@@ -827,7 +827,7 @@
             "items": {
               "$ref": "#/components/schemas/FrontendInfo"
             },
-            "description": "Every filesystem frontend currently serving. A daemon serves one renderer\nper requested frontend over a single shared namespace (FUSE and NFS can\nrun concurrently on Linux); the default is the single platform frontend."
+            "description": "Every filesystem frontend currently attached to the shared namespace."
           },
           "health": {
             "$ref": "#/components/schemas/DaemonHealth",
@@ -839,7 +839,7 @@
           },
           "mount_point": {
             "type": "string",
-            "description": "Derived, not authoritative: the first native frontend's mount point,\nor empty for a namespace-only daemon (no in-process mount). `frontends`\nis the authoritative list of every serving and attached frontend."
+            "description": "Derived, not authoritative: the first local attached frontend's mount\npoint, or empty when none is connected. `frontends` is authoritative."
           },
           "mounts": {
             "type": "array",
@@ -1038,9 +1038,8 @@
       },
       "FrontendDelivery": {
         "type": "string",
-        "description": "How a frontend is delivered to the shared namespace. Assigned by the host\nat bind time (per listener for a virtualized frontend), never\nself-reported by the connecting guest.",
+        "description": "How a frontend is delivered to the shared namespace. Assigned by the host\nat bind time per listener, never\nself-reported by the connecting guest.",
         "enum": [
-          "native",
           "local",
           "docker",
           "krunkit"
@@ -1062,7 +1061,7 @@
           },
           "mount_point": {
             "type": "string",
-            "description": "The host-visible mount point for a native frontend, or the\nguest-reported mount point (display-only) for an attached one."
+            "description": "The frontend-reported mount point. It is host-visible for the local\ndriver and display-only for Docker and krunkit guests."
           },
           "source": {
             "type": "string"
@@ -1278,7 +1277,7 @@
       },
       "ReadyInfo": {
         "type": "object",
-        "description": "`GET /v1/ready`: 200 with `ready: true` once the filesystem is serving.\nNon-ready responses use [`ApiError`].",
+        "description": "`GET /v1/ready`: 200 with `ready: true` once startup reconcile completes\nand every requested namespace listener is serving.\nNon-ready responses use [`ApiError`].",
         "required": [
           "ready"
         ],
@@ -1338,7 +1337,7 @@
       },
       "StopReport": {
         "type": "object",
-        "description": "`POST /v1/shutdown`: what the daemon tore down before exiting.",
+        "description": "`POST /v1/shutdown`: daemon state immediately before exit.",
         "required": [
           "frontends",
           "mount_point",
@@ -1350,7 +1349,7 @@
             "items": {
               "$ref": "#/components/schemas/FrontendInfo"
             },
-            "description": "Every serving and attached frontend at the moment of shutdown."
+            "description": "Every attached frontend at the moment of shutdown."
           },
           "mount_point": {
             "type": "string"

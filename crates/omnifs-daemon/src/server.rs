@@ -31,11 +31,13 @@ use omnifs_workspace::authn::CredentialId;
 use omnifs_workspace::mounts::materialize::materialize;
 use omnifs_workspace::mounts::{Name as MountName, Registry, Spec, UpgradePlan};
 use omnifs_workspace::provider::{Catalog, CatalogError, Provider};
-use omnifs_workspace::runtime_record::{AttachRecord, RuntimeRecord};
+use omnifs_workspace::runtime_record::{
+    AttachRecord, FrontendKind as RecordFrontendKind, FrontendRecord, RuntimeRecord, Via,
+};
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
 use std::net::{Ipv4Addr, SocketAddr};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use time::format_description::well_known::Rfc3339;
 use tokio_stream::StreamExt as _;
@@ -230,21 +232,99 @@ pub(crate) enum AttachOutcome<T> {
     NamespaceNotReady,
 }
 
+pub(crate) struct RuntimeRecordStore {
+    path: PathBuf,
+    record: Mutex<Option<RuntimeRecord>>,
+}
+
+impl RuntimeRecordStore {
+    pub(crate) fn new(path: PathBuf, record: RuntimeRecord) -> Arc<Self> {
+        Arc::new(Self {
+            path,
+            record: Mutex::new(Some(record)),
+        })
+    }
+
+    pub(crate) fn write(&self) {
+        let guard = self
+            .record
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(record) = guard.as_ref()
+            && let Err(error) = record.write(&self.path)
+        {
+            warn!(%error, path = %self.path.display(), "failed to write runtime record");
+        }
+    }
+
+    fn set_attach(&self, target: AttachRecord) {
+        let mut guard = self
+            .record
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(record) = guard.as_mut() {
+            record.set_attach(target);
+            if let Err(error) = record.write(&self.path) {
+                warn!(%error, path = %self.path.display(), "failed to persist attach listener");
+            }
+        }
+    }
+
+    fn set_frontends(&self, frontends: Vec<FrontendInfo>) {
+        let frontends = frontends
+            .into_iter()
+            .map(|frontend| FrontendRecord {
+                kind: match frontend.fs_type {
+                    FsType::Fuse => RecordFrontendKind::Fuse,
+                    FsType::Nfs => RecordFrontendKind::Nfs,
+                },
+                mount_point: frontend.mount_point,
+                via: match frontend.delivery {
+                    FrontendDelivery::Local => Via::Local,
+                    FrontendDelivery::Docker => Via::Docker,
+                    FrontendDelivery::Krunkit => Via::Krunkit,
+                },
+            })
+            .collect();
+        let mut guard = self
+            .record
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(record) = guard.as_mut() {
+            record.set_frontends(frontends);
+            if let Err(error) = record.write(&self.path) {
+                warn!(%error, path = %self.path.display(), "failed to persist attached frontends");
+            }
+        }
+    }
+
+    pub(crate) fn remove(&self) {
+        let mut guard = self
+            .record
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.take();
+        if let Err(error) = RuntimeRecord::remove(&self.path) {
+            warn!(%error, path = %self.path.display(), "failed to remove runtime record");
+        }
+    }
+}
+
 pub struct Daemon {
     context: DaemonContext,
     registry: Arc<MountRuntimes>,
     sink: Option<Arc<InspectorSink>>,
     frontends: Frontends,
+    runtime_record: Arc<RuntimeRecordStore>,
     control_token: ControlToken,
     /// The last reconcile's failed mounts, surfaced in `status` so a dark mount
     /// is visible with its reason instead of silently absent.
     last_failed: std::sync::Mutex<Vec<MountFailure>>,
-    /// Set once the namespace attach-socket listeners are serving. Read into
-    /// frontend health so a namespace-only daemon reports ready only after its
-    /// sockets are up (and mounts reconciled, which precedes the spawn).
+    /// Set once all startup namespace listeners are serving. Mount reconcile
+    /// precedes listener spawn, so this is the final startup readiness gate.
     attach_serving: std::sync::atomic::AtomicBool,
-    /// The shared namespace every in-process frontend and attach listener
-    /// serves. Set once via [`Self::set_namespace`], right after startup
+    /// The shared namespace every attach listener serves. Set once via
+    /// [`Self::set_namespace`], right after startup
     /// reconcile builds it (see `run` in `app.rs`); read by
     /// [`Self::ensure_attach_tcp`] so a `POST /v1/frontend/attach-target` call can
     /// bind a TCP attach listener on a running daemon without a restart.
@@ -265,14 +345,19 @@ impl Daemon {
         context: DaemonContext,
         registry: Arc<MountRuntimes>,
         sink: Option<Arc<InspectorSink>>,
-        frontends: Frontends,
+        runtime_record: Arc<RuntimeRecordStore>,
         control_token: ControlToken,
     ) -> Self {
+        let record = Arc::clone(&runtime_record);
+        let frontends = Frontends::new(Arc::new(move |frontends| {
+            record.set_frontends(frontends);
+        }));
         Self {
             context,
             registry,
             sink,
             frontends,
+            runtime_record,
             control_token,
             last_failed: std::sync::Mutex::new(Vec::new()),
             attach_serving: std::sync::atomic::AtomicBool::new(false),
@@ -280,10 +365,6 @@ impl Daemon {
             attach_tcp: Mutex::new(None),
             attach_uds: Mutex::new(None),
         }
-    }
-
-    pub fn mount_point(&self) -> &Path {
-        self.context.mount_point()
     }
 
     /// Record the shared namespace once it is built (after startup reconcile).
@@ -349,7 +430,10 @@ impl Daemon {
         let state = AttachTcpState { addr, token };
         *guard = Some(state.clone());
         drop(guard);
-        self.persist_attach_record(&state);
+        self.runtime_record.set_attach(AttachRecord::Tcp {
+            addr: state.addr.to_string(),
+            token: state.token.clone(),
+        });
         Ok(AttachOutcome::Bound(state))
     }
 
@@ -363,10 +447,8 @@ impl Daemon {
     /// `token` (not filesystem permissions) is the real auth here, checked the
     /// same way [`Self::ensure_attach_tcp`]'s token is.
     ///
-    /// Unlike the TCP listener, this binding is not persisted into the runtime
-    /// record: the socket path is self-healing (a stale leftover from a crashed
-    /// daemon is detected and unlinked on the next bind, same as
-    /// [`crate::context::DaemonContext::bind_attach_sockets`]).
+    /// The target is persisted in the daemon-owned runtime record, and its
+    /// socket path uses the same stale-socket policy as the local listener.
     pub fn ensure_attach_uds(
         self: &Arc<Self>,
         rt: &tokio::runtime::Handle,
@@ -406,36 +488,16 @@ impl Daemon {
         let state = AttachUdsState { socket_path, token };
         *guard = Some(state.clone());
         drop(guard);
-        Ok(AttachOutcome::Bound(state))
-    }
-
-    /// Read-modify-write the on-disk runtime record to add `attach`, preserving
-    /// every other field (notably `started_at`, which must not shift just
-    /// because the TCP listener bound after the initial write).
-    fn persist_attach_record(&self, state: &AttachTcpState) {
-        let path = self.context.runtime_record_file();
-        let patched = RuntimeRecord::update(&path, |record| {
-            record.attach = Some(AttachRecord {
-                addr: state.addr.to_string(),
-                token: state.token.clone(),
-            });
+        self.runtime_record.set_attach(AttachRecord::Vsock {
+            socket_path: state.socket_path.clone(),
+            token: state.token.clone(),
         });
-        match patched {
-            Ok(true) => {},
-            Ok(false) => warn!(
-                path = %path.display(),
-                "runtime record missing; cannot persist the attach listener"
-            ),
-            Err(error) => {
-                warn!(%error, path = %path.display(), "failed to persist the attach listener into the runtime record");
-            },
-        }
+        Ok(AttachOutcome::Bound(state))
     }
 
     /// Build the [`omnifs_vfs_wire::AttachObserver`] for one wire listener,
     /// labeled with the delivery mechanism the caller assigned it at bind
-    /// time. Exposed so `app.rs` can wire it into the named
-    /// `--attach-socket <name>` listeners it spawns directly.
+    /// time. Exposed so `app.rs` can wire it into the fixed local listener.
     pub(crate) fn attach_observer(
         &self,
         delivery: FrontendDelivery,
@@ -443,9 +505,8 @@ impl Daemon {
         self.frontends.attach_observer(delivery)
     }
 
-    /// Mark the namespace attach-socket listeners as serving. Called once, after
-    /// mounts reconcile and the listeners are spawned, so `/v1/ready` flips true
-    /// for a namespace-only daemon.
+    /// Mark all startup namespace listeners as serving. Called once after mount
+    /// reconcile and every requested listener bind succeeds.
     pub fn mark_attach_serving(&self) {
         self.attach_serving
             .store(true, std::sync::atomic::Ordering::Release);
@@ -490,12 +551,8 @@ impl Daemon {
         Ok(())
     }
 
-    pub fn serve(
-        &self,
-        namespace: &Arc<omnifs_engine::TreeNamespace>,
-        rt: &tokio::runtime::Handle,
-    ) -> anyhow::Result<()> {
-        self.frontends.serve(namespace, rt)
+    pub fn serve(&self) {
+        self.frontends.serve();
     }
 
     fn control_status(&self) -> DaemonStatus {
@@ -526,7 +583,6 @@ impl Daemon {
             .map(|failed| failed.clone())
             .unwrap_or_default();
         self.context.status(
-            self.frontends.serving(),
             self.attach_serving
                 .load(std::sync::atomic::Ordering::Acquire),
             self.frontends.attached(),
@@ -537,10 +593,8 @@ impl Daemon {
     }
 
     /// Converge the running mount set to `mounts/*.json`, synchronously. Runs
-    /// `registry.reconcile`, then reflects the result into the frontend: added
-    /// and updated mounts (re)create the root symlink, removed and updated
-    /// mounts invalidate the root child so a torn-down mount does not linger as
-    /// a phantom directory. Callable directly from the blocking startup path.
+    /// `registry.reconcile`, then records failures for status. Callable directly
+    /// from the blocking startup path.
     pub fn reconcile_blocking(&self, handle: &tokio::runtime::Handle) -> ReconcileReport {
         let outcome = self.registry.reconcile(handle);
         self.apply_reconcile_outcome(outcome)
@@ -619,12 +673,6 @@ impl Daemon {
     }
 
     fn apply_reconcile_outcome(&self, outcome: ReconcileOutcome) -> ReconcileReport {
-        for name in &outcome.updated {
-            self.frontends.invalidate_root_child(name);
-        }
-        for name in &outcome.removed {
-            self.frontends.invalidate_root_child(name);
-        }
         let failed: Vec<MountFailure> = outcome.failed.into_iter().map(api_mount_failure).collect();
         if let Ok(mut last) = self.last_failed.lock() {
             last.clone_from(&failed);
@@ -637,19 +685,13 @@ impl Daemon {
         }
     }
 
-    /// Unmount the frontend from a detached task so the HTTP response flushes
-    /// first. The unmount unblocks the `serve` loop on the main thread, which
-    /// then drops providers and exits. The brief delay keeps the response ahead
-    /// of the process teardown on the localhost connection.
+    /// Release the process-lifetime serving latch after giving the HTTP response
+    /// a brief chance to flush.
     pub fn trigger_shutdown(self: &Arc<Self>) {
         let daemon = Arc::clone(self);
-        // `unmount` shells out (a blocking syscall), so run it on a blocking
-        // thread rather than an async worker. The brief delay lets the HTTP
-        // response flush on the localhost connection before the mount drops and
-        // `serve` unblocks the process toward exit.
-        tokio::task::spawn_blocking(move || {
-            std::thread::sleep(std::time::Duration::from_millis(50));
-            daemon.frontends.unmount();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            daemon.frontends.shutdown();
         });
     }
 
@@ -747,8 +789,8 @@ pub fn openapi_json() -> String {
     path = "/v1/ready",
     operation_id = "ready",
     responses(
-        (status = 200, description = "filesystem frontend is serving", body = ReadyInfo),
-        (status = 503, description = "filesystem frontend is not serving yet", body = ApiError),
+        (status = 200, description = "namespace listeners are serving", body = ReadyInfo),
+        (status = 503, description = "namespace listeners are not serving yet", body = ApiError),
     ),
 )]
 async fn ready(State(daemon): State<Arc<Daemon>>) -> Response {
@@ -759,7 +801,7 @@ async fn ready(State(daemon): State<Arc<Daemon>>) -> Response {
         error_response(
             StatusCode::SERVICE_UNAVAILABLE,
             ErrorCode::Internal,
-            "filesystem frontend is not serving yet",
+            "namespace listeners are not serving yet",
         )
     }
 }
@@ -1205,14 +1247,13 @@ async fn reconcile(
     }
 }
 
-/// `POST /v1/shutdown`: unmount the frontend and exit. The daemon holds the
-/// frontend handle, so it tears itself down; `omnifs down` no longer infers the
-/// teardown from configuration.
+/// `POST /v1/shutdown`: release the daemon's serving latch and exit. Frontend
+/// processes have independent lifetimes and are torn down by the CLI.
 #[utoipa::path(
     post,
     path = "/v1/shutdown",
     operation_id = "shutdown",
-    responses((status = 200, description = "what the daemon tore down before exiting", body = StopReport)),
+    responses((status = 200, description = "daemon state at shutdown", body = StopReport)),
 )]
 async fn shutdown(State(daemon): State<Arc<Daemon>>) -> Json<StopReport> {
     let status = daemon.control_status();
@@ -1558,6 +1599,47 @@ mod tests {
     }
 
     #[test]
+    fn runtime_record_store_fences_late_updates_after_removal() {
+        use omnifs_workspace::runtime_record::{
+            AttachRecord, Endpoint, RecordedBackend, RuntimeRecord,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("daemon.json");
+        let store = super::RuntimeRecordStore::new(
+            path.clone(),
+            RuntimeRecord::new(
+                Endpoint::Unix {
+                    path: dir.path().join("control.sock"),
+                },
+                RecordedBackend::Native { pid: 1 },
+                "instance".to_string(),
+                Vec::new(),
+            ),
+        );
+
+        store.write();
+        store.set_attach(AttachRecord::Tcp {
+            addr: "127.0.0.1:1".to_string(),
+            token: "a".repeat(32),
+        });
+        store.set_attach(AttachRecord::Vsock {
+            socket_path: dir.path().join("vsock.sock"),
+            token: "b".repeat(32),
+        });
+        assert_eq!(RuntimeRecord::read(&path).unwrap().unwrap().attach.len(), 2);
+
+        store.remove();
+        store.set_frontends(vec![omnifs_api::FrontendInfo {
+            source: "wire".to_string(),
+            fs_type: omnifs_api::FsType::Nfs,
+            mount_point: PathBuf::from("/omnifs"),
+            delivery: omnifs_api::FrontendDelivery::Local,
+        }]);
+        assert!(!path.exists());
+    }
+
+    #[test]
     fn create_mount_rejects_secret_field_in_auth_block() {
         let spec = serde_json::json!({
             "provider": {
@@ -1806,18 +1888,10 @@ mod tests {
         }
 
         let args = crate::app::DaemonArgs {
-            nfs_port: 0,
-            nfs_state_dir: None,
-            nfs_trace: None,
             listen: None,
-            frontends: Vec::new(),
-            // A non-empty attach-socket list makes this a namespace-only
-            // daemon (no in-process native frontend to mount), the cheapest
-            // shape for a status test: no real FUSE/NFS mount syscall.
-            attach_sockets: vec!["test".to_string()],
             attach_tcp: None,
         };
-        let context = crate::context::DaemonContext::resolve(args).unwrap();
+        let context = crate::context::DaemonContext::resolve(&args).unwrap();
         context.prepare_startup_dirs().unwrap();
 
         let cloner = Arc::new(omnifs_engine::GitCloner::new(
@@ -1825,13 +1899,14 @@ mod tests {
         ));
         let registry =
             Arc::new(omnifs_engine::MountRuntimes::new(context.host_context(), cloner).unwrap());
-        let frontends = crate::frontends::Frontends::from_context(&context);
+        let runtime_record =
+            super::RuntimeRecordStore::new(context.runtime_record_file(), context.runtime_record());
         let control_token = super::ControlToken::from_test_value("test-token");
         let daemon = Arc::new(super::Daemon::new(
             context,
             Arc::clone(&registry),
             None,
-            frontends,
+            runtime_record,
             control_token,
         ));
 

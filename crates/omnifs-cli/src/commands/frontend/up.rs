@@ -15,7 +15,6 @@ use std::time::Duration;
 
 use anyhow::{Context as _, ensure};
 use clap::Args;
-use omnifs_workspace::runtime_record::{FrontendKind, FrontendRecord, RuntimeRecord, Via};
 
 use crate::frontend_backend::{DockerBackend, Driver, FrontendBackend, FrontendLaunchSpec};
 use crate::frontend_container::{frontend_container_name, resolve_frontend_image};
@@ -111,7 +110,6 @@ async fn run_docker(
     backend.launch(&spec).await?;
 
     wait_for_mount(&backend, mount_name, DOCKER_MOUNT_PROBE_TIMEOUT).await?;
-    record_frontend(&paths.runtime_record_file(), Driver::Docker.as_via());
 
     anstream::eprintln!(
         "✓ {GUEST_MOUNT} is mounted inside `{}`",
@@ -148,7 +146,6 @@ async fn run_krunkit(
     backend.launch(&spec).await?;
 
     wait_for_mount(&backend, mount_name, KRUNKIT_MOUNT_PROBE_TIMEOUT).await?;
-    record_frontend(&paths.runtime_record_file(), Driver::Krunkit.as_via());
 
     anstream::eprintln!("✓ {GUEST_MOUNT} is mounted inside the krunkit guest");
     anstream::eprintln!();
@@ -212,34 +209,5 @@ async fn wait_for_mount(
             );
         }
         tokio::time::sleep(MOUNT_PROBE_INTERVAL).await;
-    }
-}
-
-/// Append (or replace) the virtualized frontend's entry in the host-native
-/// daemon's on-disk runtime record with a read-modify-write, mirroring how
-/// the daemon itself patches in its TCP attach binding
-/// (`Daemon::persist_attach_record`). Best-effort: a failure here does not
-/// unwind the already-running frontend, since the daemon owns the record's
-/// lifecycle and will rewrite it wholesale on its next restart anyway.
-///
-/// Drops any prior virtualized frontend entry regardless of which backend it
-/// was delivered by: at most one virtualized frontend is recorded at a time.
-fn record_frontend(record_path: &std::path::Path, via: Via) {
-    let patched = RuntimeRecord::update(record_path, |record| {
-        record.frontends.retain(|frontend| frontend.via.is_none());
-        record.frontends.push(FrontendRecord {
-            kind: FrontendKind::Fuse,
-            mount_point: std::path::PathBuf::from(GUEST_MOUNT),
-            via: Some(via),
-        });
-    });
-    match patched {
-        Ok(true) => {},
-        Ok(false) => {
-            anstream::eprintln!("warning: runtime record missing; cannot record the frontend");
-        },
-        Err(error) => {
-            anstream::eprintln!("warning: could not persist the frontend: {error:#}");
-        },
     }
 }

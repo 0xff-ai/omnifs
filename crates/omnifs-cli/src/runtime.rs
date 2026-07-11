@@ -6,18 +6,21 @@ use std::collections::HashMap;
 use std::io::Write as _;
 #[cfg(target_os = "linux")]
 use std::net::Ipv4Addr;
+use std::path::Path;
 
 use anyhow::{Context, Result, anyhow};
 use bollard::Docker;
 use bollard::models::ContainerCreateBody;
 use bollard::query_parameters::{
-    CreateContainerOptions, CreateImageOptions, InspectContainerOptions, RemoveContainerOptions,
-    StartContainerOptions, StopContainerOptions,
+    CreateContainerOptions, CreateImageOptions, InspectContainerOptions,
+    ListContainersOptionsBuilder, RemoveContainerOptions, StartContainerOptions,
+    StopContainerOptions,
 };
 use futures_util::TryStreamExt;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
 use crate::error::WithHint;
+use crate::frontend_container::FRONTEND_HOME_LABEL;
 use crate::launch_backend::{
     BUILD_CHANNEL, BuildChannel, ContainerName, DockerTarget, ImageRef, names_registry,
 };
@@ -204,6 +207,39 @@ impl Runtime {
 
     pub(crate) async fn remove(&self) -> Result<()> {
         self.remove_existing(self.container_name()).await
+    }
+
+    /// Discover this workspace's frontend container by its ownership label.
+    pub(crate) async fn frontend_container_for_home(
+        &self,
+        config_dir: &Path,
+    ) -> Result<Option<ContainerName>> {
+        let mut filters = HashMap::new();
+        filters.insert(
+            "label".to_string(),
+            vec![format!("{FRONTEND_HOME_LABEL}={}", config_dir.display())],
+        );
+        let containers = self
+            .docker
+            .list_containers(Some(
+                ListContainersOptionsBuilder::default()
+                    .all(true)
+                    .filters(&filters)
+                    .build(),
+            ))
+            .await
+            .context("list frontend containers by workspace label")?;
+        anyhow::ensure!(
+            containers.len() <= 1,
+            "multiple frontend containers claim workspace {}",
+            config_dir.display()
+        );
+        containers
+            .into_iter()
+            .next()
+            .and_then(|container| container.names?.into_iter().next())
+            .map(|name| ContainerName::new(name.trim_start_matches('/').to_string()))
+            .transpose()
     }
 
     /// `Some(running)` when a container named `name` exists, `None` when it

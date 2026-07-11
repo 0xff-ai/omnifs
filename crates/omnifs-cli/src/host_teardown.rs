@@ -1,35 +1,21 @@
-//! Host-native teardown for `omnifs down`.
-//!
-//! Unmounts the host-native frontend. Linux native uses FUSE directly at the
-//! default host mount point. Non-Linux native uses the loopback NFS state files
-//! written by the daemon, signals the recording daemon so it exits cleanly, and
-//! sweeps any orphaned state files.
+//! Filesystem teardown driven by runner-owned mount state.
 
-#[cfg(not(target_os = "linux"))]
-use std::collections::HashSet;
-use std::fmt::Write as _;
 use std::path::Path;
 #[cfg(not(target_os = "linux"))]
 use std::path::PathBuf;
-use std::process::Command;
-#[cfg(not(target_os = "linux"))]
-use std::process::Stdio;
 use std::time::Duration;
 
 #[cfg(not(target_os = "linux"))]
-use crate::process::is_alive as pid_alive;
-#[cfg(target_os = "linux")]
-use anyhow::Context as _;
-#[cfg(not(target_os = "linux"))]
 use omnifs_mtab::NfsMountState;
+#[cfg(not(target_os = "linux"))]
 use omnifs_mtab::{Platform, UnmountCommand};
 
-/// Outcome of a host-native teardown sweep, classified so `omnifs down` reports
+/// Outcome of an NFS teardown sweep, classified so `omnifs down` reports
 /// only what actually happened.
 #[derive(Debug, Default, PartialEq, Eq)]
 #[cfg(not(target_os = "linux"))]
 pub(crate) struct TeardownSummary {
-    /// Records whose daemon was alive: a real running mount we tore down.
+    /// Live mounts we tore down.
     pub unmounted: usize,
     /// Records left by a dead daemon: only a stale state file to sweep.
     pub swept_orphans: usize,
@@ -46,14 +32,19 @@ pub(crate) struct TeardownSummary {
 impl TeardownSummary {
     /// Tear down one recorded mount and record the outcome.
     ///
-    /// The unmount is always forced. The sweep is reached only when the daemon
-    /// is not managing its own teardown (it did not answer the control API), so
-    /// a non-force unmount can wait on an NFS server that has already vanished
-    /// (a `kill -9` leaves exactly such a stale mount). A forced unmount is
-    /// safe for a read-only projection.
-    fn tear_down_one(&mut self, state_file: &Path, mount_point: &Path, pid: u32) {
-        unmount(mount_point, true);
-        signal_term(pid);
+    /// Recorded mounts receive a graceful unmount unless the user requested
+    /// `--force`. PID liveness never authorizes teardown.
+    fn tear_down_one(&mut self, state_file: &Path, mount_point: &Path, force: bool) {
+        if !omnifs_nfs::mount_is_active(mount_point) {
+            remove_state_file(state_file);
+            self.swept_orphans += 1;
+            return;
+        }
+        if !omnifs_nfs::mount_is_omnifs(mount_point) {
+            self.failed.push(mount_point.to_path_buf());
+            return;
+        }
+        unmount(mount_point, force);
 
         if !mount_settled(mount_point) {
             // Still mounted: keep the state file so a later `down` retries.
@@ -65,127 +56,18 @@ impl TeardownSummary {
         remove_state_file(state_file);
         self.unmounted += 1;
     }
-
-    fn tear_down_orphan(&mut self, state_file: &Path, mount_point: &Path, live_mount_exists: bool) {
-        if live_mount_exists {
-            remove_state_file(state_file);
-            self.swept_orphans += 1;
-            return;
-        }
-
-        if omnifs_nfs::mount_is_active(mount_point) {
-            unmount(mount_point, true);
-            if !mount_settled(mount_point) {
-                self.failed.push(mount_point.to_path_buf());
-                return;
-            }
-        }
-        remove_state_file(state_file);
-        self.swept_orphans += 1;
-    }
 }
 
-pub(crate) fn open_handle_summary(mount_point: &Path) -> Option<String> {
-    let output = Command::new("lsof")
-        .args(["-F", "pcfn", "--"])
-        .arg(mount_point)
-        .output();
-    match output {
-        Ok(output) if output.status.success() || !output.stdout.is_empty() => {
-            render_lsof_handles(&String::from_utf8_lossy(&output.stdout))
-        },
-        Ok(_) => None,
-        Err(error) => Some(format!(
-            "Could not inspect open mount handles with `lsof`: {error}"
-        )),
-    }
-}
-
-fn render_lsof_handles(fields: &str) -> Option<String> {
-    let mut processes: Vec<(String, String, Vec<String>)> = Vec::new();
-    let mut current = None;
-    let mut current_fd = None::<String>;
-
-    for line in fields.lines() {
-        if line.is_empty() {
-            continue;
-        }
-        let (kind, value) = line.split_at(1);
-        match kind {
-            "p" => {
-                processes.push((value.to_string(), "unknown".to_string(), Vec::new()));
-                current = Some(processes.len() - 1);
-                current_fd = None;
-            },
-            "c" => {
-                if let Some(index) = current {
-                    processes[index].1 = value.to_string();
-                }
-            },
-            "f" => {
-                current_fd = Some(value.to_string());
-            },
-            "n" => {
-                if let Some(index) = current {
-                    processes[index].2.push(format!(
-                        "{} {}",
-                        current_fd.as_deref().unwrap_or("?"),
-                        value
-                    ));
-                }
-            },
-            _ => {},
-        }
-    }
-
-    if processes.is_empty() {
-        return None;
-    }
-
-    let mut out = String::from("Open handles inside the mount:\n");
-    for (pid, command, handles) in processes {
-        let _ = write!(out, "  {command} pid {pid}");
-        if !handles.is_empty() {
-            out.push_str(": ");
-            out.push_str(&handles.join("; "));
-        }
-        out.push('\n');
-    }
-    Some(out.trim_end().to_string())
-}
-
-#[cfg(target_os = "linux")]
-pub(crate) fn teardown_host_native_fuse(mount_point: &Path) -> anyhow::Result<bool> {
-    if !omnifs_nfs::mount_is_active(mount_point) {
-        return Ok(false);
-    }
-
-    UnmountCommand::graceful(Platform::Linux, mount_point)
-        .run_quiet()
-        .context("run fusermount -u")?;
-    anyhow::ensure!(
-        mount_settled(mount_point),
-        "{} is still mounted; re-run `omnifs down`",
-        mount_point.display()
-    );
-    Ok(true)
-}
-
-#[cfg(target_os = "linux")]
-pub(crate) fn force_unmount_host_native(mount_point: &Path) {
-    let _ = UnmountCommand::forced(Platform::Linux, mount_point).run_quiet();
-}
-
-/// Tear down every host-native NFS mount recorded under `state_dir`.
+/// Tear down every Omnifs NFS mount recorded under `state_dir`.
 ///
-/// Best-effort and idempotent: an already-unmounted view, a dead daemon, or a
-/// failed signal are all non-fatal. A missing `state_dir` means nothing is
-/// running (an empty summary).
-///
-/// Every unmount is forced: the sweep runs only when the daemon is not managing
-/// its own teardown, where a non-force NFS unmount can block on a dead server.
+/// Best-effort and idempotent. A missing `state_dir` means nothing is running
+/// (an empty summary). `force` selects the unmount mode only after the live
+/// mount table confirms the mount is Omnifs's NFS export.
 #[cfg(not(target_os = "linux"))]
-pub(crate) fn teardown_host_native_nfs(state_dir: &Path) -> anyhow::Result<TeardownSummary> {
+pub(crate) fn teardown_host_native_nfs(
+    state_dir: &Path,
+    force: bool,
+) -> anyhow::Result<TeardownSummary> {
     if !state_dir.exists() {
         return Ok(TeardownSummary::default());
     }
@@ -194,7 +76,7 @@ pub(crate) fn teardown_host_native_nfs(state_dir: &Path) -> anyhow::Result<Teard
     let mut states = Vec::new();
     for entry in std::fs::read_dir(state_dir)? {
         let path = entry?.path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+        if !is_mount_state_file(&path) {
             continue;
         }
         let state = match NfsMountState::read_file(&path) {
@@ -217,31 +99,15 @@ pub(crate) fn teardown_host_native_nfs(state_dir: &Path) -> anyhow::Result<Teard
         states.push((path, state));
     }
 
-    let live_mount_points = states
-        .iter()
-        .filter(|(_, state)| pid_alive(state.pid))
-        .map(|(_, state)| state.mount_point.clone())
-        .collect::<HashSet<_>>();
-    let mut seen_mount_points = HashSet::new();
     for (path, state) in states {
-        if !pid_alive(state.pid) {
-            summary.tear_down_orphan(
-                &path,
-                &state.mount_point,
-                live_mount_points.contains(&state.mount_point),
-            );
-        } else if seen_mount_points.insert(state.mount_point.clone()) {
-            summary.tear_down_one(&path, &state.mount_point, state.pid);
-        }
+        summary.tear_down_one(&path, &state.mount_point, force);
     }
 
     Ok(summary)
 }
 
-/// Unmount the loopback view. `force` is used when the recording daemon is
-/// already dead, so stale mounts use the platform's forced teardown path.
-/// Output is swallowed: the authoritative signal is whether the mount survives
-/// (see `mount_settled`), not the platform tool's exit text.
+/// Unmount the loopback view. Output is swallowed because the authoritative
+/// signal is whether the mount survives (see `mount_settled`).
 #[cfg(target_os = "macos")]
 fn unmount(mount_point: &Path, force: bool) {
     let command = if force {
@@ -250,11 +116,6 @@ fn unmount(mount_point: &Path, force: bool) {
         UnmountCommand::graceful(Platform::Macos, mount_point)
     };
     let _ = command.run_quiet();
-}
-
-#[cfg(not(target_os = "linux"))]
-pub(crate) fn force_unmount_host_native(mount_point: &Path) {
-    unmount(mount_point, true);
 }
 
 #[cfg(all(not(target_os = "macos"), not(target_os = "linux")))]
@@ -267,16 +128,16 @@ fn unmount(mount_point: &Path, force: bool) {
     let _ = command.run_quiet();
 }
 
-/// Best-effort SIGTERM so a live daemon exits promptly and releases the control
-/// port; a dead pid (the signal lands after the daemon self-exits) is harmless.
 #[cfg(not(target_os = "linux"))]
-fn signal_term(pid: u32) {
-    let _ = Command::new("kill")
-        .arg("-TERM")
-        .arg(pid.to_string())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+fn is_mount_state_file(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            name.starts_with("mount-")
+                && Path::new(name)
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
+        })
 }
 
 /// Poll the OS mount table at `cadence` until `mount_point` is no longer active,
@@ -295,8 +156,7 @@ pub(crate) fn poll_until_unmounted(mount_point: &Path, cadence: Duration, attemp
     false
 }
 
-/// Poll until `mount_point` leaves the OS mount table, up to ~6s (a live daemon
-/// needs a beat to unmount after SIGTERM).
+/// Poll until `mount_point` leaves the OS mount table, up to ~6s.
 fn mount_settled(mount_point: &Path) -> bool {
     poll_until_unmounted(mount_point, Duration::from_millis(500), 12)
 }

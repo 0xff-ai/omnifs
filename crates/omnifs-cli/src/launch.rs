@@ -122,7 +122,9 @@ async fn launch_host_native(
         report_launch_status(status);
     }
     Ok(LaunchOutcome {
-        mount_point: status.map(|status| status.mount_point),
+        mount_point: status
+            .map(|status| status.mount_point)
+            .filter(|mount_point| !mount_point.as_os_str().is_empty()),
     })
 }
 
@@ -269,7 +271,7 @@ fn report_launch_status(status: &DaemonStatus) {
     if let Some(frontend) = status.health.subsystem(DaemonSubsystem::Frontend) {
         anstream::eprintln!("✓ {}", frontend.message);
     } else {
-        anstream::eprintln!("✓ Mount is serving at {}", status.mount_point.display());
+        anstream::eprintln!("✓ Namespace daemon is serving");
     }
 
     if let Some(mounts) = status.health.subsystem(DaemonSubsystem::Mounts) {

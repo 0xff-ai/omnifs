@@ -13,7 +13,6 @@
 
 use clap::Args;
 use omnifs_workspace::layout::WorkspaceLayout;
-use omnifs_workspace::runtime_record::{RuntimeRecord, Via};
 
 use crate::frontend_backend::{DockerBackend, FrontendBackend};
 use crate::frontend_container::{FRONTEND_DEV_IMAGE, frontend_container_name};
@@ -28,7 +27,7 @@ pub struct FrontendDownArgs {}
 impl FrontendDownArgs {
     pub async fn run(self) -> anyhow::Result<()> {
         let workspace = Workspace::resolve()?;
-        let found = teardown(workspace.layout()).await?;
+        let found = teardown(workspace.layout(), false).await?;
         if found {
             anstream::eprintln!(
                 "note: the daemon's namespace attach listener is not closed by this command; \
@@ -41,28 +40,74 @@ impl FrontendDownArgs {
     }
 }
 
-/// Remove the virtualized frontend for `paths`'s workspace, if one exists,
-/// dispatching to whichever backend the runtime record names, and clear its
-/// record entry. Returns whether a frontend was found. An unreachable backend
-/// (Docker daemon down, or a leftover pidfile) is a warning, not an error:
-/// this workspace may simply have no frontend attached.
-pub(crate) async fn teardown(paths: &WorkspaceLayout) -> anyhow::Result<bool> {
-    let recorded_via = RuntimeRecord::read(&paths.runtime_record_file())
-        .ok()
-        .flatten()
-        .and_then(|record| record.virtualized_frontend().map(|(via, _mount_point)| via));
+/// Remove every frontend discoverable for this workspace.
+pub(crate) async fn teardown(paths: &WorkspaceLayout, force: bool) -> anyhow::Result<bool> {
+    let mut failures = Vec::new();
+    let krunkit = KrunkitBackend::new(paths.config_dir.clone());
+    let krunkit_found = match krunkit.is_running().await {
+        Ok(Some(_)) => match krunkit.tear_down().await {
+            Ok(()) => {
+                anstream::println!("✓ krunkit frontend removed");
+                true
+            },
+            Err(error) => {
+                failures.push(format!("remove krunkit frontend: {error:#}"));
+                false
+            },
+        },
+        Ok(None) => false,
+        Err(error) => {
+            failures.push(format!("inspect krunkit frontend: {error:#}"));
+            false
+        },
+    };
 
-    if recorded_via == Some(Via::Krunkit) {
-        let backend = KrunkitBackend::new(paths.config_dir.clone());
-        let running = backend.is_running().await?;
-        if running.is_some() {
-            backend.tear_down().await?;
-            anstream::println!("✓ krunkit frontend removed");
+    let found = match teardown_docker(paths).await {
+        Ok(found) => found,
+        Err(error) => {
+            failures.push(format!("inspect or remove Docker frontend: {error:#}"));
+            false
+        },
+    };
+
+    #[cfg(all(feature = "daemon", not(target_os = "linux")))]
+    let nfs_found = {
+        let summary =
+            crate::host_teardown::teardown_host_native_nfs(&paths.nfs_state_dir(), force)?;
+        if summary.unmounted > 0 {
+            anstream::println!("✓ Unmounted {} local NFS frontend(s)", summary.unmounted);
         }
-        clear_frontend_record(&paths.runtime_record_file());
-        return Ok(running.is_some());
+        if summary.swept_orphans > 0 {
+            anstream::println!(
+                "✓ Swept {} orphaned NFS mount-state file(s)",
+                summary.swept_orphans
+            );
+        }
+        if !summary.failed.is_empty() {
+            failures.push(format!(
+                "{} NFS frontend(s) could not be safely unmounted",
+                summary.failed.len()
+            ));
+        }
+        if summary.skipped > 0 {
+            failures.push(format!(
+                "{} NFS mount-state file(s) could not be read",
+                summary.skipped
+            ));
+        }
+        summary.unmounted > 0 || summary.swept_orphans > 0
+    };
+    #[cfg(not(all(feature = "daemon", not(target_os = "linux"))))]
+    let nfs_found = false;
+
+    if !failures.is_empty() {
+        anyhow::bail!("frontend teardown incomplete: {}", failures.join("; "));
     }
 
+    Ok(krunkit_found || found || nfs_found)
+}
+
+async fn teardown_docker(paths: &WorkspaceLayout) -> anyhow::Result<bool> {
     let container_name = frontend_container_name(paths)?;
 
     // The image field is unused by removal; it only needs to be a valid
@@ -71,42 +116,30 @@ pub(crate) async fn teardown(paths: &WorkspaceLayout) -> anyhow::Result<bool> {
         container_name.as_str().to_string(),
         FRONTEND_DEV_IMAGE.to_string(),
     )?;
-    let found = match Runtime::connect_for(&target) {
-        Ok(runtime) => {
-            let backend = DockerBackend::new(runtime);
-            let running = backend.is_running().await?;
-            if running.is_some() {
-                backend.tear_down().await?;
-                anstream::println!("✓ Frontend container `{container_name}` removed");
-            }
-            running.is_some()
-        },
+    let runtime = match Runtime::connect_for(&target) {
+        Ok(runtime) => runtime,
         Err(error) => {
             anstream::eprintln!(
                 "⚠  Docker not reachable; could not check for frontend container `{container_name}`: {error}"
             );
-            false
+            return Ok(false);
         },
     };
-
-    clear_frontend_record(&paths.runtime_record_file());
-    Ok(found)
-}
-
-/// Drop the virtualized frontend's entry from the on-disk runtime record (a
-/// read-modify-write, mirroring `frontend up`'s append). Best-effort: a
-/// missing or unreadable record is not an error, since the daemon may already
-/// be down. Drops any virtualized entry regardless of which backend
-/// delivered it, mirroring `frontend up`'s "at most one" invariant.
-fn clear_frontend_record(record_path: &std::path::Path) {
-    let Ok(Some(mut record)) = RuntimeRecord::read(record_path) else {
-        return;
+    let Some(discovered) = runtime
+        .frontend_container_for_home(&paths.config_dir)
+        .await?
+    else {
+        return Ok(false);
     };
-    let before = record.frontends.len();
-    record.frontends.retain(|frontend| frontend.via.is_none());
-    if record.frontends.len() != before
-        && let Err(error) = record.write(record_path)
-    {
-        anstream::eprintln!("warning: could not update the runtime record: {error:#}");
+    let discovered_target = DockerTarget::new(
+        discovered.as_str().to_string(),
+        FRONTEND_DEV_IMAGE.to_string(),
+    )?;
+    let backend = DockerBackend::new(Runtime::connect_for(&discovered_target)?);
+    let running = backend.is_running().await?.is_some();
+    if running {
+        backend.tear_down().await?;
+        anstream::println!("✓ Frontend container `{discovered}` removed");
     }
+    Ok(running)
 }

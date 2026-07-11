@@ -2,7 +2,7 @@
 //! health, whichever backend it was launched with.
 
 use clap::Args;
-use omnifs_workspace::runtime_record::{RuntimeRecord, Via};
+use omnifs_workspace::runtime_record::{AttachRecord, RuntimeRecord, Via};
 
 use crate::error::ExitCode;
 use crate::frontend_backend::{DockerBackend, FrontendBackend};
@@ -43,8 +43,12 @@ impl FrontendStatusArgs {
         };
 
         let attach_addr = record
-            .and_then(|record| record.attach)
-            .map(|attach| attach.addr);
+            .into_iter()
+            .flat_map(|record| record.attach)
+            .find_map(|attach| match attach {
+                AttachRecord::Tcp { addr, .. } => Some(addr),
+                AttachRecord::Vsock { .. } => None,
+            });
 
         let exit_code = match running {
             Some(true) => {

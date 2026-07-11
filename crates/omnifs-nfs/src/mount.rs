@@ -404,7 +404,9 @@ fn mount_table_entries() -> std::io::Result<Vec<MountTableEntry>> {
         proc_mounts::parse(&mounts)
             .into_iter()
             .map(|entry| MountTableEntry {
+                source: entry.device,
                 mount_point: PathBuf::from(entry.mount_point),
+                fs_type: entry.fs_type,
             })
             .collect()
     })
@@ -417,7 +419,9 @@ fn mount_table_entries() -> std::io::Result<Vec<MountTableEntry>> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct MountTableEntry {
+    source: String,
     mount_point: PathBuf,
+    fs_type: String,
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -425,10 +429,17 @@ fn parse_macos_mounts(contents: &str) -> Vec<MountTableEntry> {
     contents
         .lines()
         .filter_map(|line| {
-            let (mount, _options) = line.rsplit_once(" (")?;
-            let (_source, mount_point) = mount.rsplit_once(" on ")?;
+            let (mount, options) = line.rsplit_once(" (")?;
+            let (source, mount_point) = mount.rsplit_once(" on ")?;
+            let fs_type = options
+                .trim_start_matches(" (")
+                .split(',')
+                .next()?
+                .to_string();
             Some(MountTableEntry {
+                source: source.to_string(),
                 mount_point: PathBuf::from(mount_point),
+                fs_type,
             })
         })
         .collect()
@@ -451,6 +462,19 @@ pub fn mount_is_active(mount_point: &Path) -> bool {
     }
 }
 
+/// Whether `mount_point` is the loopback NFS export served by an Omnifs NFS
+/// runner. Teardown uses this before acting on a stale state file so an old or
+/// corrupted record cannot unmount an unrelated filesystem.
+pub fn mount_is_omnifs(mount_point: &Path) -> bool {
+    mount_table_entries().is_ok_and(|entries| {
+        entries.iter().any(|entry| {
+            mount_entry_matches(entry, mount_point)
+                && entry.source == export_source()
+                && entry.fs_type.starts_with("nfs")
+        })
+    })
+}
+
 fn mount_is_active_checked(mount_point: &Path) -> Result<bool, NfsFrontendError> {
     mount_table_entries()
         .map(|entries| mount_table_contains(&entries, mount_point))
@@ -458,12 +482,16 @@ fn mount_is_active_checked(mount_point: &Path) -> Result<bool, NfsFrontendError>
 }
 
 fn mount_table_contains(entries: &[MountTableEntry], mount_point: &Path) -> bool {
+    entries
+        .iter()
+        .any(|entry| mount_entry_matches(entry, mount_point))
+}
+
+fn mount_entry_matches(entry: &MountTableEntry, mount_point: &Path) -> bool {
     let wanted = normalize_mount_path(mount_point);
     let canonical = normalize_mount_path(&canonical_mount_path(mount_point));
-    entries.iter().any(|entry| {
-        let entry_path = normalize_mount_path(&entry.mount_point);
-        entry_path == wanted || entry_path == canonical
-    })
+    let entry_path = normalize_mount_path(&entry.mount_point);
+    entry_path == wanted || entry_path == canonical
 }
 
 fn canonical_mount_path(path: &Path) -> PathBuf {
@@ -667,7 +695,9 @@ mod tests {
         assert_eq!(
             mounts,
             vec![MountTableEntry {
+                source: "127.0.0.1:/omnifs".to_string(),
                 mount_point: PathBuf::from("/Volumes/omnifs mount"),
+                fs_type: "nfs".to_string(),
             }]
         );
         assert!(mount_table_contains(

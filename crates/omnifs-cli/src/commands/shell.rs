@@ -76,7 +76,7 @@ impl ShellArgs {
                 return self.exec_in_container(&container_name);
             },
             Some(Via::Krunkit) => return self.exec_in_krunkit_guest(paths),
-            None => {},
+            Some(Via::Local) | None => {},
         }
 
         let Some(record) = record else {

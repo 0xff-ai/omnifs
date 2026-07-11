@@ -1,19 +1,11 @@
-//! The launch backend: the host-native daemon spawn/reclaim primitives, and
-//! the `DockerTarget`/`ContainerName`/`ImageRef` naming types the optional
-//! Docker-hosted FUSE frontend (`omnifs frontend up`) builds on.
+//! Host-native daemon launch and the naming types used by the Docker frontend.
 //!
-//! `LaunchBackend` is the daemon's one reclaimable identity. The daemon always
-//! runs host-native; `LaunchBackend::reclaim` tears down its stale mount after
-//! a control-API shutdown. Callers (down.rs, reset.rs) never branch on backend
-//! themselves.
-
 use std::fmt;
 use std::path::Path;
 
 #[cfg(feature = "daemon")]
 use anyhow::Context as _;
 use anyhow::Result;
-use omnifs_api::DaemonBackend;
 
 /// Whether this binary was produced by the release packaging lane
 /// (`OMNIFS_RELEASE` set at compile time) or a local/dev build. Release
@@ -198,39 +190,6 @@ impl DockerTarget {
     }
 }
 
-/// The daemon's reclaimable backend identity. The daemon always runs
-/// host-native; this stays a named type (rather than a bare function) because
-/// `daemon_teardown.rs` builds it from both a live daemon's reported backend
-/// and a cached runtime record before choosing how to reclaim.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum LaunchBackend {
-    Native,
-}
-
-impl LaunchBackend {
-    /// Reclaim backend-specific resources after a graceful control-API shutdown
-    /// has been attempted: sweep any stale mount.
-    ///
-    /// `mount_point` is the mount to sweep if the daemon is already dead and
-    /// left a stale mount behind. `nfs_state_dir` is where the non-Linux daemon
-    /// records its mount-state files (derived from the caller's resolved paths,
-    /// so it honors `OMNIFS_HOME`/cache overrides). The unmount is always forced,
-    /// since reclaim runs only after the daemon stopped managing its own mount.
-    pub(crate) fn reclaim(&self, mount_point: Option<&Path>, nfs_state_dir: &Path) -> Result<()> {
-        let Self::Native = self;
-        reclaim_native(mount_point, nfs_state_dir)
-    }
-}
-
-impl TryFrom<&DaemonBackend> for LaunchBackend {
-    type Error = anyhow::Error;
-
-    fn try_from(backend: &DaemonBackend) -> Result<Self> {
-        let DaemonBackend::Native { .. } = backend;
-        Ok(Self::Native)
-    }
-}
-
 // --- Native launch -----------------------------------------------------------
 
 #[cfg(feature = "daemon")]
@@ -378,76 +337,6 @@ fn read_log_tail(log_path: &Path) -> String {
         },
         Err(error) => format!("(could not read {}: {error})", log_path.display()),
     }
-}
-
-// --- Native reclaim ----------------------------------------------------------
-
-/// Sweep any stale mount left by a dead host-native daemon. On Linux the FUSE
-/// mount at `mount_point` is unmounted directly; on other platforms the NFS
-/// mount-state files under `nfs_state_dir` drive the sweep.
-#[cfg(feature = "daemon")]
-pub(crate) fn reclaim_native(mount_point: Option<&Path>, nfs_state_dir: &Path) -> Result<()> {
-    #[cfg(target_os = "linux")]
-    {
-        let _ = nfs_state_dir;
-        let Some(mp) = mount_point else {
-            anstream::println!("Nothing to tear down.");
-            return Ok(());
-        };
-        if crate::host_teardown::teardown_host_native_fuse(mp)? {
-            anstream::println!("✓ Unmounted {}", mp.display());
-        } else {
-            anstream::println!("Nothing to tear down.");
-        }
-        Ok(())
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    {
-        // The mount point is host-visible; the NFS server's mount-state files
-        // (pid, mount point, version) live under `nfs_state_dir` and are what
-        // drive an actual unmount. The caller derives `nfs_state_dir` from its
-        // resolved paths, so it honors OMNIFS_HOME and cache-dir overrides.
-        let _ = mount_point;
-        sweep_nfs_state_dir(nfs_state_dir)
-    }
-}
-
-#[cfg(not(feature = "daemon"))]
-pub(crate) fn reclaim_native(_mount_point: Option<&Path>, _nfs_state_dir: &Path) -> Result<()> {
-    anyhow::bail!(
-        "this omnifs binary was built without host-native daemon support; \
-         rerun teardown with a default omnifs build"
-    )
-}
-
-#[cfg(feature = "daemon")]
-#[cfg(not(target_os = "linux"))]
-fn sweep_nfs_state_dir(state_dir: &Path) -> Result<()> {
-    let summary = crate::host_teardown::teardown_host_native_nfs(state_dir)?;
-    if summary.unmounted > 0 {
-        anstream::println!("✓ Unmounted {} host-native mount(s)", summary.unmounted);
-    }
-    if summary.swept_orphans > 0 {
-        anstream::println!(
-            "✓ Swept {} orphaned mount-state file(s)",
-            summary.swept_orphans
-        );
-    }
-    if summary.unmounted == 0 && summary.swept_orphans == 0 {
-        if summary.skipped > 0 {
-            anstream::println!(
-                "No teardown performed; {} mount-state file(s) were unreadable (see warnings above).",
-                summary.skipped
-            );
-        } else {
-            anstream::println!("Nothing to tear down.");
-        }
-    }
-    if !summary.failed.is_empty() {
-        anyhow::bail!("{} mount(s) could not be unmounted", summary.failed.len());
-    }
-    Ok(())
 }
 
 #[cfg(test)]

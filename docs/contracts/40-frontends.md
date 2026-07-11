@@ -17,23 +17,23 @@ A frontend consumes the narrow `omnifs_engine::namespace` surface (`Namespace`, 
 
 ### Frontend registry
 
-The daemon is a frontend registry: it constructs one `TreeNamespace` over the shared mount registry and builds one renderer per requested frontend on top of it. Several renderers share a single namespace, so one invalidation fans out to all of them. Linux can serve FUSE and NFS concurrently; macOS is NFS-only. Frontend supervision matches the daemon's single-mount lifecycle: each frontend blocks until unmounted, and the first to exit takes the others down, so the daemon comes down as one unit. Which frontends are served is a daemon concern (`--frontend <kind>=<mount_point>`, repeatable), not a frontend-crate concern.
+The daemon constructs one `TreeNamespace` over the shared mount registry and serves it to separate frontend processes over the Omnifs VFS wire protocol. It tracks live attachments but never builds, mounts, supervises, or unmounts a renderer. Each frontend process owns one protocol surface and its own lifetime; the CLI owns launch and teardown through the frontend backend seam.
 
 ### FUSE
 
-FUSE is the Linux frontend, including native Linux and the optional Docker-hosted out-of-process frontend (`omnifs frontend up`), which ships its own minimal image; see `docs/contracts/60-build-validation.md` for that image's build/publish contract.
+FUSE is the Linux frontend protocol. The slim `omnifs-fuse` runner can be delivered as a local process, Docker container, or krunkit guest; see `docs/contracts/60-build-validation.md` for image build and publish contracts.
 
 The Docker-hosted FUSE frontend's mount lives entirely inside the container's own mount namespace, so killing the container is an accepted, clean failure mode: the mount disappears with it, with nothing left to unmount host-side, and `omnifs frontend up` creates a fresh container that serves again.
 
 Keep FUSE inode tables, kernel notifications, mount/unmount mechanics, and FUSE reply types in `omnifs-fuse`. Keep shared projection behavior in `omnifs-engine/src/tree`.
 
-### Native versus virtualized frontends
+### Frontend processes and drivers
 
-Frontends split into two classes. **Native** frontends are served in-process by the daemon: FUSE on Linux, NFSv4 loopback on macOS. They have no driver, no attach transport, and no seam; the daemon owns them directly. **Virtualized** frontends run the same slim `omnifs-fuse --mount-point <path>` binary (`crates/omnifs-fuse/src/bin/omnifs_fuse.rs`, a dedicated `[[bin]]` target of the `omnifs-fuse` crate — no engine, no Wasmtime, no provider bundle) and the Omnifs VFS wire protocol inside a guest, attached to the host-native daemon's namespace listener over an attach transport (TCP for Docker, vsock for krunkit). `omnifs_engine::Namespace` owns shared VFS semantics; `omnifs-vfs-wire` owns only serialization, framing, handshake, attach transport and reconnect, readiness signaling, and the client wire cache. Which class serves a given OS is a daemon/CLI concern, not a frontend-crate one.
+Every frontend is a separate slim runner process. `omnifs-fuse` and `omnifs-nfs` contain their protocol mechanics but no engine, Wasmtime runtime, provider bundle, or daemon control plane. A driver only chooses how the CLI delivers that process: `local` on the host, `docker` in a container, or `krunkit` in a guest. `omnifs_engine::Namespace` owns shared VFS semantics; `omnifs-vfs-wire` owns serialization, framing, handshake, attach transport and reconnect, readiness signaling, and the client wire cache.
 
 ### Frontend delivery backend seam
 
-Virtualized frontend delivery sits behind the CLI's `FrontendBackend` seam (`crates/omnifs-cli/src/frontend_backend.rs`): the frontend commands (`omnifs frontend up|down|status`, `omnifs shell`) launch, probe, tear down, and shell into the frontend through that trait, never against a specific runtime's client library directly. Two drivers name which backend implements the seam: `docker` (the default, `DockerBackend`) and `krunkit` (`KrunkitBackend`, `crates/omnifs-cli/src/krunkit_backend.rs`, macOS only). `--driver <docker|krunkit>` on `omnifs frontend up` and the `[frontend] driver` config key select between them; both resolve to `docker` when unset.
+Frontend delivery sits behind the CLI's `FrontendBackend` seam (`crates/omnifs-cli/src/frontend_backend.rs`): frontend lifecycle commands launch, probe, and tear down frontends through that trait, never against a specific runtime's client library directly. The drivers are `local`, `docker`, and `krunkit`; protocol kind and delivery driver remain separate facts.
 
 Krunkit is a libkrun microVM on macOS. It ships the same frontend binary and Omnifs VFS wire protocol as the Docker driver; only the attach transport changes, from TCP to vsock. Three vsock devices, each multiplexed by port on the guest's single virtio-vsock CID: attach (guest-initiated, proxied by krunkit onto the daemon's `POST /v1/frontend/attach-target/vsock` socket), a readiness beacon (guest-initiated, dialed by `omnifs-fuse` once its FUSE mount is serving — see `crates/omnifs-vfs-wire/src/beacon.rs`), and ssh (host-initiated, krunkit's explicit `connect` vsock mode, into the guest image's socket-activated dropbear, reached via `ssh -o ProxyCommand='socat - UNIX-CONNECT:<path>'`). No `virtio-net` device is ever configured: the frontend carries no credentials and needs no egress. Its purpose is dropping the Docker Desktop dependency, not changing mount semantics: the guest FUSE mount stays reachable only from inside the guest, exactly as it is inside a Docker container today. The host-visible macOS surface remains the NFSv4 loopback frontend; a backend must never claim host visibility for its guest FUSE mount.
 
@@ -53,7 +53,7 @@ The slim `omnifs-nfs` runner attaches through the Omnifs VFS wire protocol. Its 
 
 Keep `/proc/mounts` parsing, NFS mount state-file schema/IO, and shared platform unmount command construction in `omnifs-mtab`. Frontends and lifecycle code call that crate instead of carrying duplicate parsers, state versions, or unmount argv builders.
 
-The `omnifs-mtab` state file is mount *discovery and teardown* state (mount point, address, pid), shared by the CLI and daemon. The NFS filehandle-identity table (`omnifs-nfs/src/persist.rs`, persisted so a restarted out-of-process frontend decodes handles a kernel client still holds) is *protocol identity*, not mount discovery, so it stays in `omnifs-nfs` with the filehandles, stateids, and inode table. It lands in the same NFS state directory next to the mtab mount-state files and mirrors their discipline (version field, unknown version is an error, atomic write, 0600 mode), but its schema and IO are NFS-crate-owned.
+The `omnifs-mtab` state file is mount *discovery and teardown* state (mount point, address, pid), shared by frontend runners and the CLI. The NFS filehandle-identity table (`omnifs-nfs/src/persist.rs`, persisted so a restarted out-of-process frontend decodes handles a kernel client still holds) is *protocol identity*, not mount discovery, so it stays in `omnifs-nfs` with the filehandles, stateids, and inode table. It lands in the same NFS state directory next to the mtab mount-state files and mirrors their discipline (version field, unknown version is an error, atomic write, 0600 mode), but its schema and IO are NFS-crate-owned.
 
 ### NFS deferral and `NFS4ERR_DELAY`
 

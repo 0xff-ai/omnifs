@@ -1,406 +1,210 @@
-//! Filesystem frontends managed by the daemon.
-//!
-//! The daemon is a frontend registry: it constructs ONE [`TreeNamespace`] over
-//! the shared mount registry and builds one renderer per requested frontend on
-//! top of it. Every renderer subscribes to the same namespace event stream, so a
-//! single invalidation fans out to all of them. Linux can serve FUSE and NFS
-//! concurrently; macOS is NFS-only.
-//!
-//! Supervision is symmetric and matches the daemon's single-mount lifecycle: each
-//! frontend blocks on its own thread until it is unmounted, and the first one to
-//! exit (an error or an external unmount) takes the others down with it, so one
-//! mount dying stops the daemon the same way it does with a single frontend.
+//! Live registry for frontends attached to the daemon's shared namespace.
 
 use omnifs_api::{FrontendDelivery, FrontendInfo, FsType};
-use omnifs_engine::Namespace;
-use omnifs_engine::TreeNamespace;
-#[cfg(target_os = "linux")]
-use omnifs_fuse::NotifierHandle;
-#[cfg(target_os = "linux")]
-use omnifs_fuse::mount;
-#[cfg(target_os = "linux")]
-use omnifs_mtab::proc_mounts;
-use omnifs_nfs::NfsMountOptions;
-use omnifs_vfs_wire::{AttachObserver, FrontendIdentity, FrontendKind as WireFrontendKind};
+use omnifs_vfs_wire::{AttachObserver, FrontendIdentity, FrontendKind};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
-use tokio::runtime::Handle;
 
-use crate::app::{FrontendKind, FrontendMount};
-use crate::context::DaemonContext;
-
-/// The daemon's frontend registry: every in-process renderer over the shared
-/// namespace, plus the live registry of virtualized frontends attached over
-/// the wire. The namespace is built once in the startup path (post-reconcile)
-/// and passed to `serve`, so the in-process renderers and the out-of-process
-/// attach listeners serve the same [`TreeNamespace`].
 pub(crate) struct Frontends {
-    instances: Vec<Arc<Instance>>,
-    /// Releases a namespace-only `serve` (no in-process renderer drives the
-    /// lifecycle) when `unmount` fires on shutdown.
     stop_tx: mpsc::Sender<()>,
     stop_rx: std::sync::Mutex<Option<mpsc::Receiver<()>>>,
-    /// Every virtualized frontend currently attached over any wire listener,
-    /// kept live via [`AttachObserver`] callbacks rather than polling.
     attached: Arc<AttachedRegistry>,
+    on_change: Arc<dyn Fn(Vec<FrontendInfo>) + Send + Sync>,
 }
 
-/// One virtualized frontend currently attached over the wire.
 #[derive(Debug, Clone)]
 struct AttachedFrontend {
-    kind: WireFrontendKind,
+    kind: FrontendKind,
     mount_point: PathBuf,
     delivery: FrontendDelivery,
 }
 
-/// Assigns and tracks ids for every virtualized frontend attached over any of
-/// the daemon's wire listeners. Shared by every listener's own
-/// [`DeliveryObserver`], each stamping the connections it sees with its own
-/// [`FrontendDelivery`] label: the daemon decides that label per listener at
-/// bind time, never from anything the connecting guest claims in its `Hello`.
+impl AttachedFrontend {
+    fn key(&self) -> AttachmentKey {
+        AttachmentKey {
+            delivery: match self.delivery {
+                FrontendDelivery::Local => 0,
+                FrontendDelivery::Docker => 1,
+                FrontendDelivery::Krunkit => 2,
+            },
+            kind: match self.kind {
+                FrontendKind::Fuse => 0,
+                FrontendKind::Nfs => 1,
+            },
+            mount_point: self.mount_point.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct AttachmentKey {
+    delivery: u8,
+    kind: u8,
+    mount_point: PathBuf,
+}
+
+struct AttachedEntry {
+    frontend: AttachedFrontend,
+    connections: usize,
+}
+
+struct AttachedState {
+    next_id: u64,
+    ids: BTreeMap<u64, AttachmentKey>,
+    entries: BTreeMap<AttachmentKey, AttachedEntry>,
+}
+
+impl AttachedState {
+    fn snapshot(&self) -> Vec<FrontendInfo> {
+        self.entries
+            .values()
+            .map(|entry| FrontendInfo {
+                source: "wire".to_string(),
+                fs_type: match entry.frontend.kind {
+                    FrontendKind::Fuse => FsType::Fuse,
+                    FrontendKind::Nfs => FsType::Nfs,
+                },
+                mount_point: entry.frontend.mount_point.clone(),
+                delivery: entry.frontend.delivery,
+            })
+            .collect()
+    }
+}
+
 struct AttachedRegistry {
-    next_id: AtomicU64,
-    entries: std::sync::Mutex<BTreeMap<u64, AttachedFrontend>>,
+    state: std::sync::Mutex<AttachedState>,
 }
 
 impl AttachedRegistry {
     fn new() -> Arc<Self> {
         Arc::new(Self {
-            next_id: AtomicU64::new(1),
-            entries: std::sync::Mutex::new(BTreeMap::new()),
+            state: std::sync::Mutex::new(AttachedState {
+                next_id: 1,
+                ids: BTreeMap::new(),
+                entries: BTreeMap::new(),
+            }),
         })
     }
 
-    /// Every currently attached frontend, for `/v1/status`.
     fn snapshot(&self) -> Vec<FrontendInfo> {
-        self.entries
+        self.state
             .lock()
             .expect("attached-frontend registry lock")
-            .values()
-            .map(|frontend| FrontendInfo {
-                source: "wire".to_string(),
-                fs_type: api_fs_type(frontend.kind),
-                mount_point: frontend.mount_point.clone(),
-                delivery: frontend.delivery,
-            })
-            .collect()
+            .snapshot()
     }
 }
 
-fn api_fs_type(kind: WireFrontendKind) -> FsType {
-    match kind {
-        WireFrontendKind::Fuse => FsType::Fuse,
-        WireFrontendKind::Nfs => FsType::Nfs,
-    }
-}
-
-/// One wire listener's [`AttachObserver`]: shares the daemon-wide
-/// [`AttachedRegistry`] but stamps every connection through it with this
-/// listener's own [`FrontendDelivery`] label.
 struct DeliveryObserver {
     registry: Arc<AttachedRegistry>,
     delivery: FrontendDelivery,
+    on_change: Arc<dyn Fn(Vec<FrontendInfo>) + Send + Sync>,
 }
 
 impl AttachObserver for DeliveryObserver {
     fn attached(&self, identity: &FrontendIdentity) -> u64 {
-        let id = self.registry.next_id.fetch_add(1, Ordering::Relaxed);
-        self.registry
-            .entries
+        let frontend = AttachedFrontend {
+            kind: identity.kind,
+            mount_point: identity.mount_point.clone(),
+            delivery: self.delivery,
+        };
+        let key = frontend.key();
+        let mut state = self
+            .registry
+            .state
             .lock()
-            .expect("attached-frontend registry lock")
-            .insert(
-                id,
-                AttachedFrontend {
-                    kind: identity.kind,
-                    mount_point: identity.mount_point.clone(),
-                    delivery: self.delivery,
-                },
-            );
+            .expect("attached-frontend registry lock");
+        let id = state.next_id;
+        state.next_id += 1;
+        state.ids.insert(id, key.clone());
+        state
+            .entries
+            .entry(key)
+            .and_modify(|entry| entry.connections += 1)
+            .or_insert(AttachedEntry {
+                frontend,
+                connections: 1,
+            });
+        (self.on_change)(state.snapshot());
         id
     }
 
     fn detached(&self, id: u64) {
-        self.registry
-            .entries
+        let mut state = self
+            .registry
+            .state
             .lock()
-            .expect("attached-frontend registry lock")
-            .remove(&id);
-    }
-}
-
-/// One requested frontend: the renderer over the shared namespace at its mount
-/// point.
-enum Instance {
-    #[cfg(target_os = "linux")]
-    Fuse(Fuse),
-    Nfs(Nfs),
-}
-
-#[cfg(target_os = "linux")]
-struct Fuse {
-    mount_point: PathBuf,
-    notifier: NotifierHandle,
-}
-
-struct Nfs {
-    mount_point: PathBuf,
-    options: NfsMountOptions,
-}
-
-impl Nfs {
-    fn serving(&self) -> Option<FrontendInfo> {
-        #[cfg(target_os = "linux")]
-        {
-            proc_mounts::find_mount(&self.mount_point)
-                .filter(|mount| mount.fs_type.starts_with("nfs"))
-                .map(|mount| FrontendInfo {
-                    source: mount.device,
-                    fs_type: FsType::Nfs,
-                    mount_point: self.mount_point.clone(),
-                    delivery: FrontendDelivery::Native,
-                })
+            .expect("attached-frontend registry lock");
+        let Some(key) = state.ids.remove(&id) else {
+            return;
+        };
+        let remove = state.entries.get_mut(&key).is_some_and(|entry| {
+            entry.connections -= 1;
+            entry.connections == 0
+        });
+        if remove {
+            state.entries.remove(&key);
         }
-
-        #[cfg(not(target_os = "linux"))]
-        {
-            omnifs_nfs::mount_is_active(&self.mount_point).then(|| FrontendInfo {
-                source: "omnifs".to_string(),
-                fs_type: FsType::Nfs,
-                mount_point: self.mount_point.clone(),
-                delivery: FrontendDelivery::Native,
-            })
-        }
+        (self.on_change)(state.snapshot());
     }
 }
 
 impl Frontends {
-    pub(crate) fn from_context(context: &DaemonContext) -> Self {
-        let instances = context
-            .frontends()
-            .iter()
-            .map(|frontend| Arc::new(Instance::build(frontend, context)))
-            .collect();
-        let (stop_tx, stop_rx) = mpsc::channel::<()>();
+    pub(crate) fn new(on_change: Arc<dyn Fn(Vec<FrontendInfo>) + Send + Sync>) -> Self {
+        let (stop_tx, stop_rx) = mpsc::channel();
         Self {
-            instances,
             stop_tx,
             stop_rx: std::sync::Mutex::new(Some(stop_rx)),
             attached: AttachedRegistry::new(),
+            on_change,
         }
     }
 
-    /// Build the [`AttachObserver`] for one wire listener, labeled with the
-    /// delivery mechanism the daemon assigned it at bind time (never
-    /// self-reported by the connecting guest).
     pub(crate) fn attach_observer(&self, delivery: FrontendDelivery) -> Arc<dyn AttachObserver> {
         Arc::new(DeliveryObserver {
             registry: Arc::clone(&self.attached),
             delivery,
+            on_change: Arc::clone(&self.on_change),
         })
     }
 
-    /// Every virtualized frontend currently attached over the wire, tracked
-    /// live (not dependent on reconcile or polling).
     pub(crate) fn attached(&self) -> Vec<FrontendInfo> {
         self.attached.snapshot()
     }
 
-    /// Serve every in-process frontend over `namespace`, each blocking on its own
-    /// thread until unmounted. Returns once ALL frontends have exited; the first
-    /// exit unmounts the rest so the daemon comes down as one unit. The first
-    /// error observed is returned. A namespace-only daemon (no in-process
-    /// frontend) blocks until shutdown instead, so the attach-socket listeners
-    /// keep serving.
-    pub fn serve(&self, namespace: &Arc<TreeNamespace>, rt: &Handle) -> anyhow::Result<()> {
-        if self.instances.is_empty() {
-            // No in-process renderer drives the lifecycle; block until `unmount`
-            // signals shutdown so the spawned attach listeners keep serving.
-            if let Some(rx) = self.stop_rx.lock().expect("stop rx lock").take() {
-                let _ = rx.recv();
-            }
-            return Ok(());
-        }
-
-        let (exit_tx, exit_rx) = mpsc::channel::<()>();
-        let mut threads = Vec::with_capacity(self.instances.len());
-        for instance in &self.instances {
-            let instance = Arc::clone(instance);
-            let namespace = Arc::clone(namespace) as Arc<dyn Namespace>;
-            let rt = rt.clone();
-            let exit_tx = exit_tx.clone();
-            let label = instance.label();
-            let thread = std::thread::Builder::new()
-                .name(format!("frontend-{label}"))
-                .spawn(move || {
-                    let result = instance.serve_blocking(namespace, &rt);
-                    // Signal the supervisor that a frontend exited; the receiver
-                    // may already be gone if every frontend raced to exit.
-                    let _ = exit_tx.send(());
-                    result
-                })
-                .expect("spawn frontend thread");
-            threads.push(thread);
-        }
-        drop(exit_tx);
-
-        // Block until the first frontend exits (error or external unmount).
-        let _ = exit_rx.recv();
-        // One mount dying takes the daemon down: unmount the rest so their serve
-        // loops unblock, then join every thread.
-        self.unmount();
-
-        let mut first_error = None;
-        for thread in threads {
-            match thread.join() {
-                Ok(Ok(())) => {},
-                Ok(Err(error)) => {
-                    if first_error.is_none() {
-                        first_error = Some(error);
-                    }
-                },
-                Err(panic) => {
-                    if first_error.is_none() {
-                        first_error = Some(anyhow::anyhow!("frontend thread panicked: {panic:?}"));
-                    }
-                },
-            }
-        }
-
-        match first_error {
-            Some(error) => Err(error),
-            None => Ok(()),
+    pub(crate) fn serve(&self) {
+        if let Some(rx) = self.stop_rx.lock().expect("stop rx lock").take() {
+            let _ = rx.recv();
         }
     }
 
-    /// The subset of requested frontends currently present in the OS mount table.
-    pub fn serving(&self) -> Vec<FrontendInfo> {
-        self.instances
-            .iter()
-            .filter_map(|instance| instance.serving())
-            .collect()
-    }
-
-    /// Unmount every frontend. Best-effort per frontend; each unblocks its own
-    /// serve loop. Also releases a namespace-only `serve`, which has no frontend
-    /// to unmount.
-    pub fn unmount(&self) {
-        // Release a blocked namespace-only `serve`; the receiver may already be
-        // gone if `serve` returned or was never namespace-only.
+    pub(crate) fn shutdown(&self) {
         let _ = self.stop_tx.send(());
-        for instance in &self.instances {
-            instance.unmount();
-        }
-    }
-
-    /// Invalidate the kernel dentry for a root child across every FUSE frontend
-    /// (NFS has no kernel-notify equivalent here).
-    pub fn invalidate_root_child(&self, name: &str) {
-        for instance in &self.instances {
-            instance.invalidate_root_child(name);
-        }
     }
 }
 
-impl Instance {
-    fn build(frontend: &FrontendMount, context: &DaemonContext) -> Self {
-        match frontend.kind {
-            #[cfg(target_os = "linux")]
-            FrontendKind::Fuse => Self::Fuse(Fuse {
-                mount_point: frontend.mount_point.clone(),
-                notifier: omnifs_fuse::new_notifier_handle(),
-            }),
-            #[cfg(not(target_os = "linux"))]
-            FrontendKind::Fuse => {
-                // `DaemonContext::resolve` rejects the FUSE frontend off Linux, so
-                // it never reaches the registry there.
-                unreachable!("the fuse frontend is only available on Linux")
-            },
-            FrontendKind::Nfs => Self::Nfs(Nfs {
-                mount_point: frontend.mount_point.clone(),
-                options: context.nfs_mount_options(),
-            }),
-        }
-    }
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    /// Block serving this frontend over the shared namespace until it is
-    /// unmounted. Provider teardown is the daemon's job after `serve` returns.
-    fn serve_blocking(&self, namespace: Arc<dyn Namespace>, rt: &Handle) -> anyhow::Result<()> {
-        match self {
-            #[cfg(target_os = "linux")]
-            Instance::Fuse(frontend) => {
-                mount::run_blocking(&frontend.mount_point, namespace, rt, &frontend.notifier)?;
-            },
-            Instance::Nfs(frontend) => {
-                // The in-process daemon frontend is not a restartable unit (its
-                // mount dies with the daemon), so it neither persists filehandles
-                // nor listens for reattach.
-                omnifs_nfs::mount_blocking(
-                    &frontend.mount_point,
-                    namespace,
-                    rt.clone(),
-                    &frontend.options,
-                    None,
-                )?;
-            },
-        }
-        Ok(())
-    }
-
-    fn serving(&self) -> Option<FrontendInfo> {
-        match self {
-            #[cfg(target_os = "linux")]
-            Instance::Fuse(frontend) => proc_mounts::find_mount(&frontend.mount_point)
-                .filter(|mount| mount.device == "omnifs" && mount.fs_type.starts_with("fuse"))
-                .map(|mount| FrontendInfo {
-                    source: mount.device,
-                    fs_type: FsType::Fuse,
-                    mount_point: frontend.mount_point.clone(),
-                    delivery: FrontendDelivery::Native,
-                }),
-            Instance::Nfs(frontend) => frontend.serving(),
-        }
-    }
-
-    /// Unmount this frontend from within the daemon, unblocking its `serve`
-    /// loop. Best-effort: a failure is logged, since `omnifs down` falls back to
-    /// an external sweep.
-    fn unmount(&self) {
-        let result = match self {
-            #[cfg(target_os = "linux")]
-            Instance::Fuse(frontend) => {
-                omnifs_fuse::mount::unmount(&frontend.mount_point).map_err(|e| e.to_string())
-            },
-            Instance::Nfs(frontend) => {
-                omnifs_nfs::unmount(&frontend.mount_point).map_err(|e| e.to_string())
-            },
+    #[test]
+    fn overlapping_reconnect_keeps_one_frontend_until_last_disconnect() {
+        let frontends = Frontends::new(Arc::new(|_| {}));
+        let observer = frontends.attach_observer(FrontendDelivery::Local);
+        let identity = FrontendIdentity {
+            kind: FrontendKind::Nfs,
+            mount_point: PathBuf::from("/omnifs"),
         };
-        if let Err(error) = result {
-            tracing::warn!(%error, "self-unmount failed");
-        }
-    }
 
-    fn invalidate_root_child(&self, name: &str) {
-        match self {
-            #[cfg(target_os = "linux")]
-            Instance::Fuse(frontend) => {
-                omnifs_fuse::invalidate_root_child(&frontend.notifier, name);
-            },
-            Instance::Nfs(_) => {
-                let _ = name;
-            },
-        }
-    }
+        let first = observer.attached(&identity);
+        let second = observer.attached(&identity);
+        assert_eq!(frontends.attached().len(), 1);
 
-    /// A short kind label for the frontend thread name.
-    fn label(&self) -> &'static str {
-        match self {
-            #[cfg(target_os = "linux")]
-            Instance::Fuse(_) => "fuse",
-            Instance::Nfs(_) => "nfs",
-        }
+        observer.detached(first);
+        assert_eq!(frontends.attached().len(), 1);
+
+        observer.detached(second);
+        assert!(frontends.attached().is_empty());
     }
 }

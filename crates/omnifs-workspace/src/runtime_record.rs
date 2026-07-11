@@ -24,13 +24,13 @@ use crate::io::write_atomic;
 /// Schema version this build understands. A record carrying a different version
 /// was written by a build that knows something this one does not, and is
 /// reported rather than silently reinterpreted.
-pub const RUNTIME_RECORD_VERSION: u32 = 1;
+pub const RUNTIME_RECORD_VERSION: u32 = 2;
 
 /// How a client reaches the daemon's control API. The daemon always serves a
 /// Unix domain socket; kept as a named type (rather than a bare path) for the
 /// same reason [`RecordedBackend`] stays an enum: the on-disk schema's `kind`
 /// tag is a stable wire contract, not a Rust-only convenience.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum Endpoint {
     /// Host-native daemon serving a Unix domain socket. Auth is filesystem
@@ -41,24 +41,18 @@ pub enum Endpoint {
 /// The backend serving the daemon, mirroring `omnifs_api::DaemonBackend` but
 /// owned here so the workspace crate does not depend on the control-API crate.
 /// The native variant carries the pid for a liveness-checked sweep.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "backend", rename_all = "lowercase")]
 pub enum RecordedBackend {
     Native { pid: u32 },
 }
 
-/// A bound TCP namespace attach listener: the Docker Desktop path, where a
-/// containerized frontend cannot share this host's Unix socket into the Linux
-/// VM it runs in, so it dials TCP loopback with `token` instead. Bound eagerly
-/// at daemon start (`--attach-tcp`) or later via `POST /v1/frontend/attach-target`;
-/// absent when TCP attach was never requested, matching the other UDS-only
-/// attach transport, which needs no record entry at all (filesystem
-/// permissions are its whole auth story).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AttachRecord {
-    pub addr: String,
-    pub token: String,
+/// One token-authenticated namespace attach target owned by the daemon.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "transport", rename_all = "lowercase", deny_unknown_fields)]
+pub enum AttachRecord {
+    Tcp { addr: String, token: String },
+    Vsock { socket_path: PathBuf, token: String },
 }
 
 /// One serving frontend and where it is mounted.
@@ -67,11 +61,9 @@ pub struct AttachRecord {
 pub struct FrontendRecord {
     pub kind: FrontendKind,
     pub mount_point: PathBuf,
-    /// How this frontend is delivered. Absent for a host-native frontend;
-    /// `Some(Via::Docker)` or `Some(Via::Krunkit)` for a virtualized FUSE
-    /// frontend attached to a host-native daemon's namespace listener.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub via: Option<Via>,
+    /// Listener-assigned delivery mechanism. Entries are live attachments;
+    /// the connecting frontend cannot choose this value.
+    pub via: Via,
 }
 
 /// How a frontend reaches the shared namespace. Distinct from `RecordedBackend`,
@@ -80,9 +72,10 @@ pub struct FrontendRecord {
 /// `Docker` runs a container attached over TCP; `Krunkit` (a libkrun microVM
 /// on macOS, see `docs/contracts/40-frontends.md`) runs the same frontend
 /// binary in a guest attached over vsock.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Via {
+    Local,
     Docker,
     Krunkit,
 }
@@ -94,6 +87,7 @@ impl Via {
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
+            Self::Local => "local",
             Self::Docker => "docker",
             Self::Krunkit => "krunkit",
         }
@@ -102,7 +96,7 @@ impl Via {
 
 /// Frontend protocol, owned here so the record does not depend on the daemon or
 /// API crates.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FrontendKind {
     Fuse,
@@ -124,18 +118,15 @@ pub struct RuntimeRecord {
     pub frontends: Vec<FrontendRecord>,
     /// RFC3339 UTC timestamp of when the daemon started serving.
     pub started_at: String,
-    /// The bound TCP attach listener, if one was ever requested this start.
-    /// Absent (not merely empty) when TCP attach was never bound, so an older
-    /// reader sees no field at all rather than a spurious `null`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub attach: Option<AttachRecord>,
+    /// Token-authenticated TCP and vsock attach targets bound this start.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attach: Vec<AttachRecord>,
 }
 
 impl RuntimeRecord {
     /// Assemble a record stamped with the current schema version and an
-    /// `started_at` of now. `attach` starts absent; a running daemon that later
-    /// binds the TCP attach listener patches it in with a read-modify-write
-    /// (see the daemon's `ensure_attach_tcp`), preserving this `started_at`.
+    /// `started_at` of now. Attach targets start empty and are added by the
+    /// daemon's serialized record owner as listeners bind.
     #[must_use]
     pub fn new(
         endpoint: Endpoint,
@@ -153,7 +144,7 @@ impl RuntimeRecord {
             instance_id,
             frontends,
             started_at,
-            attach: None,
+            attach: Vec::new(),
         }
     }
 
@@ -168,6 +159,28 @@ impl RuntimeRecord {
         write_atomic(path, &json, 0o600)
     }
 
+    /// Replace the target for one transport and keep transport order stable.
+    pub fn set_attach(&mut self, target: AttachRecord) {
+        let transport = std::mem::discriminant(&target);
+        self.attach
+            .retain(|existing| std::mem::discriminant(existing) != transport);
+        self.attach.push(target);
+        self.attach.sort();
+    }
+
+    /// Replace the live frontend snapshot in semantic order without duplicates.
+    pub fn set_frontends(&mut self, mut frontends: Vec<FrontendRecord>) {
+        frontends.sort_by(|left, right| {
+            (left.via, left.kind, &left.mount_point).cmp(&(
+                right.via,
+                right.kind,
+                &right.mount_point,
+            ))
+        });
+        frontends.dedup();
+        self.frontends = frontends;
+    }
+
     /// Read the record at `path`. Returns `Ok(None)` when the file does not
     /// exist (no daemon is running). Returns an error when the file is present
     /// but unreadable, unparseable, or carries a version this build does not
@@ -178,25 +191,32 @@ impl RuntimeRecord {
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error),
         };
-        let record: Self = serde_json::from_slice(&bytes).map_err(|error| {
+        let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("parse runtime record {}: {error}", path.display()),
             )
         })?;
-        if record.version != RUNTIME_RECORD_VERSION {
+        let version = value.get("version").and_then(serde_json::Value::as_u64);
+        if version != Some(u64::from(RUNTIME_RECORD_VERSION)) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
                     "runtime record at {} has version {}; this build understands only version {}. \
                      Run `omnifs down` with the build that started the daemon, or delete {} manually.",
                     path.display(),
-                    record.version,
+                    version.map_or_else(|| "missing".to_string(), |version| version.to_string()),
                     RUNTIME_RECORD_VERSION,
                     path.display(),
                 ),
             ));
         }
+        let record: Self = serde_json::from_value(value).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("parse runtime record {}: {error}", path.display()),
+            )
+        })?;
         Ok(Some(record))
     }
 
@@ -209,28 +229,12 @@ impl RuntimeRecord {
         }
     }
 
-    /// Read the record at `path`, apply `patch`, and write it back atomically,
-    /// preserving every field the closure leaves untouched. Returns `Ok(true)`
-    /// when a record existed and was rewritten, `Ok(false)` when no record was
-    /// present (nothing to patch). The read-modify-write is not serialized
-    /// against a concurrent writer: it is for best-effort field patches (the
-    /// attach binding, the frontend list) that the daemon rewrites wholesale on
-    /// its next restart.
-    pub fn update(path: &Path, edit: impl FnOnce(&mut Self)) -> io::Result<bool> {
-        let Some(mut record) = Self::read(path)? else {
-            return Ok(false);
-        };
-        edit(&mut record);
-        record.write(path)?;
-        Ok(true)
-    }
-
-    /// The mount point of the first serving frontend, if any.
+    /// The mount point of the first local serving frontend, if any.
     #[must_use]
     pub fn mount_point(&self) -> Option<&Path> {
-        self.frontends
-            .first()
-            .map(|frontend| frontend.mount_point.as_path())
+        self.frontends.iter().find_map(|frontend| {
+            (frontend.via == Via::Local).then_some(frontend.mount_point.as_path())
+        })
     }
 
     /// The first separately launched frontend attached to this daemon.
@@ -238,9 +242,7 @@ impl RuntimeRecord {
     #[must_use]
     pub fn virtualized_frontend(&self) -> Option<(Via, &Path)> {
         self.frontends.iter().find_map(|frontend| {
-            frontend
-                .via
-                .map(|via| (via, frontend.mount_point.as_path()))
+            (frontend.via != Via::Local).then_some((frontend.via, frontend.mount_point.as_path()))
         })
     }
 }
@@ -265,7 +267,7 @@ mod tests {
             vec![FrontendRecord {
                 kind: FrontendKind::Nfs,
                 mount_point: PathBuf::from("/home/u/omnifs"),
-                via: None,
+                via: Via::Local,
             }],
         )
     }
@@ -301,7 +303,7 @@ mod tests {
     #[test]
     fn attach_is_absent_by_default_and_not_serialized() {
         let record = sample_native();
-        assert_eq!(record.attach, None);
+        assert!(record.attach.is_empty());
         let json = serde_json::to_value(&record).unwrap();
         assert!(
             json.get("attach").is_none(),
@@ -310,22 +312,34 @@ mod tests {
     }
 
     #[test]
-    fn attach_round_trips_through_disk_when_present() {
+    fn attach_transports_round_trip_together() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(RUNTIME_RECORD_FILE);
         let mut record = sample_native();
-        record.attach = Some(AttachRecord {
-            addr: "127.0.0.1:54321".to_string(),
-            token: "a".repeat(32),
-        });
+        record.attach = vec![
+            AttachRecord::Tcp {
+                addr: "127.0.0.1:54321".to_string(),
+                token: "a".repeat(32),
+            },
+            AttachRecord::Vsock {
+                socket_path: PathBuf::from("/home/u/.omnifs/frontends/vsock-attach.sock"),
+                token: "b".repeat(32),
+            },
+        ];
         record.write(&path).unwrap();
 
         let read = RuntimeRecord::read(&path).unwrap().unwrap();
         assert_eq!(read.attach, record.attach);
 
         let json = serde_json::to_value(&record).unwrap();
-        assert_eq!(json["attach"]["addr"], "127.0.0.1:54321");
-        assert_eq!(json["attach"]["token"], "a".repeat(32));
+        assert_eq!(json["attach"][0]["transport"], "tcp");
+        assert_eq!(json["attach"][0]["addr"], "127.0.0.1:54321");
+        assert_eq!(json["attach"][0]["token"], "a".repeat(32));
+        assert_eq!(json["attach"][1]["transport"], "vsock");
+        assert_eq!(
+            json["attach"][1]["socket_path"],
+            "/home/u/.omnifs/frontends/vsock-attach.sock"
+        );
 
         #[cfg(unix)]
         {
@@ -336,41 +350,74 @@ mod tests {
     }
 
     #[test]
-    fn a_record_written_without_attach_reads_back_as_none() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(RUNTIME_RECORD_FILE);
-        // An older writer's JSON shape: no `attach` key at all.
-        std::fs::write(
-            &path,
-            r#"{"version":1,"endpoint":{"kind":"unix","path":"/x"},"backend":"native","pid":1,"instance_id":"x","frontends":[],"started_at":"2026-07-07T00:00:00Z"}"#,
-        )
-        .unwrap();
-        let read = RuntimeRecord::read(&path).unwrap().unwrap();
-        assert_eq!(read.attach, None);
+    fn record_updates_are_deterministic() {
+        let mut record = sample_native();
+        record.set_attach(AttachRecord::Vsock {
+            socket_path: PathBuf::from("/vsock.sock"),
+            token: "b".repeat(32),
+        });
+        record.set_attach(AttachRecord::Tcp {
+            addr: "127.0.0.1:1".to_string(),
+            token: "a".repeat(32),
+        });
+        record.set_frontends(vec![
+            FrontendRecord {
+                kind: FrontendKind::Fuse,
+                mount_point: PathBuf::from("/guest"),
+                via: Via::Docker,
+            },
+            FrontendRecord {
+                kind: FrontendKind::Nfs,
+                mount_point: PathBuf::from("/local"),
+                via: Via::Local,
+            },
+            FrontendRecord {
+                kind: FrontendKind::Nfs,
+                mount_point: PathBuf::from("/local"),
+                via: Via::Local,
+            },
+        ]);
+
+        assert!(matches!(record.attach[0], AttachRecord::Tcp { .. }));
+        assert!(matches!(record.attach[1], AttachRecord::Vsock { .. }));
+        assert_eq!(record.frontends.len(), 2);
+        assert_eq!(record.frontends[0].via, Via::Local);
+        assert_eq!(record.mount_point(), Some(Path::new("/local")));
     }
 
     #[test]
-    fn frontend_via_docker_round_trips_and_omits_when_absent() {
+    fn a_record_written_without_attach_reads_back_as_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(RUNTIME_RECORD_FILE);
+        // No token-authenticated attach targets were bound.
+        std::fs::write(
+            &path,
+            r#"{"version":2,"endpoint":{"kind":"unix","path":"/x"},"backend":"native","pid":1,"instance_id":"x","frontends":[],"started_at":"2026-07-07T00:00:00Z"}"#,
+        )
+        .unwrap();
+        let read = RuntimeRecord::read(&path).unwrap().unwrap();
+        assert!(read.attach.is_empty());
+    }
+
+    #[test]
+    fn local_and_docker_frontends_round_trip() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(RUNTIME_RECORD_FILE);
         let mut record = sample_native();
         record.frontends.push(FrontendRecord {
             kind: FrontendKind::Fuse,
             mount_point: PathBuf::from("/omnifs"),
-            via: Some(Via::Docker),
+            via: Via::Docker,
         });
         record.write(&path).unwrap();
 
         let read = RuntimeRecord::read(&path).unwrap().unwrap();
-        assert_eq!(read.frontends[1].via, Some(Via::Docker));
-        assert_eq!(read.frontends[0].via, None);
+        assert_eq!(read.frontends[1].via, Via::Docker);
+        assert_eq!(read.frontends[0].via, Via::Local);
 
         let json = serde_json::to_value(&record).unwrap();
         assert_eq!(json["frontends"][1]["via"], "docker");
-        assert!(
-            json["frontends"][0].get("via").is_none(),
-            "an absent via must not serialize as a null field: {json}"
-        );
+        assert_eq!(json["frontends"][0]["via"], "local");
     }
 
     #[test]
@@ -381,12 +428,12 @@ mod tests {
         record.frontends.push(FrontendRecord {
             kind: FrontendKind::Fuse,
             mount_point: PathBuf::from("/omnifs"),
-            via: Some(Via::Krunkit),
+            via: Via::Krunkit,
         });
         record.write(&path).unwrap();
 
         let read = RuntimeRecord::read(&path).unwrap().unwrap();
-        assert_eq!(read.frontends[1].via, Some(Via::Krunkit));
+        assert_eq!(read.frontends[1].via, Via::Krunkit);
 
         let json = serde_json::to_value(&record).unwrap();
         assert_eq!(json["frontends"][1]["via"], "krunkit");
@@ -394,18 +441,18 @@ mod tests {
     }
 
     #[test]
-    fn virtualized_frontend_skips_native_frontends_and_selects_the_first_attachment() {
+    fn virtualized_frontend_skips_local_frontends() {
         let mut record = sample_native();
         record.frontends.extend([
             FrontendRecord {
                 kind: FrontendKind::Fuse,
                 mount_point: PathBuf::from("/docker-omnifs"),
-                via: Some(Via::Docker),
+                via: Via::Docker,
             },
             FrontendRecord {
                 kind: FrontendKind::Fuse,
                 mount_point: PathBuf::from("/krunkit-omnifs"),
-                via: Some(Via::Krunkit),
+                via: Via::Krunkit,
             },
         ]);
 
@@ -413,21 +460,6 @@ mod tests {
             record.virtualized_frontend(),
             Some((Via::Docker, Path::new("/docker-omnifs")))
         );
-    }
-
-    /// An older writer's JSON shape (no `via` key on a frontend entry) must
-    /// still parse, reading back as `None`.
-    #[test]
-    fn frontend_without_via_reads_back_as_none() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(RUNTIME_RECORD_FILE);
-        std::fs::write(
-            &path,
-            r#"{"version":1,"endpoint":{"kind":"unix","path":"/x"},"backend":"native","pid":1,"instance_id":"x","frontends":[{"kind":"fuse","mount_point":"/omnifs"}],"started_at":"2026-07-07T00:00:00Z"}"#,
-        )
-        .unwrap();
-        let read = RuntimeRecord::read(&path).unwrap().unwrap();
-        assert_eq!(read.frontends[0].via, None);
     }
 
     #[test]
@@ -450,40 +482,6 @@ mod tests {
         RuntimeRecord::remove(&path).unwrap();
         sample_native().write(&path).unwrap();
         RuntimeRecord::remove(&path).unwrap();
-        assert!(!path.exists());
-    }
-
-    #[test]
-    fn update_patches_in_place_and_preserves_untouched_fields() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(RUNTIME_RECORD_FILE);
-        let record = sample_native();
-        let started_at = record.started_at.clone();
-        record.write(&path).unwrap();
-
-        let existed = RuntimeRecord::update(&path, |r| {
-            r.attach = Some(AttachRecord {
-                addr: "127.0.0.1:7979".to_string(),
-                token: "cafef00d".to_string(),
-            });
-        })
-        .unwrap();
-        assert!(existed);
-
-        let read = RuntimeRecord::read(&path).unwrap().unwrap();
-        assert_eq!(read.attach.as_ref().unwrap().addr, "127.0.0.1:7979");
-        // fields the closure did not touch survive verbatim.
-        assert_eq!(read.started_at, started_at);
-        assert_eq!(read.instance_id, "b1946ac92492d234");
-    }
-
-    #[test]
-    fn update_on_absent_record_is_a_reported_noop() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(RUNTIME_RECORD_FILE);
-        let existed =
-            RuntimeRecord::update(&path, |_| panic!("must not run on an absent record")).unwrap();
-        assert!(!existed);
         assert!(!path.exists());
     }
 }
