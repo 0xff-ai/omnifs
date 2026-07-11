@@ -659,16 +659,6 @@ mod tests {
         (dir, caches, store)
     }
 
-    // Object keys are raw now (per-mount keyspaces); the mount arg is retained
-    // only to keep call sites readable about which mount they target.
-    fn test_scoped_id(_mount: &str, id: &[u8]) -> Vec<u8> {
-        id.to_vec()
-    }
-
-    fn test_scoped_path(_mount: &str, path: &str) -> Vec<u8> {
-        path.as_bytes().to_vec()
-    }
-
     fn p(path: &str) -> Path {
         Path::parse(path).unwrap()
     }
@@ -690,18 +680,15 @@ mod tests {
             store.current_generation(),
         ));
 
-        let p1 = test_scoped_path("gh", "/issues/open/42/item.json");
-        let p2 = test_scoped_path("gh", "/issues/all/42/item.json");
-        let scoped_id = test_scoped_id("gh", OBJ_ID);
         assert_eq!(
-            store.object.id_of(&p1).as_deref(),
-            Some(scoped_id.as_slice())
+            store.object.id_of(b"/issues/open/42/item.json").as_deref(),
+            Some(OBJ_ID)
         );
         assert_eq!(
-            store.object.id_of(&p2).as_deref(),
-            Some(scoped_id.as_slice())
+            store.object.id_of(b"/issues/all/42/item.json").as_deref(),
+            Some(OBJ_ID)
         );
-        assert!(store.object.get(&scoped_id).unwrap().canonical.is_some());
+        assert!(store.object.get(OBJ_ID).unwrap().canonical.is_some());
         assert!(
             store
                 .cached_canonical_for(&p("/issues/open/42/item.json"))
@@ -731,7 +718,6 @@ mod tests {
         let (_dir, _caches, store) = open_store("m");
         let l1 = p("/p/L1");
         let l2 = p("/p/L2");
-        let scoped_id = test_scoped_id("m", OBJ_ID);
 
         store.put_canonical(OBJ_ID, b"v1".to_vec(), None, std::slice::from_ref(&l1), 0);
 
@@ -740,12 +726,12 @@ mod tests {
 
         assert!(store.put_canonical(OBJ_ID, b"v2".to_vec(), None, std::slice::from_ref(&l2), 0));
 
-        let obj = store.object.get(&scoped_id).unwrap();
+        let obj = store.object.get(OBJ_ID).unwrap();
         assert!(obj.leaves.iter().any(|p| p.ends_with("/p/L1")));
         assert!(obj.leaves.iter().any(|p| p.ends_with("/p/L2")));
         assert_eq!(
-            store.object.id_of(&test_scoped_path("m", &l1)).as_deref(),
-            Some(scoped_id.as_slice())
+            store.object.id_of(l1.as_str().as_bytes()).as_deref(),
+            Some(OBJ_ID)
         );
         assert!(
             store.cache_get(&p(&l1), RecordKind::File, None).is_none(),
@@ -756,7 +742,6 @@ mod tests {
     #[test]
     fn canonical_beats_preload() {
         let (_dir, _caches, store) = open_store("m");
-        let scoped_id = test_scoped_id("m", OBJ_ID);
         let l1 = p("/issues/42/item.json");
         assert!(store.put_canonical(
             OBJ_ID,
@@ -767,7 +752,7 @@ mod tests {
         ));
         assert!(store.put_index_only(OBJ_ID, &[p("/issues/42/title")], 0));
 
-        let got = store.object.get(&scoped_id).unwrap();
+        let got = store.object.get(OBJ_ID).unwrap();
         assert!(got.canonical.is_some());
         assert_eq!(got.canonical.as_ref().unwrap().bytes, b"data");
     }
@@ -775,7 +760,6 @@ mod tests {
     #[test]
     fn capacity_evict_keeps_index_drops_validator() {
         let (_dir, _caches, store) = open_store("m");
-        let scoped_id = test_scoped_id("m", OBJ_ID);
         let leaf = p("/a/leaf");
         store.put_canonical(
             OBJ_ID,
@@ -785,20 +769,19 @@ mod tests {
             0,
         );
 
-        store.object.capacity_evict(&scoped_id, |_| {});
+        store.object.capacity_evict(OBJ_ID, |_| {});
 
-        let got = store.object.get(&scoped_id).unwrap();
+        let got = store.object.get(OBJ_ID).unwrap();
         assert!(got.canonical.is_none());
         assert_eq!(
-            store.object.id_of(&test_scoped_path("m", &leaf)).as_deref(),
-            Some(scoped_id.as_slice())
+            store.object.id_of(leaf.as_str().as_bytes()).as_deref(),
+            Some(OBJ_ID)
         );
     }
 
     #[test]
     fn delete_object_removes_index() {
         let (_dir, _caches, store) = open_store("m");
-        let scoped_id = test_scoped_id("m", OBJ_ID);
         let leaf = p("/issues/42/item.json");
         store.put_canonical(
             OBJ_ID,
@@ -811,15 +794,14 @@ mod tests {
 
         store.delete_object(OBJ_ID);
 
-        assert!(store.object.get(&scoped_id).is_none());
-        assert!(store.object.id_of(&test_scoped_path("m", &leaf)).is_none());
+        assert!(store.object.get(OBJ_ID).is_none());
+        assert!(store.object.id_of(leaf.as_str().as_bytes()).is_none());
         assert!(store.negative_for(&p(&leaf), 1_000).is_none());
     }
 
     #[test]
     fn delete_listing_keeps_canonicals() {
         let (_dir, _caches, store) = open_store("m");
-        let scoped_id = test_scoped_id("m", OBJ_ID);
         let leaf = p("/dir/child.json");
         store.put_canonical(
             OBJ_ID,
@@ -838,10 +820,10 @@ mod tests {
 
         store.delete_listing_prefix(&p("/dir"));
 
-        assert!(store.object.get(&scoped_id).unwrap().canonical.is_some());
+        assert!(store.object.get(OBJ_ID).unwrap().canonical.is_some());
         assert_eq!(
-            store.object.id_of(&test_scoped_path("m", &leaf)).as_deref(),
-            Some(scoped_id.as_slice())
+            store.object.id_of(leaf.as_str().as_bytes()).as_deref(),
+            Some(OBJ_ID)
         );
         assert!(
             store
