@@ -261,13 +261,6 @@ impl TestOpExt for TestOp<'_> {
     }
 }
 
-/// Stable on-disk wasm artifact cache shared across test processes. nextest
-/// runs a process per test, so without a fixed directory every process would
-/// recompile providers from scratch; a workspace-local dir keeps them warm.
-fn itest_wasm_cache_dir() -> PathBuf {
-    workspace_root().join("target").join("wasm-cache")
-}
-
 /// Borrow the inline payload of a `ReadFileResult`, panicking if the
 /// terminal returned a blob-backed file. Tests that intentionally
 /// exercise the blob path must match on the variant directly.
@@ -350,8 +343,11 @@ pub fn make_engine() -> wasmtime::Engine {
     static ENGINE: OnceLock<wasmtime::Engine> = OnceLock::new();
     ENGINE
         .get_or_init(|| {
-            omnifs_engine::test_support::component_engine(Some(&itest_wasm_cache_dir()), |_| {})
-                .expect("build provider engine")
+            omnifs_engine::test_support::component_engine(
+                Some(&omnifs_engine::test_support::wasm_cache_dir()),
+                |_| {},
+            )
+            .expect("build provider engine")
         })
         .clone()
 }

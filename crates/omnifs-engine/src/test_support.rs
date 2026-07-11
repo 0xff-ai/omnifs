@@ -1,6 +1,7 @@
 //! Test harness surface for provider and engine integration tests.
 
 use std::fmt;
+use std::path::PathBuf;
 use std::sync::mpsc;
 
 use crate::Runtime;
@@ -22,6 +23,22 @@ pub use crate::ops::op::Op;
 pub use crate::runtime::wasm::component_engine;
 pub use crate::tree::{PaginationControl, Synthetic, SyntheticContent, probe_live_growth};
 pub use crate::{Cursor, Engine, EngineError, GitCloner, HostContext};
+
+/// Stable compiled-component cache shared by test processes.
+///
+/// Runtime data remains in each fixture's temporary cache directory. Only
+/// Wasmtime's content-addressed compilation artifacts are shared here.
+#[must_use]
+pub fn wasm_cache_dir() -> PathBuf {
+    std::env::var_os("CARGO_TARGET_DIR").map_or_else(
+        || {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join("target/wasm-cache")
+        },
+        |target_dir| PathBuf::from(target_dir).join("wasm-cache"),
+    )
+}
 
 pub mod auth {
     pub use crate::auth::AuthManager;

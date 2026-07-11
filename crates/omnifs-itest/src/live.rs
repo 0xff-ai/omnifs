@@ -60,18 +60,38 @@ pub fn platform_can_mount() -> bool {
 
 /// Resolve the `omnifs` binary the live lanes spawn.
 ///
-/// `omnifs-itest` does not depend on `omnifs-cli`, so `CARGO_BIN_EXE_omnifs` is
-/// not available here. Resolve as `OMNIFS_BIN` if set (CI hands the packaged
-/// binary that way and installs no wasm toolchain on the test runner), else
-/// build it once per process from the workspace root and use the default debug
-/// artifact.
+/// CI can supply a packaged binary through `OMNIFS_BIN`. Local nextest runs
+/// use the non-test binary nextest already built. Standalone libtest runs fall
+/// back to building the workspace binary once per process.
 #[must_use]
 pub fn omnifs_bin() -> PathBuf {
     if let Some(path) = std::env::var_os("OMNIFS_BIN") {
         return PathBuf::from(path);
     }
+    if let Some(path) = std::env::var_os("NEXTEST_BIN_EXE_omnifs") {
+        return PathBuf::from(path);
+    }
+    if let Some(path) = nextest_workspace_binary("omnifs") {
+        return path;
+    }
     ensure_omnifs_built();
     crate::workspace_root().join("target/debug/omnifs")
+}
+
+/// Resolve a workspace binary that nextest built for another package.
+///
+/// Nextest only exports `NEXTEST_BIN_EXE_*` to integration tests belonging to
+/// the binary's own package. A workspace run still builds these non-test
+/// binaries in the target directory before any test starts.
+fn nextest_workspace_binary(name: &str) -> Option<PathBuf> {
+    std::env::var_os("NEXTEST").and_then(|_| {
+        let target_dir = std::env::var_os("CARGO_TARGET_DIR")
+            .map_or_else(|| crate::workspace_root().join("target"), PathBuf::from);
+        let path = target_dir
+            .join("debug")
+            .join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+        path.is_file().then_some(path)
+    })
 }
 
 /// Build the `omnifs` CLI once per process at test runtime.
@@ -102,6 +122,15 @@ pub fn nfs_runner_bin() -> PathBuf {
     if let Some(path) = std::env::var_os("OMNIFS_NFS_BIN") {
         return PathBuf::from(path);
     }
+    if let Some(path) = std::env::var_os("NEXTEST_BIN_EXE_omnifs-nfs") {
+        return PathBuf::from(path);
+    }
+    if let Some(path) = std::env::var_os("NEXTEST_BIN_EXE_omnifs_nfs") {
+        return PathBuf::from(path);
+    }
+    if let Some(path) = nextest_workspace_binary("omnifs-nfs") {
+        return path;
+    }
     ensure_nfs_runner_built();
     crate::workspace_root().join("target/debug/omnifs-nfs")
 }
@@ -111,6 +140,15 @@ pub fn nfs_runner_bin() -> PathBuf {
 pub fn fuse_runner_bin() -> PathBuf {
     if let Some(path) = std::env::var_os("OMNIFS_FUSE_BIN") {
         return PathBuf::from(path);
+    }
+    if let Some(path) = std::env::var_os("NEXTEST_BIN_EXE_omnifs-fuse") {
+        return PathBuf::from(path);
+    }
+    if let Some(path) = std::env::var_os("NEXTEST_BIN_EXE_omnifs_fuse") {
+        return PathBuf::from(path);
+    }
+    if let Some(path) = nextest_workspace_binary("omnifs-fuse") {
+        return path;
     }
     ensure_fuse_runner_built();
     crate::workspace_root().join("target/debug/omnifs-fuse")

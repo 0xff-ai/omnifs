@@ -60,6 +60,7 @@ const RECENT_REVALIDATE_OBJECTS: usize = 32;
 #[derive(Clone, Debug)]
 pub struct HostContext {
     cache_dir: PathBuf,
+    wasm_cache_dir: PathBuf,
     config_dir: PathBuf,
     providers_dir: PathBuf,
     credentials_file: PathBuf,
@@ -72,12 +73,25 @@ impl HostContext {
         providers_dir: impl AsRef<StdPath>,
         credentials_file: impl AsRef<StdPath>,
     ) -> Self {
+        let cache_dir = cache_dir.as_ref().to_path_buf();
         Self {
-            cache_dir: cache_dir.as_ref().to_path_buf(),
+            wasm_cache_dir: omnifs_workspace::layout::wasm_cache_dir(&cache_dir),
+            cache_dir,
             config_dir: config_dir.as_ref().to_path_buf(),
             providers_dir: providers_dir.as_ref().to_path_buf(),
             credentials_file: credentials_file.as_ref().to_path_buf(),
         }
+    }
+
+    /// Store compiled provider components separately from runtime cache data.
+    ///
+    /// Production hosts use the default path under [`Self::cache_dir`]. Test
+    /// harnesses can share compiled artifacts across otherwise-hermetic cache
+    /// directories so each test process does not compile the same component.
+    #[must_use]
+    pub fn with_wasm_cache_dir(mut self, wasm_cache_dir: impl AsRef<StdPath>) -> Self {
+        self.wasm_cache_dir = wasm_cache_dir.as_ref().to_path_buf();
+        self
     }
 
     pub fn cache_dir(&self) -> &StdPath {
@@ -101,8 +115,8 @@ impl HostContext {
             .join(omnifs_workspace::layout::MOUNTS_SUBDIR)
     }
 
-    pub(crate) fn wasm_cache_dir(&self) -> PathBuf {
-        omnifs_workspace::layout::wasm_cache_dir(&self.cache_dir)
+    pub(crate) fn wasm_cache_dir(&self) -> &StdPath {
+        &self.wasm_cache_dir
     }
 
     /// `<hex>.wasm` for a pinned provider id: the serving path the

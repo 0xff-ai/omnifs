@@ -55,7 +55,7 @@ impl MountRuntimes {
         // Compiled component artifacts live with the rest of the host's state,
         // under `<cache>/wasm`, rather than a global per-user wasmtime cache.
         let wasm_cache = context.wasm_cache_dir();
-        let engine = component_engine(Some(&wasm_cache), |_| {})
+        let engine = component_engine(Some(wasm_cache), |_| {})
             .map_err(|e| RegistryError::RuntimeError(format!("provider engine init: {e}")))?;
 
         // Global cache handles: a durable object database and a disposable view
@@ -1120,7 +1120,8 @@ mod tests {
                     &paths.config_dir,
                     providers_dir.path(),
                     &paths.credentials_file,
-                ),
+                )
+                .with_wasm_cache_dir(crate::test_support::wasm_cache_dir()),
                 cloner,
             )
             .expect("registry init"),
@@ -1181,7 +1182,8 @@ mod tests {
                     &paths.config_dir,
                     providers_dir.path(),
                     &paths.credentials_file,
-                ),
+                )
+                .with_wasm_cache_dir(crate::test_support::wasm_cache_dir()),
                 cloner,
             )
             .expect("registry init"),
@@ -1252,7 +1254,8 @@ mod tests {
                     &paths.config_dir,
                     providers_dir.path(),
                     &paths.credentials_file,
-                ),
+                )
+                .with_wasm_cache_dir(crate::test_support::wasm_cache_dir()),
                 cloner,
             )
             .expect("registry init"),
@@ -1310,7 +1313,8 @@ mod tests {
             }),
         );
 
-        let engine = crate::component_engine(None, |_| {}).expect("engine");
+        let engine = crate::component_engine(Some(&crate::test_support::wasm_cache_dir()), |_| {})
+            .expect("engine");
         let cloner = Arc::new(GitCloner::new(cache_dir.path().join("clones")));
         let caches = Caches::open(cache_dir.path()).expect("cache open");
         let context = HostContext::new(
@@ -1345,7 +1349,8 @@ mod tests {
                 &timer_paths.config_dir,
                 timer_providers_dir.path(),
                 &timer_paths.credentials_file,
-            ),
+            )
+            .with_wasm_cache_dir(crate::test_support::wasm_cache_dir()),
             Arc::new(GitCloner::new(timer_cache_dir.path().join("clones"))),
         )
         .expect("timer registry");
@@ -1439,7 +1444,8 @@ mod tests {
                     &paths.config_dir,
                     providers_dir.path(),
                     &paths.credentials_file,
-                ),
+                )
+                .with_wasm_cache_dir(crate::test_support::wasm_cache_dir()),
                 cloner,
             )
             .expect("registry init"),
@@ -1689,7 +1695,8 @@ mod tests {
                     &paths.config_dir,
                     providers_dir.path(),
                     &paths.credentials_file,
-                ),
+                )
+                .with_wasm_cache_dir(crate::test_support::wasm_cache_dir()),
                 Arc::new(GitCloner::new(cache_dir.path().join("clones"))),
             )
             .expect("registry init"),
