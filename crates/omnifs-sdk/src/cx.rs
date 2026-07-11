@@ -43,9 +43,8 @@ impl<S> Clone for Cx<S> {
 /// [`Cx`] shares the same operation identity (see [`Cx::erase_state`]).
 struct CxShared {
     id: u64,
-    /// The host-pushed validator for this path's anchor, if held (ADR-0001
-    /// §5.2). Set by host glue via [`Cx::with_version`]; read by handlers
-    /// through [`Cx::version`].
+    /// The host-pushed validator for this path's anchor, if held. Set by host
+    /// glue via [`Cx::with_version`]; read by handlers through [`Cx::version`].
     version: Option<crate::file_attrs::VersionToken>,
 }
 
@@ -85,8 +84,8 @@ impl<S> Cx<S> {
         }
     }
 
-    /// The host-pushed validator for this path's anchor, if held (ADR-0001
-    /// §5.2). A handler maps it to `If-None-Match` through
+    /// The host-pushed validator for this path's anchor, if held. A handler
+    /// maps it to `If-None-Match` through
     /// [`crate::endpoint::RequestBuilder::maybe_if_none_match`].
     pub fn version(&self) -> Option<&crate::file_attrs::VersionToken> {
         self.shared.version.as_ref()

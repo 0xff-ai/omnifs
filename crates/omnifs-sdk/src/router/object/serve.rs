@@ -304,7 +304,7 @@ where
     }
 
     /// Lower the typed [`crate::object::Preloads`] from a fresh load onto the
-    /// effects channel (R5):
+    /// effects channel:
     ///
     /// - `objects` (same-type siblings): store the sibling canonical against
     ///   its own anchor id, with view leaves computed from THIS object's
@@ -324,8 +324,8 @@ where
         let (objects, files) = preloads.into_parts();
 
         // A preloaded sibling resolves on lookup, but it must also appear in its
-        // parent directory's listing so `ls` of the fetched range shows it (the
-        // SDK derives the directory effect from the preload path; spec Part 5).
+        // parent directory's listing so `ls` of the fetched range shows it. The
+        // SDK derives the directory effect from the preload path.
         let mut parent_dirs: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
 
         for sibling in objects {

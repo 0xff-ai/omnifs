@@ -1,16 +1,7 @@
-//! Source locations and generated bindings for omnifs WIT packages.
-
-use std::path::Path;
-
-const PROVIDER_WORLD_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/wit");
+//! Generated bindings and package identity for the omnifs WIT contract.
 
 /// Package declaration from `wit/provider.wit`.
 pub const PROVIDER_WIT_PACKAGE: &str = "package omnifs:provider@0.4.0;";
-
-/// Return the directory containing the `omnifs:provider` WIT package.
-pub fn provider_world_path() -> &'static Path {
-    Path::new(PROVIDER_WORLD_DIR)
-}
 
 #[cfg(test)]
 mod tests {

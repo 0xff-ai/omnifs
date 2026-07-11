@@ -32,6 +32,28 @@ pub struct ProviderArgs {
     timer: Option<TimerSpec>,
 }
 
+impl ProviderArgs {
+    fn requested_capabilities_tokens(&self) -> TokenStream2 {
+        let git = self
+            .capabilities
+            .iter()
+            .any(|need| matches!(need, omnifs_caps::AccessNeed::GitRepo { .. }));
+        let refresh = if let Some(timer) = &self.timer {
+            let interval = &timer.interval;
+            quote! { (#interval).as_secs() as u32 }
+        } else {
+            quote! { 0u32 }
+        };
+        quote! {
+            omnifs_sdk::prelude::RequestedCapabilities {
+                needs_git: #git,
+                refresh_interval_secs: #refresh,
+                ..omnifs_sdk::prelude::RequestedCapabilities::empty()
+            }
+        }
+    }
+}
+
 impl Parse for ProviderArgs {
     fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
         let mut args = Self {
@@ -327,77 +349,81 @@ struct ClassifiedImpl {
     methods: Vec<ImplItemFn>,
 }
 
+impl ClassifiedImpl {
+    fn classify(items: Vec<ImplItem>) -> syn::Result<Self> {
+        let mut start_spec = None;
+        let mut methods = Vec::new();
+
+        for item in items {
+            match item {
+                ImplItem::Fn(func) => {
+                    if func.sig.ident == "start" {
+                        start_spec = Some(StartSpec::classify(&func)?);
+                    }
+                    methods.push(func);
+                },
+                other => {
+                    return Err(syn::Error::new(
+                        other.span(),
+                        "unsupported item in #[provider] impl; expected methods only",
+                    ));
+                },
+            }
+        }
+
+        let Some(start_spec) = start_spec else {
+            return Err(syn::Error::new(
+                proc_macro2::Span::call_site(),
+                "missing required `fn start(..)`",
+            ));
+        };
+
+        Ok(Self {
+            config_type: start_spec
+                .config_type
+                .unwrap_or_else(|| parse_quote!(omnifs_sdk::NoConfig)),
+            state_type: start_spec.state_type.unwrap_or_else(|| parse_quote!(())),
+            start_kind: start_spec.kind,
+            methods,
+        })
+    }
+}
+
 struct StartSpec {
     kind: StartKind,
     config_type: Option<Type>,
     state_type: Option<Type>,
 }
 
+impl StartSpec {
+    fn classify(func: &ImplItemFn) -> syn::Result<Self> {
+        let mut inputs = func.sig.inputs.iter().filter_map(|arg| match arg {
+            FnArg::Typed(input) => Some(input),
+            FnArg::Receiver(_) => None,
+        });
+        match (inputs.next(), inputs.next(), inputs.next()) {
+            (Some(router), None, None) => Ok(Self {
+                kind: StartKind::RouterOnly,
+                config_type: None,
+                state_type: router_state_type(router.ty.as_ref()),
+            }),
+            (Some(config), Some(router), None) => Ok(Self {
+                kind: StartKind::ConfigAndRouter,
+                config_type: Some(config.ty.as_ref().clone()),
+                state_type: router_state_type(router.ty.as_ref()),
+            }),
+            _ => Err(syn::Error::new(
+                func.sig.span(),
+                "`start` must be `fn start(r: &mut Router<..>) -> Result<..>` or `fn start(config, r: &mut Router<..>) -> Result<..>`",
+            )),
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum StartKind {
     ConfigAndRouter,
     RouterOnly,
-}
-
-fn classify_impl(items: Vec<ImplItem>) -> syn::Result<ClassifiedImpl> {
-    let mut start_spec = None;
-    let mut methods = Vec::new();
-
-    for item in items {
-        match item {
-            ImplItem::Fn(func) => {
-                if func.sig.ident == "start" {
-                    start_spec = Some(classify_start(&func)?);
-                }
-                methods.push(func);
-            },
-            other => {
-                return Err(syn::Error::new(
-                    other.span(),
-                    "unsupported item in #[provider] impl; expected methods only",
-                ));
-            },
-        }
-    }
-
-    let Some(start_spec) = start_spec else {
-        return Err(syn::Error::new(
-            proc_macro2::Span::call_site(),
-            "missing required `fn start(..)`",
-        ));
-    };
-
-    Ok(ClassifiedImpl {
-        config_type: start_spec
-            .config_type
-            .unwrap_or_else(|| parse_quote!(omnifs_sdk::NoConfig)),
-        state_type: start_spec.state_type.unwrap_or_else(|| parse_quote!(())),
-        start_kind: start_spec.kind,
-        methods,
-    })
-}
-
-fn classify_start(func: &ImplItemFn) -> syn::Result<StartSpec> {
-    let mut inputs = func.sig.inputs.iter().filter_map(|arg| match arg {
-        FnArg::Typed(input) => Some(input),
-        FnArg::Receiver(_) => None,
-    });
-    match (inputs.next(), inputs.next(), inputs.next()) {
-        (Some(router), None, None) => Ok(StartSpec {
-            kind: StartKind::RouterOnly,
-            config_type: None,
-            state_type: router_state_type(router.ty.as_ref()),
-        }),
-        (Some(config), Some(router), None) => Ok(StartSpec {
-            kind: StartKind::ConfigAndRouter,
-            config_type: Some(config.ty.as_ref().clone()),
-            state_type: router_state_type(router.ty.as_ref()),
-        }),
-        _ => Err(syn::Error::new(
-            func.sig.span(),
-            "`start` must be `fn start(r: &mut Router<..>) -> Result<..>` or `fn start(config, r: &mut Router<..>) -> Result<..>`",
-        )),
-    }
 }
 
 fn router_state_type(ty: &Type) -> Option<Type> {
@@ -427,112 +453,94 @@ struct ManifestFacts {
     version: Option<String>,
 }
 
-/// Build the manifest base from `#[provider(..)]` annotations.
-fn build_manifest_facts_from_args(args: &ProviderArgs) -> syn::Result<ManifestFacts> {
-    let id = args
-        .id
-        .as_ref()
-        .expect("caller checks `id` is present")
-        .value();
-    let display_name = args
-        .display_name
-        .as_ref()
-        .map_or_else(|| id.clone(), syn::LitStr::value);
-    let default_mount = args
-        .mount
-        .as_ref()
-        .map_or_else(|| id.clone(), syn::LitStr::value);
-    let pkg_name = std::env::var("CARGO_PKG_NAME").map_err(|error| {
-        syn::Error::new(
-            Span::call_site(),
-            format!("CARGO_PKG_NAME is not set: {error}"),
-        )
-    })?;
+impl ManifestFacts {
+    /// Build the manifest base from `#[provider(..)]` annotations.
+    fn from_args(args: &ProviderArgs) -> syn::Result<Self> {
+        let id = args
+            .id
+            .as_ref()
+            .expect("caller checks `id` is present")
+            .value();
+        let display_name = args
+            .display_name
+            .as_ref()
+            .map_or_else(|| id.clone(), syn::LitStr::value);
+        let default_mount = args
+            .mount
+            .as_ref()
+            .map_or_else(|| id.clone(), syn::LitStr::value);
+        let pkg_name = std::env::var("CARGO_PKG_NAME").map_err(|error| {
+            syn::Error::new(
+                Span::call_site(),
+                format!("CARGO_PKG_NAME is not set: {error}"),
+            )
+        })?;
 
-    Ok(ManifestFacts {
-        name: id,
-        display_name,
-        description: args.description.as_ref().map(syn::LitStr::value),
-        default_mount,
-        provider_file: format!("{}.wasm", pkg_name.replace('-', "_")),
-        version: std::env::var("CARGO_PKG_VERSION").ok(),
-    })
-}
+        Ok(Self {
+            name: id,
+            display_name,
+            description: args.description.as_ref().map(syn::LitStr::value),
+            default_mount,
+            provider_file: format!("{}.wasm", pkg_name.replace('-', "_")),
+            version: std::env::var("CARGO_PKG_VERSION").ok(),
+        })
+    }
 
-fn provider_info_tokens(manifest: &ManifestFacts) -> TokenStream2 {
-    let name = &manifest.name;
-    let display_name = &manifest.display_name;
-    quote! {
-        omnifs_sdk::prelude::ProviderInfo {
-            name: #name.to_string(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
-            description: #display_name.to_string(),
+    fn provider_info_tokens(&self) -> TokenStream2 {
+        let name = &self.name;
+        let display_name = &self.display_name;
+        quote! {
+            omnifs_sdk::prelude::ProviderInfo {
+                name: #name.to_string(),
+                version: env!("CARGO_PKG_VERSION").to_string(),
+                description: #display_name.to_string(),
+            }
         }
     }
-}
 
-fn requested_capabilities_tokens(args: &ProviderArgs) -> TokenStream2 {
-    let git = args
-        .capabilities
-        .iter()
-        .any(|need| matches!(need, omnifs_caps::AccessNeed::GitRepo { .. }));
-    let refresh = if let Some(timer) = &args.timer {
-        let interval = &timer.interval;
-        quote! { (#interval).as_secs() as u32 }
-    } else {
-        quote! { 0u32 }
-    };
-    quote! {
-        omnifs_sdk::prelude::RequestedCapabilities {
-            needs_git: #git,
-            refresh_interval_secs: #refresh,
-            ..omnifs_sdk::prelude::RequestedCapabilities::empty()
-        }
-    }
-}
-
-fn metadata_tokens(
-    manifest: &ManifestFacts,
-    config_type: &Type,
-    capabilities: &[omnifs_caps::AccessNeed],
-    limits: &omnifs_caps::LimitDeclarations,
-    auth: Option<&syn::Expr>,
-) -> TokenStream2 {
-    let id = LitStr::new(&manifest.name, Span::call_site());
-    let display_name = LitStr::new(&manifest.display_name, Span::call_site());
-    let description = manifest.description.as_ref().map_or_else(
-        || quote! { None },
-        |description| {
-            let description = LitStr::new(description, Span::call_site());
-            quote! { Some(#description.to_string()) }
-        },
-    );
-    let provider_file = LitStr::new(&manifest.provider_file, Span::call_site());
-    let default_mount = LitStr::new(&manifest.default_mount, Span::call_site());
-    let version = manifest.version.as_ref().map_or_else(
-        || quote! { None },
-        |version| {
-            let version = LitStr::new(version, Span::call_site());
-            quote! { Some(#version.to_string()) }
-        },
-    );
-    let capability_entries = capabilities.iter().map(capability_tokens);
-    let limits = limit_declarations_tokens(limits);
-    let auth = auth.map_or_else(|| quote! { None }, |auth| quote! { Some(#auth) });
-    quote! {
-        omnifs_sdk::ProviderManifest {
-            id: #id.to_string(),
-            display_name: #display_name.to_string(),
-            description: #description,
-            provider: #provider_file.to_string(),
-            default_mount: #default_mount.to_string(),
-            version: #version,
-            wit_package: Some(omnifs_sdk::PROVIDER_WIT_PACKAGE.to_string()),
-            sdk_version: Some(omnifs_sdk::SDK_VERSION.to_string()),
-            capabilities: ::std::vec![#(#capability_entries),*],
-            limits: #limits,
-            auth: #auth,
-            config: <#config_type as omnifs_sdk::ProvidesConfigMetadata>::metadata(),
+    fn metadata_tokens(
+        &self,
+        config_type: &Type,
+        capabilities: &[omnifs_caps::AccessNeed],
+        limits: &omnifs_caps::LimitDeclarations,
+        auth: Option<&syn::Expr>,
+    ) -> TokenStream2 {
+        let id = LitStr::new(&self.name, Span::call_site());
+        let display_name = LitStr::new(&self.display_name, Span::call_site());
+        let description = self.description.as_ref().map_or_else(
+            || quote! { None },
+            |description| {
+                let description = LitStr::new(description, Span::call_site());
+                quote! { Some(#description.to_string()) }
+            },
+        );
+        let provider_file = LitStr::new(&self.provider_file, Span::call_site());
+        let default_mount = LitStr::new(&self.default_mount, Span::call_site());
+        let version = self.version.as_ref().map_or_else(
+            || quote! { None },
+            |version| {
+                let version = LitStr::new(version, Span::call_site());
+                quote! { Some(#version.to_string()) }
+            },
+        );
+        let capability_entries = capabilities.iter().map(capability_tokens);
+        let limits = limit_declarations_tokens(limits);
+        let auth = auth.map_or_else(|| quote! { None }, |auth| quote! { Some(#auth) });
+        quote! {
+            omnifs_sdk::ProviderManifest {
+                id: #id.to_string(),
+                display_name: #display_name.to_string(),
+                description: #description,
+                provider: #provider_file.to_string(),
+                default_mount: #default_mount.to_string(),
+                version: #version,
+                wit_package: Some(omnifs_sdk::PROVIDER_WIT_PACKAGE.to_string()),
+                sdk_version: Some(omnifs_sdk::SDK_VERSION.to_string()),
+                capabilities: ::std::vec![#(#capability_entries),*],
+                limits: #limits,
+                auth: #auth,
+                config: <#config_type as omnifs_sdk::ProvidesConfigMetadata>::metadata(),
+            }
         }
     }
 }
@@ -947,7 +955,7 @@ pub(crate) fn provider_impl(args: &ProviderArgs, input: ItemImpl) -> syn::Result
     }
     .ok_or_else(|| syn::Error::new(input.self_ty.span(), "expected a named type"))?;
 
-    let classified = classify_impl(input.items)?;
+    let classified = ClassifiedImpl::classify(input.items)?;
     let config_type = &classified.config_type;
     let state_type = &classified.state_type;
     let start_kind = classified.start_kind;
@@ -959,11 +967,10 @@ pub(crate) fn provider_impl(args: &ProviderArgs, input: ItemImpl) -> syn::Result
             "provider needs an `id = \"...\"` annotation",
         ));
     }
-    let manifest = build_manifest_facts_from_args(args)?;
-    let info_tokens = provider_info_tokens(&manifest);
-    let caps_tokens = requested_capabilities_tokens(args);
-    let metadata = metadata_tokens(
-        &manifest,
+    let manifest = ManifestFacts::from_args(args)?;
+    let info_tokens = manifest.provider_info_tokens();
+    let caps_tokens = args.requested_capabilities_tokens();
+    let metadata = manifest.metadata_tokens(
         config_type,
         &args.capabilities,
         &args.limits,

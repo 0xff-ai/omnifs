@@ -731,10 +731,7 @@ impl<'a, O: Object> DirFace<'a, O> {
                     let cx = (*dir_cx).clone();
                     let list_cx = crate::collection::ListCx::new(cx, cursor);
                     let collection = method(key, list_cx).await?;
-                    crate::collection::collection_to_dir_projection::<C, Cur>(
-                        &child_view,
-                        collection,
-                    )
+                    collection.into_dir_projection(&child_view)
                 }) as DirProjectionFuture
             },
         );

@@ -1,4 +1,4 @@
-//! Typed outbound endpoints (ADR-0001 §10).
+//! Typed outbound endpoints.
 //!
 //! A provider declares each upstream host once with `#[derive(Endpoint)]` and
 //! reaches it through [`Cx::endpoint`]. The returned [`EndpointHandle`] builds

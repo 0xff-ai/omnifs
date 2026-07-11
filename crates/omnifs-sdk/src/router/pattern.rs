@@ -368,7 +368,7 @@ impl Pattern {
         self.segments
             .iter()
             .take(self.segments.len().saturating_sub(1))
-            .map(segment_signature)
+            .map(PatternSegment::signature)
             .collect::<Vec<_>>()
             .join("/")
     }
@@ -475,7 +475,7 @@ impl Pattern {
                         .iter()
                         .take(self.fixed_prefix_len())
                         .zip(other.segments.iter().take(other.fixed_prefix_len()))
-                        .all(|(left, right)| segments_overlap(left, right))
+                        .all(|(left, right)| left.overlaps(right))
             },
             (true, false) | (false, true) => false,
             (false, false) => {
@@ -485,7 +485,7 @@ impl Pattern {
                         .segments
                         .iter()
                         .zip(other.segments.iter())
-                        .all(|(left, right)| segments_overlap(left, right))
+                        .all(|(left, right)| left.overlaps(right))
             },
         }
     }
@@ -564,6 +564,55 @@ impl PatternSegment {
             Self::Rest { name } => format!("{{*{name}}}"),
         }
     }
+
+    fn signature(&self) -> String {
+        match self {
+            Self::Literal(value) => format!("l:{value}"),
+            Self::Capture {
+                prefix: Some(prefix),
+                ..
+            } => format!("p:{prefix}"),
+            Self::Capture { prefix: None, .. } => "c".to_string(),
+            Self::Rest { .. } => "r".to_string(),
+        }
+    }
+
+    fn overlaps(&self, other: &Self) -> bool {
+        if matches!(self, Self::Rest { .. }) || matches!(other, Self::Rest { .. }) {
+            return true;
+        }
+        match (self, other) {
+            (Self::Literal(left), Self::Literal(right)) => left == right,
+            (Self::Literal(_) | Self::Capture { .. }, Self::Capture { prefix: None, .. })
+            | (Self::Capture { prefix: None, .. }, Self::Literal(_) | Self::Capture { .. }) => true,
+            (
+                Self::Literal(literal),
+                Self::Capture {
+                    prefix: Some(prefix),
+                    ..
+                },
+            )
+            | (
+                Self::Capture {
+                    prefix: Some(prefix),
+                    ..
+                },
+                Self::Literal(literal),
+            ) => literal
+                .strip_prefix(prefix)
+                .is_some_and(|rest| !rest.is_empty()),
+            (
+                Self::Capture {
+                    prefix: Some(left), ..
+                },
+                Self::Capture {
+                    prefix: Some(right),
+                    ..
+                },
+            ) => left.starts_with(right) || right.starts_with(left),
+            (Self::Rest { .. }, _) | (_, Self::Rest { .. }) => unreachable!(),
+        }
+    }
 }
 
 fn validate_capture_name(name: &str) -> core::result::Result<(), PatternError> {
@@ -582,61 +631,6 @@ fn validate_capture_name(name: &str) -> core::result::Result<(), PatternError> {
         Err(PatternError::InvalidCaptureName {
             name: name.to_string(),
         })
-    }
-}
-
-fn segment_signature(segment: &PatternSegment) -> String {
-    match segment {
-        PatternSegment::Literal(value) => format!("l:{value}"),
-        PatternSegment::Capture {
-            prefix: Some(prefix),
-            ..
-        } => format!("p:{prefix}"),
-        PatternSegment::Capture { prefix: None, .. } => "c".to_string(),
-        PatternSegment::Rest { .. } => "r".to_string(),
-    }
-}
-
-fn segments_overlap(left: &PatternSegment, right: &PatternSegment) -> bool {
-    if matches!(left, PatternSegment::Rest { .. }) || matches!(right, PatternSegment::Rest { .. }) {
-        return true;
-    }
-    match (left, right) {
-        (PatternSegment::Literal(left), PatternSegment::Literal(right)) => left == right,
-        (
-            PatternSegment::Literal(_) | PatternSegment::Capture { .. },
-            PatternSegment::Capture { prefix: None, .. },
-        )
-        | (
-            PatternSegment::Capture { prefix: None, .. },
-            PatternSegment::Literal(_) | PatternSegment::Capture { .. },
-        ) => true,
-        (
-            PatternSegment::Literal(literal),
-            PatternSegment::Capture {
-                prefix: Some(prefix),
-                ..
-            },
-        )
-        | (
-            PatternSegment::Capture {
-                prefix: Some(prefix),
-                ..
-            },
-            PatternSegment::Literal(literal),
-        ) => literal
-            .strip_prefix(prefix)
-            .is_some_and(|rest| !rest.is_empty()),
-        (
-            PatternSegment::Capture {
-                prefix: Some(left), ..
-            },
-            PatternSegment::Capture {
-                prefix: Some(right),
-                ..
-            },
-        ) => left.starts_with(right) || right.starts_with(left),
-        (PatternSegment::Rest { .. }, _) | (_, PatternSegment::Rest { .. }) => unreachable!(),
     }
 }
 

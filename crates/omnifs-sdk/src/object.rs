@@ -9,10 +9,10 @@
 //! re-renders from host-pushed canonical bytes on warm reads, and answers
 //! conditional reloads through the `since` validator.
 //!
-//! The split from the previous design: `load` and `decode` live on `Object`
-//! (the key is pure identity + route context), the canonical content type is an
-//! associated [`Format`] rather than a method, and there is no `serde` bound
-//! (a private transport DTO may live inside `decode`).
+//! `load` and `decode` live on `Object` because the key is pure identity and
+//! route context. The canonical content type is an associated [`Format`], and a
+//! private transport representation may live inside `decode` without imposing a
+//! `serde` bound on the object.
 
 use crate::cx::Cx;
 use crate::error::{ProviderError, Result};

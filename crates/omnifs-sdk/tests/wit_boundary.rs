@@ -1105,8 +1105,8 @@ fn choices_face_lists_fixed_dir_entries_exhaustive() {
 }
 
 // ===========================================================================
-// Object stream face (R6): a live ranged leaf under an object anchor opens
-// through `open_file` and serves chunks from its RangeReader.
+// A live ranged leaf under an object anchor opens through `open_file` and
+// serves chunks from its RangeReader.
 // ===========================================================================
 
 #[derive(serde::Serialize, serde::Deserialize)]

@@ -203,6 +203,79 @@ impl<T: Object, C: Cursor> Collection<T, C> {
         }
         self
     }
+
+    /// Lower this collection to the [`crate::projection::DirProjection`] the
+    /// SDK-generated collection list handler returns.
+    ///
+    /// Each entry becomes a child directory named by the child object anchor's
+    /// segment(s) beyond the collection dir, computed from the entry key against
+    /// the child's registered template. Fresh entries also store canonical bytes
+    /// and computed entries project their shallow leaves under the child anchor.
+    pub(crate) fn into_dir_projection(
+        self,
+        child_view: &crate::router::ResolvedChildView,
+    ) -> Result<crate::projection::DirProjection>
+    where
+        T::Key: crate::object::Key,
+    {
+        use crate::identity::IdentityCaptures;
+        use crate::object::FacetMetadata as _;
+        use crate::projection::{DirProjection, Entry};
+
+        let (entries, cursor, validator, complete) = match self {
+            Self::Complete { entries, validator } => (entries, None, validator, true),
+            Self::Partial { entries, validator } => (entries, None, validator, false),
+            Self::Page {
+                entries,
+                next,
+                validator,
+            } => (entries, Some(encode_cursor(&next)), validator, false),
+            Self::Unchanged => return Ok(DirProjection::unchanged()),
+        };
+
+        let mut fresh_stores: Vec<(crate::router::EntryView, Canonical)> = Vec::new();
+        let mut computed_files: Vec<(String, FileProjection)> = Vec::new();
+        let mut dir_entries = Vec::with_capacity(entries.len());
+
+        for entry in entries {
+            let key = entry.entry_key();
+            let view = child_view.entry_view(&key.identity_captures(), T::Key::facet_axes())?;
+            dir_entries.push(Entry::dir(view.child_name.clone()));
+
+            match entry {
+                CollectionEntry::Fresh { canonical, .. } => fresh_stores.push((view, canonical)),
+                CollectionEntry::Computed { files, .. } => {
+                    for (leaf, file) in files {
+                        computed_files.push((format!("{}/{leaf}", view.anchor_base), file));
+                    }
+                },
+                CollectionEntry::Key { .. } => {},
+            }
+        }
+
+        let mut projection = if complete {
+            DirProjection::exhaustive(dir_entries)
+        } else if let Some(cursor) = cursor {
+            DirProjection::paged(dir_entries, cursor)
+        } else {
+            DirProjection::open(dir_entries)
+        };
+        if let Some(validator) = validator {
+            projection = projection.with_validator(validator);
+        }
+        for (view, canonical) in fresh_stores {
+            projection = projection.store_canonical(
+                view.id,
+                canonical.validator,
+                canonical.bytes,
+                view.view_leaves,
+            );
+        }
+        for (path, file) in computed_files {
+            projection = projection.preload_file(path, file);
+        }
+        Ok(projection)
+    }
 }
 
 /// A pending paged collection awaiting its resume cursor.
@@ -221,87 +294,6 @@ impl<T: Object, C: Cursor> CollectionPage<T, C> {
             validator: None,
         }
     }
-}
-
-/// Lower a typed [`Collection`] to the [`crate::projection::DirProjection`] the
-/// SDK-generated collection list handler returns.
-///
-/// Each entry becomes a child directory named by the child object anchor's
-/// segment(s) beyond the collection dir, computed from the entry key against
-/// the CHILD's registered template (not the parent's captures). A `Fresh`
-/// entry also stores the child canonical against its own logical id with the
-/// child's canonical-view leaf paths (canonical/representation/computed,
-/// facet-expanded) as view leaves, so a later read of any child leaf serves
-/// warm. A `Computed` entry projects its shallow leaves under the child anchor.
-/// The completeness variant selects exhaustive / open / paged.
-pub(crate) fn collection_to_dir_projection<T, C>(
-    child_view: &crate::router::ResolvedChildView,
-    collection: Collection<T, C>,
-) -> Result<crate::projection::DirProjection>
-where
-    T: Object,
-    T::Key: crate::object::Key,
-    C: Cursor,
-{
-    use crate::identity::IdentityCaptures;
-    use crate::object::FacetMetadata as _;
-    use crate::projection::{DirProjection, Entry};
-
-    let (entries, cursor, validator, complete) = match collection {
-        Collection::Complete { entries, validator } => (entries, None, validator, true),
-        Collection::Partial { entries, validator } => (entries, None, validator, false),
-        Collection::Page {
-            entries,
-            next,
-            validator,
-        } => (entries, Some(encode_cursor(&next)), validator, false),
-        Collection::Unchanged => return Ok(DirProjection::unchanged()),
-    };
-
-    // The child view resolution plus the canonical bytes a fresh entry stores,
-    // and the shallow computed leaves a computed entry projects.
-    let mut fresh_stores: Vec<(crate::router::EntryView, Canonical)> = Vec::new();
-    let mut computed_files: Vec<(String, crate::projection::FileProjection)> = Vec::new();
-    let mut dir_entries = Vec::with_capacity(entries.len());
-
-    for entry in entries {
-        let key = entry.entry_key();
-        let view = child_view.entry_view(&key.identity_captures(), T::Key::facet_axes())?;
-        dir_entries.push(Entry::dir(view.child_name.clone()));
-
-        match entry {
-            CollectionEntry::Fresh { canonical, .. } => fresh_stores.push((view, canonical)),
-            CollectionEntry::Computed { files, .. } => {
-                for (leaf, file) in files {
-                    computed_files.push((format!("{}/{leaf}", view.anchor_base), file));
-                }
-            },
-            CollectionEntry::Key { .. } => {},
-        }
-    }
-
-    let mut projection = if complete {
-        DirProjection::exhaustive(dir_entries)
-    } else if let Some(cursor) = cursor {
-        DirProjection::paged(dir_entries, cursor)
-    } else {
-        DirProjection::open(dir_entries)
-    };
-    if let Some(validator) = validator {
-        projection = projection.with_validator(validator);
-    }
-    for (view, canonical) in fresh_stores {
-        projection = projection.store_canonical(
-            view.id,
-            canonical.validator,
-            canonical.bytes,
-            view.view_leaves,
-        );
-    }
-    for (path, file) in computed_files {
-        projection = projection.preload_file(path, file);
-    }
-    Ok(projection)
 }
 
 /// Encode a typed cursor into the host-opaque token carried by the wire.

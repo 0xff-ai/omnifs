@@ -511,8 +511,8 @@ pub enum List {
         tree: u64,
     },
     /// The host's `cached-validator` still matched: the host serves its cached
-    /// dirents and the provider enumerated nothing (ADR-0001 §6, listings
-    /// revalidate like reads). Lowers to `list-children-result::unchanged`.
+    /// dirents and the provider enumerated nothing. Lowers to
+    /// `list-children-result::unchanged`.
     Unchanged,
 }
 

@@ -1,4 +1,4 @@
-//! The declarative provider router (ADR-0001 §10).
+//! The declarative provider router.
 //!
 //! A provider's `start` registers its whole path surface imperatively on a
 //! [`Router`]; afterwards the `#[omnifs_sdk::provider]` macro glue calls

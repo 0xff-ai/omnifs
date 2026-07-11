@@ -1,4 +1,4 @@
-//! Path captures (ADR-0001 §8, §10).
+//! Path captures.
 //!
 //! A [`PathSegment`] validates one path segment and may enumerate a finite
 //! choice set. A multi-segment key is a `#[path_captures]` struct whose

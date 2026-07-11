@@ -1,10 +1,10 @@
-//! Typestate projections (ADR-0001 §7, §10): what handlers return.
+//! Typestate projections: what handlers return.
 //!
 //! [`FileProjection`] is the author-facing file projection. Its byte-source
 //! constructor fixes a typestate marker (`Inline`/`Body`/`Full`/`Ranged`/
 //! `Blob`/`Deferred`) that gates which finishers are legal: `.live()`
 //! exists only on a `Ranged` source, and a `Deferred` source cannot `.build()`
-//! until its read mode is chosen. The illegal §7 cells (`Live+Inline`,
+//! until its read mode is chosen. Invalid combinations (`Live+Inline`,
 //! `Live+Full`, deferred-without-read-mode) are therefore unrepresentable.
 //!
 //! [`DirListing`] is the author-facing raw directory listing: what an
@@ -468,7 +468,7 @@ impl DirProjection {
     }
 
     /// Preload a child file alongside the listing (the `project` effect).
-    /// `path` may be mount-relative or absolute; see [`join_preload_path`].
+    /// `path` may be mount-relative or absolute; see [`Self::join_preload_path`].
     #[must_use]
     pub fn preload_file(mut self, path: impl Into<String>, file: FileProjection) -> Self {
         self.extra_files.push((path.into(), file));
@@ -490,14 +490,23 @@ impl DirProjection {
         self.extra_dirs.push((path.clone(), exhaustive));
         for (subdir, subdir_exhaustive) in child.extra_dirs {
             self.extra_dirs
-                .push((join_preload_path(&path, &subdir), subdir_exhaustive));
+                .push((Self::join_preload_path(&path, &subdir), subdir_exhaustive));
         }
         for (file_path, file) in child.extra_files {
             self.extra_files
-                .push((join_preload_path(&path, &file_path), file));
+                .push((Self::join_preload_path(&path, &file_path), file));
         }
         self.extra_canonical.extend(child.extra_canonical);
         self
+    }
+
+    /// Join a parent preload path with a child path. Absolute child paths pass
+    /// through unchanged.
+    fn join_preload_path(base: &str, leaf: &str) -> String {
+        if leaf.starts_with('/') {
+            return leaf.to_string();
+        }
+        format!("{}/{leaf}", base.trim_end_matches('/'))
     }
 
     /// Store canonical bytes at an object anchor so later reads of identity or
@@ -828,13 +837,4 @@ impl<R: RangeReader + 'static> From<R> for StreamFile {
     fn from(reader: R) -> Self {
         Self::new(reader)
     }
-}
-
-/// Join a parent preload path with a child path. Absolute child paths pass through.
-fn join_preload_path(base: &str, leaf: &str) -> String {
-    if leaf.starts_with('/') {
-        return leaf.to_string();
-    }
-    let base = base.trim_end_matches('/');
-    format!("{base}/{leaf}")
 }

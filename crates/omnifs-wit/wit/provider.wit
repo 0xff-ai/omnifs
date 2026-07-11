@@ -218,7 +218,7 @@ interface types {
 
     /// A materialized file: a byte source plus attributes and an optional
     /// SDK-supplied content type the host echoes opaquely for a bare-name
-    /// leaf the standard extension suffix map cannot type (ADR-0001 §2, §9).
+    /// leaf the standard extension suffix map cannot type.
     record file-out {
         content-type: option<string>,
         attrs: file-attrs,
@@ -258,8 +258,7 @@ interface types {
         entries(dir-listing),
         subtree(tree-ref),
         /// The host-supplied `cached-validator` still matches: the host
-        /// serves its cached dirents and the provider enumerated nothing
-        /// (ADR-0001 §6, listings revalidate like reads).
+        /// serves its cached dirents and the provider enumerated nothing.
         unchanged,
     }
 
@@ -270,7 +269,7 @@ interface types {
         exhaustive: bool,
         /// Opaque validator (e.g. an ETag) the host stores with the
         /// listing and echoes as `cached-validator` on the next
-        /// `list-children` for a cheap re-list (ADR-0001 §8, OPEN-8).
+        /// `list-children` for a cheap re-list.
         validator: option<string>,
         /// Resume token for a paged (non-exhaustive) listing; the host
         /// echoes it back as the `cursor` argument to continue.

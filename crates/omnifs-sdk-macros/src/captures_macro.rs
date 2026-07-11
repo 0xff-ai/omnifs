@@ -52,6 +52,21 @@ struct FieldSpec {
     facet_inner_ty: Option<Type>,
 }
 
+impl FieldSpec {
+    fn capture_value(&self) -> TokenStream2 {
+        let name = &self.name_lit;
+        if self.is_option {
+            quote! { caps.parse_optional(#name)? }
+        } else if self.facet_inner_ty.is_some() {
+            // The inner type is inferred from the field. Emitting `Facet<T>(..)`
+            // would parse as a chained comparison in expression position.
+            quote! { omnifs_sdk::identity::Facet(caps.parse(#name)?) }
+        } else {
+            quote! { caps.parse(#name)? }
+        }
+    }
+}
+
 pub(crate) fn path_captures_impl(item: &ItemStruct) -> syn::Result<TokenStream2> {
     let Fields::Named(named_fields) = &item.fields else {
         return Err(syn::Error::new(
@@ -85,7 +100,7 @@ pub(crate) fn path_captures_impl(item: &ItemStruct) -> syn::Result<TokenStream2>
 
     let field_inits = fields.iter().map(|field| {
         let ident = &field.ident;
-        let value = field_capture_value(field);
+        let value = field.capture_value();
         quote! {
             #ident: #value,
         }
@@ -94,7 +109,7 @@ pub(crate) fn path_captures_impl(item: &ItemStruct) -> syn::Result<TokenStream2>
     let present_validations = fields.iter().map(|field| {
         let name_lit = &field.name_lit;
         let ty = &field.ty;
-        let value = field_capture_value(field);
+        let value = field.capture_value();
         quote! {
             if caps.get(#name_lit).is_some() {
                 let _: #ty = #value;
@@ -235,18 +250,4 @@ pub(crate) fn path_captures_impl(item: &ItemStruct) -> syn::Result<TokenStream2>
         {
         }
     })
-}
-
-fn field_capture_value(field: &FieldSpec) -> TokenStream2 {
-    let name_lit = &field.name_lit;
-    if field.is_option {
-        quote! { caps.parse_optional(#name_lit)? }
-    } else if field.facet_inner_ty.is_some() {
-        // Construct the Facet newtype by inference: writing `#ty(..)` would emit
-        // `Facet<T>(..)`, which parses as a chained comparison in expression
-        // position. The inner type is inferred from the field.
-        quote! { omnifs_sdk::identity::Facet(caps.parse(#name_lit)?) }
-    } else {
-        quote! { caps.parse(#name_lit)? }
-    }
 }

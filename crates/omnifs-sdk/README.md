@@ -53,7 +53,7 @@ Add `crate-type = ["cdylib", "lib"]` and target `wasm32-wasip2`.
 
 ## Status
 
-Pre-1.0. The v2 authoring surface (`Router`, projections, objects) is the supported path; legacy `#[handlers]` / `#[subtree]` attributes were removed.
+Pre-1.0. The `Router`-, projection-, and object-based authoring surface is supported; `#[handlers]` / `#[subtree]` are not part of it.
 
 ## License
 

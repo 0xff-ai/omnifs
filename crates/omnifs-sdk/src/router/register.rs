@@ -504,8 +504,8 @@ impl<S> Router<S> {
             }
 
             let child_pattern = Pattern::parse(&child.template)?;
-            // The child key must be derivable from the child template captures
-            // (Part 8): every facet axis must name a capture in the template.
+            // The child key must be derivable from the child template captures:
+            // every facet axis must name a capture in the template.
             for axis in child.facet_axes {
                 if child_pattern.capture_location(axis.capture_name).is_none() {
                     return Err(ProviderError::invalid_input(format!(
