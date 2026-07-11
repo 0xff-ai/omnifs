@@ -85,29 +85,21 @@ async fn login(
         },
         LoginRequest::ManualCode(request) => login_manual(&client, request, mount, session).await?,
         LoginRequest::DeviceCode(request) => {
-            let bar = indicatif::ProgressBar::new_spinner();
-            bar.set_style(indicatif::ProgressStyle::with_template(
-                "{spinner:.cyan} {msg}",
-            )?);
-            bar.enable_steady_tick(std::time::Duration::from_millis(120));
-            let bar_clone = bar.clone();
+            // The callback runs before the await inside login_device_code, so we cannot
+            // borrow &mut session across the future. Emit directly with cliclack log
+            // remark (the same rail renderer used by Session).
             let result = client
                 .login_device_code(request, move |prompt| {
-                    let bar = bar_clone.clone();
-                    async move {
-                        present_device_prompt(&prompt, &bar, no_browser);
-                        Ok(())
-                    }
+                    present_device_prompt(&prompt, no_browser);
+                    async move { Ok(()) }
                 })
                 .await;
-            match &result {
-                Ok(_) => {
-                    bar.finish_with_message(format!(
-                        "│  {} authorized",
-                        crate::style::success("✓")
-                    ));
-                },
-                Err(_) => bar.finish_and_clear(),
+            if result.is_ok() {
+                session.row(crate::ui::report::Row::new(
+                    crate::ui::style::Glyph::Done,
+                    "oauth",
+                    "authorized",
+                ));
             }
             result.with_hint(format!("Re-run `omnifs mounts reauth {mount}` to retry"))?
         },
@@ -198,44 +190,56 @@ pub(crate) async fn login_with_workspace(
     .await
 }
 
-fn present_device_prompt(
-    prompt: &DeviceCodePrompt,
-    bar: &indicatif::ProgressBar,
-    no_browser: bool,
-) {
-    // Verification URL.
+fn present_device_prompt(prompt: &DeviceCodePrompt, no_browser: bool) {
+    // Each line goes through cliclack log remark. This produces the same
+    // rail-framed stderr that Session uses and drops the spinner bar from
+    // the device-code path.
     let url = prompt
         .verification_uri_complete
         .as_deref()
         .unwrap_or(&prompt.verification_uri);
-    bar.println(format!("│  {}", crate::style::accent(url)));
+    let _ = cliclack::log::remark(crate::style::accent(url));
 
-    // User code — attempt clipboard copy best-effort.
+    // Clipboard copy is best effort only. Failure must not prevent showing
+    // the code or continuing the flow.
     let code_line =
         match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(prompt.user_code.clone())) {
             Ok(()) => format!(
-                "│  {} {}",
+                "{} {}",
                 crate::style::bold(&prompt.user_code),
                 crate::style::dim("(copied to clipboard)")
             ),
-            Err(_) => format!("│  {}", crate::style::bold(&prompt.user_code)),
+            Err(_) => crate::style::bold(&prompt.user_code),
         };
-    bar.println(code_line);
+    let _ = cliclack::log::remark(code_line);
 
-    // Open the browser when a complete URI is available and not suppressed.
-    // Only claim the browser opened when the open actually succeeded; otherwise
-    // point at manual entry so the message never overstates what happened.
+    // Show the code lifetime so the user knows how long they have before the
+    // prompt on the provider side expires.
+    let secs = prompt.expires_in.as_secs();
+    let expiry_text = if secs < 60 {
+        format!("expires in {secs}s")
+    } else {
+        let mins = secs / 60;
+        format!("expires in {mins}m")
+    };
+    let _ = cliclack::log::remark(crate::style::dim(expiry_text));
+
+    // Only attempt browser open when allowed and a complete uri is present.
+    // Report outcome only on real success so we never overstate what happened.
     if !no_browser && let Some(complete_url) = &prompt.verification_uri_complete {
         match webbrowser::open(complete_url) {
-            Ok(()) => bar.println(format!("│  {}", crate::style::dim("(opened your browser)"))),
-            Err(_) => bar.println(format!(
-                "│  {}",
-                crate::style::dim("(could not open a browser; visit the URL above)")
-            )),
+            Ok(()) => {
+                let _ = cliclack::log::remark(crate::style::dim("(opened your browser)"));
+            },
+            Err(_) => {
+                let _ = cliclack::log::remark(crate::style::dim(
+                    "(could not open a browser; visit the URL above)",
+                ));
+            },
         }
     }
 
-    bar.set_message("Authorizing — waiting for confirmation");
+    let _ = cliclack::log::remark(crate::style::dim("waiting for confirmation"));
 }
 
 fn print_oauth_consent_summary(
