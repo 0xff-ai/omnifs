@@ -555,8 +555,7 @@ fn pid_alive(pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        MountCommand, MountOptions, MountTableEntry, ensure_private_state_dir,
-        mount_table_contains, parse_macos_mounts,
+        MountCommand, MountOptions, MountTableEntry, mount_table_contains, parse_macos_mounts,
     };
     use std::path::{Path, PathBuf};
 
