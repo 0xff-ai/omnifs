@@ -18,9 +18,11 @@
 use std::sync::Arc;
 
 use omnifs_engine::Namespace;
+use serde::Deserialize;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, UnixListener};
 use tokio::sync::mpsc;
+use tokio::task::JoinSet;
 
 use crate::frame::{Frame, KIND_EVENT, KIND_REQUEST, KIND_RESPONSE, read_frame, write_frame};
 use crate::{
@@ -219,7 +221,23 @@ where
     if frame.kind != KIND_REQUEST {
         return Err(WireError::HandshakeUnexpected { expected: "hello" });
     }
-    let hello: Handshake = postcard::from_bytes(&frame.body)?;
+    let hello: Handshake = match postcard::from_bytes(&frame.body) {
+        Ok(hello) => hello,
+        Err(error) => {
+            if let Ok(LegacyHandshake::Hello { protocol, token }) =
+                postcard::from_bytes(&frame.body)
+            {
+                let _ = token;
+                let error = WireError::VersionMismatch {
+                    ours: PROTOCOL,
+                    theirs: protocol,
+                };
+                send_rejected(outbound_tx, error.to_string());
+                return Err(error);
+            }
+            return Err(error.into());
+        },
+    };
     let Handshake::Hello {
         protocol,
         token,
@@ -253,6 +271,16 @@ where
         .send(Frame::new(0, KIND_RESPONSE, body))
         .map_err(|_| WireError::HandshakeClosed)?;
     Ok(frontend)
+}
+
+/// The v2 client Hello, decoded only to return a useful rejection after v3
+/// added [`FrontendIdentity`]. It is never accepted as a current handshake.
+#[derive(Deserialize)]
+enum LegacyHandshake {
+    Hello {
+        protocol: u32,
+        token: Option<String>,
+    },
 }
 
 /// Fires [`AttachObserver::detached`] exactly once when the connection this
@@ -290,6 +318,7 @@ async fn read_loop<R>(
 where
     R: AsyncRead + Unpin,
 {
+    let mut requests = JoinSet::new();
     loop {
         let Some(frame) = read_frame(reader).await? else {
             return Ok(());
@@ -304,7 +333,7 @@ where
         let request_id = frame.request_id;
         let namespace = Arc::clone(namespace);
         let outbound_tx = outbound_tx.clone();
-        tokio::spawn(async move {
+        requests.spawn(async move {
             let response = dispatch(namespace.as_ref(), request).await;
             match postcard::to_allocvec(&response) {
                 Ok(body) => {

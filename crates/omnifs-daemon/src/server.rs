@@ -1697,10 +1697,6 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------
-    // Attach registry: `/v1/status` reflects live wire attaches
-    // -----------------------------------------------------------------
-
     /// Fetch and decode `/v1/status` from `router`.
     async fn fetch_status(router: &Router) -> omnifs_api::DaemonStatus {
         let response = router
@@ -1739,11 +1735,64 @@ mod tests {
         panic!("status did not converge to the expected shape within the deadline");
     }
 
-    /// The user-visible fix this phase delivers: a virtualized frontend
-    /// attaching over the TCP namespace listener shows up in `/v1/status`
-    /// with the `docker` delivery label the instant it connects, and
-    /// disappears the instant it disconnects, with no dependency on
-    /// reconcile or polling on the daemon side.
+    async fn assert_non_docker_attach_is_rejected(router: &Router) {
+        let response = router
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/frontend/attach-target")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"driver":"local"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    async fn shutdown_report(router: &Router) -> omnifs_api::StopReport {
+        let response = router
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/shutdown")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        serde_json::from_slice(
+            &to_bytes(response.into_body(), 4 * 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn assert_attached_frontend(status: &omnifs_api::DaemonStatus) {
+        let attached = status
+            .frontends
+            .iter()
+            .find(|frontend| frontend.delivery == omnifs_api::FrontendDelivery::Docker)
+            .unwrap();
+        assert_eq!(attached.fs_type, omnifs_api::FsType::Fuse);
+        assert_eq!(attached.source, "wire");
+        assert_eq!(attached.mount_point, PathBuf::from("/guest/omnifs"));
+        assert!(
+            status
+                .health
+                .subsystem(omnifs_api::DaemonSubsystem::Frontend)
+                .unwrap()
+                .message
+                .contains("attached fuse at /guest/omnifs via docker")
+        );
+    }
+
+    /// A frontend attached through the TCP namespace listener appears in
+    /// `/v1/status` with the listener-owned `docker` delivery label, then
+    /// disappears when its connection closes.
     #[tokio::test]
     #[allow(unsafe_code)] // env::set_var requires unsafe; see SAFETY below.
     async fn attached_frontend_appears_and_disappears_in_status() {
@@ -1802,6 +1851,8 @@ mod tests {
 
         let router = super::Daemon::router(Arc::clone(&daemon), super::Auth::FilesystemPermissions);
 
+        assert_non_docker_attach_is_rejected(&router).await;
+
         let baseline = fetch_status(&router).await;
         assert!(
             baseline
@@ -1833,14 +1884,14 @@ mod tests {
                 .any(|frontend| frontend.delivery == omnifs_api::FrontendDelivery::Docker)
         })
         .await;
-        let attached = attached_status
-            .frontends
-            .iter()
-            .find(|frontend| frontend.delivery == omnifs_api::FrontendDelivery::Docker)
-            .unwrap();
-        assert_eq!(attached.fs_type, omnifs_api::FsType::Fuse);
-        assert_eq!(attached.source, "wire");
-        assert_eq!(attached.mount_point, PathBuf::from("/guest/omnifs"));
+        assert_attached_frontend(&attached_status);
+
+        let report = shutdown_report(&router).await;
+        assert_eq!(report.frontends.len(), 1);
+        assert_eq!(
+            report.frontends[0].delivery,
+            omnifs_api::FrontendDelivery::Docker
+        );
 
         drop(wire);
 

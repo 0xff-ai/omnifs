@@ -34,6 +34,14 @@ fn test_identity() -> FrontendIdentity {
     }
 }
 
+#[derive(serde::Serialize)]
+enum V2Handshake {
+    Hello {
+        protocol: u32,
+        token: Option<String>,
+    },
+}
+
 // ---------------------------------------------------------------------------
 // Stub namespace
 // ---------------------------------------------------------------------------
@@ -418,10 +426,22 @@ async fn old_client_is_rejected_outright() {
     let (mut io, server) = serve_over_duplex(stub);
     assert_eq!(PROTOCOL, 3, "this test assumes the v2-rejection bump to v3");
 
-    let client_result = client_handshake_with_token(&mut io, 2, None).await;
+    let hello = postcard::to_allocvec(&V2Handshake::Hello {
+        protocol: 2,
+        token: None,
+    })
+    .unwrap();
+    write_frame(&mut io, &Frame::new(0, KIND_REQUEST, hello))
+        .await
+        .unwrap();
+    let response = read_frame(&mut io).await.unwrap().expect("rejection frame");
+    let reason = match postcard::from_bytes::<Handshake>(&response.body).unwrap() {
+        Handshake::Rejected { reason } => reason,
+        other => panic!("expected Rejected, got {other:?}"),
+    };
     assert_eq!(
-        client_result,
-        Err("protocol version mismatch: this build speaks 3, the peer speaks 2".to_string())
+        reason,
+        "protocol version mismatch: this build speaks 3, the peer speaks 2"
     );
 
     match server.await.unwrap() {
@@ -789,6 +809,39 @@ async fn detach_fires_via_drop_guard_on_abnormal_termination() {
     let outcome = server.await;
     assert!(outcome.is_err() && outcome.unwrap_err().is_cancelled());
 
+    assert_eq!(observer.detached_count(), 1);
+}
+
+/// Disconnecting aborts in-flight namespace calls before waiting for the
+/// writer, so a blocked provider operation cannot keep a dead frontend in the
+/// attach registry.
+#[tokio::test]
+async fn disconnect_drops_attach_with_an_in_flight_request() {
+    let observer = Arc::new(RecordingObserver::default());
+    let (mut io, server) = serve_over_duplex_with(
+        StubNamespace::new(),
+        None,
+        Some(Arc::clone(&observer) as Arc<dyn AttachObserver>),
+    );
+
+    client_handshake(&mut io, PROTOCOL).await.unwrap();
+    send_request(
+        &mut io,
+        1,
+        &WireRequest::Read {
+            node: NodeId(1),
+            offset: 60_000,
+            len: 1,
+        },
+    )
+    .await;
+    drop(io);
+
+    tokio::time::timeout(Duration::from_secs(1), server)
+        .await
+        .expect("server must not wait for the blocked request")
+        .unwrap()
+        .unwrap();
     assert_eq!(observer.detached_count(), 1);
 }
 

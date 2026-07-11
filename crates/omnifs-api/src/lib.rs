@@ -17,11 +17,11 @@ pub mod events;
 
 /// Control API major version. The CLI refuses to talk to a daemon with a
 /// different major. Bump when routes or payloads change incompatibly.
-pub const API_MAJOR: u16 = 4;
+pub const API_MAJOR: u16 = 5;
 
 /// Control API minor version. The CLI warns but proceeds when the daemon's
 /// minor differs. Bump for additive, backward-compatible additions.
-pub const API_MINOR: u16 = 1;
+pub const API_MINOR: u16 = 0;
 
 /// TCP namespace attach address, injected by the frontend container launcher
 /// and read by the out-of-process `omnifs-fuse` runner when no `--attach`
@@ -258,11 +258,13 @@ pub struct FrontendInfo {
     pub fs_type: FsType,
     /// The host-visible mount point for a native frontend, or the
     /// guest-reported mount point (display-only) for an attached one.
+    #[serde(default)]
     #[schema(value_type = String)]
     pub mount_point: PathBuf,
     /// How this frontend reaches the shared namespace. The host assigns this
     /// from which listener the connection arrived on, never from anything a
     /// connecting guest claims about itself.
+    #[serde(default)]
     pub delivery: FrontendDelivery,
 }
 
@@ -273,6 +275,7 @@ pub struct FrontendInfo {
 #[serde(rename_all = "lowercase")]
 pub enum FrontendDelivery {
     /// Served in-process by the daemon (no attach transport, no seam).
+    #[default]
     Native,
     /// Attached over a Unix domain socket under `frontends/<name>.sock`
     /// (`--attach-socket <name>`).
@@ -281,11 +284,16 @@ pub enum FrontendDelivery {
     /// /v1/frontend/attach-target`), the Docker Desktop delivery path. The
     /// default: `FrontendAttachTargetRequest.driver` defaults to it, and it
     /// is the only value that route accepts today.
-    #[default]
     Docker,
     /// Attached over the token-checking UDS vsock-proxy listener (`POST
     /// /v1/frontend/attach-target/vsock`), the krunkit-on-macOS delivery path.
     Krunkit,
+}
+
+impl FrontendDelivery {
+    fn default_attach() -> Self {
+        Self::Docker
+    }
 }
 
 impl std::fmt::Display for FrontendDelivery {
@@ -567,7 +575,7 @@ pub struct StopReport {
 /// honored only on the first bind (the listener is idempotent thereafter).
 /// An absent `bind_ip` selects loopback; native Linux may request the default
 /// Docker bridge gateway, which the daemon validates before binding.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct FrontendAttachTargetRequest {
     #[serde(default)]
     #[schema(value_type = Option<String>)]
@@ -576,8 +584,17 @@ pub struct FrontendAttachTargetRequest {
     /// accepted today (krunkit attaches over vsock instead, through the
     /// separate `/v1/frontend/attach-target/vsock` route); any other value is
     /// a 400. Defaults to `docker` when omitted.
-    #[serde(default)]
+    #[serde(default = "FrontendDelivery::default_attach")]
     pub driver: FrontendDelivery,
+}
+
+impl Default for FrontendAttachTargetRequest {
+    fn default() -> Self {
+        Self {
+            bind_ip: None,
+            driver: FrontendDelivery::default_attach(),
+        }
+    }
 }
 
 /// `POST /v1/frontend/attach-target`: the TCP attach target a frontend dials
@@ -613,7 +630,25 @@ pub struct FrontendAttachTargetVsockReport {
 
 #[cfg(test)]
 mod tests {
-    use super::{CredentialHealth, CredentialStatus};
+    use super::{
+        CredentialHealth, CredentialStatus, FrontendAttachTargetRequest, FrontendDelivery,
+        FrontendInfo,
+    };
+
+    #[test]
+    fn frontend_defaults_preserve_version_diagnostics() {
+        let old: FrontendInfo = serde_json::from_value(serde_json::json!({
+            "source": "omnifs",
+            "fs_type": "nfs"
+        }))
+        .unwrap();
+        assert!(old.mount_point.as_os_str().is_empty());
+        assert_eq!(old.delivery, FrontendDelivery::Native);
+
+        let request: FrontendAttachTargetRequest =
+            serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(request.driver, FrontendDelivery::Docker);
+    }
 
     #[test]
     fn steady_state_healths_do_not_need_attention() {

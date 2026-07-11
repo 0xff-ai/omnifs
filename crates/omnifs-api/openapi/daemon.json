@@ -1050,9 +1050,7 @@
         "type": "object",
         "required": [
           "source",
-          "fs_type",
-          "mount_point",
-          "delivery"
+          "fs_type"
         ],
         "properties": {
           "delivery": {

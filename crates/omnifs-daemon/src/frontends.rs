@@ -22,12 +22,11 @@ use omnifs_fuse::mount;
 use omnifs_mtab::proc_mounts;
 use omnifs_nfs::NfsMountOptions;
 use omnifs_vfs_wire::{AttachObserver, FrontendIdentity, FrontendKind as WireFrontendKind};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
-use std::time::SystemTime;
 use tokio::runtime::Handle;
 
 use crate::app::{FrontendKind, FrontendMount};
@@ -55,10 +54,6 @@ struct AttachedFrontend {
     kind: WireFrontendKind,
     mount_point: PathBuf,
     delivery: FrontendDelivery,
-    /// Tracked for a future status surface; [`FrontendInfo`] does not expose
-    /// it yet, so this field is otherwise unread.
-    #[allow(dead_code)]
-    connected_at: SystemTime,
 }
 
 /// Assigns and tracks ids for every virtualized frontend attached over any of
@@ -68,14 +63,14 @@ struct AttachedFrontend {
 /// bind time, never from anything the connecting guest claims in its `Hello`.
 struct AttachedRegistry {
     next_id: AtomicU64,
-    entries: std::sync::Mutex<HashMap<u64, AttachedFrontend>>,
+    entries: std::sync::Mutex<BTreeMap<u64, AttachedFrontend>>,
 }
 
 impl AttachedRegistry {
     fn new() -> Arc<Self> {
         Arc::new(Self {
             next_id: AtomicU64::new(1),
-            entries: std::sync::Mutex::new(HashMap::new()),
+            entries: std::sync::Mutex::new(BTreeMap::new()),
         })
     }
 
@@ -123,7 +118,6 @@ impl AttachObserver for DeliveryObserver {
                     kind: identity.kind,
                     mount_point: identity.mount_point.clone(),
                     delivery: self.delivery,
-                    connected_at: SystemTime::now(),
                 },
             );
         id
