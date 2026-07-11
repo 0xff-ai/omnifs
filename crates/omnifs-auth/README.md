@@ -12,7 +12,7 @@ This crate owns the Omnifs-specific boundary around that protocol:
   client secret
 - running the user interaction around loopback, manual-code, and device-code
   login flows
-- converting successful token responses into `omnifs_creds::CredentialEntry`
+- converting successful token responses into `omnifs_workspace::creds::CredentialEntry`
 - mapping oauth2 transport and endpoint errors into `AuthError`
 
 The HTTP client is a plain `reqwest::Client` configured with redirects disabled,
