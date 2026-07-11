@@ -13,7 +13,9 @@
 
 use clap::Args;
 
+use crate::commands::receipt::TeardownReceipt;
 use crate::daemon_teardown::DaemonTeardown;
+use crate::error::ExitCode;
 use crate::workspace::Workspace;
 
 #[derive(Args, Debug, Clone, Default)]
@@ -21,15 +23,44 @@ pub struct DownArgs {
     /// Force the host-native unmount if a clean shutdown leaves the mount busy.
     #[arg(long)]
     pub force: bool,
+    /// Emit a machine-readable JSON receipt of the teardown on stdout.
+    #[arg(long)]
+    pub json: bool,
 }
 
 impl DownArgs {
-    pub async fn run(self) -> anyhow::Result<()> {
-        let DownArgs { force } = self;
+    pub async fn run(self) -> anyhow::Result<ExitCode> {
+        let DownArgs { force, json } = self;
+        if json {
+            crate::ui::output::note_json_receipt();
+        }
         let workspace = Workspace::resolve()?;
 
-        DaemonTeardown::new(&workspace).down(force).await?;
+        let teardown = DaemonTeardown::new(&workspace);
+        let exit = if json {
+            // The receipt is the whole story: a failed row already conveys the
+            // failure, so this returns a non-zero exit code rather than an
+            // error that would print a second JSON document.
+            let outcomes = teardown.down_collect(force).await?;
+            let rows = outcomes
+                .iter()
+                .map(crate::daemon_teardown::TeardownOutcome::outcome)
+                .collect();
+            let receipt = TeardownReceipt::new(rows);
+            let failed = outcomes
+                .iter()
+                .any(crate::daemon_teardown::TeardownOutcome::is_failure);
+            crate::ui::print_json(&receipt)?;
+            if failed {
+                ExitCode::GenericFailure
+            } else {
+                ExitCode::Success
+            }
+        } else {
+            teardown.down(force).await?;
+            ExitCode::Success
+        };
         crate::telemetry::maybe_print_health_nudge(&workspace).await;
-        Ok(())
+        Ok(exit)
     }
 }

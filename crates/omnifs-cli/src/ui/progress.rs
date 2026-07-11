@@ -25,7 +25,7 @@ use crossterm::{
 };
 
 use super::KEY_WIDTH;
-use super::event::{LedgerRenderer, Render, UiEvent};
+use super::event::{Render, StreamRenderer, UiEvent};
 use super::style::{self, Glyph};
 
 /// Braille spinner frames, advanced by [`LiveRow::update`].
@@ -73,7 +73,7 @@ fn human_bytes(bytes: u64) -> String {
     }
 }
 
-pub(crate) struct LiveRow<R = LedgerRenderer> {
+pub(crate) struct LiveRow<R = StreamRenderer> {
     key: String,
     tty: bool,
     started: Instant,
@@ -85,13 +85,15 @@ pub(crate) struct LiveRow<R = LedgerRenderer> {
     renderer: R,
 }
 
-impl LiveRow<LedgerRenderer> {
+impl LiveRow<StreamRenderer> {
     /// Begin a live row. Nothing is drawn yet: a fast step must not flicker, so
-    /// the spinner waits for [`APPEARANCE_DELAY`] and the first [`update`].
+    /// the spinner waits for [`APPEARANCE_DELAY`] and the first [`update`]. The
+    /// renderer is chosen from the global `--progress` selection, so the same
+    /// call site animates a stderr row or emits NDJSON without any change here.
     ///
     /// [`update`]: LiveRow::update
     pub(crate) fn start(key: &str, _text: &str) -> Self {
-        Self::with_renderer(key, LedgerRenderer)
+        Self::with_renderer(key, StreamRenderer::from_global())
     }
 
     pub(crate) fn human_bytes(bytes: u64) -> String {
@@ -127,7 +129,12 @@ impl<R: Render> LiveRow<R> {
             key: self.key.clone(),
             message: text.to_string(),
         });
-        if !self.tty || self.started.elapsed() < APPEARANCE_DELAY {
+        // Under `--progress json` the renderer already emitted the tick as a
+        // JSON line on stdout; drawing the animated stderr row would be noise.
+        if super::output::progress_is_json()
+            || !self.tty
+            || self.started.elapsed() < APPEARANCE_DELAY
+        {
             return;
         }
         self.frame = (self.frame + 1) % SPINNER_FRAMES.len();

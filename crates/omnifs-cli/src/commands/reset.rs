@@ -15,13 +15,16 @@ use omnifs_workspace::runtime_record::RuntimeRecord;
 use std::sync::Arc;
 
 use crate::commands::mount::delete_credentials;
+use crate::commands::receipt::TeardownReceipt;
 use crate::credential_target::CredentialTarget;
 use crate::daemon_teardown::DaemonTeardown;
+use crate::error::ExitCode;
 use crate::stages::PromptMode;
 use crate::ui::consent::{Decision, Outcome, Plan, Row};
 use crate::workspace::{MountRemovalTarget, Workspace};
 
 #[derive(Args, Debug, Clone, Default)]
+#[allow(clippy::struct_excessive_bools)] // mirrors CLI flags 1:1
 pub struct ResetArgs {
     /// Skip the confirmation prompt. The plan and receipt are still shown.
     #[arg(short = 'y', long)]
@@ -32,11 +35,17 @@ pub struct ResetArgs {
     /// Print the reset plan and make no changes.
     #[arg(long)]
     pub dry_run: bool,
+    /// Emit a machine-readable JSON receipt of the reset on stdout.
+    #[arg(long)]
+    pub json: bool,
 }
 
 impl ResetArgs {
     #[allow(clippy::too_many_lines)] // plan/apply/receipt is one auditable flow
-    pub async fn run(self) -> anyhow::Result<()> {
+    pub async fn run(self) -> anyhow::Result<ExitCode> {
+        if self.json {
+            crate::ui::output::note_json_receipt();
+        }
         let workspace = Workspace::resolve()?;
         let layout = workspace.layout();
         let targets = workspace.reset_removal_targets()?;
@@ -49,11 +58,11 @@ impl ResetArgs {
         match decision {
             Decision::Decline => {
                 session.outro("Reset aborted.");
-                return Ok(());
+                return Ok(ExitCode::Success);
             },
             Decision::DryRun => {
                 session.outro("Dry run; no changes made.");
-                return Ok(());
+                return Ok(ExitCode::Success);
             },
             Decision::Apply => {},
         }
@@ -188,16 +197,27 @@ impl ResetArgs {
             .iter()
             .find(|row| row.state == crate::ui::consent::OutcomeState::Fail)
             .map(|row| row.value.clone());
-        if let Some(failed) = failed {
+        if let Some(message) = failed {
             session.outro("Reset incomplete; see the failed rows above.");
-            anyhow::bail!(failed);
-        } else if targets.is_empty() {
+            if self.json {
+                // The receipt is the whole story; a failed row carries the
+                // failure, so return a non-zero code instead of an error that
+                // would emit a second JSON document.
+                crate::ui::print_json(&TeardownReceipt::new(receipt.rows))?;
+                return Ok(ExitCode::GenericFailure);
+            }
+            anyhow::bail!(message);
+        }
+        if targets.is_empty() {
             session.outro("Reset complete; no mounts were configured.");
         } else {
             session.outro("Reset complete. Run `omnifs setup` to start again.");
         }
+        if self.json {
+            crate::ui::print_json(&TeardownReceipt::new(receipt.rows))?;
+        }
         crate::telemetry::maybe_print_health_nudge(&workspace).await;
-        Ok(())
+        Ok(ExitCode::Success)
     }
 }
 

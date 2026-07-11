@@ -43,7 +43,8 @@ pub(crate) async fn maybe_print_health_nudge(workspace: &Workspace) {
     let Some(line) = health_nudge(workspace).await else {
         return;
     };
-    anstream::eprintln!("{line}");
+    // The nudge is a conversational aside; `-q` drops it.
+    crate::ui::narrate(line);
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }

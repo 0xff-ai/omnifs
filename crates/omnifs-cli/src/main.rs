@@ -48,13 +48,32 @@ mod upgrade;
 mod workspace;
 
 use clap::Parser;
-use cli::Cli;
+use cli::{Cli, ProgressFormat};
+use error::ExitCode;
 
 #[tokio::main]
 async fn main() {
-    let cli = Cli::parse();
+    // Map clap's parse outcome at the boundary, not per command: a usage error
+    // exits 2, while `--help`/`--version` display exits 0. clap picks the right
+    // stream (stdout for help/version, stderr for errors).
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) => {
+            let _ = error.print();
+            let code = match error.kind() {
+                clap::error::ErrorKind::DisplayHelp
+                | clap::error::ErrorKind::DisplayVersion
+                | clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand => {
+                    ExitCode::Success
+                },
+                _ => ExitCode::Usage,
+            };
+            std::process::exit(code.code());
+        },
+    };
     init_tracing(cli.verbose);
     ui::session::install_theme();
+    ui::output::configure(cli.progress == ProgressFormat::Json, cli.quiet);
     // Capture the telemetry label before `run` consumes `cli`. `None` for the
     // internal `daemon` subcommand, which records `daemon.jsonl` itself.
     // Subcommands that `std::process::exit` on their own (shell, doctor) record
@@ -71,24 +90,44 @@ async fn main() {
             }
         },
         Err(error) => {
-            // A user cancel (picker Esc/Ctrl-C, or a prompt mapped to
-            // the same marker) is a normal exit, not a failure to spell out with
-            // an `Error:` block: render one quiet line and leave.
+            // A user cancel (picker Esc/Ctrl-C, or a prompt mapped to the same
+            // marker) is a normal exit, not a failure to spell out with an
+            // `Error:` block. It exits 130 (128 + SIGINT), the shell convention.
             if ui::picker::is_canceled(&error) {
-                let code = error::ExitCode::GenericFailure.code();
+                let code = ExitCode::Canceled;
                 if let Some(cmd) = telemetry_label {
-                    telemetry::record_cli_exit(cmd, code);
+                    telemetry::record_cli_exit(cmd, code.code());
                 }
-                ui::eprint_raw(&format!("{}\n", style::dim("canceled")));
-                std::process::exit(code);
+                if ui::output::json_receipt() {
+                    emit_json_error(&error::to_json_for(code, "canceled"));
+                } else {
+                    ui::eprint_raw(&format!("{}\n", style::dim("canceled")));
+                }
+                std::process::exit(code.code());
             }
             let exit_code = error::exit_code(&error).code();
             if let Some(cmd) = telemetry_label {
                 telemetry::record_cli_exit(cmd, exit_code);
             }
-            ui::eprint_raw(&error::render(&error));
+            // A `--json` command that failed before its receipt emits exactly
+            // one JSON error document on stdout (with the stable `id`), rather
+            // than the human `Error:` block on stderr.
+            if ui::output::json_receipt() {
+                emit_json_error(&error::to_json(&error));
+            } else {
+                ui::eprint_raw(&error::render(&error));
+            }
             std::process::exit(exit_code);
         },
+    }
+}
+
+fn emit_json_error(document: &error::ErrorJson) {
+    match ui::print_json(document) {
+        Ok(()) => {},
+        // Falling back to the human block keeps the failure visible if the
+        // error document itself cannot be serialized.
+        Err(_) => ui::eprint_raw("Error: failed to serialize error document\n"),
     }
 }
 

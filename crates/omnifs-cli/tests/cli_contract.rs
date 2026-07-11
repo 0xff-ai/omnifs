@@ -200,6 +200,73 @@ fn json_commands_emit_expected_shapes() {
 }
 
 #[test]
+fn lifecycle_json_receipts_emit_one_document_with_a_verdict() {
+    let fixture = Fixture::new();
+
+    // `down --json` with no daemon settles a clean receipt on stdout and exits
+    // 0; the prose rail stays on stderr.
+    let down = fixture.run(&["down", "--json"]);
+    assert_eq!(
+        exit_code(&down),
+        0,
+        "stderr: {}",
+        String::from_utf8_lossy(&down.stderr)
+    );
+    let down_json = stdout_json(&down);
+    assert_eq!(down_json["verdict"], "ok");
+    assert!(down_json["rows"].as_array().is_some());
+
+    // `reset --json --yes` with nothing configured is a clean, empty reset.
+    let reset = fixture.run(&["reset", "--yes", "--json"]);
+    assert_eq!(
+        exit_code(&reset),
+        0,
+        "stderr: {}",
+        String::from_utf8_lossy(&reset.stderr)
+    );
+    let reset_json = stdout_json(&reset);
+    assert_eq!(reset_json["verdict"], "ok");
+    assert!(reset_json["rows"].as_array().is_some());
+}
+
+#[test]
+fn mount_add_json_receipt_names_the_mount() {
+    let fixture = Fixture::new();
+    install_test_provider_as(&fixture.home_path().join("providers"), "test");
+
+    let output = fixture.run(&["mount", "add", "test", "--no-input", "--yes", "--json"]);
+    assert_eq!(
+        exit_code(&output),
+        0,
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // The single JSON document is on stdout; the session rail is on stderr.
+    let json = stdout_json(&output);
+    assert_eq!(json["verdict"], "ok");
+    assert_eq!(json["mount"], "test");
+    assert!(
+        matches!(json["status"].as_str(), Some("ready" | "sign_in_declined")),
+        "unexpected status: {json}"
+    );
+}
+
+/// A `--json` command that fails before its receipt emits exactly one JSON
+/// error document on stdout carrying the stable `id`, not the human block.
+#[test]
+fn json_error_document_carries_a_stable_id() {
+    let fixture = Fixture::new();
+    fixture.write_static_token_mount_without_credential();
+
+    let output = fixture.run(&["up", "--json"]);
+    assert_eq!(exit_code(&output), 4);
+    let json = stdout_json(&output);
+    assert_eq!(json["error"]["id"], "auth-required");
+    assert!(json["error"]["message"].as_str().is_some());
+}
+
+#[test]
 fn bare_invocation_without_setup_points_to_setup() {
     let fixture = Fixture::new();
     let output = fixture.run(&[]);

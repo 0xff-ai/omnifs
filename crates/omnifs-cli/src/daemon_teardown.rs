@@ -85,19 +85,27 @@ impl<'a> DaemonTeardown<'a> {
         Self { workspace }
     }
 
-    /// Stop frontends before stopping the namespace daemon they depend on.
-    /// Human output is rendered from typed outcomes, not emitted by this
-    /// workflow itself.
+    /// Stop frontends before stopping the namespace daemon they depend on, and
+    /// render the typed outcomes to the flat ledger. Bails on the first failure
+    /// so the exit code reflects an incomplete teardown.
     pub(crate) async fn down(&self, force: bool) -> anyhow::Result<()> {
-        let mut outcomes = Vec::new();
-        outcomes.push(self.teardown_frontends(force).await);
+        let outcomes = self.down_collect(force).await?;
+        render_outcomes(&outcomes);
+        if let Some(outcome) = outcomes.iter().find(|outcome| outcome.is_failure()) {
+            anyhow::bail!(outcome.outcome().value);
+        }
+        Ok(())
+    }
 
-        // A live frontend depends on the daemon namespace. Preserve the
-        // previous fail-closed behavior: if teardown could not prove that all
-        // frontends are gone, do not stop the daemon underneath them.
+    /// Run the teardown workflow and return its typed outcomes without
+    /// rendering. `down` renders these to the ledger; the `--json` path settles
+    /// them into a receipt. A frontend-teardown failure stops the workflow
+    /// before the daemon is touched (fail-closed: a live frontend depends on
+    /// the daemon namespace).
+    pub(crate) async fn down_collect(&self, force: bool) -> anyhow::Result<Vec<TeardownOutcome>> {
+        let mut outcomes = vec![self.teardown_frontends(force).await];
         if outcomes[0].is_failure() {
-            render_outcomes(&outcomes);
-            anyhow::bail!(outcomes[0].outcome().value);
+            return Ok(outcomes);
         }
 
         let record_path = self.workspace.layout().runtime_record_file();
@@ -136,12 +144,7 @@ impl<'a> DaemonTeardown<'a> {
                 None => return Err(error),
             },
         }
-
-        render_outcomes(&outcomes);
-        if let Some(outcome) = outcomes.iter().find(|outcome| outcome.is_failure()) {
-            anyhow::bail!(outcome.outcome().value);
-        }
-        Ok(())
+        Ok(outcomes)
     }
 
     /// Best-effort daemon teardown for `omnifs reset`. Every branch is returned

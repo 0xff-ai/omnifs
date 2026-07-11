@@ -21,8 +21,25 @@ pub struct Cli {
     #[arg(short = 'v', long = "verbose", action = clap::ArgAction::Count)]
     pub verbose: u8,
 
+    /// Progress rendering. `text` animates a stderr row (the default); `json`
+    /// emits one NDJSON `UiEvent` per line on stdout for machine consumers.
+    #[arg(long, global = true, value_enum, default_value_t = ProgressFormat::Text)]
+    pub progress: ProgressFormat,
+
+    /// Suppress conversational narration on stderr. Receipts, progress settle
+    /// lines, and errors are preserved.
+    #[arg(short = 'q', long, global = true)]
+    pub quiet: bool,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
+}
+
+/// Progress stream selection for the global `--progress` flag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum ProgressFormat {
+    Text,
+    Json,
 }
 
 #[derive(Subcommand)]
@@ -178,15 +195,15 @@ impl Commands {
             },
             Self::Status(args) => args.run().await,
             Self::Setup(args) => args.run().await.map(|()| ExitCode::Success),
-            Self::Up(args) => args.run().await.map(|()| ExitCode::Success),
-            Self::Down(args) => args.run().await.map(|()| ExitCode::Success),
+            Self::Up(args) => args.run().await,
+            Self::Down(args) => args.run().await,
             Self::Logs(args) => args.run().map(|()| ExitCode::Success),
             Self::Inspect(args) => args.run().await.map(|()| ExitCode::Success),
             Self::Shell(args) => args.run().await.map(|()| ExitCode::Success),
             Self::Mount(args) => args.run().await,
             Self::Provider(args) => args.run().await,
             Self::Skill(args) => args.run().map(|()| ExitCode::Success),
-            Self::Reset(args) => args.run().await.map(|()| ExitCode::Success),
+            Self::Reset(args) => args.run().await,
             Self::Completions(args) => {
                 args.run();
                 Ok(ExitCode::Success)
@@ -224,18 +241,18 @@ async fn run_bare() -> anyhow::Result<ExitCode> {
     let running = report.runtime.is_some();
     report.build_report(false).print();
 
-    anstream::eprintln!();
+    // The status report is the record (stdout); these next-step hints are
+    // conversational, so `-q` drops them.
     if running {
-        anstream::eprintln!(
-            "{}",
-            crate::ui::hint("omnifs shell", "open a shell at the tree")
-        );
-        anstream::eprintln!(
-            "{}",
-            crate::ui::hint("omnifs mount add <provider>", "add another mount")
-        );
+        crate::ui::narrate("");
+        crate::ui::narrate(crate::ui::hint("omnifs shell", "open a shell at the tree"));
+        crate::ui::narrate(crate::ui::hint(
+            "omnifs mount add <provider>",
+            "add another mount",
+        ));
     } else {
-        anstream::eprintln!("{}", crate::ui::hint("omnifs up", "start the daemon"));
+        crate::ui::narrate("");
+        crate::ui::narrate(crate::ui::hint("omnifs up", "start the daemon"));
     }
     Ok(exit_code)
 }

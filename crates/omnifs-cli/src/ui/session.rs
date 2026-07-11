@@ -168,7 +168,9 @@ impl Render for RailRenderer {
     fn event(&mut self, event: &UiEvent) {
         match event {
             UiEvent::Narration { message } => {
-                let _ = cliclack::log::remark(message);
+                if !super::output::quiet() {
+                    let _ = cliclack::log::remark(message);
+                }
             },
             UiEvent::PhaseStarted { title, .. } => {
                 let _ = cliclack::log::step(title);

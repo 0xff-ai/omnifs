@@ -593,6 +593,7 @@ impl SetupArgs {
                 config_json: None,
                 capabilities_json: None,
                 limits_json: None,
+                json: false,
             };
             match crate::stages::configure_mount(init_args, workspace, false, session).await {
                 Ok(outcome) => out.push(InitResult {

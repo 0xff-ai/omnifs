@@ -16,6 +16,7 @@
 
 pub(crate) mod consent;
 pub(crate) mod event;
+pub(crate) mod output;
 pub(crate) mod picker;
 pub(crate) mod progress;
 pub(crate) mod prompt;
@@ -50,6 +51,17 @@ pub(crate) fn print_json(value: &impl serde::Serialize) -> anyhow::Result<()> {
 /// allow, never calls a print macro itself.
 pub(crate) fn eprint_raw(text: &str) {
     anstream::eprint!("{text}");
+}
+
+/// Conversational narration on stderr, dropped under `-q`/`--quiet`. This is the
+/// one path for the prose lines that lifecycle commands print directly (outside
+/// the event stream); the record lines (settle rows, receipts, errors) never
+/// route through here, so quiet keeps them.
+pub(crate) fn narrate(line: impl std::fmt::Display) {
+    if output::quiet() {
+        return;
+    }
+    anstream::eprintln!("{line}");
 }
 
 /// Truncate plain text to `max_chars`, counting the ellipsis in that budget.

@@ -65,15 +65,26 @@ pub struct AddArgs {
     /// Full resource limits JSON object to write into the mount spec.
     #[arg(long = "limits-json", value_name = "JSON")]
     pub limits_json: Option<String>,
+    /// Emit a machine-readable JSON receipt (the mount name and its readiness)
+    /// on stdout.
+    #[arg(long)]
+    pub json: bool,
 }
 
 impl AddArgs {
-    pub async fn run(self) -> anyhow::Result<()> {
+    pub async fn run(self) -> anyhow::Result<crate::error::ExitCode> {
         let workspace = Workspace::resolve()?;
         self.run_in_workspace(&workspace).await
     }
 
-    pub(crate) async fn run_in_workspace(self, workspace: &Workspace) -> anyhow::Result<()> {
+    pub(crate) async fn run_in_workspace(
+        self,
+        workspace: &Workspace,
+    ) -> anyhow::Result<crate::error::ExitCode> {
+        let json = self.json;
+        if json {
+            crate::ui::output::note_json_receipt();
+        }
         let mut session = crate::ui::session::Session::intro("omnifs mount add")?;
         let outcome = crate::stages::configure_mount(self, workspace, true, &mut session).await?;
         match outcome.status {
@@ -87,7 +98,14 @@ impl AddArgs {
                 ));
             },
         }
-        Ok(())
+        if json {
+            crate::ui::print_json(&crate::commands::receipt::MountAddReceipt {
+                verdict: crate::commands::receipt::Verdict::Ok,
+                mount: outcome.mount_name,
+                status: outcome.status.into(),
+            })?;
+        }
+        Ok(crate::error::ExitCode::Success)
     }
 }
 
@@ -364,6 +382,7 @@ mod tests {
             config_json: None,
             capabilities_json: None,
             limits_json: None,
+            json: false,
         };
 
         tokio::runtime::Builder::new_current_thread()

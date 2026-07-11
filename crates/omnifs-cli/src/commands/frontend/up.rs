@@ -171,16 +171,16 @@ async fn run_local(
     mount_point: std::path::PathBuf,
 ) -> anyhow::Result<()> {
     let backend = LocalBackend::new(paths.clone(), mount_point.clone(), kind.into())?;
-    anstream::eprintln!("Starting the local {} frontend", kind.label());
+    crate::ui::narrate(format!("Starting the local {} frontend", kind.label()));
     backend.launch(mount_name).await?;
 
     let probe_path = mount_point.join(mount_name);
-    anstream::eprintln!("✓ {} is mounted", probe_path.display());
-    anstream::eprintln!();
-    anstream::eprintln!(
+    crate::ui::narrate(format!("✓ {} is mounted", probe_path.display()));
+    crate::ui::narrate("");
+    crate::ui::narrate(format!(
         "Run `{}` to browse the local mount.",
         crate::style::bold("omnifs shell")
-    );
+    ));
     Ok(())
 }
 
@@ -206,7 +206,7 @@ async fn run_docker(
     #[cfg(not(target_os = "linux"))]
     let (bind_ip, expected_bind_ip) = (None, Ipv4Addr::LOCALHOST);
 
-    anstream::eprintln!("Requesting the daemon's TCP namespace attach target");
+    crate::ui::narrate("Requesting the daemon's TCP namespace attach target");
     let attach = workspace.daemon().frontend_attach_target(bind_ip).await?;
     let attach_addr = attach_addr(&attach.addr)?;
     ensure!(
@@ -231,11 +231,11 @@ async fn run_docker(
     )
     .await?;
 
-    anstream::eprintln!();
-    anstream::eprintln!(
+    crate::ui::narrate("");
+    crate::ui::narrate(format!(
         "Run `{}` to open a shell inside the container and browse {GUEST_MOUNT}.",
         crate::style::bold("omnifs shell")
-    );
+    ));
     Ok(())
 }
 
@@ -249,7 +249,7 @@ async fn run_krunkit(
         .into_local_path(&paths.cache_dir)
         .await?;
 
-    anstream::eprintln!("Requesting the daemon's vsock namespace attach listener");
+    crate::ui::narrate("Requesting the daemon's vsock namespace attach listener");
     let attach = workspace.daemon().frontend_attach_target_vsock().await?;
 
     let backend = KrunkitBackend::new(paths.config_dir.clone());
@@ -258,7 +258,7 @@ async fn run_krunkit(
         attach_token: attach.token.clone(),
         guest_image,
     };
-    anstream::eprintln!("Starting the krunkit guest");
+    crate::ui::narrate("Starting the krunkit guest");
     backend.launch(&spec).await?;
 
     wait_for_mount(
@@ -269,11 +269,11 @@ async fn run_krunkit(
     )
     .await?;
 
-    anstream::eprintln!();
-    anstream::eprintln!(
+    crate::ui::narrate("");
+    crate::ui::narrate(format!(
         "Run `{}` to open a shell inside the guest and browse {GUEST_MOUNT}.",
         crate::style::bold("omnifs shell")
-    );
+    ));
     Ok(())
 }
 

@@ -8,8 +8,8 @@
 //! is deliberate: there is no async bus, and progress is driven by the caller.
 
 // This module is the sanctioned output owner; the drift gate denies print
-// macros everywhere else.
-#![allow(clippy::disallowed_macros, clippy::print_stderr)]
+// macros everywhere else. The NDJSON renderer is the one stdout writer here.
+#![allow(clippy::disallowed_macros, clippy::print_stderr, clippy::print_stdout)]
 
 use super::consent::{Outcome, Row as ConsentRow};
 use super::report::Row;
@@ -85,6 +85,16 @@ pub(crate) struct LedgerRenderer;
 
 impl Render for LedgerRenderer {
     fn event(&mut self, event: &UiEvent) {
+        // Quiet drops conversational narration and prompt echoes; the record
+        // (settled rows, plans, receipts, the outro hand-off) is preserved.
+        if super::output::quiet()
+            && matches!(
+                event,
+                UiEvent::Narration { .. } | UiEvent::PromptShown { .. }
+            )
+        {
+            return;
+        }
         match event {
             UiEvent::Narration { message } => anstream::eprintln!("{message}"),
             UiEvent::PhaseStarted { title, count } => {
@@ -148,10 +158,85 @@ impl Render for LedgerRenderer {
     }
 }
 
+/// The `--progress json` renderer: one serialized [`UiEvent`] per line on
+/// stdout. This is the machine face of the same event stream the flat ledger
+/// animates, so an agent sees every phase, progress tick, and settle as JSON
+/// lines.
+///
+/// Stream choice: NDJSON goes to stdout (machine output), the same stream a
+/// `--json` final receipt uses. A receipt is itself a single-line JSON
+/// document, so when both flags are set the combined stdout stays a valid
+/// JSON-lines stream whose last line is the receipt.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct NdjsonRenderer;
+
+impl Render for NdjsonRenderer {
+    fn event(&mut self, event: &UiEvent) {
+        // A UiEvent is always serializable; drop the line rather than panic if
+        // that ever changes, so progress never aborts a command.
+        if let Ok(line) = serde_json::to_string(event) {
+            anstream::println!("{line}");
+        }
+    }
+}
+
+/// The renderer [`super::progress::LiveRow`] uses by default. It dispatches to
+/// the flat ledger or the NDJSON stream based on the global `--progress`
+/// selection, so every progress-bearing command routes through one type
+/// without threading a generic parameter down the call graph.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum StreamRenderer {
+    Flat(LedgerRenderer),
+    Ndjson(NdjsonRenderer),
+}
+
+impl StreamRenderer {
+    pub(crate) fn from_global() -> Self {
+        if super::output::progress_is_json() {
+            Self::Ndjson(NdjsonRenderer)
+        } else {
+            Self::Flat(LedgerRenderer)
+        }
+    }
+}
+
+impl Render for StreamRenderer {
+    fn event(&mut self, event: &UiEvent) {
+        match self {
+            Self::Flat(renderer) => renderer.event(event),
+            Self::Ndjson(renderer) => renderer.event(event),
+        }
+    }
+}
+
 fn format_duration(duration: Duration) -> String {
     if duration.as_secs() > 0 {
         format!("{}s", duration.as_secs())
     } else {
         format!("{}ms", duration.as_millis())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ndjson_serializes_one_tagged_object_per_event() {
+        // The NDJSON line is a single serialized UiEvent: a `type` tag plus the
+        // variant's fields, no trailing newline in the value itself.
+        let event = UiEvent::RowSettled {
+            glyph: Glyph::Done,
+            key: "daemon".to_owned(),
+            value: "running".to_owned(),
+            fix: None,
+            duration: Some(Duration::from_millis(12)),
+        };
+        let line = serde_json::to_string(&event).unwrap();
+        assert!(!line.contains('\n'), "one event is one line: {line}");
+        let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(value["type"], "row_settled");
+        assert_eq!(value["key"], "daemon");
+        assert_eq!(value["glyph"], "done");
     }
 }

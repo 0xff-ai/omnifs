@@ -93,6 +93,30 @@ The Omnifs VFS wire protocol also serves over token-authenticated TCP because a 
 
 Provider-store indexes strict-parse both the top-level index object and retained provider entries. Unknown keys make the store unreadable instead of being silently accepted.
 
+### Agent contract: exit codes, JSON, progress, quiet
+
+The CLI is a machine surface, not only a human one. `crates/omnifs-cli/src/error.rs` owns the exit-code enum and the stable error identities; the receipts live in `crates/omnifs-cli/src/commands/receipt.rs`.
+
+Exit codes are the API. Every code is modeled in `error::ExitCode`, and clap parse/usage errors are mapped once at the `main` parse boundary (never per command):
+
+| code | meaning |
+|---|---|
+| 0 | success |
+| 1 | generic failure |
+| 2 | usage error (clap) |
+| 3 | daemon unreachable |
+| 4 | auth or consent required |
+| 5 | degraded health |
+| 130 | canceled (declined prompt or Ctrl-C, 128 + SIGINT) |
+
+Every top-level error carries a stable, machine-stable slug derived from its exit class, not its wording (`generic-failure`, `usage`, `daemon-unavailable`, `auth-required`, `degraded`, `canceled`). The human error block shows it dim as a trailing `(id: <slug>)`; a `--json` command that fails before its receipt emits the same slug as the `id` field of a single JSON error document on stdout.
+
+`--json` is available on the state-reporting commands (`status`, `mount ls`, `provider ls`, `version`, `doctor`) and on the mutating and lifecycle commands (`up`, `down`, `reset`, `mount add`). The contract is: exactly one JSON document on stdout, all prose and narration on stderr, no human sentences inside JSON values, and a machine-visible `fix` naming the next command on every failure. Receipts are typed `#[derive(Serialize)]` structs that reuse the status view types, never hand-rolled `json!`. The `up` receipt carries the daemon, its mounts and frontends, and a verdict, and exits 5 when the verdict is degraded. A `--json` failure that has already emitted its receipt (a failed teardown row) returns the non-zero exit code without emitting a second error document.
+
+`--progress <text|json>` is a global flag. `text` (default) animates a stderr row that settles into the permanent transcript; `json` emits one serialized `UiEvent` per line on stdout (NDJSON). NDJSON shares stdout with a `--json` final receipt on purpose: a receipt is itself a single-line JSON document, so the combined stdout stays a valid JSON-lines stream whose last line is the receipt.
+
+`-q`/`--quiet` is a global flag that drops conversational narration (notes, hints, health nudges) while preserving the record: settled progress rows, receipts, and errors still print.
+
 ## Must not
 
 - Bypass the daemon mount CRUD API for config changes while a compatible daemon is ready.

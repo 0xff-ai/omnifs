@@ -98,7 +98,7 @@ pub struct ReauthArgs {
 impl MountArgs {
     pub async fn run(self) -> anyhow::Result<ExitCode> {
         match self.command {
-            MountCommand::Add(args) => args.run().await.map(|()| ExitCode::Success),
+            MountCommand::Add(args) => args.run().await,
             MountCommand::Ls(args) => ls(&args),
             MountCommand::Reauth(args) => args.run().await.map(|()| ExitCode::Success),
             MountCommand::Snapshot(args) => args.run().await.map(|()| ExitCode::Success),
