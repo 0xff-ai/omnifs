@@ -96,6 +96,9 @@ pub struct DaemonStatus {
     #[serde(default)]
     #[schema(value_type = String)]
     pub executable: PathBuf,
+    /// Derived, not authoritative: the first native frontend's mount point,
+    /// or empty for a namespace-only daemon (no in-process mount). `frontends`
+    /// is the authoritative list of every serving and attached frontend.
     #[schema(value_type = String)]
     pub mount_point: PathBuf,
     #[schema(value_type = String)]
@@ -253,6 +256,47 @@ impl std::fmt::Display for FsType {
 pub struct FrontendInfo {
     pub source: String,
     pub fs_type: FsType,
+    /// The host-visible mount point for a native frontend, or the
+    /// guest-reported mount point (display-only) for an attached one.
+    #[schema(value_type = String)]
+    pub mount_point: PathBuf,
+    /// How this frontend reaches the shared namespace. The host assigns this
+    /// from which listener the connection arrived on, never from anything a
+    /// connecting guest claims about itself.
+    pub delivery: FrontendDelivery,
+}
+
+/// How a frontend is delivered to the shared namespace. Assigned by the host
+/// at bind time (per listener for a virtualized frontend), never
+/// self-reported by the connecting guest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum FrontendDelivery {
+    /// Served in-process by the daemon (no attach transport, no seam).
+    Native,
+    /// Attached over a Unix domain socket under `frontends/<name>.sock`
+    /// (`--attach-socket <name>`).
+    Local,
+    /// Attached over the TCP namespace listener (`POST
+    /// /v1/frontend/attach-target`), the Docker Desktop delivery path. The
+    /// default: `FrontendAttachTargetRequest.driver` defaults to it, and it
+    /// is the only value that route accepts today.
+    #[default]
+    Docker,
+    /// Attached over the token-checking UDS vsock-proxy listener (`POST
+    /// /v1/frontend/attach-target/vsock`), the krunkit-on-macOS delivery path.
+    Krunkit,
+}
+
+impl std::fmt::Display for FrontendDelivery {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Native => "native",
+            Self::Local => "local",
+            Self::Docker => "docker",
+            Self::Krunkit => "krunkit",
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -512,7 +556,8 @@ pub struct ReconcileRequest {
 /// `POST /v1/shutdown`: what the daemon tore down before exiting.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct StopReport {
-    pub frontend: Option<FrontendInfo>,
+    /// Every serving and attached frontend at the moment of shutdown.
+    pub frontends: Vec<FrontendInfo>,
     #[schema(value_type = String)]
     pub mount_point: PathBuf,
     pub providers_dropped: usize,
@@ -527,6 +572,12 @@ pub struct FrontendAttachTargetRequest {
     #[serde(default)]
     #[schema(value_type = Option<String>)]
     pub bind_ip: Option<std::net::Ipv4Addr>,
+    /// The delivery mechanism attaching over this listener. Only `docker` is
+    /// accepted today (krunkit attaches over vsock instead, through the
+    /// separate `/v1/frontend/attach-target/vsock` route); any other value is
+    /// a 400. Defaults to `docker` when omitted.
+    #[serde(default)]
+    pub driver: FrontendDelivery,
 }
 
 /// `POST /v1/frontend/attach-target`: the TCP attach target a frontend dials

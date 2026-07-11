@@ -31,7 +31,8 @@ use hyperlocal::{UnixConnector, Uri as UnixUri};
 use omnifs_api::{
     API_MAJOR, API_MINOR, ApiError, CredentialStatus, DaemonStatus, ErrorCode,
     FrontendAttachTargetReport, FrontendAttachTargetRequest, FrontendAttachTargetVsockReport,
-    MountReport, MountUpdateRequest, ProviderSummary, ReconcileReport, StopReport, UpgradeDelta,
+    FrontendDelivery, MountReport, MountUpdateRequest, ProviderSummary, ReconcileReport,
+    StopReport, UpgradeDelta,
 };
 use omnifs_workspace::authn::CredentialId;
 use omnifs_workspace::layout::WorkspaceLayout;
@@ -466,8 +467,14 @@ impl DaemonClient {
         &self,
         bind_ip: Option<std::net::Ipv4Addr>,
     ) -> Result<FrontendAttachTargetReport> {
-        let body = serde_json::to_value(FrontendAttachTargetRequest { bind_ip })
-            .context("serialize attach-target request")?;
+        let body = serde_json::to_value(FrontendAttachTargetRequest {
+            bind_ip,
+            // The only driver this route serves today; the daemon rejects
+            // anything else with a 400 (krunkit attaches over vsock instead,
+            // through the separate `.../attach-target/vsock` route).
+            driver: FrontendDelivery::Docker,
+        })
+        .context("serialize attach-target request")?;
         let raw = self
             .request(
                 Method::POST,

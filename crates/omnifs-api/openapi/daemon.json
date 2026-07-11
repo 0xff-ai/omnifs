@@ -838,7 +838,8 @@
             "description": "Random 16-hex-character id generated per daemon start. The CLI asserts it\nagainst the runtime record it resolved from, so a record overwritten by a\nrestart mid-command is detected instead of silently trusted."
           },
           "mount_point": {
-            "type": "string"
+            "type": "string",
+            "description": "Derived, not authoritative: the first native frontend's mount point,\nor empty for a namespace-only daemon (no in-process mount). `frontends`\nis the authoritative list of every serving and attached frontend."
           },
           "mounts": {
             "type": "array",
@@ -1012,6 +1013,10 @@
               "string",
               "null"
             ]
+          },
+          "driver": {
+            "$ref": "#/components/schemas/FrontendDelivery",
+            "description": "The delivery mechanism attaching over this listener. Only `docker` is\naccepted today (krunkit attaches over vsock instead, through the\nseparate `/v1/frontend/attach-target/vsock` route); any other value is\na 400. Defaults to `docker` when omitted."
           }
         }
       },
@@ -1031,15 +1036,35 @@
           }
         }
       },
+      "FrontendDelivery": {
+        "type": "string",
+        "description": "How a frontend is delivered to the shared namespace. Assigned by the host\nat bind time (per listener for a virtualized frontend), never\nself-reported by the connecting guest.",
+        "enum": [
+          "native",
+          "local",
+          "docker",
+          "krunkit"
+        ]
+      },
       "FrontendInfo": {
         "type": "object",
         "required": [
           "source",
-          "fs_type"
+          "fs_type",
+          "mount_point",
+          "delivery"
         ],
         "properties": {
+          "delivery": {
+            "$ref": "#/components/schemas/FrontendDelivery",
+            "description": "How this frontend reaches the shared namespace. The host assigns this\nfrom which listener the connection arrived on, never from anything a\nconnecting guest claims about itself."
+          },
           "fs_type": {
             "$ref": "#/components/schemas/FsType"
+          },
+          "mount_point": {
+            "type": "string",
+            "description": "The host-visible mount point for a native frontend, or the\nguest-reported mount point (display-only) for an attached one."
           },
           "source": {
             "type": "string"
@@ -1317,19 +1342,17 @@
         "type": "object",
         "description": "`POST /v1/shutdown`: what the daemon tore down before exiting.",
         "required": [
+          "frontends",
           "mount_point",
           "providers_dropped"
         ],
         "properties": {
-          "frontend": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/FrontendInfo"
-              }
-            ]
+          "frontends": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FrontendInfo"
+            },
+            "description": "Every serving and attached frontend at the moment of shutdown."
           },
           "mount_point": {
             "type": "string"
