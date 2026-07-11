@@ -244,12 +244,28 @@ impl SetupArgs {
             return Ok(());
         }
 
+        // Time-to-first-file: in the fresh wizard, when at least one selected
+        // provider needs no auth, bring those mounts up and prove a real read
+        // before any browser sign-in begins. The rail stays a single linear
+        // spine: the fast mounts' whole section (their configuration, the
+        // daemon launch, and the first-read proof) finishes, and only then do
+        // the auth-requiring providers sign in. They attach to the
+        // already-running daemon, so no relaunch is needed.
+        if matches!(style, StageStyle::Wizard) && !self.no_up {
+            let (fast, rest) = Self::split_fast_lane(&selected, &installed);
+            if !fast.is_empty() {
+                return self
+                    .fast_lane_launch(&fast, &rest, &installed, workspace, mount_point, session)
+                    .await;
+            }
+        }
+
         // A provider configuration or credential failure is a command failure,
         // not a soft skip. Returning the original error preserves its exit
         // code and context for scripts and for the top-level renderer. Only an
         // explicit sign-in decline becomes `MountOutcome::Skipped`.
         let results = self
-            .run_init_loop(&selected, &installed, workspace, style, session)
+            .run_init_loop(&selected, &installed, workspace, style, 4, session)
             .await?;
 
         let any_ready = results
@@ -270,6 +286,63 @@ impl SetupArgs {
         let outcome = self
             .launch_and_report(workspace, mount_point.as_deref(), &results, style, session)
             .await?;
+        Self::print_closer(&results, Some(&outcome), session);
+        Ok(())
+    }
+
+    /// Partition selected provider names into the no-auth fast lane and the
+    /// auth-requiring rest, preserving each group's original order so the
+    /// transcript is deterministic. A provider is fast when its manifest
+    /// declares no auth (the same predicate `--yes` auto-selection uses).
+    fn split_fast_lane(
+        selected: &[String],
+        installed: &[(Provider, ProviderManifest)],
+    ) -> (Vec<String>, Vec<String>) {
+        selected.iter().cloned().partition(|name| {
+            crate::catalog::find_installed(installed, name)
+                .is_some_and(|(_, manifest)| manifest.auth.is_none())
+        })
+    }
+
+    /// The time-to-first-file spine: configure the no-auth mounts (phase 4),
+    /// launch the daemon and prove a read on the first of them (phase 5), then
+    /// sign the auth-requiring providers in afterward (phase 5, applied live to
+    /// the running daemon). Only the fresh wizard reaches this path, and only
+    /// when a launch is wanted (`!--no-up`) and `fast` is non-empty.
+    async fn fast_lane_launch(
+        &self,
+        fast: &[String],
+        rest: &[String],
+        installed: &[(Provider, ProviderManifest)],
+        workspace: &Workspace,
+        mount_point: Option<PathBuf>,
+        session: &mut crate::ui::session::Session,
+    ) -> anyhow::Result<()> {
+        let mut results = self
+            .run_init_loop(fast, installed, workspace, StageStyle::Wizard, 4, session)
+            .await?;
+
+        // Launch on the fast mounts alone. The daemon reads the specs just
+        // written and serves them; the first-read proof runs against the first
+        // Ready mount here, before any browser round trip.
+        let outcome = self
+            .launch_and_report(
+                workspace,
+                mount_point.as_deref(),
+                &results,
+                StageStyle::Wizard,
+                session,
+            )
+            .await?;
+
+        // The auth-requiring providers sign in below. `configure_mount`'s
+        // persist step applies each spec to the now-running daemon (its
+        // create-if-ready path), so these mounts go live without a relaunch.
+        let rest_results = self
+            .run_init_loop(rest, installed, workspace, StageStyle::Wizard, 5, session)
+            .await?;
+        results.extend(rest_results);
+
         Self::print_closer(&results, Some(&outcome), session);
         Ok(())
     }
@@ -486,6 +559,7 @@ impl SetupArgs {
         installed: &[(Provider, ProviderManifest)],
         workspace: &Workspace,
         style: StageStyle,
+        phase_num: usize,
         session: &mut crate::ui::session::Session,
     ) -> anyhow::Result<Vec<InitResult>> {
         let mut out = Vec::new();
@@ -495,7 +569,14 @@ impl SetupArgs {
                 anyhow::bail!("provider `{provider_name}` not found");
             };
             let mount_name = manifest.default_mount.clone();
-            session.phase(style.phase(4, &format!("{provider_name} sign in")));
+            // A no-auth provider has nothing to sign into; naming its phase
+            // "sign in" would misdescribe a mount that just comes up.
+            let verb = if manifest.auth.is_some() {
+                "sign in"
+            } else {
+                "mount"
+            };
+            session.phase(style.phase(phase_num, &format!("{provider_name} {verb}")));
 
             let init_args = init::InitArgs {
                 provider: Some(provider_name.clone()),
