@@ -59,12 +59,15 @@ impl Row {
         self
     }
 
-    /// `  <glyph> <key padded to KEY_WIDTH>value`. The glyph carries the only
-    /// color in the prefix so padding math runs on the plain key; a key at or
-    /// past the column keeps one separating space.
+    /// A single fixed-width row for the rail (`  <glyph> <key padded>value`).
+    /// The flat [`Report`] no longer routes through here: it builds a `tabled`
+    /// grid so columns size to content. This stays for the rail, whose keys are
+    /// short; the value renders `` `cmd` `` spans as the cyan accent.
     pub(super) fn render(&self) -> String {
         let display_key = super::truncate(&self.key, KEY_WIDTH);
-        let key_pad = KEY_WIDTH - display_key.chars().count();
+        // Always keep at least one space before the value so a key that fills
+        // the column never jams against it.
+        let key_pad = (KEY_WIDTH - display_key.chars().count()).max(1);
         let key = if self.bold_key {
             style::bold(&display_key)
         } else {
@@ -74,7 +77,7 @@ impl Row {
             "  {} {key}{:pad$}{}",
             self.glyph.render(),
             "",
-            self.value,
+            style::accentuate(&self.value),
             pad = key_pad
         )
     }
@@ -120,8 +123,8 @@ impl Section {
 
     fn heading(&self) -> String {
         match self.count {
-            Some(count) => style::bold(format!("{} ({count})", self.title)),
-            None => style::bold(&self.title),
+            Some(count) => style::heading(format!("{} ({count})", self.title)),
+            None => style::heading(&self.title),
         }
     }
 }
@@ -144,17 +147,43 @@ impl Report {
         self.sections.push(section);
     }
 
-    /// The flat human grid: bold headings, blank line between sections,
-    /// `KEY_WIDTH`-aligned columns, no rules.
+    /// The flat human grid: a colored bold heading per section, then a
+    /// borderless `tabled` grid whose glyph/key/value columns size to content
+    /// (unicode- and ANSI-width aware), a blank line between sections, no rules.
     pub(crate) fn render(&self) -> String {
+        use tabled::builder::Builder;
+        use tabled::settings::object::Columns;
+        use tabled::settings::{Padding, Style};
+
         let mut out = String::new();
         for (index, section) in self.sections.iter().enumerate() {
             if index > 0 {
                 out.push('\n');
             }
             let _ = writeln!(out, "{}", section.heading());
+            if section.rows.is_empty() {
+                continue;
+            }
+            let mut builder = Builder::default();
             for row in &section.rows {
-                let _ = writeln!(out, "{}", row.render());
+                let key = if row.bold_key {
+                    style::bold(&row.key)
+                } else {
+                    row.key.clone()
+                };
+                builder.push_record([row.glyph.render(), key, style::accentuate(&row.value)]);
+            }
+            let mut table = builder.build();
+            // Borderless: one space between columns (right padding), a two-space
+            // gutter before the glyph column. Style::empty drops every rule.
+            table
+                .with(Style::empty())
+                .with(Padding::new(0, 1, 0, 0))
+                .modify(Columns::first(), Padding::new(2, 1, 0, 0));
+            // tabled pads every cell to its column width, so the last column
+            // trails spaces; strip them so lines end at their content.
+            for line in table.to_string().lines() {
+                let _ = writeln!(out, "{}", line.trim_end());
             }
         }
         out
@@ -190,14 +219,18 @@ mod tests {
     }
 
     #[test]
-    fn rows_align_value_at_column_18() {
+    fn rows_within_a_section_align_their_values() {
         let plain = strip_ansi(&sample().render());
-        for line in plain.lines().filter(|l| l.starts_with("  ")) {
-            // Value begins at column 18: 2 gutter + 1 glyph + 1 space + 14 key.
-            let prefix: String = line.chars().take(18).collect();
-            assert_eq!(prefix.chars().count(), 18, "{line:?}");
-            assert_ne!(line.chars().nth(18), Some(' '), "value column: {line:?}");
-        }
+        let daemon = plain.lines().find(|l| l.contains("daemon")).unwrap();
+        let home = plain.lines().find(|l| l.contains("home")).unwrap();
+        // The grid aligns every value in a section to one column, and a space
+        // always separates the key from the value (no jamming).
+        assert_eq!(
+            daemon.find("running"),
+            home.find("~/.omnifs"),
+            "values misaligned:\n{daemon:?}\n{home:?}"
+        );
+        assert!(daemon.contains("daemon "), "key jams value: {daemon:?}");
     }
 
     #[test]
@@ -221,10 +254,13 @@ mod tests {
     }
 
     #[test]
-    fn long_keys_are_truncated_without_shifting_the_value_column() {
+    fn long_keys_truncate_and_keep_a_separator_in_the_rail() {
+        // `Row::render` is the rail single-row path with a fixed column. A key
+        // past the column truncates and still keeps one space before the value,
+        // so it can never jam. (The flat grid instead grows the column via
+        // tabled and does not truncate.)
         let row = Row::new(Glyph::Done, "providers discovered", "9 providers");
         let plain = strip_ansi(&row.render());
-        assert!(plain.contains("providers dis…"));
-        assert_eq!(plain.chars().nth(18), Some('9'));
+        assert!(plain.contains("providers dis… 9 providers"), "{plain:?}");
     }
 }

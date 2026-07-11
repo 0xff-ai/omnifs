@@ -218,19 +218,22 @@ pub fn render(error: &anyhow::Error) -> String {
     let hints: &[Cow<'static, str>] = HintedError::find(error).map_or(&[], |h| h.hints.as_slice());
     let messages = message_chain(error);
 
+    // Command spans written as `` `cmd` `` render in the cyan accent, never as
+    // literal backticks: this is terminal output, not markdown.
+    let accent = crate::ui::style::accentuate;
     if let Some(first) = messages.first() {
-        let _ = writeln!(&mut out, "Error: {first}");
+        let _ = writeln!(&mut out, "Error: {}", accent(first));
     }
     if messages.len() > 1 {
         out.push_str("\nCaused by:\n");
         for msg in &messages[1..] {
-            let _ = writeln!(&mut out, "  {msg}");
+            let _ = writeln!(&mut out, "  {}", accent(msg));
         }
     }
     if !hints.is_empty() {
         out.push_str("\nTry:\n");
         for hint in hints {
-            let _ = writeln!(&mut out, "  \u{2022} {hint}");
+            let _ = writeln!(&mut out, "  \u{2022} {}", accent(hint));
         }
     }
     // The stable identity, dim, so support and agents can name the failure

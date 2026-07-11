@@ -155,7 +155,10 @@ fn mount_reauth_requires_existing_mount() {
 
     assert_eq!(exit_code(&output), 1);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("no mount named `github`"));
+    // The command name renders in the accent color, not backticks, so assert on
+    // the message and the mount name separately.
+    assert!(stderr.contains("no mount named"));
+    assert!(stderr.contains("github"));
 }
 
 #[test]

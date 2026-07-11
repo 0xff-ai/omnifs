@@ -260,8 +260,10 @@ pub(crate) async fn launch_native(
     let client = DaemonClient::for_layout(paths);
     for _ in 0..300 {
         if let Some(status) = child.try_wait().context("poll daemon child status")? {
-            let tail = read_log_tail(&log_path);
-            anyhow::bail!("omnifs daemon exited before the mount became ready ({status})\n{tail}");
+            let cause = log_cause_suffix(&log_path);
+            anyhow::bail!(
+                "omnifs daemon exited before the mount became ready ({status}){cause}; run `omnifs logs` for the full daemon log"
+            );
         }
         if client.ready().await {
             if let Some(pid) = child_pid {
@@ -273,11 +275,10 @@ pub(crate) async fn launch_native(
                         return Ok(());
                     },
                     Ok(status) => {
-                        let tail = read_log_tail(&log_path);
                         let _ = child.kill().await;
                         anyhow::bail!(
                             "daemon readiness came from pid {}, not spawned pid {pid}; \
-                             another omnifs daemon is already serving on the control port\n{tail}",
+                             another omnifs daemon is already serving on the control port",
                             status.pid
                         );
                     },
@@ -306,9 +307,11 @@ pub(crate) async fn launch_native(
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    let tail = read_log_tail(&log_path);
+    let cause = log_cause_suffix(&log_path);
     let _ = child.kill().await;
-    anyhow::bail!("omnifs daemon did not become ready within 30s\n{tail}")
+    anyhow::bail!(
+        "omnifs daemon did not become ready within 30s{cause}; run `omnifs logs` for the full daemon log"
+    )
 }
 
 #[cfg(not(feature = "daemon"))]
@@ -324,19 +327,22 @@ pub(crate) async fn launch_native(
 }
 
 #[cfg(feature = "daemon")]
-fn read_log_tail(log_path: &Path) -> String {
-    const TAIL: usize = 4096;
-    match std::fs::read(log_path) {
-        Ok(bytes) => {
-            let start = bytes.len().saturating_sub(TAIL);
-            format!(
-                "--- {} (tail) ---\n{}",
-                log_path.display(),
-                String::from_utf8_lossy(&bytes[start..])
-            )
-        },
-        Err(error) => format!("(could not read {}: {error})", log_path.display()),
-    }
+/// The daemon's last non-empty log line, which is almost always its fatal
+/// error (a startup crash writes the cause last). Surfacing that one line keeps
+/// the failure legible; `omnifs logs` shows the rest. Dumping the whole tail
+/// buried the cause under repeated warnings.
+fn last_log_line(log_path: &Path) -> Option<String> {
+    let contents = std::fs::read_to_string(log_path).ok()?;
+    contents
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .map(str::to_owned)
+}
+
+/// Format the daemon's fatal line as a `: cause` suffix, or nothing.
+fn log_cause_suffix(log_path: &Path) -> String {
+    last_log_line(log_path).map_or_else(String::new, |line| format!(": {line}"))
 }
 
 #[cfg(test)]

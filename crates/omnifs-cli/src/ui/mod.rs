@@ -61,7 +61,9 @@ pub(crate) fn narrate(line: impl std::fmt::Display) {
     if output::quiet() {
         return;
     }
-    anstream::eprintln!("{line}");
+    // Command spans (`` `cmd` ``) render in the cyan accent, never as literal
+    // backticks: prose on the terminal is not markdown.
+    anstream::eprintln!("{}", style::accentuate(&line.to_string()));
 }
 
 /// Truncate plain text to `max_chars`, counting the ellipsis in that budget.

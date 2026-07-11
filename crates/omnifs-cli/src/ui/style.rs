@@ -50,6 +50,35 @@ pub(crate) fn bold(s: impl Display) -> String {
     format!("{}", s.bold())
 }
 
+/// Section heading: bold plus a structural blue so a section title separates
+/// from its rows at a glance. Blue is kept distinct from the cyan accent (which
+/// means "actionable") so headings never read as something to type.
+pub(crate) fn heading(s: impl Display) -> String {
+    format!("{}", s.blue().bold())
+}
+
+/// Render inline command spans written as `` `cmd` `` in the cyan accent,
+/// dropping the backticks. Output is text, not markdown: a command the user can
+/// type is shown by color, never by punctuation. Unbalanced backticks are left
+/// literal.
+pub(crate) fn accentuate(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(open) = rest.find('`') {
+        out.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        if let Some(close) = after.find('`') {
+            out.push_str(&accent(&after[..close]));
+            rest = &after[close + 1..];
+        } else {
+            out.push('`');
+            rest = after;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// The closed glyph set. One owner per meaning; a single space always follows a
 /// glyph in a row. The liveness dots (`LiveDot`/`IdleDot`) are for status lists
 /// only and never carry failure: failures get `Warn`/`Fail` so shape carries

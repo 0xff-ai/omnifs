@@ -30,16 +30,16 @@ impl Theme for OmnifsTheme {
         let Some(first) = lines.next() else {
             return "│\n".to_string();
         };
+        // A symboled line (a `◇` phase marker) opens a new section, so lead it
+        // with a blank spine to separate it from the rows above. Remark rows
+        // (empty symbol) carry no blank, so rows within a group pack tightly.
         let mut out = if symbol.is_empty() {
             format!("│  {first}\n")
         } else {
-            format!("{symbol} {first}\n")
+            format!("│\n{symbol} {}\n", super::style::heading(first))
         };
         for line in lines {
             let _ = writeln!(out, "│  {line}");
-        }
-        if !symbol.is_empty() {
-            out.push_str("│\n");
         }
         out
     }
@@ -48,7 +48,13 @@ impl Theme for OmnifsTheme {
         if matches!(state, ThemeState::Cancel) {
             String::new()
         } else {
-            <DefaultTheme as Theme>::format_header(&DefaultTheme, state, prompt)
+            // Lead every prompt with a blank spine so a `◆` question separates
+            // from the rows above it (remark rows pack tightly and carry no
+            // trailing spine of their own).
+            format!(
+                "│\n{}",
+                <DefaultTheme as Theme>::format_header(&DefaultTheme, state, prompt)
+            )
         }
     }
 
@@ -218,10 +224,11 @@ mod tests {
     fn theme_renders_the_session_rail() {
         let theme = OmnifsTheme;
         assert_eq!(theme.format_intro("omnifs setup"), "┌ omnifs setup\n│\n");
-        assert_eq!(
-            theme.format_log("1/5 environment", "◇"),
-            "◇ 1/5 environment\n│\n"
-        );
+        // A phase marker opens a section: lead with a blank spine, bold the
+        // title, and carry no trailing spine so the section's rows pack under it.
+        let step = crate::ui::strip_ansi(&theme.format_log("1/5 environment", "◇"));
+        assert_eq!(step, "│\n◇ 1/5 environment\n");
+        // Remark rows pack tightly: no leading or trailing spine.
         assert_eq!(
             theme.format_log("✓ daemon  ready", ""),
             "│  ✓ daemon  ready\n"

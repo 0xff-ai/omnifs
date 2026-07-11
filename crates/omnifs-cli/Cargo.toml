@@ -57,6 +57,7 @@ ratatui = "0.29"
 crossterm = "0.28"
 tar = { workspace = true }
 zstd = { workspace = true }
+tabled = { version = "0.21.0", features = ["ansi"] }
 
 [features]
 default = ["daemon"]
