@@ -131,18 +131,15 @@ fn group_versions_preferred_first(group: &APIGroup) -> Vec<String> {
     let preferred = group
         .preferred_version
         .as_ref()
-        .map(|version| version.group_version.clone())
-        .unwrap_or_default();
-    let mut versions = Vec::new();
-    if !preferred.is_empty() {
-        versions.push(preferred.clone());
-    }
+        .map(|version| version.group_version.as_str())
+        .filter(|version| !version.is_empty());
+    let mut versions = preferred.into_iter().map(str::to_owned).collect::<Vec<_>>();
     versions.extend(
         group
             .versions
             .iter()
             .map(|version| version.group_version.clone())
-            .filter(|version| !version.is_empty() && version != &preferred),
+            .filter(|version| !version.is_empty() && Some(version.as_str()) != preferred),
     );
     versions
 }
@@ -451,19 +448,18 @@ impl PodLogReader {
 
     fn append(&self, body: &[u8]) {
         let text = String::from_utf8_lossy(body);
-        let lines: Vec<&str> = text.lines().collect();
         let mut buf = self.buf.borrow_mut();
         buf.started = true;
         // Resume after the marker if the over-fetched window still contains it;
         // otherwise (rotation, or first fetch) take the whole window.
         let start = match &buf.last_raw {
-            Some(marker) => lines
-                .iter()
+            Some(marker) => text
+                .lines()
                 .position(|line| line == marker)
                 .map_or(0, |i| i + 1),
             None => 0,
         };
-        for &line in &lines[start..] {
+        for line in text.lines().skip(start) {
             let content = line.split_once(' ').map_or(line, |(_, rest)| rest);
             buf.content.extend_from_slice(content.as_bytes());
             buf.content.push(b'\n');
