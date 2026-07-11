@@ -749,11 +749,11 @@ fn upgrade_delta_to_api(plan: &UpgradePlan) -> Result<UpgradeDelta> {
 
 fn hint_for(code: ErrorCode) -> &'static str {
     match code {
-        ErrorCode::AuthRequired | ErrorCode::ConsentRequired => "Try: omnifs mounts reauth <name>",
-        ErrorCode::CredentialNotFound => "Try: omnifs mounts reauth <mount>",
-        ErrorCode::MountNotFound => "Try: omnifs mounts ls",
+        ErrorCode::AuthRequired | ErrorCode::ConsentRequired => "Try: omnifs mount reauth <name>",
+        ErrorCode::CredentialNotFound => "Try: omnifs mount reauth <mount>",
+        ErrorCode::MountNotFound => "Try: omnifs mount ls",
         ErrorCode::SpecInvalid => {
-            "Try: edit the mount spec or recreate it with `omnifs init <provider> --as <name>`"
+            "Try: edit the mount spec or recreate it with `omnifs mount add <provider> --as <name>`"
         },
         ErrorCode::ProviderMissing => "Try: just providers build",
         ErrorCode::ReconcileBusy => "Try: rerun the command after reconcile finishes",
@@ -934,7 +934,7 @@ mod tests {
         let error = client.status_optional().await.unwrap_err();
         let rendered = crate::error::render(&error);
         assert!(rendered.contains("daemon status request failed: credential required"));
-        assert!(rendered.contains("Try: omnifs mounts reauth <name>"));
+        assert!(rendered.contains("Try: omnifs mount reauth <name>"));
         server.await.unwrap();
     }
 
@@ -944,20 +944,20 @@ mod tests {
         assert!(hint_for(ErrorCode::Unauthorized).contains("OMNIFS_DAEMON_ADDR"));
         assert_eq!(
             hint_for(ErrorCode::AuthRequired),
-            "Try: omnifs mounts reauth <name>"
+            "Try: omnifs mount reauth <name>"
         );
         assert_eq!(
             hint_for(ErrorCode::ConsentRequired),
-            "Try: omnifs mounts reauth <name>"
+            "Try: omnifs mount reauth <name>"
         );
         assert_eq!(
             hint_for(ErrorCode::CredentialNotFound),
-            "Try: omnifs mounts reauth <mount>"
+            "Try: omnifs mount reauth <mount>"
         );
-        assert_eq!(hint_for(ErrorCode::MountNotFound), "Try: omnifs mounts ls");
+        assert_eq!(hint_for(ErrorCode::MountNotFound), "Try: omnifs mount ls");
         assert_eq!(
             hint_for(ErrorCode::SpecInvalid),
-            "Try: edit the mount spec or recreate it with `omnifs init <provider> --as <name>`"
+            "Try: edit the mount spec or recreate it with `omnifs mount add <provider> --as <name>`"
         );
         assert_eq!(
             hint_for(ErrorCode::ProviderMissing),

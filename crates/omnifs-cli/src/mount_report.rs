@@ -130,7 +130,7 @@ fn read_user_mount_status(
 }
 
 /// The one mount-row renderer, shared by `omnifs status`'s Mounts section and
-/// `omnifs mounts ls`, so both agree on shape and severity. Auth states split by
+/// `omnifs mount ls`, so both agree on shape and severity. Auth states split by
 /// glyph so shape carries meaning without color: ready is a green liveness dot,
 /// a mount needing no auth is a dim idle dot, a mount needing sign-in (missing
 /// or expired) is a yellow `!` with the reauth command, and a credential-store
@@ -142,7 +142,7 @@ pub(crate) fn mount_row(status: &UserMountStatus) -> crate::ui::report::Row {
 
     match status {
         UserMountStatus::Ready(mount) => {
-            let reauth = format!("omnifs mounts reauth {}", mount.mount);
+            let reauth = format!("omnifs mount reauth {}", mount.mount);
             let (glyph, value, fix): (Glyph, String, Option<String>) = match &mount.auth {
                 AuthReadiness::None => (Glyph::IdleDot, "no auth needed".to_string(), None),
                 AuthReadiness::Ready { .. } if ready_expired(&mount.auth) => (
@@ -236,7 +236,7 @@ mod golden {
             ready(
                 "linear",
                 &["read"],
-                &["expired; run `omnifs mounts reauth linear`"],
+                &["expired; run `omnifs mount reauth linear`"],
             ),
             UserMountStatus::Ready(UserMountReadyStatus {
                 config_path: PathBuf::from("/omnifs-home/mounts/rss.json"),
@@ -251,7 +251,7 @@ mod golden {
                 provider: "notion".to_string(),
                 provider_present: true,
                 auth: AuthReadiness::Missing {
-                    command: "omnifs mounts reauth notion".to_string(),
+                    command: "omnifs mount reauth notion".to_string(),
                 },
             }),
             UserMountStatus::Invalid {

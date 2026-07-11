@@ -4,7 +4,7 @@
 //! lives here (host-owned) rather than being re-authored in every provider
 //! manifest. A provider manifest supplies only what is specific to it (which
 //! token to create, which app to register); that guidance is paired with this
-//! canned copy at the point of display by `omnifs init`'s auth step.
+//! canned copy at the point of display by `omnifs mount add`'s auth step.
 
 use omnifs_workspace::authn::OAuthFlow;
 

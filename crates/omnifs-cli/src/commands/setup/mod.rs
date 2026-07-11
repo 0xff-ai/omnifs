@@ -19,7 +19,7 @@ use clap::Args;
 use omnifs_workspace::layout::WorkspaceLayout;
 use omnifs_workspace::provider::{Provider, ProviderManifest};
 
-use crate::commands::init;
+use crate::commands::mount;
 use crate::frontend_backend::Driver;
 use crate::launch::{LaunchOutcome, Launcher};
 use crate::stages::PromptMode;
@@ -279,7 +279,7 @@ impl SetupArgs {
             return Ok(());
         }
         if !any_ready {
-            session.outro("No mounts yet. Add one with `omnifs init <provider>`.");
+            session.outro("No mounts yet. Add one with `omnifs mount add <provider>`.");
             return Ok(());
         }
 
@@ -437,7 +437,7 @@ impl SetupArgs {
                 .as_ref()
                 .is_some_and(omnifs_workspace::provider::ConfigMetadata::requires_prompt);
             let ambient =
-                !crate::commands::init::detect::detect(manifest.wasm_auth_manifest().as_ref())
+                !crate::commands::mount::detect::detect(manifest.wasm_auth_manifest().as_ref())
                     .is_empty();
             if requires_prompt {
                 skipped.push(format!("{name} (needs configuration)"));
@@ -508,7 +508,7 @@ impl SetupArgs {
             session.note(ui::hint("omnifs shell", "browse your files"));
         }
         session.note(ui::hint("omnifs status", "check the daemon"));
-        session.note(ui::hint("omnifs init", "add another provider"));
+        session.note(ui::hint("omnifs mount add", "add another provider"));
         session.note(ui::hint(
             "omnifs completions",
             "tab completion for your shell",
@@ -578,7 +578,7 @@ impl SetupArgs {
             };
             session.phase(style.phase(phase_num, &format!("{provider_name} {verb}")));
 
-            let init_args = init::InitArgs {
+            let init_args = mount::AddArgs {
                 provider: Some(provider_name.clone()),
                 as_name: None,
                 no_input: self.no_input || self.yes,
@@ -806,7 +806,7 @@ impl SetupArgs {
                 },
             }
         };
-        let reauth = crate::commands::mounts::ReauthArgs {
+        let reauth = crate::commands::mount::ReauthArgs {
             name: target,
             no_input: false,
             no_browser: self.no_browser,

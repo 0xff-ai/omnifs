@@ -1,4 +1,4 @@
-//! The frontend backend seam: how `omnifs frontend up|down|status` and
+//! The frontend backend seam: how `omnifs frontend up|down` and
 //! `omnifs shell` launch, probe, tear down, and shell into the optional FUSE
 //! frontend, independent of which runtime hosts it.
 //!

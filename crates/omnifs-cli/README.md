@@ -23,7 +23,7 @@ cargo install omnifs-cli
 ## Quick start
 
 ```bash
-omnifs init github
+omnifs mount add github
 omnifs up
 omnifs shell
 ```

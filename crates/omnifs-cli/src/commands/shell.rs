@@ -184,7 +184,7 @@ impl ShellArgs {
     /// Uses [`DockerBackend`] only for command construction; the image field of
     /// its `DockerTarget`
     /// is unused here, so the dev placeholder is fine regardless of build
-    /// channel, mirroring `frontend down`/`frontend status`.
+    /// channel, mirroring `frontend down`.
     fn exec_in_container(&self, container_name: &ContainerName) -> Result<()> {
         let target = DockerTarget::new(
             container_name.as_str().to_string(),

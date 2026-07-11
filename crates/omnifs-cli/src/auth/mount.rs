@@ -13,7 +13,7 @@ use super::manifest_view::AuthManifestView;
 use super::readiness::AuthReadiness;
 use crate::credential_target::CredentialTarget;
 use crate::mount_config::MountConfig;
-/// Auth mode chosen during `omnifs init` before a mount config exists on disk.
+/// Auth mode chosen during `omnifs mount add` before a mount config exists on disk.
 #[derive(Clone, Debug)]
 pub(crate) struct AuthSelection {
     pub(crate) auth_type: AuthKind,

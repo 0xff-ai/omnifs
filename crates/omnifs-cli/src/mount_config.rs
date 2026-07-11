@@ -53,13 +53,13 @@ impl MountConfig {
             (_, Ok(_)) => Ok(()),
             (true, Err(error)) => Err(error)
                 .with_hint(format!(
-                    "Run `omnifs mounts reauth {}` to authenticate",
+                    "Run `omnifs mount reauth {}` to authenticate",
                     self.name
                 ))
                 .with_exit_code(ExitCode::AuthRequired),
             (false, Err(error)) => Err(error)
                 .with_hint(format!(
-                    "Run `omnifs mounts reauth {}` to configure this mount's token",
+                    "Run `omnifs mount reauth {}` to configure this mount's token",
                     self.name
                 ))
                 .with_exit_code(ExitCode::AuthRequired),

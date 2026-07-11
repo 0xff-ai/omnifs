@@ -1,4 +1,4 @@
-//! Golden path: setup defaults, init fixture provider, up --wait, read, down.
+//! Golden path: setup defaults, mount add fixture provider, up --wait, read, down.
 
 #![cfg(not(target_os = "wasi"))]
 
@@ -110,17 +110,17 @@ fn setup_init_up_wait_read_down_golden_path() {
         String::from_utf8_lossy(&setup.stderr)
     );
 
-    let init = fixture.run(&["init", "test", "--no-input", "--yes"]);
+    let init = fixture.run(&["mount", "add", "test", "--no-input", "--yes"]);
     assert_eq!(
         exit_code(&init),
         0,
-        "init test --no-input --yes must exit 0\nstdout: {}\nstderr: {}",
+        "mount add test --no-input --yes must exit 0\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&init.stdout),
         String::from_utf8_lossy(&init.stderr)
     );
     assert!(
         fixture.home_path().join("mounts/test.json").is_file(),
-        "init must write mounts/test.json"
+        "mount add must write mounts/test.json"
     );
 
     if !live_acceptance_enabled() {

@@ -39,7 +39,7 @@ impl<'a> Launcher<'a> {
         let configs = self.workspace.mounts()?;
         if configs.is_empty() {
             anyhow::bail!(
-                "no mount configs found in {}; run `omnifs setup` for guided onboarding, or `omnifs init <provider>` to add one directly",
+                "no mount configs found in {}; run `omnifs setup` for guided onboarding, or `omnifs mount add <provider>` to add one directly",
                 paths.mounts_dir.display()
             );
         }

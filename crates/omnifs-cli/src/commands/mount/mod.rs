@@ -1,4 +1,18 @@
-//! `omnifs mounts` — list, re-authenticate, or remove configured mounts.
+//! `omnifs mount` — add, list, re-authenticate, remove, or snapshot mounts.
+
+pub(crate) mod add;
+pub(crate) mod auth_import;
+pub(crate) mod detect;
+pub(crate) mod mount_file;
+pub(crate) mod provider_selection;
+pub(crate) mod snapshot;
+pub(crate) mod spec_creation;
+mod token_validation;
+
+pub(crate) use add::AddArgs;
+pub(crate) use add::{render_consent_block, run_static_token_init};
+pub(crate) use auth_import::AuthImportDecision;
+pub(crate) use auth_import::ImportOutcome;
 
 use anyhow::{Context, anyhow, bail};
 use clap::{Args, Subcommand};
@@ -18,13 +32,15 @@ use crate::workspace::Workspace;
 use omnifs_workspace::layout::WorkspaceLayout;
 
 #[derive(Args, Debug, Clone)]
-pub struct MountsArgs {
+pub struct MountArgs {
     #[command(subcommand)]
-    pub command: MountsCommand,
+    pub command: MountCommand,
 }
 
 #[derive(Subcommand, Debug, Clone)]
-pub enum MountsCommand {
+pub enum MountCommand {
+    /// Add and authenticate a mount.
+    Add(AddArgs),
     /// List configured mounts with their provider and auth state.
     Ls(LsArgs),
     /// Re-authenticate an existing mount.
@@ -42,6 +58,8 @@ pub enum MountsCommand {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Export a mount's canonical cache to a directory.
+    Snapshot(snapshot::SnapshotArgs),
 }
 
 #[derive(Args, Debug, Clone, Default)]
@@ -77,12 +95,14 @@ pub struct ReauthArgs {
     pub scopes: Vec<String>,
 }
 
-impl MountsArgs {
+impl MountArgs {
     pub async fn run(self) -> anyhow::Result<ExitCode> {
         match self.command {
-            MountsCommand::Ls(args) => ls(&args),
-            MountsCommand::Reauth(args) => args.run().await.map(|()| ExitCode::Success),
-            MountsCommand::Rm {
+            MountCommand::Add(args) => args.run().await.map(|()| ExitCode::Success),
+            MountCommand::Ls(args) => ls(&args),
+            MountCommand::Reauth(args) => args.run().await.map(|()| ExitCode::Success),
+            MountCommand::Snapshot(args) => args.run().await.map(|()| ExitCode::Success),
+            MountCommand::Rm {
                 name,
                 yes,
                 keep_credentials,
@@ -130,7 +150,7 @@ fn ls(args: &LsArgs) -> anyhow::Result<ExitCode> {
         section.push(crate::ui::report::Row::new(
             crate::ui::style::Glyph::Skip,
             "",
-            "no mounts configured; run `omnifs init <provider>`",
+            "no mounts configured; run `omnifs mount add <provider>`",
         ));
     } else {
         for status in &statuses {
@@ -147,7 +167,7 @@ impl ReauthArgs {
     async fn run(self) -> anyhow::Result<()> {
         let workspace = Workspace::resolve()?;
         let mut session =
-            crate::ui::session::Session::intro(format!("omnifs mounts reauth {}", self.name))?;
+            crate::ui::session::Session::intro(format!("omnifs mount reauth {}", self.name))?;
         let result = self.run_in_session(&workspace, &mut session).await;
         if result.is_ok() {
             session.outro(format!("Re-authenticated `{}`.", self.name));
@@ -167,7 +187,9 @@ impl ReauthArgs {
             .iter()
             .find(|m| m.name.as_str() == mount_name)
             .ok_or_else(|| {
-                anyhow!("no mount named `{mount_name}`; run `omnifs init <provider>` to create it")
+                anyhow!(
+                    "no mount named `{mount_name}`; run `omnifs mount add <provider>` to create it"
+                )
             })?;
         let Some(auth) = mount_config.config.auth.as_ref() else {
             anyhow::bail!("mount `{mount_name}` needs no authentication");
@@ -187,12 +209,12 @@ impl ReauthArgs {
         };
 
         // `--no-input` must never reach an OAuth browser handoff (it would hang
-        // on the browser confirm or the manual-code paste). Mirror the init-side
+        // on the browser confirm or the manual-code paste). Mirror the add-side
         // guard: bail naming the interactive and static-token alternatives.
         let interactive = !self.no_input && crate::ui::prompt::is_terminal();
         if !interactive && selection.is_oauth() {
             return Err(anyhow!(
-                "`omnifs mounts reauth {mount_name}` cannot complete OAuth without a terminal; run it interactively, or use a static-token scheme with --token - or --token-env VAR"
+                "`omnifs mount reauth {mount_name}` cannot complete OAuth without a terminal; run it interactively, or use a static-token scheme with --token - or --token-env VAR"
             ))
             .with_exit_code(ExitCode::AuthRequired);
         }
@@ -216,7 +238,7 @@ impl ReauthArgs {
                 interactive,
             )?;
             let token = source.read()?;
-            crate::commands::init::run_static_token_init(
+            run_static_token_init(
                 manifest,
                 &selection,
                 token,
@@ -270,7 +292,7 @@ async fn rm_with_options(
     dry_run: bool,
 ) -> anyhow::Result<()> {
     let layout = workspace.layout();
-    let mut session = crate::ui::session::Session::intro(format!("omnifs mounts rm {name}"))?;
+    let mut session = crate::ui::session::Session::intro(format!("omnifs mount rm {name}"))?;
     let mounts = workspace.mounts()?;
     let name =
         MountName::new(name.to_owned()).with_context(|| format!("invalid mount name `{name}`"))?;

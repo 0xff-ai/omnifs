@@ -74,7 +74,7 @@ async fn health_nudge(workspace: &Workspace) -> Option<String> {
                 && health.needs_attention()
             {
                 return Some(format!(
-                    "mount `{}` has {}; run `omnifs mounts reauth {}`",
+                    "mount `{}` has {}; run `omnifs mount reauth {}`",
                     mount.mount,
                     credential_health_noun(health),
                     mount.mount
@@ -100,13 +100,13 @@ async fn health_nudge(workspace: &Workspace) -> Option<String> {
             crate::status::UserMountStatus::Ready(mount) => match mount.auth.terminal_row().kind {
                 crate::auth::AuthTerminalKind::Missing => {
                     return Some(format!(
-                        "mount `{}` has a missing credential; run `omnifs mounts reauth {}`",
+                        "mount `{}` has a missing credential; run `omnifs mount reauth {}`",
                         mount.mount, mount.mount
                     ));
                 },
                 crate::auth::AuthTerminalKind::Error => {
                     return Some(format!(
-                        "mount `{}` has a credential error; run `omnifs mounts reauth {}`",
+                        "mount `{}` has a credential error; run `omnifs mount reauth {}`",
                         mount.mount, mount.mount
                     ));
                 },

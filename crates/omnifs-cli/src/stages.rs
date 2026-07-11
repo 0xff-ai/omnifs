@@ -1,7 +1,7 @@
-//! Shared onboarding and lifecycle stages used by `setup`, `init`, and `up`.
+//! Shared onboarding and lifecycle stages used by `setup`, `mount add`, and `up`.
 //!
 //! Commands own narration. This module owns the stage behavior so the guided
-//! setup wizard and express `init` lane cannot drift from each other.
+//! setup wizard and express `mount add` lane cannot drift from each other.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -16,10 +16,10 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use crate::auth::AuthSelection;
-use crate::commands::init::mount_file::MountFile;
-use crate::commands::init::provider_selection::ProviderSelection;
-use crate::commands::init::spec_creation::{CreatedMountSpec, MountSpecCreator};
-use crate::commands::init::{AuthImportDecision, ImportOutcome, InitArgs};
+use crate::commands::mount::mount_file::MountFile;
+use crate::commands::mount::provider_selection::ProviderSelection;
+use crate::commands::mount::spec_creation::{CreatedMountSpec, MountSpecCreator};
+use crate::commands::mount::{AddArgs, AuthImportDecision, ImportOutcome};
 use crate::commands::setup::host_os::HostOs;
 use crate::error::{ExitCode, WithExitCode, WithHint};
 use crate::launch::LaunchOutcome;
@@ -177,7 +177,7 @@ pub(crate) fn mount_point_resolution(
 
 #[allow(clippy::too_many_lines)] // linear ledger narration reads best inline
 pub(crate) async fn configure_mount(
-    args: InitArgs,
+    args: AddArgs,
     workspace: &Workspace,
     standalone: bool,
     session: &mut crate::ui::session::Session,
@@ -199,7 +199,7 @@ pub(crate) async fn configure_mount(
             crate::ui::style::Glyph::Skip,
             "sign in",
             format!(
-                "skipped; run `omnifs mounts reauth {}` later",
+                "skipped; run `omnifs mount reauth {}` later",
                 plan.mount_name
             ),
         )),
@@ -253,13 +253,13 @@ pub(crate) async fn configure_mount(
 /// `--no-input`. A piped stdin is non-interactive even without the flag, so
 /// prompt sites bail cleanly (naming the satisfying flags) instead of hitting
 /// a prompt library's raw "not a terminal" error. Mirrors setup's terminal derivation.
-fn init_interactive(args: &InitArgs) -> bool {
+fn init_interactive(args: &AddArgs) -> bool {
     !args.no_input && crate::ui::prompt::is_terminal()
 }
 
 #[allow(clippy::too_many_lines)] // one linear spec-assembly path
 pub(crate) fn spec_creation(
-    args: &InitArgs,
+    args: &AddArgs,
     workspace: &Workspace,
     session: &mut crate::ui::session::Session,
 ) -> anyhow::Result<MountInitPlan> {
@@ -297,9 +297,9 @@ pub(crate) fn spec_creation(
                 provider_selection.provider_names().join(", ")
             )
         })
-        .with_hint("Run `omnifs providers ls` to list available providers (or `omnifs init` with no args to pick one interactively)")
+        .with_hint("Run `omnifs provider ls` to list available providers (or `omnifs mount add` with no args to pick one interactively)")
         .with_hint(format!(
-            "Or run `omnifs providers add <wasm-or-dir>` to install provider artifacts into {}",
+            "Or run `omnifs provider add <wasm-or-dir>` to install provider artifacts into {}",
             paths.providers_dir.display()
         ))?;
     let reference = provider.reference();
@@ -387,18 +387,18 @@ pub(crate) fn spec_creation(
 impl MountInitPlan {
     async fn authenticate(
         &mut self,
-        args: &InitArgs,
+        args: &AddArgs,
         workspace: &Workspace,
         session: &mut crate::ui::session::Session,
     ) -> anyhow::Result<MountInitStatus> {
-        crate::commands::init::render_consent_block(session, &self.manifest);
+        crate::commands::mount::render_consent_block(session, &self.manifest);
         let plan = self;
         let Some(auth) = plan.effective_auth.as_ref() else {
             return Ok(MountInitStatus::Ready);
         };
         let interactive = init_interactive(args);
         if let Some(token) = plan.imported_token.take() {
-            crate::commands::init::run_static_token_init(
+            crate::commands::mount::run_static_token_init(
                 &plan.manifest,
                 auth,
                 token,
@@ -433,7 +433,7 @@ impl MountInitPlan {
             .await
             .inspect_err(|_| {
                 session.note(format!(
-                    "login did not complete; run `omnifs mounts reauth {}` to finish",
+                    "login did not complete; run `omnifs mount reauth {}` to finish",
                     plan.mount_name
                 ));
             })?;
@@ -466,7 +466,7 @@ impl MountInitPlan {
                 interactive,
             )?;
             let token = source.read()?;
-            crate::commands::init::run_static_token_init(
+            crate::commands::mount::run_static_token_init(
                 &plan.manifest,
                 auth,
                 token,
@@ -523,7 +523,7 @@ pub(crate) fn parse_wait_duration(raw: &str) -> anyhow::Result<Duration> {
 }
 
 fn selected_auth(
-    args: &InitArgs,
+    args: &AddArgs,
     reference: &omnifs_workspace::ids::ProviderRef,
     mount_name: &MountName,
     manifest: &ProviderManifest,
@@ -581,7 +581,7 @@ async fn persist_mount_spec(
 }
 
 fn apply_mount_overrides(
-    args: &InitArgs,
+    args: &AddArgs,
     manifest: &ProviderManifest,
     creator: &MountSpecCreator<'_>,
     created: &mut CreatedMountSpec,
@@ -668,7 +668,7 @@ fn approved_upgrade_for_existing_mount(
     }
     if !interactive {
         anyhow::bail!(
-            "`omnifs init --no-input` cannot approve provider upgrade changes for existing mount `{mount_name}`"
+            "`omnifs mount add --no-input` cannot approve provider upgrade changes for existing mount `{mount_name}`"
         );
     }
 

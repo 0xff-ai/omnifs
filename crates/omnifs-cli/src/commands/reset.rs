@@ -14,7 +14,7 @@ use omnifs_workspace::layout::WorkspaceLayout;
 use omnifs_workspace::runtime_record::RuntimeRecord;
 use std::sync::Arc;
 
-use crate::commands::mounts::delete_credentials;
+use crate::commands::mount::delete_credentials;
 use crate::credential_target::CredentialTarget;
 use crate::daemon_teardown::DaemonTeardown;
 use crate::stages::PromptMode;

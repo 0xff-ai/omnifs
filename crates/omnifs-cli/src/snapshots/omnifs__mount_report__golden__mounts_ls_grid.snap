@@ -4,7 +4,7 @@ expression: strip_ansi(&report.render())
 ---
 Mounts (5)
   ● github        oauth  2 scopes  expires 2026-08-01T00:00:00Z
-  ! linear        credential expired; run `omnifs mounts reauth linear`
+  ! linear        credential expired; run `omnifs mount reauth linear`
   ◌ rss           no auth needed
-  ! notion        needs sign-in; run `omnifs mounts reauth notion`
+  ! notion        needs sign-in; run `omnifs mount reauth notion`
   ✗ broken.json   invalid (provider artifact missing)

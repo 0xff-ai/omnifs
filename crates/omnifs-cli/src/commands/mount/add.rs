@@ -1,16 +1,9 @@
-//! `omnifs init` — interactive setup for a new mount.
+//! `omnifs mount add` — interactive setup for a new mount.
 //!
 //! Walks the user through naming a mount, discovers provider defaults from
 //! the built-in catalog or provider wasm metadata, writes the resulting mount config to
 //! the resolved omnifs config file, and runs the provider's default auth flow
 //! when one is declared.
-
-pub(crate) mod auth_import;
-pub(crate) mod detect;
-pub(crate) mod mount_file;
-pub(crate) mod provider_selection;
-pub(crate) mod spec_creation;
-mod token_validation;
 
 use anyhow::Context;
 use clap::Args;
@@ -20,16 +13,14 @@ use secrecy::{ExposeSecret, SecretString};
 use std::path::Path;
 use time::OffsetDateTime;
 
+use super::token_validation::StaticTokenValidator;
 use crate::auth::AuthSelection;
 use crate::credential_target::CredentialTarget;
 use crate::workspace::Workspace;
-pub(crate) use auth_import::AuthImportDecision;
-pub(crate) use auth_import::ImportOutcome;
-use token_validation::StaticTokenValidator;
 
 #[derive(Args, Debug, Clone)]
 #[allow(clippy::struct_excessive_bools)] // mirrors CLI flags 1:1
-pub struct InitArgs {
+pub struct AddArgs {
     /// Provider to use (positional; picker if omitted).
     pub provider: Option<String>,
     /// Mount name override. Auto-generated from the provider if absent.
@@ -76,14 +67,14 @@ pub struct InitArgs {
     pub limits_json: Option<String>,
 }
 
-impl InitArgs {
+impl AddArgs {
     pub async fn run(self) -> anyhow::Result<()> {
         let workspace = Workspace::resolve()?;
         self.run_in_workspace(&workspace).await
     }
 
     pub(crate) async fn run_in_workspace(self, workspace: &Workspace) -> anyhow::Result<()> {
-        let mut session = crate::ui::session::Session::intro("omnifs init")?;
+        let mut session = crate::ui::session::Session::intro("omnifs mount add")?;
         let outcome = crate::stages::configure_mount(self, workspace, true, &mut session).await?;
         match outcome.status {
             crate::stages::MountInitStatus::Ready => {
@@ -91,7 +82,7 @@ impl InitArgs {
             },
             crate::stages::MountInitStatus::SignInDeclined => {
                 session.outro(format!(
-                    "Saved `{}`. Run `omnifs mounts reauth {}` to sign in later.",
+                    "Saved `{}`. Run `omnifs mount reauth {}` to sign in later.",
                     outcome.mount_name, outcome.mount_name
                 ));
             },
@@ -100,8 +91,9 @@ impl InitArgs {
     }
 }
 
-/// The per-provider consent block shared by setup's loop and standalone `init`:
-/// a plain description line, then compact needs and limits lines. All on stderr.
+/// The per-provider consent block shared by setup's loop and standalone
+/// `mount add`: a plain description line, then compact needs and limits lines.
+/// All on stderr.
 pub(crate) fn render_consent_block(
     session: &mut crate::ui::session::Session,
     manifest: &ProviderManifest,
@@ -197,10 +189,11 @@ pub(crate) async fn run_static_token_init(
 
 #[cfg(test)]
 mod tests {
-    use super::mount_file::MountFile;
-    use super::spec_creation::{CreatedMountSpec, MountSpecCreator};
-    use super::{AuthImportDecision, InitArgs};
+    use super::AddArgs;
     use crate::auth::AuthSelection;
+    use crate::commands::mount::AuthImportDecision;
+    use crate::commands::mount::mount_file::MountFile;
+    use crate::commands::mount::spec_creation::{CreatedMountSpec, MountSpecCreator};
     use crate::workspace::Workspace;
     use omnifs_caps::{
         Grant, Grants as ProviderCapabilities, LimitDeclarations, Limits as ProviderLimits,
@@ -272,8 +265,8 @@ mod tests {
             created.config,
             Some(serde_json::json!({"endpoint": "unix:///var/run/docker.sock"})),
         );
-        // `init` seeds the spec's grants from the manifest's needs, so a mount
-        // carries explicit grants the materialize-time check can satisfy.
+        // `mount add` seeds the spec's grants from the manifest's needs, so a
+        // mount carries explicit grants the materialize-time check can satisfy.
         let capabilities = created.capabilities.expect("grants seeded from needs");
         assert_eq!(
             capabilities.domains,
@@ -351,12 +344,12 @@ mod tests {
     }
 
     #[test]
-    fn init_dns_writes_snapshot_spec() {
+    fn add_dns_writes_snapshot_spec() {
         let dir = tempfile::tempdir().unwrap();
         let workspace = Workspace::from_layout(
             omnifs_workspace::layout::WorkspaceLayout::under_root(dir.path()),
         );
-        let args = InitArgs {
+        let args = AddArgs {
             provider: Some("dns".to_string()),
             as_name: None,
             no_input: true,

@@ -16,13 +16,13 @@ use crate::error::ExitCode;
 use crate::workspace::Workspace;
 
 #[derive(Args, Debug, Clone)]
-pub struct ProvidersArgs {
+pub struct ProviderArgs {
     #[command(subcommand)]
-    pub command: ProvidersCommand,
+    pub command: ProviderCommand,
 }
 
 #[derive(Subcommand, Debug, Clone)]
-pub enum ProvidersCommand {
+pub enum ProviderCommand {
     /// Install provider WASM artifacts into the local provider store.
     Add(AddArgs),
     /// List installed provider WASM artifacts.
@@ -43,11 +43,11 @@ pub struct LsArgs {
     pub json: bool,
 }
 
-impl ProvidersArgs {
+impl ProviderArgs {
     pub async fn run(self) -> anyhow::Result<ExitCode> {
         match self.command {
-            ProvidersCommand::Add(args) => args.run().map(|()| ExitCode::Success),
-            ProvidersCommand::Ls(args) => args.run().await,
+            ProviderCommand::Add(args) => args.run().map(|()| ExitCode::Success),
+            ProviderCommand::Ls(args) => args.run().await,
         }
     }
 }
@@ -134,7 +134,7 @@ fn render_providers(local: &[ProviderSummary], daemon: Option<&[ProviderSummary]
     out
 }
 
-/// One summary per distinct provider name, the same view `providers ls`
+/// One summary per distinct provider name, the same view `provider ls`
 /// renders, so any other caller counting "distinct providers" matches it
 /// exactly instead of re-deriving the name-collapsing logic.
 pub(crate) fn provider_summaries(

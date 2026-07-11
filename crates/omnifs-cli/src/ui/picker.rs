@@ -168,7 +168,7 @@ pub(crate) fn default_on(manifest: &ProviderManifest) -> bool {
     if default_is_oauth {
         return true;
     }
-    let ambient = crate::commands::init::detect::detect(manifest.wasm_auth_manifest().as_ref());
+    let ambient = crate::commands::mount::detect::detect(manifest.wasm_auth_manifest().as_ref());
     !ambient.is_empty()
 }
 
@@ -282,7 +282,7 @@ pub(crate) fn build_rows(
                 .description
                 .clone()
                 .unwrap_or_else(|| manifest.display_name.clone());
-            // The returned id is the installable name that `init` consumes, which
+            // The returned id is the installable name that `mount add` consumes, which
             // usually equals the manifest id but can differ (test fixtures).
             PickerRow {
                 id: provider.meta.name.to_string(),

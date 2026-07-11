@@ -11,7 +11,7 @@
 //! | Identical / no newer artifact | Nothing. |
 //! | Additive optional config | Auto-migrate: fill defaults, repin, rewrite the spec file. |
 //! | Breaking config | Hard error: re-init with the new schema. |
-//! | Capability, limit, or auth change | Warn and keep the pinned artifact; re-consent via `omnifs init`. |
+//! | Capability, limit, or auth change | Warn and keep the pinned artifact; re-consent via `omnifs mount add`. |
 //!
 //! Problems are per-mount, never fatal to the whole command: a blocking upgrade
 //! keeps the mount on its known-good pinned artifact (warn, skip), and a pinned
@@ -50,7 +50,7 @@ pub(crate) fn run_upgrade_check(
             anstream::eprintln!(
                 "warning: mount `{mount}` provider artifact is missing (pinned id {id}); \
                  the daemon will report this mount as failed. \
-                 Run `omnifs init {name} --as {mount}` to re-pin it.",
+                 Run `omnifs mount add {name} --as {mount}` to re-pin it.",
                 id = spec.provider.id,
             );
             continue;
@@ -90,7 +90,7 @@ pub(crate) fn run_upgrade_check(
                 anstream::eprintln!(
                     "warning: mount `{mount}` keeps its pinned `{name}`: a newer artifact has a \
                      breaking config change ({}) and cannot be adopted automatically.\n\
-                     Run `omnifs init {name} --as {mount}` to re-initialise with the new schema, \
+                     Run `omnifs mount add {name} --as {mount}` to re-initialise with the new schema, \
                      or edit {} manually.",
                     descriptions.join(", "),
                     config.source.display(),
@@ -105,7 +105,7 @@ pub(crate) fn run_upgrade_check(
                 anstream::eprintln!(
                     "warning: mount `{mount}` keeps its pinned `{name}`: a newer artifact changed \
                      its access or runtime surface and needs re-consent.\nChanges: {}\n\
-                     Run `omnifs init {name} --as {mount}` to review and accept the new surface.",
+                     Run `omnifs mount add {name} --as {mount}` to review and accept the new surface.",
                     parts.join("; "),
                 );
             },

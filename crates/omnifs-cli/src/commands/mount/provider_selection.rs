@@ -57,9 +57,9 @@ impl<'a> ProviderSelection<'a> {
                     self.provider_names().join(", ")
                 )
             })
-            .with_hint("Run `omnifs providers ls` to list installed providers")
+            .with_hint("Run `omnifs provider ls` to list installed providers")
             .with_hint(
-                "Or run `omnifs providers add <wasm-or-dir>` to install a provider artifact",
+                "Or run `omnifs provider add <wasm-or-dir>` to install a provider artifact",
             )?;
 
         let proposed = explicit_name.map_or_else(|| manifest.default_mount.clone(), str::to_string);

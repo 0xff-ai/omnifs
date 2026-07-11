@@ -12,6 +12,6 @@ Frontends (0)
 Mounts (5)
   ● github        oauth  2 scopes  expires 2026-08-01T00:00:00Z
   ◌ rss           no auth needed
-  ! linear        needs sign-in; run `omnifs mounts reauth linear`
-  ✗ notion        credential store unreadable; run `omnifs mounts reauth notion`
+  ! linear        needs sign-in; run `omnifs mount reauth linear`
+  ✗ notion        credential store unreadable; run `omnifs mount reauth notion`
   ✗ broken.json   invalid (provider artifact missing)

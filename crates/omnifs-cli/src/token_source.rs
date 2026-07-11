@@ -1,4 +1,4 @@
-//! Typed source for static-token input used by `omnifs init`. `--token VALUE`
+//! Typed source for static-token input used by `omnifs mount add`. `--token VALUE`
 //! is rejected to keep secrets out of shell history; only `--token -` (stdin)
 //! and `--token-env VAR` are accepted. Interactive mode (no flags, terminal
 //! stdin) prompts.

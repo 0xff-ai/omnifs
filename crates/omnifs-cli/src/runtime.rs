@@ -1,6 +1,6 @@
 #![allow(clippy::disallowed_macros)] // migrates in wave 5 (cli-redesign)
 //! The Docker client for the optional Docker-hosted FUSE frontend
-//! (`omnifs frontend up|down|status`). The daemon itself always runs
+//! (`omnifs frontend up|down`). The daemon itself always runs
 //! host-native and has no Docker surface here.
 
 use std::collections::HashMap;
@@ -256,9 +256,8 @@ impl Runtime {
     }
 
     /// `Some(running)` when a container named `name` exists, `None` when it
-    /// does not. Generic over `name` (unlike a self-targeted check) so
-    /// `omnifs frontend status` can probe the frontend container through any
-    /// connected `Runtime`.
+    /// does not. Generic over `name` (unlike a self-targeted check) so a
+    /// caller can probe the frontend container through any connected `Runtime`.
     pub(crate) async fn container_running(&self, name: &ContainerName) -> Result<Option<bool>> {
         match self
             .docker

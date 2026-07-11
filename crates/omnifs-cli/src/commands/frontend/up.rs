@@ -303,7 +303,9 @@ pub(crate) fn first_mount_name(workspace: &Workspace) -> anyhow::Result<String> 
         .into_iter()
         .map(|mount| mount.name.to_string())
         .next()
-        .context("no mounts configured; run `omnifs init <provider>` before `omnifs frontend up`")
+        .context(
+            "no mounts configured; run `omnifs mount add <provider>` before `omnifs frontend up`",
+        )
 }
 
 /// Poll `backend.mount_ready` until it reports the mount is live or

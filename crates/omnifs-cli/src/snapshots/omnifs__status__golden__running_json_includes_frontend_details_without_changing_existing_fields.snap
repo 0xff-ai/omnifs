@@ -82,7 +82,7 @@ expression: "serde_json::to_string_pretty(&report.into_json()).unwrap()"
       "provider_present": true,
       "auth": {
         "state": "missing",
-        "command": "omnifs mounts reauth linear"
+        "command": "omnifs mount reauth linear"
       }
     },
     {

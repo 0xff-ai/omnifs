@@ -169,7 +169,7 @@ impl DoctorReport {
         }
     }
 
-    fn finish(self, live: LiveSection) -> anyhow::Result<DoctorVerdict> {
+    fn finish(self, live: LiveSection, paths: Section) -> anyhow::Result<DoctorVerdict> {
         match self.output {
             OutputFormat::Json => {
                 crate::ui::print_json(&DoctorJson {
@@ -188,6 +188,9 @@ impl DoctorReport {
                 }
                 report.push(diagnostics);
                 report.push(live_section(&live));
+                // The workspace paths block lives here, not on `version`: it is
+                // diagnostic detail, and doctor ends with its verdict line.
+                report.push(paths);
                 report.push(Section::new(verdict_line(self.verdict, warnings, failures)));
                 report.print();
             },
@@ -337,7 +340,27 @@ impl Doctor<'_> {
 
         let live = self.probe_live().await?;
         report.record_live(&live);
-        report.finish(live)
+        let paths = self.paths_section();
+        report.finish(live, paths)
+    }
+
+    /// The workspace paths block: config, cache, mounts, providers, credentials,
+    /// and the config file, each on its own informational row. Moved here from
+    /// `version --detail`; it is diagnostic detail, not a version fact.
+    fn paths_section(&self) -> Section {
+        let layout = self.workspace.layout();
+        let mut section = Section::new("Paths");
+        for (key, path) in [
+            ("config", &layout.config_dir),
+            ("cache", &layout.cache_dir),
+            ("mounts", &layout.mounts_dir),
+            ("providers", &layout.providers_dir),
+            ("credentials", &layout.credentials_file),
+            ("config file", &layout.config_file),
+        ] {
+            section.push(Row::new(Glyph::Skip, key, WorkspaceLayout::display(path)));
+        }
+        section
     }
 
     async fn probe_docker_reachable(&self) -> (Option<Runtime>, ProbeResult) {
@@ -406,7 +429,7 @@ impl Doctor<'_> {
     fn probe_providers_discovered(&self) -> ProbeResult {
         match self.workspace.catalog().dir_status() {
             DirStatus::Present { wasm_count } if wasm_count > 0 => {
-                match crate::commands::providers::provider_summaries(self.workspace.catalog()) {
+                match crate::commands::provider::provider_summaries(self.workspace.catalog()) {
                     Ok(summaries) => ProbeResult::Ok(format!(
                         "{} providers ({wasm_count} artifacts)",
                         summaries.len()
@@ -580,7 +603,7 @@ fn live_findings(
         // under-grants land here too), so the fix is spec recreation, which is
         // also what the daemon's own error text recommends.
         let fix = match provider_by_mount.get(&failure.mount) {
-            Some(provider) => format!("omnifs init {provider} --as {}", failure.mount),
+            Some(provider) => format!("omnifs mount add {provider} --as {}", failure.mount),
             None => "omnifs logs".to_string(),
         };
         findings.push(LiveFinding {
@@ -607,7 +630,7 @@ fn live_findings(
                     credential.id,
                     credential_health_label(credential.health)
                 ),
-                fix: format!("omnifs mounts reauth {}", mount.mount),
+                fix: format!("omnifs mount reauth {}", mount.mount),
             })
             .peekable();
         // The aggregate mount health is derived from the same credentials, so
@@ -621,7 +644,7 @@ fn live_findings(
                 mount: mount.mount.clone(),
                 state: "warn",
                 message: format!("credential health is {}", credential_health_label(health)),
-                fix: format!("omnifs mounts reauth {}", mount.mount),
+                fix: format!("omnifs mount reauth {}", mount.mount),
             });
         }
     }
@@ -677,7 +700,7 @@ mod golden {
                 mount: "linear".to_string(),
                 state: "warn",
                 message: "credential `linear:oauth:default` is expired".to_string(),
-                fix: "omnifs mounts reauth linear".to_string(),
+                fix: "omnifs mount reauth linear".to_string(),
             }],
         }
     }

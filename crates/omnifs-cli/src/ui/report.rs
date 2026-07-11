@@ -183,7 +183,7 @@ mod tests {
         mounts.push(
             Row::new(Glyph::Warn, "linear", "credential expired; run `x`")
                 .identity()
-                .with_fix("omnifs mounts reauth linear"),
+                .with_fix("omnifs mount reauth linear"),
         );
         report.push(mounts);
         report
@@ -217,7 +217,7 @@ mod tests {
         assert_eq!(mounts["count"], 2);
         assert_eq!(mounts["rows"][0]["state"], "ok");
         assert_eq!(mounts["rows"][1]["state"], "warn");
-        assert_eq!(mounts["rows"][1]["fix"], "omnifs mounts reauth linear");
+        assert_eq!(mounts["rows"][1]["fix"], "omnifs mount reauth linear");
     }
 
     #[test]

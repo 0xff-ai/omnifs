@@ -109,7 +109,7 @@ impl StatusReport {
             mounts.push(Row::new(
                 Glyph::Skip,
                 "",
-                "no mounts configured; run `omnifs init <provider>`",
+                "no mounts configured; run `omnifs mount add <provider>`",
             ));
         } else {
             for mount in &self.user_mounts {
@@ -470,7 +470,7 @@ mod golden {
             provider: mount.to_string(),
             provider_present: true,
             auth: AuthReadiness::Missing {
-                command: format!("omnifs mounts reauth {mount}"),
+                command: format!("omnifs mount reauth {mount}"),
             },
         })
     }

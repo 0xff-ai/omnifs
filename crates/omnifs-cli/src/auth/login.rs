@@ -72,11 +72,11 @@ async fn login(
         LoginRequest::Loopback(request) => client
             .login_loopback(request)
             .await
-            .with_hint(format!("Re-run `omnifs mounts reauth {mount}` to retry"))?,
+            .with_hint(format!("Re-run `omnifs mount reauth {mount}` to retry"))?,
         LoginRequest::ClientSideToken(request) => client
             .login_client_side_token(request)
             .await
-            .with_hint(format!("Re-run `omnifs mounts reauth {mount}` to retry"))?,
+            .with_hint(format!("Re-run `omnifs mount reauth {mount}` to retry"))?,
         LoginRequest::ManualCode(_) if no_input => {
             return Err(anyhow!(
                 "`--no-input` cannot complete the manual-code OAuth flow for `{mount}` (it needs a pasted redirect URL); run it interactively"
@@ -101,7 +101,7 @@ async fn login(
                     "authorized",
                 ));
             }
-            result.with_hint(format!("Re-run `omnifs mounts reauth {mount}` to retry"))?
+            result.with_hint(format!("Re-run `omnifs mount reauth {mount}` to retry"))?
         },
     };
     for url in printed_urls
@@ -159,7 +159,7 @@ async fn login_manual(
         Err(omnifs_auth::AuthError::BrowserOpen(message)) if message == MANUAL_PROMPT_CANCELED => {
             Err(anyhow::Error::new(crate::ui::picker::Canceled))
         },
-        result => result.with_hint(format!("Re-run `omnifs mounts reauth {mount}` to retry")),
+        result => result.with_hint(format!("Re-run `omnifs mount reauth {mount}` to retry")),
     }
 }
 

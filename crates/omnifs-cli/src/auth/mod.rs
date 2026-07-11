@@ -1,5 +1,5 @@
 //! Shared auth helpers: the OAuth login flow, manifest views, mount auth
-//! loading, and readiness probes. `omnifs init` drives credential acquisition;
+//! loading, and readiness probes. `omnifs mount add` drives credential acquisition;
 //! there is no `omnifs auth` command surface.
 
 pub(crate) mod explain;

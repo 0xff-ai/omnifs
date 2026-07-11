@@ -85,13 +85,38 @@ fn help_documents_exit_codes() {
 }
 
 #[test]
-fn removed_mounts_add_is_usage_error() {
+fn removed_top_level_commands_are_usage_errors() {
     let fixture = Fixture::new();
-    let output = fixture.run(&["mounts", "add", "github"]);
-
-    assert_eq!(exit_code(&output), 2);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("unrecognized subcommand 'add'"));
+    // `init` folded into `mount add`, top-level `snapshot` into `mount
+    // snapshot`, and `frontend status` was deleted; each must now be a clap
+    // usage error, not a silent no-op.
+    for (args, needle) in [
+        (
+            ["init", "github"].as_slice(),
+            "unrecognized subcommand 'init'",
+        ),
+        (
+            ["snapshot", "test"].as_slice(),
+            "unrecognized subcommand 'snapshot'",
+        ),
+        (
+            ["frontend", "status"].as_slice(),
+            "unrecognized subcommand 'status'",
+        ),
+        (
+            ["mounts", "ls"].as_slice(),
+            "unrecognized subcommand 'mounts'",
+        ),
+        (
+            ["providers", "ls"].as_slice(),
+            "unrecognized subcommand 'providers'",
+        ),
+    ] {
+        let output = fixture.run(args);
+        assert_eq!(exit_code(&output), 2, "{args:?}: {output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(needle), "{args:?}: {stderr}");
+    }
 }
 
 #[test]
@@ -120,13 +145,13 @@ fn missing_mount_credential_exits_4() {
     assert_eq!(exit_code(&output), 4);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("no stored credential"));
-    assert!(stderr.contains("omnifs mounts reauth test"));
+    assert!(stderr.contains("omnifs mount reauth test"));
 }
 
 #[test]
-fn mounts_reauth_requires_existing_mount() {
+fn mount_reauth_requires_existing_mount() {
     let fixture = Fixture::new();
-    let output = fixture.run(&["mounts", "reauth", "github", "--no-input"]);
+    let output = fixture.run(&["mount", "reauth", "github", "--no-input"]);
 
     assert_eq!(exit_code(&output), 1);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -144,12 +169,12 @@ fn json_commands_emit_expected_shapes() {
     assert!(status_json["mounts"].as_array().is_some());
     assert!(status_json["providers"].as_array().is_some());
 
-    let mounts = fixture.run(&["mounts", "ls", "--json"]);
+    let mounts = fixture.run(&["mount", "ls", "--json"]);
     assert_eq!(exit_code(&mounts), 0);
     let mounts_json = stdout_json(&mounts);
     assert!(mounts_json["mounts"].as_array().is_some());
 
-    let providers = fixture.run(&["providers", "ls", "--json"]);
+    let providers = fixture.run(&["provider", "ls", "--json"]);
     assert_eq!(exit_code(&providers), 0);
     let providers_json = stdout_json(&providers);
     assert!(providers_json["local"].as_array().is_some());
@@ -160,7 +185,12 @@ fn json_commands_emit_expected_shapes() {
     let version_json = stdout_json(&version);
     assert!(version_json["cli"].as_str().is_some());
     assert!(version_json["daemon"].is_null());
-    assert!(version_json["paths"]["config"].as_str().is_some());
+    assert!(version_json["channel"].as_str().is_some());
+    // Providers is now a structured object, not a bare count, and the paths
+    // block moved to `doctor`.
+    assert!(version_json["providers"]["state"].as_str().is_some());
+    assert!(version_json["providers"]["count"].as_u64().is_some());
+    assert!(version_json["paths"].is_null());
 
     let doctor = fixture.run(&["doctor", "--json"]);
     let doctor_json = stdout_json(&doctor);
@@ -181,7 +211,7 @@ fn bare_invocation_without_setup_points_to_setup() {
 }
 
 #[test]
-fn scripted_setup_and_init_do_not_prompt() {
+fn scripted_setup_and_mount_add_do_not_prompt() {
     let fixture = Fixture::new();
     install_test_provider_as(&fixture.home_path().join("providers"), "test");
 
@@ -203,17 +233,17 @@ fn scripted_setup_and_init_do_not_prompt() {
     );
     assert!(setup_stderr.contains("└ You're set."), "{setup_stderr}");
 
-    let init = fixture.run(&["init", "test", "--no-input", "--yes"]);
+    let init = fixture.run(&["mount", "add", "test", "--no-input", "--yes"]);
     assert_eq!(
         exit_code(&init),
         0,
-        "init test --no-input --yes must succeed\nstdout: {}\nstderr: {}",
+        "mount add test --no-input --yes must succeed\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&init.stdout),
         String::from_utf8_lossy(&init.stderr)
     );
     assert!(init.stdout.is_empty(), "session prose belongs on stderr");
     let init_stderr = String::from_utf8_lossy(&init.stderr);
-    assert!(init_stderr.contains("┌ omnifs init"), "{init_stderr}");
+    assert!(init_stderr.contains("┌ omnifs mount add"), "{init_stderr}");
     assert!(
         init_stderr.contains("mount name") && init_stderr.contains("test taken, using test-2"),
         "--yes collision rename must stay visible: {init_stderr}"
@@ -221,7 +251,7 @@ fn scripted_setup_and_init_do_not_prompt() {
     assert!(init_stderr.contains("└ Mounted `test-2`."), "{init_stderr}");
     assert!(
         fixture.home_path().join("mounts/test.json").is_file(),
-        "init must write the test mount spec"
+        "mount add must write the test mount spec"
     );
     assert!(
         fixture.home_path().join("mounts/test-2.json").is_file(),

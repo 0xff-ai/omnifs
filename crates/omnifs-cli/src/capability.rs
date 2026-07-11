@@ -1,7 +1,7 @@
 //! Human-readable formatting for provider capability manifest entries.
 //!
 //! This module is the single owner of capability prose. The setup per-provider
-//! block, the picker detail panel, and standalone `omnifs init` all render a
+//! block, the picker detail panel, and standalone `omnifs mount add` all render a
 //! manifest's needs and limits through these helpers, so the wording cannot
 //! drift between surfaces.
 
@@ -81,7 +81,7 @@ pub(crate) fn compact_limits(manifest: &ProviderManifest) -> Option<String> {
     Some(parts.join(", "))
 }
 
-/// Two-column needs/limits rows for the picker panel and standalone `init`.
+/// Two-column needs/limits rows for the picker panel and standalone `mount add`.
 /// Left column is the value or limit noun; right column is the justification or
 /// the limit value. Needs sharing an identical justification merge into one row
 /// so the same sentence never prints twice.

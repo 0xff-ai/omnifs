@@ -55,27 +55,21 @@ pub enum Commands {
     /// available.
     Shell(commands::shell::ShellArgs),
 
-    /// Export a mount's canonical cache to a directory
-    Snapshot(commands::snapshot::SnapshotArgs),
-
     /// Guided setup: environment, providers, auth, launch
     ///
     /// First-run wizard: detect the OS, pick several providers, authenticate
     /// each, and launch in one pass.
     ///
-    /// Run this once to get started; use `omnifs init` to add a single
+    /// Run this once to get started; use `omnifs mount add` to add a single
     /// provider later. Re-runnable: already-configured providers are listed
     /// but excluded from the picker.
     Setup(commands::setup::SetupArgs),
 
-    /// Add and authenticate a mount
-    Init(commands::init::InitArgs),
-
-    /// List, reauthenticate, or remove mounts
-    Mounts(commands::mounts::MountsArgs),
+    /// Add, list, reauthenticate, snapshot, or remove mounts
+    Mount(commands::mount::MountArgs),
 
     /// List or install provider artifacts
-    Providers(commands::providers::ProvidersArgs),
+    Provider(commands::provider::ProviderArgs),
 
     /// Install omnifs usage skills for agent harnesses
     Skill(commands::skill::SkillArgs),
@@ -94,8 +88,8 @@ pub enum Commands {
 
     /// Print version information
     ///
-    /// Use `--detail` for daemon, store, and provider count alongside the CLI
-    /// version.
+    /// Prints the one-line build identity. Use `--json` for structured CLI,
+    /// daemon, channel, and provider facts.
     Version(commands::version::VersionArgs),
 
     /// Debug utilities. Hidden from `--help`.
@@ -114,7 +108,7 @@ pub enum Commands {
     ///
     /// The daemon always runs host-native. `omnifs frontend up` launches a
     /// separate, credential-free Docker container that renders FUSE over the
-    /// daemon's shared namespace; `down` and `status` manage its lifecycle.
+    /// daemon's shared namespace; `down` tears it down.
     Frontend(commands::frontend::FrontendArgs),
 }
 
@@ -159,11 +153,9 @@ impl Commands {
             Self::Logs(_) => "logs",
             Self::Inspect(_) => "inspect",
             Self::Shell(_) => "shell",
-            Self::Snapshot(_) => "snapshot",
             Self::Setup(_) => "setup",
-            Self::Init(_) => "init",
-            Self::Mounts(_) => "mounts",
-            Self::Providers(_) => "providers",
+            Self::Mount(_) => "mount",
+            Self::Provider(_) => "provider",
             Self::Skill(_) => "skill",
             Self::Reset(_) => "reset",
             Self::Doctor(_) => "doctor",
@@ -186,15 +178,13 @@ impl Commands {
             },
             Self::Status(args) => args.run().await,
             Self::Setup(args) => args.run().await.map(|()| ExitCode::Success),
-            Self::Init(args) => args.run().await.map(|()| ExitCode::Success),
             Self::Up(args) => args.run().await.map(|()| ExitCode::Success),
             Self::Down(args) => args.run().await.map(|()| ExitCode::Success),
             Self::Logs(args) => args.run().map(|()| ExitCode::Success),
             Self::Inspect(args) => args.run().await.map(|()| ExitCode::Success),
             Self::Shell(args) => args.run().await.map(|()| ExitCode::Success),
-            Self::Snapshot(args) => args.run().await.map(|()| ExitCode::Success),
-            Self::Mounts(args) => args.run().await,
-            Self::Providers(args) => args.run().await,
+            Self::Mount(args) => args.run().await,
+            Self::Provider(args) => args.run().await,
             Self::Skill(args) => args.run().map(|()| ExitCode::Success),
             Self::Reset(args) => args.run().await.map(|()| ExitCode::Success),
             Self::Completions(args) => {
@@ -210,16 +200,44 @@ impl Commands {
     }
 }
 
+/// Bare `omnifs` adapts to the workspace: an unconfigured workspace points at
+/// `setup`; a configured-but-stopped daemon shows the status report plus an
+/// `up` hint; a healthy daemon shows the full status report plus two next-step
+/// hints. It is a thin dispatcher over the shared status/report code, so it
+/// never drifts from `omnifs status`.
 async fn run_bare() -> anyhow::Result<ExitCode> {
     let workspace = Workspace::resolve()?;
-    let configured = workspace.mounts().is_ok_and(|mounts| !mounts.is_empty());
-
-    if configured {
-        commands::status::StatusArgs::default().run().await
-    } else {
+    let mounts = workspace.mounts().unwrap_or_default();
+    if mounts.is_empty() {
         anstream::println!("omnifs is not set up. Run `omnifs setup` to get started.");
-        Ok(ExitCode::Success)
+        return Ok(ExitCode::Success);
     }
+
+    let runtime = workspace.daemon().compatible_status_optional().await?;
+    let report = crate::status::StatusReport::collect(
+        workspace.catalog(),
+        workspace.layout().clone(),
+        runtime,
+        &mounts,
+    );
+    let exit_code = report.exit_code();
+    let running = report.runtime.is_some();
+    report.build_report(false).print();
+
+    anstream::eprintln!();
+    if running {
+        anstream::eprintln!(
+            "{}",
+            crate::ui::hint("omnifs shell", "open a shell at the tree")
+        );
+        anstream::eprintln!(
+            "{}",
+            crate::ui::hint("omnifs mount add <provider>", "add another mount")
+        );
+    } else {
+        anstream::eprintln!("{}", crate::ui::hint("omnifs up", "start the daemon"));
+    }
+    Ok(exit_code)
 }
 
 fn exit_for_verdict(verdict: DoctorVerdict) -> ExitCode {
@@ -245,15 +263,19 @@ mod tests {
             ("setup mount point", "setup", "mount-point"),
             ("setup provider picker", "setup", "providers"),
             ("setup provider confirmation", "setup", "yes"),
-            ("init provider picker", "init", "provider"),
-            ("init mount name collision", "init", "as"),
-            ("init auth scheme", "init", "scheme"),
-            ("init OAuth browser", "init", "no-browser"),
-            ("init static token", "init", "token-env"),
-            ("init auth suppression", "init", "no-auth"),
-            ("init provider config", "init", "config-json"),
-            ("init capability grants", "init", "capabilities-json"),
-            ("init resource limits", "init", "limits-json"),
+            ("mount add provider picker", "mount add", "provider"),
+            ("mount add mount name collision", "mount add", "as"),
+            ("mount add auth scheme", "mount add", "scheme"),
+            ("mount add OAuth browser", "mount add", "no-browser"),
+            ("mount add static token", "mount add", "token-env"),
+            ("mount add auth suppression", "mount add", "no-auth"),
+            ("mount add provider config", "mount add", "config-json"),
+            (
+                "mount add capability grants",
+                "mount add",
+                "capabilities-json",
+            ),
+            ("mount add resource limits", "mount add", "limits-json"),
             ("up readiness wait", "up", "wait"),
         ];
 
@@ -265,11 +287,17 @@ mod tests {
         }
     }
 
+    /// Resolve a whitespace-separated subcommand path (for example `mount add`)
+    /// and check whether the leaf subcommand declares the argument.
     fn has_arg(command: &clap::Command, subcommand: &str, arg: &str) -> bool {
-        let Some(command) = command.find_subcommand(subcommand) else {
-            return false;
-        };
-        command
+        let mut current = command;
+        for segment in subcommand.split_whitespace() {
+            let Some(next) = current.find_subcommand(segment) else {
+                return false;
+            };
+            current = next;
+        }
+        current
             .get_arguments()
             .any(|candidate| candidate.get_id() == arg || candidate.get_long() == Some(arg))
     }

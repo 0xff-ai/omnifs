@@ -10,6 +10,6 @@ Diagnostics (5)
   ✗ network       ghcr.io unreachable
 
 Live daemon
-  ! linear        credential `linear:oauth:default` is expired; run `omnifs mounts reauth linear`
+  ! linear        credential `linear:oauth:default` is expired; run `omnifs mount reauth linear`
 
 verdict: 1 failure

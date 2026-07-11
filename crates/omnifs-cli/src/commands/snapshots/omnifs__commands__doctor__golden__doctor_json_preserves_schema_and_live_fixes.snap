@@ -18,7 +18,7 @@ expression: "serde_json::to_string_pretty(&payload).unwrap()"
         "mount": "linear",
         "state": "warn",
         "message": "credential `linear:oauth:default` is expired",
-        "fix": "omnifs mounts reauth linear"
+        "fix": "omnifs mount reauth linear"
       }
     ]
   }

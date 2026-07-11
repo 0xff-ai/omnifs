@@ -65,7 +65,7 @@ impl AuthReadiness {
             CredentialTarget::Internal(_) => {},
         }
 
-        let command = format!("omnifs mounts reauth {mount_name}");
+        let command = format!("omnifs mount reauth {mount_name}");
         match target.lookup(store) {
             Ok(Some(entry)) => Self::from_entry(entry, Some(&command)),
             Ok(None) => Self::Missing { command },
@@ -185,7 +185,7 @@ pub(crate) fn credential_notices(
         return Vec::new();
     }
     if entry.is_expired_at(time::OffsetDateTime::now_utc()) {
-        let command = reauth_command.unwrap_or("omnifs mounts reauth <mount>");
+        let command = reauth_command.unwrap_or("omnifs mount reauth <mount>");
         return vec![format!("expired; run `{command}`")];
     }
     vec!["not refreshable; re-authentication will be required after expiry".to_owned()]
@@ -238,7 +238,7 @@ mod tests {
         assert_eq!(
             AuthReadiness::from_target("github", &CredentialTarget::Internal(key), &store),
             AuthReadiness::Missing {
-                command: "omnifs mounts reauth github".into(),
+                command: "omnifs mount reauth github".into(),
             }
         );
     }
