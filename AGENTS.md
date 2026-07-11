@@ -191,6 +191,7 @@ Do not use `cargo check --workspace --all-targets` as the host gate. If validati
 
 ## Footguns
 
+- **Bare `omnifs` on PATH may be the stale npm release.** A global `@0xff-ai/omnifs` shim under the node/fnm tree can shadow the worktree binary and serve a stale published build with retired behavior, such as the pre-host-native Docker-daemon model. When operating the daemon, mounts, or any CLI command from this worktree, always run the compiled `target/debug/omnifs` or `target/release/omnifs`, never bare `omnifs`; a stale shim answering `omnifs status` or `omnifs shell` with errors like a missing `omnifs` Docker container is this footgun, not a real regression.
 - **Default members, not workspace.** `cargo check --workspace --all-targets` forces WASM guest crates onto the host target and fails on `main` too. Guest crates build through `just providers build` and `just providers check`.
 - **Stale wit-bindgen after `.wit` edits.** Incremental builds can serve stale codegen. Run `cargo clean -p omnifs-wit` or a clean build before trusting downstream errors.
 - **Provider rebuild contention under nextest.** Some `omnifs-engine` integration tests shell out to `just providers build`. Reliable flow: `just providers wasi-sdk`, `just providers build`, then `OMNIFS_ITEST_SKIP_PROVIDER_BUILD=1 cargo nextest run ...` (or `just host test`, which sets that flag for you).
