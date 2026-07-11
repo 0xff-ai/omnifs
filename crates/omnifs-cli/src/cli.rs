@@ -31,14 +31,15 @@ pub enum Commands {
 
     /// Start the daemon and serve configured mounts
     ///
-    /// Spawns the host-native daemon over configured mounts. On macOS this
-    /// also auto-starts the optional Docker-hosted FUSE frontend
-    /// (`--no-frontend` to skip it).
+    /// Spawns the host-native daemon over configured mounts, then launches
+    /// every frontend in the effective `[[frontends]]` plan (explicit config,
+    /// else the platform default). `--no-frontend` starts the daemon only,
+    /// on every OS.
     Up(commands::up::UpArgs),
     /// Stop the daemon and clean up
     ///
-    /// Tears down the running daemon, its mount, and (if attached) the
-    /// Docker-hosted FUSE frontend.
+    /// Tears down every running frontend (local, Docker, or krunkit), then
+    /// the daemon.
     Down(commands::down::DownArgs),
     /// Tail the daemon log
     Logs(commands::logs::LogsArgs),

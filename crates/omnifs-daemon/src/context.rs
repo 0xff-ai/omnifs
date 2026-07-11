@@ -235,7 +235,7 @@ impl DaemonContext {
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
             .with_context(|| format!("restrict attach socket dir {} to 0700", dir.display()))?;
 
-        let path = self.layout.attach_socket("local");
+        let path = self.layout.local_attach_socket();
         let listener = Self::bind_attach_socket_at(&path, "local attach socket")?;
         Ok(AttachSocket { path, listener })
     }

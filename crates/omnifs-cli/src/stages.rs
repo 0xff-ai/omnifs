@@ -98,11 +98,11 @@ pub(crate) fn environment_check(
     Ok(EnvironmentReport { configured })
 }
 
-/// Informational Docker reachability, for macOS setup's environment stage
-/// (the daemon always runs host-native; this checks Docker only because
-/// `omnifs up` on macOS auto-starts the Docker-hosted FUSE frontend). Never
-/// fails setup: an unreachable daemon (or an unresolvable target) is reported,
-/// not raised.
+/// Informational Docker reachability, for setup's environment stage (the
+/// daemon always runs host-native; the caller shows this row only when the
+/// effective `[[frontends]]` plan actually launches a Docker frontend).
+/// Never fails setup: an unreachable daemon (or an unresolvable target) is
+/// reported, not raised.
 pub(crate) enum DockerReachability {
     Running { version: String },
     Unreachable,

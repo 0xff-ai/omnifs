@@ -1,5 +1,5 @@
-//! `omnifs frontend status`: the virtualized FUSE frontend's state and attach
-//! health, whichever backend it was launched with.
+//! `omnifs frontend status`: local, Docker, and krunkit frontend state and
+//! attach health, whichever drivers this workspace has running.
 
 use clap::Args;
 #[cfg(feature = "daemon")]

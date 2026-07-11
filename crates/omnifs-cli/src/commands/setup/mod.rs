@@ -4,10 +4,11 @@
 //! point question, a provider picker, a per-provider block for each
 //! selection, and a launch. Every human line prints on stderr through the
 //! `crate::ui` design system; stdout is reserved for machine output. The
-//! daemon always runs host-native, so there is no runtime-backend stage: on
-//! macOS `omnifs up` additionally auto-starts the optional Docker-hosted FUSE
-//! frontend, which is why this wizard still surfaces Docker reachability
-//! there.
+//! daemon always runs host-native, so there is no runtime-backend stage: the
+//! wizard surfaces Docker reachability and asks for a host mount point only
+//! when the effective `[[frontends]]` plan (explicit config, else the
+//! platform default) actually launches those frontend kinds — a guest-only
+//! config, for instance, needs neither.
 
 pub mod host_os;
 
@@ -20,6 +21,7 @@ use omnifs_workspace::layout::WorkspaceLayout;
 use omnifs_workspace::provider::{Provider, ProviderManifest};
 
 use crate::commands::init;
+use crate::frontend_backend::Driver;
 use crate::launch::{LaunchOutcome, Launcher};
 use crate::stages::PromptMode;
 use crate::ui;
@@ -40,7 +42,8 @@ pub struct SetupArgs {
     /// Fail instead of prompting. Use flags or --yes for every answer.
     #[arg(long)]
     pub no_input: bool,
-    /// Mount point for the daemon's native mount.
+    /// Mount point for the local frontend, when the effective `[[frontends]]`
+    /// plan includes one.
     #[arg(long, value_name = "PATH")]
     pub mount_point: Option<PathBuf>,
     /// Preselect providers and skip the picker.
@@ -117,16 +120,33 @@ impl SetupArgs {
             "{}",
             ui::ok("providers", format!("{} installed", installed.len()))
         );
-        // Docker reachability matters only on macOS, where `omnifs up`
-        // auto-starts the Docker-hosted FUSE frontend; Linux's native FUSE
-        // mount needs no container.
-        if os == HostOs::MacOs {
+        let frontend_plan = resolve_setup_frontend_plan(&config, os)?;
+        // Docker reachability matters only when the effective `[[frontends]]`
+        // plan actually launches a Docker frontend; a Linux host or a
+        // guest-only config needs no container.
+        if frontend_plan
+            .iter()
+            .any(|entry| entry.driver == Driver::Docker)
+        {
             Self::render_docker_row(&config).await;
         }
 
         anstream::eprintln!();
         anstream::eprintln!("{}", ui::stage_rule(2, 5, "mount point"));
-        let mount_point = self.resolve_mount_point(mode)?;
+        let mount_point = if frontend_plan
+            .iter()
+            .any(|entry| entry.driver == Driver::Local)
+        {
+            Some(self.resolve_mount_point(mode)?)
+        } else {
+            anstream::eprintln!(
+                "{}",
+                ui::note(
+                    "no local frontend is configured; skipping the host mount point (see `omnifs frontend up`)"
+                )
+            );
+            None
+        };
 
         self.configure_and_launch(&workspace, mount_point, mode, StageStyle::Wizard)
             .await
@@ -179,10 +199,12 @@ impl SetupArgs {
     }
 
     /// Shared tail: pick providers, configure each, launch, and close.
+    /// `mount_point` is `None` for a guest-only `[[frontends]]` plan (no
+    /// local frontend to report a host path for).
     async fn configure_and_launch(
         &self,
         workspace: &Workspace,
-        mount_point: PathBuf,
+        mount_point: Option<PathBuf>,
         mode: PromptMode,
         style: StageStyle,
     ) -> anyhow::Result<()> {
@@ -228,7 +250,7 @@ impl SetupArgs {
         }
 
         let outcome = self
-            .launch_and_report(workspace, &mount_point, &results, style)
+            .launch_and_report(workspace, mount_point.as_deref(), &results, style)
             .await?;
         Self::print_closer(&results, Some(&outcome));
         Ok(())
@@ -237,7 +259,7 @@ impl SetupArgs {
     async fn launch_and_report(
         &self,
         workspace: &Workspace,
-        mount_point: &std::path::Path,
+        mount_point: Option<&std::path::Path>,
         results: &[InitResult],
         style: StageStyle,
     ) -> anyhow::Result<LaunchOutcome> {
@@ -258,8 +280,11 @@ impl SetupArgs {
         let mp = outcome
             .mount_point
             .clone()
-            .unwrap_or_else(|| mount_point.to_path_buf());
-        let daemon = format!("running natively at {}", WorkspaceLayout::display(&mp));
+            .or_else(|| mount_point.map(std::path::Path::to_path_buf));
+        let daemon = match &mp {
+            Some(mp) => format!("running; local mount at {}", WorkspaceLayout::display(mp)),
+            None => "running (no local frontend attached; see `omnifs frontend up`)".to_string(),
+        };
         anstream::eprintln!("{}", ui::ok("daemon", daemon));
 
         if let Some(mount) = results
@@ -494,13 +519,50 @@ fn print_header() {
     anstream::eprintln!();
 }
 
+/// Map the setup wizard's OS detection onto the frontend resolver's coarser
+/// OS axis. WSL counts as Linux: it hosts a real Linux kernel FUSE stack, the
+/// same distinction the resolver cares about.
+fn to_resolver_os(os: HostOs) -> crate::config::HostOs {
+    match os {
+        HostOs::MacOs => crate::config::HostOs::MacOs,
+        HostOs::LinuxNative | HostOs::LinuxWsl => crate::config::HostOs::Linux,
+        HostOs::Unsupported => crate::config::HostOs::Other,
+    }
+}
+
+/// The effective `[[frontends]]` plan, for wizard stage gating only (whether
+/// to show the Docker reachability row, whether to ask for a host mount
+/// point). Falls back to `/` when the platform mount-point default itself is
+/// unresolvable (e.g. `HOME` unset): a local entry's driver/kind presence in
+/// the plan does not depend on which path it ultimately resolves to, only
+/// gating decisions read this plan, and the real mount-point question (when
+/// asked) resolves and validates the default itself.
+fn resolve_setup_frontend_plan(
+    config: &crate::config::Config,
+    os: HostOs,
+) -> anyhow::Result<Vec<crate::config::EffectiveFrontend>> {
+    let default_mount_point =
+        omnifs_workspace::layout::resolve_mount_point().unwrap_or_else(|| PathBuf::from("/"));
+    crate::config::resolve_frontends(&config.frontends, to_resolver_os(os), &default_mount_point)
+}
+
 /// Mount point for the review-mode add-a-provider path, derived without any
 /// prompt: the resolved default (`OMNIFS_MOUNT_POINT` or the home-derived
-/// path), since the daemon always runs host-native.
-fn add_provider_mount_point() -> anyhow::Result<PathBuf> {
-    omnifs_workspace::layout::resolve_mount_point().ok_or_else(|| {
-        anyhow::anyhow!("cannot resolve host mount point: set HOME or OMNIFS_MOUNT_POINT")
-    })
+/// path), when the effective `[[frontends]]` plan includes a local frontend.
+/// A guest-only plan has no host mount path to derive.
+fn add_provider_mount_point(
+    config: &crate::config::Config,
+    os: HostOs,
+) -> anyhow::Result<Option<PathBuf>> {
+    let plan = resolve_setup_frontend_plan(config, os)?;
+    if !plan.iter().any(|entry| entry.driver == Driver::Local) {
+        return Ok(None);
+    }
+    omnifs_workspace::layout::resolve_mount_point()
+        .map(Some)
+        .ok_or_else(|| {
+            anyhow::anyhow!("cannot resolve host mount point: set HOME or OMNIFS_MOUNT_POINT")
+        })
 }
 
 fn one_line(error: &anyhow::Error) -> String {
@@ -587,7 +649,8 @@ impl SetupArgs {
                 "add a provider" => {
                     // Jump straight to the shared configure tail. Esc at the
                     // provider picker returns to the hub, not out of setup.
-                    let mount_point = add_provider_mount_point()?;
+                    let mount_point =
+                        add_provider_mount_point(&workspace.config()?, HostOs::detect())?;
                     match self
                         .configure_and_launch(workspace, mount_point, mode, StageStyle::Hub)
                         .await
@@ -820,12 +883,33 @@ mod tests {
     use super::*;
 
     /// The review-mode add-a-provider path must never prompt for a mount
-    /// point: it derives the resolved host default without asking.
+    /// point: it derives the resolved host default without asking, for the
+    /// default (locally-mounted) `[[frontends]]` plan.
     #[test]
     fn add_provider_mount_point_is_prompt_free() {
         assert_eq!(
-            add_provider_mount_point().unwrap(),
+            add_provider_mount_point(&crate::config::Config::default(), HostOs::detect())
+                .unwrap()
+                .unwrap(),
             omnifs_workspace::layout::resolve_mount_point().unwrap()
+        );
+    }
+
+    /// A guest-only `[[frontends]]` plan has no host mount path to derive:
+    /// the review-mode add-a-provider path must not fabricate one.
+    #[test]
+    fn add_provider_mount_point_is_none_for_a_guest_only_plan() {
+        let config = crate::config::Config {
+            frontends: vec![crate::config::ConfigFrontendEntry {
+                kind: omnifs_workspace::runtime_record::FrontendKind::Fuse,
+                driver: crate::frontend_backend::Driver::Docker,
+                mount_point: None,
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            add_provider_mount_point(&config, HostOs::MacOs).unwrap(),
+            None
         );
     }
 

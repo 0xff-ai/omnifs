@@ -10,20 +10,24 @@
 //! the user exactly where they were with nothing to undo; their real dotfiles
 //! are never touched.
 //!
-//! Surface-aware: the daemon always runs host-native, so its own mount is
-//! always host-visible. But when the optional virtualized FUSE frontend is
-//! attached (`omnifs frontend up`, Docker container or krunkit microVM), its
-//! mount lives inside the guest and is invisible on the host; that frontend
-//! is also the primary consumption surface on macOS, so `omnifs shell`
-//! prefers it when running and execs into the guest (`docker exec` or
-//! ssh-over-vsock) instead of the host subshell.
+//! Surface-aware: several frontends can be attached at once (`[[frontends]]`
+//! config), so `omnifs shell` probes live state and picks one rather than
+//! trusting a single recorded choice. A guest frontend's mount (Docker
+//! container or krunkit microVM) is invisible on the host, so a live guest is
+//! preferred over a host subshell and entered by execing into it (`docker
+//! exec` or ssh-over-vsock); Docker is checked before krunkit only because
+//! both are vanishingly unlikely to run at once and a deterministic order
+//! beats an arbitrary one. With no guest running, a live local mount is used
+//! instead; more than one live local mount with no guest attached is
+//! reported as an ambiguity rather than silently picked for the user.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result};
 use clap::Args;
-use omnifs_api::MountInfo;
+use omnifs_api::{DaemonStatus, FrontendDelivery, MountInfo};
+use omnifs_mtab::MountState;
 
 use crate::frontend_backend::{DockerBackend, FrontendBackend};
 use crate::frontend_container::FRONTEND_DEV_IMAGE;
@@ -32,7 +36,6 @@ use crate::launch_backend::{ContainerName, DockerTarget, GUEST_MOUNT};
 use crate::runtime::Runtime;
 use crate::workspace::Workspace;
 use omnifs_workspace::layout::{OMNIFS_MOUNT_POINT_ENV, WorkspaceLayout};
-use omnifs_workspace::runtime_record::{RuntimeRecord, Via};
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct ShellArgs {
@@ -58,50 +61,29 @@ impl ShellArgs {
         let workspace = Workspace::resolve()?;
         let paths = workspace.layout();
 
-        // The runtime record is the source of truth for whether a daemon was
-        // started and whether a Docker-hosted frontend is attached — no live
-        // daemon required to discover either.
-        let record = RuntimeRecord::read(&paths.runtime_record_file())?;
-
-        // The virtualized FUSE frontend's mount lives inside its guest, not on
-        // the host, so a host subshell can never see it; prefer it when
-        // attached (it is macOS's primary consumption surface). Dispatches to
-        // the backend named by the recorded `via`.
-        let recorded_via = record
-            .as_ref()
-            .and_then(|record| record.virtualized_frontend().map(|(via, _mount_point)| via));
-        match recorded_via {
-            Some(Via::Docker) => {
-                let container_name = crate::frontend_container::frontend_container_name(paths)?;
-                return self.exec_in_container(&container_name);
-            },
-            Some(Via::Krunkit) => return self.exec_in_krunkit_guest(paths),
-            Some(Via::Local) | None => {},
+        // A guest frontend's mount is invisible on the host, so prefer a live
+        // one over a host subshell; probe rather than trust a single recorded
+        // choice, since several frontends can be configured at once.
+        if docker_frontend_is_running(paths).await {
+            let container_name = crate::frontend_container::frontend_container_name(paths)?;
+            return self.exec_in_container(&container_name);
+        }
+        if krunkit_frontend_is_running(paths).await {
+            return self.exec_in_krunkit_guest(paths);
         }
 
-        let Some(record) = record else {
-            anyhow::bail!(
-                "no omnifs daemon record in {}; start it with `omnifs frontend up`",
-                paths.config_dir.display()
-            );
-        };
-
-        // A live status call, when the daemon answers, supplies the mount→provider
-        // map for the prompt and the canonical mount point; if it does not, fall
-        // back to the record and warn that the mount may be stale.
+        // No guest frontend is live: fall back to a local mount. A live
+        // status call, when the daemon answers, supplies the mount→provider
+        // map for the prompt and the authoritative local attachment set; if
+        // it does not answer, discover local mounts from the runner-owned
+        // mount-state records directly and warn that they may be stale.
         let live = workspace.daemon().status().await.ok();
         if live.is_none() {
             anstream::eprintln!(
                 "note: the daemon is not answering; its mount may be stale (try `omnifs up`)"
             );
         }
-        let mount_point = live
-            .as_ref()
-            .map(|status| status.mount_point.clone())
-            .or_else(|| record.mount_point().map(Path::to_path_buf))
-            .ok_or_else(|| {
-                anyhow::anyhow!("no host mount is available; start it with `omnifs frontend up`")
-            })?;
+        let mount_point = select_local_mount(paths, live.as_ref())?;
         let mounts = live.map(|status| status.mounts).unwrap_or_default();
 
         // A one-shot command runs directly in the mount context; no rc or prompt
@@ -144,7 +126,7 @@ impl ShellArgs {
         set_cwd_to_mount(&mut cmd, &mount_point);
 
         anstream::eprintln!(
-            "omnifs shell (native) at {} (type `exit` to leave)",
+            "omnifs shell (local) at {} (type `exit` to leave)",
             mount_point.display()
         );
         spawn_and_propagate(cmd, "launch omnifs shell".to_string())
@@ -184,6 +166,109 @@ impl ShellArgs {
             anstream::eprintln!("omnifs shell (krunkit) at {GUEST_MOUNT} (type `exit` to leave)");
         }
         spawn_and_propagate(cmd, "open shell in the krunkit guest".to_string())
+    }
+}
+
+/// Whether the workspace's frontend container exists and is running. A
+/// best-effort probe: any failure to even reach Docker is "not running"
+/// rather than a hard error, since `omnifs shell` should still fall through
+/// to krunkit or a local mount when Docker is simply unavailable. Mirrors the
+/// discovery in `commands/frontend/status.rs`.
+async fn docker_frontend_is_running(paths: &WorkspaceLayout) -> bool {
+    let Ok(container_name) = crate::frontend_container::frontend_container_name(paths) else {
+        return false;
+    };
+    let Ok(target) = DockerTarget::new(
+        container_name.as_str().to_string(),
+        FRONTEND_DEV_IMAGE.to_string(),
+    ) else {
+        return false;
+    };
+    let Ok(runtime) = Runtime::connect_for(&target) else {
+        return false;
+    };
+    matches!(
+        DockerBackend::new(runtime).is_running().await,
+        Ok(Some(true))
+    )
+}
+
+/// Whether the workspace's krunkit guest exists and is running. Same
+/// best-effort probe policy as [`docker_frontend_is_running`].
+async fn krunkit_frontend_is_running(paths: &WorkspaceLayout) -> bool {
+    matches!(
+        KrunkitBackend::new(paths.config_dir.clone())
+            .is_running()
+            .await,
+        Ok(Some(true))
+    )
+}
+
+/// The live local mount points: the daemon's own attachment list when it
+/// answers, else the runner-owned mount-state records on disk (the daemon
+/// may be down or unreachable, but a local frontend runner persists its own
+/// state independently).
+fn local_mount_candidates(
+    paths: &WorkspaceLayout,
+    live: Option<&DaemonStatus>,
+) -> Result<Vec<PathBuf>> {
+    if let Some(status) = live {
+        return Ok(status
+            .frontends
+            .iter()
+            .filter(|frontend| frontend.delivery == FrontendDelivery::Local)
+            .map(|frontend| frontend.mount_point.clone())
+            .collect());
+    }
+    let mut candidates = Vec::new();
+    for path in MountState::files_under(&paths.frontend_state_root())
+        .context("discover local frontend records")?
+    {
+        match MountState::read_file(&path) {
+            Ok(state) => {
+                // A record whose mount is no longer live is teardown debris,
+                // not a shell destination; counting it would also turn one
+                // live mount plus one stale record into a false ambiguity.
+                // Without the daemon feature the ownership probe (an
+                // omnifs-nfs dependency) does not exist, so records are
+                // trusted as-is there.
+                #[cfg(feature = "daemon")]
+                if !crate::host_teardown::local_mount_is_owned(&state) {
+                    continue;
+                }
+                candidates.push(state.mount_point);
+            },
+            Err(error) => {
+                anstream::eprintln!(
+                    "⚠  Skipping local frontend record {}: {error}",
+                    path.display()
+                );
+            },
+        }
+    }
+    Ok(candidates)
+}
+
+/// Pick the local mount `omnifs shell` should enter. Ambiguity — more than
+/// one live local mount with no guest frontend attached — is never silently
+/// resolved for the user; it is a distinct, equally-preferred choice, so the
+/// caller is asked to `cd` into one directly instead.
+fn select_local_mount(paths: &WorkspaceLayout, live: Option<&DaemonStatus>) -> Result<PathBuf> {
+    let mut candidates = local_mount_candidates(paths, live)?;
+    match candidates.len() {
+        0 => anyhow::bail!("no host mount is available; start it with `omnifs frontend up`"),
+        1 => Ok(candidates.remove(0)),
+        _ => {
+            candidates.sort();
+            let listed = candidates
+                .iter()
+                .map(|mount_point| WorkspaceLayout::display(mount_point))
+                .collect::<Vec<_>>()
+                .join(", ");
+            anyhow::bail!(
+                "multiple local frontends are live ({listed}); `cd` into the one you want instead of running `omnifs shell`"
+            )
+        },
     }
 }
 

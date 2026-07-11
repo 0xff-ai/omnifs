@@ -37,7 +37,7 @@ impl LocalProtocol {
         }
     }
 
-    const fn kind(self) -> FrontendKind {
+    pub(crate) const fn kind(self) -> FrontendKind {
         match self {
             Self::Fuse => FrontendKind::Fuse,
             Self::Nfs => FrontendKind::Nfs,
@@ -59,6 +59,15 @@ impl LocalProtocol {
             .parent()
             .context("the omnifs executable has no parent directory")?
             .join(self.binary_name()))
+    }
+}
+
+impl From<FrontendKind> for LocalProtocol {
+    fn from(kind: FrontendKind) -> Self {
+        match kind {
+            FrontendKind::Fuse => Self::Fuse,
+            FrontendKind::Nfs => Self::Nfs,
+        }
     }
 }
 
@@ -157,7 +166,7 @@ impl LocalBackend {
             .arg("--state-dir")
             .arg(self.state_dir())
             .arg("--attach")
-            .arg(self.paths.attach_socket("local"));
+            .arg(self.paths.local_attach_socket());
         command
     }
 

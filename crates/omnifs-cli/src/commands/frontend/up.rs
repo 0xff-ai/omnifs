@@ -11,9 +11,12 @@ use std::net::Ipv4Addr;
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
+use std::path::Path;
+
 use anyhow::{Context as _, ensure};
 use clap::Args;
 
+use crate::config::{EffectiveFrontend, HostOs, Provenance, resolve_frontends};
 use crate::frontend_backend::{DockerBackend, Driver, FrontendBackend, FrontendLaunchSpec};
 use crate::frontend_container::{frontend_container_name, resolve_frontend_image};
 use crate::krunkit_backend::{GuestImageSource, KrunkitBackend};
@@ -38,8 +41,11 @@ const MOUNT_PROBE_INTERVAL: Duration = Duration::from_millis(200);
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct FrontendUpArgs {
-    /// How to deliver the frontend. Defaults to the `[frontend] driver`
-    /// config value.
+    /// How to deliver the frontend. Defaults to the first entry in the
+    /// effective `[[frontends]]` plan (explicit config, else the platform
+    /// default). When given and no plan entry uses this driver, an ad-hoc
+    /// default is constructed for it (local: platform-default kind at the
+    /// default mount point; docker/krunkit: fuse).
     #[arg(long, value_enum)]
     pub driver: Option<Driver>,
 }
@@ -55,22 +61,103 @@ impl FrontendUpArgs {
     /// daemon client instead of constructing a second command context midway
     /// through the lifecycle operation.
     pub(crate) async fn run_in(self, workspace: &Workspace) -> anyhow::Result<()> {
-        let paths = workspace.layout().clone();
-        let config = workspace.config()?;
-
-        let driver = self.driver.unwrap_or(config.frontend.driver);
         ensure_native_daemon(workspace).await?;
-
         let mount_name = first_mount_name(workspace)?;
 
-        match driver {
-            #[cfg(feature = "daemon")]
-            Driver::Local => run_local(&paths, &mount_name).await,
-            #[cfg(not(feature = "daemon"))]
-            Driver::Local => anyhow::bail!("the local frontend requires the daemon feature"),
-            Driver::Docker => run_docker(workspace, &paths, &config, &mount_name).await,
-            Driver::Krunkit => run_krunkit(workspace, &paths, &config, &mount_name).await,
+        let config = workspace.config()?;
+        let default_mount_point = omnifs_workspace::layout::resolve_mount_point()
+            .context("cannot resolve the default mount point: set HOME or OMNIFS_MOUNT_POINT")?;
+        let plan = resolve_frontends(&config.frontends, HostOs::current(), &default_mount_point)?;
+        let entry = self.select_entry(&plan, &default_mount_point);
+
+        launch_entry(workspace, &entry, &mount_name).await
+    }
+
+    fn select_entry(
+        &self,
+        plan: &[EffectiveFrontend],
+        default_mount_point: &Path,
+    ) -> EffectiveFrontend {
+        match self.driver {
+            Some(driver) => plan
+                .iter()
+                .find(|entry| entry.driver == driver)
+                .cloned()
+                .unwrap_or_else(|| ad_hoc_default(driver, default_mount_point)),
+            None => plan
+                .first()
+                .cloned()
+                .expect("resolve_frontends always returns a non-empty plan"),
         }
+    }
+}
+
+/// Launch one resolved frontend entry. Shared by `omnifs frontend up` (one
+/// entry, selected by `--driver` or plan order) and `omnifs up` (every entry
+/// in the plan).
+pub(crate) async fn launch_entry(
+    workspace: &Workspace,
+    entry: &EffectiveFrontend,
+    mount_name: &str,
+) -> anyhow::Result<()> {
+    let paths = workspace.layout().clone();
+    let config = workspace.config()?;
+    match entry.driver {
+        #[cfg(feature = "daemon")]
+        Driver::Local => {
+            let mount_point = entry
+                .mount_point
+                .clone()
+                .context("a local frontend entry always resolves a mount point")?;
+            run_local(&paths, mount_name, entry.kind, mount_point).await
+        },
+        #[cfg(not(feature = "daemon"))]
+        Driver::Local => anyhow::bail!("the local frontend requires the daemon feature"),
+        Driver::Docker => run_docker(workspace, &paths, &config, mount_name).await,
+        Driver::Krunkit => run_krunkit(workspace, &paths, &config, mount_name).await,
+    }
+}
+
+/// An ad-hoc default entry for `--driver X` when the effective plan has no
+/// entry using that driver. `LocalProtocol::platform_default()` stays alive
+/// for this path (see `local_backend.rs`); without the `daemon` feature the
+/// local runner does not exist at all, so the kind is derived directly from
+/// the host OS instead.
+#[cfg(feature = "daemon")]
+fn ad_hoc_default(driver: Driver, default_mount_point: &Path) -> EffectiveFrontend {
+    default_entry(
+        driver,
+        LocalProtocol::platform_default().kind(),
+        default_mount_point,
+    )
+}
+
+#[cfg(not(feature = "daemon"))]
+fn ad_hoc_default(driver: Driver, default_mount_point: &Path) -> EffectiveFrontend {
+    let kind = if matches!(HostOs::current(), HostOs::Linux) {
+        omnifs_workspace::runtime_record::FrontendKind::Fuse
+    } else {
+        omnifs_workspace::runtime_record::FrontendKind::Nfs
+    };
+    default_entry(driver, kind, default_mount_point)
+}
+
+fn default_entry(
+    driver: Driver,
+    local_kind: omnifs_workspace::runtime_record::FrontendKind,
+    default_mount_point: &Path,
+) -> EffectiveFrontend {
+    let (kind, mount_point) = match driver {
+        Driver::Local => (local_kind, Some(default_mount_point.to_path_buf())),
+        Driver::Docker | Driver::Krunkit => {
+            (omnifs_workspace::runtime_record::FrontendKind::Fuse, None)
+        },
+    };
+    EffectiveFrontend {
+        kind,
+        driver,
+        mount_point,
+        provenance: Provenance::Default,
     }
 }
 
@@ -78,14 +165,10 @@ impl FrontendUpArgs {
 async fn run_local(
     paths: &omnifs_workspace::layout::WorkspaceLayout,
     mount_name: &str,
+    kind: omnifs_workspace::runtime_record::FrontendKind,
+    mount_point: std::path::PathBuf,
 ) -> anyhow::Result<()> {
-    let mount_point = omnifs_workspace::layout::resolve_mount_point()
-        .context("cannot resolve the local mount point: set HOME or OMNIFS_MOUNT_POINT")?;
-    let backend = LocalBackend::new(
-        paths.clone(),
-        mount_point.clone(),
-        LocalProtocol::platform_default(),
-    )?;
+    let backend = LocalBackend::new(paths.clone(), mount_point.clone(), kind.into())?;
     anstream::eprintln!("Starting the local {} frontend", backend.protocol());
     backend.launch(mount_name).await?;
 
@@ -205,7 +288,7 @@ fn attach_addr(addr: &str) -> anyhow::Result<SocketAddr> {
         .with_context(|| format!("attach listener address `{addr}` is invalid"))
 }
 
-fn first_mount_name(workspace: &Workspace) -> anyhow::Result<String> {
+pub(crate) fn first_mount_name(workspace: &Workspace) -> anyhow::Result<String> {
     workspace
         .mounts()?
         .into_iter()

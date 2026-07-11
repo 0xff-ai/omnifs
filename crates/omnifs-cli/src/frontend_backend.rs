@@ -27,12 +27,11 @@ use crate::launch_backend::GUEST_MOUNT;
 use crate::runtime::Runtime;
 
 /// How the frontend process is delivered. Selected by `--driver` (CLI flag)
-/// or `[frontend] driver` (config).
-#[derive(clap::ValueEnum, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// or a `[[frontends]]` entry's `driver` field (config).
+#[derive(clap::ValueEnum, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum Driver {
     Local,
-    #[default]
     Docker,
     Krunkit,
 }

@@ -20,11 +20,11 @@ pub struct FrontendArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum FrontendCommand {
-    /// Bring up the virtualized FUSE frontend
+    /// Bring up a local, Docker, or krunkit frontend
     Up(up::FrontendUpArgs),
-    /// Tear down the virtualized FUSE frontend
+    /// Tear down a Docker or krunkit frontend
     Down(down::FrontendDownArgs),
-    /// Report the virtualized FUSE frontend's state and attach health
+    /// Report frontend state and attach health, every driver
     Status(status::FrontendStatusArgs),
 }
 

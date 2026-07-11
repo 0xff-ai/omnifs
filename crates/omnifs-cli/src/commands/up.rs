@@ -1,14 +1,20 @@
 //! `omnifs up`: daemon lifecycle start.
 
+use anyhow::Context as _;
 use clap::Args;
 
+use crate::commands::frontend::up::{first_mount_name, launch_entry};
+use crate::config::{EffectiveFrontend, HostOs, Provenance, resolve_frontends};
+use crate::frontend_backend::Driver;
 use crate::launch::Launcher;
 use crate::workspace::Workspace;
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct UpArgs {
-    /// Skip auto-starting the virtualized FUSE frontend on macOS. No effect
-    /// on Linux, where the frontend stays manual (`omnifs frontend up`).
+    /// Skip launching any configured frontends after the daemon comes up, on
+    /// every OS. The daemon still starts; a frontend already running from a
+    /// previous session is untouched and stays usable. Frontends can always
+    /// be started later with `omnifs frontend up`.
     #[arg(long)]
     pub no_frontend: bool,
     /// Wait until /v1/ready answers, failing with exit code 3 on timeout.
@@ -33,12 +39,8 @@ impl UpArgs {
             );
         }
 
-        // macOS's primary consumption surface is the virtualized FUSE
-        // frontend; the native NFS mount above stays available either way.
-        // Linux never auto-starts it: the native FUSE host mount is already
-        // the primary surface there, and the frontend stays opt-in.
-        if cfg!(target_os = "macos") && !self.no_frontend {
-            start_frontend(&workspace).await;
+        if !self.no_frontend {
+            launch_frontends(&workspace).await?;
         }
 
         if let Some(timeout) = wait {
@@ -50,31 +52,63 @@ impl UpArgs {
     }
 }
 
-/// Auto-start the virtualized FUSE frontend, under the configured `[frontend]
-/// driver` (docker by default; `FrontendUpArgs::default()` carries no
-/// explicit `--driver` override, so it resolves the same config value
-/// `omnifs frontend up` would). The daemon's own native mount has already
-/// succeeded by the time this runs, so a failure here (most commonly: the
-/// driver's runtime is not available, or an unimplemented driver was
-/// configured) is reported plainly and does not fail `omnifs up` — the
-/// native mount stays usable, and `omnifs frontend up` can be retried once
-/// the driver is available.
-async fn start_frontend(workspace: &Workspace) {
-    anstream::eprintln!();
-    let driver_label = workspace
-        .config()
-        .map_or("docker", |config| config.frontend.driver.as_via().label());
-    anstream::eprintln!("Starting the {driver_label} frontend...");
-    if let Err(error) = crate::commands::frontend::up::FrontendUpArgs::default()
-        .run_in(workspace)
-        .await
-    {
-        anstream::eprintln!("⚠  Could not start the {driver_label} frontend: {error:#}");
-        anstream::eprintln!(
-            "{}",
-            crate::ui::note(
-                "the native mount above is still available; run `omnifs frontend up` to retry, or pass --no-frontend to skip it"
-            )
-        );
+/// Launch every frontend in the effective `[[frontends]]` plan (explicit
+/// config, else the platform default). Local entries launch first so the
+/// soft-fail rule below is meaningful: only the implicit macOS Docker
+/// default (a default-provenance entry using the docker driver) may fail
+/// with a warning, once the local entry it follows has already succeeded.
+/// Every other entry failure — any explicit entry, or a local default — is
+/// fatal to `omnifs up`.
+async fn launch_frontends(workspace: &Workspace) -> anyhow::Result<()> {
+    let config = workspace.config()?;
+    let default_mount_point = omnifs_workspace::layout::resolve_mount_point()
+        .context("cannot resolve the default mount point: set HOME or OMNIFS_MOUNT_POINT")?;
+    let plan = resolve_frontends(&config.frontends, HostOs::current(), &default_mount_point)?;
+    let mount_name = first_mount_name(workspace)?;
+
+    let (locals, guests): (Vec<_>, Vec<_>) = plan
+        .into_iter()
+        .partition(|entry| entry.driver == Driver::Local);
+
+    for entry in &locals {
+        announce(entry);
+        launch_entry(workspace, entry, &mount_name)
+            .await
+            .with_context(|| format!("start the local {} frontend", entry.kind.label()))?;
     }
+
+    for entry in &guests {
+        announce(entry);
+        let result = launch_entry(workspace, entry, &mount_name).await;
+        let soft_fail = entry.provenance == Provenance::Default && entry.driver == Driver::Docker;
+        match (result, soft_fail) {
+            (Ok(()), _) => {},
+            (Err(error), true) => {
+                let driver_label = entry.driver.as_via().label();
+                anstream::eprintln!("⚠  Could not start the {driver_label} frontend: {error:#}");
+                anstream::eprintln!(
+                    "{}",
+                    crate::ui::note(
+                        "the mount above is still available; run `omnifs frontend up` to retry, or pass --no-frontend to skip it"
+                    )
+                );
+            },
+            (Err(error), false) => {
+                return Err(error).with_context(|| {
+                    format!("start the {} frontend", entry.driver.as_via().label())
+                });
+            },
+        }
+    }
+
+    Ok(())
+}
+
+fn announce(entry: &EffectiveFrontend) {
+    anstream::eprintln!();
+    anstream::eprintln!(
+        "Starting the {} {} frontend...",
+        entry.driver.as_via().label(),
+        entry.kind.label()
+    );
 }

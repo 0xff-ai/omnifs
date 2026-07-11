@@ -68,7 +68,7 @@ pub struct FrontendRecord {
 
 /// How a frontend reaches the shared namespace. Distinct from `RecordedBackend`,
 /// which names the daemon's own delivery: a host-native daemon can still host a
-/// virtualized-delivered frontend attached over the TCP namespace listener.
+/// guest-delivered frontend attached over the TCP namespace listener.
 /// `Docker` runs a container attached over TCP; `Krunkit` (a libkrun microVM
 /// on macOS, see `docs/contracts/40-frontends.md`) runs the same frontend
 /// binary in a guest attached over vsock.
@@ -238,23 +238,6 @@ impl RuntimeRecord {
             Err(error) => Err(error),
         }
     }
-
-    /// The mount point of the first local serving frontend, if any.
-    #[must_use]
-    pub fn mount_point(&self) -> Option<&Path> {
-        self.frontends.iter().find_map(|frontend| {
-            (frontend.via == Via::Local).then_some(frontend.mount_point.as_path())
-        })
-    }
-
-    /// The first separately launched frontend attached to this daemon.
-    /// Host-native frontends have no delivery marker and are skipped.
-    #[must_use]
-    pub fn virtualized_frontend(&self) -> Option<(Via, &Path)> {
-        self.frontends.iter().find_map(|frontend| {
-            (frontend.via != Via::Local).then_some((frontend.via, frontend.mount_point.as_path()))
-        })
-    }
 }
 
 /// The file name of the runtime record under the config directory.
@@ -291,7 +274,7 @@ mod tests {
 
         let read = RuntimeRecord::read(&path).unwrap().unwrap();
         assert_eq!(read, record);
-        assert_eq!(read.mount_point(), Some(Path::new("/home/u/omnifs")));
+        assert_eq!(read.frontends[0].mount_point, Path::new("/home/u/omnifs"));
 
         #[cfg(unix)]
         {
@@ -392,7 +375,7 @@ mod tests {
         assert!(matches!(record.attach[1], AttachRecord::Vsock { .. }));
         assert_eq!(record.frontends.len(), 2);
         assert_eq!(record.frontends[0].via, Via::Local);
-        assert_eq!(record.mount_point(), Some(Path::new("/local")));
+        assert_eq!(record.frontends[0].mount_point, Path::new("/local"));
     }
 
     #[test]
@@ -451,7 +434,13 @@ mod tests {
     }
 
     #[test]
-    fn virtualized_frontend_skips_local_frontends() {
+    fn frontends_field_preserves_every_delivery_and_mount_point() {
+        // There is no derived "pick one frontend" helper on the record
+        // anymore: `omnifs status` and `omnifs shell` read `frontends`
+        // directly and choose live-probed delivery preference themselves
+        // (see `omnifs-cli/src/status.rs` and `commands/shell.rs`). This
+        // proves the underlying data those callers depend on: every
+        // delivery, local and guest, keeps its own distinct mount point.
         let mut record = sample_native();
         record.frontends.extend([
             FrontendRecord {
@@ -466,9 +455,24 @@ mod tests {
             },
         ]);
 
+        let mount_point_for = |via: Via| {
+            record
+                .frontends
+                .iter()
+                .find(|frontend| frontend.via == via)
+                .map(|frontend| frontend.mount_point.as_path())
+        };
         assert_eq!(
-            record.virtualized_frontend(),
-            Some((Via::Docker, Path::new("/docker-omnifs")))
+            mount_point_for(Via::Local),
+            Some(Path::new("/home/u/omnifs"))
+        );
+        assert_eq!(
+            mount_point_for(Via::Docker),
+            Some(Path::new("/docker-omnifs"))
+        );
+        assert_eq!(
+            mount_point_for(Via::Krunkit),
+            Some(Path::new("/krunkit-omnifs"))
         );
     }
 

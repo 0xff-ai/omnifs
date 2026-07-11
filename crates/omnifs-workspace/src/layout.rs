@@ -27,17 +27,22 @@ pub const PROVIDERS_SUBDIR: &str = "providers";
 pub const CACHE_SUBDIR: &str = "cache";
 /// Subdirectory of `cache_dir` holding local frontend state.
 pub const FRONTEND_STATE_SUBDIR: &str = "frontends";
-/// Subdirectory of `config_dir` holding the daemon's per-name namespace attach
-/// sockets (`<config_dir>/frontends/<name>.sock`), served to out-of-process
-/// frontend runners.
+/// Subdirectory of `config_dir` holding the daemon's namespace attach sockets
+/// served to out-of-process frontend runners: the fixed local socket
+/// (`<config_dir>/frontends/local.sock`) and, on demand, the vsock-proxy
+/// listener below.
 pub const FRONTENDS_SUBDIR: &str = "frontends";
+/// Filename of the daemon's fixed namespace attach socket for local frontend
+/// runners (`<config_dir>/frontends/local.sock`). One socket, always at this
+/// name; auth is filesystem permissions on the socket.
+pub const LOCAL_ATTACH_SOCKET_NAME: &str = "local.sock";
 /// Filename of the token-checking UDS namespace attach listener under
 /// `frontends/` (`<config_dir>/frontends/vsock-attach.sock`). Bound on demand
-/// via `POST /v1/frontend/attach-target/vsock`, one per daemon instance; unlike a
-/// `frontends/<name>.sock` attach socket, whose auth is filesystem
-/// permissions, a connection here proves itself with a per-instance token,
-/// because the krunkit vsock-proxy path terminates every guest vsock dial on
-/// this socket as the same local peer.
+/// via `POST /v1/frontend/attach-target/vsock`, one per daemon instance;
+/// unlike the fixed local socket, whose auth is filesystem permissions, a
+/// connection here proves itself with a per-instance token, because the
+/// krunkit vsock-proxy path terminates every guest vsock dial on this socket
+/// as the same local peer.
 pub const VSOCK_ATTACH_SOCKET_NAME: &str = "vsock-attach.sock";
 pub const OMNIFS_HOME_ENV: &str = "OMNIFS_HOME";
 /// Overrides the host-visible mount point the daemon serves at.
@@ -157,10 +162,11 @@ impl WorkspaceLayout {
         self.config_dir.join(FRONTENDS_SUBDIR)
     }
 
-    /// The attach socket for `name` (`<config_dir>/frontends/<name>.sock`). The
-    /// caller validates `name`; auth on the socket is filesystem permissions.
-    pub fn attach_socket(&self, name: &str) -> PathBuf {
-        self.frontends_dir().join(format!("{name}.sock"))
+    /// The daemon's fixed namespace attach socket for local frontend runners
+    /// (`<config_dir>/frontends/local.sock`). Auth on the socket is
+    /// filesystem permissions.
+    pub fn local_attach_socket(&self) -> PathBuf {
+        self.frontends_dir().join(LOCAL_ATTACH_SOCKET_NAME)
     }
 
     /// The token-checking UDS namespace attach listener

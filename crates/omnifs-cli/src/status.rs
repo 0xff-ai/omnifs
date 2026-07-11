@@ -4,12 +4,11 @@ use omnifs_workspace::creds::FileStore;
 use std::fmt::Write as _;
 
 use omnifs_api::{
-    CredentialHealth, DaemonHealth, DaemonStatus, DaemonSubsystem, FsType, HealthState,
-    SubsystemHealth,
+    CredentialHealth, DaemonHealth, DaemonStatus, DaemonSubsystem, FrontendDelivery, FrontendInfo,
+    FsType, HealthState, SubsystemHealth,
 };
 use omnifs_workspace::layout::WorkspaceLayout;
 use omnifs_workspace::provider::Catalog;
-use omnifs_workspace::runtime_record::{RuntimeRecord, Via};
 
 use crate::auth::AuthTerminalKind;
 use crate::error::ExitCode;
@@ -19,15 +18,13 @@ pub(crate) use crate::mount_report::{ProviderConfigStatus, ProviderReadyStatus, 
 pub(crate) struct StatusReport {
     pub(crate) paths: WorkspaceLayout,
     /// Daemon runtime facts from the control API; `None` when no daemon
-    /// answered on the control port.
+    /// answered on the control port. `runtime.frontends` is the live
+    /// attachment registry: every frontend `omnifs status` reports comes
+    /// from here, not from the on-disk runtime record (`omnifs frontend
+    /// status` reports additional un-attached backend health).
     pub(crate) runtime: Option<DaemonStatus>,
     pub(crate) user_mounts: Vec<UserMountStatus>,
     pub(crate) providers: Vec<ProviderConfigStatus>,
-    /// Backend and mount point of the virtualized FUSE frontend, read from
-    /// the runtime record's `via` entry; `None` when none is attached. This
-    /// is a record fact only (no backend connection), so `omnifs status`
-    /// stays fast; `omnifs frontend status` reports live container health.
-    pub(crate) virtualized_frontend: Option<(Via, std::path::PathBuf)>,
 }
 
 impl StatusReport {
@@ -38,20 +35,11 @@ impl StatusReport {
         mounts: &[crate::mount_config::MountConfig],
     ) -> Self {
         let store = FileStore::new(&paths.credentials_file);
-        let virtualized_frontend = RuntimeRecord::read(&paths.runtime_record_file())
-            .ok()
-            .flatten()
-            .and_then(|record| {
-                record
-                    .virtualized_frontend()
-                    .map(|(via, mount_point)| (via, mount_point.to_path_buf()))
-            });
         Self {
             runtime,
             user_mounts: crate::mount_report::scan_user_mount_configs(catalog, mounts, &store),
             providers: crate::mount_report::scan_provider_configs(catalog, mounts),
             paths,
-            virtualized_frontend,
         }
     }
 
@@ -67,21 +55,16 @@ impl StatusReport {
             format_runtime(self.runtime.as_ref())
         );
         let _ = writeln!(out, "  {:<7} │ {}", "mount", self.format_mount());
-        if let Some((via, mount_point)) = &self.virtualized_frontend {
-            let _ = writeln!(
-                out,
-                "  {:<7} │ {} frontend at {} (see `omnifs frontend status`)",
-                "frontend",
-                via.label(),
-                WorkspaceLayout::display(mount_point)
-            );
-        }
         let _ = writeln!(
             out,
             "  {:<7} │ {}",
             "cache",
             WorkspaceLayout::display(&self.paths.cache_dir)
         );
+
+        if let Some(runtime) = &self.runtime {
+            write_frontends(&mut out, &runtime.frontends);
+        }
 
         if let Some(runtime) = &self.runtime
             && !runtime.health.subsystems.is_empty()
@@ -170,6 +153,10 @@ impl StatusReport {
         })
     }
 
+    /// The daemon-derived local mount point (`DaemonStatus.mount_point` is
+    /// already the authoritative "first local live attachment" fact; this
+    /// never re-derives it from `frontends`). See [`write_frontends`] for the
+    /// full attachment table, local and guest alike.
     fn format_mount(&self) -> String {
         match &self.runtime {
             Some(runtime) if !runtime.health.subsystems.is_empty() => runtime
@@ -179,13 +166,10 @@ impl StatusReport {
                     || WorkspaceLayout::display(&runtime.mount_point),
                     |frontend| frontend.message.clone(),
                 ),
-            Some(runtime) => {
-                let mp = WorkspaceLayout::display(&runtime.mount_point);
-                match runtime.frontends.first() {
-                    Some(frontend) => format!("{mp} ({})", frontend.fs_type),
-                    None => format!("{mp} (not mounted)"),
-                }
+            Some(runtime) if runtime.mount_point.as_os_str().is_empty() => {
+                "(no local frontend attached)".to_string()
             },
+            Some(runtime) => WorkspaceLayout::display(&runtime.mount_point),
             None => "—".to_string(),
         }
     }
@@ -243,6 +227,33 @@ fn format_runtime(runtime: Option<&DaemonStatus>) -> String {
         "running ({})",
         health_state_label(runtime.health.overall_state())
     )
+}
+
+/// One row per live frontend attachment: every filesystem frontend currently
+/// attached to the shared namespace, not just the first. Docker and krunkit
+/// mount points live inside their guest, so they are marked `(guest)` rather
+/// than presented as host-visible paths.
+fn write_frontends(out: &mut String, frontends: &[FrontendInfo]) {
+    if frontends.is_empty() {
+        return;
+    }
+    let _ = writeln!(out);
+    let _ = writeln!(out, "Frontends ({})", frontends.len());
+    for frontend in frontends {
+        let location = WorkspaceLayout::display(&frontend.mount_point);
+        let location = match frontend.delivery {
+            FrontendDelivery::Local => location,
+            FrontendDelivery::Docker | FrontendDelivery::Krunkit => format!("{location} (guest)"),
+        };
+        let _ = writeln!(
+            out,
+            "  {}  {:<5} {:<7} {}",
+            crate::style::success("●"),
+            frontend.fs_type,
+            frontend.delivery,
+            location
+        );
+    }
 }
 
 fn write_daemon_health(out: &mut String, health: &DaemonHealth) {
@@ -359,7 +370,8 @@ pub(crate) struct StatusJson {
     pub version: String,
     pub runtime: RuntimeJson,
     pub mount: Option<MountJson>,
-    pub virtualized_frontend: Option<VirtualizedFrontendJson>,
+    /// Every live frontend attachment, local and guest alike.
+    pub frontends: Vec<FrontendJson>,
     pub paths: WorkspaceLayout,
     pub mounts: Vec<UserMountStatus>,
     pub providers: Vec<ProviderConfigStatus>,
@@ -402,19 +414,44 @@ pub(crate) struct MountJson {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct VirtualizedFrontendJson {
-    pub driver: String,
+pub(crate) struct FrontendJson {
+    pub fs_type: FsType,
+    pub delivery: FrontendDelivery,
     pub mount_point: std::path::PathBuf,
+}
+
+impl From<&FrontendInfo> for FrontendJson {
+    fn from(frontend: &FrontendInfo) -> Self {
+        Self {
+            fs_type: frontend.fs_type,
+            delivery: frontend.delivery,
+            mount_point: frontend.mount_point.clone(),
+        }
+    }
 }
 
 impl StatusReport {
     pub(crate) fn into_json(self) -> StatusJson {
+        // `mount` names the first LOCAL attachment specifically (source and
+        // fs_type must come from that same entry); the path itself is the
+        // daemon-derived `mount_point` verbatim, never re-derived
+        // client-side from the frontends list.
         let mount = self.runtime.as_ref().and_then(|runtime| {
-            runtime.frontends.first().map(|frontend| MountJson {
-                source: frontend.source.clone(),
+            if runtime.mount_point.as_os_str().is_empty() {
+                return None;
+            }
+            let local = runtime
+                .frontends
+                .iter()
+                .find(|frontend| frontend.delivery == FrontendDelivery::Local)?;
+            Some(MountJson {
+                source: local.source.clone(),
                 mount_point: runtime.mount_point.clone(),
-                fs_type: frontend.fs_type,
+                fs_type: local.fs_type,
             })
+        });
+        let frontends = self.runtime.as_ref().map_or_else(Vec::new, |runtime| {
+            runtime.frontends.iter().map(FrontendJson::from).collect()
         });
         let runtime_json = self
             .runtime
@@ -442,12 +479,7 @@ impl StatusReport {
             version: env!("CARGO_PKG_VERSION").to_string(),
             runtime: runtime_json,
             mount,
-            virtualized_frontend: self.virtualized_frontend.map(|(via, mount_point)| {
-                VirtualizedFrontendJson {
-                    driver: via.label().to_string(),
-                    mount_point,
-                }
-            }),
+            frontends,
             paths: self.paths,
             mounts: self.user_mounts,
             providers: self.providers,
