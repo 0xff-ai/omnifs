@@ -1,9 +1,8 @@
 //! The TCP namespace-attach transport: `--attach-tcp` and
 //! `POST /v1/frontend/attach-target`.
 //!
-//! Both entry points converge on one binding: the daemon runs namespace-only
-//! (an attach socket, no `--frontend`), so no OS mount is ever served here and
-//! this suite needs no `OMNIFS_ACCEPTANCE_LIVE` gate.
+//! Both entry points converge on one binding. No frontend runner is launched,
+//! so no OS mount is served and this suite needs no acceptance gate.
 
 #![cfg(not(target_os = "wasi"))]
 
@@ -15,9 +14,8 @@ use std::time::{Duration, Instant};
 use omnifs_itest::live::omnifs_bin;
 use tempfile::TempDir;
 
-/// A namespace-only host-native daemon (an attach socket, no in-process
-/// frontend): it reconciles an empty mount set and serves its control socket,
-/// with no OS mount anywhere. Torn down on drop.
+/// A host-native daemon with no frontend runner. It reconciles an empty mount
+/// set and serves its control and namespace sockets, with no OS mount anywhere.
 struct NamespaceOnlyDaemon {
     child: Child,
     home: TempDir,
@@ -45,13 +43,13 @@ impl NamespaceOnlyDaemon {
     }
 }
 
-/// Spawn a namespace-only daemon in a fresh, empty `OMNIFS_HOME` (no provider,
+/// Spawn a daemon in a fresh, empty `OMNIFS_HOME` (no provider,
 /// no mount spec: reconcile converges an empty set immediately).
 fn spawn_namespace_only(extra_args: &[&str]) -> NamespaceOnlyDaemon {
     let home = tempfile::tempdir().expect("home tempdir");
     std::fs::create_dir_all(home.path().join("mounts")).expect("mounts dir");
 
-    let mut args = vec!["daemon", "--attach-socket", "dummy"];
+    let mut args = vec!["daemon"];
     args.extend_from_slice(extra_args);
     let child = Command::new(omnifs_bin())
         .args(&args)

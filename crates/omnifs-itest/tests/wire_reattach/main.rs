@@ -11,7 +11,7 @@
 //!   reloads the persisted filehandle table (same generation) and serves without
 //!   remounting. A held fd keeps reading, a fresh open works, and a previously
 //!   listed directory still lists. No unmount happened.
-//! - **Daemon restart.** SIGKILL the namespace-only daemon under the live
+//! - **Daemon restart.** SIGKILL the daemon under the live
 //!   frontend and relaunch it. The frontend's VFS wire client reconnects onto a
 //!   fresh instance id, drops every cached `NodeId`, and re-resolves lazily. The
 //!   held fd
@@ -169,20 +169,14 @@ fn wire_reattach_survives_frontend_and_daemon_restart() {
     let ctrl_port = live::free_port();
     let ctrl_addr = format!("127.0.0.1:{ctrl_port}");
     let base = format!("http://{ctrl_addr}");
-    let socket = home.join("frontends/nfs-wire.sock");
+    let socket = home.join("frontends/local.sock");
     let mount_point = home.join("mnt-reattach");
     std::fs::create_dir_all(&mount_point).expect("mount point");
     let state_dir = home.join("nfs-state");
 
     let spawn_daemon = || {
         Command::new(live::omnifs_bin())
-            .args([
-                "daemon",
-                "--listen",
-                &ctrl_addr,
-                "--attach-socket",
-                "nfs-wire",
-            ])
+            .args(["daemon", "--listen", &ctrl_addr])
             .env("OMNIFS_HOME", &home)
             .env("OMNIFS_DAEMON_ADDR", &ctrl_addr)
             .env_remove("OMNIFS_MOUNT_POINT")
@@ -221,11 +215,11 @@ fn wire_reattach_survives_frontend_and_daemon_restart() {
         _lock: nfs_lock,
     };
 
-    // The namespace-only daemon reports ready once its attach socket serves.
+    // The daemon reports ready once its fixed local attach socket serves.
     let deadline = Instant::now() + Duration::from_secs(30);
     while !curl_ready(&base) {
         if Instant::now() >= deadline {
-            eprintln!("skip: namespace-only daemon never became ready");
+            eprintln!("skip: daemon never became ready");
             return;
         }
         std::thread::sleep(Duration::from_millis(200));

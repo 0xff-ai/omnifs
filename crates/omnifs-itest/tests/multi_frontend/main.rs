@@ -41,10 +41,6 @@ fn acceptance_gated() -> bool {
     true
 }
 
-// ===========================================================================
-// Test A: dual frontend (Linux only)
-// ===========================================================================
-
 #[cfg(target_os = "linux")]
 #[test]
 fn dual_frontend_serves_one_namespace() {
@@ -137,10 +133,6 @@ fn dual_frontend_serves_one_namespace() {
     eprintln!("skip: dual FUSE+NFS is Linux-only; macOS is NFS-only");
 }
 
-// ===========================================================================
-// Test B: invalidation reaches every frontend
-// ===========================================================================
-
 #[cfg(target_os = "linux")]
 #[test]
 fn invalidation_reaches_both_frontends_within_one_op() {
@@ -173,17 +165,13 @@ fn invalidation_reaches_both_frontends_within_one_op() {
     drop(daemon);
 }
 
-// ===========================================================================
-// Test C: out-of-process wire frontend (macOS NFS)
-// ===========================================================================
-
 /// A renderer serves the projected tree from a different process than the
 /// projection owner over the Omnifs VFS wire protocol. A
-/// namespace-only daemon serves an attach socket; an `omnifs-nfs` child
+/// daemon serves its fixed local attach socket; an `omnifs-nfs` child
 /// (the shipped out-of-process NFS runner) mounts NFS over an Omnifs VFS
 /// wire-backed namespace. The full conformance row table runs against that
-/// out-of-process mount with the same expectations as the in-process macOS NFS
-/// loopback lane, scored as column `macos-nfs-wire`.
+/// mount with the same expectations as the regular macOS NFS loopback lane,
+/// scored as column `macos-nfs-wire`.
 #[cfg(not(target_os = "linux"))]
 #[test]
 fn wire_frontend_nfs_parity() {
@@ -198,8 +186,7 @@ fn wire_frontend_nfs_parity() {
     };
 
     // The out-of-process NFS mount is a fresh column with the same expectations
-    // as the in-process macOS NFS loopback lane: out-of-process parity is the
-    // property under test.
+    // as the regular macOS NFS loopback lane.
     let column = Column {
         id: "macos-nfs-wire",
         platform: "macos",

@@ -106,6 +106,32 @@ pub fn nfs_runner_bin() -> PathBuf {
     crate::workspace_root().join("target/debug/omnifs-nfs")
 }
 
+/// Resolve the shipped `omnifs-fuse` runner the live lanes spawn.
+#[must_use]
+pub fn fuse_runner_bin() -> PathBuf {
+    if let Some(path) = std::env::var_os("OMNIFS_FUSE_BIN") {
+        return PathBuf::from(path);
+    }
+    ensure_fuse_runner_built();
+    crate::workspace_root().join("target/debug/omnifs-fuse")
+}
+
+/// Build the shipped FUSE runner once per process at test runtime.
+fn ensure_fuse_runner_built() {
+    static BUILT: OnceLock<()> = OnceLock::new();
+    BUILT.get_or_init(|| {
+        let status = Command::new("cargo")
+            .args(["build", "-p", "omnifs-fuse", "--bin", "omnifs-fuse"])
+            .current_dir(crate::workspace_root())
+            .status()
+            .expect("spawn `cargo build -p omnifs-fuse --bin omnifs-fuse`");
+        assert!(
+            status.success(),
+            "`cargo build -p omnifs-fuse --bin omnifs-fuse` failed; run it directly to see the error",
+        );
+    });
+}
+
 /// Build the shipped NFS runner once per process at test runtime.
 fn ensure_nfs_runner_built() {
     static BUILT: OnceLock<()> = OnceLock::new();
@@ -181,10 +207,11 @@ pub fn hermetic_home() -> HermeticHome {
     HermeticHome { home, mount_point }
 }
 
-/// A running `omnifs daemon` (platform-default host-native frontend) with the
-/// test-provider mounted, torn down on drop.
+/// A running `omnifs daemon` and platform-default local frontend runner with
+/// the test provider mounted, torn down on drop.
 pub struct NativeDaemon {
-    child: Child,
+    daemon: Child,
+    frontend: Child,
     pub mount_point: PathBuf,
     _home: TempDir,
     /// Cross-process NFS serialization lock, held for the lane's lifetime.
@@ -195,9 +222,15 @@ pub struct NativeDaemon {
 
 impl Drop for NativeDaemon {
     fn drop(&mut self) {
+        sigterm(&self.frontend);
+        wait_briefly(&mut self.frontend);
         self.detach_mount();
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        sigterm(&self.daemon);
+        wait_briefly(&mut self.daemon);
+        let _ = self.frontend.kill();
+        let _ = self.frontend.wait();
+        let _ = self.daemon.kill();
+        let _ = self.daemon.wait();
     }
 }
 
@@ -231,12 +264,11 @@ impl NativeDaemon {
     }
 }
 
-/// A running `omnifs daemon` serving an explicit set of frontends, one per
-/// `--frontend <kind>=<mount_point>` flag, over one shared namespace. Host-native
-/// so it publishes a runtime record; torn down on drop. Used by the
-/// dual-frontend acceptance test.
+/// A running `omnifs daemon` with an explicit set of local frontend runners
+/// attached over one shared namespace. Torn down on drop.
 pub struct MultiFrontendDaemon {
-    child: Child,
+    daemon: Child,
+    frontends: Vec<Child>,
     pub mount_points: Vec<PathBuf>,
     home: TempDir,
     /// Cross-process NFS serialization lock, held for the lane's lifetime.
@@ -245,11 +277,23 @@ pub struct MultiFrontendDaemon {
 
 impl Drop for MultiFrontendDaemon {
     fn drop(&mut self) {
+        for frontend in &self.frontends {
+            sigterm(frontend);
+        }
+        for frontend in &mut self.frontends {
+            wait_briefly(frontend);
+        }
         for mount_point in &self.mount_points {
             detach_mount_any(mount_point);
         }
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        sigterm(&self.daemon);
+        wait_briefly(&mut self.daemon);
+        for frontend in &mut self.frontends {
+            let _ = frontend.kill();
+            let _ = frontend.wait();
+        }
+        let _ = self.daemon.kill();
+        let _ = self.daemon.wait();
     }
 }
 
@@ -287,16 +331,16 @@ fn detach_mount_any(mount_point: &Path) {
     }
 }
 
-/// Bring up `omnifs daemon` serving the frontends named in `kinds` (`"fuse"` or
-/// `"nfs"`), each at its own mount point under a hermetic home, over one shared
-/// namespace. Polls the runtime record and every mount rather than the control
-/// API, so no `OMNIFS_DAEMON_ADDR` is needed.
+/// Bring up `omnifs daemon` and the local frontend runners named in `kinds`
+/// (`"fuse"` or `"nfs"`), each at its own mount point under a hermetic home and
+/// attached to the fixed local namespace socket.
 ///
 /// Returns `None` (skip) when the platform cannot mount or the daemon does not
 /// serve every mount (for example the NFS client bits are missing). Panics only
 /// on a spawn error. The caller gates on `OMNIFS_ACCEPTANCE_LIVE` and holds the
 /// NFS serial lock (this helper also holds its own copy for the lane lifetime).
 #[must_use]
+#[allow(clippy::too_many_lines)] // linear process-group bring-up
 pub fn start_multi_frontend_daemon(kinds: &[&str]) -> Option<MultiFrontendDaemon> {
     let test_wasm = crate::provider_artifact_dir().join("test_provider.wasm");
     if !test_wasm.exists() {
@@ -314,25 +358,25 @@ pub fn start_multi_frontend_daemon(kinds: &[&str]) -> Option<MultiFrontendDaemon
     let nfs_lock = nfs_serial_lock();
     let HermeticHome { home, .. } = hermetic_home();
 
-    let mut args = vec!["daemon".to_string()];
+    let port = free_port();
+    let listen_addr = format!("127.0.0.1:{port}");
+    let base = format!("http://{listen_addr}");
     let mut mount_points = Vec::with_capacity(kinds.len());
     for (index, kind) in kinds.iter().enumerate() {
         let mount_point = home.path().join(format!("mnt-{index}-{kind}"));
         std::fs::create_dir_all(&mount_point).expect("frontend mount point");
-        args.push("--frontend".to_string());
-        args.push(format!("{kind}={}", mount_point.display()));
         mount_points.push(mount_point);
     }
 
-    let child = Command::new(omnifs_bin())
-        .args(&args)
+    let daemon = Command::new(omnifs_bin())
+        .args(["daemon", "--listen", &listen_addr])
         .env("OMNIFS_HOME", home.path())
         .env_remove("OMNIFS_MOUNT_POINT")
-        .env_remove("OMNIFS_DAEMON_ADDR")
+        .env("OMNIFS_DAEMON_ADDR", &listen_addr)
         .env_remove("OMNIFS_CONTROL_TOKEN")
         .env("RUST_LOG", "warn")
         .spawn();
-    let child = match child {
+    let mut daemon = match daemon {
         Ok(child) => child,
         Err(error) => {
             eprintln!("skip: spawn omnifs daemon failed: {error}");
@@ -340,8 +384,68 @@ pub fn start_multi_frontend_daemon(kinds: &[&str]) -> Option<MultiFrontendDaemon
         },
     };
 
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !curl_ok(&format!("{base}/v1/ready")) {
+        match daemon.try_wait() {
+            Ok(Some(status)) => panic!("omnifs daemon exited with {status} before ready"),
+            Ok(None) => {},
+            Err(error) => panic!("poll daemon child status: {error}"),
+        }
+        if Instant::now() >= deadline {
+            let _ = daemon.kill();
+            let _ = daemon.wait();
+            panic!("omnifs daemon never reported ready on {listen_addr}");
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    let attach_socket = home.path().join("frontends/local.sock");
+    let mut frontends = Vec::with_capacity(kinds.len());
+    for ((index, kind), mount_point) in kinds.iter().enumerate().zip(&mount_points) {
+        let mut command = match *kind {
+            "fuse" => {
+                let mut command = Command::new(fuse_runner_bin());
+                command
+                    .arg("--mount-point")
+                    .arg(mount_point)
+                    .arg("--attach")
+                    .arg(&attach_socket);
+                command
+            },
+            "nfs" => {
+                let mut command = Command::new(nfs_runner_bin());
+                command
+                    .arg("--mount-point")
+                    .arg(mount_point)
+                    .arg("--state-dir")
+                    .arg(home.path().join(format!("cache/nfs-{index}")))
+                    .arg("--attach")
+                    .arg(&attach_socket);
+                command
+            },
+            other => panic!("unsupported frontend kind `{other}`"),
+        };
+        command
+            .env("OMNIFS_HOME", home.path())
+            .env("RUST_LOG", "warn");
+        match command.spawn() {
+            Ok(child) => frontends.push(child),
+            Err(error) => {
+                for frontend in &mut frontends {
+                    let _ = frontend.kill();
+                    let _ = frontend.wait();
+                }
+                let _ = daemon.kill();
+                let _ = daemon.wait();
+                eprintln!("skip: spawn omnifs-{kind} failed: {error}");
+                return None;
+            },
+        }
+    }
+
     let mut daemon = MultiFrontendDaemon {
-        child,
+        daemon,
+        frontends,
         mount_points,
         home,
         _nfs_lock: nfs_lock,
@@ -360,13 +464,13 @@ pub fn start_multi_frontend_daemon(kinds: &[&str]) -> Option<MultiFrontendDaemon
         if record.exists() && all_serving {
             return Some(daemon);
         }
-        match daemon.child.try_wait() {
+        match daemon.daemon.try_wait() {
             Ok(Some(status)) => {
                 if status.success() {
                     eprintln!("skip: daemon exited cleanly before every frontend served");
                 } else {
                     eprintln!(
-                        "skip: daemon exited ({status}) before every frontend served — a \
+                        "skip: daemon exited ({status}) before every frontend served; a \
                          requested frontend could not come up on this platform"
                     );
                 }
@@ -374,6 +478,16 @@ pub fn start_multi_frontend_daemon(kinds: &[&str]) -> Option<MultiFrontendDaemon
             },
             Ok(None) => {},
             Err(error) => panic!("poll daemon child status: {error}"),
+        }
+        for frontend in &mut daemon.frontends {
+            match frontend.try_wait() {
+                Ok(Some(status)) => {
+                    eprintln!("skip: frontend runner exited ({status}) before every mount served");
+                    return None;
+                },
+                Ok(None) => {},
+                Err(error) => panic!("poll frontend child status: {error}"),
+            }
         }
         if Instant::now() >= deadline {
             eprintln!("skip: not every frontend served within 30s");
@@ -383,9 +497,9 @@ pub fn start_multi_frontend_daemon(kinds: &[&str]) -> Option<MultiFrontendDaemon
     }
 }
 
-/// A namespace-only `omnifs daemon` (one attach socket, no in-process frontend)
-/// plus an out-of-process `omnifs-nfs` runner attached to it. Torn down
-/// on drop: the frontend first (it owns the mount), then the daemon.
+/// An `omnifs daemon` plus an out-of-process `omnifs-nfs` runner attached to
+/// its fixed local namespace socket. Torn down on drop: the frontend first,
+/// then the daemon.
 pub struct WireFrontendDaemon {
     daemon: Child,
     frontend: Child,
@@ -440,13 +554,13 @@ fn wait_briefly(child: &mut Child) {
     }
 }
 
-/// Bring up a namespace-only daemon serving one attach socket, then the
-/// out-of-process `omnifs-nfs` runner attached to it. Proves the
-/// projected tree serves out of process over the Omnifs VFS wire protocol.
+/// Bring up a daemon and an `omnifs-nfs` runner attached to its fixed local
+/// namespace socket. Proves the projected tree serves out of process over the
+/// Omnifs VFS wire protocol.
 ///
 /// Returns `None` (skip) when the platform cannot mount or a surface never comes
 /// up; panics only on a spawn error or a daemon that is alive but never ready
-/// (a real regression in the namespace-only ready path). The caller gates on
+/// (a real regression in daemon readiness). The caller gates on
 /// `OMNIFS_ACCEPTANCE_LIVE`.
 #[must_use]
 pub fn start_wire_frontend() -> Option<WireFrontendDaemon> {
@@ -508,17 +622,12 @@ fn wire_frontend(
     let listen_addr = format!("127.0.0.1:{port}");
     let base = format!("http://{listen_addr}");
 
-    // Namespace-only: at least one attach socket named, no `--frontend`
-    // (`resolve_frontends` only suppresses the default frontend when the named
-    // attach-socket list is non-empty, so the Tcp lane still names one even
-    // though the runner never dials it). --listen adds a TCP control API to
-    // poll beside the daemon's UDS record.
+    // The daemon always serves its fixed local socket. The TCP lane additionally
+    // requests the token-guarded listener it intentionally exercises.
     let mut daemon_args = vec![
         "daemon".to_string(),
         "--listen".to_string(),
         listen_addr.clone(),
-        "--attach-socket".to_string(),
-        "nfs-wire".to_string(),
     ];
     if matches!(transport, AttachTransport::Tcp) {
         daemon_args.push("--attach-tcp".to_string());
@@ -540,15 +649,14 @@ fn wire_frontend(
         },
     };
 
-    // A namespace-only daemon reports ready once mounts reconcile and its attach
-    // sockets serve. A non-zero exit before that is a hard failure.
+    // Ready means mounts reconciled and all requested attach listeners serve.
     let deadline = Instant::now() + Duration::from_secs(30);
     let ready = loop {
         match daemon.try_wait() {
             Ok(Some(status)) => {
                 let _ = daemon.wait();
                 panic!(
-                    "namespace-only daemon exited with {status} before /v1/ready on {listen_addr}; \
+                    "daemon exited with {status} before /v1/ready on {listen_addr}; \
                      this is a startup regression, not a skip"
                 );
             },
@@ -563,11 +671,14 @@ fn wire_frontend(
         }
         std::thread::sleep(Duration::from_millis(200));
     };
-    assert!(
-        ready,
-        "namespace-only daemon never reported /v1/ready on {listen_addr} after 30s; \
-         the attach-socket ready path regressed. Check the daemon log."
-    );
+    if !ready {
+        let _ = daemon.kill();
+        let _ = daemon.wait();
+        panic!(
+            "daemon never reported /v1/ready on {listen_addr} after 30s; \
+             the attach-listener ready path regressed. Check the daemon log."
+        );
+    }
 
     let mount_point = home_path.join("mnt-wire");
     std::fs::create_dir_all(&mount_point).expect("frontend mount point");
@@ -585,7 +696,7 @@ fn wire_frontend(
         .env("RUST_LOG", "warn");
     match transport {
         AttachTransport::Unix => {
-            let socket = home_path.join("frontends/nfs-wire.sock");
+            let socket = home_path.join("frontends/local.sock");
             assert!(
                 socket.exists(),
                 "attach socket {} absent after the daemon reported ready",
@@ -601,10 +712,17 @@ fn wire_frontend(
             .expect("daemon.json present once ready");
             let attach = record
                 .attach
-                .expect("daemon.json must carry `attach` after --attach-tcp");
+                .into_iter()
+                .find_map(|attach| match attach {
+                    omnifs_workspace::runtime_record::AttachRecord::Tcp { addr, token } => {
+                        Some((addr, token))
+                    },
+                    omnifs_workspace::runtime_record::AttachRecord::Vsock { .. } => None,
+                })
+                .expect("daemon.json must carry TCP attach after --attach-tcp");
             frontend_cmd
-                .env(omnifs_api::OMNIFS_ATTACH_ADDR_ENV, &attach.addr)
-                .env(omnifs_api::OMNIFS_ATTACH_TOKEN_ENV, &attach.token);
+                .env(omnifs_api::OMNIFS_ATTACH_ADDR_ENV, &attach.0)
+                .env(omnifs_api::OMNIFS_ATTACH_TOKEN_ENV, &attach.1);
         },
     }
     let frontend = frontend_cmd.spawn();
@@ -633,7 +751,7 @@ fn wire_frontend(
         match frontend.try_wait() {
             Ok(Some(status)) => {
                 eprintln!(
-                    "skip: frontend runner exited ({status}) before the mount served — \
+                    "skip: frontend runner exited ({status}) before the mount served; \
                      the renderer could not come up on this platform"
                 );
                 let _ = daemon.kill();
@@ -662,10 +780,9 @@ fn curl_ok(url: &str) -> bool {
         .is_ok_and(|status| status.success())
 }
 
-/// Bring up `omnifs daemon` with the platform-default host-native frontend and
-/// only the test-provider mounted. `OMNIFS_HOME`, `OMNIFS_MOUNT_POINT`, and
-/// `OMNIFS_DAEMON_ADDR` are all hermetic per-lane values, so the daemon never
-/// touches the user's real home or the default control port.
+/// Bring up `omnifs daemon` with the platform-default local frontend runner and
+/// only the test provider mounted. `OMNIFS_HOME` and `OMNIFS_DAEMON_ADDR` are
+/// hermetic per lane, so neither process touches the user's real workspace.
 ///
 /// Returns `None` (skip) only when the platform genuinely cannot mount. Panics
 /// if the daemon exits due to a CLI parse error or bind collision, since that is
@@ -678,14 +795,6 @@ pub fn start_native_daemon() -> Option<NativeDaemon> {
     // Hold the cross-process NFS lock for the whole lane so this binary's mount
     // never races the CLI lifecycle suite's mounts in a parallel nextest run.
     native_daemon(Some(nfs_serial_lock()))
-}
-
-/// Like [`start_native_daemon`] but the caller already holds the NFS serial lock
-/// and keeps holding it. The perf lane holds one lock across both its sequential
-/// lanes, so it must not let each bring-up acquire (and later drop) its own.
-#[must_use]
-pub fn start_native_daemon_holding_lock() -> Option<NativeDaemon> {
-    native_daemon(None)
 }
 
 #[allow(clippy::too_many_lines)] // linear end-to-end daemon bring-up
@@ -712,17 +821,15 @@ fn native_daemon(nfs_lock: Option<TcpListener>) -> Option<NativeDaemon> {
     let listen_addr = format!("127.0.0.1:{port}");
     let base = format!("http://{listen_addr}");
 
-    // The daemon picks the platform-default frontend automatically; no
-    // --frontend flag. Mount point comes from OMNIFS_MOUNT_POINT; config and
-    // providers come from OMNIFS_HOME.
-    let child = Command::new(omnifs_bin())
+    let daemon = Command::new(omnifs_bin())
         .args(["daemon", "--listen", &listen_addr])
         .env("OMNIFS_HOME", hermetic.home.path())
-        .env("OMNIFS_MOUNT_POINT", &mount_point)
+        .env_remove("OMNIFS_MOUNT_POINT")
         .env("OMNIFS_DAEMON_ADDR", &listen_addr)
+        .env_remove("OMNIFS_CONTROL_TOKEN")
         .env("RUST_LOG", "warn")
         .spawn();
-    let child = match child {
+    let mut daemon = match daemon {
         Ok(child) => child,
         Err(error) => {
             eprintln!("skip: spawn omnifs daemon failed: {error}");
@@ -730,19 +837,10 @@ fn native_daemon(nfs_lock: Option<TcpListener>) -> Option<NativeDaemon> {
         },
     };
 
-    let mut daemon = NativeDaemon {
-        child,
-        mount_point: mount_point.clone(),
-        _home: hermetic.home,
-        _nfs_lock: nfs_lock,
-    };
-
-    // Wait for the control API. A non-zero exit before serving is a hard failure
-    // (bad CLI parse or bind collision) and panics; a clean exit is an
-    // unexpected but non-hard skip.
+    // Wait for the daemon before attaching the runner.
     let deadline = Instant::now() + Duration::from_secs(30);
     let ready = loop {
-        match daemon.child.try_wait() {
+        match daemon.try_wait() {
             Ok(Some(status)) => {
                 if status.success() {
                     eprintln!("skip: daemon exited cleanly before the control API was ready");
@@ -750,7 +848,7 @@ fn native_daemon(nfs_lock: Option<TcpListener>) -> Option<NativeDaemon> {
                 }
                 panic!(
                     "omnifs daemon exited with {status} before the control API became ready on \
-                     {listen_addr} — this is a CLI or startup error, not a skip. \
+                     {listen_addr}; this is a CLI or startup error, not a skip. \
                      Check that the daemon accepts the args passed in this lane \
                      and that `{listen_addr}` was not already in use."
                 );
@@ -766,11 +864,59 @@ fn native_daemon(nfs_lock: Option<TcpListener>) -> Option<NativeDaemon> {
         }
         std::thread::sleep(Duration::from_millis(200));
     };
-    assert!(
-        ready,
-        "omnifs daemon control API never became ready on {listen_addr} after 30s; \
-         the daemon is alive but not serving. Check the daemon log."
-    );
+    if !ready {
+        let _ = daemon.kill();
+        let _ = daemon.wait();
+        panic!(
+            "omnifs daemon control API never became ready on {listen_addr} after 30s; \
+             the daemon is alive but not serving. Check the daemon log."
+        );
+    }
+
+    let attach_socket = hermetic.home.path().join("frontends/local.sock");
+    #[cfg(target_os = "linux")]
+    let mut frontend_command = {
+        let mut command = Command::new(fuse_runner_bin());
+        command
+            .arg("--mount-point")
+            .arg(&mount_point)
+            .arg("--attach")
+            .arg(&attach_socket);
+        command
+    };
+    #[cfg(not(target_os = "linux"))]
+    let mut frontend_command = {
+        let mut command = Command::new(nfs_runner_bin());
+        command
+            .arg("--mount-point")
+            .arg(&mount_point)
+            .arg("--state-dir")
+            .arg(hermetic.home.path().join("cache/nfs-local"))
+            .arg("--attach")
+            .arg(&attach_socket);
+        command
+    };
+    let frontend = frontend_command
+        .env("OMNIFS_HOME", hermetic.home.path())
+        .env("RUST_LOG", "warn")
+        .spawn();
+    let frontend = match frontend {
+        Ok(frontend) => frontend,
+        Err(error) => {
+            let _ = daemon.kill();
+            let _ = daemon.wait();
+            eprintln!("skip: spawn local frontend runner failed: {error}");
+            return None;
+        },
+    };
+
+    let mut daemon = NativeDaemon {
+        daemon,
+        frontend,
+        mount_point: mount_point.clone(),
+        _home: hermetic.home,
+        _nfs_lock: nfs_lock,
+    };
 
     // Wait for the mount to serve the projected tree, bailing if the daemon exits.
     let message = mount_point.join("test/hello/message");
@@ -779,20 +925,17 @@ fn native_daemon(nfs_lock: Option<TcpListener>) -> Option<NativeDaemon> {
         if message.is_file() {
             return Some(daemon);
         }
-        match daemon.child.try_wait() {
+        match daemon.frontend.try_wait() {
             Ok(Some(status)) => {
-                eprintln!(
-                    "skip: daemon exited ({status}) before the mount was active — \
-                     the platform frontend could not serve"
-                );
+                eprintln!("skip: frontend runner exited ({status}) before the mount was active");
                 return None;
             },
             Ok(None) => {},
-            Err(error) => panic!("poll daemon child status: {error}"),
+            Err(error) => panic!("poll frontend child status: {error}"),
         }
         if Instant::now() >= deadline {
             eprintln!(
-                "skip: {} never appeared within 30s — the mount could not come up on this platform",
+                "skip: {} never appeared within 30s; the mount could not come up on this platform",
                 message.display()
             );
             return None;

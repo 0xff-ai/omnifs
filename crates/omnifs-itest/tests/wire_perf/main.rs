@@ -1,21 +1,19 @@
-//! Wire-overhead measurement lane: the out-of-process frontend hop measured
-//! against the in-process frontend on the conformance read/readdir workloads.
+//! Attach-transport measurement lane: TCP measured against the fixed local Unix
+//! socket on the conformance read/readdir workloads.
 //!
 //! Two lanes serve the same test-provider tree over NFS and run the same two
-//! workloads; the only difference is where the frontend renders:
+//! workloads; the only difference is the frontend's attach transport:
 //!
-//! - **Lane 1 (in-process).** The daemon serves the platform-default host-native
-//!   frontend itself (the native path the conformance matrix uses).
-//! - **Lane 2 (wire).** A namespace-only daemon (`--attach-socket`) plus an
-//!   out-of-process `omnifs-nfs` runner attached through the
-//!   Omnifs VFS wire protocol, so every filesystem op crosses the VFS wire.
+//! - **Lane 1 (Unix).** `omnifs-nfs` attaches to `frontends/local.sock`.
+//! - **Lane 2 (TCP).** The same runner attaches to the token-guarded loopback
+//!   listener used by virtualized frontends.
 //!
 //! The lanes run sequentially, never two mounts at once, under one held NFS
 //! serial lock so no other test process interleaves a mount between them. Lane 1
 //! is torn down fully (unmount, kill daemon, sweep) before lane 2 comes up, so
 //! the measurements never overlap.
 //!
-//! The enforced budget is wire overhead under 15% on sequential 128 KiB reads and
+//! The enforced budget is TCP overhead under 15% on sequential 128 KiB reads and
 //! under 25% on a readdir-heavy `find`. Evidence (all samples, medians, overhead)
 //! always lands in `target/conformance/wire-perf.json` and a printed table before
 //! the budget assertion, so a violation is diagnosable. This lane reports and
@@ -124,24 +122,24 @@ struct Report {
 #[derive(Serialize)]
 struct Workload {
     id: &'static str,
-    inproc_ms: Vec<f64>,
-    wire_ms: Vec<f64>,
-    inproc_median_ms: f64,
-    wire_median_ms: f64,
+    unix_ms: Vec<f64>,
+    tcp_ms: Vec<f64>,
+    unix_median_ms: f64,
+    tcp_median_ms: f64,
     overhead_pct: f64,
     budget_pct: u32,
 }
 
-fn workload(id: &'static str, inproc_ms: Vec<f64>, wire_ms: Vec<f64>, budget_pct: u32) -> Workload {
-    let inproc_median_ms = median(&inproc_ms);
-    let wire_median_ms = median(&wire_ms);
-    let overhead_pct = (wire_median_ms - inproc_median_ms) / inproc_median_ms * 100.0;
+fn workload(id: &'static str, unix_ms: Vec<f64>, tcp_ms: Vec<f64>, budget_pct: u32) -> Workload {
+    let unix_median_ms = median(&unix_ms);
+    let tcp_median_ms = median(&tcp_ms);
+    let overhead_pct = (tcp_median_ms - unix_median_ms) / unix_median_ms * 100.0;
     Workload {
         id,
-        inproc_ms,
-        wire_ms,
-        inproc_median_ms,
-        wire_median_ms,
+        unix_ms,
+        tcp_ms,
+        unix_median_ms,
+        tcp_median_ms,
         overhead_pct,
         budget_pct,
     }
@@ -169,18 +167,18 @@ fn uname_ms() -> String {
 }
 
 fn print_table(report: &Report) {
-    eprintln!("\nworkload      inproc(ms)   wire(ms)   overhead   budget");
+    eprintln!("\nworkload        unix(ms)    tcp(ms)   overhead   budget");
     for w in &report.workloads {
         eprintln!(
             "{:<12} {:>10.1} {:>10.1} {:>9.1}% {:>7}%",
-            w.id, w.inproc_median_ms, w.wire_median_ms, w.overhead_pct, w.budget_pct
+            w.id, w.unix_median_ms, w.tcp_median_ms, w.overhead_pct, w.budget_pct
         );
     }
 }
 
 #[test]
 #[allow(clippy::too_many_lines)] // linear two-lane bring-up, measure, report
-fn wire_overhead_within_budget() {
+fn tcp_attach_overhead_within_budget() {
     if std::env::var_os("OMNIFS_ACCEPTANCE_PERF").is_none() {
         eprintln!("skip: set OMNIFS_ACCEPTANCE_PERF=1 to run the wire-overhead measurement lane");
         return;
@@ -196,10 +194,9 @@ fn wire_overhead_within_budget() {
     // so neither lane acquires (or, on teardown, drops) its own copy.
     let _nfs_lock = live::nfs_serial_lock();
 
-    // Lane 1 (in-process): the daemon serves the platform-default frontend.
-    let inproc = {
-        let Some(daemon) = live::start_native_daemon_holding_lock() else {
-            eprintln!("skip: in-process lane could not come up");
+    let unix = {
+        let Some(daemon) = live::start_wire_frontend_holding_lock() else {
+            eprintln!("skip: Unix attach lane could not come up");
             return;
         };
         let samples = measure_lane(&daemon.tree_root());
@@ -209,13 +206,12 @@ fn wire_overhead_within_budget() {
         samples
     };
 
-    // Let the NFS teardown settle before the wire lane mounts a fresh export.
+    // Let the NFS teardown settle before the TCP lane mounts a fresh export.
     std::thread::sleep(Duration::from_secs(1));
 
-    // Lane 2 (wire): a namespace-only daemon plus an out-of-process nfs frontend.
-    let wire = {
-        let Some(wire_daemon) = live::start_wire_frontend_holding_lock() else {
-            eprintln!("skip: wire lane could not come up");
+    let tcp = {
+        let Some(wire_daemon) = live::start_wire_frontend_tcp_holding_lock() else {
+            eprintln!("skip: TCP attach lane could not come up");
             return;
         };
         let samples = measure_lane(&wire_daemon.tree_root());
@@ -224,17 +220,12 @@ fn wire_overhead_within_budget() {
     };
 
     let report = Report {
-        version: 1,
+        version: 2,
         generated_at: now_rfc3339(),
         machine: uname_ms(),
         workloads: vec![
-            workload("read-128k", inproc.read_ms, wire.read_ms, READ_BUDGET_PCT),
-            workload(
-                "find-readdir",
-                inproc.find_ms,
-                wire.find_ms,
-                FIND_BUDGET_PCT,
-            ),
+            workload("read-128k", unix.read_ms, tcp.read_ms, READ_BUDGET_PCT),
+            workload("find-readdir", unix.find_ms, tcp.find_ms, FIND_BUDGET_PCT),
         ],
     };
 
@@ -248,14 +239,14 @@ fn wire_overhead_within_budget() {
     for w in &report.workloads {
         assert!(
             w.overhead_pct <= f64::from(w.budget_pct),
-            "workload `{}` wire overhead {:.1}% exceeds budget {}% \
-             (in-process median {:.1}ms, wire median {:.1}ms). \
+            "workload `{}` TCP overhead {:.1}% exceeds budget {}% \
+             (Unix median {:.1}ms, TCP median {:.1}ms). \
              Report the measurements rather than relaxing the budget.",
             w.id,
             w.overhead_pct,
             w.budget_pct,
-            w.inproc_median_ms,
-            w.wire_median_ms,
+            w.unix_median_ms,
+            w.tcp_median_ms,
         );
     }
 }
