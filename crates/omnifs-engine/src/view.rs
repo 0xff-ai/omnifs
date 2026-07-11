@@ -39,6 +39,34 @@ pub enum Stability {
     Live,
 }
 
+/// Version evidence validated at the untrusted provider boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VersionToken(String);
+
+impl VersionToken {
+    pub fn new(value: String) -> Result<Self, String> {
+        let token = Self(value);
+        token.validate()?;
+        Ok(token)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.0.is_empty() {
+            return Err("version token must not be empty".to_string());
+        }
+        if self.0.len() > MAX_VERSION_TOKEN_BYTES {
+            return Err(format!(
+                "version token exceeds {MAX_VERSION_TOKEN_BYTES} bytes"
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FileAttrsCache {
     Inline {
@@ -66,15 +94,15 @@ pub enum FileAttrsCache {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Freshness {
-    Stable { version_token: Option<String> },
-    Dynamic { version_token: Option<String> },
+    Stable { version_token: Option<VersionToken> },
+    Dynamic { version_token: Option<VersionToken> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RangedFreshness {
-    Stable { version_token: Option<String> },
-    Dynamic { version_token: Option<String> },
-    Live { version_token: Option<String> },
+    Stable { version_token: Option<VersionToken> },
+    Dynamic { version_token: Option<VersionToken> },
+    Live { version_token: Option<VersionToken> },
 }
 
 #[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -477,7 +505,7 @@ impl FileAttrsCache {
 
 impl Freshness {
     fn new(stability: Stability, version_token: Option<String>) -> Result<Self, String> {
-        validate_version_token(version_token.as_deref())?;
+        let version_token = version_token.map(VersionToken::new).transpose()?;
         match stability {
             Stability::Stable => Ok(Self::Stable { version_token }),
             Stability::Dynamic => Ok(Self::Dynamic { version_token }),
@@ -497,19 +525,23 @@ impl Freshness {
     fn version_token(&self) -> Option<&str> {
         match self {
             Self::Stable { version_token } | Self::Dynamic { version_token } => {
-                version_token.as_deref()
+                version_token.as_ref().map(VersionToken::as_str)
             },
         }
     }
 
     fn validate(&self) -> Result<(), String> {
-        validate_version_token(self.version_token())
+        match self {
+            Self::Stable { version_token } | Self::Dynamic { version_token } => version_token
+                .as_ref()
+                .map_or(Ok(()), VersionToken::validate),
+        }
     }
 }
 
 impl RangedFreshness {
     fn new(stability: Stability, version_token: Option<String>) -> Result<Self, String> {
-        validate_version_token(version_token.as_deref())?;
+        let version_token = version_token.map(VersionToken::new).transpose()?;
         match stability {
             Stability::Stable => Ok(Self::Stable { version_token }),
             Stability::Dynamic => Ok(Self::Dynamic { version_token }),
@@ -529,27 +561,19 @@ impl RangedFreshness {
         match self {
             Self::Stable { version_token }
             | Self::Dynamic { version_token }
-            | Self::Live { version_token } => version_token.as_deref(),
+            | Self::Live { version_token } => version_token.as_ref().map(VersionToken::as_str),
         }
     }
 
     fn validate(&self) -> Result<(), String> {
-        validate_version_token(self.version_token())
-    }
-}
-
-fn validate_version_token(token: Option<&str>) -> Result<(), String> {
-    if let Some(token) = token {
-        if token.is_empty() {
-            return Err("version token must not be empty".to_string());
-        }
-        if token.len() > MAX_VERSION_TOKEN_BYTES {
-            return Err(format!(
-                "version token exceeds {MAX_VERSION_TOKEN_BYTES} bytes"
-            ));
+        match self {
+            Self::Stable { version_token }
+            | Self::Dynamic { version_token }
+            | Self::Live { version_token } => version_token
+                .as_ref()
+                .map_or(Ok(()), VersionToken::validate),
         }
     }
-    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -917,7 +941,7 @@ mod tests {
     fn merged_introduction_appends_and_demotes_exhaustive() {
         let existing = DirentsPayload {
             entries: vec![dir_record("alpha"), dir_record("beta")],
-            exhaustive: true, // previously exhaustive
+            exhaustive: true,
             validator: Some("v1".to_string()),
             next_cursor: None,
             paginated: false,
