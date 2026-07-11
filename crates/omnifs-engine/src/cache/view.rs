@@ -406,7 +406,7 @@ impl Default for Cache {
 fn make_key(key: &Key) -> String {
     let prefix = kind_prefix(key.kind);
     match &key.aux {
-        Some(aux) => format!("{prefix}:{}\u{1f}{}", key.path, hex_bytes(aux)),
+        Some(aux) => format!("{prefix}:{}\u{1f}{}", key.path, hex::encode(aux)),
         None => format!("{prefix}:{}", key.path),
     }
 }
@@ -418,15 +418,4 @@ fn kind_prefix(kind: RecordKind) -> char {
         RecordKind::Dirents => 'D',
         RecordKind::File => 'F',
     }
-}
-
-fn hex_bytes(value: &str) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let bytes = value.as_bytes();
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        out.push(HEX[(byte >> 4) as usize] as char);
-        out.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    out
 }
