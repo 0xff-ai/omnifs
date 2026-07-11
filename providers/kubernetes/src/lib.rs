@@ -171,9 +171,9 @@ struct PodLogKey {
 impl KubernetesProvider {
     fn start(config: Config, r: &mut Router<State>) -> Result<State> {
         r.dir("/namespaces").handler(namespaces_dir)?;
-        r.dir("/namespaces/{ns}").handler(ns_types_dir)?;
+        r.dir("/namespaces/{ns}").handler(NamespaceKey::types)?;
         r.dir("/namespaces/{ns}/{rtype}")
-            .handler(ns_resources_dir)?;
+            .handler(NsTypeKey::resources)?;
         r.object::<NamespacedResource>("/namespaces/{ns}/{rtype}/{name}", |o| {
             o.dynamic();
             o.file("manifest.json").canonical::<Json>()?;
@@ -195,7 +195,8 @@ impl KubernetesProvider {
             .handler(pod_log_read)?;
 
         r.dir("/cluster").handler(cluster_types_dir)?;
-        r.dir("/cluster/{rtype}").handler(cluster_resources_dir)?;
+        r.dir("/cluster/{rtype}")
+            .handler(ClusterTypeKey::resources)?;
         r.object::<ClusterResource>("/cluster/{rtype}/{name}", |o| {
             o.dynamic();
             o.file("manifest.json").canonical::<Json>()?;
@@ -235,10 +236,6 @@ impl NamespaceKey {
     }
 }
 
-async fn ns_types_dir(cx: DirCx<State>, key: NamespaceKey) -> Result<DirListing> {
-    key.types(cx).await
-}
-
 impl NsTypeKey {
     async fn resources(self, cx: DirCx<State>) -> Result<DirListing> {
         let api = KubeApi::new(&cx);
@@ -251,10 +248,6 @@ impl NsTypeKey {
                 .await?,
         ))
     }
-}
-
-async fn ns_resources_dir(cx: DirCx<State>, key: NsTypeKey) -> Result<DirListing> {
-    key.resources(cx).await
 }
 
 async fn pod_logs_dir(cx: DirCx<State>, key: PodLogsKey) -> Result<DirListing> {
@@ -298,8 +291,4 @@ impl ClusterTypeKey {
             api.list_names(&resource.collection_path(None)).await?,
         ))
     }
-}
-
-async fn cluster_resources_dir(cx: DirCx<State>, key: ClusterTypeKey) -> Result<DirListing> {
-    key.resources(cx).await
 }
