@@ -344,19 +344,9 @@ async fn fetch_all_teams(cx: &Cx) -> Result<Vec<Team>> {
 }
 
 async fn fetch_all_issues(cx: &Cx, team: &TeamKey, filter: StateFilter) -> Result<IssuePage> {
-    let state_types = match filter {
-        StateFilter::Open => vec!["triage", "backlog", "unstarted", "started"],
-        StateFilter::All => Vec::new(),
-    };
-    let state_filter: serde_json::Value = if state_types.is_empty() {
-        serde_json::Value::Null
-    } else {
-        serde_json::Value::Array(
-            state_types
-                .into_iter()
-                .map(serde_json::Value::from)
-                .collect(),
-        )
+    let state_filter = match filter {
+        StateFilter::Open => json!(["triage", "backlog", "unstarted", "started"]),
+        StateFilter::All => serde_json::Value::Null,
     };
 
     let mut items: Vec<Issue> = Vec::new();
