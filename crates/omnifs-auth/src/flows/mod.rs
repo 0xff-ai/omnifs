@@ -58,8 +58,8 @@ pub(crate) fn credential_entry_from_token(
     >,
 ) -> CredentialEntry {
     let now = OffsetDateTime::now_utc();
-    // Stamp the real expiry; the freshness margin is applied at check time in
-    // `service::is_fresh`, not baked in here.
+    // Stamp the real expiry; the credential service applies its freshness
+    // margin at check time instead of baking it in here.
     let expires_at = token.expires_in().map(|expires_in| now + expires_in);
     let refresh_token = token
         .refresh_token()

@@ -1,7 +1,7 @@
 //! Proactive, fail-closed credential ownership.
 //!
 //! [`CredentialService`] is the single host-side owner of credential store
-//! access, the one expiry predicate ([`is_fresh`]), and OAuth refresh. A mount's
+//! access, the one expiry predicate, and OAuth refresh. A mount's
 //! injector ([`crate`] consumers in `omnifs-engine`) registers each credential
 //! it needs, then asks for [`CredentialService::authorization`] per request. The
 //! service reads the store, refreshes synchronously inside the refresh window,
@@ -53,17 +53,6 @@ const REFRESH_LOOP_MIN_INTERVAL: Duration = Duration::from_secs(1);
 /// randomness) so a test driving the loop with paused time sees a
 /// reproducible sequence of wake-ups.
 const REFRESH_LOOP_SEED: u64 = 0x5EED_1E55_0A57_0000;
-
-/// The one expiry predicate. Every credential expiry decision (emit, refresh,
-/// health) routes through here. A credential with no expiry is always fresh.
-#[must_use]
-fn is_fresh(entry: &CredentialEntry, now: OffsetDateTime) -> bool {
-    let window =
-        time::Duration::try_from(REFRESH_WINDOW).expect("REFRESH_WINDOW fits in time::Duration");
-    entry
-        .expires_at()
-        .is_none_or(|expires_at| expires_at - now > window)
-}
 
 /// The resolved auth header the injector places on a request. Holds the secret
 /// value (already prefixed, e.g. `Bearer <token>`) as a [`SecretString`] so it
@@ -165,7 +154,28 @@ impl RejectionEvidence {
                 && self
                     .www_authenticate
                     .as_deref()
-                    .is_some_and(bearer_invalid_token))
+                    .is_some_and(Self::bearer_invalid_token))
+    }
+
+    fn bearer_invalid_token(challenges: &str) -> bool {
+        let mut in_bearer = false;
+        for part in challenges
+            .split(',')
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+        {
+            if let Some((scheme, params)) = strip_auth_scheme(part) {
+                in_bearer = scheme.eq_ignore_ascii_case("bearer");
+                if in_bearer && auth_param_is_invalid_token(params) {
+                    return true;
+                }
+                continue;
+            }
+            if in_bearer && auth_param_is_invalid_token(part) {
+                return true;
+            }
+        }
+        false
     }
 }
 
@@ -230,6 +240,49 @@ struct CredentialState {
     needs_consent: AtomicBool,
 }
 
+impl CredentialState {
+    fn authorization(&self, entry: &CredentialEntry) -> HeaderMaterial {
+        let value = format!(
+            "{}{}",
+            self.value_prefix,
+            entry.access_token().expose_secret()
+        );
+        HeaderMaterial {
+            name: self.header_name.clone(),
+            value: SecretString::from(value),
+        }
+    }
+
+    fn health(
+        &self,
+        entry: &CredentialEntry,
+        now: OffsetDateTime,
+        failures: u32,
+    ) -> CredentialHealth {
+        if self.needs_consent.load(Ordering::Relaxed) {
+            return CredentialHealth::NeedsConsent;
+        }
+        if self.kind == AuthKind::StaticToken {
+            return CredentialHealth::StaticUnvalidated;
+        }
+        if failures > 0 && !CredentialService::is_fresh(entry, now) {
+            return CredentialHealth::RefreshFailed { attempts: failures };
+        }
+        if entry.is_expired_at(now) {
+            return if entry.refresh_token().is_some() {
+                CredentialHealth::Expired
+            } else {
+                CredentialHealth::NeedsConsent
+            };
+        }
+        if CredentialService::is_fresh(entry, now) {
+            CredentialHealth::Ready
+        } else {
+            CredentialHealth::ExpiringSoon
+        }
+    }
+}
+
 /// Proactive owner of credential store access, expiry, and OAuth refresh.
 ///
 /// One instance is shared across every mount in a host: mounts that resolve to
@@ -259,6 +312,17 @@ impl CredentialService {
             refreshes: Group::new(),
             refresh_notify: Notify::new(),
         }
+    }
+
+    /// The one expiry predicate. Every credential expiry decision (emit,
+    /// refresh, health) routes through here. A credential with no expiry is
+    /// always fresh.
+    fn is_fresh(entry: &CredentialEntry, now: OffsetDateTime) -> bool {
+        let window = time::Duration::try_from(REFRESH_WINDOW)
+            .expect("REFRESH_WINDOW fits in time::Duration");
+        entry
+            .expires_at()
+            .is_none_or(|expires_at| expires_at - now > window)
     }
 
     /// Register a static-token credential and its header shape. Reads the store
@@ -342,15 +406,15 @@ impl CredentialService {
         };
 
         if state.kind == AuthKind::StaticToken {
-            return Ok(compose(&state, &entry));
+            return Ok(state.authorization(&entry));
         }
 
-        if is_fresh(&entry, OffsetDateTime::now_utc()) {
-            return Ok(compose(&state, &entry));
+        if Self::is_fresh(&entry, OffsetDateTime::now_utc()) {
+            return Ok(state.authorization(&entry));
         }
 
         match self.refresh_locked(&state, id, false).await {
-            Ok(Some(fresh)) => Ok(compose(&state, &fresh)),
+            Ok(Some(fresh)) => Ok(state.authorization(&fresh)),
             Ok(None) => Err(AuthUnavailable::Missing),
             Err(reason) => {
                 state.refresh_failures.fetch_add(1, Ordering::Relaxed);
@@ -371,7 +435,7 @@ impl CredentialService {
             return None;
         }
         let entry = self.current_entry(&state, id).ok().flatten()?;
-        is_fresh(&entry, OffsetDateTime::now_utc()).then(|| compose(&state, &entry))
+        Self::is_fresh(&entry, OffsetDateTime::now_utc()).then(|| state.authorization(&entry))
     }
 
     /// Force a refresh of `id` (an upstream rejected the current token).
@@ -391,7 +455,7 @@ impl CredentialService {
             return Err(AuthUnavailable::NeedsConsent);
         }
         match self.refresh_locked(&state, id, true).await {
-            Ok(Some(entry)) => Ok(Some(compose(&state, &entry))),
+            Ok(Some(entry)) => Ok(Some(state.authorization(&entry))),
             Ok(None) => Ok(None),
             Err(reason) => {
                 state.refresh_failures.fetch_add(1, Ordering::Relaxed);
@@ -549,7 +613,7 @@ impl CredentialService {
             Some(credential) => {
                 let failures = state.refresh_failures.load(Ordering::Relaxed);
                 (
-                    classify(state, &credential, now, failures),
+                    state.health(&credential, now, failures),
                     credential.expires_at(),
                     credential.scopes().to_vec(),
                 )
@@ -636,7 +700,7 @@ impl CredentialService {
         // A concurrently-written stored entry that is already fresh (and, when
         // forcing, differs from the token the caller observed before joining
         // the flight) supersedes an endpoint call.
-        if stored_satisfies(&stored, observed.as_deref(), now, force) {
+        if Self::stored_satisfies(&stored, observed.as_deref(), now, force) {
             state.current.store(Some(Arc::new(stored.clone())));
             return Ok(Some(stored));
         }
@@ -697,8 +761,8 @@ impl CredentialService {
             let now = OffsetDateTime::now_utc();
             let remaining = deadline - now;
             let remaining = Duration::try_from(remaining).unwrap_or(Duration::ZERO);
-            let sleep_for =
-                (remaining + jitter(&mut rng, remaining)).max(REFRESH_LOOP_MIN_INTERVAL);
+            let sleep_for = (remaining + Self::refresh_jitter(&mut rng, remaining))
+                .max(REFRESH_LOOP_MIN_INTERVAL);
 
             tokio::select! {
                 () = tokio::time::sleep(sleep_for) => {},
@@ -745,69 +809,28 @@ impl CredentialService {
             })
             .min_by_key(|(_, deadline)| *deadline)
     }
-}
 
-/// Additive jitter up to [`REFRESH_JITTER_FRACTION`] of `base`, from a
-/// deterministic PRNG (never system randomness, so a test driving the loop
-/// under paused time sees a reproducible sequence of sleeps).
-fn jitter(rng: &mut SmallRng, base: Duration) -> Duration {
-    base.mul_f64(rng.random::<f64>() * REFRESH_JITTER_FRACTION)
-}
+    /// Additive jitter up to [`REFRESH_JITTER_FRACTION`] of `base`, from a
+    /// deterministic PRNG so a test driving the loop under paused time sees a
+    /// reproducible sequence of sleeps.
+    fn refresh_jitter(rng: &mut SmallRng, base: Duration) -> Duration {
+        base.mul_f64(rng.random::<f64>() * REFRESH_JITTER_FRACTION)
+    }
 
-fn compose(state: &CredentialState, entry: &CredentialEntry) -> HeaderMaterial {
-    let value = format!(
-        "{}{}",
-        state.value_prefix,
-        entry.access_token().expose_secret()
-    );
-    HeaderMaterial {
-        name: state.header_name.clone(),
-        value: SecretString::from(value),
+    fn stored_satisfies(
+        stored: &CredentialEntry,
+        current: Option<&CredentialEntry>,
+        now: OffsetDateTime,
+        force: bool,
+    ) -> bool {
+        if !Self::is_fresh(stored, now) {
+            return false;
+        }
+        if !force {
+            return true;
+        }
+        current.is_none_or(|current| !same_oauth_token(stored, current))
     }
-}
-
-fn classify(
-    state: &CredentialState,
-    entry: &CredentialEntry,
-    now: OffsetDateTime,
-    failures: u32,
-) -> CredentialHealth {
-    if state.needs_consent.load(Ordering::Relaxed) {
-        return CredentialHealth::NeedsConsent;
-    }
-    if state.kind == AuthKind::StaticToken {
-        return CredentialHealth::StaticUnvalidated;
-    }
-    if failures > 0 && !is_fresh(entry, now) {
-        return CredentialHealth::RefreshFailed { attempts: failures };
-    }
-    if entry.is_expired_at(now) {
-        return if entry.refresh_token().is_some() {
-            CredentialHealth::Expired
-        } else {
-            CredentialHealth::NeedsConsent
-        };
-    }
-    if is_fresh(entry, now) {
-        CredentialHealth::Ready
-    } else {
-        CredentialHealth::ExpiringSoon
-    }
-}
-
-fn stored_satisfies(
-    stored: &CredentialEntry,
-    current: Option<&CredentialEntry>,
-    now: OffsetDateTime,
-    force: bool,
-) -> bool {
-    if !is_fresh(stored, now) {
-        return false;
-    }
-    if !force {
-        return true;
-    }
-    current.is_none_or(|current| !same_oauth_token(stored, current))
 }
 
 fn same_oauth_token(left: &CredentialEntry, right: &CredentialEntry) -> bool {
@@ -819,28 +842,6 @@ fn same_oauth_token(left: &CredentialEntry, right: &CredentialEntry) -> bool {
         (None, None) => true,
         (Some(_), None) | (None, Some(_)) => false,
     }
-}
-
-fn bearer_invalid_token(challenges: &str) -> bool {
-    let mut in_bearer = false;
-    for part in challenges
-        .split(',')
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-    {
-        if let Some(rest) = strip_auth_scheme(part) {
-            let (scheme, params) = rest;
-            in_bearer = scheme.eq_ignore_ascii_case("bearer");
-            if in_bearer && auth_param_is_invalid_token(params) {
-                return true;
-            }
-            continue;
-        }
-        if in_bearer && auth_param_is_invalid_token(part) {
-            return true;
-        }
-    }
-    false
 }
 
 fn strip_auth_scheme(part: &str) -> Option<(&str, &str)> {
