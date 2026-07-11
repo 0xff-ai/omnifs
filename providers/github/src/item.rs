@@ -952,11 +952,7 @@ async fn comments_collection(
         let files = eager_comment_leaves(&comment, &key)?;
         entries.push(CollectionEntry::computed(key, files));
     }
-    if len < COMMENT_PAGE_SIZE {
-        Ok(Collection::complete(entries))
-    } else {
-        Ok(Collection::page(entries).next(PageCursor(page + 1)))
-    }
+    page_or_complete(entries, len, COMMENT_PAGE_SIZE, page)
 }
 
 pub(crate) fn unzip_logs(bytes: &[u8]) -> Vec<u8> {
