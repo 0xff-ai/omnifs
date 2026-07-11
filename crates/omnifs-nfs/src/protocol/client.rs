@@ -49,7 +49,7 @@ impl ClientTable {
 
         let slot = self.next_slot.fetch_add(1, Ordering::Relaxed);
         let clientid = client_id_for_slot(self.generation, slot);
-        let confirm = confirm_verifier(self.generation, clientid, verifier, &owner);
+        let confirm = self.confirm_verifier(clientid, verifier, &owner);
         records.insert(
             clientid,
             ClientRecord {
@@ -82,13 +82,22 @@ impl ClientTable {
             .is_some_and(|record| record.confirmed)
     }
 
+    fn confirm_verifier(&self, clientid: u64, verifier: [u8; 8], owner: &[u8]) -> [u8; 8] {
+        let mut hasher = DefaultHasher::new();
+        self.generation.hash(&mut hasher);
+        clientid.hash(&mut hasher);
+        verifier.hash(&mut hasher);
+        owner.hash(&mut hasher);
+        hasher.finish().to_be_bytes()
+    }
+
     #[cfg(test)]
     pub(crate) fn with_confirmed_default(generation: u64) -> Self {
         let table = Self::new(generation);
         let verifier = [0; 8];
         let owner = b"test-client".to_vec();
         let clientid = crate::protocol::filehandle::client_id(generation);
-        let confirm = confirm_verifier(generation, clientid, verifier, &owner);
+        let confirm = table.confirm_verifier(clientid, verifier, &owner);
         table.records.lock().expect("NFS client table lock").insert(
             clientid,
             ClientRecord {
@@ -100,13 +109,4 @@ impl ClientTable {
         );
         table
     }
-}
-
-fn confirm_verifier(generation: u64, clientid: u64, verifier: [u8; 8], owner: &[u8]) -> [u8; 8] {
-    let mut hasher = DefaultHasher::new();
-    generation.hash(&mut hasher);
-    clientid.hash(&mut hasher);
-    verifier.hash(&mut hasher);
-    owner.hash(&mut hasher);
-    hasher.finish().to_be_bytes()
 }

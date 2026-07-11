@@ -1,7 +1,7 @@
 //! /proc/mounts parser.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MountEntry {
@@ -29,14 +29,11 @@ pub fn parse(contents: &str) -> Vec<MountEntry> {
 
 pub fn find_mount(path: &Path) -> Option<MountEntry> {
     let mounts = fs::read_to_string("/proc/mounts").ok()?;
-    let wanted = normalize_path(path);
-    parse(&mounts)
-        .into_iter()
-        .find(|mount| normalize_path(Path::new(&mount.mount_point)) == wanted)
-}
-
-pub fn normalize_path(path: &Path) -> PathBuf {
-    path.components().collect()
+    parse(&mounts).into_iter().find(|mount| {
+        Path::new(&mount.mount_point)
+            .components()
+            .eq(path.components())
+    })
 }
 
 fn decode_mount_field(field: &str) -> String {

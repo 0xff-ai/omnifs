@@ -87,6 +87,32 @@ impl FhState {
         }
         Ok(Some(state))
     }
+
+    /// Atomically encode to a sibling temp file, fsync, and rename over `path`.
+    fn write_atomic(&self, path: &Path) -> io::Result<()> {
+        let dir = path.parent().unwrap_or_else(|| Path::new("."));
+        let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
+        {
+            let mut options = std::fs::OpenOptions::new();
+            options.create(true).truncate(true).write(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut file = options.open(&tmp)?;
+            let bytes = serde_json::to_vec(self).map_err(io::Error::other)?;
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+        }
+        std::fs::rename(&tmp, path).inspect_err(|_| {
+            let _ = std::fs::remove_file(&tmp);
+        })?;
+        if let Ok(dir_file) = std::fs::File::open(dir) {
+            let _ = dir_file.sync_all();
+        }
+        Ok(())
+    }
 }
 
 /// One inode's persistable protocol identity: no [`NodeId`](omnifs_engine::NodeId),
@@ -179,6 +205,12 @@ impl PersistTables {
             entries: by_id.into_values().collect(),
         }
     }
+
+    fn persist(&self, path: &Path) {
+        if let Err(error) = self.snapshot().write_atomic(path) {
+            tracing::warn!(%error, path = %path.display(), "failed to persist NFS filehandle table");
+        }
+    }
 }
 
 /// A debounced write-behind persister for the filehandle table. It owns a
@@ -240,12 +272,12 @@ fn run(path: &Path, tables: &PersistTables, rx: &mpsc::Receiver<Cmd>) {
             match rx.recv_timeout(DEBOUNCE) {
                 Ok(cmd) => cmd,
                 Err(RecvTimeoutError::Timeout) => {
-                    write_snapshot(path, tables);
+                    tables.persist(path);
                     dirty = false;
                     continue;
                 },
                 Err(RecvTimeoutError::Disconnected) => {
-                    write_snapshot(path, tables);
+                    tables.persist(path);
                     return;
                 },
             }
@@ -258,48 +290,12 @@ fn run(path: &Path, tables: &PersistTables, rx: &mpsc::Receiver<Cmd>) {
         match cmd {
             Cmd::Dirty => dirty = true,
             Cmd::Flush(ack) => {
-                write_snapshot(path, tables);
+                tables.persist(path);
                 dirty = false;
                 let _ = ack.send(());
             },
         }
     }
-}
-
-fn write_snapshot(path: &Path, tables: &PersistTables) {
-    let state = tables.snapshot();
-    if let Err(error) = write_atomic(path, &state) {
-        tracing::warn!(%error, path = %path.display(), "failed to persist NFS filehandle table");
-    }
-}
-
-/// Write `state` atomically: encode to a sibling temp file, fsync, then rename
-/// over `path`. The rename is atomic within the directory, so a reader never sees
-/// a torn file. Mode 0600 on unix.
-fn write_atomic(path: &Path, state: &FhState) -> io::Result<()> {
-    let dir = path.parent().unwrap_or_else(|| Path::new("."));
-    let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
-    {
-        let mut options = std::fs::OpenOptions::new();
-        options.create(true).truncate(true).write(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut file = options.open(&tmp)?;
-        let bytes = serde_json::to_vec(state).map_err(io::Error::other)?;
-        file.write_all(&bytes)?;
-        file.sync_all()?;
-    }
-    std::fs::rename(&tmp, path).inspect_err(|_| {
-        let _ = std::fs::remove_file(&tmp);
-    })?;
-    // fsync the directory so the rename itself is durable.
-    if let Ok(dir_file) = std::fs::File::open(dir) {
-        let _ = dir_file.sync_all();
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -348,7 +344,7 @@ mod tests {
         let dir = temp_dir();
         let path = dir.join(FH_STATE_FILE);
         let state = sample();
-        write_atomic(&path, &state).expect("write");
+        state.write_atomic(&path).expect("write");
         let loaded = FhState::load(&path).expect("load").expect("present");
         assert_eq!(loaded, state);
         std::fs::remove_dir_all(&dir).ok();
@@ -385,7 +381,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let dir = temp_dir();
         let path = dir.join(FH_STATE_FILE);
-        write_atomic(&path, &sample()).expect("write");
+        sample().write_atomic(&path).expect("write");
         let mode = std::fs::metadata(&path)
             .expect("metadata")
             .permissions()

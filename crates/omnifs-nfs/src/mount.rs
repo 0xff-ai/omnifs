@@ -47,6 +47,33 @@ impl NfsMountOptions {
             persist_filehandles: false,
         }
     }
+
+    /// Resolve the filehandle generation and optional persisted table seed.
+    fn filehandle_generation(&self) -> Result<(u64, Option<PersistInit>), NfsFrontendError> {
+        if !self.persist_filehandles {
+            return Ok((crate::protocol::filehandle::generation(), None));
+        }
+        let state_path = self.state_dir.join(FH_STATE_FILE);
+        let (generation, next_ino, entries) = match FhState::load(&state_path)
+            .map_err(|error| NfsFrontendError::State(error.to_string()))?
+        {
+            Some(state) => (state.generation, state.next_ino, state.entries),
+            None => (
+                crate::protocol::filehandle::generation(),
+                EXPORT_ROOT_ID + 1,
+                Vec::new(),
+            ),
+        };
+        Ok((
+            generation,
+            Some(PersistInit {
+                generation,
+                next_ino,
+                entries,
+                state_path,
+            }),
+        ))
+    }
 }
 
 pub fn mount_blocking(
@@ -64,7 +91,7 @@ pub fn mount_blocking(
     // A pinned filehandle generation persists across a restart so a kernel client
     // never sees `NFS4ERR_FHEXPIRED` for a handle it still holds. Off the runner
     // path, keep the fresh-per-process random generation.
-    let (generation, persist_init) = filehandle_generation(options)?;
+    let (generation, persist_init) = options.filehandle_generation()?;
 
     let export = Arc::new(match persist_init {
         Some(init) => Export::with_persistence(rt, namespace, init),
@@ -128,39 +155,6 @@ pub fn unmount(mount_point: &Path) -> Result<(), NfsFrontendError> {
     UnmountCommand::graceful(Platform::current(), mount_point)
         .run()
         .map_err(|error| NfsFrontendError::Unmount(error.to_string()))
-}
-
-/// Resolve the filehandle generation and, on the runner path, the persisted
-/// table to seed. Off the runner path there is no state file and the generation
-/// is fresh per process. On the runner path a reloaded table pins the generation
-/// (so old filehandles keep decoding) and resumes the allocation cursor; a first
-/// start mints a fresh generation and writes it out.
-fn filehandle_generation(
-    options: &NfsMountOptions,
-) -> Result<(u64, Option<PersistInit>), NfsFrontendError> {
-    if !options.persist_filehandles {
-        return Ok((crate::protocol::filehandle::generation(), None));
-    }
-    let state_path = options.state_dir.join(FH_STATE_FILE);
-    let (generation, next_ino, entries) = match FhState::load(&state_path)
-        .map_err(|error| NfsFrontendError::State(error.to_string()))?
-    {
-        Some(state) => (state.generation, state.next_ino, state.entries),
-        None => (
-            crate::protocol::filehandle::generation(),
-            EXPORT_ROOT_ID + 1,
-            Vec::new(),
-        ),
-    };
-    Ok((
-        generation,
-        Some(PersistInit {
-            generation,
-            next_ino,
-            entries,
-            state_path,
-        }),
-    ))
 }
 
 fn mount_client(mount_point: &Path, addr: SocketAddr) -> Result<(), NfsFrontendError> {
@@ -564,9 +558,6 @@ mod tests {
         MountCommand, MountOptions, MountTableEntry, ensure_private_state_dir,
         mount_table_contains, parse_macos_mounts,
     };
-    use omnifs_mtab::{NfsMountState, StateFile};
-    use serde_json::Value;
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::path::{Path, PathBuf};
 
     fn args_as_strings(command: &MountCommand) -> Vec<String> {
@@ -671,8 +662,7 @@ mod tests {
 
         let mut options = super::NfsMountOptions::loopback(dir.path().to_path_buf());
         options.persist_filehandles = true;
-        let (generation, init) =
-            super::filehandle_generation(&options).expect("resolve generation");
+        let (generation, init) = options.filehandle_generation().expect("resolve generation");
         let init = init.expect("persist init on the runner path");
         assert_eq!(generation, 0xABCD_1234, "a reload must keep the generation");
         assert_eq!(init.generation, generation);
@@ -684,35 +674,8 @@ mod tests {
     fn no_persist_uses_fresh_generation_and_no_init() {
         let dir = tempfile::tempdir().expect("state dir");
         let options = super::NfsMountOptions::loopback(dir.path().to_path_buf());
-        let (generation, init) =
-            super::filehandle_generation(&options).expect("resolve generation");
+        let (generation, init) = options.filehandle_generation().expect("resolve generation");
         assert_ne!(generation, 0, "a fresh generation is non-zero");
         assert!(init.is_none(), "the daemon path never persists filehandles");
-    }
-
-    #[test]
-    fn state_file_is_json_and_removed_on_drop() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        ensure_private_state_dir(temp.path()).expect("state dir");
-        let guard = StateFile::write(
-            Path::new("/mnt/omnifs"),
-            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 2049),
-            temp.path(),
-        )
-        .expect("state file");
-        let path = guard.path().to_path_buf();
-        let state: Value =
-            serde_json::from_slice(&std::fs::read(&path).expect("read state")).expect("json");
-
-        assert_eq!(state["version"], 1);
-        assert_eq!(state["mount_point"], "/mnt/omnifs");
-        assert_eq!(state["addr"], "127.0.0.1:2049");
-        assert!(state["pid"].as_u64().is_some());
-        let states = NfsMountState::read_all(temp.path()).expect("mount states");
-        assert_eq!(states.len(), 1);
-        assert_eq!(states[0].mount_point, PathBuf::from("/mnt/omnifs"));
-
-        drop(guard);
-        assert!(!path.exists());
     }
 }

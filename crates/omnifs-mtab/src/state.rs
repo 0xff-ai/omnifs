@@ -27,7 +27,7 @@ pub struct NfsMountState {
 impl NfsMountState {
     pub const VERSION: u8 = 1;
 
-    pub fn current(mount_point: &Path, addr: SocketAddr) -> Self {
+    fn current(mount_point: &Path, addr: SocketAddr) -> Self {
         Self {
             version: Self::VERSION,
             mount_point: mount_point.to_path_buf(),

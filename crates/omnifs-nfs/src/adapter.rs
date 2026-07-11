@@ -532,7 +532,7 @@ impl Export {
     }
 
     /// Promote a discovered subtree: a node the listing bound as a plain provider
-    /// directory that resolves to a treeref backing dir now serves locally.
+    /// directory serves locally when it resolves to a treeref backing dir.
     fn rebind_subtree(&self, id: u64, node: NodeId, root: PathBuf) {
         if let Some(mut entry) = self.inodes.get_mut(&id)
             && !matches!(entry.body, Body::Subtree { .. })
@@ -667,13 +667,13 @@ impl Export {
             let id = self.intern_node(None, scope, parent, &entry.name, entry.node, kind, None);
             let mut attr = if kind == NodeKind::File {
                 match self.rt.block_on(self.namespace.getattr_exact(entry.node)) {
-                    Ok(attrs) => attr_from_ns(id, parent, &attrs),
+                    Ok(attrs) => Attr::from_namespace(id, parent, &attrs),
                     // A child that vanished between listing and probe keeps its
                     // listing attrs rather than dropping out of the snapshot.
-                    Err(_) => attr_from_ns(id, parent, &entry.attrs),
+                    Err(_) => Attr::from_namespace(id, parent, &entry.attrs),
                 }
             } else {
-                attr_from_ns(id, parent, &entry.attrs)
+                Attr::from_namespace(id, parent, &entry.attrs)
             };
             if let Some(grown) = self.grown_sizes.get(&entry.node) {
                 attr.size = attr.size.max(*grown);
@@ -709,7 +709,7 @@ impl Export {
             entries.push(DirEntry {
                 id,
                 name: name.to_string(),
-                attr: attr_from_metadata(id, parent, &metadata)?,
+                attr: Attr::from_metadata(id, parent, &metadata)?,
             });
         }
         Ok(DirListing {
@@ -748,7 +748,7 @@ impl ReadOnlyExport for Export {
             self.apply_pending_events();
             self.inodes.get(&id).ok_or(Status::Stale)?;
             let metadata = std::fs::symlink_metadata(backing).map_err(|_| Status::Stale)?;
-            return attr_from_metadata(id, parent, &metadata);
+            return Attr::from_metadata(id, parent, &metadata);
         }
 
         let node = body.node().ok_or(Status::Stale)?;
@@ -770,14 +770,14 @@ impl ReadOnlyExport for Export {
             return Err(Status::Stale);
         }
 
-        // A node that resolves to a treeref backing dir now serves locally.
+        // A node that resolves to a treeref backing dir serves locally.
         if let EntryKind::Subtree { root } = &attrs.kind {
             self.rebind_subtree(id, node, root.clone());
             let metadata = std::fs::symlink_metadata(root).map_err(|_| Status::Stale)?;
-            return attr_from_metadata(id, parent, &metadata);
+            return Attr::from_metadata(id, parent, &metadata);
         }
 
-        let mut attr = attr_from_ns(id, parent, &attrs);
+        let mut attr = Attr::from_namespace(id, parent, &attrs);
         if let Some(grown) = self.grown_sizes.get(&node) {
             attr.size = attr.size.max(*grown);
         }
@@ -946,9 +946,8 @@ impl ReadOnlyExport for Export {
                 // readers (`tail -n`) trust the size their post-open stat
                 // reports, so a cold unknown-length file must not answer the
                 // 1-byte sentinel past OPEN. One 1-byte read makes the
-                // namespace learn and cache the exact size (the old adapter
-                // achieved this by materializing the whole file at open);
-                // subsequent READs stay read-through.
+                // namespace learn and cache the exact size; subsequent READs
+                // stay read-through.
                 if attr.size <= 1 {
                     self.read_node_chunk(id, node, 0, 1)?;
                     attr = self.attr(id)?;
@@ -1059,53 +1058,50 @@ impl TryFrom<&std::fs::Metadata> for NodeKind {
     }
 }
 
-fn attr_from_ns(id: u64, parent: u64, attrs: &Attrs) -> Attr {
-    let kind = NodeKind::from(&attrs.kind);
-    Attr {
-        id,
-        parent,
-        kind,
-        size: attrs.size,
-        mode: kind.mode(),
-        change: attrs.change,
-        mtime_sec: 0,
+impl Attr {
+    fn from_namespace(id: u64, parent: u64, attrs: &Attrs) -> Self {
+        let kind = NodeKind::from(&attrs.kind);
+        Self {
+            id,
+            parent,
+            kind,
+            size: attrs.size,
+            mode: kind.mode(),
+            change: attrs.change,
+            mtime_sec: 0,
+        }
     }
-}
 
-/// Build a `fattr4`-shaped answer from local filesystem metadata. The read-only
-/// mode follows the node kind (`0o555`/`0o444`/`0o777`), matching the byte
-/// boundary's backing-metadata mapping.
-fn attr_from_metadata(id: u64, parent: u64, metadata: &std::fs::Metadata) -> StatusResult<Attr> {
-    let kind = NodeKind::try_from(metadata)?;
-    let mtime_sec = metadata
-        .modified()
-        .ok()
-        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
-        .map_or(0, |duration| {
-            i64::try_from(duration.as_secs()).unwrap_or(i64::MAX)
-        });
-    Ok(Attr {
-        id,
-        parent,
-        kind,
-        size: metadata.len(),
-        mode: kind.mode(),
-        change: metadata_change(id, metadata),
-        mtime_sec,
-    })
-}
-
-fn metadata_change(id: u64, metadata: &std::fs::Metadata) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    id.hash(&mut hasher);
-    metadata.len().hash(&mut hasher);
-    if let Ok(modified) = metadata.modified()
-        && let Ok(duration) = modified.duration_since(UNIX_EPOCH)
-    {
-        duration.as_secs().hash(&mut hasher);
-        duration.subsec_nanos().hash(&mut hasher);
+    /// Build a `fattr4`-shaped answer from local filesystem metadata. The
+    /// read-only mode follows the node kind (`0o555`/`0o444`/`0o777`).
+    fn from_metadata(id: u64, parent: u64, metadata: &std::fs::Metadata) -> StatusResult<Self> {
+        let kind = NodeKind::try_from(metadata)?;
+        let mtime_sec = metadata
+            .modified()
+            .ok()
+            .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+            .map_or(0, |duration| {
+                i64::try_from(duration.as_secs()).unwrap_or(i64::MAX)
+            });
+        let mut change = DefaultHasher::new();
+        id.hash(&mut change);
+        metadata.len().hash(&mut change);
+        if let Ok(modified) = metadata.modified()
+            && let Ok(duration) = modified.duration_since(UNIX_EPOCH)
+        {
+            duration.as_secs().hash(&mut change);
+            duration.subsec_nanos().hash(&mut change);
+        }
+        Ok(Self {
+            id,
+            parent,
+            kind,
+            size: metadata.len(),
+            mode: kind.mode(),
+            change: change.finish(),
+            mtime_sec,
+        })
     }
-    hasher.finish()
 }
 
 #[cfg(test)]
