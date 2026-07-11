@@ -118,7 +118,7 @@ impl Paper {
             } else {
                 Stability::Dynamic
             })
-            .content_type(ContentType::custom("application/pdf").unwrap_or(ContentType::Octet)))
+            .content_type(ContentType::Custom("application/pdf")))
     }
 
     pub(crate) async fn source(cx: Cx<()>, key: PaperVersionKey) -> Result<BlobFile<Atom>> {

@@ -27,14 +27,6 @@ pub enum ContentType {
 }
 
 impl ContentType {
-    /// Construct a custom content type after validating it with the `mime`
-    /// parser. Existing code may still use [`ContentType::Custom`] directly
-    /// when it already owns a trusted static MIME string.
-    pub fn custom(value: &'static str) -> Result<Self, mime::FromStrError> {
-        value.parse::<mime::Mime>()?;
-        Ok(Self::Custom(value))
-    }
-
     /// The representation extension this type renders to, if it has a known
     /// path suffix.
     pub fn extension(self) -> Option<&'static str> {
@@ -51,7 +43,7 @@ impl ContentType {
     }
 
     /// Map a known representation extension to its content type.
-    pub fn from_extension(ext: &str) -> Option<Self> {
+    pub(crate) fn from_extension(ext: &str) -> Option<Self> {
         match ext {
             "md" => Some(Self::Markdown),
             "json" => Some(Self::Json),
@@ -82,15 +74,6 @@ impl ContentType {
 #[cfg(test)]
 mod tests {
     use super::ContentType;
-
-    #[test]
-    fn custom_validates_mime_string() {
-        assert_eq!(
-            ContentType::custom("text/plain").unwrap(),
-            ContentType::Custom("text/plain")
-        );
-        assert!(ContentType::custom("not-a-mime").is_err());
-    }
 
     #[test]
     fn maps_known_extensions() {

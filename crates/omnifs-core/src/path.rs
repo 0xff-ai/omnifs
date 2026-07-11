@@ -64,14 +64,6 @@ impl Path {
         Ok(Self(path.to_string()))
     }
 
-    /// Parse a batch of wire path strings, short-circuiting on the first
-    /// invalid entry. The returned `ParseError` names which validation failed
-    /// (and, for most variants, the offending path), so callers need not carry
-    /// the raw string alongside it.
-    pub fn parse_all(paths: &[String]) -> Result<Vec<Self>, ParseError> {
-        paths.iter().map(|path| Self::parse(path)).collect()
-    }
-
     fn validate_str(path: &str) -> Result<(), ParseError> {
         if path.is_empty() {
             return Err(ParseError::Empty);
@@ -89,7 +81,7 @@ impl Path {
             return Err(ParseError::DoubleSlash(path.to_string()));
         }
         for segment in path[1..].split('/') {
-            validate_segment_str(segment)?;
+            Segment::validate(segment)?;
         }
         Ok(())
     }
@@ -243,6 +235,24 @@ impl<'de> Deserialize<'de> for Path {
 }
 
 impl Segment {
+    fn validate(value: &str) -> Result<(), ParseError> {
+        if value.is_empty() {
+            return Err(ParseError::EmptySegment);
+        }
+        if value.contains('/') {
+            return Err(ParseError::SlashInSegment(value.to_string()));
+        }
+        if matches!(value, "." | "..") {
+            return Err(ParseError::RelativeSegment(value.to_string()));
+        }
+        // Besides being invalid in real filenames, control characters would
+        // collide with low separator bytes used in cache keys.
+        if value.chars().any(char::is_control) {
+            return Err(ParseError::ControlCharInSegment(value.to_string()));
+        }
+        Ok(())
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -272,7 +282,7 @@ impl TryFrom<&str> for Segment {
     type Error = ParseError;
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
-        validate_segment_str(value)?;
+        Self::validate(value)?;
         Ok(Self(value.to_string()))
     }
 }
@@ -281,7 +291,7 @@ impl TryFrom<String> for Segment {
     type Error = ParseError;
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
-        validate_segment_str(&value)?;
+        Self::validate(&value)?;
         Ok(Self(value))
     }
 }
@@ -314,25 +324,6 @@ impl<'de> Deserialize<'de> for Segment {
         let value = String::deserialize(deserializer)?;
         Self::try_from(value).map_err(serde::de::Error::custom)
     }
-}
-
-fn validate_segment_str(segment: &str) -> Result<(), ParseError> {
-    if segment.is_empty() {
-        return Err(ParseError::EmptySegment);
-    }
-    if segment.contains('/') {
-        return Err(ParseError::SlashInSegment(segment.to_string()));
-    }
-    if matches!(segment, "." | "..") {
-        return Err(ParseError::RelativeSegment(segment.to_string()));
-    }
-    // Reject control characters. Besides being invalid in real filenames, this
-    // keeps low separator bytes (e.g. the cache's `\x1f` aux separator) free of
-    // collisions with path content.
-    if segment.chars().any(char::is_control) {
-        return Err(ParseError::ControlCharInSegment(segment.to_string()));
-    }
-    Ok(())
 }
 
 #[cfg(test)]
