@@ -130,7 +130,7 @@ pub(crate) struct PageInfo {
 
 impl PageInfo {
     pub(crate) fn next_cursor(self) -> Option<String> {
-        self.has_next_page.then_some(self.end_cursor).flatten()
+        self.end_cursor.filter(|_| self.has_next_page)
     }
 }
 
