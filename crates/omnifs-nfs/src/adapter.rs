@@ -818,8 +818,19 @@ impl ReadOnlyExport for Export {
                 // Eagerly probe a file child's exact size so a bare `stat`/`ls -l`
                 // after the lookup reflects a ranged file's real size; the
                 // namespace caches the learned size for the later `getattr`.
-                if matches!(NodeKind::from(&answer.kind), NodeKind::File) {
-                    let _ = self.rt.block_on(self.namespace.getattr_exact(answer.node));
+                // `getattr_exact` only learns a deferred-ranged file's size; an
+                // unknown-length deferred-full file only learns its exact size
+                // through a read, which materializes it and lets the namespace
+                // cache the result. This must happen at lookup time: the macOS
+                // NFS client pins the size it knew before OPEN for the lifetime
+                // of that open (even `fstat` on the open fd serves the pinned
+                // value), so learning at OPEN is too late and the first `cat` of
+                // a cold file would be clamped to the 1-byte sentinel.
+                if matches!(NodeKind::from(&answer.kind), NodeKind::File)
+                    && let Ok(attrs) = self.rt.block_on(self.namespace.getattr_exact(answer.node))
+                    && attrs.size <= 1
+                {
+                    let _ = self.read_node_chunk(id, answer.node, 0, 1);
                 }
                 self.apply_pending_events();
                 Ok(id)
@@ -942,12 +953,14 @@ impl ReadOnlyExport for Export {
         match body {
             Body::Backing(_) => {},
             Body::Node(node) => {
-                // Learn the exact size before the OPEN reply. Seek-from-end
-                // readers (`tail -n`) trust the size their post-open stat
-                // reports, so a cold unknown-length file must not answer the
-                // 1-byte sentinel past OPEN. One 1-byte read makes the
-                // namespace learn and cache the exact size; subsequent READs
-                // stay read-through.
+                // Learn the exact size before the OPEN reply. The lookup that
+                // precedes OPEN already runs this probe, so this is the backstop
+                // for opens that arrive without a fresh lookup (e.g. a stale
+                // cached inode reopened directly). Seek-from-end readers
+                // (`tail -n`) trust the size their post-open stat reports, so a
+                // cold unknown-length file must not answer the 1-byte sentinel
+                // past OPEN. One 1-byte read makes the namespace learn and cache
+                // the exact size; subsequent READs stay read-through.
                 if attr.size <= 1 {
                     self.read_node_chunk(id, node, 0, 1)?;
                     attr = self.attr(id)?;
@@ -1236,7 +1249,7 @@ mod tests {
         Attrs, DirPage, NodeAnswer, ReadAnswer, ReadStyle, StabilityClass,
     };
     use std::collections::HashMap;
-    use std::sync::atomic::AtomicU64;
+    use std::sync::atomic::{AtomicBool, AtomicU64};
     use std::time::Duration;
 
     /// A minimal in-memory namespace: a fixed `(parent, name) -> (node, kind)`
@@ -1245,6 +1258,13 @@ mod tests {
         children: HashMap<(u64, String), (u64, EntryKind)>,
         kinds: HashMap<u64, EntryKind>,
         lookups: AtomicU64,
+        /// A file node that reports the unknown-size sentinel until a read
+        /// probes it, simulating a deferred-full file that only learns its
+        /// exact size by materializing through a read.
+        deferred_node: Option<u64>,
+        materialized: AtomicBool,
+        reads: AtomicU64,
+        last_read: Mutex<Option<(u64, u32)>>,
     }
 
     fn stub_attrs(kind: EntryKind) -> Attrs {
@@ -1264,6 +1284,18 @@ mod tests {
         }
     }
 
+    impl StubNamespace {
+        /// Attrs for `node`, clamped to the unknown-size sentinel while it is
+        /// the tree's deferred file and hasn't been materialized by a read yet.
+        fn attrs_for(&self, node: u64, kind: EntryKind) -> Attrs {
+            let mut attrs = stub_attrs(kind);
+            if self.deferred_node == Some(node) && !self.materialized.load(Ordering::Relaxed) {
+                attrs.size = 1;
+            }
+            attrs
+        }
+    }
+
     impl Namespace for StubNamespace {
         fn lookup<'a>(
             &'a self,
@@ -1276,7 +1308,7 @@ mod tests {
                 .get(&(parent.0, name.to_string()))
                 .map(|(node, kind)| NodeAnswer {
                     node: NodeId(*node),
-                    attrs: stub_attrs(kind.clone()),
+                    attrs: self.attrs_for(*node, kind.clone()),
                     kind: kind.clone(),
                 })
                 .ok_or(NsError::NotFound);
@@ -1290,7 +1322,7 @@ mod tests {
             let answer = self
                 .kinds
                 .get(&node.0)
-                .map(|kind| stub_attrs(kind.clone()))
+                .map(|kind| self.attrs_for(node.0, kind.clone()))
                 .ok_or(NsError::NotFound);
             Box::pin(async move { answer })
         }
@@ -1318,10 +1350,15 @@ mod tests {
 
         fn read(
             &self,
-            _node: NodeId,
+            node: NodeId,
             offset: u64,
-            _len: u32,
+            len: u32,
         ) -> Pin<Box<dyn Future<Output = Result<ReadAnswer, NsError>> + Send + '_>> {
+            self.reads.fetch_add(1, Ordering::Relaxed);
+            *self.last_read.lock().expect("lock last_read") = Some((offset, len));
+            if self.deferred_node == Some(node.0) {
+                self.materialized.store(true, Ordering::Relaxed);
+            }
             Box::pin(async move {
                 let all = b"hello".to_vec();
                 let start = usize::try_from(offset).unwrap_or(all.len()).min(all.len());
@@ -1360,7 +1397,20 @@ mod tests {
             children,
             kinds,
             lookups: AtomicU64::new(0),
+            deferred_node: None,
+            materialized: AtomicBool::new(false),
+            reads: AtomicU64::new(0),
+            last_read: Mutex::new(None),
         }
+    }
+
+    /// Variant of [`stub_tree`] whose `message` file reports the unknown-size
+    /// sentinel until a probe read materializes it, for testing the
+    /// lookup-time size-learning probe.
+    fn stub_tree_with_deferred_file() -> StubNamespace {
+        let mut tree = stub_tree();
+        tree.deferred_node = Some(11);
+        tree
     }
 
     fn cold_entries() -> Vec<FhEntry> {
@@ -1462,6 +1512,36 @@ mod tests {
         assert!(
             namespace.lookups.load(Ordering::Relaxed) > before,
             "a reattach must force re-resolution through the namespace again"
+        );
+    }
+
+    #[test]
+    fn lookup_probes_unknown_size_file_and_learns_exact_size() {
+        let runtime = TokioRuntime::new().expect("tokio runtime");
+        let namespace = Arc::new(stub_tree_with_deferred_file());
+        let export = Export::new(
+            runtime.handle().clone(),
+            Arc::clone(&namespace) as Arc<dyn Namespace>,
+        );
+
+        let test_dir = export.lookup(export.root(), "test").expect("lookup test");
+        let message = export.lookup(test_dir, "message").expect("lookup message");
+
+        assert_eq!(
+            namespace.reads.load(Ordering::Relaxed),
+            1,
+            "an unknown-size file must be probed with exactly one read during lookup"
+        );
+        assert_eq!(
+            *namespace.last_read.lock().expect("lock last_read"),
+            Some((0, 1)),
+            "the lookup-time probe must be a one-byte read at offset 0"
+        );
+
+        let attr = export.attr(message).expect("attr after lookup probe");
+        assert_eq!(
+            attr.size, 5,
+            "attrs served after lookup must reflect the size learned by the probe"
         );
     }
 

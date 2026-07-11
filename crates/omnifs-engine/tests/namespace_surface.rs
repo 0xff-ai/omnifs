@@ -134,6 +134,39 @@ async fn full_read_slices_by_offset_and_learns_size() {
     );
 }
 
+/// The NFS OPEN path probes one byte precisely so its immediate re-getattr
+/// reports the learned exact size instead of the sentinel; without this the
+/// macOS NFS client clamps the first `cat` of a cold file to the sentinel.
+#[tokio::test(flavor = "multi_thread")]
+async fn one_byte_probe_read_learns_size_for_next_getattr() {
+    let t = test_ns();
+    let ns = &t.ns;
+
+    let hello = ns.lookup(NodeId::ROOT, "hello").await.unwrap();
+    let message = ns.lookup(hello.node, "message").await.unwrap();
+
+    let answer = ns.read(message.node, 0, 1).await.expect("probe read");
+    assert_eq!(answer.bytes, b"H");
+    assert_eq!(answer.attrs.size, 13, "the read answer carries exact size");
+
+    let attrs = ns.getattr(message.node).await.expect("getattr after probe");
+    assert_eq!(attrs.size, 13, "probe read must learn the exact size");
+
+    // The same probe shape against a dynamic handler file (the NFS OPEN
+    // sequence: getattr, one-byte read, getattr).
+    let fresh = ns.lookup(hello.node, "fresh-full").await.unwrap();
+    let before = ns.getattr(fresh.node).await.expect("getattr before probe");
+    assert_eq!(before.size, 1, "dynamic file starts on the sentinel");
+    let answer = ns.read(fresh.node, 0, 1).await.expect("dynamic probe read");
+    assert_eq!(answer.bytes, b"f");
+    let attrs = ns.getattr(fresh.node).await.expect("getattr after probe");
+    assert_eq!(
+        attrs.size,
+        "fresh-full-1\n".len() as u64,
+        "dynamic probe read must learn the exact size"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn ranged_read_reuses_one_handle_and_reports_eof() {
     let t = test_ns();
