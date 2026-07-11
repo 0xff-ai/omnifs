@@ -46,7 +46,7 @@ serde_json = { workspace = true }
 toml = "0.8"
 secrecy = "0.10"
 anstream = "1"
-owo-colors = { version = "4", features = ["supports-colors"] }
+owo-colors = "4"
 indicatif = "0.17"
 inquire = "0.7"
 arboard = { version = "3", default-features = false }

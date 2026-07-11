@@ -9,7 +9,7 @@ description = "The omnifs capability subsystem: data model, invariants, and matc
 
 [dependencies]
 serde = { workspace = true }
-schemars = { workspace = true, features = ["indexmap2"] }
+schemars = { workspace = true }
 utoipa = { workspace = true }
 thiserror = { workspace = true }
 url = { workspace = true }

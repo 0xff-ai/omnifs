@@ -29,7 +29,6 @@ wasmtime = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
 tempfile = { workspace = true }
-http = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 serde = { workspace = true }
 serde_json = { workspace = true }

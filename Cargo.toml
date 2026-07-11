@@ -29,7 +29,6 @@ omnifs-auth = { version = "0.2.1", path = "crates/omnifs-auth" }
 omnifs-caps = { version = "0.2.1", path = "crates/omnifs-caps" }
 omnifs-daemon = { version = "0.2.1", path = "crates/omnifs-daemon" }
 omnifs-engine = { version = "0.2.1", path = "crates/omnifs-engine" }
-omnifs-fuse = { version = "0.2.1", path = "crates/omnifs-fuse" }
 omnifs-workspace = { version = "0.2.1", path = "crates/omnifs-workspace" }
 omnifs-core = { version = "0.2.1", path = "crates/omnifs-core" }
 omnifs-mtab = { version = "0.2.1", path = "crates/omnifs-mtab" }
@@ -49,7 +48,7 @@ utoipa = "5.5"
 utoipa-axum = "0.2.0"
 schemars = "1"
 jsonschema = { version = "0.46", default-features = false }
-postcard = { version = "1", features = ["alloc"] }
+postcard = { version = "1", default-features = false, features = ["alloc"] }
 tracing = "0.1"
 bollard = "0.20.0"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -64,16 +63,15 @@ fjall = "3.1.5"
 moka = { version = "0.12", features = ["sync"] }
 hashbrown = "0.15"
 http = "1"
-mime = "0.3"
 strum = { version = "0.27", features = ["derive"] }
 trybuild = "1"
 percent-encoding = "2"
 url = "2"
 time = { version = "0.3", default-features = false, features = ["std", "parsing"] }
 quick-xml = { version = "0.38", features = ["serialize", "overlapped-lists"] }
-tar = "0.4"
+tar = { version = "0.4", default-features = false }
 flate2 = "1"
-zstd = "0.13.3"
+zstd = { version = "0.13.3", default-features = false }
 zip = { version = "5", default-features = false, features = ["deflate"] }
 sha2 = "0.10"
 fs2 = "0.4"

@@ -19,9 +19,9 @@ secrecy = { version = "0.10", features = ["serde"] }
 time = { workspace = true, features = ["serde", "formatting"] }
 fs2 = { workspace = true }
 atomic-write-file = "0.3"
-schemars = { workspace = true, features = ["indexmap2"] }
+schemars = { workspace = true }
 jsonschema = { workspace = true }
-wasmparser = "0.246"
+wasmparser = { version = "0.247", default-features = false, features = ["std", "component-model"] }
 hex = { workspace = true }
 blake3 = { workspace = true }
 strum = { workspace = true }

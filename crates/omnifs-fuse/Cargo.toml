@@ -43,7 +43,6 @@ bin = ["dep:anyhow", "dep:clap", "dep:omnifs-vfs-wire", "dep:tracing-subscriber"
 omnifs-wit = { workspace = true, features = ["host-bindings"] }
 omnifs-workspace = { workspace = true }
 tempfile = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [lints]
 workspace = true

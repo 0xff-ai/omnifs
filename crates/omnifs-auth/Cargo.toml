@@ -16,7 +16,7 @@ dashmap = { workspace = true }
 http = { workspace = true }
 oauth2 = { workspace = true }
 rand = { version = "0.9", features = ["small_rng"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 secrecy = "0.10"
 serde_json = { workspace = true }
 serde_urlencoded = "0.7"
@@ -29,8 +29,7 @@ webbrowser = { workspace = true }
 
 [dev-dependencies]
 rcgen = "0.13"
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
-tokio-rustls = "0.26"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 
 [lints]
 workspace = true
