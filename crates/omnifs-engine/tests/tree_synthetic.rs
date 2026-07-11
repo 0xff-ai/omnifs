@@ -1,12 +1,11 @@
-//! Kernel-free tests for omnifs-engine tree slice 1c: the listing/lookup DECISION logic
-//! `Tree` now owns end-to-end, with NO fuser, NO mount, NO container, NO root.
+//! Kernel-free tests for the listing and lookup policy `Tree` owns end to end,
+//! with no fuser, mount, container, or root privileges.
 //!
 //! Covers the renderer-neutral synthetic entries (`@next`/`@all` pagination
 //! controls and the mount-root `.gitignore`/`.ignore`/`.rgignore` files), the
 //! cursor-driven pagination drain, the serve-cached listing path, and the
-//! negative-cache short-circuit. These are the pieces FUSE otherwise carries in
-//! `listing.rs`/`lookup.rs`/`synthetic.rs`; slice 1c makes `Tree` carry them so
-//! slice 2b can switch FUSE onto `Tree` and delete the copies.
+//! negative-cache short-circuit. Keeping these policies in `Tree` gives every
+//! frontend the same behavior.
 //!
 //! Reuses the omnifs-itest provider-loading harness (`make_runtime`), keeps an
 //! `Arc<Engine>` clone so a test can inspect the negative index and the cached

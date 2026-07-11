@@ -1,12 +1,12 @@
 //! Characterization: live-file growth through the kernel-free Tree surface.
 //!
-//! N2 freezes CURRENT behavior. There is no live-follow coverage in omnifs-itest
-//! today (the FUSE follow-pump tests are Linux-only), so this pins the neutral
-//! `Tree` surface a renderer's `tail -f` loop drives: opening the test provider's
-//! `Stability::Live` `/hello/volatile-tail` yields a ranged handle whose reported
-//! size is unknown, a follow read observes freshly appended bytes at successive
-//! offsets, and the shared `probe_live_growth` advances the observed end
-//! monotonically (the learned size a renderer reports for a growing file).
+//! This covers the neutral `Tree` surface a renderer's `tail -f` loop drives,
+//! complementing the Linux-only FUSE follow-pump tests. Opening the test
+//! provider's `Stability::Live` `/hello/volatile-tail` yields a ranged handle
+//! whose reported size is unknown, a follow read observes freshly appended
+//! bytes at successive offsets, and the shared `probe_live_growth` advances the
+//! observed end monotonically (the learned size a renderer reports for a growing
+//! file).
 //!
 //! The `LiveTailReader` route serves `tail:{offset}\n` for any offset and never
 //! signals EOF, modelling an upstream that keeps growing while observed.

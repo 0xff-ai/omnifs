@@ -21,7 +21,7 @@ The provider declares a dynamic domain need. Each mount lists allowed hostnames 
 
 ## Limitations
 
-Only HTTPS URLs are projected. Query strings and fragments are not supported in v1.
+Only HTTPS URLs are projected. Query strings and fragments are not supported.
 
 ## Install
 

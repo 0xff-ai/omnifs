@@ -383,12 +383,10 @@ async function renderDevHomePlan(
       continue;
     }
 
-    // The db/k8s fixtures write to a host-native `devHome`-relative path (the
-    // daemon is host-native now: no daemon container, no bind mount, so the
-    // checked-in templates' container-shaped paths (`/data/test.db`,
-    // `unix:///run/omnifs/k8s.sock`) never resolve). Render the real host path
-    // per session instead of baking a devHome-dependent value into the
-    // checked-in template.
+    // The checked-in db/k8s templates use container-shaped paths
+    // (`/data/test.db`, `unix:///run/omnifs/k8s.sock`), but the daemon is
+    // host-native. Render absolute host-visible fixture paths under `devHome`
+    // per session instead of baking workspace-specific paths into the template.
     if (mountName === "db") {
       const spec = structuredClone(found.template);
       spec.config = { ...spec.config, path: fixturePaths.dbPath };
@@ -403,14 +401,14 @@ async function renderDevHomePlan(
       // a host-native daemon on macOS cannot dial it. Linux bind mounts are
       // same-kernel, so the socket is real there. A TCP-published
       // `kubectl proxy` endpoint would work on both, but the kubernetes
-      // provider's `endpoint` config is currently `HostSocket`-typed
-      // (unix-only); widening it is a provider capability change, out of
-      // scope here. Named limitation, not a silent drop.
+      // provider's `endpoint` config is `HostSocket`-typed (unix-only);
+      // widening it is a provider capability change. Named limitation, not a
+      // silent drop.
       if (process.platform === "darwin") {
         skipped.push(
           `${mountName}: host-native daemon on macOS cannot reach a Docker bind-mounted unix ` +
             "socket (Docker Desktop does not proxy AF_UNIX connections across its VM boundary); " +
-            "a TCP-proxy endpoint is a follow-up",
+            "the provider accepts only a Unix socket endpoint",
         );
         continue;
       }

@@ -1,10 +1,7 @@
 //! Characterization: `AuthManager` OAuth refresh behavior.
 //!
-//! N2 freezes CURRENT behavior at the `AuthManager` contract level (the surface
-//! A1/A3 refactor into a `CredentialService`). `auth_test.rs` already exercises
-//! the same three behaviors end-to-end through `HttpStack` + a live HTTPS API;
-//! this file pins them directly on the manager so the coming refactor has one
-//! focused home:
+//! `auth_test.rs` exercises these behaviors end to end through `HttpStack` and a
+//! live HTTPS API; this file exercises the same contract directly on the manager:
 //!
 //!   (a) preparing a request whose credential expires inside the 60s refresh
 //!       window triggers a synchronous refresh (and a fresh credential does not);
@@ -14,13 +11,9 @@
 //!   (c) an `invalid_grant` refresh marks the credential as `NeedsConsent` while
 //!       keeping the stored entry.
 //!
-//! Assertion (c) intentionally changed in A3 from deletion to a fail-closed
-//! `NeedsConsent` transition that keeps the stored secret for diagnostics.
-//!
-//! Harness note: the step named `omnifs-auth`'s `FakeAuthServer`, but that type
-//! is `pub(super)` inside `omnifs-auth`'s `client` module and unreachable from an
-//! `omnifs-engine` integration test. This file uses a local fake token server, the
-//! same idiom `auth_test.rs` uses for the host-side refresh tests.
+//! The `NeedsConsent` transition is fail-closed while retaining the stored
+//! secret for diagnostics. This integration test uses a local fake token server
+//! because `omnifs-auth`'s `FakeAuthServer` is private to its `client` module.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};

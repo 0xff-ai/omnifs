@@ -215,7 +215,7 @@ impl Drop for Fixture {
     }
 }
 
-// ── Scenario 1: status, nothing running ───────────────────────────────────────
+// Status when no daemon is running.
 
 /// `status` when no daemon is running: exit 0, reports not running.
 #[test]
@@ -239,7 +239,7 @@ fn scenario_1_status_nothing_running() {
     );
 }
 
-// ── Scenario 2: down, nothing running ─────────────────────────────────────────
+// Shutdown when no daemon is running.
 
 /// `down` when nothing is running: exit 0, prints "Nothing to tear down."
 #[test]
@@ -265,7 +265,7 @@ fn scenario_2_down_nothing_running() {
     );
 }
 
-// ── Scenarios 3-6: up/status/up-again/down cycle ──────────────────────────────
+// Full up, status, repeated up, and down lifecycle.
 
 /// Up serves the mount, status shows it running, up-again is rejected,
 /// down is clean. Scenarios 3-6 share a single daemon lifecycle so we do not
@@ -294,7 +294,7 @@ fn scenarios_3_to_6_lifecycle_cycle() {
     let mut fixture = Fixture::new();
     fixture.write_test_spec();
 
-    // ── Scenario 3: up serves the mount ──────────────────────────────────────
+    // Starting the daemon serves the mount.
 
     let Some(()) = fixture.up_and_wait() else {
         return; // skip: platform could not mount
@@ -322,7 +322,7 @@ fn scenarios_3_to_6_lifecycle_cycle() {
         "daemon.json must exist after `omnifs up`"
     );
 
-    // ── Scenario 4: status while running ─────────────────────────────────────
+    // Status reports the running daemon.
 
     let out = fixture.run(&["status", "--json"]);
     assert!(
@@ -375,7 +375,7 @@ fn scenarios_3_to_6_lifecycle_cycle() {
         status_json["backend"]
     );
 
-    // ── Scenario 5: up while already running ─────────────────────────────────
+    // Starting an already-running daemon is rejected.
 
     let out = fixture.run(&["up"]);
     assert!(
@@ -394,7 +394,7 @@ fn scenarios_3_to_6_lifecycle_cycle() {
         "up-while-running error must mention 'already running' or 'daemon'; got:\n{combined}"
     );
 
-    // ── Scenario 6: down is clean ─────────────────────────────────────────────
+    // Shutdown cleans up the daemon and mount.
 
     // Use --force so a tardy NFS unmount does not cause `down` to exit
     // non-zero. On macOS the NFS client takes a variable amount of time to
@@ -463,7 +463,7 @@ fn scenarios_3_to_6_lifecycle_cycle() {
     }
 }
 
-// ── Scenario 7: dead-daemon fallback ──────────────────────────────────────────
+// Recovery from a dead daemon.
 
 /// No daemon answers the control port; `down` falls back to the runtime record
 /// to identify the backend, reclaims, and removes the record, without hanging.
@@ -505,7 +505,7 @@ fn scenario_7_dead_daemon_record_fallback() {
     );
 }
 
-// ── Scenario 8: failed mount surfaced ─────────────────────────────────────────
+// Failed mounts remain visible in status.
 
 /// Add a spec with a missing provider, `up`, `status` shows the broken mount
 /// in the failed set with a reason; `test` still serves; `down` cleans up.

@@ -60,7 +60,7 @@ changes:
   child relationships; use blob shape when the important property is that bytes
   stay host-side;
 - an object owns identity, load, decode, and canonical bytes. Identity is a named
-  `#[path_captures]` key struct (tuple keys are a deferred future note);
+  `#[path_captures]` key struct; tuple keys are unsupported;
 - canonical bytes are replayable object bytes. Prefer the raw upstream response
   when that response is the object contract. Allow deterministic slicing,
   normalization, or assembly from a batch response, envelope, noisy server
@@ -241,9 +241,8 @@ impl Object for RepoAlias {
 
 Keys are named `#[path_captures]` structs; `#[path_captures]` emits the `impl
 Key`. Providers with no state use `()`. Tuple keys (`type Key = (OwnerName,
-RepoName)`) are a deferred future note: they would need SDK blanket `Key` impls
-parsing positionally, and every shipped key is a named struct, so they are not
-built.
+RepoName)`) are unsupported: they would need SDK blanket `Key` impls parsing
+positionally, and named structs keep capture meaning explicit.
 
 The format type identifies the byte format. The object decides what those bytes
 mean. `Object::load` returns a `Load` carrying the object value, canonical
@@ -867,9 +866,9 @@ canonical JSON object face for that day and collection.
 Oura's range endpoints make object-load prefetch mandatory: reading one day can
 fetch a window around that day and store neighboring daily collection canonicals
 with exact sizes and validators. Some time-series collections, such as heart
-rate and ring battery level, are already object-shaped daily collection files
-using datetime range partitioning. Direct time-series faces are only for future
-collections that cannot be partitioned into replayable daily canonicals.
+rate and ring battery level, are object-shaped daily collection files using
+datetime range partitioning. Use direct time-series faces only when a collection
+cannot be partitioned into replayable daily canonicals.
 
 ### Test provider
 

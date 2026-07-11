@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "omnifs provider for browsing relational databases (SQLite today, PostgreSQL future)"
+description = "omnifs provider for browsing SQLite databases"
 categories = ["filesystem", "wasm", "database"]
 keywords = ["omnifs", "database", "sqlite", "filesystem", "wasm"]
 

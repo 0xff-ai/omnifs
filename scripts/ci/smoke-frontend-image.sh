@@ -2,7 +2,7 @@
 # Smoke the frontend image directly: the three structural guarantees it must
 # uphold on its own, with no daemon and no attach target. The full
 # attach/mount path (a live daemon, a real TCP attach, an actual FUSE mount)
-# is exercised by the fuse-docker itest gate, a later slice, not here.
+# is exercised separately by the fuse-docker itest gate.
 #
 # Requires IMAGE (container image ref).
 set -euo pipefail

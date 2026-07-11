@@ -102,7 +102,7 @@ impl Frontend {
         };
         self.apply_pending_events();
 
-        // A node that resolves to a treeref backing dir now serves locally.
+        // A node that resolves to a treeref backing dir serves locally.
         if let NsEntryKind::Subtree { root } = &attrs.kind {
             self.rebind_subtree(ino, node, root.clone());
             let meta = std::fs::symlink_metadata(root).map_err(|_| Errno::ENOENT)?;

@@ -35,7 +35,7 @@ Provider metadata declares needs. The resolved mount spec carries grants. The ho
 
 The resolved spec is the runtime grant authority. It determines allowed domains, auth schemes, preopened host resources, socket access, and other host-mediated authority.
 
-Over-grant detection is still a future policy decision. Until that lands, do not claim the manifest alone bounds authority. The host enforces the resolved spec.
+Over-grant detection is not enforced. Do not claim the manifest alone bounds authority; the host enforces the resolved spec.
 
 ## Token injection
 

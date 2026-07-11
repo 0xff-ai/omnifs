@@ -928,8 +928,8 @@ jobs:
   # The frontend image needs no daemon, no dev home, and no provider store: it
   # only ever runs `omnifs-fuse`, so its smoke test is the three
   # structural checks in scripts/ci/smoke-frontend-image.sh, not the
-  # scripts/dev.ts launch path smoke-amd64/arm64 use. The live attach/mount
-  # path is a later slice's fuse-docker itest gate.
+  # scripts/dev.ts launch path smoke-amd64/arm64 use. The fuse-docker gate
+  # separately exercises the live daemon, TCP attach, and FUSE mount path.
   smoke-frontend-amd64:
     name: smoke frontend amd64
     if: >-
@@ -986,8 +986,8 @@ jobs:
       - name: Run frontend image smoke test
         run: scripts/ci/smoke-frontend-image.sh
 
-  # Gate 4 (amended): the Docker-hosted FUSE frontend end to end, against a
-  # real host-native daemon and the real amd64 frontend image. Mirrors
+  # Exercises the Docker-hosted FUSE frontend end to end against a real
+  # host-native daemon and the real amd64 frontend image. Mirrors
   # conformance-fuse's input-consumption shape (wasm sidecar, packaged Linux
   # CLI) and additionally needs frontend-amd64's image digest. One job, no
   # per-arch matrix: the frontend image build already covers arm64 separately

@@ -76,7 +76,7 @@ The `omnifs-mtab` state file is mount *discovery and teardown* state (mount poin
 - Treat container FUSE as the architecture; the Docker-hosted frontend is one optional delivery mechanism attached to a host-native daemon.
 - Remove live NFS test serialization casually.
 - Claim NFS gives FUSE-equivalent permission isolation.
-- Put wait budgets or `DELAY` policy in `omnifs-tree`.
+- Put wait budgets or `DELAY` policy in `omnifs-engine`.
 - Assume every `NFS4ERR_DELAY` implies background continuation past the reply.
 
 ## Code

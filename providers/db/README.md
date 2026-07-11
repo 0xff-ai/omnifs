@@ -1,8 +1,6 @@
 # omnifs-provider-db
 
-A database provider for omnifs. v1 ships SQLite-only and exposes a
-read-only browse surface; PostgreSQL and other backends will slot
-behind the same path tree later.
+A read-only SQLite provider for omnifs.
 
 ## Design
 
@@ -48,11 +46,6 @@ with a version token and ranged reads above the inline cap.
 /db/tables/{table}/count.txt     # direct row count text
 /db/tables/{table}/sample.json   # route-shaped: SELECT * LIMIT sample_limit (default 20)
 ```
-
-Views and global `/indexes/` are deferred to a later surface. Per-row
-directories (`rows/{pk}/...`) are out of scope: composite PKs,
-non-integer PKs, and tables without a primary key all need design
-work that has not happened.
 
 ## File attributes
 
@@ -102,7 +95,7 @@ wasi-sdk sysroot absent from the Rust `wasm32-wasip2` toolchain. Use `just
 providers build`; it installs the pinned wasi-sdk and supplies the compiler and
 sysroot settings.
 
-## What's deferred
+## Unprojected surfaces
 
 - Views (`/views/...`) and global `/indexes/` directories.
 - Per-row paths (`rows/{pk}/...`); needs design for composite,

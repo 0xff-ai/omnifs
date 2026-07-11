@@ -18,10 +18,9 @@ plugins, OIDC, and custom CAs are all handled upstream by kubectl. The host's
 `unix:` callout transport bypasses the HTTPS-only / private-IP egress
 restrictions that otherwise block local and in-cluster API servers.
 
-Direct `https://` API-server transport is intentionally not advertised yet.
-Host auth injection needs provider auth metadata before bearer-token mounts can
-work reliably, and the host callout currently has no custom-CA or client-cert
-support.
+Direct `https://` API-server transport is intentionally not advertised. Host
+auth injection needs provider auth metadata for bearer-token mounts, and the
+host callout has no custom-CA or client-cert support.
 
 ### Running with kubectl proxy
 
@@ -90,25 +89,23 @@ cat /omnifs/k8s/cluster/nodes/node-1/manifest.yaml
 grep -r --include=manifest.yaml image: /omnifs/k8s/namespaces/default
 ```
 
-## Scope and limitations (v1)
+## Scope and limitations
 
 - **Read-only.** No writes/mutations, consistent with the omnifs read model.
 - **No live watch.** Object reads populate the host object cache and derive
   `manifest`/`status` leaves from the canonical Kubernetes object. External
-  cluster changes are not invalidated live yet; a polling-based change feed
-  (periodic `LIST` keyed by `resourceVersion`, emitting cache invalidations) is
-  a natural follow-up using the runtime's `refresh-interval`/`timer-tick`
-  mechanism.
+  cluster changes are not invalidated live.
 - **`describe.txt`** is intentionally omitted — a faithful `kubectl describe`
   renderer is large and per-kind; the raw `manifest.yaml`/`status.yaml`/
-  `events.txt` cover the same information for v1.
-- **Pod logs** are a current-logs snapshot per container (equivalent to
-  `kubectl logs <pod> -c <container>`). Streaming follow (`tail -f`),
-  `--previous`, and `--timestamps` are follow-ups (they need the ranged/live
-  file path / extra log options).
+  `events.txt` cover the same information.
+- **Pod logs** are live ranged files. The initial read seeds the trailing 2,000
+  lines; reads at the buffered end fetch deltas with `timestamps=true` and
+  `sinceTime`, then strip the transport timestamps, so `tail -f` follows new
+  output. `--previous` and exposing timestamps in the projected bytes remain
+  unsupported.
 - **Listings** issue a single unpaginated `LIST` (the API returns the full
-  collection — no silent truncation). Chunked listing (`limit`/`continue`, as
-  `kubectl` does at 500) is a follow-up for very large namespaces.
+  collection — no silent truncation), which can be expensive for very large
+  namespaces.
 - **Discovery** walks `/api/v1` plus every API group once per instance and
   caches it. Each group's versions are queried preferred-first, so a
   multi-version resource resolves to its preferred version while a resource

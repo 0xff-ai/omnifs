@@ -4,7 +4,7 @@ Status: future
 
 The current provider runtime already uses Wasmtime component async. Provider handlers await omnifs-owned async host imports, and one provider instance can have multiple filesystem operations in flight. See `docs/architecture/60-async-provider-runtime.md` for the current design.
 
-This note is only about a later boundary change: replacing the repo-local HTTP callout records with direct `wasi:http` imports.
+This note describes a possible boundary change: replacing the repo-local HTTP callout records with direct `wasi:http` imports.
 
 ## Current baseline
 

@@ -17,8 +17,8 @@ fn main() {
     println!("cargo:rerun-if-env-changed={PROVIDER_BUNDLE_DIR_ENV}");
 
     // Each provider crate `providers/<name>` (crate `omnifs-provider-<name>`)
-    // builds to `omnifs_provider_<name>.wasm`. The provider manifest now travels
-    // inside that wasm as the `omnifs.provider-metadata.v1` custom section
+    // builds to `omnifs_provider_<name>.wasm`. Its manifest travels inside the
+    // wasm as the `omnifs.provider-metadata.v1` custom section
     // (authored from `#[provider]` annotations), so there is no
     // `omnifs.provider.json` to read here: the set of providers is the set of
     // crate dirs under `providers/`, minus the test fixtures.

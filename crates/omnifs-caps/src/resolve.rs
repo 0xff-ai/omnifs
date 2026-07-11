@@ -1,5 +1,5 @@
-//! Resolving a dynamic grant to its concrete value at mount init. Today the
-//! only dynamic capability is a unix socket derived from the mount's endpoint
+//! Resolving a dynamic grant to its concrete value at mount init. The dynamic
+//! capability is a unix socket derived from the mount's endpoint
 //! config; the host calls [`endpoint_socket`] when a mount grants
 //! `unix_sockets: { "dynamic": true }` and feeds the result into the runtime
 //! [`Allowlist`](crate::Allowlist).

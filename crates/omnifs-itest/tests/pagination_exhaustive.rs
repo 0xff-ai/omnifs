@@ -1,8 +1,8 @@
 //! Characterization: the Tree-level `@next`/`@all` pagination controls.
 //!
-//! N2 freezes CURRENT behavior. `crates/omnifs-engine/tests/pagination_test.rs`
-//! already drives `Runtime::paginate_{next,all}` directly and inspects the cache;
-//! this file characterizes the SAME feed through the kernel-free `Tree` surface a
+//! `crates/omnifs-engine/tests/pagination_test.rs` drives
+//! `Runtime::paginate_{next,all}` directly and inspects the cache; this file
+//! characterizes the same feed through the kernel-free `Tree` surface a
 //! frontend sees: a first-page browse listing carries the synthetic `@next`/`@all`
 //! controls, reading `@next` advances the parent's accumulated dirents, and a
 //! re-listing reflects the grown feed until the controls disappear at exhaustion.
@@ -10,7 +10,7 @@
 //!
 //! `stale_snapshot_controls_resolve_after_exhaustion` covers the converse: a
 //! `@next`/`@all` name a consumer already captured from an earlier (non-exhausted)
-//! listing keeps resolving and reading (as a no-op) even after a FRESH listing
+//! listing keeps resolving and reading (as a no-op) even after a fresh listing
 //! has stopped naming it. Presence in an already-served listing must never
 //! regress to ENOENT, mirroring the existing rule that absence from a
 //! non-exhaustive listing is never ENOENT either

@@ -8,9 +8,8 @@
 //! requested delay. No network is involved and no extra provider authority is
 //! granted.
 //!
-//! Ignored until F1: today's FUSE dispatch serializes operations, so the fast
-//! batch head-of-line blocks behind the parked read and the budget assertion
-//! fails. F1 (async-first dispatch) flips this test on.
+//! The fast batch must complete while the slow read remains parked, proving
+//! async dispatch prevents head-of-line blocking.
 
 use omnifs_engine::GitCloner;
 use omnifs_engine::HostContext;

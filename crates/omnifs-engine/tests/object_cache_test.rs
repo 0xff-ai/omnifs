@@ -1,4 +1,4 @@
-//! Host + object-cache coherence tests (spec §14 invariants #7–#16).
+//! Host and object-cache coherence tests.
 
 use omnifs_core::path::Path;
 use omnifs_engine::EngineError;

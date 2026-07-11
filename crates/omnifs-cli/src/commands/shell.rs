@@ -155,8 +155,8 @@ impl ShellArgs {
     /// so no host rc plumbing applies here; `--shell` overrides the default
     /// and a trailing command runs non-interactively.
     ///
-    /// Goes through the [`FrontendBackend`] seam (today: `DockerBackend`)
-    /// only for command construction; the image field of its `DockerTarget`
+    /// Uses [`DockerBackend`] only for command construction; the image field of
+    /// its `DockerTarget`
     /// is unused here, so the dev placeholder is fine regardless of build
     /// channel, mirroring `frontend down`/`frontend status`.
     fn exec_in_container(&self, container_name: &ContainerName) -> Result<()> {

@@ -1,22 +1,21 @@
-//! Kernel-free read tests for omnifs-engine tree slice 2a: `Tree::read`, `Tree::open`
+//! Kernel-free read tests for `Tree::read`, `Tree::open`
 //! with `RangedHandle::read`, the read cache cascade, the canonical-not-copied
 //! hybrid, and learned-size promotion, all against the in-tree
-//! `test_provider.wasm` with NO fuser, NO mount, NO container, NO root.
+//! `test_provider.wasm` with no fuser, mount, container, or root privileges.
 //!
 //! Reuses the omnifs-itest provider-loading harness (`RuntimeHarness` via
 //! `make_runtime`), keeps an `Arc<Engine>` clone so the test can inspect the
 //! durable view cache and drive object invalidations directly, and wraps the
-//! same `Engine` in a `Tree` via `ServingContext::single`. This is the kernel-free
-//! proof of the read-path DECISION logic FUSE otherwise carries in
-//! `read.rs`/`read_helpers.rs`.
+//! same `Engine` in a `Tree` via `ServingContext::single`. This proves the
+//! shared read policy without a kernel frontend.
 //!
 //! The per-mount `op_gen` write fence's true-branch is NOT exercised here: it
 //! only fires for a write whose `op_gen` predates a live tombstone for the
 //! path's object, and `Tree::read` captures `op_gen` and writes the durable
 //! cache in one synchronous poll for the canned (no-callout) test provider, so
-//! the fenced ordering cannot be induced kernel-free. The fence call site is a
-//! faithful port of the FUSE path, and the underlying `Store::write_fenced`
-//! mechanism is covered by engine cache's `fence_rejects_stale_write`.
+//! the fenced ordering cannot be induced kernel-free. The underlying
+//! `Store::write_fenced` mechanism is covered by engine cache's
+//! `fence_rejects_stale_write`.
 //!
 //! Precondition: `just providers build` has produced
 //! `target/wasm32-wasip2/release/test_provider.wasm` (`provider_wasm_path`

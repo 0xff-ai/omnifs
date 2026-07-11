@@ -1,4 +1,4 @@
-//! Gate 4 (amended): the Docker-hosted FUSE frontend end to end.
+//! The Docker-hosted FUSE frontend end to end.
 //!
 //! `omnifs frontend up` attaches a separate, credential-free container to a
 //! host-native daemon's shared namespace over TCP and renders kernel FUSE
@@ -9,12 +9,6 @@
 //! `omnifs frontend {up,down,status}`, `omnifs down` teardown ordering, a
 //! cold-start budget, cross-mount byte identity, kill/reattach behavior, and
 //! the no-credentials contract.
-//!
-//! Not to be confused with `tests/frontend_matrix`'s `fuse_in_docker_matrix`
-//! lane (`OMNIFS_ACCEPTANCE_DOCKER`), which exercises the older
-//! whole-daemon-in-a-container runtime image. This suite is the newer,
-//! narrower Docker-hosted *frontend* (no daemon inside the container, no home
-//! bind mount): see `docs/contracts/50-control-plane.md`.
 //!
 //! Gated on `OMNIFS_ACCEPTANCE_LIVE`, matching every other live-mount lane.
 //! Requires Docker, the `omnifs-frontend:*dev*` image (`just frontend-image`,
@@ -789,9 +783,8 @@ fn kill_and_reattach_fuse_semantics() {
 /// transport's own cost from the container's. Reuses the wire-frontend
 /// bring-up `live.rs` already owns (`start_wire_frontend_holding_lock` /
 /// `start_wire_frontend_tcp_holding_lock`), and writes its numbers next to
-/// `wire-perf.json` in the same scorecard directory. Recorded, not gated: no
-/// budget assertion, matching the wire-perf lane's own escape hatch for a
-/// blown number (a design round for the orchestrator, not a test tuning).
+/// `wire-perf.json` in the same scorecard directory. Recorded, not gated: the
+/// transport comparison reports evidence without enforcing a budget.
 #[derive(serde::Serialize)]
 struct AttachTransportPerf {
     version: u32,

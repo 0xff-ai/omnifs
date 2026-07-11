@@ -198,8 +198,7 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
         .await
         .unwrap();
     assert_materialized_lookup(domain_lookup, "/example.com", true);
-    // lookup_child does NOT warm adjacent cache entries; the
-    // cache_get assertions from v1 are removed.
+    // lookup_child does not warm adjacent cache entries.
 
     let listing = harness
         .runtime

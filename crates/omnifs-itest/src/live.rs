@@ -2,9 +2,8 @@
 //!
 //! This is the one owner of the cross-process NFS serialization lock, the
 //! `omnifs` binary resolution used by matrix lanes, the hermetic `OMNIFS_HOME`
-//! construction, and native-daemon bring-up/readiness/teardown. It is ported
-//! from the retired `omnifs-cli` `frontend_conformance` test so the matrix and
-//! the CLI lifecycle suite share one lock owner and one daemon contract.
+//! construction, and native-daemon bring-up/readiness/teardown. The matrix and
+//! CLI lifecycle suite share this lock owner and daemon contract.
 
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};

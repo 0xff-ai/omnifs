@@ -16,8 +16,8 @@ omnifs-sdk = { workspace = true }
 # README warns that these stubs may change shape between versions, and
 # `bollard` itself does not build for `wasm32-wasip2` (its non-optional
 # `tokio` dep requires the `net` feature which `compile_error!`s on
-# wasm). We accept the trade by treating each version bump as a small
-# migration, not a routine `cargo update`.
+# wasm). Every version bump therefore requires an explicit bindgen-shape and
+# wasm32-wasip2 compatibility check.
 bollard-stubs = { version = "=1.52.1-rc.29.1.3", default-features = false }
 serde = { workspace = true }
 serde_json = { workspace = true }

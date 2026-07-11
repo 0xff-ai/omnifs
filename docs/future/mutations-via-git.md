@@ -233,7 +233,7 @@ The key design choice is that a first read may hydrate. This is intentional. It 
 
 ### Hydration operation
 
-Hydration calls `fetch-resource(path)` on the proposed provider reconcile interface (see Provider contract; this interface is not in the shipped WIT yet), where `path` may be any provider-owned path inside the resource. The provider normalizes that path to the owning resource and returns all files for that resource, including version tokens.
+Hydration calls `fetch-resource(path)` on the proposed provider reconcile interface (see Provider contract; this interface is not part of the shipped WIT), where `path` may be any provider-owned path inside the resource. The provider normalizes that path to the owning resource and returns all files for that resource, including version tokens.
 
 Hydration stores:
 
@@ -468,7 +468,7 @@ Disowned islands are excluded from this refresh.
 
 ## Provider contract
 
-This design requires a new provider reconcile interface that does not exist in the shipped WIT contract yet. The current `omnifs:provider` package declares lifecycle, namespace, notify, and callout interfaces, but no mutation-oriented reconcile surface. The reconcile interface this design depends on must add:
+This design requires a new provider reconcile interface that is not part of the shipped WIT contract. The current `omnifs:provider` package declares lifecycle, namespace, notify, and callout interfaces, but no mutation-oriented reconcile surface. The reconcile interface this design depends on must add:
 
 - `plan-mutations`
 - `execute`

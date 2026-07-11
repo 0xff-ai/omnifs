@@ -88,24 +88,18 @@ additional Linear round trip. `description.md` is listed but not
 eager-preloaded, because the list query omits the description and the
 single-issue payload is the body contract.
 
-The polling interval (`refresh_interval_secs`) is 120 s. With Linear's
-3M-point-per-hour API key budget, a few-team workspace stays well
-under budget even with periodic refresh.
+## Unprojected surfaces
 
-## TODOs (deferred from v1)
-
-- Comments. Linear issues carry threaded comments; expose them under
-  `comments/{n}` analogously to the GitHub provider.
-- Cycles. `/linear/teams/{KEY}/cycles/{id}/issues/` would surface a
-  cycle's contents.
-- Projects. `/linear/projects/{slug}/issues/` (and per-team project
-  links).
-- Labels. Filter by label, or expose label sets as directories.
-- Pagination cursors. The current implementation flattens all pages
-  into one listing (capped at 2000 issues). Larger workspaces would
-  want pagination via a typed `Collection::page(entries).next(cursor)`
-  (host `@next` cursor resume) instead of flattening all pages.
-- Automated live OAuth validation. CI still relies on fake OAuth servers
+- Comments. Linear issues carry threaded comments, but the provider does not
+  expose a `comments/{n}` tree.
+- Cycles. The provider does not expose
+  `/linear/teams/{KEY}/cycles/{id}/issues/`.
+- Projects. The provider has no `/linear/projects/{slug}/issues/` tree or
+  per-team project links.
+- Labels. Label filters and label-set directories are not projected.
+- Pagination cursors. The implementation flattens pages into one listing capped
+  at 2,000 issues.
+- Automated live OAuth validation. CI relies on fake OAuth servers
   because the real flow requires browser authorization.
-- `on-event` invalidation. Linear has webhooks but the provider does
-  not subscribe; cache invalidation today is purely capacity-based.
+- `on-event` invalidation. Linear has webhooks, but the provider does not
+  subscribe; cache invalidation is purely capacity-based.

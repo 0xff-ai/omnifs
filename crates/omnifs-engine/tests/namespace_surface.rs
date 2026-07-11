@@ -1,13 +1,13 @@
-//! Kernel-free tracer for the engine `Namespace` surface (runtime redesign
-//! phase 2, step 1): drive `TreeNamespace` against the in-tree
-//! `test_provider.wasm` with NO fuser, NO mount, NO container.
+//! Kernel-free tests for the engine `Namespace` surface, driving
+//! `TreeNamespace` against the in-tree `test_provider.wasm` with no fuser,
+//! mount, or container.
 //!
 //! Reuses the omnifs-itest provider-loading harness (`RuntimeHarness` via
 //! `make_runtime`), keeps an `Arc<Engine>` clone so the test can fire provider
 //! effects directly, and builds a single-mount `TreeNamespace` over the same
 //! engine. This proves the narrow frontend-facing surface (opaque node ids,
 //! policied attrs, ranged-handle reuse, paging, and the invalidation event
-//! stream) before either kernel adapter is ported onto it.
+//! stream) consumed by both kernel adapters.
 //!
 //! Precondition: `just providers build` has produced
 //! `target/wasm32-wasip2/release/test_provider.wasm`.
@@ -243,7 +243,7 @@ async fn readdir_budget_buffers_overflow() {
     );
 }
 
-// An object STREAM face (`o.file("log").stream(...)`) now stamps its
+// An object stream face (`o.file("log").stream(...)`) stamps its
 // lookup/listing placeholder with `Deferred(Ranged)`
 // (`omnifs-sdk` `object_dir_listing`, `ListingLeaf::is_stream`), so every
 // `is_deferred_ranged` consumer (this namespace's read path, and the FUSE/NFS

@@ -189,7 +189,7 @@ fn two_daemons_two_homes_resolve_through_their_own_records() {
     // binary races these two mounts.
     let _nfs_lock = live::nfs_serial_lock();
 
-    // ── 1: two daemons, two homes, distinct mount points ─────────────────────
+    // Two daemons use independent homes and mount points.
     let Some(mut daemon_a) = Daemon::spawn() else {
         return;
     };
@@ -200,7 +200,7 @@ fn two_daemons_two_homes_resolve_through_their_own_records() {
         return;
     }
 
-    // ── 2: each home's status resolves its own daemon over its own socket ─────
+    // Each home resolves its own daemon over its own socket.
     let out_a = run_status(daemon_a.home.path(), &daemon_a.mount_point);
     assert_eq!(
         exit_code(&out_a),
@@ -239,7 +239,7 @@ fn two_daemons_two_homes_resolve_through_their_own_records() {
 
     assert_ne!(pid_a, pid_b, "the two daemons must be distinct processes");
 
-    // ── 3: a fresh home with no record never dials blind ─────────────────────
+    // A fresh home with no runtime record never dials a default address.
     //
     // `omnifs status` is informational and exits 0 whether or not a daemon is
     // running (locked by the CLI lifecycle suite's scenario_1). The property
@@ -260,7 +260,8 @@ fn two_daemons_two_homes_resolve_through_their_own_records() {
         "a home with no record must report not_running, never a foreign daemon"
     );
 
-    // ── 4: SIGKILL A; its next command cleans the stale record; B is fine ────
+    // After home A's daemon is killed, its next command cleans the stale
+    // record without disturbing home B.
     let pid_a = daemon_a.pid();
     let _ = Command::new("kill")
         .args(["-9", &pid_a.to_string()])
@@ -311,7 +312,7 @@ fn two_daemons_two_homes_resolve_through_their_own_records() {
         Some(u64::from(daemon_b.pid())),
     );
 
-    // ── 5: graceful SIGTERM for B; the record is removed on clean exit ───────
+    // A graceful SIGTERM removes home B's runtime record.
     let pid_b = daemon_b.pid();
     let _ = Command::new("kill")
         .args(["-TERM", &pid_b.to_string()])

@@ -1721,10 +1721,9 @@ fn github_provider_resource_reads_do_not_fall_back_to_provider_cache() {
     }
 }
 
-/// Comments are `{comment_id}` object dirs (a DEPARTURE from the old indexed
-/// `comments/{idx}` files; the "zero index" concept no longer exists). The
-/// collection lists each comment as a directory keyed by its own id, and each
-/// comment's `comment.json` / `comment.md` faces load from the standalone
+/// Comments are `{comment_id}` object directories. The collection lists each
+/// comment by its own id. Each `comment.json` / `comment.md` face loads from
+/// the standalone
 /// comment GET. This test pins (a) the id-keyed dir model, (b) the refetch
 /// invariant: a comment face read fetches upstream and a reread refetches
 /// (never serves a provider-side cache), and (c) reject: a face under a missing
@@ -2191,9 +2190,8 @@ fn github_provider_lookup_owner_validates_and_owner_listing_classifies_with_org_
 
 #[test]
 fn github_provider_polls_events_and_invalidates_caches() {
-    // the event poller and active-path tracking are removed; State is empty.
-    // This test verifies that the issue read path still works with issue.json,
-    // and that timer ticks are no-ops (no callouts, no invalidations).
+    // State is empty and timer ticks are no-ops. This test verifies both the
+    // comment read path and the absence of timer callouts or invalidations.
     let harness = github_harness();
     // Read a comment object face: a `{comment_id}` dir's `comment.json` loads the
     // standalone comment GET.
@@ -2222,9 +2220,7 @@ fn github_provider_polls_events_and_invalidates_caches() {
         OpResult::ReadFile(_) => {},
         other => panic!("expected comment ReadFile result, got {other:?}"),
     }
-    // the event poller (events_etags, active_paths, timer handler) is
-    // removed. State is empty. TimerTick returns immediately with no callouts
-    // and no cache invalidations.
+    // TimerTick returns immediately with no callouts or cache invalidations.
     let first_tick = harness.timer_tick().unwrap();
     assert!(
         first_tick.callouts().is_empty(),
@@ -2309,7 +2305,7 @@ fn github_provider_list_routes_preserve_typed_http_errors() {
     }
 }
 
-/// Invariant #1: `issues/open/42` and `issues/all/42` share one object load.
+/// `issues/open/42` and `issues/all/42` share one object load.
 #[tokio::test]
 async fn open_then_all_one_load() {
     use omnifs_wit::provider::types::{Callout, CalloutResult, HttpResponse, ReadFileOutcome};
@@ -2393,7 +2389,7 @@ async fn open_then_all_one_load() {
     }
 }
 
-/// Invariant #3: `item.json` bytes equal the single-item GET body verbatim.
+/// `item.json` bytes equal the single-item GET body verbatim.
 #[test]
 fn item_json_byte_equals_single_get() {
     use omnifs_wit::provider::types::{

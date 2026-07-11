@@ -1,9 +1,7 @@
 //! Characterization: cache effect application order and object deletion.
 //!
-//! N2 freezes CURRENT behavior. `object_cache_test.rs` already characterizes
-//! object-vs-listing invalidation and the write fence; this file pins the two
-//! properties U1's `EffectApplier` split (which factors `apply`
-//! into per-effect-kind methods) must preserve unchanged:
+//! `object_cache_test.rs` covers object-vs-listing invalidation and the write
+//! fence; this file covers two ordering properties of `EffectApplier`:
 //!
 //! - one effect batch applies canonical stores, fs writes, and the dirents merge
 //!   together; and

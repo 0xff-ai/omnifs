@@ -1,7 +1,7 @@
-//! Slice 3: a kernel-free Tree-level CONFORMANCE harness.
+//! Kernel-free conformance tests for the Tree surface.
 //!
-//! This is the provider-author verification loop (D9): it drives omnifs-engine tree's
-//! neutral `resolve` / `list` / `read` / `open` surface against a real wasm
+//! The provider-author verification loop drives omnifs-engine tree's neutral
+//! `resolve` / `list` / `read` / `open` surface against a real wasm
 //! provider with NO fuser, NO mount, NO container, NO root. A provider author
 //! (or a frontend author proving the neutral surface) runs these to confirm a
 //! provider's projection without standing up a kernel adapter.
@@ -9,7 +9,7 @@
 //! It reuses the omnifs-itest provider-loading harness (`make_runtime`), so the
 //! provider is loaded and executed exactly as the host does in production; only
 //! the renderer (FUSE/NFS) is absent. The reusable helpers below are the three
-//! the brief calls for:
+//! reusable operations:
 //!
 //!   (a) load a wasm provider into a `Runtime`             -> `tree_harness`
 //!   (b) build a `Tree` over it                            -> `tree_harness`
@@ -409,9 +409,8 @@ async fn lists_cursored_pages() {
 /// surface here. Its route is registered with static leaves, so `/items/open/404`
 /// and `/items/open/404/item.json` resolve to directory/file nodes; the
 /// `Load::NotFound` only fires on `read`, where the provider returns
-/// `ErrorKind::NotFound`. Slice 1's `From<host::Error>` still maps that to
-/// `TreeErrorKind::Internal` (error.rs: "a richer mapping lands [later]"), so a
-/// read-time NotFound is intentionally out of this conformance set's scope.
+/// `ErrorKind::NotFound`, so a read-time NotFound is outside this resolution
+/// test's scope.
 #[tokio::test(flavor = "multi_thread")]
 async fn resolves_unrouted_path_as_not_found() {
     let t = tree_harness();

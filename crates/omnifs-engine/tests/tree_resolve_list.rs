@@ -1,11 +1,10 @@
-//! Kernel-free tracer for omnifs-engine tree slice 1: resolve + list against the
-//! in-tree `test_provider.wasm` with NO fuser, NO mount, NO container, NO root.
+//! Kernel-free resolve and list tests against the in-tree `test_provider.wasm`,
+//! with no fuser, mount, container, or root privileges.
 //!
 //! Reuses the existing omnifs-itest provider-loading harness (`RuntimeHarness`
 //! via `make_runtime`), wraps the bare `Engine` in a `Tree` via
-//! `ServingContext::single`, and drives `Tree::resolve` / `Tree::list`. This is the
-//! third consumer (after FUSE and NFS) proving the neutral surface, passing
-//! before either kernel adapter is rewired.
+//! `ServingContext::single`, and drives `Tree::resolve` / `Tree::list` through
+//! the same neutral surface used by FUSE and NFS.
 //!
 //! Precondition: `just providers build` has produced
 //! `target/wasm32-wasip2/release/test_provider.wasm` (`provider_wasm_path`

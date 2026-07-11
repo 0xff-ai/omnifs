@@ -6,8 +6,8 @@
 //! rows and runs it against a live mount through an [`Exec`] lane (local process
 //! or `docker exec`). Each lane produces a [`Scorecard`] whose per-row observed
 //! outcome is checked against a per-column [`Expect`]; a run is red iff any row
-//! contradicts its expectation. The row table and models live here (not in a
-//! test target) so future runtime-redesign phases reuse them.
+//! contradicts its expectation. The row table and models live here so every
+//! frontend conformance target shares the same contract.
 
 use std::io::Read;
 use std::path::PathBuf;
@@ -26,8 +26,7 @@ const ROW_TIMEOUT: Duration = Duration::from_mins(1);
 // ===========================================================================
 
 /// Whether a row exercises read semantics or a write/mutation. Write rows expect
-/// failure today (the frontends are read-only) and flip green the day the write
-/// path lands.
+/// failure because the frontends are read-only.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RowClass {
     Read,
@@ -755,7 +754,7 @@ sz=$(stat -f%z "$SCRATCH/chunk" 2>/dev/null || stat -c%s "$SCRATCH/chunk"); [ "$
 ls "$ROOT/hello/bundle" >/dev/null 2>&1 || true
 ! test -e "$ROOT/hello/.DS_Store" && ! test -e "$ROOT/hello/._message" && ! test -e "$ROOT/hello/bundle/.DS_Store""#,
     },
-    // --- writes (expect fail today; the frontends are read-only) -----------
+    // --- writes (expect failure because the frontends are read-only) -------
     Row {
         id: "append",
         class: RowClass::Write,
@@ -800,26 +799,25 @@ ls "$ROOT/hello/bundle" >/dev/null 2>&1 || true
 /// at all, but plain `grep -r` is not one). It also walks into
 /// `items/open/7/log`, an object stream face (`.stream(Item::log)`).
 ///
-/// Both of this row's historical failure causes are now fixed:
+/// Two invariants keep this row passing:
 ///
-/// - Pagination-control visibility: the parent's accumulated dirents no
-///   longer strip a control record back out once the directory has paged,
+/// - Pagination-control visibility: the parent's accumulated dirents never
+///   strip a control record back out once the directory has paged,
 ///   even past exhaustion (`omnifs-engine/src/pagination.rs`,
 ///   `tree/synthetic.rs::resolve_synthetic_child`), so the same stale readdir
 ///   snapshot's `@all` name still resolves and reads as a no-op instead of
 ///   ENOENT (proved by `omnifs-itest`'s
 ///   `pagination_exhaustive::stale_snapshot_controls_resolve_after_exhaustion`).
 /// - Stream-face shape: an object stream leaf's lookup/listing placeholder
-///   now carries `Deferred(Ranged)` (`omnifs-sdk`'s `object_dir_listing`,
+///   carries `Deferred(Ranged)` (`omnifs-sdk`'s `object_dir_listing`,
 ///   `ListingLeaf::is_stream`), so `grep -r`'s recursive walk opens `log`
-///   through `open-file` instead of a whole-file `read-file` the provider
-///   rejected with `ErrorKind::InvalidInput`. The row genuinely passes now.
+///   through `open-file` instead of a whole-file `read-file` the provider would
+///   reject with `ErrorKind::InvalidInput`.
 const GREP_R_PAGINATION_CONTROLS: (&str, Expect) = ("grep-r", Expect::Pass);
 
 /// Linux kernel-FUSE native lane. CI's conformance-fuse job runs this on a
 /// GitHub Ubuntu runner with GNU coreutils, where GNU `tail -f` sees the follow
-/// pump's out-of-band growth; that lane observed `tail-f-growing` PASS, and
-/// `grep -r` now passes here too (both its historical causes are fixed; see
+/// pump's out-of-band growth; `tail-f-growing` and `grep -r` both pass (see
 /// [`GREP_R_PAGINATION_CONTROLS`]).
 pub const LINUX_FUSE_NATIVE: Column = Column {
     id: "linux-fuse-native",
@@ -869,8 +867,8 @@ pub const LINUX_NFS_LOOPBACK: Column = Column {
     ],
 };
 
-/// The Docker-hosted FUSE frontend (`omnifs frontend up`), gate 4 (amended):
-/// a separate, credential-free container attached to a host-native daemon's
+/// The Docker-hosted FUSE frontend (`omnifs frontend up`): a separate,
+/// credential-free container attached to a host-native daemon's
 /// shared namespace over TCP, running kernel FUSE inside the container. This
 /// frontend ships its own minimal `debian:trixie-slim` image (`Dockerfile`'s
 /// `frontend-base`) chosen specifically because Debian's default

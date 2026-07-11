@@ -245,7 +245,7 @@ impl SetupArgs {
         anstream::eprintln!("{}", style.banner(5, "launch"));
         // `Launcher::launch` writes its own stderr progress lines; a spinner
         // here would be overwritten mid-line by them. Print a plain note before
-        // and settle into a static row after, as the pre-LiveRow design did.
+        // and settle into a static row after.
         anstream::eprintln!("{}", ui::note("starting the daemon"));
         let outcome = match Launcher::new(workspace, "omnifs setup").launch().await {
             Ok(outcome) => outcome,

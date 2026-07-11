@@ -1,8 +1,8 @@
 //! Wire-overhead measurement lane: the out-of-process frontend hop measured
 //! against the in-process frontend on the conformance read/readdir workloads.
 //!
-//! Phase-3 part C. Two lanes serve the same test-provider tree over NFS and run
-//! the same two workloads; the only difference is where the frontend renders:
+//! Two lanes serve the same test-provider tree over NFS and run the same two
+//! workloads; the only difference is where the frontend renders:
 //!
 //! - **Lane 1 (in-process).** The daemon serves the platform-default host-native
 //!   frontend itself (the native path the conformance matrix uses).
@@ -15,15 +15,14 @@
 //! is torn down fully (unmount, kill daemon, sweep) before lane 2 comes up, so
 //! the measurements never overlap.
 //!
-//! The ratified budget: wire overhead under 15% on sequential 128 KiB reads and
+//! The enforced budget is wire overhead under 15% on sequential 128 KiB reads and
 //! under 25% on a readdir-heavy `find`. Evidence (all samples, medians, overhead)
 //! always lands in `target/conformance/wire-perf.json` and a printed table before
-//! the budget assertion, so a blown budget is diagnosable. Per the escape hatch,
-//! a blown budget is NOT tuned or relaxed here: batching is a design round for the
-//! orchestrator, so this lane just reports the numbers and fails.
+//! the budget assertion, so a violation is diagnosable. This lane reports and
+//! fails rather than changing its own budget.
 //!
 //! Gated on `OMNIFS_ACCEPTANCE_PERF`. Deliberately absent from every CI filter:
-//! shared runners cannot hold a perf budget, so this is a local gate lane.
+//! shared runners cannot hold a perf budget, so this is a local acceptance lane.
 
 #![cfg(not(target_os = "wasi"))]
 
@@ -250,9 +249,8 @@ fn wire_overhead_within_budget() {
         assert!(
             w.overhead_pct <= f64::from(w.budget_pct),
             "workload `{}` wire overhead {:.1}% exceeds budget {}% \
-             (in-process median {:.1}ms, wire median {:.1}ms). Per the ratified escape hatch, \
-             do NOT relax the budget or tune constants here: batching is a design round for the \
-             orchestrator. Report the numbers and stop.",
+             (in-process median {:.1}ms, wire median {:.1}ms). \
+             Report the measurements rather than relaxing the budget.",
             w.id,
             w.overhead_pct,
             w.budget_pct,

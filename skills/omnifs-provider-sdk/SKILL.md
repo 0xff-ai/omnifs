@@ -217,7 +217,7 @@ For any path-surface change, test whole-shell traversal in the live container, n
 5. `MemoryRangeReader` for genuinely large content: it buffers everything; implement a real `RangeReader` over blob ranges.
 6. Stub handlers for intermediate directories: unnecessary (auto-navigation) and can shadow real routes.
 7. Unknown config keys: `#[omnifs_sdk::config]` sets `deny_unknown_fields`; mount JSON typos fail initialization (good); do not "fix" by loosening.
-8. Expecting webhook/file-changed events to fire handlers: only `timer` is dispatched today.
+8. Expecting webhook/file-changed events to fire handlers: only `timer` is dispatched.
 9. A finite `choices()` list for a dynamic universe: it silently hides new upstream values; reserve choices for truly static sets.
 10. Provider-local caching "to be safe": it fights the host's invalidation and fence machinery; delete it.
 11. Face modifiers go before the terminal face call: `o.file("body").lazy().computed(f)` marks `body` lazy; `.computed()`/`.canonical()`/`.direct()`/etc. is the terminal registration call. A collection child object (`o.dir(..).collection::<C>(..)`) must have its own `r.object::<C>` route or seal fails to resolve it.

@@ -68,10 +68,8 @@ trap 'rm -rf "$staging"' EXIT
 # runner dials on host CID to signal the FUSE mount is serving
 # (crates/omnifs-vfs-wire/src/beacon.rs). OMNIFS_SSH_PUBKEY, when given, is
 # installed into root's authorized_keys before the vsock ssh socket starts
-# (scripts/guest-image/mkosi/mkosi.extra/usr/local/lib/omnifs/setup-ssh.sh);
-# omitting it (the default here, since this script's only caller today is
-# smoke.sh) leaves ssh disabled for that launch, which is the intended "no
-# key" smoke path.
+# (scripts/guest-image/mkosi/mkosi.extra/usr/local/lib/omnifs/setup-ssh.sh).
+# The boot smoke omits the key, which leaves ssh disabled for that launch.
 cat >"$staging/omnifs-seed.conf" <<EOF
 OMNIFS_ATTACH_ADDR=${attach_addr}
 OMNIFS_ATTACH_TOKEN=${attach_token}

@@ -1,6 +1,7 @@
 //! Provider WASM installation into the content-addressed store.
 //!
-//! Each provider WASM is hashed to its [`ProviderId`], written under
+//! Each provider WASM is hashed to its
+//! [`ProviderId`](omnifs_workspace::ids::ProviderId), written under
 //! `providers_dir/<hex>.wasm`, and recorded in `index.json` (advancing
 //! `latest[name]`). Content addressing makes installation idempotent.
 

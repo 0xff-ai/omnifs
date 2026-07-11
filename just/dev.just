@@ -72,8 +72,7 @@ guest-image:
 
 # Boot the guest image once with a throwaway seed ISO and check the serial
 # console for a successful boot and the frontend runner starting. See
-# scripts/guest-image/smoke.sh for what "success" means at this phase (no
-# live daemon to attach to yet).
+# scripts/guest-image/smoke.sh for the intentionally boot-only success criteria.
 [group('dev')]
 guest-image-smoke:
     bash scripts/guest-image/smoke.sh

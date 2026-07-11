@@ -164,8 +164,7 @@ impl Frontend {
 
     /// Background pump: apply namespace events continuously so an invalidation
     /// from the engine's background drain tick reaches the kernel even when no
-    /// op is in flight. The old FUSE adapter drained only on ops; the namespace
-    /// now emits events out of band, so a pump keeps the kernel current.
+    /// op is in flight.
     pub(crate) fn spawn_event_pump(&self) {
         let fs = self.clone();
         let mut sub = fs.namespace.subscribe();

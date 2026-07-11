@@ -1,4 +1,4 @@
-//! Gate 3 survival: a restartable out-of-process NFS frontend.
+//! Restart survival for the out-of-process NFS frontend.
 //!
 //! This is the structural answer to the ESTALE row in the NFS quirk catalog. Two
 //! legs, run in order against one live mount:
