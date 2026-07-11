@@ -28,12 +28,13 @@ omnifs-api = { version = "0.2.1", path = "crates/omnifs-api" }
 omnifs-auth = { version = "0.2.1", path = "crates/omnifs-auth" }
 omnifs-caps = { version = "0.2.1", path = "crates/omnifs-caps" }
 omnifs-daemon = { version = "0.2.1", path = "crates/omnifs-daemon" }
-omnifs-engine = { version = "0.2.1", path = "crates/omnifs-engine" }
+omnifs-engine = { version = "0.2.1", path = "crates/omnifs-engine", default-features = false }
+omnifs-fuse = { version = "0.2.1", path = "crates/omnifs-fuse", default-features = false }
 omnifs-workspace = { version = "0.2.1", path = "crates/omnifs-workspace" }
 omnifs-core = { version = "0.2.1", path = "crates/omnifs-core" }
 omnifs-mtab = { version = "0.2.1", path = "crates/omnifs-mtab" }
 omnifs-vfs-wire = { version = "0.2.1", path = "crates/omnifs-vfs-wire" }
-omnifs-nfs = { version = "0.2.1", path = "crates/omnifs-nfs" }
+omnifs-nfs = { version = "0.2.1", path = "crates/omnifs-nfs", default-features = false }
 omnifs-sdk = { version = "0.2.1", path = "crates/omnifs-sdk" }
 omnifs-sdk-macros = { version = "0.2.1", path = "crates/omnifs-sdk-macros" }
 omnifs-wit = { version = "0.2.1", path = "crates/omnifs-wit" }

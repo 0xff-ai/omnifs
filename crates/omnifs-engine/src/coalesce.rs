@@ -386,6 +386,7 @@ impl<K: CoverKey, V> Drop for RunGuard<'_, K, V> {
 
 /// Namespace provider-op keys. Lives here so [`crate::runtime::Runtime`] can own
 /// the shared [`Coalesce`] without a namespace ↔ runtime cycle.
+#[cfg(feature = "runtime")]
 pub mod ns {
     use super::{CoalesceKey, CoverKey};
     use crate::object_id::ObjectId;

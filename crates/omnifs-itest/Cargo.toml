@@ -19,7 +19,7 @@ path = "src/bin/wire_test_frontend.rs"
 
 [dependencies]
 omnifs-api = { workspace = true }
-omnifs-engine = { workspace = true }
+omnifs-engine = { workspace = true, features = ["runtime"] }
 omnifs-vfs-wire = { workspace = true }
 omnifs-wit = { path = "../omnifs-wit", features = ["host-bindings"] }
 omnifs-core = { path = "../omnifs-core" }
