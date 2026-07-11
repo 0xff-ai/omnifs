@@ -261,6 +261,43 @@ impl ProviderManifest {
     pub fn provider_limits(&self) -> Limits {
         Limits::from_declarations(&self.limits)
     }
+
+    /// The `domains` config field that supplies a dynamic domain grant's
+    /// allowlist, when this provider both declares a dynamic domain need and
+    /// exposes a matching string-array config field. `mount add` seeds the
+    /// dynamic grant from the need, but the grant stays inert until the mount
+    /// lists concrete domains, so this value must be collected per mount. The
+    /// grant remains dynamic (resolved against exactly this list at
+    /// mount-start), never widened to a literal wildcard.
+    #[must_use]
+    pub fn dynamic_domain_field(&self) -> Option<&str> {
+        let declares_dynamic_domain = self
+            .capabilities
+            .iter()
+            .any(|need| matches!(need, AccessNeed::Domain { dynamic: true, .. }));
+        if !declares_dynamic_domain {
+            return None;
+        }
+        self.config
+            .as_ref()
+            .and_then(ConfigMetadata::domain_list_field)
+    }
+
+    /// Whether creating a mount for this provider needs per-mount input that a
+    /// non-interactive run cannot synthesize: a host-file path, or the domain
+    /// allowlist a dynamic domain grant resolves from. `setup --yes` skips such
+    /// a provider (it cannot answer for the operator), and `mount add` prompts
+    /// interactively or requires `--config-json`. Without this, the flow would
+    /// seed a dynamic domain grant and write a mount whose empty allowlist the
+    /// materialize-time check then refuses, an unfixable state from the flow.
+    #[must_use]
+    pub fn requires_mount_input(&self) -> bool {
+        self.dynamic_domain_field().is_some()
+            || self
+                .config
+                .as_ref()
+                .is_some_and(ConfigMetadata::requires_prompt)
+    }
 }
 
 fn validate_limit_why<T>(

@@ -542,6 +542,66 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    /// A web-like provider: a *dynamic* domain need plus a `domains` string
+    /// array config field with no default and no auth. This is the shape that
+    /// seeds a dynamic domain grant but leaves the allowlist for the mount to
+    /// supply.
+    fn web_manifest() -> ProviderManifest {
+        let mut manifest = provider_manifest();
+        manifest.id = "web".to_string();
+        manifest.display_name = "Web".to_string();
+        manifest.default_mount = "web".to_string();
+        manifest.auth = None;
+        manifest.capabilities = vec![omnifs_caps::AccessNeed::Domain {
+            value: "resolved from config at mount-start".to_string(),
+            why: "fetch configured domains".to_string(),
+            dynamic: true,
+        }];
+        manifest.config = Some(ConfigMetadata {
+            fields: vec![ConfigField {
+                name: "domains".to_string(),
+                value_type: ConfigType::Array {
+                    items: Box::new(ConfigType::String),
+                },
+                required: false,
+                default: None,
+                description: None,
+                binding: None,
+            }],
+        });
+        manifest
+    }
+
+    #[test]
+    fn dynamic_domain_provider_requires_domains_input() {
+        // The web provider declares a dynamic domain need and reads its
+        // allowlist from a `domains` config field with no default. `mount add`
+        // seeds the dynamic grant automatically, but that grant is inert until
+        // the mount supplies concrete domains, and the materialize-time check
+        // refuses an empty allowlist. So the flow must treat a dynamic-domain
+        // provider as needing input: a non-interactive run without
+        // --config-json bails asking for it rather than writing a spec that can
+        // never be served.
+        let manifest = web_manifest();
+        let reference = provider_ref("web");
+        let mount_name = MountName::try_from("web").unwrap();
+        let creator = MountSpecCreator::new(&reference, &mount_name, &manifest);
+        assert!(
+            creator.requires_prompt(),
+            "a dynamic-domain provider must require domain input"
+        );
+
+        // The seeded grant stays a dynamic grant, constrained to the config
+        // allowlist at mount-start, never a wildcard literal that would let the
+        // provider fetch any domain.
+        let created = creator.create_for_config_override();
+        let caps = created.capabilities.expect("dynamic domain grant seeded");
+        assert!(
+            caps.domains.expect("domains grant").is_dynamic(),
+            "domain grant must stay dynamic, not widen to a literal wildcard"
+        );
+    }
+
     fn provider_ref(name: &str) -> ProviderRef {
         ProviderRef {
             id: ProviderId::from_wasm_bytes(name.as_bytes()),

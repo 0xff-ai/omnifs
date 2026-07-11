@@ -432,10 +432,7 @@ impl SetupArgs {
             if configured.contains_key(&name) {
                 continue;
             }
-            let requires_prompt = manifest
-                .config
-                .as_ref()
-                .is_some_and(omnifs_workspace::provider::ConfigMetadata::requires_prompt);
+            let requires_prompt = manifest.requires_mount_input();
             let ambient =
                 !crate::commands::mount::detect::detect(manifest.wasm_auth_manifest().as_ref())
                     .is_empty();
