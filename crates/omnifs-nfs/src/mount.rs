@@ -6,7 +6,7 @@ use crate::server::start_server;
 use omnifs_engine::namespace::{Namespace, NsAttachEvent};
 #[cfg(target_os = "linux")]
 use omnifs_mtab::proc_mounts;
-use omnifs_mtab::{MountKind, MountState, Platform, StateError, StateFile, UnmountCommand};
+use omnifs_mtab::{MountState, Platform, StateError, StateFile, UnmountCommand};
 use std::ffi::OsString;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -28,11 +28,11 @@ pub struct NfsMountOptions {
     pub state_dir: PathBuf,
     /// Persist the filehandle-identity table so a restart of this process decodes
     /// the filehandles a kernel client still holds. Set by the restartable
-    /// out-of-process runner; left `false` for the in-process daemon frontend,
-    /// whose mount dies with the process. When `true` the mount step is also
-    /// skipped if the mount point already carries an active NFS mount (the
-    /// restart case), so the restarted server serves the export the kernel client
-    /// is still connected to instead of remounting.
+    /// out-of-process runner; left `false` for callers that do not need restart
+    /// persistence. When `true` the mount step is also skipped if the mount point
+    /// already carries an active NFS mount (the restart case), so the restarted
+    /// server serves the export the kernel client is still connected to instead
+    /// of remounting.
     pub persist_filehandles: bool,
 }
 
@@ -81,23 +81,9 @@ impl NfsMountOptions {
     }
 
     fn bind_for_active_mount(&self, mount_point: &Path) -> Result<SocketAddr, NfsFrontendError> {
-        let mut matching = MountState::read_all(&self.state_dir)
-            .map_err(|error| NfsFrontendError::State(error.to_string()))?
-            .into_iter()
-            .filter(|state| state.mount_point == mount_point)
-            .filter_map(|state| state.kind.nfs_addr());
-        let persisted = matching.next().ok_or_else(|| {
-            NfsFrontendError::State(format!(
-                "active NFS mount {} has no persisted server address",
-                mount_point.display()
-            ))
-        })?;
-        if matching.next().is_some() {
-            return Err(NfsFrontendError::State(format!(
-                "active NFS mount {} has multiple persisted server addresses",
-                mount_point.display()
-            )));
-        }
+        let persisted = MountState::read_unique(&self.state_dir)
+            .and_then(|state| state.nfs_addr_for(mount_point))
+            .map_err(|error| NfsFrontendError::State(error.to_string()))?;
         if self.bind.port() != 0 && self.bind != persisted {
             return Err(NfsFrontendError::State(format!(
                 "active NFS mount {} is connected to {persisted}, not requested {}",
@@ -119,7 +105,6 @@ pub fn mount_blocking(
     std::fs::create_dir_all(mount_point)?;
     ensure_private_state_dir(&options.state_dir)?;
     let bind = options.bind_for_mount(mount_point)?;
-    sweep_stale_states(&options.state_dir);
 
     // A pinned filehandle generation persists across a restart so a kernel client
     // never sees `NFS4ERR_FHEXPIRED` for a handle it still holds. Off the runner
@@ -152,13 +137,15 @@ pub fn mount_blocking(
         generation,
         options.trace_path.clone(),
     )?;
-    let _state_file = StateFile::write_nfs(mount_point, server.addr(), &options.state_dir)
-        .map_err(|error| match error {
-            StateError::Io(error) => error.into(),
-            error @ (StateError::Json(_) | StateError::UnsupportedVersion(_)) => {
-                NfsFrontendError::State(error.to_string())
-            },
+    let state_file =
+        StateFile::write_nfs(mount_point, server.addr(), &options.state_dir).map_err(|error| {
+            match error {
+                StateError::Io(error) => error.into(),
+                error => NfsFrontendError::State(error.to_string()),
+            }
         })?;
+    MountState::remove_other_files(&options.state_dir, state_file.path())
+        .map_err(|error| NfsFrontendError::State(error.to_string()))?;
 
     // Restart case: the kernel client still holds the mount, so serve the export
     // over the same port without remounting. A first start (or a stale, dead
@@ -473,7 +460,8 @@ pub fn mount_is_omnifs(mount_point: &Path) -> bool {
     })
 }
 
-fn mount_is_active_checked(mount_point: &Path) -> Result<bool, NfsFrontendError> {
+/// Fallible mount-table probe for lifecycle decisions that must fail closed.
+pub fn mount_is_active_checked(mount_point: &Path) -> Result<bool, NfsFrontendError> {
     mount_table_entries()
         .map(|entries| mount_table_contains(&entries, mount_point))
         .map_err(Into::into)
@@ -543,37 +531,6 @@ fn ensure_private_state_dir(state_dir: &Path) -> Result<(), NfsFrontendError> {
         std::fs::create_dir_all(state_dir)?;
     }
     Ok(())
-}
-
-fn sweep_stale_states(state_dir: &Path) {
-    let Ok(entries) = std::fs::read_dir(state_dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !MountState::is_file(&path) {
-            continue;
-        }
-        let Ok(state) = MountState::read_file(&path) else {
-            continue;
-        };
-        if !matches!(state.kind, MountKind::Nfs { .. }) {
-            continue;
-        }
-        if !pid_alive(state.pid) {
-            let _ = std::fs::remove_file(path);
-        }
-    }
-}
-
-fn pid_alive(pid: u32) -> bool {
-    Command::new("kill")
-        .arg("-0")
-        .arg(pid.to_string())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
 }
 
 #[cfg(test)]
@@ -663,6 +620,34 @@ mod tests {
         let mut options = NfsMountOptions::loopback(dir.path().to_path_buf());
         options.persist_filehandles = true;
         assert!(options.bind_for_active_mount(mount).is_err());
+    }
+
+    #[test]
+    fn active_mount_rejects_fuse_or_other_mount_state() {
+        let fuse_dir = tempfile::tempdir().expect("tempdir");
+        let _fuse = StateFile::write_fuse(Path::new("/mnt/omnifs"), fuse_dir.path()).unwrap();
+        let mut options = NfsMountOptions::loopback(fuse_dir.path().to_path_buf());
+        options.persist_filehandles = true;
+        assert!(
+            options
+                .bind_for_active_mount(Path::new("/mnt/omnifs"))
+                .is_err()
+        );
+
+        let other_dir = tempfile::tempdir().expect("tempdir");
+        let _other = StateFile::write_nfs(
+            Path::new("/mnt/other"),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 2049),
+            other_dir.path(),
+        )
+        .unwrap();
+        let mut options = NfsMountOptions::loopback(other_dir.path().to_path_buf());
+        options.persist_filehandles = true;
+        assert!(
+            options
+                .bind_for_active_mount(Path::new("/mnt/omnifs"))
+                .is_err()
+        );
     }
 
     #[test]

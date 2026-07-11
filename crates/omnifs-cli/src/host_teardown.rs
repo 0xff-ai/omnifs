@@ -62,26 +62,11 @@ fn fuse_mount_is_omnifs(_mount_point: &Path) -> bool {
 }
 
 pub(crate) fn teardown_local_frontends(
-    state_dir: &Path,
+    state_root: &Path,
     force: bool,
 ) -> anyhow::Result<TeardownSummary> {
-    let entries = match std::fs::read_dir(state_dir) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(TeardownSummary::default());
-        },
-        Err(error) => return Err(error.into()),
-    };
-    let mut paths = entries
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .map(|entry| entry.path())
-        .filter(|path| MountState::is_file(path))
-        .collect::<Vec<_>>();
-    paths.sort();
-
     let mut summary = TeardownSummary::default();
-    for path in paths {
+    for path in MountState::files_under(state_root)? {
         match MountState::read_file(&path) {
             Ok(state) => summary.tear_down_one(&path, state, force),
             Err(error) => {
@@ -116,5 +101,30 @@ fn remove_state_file(state_file: &Path) {
             "omnifs: failed to remove mount state {}: {error}",
             state_file.display()
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn corrupt_record_does_not_hide_healthy_sibling() {
+        let root = tempfile::tempdir().unwrap();
+        let good_dir = root.path().join("nfs/good");
+        let good = omnifs_mtab::StateFile::write_nfs(
+            &root.path().join("mount"),
+            "127.0.0.1:2049".parse().unwrap(),
+            &good_dir,
+        )
+        .unwrap();
+        let corrupt_dir = root.path().join("fuse/corrupt");
+        std::fs::create_dir_all(&corrupt_dir).unwrap();
+        std::fs::write(corrupt_dir.join("mount-corrupt.json"), b"not json").unwrap();
+
+        let summary = teardown_local_frontends(root.path(), false).unwrap();
+        assert_eq!(summary.swept_orphans, 1);
+        assert_eq!(summary.skipped, 1);
+        assert!(!good.path().exists());
     }
 }

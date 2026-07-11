@@ -73,7 +73,7 @@ pub(crate) async fn teardown(paths: &WorkspaceLayout, force: bool) -> anyhow::Re
     #[cfg(feature = "daemon")]
     let local_found = {
         let summary =
-            crate::host_teardown::teardown_local_frontends(&paths.nfs_state_dir(), force)?;
+            crate::host_teardown::teardown_local_frontends(&paths.frontend_state_root(), force)?;
         if summary.unmounted > 0 {
             anstream::println!("✓ Unmounted {} local frontend(s)", summary.unmounted);
         }

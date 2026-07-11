@@ -25,8 +25,8 @@ pub const CREDENTIALS_FILE: &str = "credentials.json";
 pub const MOUNTS_SUBDIR: &str = "mounts";
 pub const PROVIDERS_SUBDIR: &str = "providers";
 pub const CACHE_SUBDIR: &str = "cache";
-/// Subdirectory of `cache_dir` holding NFS loopback mount-state files.
-pub const NFS_STATE_SUBDIR: &str = "nfs";
+/// Subdirectory of `cache_dir` holding local frontend state.
+pub const FRONTEND_STATE_SUBDIR: &str = "frontends";
 /// Subdirectory of `config_dir` holding the daemon's per-name namespace attach
 /// sockets (`<config_dir>/frontends/<name>.sock`), served to out-of-process
 /// frontend runners.
@@ -113,13 +113,26 @@ impl WorkspaceLayout {
         }
     }
 
-    /// Directory holding NFS loopback mount-state files (`<cache_dir>/nfs`).
+    /// Discoverable parent of all local frontend state directories.
+    pub fn frontend_state_root(&self) -> PathBuf {
+        self.cache_dir.join(FRONTEND_STATE_SUBDIR)
+    }
+
+    /// Stable state directory for one local frontend mount.
     ///
-    /// Single source of this path: the daemon writes state files here (its
-    /// `--nfs-state-dir` default) and the CLI reads them for host-native
-    /// `omnifs down`, so the producer and consumer cannot drift.
-    pub fn nfs_state_dir(&self) -> PathBuf {
-        self.cache_dir.join(NFS_STATE_SUBDIR)
+    /// Each leaf owns its runner discovery record and, for NFS, its persistent
+    /// filehandle table. Isolating leaves prevents two NFS mounts from sharing
+    /// protocol identity.
+    pub fn frontend_state_dir(
+        &self,
+        kind: crate::runtime_record::FrontendKind,
+        mount_point: &Path,
+    ) -> PathBuf {
+        let normalized = mount_point.components().collect::<PathBuf>();
+        let digest = blake3::hash(normalized.as_os_str().as_encoded_bytes()).to_hex();
+        self.frontend_state_root()
+            .join(kind.label())
+            .join(digest.as_str())
     }
 
     /// The daemon-owned runtime record (`<config_dir>/daemon.json`). The daemon

@@ -2,12 +2,15 @@
 
 use std::fmt;
 use std::fs::OpenOptions;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result};
+use omnifs_mtab::{MountKind, MountState};
 use omnifs_workspace::layout::WorkspaceLayout;
+use omnifs_workspace::runtime_record::FrontendKind;
 
 const MOUNT_TIMEOUT: Duration = Duration::from_secs(10);
 const MOUNT_POLL_INTERVAL: Duration = Duration::from_millis(200);
@@ -32,6 +35,23 @@ impl LocalProtocol {
             Self::Fuse => "omnifs-fuse",
             Self::Nfs => "omnifs-nfs",
         }
+    }
+
+    const fn kind(self) -> FrontendKind {
+        match self {
+            Self::Fuse => FrontendKind::Fuse,
+            Self::Nfs => FrontendKind::Nfs,
+        }
+    }
+
+    fn matches_child(self, state: &MountState, mount_point: &Path, pid: u32) -> bool {
+        if state.mount_point != mount_point || state.pid != pid {
+            return false;
+        }
+        matches!(
+            (self, &state.kind),
+            (Self::Fuse, MountKind::Fuse) | (Self::Nfs, MountKind::Nfs { .. })
+        )
     }
 
     fn runner_beside(self, current_exe: &Path) -> Result<PathBuf> {
@@ -88,11 +108,10 @@ impl LocalBackend {
     pub(crate) async fn launch(&self, mount_name: &str) -> Result<()> {
         std::fs::create_dir_all(&self.mount_point)
             .with_context(|| format!("create mount point {}", self.mount_point.display()))?;
-        if omnifs_nfs::mount_is_active(&self.mount_point) {
-            anyhow::bail!(
-                "refusing to start a local frontend: {} is already mounted",
-                self.mount_point.display()
-            );
+        if omnifs_nfs::mount_is_active_checked(&self.mount_point)
+            .with_context(|| format!("inspect mount point {}", self.mount_point.display()))?
+        {
+            self.validate_active_mount_recovery()?;
         }
         std::fs::create_dir_all(&self.paths.cache_dir)
             .with_context(|| format!("create {}", self.paths.cache_dir.display()))?;
@@ -136,10 +155,44 @@ impl LocalBackend {
             .arg("--mount-point")
             .arg(&self.mount_point)
             .arg("--state-dir")
-            .arg(self.paths.nfs_state_dir())
+            .arg(self.state_dir())
             .arg("--attach")
             .arg(self.paths.attach_socket("local"));
         command
+    }
+
+    fn state_dir(&self) -> PathBuf {
+        self.paths
+            .frontend_state_dir(self.protocol.kind(), &self.mount_point)
+    }
+
+    fn validate_active_mount_recovery(&self) -> Result<()> {
+        if self.protocol != LocalProtocol::Nfs || !omnifs_nfs::mount_is_omnifs(&self.mount_point) {
+            anyhow::bail!(
+                "refusing to start a local frontend: {} is already mounted",
+                self.mount_point.display()
+            );
+        }
+        self.persisted_nfs_addr()?;
+        Ok(())
+    }
+
+    fn persisted_nfs_addr(&self) -> Result<SocketAddr> {
+        MountState::read_unique(&self.state_dir())
+            .and_then(|state| state.nfs_addr_for(&self.mount_point))
+            .with_context(|| {
+                format!(
+                    "refusing to recover active NFS mount {} without its unique typed state",
+                    self.mount_point.display()
+                )
+            })
+    }
+
+    fn direct_child_owns_mount(&self, pid: u32) -> bool {
+        MountState::read_unique(&self.state_dir()).is_ok_and(|state| {
+            self.protocol.matches_child(&state, &self.mount_point, pid)
+                && crate::host_teardown::local_mount_is_owned(&state)
+        })
     }
 
     async fn wait_until_mounted(
@@ -207,7 +260,7 @@ impl LocalBackend {
             }
             tokio::time::sleep(MOUNT_POLL_INTERVAL).await;
         }
-        if omnifs_nfs::mount_is_active(&self.mount_point) {
+        if matches!(child.try_wait(), Ok(None)) && self.direct_child_owns_mount(child.id()) {
             let _ = omnifs_mtab::UnmountCommand::forced(
                 omnifs_mtab::Platform::current(),
                 &self.mount_point,
@@ -264,16 +317,75 @@ mod tests {
                 .map(|arg| arg.to_string_lossy().into_owned())
                 .collect::<Vec<_>>();
             assert_eq!(
-                args,
-                [
-                    "--mount-point",
-                    "/home/user/omnifs",
-                    "--state-dir",
-                    "/home/user/.omnifs/cache/nfs",
-                    "--attach",
-                    "/home/user/.omnifs/frontends/local.sock",
-                ]
+                args[0..3],
+                ["--mount-point", "/home/user/omnifs", "--state-dir"]
+            );
+            assert_eq!(Path::new(&args[3]), backend.state_dir());
+            assert_eq!(
+                args[4..],
+                ["--attach", "/home/user/.omnifs/frontends/local.sock"]
             );
         }
+    }
+
+    #[test]
+    fn state_dirs_are_stable_and_isolated_by_protocol_and_mount() {
+        let paths = WorkspaceLayout::under_root(Path::new("/home/user/.omnifs"));
+        let backend = |protocol: LocalProtocol, mount_point: &'static str| LocalBackend {
+            runner: PathBuf::from(protocol.binary_name()),
+            paths: paths.clone(),
+            mount_point: PathBuf::from(mount_point),
+            protocol,
+        };
+        let first = backend(LocalProtocol::Nfs, "/mnt/first");
+        let same = backend(LocalProtocol::Nfs, "/mnt/first");
+        let normalized_same = backend(LocalProtocol::Nfs, "/mnt/./first/");
+        let other = backend(LocalProtocol::Nfs, "/mnt/other");
+        let fuse = backend(LocalProtocol::Fuse, "/mnt/first");
+
+        assert_eq!(first.state_dir(), same.state_dir());
+        assert_eq!(first.state_dir(), normalized_same.state_dir());
+        assert_ne!(first.state_dir(), other.state_dir());
+        assert_ne!(first.state_dir(), fuse.state_dir());
+        assert!(first.state_dir().starts_with(paths.frontend_state_root()));
+    }
+
+    #[test]
+    fn nfs_recovery_requires_unique_matching_nfs_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = WorkspaceLayout::under_root(tmp.path());
+        let backend = LocalBackend {
+            runner: PathBuf::from("omnifs-nfs"),
+            paths,
+            mount_point: PathBuf::from("/mnt/omnifs"),
+            protocol: LocalProtocol::Nfs,
+        };
+        let addr: SocketAddr = "127.0.0.1:2049".parse().unwrap();
+        let state =
+            omnifs_mtab::StateFile::write_nfs(&backend.mount_point, addr, &backend.state_dir())
+                .unwrap();
+        assert_eq!(backend.persisted_nfs_addr().unwrap(), addr);
+
+        drop(state);
+        let wrong =
+            omnifs_mtab::StateFile::write_fuse(&backend.mount_point, &backend.state_dir()).unwrap();
+        assert!(backend.persisted_nfs_addr().is_err());
+        drop(wrong);
+    }
+
+    #[test]
+    fn rollback_ownership_requires_the_direct_child_and_typed_mount() {
+        let state = MountState {
+            version: MountState::VERSION,
+            mount_point: PathBuf::from("/mnt/omnifs"),
+            pid: 42,
+            kind: MountKind::Nfs {
+                addr: "127.0.0.1:2049".parse().unwrap(),
+            },
+        };
+        assert!(LocalProtocol::Nfs.matches_child(&state, Path::new("/mnt/omnifs"), 42));
+        assert!(!LocalProtocol::Nfs.matches_child(&state, Path::new("/mnt/omnifs"), 43));
+        assert!(!LocalProtocol::Fuse.matches_child(&state, Path::new("/mnt/omnifs"), 42));
+        assert!(!LocalProtocol::Nfs.matches_child(&state, Path::new("/mnt/other"), 42));
     }
 }

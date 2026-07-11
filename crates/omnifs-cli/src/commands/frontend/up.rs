@@ -227,16 +227,119 @@ async fn wait_for_mount(
     let probe_path = format!("{GUEST_MOUNT}/{mount_name}");
     anstream::eprintln!("Waiting for {probe_path} inside the frontend");
     let deadline = tokio::time::Instant::now() + timeout;
-    loop {
-        if backend.mount_ready(&probe_path).await.unwrap_or(false) {
-            return Ok(());
+    let failure = loop {
+        match backend.mount_ready(&probe_path).await {
+            Ok(true) => return Ok(()),
+            Ok(false) => {},
+            Err(error) => break error.context(format!("probe {probe_path} readiness")),
         }
         if tokio::time::Instant::now() >= deadline {
-            anyhow::bail!(
+            break anyhow::anyhow!(
                 "{probe_path} did not appear inside the frontend within {}s",
                 timeout.as_secs()
             );
         }
         tokio::time::sleep(MOUNT_PROBE_INTERVAL).await;
+    };
+
+    match backend.tear_down().await {
+        Ok(()) => Err(failure),
+        Err(cleanup) => Err(failure.context(format!("frontend cleanup also failed: {cleanup:#}"))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::process::Command;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+
+    enum Probe {
+        Pending,
+        Error,
+    }
+
+    struct FakeBackend {
+        probe: Probe,
+        cleanup_fails: bool,
+        cleanup_calls: AtomicUsize,
+    }
+
+    impl FakeBackend {
+        fn new(probe: Probe, cleanup_fails: bool) -> Self {
+            Self {
+                probe,
+                cleanup_fails,
+                cleanup_calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl FrontendBackend for FakeBackend {
+        async fn launch(&self, _spec: &FrontendLaunchSpec) -> anyhow::Result<()> {
+            unreachable!()
+        }
+
+        async fn mount_ready(&self, _path: &str) -> anyhow::Result<bool> {
+            match self.probe {
+                Probe::Pending => Ok(false),
+                Probe::Error => anyhow::bail!("readiness probe failed"),
+            }
+        }
+
+        async fn is_running(&self) -> anyhow::Result<Option<bool>> {
+            unreachable!()
+        }
+
+        async fn tear_down(&self) -> anyhow::Result<()> {
+            self.cleanup_calls.fetch_add(1, Ordering::SeqCst);
+            if self.cleanup_fails {
+                anyhow::bail!("cleanup failed");
+            }
+            Ok(())
+        }
+
+        fn shell_command(&self, _shell_override: Option<&str>, _trailing: &[String]) -> Command {
+            unreachable!()
+        }
+    }
+
+    #[tokio::test]
+    async fn probe_error_tears_down_launched_frontend() {
+        let backend = FakeBackend::new(Probe::Error, false);
+
+        let error = wait_for_mount(&backend, "github", Duration::ZERO)
+            .await
+            .unwrap_err();
+
+        assert_eq!(backend.cleanup_calls.load(Ordering::SeqCst), 1);
+        assert!(format!("{error:#}").contains("readiness probe failed"));
+    }
+
+    #[tokio::test]
+    async fn timeout_tears_down_launched_frontend() {
+        let backend = FakeBackend::new(Probe::Pending, false);
+
+        let error = wait_for_mount(&backend, "github", Duration::ZERO)
+            .await
+            .unwrap_err();
+
+        assert_eq!(backend.cleanup_calls.load(Ordering::SeqCst), 1);
+        assert!(format!("{error:#}").contains("did not appear"));
+    }
+
+    #[tokio::test]
+    async fn cleanup_failure_keeps_readiness_failure() {
+        let backend = FakeBackend::new(Probe::Error, true);
+
+        let error = wait_for_mount(&backend, "github", Duration::ZERO)
+            .await
+            .unwrap_err();
+        let message = format!("{error:#}");
+
+        assert_eq!(backend.cleanup_calls.load(Ordering::SeqCst), 1);
+        assert!(message.contains("readiness probe failed"));
+        assert!(message.contains("frontend cleanup also failed: cleanup failed"));
     }
 }

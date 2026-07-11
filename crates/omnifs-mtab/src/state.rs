@@ -18,6 +18,12 @@ pub enum StateError {
     Json(#[from] serde_json::Error),
     #[error("unsupported mount state version {0}")]
     UnsupportedVersion(u64),
+    #[error("expected one mount state record, found {0}")]
+    RecordCount(usize),
+    #[error("mount state belongs to {actual}, not {expected}")]
+    MountMismatch { actual: PathBuf, expected: PathBuf },
+    #[error("mount state is not nfs")]
+    KindMismatch,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -25,15 +31,6 @@ pub enum StateError {
 pub enum MountKind {
     Fuse,
     Nfs { addr: SocketAddr },
-}
-
-impl MountKind {
-    pub fn nfs_addr(&self) -> Option<SocketAddr> {
-        match self {
-            Self::Nfs { addr } => Some(*addr),
-            Self::Fuse => None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -77,6 +74,69 @@ impl MountState {
             .into_iter()
             .map(|path| Self::read_file(&path))
             .collect()
+    }
+
+    /// Read the sole runner record in one per-mount state directory.
+    pub fn read_unique(dir: &Path) -> Result<Self, StateError> {
+        let mut states = Self::read_all(dir)?;
+        if states.len() != 1 {
+            return Err(StateError::RecordCount(states.len()));
+        }
+        Ok(states.remove(0))
+    }
+
+    /// Recover the loopback address only when this record belongs to the
+    /// expected NFS mount.
+    pub fn nfs_addr_for(&self, mount_point: &Path) -> Result<SocketAddr, StateError> {
+        if self.mount_point != mount_point {
+            return Err(StateError::MountMismatch {
+                actual: self.mount_point.clone(),
+                expected: mount_point.to_path_buf(),
+            });
+        }
+        match &self.kind {
+            MountKind::Nfs { addr } => Ok(*addr),
+            MountKind::Fuse => Err(StateError::KindMismatch),
+        }
+    }
+
+    /// Find runner records below the discoverable frontend-state parent.
+    /// Corrupt records remain in the returned list so callers can report each
+    /// one independently with [`MountState::read_file`].
+    pub fn files_under(root: &Path) -> Result<Vec<PathBuf>, StateError> {
+        let mut pending = vec![root.to_path_buf()];
+        let mut paths = Vec::new();
+        while let Some(dir) = pending.pop() {
+            let entries = match std::fs::read_dir(&dir) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == io::ErrorKind::NotFound && dir == root => {
+                    return Ok(Vec::new());
+                },
+                Err(error) => return Err(error.into()),
+            };
+            for entry in entries {
+                let entry = entry?;
+                let path = entry.path();
+                if entry.file_type()?.is_dir() {
+                    pending.push(path);
+                } else if Self::is_file(&path) {
+                    paths.push(path);
+                }
+            }
+        }
+        paths.sort();
+        Ok(paths)
+    }
+
+    /// Remove discovery records in one state leaf except the live guard.
+    pub fn remove_other_files(dir: &Path, keep: &Path) -> Result<(), StateError> {
+        for entry in std::fs::read_dir(dir)? {
+            let path = entry?.path();
+            if path != keep && Self::is_file(&path) {
+                std::fs::remove_file(path)?;
+            }
+        }
+        Ok(())
     }
 
     pub fn read_file(path: &Path) -> Result<Self, StateError> {
@@ -227,7 +287,7 @@ mod tests {
         let states = MountState::read_all(&dir).expect("mount states");
         assert_eq!(states.len(), 1);
         assert_eq!(states[0].mount_point, PathBuf::from("/mnt/omnifs"));
-        assert_eq!(states[0].kind.nfs_addr(), Some(addr));
+        assert_eq!(states[0].kind, MountKind::Nfs { addr });
 
         #[cfg(unix)]
         {
@@ -255,7 +315,6 @@ mod tests {
 
         assert_eq!(states.len(), 1);
         assert_eq!(states[0].kind, MountKind::Fuse);
-        assert_eq!(states[0].kind.nfs_addr(), None);
 
         drop(guard);
         let _ = std::fs::remove_dir_all(dir);
@@ -284,6 +343,79 @@ mod tests {
             MountState::read_all(&dir),
             Err(super::StateError::UnsupportedVersion(1))
         ));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn unique_nfs_state_rejects_wrong_kind_mount_and_count() {
+        let root = temp_state_dir();
+        let first = root.join("first");
+        let second = root.join("second");
+        let fuse = StateFile::write_fuse(Path::new("/mnt/fuse"), &first).unwrap();
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 2049);
+        let nfs = StateFile::write_nfs(Path::new("/mnt/nfs"), addr, &second).unwrap();
+
+        let fuse_state = MountState::read_unique(&first).unwrap();
+        assert!(matches!(
+            fuse_state.nfs_addr_for(Path::new("/mnt/fuse")),
+            Err(super::StateError::KindMismatch)
+        ));
+        let nfs_state = MountState::read_unique(&second).unwrap();
+        assert!(matches!(
+            nfs_state.nfs_addr_for(Path::new("/mnt/other")),
+            Err(super::StateError::MountMismatch { .. })
+        ));
+        assert_eq!(nfs_state.nfs_addr_for(Path::new("/mnt/nfs")).unwrap(), addr);
+        assert!(matches!(
+            MountState::read_unique(&root),
+            Err(super::StateError::RecordCount(0))
+        ));
+
+        drop((fuse, nfs));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn files_under_discovers_nested_records_without_parsing_them() {
+        let root = temp_state_dir();
+        let good_dir = root.join("nfs/good");
+        let good = StateFile::write_nfs(
+            Path::new("/mnt/nfs"),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 2049),
+            &good_dir,
+        )
+        .unwrap();
+        let corrupt_dir = root.join("fuse/corrupt");
+        std::fs::create_dir_all(&corrupt_dir).unwrap();
+        let corrupt = corrupt_dir.join("mount-corrupt.json");
+        std::fs::write(&corrupt, b"not json").unwrap();
+
+        assert_eq!(
+            MountState::files_under(&root).unwrap(),
+            vec![corrupt, good.path().to_path_buf()]
+        );
+
+        drop(good);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn replacement_record_removes_every_other_runner_record() {
+        let dir = temp_state_dir();
+        let stale = dir.join("mount-stale.json");
+        std::fs::write(&stale, b"stale").unwrap();
+        let live = StateFile::write_nfs(
+            Path::new("/mnt/nfs"),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 2049),
+            &dir,
+        )
+        .unwrap();
+
+        MountState::remove_other_files(&dir, live.path()).unwrap();
+        assert!(!stale.exists());
+        assert!(live.path().exists());
+
+        drop(live);
         let _ = std::fs::remove_dir_all(dir);
     }
 }

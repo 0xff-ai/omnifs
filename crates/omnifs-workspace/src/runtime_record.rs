@@ -103,6 +103,16 @@ pub enum FrontendKind {
     Nfs,
 }
 
+impl FrontendKind {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Fuse => "fuse",
+            Self::Nfs => "nfs",
+        }
+    }
+}
+
 /// The persisted runtime record. Stored as JSON at `<config_dir>/daemon.json`.
 ///
 /// `deny_unknown_fields` cannot be combined with the flattened `backend`
