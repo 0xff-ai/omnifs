@@ -3,8 +3,8 @@
 //! [`Namespace`] is the whole contract a frontend needs to project a mount: name
 //! resolution, attributes, directory paging, byte reads, and an invalidation
 //! event stream. Every type crossing this boundary is plain data (serde-friendly,
-//! no engine internals), so in-process and wire-attached frontends both hold a
-//! `dyn Namespace` and nothing else.
+//! no engine internals), so a wire-attached frontend (the only kind) holds a
+//! `dyn Namespace` proxy and nothing else of the engine.
 //!
 //! With the `runtime` feature, the in-engine implementation over the projection
 //! tree owns the
@@ -74,8 +74,8 @@ pub struct Epoch(pub u64);
 /// variant keeps the wire shape complete.
 /// `Subtree` is a local-directory handoff (a resolved treeref clone/archive).
 /// The consumer can serve `root` only when that path is accessible in its
-/// filesystem namespace; virtualized frontends cannot dereference a host-local
-/// path.
+/// filesystem namespace; containerized or guest frontends (docker, krunkit)
+/// cannot dereference a host-local path.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EntryKind {
     Directory,
@@ -187,8 +187,8 @@ pub struct ReadAnswer {
     pub attrs: Attrs,
 }
 
-/// A namespace event. Plain data so in-process and wire-attached frontends can
-/// consume the same stream.
+/// A namespace event. Plain data so wire-attached frontends can consume the
+/// same stream.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NsEvent {
     /// The subtree rooted at `node` may have changed; drop protocol-cached state

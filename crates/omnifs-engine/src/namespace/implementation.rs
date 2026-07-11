@@ -579,8 +579,9 @@ impl TreeNamespace {
                 let attrs = self.attrs_for_read(id, EntryKind::from_node(node), attrs.as_ref());
                 Ok(ReadAnswer { bytes, eof, attrs })
             },
-            // A subtree node is a directory; its files are served by the
-            // in-process frontend from the backing dir, never through this read.
+            // A subtree node is a directory; its files are served directly by the
+            // projection tree from the backing directory, never through this read
+            // path (provider-backed content only).
             ReadResult::Subtree(_) => Err(NsError::IsDirectory),
         }
     }
@@ -694,8 +695,8 @@ impl TreeNamespace {
             let ctx = RequestCtx { trace };
             let listing = match self.tree.list(&node, tree_cursor, &ctx).await? {
                 ListOutcome::Listing(listing) => listing,
-                // A subtree node's children are served by the in-process
-                // frontend from the backing dir; this listing path does not
+                // A subtree node's children are served directly by the projection
+                // tree from the backing directory; this listing path does not
                 // enumerate them.
                 ListOutcome::Subtree(_) => return Err(NsError::NotDirectory),
             };

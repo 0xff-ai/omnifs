@@ -6,7 +6,7 @@
 //!
 //! - **Lane 1 (Unix).** `omnifs-nfs` attaches to `frontends/local.sock`.
 //! - **Lane 2 (TCP).** The same runner attaches to the token-guarded loopback
-//!   listener used by virtualized frontends.
+//!   listener used by Docker-delivered frontends.
 //!
 //! The lanes run sequentially, never two mounts at once, under one held NFS
 //! serial lock so no other test process interleaves a mount between them. Lane 1

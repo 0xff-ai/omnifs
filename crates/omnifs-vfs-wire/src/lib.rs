@@ -65,18 +65,15 @@ pub use beacon::{ReadyPortError, resolve_ready_vsock_port};
 pub use client::{AttachTarget, AttachTargetError, WireNamespace};
 pub use server::{serve_connection, serve_listener, serve_listener_tcp};
 
-/// The Omnifs VFS wire protocol version. Bumped on any incompatible change to
-/// the frame payloads or handshake. A client and server that disagree refuse
+/// The Omnifs VFS wire protocol version. A client and server that disagree refuse
 /// to serve: there is no version negotiation, so v3 rejects a v2 (or lower)
-/// peer outright. Bumped 2 to 3 to carry [`FrontendIdentity`] in `Hello`.
+/// peer outright with a named reason.
 pub const PROTOCOL: u32 = 3;
 
-/// Identity a virtualized frontend presents in its handshake `Hello`, naming
-/// its own kind and guest-side mount point so the daemon's frontend registry
-/// can report it. Display-only for the host: the host owns trust and derives
-/// the *delivery* mechanism (native/docker/krunkit/external) from which
-/// listener the connection arrived on, never from anything the guest claims
-/// here.
+/// Identity a connecting frontend presents in its handshake `Hello`, naming
+/// its own kind and guest-side mount point (display-only). The daemon's
+/// frontend registry reports it. The host derives delivery (local/docker/krunkit)
+/// from the listener that accepted the connection, never from the guest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FrontendIdentity {
     pub kind: FrontendKind,
@@ -85,10 +82,9 @@ pub struct FrontendIdentity {
     pub mount_point: PathBuf,
 }
 
-/// The protocol a virtualized frontend renders over its wire-attached
-/// namespace. Mirrors the two shipped renderers; unrelated to
-/// [`omnifs_api::FsType`], which describes a native, in-process frontend's OS
-/// mount table entry.
+/// The protocol kind a frontend renders (FUSE or NFS). Unrelated to
+/// [`omnifs_api::FsType`], which is the OS-visible filesystem type reported
+/// for a live attachment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FrontendKind {
     Fuse,
@@ -96,9 +92,8 @@ pub enum FrontendKind {
 }
 
 /// Observes the attach lifecycle of connections on a wire listener. A server
-/// that wants to track which virtualized frontends are currently attached
-/// (the daemon's frontend registry) passes one in; a bare test server passes
-/// `None`.
+/// that wants to track which frontends are currently attached (the daemon's
+/// frontend registry) passes one in; a bare test server passes `None`.
 pub trait AttachObserver: Send + Sync {
     /// Called once, right after a connection completes its handshake.
     /// Returns an opaque id that [`Self::detached`] receives back when that

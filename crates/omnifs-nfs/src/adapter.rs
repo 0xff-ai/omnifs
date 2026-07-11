@@ -155,15 +155,14 @@ pub struct Export {
     /// the `noac` mount re-stats, sees growth, and reads the new bytes.
     grown_sizes: DashMap<NodeId, u64>,
     /// The filehandle-table persister, present only on the restartable
-    /// out-of-process runner path. `None` for the in-process daemon frontend,
-    /// whose mount dies with the process, so persistence would be pointless.
+    /// out-of-process NFS runner path. `None` for FUSE (whose inode table lives
+    /// with the mount process) and unit tests.
     persist: Option<Persister>,
 }
 
 impl Export {
-    /// Build an export over `namespace` with no filehandle persistence: the
-    /// in-process daemon frontend and unit tests, whose mount dies with the
-    /// process.
+    /// Build an export over `namespace` with no filehandle persistence: used by
+    /// FUSE (inodes die with the process) and unit tests.
     pub fn new(rt: Handle, namespace: Arc<dyn Namespace>) -> Self {
         Self::build(rt, namespace, None)
     }

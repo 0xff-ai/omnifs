@@ -4,7 +4,7 @@ Reference for the contributor workflow, build and validation commands, runtime d
 
 ## Getting started
 
-The primary contributor workflow is `just dev`, which runs `scripts/dev.ts`. The script checks prerequisites, builds provider WASM into a content-addressed provider-store bundle, builds the omnifs CLI natively, starts a host-native daemon (`omnifs up --no-frontend`) with dev mounts and credentials rendered into `~/.omnifs-dev`, attaches the Docker-hosted FUSE frontend (`omnifs frontend up`) to it, and opens a shell inside that frontend container at `/omnifs`.
+The primary contributor workflow is `just dev`, which runs `scripts/dev.ts`. The script checks prerequisites, builds provider WASM into a content-addressed provider-store bundle, builds the omnifs CLI natively, starts a host-native daemon (`omnifs up --no-frontend`) with dev mounts and credentials rendered into `~/.omnifs-dev`, launches the Docker FUSE frontend (via driver), and opens a shell inside that frontend container at `/omnifs`.
 
 ```bash
 just dev            # build providers and the CLI, start the native daemon, attach the frontend, open /omnifs

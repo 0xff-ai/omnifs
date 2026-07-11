@@ -12,7 +12,7 @@ omnifs projects external systems into local filesystem paths. GitHub, DNS, arXiv
 
 The goal is simple: if a tool can read files, it can read the outside world without learning another SDK, auth flow, pagination model, or response schema.
 
-> Alpha status: omnifs is real and usable, but the read surface is still early. The daemon runs natively on Linux and macOS. Linux uses FUSE by default; macOS uses read-only NFSv4 loopback. An optional virtualized FUSE frontend, delivered through Docker or krunkit, provides an isolated `/omnifs` shell without owning providers or credentials.
+> Alpha status: omnifs is real and usable, but the read surface is still early. The daemon runs natively on Linux and macOS. Frontends are declared via `[[frontends]]` (or platform defaults): Linux defaults to local FUSE; macOS defaults to local NFS plus a Docker FUSE frontend; other hosts default to local NFS. Docker and krunkit deliver FUSE only. Frontends attach over the wire protocol and carry no providers or credentials.
 
 <p align="center">
   <img src="https://github.com/user-attachments/assets/b9598ece-e772-4fdc-b5c7-8ad5ba26d39d" alt="omnifs demo" width="960">
@@ -30,9 +30,7 @@ omnifs up
 omnifs shell
 ```
 
-`omnifs setup` prepares the workspace and mount point. `omnifs init <provider>` creates a self-contained mount spec and completes any required authentication. `omnifs up` starts the host-native daemon.
-
-`omnifs frontend up` is optional; it starts the selected virtualized FUSE frontend (`docker` by default). `omnifs shell` prefers that frontend when attached and otherwise opens at the native mount. Native mounts remain available without either command.
+`omnifs setup` prepares the workspace and mount point. `omnifs init <provider>` creates a self-contained mount spec and completes any required authentication. `omnifs up` starts the host-native daemon and launches every effective frontend from the `[[frontends]]` config (or platform defaults). `--no-frontend` starts the daemon only. `omnifs shell` prefers a Docker frontend when present, then krunkit, then a local mount.
 
 ---
 
@@ -201,7 +199,7 @@ The current surface is read-only. Write-back is designed around explicit staged 
 
 ## How it works
 
-The host-native daemon owns providers, credentials, caching, callouts, and one shared namespace. Native FUSE on Linux, NFSv4 loopback on macOS, and optional virtualized FUSE frontends all expose that same tree.
+The host-native daemon owns providers, credentials, caching, callouts, and one shared namespace. FUSE and NFS frontends (local processes, Docker containers, or krunkit guests) all expose that same tree via the wire protocol.
 
 ```text
                                                                   +----------------+
@@ -247,7 +245,7 @@ tail -n 80 ~/.omnifs-dev/cache/daemon.log
 
 ### ✅ Working today
 
-- Native FUSE on Linux, read-only NFSv4 loopback on macOS, and an optional Docker- or krunkit-hosted FUSE frontend for `omnifs shell`.
+- FUSE (Linux) and read-only NFSv4 loopback (macOS) frontends, delivered by local, Docker, or krunkit drivers; declared through `[[frontends]]` or platform defaults.
 - A host CLI on npm that handles setup, auth, lifecycle, logs, status, and inspection.
 - Sandboxed Wasm providers that can only reach the network, Git, sockets, and files the host hands them.
 - Host-held credentials, layered caching, and `omnifs inspect` for a live view of what the runtime is doing.
@@ -268,7 +266,7 @@ tail -n 80 ~/.omnifs-dev/cache/daemon.log
 - Many more providers, including object stores, Postgres, Redis, Slack, Discord, Google Drive, Gmail, Notion, Stripe, Cloudflare, Vercel, and Telegram.
 - A real provider ecosystem: standalone packaging, a community catalog, authoring docs, and sidecars for providers that need native dependencies.
 - Additional mount surfaces beyond Linux FUSE and macOS NFSv4, plus passthrough for host-backed subtrees.
-- Easier install and slimmer packaging: Homebrew or shell installers and smaller virtualized frontend artifacts.
+- Easier install and slimmer packaging: Homebrew or shell installers and smaller frontend images for docker and krunkit delivery.
 - Going further than warm cache reads: offline snapshots, background indexing, semantic search, and DNS prefetch.
 - Trust and safety: signed provider manifests, tighter sandboxing for host-run tools, and metered filesystem access.
 

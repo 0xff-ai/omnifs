@@ -47,13 +47,13 @@ macOS host-native integration uses read-only NFSv4.0 loopback. NFS is a frontend
 
 Keep NFS filehandles, stateids, leases, and NFS protocol errors in `omnifs-nfs`. Preserve read-only behavior for mutation operations. Keep macOS mount readiness and teardown behavior in the NFS/CLI path.
 
-The slim `omnifs-nfs` runner attaches through the Omnifs VFS wire protocol. Its state directory owns both mount discovery records and the persistent filehandle table; an active-mount restart must reuse the recorded server address, never silently bind a new port and skip remounting.
+The slim `omnifs-nfs` runner attaches through the Omnifs VFS wire protocol. Mount discovery records and the persistent filehandle table live under per-mount state leaves (`cache/frontends/<kind>/<blake3-of-mount-path>`); an active-mount restart must reuse the recorded server address for that leaf, never silently bind a new port and skip remounting. Corrupt leaves degrade individually.
 
 ### Mount-table mechanics
 
 Keep `/proc/mounts` parsing, NFS mount state-file schema/IO, and shared platform unmount command construction in `omnifs-mtab`. Frontends and lifecycle code call that crate instead of carrying duplicate parsers, state versions, or unmount argv builders.
 
-The `omnifs-mtab` state file is mount *discovery and teardown* state (mount point, address, pid), shared by frontend runners and the CLI. The NFS filehandle-identity table (`omnifs-nfs/src/persist.rs`, persisted so a restarted out-of-process frontend decodes handles a kernel client still holds) is *protocol identity*, not mount discovery, so it stays in `omnifs-nfs` with the filehandles, stateids, and inode table. It lands in the same NFS state directory next to the mtab mount-state files and mirrors their discipline (version field, unknown version is an error, atomic write, 0600 mode), but its schema and IO are NFS-crate-owned.
+The `omnifs-mtab` state files under the per-mount state leaf are mount *discovery and teardown* state (mount point, address, pid), shared by frontend runners and the CLI. The NFS filehandle-identity table (`omnifs-nfs/src/persist.rs`, persisted so a restarted out-of-process frontend decodes handles a kernel client still holds) is *protocol identity*, not mount discovery, so it stays in `omnifs-nfs` with the filehandles, stateids, and inode table. It lives in the same per-mount leaf (`cache/frontends/nfs/<hash>`) alongside the mtab files and mirrors their discipline (version field, unknown version is an error, atomic write, 0600 mode), but its schema and IO are NFS-crate-owned. Discovery records degrade individually; healthy siblings are never hidden.
 
 ### NFS deferral and `NFS4ERR_DELAY`
 

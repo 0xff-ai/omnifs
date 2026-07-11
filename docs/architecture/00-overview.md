@@ -67,21 +67,13 @@ Unknown and non-zero sizes use truthful sentinel behavior until exact size is le
 
 ## Frontends
 
-FUSE and NFS are protocol adapters over the same projected tree.
+FUSE and NFS are protocol adapters over the same projected tree. Every frontend is a separate slim runner binary (`omnifs-fuse` for FUSE, `omnifs-nfs` for NFSv4 loopback) that contains protocol mechanics only and attaches to the daemon over the Omnifs VFS wire protocol. The CLI owns launch and teardown through drivers (`local`, `docker`, `krunkit`); the daemon is only a namespace server and attachment registry and never mounts or supervises a frontend.
 
-FUSE is the Linux frontend, including native Linux and the optional Docker-hosted out-of-process frontend (`omnifs frontend up`). It owns inode tables, kernel notifications, mount/unmount mechanics, and FUSE reply construction.
-
-NFSv4.0 loopback is the macOS host-native frontend. It is read-only today and owns filehandles, stateids, leases, NFS protocol errors, mount state, and macOS mount readiness/teardown.
+FUSE owns inode tables, kernel notifications, mount/unmount mechanics, and FUSE reply construction. NFSv4.0 loopback (macOS host-native) owns filehandles, stateids, leases, NFS protocol errors, mount readiness, and teardown. Mount discovery and NFS filehandle state live under per-mount leaves under `cache/frontends/<kind>/<hash>`.
 
 Neither frontend owns projection semantics, provider WIT calls, cache schema, root enumeration, learned-size rules, preload policy, inline-byte policy, or negative lookup policy.
 
-An out-of-process frontend consumes the same `omnifs_engine::Namespace` through
-the Omnifs VFS wire protocol. `omnifs-engine` remains the semantic owner;
-`omnifs-vfs-wire` owns postcard serialization, framing, the handshake, attach
-target resolution and reconnect, readiness signaling, and its client-side wire
-cache. Unix sockets, token-authenticated TCP, and vsock are attach transports
-for this one internal protocol. The VFS wire protocol is separate from the
-provider WIT contract and does not define another projection model.
+A frontend (always out-of-process) consumes the same `omnifs_engine::Namespace` through the Omnifs VFS wire protocol. `omnifs-engine` remains the semantic owner; `omnifs-vfs-wire` owns postcard serialization, framing, the handshake, attach target resolution and reconnect, readiness signaling, and its client-side wire cache. Unix sockets (local), token-authenticated TCP (docker), and vsock (krunkit) are attach transports for this one internal protocol. The VFS wire protocol is separate from the provider WIT contract and does not define another projection model. Delivery is labeled by listener ownership at the daemon (UDS local, TCP docker, vsock krunkit); the guest never self-reports delivery.
 
 ## Control plane
 
@@ -89,7 +81,7 @@ There is one `omnifs` binary. The runtime loop lives behind hidden `omnifs daemo
 
 Mount delivery uses the control API while a compatible daemon is running and the on-disk registry while it is not. Online create, update, and delete requests go through the daemon; offline changes write specs under `mounts/`, and startup or `/v1/reconcile` converges them. New non-secret interactions should prefer REST API extensions over new direct workspace coupling.
 
-The daemon has one runtime mode: host-native. Docker delivers only the optional FUSE frontend, attached to the host-native daemon; it is not a daemon runtime mode. Contributor dev sessions run through `scripts/dev.ts`, which writes a dedicated `~/.omnifs-dev` home and starts the daemon on the host directly.
+The daemon has one runtime mode: host-native. It is a pure namespace server and attachment registry. Docker and krunkit deliver only FUSE frontends (as separate processes); they are not daemon runtime modes. Contributor dev sessions run through `scripts/dev.ts`, which writes a dedicated `~/.omnifs-dev` home and starts the daemon on the host directly.
 
 ## Auth and sandbox
 
