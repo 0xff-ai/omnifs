@@ -3,6 +3,7 @@
 use cliclack::{Theme, ThemeState};
 use std::fmt::Write as _;
 
+use super::consent::{Plan, Receipt};
 use super::event::{Render, UiEvent};
 use super::report::Row;
 
@@ -123,6 +124,17 @@ impl Session {
         });
     }
 
+    /// Emit one destructive-operation preview. The same [`Plan`] is later
+    /// passed to [`Self::receipt`], preserving row identity across the rail.
+    pub(crate) fn plan(&mut self, plan: &Plan) {
+        self.renderer.event(&plan.event());
+    }
+
+    /// Emit the settled receipt for a previously displayed plan.
+    pub(crate) fn receipt(&mut self, receipt: &Receipt) {
+        self.renderer.event(&receipt.event());
+    }
+
     pub(crate) fn row(&mut self, row: Row) {
         self.renderer.event(&UiEvent::RowSettled {
             glyph: row.glyph,
@@ -161,11 +173,30 @@ impl Render for RailRenderer {
             UiEvent::PhaseStarted { title, .. } => {
                 let _ = cliclack::log::step(title);
             },
+            UiEvent::Plan {
+                rows, remove, keep, ..
+            } => {
+                let _ = cliclack::log::step("plan");
+                for row in rows {
+                    let rendered = row.render_plan().render();
+                    let _ = cliclack::log::remark(rendered.trim_start());
+                }
+                let _ = cliclack::log::remark(super::style::dim(format!(
+                    "{remove} to remove, {keep} kept"
+                )));
+            },
             UiEvent::RowSettled {
                 glyph, key, value, ..
             } => {
                 let row = Row::new(*glyph, key.clone(), value.clone()).render();
                 let _ = cliclack::log::remark(row.trim_start());
+            },
+            UiEvent::Receipt { rows, .. } => {
+                let _ = cliclack::log::step("apply");
+                for row in rows {
+                    let rendered = row.render_receipt().render();
+                    let _ = cliclack::log::remark(rendered.trim_start());
+                }
             },
             UiEvent::Outro { message } => {
                 let _ = cliclack::outro(message);

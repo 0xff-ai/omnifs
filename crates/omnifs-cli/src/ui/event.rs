@@ -11,8 +11,10 @@
 // macros everywhere else.
 #![allow(clippy::disallowed_macros, clippy::print_stderr)]
 
+use super::consent::{Outcome, Row as ConsentRow};
 use super::report::Row;
 use super::style::{self, Glyph};
+use serde::Serialize;
 use std::time::Duration;
 
 /// One thing that happened, described so any renderer can present it. Narration
@@ -22,12 +24,21 @@ use std::time::Duration;
 // construct every variant and read every field; the flat ledger built here
 // consumes the subset it needs today.
 #[allow(dead_code)]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum UiEvent {
     /// Explanatory prose inside a command transcript.
     Narration { message: String },
     /// A titled block began (`Frontends (2)`), rendered as a heading.
     PhaseStarted { title: String, count: Option<usize> },
+    /// A destructive-operation preview. These rows are reused verbatim by the
+    /// receipt event, with only their settled glyph/value changing.
+    Plan {
+        title: String,
+        rows: Vec<ConsentRow>,
+        remove: usize,
+        keep: usize,
+    },
     /// A row reached its final state: the permanent transcript record.
     RowSettled {
         glyph: Glyph,
@@ -36,6 +47,8 @@ pub(crate) enum UiEvent {
         fix: Option<String>,
         duration: Option<Duration>,
     },
+    /// Settled rows for a previously emitted [`UiEvent::Plan`].
+    Receipt { title: String, rows: Vec<Outcome> },
     /// A transient progress tick. The flat ledger paints its own in-place
     /// spinner and ignores this; an NDJSON renderer forwards it.
     Progress { key: String, message: String },
@@ -50,7 +63,8 @@ pub(crate) enum UiEvent {
     Outro { message: String },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum PromptAnswer {
     Visible(String),
     Secret,
@@ -81,6 +95,19 @@ impl Render for LedgerRenderer {
                 };
                 anstream::eprintln!("{}", style::bold(heading));
             },
+            UiEvent::Plan {
+                title,
+                rows,
+                remove,
+                keep,
+            } => {
+                anstream::eprintln!();
+                anstream::eprintln!("{}", style::bold(title));
+                for row in rows {
+                    anstream::eprintln!("{}", row.render_plan().render());
+                }
+                anstream::eprintln!("{}", style::dim(format!("{remove} to remove, {keep} kept")));
+            },
             UiEvent::RowSettled {
                 glyph,
                 key,
@@ -97,6 +124,13 @@ impl Render for LedgerRenderer {
                 };
                 let row = Row::new(*glyph, key.clone(), value);
                 anstream::eprintln!("{}", row.render());
+            },
+            UiEvent::Receipt { title, rows } => {
+                anstream::eprintln!();
+                anstream::eprintln!("{}", style::bold(title));
+                for row in rows {
+                    anstream::eprintln!("{}", row.render_receipt().render());
+                }
             },
             UiEvent::Progress { .. } | UiEvent::PromptShown { .. } => {},
             UiEvent::PromptAnswered { question, answer } => {

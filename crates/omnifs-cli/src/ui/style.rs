@@ -15,6 +15,7 @@
 use std::fmt::Display;
 
 use owo_colors::OwoColorize;
+use serde::Serialize;
 
 // Color roles. These are the only place in the crate that names a color; command
 // code asks for a role, never a hue.
@@ -53,7 +54,8 @@ pub(crate) fn bold(s: impl Display) -> String {
 /// glyph in a row. The liveness dots (`LiveDot`/`IdleDot`) are for status lists
 /// only and never carry failure: failures get `Warn`/`Fail` so shape carries
 /// severity independent of color.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum Glyph {
     /// `✓` green: done / healthy.
     Done,

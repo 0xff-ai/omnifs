@@ -12,12 +12,15 @@ pub(crate) struct TeardownSummary {
     pub swept_orphans: usize,
     pub failed: Vec<PathBuf>,
     pub skipped: usize,
+    pub errors: Vec<String>,
 }
 
 impl TeardownSummary {
     fn tear_down_one(&mut self, state_file: &Path, state: MountState, force: bool) {
         if !omnifs_nfs::mount_is_active(&state.mount_point) {
-            remove_state_file(state_file);
+            if let Some(error) = remove_state_file(state_file) {
+                self.errors.push(error);
+            }
             self.swept_orphans += 1;
             return;
         }
@@ -39,7 +42,9 @@ impl TeardownSummary {
             self.failed.push(state.mount_point);
             return;
         }
-        remove_state_file(state_file);
+        if let Some(error) = remove_state_file(state_file) {
+            self.errors.push(error);
+        }
         self.unmounted += 1;
     }
 }
@@ -70,11 +75,7 @@ pub(crate) fn teardown_local_frontends(
     for path in MountState::files_under(state_root)? {
         match MountState::read_file(&path) {
             Ok(state) => summary.tear_down_one(&path, state, force),
-            Err(error) => {
-                anstream::eprintln!(
-                    "⚠  Skipping local frontend record {}: {error}",
-                    path.display()
-                );
+            Err(_error) => {
                 summary.skipped += 1;
             },
         }
@@ -94,14 +95,14 @@ pub(crate) fn poll_until_unmounted(mount_point: &Path, cadence: Duration, attemp
     false
 }
 
-fn remove_state_file(state_file: &Path) {
+fn remove_state_file(state_file: &Path) -> Option<String> {
     match std::fs::remove_file(state_file) {
-        Ok(()) => {},
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
-        Err(error) => eprintln!(
-            "omnifs: failed to remove mount state {}: {error}",
+        Ok(()) => None,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => Some(format!(
+            "failed to remove mount state {}: {error}",
             state_file.display()
-        ),
+        )),
     }
 }
 

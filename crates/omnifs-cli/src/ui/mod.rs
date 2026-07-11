@@ -14,6 +14,7 @@
 // macros everywhere else. Only `print_json` and `eprint_raw` print here.
 #![allow(clippy::disallowed_macros, clippy::print_stdout)]
 
+pub(crate) mod consent;
 pub(crate) mod event;
 pub(crate) mod picker;
 pub(crate) mod progress;
