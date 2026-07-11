@@ -32,8 +32,7 @@ impl InspectorLineWriter {
     }
 
     pub fn write_record(&mut self, record: &InspectorRecord) -> Result<(), LineWriteError> {
-        let mut line = record.to_json()?;
-        line.push('\n');
+        let line = record.to_json_line()?;
         self.file.write_all(line.as_bytes())?;
         self.file.flush()?;
         Ok(())

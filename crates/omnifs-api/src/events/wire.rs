@@ -22,7 +22,7 @@ impl InspectorRecord {
         Self::parse(trimmed)
     }
 
-    pub fn parse(json: &str) -> Result<Self, ParseRecordError> {
+    fn parse(json: &str) -> Result<Self, ParseRecordError> {
         let record: Self = serde_json::from_str(json)?;
         if record.v != crate::events::envelope::SCHEMA_VERSION {
             return Err(ParseRecordError::UnsupportedVersion {
@@ -33,8 +33,17 @@ impl InspectorRecord {
         Ok(record)
     }
 
-    pub fn to_json(&self) -> Result<String, serde_json::Error> {
+    fn to_json(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string(self)
+    }
+
+    /// Serialize this record with the newline framing used by inspector JSONL
+    /// streams and files.
+    pub fn to_json_line(&self) -> Result<String, serde_json::Error> {
+        self.to_json().map(|mut line| {
+            line.push('\n');
+            line
+        })
     }
 }
 
@@ -51,16 +60,6 @@ pub fn split_complete_lines(buffer: &str) -> (Vec<&str>, &str) {
         rest = &after[1..];
     }
     (complete, rest)
-}
-
-/// Deserialize every complete line; skip empty lines; return partial tail.
-pub fn parse_complete_lines(buffer: &str) -> (Vec<InspectorRecord>, &str) {
-    let (lines, remainder) = split_complete_lines(buffer);
-    let records = lines
-        .into_iter()
-        .filter_map(|line| InspectorRecord::parse_line(line).ok())
-        .collect();
-    (records, remainder)
 }
 
 #[cfg(test)]
@@ -157,8 +156,9 @@ mod tests {
     #[test]
     fn partial_tail_preserves_incomplete_line() {
         let buffer = "{\"v\":1,\"ts\":\"t\",\"mono_us\":1,\"seq\":0,\"trace_id\":1,\"event\":{\"type\":\"fuse.start\",\"op\":\"read\",\"mount\":\"dns\",\"path\":\"/\"}}\n{\"v\":1,";
-        let (records, tail) = parse_complete_lines(buffer);
-        assert_eq!(records.len(), 1);
+        let (lines, tail) = split_complete_lines(buffer);
+        assert_eq!(lines.len(), 1);
+        InspectorRecord::parse_line(lines[0]).expect("complete line parses");
         assert!(tail.starts_with("{\"v\":1,"));
     }
 

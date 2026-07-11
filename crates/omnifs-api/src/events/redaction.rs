@@ -30,19 +30,6 @@ pub fn is_sensitive_query_param(name: &str) -> bool {
         || name.ends_with("_key")
 }
 
-/// Redact a URL for the inspector stream: no credentials, no query string.
-pub fn redact_url_for_live(raw: &str) -> String {
-    let Ok(mut parsed) = url::Url::parse(raw) else {
-        return raw.to_string();
-    };
-
-    let _ = parsed.set_username("");
-    let _ = parsed.set_password(None);
-    parsed.set_query(None);
-
-    parsed.to_string()
-}
-
 /// Build a compact HTTP callout summary: `GET host/path` without query secrets.
 pub fn redact_http_url_for_summary(method: &str, raw_url: &str) -> String {
     let Ok(parsed) = url::Url::parse(raw_url) else {
@@ -133,35 +120,6 @@ mod tests {
         assert!(!is_sensitive_query_param("page"));
         assert!(!is_sensitive_query_param("per_page"));
         assert!(!is_sensitive_query_param("format"));
-    }
-
-    // ── redact_url_for_live ───────────────────────────────────────────────
-
-    #[test]
-    fn live_url_strips_userinfo_and_query() {
-        let out = redact_url_for_live(
-            "https://user:pass@api.github.com/repos/o/r?access_token=secret&ref=main",
-        );
-        assert!(!out.contains("user"), "username leaked");
-        assert!(!out.contains("pass"), "password leaked");
-        assert!(!out.contains("access_token"), "secret param name leaked");
-        assert!(!out.contains("secret"), "secret value leaked");
-        assert!(!out.contains('?'), "query separator leaked");
-        assert!(out.contains("api.github.com/repos/o/r"));
-    }
-
-    #[test]
-    fn live_url_strips_credentials_even_without_query() {
-        let out = redact_url_for_live("https://token:x@api.github.com/data");
-        assert!(!out.contains("token:x"), "credentials leaked");
-        assert!(out.contains("api.github.com/data"));
-    }
-
-    #[test]
-    fn live_url_passes_through_unparseable_input_unchanged() {
-        // Not a valid URL: returned as-is rather than panicking or corrupting.
-        let raw = "not a url at all";
-        assert_eq!(redact_url_for_live(raw), raw);
     }
 
     // ── redact_http_url_for_summary ───────────────────────────────────────

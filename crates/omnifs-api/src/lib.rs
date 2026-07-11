@@ -46,17 +46,6 @@ pub const OMNIFS_ATTACH_TOKEN_ENV: &str = "OMNIFS_ATTACH_TOKEN";
 /// guest can dial vsock.
 pub const OMNIFS_READY_VSOCK_PORT_ENV: &str = "OMNIFS_READY_VSOCK_PORT";
 
-/// Default control port. The container publishes it on the host loopback;
-/// both binaries default to it so `omnifs` finds the daemon with zero config.
-pub const DEFAULT_PORT: u16 = 7878;
-
-/// Default loopback control address used by host-side clients and native
-/// daemon launches.
-#[must_use]
-pub fn default_listen_addr() -> std::net::SocketAddr {
-    std::net::SocketAddr::from(([127, 0, 0, 1], DEFAULT_PORT))
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ApiError {
     pub code: ErrorCode,
@@ -142,8 +131,10 @@ impl DaemonStatus {
     #[must_use]
     pub fn ready(&self) -> bool {
         self.health
-            .frontend_ready()
-            .unwrap_or(!self.frontends.is_empty())
+            .subsystem(DaemonSubsystem::Frontend)
+            .map_or(!self.frontends.is_empty(), |entry| {
+                entry.state == HealthState::Healthy
+            })
     }
 }
 
@@ -163,12 +154,6 @@ impl DaemonHealth {
         self.subsystems
             .iter()
             .find(|entry| entry.subsystem == subsystem)
-    }
-
-    #[must_use]
-    pub fn frontend_ready(&self) -> Option<bool> {
-        self.subsystem(DaemonSubsystem::Frontend)
-            .map(|entry| entry.state == HealthState::Healthy)
     }
 
     #[must_use]
@@ -245,15 +230,6 @@ pub enum DaemonBackend {
 impl Default for DaemonBackend {
     fn default() -> Self {
         Self::Native { pid: 0 }
-    }
-}
-
-impl DaemonBackend {
-    #[must_use]
-    pub fn label(&self) -> &'static str {
-        match self {
-            Self::Native { .. } => "native",
-        }
     }
 }
 
@@ -495,6 +471,35 @@ pub struct ReconcileReport {
     pub removed: Vec<String>,
     pub updated: Vec<String>,
     pub failed: Vec<MountFailure>,
+}
+
+impl ReconcileReport {
+    /// Derive the outcome for one mount, preserving failure precedence over
+    /// successful changes.
+    pub fn for_mount(&self, mount: &str, approved: Option<UpgradeDelta>) -> MountReport {
+        let failure = self
+            .failed
+            .iter()
+            .find(|failure| failure.mount == mount)
+            .cloned();
+        let outcome = if failure.is_some() {
+            MountOutcome::Failed
+        } else if self.added.iter().any(|name| name == mount) {
+            MountOutcome::Added
+        } else if self.updated.iter().any(|name| name == mount) {
+            MountOutcome::Updated
+        } else if self.removed.iter().any(|name| name == mount) {
+            MountOutcome::Removed
+        } else {
+            MountOutcome::Unchanged
+        };
+        MountReport {
+            mount: mount.to_string(),
+            outcome,
+            failure,
+            approved,
+        }
+    }
 }
 
 /// Optional request body for `POST /v1/reconcile`.

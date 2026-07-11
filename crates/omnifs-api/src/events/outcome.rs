@@ -26,20 +26,6 @@ pub struct OutcomeFields {
     pub message: Option<String>,
 }
 
-impl InspectorOutcome {
-    /// Map a FUSE/libc errno code to a stable inspector outcome.
-    pub fn from_errno_code(code: i32) -> Self {
-        match code {
-            libc::ENOENT => Self::NotFound,
-            libc::EACCES => Self::Denied,
-            libc::EINVAL => Self::InvalidInput,
-            libc::EFBIG => Self::TooLarge,
-            libc::EAGAIN => Self::Timeout,
-            _ => Self::Internal,
-        }
-    }
-}
-
 impl OutcomeFields {
     pub fn ok() -> Self {
         Self {
@@ -53,11 +39,5 @@ impl OutcomeFields {
             outcome,
             message: None,
         }
-    }
-
-    #[must_use]
-    pub fn with_message(mut self, message: impl Into<String>) -> Self {
-        self.message = Some(message.into());
-        self
     }
 }

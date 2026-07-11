@@ -18,9 +18,9 @@ pub use kind::{CacheKind, CalloutKind};
 pub use outcome::{InspectorOutcome, OutcomeFields};
 pub use redaction::{
     is_sensitive_header, is_sensitive_query_param, redact_git_remote, redact_http_url_for_summary,
-    redact_url_for_live, summary_is_cache_key_shaped, write_truncated,
+    summary_is_cache_key_shaped, write_truncated,
 };
-pub use wire::{ParseRecordError, parse_complete_lines, split_complete_lines};
+pub use wire::{ParseRecordError, split_complete_lines};
 pub use writer::{InspectorLineWriter, LineWriteError};
 
 /// FUSE-bound correlation id, one per FUSE request.
