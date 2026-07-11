@@ -353,8 +353,8 @@ impl Representable<Markdown> for CheckRun {
     }
 }
 
-/// A GitHub owner (user or organization) profile. Today the upstream profile
-/// JSON is the canonical payload; `profile.md` renders it.
+/// A GitHub owner (user or organization) profile. The upstream profile JSON is
+/// the canonical payload; `profile.md` renders it.
 #[omnifs_sdk::object(kind = "github.owner", key = crate::item::OwnerKey)]
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct Owner {

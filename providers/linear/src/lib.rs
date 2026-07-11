@@ -20,7 +20,7 @@ use serde_json::json;
 
 use crate::api::{
     GqlResponse, ISSUE_BY_IDENTIFIER_QUERY, ISSUES_QUERY, IssueNodeData, IssuePage, IssuesData,
-    TEAM_BY_KEY_QUERY, TEAMS_QUERY, TeamByKeyData, TeamsData, gql_request, gql_unwrap,
+    TEAM_BY_KEY_QUERY, TEAMS_QUERY, TeamByKeyData, TeamsData, gql_request,
 };
 use crate::objects::{Issue, Team};
 
@@ -132,7 +132,7 @@ impl Issue {
             .body_json(&gql_request(ISSUE_BY_IDENTIFIER_QUERY, &vars))
             .json()
             .await?;
-        let Some(node) = gql_unwrap(resp)?.issue else {
+        let Some(node) = resp.into_data()?.issue else {
             return Ok(Load::NotFound);
         };
         let bytes = node.get().as_bytes().to_vec();
@@ -275,7 +275,7 @@ impl Team {
             .body_json(&gql_request(TEAM_BY_KEY_QUERY, &vars))
             .json()
             .await?;
-        let Some(node) = gql_unwrap(resp)?.teams.nodes.into_iter().next() else {
+        let Some(node) = resp.into_data()?.teams.nodes.into_iter().next() else {
             return Ok(Load::NotFound);
         };
         let bytes = node.get().as_bytes().to_vec();
@@ -326,13 +326,13 @@ async fn fetch_all_teams(cx: &Cx) -> Result<Vec<Team>> {
     let mut after: Option<String> = None;
     loop {
         let vars = json!({ "after": after });
-        let data: TeamsData = gql_unwrap(
-            cx.endpoint(LinearApi)
-                .post("/graphql")
-                .body_json(&gql_request(TEAMS_QUERY, &vars))
-                .json()
-                .await?,
-        )?;
+        let data = cx
+            .endpoint(LinearApi)
+            .post("/graphql")
+            .body_json(&gql_request(TEAMS_QUERY, &vars))
+            .json::<GqlResponse<TeamsData>>()
+            .await?
+            .into_data()?;
         out.extend(data.teams.nodes);
         let Some(cursor) = data.teams.page_info.next_cursor() else {
             break;
@@ -358,13 +358,13 @@ async fn fetch_all_issues(cx: &Cx, team: &TeamKey, filter: StateFilter) -> Resul
             "stateTypes": state_filter,
             "after": after,
         });
-        let data: IssuesData = gql_unwrap(
-            cx.endpoint(LinearApi)
-                .post("/graphql")
-                .body_json(&gql_request(ISSUES_QUERY, &vars))
-                .json()
-                .await?,
-        )?;
+        let data = cx
+            .endpoint(LinearApi)
+            .post("/graphql")
+            .body_json(&gql_request(ISSUES_QUERY, &vars))
+            .json::<GqlResponse<IssuesData>>()
+            .await?
+            .into_data()?;
         items.extend(data.issues.nodes);
         let Some(cursor) = data.issues.page_info.next_cursor() else {
             break;

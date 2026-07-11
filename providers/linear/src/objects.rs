@@ -5,7 +5,6 @@ use omnifs_sdk::prelude::*;
 use omnifs_sdk::repr::{Markdown, Representable};
 use serde::{Deserialize, Serialize};
 
-use crate::api::priority_label;
 use crate::{IssueKey, TeamPath};
 
 #[omnifs_sdk::object(kind = "linear.issue", key = crate::IssueKey)]
@@ -56,6 +55,17 @@ impl Issue {
         self.state.as_ref().map_or("", |s| s.name.as_str())
     }
 
+    /// Linear uses 0 for no priority and 1 through 4 for urgent through low.
+    fn priority_label(&self) -> &'static str {
+        match self.priority {
+            Some(priority) if (0.5..1.5).contains(&priority) => "Urgent",
+            Some(priority) if (1.5..2.5).contains(&priority) => "High",
+            Some(priority) if (2.5..3.5).contains(&priority) => "Medium",
+            Some(priority) if (3.5..4.5).contains(&priority) => "Low",
+            _ => "No priority",
+        }
+    }
+
     pub(crate) fn title(&self, _key: &IssueKey) -> crate::Result<FileProjection> {
         Ok(FileProjection::text(self.title.as_str(), TextFormat::Newline).build())
     }
@@ -65,7 +75,7 @@ impl Issue {
     }
 
     pub(crate) fn priority(&self, _key: &IssueKey) -> crate::Result<FileProjection> {
-        Ok(FileProjection::text(priority_label(self.priority), TextFormat::Newline).build())
+        Ok(FileProjection::text(self.priority_label(), TextFormat::Newline).build())
     }
 
     pub(crate) fn assignee(&self, _key: &IssueKey) -> crate::Result<FileProjection> {
@@ -87,7 +97,7 @@ impl Representable<Markdown> for Issue {
             self.identifier,
             self.title,
             self.state_label(),
-            priority_label(self.priority),
+            self.priority_label(),
             self.assignee_label(),
             self.description.as_deref().unwrap_or(""),
         )

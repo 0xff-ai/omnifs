@@ -199,6 +199,19 @@ impl Day {
         (0..=9999).contains(&date.year()).then_some(Self(date))
     }
 
+    fn from_item(item: &Value) -> Option<Self> {
+        DATE_FIELDS.iter().find_map(|field| {
+            item.get(*field)
+                .and_then(Value::as_str)
+                .and_then(Self::from_date_prefix)
+        })
+    }
+
+    fn from_date_prefix(value: &str) -> Option<Self> {
+        let date = Date::parse(value.get(..10)?, &Iso8601::DATE).ok()?;
+        Self::from_date(date)
+    }
+
     fn start_datetime(self) -> Result<String> {
         self.datetime(Time::MIDNIGHT)
     }
@@ -337,7 +350,7 @@ struct RangeResponse {
 
 impl RangeResponse {
     /// Assemble the requested day as the loaded object's canonical and ride the
-    /// neighboring days back as same-type sibling preloads (R5): one fetch warms
+    /// neighboring days back as same-type sibling preloads: one fetch warms
     /// the whole window's canonical cache, so reading an adjacent day is a warm
     /// hit. Every day's slice is materialized exactly once from the partitioned
     /// rows.
@@ -382,7 +395,7 @@ impl DayGrouping {
         };
         let mut rows: HashMap<Day, Vec<Value>> = HashMap::new();
         for item in items {
-            if let Some(day) = item_day(&item) {
+            if let Some(day) = Day::from_item(&item) {
                 rows.entry(day).or_default().push(item);
             }
         }
@@ -414,17 +427,4 @@ impl DayGrouping {
             Self::Whole(body) => body.clone(),
         }
     }
-}
-
-fn item_day(item: &Value) -> Option<Day> {
-    DATE_FIELDS.iter().find_map(|field| {
-        item.get(*field)
-            .and_then(Value::as_str)
-            .and_then(date_value)
-    })
-}
-
-fn date_value(value: &str) -> Option<Day> {
-    let date = Date::parse(value.get(..10)?, &Iso8601::DATE).ok()?;
-    Day::from_date(date)
 }

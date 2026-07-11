@@ -272,7 +272,7 @@ impl DockerProvider {
         r.file("/containers/stopped/{reference}/summary.txt")
             .handler(container_summary)?;
 
-        // Compose subtree: stays raw (R7 — future work).
+        // Compose uses path-oriented handlers.
         r.dir("/compose/{project}/services")
             .handler(project_services)?;
         r.dir("/compose/{project}/services/{service}/containers")

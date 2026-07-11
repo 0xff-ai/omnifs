@@ -83,7 +83,7 @@ impl Item {
             .build())
     }
 
-    /// Object-level stream face (R6): a live ranged leaf under the item anchor.
+    /// A live ranged leaf under the item anchor.
     /// It opens through `open-file`, exercising the object Stream dispatch the
     /// conformance fixture must cover. Unlike `hello/ranged` (`LiveTailReader`,
     /// probed only at fixed offsets), a recursive walk (`grep -r`) opens every
@@ -371,8 +371,7 @@ impl TestProvider {
             o.file("title").computed(Item::title)?;
             o.file("state").computed(Item::state)?;
             o.file("body").lazy().computed(Item::body)?;
-            // Object-level stream face (R6): a live ranged leaf opened through
-            // open-file -> object Stream dispatch.
+            // The live ranged leaf opens through object stream dispatch.
             o.file("log").stream(Item::log)?;
             o.dir("comments").collection(item_comments)?;
             Ok(())

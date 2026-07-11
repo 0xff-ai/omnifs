@@ -36,7 +36,36 @@ pub(crate) struct SqliteBackend {
 
 impl SqliteBackend {
     pub fn open(path: &str, read_only: bool) -> Result<Self, BackendError> {
-        let conn = open_connection(path, read_only)?;
+        let (flags, uri) = if read_only {
+            (
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+                format!("file:{}?mode=ro&immutable=1", Self::encode_uri_path(path)),
+            )
+        } else {
+            (
+                OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_URI,
+                format!("file:{}", Self::encode_uri_path(path)),
+            )
+        };
+        let conn = match Connection::open_with_flags(&uri, flags) {
+            Ok(connection) => connection,
+            Err(error) if read_only => {
+                // Some databases left mid-WAL refuse to open with
+                // `immutable=1`. Retry without it before giving up. If
+                // even that fails, surface the original error.
+                let retry_uri = format!("file:{}?mode=ro", Self::encode_uri_path(path));
+                Connection::open_with_flags(
+                    &retry_uri,
+                    OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+                )
+                .map_err(|_| BackendError::Open(error.to_string()))?
+            },
+            Err(error) => return Err(BackendError::Open(error.to_string())),
+        };
+        // Confirm the file is reachable. A bad path or missing file tends to
+        // surface as a query error rather than at open time with URI mode.
+        conn.query_row("SELECT 1", [], |_| Ok(()))
+            .map_err(|error| BackendError::Open(error.to_string()))?;
         Ok(Self {
             conn,
             path: path.to_string(),
@@ -131,7 +160,7 @@ impl SqliteBackend {
         // splice the table name. The name is sourced from sqlite_master
         // (verified by `table_exists`); we still escape embedded
         // quotes defensively.
-        let pragma = format!("PRAGMA table_info(\"{}\")", escape_identifier(table));
+        let pragma = format!("PRAGMA table_info(\"{}\")", Self::escape_identifier(table));
         let mut stmt = self.conn.prepare(&pragma)?;
         let rows = stmt
             .query_map([], |row| {
@@ -149,7 +178,7 @@ impl SqliteBackend {
     }
 
     pub fn table_indexes(&self, table: &str) -> Result<Vec<IndexInfo>, BackendError> {
-        let list_sql = format!("PRAGMA index_list(\"{}\")", escape_identifier(table));
+        let list_sql = format!("PRAGMA index_list(\"{}\")", Self::escape_identifier(table));
         let mut list = self.conn.prepare(&list_sql)?;
         let infos = list
             .query_map([], |row| {
@@ -164,7 +193,10 @@ impl SqliteBackend {
             .collect::<Result<Vec<_>, _>>()?;
         let mut out = Vec::with_capacity(infos.len());
         for info in infos {
-            let cols_sql = format!("PRAGMA index_info(\"{}\")", escape_identifier(&info.name));
+            let cols_sql = format!(
+                "PRAGMA index_info(\"{}\")",
+                Self::escape_identifier(&info.name)
+            );
             let mut cols = self.conn.prepare(&cols_sql)?;
             let columns = cols
                 .query_map([], |row| {
@@ -188,13 +220,19 @@ impl SqliteBackend {
     }
 
     pub fn table_row_count(&self, table: &str) -> Result<i64, BackendError> {
-        let sql = format!("SELECT count(*) FROM \"{}\"", escape_identifier(table));
+        let sql = format!(
+            "SELECT count(*) FROM \"{}\"",
+            Self::escape_identifier(table)
+        );
         let count: i64 = self.conn.query_row(&sql, [], |row| row.get(0))?;
         Ok(count)
     }
 
     pub fn table_sample(&self, table: &str, limit: u32) -> Result<Vec<JsonValue>, BackendError> {
-        let sql = format!("SELECT * FROM \"{}\" LIMIT ?1", escape_identifier(table));
+        let sql = format!(
+            "SELECT * FROM \"{}\" LIMIT ?1",
+            Self::escape_identifier(table)
+        );
         let mut stmt = self.conn.prepare(&sql)?;
         let column_names: Vec<String> = stmt
             .column_names()
@@ -238,61 +276,26 @@ impl SqliteBackend {
         hasher.update(count.to_le_bytes());
         Ok(hex::encode(hasher.finalize()))
     }
-}
 
-fn open_connection(path: &str, read_only: bool) -> Result<Connection, BackendError> {
-    let (flags, uri) = if read_only {
-        (
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
-            format!("file:{}?mode=ro&immutable=1", encode_uri_path(path)),
-        )
-    } else {
-        (
-            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_URI,
-            format!("file:{}", encode_uri_path(path)),
-        )
-    };
-    let conn = match Connection::open_with_flags(&uri, flags) {
-        Ok(c) => c,
-        Err(e) if read_only => {
-            // Some databases left mid-WAL refuse to open with
-            // `immutable=1`. Retry without it before giving up. If
-            // even that fails, surface the original error.
-            let retry_uri = format!("file:{}?mode=ro", encode_uri_path(path));
-            Connection::open_with_flags(
-                &retry_uri,
-                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
-            )
-            .map_err(|_| BackendError::Open(e.to_string()))?
-        },
-        Err(e) => return Err(BackendError::Open(e.to_string())),
-    };
-    // Confirm the file is reachable. A bad path or missing file
-    // tends to surface as a query error rather than at open time
-    // with URI mode.
-    conn.query_row("SELECT 1", [], |_| Ok(()))
-        .map_err(|e| BackendError::Open(e.to_string()))?;
-    Ok(conn)
-}
-
-fn encode_uri_path(path: &str) -> String {
-    // SQLite URIs are file-URI-shaped: spaces, '?', '#' need
-    // percent-encoding so they don't break query-string parsing.
-    let mut out = String::with_capacity(path.len());
-    for ch in path.chars() {
-        match ch {
-            ' ' => out.push_str("%20"),
-            '?' => out.push_str("%3F"),
-            '#' => out.push_str("%23"),
-            '%' => out.push_str("%25"),
-            c => out.push(c),
+    fn encode_uri_path(path: &str) -> String {
+        // SQLite URIs are file-URI-shaped: spaces, '?', '#' need
+        // percent-encoding so they don't break query-string parsing.
+        let mut out = String::with_capacity(path.len());
+        for ch in path.chars() {
+            match ch {
+                ' ' => out.push_str("%20"),
+                '?' => out.push_str("%3F"),
+                '#' => out.push_str("%23"),
+                '%' => out.push_str("%25"),
+                other => out.push(other),
+            }
         }
+        out
     }
-    out
-}
 
-fn escape_identifier(name: &str) -> String {
-    name.replace('"', "\"\"")
+    fn escape_identifier(name: &str) -> String {
+        name.replace('"', "\"\"")
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -11,10 +11,10 @@ use serde::de::DeserializeOwned;
 use crate::Result;
 use crate::State;
 
-/// Pinned to v1.43 for the Phase 2 slice. v1.43 ships in Docker Engine
-/// 24.0+ (mid-2023); macOS/Linux Docker Desktop and most CI runners
-/// satisfy this. A daemon advertising a lower `MinAPIVersion` will
-/// reject these calls; bump deliberately when raising the floor.
+/// Pinned to v1.43, which ships in Docker Engine 24.0+ (mid-2023).
+/// macOS/Linux Docker Desktop and most CI runners satisfy this. A daemon
+/// advertising a lower `MinAPIVersion` will reject these calls; bump
+/// deliberately when raising the floor.
 pub(crate) const API_VERSION_PREFIX: &str = "/v1.43";
 
 /// The Docker daemon endpoint. Its base is the configured daemon address (a

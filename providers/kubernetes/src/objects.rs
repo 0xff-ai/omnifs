@@ -14,8 +14,11 @@ pub(crate) struct KubeManifest(Value);
 
 impl KubeManifest {
     pub(crate) fn from_upstream_bytes(bytes: &[u8]) -> Result<Self> {
-        let value: Value = decode_json(bytes)?;
-        Ok(Self(clean_manifest(value)))
+        let mut value: Value = decode_json(bytes)?;
+        if let Some(metadata) = value.get_mut("metadata").and_then(Value::as_object_mut) {
+            metadata.remove("managedFields");
+        }
+        Ok(Self(value))
     }
 
     pub(crate) fn canonical_json_bytes(&self) -> Result<Vec<u8>> {
@@ -174,13 +177,6 @@ impl Representable<Yaml> for ClusterResource {
     fn represent(&self) -> Vec<u8> {
         self.0.manifest_yaml_bytes().unwrap_or_else(error_bytes)
     }
-}
-
-fn clean_manifest(mut value: Value) -> Value {
-    if let Some(metadata) = value.get_mut("metadata").and_then(Value::as_object_mut) {
-        metadata.remove("managedFields");
-    }
-    value
 }
 
 fn yaml_bytes(value: &Value) -> Result<Vec<u8>> {

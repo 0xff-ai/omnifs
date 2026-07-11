@@ -96,28 +96,31 @@ pub(crate) struct GqlResponse<T> {
     pub(crate) errors: Vec<GqlError>,
 }
 
+impl<T> GqlResponse<T> {
+    /// Surface GraphQL errors, then return the required `data` field.
+    pub(crate) fn into_data(self) -> crate::Result<T> {
+        if !self.errors.is_empty() {
+            let message = self
+                .errors
+                .iter()
+                .map(|error| error.message.as_str())
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(omnifs_sdk::prelude::ProviderError::internal(format!(
+                "linear: GraphQL errors: {message}"
+            )));
+        }
+        self.data.ok_or_else(|| {
+            omnifs_sdk::prelude::ProviderError::internal(
+                "linear: GraphQL response missing data field",
+            )
+        })
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct GqlError {
     pub(crate) message: String,
-}
-
-/// Unwrap a GraphQL envelope: surface `errors` as a `ProviderError`, then
-/// return the `data` field (a missing `data` with no errors is itself an error).
-pub(crate) fn gql_unwrap<T>(resp: GqlResponse<T>) -> crate::Result<T> {
-    if !resp.errors.is_empty() {
-        let msg = resp
-            .errors
-            .iter()
-            .map(|e| e.message.as_str())
-            .collect::<Vec<_>>()
-            .join("; ");
-        return Err(omnifs_sdk::prelude::ProviderError::internal(format!(
-            "linear: GraphQL errors: {msg}"
-        )));
-    }
-    resp.data.ok_or_else(|| {
-        omnifs_sdk::prelude::ProviderError::internal("linear: GraphQL response missing data field")
-    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -179,19 +182,6 @@ pub(crate) struct IssueNodeData {
 pub(crate) struct IssuePage {
     pub(crate) items: Vec<Issue>,
     pub(crate) truncated: bool,
-}
-
-/// Convert a numeric priority to its label. Linear uses 0=No priority,
-/// 1=Urgent, 2=High, 3=Medium, 4=Low. The API returns the value as a
-/// JSON number; only the integer values 0..=4 are meaningful.
-pub(crate) fn priority_label(priority: Option<f64>) -> &'static str {
-    match priority {
-        Some(p) if (0.5..1.5).contains(&p) => "Urgent",
-        Some(p) if (1.5..2.5).contains(&p) => "High",
-        Some(p) if (2.5..3.5).contains(&p) => "Medium",
-        Some(p) if (3.5..4.5).contains(&p) => "Low",
-        _ => "No priority",
-    }
 }
 
 /// Render a GraphQL request body. The endpoint's `body_json` encodes this as

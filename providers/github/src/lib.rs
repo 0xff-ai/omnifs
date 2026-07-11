@@ -40,6 +40,15 @@ pub enum StateFilter {
     All,
 }
 
+impl StateFilter {
+    const fn rest_state(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::All => "all",
+        }
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn auth() -> ProviderAuthManifest {
     ProviderAuthManifest::builder("device")
@@ -291,7 +300,7 @@ impl FilePath {
                     }
                     i += 3;
                 },
-                b if is_unreserved_path_byte(b) => i += 1,
+                b if Self::is_unreserved_path_byte(b) => i += 1,
                 _ => return false,
             }
         }
@@ -301,7 +310,7 @@ impl FilePath {
     fn encode(path: &str) -> String {
         let mut encoded = String::with_capacity(path.len());
         for byte in path.bytes() {
-            if is_unreserved_path_byte(byte) {
+            if Self::is_unreserved_path_byte(byte) {
                 encoded.push(char::from(byte));
             } else {
                 const HEX: &[u8; 16] = b"0123456789ABCDEF";
@@ -325,8 +334,8 @@ impl FilePath {
         let mut i = 0;
         while i < bytes.len() {
             if bytes[i] == b'%' {
-                let hi = hex_value(bytes[i + 1])?;
-                let lo = hex_value(bytes[i + 2])?;
+                let hi = Self::hex_value(bytes[i + 1])?;
+                let lo = Self::hex_value(bytes[i + 2])?;
                 out.push((hi << 4) | lo);
                 i += 3;
             } else {
@@ -335,6 +344,21 @@ impl FilePath {
             }
         }
         Ok(out)
+    }
+
+    const fn is_unreserved_path_byte(byte: u8) -> bool {
+        byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~')
+    }
+
+    fn hex_value(byte: u8) -> Result<u8> {
+        match byte {
+            b'0'..=b'9' => Ok(byte - b'0'),
+            b'a'..=b'f' => Ok(byte - b'a' + 10),
+            b'A'..=b'F' => Ok(byte - b'A' + 10),
+            _ => Err(ProviderError::invalid_input(
+                "bad percent-encoded file path",
+            )),
+        }
     }
 }
 
@@ -387,21 +411,6 @@ pub fn is_safe_segment(s: &str) -> bool {
 /// directories, which would shadow them and defeat the ignore mechanism.
 pub fn is_safe_owner(s: &str) -> bool {
     !s.eq_ignore_ascii_case("notifications") && !s.starts_with('.') && is_safe_segment(s)
-}
-
-const fn is_unreserved_path_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~')
-}
-
-fn hex_value(byte: u8) -> Result<u8> {
-    match byte {
-        b'0'..=b'9' => Ok(byte - b'0'),
-        b'a'..=b'f' => Ok(byte - b'a' + 10),
-        b'A'..=b'F' => Ok(byte - b'A' + 10),
-        _ => Err(ProviderError::invalid_input(
-            "bad percent-encoded file path",
-        )),
-    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -551,7 +560,7 @@ pub(crate) async fn list_items(
          &sort=created&order=desc&per_page={PAGE_SIZE}"
     );
     let rest_resource = kind.rest_resource();
-    let rest_state = rest_state(filter);
+    let rest_state = filter.rest_state();
     let rest_path = format!(
         "/repos/{owner}/{repo}/{rest_resource}?state={rest_state}\
          &sort=created&direction=desc&per_page={PAGE_SIZE}"
@@ -591,13 +600,6 @@ pub(crate) async fn list_items(
         items,
         exhaustive: first.total_count <= SEARCH_RESULT_CAP,
     })
-}
-
-const fn rest_state(filter: StateFilter) -> &'static str {
-    match filter {
-        StateFilter::Open => "open",
-        StateFilter::All => "all",
-    }
 }
 
 fn is_search_repo_missing(err: &ProviderError) -> bool {

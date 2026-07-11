@@ -406,7 +406,7 @@ impl Repo {
                         filter: Facet(filter),
                         number: item.number,
                     },
-                    eager_item_leaves(item),
+                    item.eager_leaves(),
                 )
             })
             .collect::<Vec<_>>();
@@ -430,7 +430,7 @@ impl Repo {
                         filter: Facet(filter),
                         number: item.number,
                     },
-                    eager_item_leaves(item),
+                    item.eager_leaves(),
                 )
             })
             .collect::<Vec<_>>();
@@ -524,7 +524,7 @@ impl PullRequest {
                         number: key.number,
                         path,
                     },
-                    eager_file_leaves(&file),
+                    file.eager_leaves(),
                 ))
             })
             .collect::<Vec<_>>();
@@ -550,7 +550,7 @@ impl PullRequest {
                         number: key.number,
                         review_id,
                     },
-                    eager_review_leaves(&review),
+                    review.eager_leaves(),
                 )
             })
             .collect::<Vec<_>>();
@@ -590,7 +590,7 @@ impl PullRequest {
                         number: key.number,
                         check_run_id,
                     },
-                    eager_check_leaves(&check),
+                    check.eager_leaves(),
                 )
             })
             .collect::<Vec<_>>();
@@ -621,7 +621,7 @@ impl Review {
                         review_id: key.review_id,
                         comment_id,
                     },
-                    eager_review_comment_leaves(&comment),
+                    comment.eager_leaves(),
                 )
             })
             .collect::<Vec<_>>();
@@ -739,53 +739,63 @@ fn inline_text(s: &str) -> FileProjection {
 /// single-item canonical: the tiny `title`/`state`/`user` fields. `body`,
 /// `item.md`, and `item.json` come from the canonical, which the lossy row
 /// cannot reproduce, so they load on first read.
-fn eager_item_leaves(item: &ItemData) -> Vec<(String, FileProjection)> {
-    let login = item.user.as_ref().map_or("", |u| u.login.as_str());
-    vec![
-        ("title".to_string(), inline_text(&item.title)),
-        ("state".to_string(), inline_text(&item.state)),
-        ("user".to_string(), inline_text(login)),
-    ]
+impl ItemData {
+    fn eager_leaves(&self) -> Vec<(String, FileProjection)> {
+        let login = self.user.as_ref().map_or("", |user| user.login.as_str());
+        vec![
+            ("title".to_string(), inline_text(&self.title)),
+            ("state".to_string(), inline_text(&self.state)),
+            ("user".to_string(), inline_text(login)),
+        ]
+    }
 }
 
-fn eager_file_leaves(file: &ChangedFile) -> Vec<(String, FileProjection)> {
-    vec![
-        ("filename".to_string(), inline_text(&file.filename)),
-        ("status".to_string(), inline_text(&file.status)),
-    ]
+impl ChangedFile {
+    fn eager_leaves(&self) -> Vec<(String, FileProjection)> {
+        vec![
+            ("filename".to_string(), inline_text(&self.filename)),
+            ("status".to_string(), inline_text(&self.status)),
+        ]
+    }
 }
 
-fn eager_review_leaves(review: &Review) -> Vec<(String, FileProjection)> {
-    let login = review.user.as_ref().map_or("", |u| u.login.as_str());
-    vec![
-        (
-            "state".to_string(),
-            inline_text(review.state.as_deref().unwrap_or("")),
-        ),
-        ("user".to_string(), inline_text(login)),
-    ]
+impl Review {
+    fn eager_leaves(&self) -> Vec<(String, FileProjection)> {
+        let login = self.user.as_ref().map_or("", |user| user.login.as_str());
+        vec![
+            (
+                "state".to_string(),
+                inline_text(self.state.as_deref().unwrap_or("")),
+            ),
+            ("user".to_string(), inline_text(login)),
+        ]
+    }
 }
 
-fn eager_review_comment_leaves(comment: &ReviewComment) -> Vec<(String, FileProjection)> {
-    let login = comment.user.as_ref().map_or("", |u| u.login.as_str());
-    vec![
-        ("author".to_string(), inline_text(login)),
-        (
-            "path".to_string(),
-            inline_text(comment.path.as_deref().unwrap_or("")),
-        ),
-    ]
+impl ReviewComment {
+    fn eager_leaves(&self) -> Vec<(String, FileProjection)> {
+        let login = self.user.as_ref().map_or("", |user| user.login.as_str());
+        vec![
+            ("author".to_string(), inline_text(login)),
+            (
+                "path".to_string(),
+                inline_text(self.path.as_deref().unwrap_or("")),
+            ),
+        ]
+    }
 }
 
-fn eager_check_leaves(check: &CheckRun) -> Vec<(String, FileProjection)> {
-    vec![
-        ("name".to_string(), inline_text(&check.name)),
-        ("status".to_string(), inline_text(&check.status)),
-        (
-            "conclusion".to_string(),
-            inline_text(check.conclusion.as_deref().unwrap_or("")),
-        ),
-    ]
+impl CheckRun {
+    fn eager_leaves(&self) -> Vec<(String, FileProjection)> {
+        vec![
+            ("name".to_string(), inline_text(&self.name)),
+            ("status".to_string(), inline_text(&self.status)),
+            (
+                "conclusion".to_string(),
+                inline_text(self.conclusion.as_deref().unwrap_or("")),
+            ),
+        ]
+    }
 }
 
 /// The shallow eager leaves a comment listing row can fill from the lossy list
@@ -793,14 +803,13 @@ fn eager_check_leaves(check: &CheckRun) -> Vec<(String, FileProjection)> {
 /// they preload at listing time. `comment.json`/`comment.md` come from the
 /// verbatim standalone GET, which the list response cannot reproduce, so they
 /// load on first read.
-fn eager_comment_leaves(
-    comment: &Comment,
-    key: &CommentKey,
-) -> Result<Vec<(String, FileProjection)>> {
-    Ok(vec![
-        ("author".to_string(), comment.author(key)?),
-        ("body.md".to_string(), comment.body_md(key)?),
-    ])
+impl Comment {
+    fn eager_leaves(&self, key: &CommentKey) -> Result<Vec<(String, FileProjection)>> {
+        Ok(vec![
+            ("author".to_string(), self.author(key)?),
+            ("body.md".to_string(), self.body_md(key)?),
+        ])
+    }
 }
 
 fn complete_or_partial<T: omnifs_sdk::object::Object, C: ListCursor>(
@@ -949,7 +958,7 @@ async fn comments_collection(
             number,
             comment_id: comment.id,
         };
-        let files = eager_comment_leaves(&comment, &key)?;
+        let files = comment.eager_leaves(&key)?;
         entries.push(CollectionEntry::computed(key, files));
     }
     page_or_complete(entries, len, COMMENT_PAGE_SIZE, page)

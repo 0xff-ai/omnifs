@@ -73,6 +73,27 @@ impl Discovery {
         self.by_plural.entry(fs_name).or_insert(resource);
     }
 
+    fn add_resources(&mut self, api_root: &str, group: &str, resources: &[K8sApiResource]) {
+        for entry in resources {
+            if !is_browsable(entry) || self.has_group_resource(group, &entry.name) {
+                continue;
+            }
+            let resource = Resource {
+                api_root: api_root.to_string(),
+                plural: entry.name.clone(),
+                kind: entry.kind.clone(),
+                group: group.to_string(),
+                namespaced: entry.namespaced,
+            };
+            let fs_name = if !group.is_empty() && self.get(&entry.name).is_some() {
+                format!("{}.{}", entry.name, group)
+            } else {
+                entry.name.clone()
+            };
+            self.insert(fs_name, resource);
+        }
+    }
+
     fn get(&self, fs_plural: &str) -> Option<&Resource> {
         self.by_plural.get(fs_plural)
     }
@@ -92,32 +113,6 @@ impl Discovery {
             .collect();
         names.sort();
         names
-    }
-}
-
-fn add_resources(
-    discovery: &mut Discovery,
-    api_root: &str,
-    group: &str,
-    resources: &[K8sApiResource],
-) {
-    for entry in resources {
-        if !is_browsable(entry) || discovery.has_group_resource(group, &entry.name) {
-            continue;
-        }
-        let resource = Resource {
-            api_root: api_root.to_string(),
-            plural: entry.name.clone(),
-            kind: entry.kind.clone(),
-            group: group.to_string(),
-            namespaced: entry.namespaced,
-        };
-        let fs_name = if !group.is_empty() && discovery.get(&entry.name).is_some() {
-            format!("{}.{}", entry.name, group)
-        } else {
-            entry.name.clone()
-        };
-        discovery.insert(fs_name, resource);
     }
 }
 
@@ -266,7 +261,7 @@ impl<'a> KubeApi<'a> {
         let list: EventList = self
             .get_json(&path, &[("fieldSelector", &field_selector)])
             .await?;
-        Ok(render_event_list(list))
+        Ok(list.render())
     }
 
     /// The container names of one pod, init containers first, in spec order.
@@ -287,7 +282,7 @@ impl<'a> KubeApi<'a> {
         let mut discovery = Discovery::default();
 
         if let Ok(core) = self.get_json::<APIResourceList>("/api/v1", &[]).await {
-            add_resources(&mut discovery, "/api/v1", "", &core.resources);
+            discovery.add_resources("/api/v1", "", &core.resources);
         }
 
         if let Ok(groups) = self.get_json::<APIGroupList>("/apis", &[]).await {
@@ -295,7 +290,7 @@ impl<'a> KubeApi<'a> {
                 for group_version in group_versions_preferred_first(group) {
                     let api_root = format!("/apis/{group_version}");
                     if let Ok(list) = self.get_json::<APIResourceList>(&api_root, &[]).await {
-                        add_resources(&mut discovery, &api_root, &group.name, &list.resources);
+                        discovery.add_resources(&api_root, &group.name, &list.resources);
                     }
                 }
             }
@@ -402,6 +397,19 @@ struct LogBuf {
     started: bool,
 }
 
+impl LogBuf {
+    /// Truncate the last raw log timestamp to whole seconds, the precision the
+    /// apiserver honors for `sinceTime`.
+    fn since_time(&self) -> Option<String> {
+        let line = self.last_raw.as_deref()?;
+        let timestamp = line
+            .split_once(' ')
+            .map_or(line, |(timestamp, _)| timestamp);
+        let date_time = timestamp.get(..19)?;
+        Some(format!("{date_time}Z"))
+    }
+}
+
 impl PodLogReader {
     pub(crate) fn new(base: String, namespace: &str, pod: &str, container: &str) -> Self {
         Self {
@@ -416,10 +424,7 @@ impl PodLogReader {
     async fn fetch_delta(&self, cx: &Cx<()>) -> Result<()> {
         let (since, first) = {
             let buf = self.buf.borrow();
-            (
-                buf.last_raw.as_deref().and_then(log_line_second),
-                !buf.started,
-            )
+            (buf.since_time(), !buf.started)
         };
         let path = format!(
             "/api/v1/namespaces/{}/pods/{}/log",
@@ -492,15 +497,6 @@ impl RangeReader for PodLogReader {
     }
 }
 
-/// Truncate a raw log line's `RFC3339Nano` timestamp to whole seconds for
-/// `sinceTime` (which the apiserver honors only at second precision), e.g.
-/// `2026-06-14T00:15:45Z`.
-fn log_line_second(line: &str) -> Option<String> {
-    let ts = line.split_once(' ').map_or(line, |(ts, _)| ts);
-    let date_time = ts.get(..19)?;
-    Some(format!("{date_time}Z"))
-}
-
 fn container_names(pod: &Value) -> Vec<String> {
     let mut names = Vec::new();
     for field in ["initContainers", "containers"] {
@@ -538,6 +534,30 @@ struct EventList {
     items: Vec<EventItem>,
 }
 
+impl EventList {
+    fn render(self) -> String {
+        if self.items.is_empty() {
+            return "No events.\n".to_string();
+        }
+        let mut out = String::new();
+        let _ = writeln!(out, "LAST SEEN\tCOUNT\tTYPE\tREASON\tMESSAGE");
+        for event in self.items {
+            let timestamp = event
+                .last_timestamp
+                .or(event.event_time)
+                .unwrap_or_else(|| "-".to_string());
+            let count = event.count.unwrap_or(1);
+            let message = event.message.replace('\n', " ");
+            let _ = writeln!(
+                out,
+                "{timestamp}\t{count}\t{}\t{}\t{message}",
+                event.event_type, event.reason
+            );
+        }
+        out
+    }
+}
+
 #[derive(Deserialize)]
 struct EventItem {
     #[serde(rename = "type", default)]
@@ -552,26 +572,4 @@ struct EventItem {
     last_timestamp: Option<String>,
     #[serde(rename = "eventTime")]
     event_time: Option<String>,
-}
-
-fn render_event_list(list: EventList) -> String {
-    if list.items.is_empty() {
-        return "No events.\n".to_string();
-    }
-    let mut out = String::new();
-    let _ = writeln!(out, "LAST SEEN\tCOUNT\tTYPE\tREASON\tMESSAGE");
-    for event in list.items {
-        let timestamp = event
-            .last_timestamp
-            .or(event.event_time)
-            .unwrap_or_else(|| "-".to_string());
-        let count = event.count.unwrap_or(1);
-        let message = event.message.replace('\n', " ");
-        let _ = writeln!(
-            out,
-            "{timestamp}\t{count}\t{}\t{}\t{message}",
-            event.event_type, event.reason
-        );
-    }
-    out
 }

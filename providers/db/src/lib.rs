@@ -2,8 +2,8 @@
 
 //! `omnifs-provider-db`: relational database provider for omnifs.
 //!
-//! Mirrors a database into a projected filesystem. Today this is a
-//! `SQLite`-only build: `rusqlite` (with the `bundled` feature) compiles
+//! Mirrors a `SQLite` database into a projected filesystem. `rusqlite` (with
+//! the `bundled` feature) compiles
 //! the C `SQLite` source against `wasi-libc`, opens the database file
 //! through preopened WASI directories, and exposes schema, indexes,
 //! counts, and small samples per table.

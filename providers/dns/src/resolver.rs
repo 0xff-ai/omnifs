@@ -143,21 +143,9 @@ const BUILTIN_RESOLVERS: &[(&str, &str, &[&str])] = &[
     ),
 ];
 
-fn builtin_resolver_entries() -> Result<Vec<ResolverEntry>> {
-    BUILTIN_RESOLVERS
-        .iter()
-        .map(|(name, url, aliases)| {
-            Ok(ResolverEntry {
-                name: (*name).to_string(),
-                url: Endpoint::new(*url).map_err(ProviderError::invalid_input)?,
-                aliases: aliases.iter().map(|alias| (*alias).to_string()).collect(),
-            })
-        })
-        .collect()
-}
-
 /// The `DoH` resolver endpoint. The base is the fully-formed query URL
-/// (resolver URL plus the `dns=` parameter, built by [`query_url`]), so the
+/// (resolver URL plus the `dns=` parameter, built by
+/// [`ResolverConfig::query_url`]), so the
 /// request path is empty and the endpoint URL builder uses the base verbatim.
 /// Routing through the endpoint gives every resolver the rate-limit breaker.
 struct DohEndpoint {
@@ -239,7 +227,7 @@ impl ResolverConfig {
         resolvers: BTreeMap<String, crate::ConfigResolver>,
     ) -> Result<Self> {
         let resolvers = if resolvers.is_empty() {
-            builtin_resolver_entries()?
+            Self::builtin_entries()?
         } else {
             resolvers
                 .into_iter()
@@ -282,24 +270,66 @@ impl ResolverConfig {
             ))
         })
     }
-}
 
-/// Build a `DoH` query URL for the new async SDK (returns URL string).
-pub(super) fn query_url(
-    config: &ResolverConfig,
-    resolver: Option<&str>,
-    domain: &str,
-    rtype: SupportedRecordType,
-) -> Result<String> {
-    let fqdn = if domain.ends_with('.') {
-        domain.to_string()
-    } else {
-        format!("{domain}.")
-    };
-    let name = Name::from_ascii(&fqdn).map_err(|error| {
-        ProviderError::invalid_input(format!("invalid domain name {domain:?}: {error}"))
-    })?;
-    query_with_name(config, resolver, name, rtype)
+    fn builtin_entries() -> Result<Vec<ResolverEntry>> {
+        BUILTIN_RESOLVERS
+            .iter()
+            .map(|(name, url, aliases)| {
+                Ok(ResolverEntry {
+                    name: (*name).to_string(),
+                    url: Endpoint::new(*url).map_err(ProviderError::invalid_input)?,
+                    aliases: aliases.iter().map(|alias| (*alias).to_string()).collect(),
+                })
+            })
+            .collect()
+    }
+
+    /// Build a `DoH` query URL for `domain` and the selected resolver.
+    fn query_url(
+        &self,
+        resolver: Option<&str>,
+        domain: &str,
+        rtype: SupportedRecordType,
+    ) -> Result<String> {
+        let fqdn = if domain.ends_with('.') {
+            domain.to_string()
+        } else {
+            format!("{domain}.")
+        };
+        let name = Name::from_ascii(&fqdn).map_err(|error| {
+            ProviderError::invalid_input(format!("invalid domain name {domain:?}: {error}"))
+        })?;
+        self.query_with_name(resolver, name, rtype)
+    }
+
+    fn query_with_name(
+        &self,
+        resolver: Option<&str>,
+        name: Name,
+        rtype: SupportedRecordType,
+    ) -> Result<String> {
+        let endpoint = match resolver {
+            None => self.default_endpoint()?,
+            Some(spec) if spec.contains("://") => {
+                Endpoint::new(spec).map_err(ProviderError::invalid_input)?
+            },
+            Some(spec) => self.lookup(spec).ok_or_else(|| {
+                ProviderError::invalid_input(format!("unknown resolver specifier: {spec}"))
+            })?,
+        };
+        let ep = &endpoint.0;
+        let sep = if ep.contains('?') { '&' } else { '?' };
+
+        let mut message = Message::new(0, MessageType::Query, OpCode::Query);
+        message.add_query(DnsQuery::query(name, rtype.as_hickory()));
+        message.metadata.recursion_desired = true;
+        let wire = message.to_vec().map_err(|error| {
+            ProviderError::internal(format!("failed to encode DNS query: {error}"))
+        })?;
+        let dns_query = URL_SAFE_NO_PAD.encode(wire);
+
+        Ok(format!("{ep}{sep}dns={dns_query}"))
+    }
 }
 
 pub(super) fn parse_response(body: &[u8]) -> Result<(Vec<crate::DnsRecord>, u64)> {
@@ -338,35 +368,6 @@ pub(super) fn parse_response(body: &[u8]) -> Result<(Vec<crate::DnsRecord>, u64)
     Ok((records, min_ttl.unwrap_or(DEFAULT_TTL_SECS)))
 }
 
-fn query_with_name(
-    config: &ResolverConfig,
-    resolver: Option<&str>,
-    name: Name,
-    rtype: SupportedRecordType,
-) -> Result<String> {
-    let endpoint = match resolver {
-        None => config.default_endpoint()?,
-        Some(spec) if spec.contains("://") => {
-            Endpoint::new(spec).map_err(ProviderError::invalid_input)?
-        },
-        Some(spec) => config.lookup(spec).ok_or_else(|| {
-            ProviderError::invalid_input(format!("unknown resolver specifier: {spec}"))
-        })?,
-    };
-    let ep = &endpoint.0;
-    let sep = if ep.contains('?') { '&' } else { '?' };
-
-    let mut message = Message::new(0, MessageType::Query, OpCode::Query);
-    message.add_query(DnsQuery::query(name, rtype.as_hickory()));
-    message.metadata.recursion_desired = true;
-    let wire = message
-        .to_vec()
-        .map_err(|error| ProviderError::internal(format!("failed to encode DNS query: {error}")))?;
-    let dns_query = URL_SAFE_NO_PAD.encode(wire);
-
-    Ok(format!("{ep}{sep}dns={dns_query}"))
-}
-
 pub(crate) async fn read_reverse_bytes(
     cx: &Cx<State>,
     resolver: Option<&ResolverName>,
@@ -378,7 +379,7 @@ pub(crate) async fn read_reverse_bytes(
         .parse::<IpAddr>()
         .map_err(|_| ProviderError::invalid_input(format!("invalid IP address: {ip}")))?;
     let name = Name::from(addr);
-    let url = query_with_name(&config, resolver_name, name, SupportedRecordType::PTR)?;
+    let url = config.query_with_name(resolver_name, name, SupportedRecordType::PTR)?;
     let body = fetch_dns_message(cx, url).await?;
     let (records, _) = parse_response(&body)?;
     Ok(format_record_lines(&records))
@@ -398,7 +399,7 @@ pub(crate) async fn read_record_bytes(
 
             let mut requests = Vec::with_capacity(SupportedRecordType::common().len());
             for record_type in SupportedRecordType::common() {
-                let url = query_url(&config, resolver_ref, &domain_str, *record_type)?;
+                let url = config.query_url(resolver_ref, &domain_str, *record_type)?;
                 requests.push(fetch_dns_message(cx, url));
             }
 
@@ -437,7 +438,7 @@ pub(crate) async fn read_record_bytes(
         "raw" => {
             let domain_str = domain.to_string();
             let resolver_ref = resolver.map(ResolverName::as_ref);
-            let url = query_url(&config, resolver_ref, &domain_str, SupportedRecordType::A)?;
+            let url = config.query_url(resolver_ref, &domain_str, SupportedRecordType::A)?;
             let body = fetch_dns_message(cx, url).await?;
             let (records, _) = parse_response(&body)?;
 
@@ -459,7 +460,7 @@ pub(crate) async fn read_record_bytes(
                 .map_err(|()| ProviderError::not_found("record not found"))?;
             let domain_str = domain.to_string();
             let resolver_name = resolver.map(ResolverName::as_ref);
-            let url = query_url(&config, resolver_name, &domain_str, record_type)?;
+            let url = config.query_url(resolver_name, &domain_str, record_type)?;
             let body = fetch_dns_message(cx, url).await?;
             let (records, _) = parse_response(&body)?;
             Ok(format_record_lines(&records))
