@@ -17,7 +17,7 @@ use std::sync::Arc;
 use anyhow::Context as _;
 use clap::Parser;
 use omnifs_engine::{Namespace, NsAttachEvent};
-use omnifs_vfs_wire::{AttachEvent, AttachTarget, WireNamespace};
+use omnifs_vfs_wire::{AttachEvent, AttachTarget, FrontendIdentity, FrontendKind, WireNamespace};
 use tokio::runtime::Handle;
 use tokio::sync::broadcast;
 use tracing::{info, warn};
@@ -66,8 +66,15 @@ fn main() -> anyhow::Result<()> {
         .context("build the tokio runtime")?;
     let handle = rt.handle().clone();
 
+    // This test double always simulates the NFS renderer (see the module doc):
+    // the shipped runner binary is FUSE-only, so NFS is the leg only this
+    // double exercises.
+    let identity = FrontendIdentity {
+        kind: FrontendKind::Nfs,
+        mount_point: args.mount_point.clone(),
+    };
     let namespace = rt
-        .block_on(WireNamespace::attach(target, handle.clone()))
+        .block_on(WireNamespace::attach(target, identity, handle.clone()))
         .context("attach to the namespace")?;
     info!(
         target = %target_label,

@@ -23,13 +23,17 @@ use tokio::net::{TcpListener, UnixListener};
 use tokio::sync::mpsc;
 
 use crate::frame::{Frame, KIND_EVENT, KIND_REQUEST, KIND_RESPONSE, read_frame, write_frame};
-use crate::{Handshake, PROTOCOL, WireError, WireRequest, WireResponse};
+use crate::{
+    AttachObserver, FrontendIdentity, Handshake, PROTOCOL, WireError, WireRequest, WireResponse,
+};
 
 /// Serve one attached client over `stream` until it disconnects. `instance_id`
 /// is the daemon's per-start id, reported in the handshake so the client can
 /// detect a restart on reconnect. `expected_token` is `None` for a Unix-socket
 /// listener (the field is ignored) and `Some(token)` for a TCP attach listener,
-/// which rejects a Hello whose token does not match.
+/// which rejects a Hello whose token does not match. `observer`, when
+/// present, is notified once the handshake succeeds and again when this
+/// connection ends, for any reason (see [`AttachObserver`]).
 ///
 /// Returns `Ok(())` on an orderly client disconnect and a [`WireError`] on a
 /// protocol fault (an oversized frame, a malformed handshake, a version
@@ -39,6 +43,7 @@ pub async fn serve_connection<S>(
     stream: S,
     instance_id: String,
     expected_token: Option<&str>,
+    observer: Option<Arc<dyn AttachObserver>>,
 ) -> Result<(), WireError>
 where
     S: AsyncRead + AsyncWrite + Send + 'static,
@@ -63,15 +68,29 @@ where
     // drops the connection.
     let handshake_result =
         server_handshake(&mut reader, &outbound_tx, &instance_id, expected_token).await;
-    if let Err(error) = handshake_result {
-        // A rejection queues a `Handshake::Rejected` frame on `outbound_tx`
-        // before returning; drop the sender and let the writer task drain that
-        // frame and exit on its own, rather than aborting it and racing the
-        // flush (the same drain-on-drop pattern the end of this function uses).
-        drop(outbound_tx);
-        let _ = writer_task.await;
-        return Err(error);
-    }
+    let identity = match handshake_result {
+        Ok(identity) => identity,
+        Err(error) => {
+            // A rejection queues a `Handshake::Rejected` frame on `outbound_tx`
+            // before returning; drop the sender and let the writer task drain
+            // that frame and exit on its own, rather than aborting it and
+            // racing the flush (the same drain-on-drop pattern the end of this
+            // function uses).
+            drop(outbound_tx);
+            let _ = writer_task.await;
+            return Err(error);
+        },
+    };
+
+    // Registers this connection with the observer (if any) and unregisters it
+    // on drop, no matter how this function returns: an orderly disconnect, a
+    // protocol fault below, or a panic unwinding through this scope. Held for
+    // the rest of the function so it outlives the event forwarder and read
+    // loop.
+    let _attach_guard = observer.as_ref().map(|observer| AttachGuard {
+        id: observer.attached(&identity),
+        observer: Arc::clone(observer),
+    });
 
     // Forward namespace invalidation events as event frames for the connection's
     // lifetime. Aborted when the read loop ends.
@@ -112,12 +131,14 @@ where
 /// identity is not trustworthy on its own and every Hello must match it,
 /// checked exactly like [`serve_listener_tcp`]'s (the krunkit vsock-proxy
 /// path's shape, where krunkit terminates every guest vsock dial on this
-/// socket as the same local peer).
+/// socket as the same local peer). `observer`, when present, is shared by
+/// every connection this listener accepts.
 pub async fn serve_listener(
     namespace: Arc<dyn Namespace>,
     listener: UnixListener,
     instance_id: String,
     token: Option<String>,
+    observer: Option<Arc<dyn AttachObserver>>,
 ) {
     loop {
         match listener.accept().await {
@@ -125,9 +146,11 @@ pub async fn serve_listener(
                 let namespace = Arc::clone(&namespace);
                 let instance_id = instance_id.clone();
                 let token = token.clone();
+                let observer = observer.clone();
                 tokio::spawn(async move {
                     if let Err(error) =
-                        serve_connection(namespace, stream, instance_id, token.as_deref()).await
+                        serve_connection(namespace, stream, instance_id, token.as_deref(), observer)
+                            .await
                     {
                         tracing::debug!(%error, "wire: connection ended with a protocol error");
                     }
@@ -145,12 +168,14 @@ pub async fn serve_listener(
 /// same shape as [`serve_listener`]. This is the Docker Desktop path: a
 /// containerized frontend cannot share a host Unix socket into the Linux VM it
 /// runs in, so it dials TCP instead and proves itself with `token` (the
-/// listener's only auth) in every connection's Hello.
+/// listener's only auth) in every connection's Hello. `observer`, when
+/// present, is shared by every connection this listener accepts.
 pub async fn serve_listener_tcp(
     namespace: Arc<dyn Namespace>,
     listener: TcpListener,
     instance_id: String,
     token: String,
+    observer: Option<Arc<dyn AttachObserver>>,
 ) {
     loop {
         match listener.accept().await {
@@ -158,9 +183,11 @@ pub async fn serve_listener_tcp(
                 let namespace = Arc::clone(&namespace);
                 let instance_id = instance_id.clone();
                 let token = token.clone();
+                let observer = observer.clone();
                 tokio::spawn(async move {
                     if let Err(error) =
-                        serve_connection(namespace, stream, instance_id, Some(&token)).await
+                        serve_connection(namespace, stream, instance_id, Some(&token), observer)
+                            .await
                     {
                         tracing::debug!(%error, "wire: tcp connection ended with a protocol error");
                     }
@@ -175,13 +202,14 @@ pub async fn serve_listener_tcp(
 }
 
 /// Read the client's `Hello`, check the protocol and (when `expected_token` is
-/// set) the token, and answer with `Welcome` or `Rejected`.
+/// set) the token, and answer with `Welcome` or `Rejected`. On success returns
+/// the connecting frontend's identity.
 async fn server_handshake<R>(
     reader: &mut R,
     outbound_tx: &mpsc::UnboundedSender<Frame>,
     instance_id: &str,
     expected_token: Option<&str>,
-) -> Result<(), WireError>
+) -> Result<FrontendIdentity, WireError>
 where
     R: AsyncRead + Unpin,
 {
@@ -192,7 +220,12 @@ where
         return Err(WireError::HandshakeUnexpected { expected: "hello" });
     }
     let hello: Handshake = postcard::from_bytes(&frame.body)?;
-    let Handshake::Hello { protocol, token } = hello else {
+    let Handshake::Hello {
+        protocol,
+        token,
+        frontend,
+    } = hello
+    else {
         return Err(WireError::HandshakeUnexpected { expected: "hello" });
     };
     if protocol != PROTOCOL {
@@ -219,7 +252,22 @@ where
     outbound_tx
         .send(Frame::new(0, KIND_RESPONSE, body))
         .map_err(|_| WireError::HandshakeClosed)?;
-    Ok(())
+    Ok(frontend)
+}
+
+/// Fires [`AttachObserver::detached`] exactly once when the connection this
+/// guard was constructed for ends, including via an unwind (a panic
+/// propagating through [`serve_connection`]), so the registry can never keep
+/// an entry alive for a connection that has actually gone away.
+struct AttachGuard {
+    observer: Arc<dyn AttachObserver>,
+    id: u64,
+}
+
+impl Drop for AttachGuard {
+    fn drop(&mut self) {
+        self.observer.detached(self.id);
+    }
 }
 
 /// Queue a `Handshake::Rejected` frame naming `reason`, best-effort: the caller

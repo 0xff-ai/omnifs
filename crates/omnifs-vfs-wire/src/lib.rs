@@ -16,17 +16,28 @@
 //!
 //! # Handshake
 //!
-//! On connect the client sends one `Hello { protocol, token }` request frame
-//! (`request_id = 0`). The server replies with either `Welcome { protocol,
-//! instance_id }` or `Rejected { reason }` (both response frames, `request_id =
-//! 0`), then closes the connection in the rejected case. A plain UDS listener
-//! ignores `token` (filesystem permissions are that transport's whole auth); a
-//! TCP attach listener, and a UDS listener bound with a token (the krunkit
-//! vsock-proxy path, where every guest dial looks like the same trusted local
-//! peer to the socket), both require it to match the per-instance attach
-//! token. A protocol mismatch is rejected the same way. `instance_id` is the
-//! daemon's per-start id: a reconnect that lands on a different id means the
-//! daemon restarted and every [`NodeId`] the client holds is stale.
+//! On connect the client sends one `Hello { protocol, token, frontend }`
+//! request frame (`request_id = 0`), naming itself with a [`FrontendIdentity`]
+//! so the daemon's frontend registry can track it live. The server replies
+//! with either `Welcome { protocol, instance_id }` or `Rejected { reason }`
+//! (both response frames, `request_id = 0`), then closes the connection in the
+//! rejected case. A plain UDS listener ignores `token` (filesystem permissions
+//! are that transport's whole auth); a TCP attach listener, and a UDS listener
+//! bound with a token (the krunkit vsock-proxy path, where every guest dial
+//! looks like the same trusted local peer to the socket), both require it to
+//! match the per-instance attach token. A protocol mismatch is rejected the
+//! same way. `instance_id` is the daemon's per-start id: a reconnect that
+//! lands on a different id means the daemon restarted and every [`NodeId`] the
+//! client holds is stale.
+//!
+//! `frontend` is display-only for the host: the guest names its own kind and
+//! mount point so the daemon's status surface can report it, but the host
+//! decides how the connection was *delivered* (native/docker/krunkit/external)
+//! from which listener it arrived on, never from anything the guest claims. A
+//! server that tracks attach lifecycle passes an [`AttachObserver`] into
+//! [`serve_connection`]/[`serve_listener`]/[`serve_listener_tcp`]; its
+//! `attached` fires once per successful handshake and `detached` fires when
+//! that connection ends, for any reason.
 //!
 //! # Identity
 //!
@@ -56,8 +67,48 @@ pub use server::{serve_connection, serve_listener, serve_listener_tcp};
 
 /// The Omnifs VFS wire protocol version. Bumped on any incompatible change to
 /// the frame payloads or handshake. A client and server that disagree refuse
-/// to serve: there is no version negotiation, so v2 rejects a v1 peer outright.
-pub const PROTOCOL: u32 = 2;
+/// to serve: there is no version negotiation, so v3 rejects a v2 (or lower)
+/// peer outright. Bumped 2 to 3 to carry [`FrontendIdentity`] in `Hello`.
+pub const PROTOCOL: u32 = 3;
+
+/// Identity a virtualized frontend presents in its handshake `Hello`, naming
+/// its own kind and guest-side mount point so the daemon's frontend registry
+/// can report it. Display-only for the host: the host owns trust and derives
+/// the *delivery* mechanism (native/docker/krunkit/external) from which
+/// listener the connection arrived on, never from anything the guest claims
+/// here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FrontendIdentity {
+    pub kind: FrontendKind,
+    /// The guest-side mount point this frontend serves. Display-only; the
+    /// host does not treat it as host-visible.
+    pub mount_point: PathBuf,
+}
+
+/// The protocol a virtualized frontend renders over its wire-attached
+/// namespace. Mirrors the two shipped renderers; unrelated to
+/// [`omnifs_api::FsType`], which describes a native, in-process frontend's OS
+/// mount table entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FrontendKind {
+    Fuse,
+    Nfs,
+}
+
+/// Observes the attach lifecycle of connections on a wire listener. A server
+/// that wants to track which virtualized frontends are currently attached
+/// (the daemon's frontend registry) passes one in; a bare test server passes
+/// `None`.
+pub trait AttachObserver: Send + Sync {
+    /// Called once, right after a connection completes its handshake.
+    /// Returns an opaque id that [`Self::detached`] receives back when that
+    /// same connection ends.
+    fn attached(&self, identity: &FrontendIdentity) -> u64;
+    /// Called when the connection that produced `id` ends, for any reason: an
+    /// orderly disconnect, a protocol fault, or a panic in the serve loop.
+    /// Fired from a drop guard so it cannot be skipped.
+    fn detached(&self, id: u64);
+}
 
 /// One namespace call, mirroring the [`Namespace`](omnifs_engine::Namespace)
 /// trait methods. `budget` is a `u64` on the wire (the trait takes `usize`); the
@@ -110,11 +161,15 @@ pub(crate) enum WireResponse {
 /// `token` is `None` over a Unix socket (the client has nothing to prove
 /// beyond the filesystem permissions that let it open the socket); a TCP
 /// attach listener requires it and rejects a mismatch via `Rejected`.
+/// `frontend` names the connecting frontend so the server-side
+/// [`AttachObserver`] (when present) can report it; display-only, never used
+/// for a trust decision.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) enum Handshake {
     Hello {
         protocol: u32,
         token: Option<String>,
+        frontend: FrontendIdentity,
     },
     Welcome {
         protocol: u32,

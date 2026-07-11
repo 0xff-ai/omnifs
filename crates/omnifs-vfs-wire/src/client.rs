@@ -28,7 +28,9 @@ use tokio::time::sleep;
 
 use crate::cache::{WINDOW_BYTES, WireCache, window_start};
 use crate::frame::{Frame, KIND_EVENT, KIND_REQUEST, KIND_RESPONSE, read_frame, write_frame};
-use crate::{AttachEvent, Handshake, PROTOCOL, WireError, WireRequest, WireResponse};
+use crate::{
+    AttachEvent, FrontendIdentity, Handshake, PROTOCOL, WireError, WireRequest, WireResponse,
+};
 
 /// Initial-connect deadline for [`WireNamespace::attach`]. A socket that never
 /// answers within this window fails the attach with the socket named, rather
@@ -126,14 +128,17 @@ impl AttachTarget {
 
     /// Connect with backoff. With a `deadline`, a transient failure past the
     /// deadline surfaces as [`WireError::ConnectTimeout`]; without one,
-    /// transient failures retry forever.
+    /// transient failures retry forever. `identity` is sent in every attempt's
+    /// Hello (including reconnects), since a fresh connection is a fresh
+    /// handshake.
     async fn connect_with_backoff(
         &self,
         deadline: Option<Instant>,
+        identity: &FrontendIdentity,
     ) -> Result<(Connection, String), WireError> {
         let mut backoff = INITIAL_BACKOFF;
         loop {
-            match self.connect_once().await {
+            match self.connect_once(identity).await {
                 Ok(value) => return Ok(value),
                 Err(error) if !error.is_retriable() => return Err(error),
                 Err(error) => {
@@ -159,26 +164,29 @@ impl AttachTarget {
     /// Connect once, spawn the reader/writer pumps, and complete the handshake.
     /// Vsock is Linux-only because the krunkit guest is Linux; other targets
     /// fail without entering the reconnect loop.
-    async fn connect_once(&self) -> Result<(Connection, String), WireError> {
+    async fn connect_once(
+        &self,
+        identity: &FrontendIdentity,
+    ) -> Result<(Connection, String), WireError> {
         match self {
             Self::Unix(path) => {
                 let stream = UnixStream::connect(path).await?;
-                handshake_over(stream, None).await
+                handshake_over(stream, None, identity.clone()).await
             },
             Self::Tcp { addr, token } => {
                 let stream = TcpStream::connect(addr.as_str()).await?;
-                handshake_over(stream, Some(token.clone())).await
+                handshake_over(stream, Some(token.clone()), identity.clone()).await
             },
             Self::Vsock { port, token } => {
                 #[cfg(target_os = "linux")]
                 {
                     let addr = tokio_vsock::VsockAddr::new(tokio_vsock::VMADDR_CID_HOST, *port);
                     let stream = tokio_vsock::VsockStream::connect(addr).await?;
-                    handshake_over(stream, Some(token.clone())).await
+                    handshake_over(stream, Some(token.clone()), identity.clone()).await
                 }
                 #[cfg(not(target_os = "linux"))]
                 {
-                    let _ = (port, token);
+                    let _ = (port, token, identity);
                     Err(WireError::VsockUnsupported)
                 }
             },
@@ -245,17 +253,26 @@ pub struct WireNamespace {
 
 impl WireNamespace {
     /// Connect to the namespace target, perform the handshake, and return a
-    /// namespace multiplexed over the connection. Retries the initial connect
-    /// with backoff up to a 30s deadline; a later disconnect reconnects forever.
+    /// namespace multiplexed over the connection. `identity` names this
+    /// frontend in every Hello (the initial connect and every later
+    /// reconnect), so the server-side frontend registry can track it live.
+    /// Retries the initial connect with backoff up to a 30s deadline; a later
+    /// disconnect reconnects forever.
     ///
     /// # Errors
     ///
     /// Fails when the target cannot be reached within the deadline (naming it),
     /// when the server speaks an incompatible protocol version, or (`Tcp`) when
     /// the attach token is rejected.
-    pub async fn attach(target: AttachTarget, rt: Handle) -> Result<Arc<Self>, WireError> {
+    pub async fn attach(
+        target: AttachTarget,
+        identity: FrontendIdentity,
+        rt: Handle,
+    ) -> Result<Arc<Self>, WireError> {
         let deadline = Instant::now() + INITIAL_CONNECT_DEADLINE;
-        let (connection, instance_id) = target.connect_with_backoff(Some(deadline)).await?;
+        let (connection, instance_id) = target
+            .connect_with_backoff(Some(deadline), &identity)
+            .await?;
 
         let (outgoing_tx, outgoing_rx) = mpsc::unbounded_channel::<Outgoing>();
         let (events_tx, _) = broadcast::channel(EVENT_CAPACITY);
@@ -266,6 +283,7 @@ impl WireNamespace {
         let manager = rt.spawn(
             ManagerState {
                 target,
+                identity,
                 connection,
                 instance: instance_id,
                 instance_slot: Arc::clone(&instance_slot),
@@ -499,6 +517,9 @@ impl Namespace for WireNamespace {
 /// The manager's owned connection and cache state.
 struct ManagerState {
     target: AttachTarget,
+    /// This frontend's identity, sent in every reconnect's Hello (the initial
+    /// connect sends it too, before the manager task is spawned).
+    identity: FrontendIdentity,
     connection: Connection,
     instance: String,
     instance_slot: Arc<Mutex<String>>,
@@ -531,7 +552,7 @@ impl ManagerState {
                         for (_, reply) in pending.drain() {
                             let _ = reply.send(Err(NsError::Network));
                         }
-                        match self.target.connect_with_backoff(None).await {
+                        match self.target.connect_with_backoff(None, &self.identity).await {
                             Ok((connection, new_instance)) => {
                                 if new_instance != self.instance {
                                     // A restarted daemon renumbered every NodeId, so
@@ -643,11 +664,13 @@ impl Drop for Connection {
 }
 
 /// Spawn the reader/writer pumps over `stream` and complete the handshake,
-/// sending `token` in the Hello (`None` for a Unix socket, `Some` for TCP).
-/// Generic over the stream type so both transports share one handshake path.
+/// sending `token` in the Hello (`None` for a Unix socket, `Some` for TCP) and
+/// `frontend` naming this connecting frontend. Generic over the stream type so
+/// both transports share one handshake path.
 async fn handshake_over<S>(
     stream: S,
     token: Option<String>,
+    frontend: FrontendIdentity,
 ) -> Result<(Connection, String), WireError>
 where
     S: AsyncRead + AsyncWrite + Send + 'static,
@@ -677,6 +700,7 @@ where
     let hello = postcard::to_allocvec(&Handshake::Hello {
         protocol: PROTOCOL,
         token,
+        frontend,
     })?;
     frame_tx
         .send(Frame::new(0, KIND_REQUEST, hello))

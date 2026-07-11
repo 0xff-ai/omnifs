@@ -5,8 +5,8 @@
 //! runs a real [`WireNamespace`] over a `UnixListener` in a tempdir.
 
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures::future::{BoxFuture, FutureExt};
@@ -21,9 +21,18 @@ use crate::frame::{
     Frame, KIND_EVENT, KIND_REQUEST, KIND_RESPONSE, MAX_FRAME, read_frame, write_frame,
 };
 use crate::{
-    AttachTarget, Handshake, PROTOCOL, WireError, WireNamespace, WireRequest, WireResponse,
-    serve_connection, serve_listener, serve_listener_tcp,
+    AttachObserver, AttachTarget, FrontendIdentity, FrontendKind, Handshake, PROTOCOL, WireError,
+    WireNamespace, WireRequest, WireResponse, serve_connection, serve_listener, serve_listener_tcp,
 };
+
+/// A canned identity for tests that don't care about the specific value, only
+/// that a `Hello` carries one.
+fn test_identity() -> FrontendIdentity {
+    FrontendIdentity {
+        kind: FrontendKind::Fuse,
+        mount_point: PathBuf::from("/mnt/test"),
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Stub namespace
@@ -139,7 +148,12 @@ async fn client_handshake_with_token(
     protocol: u32,
     token: Option<String>,
 ) -> Result<String, String> {
-    let hello = postcard::to_allocvec(&Handshake::Hello { protocol, token }).unwrap();
+    let hello = postcard::to_allocvec(&Handshake::Hello {
+        protocol,
+        token,
+        frontend: test_identity(),
+    })
+    .unwrap();
     write_frame(io, &Frame::new(0, KIND_REQUEST, hello))
         .await
         .map_err(|error| error.to_string())?;
@@ -191,12 +205,23 @@ fn serve_over_duplex_with_token(
     namespace: Arc<dyn Namespace>,
     expected_token: Option<&'static str>,
 ) -> (DuplexStream, tokio::task::JoinHandle<Result<(), WireError>>) {
+    serve_over_duplex_with(namespace, expected_token, None)
+}
+
+/// Like [`serve_over_duplex_with_token`], additionally taking the
+/// [`AttachObserver`] the connection reports through.
+fn serve_over_duplex_with(
+    namespace: Arc<dyn Namespace>,
+    expected_token: Option<&'static str>,
+    observer: Option<Arc<dyn AttachObserver>>,
+) -> (DuplexStream, tokio::task::JoinHandle<Result<(), WireError>>) {
     let (client_io, server_io) = tokio::io::duplex(1024 * 1024);
     let handle = tokio::spawn(serve_connection(
         namespace,
         server_io,
         "inst-server".to_string(),
         expected_token,
+        observer,
     ));
     (client_io, handle)
 }
@@ -368,6 +393,7 @@ async fn handshake_version_mismatch_is_rejected() {
     let hello = postcard::to_allocvec(&Handshake::Hello {
         protocol: 999,
         token: None,
+        frontend: test_identity(),
     })
     .unwrap();
     write_frame(&mut io, &Frame::new(0, KIND_REQUEST, hello))
@@ -383,23 +409,23 @@ async fn handshake_version_mismatch_is_rejected() {
     }
 }
 
-/// v1 (the pre-attach-token protocol) is rejected outright by a v2 server. The
-/// client-visible error names the mismatch instead of leaving an ambiguous
-/// closed connection.
+/// A v2 (or lower) client, predating [`crate::FrontendIdentity`] in `Hello`, is
+/// rejected outright by a v3 server. The client-visible error names the
+/// mismatch instead of leaving an ambiguous closed connection.
 #[tokio::test]
-async fn v1_client_is_rejected_outright() {
+async fn old_client_is_rejected_outright() {
     let stub = StubNamespace::new();
     let (mut io, server) = serve_over_duplex(stub);
-    assert_eq!(PROTOCOL, 2, "this test assumes the v1-rejection bump to v2");
+    assert_eq!(PROTOCOL, 3, "this test assumes the v2-rejection bump to v3");
 
-    let client_result = client_handshake_with_token(&mut io, 1, None).await;
+    let client_result = client_handshake_with_token(&mut io, 2, None).await;
     assert_eq!(
         client_result,
-        Err("protocol version mismatch: this build speaks 2, the peer speaks 1".to_string())
+        Err("protocol version mismatch: this build speaks 3, the peer speaks 2".to_string())
     );
 
     match server.await.unwrap() {
-        Err(WireError::VersionMismatch { ours: 2, theirs: 1 }) => {},
+        Err(WireError::VersionMismatch { ours: 3, theirs: 2 }) => {},
         other => panic!("expected VersionMismatch, got {other:?}"),
     }
 }
@@ -476,10 +502,17 @@ async fn unix_listener_end_to_end() {
     let socket = dir.path().join("ns.sock");
     let listener = tokio::net::UnixListener::bind(&socket).unwrap();
     let stub = StubNamespace::new();
-    tokio::spawn(serve_listener(stub, listener, "inst-e2e".to_string(), None));
+    tokio::spawn(serve_listener(
+        stub,
+        listener,
+        "inst-e2e".to_string(),
+        None,
+        None,
+    ));
 
     let namespace = WireNamespace::attach(
         AttachTarget::Unix(socket),
+        test_identity(),
         tokio::runtime::Handle::current(),
     )
     .await
@@ -511,6 +544,7 @@ async fn tcp_listener_end_to_end() {
         listener,
         "inst-tcp-e2e".to_string(),
         "secret-token".to_string(),
+        None,
     ));
 
     let namespace = WireNamespace::attach(
@@ -518,6 +552,7 @@ async fn tcp_listener_end_to_end() {
             addr: addr.to_string(),
             token: "secret-token".to_string(),
         },
+        test_identity(),
         tokio::runtime::Handle::current(),
     )
     .await
@@ -538,6 +573,7 @@ async fn tcp_listener_rejects_wrong_token() {
         listener,
         "inst-tcp-reject".to_string(),
         "secret-token".to_string(),
+        None,
     ));
 
     let result = WireNamespace::attach(
@@ -545,6 +581,7 @@ async fn tcp_listener_rejects_wrong_token() {
             addr: addr.to_string(),
             token: "wrong-token".to_string(),
         },
+        test_identity(),
         tokio::runtime::Handle::current(),
     )
     .await;
@@ -572,12 +609,14 @@ async fn unix_listener_with_token_end_to_end() {
         listener,
         "inst-uds-token".to_string(),
         Some("secret-token".to_string()),
+        None,
     ));
 
     let mut stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
     let hello = postcard::to_allocvec(&Handshake::Hello {
         protocol: PROTOCOL,
         token: Some("secret-token".to_string()),
+        frontend: test_identity(),
     })
     .unwrap();
     write_frame(&mut stream, &Frame::new(0, KIND_REQUEST, hello))
@@ -604,12 +643,14 @@ async fn unix_listener_with_token_rejects_wrong_token() {
         listener,
         "inst-uds-reject".to_string(),
         Some("secret-token".to_string()),
+        None,
     ));
 
     let mut stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
     let hello = postcard::to_allocvec(&Handshake::Hello {
         protocol: PROTOCOL,
         token: Some("wrong-token".to_string()),
+        frontend: test_identity(),
     })
     .unwrap();
     write_frame(&mut stream, &Frame::new(0, KIND_REQUEST, hello))
@@ -623,6 +664,132 @@ async fn unix_listener_with_token_rejects_wrong_token() {
         Handshake::Rejected { .. } => {},
         other => panic!("expected Rejected, got {other:?}"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Attach lifecycle observer
+// ---------------------------------------------------------------------------
+
+/// A counting [`AttachObserver`]: records every identity `attached` reported
+/// and every id `detached` reported, so a test can assert on both halves of
+/// the lifecycle independently.
+#[derive(Default)]
+struct RecordingObserver {
+    next_id: AtomicU64,
+    attached: Mutex<Vec<(u64, FrontendIdentity)>>,
+    detached: Mutex<Vec<u64>>,
+}
+
+impl RecordingObserver {
+    fn attached_count(&self) -> usize {
+        self.attached.lock().unwrap().len()
+    }
+
+    fn detached_count(&self) -> usize {
+        self.detached.lock().unwrap().len()
+    }
+}
+
+impl AttachObserver for RecordingObserver {
+    fn attached(&self, identity: &FrontendIdentity) -> u64 {
+        // Ids start at 1 so a test can distinguish "never attached" (0) from a
+        // real assigned id.
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst) + 1;
+        self.attached.lock().unwrap().push((id, identity.clone()));
+        id
+    }
+
+    fn detached(&self, id: u64) {
+        self.detached.lock().unwrap().push(id);
+    }
+}
+
+/// A successful v3 handshake reports the connecting frontend's identity to the
+/// server's [`AttachObserver`] verbatim, and an orderly disconnect reports the
+/// matching `detached(id)`.
+#[tokio::test]
+async fn handshake_identity_reaches_the_attach_observer() {
+    let stub = StubNamespace::new();
+    let observer = Arc::new(RecordingObserver::default());
+    let (mut io, server) = serve_over_duplex_with(
+        stub,
+        None,
+        Some(Arc::clone(&observer) as Arc<dyn AttachObserver>),
+    );
+
+    let identity = FrontendIdentity {
+        kind: FrontendKind::Nfs,
+        mount_point: PathBuf::from("/guest/omnifs"),
+    };
+    let hello = postcard::to_allocvec(&Handshake::Hello {
+        protocol: PROTOCOL,
+        token: None,
+        frontend: identity.clone(),
+    })
+    .unwrap();
+    write_frame(&mut io, &Frame::new(0, KIND_REQUEST, hello))
+        .await
+        .unwrap();
+    let welcome = read_frame(&mut io).await.unwrap().expect("welcome frame");
+    match postcard::from_bytes::<Handshake>(&welcome.body).unwrap() {
+        Handshake::Welcome { .. } => {},
+        other => panic!("expected Welcome, got {other:?}"),
+    }
+
+    assert_eq!(observer.attached_count(), 1);
+    let (id, reported) = observer.attached.lock().unwrap()[0].clone();
+    assert_eq!(reported, identity);
+    assert_eq!(
+        observer.detached_count(),
+        0,
+        "not detached before disconnect"
+    );
+
+    // An orderly disconnect: drop the client half, closing the pipe.
+    drop(io);
+    server.await.unwrap().unwrap();
+
+    assert_eq!(observer.detached_count(), 1);
+    assert_eq!(observer.detached.lock().unwrap()[0], id);
+}
+
+/// The [`AttachObserver::detached`] drop guard fires even when the serve task
+/// is torn down abnormally (aborted mid-flight, standing in for a panic
+/// unwinding through [`serve_connection`]) rather than returning normally, so
+/// the registry can never leak an entry for a connection that is actually
+/// gone.
+#[tokio::test]
+async fn detach_fires_via_drop_guard_on_abnormal_termination() {
+    let stub = StubNamespace::new();
+    let observer = Arc::new(RecordingObserver::default());
+    let (mut io, server) = serve_over_duplex_with(
+        stub,
+        None,
+        Some(Arc::clone(&observer) as Arc<dyn AttachObserver>),
+    );
+
+    client_handshake(&mut io, PROTOCOL).await.unwrap();
+    // Wait for the observer to see the attach before aborting; `client_handshake`
+    // only proves the client saw `Welcome`, which the server sends before
+    // calling `attached`.
+    for _ in 0..100 {
+        if observer.attached_count() == 1 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(observer.attached_count(), 1);
+    assert_eq!(observer.detached_count(), 0);
+
+    // Abort the serve task outright instead of closing the connection in the
+    // ordinary way: tokio drops the in-flight future in place, running every
+    // local's `Drop` impl (including `AttachGuard`'s) without the function
+    // ever reaching its own return statement.
+    server.abort();
+    let outcome = server.await;
+    assert!(outcome.is_err() && outcome.unwrap_err().is_cancelled());
+
+    assert_eq!(observer.detached_count(), 1);
 }
 
 /// The manager's reconnect-forever loop, exercised over a real TCP socket:
@@ -648,7 +815,11 @@ async fn tcp_reconnect_fires_reattached_on_new_instance() {
         addr: addr.to_string(),
         token: token.clone(),
     };
-    let attach_task = rt.spawn(WireNamespace::attach(attach_target, rt.clone()));
+    let attach_task = rt.spawn(WireNamespace::attach(
+        attach_target,
+        test_identity(),
+        rt.clone(),
+    ));
 
     // Establish the initial instance, check the presented token, then drop the
     // stream outright to sever the connection.
@@ -902,9 +1073,11 @@ async fn attach_stub(stub: Arc<dyn Namespace>) -> (Arc<WireNamespace>, tempfile:
         listener,
         "memo-inst".to_string(),
         None,
+        None,
     ));
     let ns = WireNamespace::attach(
         AttachTarget::Unix(socket),
+        test_identity(),
         tokio::runtime::Handle::current(),
     )
     .await
@@ -1140,6 +1313,7 @@ async fn concurrent_reads_do_not_deadlock_or_double_fetch() {
 // the server-side dispatch already calls straight into `TreeNamespace`.
 
 mod trace_propagation {
+    use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -1147,7 +1321,7 @@ mod trace_propagation {
     use omnifs_engine::{Namespace, NodeId, TreeNamespace};
     use tokio::runtime::Handle;
 
-    use crate::{AttachTarget, WireNamespace, serve_listener_tcp};
+    use crate::{AttachTarget, FrontendIdentity, FrontendKind, WireNamespace, serve_listener_tcp};
 
     /// Drain up to `max` records from `live` within a generous per-record
     /// timeout, returning what arrived. Bounded so a missing event fails the
@@ -1197,12 +1371,17 @@ mod trace_propagation {
             listener,
             "inst-trace".to_string(),
             "secret".to_string(),
+            None,
         ));
 
         let client = WireNamespace::attach(
             AttachTarget::Tcp {
                 addr: addr.to_string(),
                 token: "secret".to_string(),
+            },
+            FrontendIdentity {
+                kind: FrontendKind::Fuse,
+                mount_point: PathBuf::from("/mnt/trace-test"),
             },
             Handle::current(),
         )
