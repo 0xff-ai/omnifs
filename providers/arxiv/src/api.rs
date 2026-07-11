@@ -79,12 +79,7 @@ pub(crate) async fn fetch_category_page<S>(
         .query("sortOrder", "descending")
         .send_checked()
         .await?;
-    parse_category_ids(resp.body())
-}
-
-/// Extract the bare arXiv ids from a multi-entry category Atom feed.
-fn parse_category_ids(feed_xml: &[u8]) -> Result<Vec<String>> {
-    Ok(category_entry_ids(feed_xml)?
+    Ok(category_entry_ids(resp.body())?
         .into_iter()
         .filter_map(|entry_id| arxiv_id_from_entry_id(&entry_id))
         .collect())
