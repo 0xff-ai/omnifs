@@ -55,6 +55,17 @@ pub struct SnapshotCapture {
     pub value: String,
 }
 
+/// Cumulative progress after one file in a snapshot directory has been
+/// written. The generated `index.json` is included in both totals because it
+/// is part of the exported snapshot tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WriteProgress {
+    pub files_written: u64,
+    pub total_files: u64,
+    pub bytes_written: u64,
+    pub total_bytes: u64,
+}
+
 #[derive(Debug, Clone)]
 struct SnapshotFile {
     logical_id: SnapshotLogicalId,
@@ -106,7 +117,38 @@ impl MountSnapshot {
 
     /// Write this snapshot as a plain directory tree.
     pub fn write_directory(&self, out: &StdPath) -> Result<()> {
+        self.write_directory_with_progress(out, |_| {})
+    }
+
+    /// Write this snapshot as a plain directory tree, reporting cumulative
+    /// file and byte counts after each completed file. Snapshot path mapping,
+    /// index generation, and output-directory validation remain owned here;
+    /// the callback is observational and cannot alter the export.
+    pub fn write_directory_with_progress(
+        &self,
+        out: &StdPath,
+        mut report: impl FnMut(WriteProgress),
+    ) -> Result<()> {
         prepare_output_dir(out)?;
+
+        let index_json = self.index_json()?;
+        let total_files = u64::try_from(self.files.len())?
+            .checked_add(1)
+            .context("snapshot contains too many files")?;
+        let total_bytes =
+            self.files
+                .iter()
+                .try_fold(u64::try_from(index_json.len())?, |total, file| {
+                    total
+                        .checked_add(u64::try_from(file.bytes.len())?)
+                        .context("snapshot byte count overflow")
+                })?;
+        let mut progress = WriteProgress {
+            files_written: 0,
+            total_files,
+            bytes_written: 0,
+            total_bytes,
+        };
 
         for file in &self.files {
             let path = out.join(file.relative_path());
@@ -116,11 +158,17 @@ impl MountSnapshot {
             }
             std::fs::write(&path, file.bytes.as_ref())
                 .with_context(|| format!("write snapshot file {}", path.display()))?;
+            progress.files_written += 1;
+            progress.bytes_written += u64::try_from(file.bytes.len())?;
+            report(progress);
         }
 
         let index_path = out.join(INDEX_FILE);
-        std::fs::write(&index_path, self.index_json()?)
+        std::fs::write(&index_path, &index_json)
             .with_context(|| format!("write snapshot index {}", index_path.display()))?;
+        progress.files_written += 1;
+        progress.bytes_written += u64::try_from(index_json.len())?;
+        report(progress);
         Ok(())
     }
 
@@ -391,5 +439,30 @@ mod tests {
             .blake3
             .clone();
         assert_ne!(before_hash, after_hash);
+    }
+
+    #[test]
+    fn directory_write_reports_files_and_bytes_including_index() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache_dir = temp.path().join("cache");
+        let out = temp.path().join("out");
+        seed(&cache_dir, "/documents/one.json", "one", b"first");
+        seed(&cache_dir, "/documents/two.json", "two", b"second");
+        let snapshot = MountSnapshot::from_cache_dir(&cache_dir, "fixture").unwrap();
+        let mut updates = Vec::new();
+
+        snapshot
+            .write_directory_with_progress(&out, |progress| updates.push(progress))
+            .unwrap();
+
+        assert_eq!(updates.len(), 3);
+        let final_update = updates.last().unwrap();
+        assert_eq!(final_update.files_written, 3);
+        assert_eq!(final_update.total_files, 3);
+        assert_eq!(final_update.bytes_written, final_update.total_bytes);
+        let bytes_on_disk = std::fs::read(out.join("documents/one.json")).unwrap().len()
+            + std::fs::read(out.join("documents/two.json")).unwrap().len()
+            + std::fs::read(out.join(INDEX_FILE)).unwrap().len();
+        assert_eq!(final_update.total_bytes, bytes_on_disk as u64);
     }
 }

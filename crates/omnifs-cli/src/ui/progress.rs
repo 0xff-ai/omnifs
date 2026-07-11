@@ -35,6 +35,10 @@ const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "�
 /// finishes quickly just prints its settle line.
 const APPEARANCE_DELAY: Duration = Duration::from_millis(150);
 
+/// Bound repaint and progress-event frequency when a producer yields chunks
+/// faster than a terminal (or an NDJSON consumer) can usefully display them.
+const UPDATE_INTERVAL: Duration = Duration::from_millis(100);
+
 /// The transient in-place line: `  <spinner> <key padded>text`, on the same grid
 /// as a settled row so the spinner and the line that replaces it align. The
 /// spinner is dim (machinery), never the cyan accent, which is reserved for
@@ -74,6 +78,7 @@ pub(crate) struct LiveRow<R = LedgerRenderer> {
     tty: bool,
     started: Instant,
     frame: usize,
+    next_update: Instant,
     /// Whether a transient spinner line is currently on screen and must be
     /// cleared before the settle line is written.
     drawn: bool,
@@ -88,6 +93,10 @@ impl LiveRow<LedgerRenderer> {
     pub(crate) fn start(key: &str, _text: &str) -> Self {
         Self::with_renderer(key, LedgerRenderer)
     }
+
+    pub(crate) fn human_bytes(bytes: u64) -> String {
+        human_bytes(bytes)
+    }
 }
 
 impl<R: Render> LiveRow<R> {
@@ -100,6 +109,7 @@ impl<R: Render> LiveRow<R> {
             tty: std::io::stderr().is_terminal(),
             started: Instant::now(),
             frame: 0,
+            next_update: Instant::now(),
             drawn: false,
             renderer,
         }
@@ -108,6 +118,11 @@ impl<R: Render> LiveRow<R> {
     /// Repaint the spinner with new text. A no-op until the step has been live
     /// past the appearance delay, and a no-op on a non-terminal stderr.
     pub(crate) fn update(&mut self, text: &str) {
+        let now = Instant::now();
+        if now < self.next_update {
+            return;
+        }
+        self.next_update = now + UPDATE_INTERVAL;
         self.renderer.event(&UiEvent::Progress {
             key: self.key.clone(),
             message: text.to_string(),
@@ -143,10 +158,40 @@ impl<R: Render> LiveRow<R> {
         self.update(&format!("{} / {}", human_bytes(done), human_bytes(total)));
     }
 
+    /// Determinate byte meter with a short source or operation suffix:
+    /// `148 MB / 262 MB from ghcr.io`.
+    pub(crate) fn update_bytes_with(
+        &mut self,
+        done: u64,
+        total: u64,
+        context: impl std::fmt::Display,
+    ) {
+        self.update(&format!(
+            "{} / {} {context}",
+            human_bytes(done),
+            human_bytes(total)
+        ));
+    }
+
     /// Determinate count meter: `3 / 10 files`.
     #[allow(dead_code)] // snapshot export (T3).
     pub(crate) fn update_count(&mut self, done: u64, total: u64, unit: &str) {
         self.update(&format!("{done} / {total} {unit}"));
+    }
+
+    /// Combined file and byte meter for exports whose total shape is known.
+    pub(crate) fn update_files_bytes(
+        &mut self,
+        files_done: u64,
+        files_total: u64,
+        bytes_done: u64,
+        bytes_total: u64,
+    ) {
+        self.update(&format!(
+            "{files_done} / {files_total} files, {} / {}",
+            human_bytes(bytes_done),
+            human_bytes(bytes_total)
+        ));
     }
 
     pub(crate) fn settle_ok(self, value: impl std::fmt::Display) {
@@ -238,6 +283,44 @@ mod tests {
                 duration: Some(_),
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn custom_renderer_receives_failure_settlement() {
+        let mut recorder = EventRecorder::default();
+        {
+            let mut row = LiveRow::with_renderer("snapshot", &mut recorder);
+            row.update("writing");
+            row.settle_fail("snapshot failed");
+        }
+        assert!(matches!(
+            recorder.0.as_slice(),
+            [
+                UiEvent::Progress { .. },
+                UiEvent::RowSettled {
+                    glyph: Glyph::Fail,
+                    key,
+                    value,
+                    ..
+                }
+            ] if key == "snapshot" && value == "snapshot failed"
+        ));
+    }
+
+    #[test]
+    fn updates_are_throttled() {
+        let mut recorder = EventRecorder::default();
+        {
+            let mut row = LiveRow::with_renderer("image", &mut recorder);
+            row.update("first");
+            row.update("too soon");
+            row.settle_ok("done");
+        }
+        assert_eq!(recorder.0.len(), 2);
+        assert!(matches!(
+            &recorder.0[0],
+            UiEvent::Progress { message, .. } if message == "first"
         ));
     }
 }

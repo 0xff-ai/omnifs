@@ -1,4 +1,3 @@
-#![allow(clippy::print_stderr)] // migrates in wave 2 (cli-redesign)
 //! Pulls the krunkit guest disk image from its ghcr OCI artifact and caches
 //! it locally: anonymous token, manifest, single blob, sha256 verification,
 //! decompress-once. Only the release channel ever reaches this path (see
@@ -34,6 +33,7 @@ use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
 
 use crate::launch_backend::ImageRef;
+use crate::ui::LiveRow;
 
 const GUEST_IMAGE_CACHE_SUBDIR: &str = "guest-images";
 
@@ -134,7 +134,7 @@ pub(crate) async fn ensure_guest_image(image: &ImageRef, cache_dir: &Path) -> Re
     let client = reqwest::Client::new();
 
     if !zst_path.is_file() {
-        download_and_verify(&client, &oci_ref, image, &zst_path).await?;
+        download_and_verify(&client, &oci_ref, &zst_path).await?;
     }
 
     match decompress(&zst_path, &raw_path) {
@@ -143,13 +143,14 @@ pub(crate) async fn ensure_guest_image(image: &ImageRef, cache_dir: &Path) -> Re
             // The cached .zst may be a leftover from an interrupted prior
             // decompress; re-download once before giving up, rather than
             // leaving the caller stuck on a permanently corrupt cache entry.
-            eprintln!(
-                "cached guest image at {} failed to decompress ({decompress_error:#}); \
-                 re-downloading",
+            let mut retry = LiveRow::start("guest image", "retrying");
+            retry.update("retrying");
+            retry.settle_warn(format!(
+                "cached image at {} is corrupt ({decompress_error:#}); retrying",
                 zst_path.display()
-            );
+            ));
             let _ = std::fs::remove_file(&zst_path);
-            download_and_verify(&client, &oci_ref, image, &zst_path).await?;
+            download_and_verify(&client, &oci_ref, &zst_path).await?;
             decompress(&zst_path, &raw_path)?;
             Ok(raw_path)
         },
@@ -207,65 +208,81 @@ async fn fetch_manifest(
 async fn download_and_verify(
     client: &reqwest::Client,
     oci_ref: &OciRef,
-    image: &ImageRef,
     dest: &Path,
 ) -> Result<()> {
-    eprintln!(
-        "Downloading the krunkit guest image ({image}); this is roughly 262 MB and only \
-         happens once per version."
-    );
+    let mut row = LiveRow::start("guest image", "downloading");
+    let result: Result<u64> = async {
+        let token = fetch_pull_token(client, oci_ref).await?;
+        let manifest = fetch_manifest(client, oci_ref, &token).await?;
+        let blob = manifest.single_blob()?;
 
-    let token = fetch_pull_token(client, oci_ref).await?;
-    let manifest = fetch_manifest(client, oci_ref, &token).await?;
-    let blob = manifest.single_blob()?;
-
-    let blob_url = format!(
-        "https://{}/v2/{}/blobs/{}",
-        oci_ref.registry, oci_ref.repository, blob.digest
-    );
-    let mut response = client
-        .get(&blob_url)
-        .bearer_auth(&token)
-        .send()
-        .await
-        .context("request the guest image blob")?
-        .error_for_status()
-        .context("ghcr blob endpoint returned an error status")?;
-
-    let tmp_path = part_path(dest);
-    let mut file = std::fs::File::create(&tmp_path)
-        .with_context(|| format!("create {}", tmp_path.display()))?;
-    let mut hasher = Sha256::new();
-    let mut downloaded: u64 = 0;
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .context("read a chunk of the guest image blob")?
-    {
-        hasher.update(&chunk);
-        file.write_all(&chunk)
-            .with_context(|| format!("write {}", tmp_path.display()))?;
-        downloaded += chunk.len() as u64;
-    }
-    file.flush()
-        .with_context(|| format!("flush {}", tmp_path.display()))?;
-    drop(file);
-
-    let actual_digest = format!("sha256:{:x}", hasher.finalize());
-    if actual_digest != blob.digest || downloaded != blob.size {
-        let _ = std::fs::remove_file(&tmp_path);
-        anyhow::bail!(
-            "guest image blob failed verification: expected {} ({} bytes), got {actual_digest} \
-             ({downloaded} bytes)",
-            blob.digest,
-            blob.size
+        let blob_url = format!(
+            "https://{}/v2/{}/blobs/{}",
+            oci_ref.registry, oci_ref.repository, blob.digest
         );
-    }
+        let mut response = client
+            .get(&blob_url)
+            .bearer_auth(&token)
+            .send()
+            .await
+            .context("request the guest image blob")?
+            .error_for_status()
+            .context("ghcr blob endpoint returned an error status")?;
 
-    std::fs::rename(&tmp_path, dest)
-        .with_context(|| format!("rename {} to {}", tmp_path.display(), dest.display()))?;
-    eprintln!("Guest image downloaded and verified.");
-    Ok(())
+        let tmp_path = part_path(dest);
+        let mut file = std::fs::File::create(&tmp_path)
+            .with_context(|| format!("create {}", tmp_path.display()))?;
+        let mut hasher = Sha256::new();
+        let mut downloaded: u64 = 0;
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .context("read a chunk of the guest image blob")?
+        {
+            hasher.update(&chunk);
+            file.write_all(&chunk)
+                .with_context(|| format!("write {}", tmp_path.display()))?;
+            downloaded += chunk.len() as u64;
+            row.update_bytes_with(
+                downloaded,
+                blob.size,
+                format_args!("from {}", oci_ref.registry),
+            );
+        }
+        file.flush()
+            .with_context(|| format!("flush {}", tmp_path.display()))?;
+        drop(file);
+
+        let actual_digest = format!("sha256:{:x}", hasher.finalize());
+        if actual_digest != blob.digest || downloaded != blob.size {
+            let _ = std::fs::remove_file(&tmp_path);
+            anyhow::bail!(
+                "guest image blob failed verification: expected {} ({} bytes), got {actual_digest} \
+                 ({downloaded} bytes)",
+                blob.digest,
+                blob.size
+            );
+        }
+
+        std::fs::rename(&tmp_path, dest)
+            .with_context(|| format!("rename {} to {}", tmp_path.display(), dest.display()))?;
+        Ok(downloaded)
+    }
+    .await;
+
+    match result {
+        Ok(downloaded) => {
+            row.settle_ok(format!(
+                "{}, verified (cached for next time)",
+                LiveRow::human_bytes(downloaded)
+            ));
+            Ok(())
+        },
+        Err(error) => {
+            row.settle_fail("download failed");
+            Err(error)
+        },
+    }
 }
 
 /// Decompress `zst_path` into `raw_path`, via a `.part` sibling renamed into

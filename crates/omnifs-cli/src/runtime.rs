@@ -18,13 +18,19 @@ use bollard::query_parameters::{
     StopContainerOptions,
 };
 use futures_util::TryStreamExt;
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
 use crate::error::WithHint;
 use crate::frontend_container::FRONTEND_HOME_LABEL;
 use crate::launch_backend::{
     BUILD_CHANNEL, BuildChannel, ContainerName, DockerTarget, ImageRef, names_registry,
 };
+use crate::ui::LiveRow;
+
+#[derive(Debug, Default)]
+struct LayerProgress {
+    current: u64,
+    total: u64,
+}
 
 /// Outcome of a Docker daemon reachability probe.
 pub(crate) enum DockerProbeOutcome {
@@ -149,7 +155,6 @@ impl Runtime {
     }
 
     pub(crate) async fn pull_image_with_progress(&self, image: &str) -> Result<()> {
-        anstream::eprintln!("Pulling {image}");
         let (from_image, tag) = image
             .rsplit_once(':')
             .ok_or_else(|| anyhow!("image `{image}` has no tag"))?;
@@ -158,52 +163,59 @@ impl Runtime {
             tag: Some(tag.to_string()),
             ..Default::default()
         };
-        let multi = MultiProgress::new();
-        let style = ProgressStyle::with_template(
-            "  {prefix:<14.bold} {wide_bar} {bytes:>10}/{total_bytes}",
-        )
-        .map_err(|e| anyhow!("progress template: {e}"))?
-        .progress_chars("##-");
-        let mut bars: HashMap<String, ProgressBar> = HashMap::new();
+        let source = image.split('/').next().unwrap_or(image);
+        let mut row = LiveRow::start("frontend image", "pulling");
+        let mut layers: HashMap<String, LayerProgress> = HashMap::new();
         let mut stream = self.docker.create_image(Some(opts), None, None);
-        while let Some(info) = stream
-            .try_next()
-            .await
-            .with_context(|| format!("pull {image}"))?
-        {
-            if let Some(id) = info.id.as_deref() {
-                let bar = bars.entry(id.to_string()).or_insert_with(|| {
-                    let bar = multi.add(ProgressBar::new(0));
-                    bar.set_style(style.clone());
-                    bar.set_prefix(id.to_string());
-                    bar
-                });
-                if let Some(progress) = info.progress_detail.as_ref() {
-                    if let Some(total) = progress.total
-                        && total > 0
-                    {
-                        bar.set_length(u64::try_from(total).unwrap_or(0));
+        let result: Result<()> = async {
+            while let Some(info) = stream
+                .try_next()
+                .await
+                .with_context(|| format!("pull {image}"))?
+            {
+                if let Some(id) = info.id.as_deref() {
+                    let layer = layers.entry(id.to_string()).or_default();
+                    if let Some(progress) = info.progress_detail.as_ref() {
+                        if let Some(total) = progress.total
+                            && let Ok(total) = u64::try_from(total)
+                            && total > 0
+                        {
+                            layer.total = total;
+                        }
+                        if let Some(current) = progress.current
+                            && let Ok(current) = u64::try_from(current)
+                        {
+                            layer.current = current;
+                        }
                     }
-                    if let Some(current) = progress.current {
-                        bar.set_position(u64::try_from(current).unwrap_or(0));
+                    let current = layers
+                        .values()
+                        .fold(0_u64, |sum, layer| sum.saturating_add(layer.current));
+                    let total = layers
+                        .values()
+                        .fold(0_u64, |sum, layer| sum.saturating_add(layer.total));
+                    if total > 0 {
+                        row.update_bytes_with(current, total, format_args!("from {source}"));
+                    } else if let Some(status) = info.status.as_deref() {
+                        row.update(status);
                     }
+                } else if let Some(status) = info.status {
+                    row.update(&status);
                 }
-                if let Some(status) = info.status.as_deref() {
-                    bar.set_message(status.to_string());
-                    if matches!(
-                        status,
-                        "Pull complete" | "Already exists" | "Download complete"
-                    ) {
-                        bar.finish_with_message(status.to_string());
-                    }
-                }
-            } else if let Some(status) = info.status {
-                anstream::eprintln!("  {status}");
             }
+            Ok(())
         }
-        multi.clear().ok();
-        anstream::eprintln!("✓ Image ready");
-        Ok(())
+        .await;
+        match result {
+            Ok(()) => {
+                row.settle_ok(format!("{image} ready"));
+                Ok(())
+            },
+            Err(error) => {
+                row.settle_fail(format!("{image} pull failed"));
+                Err(error)
+            },
+        }
     }
 
     pub(crate) async fn remove(&self) -> Result<()> {

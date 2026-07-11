@@ -26,6 +26,7 @@ use crate::launch_backend::{DockerTarget, GUEST_MOUNT};
 #[cfg(feature = "daemon")]
 use crate::local_backend::{LocalBackend, LocalProtocol};
 use crate::runtime::Runtime;
+use crate::ui::LiveRow;
 use crate::workspace::Workspace;
 
 /// How long to wait for the mount to appear inside the Docker-hosted frontend
@@ -222,12 +223,14 @@ async fn run_docker(
     };
     backend.launch(&spec).await?;
 
-    wait_for_mount(&backend, mount_name, DOCKER_MOUNT_PROBE_TIMEOUT).await?;
+    wait_for_mount(
+        &backend,
+        mount_name,
+        DOCKER_MOUNT_PROBE_TIMEOUT,
+        "fuse (docker)",
+    )
+    .await?;
 
-    anstream::eprintln!(
-        "✓ {GUEST_MOUNT} is mounted inside `{}`",
-        target.container_name()
-    );
     anstream::eprintln!();
     anstream::eprintln!(
         "Run `{}` to open a shell inside the container and browse {GUEST_MOUNT}.",
@@ -258,9 +261,14 @@ async fn run_krunkit(
     anstream::eprintln!("Starting the krunkit guest");
     backend.launch(&spec).await?;
 
-    wait_for_mount(&backend, mount_name, KRUNKIT_MOUNT_PROBE_TIMEOUT).await?;
+    wait_for_mount(
+        &backend,
+        mount_name,
+        KRUNKIT_MOUNT_PROBE_TIMEOUT,
+        "krunkit guest",
+    )
+    .await?;
 
-    anstream::eprintln!("✓ {GUEST_MOUNT} is mounted inside the krunkit guest");
     anstream::eprintln!();
     anstream::eprintln!(
         "Run `{}` to open a shell inside the guest and browse {GUEST_MOUNT}.",
@@ -307,13 +315,18 @@ async fn wait_for_mount(
     backend: &impl FrontendBackend,
     mount_name: &str,
     timeout: Duration,
+    progress_key: &str,
 ) -> anyhow::Result<()> {
     let probe_path = format!("{GUEST_MOUNT}/{mount_name}");
-    anstream::eprintln!("Waiting for {probe_path} inside the frontend");
+    let mut row = LiveRow::start(progress_key, "waiting for mount");
     let deadline = tokio::time::Instant::now() + timeout;
     let failure = loop {
+        row.update_elapsed("waiting for mount");
         match backend.mount_ready(&probe_path).await {
-            Ok(true) => return Ok(()),
+            Ok(true) => {
+                row.settle_ok(format!("{GUEST_MOUNT} mounted"));
+                return Ok(());
+            },
             Ok(false) => {},
             Err(error) => break error.context(format!("probe {probe_path} readiness")),
         }
@@ -325,6 +338,8 @@ async fn wait_for_mount(
         }
         tokio::time::sleep(MOUNT_PROBE_INTERVAL).await;
     };
+
+    row.settle_fail("mount failed");
 
     match backend.tear_down().await {
         Ok(()) => Err(failure),
@@ -393,7 +408,7 @@ mod tests {
     async fn probe_error_tears_down_launched_frontend() {
         let backend = FakeBackend::new(Probe::Error, false);
 
-        let error = wait_for_mount(&backend, "github", Duration::ZERO)
+        let error = wait_for_mount(&backend, "github", Duration::ZERO, "test frontend")
             .await
             .unwrap_err();
 
@@ -405,7 +420,7 @@ mod tests {
     async fn timeout_tears_down_launched_frontend() {
         let backend = FakeBackend::new(Probe::Pending, false);
 
-        let error = wait_for_mount(&backend, "github", Duration::ZERO)
+        let error = wait_for_mount(&backend, "github", Duration::ZERO, "test frontend")
             .await
             .unwrap_err();
 
@@ -417,7 +432,7 @@ mod tests {
     async fn cleanup_failure_keeps_readiness_failure() {
         let backend = FakeBackend::new(Probe::Error, true);
 
-        let error = wait_for_mount(&backend, "github", Duration::ZERO)
+        let error = wait_for_mount(&backend, "github", Duration::ZERO, "test frontend")
             .await
             .unwrap_err();
         let message = format!("{error:#}");
