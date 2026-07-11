@@ -3142,7 +3142,6 @@ name = "omnifs-engine"
 version = "0.2.1"
 dependencies = [
  "anyhow",
- "arc-swap",
  "blake3",
  "crossbeam-queue",
  "dashmap",

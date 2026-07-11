@@ -41,7 +41,6 @@ omnifs-wit = { workspace = true, features = ["host-bindings"] }
 anyhow = { workspace = true }
 fjall = { workspace = true }
 moka = { workspace = true }
-arc-swap = { workspace = true }
 crossbeam-queue = "0.3"
 secrecy = "0.10"
 time = { workspace = true, features = ["formatting"] }
