@@ -55,10 +55,6 @@ impl NamespacedResource {
         Self(manifest)
     }
 
-    pub(crate) fn uid(&self) -> Option<&str> {
-        self.0.uid()
-    }
-
     /// Computed: `status.yaml` leaf from the manifest's status stanza.
     pub(crate) fn status_yaml(
         &self,
@@ -94,7 +90,7 @@ impl NamespacedResource {
                 key.ns.as_str()
             )));
         };
-        let uid = NamespacedResource::new(value).uid().map(str::to_string);
+        let uid = value.uid().map(str::to_string);
         let text = api
             .events_text(
                 key.ns.as_str(),
