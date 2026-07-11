@@ -42,7 +42,6 @@ anyhow = { workspace = true }
 fjall = { workspace = true }
 moka = { workspace = true }
 arc-swap = { workspace = true }
-async_singleflight = { workspace = true }
 crossbeam-queue = "0.3"
 secrecy = "0.10"
 time = { workspace = true, features = ["formatting"] }

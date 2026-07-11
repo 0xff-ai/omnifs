@@ -1,20 +1,13 @@
-//! Workspace-standard exact-key singleflight and budgeted deferral.
+//! Budgeted wait, detached execution, and forget-on-complete for proactive NFS
+//! deferral.
 //!
-//! - [`Group`]: block-until-done dedupe (OAuth refresh in [`crate::auth`]).
-//! - [`Deferred`]: budgeted wait, detached runner, forget-on-complete (proactive
-//!   NFS deferral in `omnifs-nfs`).
-//!
-//! Both exact dedupe and budgeted deferral are implemented on
-//! [`crate::coalesce::Coalesce`]; this module keeps the small caller-facing
-//! aliases NFS and auth already import.
+//! [`Deferred`] is implemented on [`crate::coalesce::Coalesce`].
 
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::runtime::Handle;
-
-pub use async_singleflight::Group;
 
 use crate::coalesce::{Coalesce, CoverKey, ResolveOutcome};
 
