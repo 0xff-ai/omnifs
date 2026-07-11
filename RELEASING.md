@@ -9,8 +9,8 @@ How omnifs ships: conventional commits drive an always-open release PR; merging 
 | 1. Development | You + feature PRs (conventional commits) | CI verify | Work lands on `main` |
 | 2. Standing release PR | `release-pr.yml`, every push to `main` | git-cliff next version + changelog; `cargo set-version`; `just npm sync` | An open `chore(release): vX.Y.Z` PR, always current |
 | 3. Ship it | You merge the release PR | `release-pr.yml` tags the merge commit `vX.Y.Z` | `main` carries the bump; tag created |
-| 4. Build | **CI** on the merge commit | native CLI archives + runtime image | four `omnifs-cli-*` tarballs, `sha-<commit>` image |
-| 5. Publish | **`release.yml`** after green CI | GitHub Release + assets → GHCR promote → npm | GitHub Release `vX.Y.Z`, GHCR tags, npm `@0xff-ai/omnifs@X.Y.Z` |
+| 4. Build | **CI** on the merge commit | native CLI archives + frontend image + guest artifact | four `omnifs-cli-*` tarballs and `sha-<commit>` frontend/guest artifacts |
+| 5. Publish | **`release.yml`** after green CI | GitHub Release + assets → GHCR promotions → npm | GitHub Release `vX.Y.Z`, frontend/guest GHCR tags, npm `@0xff-ai/omnifs@X.Y.Z` |
 
 Phase 5 recompiles nothing: `release.yml` downloads the artifacts from the CI run for the tagged commit.
 
@@ -47,7 +47,7 @@ The next version is computed from conventional commits since the last tag: `feat
 
 | Workflow | Trigger | Role |
 |----------|---------|------|
-| `ci.yml` | push / PR to `main` | preflight, host/WASM verification, and on `main`: Linux + Darwin CLI archives, runtime images, smoke, the `sha-<commit>` manifest |
+| `ci.yml` | push / PR to `main` | preflight, host/WASM verification, and on `main`: Linux + Darwin CLI archives, frontend images, guest artifact, smoke, and `sha-<commit>` manifests |
 | `release-pr.yml` | push to `main` | maintain the standing release PR; tag `vX.Y.Z` when it merges |
 | `release.yml` | `workflow_run` after successful CI on `main` | if a `v*` tag points at the built commit: GitHub Release + assets → GHCR promote → npm; platform npm packages staged from `npm/platform/*` |
 
@@ -65,7 +65,8 @@ Day-to-day dev uses the relevant CI-shaped just lanes, `just providers build`, a
 ## What gets released
 
 - **CLI**: `omnifs-cli-linux-*.tar.xz` from `cargo-zigbuild` with glibc 2.17, and `omnifs-cli-darwin-*.tar.xz` cross-linked from Linux through the pinned `rust-cross/cargo-zigbuild` container. These binaries embed the compressed provider/tool WASM bundle and unpack it into `OMNIFS_HOME/providers`.
-- **Runtime**: `ghcr.io/0xff-ai/omnifs:<version>` promoted from `sha-<commit>` (also `v<version>` on GHCR; the CLI default uses the unprefixed tag). The runtime image stages the same Linux CLI binary.
+- **Frontend**: `ghcr.io/0xff-ai/omnifs-frontend:<version>` promoted from the multi-platform `sha-<commit>` manifest (also `v<version>` on GHCR). It contains only the credential-free `omnifs-fuse` frontend.
+- **Guest**: `ghcr.io/0xff-ai/omnifs-guest:<version>` promoted from the arm64 `sha-<commit>` OCI artifact (also `v<version>` on GHCR). It is the compressed libkrun disk image, not a container image.
 - **npm**: `@0xff-ai/omnifs` + four platform packages.
 
 ## npm platform packages
@@ -78,12 +79,13 @@ The bin shim at `npm/omnifs/bin/omnifs.js` and its `scripts/resolve-binary.js` h
 
 ## Version coupling
 
-For release `X.Y.Z`, the npm package version, the CLI `CARGO_PKG_VERSION` / `omnifs --version`, and the default runtime image tag all share the **same unprefixed semver** (`0.3.0`, not `v0.3.0`):
+For release `X.Y.Z`, the npm package version, the CLI `CARGO_PKG_VERSION` / `omnifs --version`, and the default frontend and guest tags all share the **same unprefixed semver** (`0.3.0`, not `v0.3.0`):
 
 - npm: `@0xff-ai/omnifs@X.Y.Z` and matching `@0xff-ai/omnifs-cli-*` optional dependencies
-- CLI default image: `ghcr.io/0xff-ai/omnifs:X.Y.Z` (`crates/omnifs-cli/src/session.rs`)
+- CLI default frontend: `ghcr.io/0xff-ai/omnifs-frontend:X.Y.Z` (`crates/omnifs-cli/src/frontend_container.rs`)
+- CLI default guest: `ghcr.io/0xff-ai/omnifs-guest:X.Y.Z` (`crates/omnifs-cli/src/krunkit_backend.rs`)
 - Git tag / GitHub Release name: `vX.Y.Z` (the `v` prefix is used only here)
-- GHCR promote publishes both `X.Y.Z` and `vX.Y.Z`; the CLI default uses the unprefixed tag
+- Both GHCR promotions publish `X.Y.Z` and `vX.Y.Z`; the CLI defaults use the unprefixed tags
 
 `cargo set-version` owns the bump: it sets `[workspace.package].version`, every crate that inherits it, and the workspace path-dependency requirements. Do not bump npm/Cargo versions outside the release PR, and do not change the embedded default image ref without going through a full release.
 
@@ -128,7 +130,8 @@ Re-run a failed **Release** job after fixing CI; do not re-run compile steps in 
 ```bash
 gh release view vX.Y.Z --json isPrerelease,assets
 npm view @0xff-ai/omnifs --json | jq '.["dist-tags"]'
-docker buildx imagetools inspect ghcr.io/0xff-ai/omnifs:X.Y.Z
+docker buildx imagetools inspect ghcr.io/0xff-ai/omnifs-frontend:X.Y.Z
+oras manifest fetch ghcr.io/0xff-ai/omnifs-guest:X.Y.Z >/dev/null
 ```
 
 ## Prerequisites and secrets
@@ -150,7 +153,7 @@ Gates that must be in place:
 
 - Manual `git tag` / `git push --tags` (`release-pr.yml` owns tagging)
 - Version bumps outside the release PR
-- Rebuild image/WASM/CLI during ship
+- Rebuild frontend/guest/WASM/CLI artifacts during ship
 
 ## Troubleshooting
 
