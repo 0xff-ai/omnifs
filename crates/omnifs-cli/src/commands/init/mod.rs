@@ -1,4 +1,3 @@
-#![allow(clippy::disallowed_macros)] // migrates in wave 2 (cli-redesign)
 //! `omnifs init` — interactive setup for a new mount.
 //!
 //! Walks the user through naming a mount, discovers provider defaults from
@@ -84,25 +83,39 @@ impl InitArgs {
     }
 
     pub(crate) async fn run_in_workspace(self, workspace: &Workspace) -> anyhow::Result<()> {
-        crate::stages::configure_mount(self, workspace, true)
-            .await
-            .map(|_| ())
+        let mut session = crate::ui::session::Session::intro("omnifs init")?;
+        let outcome = crate::stages::configure_mount(self, workspace, true, &mut session).await?;
+        match outcome.status {
+            crate::stages::MountInitStatus::Ready => {
+                session.outro(format!("Mounted `{}`.", outcome.mount_name));
+            },
+            crate::stages::MountInitStatus::SignInDeclined => {
+                session.outro(format!(
+                    "Saved `{}`. Run `omnifs mounts reauth {}` to sign in later.",
+                    outcome.mount_name, outcome.mount_name
+                ));
+            },
+        }
+        Ok(())
     }
 }
 
 /// The per-provider consent block shared by setup's loop and standalone `init`:
 /// a plain description line, then compact needs and limits lines. All on stderr.
-pub(crate) fn render_consent_block(manifest: &ProviderManifest) {
+pub(crate) fn render_consent_block(
+    session: &mut crate::ui::session::Session,
+    manifest: &ProviderManifest,
+) {
     let description = manifest
         .description
         .as_deref()
         .unwrap_or(&manifest.display_name);
-    anstream::eprintln!("  {description}");
+    session.note(description);
     if let Some(needs) = crate::capability::compact_needs(manifest) {
-        anstream::eprintln!("  {}", crate::style::dim(needs));
+        session.note(crate::style::dim(needs));
     }
     if let Some(limits) = crate::capability::compact_limits(manifest) {
-        anstream::eprintln!("  {}", crate::style::dim(limits));
+        session.note(crate::style::dim(limits));
     }
 }
 
@@ -112,6 +125,7 @@ pub(crate) async fn run_static_token_init(
     token: SecretString,
     credentials_file: &Path,
     validate: bool,
+    session: &mut crate::ui::session::Session,
 ) -> anyhow::Result<CredentialTarget> {
     let static_token_scheme = auth.static_token_scheme(manifest)?;
 
@@ -124,14 +138,11 @@ pub(crate) async fn run_static_token_init(
     let validation = match static_token_scheme.validation.as_ref() {
         Some(v) if validate => Some(
             StaticTokenValidator::new(v, header_name, header_prefix)
-                .validate(token.expose_secret())
+                .validate(token.expose_secret(), session)
                 .await?,
         ),
         Some(_) => {
-            anstream::eprintln!(
-                "{}",
-                crate::ui::note("token stored without validation (--no-validate)")
-            );
+            session.note("token stored without validation (--no-validate)");
             None
         },
         None => None,
@@ -139,19 +150,17 @@ pub(crate) async fn run_static_token_init(
     let identity = validation
         .as_ref()
         .and_then(|outcome| outcome.identity.clone());
-    anstream::eprintln!(
-        "{}",
-        crate::ui::ok(
-            "signed in",
-            identity
-                .clone()
-                .unwrap_or_else(|| "token accepted".to_string())
-        )
-    );
+    session.row(crate::ui::report::Row::new(
+        crate::ui::style::Glyph::Done,
+        "signed in",
+        identity
+            .clone()
+            .unwrap_or_else(|| "token accepted".to_string()),
+    ));
     if let Some(outcome) = &validation
         && let Some(workspace) = &outcome.workspace
     {
-        anstream::eprintln!("{}", crate::ui::note(workspace));
+        session.note(workspace);
     }
 
     let store = FileStore::new(credentials_file);
@@ -178,7 +187,11 @@ pub(crate) async fn run_static_token_init(
             .put(key, &entry)
             .with_context(|| "failed to store credential")?;
     }
-    anstream::eprintln!("{}", crate::ui::ok("credential", "stored"));
+    session.row(crate::ui::report::Row::new(
+        crate::ui::style::Glyph::Done,
+        "credential",
+        "stored",
+    ));
     Ok(target)
 }
 
@@ -440,7 +453,7 @@ mod tests {
             true,
             true,
         )
-        .resolve()
+        .resolve(None)
         .unwrap();
 
         let promoted = outcome.auth.expect("auth");
@@ -496,7 +509,7 @@ mod tests {
             false, // non-interactive
             true,  // --yes
         )
-        .resolve()
+        .resolve(None)
         .unwrap();
 
         assert!(

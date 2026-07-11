@@ -5,7 +5,7 @@
 
 use anyhow::{Context, bail};
 use secrecy::SecretString;
-use std::io::{IsTerminal, Read};
+use std::io::Read;
 
 #[derive(Debug, Clone)]
 pub enum TokenSource {
@@ -48,7 +48,7 @@ impl TokenSource {
     /// Read the token from the resolved source. Every source trims all
     /// surrounding whitespace and rejects an empty-after-trim value, so a
     /// stray newline or copy-paste padding never becomes part of the secret.
-    /// Interactive prompts via the inquire Password input (TTY only).
+    /// Interactive prompts via the shared hidden password input (TTY only).
     pub fn read(self) -> anyhow::Result<SecretString> {
         match self {
             Self::Stdin => {
@@ -72,16 +72,12 @@ impl TokenSource {
                 Ok(SecretString::from(trimmed.to_string()))
             },
             Self::Interactive => {
-                if !std::io::stdin().is_terminal() {
+                if !crate::ui::prompt::is_terminal() {
                     bail!(
                         "no token source and stdin is not a terminal; pass --token - or --token-env VAR"
                     );
                 }
-                let token = inquire::Password::new("Token")
-                    .with_display_mode(inquire::PasswordDisplayMode::Hidden)
-                    .without_confirmation()
-                    .prompt()
-                    .map_err(crate::ui::from_inquire)?;
+                let token = crate::ui::prompt::Password::new("Token").ask()?;
                 let trimmed = token.trim();
                 if trimmed.is_empty() {
                     bail!("token cannot be empty");

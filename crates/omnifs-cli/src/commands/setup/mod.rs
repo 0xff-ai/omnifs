@@ -1,4 +1,3 @@
-#![allow(clippy::disallowed_macros)] // migrates in wave 2 (cli-redesign)
 //! `omnifs setup`: guided onboarding walkthrough.
 //!
 //! A single ledger drives the whole wizard: an environment summary, a mount
@@ -13,7 +12,6 @@
 
 pub mod host_os;
 
-use std::io::IsTerminal;
 use std::path::PathBuf;
 
 use anyhow::Context;
@@ -55,9 +53,7 @@ pub struct SetupArgs {
     pub no_browser: bool,
 }
 
-/// How the shared configure tail titles its sections: the fresh wizard counts
-/// its stages (`── 3/5 first mount ──`), while the review hub is not a
-/// five-stage walk, so its actions print plain rules without counters.
+/// How the shared configure tail titles its rail phases.
 #[derive(Clone, Copy)]
 enum StageStyle {
     Wizard,
@@ -65,10 +61,10 @@ enum StageStyle {
 }
 
 impl StageStyle {
-    fn banner(self, n: usize, title: &str) -> String {
+    fn phase(self, n: usize, title: &str) -> String {
         match self {
-            Self::Wizard => ui::stage_rule(n, 5, title),
-            Self::Hub => ui::rule(title),
+            Self::Wizard => format!("{n}/5 {title}"),
+            Self::Hub => title.to_string(),
         }
     }
 }
@@ -77,7 +73,15 @@ impl StageStyle {
 enum MountOutcome {
     Ready,
     Skipped,
-    Failed(String),
+}
+
+impl MountOutcome {
+    fn from_status(status: crate::stages::MountInitStatus) -> Self {
+        match status {
+            crate::stages::MountInitStatus::Ready => Self::Ready,
+            crate::stages::MountInitStatus::SignInDeclined => Self::Skipped,
+        }
+    }
 }
 
 struct InitResult {
@@ -87,12 +91,8 @@ struct InitResult {
 
 impl SetupArgs {
     pub async fn run(self) -> anyhow::Result<()> {
-        let terminal = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
-        let mode = PromptMode {
-            interactive: terminal && !self.no_input,
-            yes: self.yes,
-            no_input: self.no_input,
-        };
+        let mode = PromptMode::from_flags(self.yes, self.no_input);
+        let mut session = crate::ui::session::Session::intro("omnifs setup")?;
 
         let os = HostOs::detect();
         let workspace = Workspace::resolve()?;
@@ -106,21 +106,27 @@ impl SetupArgs {
         // Review mode: a configured workspace, no explicit providers, no --yes.
         // A looping hub that owns its own actions.
         if environment.configured && self.providers.is_empty() && !self.yes {
-            return self.review_mode(&workspace, mode).await;
+            return self.review_mode(&workspace, mode, &mut session).await;
         }
 
         // Fresh mode: orientation + environment ledger.
-        print_header();
+        session.note("omnifs mounts your services as regular files.");
+        session.note("One daemon, one mount point, your standard tools.");
         let installed = crate::catalog::installed_providers(workspace.catalog())?;
         if installed.is_empty() {
             anyhow::bail!("no built-in or plugin providers are available");
         }
-        anstream::eprintln!("{}", ui::stage_rule(1, 5, "environment"));
-        anstream::eprintln!("{}", ui::ok("environment", os.name()));
-        anstream::eprintln!(
-            "{}",
-            ui::ok("providers", format!("{} installed", installed.len()))
-        );
+        session.phase("1/5 environment");
+        session.row(crate::ui::report::Row::new(
+            crate::ui::style::Glyph::Done,
+            "environment",
+            os.name(),
+        ));
+        session.row(crate::ui::report::Row::new(
+            crate::ui::style::Glyph::Done,
+            "providers",
+            format!("{} installed", installed.len()),
+        ));
         let frontend_plan = resolve_setup_frontend_plan(&config, os)?;
         // Docker reachability matters only when the effective `[[frontends]]`
         // plan actually launches a Docker frontend; a Linux host or a
@@ -129,46 +135,54 @@ impl SetupArgs {
             .iter()
             .any(|entry| entry.driver == Driver::Docker)
         {
-            Self::render_docker_row(&config).await;
+            Self::render_docker_row(&config, &mut session).await;
         }
 
-        anstream::eprintln!();
-        anstream::eprintln!("{}", ui::stage_rule(2, 5, "mount point"));
+        session.phase("2/5 mount point");
         let mount_point = if frontend_plan
             .iter()
             .any(|entry| entry.driver == Driver::Local)
         {
-            Some(self.resolve_mount_point(mode)?)
+            Some(self.resolve_mount_point(mode, &mut session)?)
         } else {
-            anstream::eprintln!(
-                "{}",
-                ui::note(
-                    "no local frontend is configured; skipping the host mount point (see `omnifs frontend up`)"
-                )
+            session.note(
+                "no local frontend is configured; skipping the host mount point (see `omnifs frontend up`)",
             );
             None
         };
 
-        self.configure_and_launch(&workspace, mount_point, mode, StageStyle::Wizard)
-            .await
+        self.configure_and_launch(
+            &workspace,
+            mount_point,
+            mode,
+            StageStyle::Wizard,
+            &mut session,
+        )
+        .await
     }
 
     /// The informational Docker reachability row for the environment stage. It
     /// never fails setup; an unreachable daemon just notes the retry hint.
-    async fn render_docker_row(config: &crate::config::Config) {
-        let mut live = ui::LiveRow::start("docker", "checking");
-        live.update("connecting");
+    async fn render_docker_row(
+        config: &crate::config::Config,
+        session: &mut crate::ui::session::Session,
+    ) {
         match crate::stages::probe_docker_reachability(config).await {
             crate::stages::DockerReachability::Running { version } => {
-                live.settle_ok(format!("{version} running"));
+                session.row(crate::ui::report::Row::new(
+                    crate::ui::style::Glyph::Done,
+                    "docker",
+                    format!("{version} running"),
+                ));
             },
             crate::stages::DockerReachability::Unreachable => {
-                live.settle_warn("not reachable");
-                anstream::eprintln!(
-                    "{}",
-                    ui::note(
-                        "start Docker Desktop so `omnifs up` can start the FUSE frontend; native NFS keeps working without it"
-                    )
+                session.row(crate::ui::report::Row::new(
+                    crate::ui::style::Glyph::Warn,
+                    "docker",
+                    "not reachable",
+                ));
+                session.note(
+                    "start Docker Desktop so `omnifs up` can start the FUSE frontend; native NFS keeps working without it",
                 );
             },
         }
@@ -176,25 +190,30 @@ impl SetupArgs {
 
     /// Resolve the mount point and print the post-answer note. The daemon
     /// always runs host-native, so this question always applies.
-    fn resolve_mount_point(&self, mode: PromptMode) -> anyhow::Result<PathBuf> {
+    fn resolve_mount_point(
+        &self,
+        mode: PromptMode,
+        session: &mut crate::ui::session::Session,
+    ) -> anyhow::Result<PathBuf> {
         let mount_point = crate::stages::mount_point_resolution(self.mount_point.clone(), mode)?;
         let display = WorkspaceLayout::display(&mount_point);
         // State the fact when the prompt was skipped (--mount-point or --yes).
         if self.mount_point.is_some() || mode.yes {
-            anstream::eprintln!("{}", ui::ok("mount point", &display));
+            session.row(crate::ui::report::Row::new(
+                crate::ui::style::Glyph::Done,
+                "mount point",
+                &display,
+            ));
         }
-        anstream::eprintln!("{}", ui::note(format!("files appear at {display}")));
+        session.note(format!("files appear at {display}"));
         // Launch reads OMNIFS_MOUNT_POINT; a typed/flagged value only previews
         // unless it is exported.
         let already = crate::config::env_string("OMNIFS_MOUNT_POINT")
             .is_some_and(|env| WorkspaceLayout::display(&PathBuf::from(env)) == display);
         if !already {
-            anstream::eprintln!(
-                "{}",
-                ui::note(format!(
-                    "`export OMNIFS_MOUNT_POINT={display}` to persist it"
-                ))
-            );
+            session.note(format!(
+                "`export OMNIFS_MOUNT_POINT={display}` to persist it"
+            ));
         }
         Ok(mount_point)
     }
@@ -208,14 +227,14 @@ impl SetupArgs {
         mount_point: Option<PathBuf>,
         mode: PromptMode,
         style: StageStyle,
+        session: &mut crate::ui::session::Session,
     ) -> anyhow::Result<()> {
         let installed = crate::catalog::installed_providers(workspace.catalog())?;
         let mounts = workspace.mounts()?;
         let configured = crate::catalog::configured_mounts(workspace.catalog(), &mounts)?;
 
-        anstream::eprintln!();
-        anstream::eprintln!("{}", style.banner(3, "first mount"));
-        let selected = self.resolve_selection(&installed, &configured, mode)?;
+        session.phase(style.phase(3, "what should omnifs mount?"));
+        let selected = self.resolve_selection(&installed, &configured, mode, session)?;
 
         // Nothing new to configure (all providers already configured, or the
         // picker was confirmed empty): from the hub, return to it without the
@@ -225,9 +244,13 @@ impl SetupArgs {
             return Ok(());
         }
 
-        anstream::eprintln!();
-        anstream::eprintln!("{}", style.banner(4, "auth + grants"));
-        let results = self.run_init_loop(&selected, &installed, workspace).await;
+        // A provider configuration or credential failure is a command failure,
+        // not a soft skip. Returning the original error preserves its exit
+        // code and context for scripts and for the top-level renderer. Only an
+        // explicit sign-in decline becomes `MountOutcome::Skipped`.
+        let results = self
+            .run_init_loop(&selected, &installed, workspace, style, session)
+            .await?;
 
         let any_ready = results
             .iter()
@@ -235,25 +258,19 @@ impl SetupArgs {
             || !configured.is_empty();
 
         if self.no_up {
-            anstream::eprintln!(
-                "{}",
-                ui::note("daemon launch skipped (--no-up); run `omnifs up` when ready")
-            );
-            Self::print_closer(&results, None);
+            session.note("daemon launch skipped (--no-up); run `omnifs up` when ready");
+            Self::print_closer(&results, None, session);
             return Ok(());
         }
         if !any_ready {
-            anstream::eprintln!(
-                "{}",
-                ui::note("no mounts yet; add one with `omnifs init <provider>`")
-            );
+            session.outro("No mounts yet. Add one with `omnifs init <provider>`.");
             return Ok(());
         }
 
         let outcome = self
-            .launch_and_report(workspace, mount_point.as_deref(), &results, style)
+            .launch_and_report(workspace, mount_point.as_deref(), &results, style, session)
             .await?;
-        Self::print_closer(&results, Some(&outcome));
+        Self::print_closer(&results, Some(&outcome), session);
         Ok(())
     }
 
@@ -263,17 +280,21 @@ impl SetupArgs {
         mount_point: Option<&std::path::Path>,
         results: &[InitResult],
         style: StageStyle,
+        session: &mut crate::ui::session::Session,
     ) -> anyhow::Result<LaunchOutcome> {
-        anstream::eprintln!();
-        anstream::eprintln!("{}", style.banner(5, "launch"));
+        session.phase(style.phase(5, "launch"));
         // `Launcher::launch` writes its own stderr progress lines; a spinner
         // here would be overwritten mid-line by them. Print a plain note before
         // and settle into a static row after.
-        anstream::eprintln!("{}", ui::note("starting the daemon"));
+        session.note("starting the daemon");
         let outcome = match Launcher::new(workspace, "omnifs setup").launch().await {
             Ok(outcome) => outcome,
             Err(error) => {
-                anstream::eprintln!("{}", ui::fail("daemon", one_line(&error)));
+                session.row(crate::ui::report::Row::new(
+                    crate::ui::style::Glyph::Fail,
+                    "daemon",
+                    one_line(&error),
+                ));
                 return Err(error);
             },
         };
@@ -286,7 +307,11 @@ impl SetupArgs {
             Some(mp) => format!("running; local mount at {}", WorkspaceLayout::display(mp)),
             None => "running (no local frontend attached; see `omnifs frontend up`)".to_string(),
         };
-        anstream::eprintln!("{}", ui::ok("daemon", daemon));
+        session.row(crate::ui::report::Row::new(
+            crate::ui::style::Glyph::Done,
+            "daemon",
+            daemon,
+        ));
 
         if let Some(mount) = results
             .iter()
@@ -299,22 +324,21 @@ impl SetupArgs {
                     // Show the actual listing (bounded) so the read is visibly
                     // real, then the summary row with the count.
                     for line in read.output.lines().take(5) {
-                        anstream::eprintln!("{}", ui::note(line));
+                        session.note(line);
                     }
-                    anstream::eprintln!(
-                        "{}",
-                        ui::ok(
-                            "first read",
-                            format!("{} ({entries} entries)", read.command)
-                        )
-                    );
+                    session.row(crate::ui::report::Row::new(
+                        crate::ui::style::Glyph::Done,
+                        "first read",
+                        format!("{} ({entries} entries)", read.command),
+                    ));
                 },
                 Err(error) => {
-                    anstream::eprintln!(
-                        "{}",
-                        ui::warn_row("first read", "failed; run omnifs doctor")
-                    );
-                    anstream::eprintln!("{}", ui::note(one_line(&error)));
+                    session.row(crate::ui::report::Row::new(
+                        crate::ui::style::Glyph::Warn,
+                        "first read",
+                        "failed; run omnifs doctor",
+                    ));
+                    session.note(one_line(&error));
                 },
             }
         }
@@ -326,6 +350,7 @@ impl SetupArgs {
     fn yes_auto_select(
         installed: &[(Provider, ProviderManifest)],
         configured: &std::collections::BTreeMap<String, String>,
+        session: &mut crate::ui::session::Session,
     ) -> Vec<String> {
         let mut selected = Vec::new();
         let mut skipped: Vec<String> = Vec::new();
@@ -358,63 +383,69 @@ impl SetupArgs {
             }
         }
         if !selected.is_empty() {
-            anstream::eprintln!(
-                "{}",
-                ui::note(format!("auto-selected {}", selected.join(", ")))
-            );
+            session.note(format!("auto-selected {}", selected.join(", ")));
         }
         for entry in &skipped {
-            anstream::eprintln!("{}", ui::note(format!("skipped {entry}")));
+            session.note(format!("skipped {entry}"));
         }
         selected
     }
 
-    /// The `You're set.` graduation card: any failures/skips first, then one
+    /// The `You're set.` graduation card: any skipped providers first, then one
     /// row per Ready mount naming where its files live, then the daily-command
     /// hints. `outcome` is `None` when the daemon was not launched (`--no-up`),
     /// which also swaps the first hint to `omnifs up`.
-    fn print_closer(results: &[InitResult], outcome: Option<&LaunchOutcome>) {
-        // Surface any failures/skips before the closer.
-        let mut had_failure = false;
+    fn print_closer(
+        results: &[InitResult],
+        outcome: Option<&LaunchOutcome>,
+        session: &mut crate::ui::session::Session,
+    ) {
+        // Surface explicit sign-in declines before the closer. Failures return
+        // from the configure tail and are rendered by the top-level error
+        // handler, preserving their original exit code.
         for result in results {
             match &result.outcome {
-                MountOutcome::Failed(reason) => {
-                    had_failure = true;
-                    anstream::eprintln!("{}", ui::fail(&result.mount_name, reason));
-                },
                 MountOutcome::Skipped => {
-                    anstream::eprintln!("{}", ui::skip(&result.mount_name, "skipped"));
+                    session.row(crate::ui::report::Row::new(
+                        crate::ui::style::Glyph::Skip,
+                        &result.mount_name,
+                        "skipped",
+                    ));
                 },
                 MountOutcome::Ready => {},
             }
         }
-        if had_failure {
-            anstream::eprintln!("{}", ui::note("retry with `omnifs init <provider>`"));
-        }
-
-        anstream::eprintln!();
-        anstream::eprintln!("{}", ui::heading("You're set."));
         // One row per Ready mount, naming where its files live. Only shown when
         // the daemon is up; without it there is no live path to point at.
         if let Some(outcome) = outcome {
             for result in results {
                 if matches!(result.outcome, MountOutcome::Ready) {
                     let where_to = ready_mount_location(outcome, &result.mount_name);
-                    anstream::eprintln!("{}", ui::ok(&result.mount_name, where_to));
+                    session.row(crate::ui::report::Row::new(
+                        crate::ui::style::Glyph::Done,
+                        &result.mount_name,
+                        where_to,
+                    ));
                 }
             }
         }
         if outcome.is_none() {
-            anstream::eprintln!("{}", ui::hint("omnifs up", "start the daemon"));
+            session.note(ui::hint("omnifs up", "start the daemon"));
         } else {
-            anstream::eprintln!("{}", ui::hint("omnifs shell", "browse your files"));
+            session.note(ui::hint("omnifs shell", "browse your files"));
         }
-        anstream::eprintln!("{}", ui::hint("omnifs status", "check the daemon"));
-        anstream::eprintln!("{}", ui::hint("omnifs init", "add another provider"));
-        anstream::eprintln!(
-            "{}",
-            ui::hint("omnifs completions", "tab completion for your shell")
-        );
+        session.note(ui::hint("omnifs status", "check the daemon"));
+        session.note(ui::hint("omnifs init", "add another provider"));
+        session.note(ui::hint(
+            "omnifs completions",
+            "tab completion for your shell",
+        ));
+        let next = if outcome.is_none() {
+            "You're set. Run `omnifs up` when ready."
+        } else {
+            "You're set. Try `omnifs shell`."
+        };
+        session.outro(next);
     }
 
     /// Resolve which provider names to configure.
@@ -423,12 +454,13 @@ impl SetupArgs {
         installed: &[(Provider, ProviderManifest)],
         configured: &std::collections::BTreeMap<String, String>,
         mode: PromptMode,
+        session: &mut crate::ui::session::Session,
     ) -> anyhow::Result<Vec<String>> {
         if !self.providers.is_empty() {
-            return validate_preselected(&self.providers, installed, configured);
+            return validate_preselected(&self.providers, installed, configured, session);
         }
         if mode.yes {
-            return Ok(Self::yes_auto_select(installed, configured));
+            return Ok(Self::yes_auto_select(installed, configured, session));
         }
         if mode.no_input {
             anyhow::bail!(
@@ -442,7 +474,7 @@ impl SetupArgs {
         }
         let rows = crate::ui::picker::build_rows(installed, configured);
         if rows.is_empty() {
-            anstream::eprintln!("{}", ui::note("all providers already configured"));
+            session.note("all providers already configured");
             return Ok(Vec::new());
         }
         crate::ui::picker::multiselect("What should omnifs mount?", rows)
@@ -453,22 +485,17 @@ impl SetupArgs {
         selected: &[String],
         installed: &[(Provider, ProviderManifest)],
         workspace: &Workspace,
-    ) -> Vec<InitResult> {
+        style: StageStyle,
+        session: &mut crate::ui::session::Session,
+    ) -> anyhow::Result<Vec<InitResult>> {
         let mut out = Vec::new();
         for provider_name in selected {
             let Some((_, manifest)) = crate::catalog::find_installed(installed, provider_name)
             else {
-                out.push(InitResult {
-                    mount_name: provider_name.clone(),
-                    outcome: MountOutcome::Failed(format!("provider `{provider_name}` not found")),
-                });
-                continue;
+                anyhow::bail!("provider `{provider_name}` not found");
             };
             let mount_name = manifest.default_mount.clone();
-
-            anstream::eprintln!();
-            anstream::eprintln!("{}", ui::rule(provider_name));
-            init::render_consent_block(manifest);
+            session.phase(style.phase(4, &format!("{provider_name} sign in")));
 
             let init_args = init::InitArgs {
                 provider: Some(provider_name.clone()),
@@ -486,38 +513,23 @@ impl SetupArgs {
                 capabilities_json: None,
                 limits_json: None,
             };
-            match crate::stages::configure_mount(init_args, workspace, false).await {
+            match crate::stages::configure_mount(init_args, workspace, false, session).await {
                 Ok(outcome) => out.push(InitResult {
                     mount_name: outcome.mount_name,
-                    outcome: MountOutcome::Ready,
+                    outcome: MountOutcome::from_status(outcome.status),
                 }),
                 Err(error) => {
-                    // A cancel (Esc/Ctrl-C at any prompt) or an auth-required
-                    // bail is a skip, not a provider failure.
-                    let skipped = crate::ui::picker::is_canceled(&error)
-                        || crate::error::exit_code(&error) == crate::error::ExitCode::AuthRequired;
-                    out.push(InitResult {
+                    session.row(crate::ui::report::Row::new(
+                        crate::ui::style::Glyph::Fail,
                         mount_name,
-                        outcome: if skipped {
-                            MountOutcome::Skipped
-                        } else {
-                            MountOutcome::Failed(one_line(&error))
-                        },
-                    });
+                        one_line(&error),
+                    ));
+                    return Err(error);
                 },
             }
         }
-        out
+        Ok(out)
     }
-}
-
-fn print_header() {
-    anstream::eprintln!();
-    anstream::eprintln!("{}", ui::heading("omnifs setup"));
-    anstream::eprintln!();
-    anstream::eprintln!("  omnifs mounts your services as regular files.");
-    anstream::eprintln!("  One daemon, one mount point, your standard tools.");
-    anstream::eprintln!();
 }
 
 /// Map the setup wizard's OS detection onto the frontend resolver's coarser
@@ -584,6 +596,7 @@ fn validate_preselected(
     requested: &[String],
     installed: &[(Provider, ProviderManifest)],
     configured: &std::collections::BTreeMap<String, String>,
+    session: &mut crate::ui::session::Session,
 ) -> anyhow::Result<Vec<String>> {
     let known = || {
         installed
@@ -598,10 +611,11 @@ fn validate_preselected(
             anyhow::bail!("provider `{id}` is not available; known: {}", known());
         }
         if configured.contains_key(id) {
-            anstream::eprintln!(
-                "{}",
-                ui::skip(id, format!("already configured as {}", configured[id]))
-            );
+            session.row(crate::ui::report::Row::new(
+                crate::ui::style::Glyph::Skip,
+                id,
+                format!("already configured as {}", configured[id]),
+            ));
             continue;
         }
         out.push(id.clone());
@@ -618,13 +632,14 @@ impl SetupArgs {
     /// The review hub: a loop over a status ledger and an action menu for an
     /// already-configured workspace. Each action runs, then control returns to
     /// the hub; the loop exits on the exit item, Esc, or Ctrl-C.
-    async fn review_mode(&self, workspace: &Workspace, mode: PromptMode) -> anyhow::Result<()> {
-        anstream::eprintln!();
-        anstream::eprintln!("{}", ui::heading("omnifs setup"));
-
+    async fn review_mode(
+        &self,
+        workspace: &Workspace,
+        mode: PromptMode,
+        session: &mut crate::ui::session::Session,
+    ) -> anyhow::Result<()> {
         loop {
-            anstream::eprintln!();
-            let summaries = render_review_ledger(workspace).await?;
+            let summaries = render_review_ledger(workspace, session).await?;
 
             // Non-interactive review keeps its verbatim bail messages.
             if mode.no_input {
@@ -642,7 +657,10 @@ impl SetupArgs {
             let choice =
                 match crate::ui::picker::select("What next?", review_menu_rows(&candidates)) {
                     Ok(id) => id,
-                    Err(error) if crate::ui::picker::is_canceled(&error) => return Ok(()),
+                    // A rail cancellation is a command cancellation. Do not turn
+                    // Esc/Ctrl-C into a skipped provider or silently fall through
+                    // to a successful setup exit.
+                    Err(error) if crate::ui::picker::is_canceled(&error) => return Err(error),
                     Err(error) => return Err(error),
                 };
 
@@ -653,7 +671,13 @@ impl SetupArgs {
                     let mount_point =
                         add_provider_mount_point(&workspace.config()?, HostOs::detect())?;
                     match self
-                        .configure_and_launch(workspace, mount_point, mode, StageStyle::Hub)
+                        .configure_and_launch(
+                            workspace,
+                            mount_point,
+                            mode,
+                            StageStyle::Hub,
+                            session,
+                        )
                         .await
                     {
                         Ok(()) => {},
@@ -662,11 +686,16 @@ impl SetupArgs {
                     }
                 },
                 "run checks" => {
-                    anstream::eprintln!("{}", ui::note("running `omnifs doctor`"));
+                    session.note("running `omnifs doctor`");
                     crate::commands::doctor::DoctorArgs::default().run().await?;
                 },
-                "exit" => return Ok(()),
-                _ => self.reauth_from_hub(workspace, &candidates).await,
+                "exit" => {
+                    session.outro("Leaving setup.");
+                    return Ok(());
+                },
+                _ => {
+                    self.reauth_from_hub(workspace, &candidates, session).await;
+                },
             }
             // The blank at the top of the next iteration separates this action's
             // output from the re-rendered ledger.
@@ -676,7 +705,12 @@ impl SetupArgs {
     /// Re-authenticate one mount from the hub. When several mounts need
     /// attention, a second picker chooses which. A cancel or a reauth failure
     /// leaves a note and returns to the hub rather than aborting setup.
-    async fn reauth_from_hub(&self, workspace: &Workspace, candidates: &[String]) {
+    async fn reauth_from_hub(
+        &self,
+        workspace: &Workspace,
+        candidates: &[String],
+        session: &mut crate::ui::session::Session,
+    ) {
         let target = if candidates.len() == 1 {
             candidates[0].clone()
         } else {
@@ -686,7 +720,7 @@ impl SetupArgs {
                 // a breadcrumb before returning.
                 Err(error) if crate::ui::picker::is_canceled(&error) => return,
                 Err(error) => {
-                    anstream::eprintln!("{}", ui::note(one_line(&error)));
+                    session.note(one_line(&error));
                     return;
                 },
             }
@@ -700,8 +734,8 @@ impl SetupArgs {
             no_validate: false,
             scopes: Vec::new(),
         };
-        if let Err(error) = reauth.run_in_workspace(workspace).await {
-            anstream::eprintln!("{}", ui::note(one_line(&error)));
+        if let Err(error) = reauth.run_in_session(workspace, session).await {
+            session.note(one_line(&error));
         }
     }
 }
@@ -710,13 +744,18 @@ impl SetupArgs {
 /// summaries the menu needs. Re-run each hub iteration for fresh facts.
 async fn render_review_ledger(
     workspace: &Workspace,
+    session: &mut crate::ui::session::Session,
 ) -> anyhow::Result<Vec<crate::mount_report::UserMountStatus>> {
     let store = omnifs_workspace::creds::FileStore::new(&workspace.layout().credentials_file);
     let mounts = workspace.mounts()?;
     let summaries =
         crate::mount_report::scan_user_mount_configs(workspace.catalog(), &mounts, &store);
     if summaries.is_empty() {
-        anstream::eprintln!("{}", ui::warn_row("mounts", "none configured"));
+        session.row(crate::ui::report::Row::new(
+            crate::ui::style::Glyph::Warn,
+            "mounts",
+            "none configured",
+        ));
     } else {
         let entries: Vec<(String, &'static str)> = summaries.iter().map(mount_summary).collect();
         let joined = entries
@@ -726,23 +765,36 @@ async fn render_review_ledger(
             .join(", ");
         // A long roster overflows the ledger row; wrap it into per-mount notes.
         if entries.len() > 3 || joined.chars().count() > MOUNTS_ROW_WIDTH {
-            anstream::eprintln!(
-                "{}",
-                ui::ok("mounts", format!("{} configured", entries.len()))
-            );
+            session.row(crate::ui::report::Row::new(
+                crate::ui::style::Glyph::Done,
+                "mounts",
+                format!("{} configured", entries.len()),
+            ));
             for (name, state) in &entries {
-                anstream::eprintln!("{}", ui::note(format!("{name}: {state}")));
+                session.note(format!("{name}: {state}"));
             }
         } else {
-            anstream::eprintln!("{}", ui::ok("mounts", joined));
+            session.row(crate::ui::report::Row::new(
+                crate::ui::style::Glyph::Done,
+                "mounts",
+                joined,
+            ));
         }
     }
 
     if workspace.daemon().ready().await {
-        anstream::eprintln!("{}", ui::ok("daemon", "running"));
+        session.row(crate::ui::report::Row::new(
+            crate::ui::style::Glyph::Done,
+            "daemon",
+            "running",
+        ));
     } else {
-        anstream::eprintln!("{}", ui::warn_row("daemon", "not running"));
-        anstream::eprintln!("{}", ui::note("start it with `omnifs up`"));
+        session.row(crate::ui::report::Row::new(
+            crate::ui::style::Glyph::Warn,
+            "daemon",
+            "not running",
+        ));
+        session.note("start it with `omnifs up`");
     }
 
     Ok(summaries)
@@ -922,6 +974,23 @@ mod tests {
         assert_eq!(
             ready_mount_location(&outcome, "github"),
             "/mnt/omnifs/github"
+        );
+    }
+
+    #[test]
+    fn declined_sign_in_is_a_skip() {
+        assert!(matches!(
+            MountOutcome::from_status(crate::stages::MountInitStatus::SignInDeclined),
+            MountOutcome::Skipped
+        ));
+    }
+
+    #[test]
+    fn review_phases_do_not_claim_the_five_stage_wizard() {
+        assert_eq!(StageStyle::Hub.phase(4, "github sign in"), "github sign in");
+        assert_eq!(
+            StageStyle::Wizard.phase(4, "github sign in"),
+            "4/5 github sign in"
         );
     }
 }

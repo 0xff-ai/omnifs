@@ -193,6 +193,15 @@ fn scripted_setup_and_init_do_not_prompt() {
         String::from_utf8_lossy(&setup.stdout),
         String::from_utf8_lossy(&setup.stderr)
     );
+    assert!(setup.stdout.is_empty(), "session prose belongs on stderr");
+    let setup_stderr = String::from_utf8_lossy(&setup.stderr);
+    assert!(setup_stderr.contains("┌ omnifs setup"), "{setup_stderr}");
+    assert!(setup_stderr.contains("1/5 environment"), "{setup_stderr}");
+    assert!(
+        setup_stderr.contains("3/5 what should omnifs mount?"),
+        "{setup_stderr}"
+    );
+    assert!(setup_stderr.contains("└ You're set."), "{setup_stderr}");
 
     let init = fixture.run(&["init", "test", "--no-input", "--yes"]);
     assert_eq!(
@@ -202,8 +211,20 @@ fn scripted_setup_and_init_do_not_prompt() {
         String::from_utf8_lossy(&init.stdout),
         String::from_utf8_lossy(&init.stderr)
     );
+    assert!(init.stdout.is_empty(), "session prose belongs on stderr");
+    let init_stderr = String::from_utf8_lossy(&init.stderr);
+    assert!(init_stderr.contains("┌ omnifs init"), "{init_stderr}");
+    assert!(
+        init_stderr.contains("mount name") && init_stderr.contains("test taken, using test-2"),
+        "--yes collision rename must stay visible: {init_stderr}"
+    );
+    assert!(init_stderr.contains("└ Mounted `test-2`."), "{init_stderr}");
     assert!(
         fixture.home_path().join("mounts/test.json").is_file(),
         "init must write the test mount spec"
+    );
+    assert!(
+        fixture.home_path().join("mounts/test-2.json").is_file(),
+        "collision rename must write the suggested mount spec"
     );
 }

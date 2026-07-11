@@ -1,11 +1,11 @@
 #![allow(clippy::disallowed_macros)] // ui/ owns terminal output
 //! Custom inline provider picker with a details side panel.
 //!
-//! `inquire::MultiSelect` cannot render a details panel, so this component draws
+//! The general-purpose prompt does not render a details panel, so this component draws
 //! its own list plus an expandable panel using `crossterm` for raw-mode keys and
 //! cursor control. It renders inline (no alternate screen): each keystroke
 //! redraws in place, and on finish the block is cleared and replaced by one
-//! answered line so scrollback matches the inquire prompts around it.
+//! answered line so scrollback matches the rail prompts around it.
 //!
 //! Only the pure parts (row building, tag derivation, truncation, `default_on`,
 //! panel assembly) are unit-tested; raw-mode rendering is exercised live.
@@ -321,7 +321,7 @@ fn render_row(
     width: usize,
 ) -> String {
     let arrow = if highlighted {
-        style::accent("❯ ")
+        style::accent("› ")
     } else {
         "  ".to_string()
     };
@@ -493,15 +493,18 @@ impl Picker {
 
         let id_width = self.id_width();
         let mut list: Vec<String> = Vec::new();
-        list.push(format!("{} {}", style::success("?"), self.question));
+        list.push(format!("{} {}", style::accent("◆"), self.question));
         for (idx, row) in self.rows.iter().enumerate() {
-            list.push(render_row(
-                row,
-                id_width,
-                idx == self.cursor,
-                self.checked[idx],
-                self.multi,
-                list_width,
+            list.push(format!(
+                "│  {}",
+                render_row(
+                    row,
+                    id_width,
+                    idx == self.cursor,
+                    self.checked[idx],
+                    self.multi,
+                    list_width.saturating_sub(3),
+                )
             ));
         }
         let help = if self.multi {
@@ -510,9 +513,9 @@ impl Picker {
             "↑↓ move, → details, enter select"
         };
         if !self.panel_open {
-            list.push(style::dim("→ details"));
+            list.push(style::dim("│  → details"));
         }
-        list.push(style::dim(help));
+        list.push(style::dim(format!("│  {help}")));
 
         let panel = self.panel_lines();
 
@@ -673,13 +676,12 @@ impl Picker {
         } else {
             style::accent(ids.join(", "))
         };
-        anstream::eprintln!("{} {} {answer}", style::success("✓"), self.question);
+        anstream::eprintln!("│  {} {} {answer}", style::success("✓"), self.question);
         Ok(())
     }
 
     fn cancel(&mut self) -> anyhow::Result<Vec<String>> {
         self.clear()?;
-        anstream::eprintln!("{} {}", self.question, style::dim("(canceled)"));
         Err(anyhow::Error::new(Canceled))
     }
 }

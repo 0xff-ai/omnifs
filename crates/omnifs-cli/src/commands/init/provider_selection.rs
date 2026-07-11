@@ -43,6 +43,7 @@ impl<'a> ProviderSelection<'a> {
         explicit_name: Option<&str>,
         interactive: bool,
         yes: bool,
+        session: &mut crate::ui::session::Session,
     ) -> anyhow::Result<(String, MountName)> {
         let provider = self.resolve_provider(provider_arg, interactive)?;
         // An unknown positional provider bails here (before the caller's own
@@ -70,7 +71,7 @@ impl<'a> ProviderSelection<'a> {
             return Ok((provider, proposed_name));
         }
 
-        let name = self.ensure_unique_name(proposed_name, interactive, yes)?;
+        let name = self.ensure_unique_name(proposed_name, interactive, yes, session)?;
         Ok((provider, name))
     }
 
@@ -89,9 +90,9 @@ impl<'a> ProviderSelection<'a> {
         if providers.is_empty() {
             anyhow::bail!("no providers found");
         }
-        inquire::Select::new("Which provider does this mount use?", providers)
-            .prompt()
-            .map_err(crate::ui::from_inquire)
+        crate::ui::prompt::Select::new("Which provider does this mount use?")
+            .items(providers)
+            .ask()
     }
 
     fn ensure_unique_name(
@@ -99,6 +100,7 @@ impl<'a> ProviderSelection<'a> {
         proposed: MountName,
         interactive: bool,
         yes: bool,
+        session: &mut crate::ui::session::Session,
     ) -> anyhow::Result<MountName> {
         if !mount_exists(self.mounts, &proposed) {
             return Ok(proposed);
@@ -107,6 +109,11 @@ impl<'a> ProviderSelection<'a> {
         // `--yes` accepts the auto-suggested name on collision, even
         // non-interactively (it never overwrites the existing mount).
         if yes {
+            session.row(crate::ui::report::Row::new(
+                crate::ui::style::Glyph::Warn,
+                "mount name",
+                format!("{proposed} taken, using {suggestion}"),
+            ));
             return Ok(suggestion);
         }
         if !interactive {
@@ -114,11 +121,9 @@ impl<'a> ProviderSelection<'a> {
                 "mount `{proposed}` already exists; pass --as explicitly (suggested: `{suggestion}`)"
             );
         }
-        anstream::eprintln!("Mount `{proposed}` already exists.");
-        let name = inquire::Text::new("New mount name")
+        let name = crate::ui::prompt::Text::new("New mount name")
             .with_default(suggestion.as_str())
-            .prompt()
-            .map_err(crate::ui::from_inquire)?;
+            .ask()?;
         Ok(MountName::new(name)?)
     }
 

@@ -1,4 +1,3 @@
-#![allow(clippy::disallowed_macros)] // migrates in wave 3 (cli-redesign)
 //! `omnifs reset`: nuke every mount config (and, by default, the stored
 //! credentials they reference) and tear down the running daemon.
 //!
@@ -20,7 +19,6 @@ use crate::daemon_teardown::DaemonTeardown;
 use crate::workspace::{MountRemovalTarget, Workspace};
 use omnifs_workspace::creds::{CredentialStore, FileStore};
 use omnifs_workspace::layout::WorkspaceLayout;
-use std::io::IsTerminal as _;
 use std::sync::Arc;
 
 #[derive(Args, Debug, Clone, Default)]
@@ -42,26 +40,29 @@ impl ResetArgs {
         let workspace = Workspace::resolve()?;
         let layout = workspace.layout();
         let targets = workspace.reset_removal_targets()?;
+        let mut session = crate::ui::session::Session::intro("omnifs reset")?;
 
         if targets.is_empty() {
-            anstream::eprintln!("No mount configs found in {}.", layout.mounts_dir.display());
+            session.note(format!(
+                "no mount configs found in {}",
+                layout.mounts_dir.display()
+            ));
         }
-        print_preview(&targets, keep_credentials);
+        print_preview(&targets, keep_credentials, &mut session);
 
         if !yes {
             // Without a terminal there is no one to answer; fail fast naming the
-            // skip flag instead of surfacing inquire's raw NotATTY error.
-            if !std::io::stdin().is_terminal() {
+            // skip flag instead of surfacing a raw not-a-terminal error.
+            if !crate::ui::prompt::is_terminal() {
                 anyhow::bail!(
-                    "cannot confirm reset on a non-interactive stdin; pass -y to skip confirmation"
+                    "cannot confirm reset on a non-interactive terminal; pass -y to skip confirmation"
                 );
             }
-            let proceed = inquire::Confirm::new("Proceed?")
+            let proceed = crate::ui::prompt::Confirm::new("Proceed?")
                 .with_default(false)
-                .prompt()
-                .map_err(crate::ui::from_inquire)?;
+                .ask()?;
             if !proceed {
-                anstream::eprintln!("Aborted.");
+                session.outro("Reset aborted.");
                 return Ok(());
             }
         }
@@ -86,14 +87,22 @@ impl ResetArgs {
                     .transpose()?
                     .unwrap_or_else(|| target.credential.clone())
             };
-            delete_credentials(&service, &credential, keep_credentials, &target.name).await?;
+            delete_credentials(
+                &service,
+                &credential,
+                keep_credentials,
+                &target.name,
+                &mut session,
+            )
+            .await?;
             let daemon_delete = match workspace.daemon().delete_mount_if_ready(&target.name).await {
                 Ok(report) => report,
                 Err(error) => {
-                    anstream::eprintln!(
-                        "Running daemon could not remove mount `{}`: {error:#}",
-                        target.name
-                    );
+                    session.row(crate::ui::report::Row::new(
+                        crate::ui::style::Glyph::Warn,
+                        format!("daemon `{}`", target.name),
+                        format!("could not remove mount: {error:#}"),
+                    ));
                     None
                 },
             };
@@ -104,7 +113,11 @@ impl ResetArgs {
                     .remove_mount(&name)
                     .with_context(|| format!("remove {}", target.path.display()))?;
             }
-            anstream::eprintln!("Removed mount `{}`", target.name);
+            session.row(crate::ui::report::Row::new(
+                crate::ui::style::Glyph::Done,
+                format!("mount `{}`", target.name),
+                "removed",
+            ));
         }
 
         // Best-effort: a non-running daemon or an absent runtime record is not a
@@ -112,30 +125,44 @@ impl ResetArgs {
         // when it was ready, so teardown no longer owns spec mutation.
         DaemonTeardown::new(&workspace).reset_best_effort().await;
 
-        if !targets.is_empty() {
-            anstream::eprintln!();
-            anstream::eprintln!("✓ Reset complete.");
+        if targets.is_empty() {
+            session.outro("Nothing to reset.");
+        } else {
+            session.outro("Reset complete.");
         }
         crate::telemetry::maybe_print_health_nudge(&workspace).await;
         Ok(())
     }
 }
 
-fn print_preview(targets: &[MountRemovalTarget], keep_credentials: bool) {
-    anstream::eprintln!("This will:");
+fn print_preview(
+    targets: &[MountRemovalTarget],
+    keep_credentials: bool,
+    session: &mut crate::ui::session::Session,
+) {
+    session.phase("plan");
+    session.note("this will:");
     for target in targets {
-        anstream::eprintln!("  • delete {}", WorkspaceLayout::display(&target.path));
+        session.row(crate::ui::report::Row::new(
+            crate::ui::style::Glyph::Plan,
+            "mount",
+            format!("delete {}", WorkspaceLayout::display(&target.path)),
+        ));
         match &target.credential {
             CredentialTarget::Internal(_) if !keep_credentials => {
                 for key in target.credential.keys() {
-                    anstream::eprintln!("      and credential `{}`", key.storage_key());
+                    session.note(format!("and credential `{}`", key.storage_key()));
                 }
             },
             CredentialTarget::Internal(_) => {
-                anstream::eprintln!("      (keeping credentials, --keep-credentials)");
+                session.note("keeping credentials (--keep-credentials)");
             },
             CredentialTarget::None => {},
         }
     }
-    anstream::eprintln!("  • stop the running daemon (if any)");
+    session.row(crate::ui::report::Row::new(
+        crate::ui::style::Glyph::Plan,
+        "daemon",
+        "stop if running",
+    ));
 }

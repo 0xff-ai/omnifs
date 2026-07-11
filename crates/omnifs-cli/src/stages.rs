@@ -1,4 +1,3 @@
-#![allow(clippy::disallowed_macros)] // migrates in wave 2 (cli-redesign)
 //! Shared onboarding and lifecycle stages used by `setup`, `init`, and `up`.
 //!
 //! Commands own narration. This module owns the stage behavior so the guided
@@ -34,6 +33,13 @@ pub(crate) struct EnvironmentReport {
 
 pub(crate) struct MountInitOutcome {
     pub(crate) mount_name: String,
+    pub(crate) status: MountInitStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MountInitStatus {
+    Ready,
+    SignInDeclined,
 }
 
 pub(crate) struct FirstRead {
@@ -60,6 +66,15 @@ pub(crate) struct PromptMode {
 }
 
 impl PromptMode {
+    /// Build prompt policy from command flags and the shared terminal check.
+    pub(crate) fn from_flags(yes: bool, no_input: bool) -> Self {
+        Self {
+            interactive: crate::ui::prompt::is_terminal() && !no_input,
+            yes,
+            no_input,
+        }
+    }
+
     /// The single decision combinator for every wizard prompt site: an explicit
     /// value wins; `--yes` takes the default; `--no-input` and non-interactive
     /// sessions bail with a flag hint; otherwise prompt.
@@ -152,10 +167,9 @@ pub(crate) fn mount_point_resolution(
         || default.clone(),
         "--mount-point <path>",
         || {
-            let raw = inquire::Text::new("Mount point")
+            let raw = crate::ui::prompt::Text::new("Mount point")
                 .with_default(&default_display)
-                .prompt()
-                .map_err(crate::ui::from_inquire)?;
+                .ask()?;
             Ok(crate::ui::input_path(raw.trim()))
         },
     )
@@ -166,35 +180,48 @@ pub(crate) async fn configure_mount(
     args: InitArgs,
     workspace: &Workspace,
     standalone: bool,
+    session: &mut crate::ui::session::Session,
 ) -> anyhow::Result<MountInitOutcome> {
-    let mut plan = spec_creation(&args, workspace)?;
-    // Standalone `omnifs init` opens its own provider block; setup opens the
-    // block in its per-provider loop before calling in.
+    let mut plan = spec_creation(&args, workspace, session)?;
     if standalone {
-        anstream::eprintln!("{}", crate::ui::rule(plan.manifest.id.as_str()));
-        crate::commands::init::render_consent_block(&plan.manifest);
+        session.phase(plan.manifest.id.as_str());
     }
-    let daemon_report = persist_mount_spec(workspace, &plan).await?;
-    auth(&args, workspace, &mut plan).await?;
+    let daemon_report = persist_mount_spec(workspace, &plan, session).await?;
+    let status = plan.authenticate(&args, workspace, session).await?;
 
-    anstream::eprintln!("{}", crate::ui::ok("mount ready", plan.mount_name.as_str()));
+    match status {
+        MountInitStatus::Ready => session.row(crate::ui::report::Row::new(
+            crate::ui::style::Glyph::Done,
+            "mount ready",
+            plan.mount_name.as_str(),
+        )),
+        MountInitStatus::SignInDeclined => session.row(crate::ui::report::Row::new(
+            crate::ui::style::Glyph::Skip,
+            "sign in",
+            format!(
+                "skipped; run `omnifs mounts reauth {}` later",
+                plan.mount_name
+            ),
+        )),
+    }
     match &daemon_report {
         Some(report) if report.failure.is_none() => {
-            anstream::eprintln!("{}", crate::ui::note("applied to the running daemon"));
+            session.note("applied to the running daemon");
         },
         Some(report) => {
             let reason = report
                 .failure
                 .as_ref()
                 .map_or("unknown error", |failure| failure.reason.as_str());
-            anstream::eprintln!("{}", crate::ui::warn_row("daemon", reason));
-            anstream::eprintln!(
-                "{}",
-                crate::ui::note("saved locally; run `omnifs up` to restart with the new mount")
-            );
+            session.row(crate::ui::report::Row::new(
+                crate::ui::style::Glyph::Warn,
+                "daemon",
+                reason,
+            ));
+            session.note("saved locally; run `omnifs up` to restart with the new mount");
         },
         None if standalone => {
-            anstream::eprintln!("{}", crate::ui::note("run `omnifs up` to start serving it"));
+            session.note("run `omnifs up` to start serving it");
         },
         // Inside setup the launch section owns "start the daemon" messaging;
         // repeating it under every provider block is noise.
@@ -203,15 +230,14 @@ pub(crate) async fn configure_mount(
 
     if standalone {
         let running = workspace.daemon().ready().await;
-        anstream::eprintln!();
         if running {
             let path = browse_path(plan.mount_name.as_str());
-            anstream::eprintln!(
-                "{}",
-                crate::ui::hint(&format!("ls {}", path.display()), "browse it")
-            );
+            session.note(crate::ui::hint(
+                &format!("ls {}", path.display()),
+                "browse it",
+            ));
         } else {
-            anstream::eprintln!("{}", crate::ui::hint("omnifs up", "start serving"));
+            session.note(crate::ui::hint("omnifs up", "start serving"));
         }
     }
 
@@ -219,22 +245,23 @@ pub(crate) async fn configure_mount(
 
     Ok(MountInitOutcome {
         mount_name: plan.mount_name.to_string(),
+        status,
     })
 }
 
-/// Init is interactive only with a real terminal on both ends and without
+/// Init is interactive only with real stdin and stderr terminals and without
 /// `--no-input`. A piped stdin is non-interactive even without the flag, so
 /// prompt sites bail cleanly (naming the satisfying flags) instead of hitting
-/// inquire's raw "not a terminal" error. Mirrors setup's terminal derivation.
+/// a prompt library's raw "not a terminal" error. Mirrors setup's terminal derivation.
 fn init_interactive(args: &InitArgs) -> bool {
-    use std::io::IsTerminal;
-    !args.no_input && std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
+    !args.no_input && crate::ui::prompt::is_terminal()
 }
 
 #[allow(clippy::too_many_lines)] // one linear spec-assembly path
 pub(crate) fn spec_creation(
     args: &InitArgs,
     workspace: &Workspace,
+    session: &mut crate::ui::session::Session,
 ) -> anyhow::Result<MountInitPlan> {
     let paths = workspace.layout();
     crate::provider_bundle::ensure_providers_installed(&paths.providers_dir)?;
@@ -260,6 +287,7 @@ pub(crate) fn spec_creation(
         args.as_name.as_deref(),
         interactive,
         args.yes,
+        session,
     )?;
 
     let (provider, manifest) = crate::catalog::find_installed(&installed, &provider_name)
@@ -284,6 +312,7 @@ pub(crate) fn spec_creation(
             &provider_name,
             &mount_name,
             interactive,
+            session,
         )?,
         None => None,
     };
@@ -307,7 +336,7 @@ pub(crate) fn spec_creation(
         interactive,
         args.yes,
     )
-    .resolve()?;
+    .resolve(Some(session))?;
     let ImportOutcome { auth, token } = import_outcome;
 
     if !interactive && token.is_none() && auth.as_ref().is_some_and(AuthSelection::is_oauth) {
@@ -355,99 +384,100 @@ pub(crate) fn spec_creation(
     })
 }
 
-pub(crate) async fn auth(
-    args: &InitArgs,
-    workspace: &Workspace,
-    plan: &mut MountInitPlan,
-) -> anyhow::Result<()> {
-    let Some(auth) = plan.effective_auth.as_ref() else {
-        return Ok(());
-    };
-    let interactive = init_interactive(args);
-    if let Some(token) = plan.imported_token.take() {
-        crate::commands::init::run_static_token_init(
-            &plan.manifest,
-            auth,
-            token,
-            &workspace.layout().credentials_file,
-            !args.no_validate,
-        )
-        .await?;
-    } else if auth.is_oauth() {
-        // Gate the browser handoff when interactive: a decline is a clean skip,
-        // not a failure.
-        if interactive && !args.yes {
-            let proceed = inquire::Confirm::new(&format!(
-                "Sign in to {} in your browser now?",
-                plan.mount_name
-            ))
-            .with_default(true)
-            .prompt()
-            .map_err(crate::ui::from_inquire)?;
-            if !proceed {
-                anstream::eprintln!(
-                    "{}",
-                    crate::ui::note(format!(
-                        "run `omnifs mounts reauth {}` to sign in later",
-                        plan.mount_name
-                    ))
-                );
-                return Err(anyhow!("sign-in skipped")).with_exit_code(ExitCode::AuthRequired);
-            }
-        }
-        crate::auth::login_with_workspace(
-            workspace,
-            plan.mount_name.as_str(),
-            auth.account.as_deref(),
-            args.no_browser,
-            args.no_input,
-            &args.scopes,
-        )
-        .await
-        .inspect_err(|_| {
-            anstream::eprintln!(
-                "{}",
-                crate::ui::note(format!(
-                    "login did not complete; run `omnifs mounts reauth {}` to finish",
+impl MountInitPlan {
+    async fn authenticate(
+        &mut self,
+        args: &InitArgs,
+        workspace: &Workspace,
+        session: &mut crate::ui::session::Session,
+    ) -> anyhow::Result<MountInitStatus> {
+        crate::commands::init::render_consent_block(session, &self.manifest);
+        let plan = self;
+        let Some(auth) = plan.effective_auth.as_ref() else {
+            return Ok(MountInitStatus::Ready);
+        };
+        let interactive = init_interactive(args);
+        if let Some(token) = plan.imported_token.take() {
+            crate::commands::init::run_static_token_init(
+                &plan.manifest,
+                auth,
+                token,
+                &workspace.layout().credentials_file,
+                !args.no_validate,
+                session,
+            )
+            .await?;
+        } else if auth.is_oauth() {
+            // Gate the browser handoff when interactive: a decline is a clean skip,
+            // not a failure.
+            if interactive && !args.yes {
+                let proceed = crate::ui::prompt::Confirm::new(format!(
+                    "Sign in to {} in your browser now?",
                     plan.mount_name
                 ))
-            );
-        })?;
-        anstream::eprintln!("{}", crate::ui::ok("signed in", "done"));
-    } else {
-        if interactive && let Ok(scheme) = auth.static_token_scheme(&plan.manifest) {
-            let guidance = plan
-                .manifest
-                .auth
-                .as_ref()
-                .map(|auth| auth.guidance_for(&scheme.key))
-                .unwrap_or_default();
-            if let Some(url) = &scheme.creation_url {
-                anstream::eprintln!("{}", crate::ui::note(format!("create a token at {url}")));
+                .with_default(true)
+                .ask()?;
+                if !proceed {
+                    return Ok(MountInitStatus::SignInDeclined);
+                }
             }
-            for step in &guidance.setup_steps {
-                anstream::eprintln!("{}", crate::ui::note(step));
+            crate::auth::login_with_workspace(
+                workspace,
+                plan.mount_name.as_str(),
+                auth.account.as_deref(),
+                args.no_browser,
+                args.no_input,
+                &args.scopes,
+                session,
+            )
+            .await
+            .inspect_err(|_| {
+                session.note(format!(
+                    "login did not complete; run `omnifs mounts reauth {}` to finish",
+                    plan.mount_name
+                ));
+            })?;
+            session.row(crate::ui::report::Row::new(
+                crate::ui::style::Glyph::Done,
+                "signed in",
+                "done",
+            ));
+        } else {
+            if interactive && let Ok(scheme) = auth.static_token_scheme(&plan.manifest) {
+                let guidance = plan
+                    .manifest
+                    .auth
+                    .as_ref()
+                    .map(|auth| auth.guidance_for(&scheme.key))
+                    .unwrap_or_default();
+                if let Some(url) = &scheme.creation_url {
+                    session.note(format!("create a token at {url}"));
+                }
+                for step in &guidance.setup_steps {
+                    session.note(step);
+                }
+                if let Some(url) = &guidance.docs_url {
+                    session.note(url);
+                }
             }
-            if let Some(url) = &guidance.docs_url {
-                anstream::eprintln!("{}", crate::ui::note(url));
-            }
+            let source = TokenSource::resolve(
+                args.token.as_deref(),
+                args.token_env.as_deref(),
+                interactive,
+            )?;
+            let token = source.read()?;
+            crate::commands::init::run_static_token_init(
+                &plan.manifest,
+                auth,
+                token,
+                &workspace.layout().credentials_file,
+                !args.no_validate,
+                session,
+            )
+            .await?;
         }
-        let source = TokenSource::resolve(
-            args.token.as_deref(),
-            args.token_env.as_deref(),
-            interactive,
-        )?;
-        let token = source.read()?;
-        crate::commands::init::run_static_token_init(
-            &plan.manifest,
-            auth,
-            token,
-            &workspace.layout().credentials_file,
-            !args.no_validate,
-        )
-        .await?;
+        Ok(MountInitStatus::Ready)
     }
-    Ok(())
 }
 
 pub(crate) fn verify_first_read(
@@ -516,6 +546,7 @@ fn selected_auth(
 async fn persist_mount_spec(
     workspace: &Workspace,
     plan: &MountInitPlan,
+    session: &mut crate::ui::session::Session,
 ) -> anyhow::Result<Option<omnifs_api::MountReport>> {
     let report = match if plan.existing_mount {
         workspace
@@ -532,28 +563,20 @@ async fn persist_mount_spec(
         },
         Err(error) => {
             workspace.put_mount(&plan.spec)?;
-            anstream::eprintln!(
-                "{}",
-                crate::ui::warn_row(
-                    "daemon",
-                    format!("could not save mount `{}`: {error:#}", plan.mount_name)
-                )
-            );
-            anstream::eprintln!(
-                "{}",
-                crate::ui::note("saved locally; run `omnifs up` to restart with the new mount")
-            );
+            session.row(crate::ui::report::Row::new(
+                crate::ui::style::Glyph::Warn,
+                "daemon",
+                format!("could not save mount `{}`: {error:#}", plan.mount_name),
+            ));
+            session.note("saved locally; run `omnifs up` to restart with the new mount");
             None
         },
     };
     // `Wrote <path>` collapses to a single dim continuation, printed once.
-    anstream::eprintln!(
-        "{}",
-        crate::ui::note(format!(
-            "wrote {}",
-            WorkspaceLayout::display(&plan.mount_path)
-        ))
-    );
+    session.note(format!(
+        "wrote {}",
+        WorkspaceLayout::display(&plan.mount_path)
+    ));
     Ok(report)
 }
 
@@ -619,6 +642,7 @@ fn approved_upgrade_for_existing_mount(
     provider_name: &str,
     mount_name: &MountName,
     interactive: bool,
+    session: &mut crate::ui::session::Session,
 ) -> anyhow::Result<Option<UpgradePlan>> {
     let existing_provider = existing.config.provider_name();
     if existing_provider.as_str() != provider_name {
@@ -648,16 +672,13 @@ fn approved_upgrade_for_existing_mount(
         );
     }
 
-    anstream::eprintln!();
-    anstream::eprintln!("{}", crate::ui::rule(provider_name));
-    anstream::eprintln!("  {provider_name} now requests different access:");
+    session.note(format!("{provider_name} now requests different access:"));
     for change in crate::upgrade::describe_upgrade_plan(&plan) {
-        anstream::eprintln!("{}", crate::ui::note(change));
+        session.note(change);
     }
-    let approved = inquire::Confirm::new("Approve this provider upgrade?")
+    let approved = crate::ui::prompt::Confirm::new("Approve this provider upgrade?")
         .with_default(false)
-        .prompt()
-        .map_err(crate::ui::from_inquire)?;
+        .ask()?;
     if !approved {
         anyhow::bail!("aborted");
     }

@@ -1,15 +1,14 @@
 //! The CLI output toolkit: commands construct typed values, this module owns
 //! every byte that reaches the terminal.
 //!
-//! The flat register lives here: the closed vocabulary ([`style`]), typed state
-//! [`report`]s, the [`event`] model with a flat ledger renderer, and the flat
-//! [`progress`] skin. The session register (cliclack rail) plugs into the same
-//! [`event`] model in a later wave. Stream discipline is owned here, not by
-//! commands: reports go to stdout, narration and progress to stderr.
+//! The CLI output toolkit: the closed vocabulary ([`style`]), typed state
+//! [`report`]s, the [`event`] model, flat [`progress`], and the cliclack
+//! [`session`] rail. Stream discipline is owned here, not by commands:
+//! reports go to stdout, while narration, prompts, and progress go to stderr.
 //!
-//! Legacy free functions ([`ok`], [`note`], [`rule`], and friends) survive for
-//! command files that have not yet moved onto [`report`] and the session
-//! register; they render on the same grid and die as those files migrate.
+//! Commands that can ask a question own a [`session::Session`] for the whole
+//! conversation. The small [`note`] and [`hint`] helpers remain only for
+//! already-flat command surfaces and should not be used to start a rail.
 
 // This module is the sanctioned output owner; the drift gate denies print
 // macros everywhere else. Only `print_json` and `eprint_raw` print here.
@@ -18,7 +17,9 @@
 pub(crate) mod event;
 pub(crate) mod picker;
 pub(crate) mod progress;
+pub(crate) mod prompt;
 pub(crate) mod report;
+pub(crate) mod session;
 pub(crate) mod style;
 
 pub(crate) use progress::LiveRow;
@@ -28,7 +29,6 @@ use std::path::PathBuf;
 use anyhow::Context as _;
 
 pub(crate) const KEY_WIDTH: usize = 14; // ledger key column
-pub(crate) const RULE_WIDTH: usize = 56; // hairline width, dies with the T2 session register
 
 /// Column at which every value/note aligns: 2 gutter + 1 glyph + 1 space + key.
 const VALUE_COLUMN: usize = 2 + 1 + 1 + KEY_WIDTH;
@@ -65,56 +65,9 @@ pub(crate) fn truncate(text: &str, max_chars: usize) -> String {
     out
 }
 
-/// One ledger row: `  <glyph> <key padded>value`. The glyph is pre-colored (one
-/// visible column); padding happens on the plain key so the value lands at
-/// [`VALUE_COLUMN`] regardless of color.
-fn row(glyph: &str, key: &str, value: impl std::fmt::Display) -> String {
-    let key_pad = KEY_WIDTH.saturating_sub(key.chars().count());
-    format!("  {glyph} {key}{:pad$}{value}", "", pad = key_pad)
-}
-
-// "  ✓ key           value"  (value starts at column 2+2+KEY_WIDTH = 18)
-pub(crate) fn ok(key: &str, value: impl std::fmt::Display) -> String {
-    row(&style::Glyph::Done.render(), key, value)
-}
-
-pub(crate) fn warn_row(key: &str, value: impl std::fmt::Display) -> String {
-    row(&style::Glyph::Warn.render(), key, value)
-}
-
-pub(crate) fn fail(key: &str, value: impl std::fmt::Display) -> String {
-    row(&style::Glyph::Fail.render(), key, value)
-}
-
-pub(crate) fn skip(key: &str, value: impl std::fmt::Display) -> String {
-    row(&style::Glyph::Skip.render(), key, value)
-}
-
 /// Dim continuation aligned to the value column.
 pub(crate) fn note(text: impl std::fmt::Display) -> String {
     format!("{:pad$}{}", "", style::dim(text), pad = VALUE_COLUMN)
-}
-
-/// Bold heading, flush left.
-pub(crate) fn heading(text: &str) -> String {
-    style::bold(text)
-}
-
-/// Dim hairline with an embedded title, padded to [`RULE_WIDTH`] chars.
-///
-// Dies with the T2 session register; setup and init still call it until then.
-pub(crate) fn rule(title: &str) -> String {
-    let head = format!("── {title} ");
-    let dashes = RULE_WIDTH.saturating_sub(head.chars().count());
-    style::dim(format!("{head}{}", "─".repeat(dashes)))
-}
-
-/// A [`rule`] with a stage counter embedded: `── 2/6 runtime ───…`, padded to
-/// [`RULE_WIDTH`]. Reuses `rule`'s construction so the hairline stays identical.
-///
-// Dies with the T2 session register; setup and init still call it until then.
-pub(crate) fn stage_rule(n: usize, total: usize, title: &str) -> String {
-    rule(&format!("{n}/{total} {title}"))
 }
 
 /// Command hint row: `  <cmd padded to 16><desc>`.
@@ -130,20 +83,6 @@ pub(crate) fn hint(cmd: &str, desc: &str) -> String {
     )
 }
 
-/// Convert an inquire prompt error into the shared cancel marker so Esc
-/// (`OperationCanceled`) and Ctrl-C (`OperationInterrupted`) behave the same
-/// across the custom [`picker`] and every inquire prompt: both surface as
-/// [`picker::Canceled`], which the top-level handler renders as a quiet
-/// `canceled` line. Non-cancel inquire errors keep their message.
-pub(crate) fn from_inquire(error: inquire::InquireError) -> anyhow::Error {
-    match error {
-        inquire::InquireError::OperationCanceled | inquire::InquireError::OperationInterrupted => {
-            anyhow::Error::new(picker::Canceled)
-        },
-        other => anyhow::anyhow!("{other}"),
-    }
-}
-
 /// Parse a path typed at a prompt, expanding a leading `~/` when `HOME` is set.
 pub(crate) fn input_path(raw: &str) -> PathBuf {
     if let Some(stripped) = raw.strip_prefix("~/")
@@ -152,27 +91,6 @@ pub(crate) fn input_path(raw: &str) -> PathBuf {
         return PathBuf::from(home).join(stripped);
     }
     PathBuf::from(raw)
-}
-
-/// Install the inquire theme. Call once from `main` before any prompt so every
-/// prompt matches the ledger palette.
-pub(crate) fn install_prompt_theme() {
-    use inquire::ui::{Color, RenderConfig, StyleSheet, Styled};
-
-    let dim = StyleSheet::new().with_fg(Color::DarkGrey);
-    let cyan = StyleSheet::new().with_fg(Color::LightCyan);
-
-    let config = RenderConfig::default()
-        .with_prompt_prefix(Styled::new("?").with_fg(Color::LightGreen))
-        .with_answered_prompt_prefix(Styled::new("✓").with_fg(Color::LightGreen))
-        .with_highlighted_option_prefix(Styled::new("❯").with_fg(Color::LightCyan))
-        .with_selected_checkbox(Styled::new("◉").with_fg(Color::LightCyan))
-        .with_unselected_checkbox(Styled::new("◯").with_fg(Color::DarkGrey))
-        .with_help_message(dim)
-        .with_answer(cyan)
-        .with_canceled_prompt_indicator(Styled::new("(canceled)").with_fg(Color::DarkGrey));
-
-    inquire::set_global_render_config(config);
 }
 
 /// Strip SGR ANSI escape sequences so column math can be asserted on the plain
@@ -212,24 +130,6 @@ mod tests {
     }
 
     #[test]
-    fn row_primitives_align_value_at_column_18() {
-        assert_eq!(VALUE_COLUMN, 18);
-        for rendered in [
-            ok("environment", "macOS"),
-            warn_row("daemon", "not running"),
-            fail("github", "auth failed"),
-            skip("linear", "skipped"),
-        ] {
-            let plain = strip_ansi(&rendered);
-            assert!(plain.chars().count() > 18, "row too short: {plain:?}");
-            let prefix: String = plain.chars().take(18).collect();
-            assert_eq!(prefix.chars().count(), 18, "row {plain:?}");
-            let value_start = plain.chars().nth(18).unwrap();
-            assert_ne!(value_start, ' ', "value must start at column 18: {plain:?}");
-        }
-    }
-
-    #[test]
     fn note_aligns_to_value_column() {
         let plain = strip_ansi(&note("hello"));
         let prefix: String = plain.chars().take(18).collect();
@@ -238,20 +138,6 @@ mod tests {
             "note prefix not blank: {plain:?}"
         );
         assert_eq!(plain.chars().nth(18), Some('h'));
-    }
-
-    #[test]
-    fn rule_is_exactly_rule_width() {
-        let plain = strip_ansi(&rule("github"));
-        assert_eq!(plain.chars().count(), RULE_WIDTH, "{plain:?}");
-        assert!(plain.starts_with("── github "));
-    }
-
-    #[test]
-    fn stage_rule_embeds_counter_and_keeps_width() {
-        let plain = strip_ansi(&stage_rule(2, 6, "runtime"));
-        assert_eq!(plain.chars().count(), RULE_WIDTH, "{plain:?}");
-        assert!(plain.starts_with("── 2/6 runtime "), "{plain:?}");
     }
 
     #[test]

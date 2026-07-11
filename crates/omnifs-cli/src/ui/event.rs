@@ -24,6 +24,8 @@ use std::time::Duration;
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(crate) enum UiEvent {
+    /// Explanatory prose inside a command transcript.
+    Narration { message: String },
     /// A titled block began (`Frontends (2)`), rendered as a heading.
     PhaseStarted { title: String, count: Option<usize> },
     /// A row reached its final state: the permanent transcript record.
@@ -40,9 +42,18 @@ pub(crate) enum UiEvent {
     /// A prompt was presented to the user.
     PromptShown { question: String },
     /// A prompt was answered; the flat ledger collapses it to one line.
-    PromptAnswered { question: String, answer: String },
+    PromptAnswered {
+        question: String,
+        answer: PromptAnswer,
+    },
     /// The closing hand-off line ("Files are live at ...").
     Outro { message: String },
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum PromptAnswer {
+    Visible(String),
+    Secret,
 }
 
 /// A sink that turns [`UiEvent`]s into output. Implementors own their stream
@@ -61,6 +72,7 @@ pub(crate) struct LedgerRenderer;
 impl Render for LedgerRenderer {
     fn event(&mut self, event: &UiEvent) {
         match event {
+            UiEvent::Narration { message } => anstream::eprintln!("{message}"),
             UiEvent::PhaseStarted { title, count } => {
                 anstream::eprintln!();
                 let heading = match count {
@@ -88,11 +100,11 @@ impl Render for LedgerRenderer {
             },
             UiEvent::Progress { .. } | UiEvent::PromptShown { .. } => {},
             UiEvent::PromptAnswered { question, answer } => {
-                anstream::eprintln!(
-                    "{} {question} {}",
-                    Glyph::Done.render(),
-                    style::accent(answer)
-                );
+                let answer = match answer {
+                    PromptAnswer::Visible(answer) => style::accent(answer),
+                    PromptAnswer::Secret => style::dim("answered"),
+                };
+                anstream::eprintln!("{} {question} {}", Glyph::Done.render(), answer);
             },
             UiEvent::Outro { message } => {
                 anstream::eprintln!();

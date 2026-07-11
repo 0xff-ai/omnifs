@@ -128,9 +128,7 @@ fn prompt_host_files(metadata: &ConfigMetadata, config: &mut Value) -> anyhow::R
 
 fn prompt_host_file(name: &str, field: &ConfigField) -> anyhow::Result<PathBuf> {
     let description = field.description.as_deref().unwrap_or(name);
-    let raw = inquire::Text::new(description)
-        .prompt()
-        .map_err(crate::ui::from_inquire)?;
+    let raw = crate::ui::prompt::Text::new(description).ask()?;
     let path = crate::ui::input_path(raw.trim());
     if !path.is_file() {
         anyhow::bail!("{} is not a readable file", path.display());

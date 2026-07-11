@@ -1,4 +1,3 @@
-#![allow(clippy::disallowed_macros)] // migrates in wave 2 (cli-redesign)
 use super::detect;
 use crate::auth::AuthSelection;
 use omnifs_workspace::authn::AuthManifest;
@@ -34,7 +33,10 @@ impl<'a> AuthImportDecision<'a> {
         }
     }
 
-    pub(crate) fn resolve(self) -> anyhow::Result<ImportOutcome> {
+    pub(crate) fn resolve(
+        self,
+        session: Option<&mut crate::ui::session::Session>,
+    ) -> anyhow::Result<ImportOutcome> {
         if self.default_auth.is_none() {
             return Ok(ImportOutcome {
                 auth: None,
@@ -47,13 +49,13 @@ impl<'a> AuthImportDecision<'a> {
         // non-interactively, so the documented behavior is reachable in scripts.
         if self.yes {
             if let Some(credential) = detected.first() {
-                anstream::eprintln!(
-                    "{}",
-                    crate::ui::ok(
+                if let Some(session) = session {
+                    session.row(crate::ui::report::Row::new(
+                        crate::ui::style::Glyph::Done,
                         "credential",
-                        format!("imported from {}", credential.source())
-                    )
-                );
+                        format!("imported from {}", credential.source()),
+                    ));
+                }
                 return self.promote(credential.value());
             }
             return Ok(ImportOutcome {
@@ -111,9 +113,9 @@ impl<'a> AuthImportDecision<'a> {
 
         // `.prompt()` so ESC/ctrl-c cancels the whole command; declining is the
         // explicit "skip auth for now" option, never a silent fallback.
-        let chosen = inquire::Select::new("How should this mount authenticate?", options.clone())
-            .prompt()
-            .map_err(crate::ui::from_inquire)?;
+        let chosen = crate::ui::prompt::Select::new("How should this mount authenticate?")
+            .items(options.clone())
+            .ask()?;
 
         for (i, cred) in detected.iter().enumerate() {
             if chosen == options[i] {
@@ -133,9 +135,9 @@ fn prompt_single_import(cred: &detect::DetectedCredential) -> anyhow::Result<Opt
     ];
     // `.prompt()` so ESC/ctrl-c cancels the whole command; declining is the
     // explicit "skip auth for now" option, never a silent fallback.
-    let answer = inquire::Select::new("How should this mount authenticate?", options)
-        .prompt()
-        .map_err(crate::ui::from_inquire)?;
+    let answer = crate::ui::prompt::Select::new("How should this mount authenticate?")
+        .items(options)
+        .ask()?;
     if answer == import {
         Ok(Some(cred.value()))
     } else {

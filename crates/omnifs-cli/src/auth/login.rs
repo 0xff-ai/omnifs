@@ -1,31 +1,33 @@
-#![allow(clippy::disallowed_macros)] // migrates in wave 3 (cli-redesign)
 //! OAuth login flow.
 
 use crate::error::{ExitCode, WithExitCode, WithHint};
 use anyhow::anyhow;
 use omnifs_auth::{
-    CredentialService, DeviceCodePrompt, LoginRequest, ManualCode, OAuthClient, OAuthRequest,
-    UrlOpener,
+    CredentialService, DeviceCodePrompt, LoginRequest, ManualCode, ManualCodeLoginRequest,
+    OAuthClient, OAuthRequest, UrlOpener,
 };
-use omnifs_workspace::creds::{CredentialStore, FileStore};
+use omnifs_workspace::creds::{CredentialEntry, CredentialStore, FileStore};
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-use super::explain::{self, AuthMode};
+use super::explain::AuthMode;
 use crate::credential_target::CredentialTarget;
 use crate::style;
 use crate::workspace::Workspace;
 use omnifs_workspace::authn::SchemeGuidance;
 use omnifs_workspace::provider::Catalog;
 
+const MANUAL_PROMPT_CANCELED: &str = "omnifs-manual-oauth-prompt-canceled";
+
 /// Whether to suppress the system browser and whether prompts are allowed.
 /// Bundled so `login` keeps a readable argument list.
 #[derive(Clone, Copy)]
-struct LoginInteractivity {
+struct LoginInteractivity<'a> {
     no_browser: bool,
     no_input: bool,
+    scopes: &'a [String],
 }
 
 async fn login(
@@ -34,12 +36,13 @@ async fn login(
     store: Box<dyn CredentialStore>,
     mount: &str,
     account: Option<&str>,
-    interactivity: LoginInteractivity,
-    scopes: &[String],
+    interactivity: LoginInteractivity<'_>,
+    session: &mut crate::ui::session::Session,
 ) -> anyhow::Result<CredentialTarget> {
     let LoginInteractivity {
         no_browser,
         no_input,
+        scopes,
     } = interactivity;
     let mount_auth = crate::auth::MountAuth::load(catalog, mounts, mount)?;
     let (request, target) = mount_auth.oauth_request(account, scopes)?;
@@ -49,10 +52,19 @@ async fn login(
         .and_then(|manifest| manifest.auth)
         .map(|auth| auth.guidance_for(&request.scheme().key))
         .unwrap_or_default();
-    print_oauth_consent_summary(mount, &request, &guidance);
+    let mode = AuthMode::from_oauth_flow(&request.scheme().flow);
+    session.note(format!(
+        "requesting OAuth for `{mount}` using scheme `{}` ({})",
+        request.scheme().key,
+        mode.label()
+    ));
+    print_oauth_consent_summary(session, &request, &guidance);
     let client = OAuthClient::new()?;
+    let printed_urls = Arc::new(Mutex::new(Vec::new()));
     let client = if no_browser {
-        client.with_opener(Arc::new(PrintOpener))
+        client.with_opener(Arc::new(PrintOpener {
+            urls: Arc::clone(&printed_urls),
+        }))
     } else {
         client.with_system_browser()
     };
@@ -71,22 +83,7 @@ async fn login(
             ))
             .with_exit_code(ExitCode::AuthRequired);
         },
-        LoginRequest::ManualCode(request) => client
-            .login_manual_code(request, |url| async move {
-                anstream::eprintln!("Open {url}");
-                let pasted = tokio::task::spawn_blocking(|| {
-                    inquire::Text::new("Paste redirect URL or `code state`")
-                        .prompt()
-                        .map_err(|e| anyhow::anyhow!("{e}"))
-                })
-                .await
-                .unwrap_or_else(|e| Err(anyhow::anyhow!("prompt task panicked: {e}")))
-                .map_err(|e| omnifs_auth::AuthError::BrowserOpen(e.to_string()))?;
-                manual_code_from_input(&pasted)
-                    .map_err(|error| omnifs_auth::AuthError::BrowserOpen(error.to_string()))
-            })
-            .await
-            .with_hint(format!("Re-run `omnifs mounts reauth {mount}` to retry"))?,
+        LoginRequest::ManualCode(request) => login_manual(&client, request, mount, session).await?,
         LoginRequest::DeviceCode(request) => {
             let bar = indicatif::ProgressBar::new_spinner();
             bar.set_style(indicatif::ProgressStyle::with_template(
@@ -105,28 +102,73 @@ async fn login(
                 .await;
             match &result {
                 Ok(_) => {
-                    bar.finish_with_message(format!("{} Authorized", crate::style::success("✓")));
+                    bar.finish_with_message(format!(
+                        "│  {} authorized",
+                        crate::style::success("✓")
+                    ));
                 },
                 Err(_) => bar.finish_and_clear(),
             }
             result.with_hint(format!("Re-run `omnifs mounts reauth {mount}` to retry"))?
         },
     };
+    for url in printed_urls
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .drain(..)
+    {
+        session.note(format!("Open {url}"));
+    }
     // Write through the credential service so the single store owner records it.
     let service = CredentialService::new(Arc::from(store), OAuthClient::new()?);
     for key in target.keys() {
         service.store_entry(key, entry.clone())?;
     }
-    anstream::eprintln!(
-        "Stored OAuth credential for `{mount}` with scopes: {}",
+    session.note(format!(
+        "stored OAuth credential for `{mount}` with scopes: {}",
         format_scopes(entry.scopes())
-    );
+    ));
     if mount == "github" && entry.scopes().is_empty() {
-        anstream::eprintln!(
-            "GitHub granted no scopes. Public resources will work; rerun with `--scope repo` for private repositories."
+        session.note(
+            "GitHub granted no scopes. Public resources will work; rerun with `--scope repo` for private repositories.",
         );
     }
     Ok(target)
+}
+
+async fn login_manual(
+    client: &OAuthClient,
+    request: ManualCodeLoginRequest,
+    mount: &str,
+    session: &mut crate::ui::session::Session,
+) -> anyhow::Result<CredentialEntry> {
+    let result = client
+        .login_manual_code(request, |url| {
+            session.note(format!("Open {url}"));
+            async move {
+                let pasted = tokio::task::spawn_blocking(|| {
+                    crate::ui::prompt::Text::new("Paste redirect URL or `code state`").ask()
+                })
+                .await
+                .unwrap_or_else(|error| Err(anyhow::anyhow!("prompt task panicked: {error}")))
+                .map_err(|error| {
+                    if crate::ui::picker::is_canceled(&error) {
+                        omnifs_auth::AuthError::BrowserOpen(MANUAL_PROMPT_CANCELED.to_string())
+                    } else {
+                        omnifs_auth::AuthError::BrowserOpen(error.to_string())
+                    }
+                })?;
+                manual_code_from_input(&pasted)
+                    .map_err(|error| omnifs_auth::AuthError::BrowserOpen(error.to_string()))
+            }
+        })
+        .await;
+    match result {
+        Err(omnifs_auth::AuthError::BrowserOpen(message)) if message == MANUAL_PROMPT_CANCELED => {
+            Err(anyhow::Error::new(crate::ui::picker::Canceled))
+        },
+        result => result.with_hint(format!("Re-run `omnifs mounts reauth {mount}` to retry")),
+    }
 }
 
 pub(crate) async fn login_with_workspace(
@@ -136,6 +178,7 @@ pub(crate) async fn login_with_workspace(
     no_browser: bool,
     no_input: bool,
     scopes: &[String],
+    session: &mut crate::ui::session::Session,
 ) -> anyhow::Result<CredentialTarget> {
     let store = Box::new(FileStore::new(&workspace.layout().credentials_file));
     let mounts = workspace.mounts()?;
@@ -148,8 +191,9 @@ pub(crate) async fn login_with_workspace(
         LoginInteractivity {
             no_browser,
             no_input,
+            scopes,
         },
-        scopes,
+        session,
     )
     .await
 }
@@ -164,17 +208,17 @@ fn present_device_prompt(
         .verification_uri_complete
         .as_deref()
         .unwrap_or(&prompt.verification_uri);
-    bar.println(format!("  {}", crate::style::accent(url)));
+    bar.println(format!("│  {}", crate::style::accent(url)));
 
     // User code — attempt clipboard copy best-effort.
     let code_line =
         match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(prompt.user_code.clone())) {
             Ok(()) => format!(
-                "  {} {}",
+                "│  {} {}",
                 crate::style::bold(&prompt.user_code),
                 crate::style::dim("(copied to clipboard)")
             ),
-            Err(_) => format!("  {}", crate::style::bold(&prompt.user_code)),
+            Err(_) => format!("│  {}", crate::style::bold(&prompt.user_code)),
         };
     bar.println(code_line);
 
@@ -183,9 +227,9 @@ fn present_device_prompt(
     // point at manual entry so the message never overstates what happened.
     if !no_browser && let Some(complete_url) = &prompt.verification_uri_complete {
         match webbrowser::open(complete_url) {
-            Ok(()) => bar.println(format!("  {}", crate::style::dim("(opened your browser)"))),
+            Ok(()) => bar.println(format!("│  {}", crate::style::dim("(opened your browser)"))),
             Err(_) => bar.println(format!(
-                "  {}",
+                "│  {}",
                 crate::style::dim("(could not open a browser; visit the URL above)")
             )),
         }
@@ -194,26 +238,34 @@ fn present_device_prompt(
     bar.set_message("Authorizing — waiting for confirmation");
 }
 
-fn print_oauth_consent_summary(mount: &str, request: &OAuthRequest, guidance: &SchemeGuidance) {
+fn print_oauth_consent_summary(
+    session: &mut crate::ui::session::Session,
+    request: &OAuthRequest,
+    guidance: &SchemeGuidance,
+) {
     let scheme = request.scheme();
     let mode = AuthMode::from_oauth_flow(&scheme.flow);
-    anstream::eprintln!(
-        "Requesting OAuth for `{mount}` using scheme `{}` ({})",
-        scheme.key,
-        mode.label()
-    );
-    explain::render_oauth_intro(mode, guidance);
-    anstream::eprintln!(
-        "  {} {}",
+    session.note(crate::style::dim(mode.experience()));
+    if !guidance.setup_steps.is_empty() {
+        session.note(crate::style::dim("Setup:"));
+        for (index, step) in guidance.setup_steps.iter().enumerate() {
+            session.note(format!("{}. {step}", index + 1));
+        }
+    }
+    if let Some(url) = &guidance.docs_url {
+        session.note(format!("{} {}", style::dim("Docs:"), style::accent(url)));
+    }
+    session.note(format!(
+        "{} {}",
         style::dim("Scopes:"),
         format_scopes(&scheme.default_scopes)
-    );
+    ));
     if !scheme.inject_domains.is_empty() {
-        anstream::eprintln!(
-            "  {} {}",
+        session.note(format!(
+            "{} {}",
             style::dim("Applies to:"),
             scheme.inject_domains.join(", ")
-        );
+        ));
     }
 }
 
@@ -238,7 +290,9 @@ fn manual_code_from_input(input: &str) -> anyhow::Result<ManualCode> {
     Ok(ManualCode::new(code, state))
 }
 
-struct PrintOpener;
+struct PrintOpener {
+    urls: Arc<Mutex<Vec<String>>>,
+}
 
 impl UrlOpener for PrintOpener {
     fn open<'a>(
@@ -246,7 +300,10 @@ impl UrlOpener for PrintOpener {
         url: &'a reqwest::Url,
     ) -> Pin<Box<dyn Future<Output = Result<(), omnifs_auth::AuthError>> + Send + 'a>> {
         Box::pin(async move {
-            anstream::eprintln!("Open {url}");
+            self.urls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(url.to_string());
             Ok(())
         })
     }

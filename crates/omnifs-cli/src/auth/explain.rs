@@ -1,4 +1,3 @@
-#![allow(clippy::disallowed_macros)] // migrates in wave 3 (cli-redesign)
 //! Host-canned explanations of the authentication mechanisms omnifs supports.
 //!
 //! The mechanics of each flow are identical across providers, so the prose
@@ -7,8 +6,7 @@
 //! token to create, which app to register); that guidance is paired with this
 //! canned copy at the point of display by `omnifs init`'s auth step.
 
-use crate::style;
-use omnifs_workspace::authn::{OAuthFlow, SchemeGuidance};
+use omnifs_workspace::authn::OAuthFlow;
 
 /// An authentication mechanism omnifs knows how to drive, independent of any
 /// particular provider.
@@ -59,23 +57,4 @@ impl AuthMode {
             },
         }
     }
-}
-
-fn print_steps_and_docs(guidance: &SchemeGuidance) {
-    if !guidance.setup_steps.is_empty() {
-        anstream::eprintln!("  {}", style::dim("Setup:"));
-        for (i, step) in guidance.setup_steps.iter().enumerate() {
-            anstream::eprintln!("    {}. {step}", i + 1);
-        }
-    }
-    if let Some(url) = &guidance.docs_url {
-        anstream::eprintln!("  {} {}", style::dim("Docs:"), style::accent(url));
-    }
-}
-
-/// Print what an OAuth login is about to do, plus any provider setup steps.
-/// Used at login time, after the caller has printed the scheme header.
-pub(crate) fn render_oauth_intro(mode: AuthMode, guidance: &SchemeGuidance) {
-    anstream::eprintln!("  {}", style::dim(mode.experience()));
-    print_steps_and_docs(guidance);
 }

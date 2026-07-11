@@ -1,4 +1,3 @@
-#![allow(clippy::disallowed_macros)] // migrates in wave 3 (cli-redesign)
 //! `omnifs mounts` — list, re-authenticate, or remove configured mounts.
 
 use anyhow::{Context, anyhow, bail};
@@ -15,7 +14,6 @@ use crate::mount_config::MountConfig;
 use crate::token_source::TokenSource;
 use crate::workspace::Workspace;
 use omnifs_workspace::layout::WorkspaceLayout;
-use std::io::IsTerminal as _;
 
 #[derive(Args, Debug, Clone)]
 pub struct MountsArgs {
@@ -142,13 +140,20 @@ fn ls(args: &LsArgs) -> anyhow::Result<ExitCode> {
 impl ReauthArgs {
     async fn run(self) -> anyhow::Result<()> {
         let workspace = Workspace::resolve()?;
-        self.run_in_workspace(&workspace).await
+        let mut session =
+            crate::ui::session::Session::intro(format!("omnifs mounts reauth {}", self.name))?;
+        let result = self.run_in_session(&workspace, &mut session).await;
+        if result.is_ok() {
+            session.outro(format!("Re-authenticated `{}`.", self.name));
+        }
+        result
     }
 
-    /// Re-acquire the credential for an existing mount: OAuth login or a fresh
-    /// static token, dispatched on the mount's stored auth. The spec is left
-    /// untouched; only the credential store changes.
-    pub(crate) async fn run_in_workspace(self, workspace: &Workspace) -> anyhow::Result<()> {
+    pub(crate) async fn run_in_session(
+        &self,
+        workspace: &Workspace,
+        session: &mut crate::ui::session::Session,
+    ) -> anyhow::Result<()> {
         let paths = workspace.layout();
         let mount_name = self.name.as_str();
         let mounts = workspace.mounts()?;
@@ -178,15 +183,16 @@ impl ReauthArgs {
         // `--no-input` must never reach an OAuth browser handoff (it would hang
         // on the browser confirm or the manual-code paste). Mirror the init-side
         // guard: bail naming the interactive and static-token alternatives.
-        if self.no_input && selection.is_oauth() {
+        let interactive = !self.no_input && crate::ui::prompt::is_terminal();
+        if !interactive && selection.is_oauth() {
             return Err(anyhow!(
-                "`omnifs mounts reauth {mount_name} --no-input` cannot complete OAuth; run it interactively, or use a static-token scheme with --token - or --token-env VAR"
+                "`omnifs mounts reauth {mount_name}` cannot complete OAuth without a terminal; run it interactively, or use a static-token scheme with --token - or --token-env VAR"
             ))
             .with_exit_code(ExitCode::AuthRequired);
         }
 
         let target = if selection.is_oauth() {
-            anstream::eprintln!("Re-authenticating `{mount_name}` over OAuth ...");
+            session.note(format!("re-authenticating `{mount_name}` over OAuth"));
             crate::auth::login_with_workspace(
                 workspace,
                 mount_name,
@@ -194,13 +200,14 @@ impl ReauthArgs {
                 self.no_browser,
                 self.no_input,
                 &self.scopes,
+                session,
             )
             .await?
         } else {
             let source = TokenSource::resolve(
                 self.token.as_deref(),
                 self.token_env.as_deref(),
-                !self.no_input,
+                interactive,
             )?;
             let token = source.read()?;
             crate::commands::init::run_static_token_init(
@@ -209,26 +216,30 @@ impl ReauthArgs {
                 token,
                 &paths.credentials_file,
                 !self.no_validate,
+                session,
             )
             .await?
         };
         for key in target.keys() {
             match workspace.daemon().reload_credential_if_ready(key).await {
                 Ok(Some(_)) => {
-                    anstream::eprintln!("✓ Reloaded `{key}` in the running daemon.");
+                    session.row(crate::ui::report::Row::new(
+                        crate::ui::style::Glyph::Done,
+                        format!("credential `{key}`"),
+                        "reloaded in running daemon",
+                    ));
                 },
                 Ok(None) => {},
                 Err(error) => {
-                    anstream::eprintln!(
-                        "Credential `{key}` was stored, but live daemon reload failed: {error:#}"
-                    );
-                    anstream::eprintln!("Run `omnifs up` to restart with the new credential.");
+                    session.row(crate::ui::report::Row::new(
+                        crate::ui::style::Glyph::Warn,
+                        format!("credential `{key}`"),
+                        format!("stored, but live reload failed: {error:#}"),
+                    ));
+                    session.note("run `omnifs up` to restart with the new credential");
                 },
             }
         }
-
-        anstream::eprintln!();
-        anstream::eprintln!("✓ Re-authenticated `{mount_name}`.");
         crate::telemetry::maybe_print_health_nudge(workspace).await;
         Ok(())
     }
@@ -241,6 +252,7 @@ pub async fn rm(
     keep_credentials: bool,
 ) -> anyhow::Result<()> {
     let layout = workspace.layout();
+    let mut session = crate::ui::session::Session::intro(format!("omnifs mounts rm {name}"))?;
     let mounts = workspace.mounts()?;
     let name =
         MountName::new(name.to_owned()).with_context(|| format!("invalid mount name `{name}`"))?;
@@ -264,9 +276,10 @@ pub async fn rm(
             &config_path,
             &credential_target,
             keep_credentials,
+            &mut session,
         )?
     {
-        anstream::eprintln!("Aborted.");
+        session.outro("Removal aborted.");
         return Ok(());
     }
 
@@ -275,6 +288,7 @@ pub async fn rm(
         &credential_target,
         keep_credentials,
         name.as_str(),
+        &mut session,
     )
     .await?;
 
@@ -285,29 +299,42 @@ pub async fn rm(
     {
         Ok(report) => report,
         Err(error) => {
-            anstream::eprintln!("Running daemon could not remove mount `{name}`: {error:#}");
-            anstream::eprintln!("Falling back to a local mount config delete.");
+            session.row(crate::ui::report::Row::new(
+                crate::ui::style::Glyph::Warn,
+                "daemon",
+                format!("could not remove mount: {error:#}; falling back locally"),
+            ));
             None
         },
     };
     if daemon_delete.is_none() {
         workspace.remove_mount(&name)?;
     }
-    anstream::eprintln!(
-        "Removed mount `{name}` ({})",
-        WorkspaceLayout::display(&config_path)
-    );
+    session.row(crate::ui::report::Row::new(
+        crate::ui::style::Glyph::Done,
+        format!("mount `{name}`"),
+        format!("removed ({})", WorkspaceLayout::display(&config_path)),
+    ));
 
     if let Some(report) = daemon_delete {
         if let Some(failure) = report.failure {
-            anstream::eprintln!(
-                "Mount config removed, but unloading it from the running daemon failed: {}",
-                failure.reason
-            );
+            session.row(crate::ui::report::Row::new(
+                crate::ui::style::Glyph::Warn,
+                "daemon",
+                format!(
+                    "config removed, but unloading from the running daemon failed: {}",
+                    failure.reason
+                ),
+            ));
         } else {
-            anstream::eprintln!("✓ Unloaded from the running daemon");
+            session.row(crate::ui::report::Row::new(
+                crate::ui::style::Glyph::Done,
+                "daemon",
+                "unloaded",
+            ));
         }
     }
+    session.outro(format!("Removed `{name}`."));
     Ok(())
 }
 
@@ -319,31 +346,36 @@ fn confirm(
     config_path: &Path,
     target: &CredentialTarget,
     keep_credentials: bool,
+    session: &mut crate::ui::session::Session,
 ) -> anyhow::Result<bool> {
     // Without a terminal there is no one to answer the prompt; fail fast naming
-    // the skip flag instead of surfacing inquire's raw NotATTY error.
-    if !std::io::stdin().is_terminal() {
+    // the skip flag instead of surfacing a raw not-a-terminal error.
+    if !crate::ui::prompt::is_terminal() {
         anyhow::bail!(
-            "cannot confirm removal of `{name}` on a non-interactive stdin; pass -y to skip confirmation"
+            "cannot confirm removal of `{name}` on a non-interactive terminal; pass -y to skip confirmation"
         );
     }
-    anstream::eprintln!("Remove mount `{name}`? This will:");
-    anstream::eprintln!("  • delete {}", WorkspaceLayout::display(config_path));
+    session.phase("plan");
+    session.note(format!("remove mount `{name}`? this will:"));
+    session.row(crate::ui::report::Row::new(
+        crate::ui::style::Glyph::Plan,
+        "mount",
+        format!("delete {}", WorkspaceLayout::display(config_path)),
+    ));
     match target {
         CredentialTarget::Internal(_) if !keep_credentials => {
             for key in target.keys() {
-                anstream::eprintln!("  • delete the stored credential `{}`", key.storage_key());
+                session.note(format!("delete stored credential `{}`", key.storage_key()));
             }
         },
         CredentialTarget::Internal(_) => {
-            anstream::eprintln!("  • keep the stored credential (--keep-credentials)");
+            session.note("keep the stored credential (--keep-credentials)");
         },
         CredentialTarget::None => {},
     }
-    inquire::Confirm::new("Proceed?")
+    crate::ui::prompt::Confirm::new("Proceed?")
         .with_default(false)
-        .prompt()
-        .map_err(crate::ui::from_inquire)
+        .ask()
 }
 
 pub(crate) async fn delete_credentials(
@@ -351,6 +383,7 @@ pub(crate) async fn delete_credentials(
     target: &CredentialTarget,
     keep_credentials: bool,
     name: &str,
+    session: &mut crate::ui::session::Session,
 ) -> anyhow::Result<()> {
     if keep_credentials {
         return Ok(());
@@ -362,7 +395,11 @@ pub(crate) async fn delete_credentials(
         if let Some(error) = outcome.delete_error() {
             bail!("delete credential for mount `{name}`: {error}");
         }
-        anstream::eprintln!("Credential `{}`: {outcome}", key.storage_key());
+        session.row(crate::ui::report::Row::new(
+            crate::ui::style::Glyph::Done,
+            format!("credential `{}`", key.storage_key()),
+            outcome.to_string(),
+        ));
     }
     Ok(())
 }
@@ -422,9 +459,11 @@ mod tests {
 
         let target = CredentialTarget::Internal(key.clone());
         let service = CredentialService::new(store.clone(), OAuthClient::new().unwrap());
-        delete_credentials(&service, &target, false, "github")
+        let mut session = crate::ui::session::Session::intro("test").unwrap();
+        delete_credentials(&service, &target, false, "github", &mut session)
             .await
             .unwrap();
+        session.outro("done");
 
         assert!(store.get(&key).unwrap().is_none());
     }

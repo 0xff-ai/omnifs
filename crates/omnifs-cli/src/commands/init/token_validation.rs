@@ -1,4 +1,3 @@
-#![allow(clippy::disallowed_macros)] // migrates in wave 2 (cli-redesign)
 use anyhow::Context;
 use omnifs_workspace::authn::TokenValidation;
 use serde_json::Value;
@@ -31,7 +30,11 @@ impl<'a> StaticTokenValidator<'a> {
         }
     }
 
-    pub(super) async fn validate(&self, token: &str) -> anyhow::Result<ValidationOutcome> {
+    pub(super) async fn validate(
+        &self,
+        token: &str,
+        session: &mut crate::ui::session::Session,
+    ) -> anyhow::Result<ValidationOutcome> {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(15))
             .user_agent(concat!("omnifs-cli/", env!("CARGO_PKG_VERSION")))
@@ -50,10 +53,7 @@ impl<'a> StaticTokenValidator<'a> {
                 .body(body.to_string());
         }
 
-        anstream::eprintln!(
-            "{}",
-            crate::ui::note(format!("validating against {}", self.validation.url))
-        );
+        session.note(format!("validating against {}", self.validation.url));
         let response = req.send().await.context("validation request failed")?;
         let status = response.status();
         if u32::from(status.as_u16()) != u32::from(self.validation.expect_status) {
