@@ -136,7 +136,7 @@ pub fn shorten_path(path: &str, max: usize) -> String {
     if max <= 3 {
         return "…".to_string();
     }
-    if path.len() <= max {
+    if path.chars().count() <= max {
         return path.to_string();
     }
     let trimmed = path.trim_matches('/');
@@ -145,17 +145,23 @@ pub fn shorten_path(path: &str, max: usize) -> String {
         let head = parts[0];
         let tail = parts[parts.len() - 1];
         let candidate = format!("{head}/…/{tail}");
-        if candidate.len() <= max {
+        if candidate.chars().count() <= max {
             return candidate;
         }
     }
     if parts.len() == 2 {
-        let candidate = format!("{}…/{}", &parts[0][..parts[0].len().min(8)], parts[1]);
-        if candidate.len() <= max {
+        let head: String = parts[0].chars().take(8).collect();
+        let candidate = format!("{head}…/{}", parts[1]);
+        if candidate.chars().count() <= max {
             return candidate;
         }
     }
-    format!("…{}", &path[path.len().saturating_sub(max - 1)..])
+    let suffix_start = path
+        .char_indices()
+        .rev()
+        .nth(max - 2)
+        .map_or(0, |(index, _)| index);
+    format!("…{}", &path[suffix_start..])
 }
 
 // Microsecond elapsed times are presented to users with one decimal of
@@ -173,4 +179,19 @@ pub fn format_latency_us(us: u64) -> String {
 
 pub fn compact_mode(cols: u16, rows: u16) -> bool {
     cols < 80 || rows < 24
+}
+
+#[cfg(test)]
+mod tests {
+    use super::shorten_path;
+
+    #[test]
+    fn non_ascii_path_respects_character_width() {
+        assert_eq!(shorten_path("éééé", 4), "éééé");
+        assert_eq!(shorten_path("日本/中間/文件", 7), "日本/…/文件");
+        assert_eq!(
+            shorten_path("日日日日日日日日日日/leaf", 14),
+            "日日日日日日日日…/leaf"
+        );
+    }
 }
