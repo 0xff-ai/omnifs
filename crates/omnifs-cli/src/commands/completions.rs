@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_macros)] // permanent: raw shell-completion passthrough to stdout
 //! `omnifs completions <shell>` — emit a clap-generated shell completion
 //! script to stdout. `clap_complete` supports bash, elvish, fish, powershell,
 //! and zsh; bash, zsh, and fish are officially documented.

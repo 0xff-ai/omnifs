@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_macros)] // migrates in wave 3 (cli-redesign)
 //! `omnifs shell` — drop into a subshell tuned for exploring the projected tree.
 //!
 //! Launches the user's `$SHELL` as a child process pointed at an omnifs-owned rc

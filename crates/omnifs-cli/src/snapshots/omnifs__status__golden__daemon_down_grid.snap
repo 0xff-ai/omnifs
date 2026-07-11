@@ -1,0 +1,17 @@
+---
+source: crates/omnifs-cli/src/status.rs
+expression: strip_ansi(&report.build_report(false).render())
+---
+omnifs 0.2.1
+  • daemon        not running; run `omnifs up`
+  • home          /omnifs-home
+
+Frontends (0)
+  •               no frontends attached
+
+Mounts (5)
+  ● github        oauth  2 scopes  expires 2026-08-01T00:00:00Z
+  ◌ rss           no auth needed
+  ! linear        needs sign-in; run `omnifs mounts reauth linear`
+  ✗ notion        credential store unreadable; run `omnifs mounts reauth notion`
+  ✗ broken.json   invalid (provider artifact missing)

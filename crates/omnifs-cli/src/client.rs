@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_macros)] // migrates in wave 5 (cli-redesign)
 //! HTTP client for the daemon control API.
 //!
 //! The client only ever dials an endpoint it read from its own workspace's

@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_macros)] // ui/ owns terminal output
 //! Custom inline provider picker with a details side panel.
 //!
 //! `inquire::MultiSelect` cannot render a details panel, so this component draws

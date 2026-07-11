@@ -3,7 +3,6 @@
 use clap::Args;
 use omnifs_api::{CredentialHealth, CredentialStatus, DaemonStatus};
 use serde::Serialize;
-use std::fmt::Write as _;
 use std::path::Path;
 
 use omnifs_workspace::creds::FileStore;
@@ -14,6 +13,8 @@ use crate::frontend_container::{frontend_container_name, resolve_frontend_image}
 use crate::launch_backend::{DockerTarget, ImageRef, names_registry};
 use crate::runtime::Runtime;
 use crate::status::UserMountStatus;
+use crate::ui::report::{Report, Row, Section};
+use crate::ui::style::Glyph;
 use crate::workspace::Workspace;
 use omnifs_workspace::layout::WorkspaceLayout;
 use omnifs_workspace::provider::DirStatus;
@@ -113,6 +114,9 @@ struct LiveFinding {
 struct DoctorReport {
     verdict: DoctorVerdict,
     probes: Vec<ProbeJson>,
+    /// The human grid rows, collected in lockstep with `probes` so the same
+    /// facts drive the text report and the JSON.
+    rows: Vec<Row>,
     output: OutputFormat,
 }
 
@@ -121,15 +125,18 @@ impl DoctorReport {
         Self {
             verdict: DoctorVerdict::Clean,
             probes: Vec::new(),
+            rows: Vec::new(),
             output,
         }
     }
 
     fn record(&mut self, name: impl Into<String>, result: ProbeResult) {
         let name = name.into();
-        if self.output == OutputFormat::Text {
-            anstream::println!("{}", result.render(&name));
-        }
+        self.rows.push(Row::new(
+            result.glyph(),
+            name.clone(),
+            result.message().to_string(),
+        ));
         let (state, message) = match result {
             ProbeResult::Ok(message) => ("ok", message),
             ProbeResult::Warn(message) => {
@@ -155,30 +162,108 @@ impl DoctorReport {
         if live.skipped.is_some() {
             return;
         }
-        if !live.findings.is_empty() && self.verdict == DoctorVerdict::Clean {
+        if live.findings.iter().any(|finding| finding.state == "err") {
+            self.verdict = DoctorVerdict::Failures;
+        } else if !live.findings.is_empty() && self.verdict == DoctorVerdict::Clean {
             self.verdict = DoctorVerdict::Warnings;
         }
     }
 
     fn finish(self, live: LiveSection) -> anyhow::Result<DoctorVerdict> {
-        if self.output == OutputFormat::Json {
-            let payload = DoctorJson {
-                verdict: self.verdict.label(),
-                probes: self.probes,
-                live,
-            };
-            anstream::println!("{}", serde_json::to_string(&payload)?);
+        match self.output {
+            OutputFormat::Json => {
+                crate::ui::print_json(&DoctorJson {
+                    verdict: self.verdict.label(),
+                    probes: self.probes,
+                    live,
+                })?;
+            },
+            OutputFormat::Text => {
+                let failures = self.count("err") + live_count(&live, "err");
+                let warnings = self.count("warn") + live_count(&live, "warn");
+                let mut report = Report::new();
+                let mut diagnostics = Section::new("Diagnostics").counted(self.probes.len());
+                for row in self.rows {
+                    diagnostics.push(row);
+                }
+                report.push(diagnostics);
+                report.push(live_section(&live));
+                report.push(Section::new(verdict_line(self.verdict, warnings, failures)));
+                report.print();
+            },
         }
         Ok(self.verdict)
     }
+
+    fn count(&self, state: &str) -> usize {
+        self.probes
+            .iter()
+            .filter(|probe| probe.state == state)
+            .count()
+    }
 }
 
-/// Width of the probe-name column in the text report.
-const PROBE_NAME_WIDTH: usize = 28;
-/// Visible column where a probe's message begins: `"  "` + glyph + `" "` +
-/// name field + `" "`. Continuation lines in a message indent to here so they
-/// sit under the first line instead of drifting to the left margin.
-const PROBE_MESSAGE_COLUMN: usize = 2 + 1 + 1 + PROBE_NAME_WIDTH + 1;
+/// Count live findings whose state matches (`"err"` for failures, anything else
+/// for warnings). A skipped live section has no findings.
+fn live_count(live: &LiveSection, state: &str) -> usize {
+    live.findings
+        .iter()
+        .filter(|finding| {
+            if state == "err" {
+                finding.state == "err"
+            } else {
+                finding.state != "err"
+            }
+        })
+        .count()
+}
+
+/// The `Live daemon` section: a skip row when no daemon answered, a single
+/// healthy row when every mount is fine, or one row per finding with its fix.
+fn live_section(live: &LiveSection) -> Section {
+    let mut section = Section::new("Live daemon");
+    if let Some(reason) = &live.skipped {
+        section.push(Row::new(Glyph::Skip, "", format!("skipped: {reason}")));
+    } else if live.findings.is_empty() {
+        section.push(Row::new(Glyph::Done, "", "all live mounts are healthy"));
+    } else {
+        for finding in &live.findings {
+            let glyph = if finding.state == "err" {
+                Glyph::Fail
+            } else {
+                Glyph::Warn
+            };
+            section.push(
+                Row::new(
+                    glyph,
+                    finding.mount.clone(),
+                    format!("{}; run `{}`", finding.message, finding.fix),
+                )
+                .identity()
+                .with_fix(finding.fix.clone()),
+            );
+        }
+    }
+    section
+}
+
+/// The closing verdict line, pluralized: `verdict: clean`, `verdict: 1 warning`,
+/// `verdict: 2 failures`.
+fn verdict_line(verdict: DoctorVerdict, warnings: usize, failures: usize) -> String {
+    match verdict {
+        DoctorVerdict::Clean => "verdict: clean".to_string(),
+        DoctorVerdict::Warnings => format!("verdict: {warnings} {}", plural(warnings, "warning")),
+        DoctorVerdict::Failures => format!("verdict: {failures} {}", plural(failures, "failure")),
+    }
+}
+
+fn plural(count: usize, word: &str) -> String {
+    if count == 1 {
+        word.to_string()
+    } else {
+        format!("{word}s")
+    }
+}
 
 #[derive(Debug)]
 enum ProbeResult {
@@ -197,23 +282,13 @@ impl ProbeResult {
         }
     }
 
-    fn glyph(&self) -> &'static str {
+    /// The closed-vocabulary glyph for this probe outcome.
+    fn glyph(&self) -> Glyph {
         match self {
-            Self::Ok(_) => "✓",
-            Self::Warn(_) => "⚠",
-            Self::Err(_) => "✗",
-            Self::Skipped(_) => "·",
-        }
-    }
-
-    /// The glyph, colored by severity. Only the glyph carries ANSI; the name
-    /// field is padded uncolored so `{:<28}` column math stays correct.
-    fn colored_glyph(&self) -> String {
-        match self {
-            Self::Ok(_) => crate::style::success(self.glyph()),
-            Self::Warn(_) => crate::style::warn(self.glyph()),
-            Self::Err(_) => crate::style::error(self.glyph()),
-            Self::Skipped(_) => crate::style::dim(self.glyph()),
+            Self::Ok(_) => Glyph::Done,
+            Self::Warn(_) => Glyph::Warn,
+            Self::Err(_) => Glyph::Fail,
+            Self::Skipped(_) => Glyph::Skip,
         }
     }
 
@@ -222,16 +297,6 @@ impl ProbeResult {
             Self::Ok(m) | Self::Warn(m) | Self::Err(m) => m.as_str(),
             Self::Skipped(reason) => reason,
         }
-    }
-
-    fn render(&self, name: &str) -> String {
-        format!(
-            "  {} {:<width$} {}",
-            self.colored_glyph(),
-            name,
-            self.message(),
-            width = PROBE_NAME_WIDTH,
-        )
     }
 }
 
@@ -271,7 +336,6 @@ impl Doctor<'_> {
         report.record("network", self.probe_network().await);
 
         let live = self.probe_live().await?;
-        self.render_live(&live);
         report.record_live(&live);
         report.finish(live)
     }
@@ -429,17 +493,16 @@ impl Doctor<'_> {
         let configs_result = if invalid.is_empty() {
             ProbeResult::Ok(format!("{valid_count} mount(s) valid"))
         } else {
-            let mut msg = String::new();
-            let _ = write!(
-                &mut msg,
-                "{} valid, {} invalid:",
-                valid_count,
+            // One-line detail keeps the message on the shared grid.
+            let detail = invalid
+                .iter()
+                .map(|(name, error)| format!("{name}: {error}"))
+                .collect::<Vec<_>>()
+                .join("; ");
+            ProbeResult::Err(format!(
+                "{valid_count} valid, {} invalid: {detail}",
                 invalid.len()
-            );
-            for (name, error) in &invalid {
-                let _ = write!(&mut msg, "\n{:PROBE_MESSAGE_COLUMN$}{name}: {error}", "");
-            }
-            ProbeResult::Err(msg)
+            ))
         };
 
         let auth_results = mounts
@@ -503,37 +566,6 @@ impl Doctor<'_> {
             skipped: None,
             findings: live_findings(&status, &credentials, &provider_by_mount),
         })
-    }
-
-    fn render_live(&self, live: &LiveSection) {
-        if self.output == OutputFormat::Json {
-            return;
-        }
-        anstream::println!();
-        anstream::println!("Live daemon");
-        if let Some(reason) = &live.skipped {
-            anstream::println!("  {} skipped: {reason}", crate::style::dim("·"));
-            return;
-        }
-        if live.findings.is_empty() {
-            anstream::println!(
-                "  {} all live mounts are healthy",
-                crate::style::success("✓")
-            );
-            return;
-        }
-        for finding in &live.findings {
-            let glyph = match finding.state {
-                "err" => crate::style::error("✗"),
-                _ => crate::style::warn("⚠"),
-            };
-            anstream::println!(
-                "  {glyph} {:<14} {}; fix: {}",
-                finding.mount,
-                finding.message,
-                finding.fix
-            );
-        }
     }
 }
 
@@ -605,5 +637,112 @@ fn credential_health_label(health: CredentialHealth) -> &'static str {
         CredentialHealth::NeedsConsent => "needs consent",
         CredentialHealth::Missing => "missing",
         CredentialHealth::StaticUnvalidated => "static unvalidated",
+    }
+}
+
+#[cfg(test)]
+mod golden {
+    use super::*;
+    use crate::ui::strip_ansi;
+
+    fn probes() -> Vec<(&'static str, ProbeResult)> {
+        vec![
+            (
+                "docker reachable",
+                ProbeResult::Ok("docker daemon responds".to_string()),
+            ),
+            (
+                "fuse",
+                ProbeResult::Skipped("macOS: native mount is NFS loopback"),
+            ),
+            (
+                "providers discovered",
+                ProbeResult::Ok("9 providers (27 artifacts)".to_string()),
+            ),
+            (
+                "credential store",
+                ProbeResult::Warn("directory will be created on first write".to_string()),
+            ),
+            (
+                "network",
+                ProbeResult::Err("ghcr.io unreachable".to_string()),
+            ),
+        ]
+    }
+
+    fn live() -> LiveSection {
+        LiveSection {
+            skipped: None,
+            findings: vec![LiveFinding {
+                mount: "linear".to_string(),
+                state: "warn",
+                message: "credential `linear:oauth:default` is expired".to_string(),
+                fix: "omnifs mounts reauth linear".to_string(),
+            }],
+        }
+    }
+
+    #[test]
+    fn doctor_grid() {
+        let probes = probes();
+        let mut diagnostics = Section::new("Diagnostics").counted(probes.len());
+        for (name, result) in &probes {
+            diagnostics.push(Row::new(
+                result.glyph(),
+                *name,
+                result.message().to_string(),
+            ));
+        }
+        let live = live();
+        let mut report = Report::new();
+        report.push(diagnostics);
+        report.push(live_section(&live));
+        // One err probe drives the failure verdict.
+        report.push(Section::new(verdict_line(DoctorVerdict::Failures, 1, 1)));
+        insta::assert_snapshot!(strip_ansi(&report.render()));
+    }
+
+    #[test]
+    fn verdict_line_pluralizes() {
+        assert_eq!(verdict_line(DoctorVerdict::Clean, 0, 0), "verdict: clean");
+        assert_eq!(
+            verdict_line(DoctorVerdict::Warnings, 1, 0),
+            "verdict: 1 warning"
+        );
+        assert_eq!(
+            verdict_line(DoctorVerdict::Failures, 0, 2),
+            "verdict: 2 failures"
+        );
+    }
+
+    #[test]
+    fn live_failure_promotes_verdict_to_failure() {
+        let live = LiveSection {
+            skipped: None,
+            findings: vec![LiveFinding {
+                mount: "broken".to_string(),
+                state: "err",
+                message: "failed to load".to_string(),
+                fix: "omnifs logs".to_string(),
+            }],
+        };
+        let mut report = DoctorReport::new(OutputFormat::Text);
+        report.record_live(&live);
+        assert_eq!(report.verdict, DoctorVerdict::Failures);
+    }
+
+    #[test]
+    fn doctor_json_preserves_schema_and_live_fixes() {
+        let live = live();
+        let payload = DoctorJson {
+            verdict: DoctorVerdict::Warnings.label(),
+            probes: vec![ProbeJson {
+                name: "network".to_string(),
+                state: "warn",
+                message: "ghcr.io unreachable".to_string(),
+            }],
+            live,
+        };
+        insta::assert_snapshot!(serde_json::to_string_pretty(&payload).unwrap());
     }
 }

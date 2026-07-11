@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_macros)] // migrates in wave 2 (cli-redesign)
 //! `omnifs init` — interactive setup for a new mount.
 //!
 //! Walks the user through naming a mount, discovers provider defaults from

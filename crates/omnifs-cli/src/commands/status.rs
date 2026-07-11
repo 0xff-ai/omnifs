@@ -4,7 +4,6 @@ use crate::cli::OutputFormat;
 use crate::error::ExitCode;
 use crate::status::StatusReport;
 use crate::workspace::Workspace;
-use anyhow::Context as _;
 use clap::Args;
 
 #[derive(Args, Debug, Clone, Default)]
@@ -30,15 +29,8 @@ impl StatusArgs {
         );
         let exit_code = report.exit_code();
         match OutputFormat::from(self.json) {
-            OutputFormat::Json => {
-                let payload = report.into_json();
-                let serialized =
-                    serde_json::to_string(&payload).context("serialize status JSON")?;
-                anstream::println!("{serialized}");
-            },
-            OutputFormat::Text => {
-                anstream::print!("{}", report.render(self.detail));
-            },
+            OutputFormat::Json => crate::ui::print_json(&report.into_json())?,
+            OutputFormat::Text => report.build_report(self.detail).print(),
         }
         Ok(exit_code)
     }

@@ -1,3 +1,4 @@
+#![allow(clippy::print_stderr)] // migrates in wave 2 (cli-redesign)
 //! Pulls the krunkit guest disk image from its ghcr OCI artifact and caches
 //! it locally: anonymous token, manifest, single blob, sha256 verification,
 //! decompress-once. Only the release channel ever reaches this path (see

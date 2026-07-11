@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_macros)] // permanent: raw log passthrough
 //! `omnifs logs` — tail the daemon's log file.
 
 use std::path::Path;

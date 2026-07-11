@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_macros)] // migrates in wave 3 (cli-redesign)
 //! `omnifs reset`: nuke every mount config (and, by default, the stored
 //! credentials they reference) and tear down the running daemon.
 //!

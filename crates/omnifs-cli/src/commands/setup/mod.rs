@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_macros)] // migrates in wave 2 (cli-redesign)
 //! `omnifs setup`: guided onboarding walkthrough.
 //!
 //! A single ledger drives the whole wizard: an environment summary, a mount

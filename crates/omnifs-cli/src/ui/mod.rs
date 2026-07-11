@@ -1,29 +1,55 @@
-//! Terminal design system for the guided CLI surfaces.
+//! The CLI output toolkit: commands construct typed values, this module owns
+//! every byte that reaches the terminal.
 //!
-//! One alignment grid for the whole wizard: a 2-space gutter, a glyph
-//! column, a fixed key column, then the value. Notes indent to the value
-//! column. Color goes through `crate::style` so `NO_COLOR` and non-TTY
-//! stripping keep working through `anstream`.
+//! The flat register lives here: the closed vocabulary ([`style`]), typed state
+//! [`report`]s, the [`event`] model with a flat ledger renderer, and the flat
+//! [`progress`] skin. The session register (cliclack rail) plugs into the same
+//! [`event`] model in a later wave. Stream discipline is owned here, not by
+//! commands: reports go to stdout, narration and progress to stderr.
+//!
+//! Legacy free functions ([`ok`], [`note`], [`rule`], and friends) survive for
+//! command files that have not yet moved onto [`report`] and the session
+//! register; they render on the same grid and die as those files migrate.
 
+// This module is the sanctioned output owner; the drift gate denies print
+// macros everywhere else. Only `print_json` and `eprint_raw` print here.
+#![allow(clippy::disallowed_macros, clippy::print_stdout)]
+
+pub(crate) mod event;
 pub(crate) mod picker;
+pub(crate) mod progress;
+pub(crate) mod report;
+pub(crate) mod style;
 
-use std::io::{IsTerminal, Write as _};
+pub(crate) use progress::LiveRow;
+
 use std::path::PathBuf;
 
-use crossterm::{
-    queue,
-    terminal::{Clear, ClearType},
-};
-
-use crate::style;
+use anyhow::Context as _;
 
 pub(crate) const KEY_WIDTH: usize = 14; // ledger key column
-pub(crate) const RULE_WIDTH: usize = 56; // hairline width
+pub(crate) const RULE_WIDTH: usize = 56; // hairline width, dies with the T2 session register
 
 /// Column at which every value/note aligns: 2 gutter + 1 glyph + 1 space + key.
 const VALUE_COLUMN: usize = 2 + 1 + 1 + KEY_WIDTH;
 /// Command column width for `hint` rows.
 const HINT_WIDTH: usize = 16;
+
+/// Serialize a value and print it as exactly one JSON document on stdout. The
+/// single machine-output path, so `--json` commands never call a print macro
+/// themselves.
+pub(crate) fn print_json(value: &impl serde::Serialize) -> anyhow::Result<()> {
+    let serialized = serde_json::to_string(value).context("serialize JSON output")?;
+    anstream::println!("{serialized}");
+    Ok(())
+}
+
+/// Emit pre-rendered text to stderr. The top-level error and cancel handler
+/// routes through here so the crate root, which cannot carry a module-scoped
+/// allow, never calls a print macro itself.
+pub(crate) fn eprint_raw(text: &str) {
+    anstream::eprint!("{text}");
+}
 
 /// Truncate plain text to `max_chars`, counting the ellipsis in that budget.
 pub(crate) fn truncate(text: &str, max_chars: usize) -> String {
@@ -49,19 +75,19 @@ fn row(glyph: &str, key: &str, value: impl std::fmt::Display) -> String {
 
 // "  ✓ key           value"  (value starts at column 2+2+KEY_WIDTH = 18)
 pub(crate) fn ok(key: &str, value: impl std::fmt::Display) -> String {
-    row(&style::success("✓"), key, value)
+    row(&style::Glyph::Done.render(), key, value)
 }
 
 pub(crate) fn warn_row(key: &str, value: impl std::fmt::Display) -> String {
-    row(&style::warn("!"), key, value)
+    row(&style::Glyph::Warn.render(), key, value)
 }
 
 pub(crate) fn fail(key: &str, value: impl std::fmt::Display) -> String {
-    row(&style::error("✗"), key, value)
+    row(&style::Glyph::Fail.render(), key, value)
 }
 
 pub(crate) fn skip(key: &str, value: impl std::fmt::Display) -> String {
-    row(&style::dim("•"), key, value)
+    row(&style::Glyph::Skip.render(), key, value)
 }
 
 /// Dim continuation aligned to the value column.
@@ -75,6 +101,8 @@ pub(crate) fn heading(text: &str) -> String {
 }
 
 /// Dim hairline with an embedded title, padded to [`RULE_WIDTH`] chars.
+///
+// Dies with the T2 session register; setup and init still call it until then.
 pub(crate) fn rule(title: &str) -> String {
     let head = format!("── {title} ");
     let dashes = RULE_WIDTH.saturating_sub(head.chars().count());
@@ -83,87 +111,10 @@ pub(crate) fn rule(title: &str) -> String {
 
 /// A [`rule`] with a stage counter embedded: `── 2/6 runtime ───…`, padded to
 /// [`RULE_WIDTH`]. Reuses `rule`'s construction so the hairline stays identical.
+///
+// Dies with the T2 session register; setup and init still call it until then.
 pub(crate) fn stage_rule(n: usize, total: usize, title: &str) -> String {
     rule(&format!("{n}/{total} {title}"))
-}
-
-/// Braille spinner frames advanced by [`LiveRow::update`].
-const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-
-/// The in-place row body: `  <glyph> <key padded>text`, on the same grid as the
-/// ledger rows so a settled row lines up with the spinner it replaces.
-fn live_line(glyph: &str, key: &str, text: &str) -> String {
-    row(&style::accent(glyph), key, text)
-}
-
-/// A single ledger row that updates in place while a long operation runs, then
-/// settles into a static ledger row so the transcript matches the plain output.
-///
-/// On a non-terminal stderr the spinner would be noise, so `start` and every
-/// `update` are no-ops there and only `settle` emits a row, keeping a captured
-/// or redirected stderr to one clean line. There is no background thread or
-/// timer: callers advance the spinner at natural progress points by calling
-/// `update`.
-pub(crate) struct LiveRow {
-    key: String,
-    tty: bool,
-    frame: usize,
-}
-
-impl LiveRow {
-    pub(crate) fn start(key: &str, text: &str) -> Self {
-        let tty = std::io::stderr().is_terminal();
-        if tty {
-            let mut err = std::io::stderr();
-            let _ = write!(err, "{}", live_line(SPINNER_FRAMES[0], key, text));
-            let _ = err.flush();
-        }
-        // Non-TTY: emit nothing at start; the settle row is the only line.
-        Self {
-            key: key.to_string(),
-            tty,
-            frame: 0,
-        }
-    }
-
-    /// Repaint the same line with the next spinner frame and new text.
-    pub(crate) fn update(&mut self, text: &str) {
-        if !self.tty {
-            return;
-        }
-        self.frame = (self.frame + 1) % SPINNER_FRAMES.len();
-        let mut err = std::io::stderr();
-        let _ = write!(err, "\r");
-        let _ = queue!(err, Clear(ClearType::CurrentLine));
-        let _ = write!(
-            err,
-            "{}",
-            live_line(SPINNER_FRAMES[self.frame], &self.key, text)
-        );
-        let _ = err.flush();
-    }
-
-    pub(crate) fn settle_ok(self, value: impl std::fmt::Display) {
-        let rendered = ok(&self.key, value);
-        self.settle(&rendered);
-    }
-
-    pub(crate) fn settle_warn(self, value: impl std::fmt::Display) {
-        let rendered = warn_row(&self.key, value);
-        self.settle(&rendered);
-    }
-
-    /// Replace the live line (TTY) or simply append (non-TTY) with the final
-    /// static ledger row.
-    fn settle(self, rendered: &str) {
-        if self.tty {
-            let mut err = std::io::stderr();
-            let _ = write!(err, "\r");
-            let _ = queue!(err, Clear(ClearType::CurrentLine));
-            let _ = err.flush();
-        }
-        anstream::eprintln!("{rendered}");
-    }
 }
 
 /// Command hint row: `  <cmd padded to 16><desc>`.
@@ -224,29 +175,30 @@ pub(crate) fn install_prompt_theme() {
     inquire::set_global_render_config(config);
 }
 
+/// Strip SGR ANSI escape sequences so column math can be asserted on the plain
+/// glyphs the toolkit aligns. Shared by the toolkit's grid tests.
+#[cfg(test)]
+pub(crate) fn strip_ansi(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' {
+            // Consume until a letter terminates the CSI sequence.
+            for next in chars.by_ref() {
+                if next.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Strip SGR ANSI escape sequences so column math can be asserted on the
-    /// plain glyphs the design system aligns.
-    fn strip_ansi(input: &str) -> String {
-        let mut out = String::with_capacity(input.len());
-        let mut chars = input.chars().peekable();
-        while let Some(ch) = chars.next() {
-            if ch == '\u{1b}' {
-                // Consume until a letter terminates the CSI sequence.
-                for next in chars.by_ref() {
-                    if next.is_ascii_alphabetic() {
-                        break;
-                    }
-                }
-            } else {
-                out.push(ch);
-            }
-        }
-        out
-    }
 
     #[test]
     fn truncate_uses_a_total_character_budget() {
@@ -269,11 +221,9 @@ mod tests {
             skip("linear", "skipped"),
         ] {
             let plain = strip_ansi(&rendered);
-            // Everything up to the value is exactly 18 columns.
             assert!(plain.chars().count() > 18, "row too short: {plain:?}");
             let prefix: String = plain.chars().take(18).collect();
             assert_eq!(prefix.chars().count(), 18, "row {plain:?}");
-            // The 18th char begins the value (non-space).
             let value_start = plain.chars().nth(18).unwrap();
             assert_ne!(value_start, ' ', "value must start at column 18: {plain:?}");
         }
@@ -305,30 +255,9 @@ mod tests {
     }
 
     #[test]
-    fn live_line_aligns_to_the_ledger_grid() {
-        let plain = strip_ansi(&live_line("⠋", "daemon", "starting"));
-        let prefix: String = plain.chars().take(18).collect();
-        assert_eq!(prefix.chars().count(), 18, "{plain:?}");
-        assert_eq!(plain.chars().nth(18), Some('s'), "{plain:?}");
-    }
-
-    #[test]
-    fn live_row_non_tty_path_is_a_noop_until_settle() {
-        // Under nextest stderr is captured (not a terminal), so this exercises
-        // the non-TTY fallback: start prints a note, update is a no-op, settle
-        // appends the static ledger row. It must not panic or emit escapes.
-        let mut row = LiveRow::start("daemon", "starting");
-        assert!(!row.tty, "captured stderr must be treated as non-terminal");
-        row.update("still going");
-        row.settle_ok("running in docker");
-    }
-
-    #[test]
     fn hint_command_column_is_16_wide() {
         let plain = strip_ansi(&hint("omnifs shell", "browse your files"));
-        // gutter(2) + command column(16) => desc starts at column 18.
         assert_eq!(plain.chars().nth(18), Some('b'), "{plain:?}");
-        // A command overflowing the column keeps a one-space gap.
         let long = strip_ansi(&hint("omnifs completions", "tab completion"));
         assert!(long.contains("omnifs completions tab"), "{long:?}");
     }

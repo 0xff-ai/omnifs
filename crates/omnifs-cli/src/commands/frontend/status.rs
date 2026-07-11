@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_macros)] // migrates in wave 4 (cli-redesign)
 //! `omnifs frontend status`: local, Docker, and krunkit frontend state and
 //! attach health, whichever drivers this workspace has running.
 

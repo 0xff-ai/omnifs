@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_macros)] // migrates in wave 4 (cli-redesign)
 //! `omnifs mount-tree` subcommand implementation.
 //!
 //! Reads the `omnifs.provider-manifest.v1` custom section from a provider

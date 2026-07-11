@@ -64,6 +64,7 @@ default = ["daemon"]
 daemon = ["dep:omnifs-daemon", "dep:omnifs-nfs"]
 
 [dev-dependencies]
+insta = "1"
 tempfile = { workspace = true }
 # Shares the cross-process NFS serialization lock (one port owner) with the
 # frontend conformance matrix. No cycle: omnifs-itest does not depend on

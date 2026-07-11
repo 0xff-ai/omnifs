@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_macros)] // migrates in wave 2 (cli-redesign)
 use anyhow::Context;
 use omnifs_workspace::authn::TokenValidation;
 use serde_json::Value;

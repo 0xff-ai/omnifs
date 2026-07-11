@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_macros)] // migrates in wave 4 (cli-redesign)
 //! Discovery helpers over the provider [`Catalog`] and the configured mounts.
 //!
 //! These wrap the CLI-facing shapes: the picker's installed-provider list, the

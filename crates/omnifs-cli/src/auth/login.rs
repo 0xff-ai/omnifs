@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_macros)] // migrates in wave 3 (cli-redesign)
 //! OAuth login flow.
 
 use crate::error::{ExitCode, WithExitCode, WithHint};

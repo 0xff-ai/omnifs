@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_macros)] // migrates in wave 5 (cli-redesign)
 //! Daemon and frontend shutdown workflows.
 
 use crate::workspace::Workspace;

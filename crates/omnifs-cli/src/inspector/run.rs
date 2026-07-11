@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_macros)] // permanent: full-screen ratatui TUI, not ledger output
 //! Ratatui main loop.
 
 use std::time::Duration;

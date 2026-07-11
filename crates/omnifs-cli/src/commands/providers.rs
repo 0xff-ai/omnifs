@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_macros)] // migrates in wave 4 (cli-redesign)
 //! Provider artifact management commands.
 
 use anyhow::{Context, bail};

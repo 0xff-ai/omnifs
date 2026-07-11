@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_macros)] // migrates in wave 2 (cli-redesign)
 use crate::catalog::mount_exists;
 use crate::error::WithHint;
 use crate::mount_config::MountConfig;

@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_macros)] // migrates in wave 2 (cli-redesign)
 //! `omnifs snapshot <mount> --out <dir>` — export canonical bytes for audit.
 
 use anyhow::{Context as _, bail};

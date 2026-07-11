@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_macros)] // migrates in wave 5 (cli-redesign)
 //! `omnifs up`: daemon lifecycle start.
 
 use anyhow::Context as _;

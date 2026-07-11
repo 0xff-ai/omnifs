@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_macros)] // migrates in wave 3 (cli-redesign)
 //! `omnifs mounts` — list, re-authenticate, or remove configured mounts.
 
 use anyhow::{Context, anyhow, bail};
@@ -116,54 +117,26 @@ fn ls(args: &LsArgs) -> anyhow::Result<ExitCode> {
         ExitCode::Success
     };
     if args.json {
-        let payload = MountsJson { mounts: statuses };
-        anstream::println!("{}", serde_json::to_string(&payload)?);
+        crate::ui::print_json(&MountsJson { mounts: statuses })?;
         return Ok(exit_code);
     }
+    // Same rendering as status's Mounts section, from the one shared row owner.
+    let mut section = crate::ui::report::Section::new("Mounts").counted(statuses.len());
     if statuses.is_empty() {
-        anstream::println!("No mounts configured.");
-        anstream::println!("Run `omnifs init` to add one.");
-        return Ok(ExitCode::Success);
+        section.push(crate::ui::report::Row::new(
+            crate::ui::style::Glyph::Skip,
+            "",
+            "no mounts configured; run `omnifs init <provider>`",
+        ));
+    } else {
+        for status in &statuses {
+            section.push(crate::mount_report::mount_row(status));
+        }
     }
-    for status in &statuses {
-        anstream::println!("{}", render_mount_row(status));
-    }
+    let mut report = crate::ui::report::Report::new();
+    report.push(section);
+    report.print();
     Ok(exit_code)
-}
-
-/// One text row per mount, sourced from the same scan that drives the JSON
-/// output and exit code. Invalid mounts (missing or corrupt provider artifact)
-/// render explicitly as a broken row rather than masquerading as normal.
-fn render_mount_row(status: &crate::status::UserMountStatus) -> String {
-    use crate::auth::AuthTerminalKind;
-    use crate::status::UserMountStatus;
-    match status {
-        UserMountStatus::Ready(mount) => {
-            let row = mount.auth.terminal_row();
-            let glyph = match row.kind {
-                AuthTerminalKind::None => crate::style::dim("◯"),
-                AuthTerminalKind::Ready => crate::style::success("●"),
-                AuthTerminalKind::Missing | AuthTerminalKind::Error => crate::style::error("●"),
-            };
-            format!(
-                "{glyph}  {}  {}  {}",
-                crate::style::bold(&mount.mount),
-                crate::style::dim(&mount.provider),
-                row.summary,
-            )
-        },
-        UserMountStatus::Invalid { config_path, error } => {
-            let name = config_path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("<unknown>");
-            format!(
-                "{}  {}  invalid ({error})",
-                crate::style::error("●"),
-                crate::style::bold(name),
-            )
-        },
-    }
 }
 
 impl ReauthArgs {

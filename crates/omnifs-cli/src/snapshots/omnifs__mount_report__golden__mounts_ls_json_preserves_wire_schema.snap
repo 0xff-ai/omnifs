@@ -1,0 +1,38 @@
+---
+source: crates/omnifs-cli/src/mount_report.rs
+expression: "serde_json::to_string_pretty(&statuses).unwrap()"
+---
+[
+  {
+    "state": "ready",
+    "config_path": "/omnifs-home/mounts/github.json",
+    "mount": "github",
+    "provider": "github",
+    "provider_present": true,
+    "auth": {
+      "state": "ready",
+      "kind": "oauth",
+      "scopes": [
+        "repo"
+      ],
+      "expires_at": "2026-08-01T00:00:00Z",
+      "refreshability": "not-applicable",
+      "notices": []
+    }
+  },
+  {
+    "state": "ready",
+    "config_path": "/omnifs-home/mounts/rss.json",
+    "mount": "rss",
+    "provider": "rss",
+    "provider_present": true,
+    "auth": {
+      "state": "none"
+    }
+  },
+  {
+    "state": "invalid",
+    "config_path": "/omnifs-home/mounts/broken.json",
+    "error": "provider artifact missing"
+  }
+]

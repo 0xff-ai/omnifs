@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_macros)] // migrates in wave 5 (cli-redesign)
 //! Provider upgrade check: classify and route a newer provider artifact before
 //! a reconcile runs.
 //!

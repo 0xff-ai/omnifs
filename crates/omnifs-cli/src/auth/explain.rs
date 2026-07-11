@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_macros)] // migrates in wave 3 (cli-redesign)
 //! Host-canned explanations of the authentication mechanisms omnifs supports.
 //!
 //! The mechanics of each flow are identical across providers, so the prose

@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_macros)] // migrates in wave 2 (cli-redesign)
 //! `omnifs frontend up`: start a local, Docker, or krunkit frontend process.
 //!
 //! The frontend is a separate, credential-free surface attached to a

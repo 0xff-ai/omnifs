@@ -1,0 +1,15 @@
+---
+source: crates/omnifs-cli/src/commands/doctor.rs
+expression: strip_ansi(&report.render())
+---
+Diagnostics (5)
+  ✓ docker reacha…docker daemon responds
+  • fuse          macOS: native mount is NFS loopback
+  ✓ providers dis…9 providers (27 artifacts)
+  ! credential st…directory will be created on first write
+  ✗ network       ghcr.io unreachable
+
+Live daemon
+  ! linear        credential `linear:oauth:default` is expired; run `omnifs mounts reauth linear`
+
+verdict: 1 failure

@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_macros)] // migrates in wave 4 (cli-redesign)
 //! Skill installation commands for agent harnesses.
 
 use anyhow::Context;

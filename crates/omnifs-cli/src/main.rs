@@ -3,6 +3,12 @@
 //! Provides commands to mount and unmount the virtual filesystem,
 //! as well as provider introspection utilities.
 
+// The output drift gate. Direct std printing is denied crate-wide so a new
+// command cannot bypass the `ui` toolkit; the anstream print macros are denied
+// through `.clippy.toml`'s `disallowed-macros`. Files under `src/ui/` and files
+// awaiting migration carry a module-level allow.
+#![deny(clippy::print_stdout, clippy::print_stderr)]
+
 mod auth;
 mod capability;
 mod catalog;
@@ -73,14 +79,14 @@ async fn main() {
                 if let Some(cmd) = telemetry_label {
                     telemetry::record_cli_exit(cmd, code);
                 }
-                anstream::eprintln!("{}", style::dim("canceled"));
+                ui::eprint_raw(&format!("{}\n", style::dim("canceled")));
                 std::process::exit(code);
             }
             let exit_code = error::exit_code(&error).code();
             if let Some(cmd) = telemetry_label {
                 telemetry::record_cli_exit(cmd, exit_code);
             }
-            anstream::eprint!("{}", error::render(&error));
+            ui::eprint_raw(&error::render(&error));
             std::process::exit(exit_code);
         },
     }

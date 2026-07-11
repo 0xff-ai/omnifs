@@ -129,10 +129,161 @@ fn read_user_mount_status(
     })
 }
 
+/// The one mount-row renderer, shared by `omnifs status`'s Mounts section and
+/// `omnifs mounts ls`, so both agree on shape and severity. Auth states split by
+/// glyph so shape carries meaning without color: ready is a green liveness dot,
+/// a mount needing no auth is a dim idle dot, a mount needing sign-in (missing
+/// or expired) is a yellow `!` with the reauth command, and a credential-store
+/// error or an invalid spec is a red `✗` with a fix. Invalid and healthy rows
+/// share the same three-column grid, so an invalid row can no longer misalign.
+pub(crate) fn mount_row(status: &UserMountStatus) -> crate::ui::report::Row {
+    use crate::ui::report::Row;
+    use crate::ui::style::Glyph;
+
+    match status {
+        UserMountStatus::Ready(mount) => {
+            let reauth = format!("omnifs mounts reauth {}", mount.mount);
+            let (glyph, value, fix): (Glyph, String, Option<String>) = match &mount.auth {
+                AuthReadiness::None => (Glyph::IdleDot, "no auth needed".to_string(), None),
+                AuthReadiness::Ready { .. } if ready_expired(&mount.auth) => (
+                    Glyph::Warn,
+                    format!("credential expired; run `{reauth}`"),
+                    Some(reauth.clone()),
+                ),
+                // A healthy ready credential keeps the readiness summary
+                // (kind, scopes, expiry) as its value.
+                AuthReadiness::Ready { .. } => {
+                    (Glyph::LiveDot, mount.auth.terminal_row().summary, None)
+                },
+                AuthReadiness::Missing { command } => (
+                    Glyph::Warn,
+                    format!("needs sign-in; run `{command}`"),
+                    Some(command.clone()),
+                ),
+                AuthReadiness::Error { message } => (
+                    Glyph::Fail,
+                    format!("{message}; run `{reauth}`"),
+                    Some(reauth.clone()),
+                ),
+            };
+            let mut row = Row::new(glyph, mount.mount.clone(), value).identity();
+            if let Some(fix) = fix {
+                row = row.with_fix(fix);
+            }
+            row
+        },
+        UserMountStatus::Invalid { config_path, error } => {
+            let name = config_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("<unknown>");
+            Row::new(Glyph::Fail, name.to_string(), format!("invalid ({error})"))
+                .identity()
+                .with_fix("omnifs doctor")
+        },
+    }
+}
+
+/// Whether a `Ready` credential is expired and needs re-authentication now (as
+/// opposed to a healthy credential that merely carries an informational
+/// not-refreshable notice). Drives the `!` vs `●` split for ready mounts.
+fn ready_expired(auth: &AuthReadiness) -> bool {
+    matches!(
+        auth,
+        AuthReadiness::Ready { notices, .. }
+            if notices.iter().any(|notice| notice.starts_with("expired"))
+    )
+}
+
 /// Returns the first mount whose name starts with `target`.
 pub(crate) fn closest_mount_name(mounts: &[MountConfig], target: &str) -> Option<String> {
     mounts
         .iter()
         .map(|mount| mount.name.to_string())
         .find(|name| name.starts_with(target))
+}
+
+#[cfg(test)]
+mod golden {
+    use super::*;
+    use crate::ui::report::{Report, Section};
+    use crate::ui::strip_ansi;
+    use omnifs_workspace::creds::Refreshability;
+
+    fn ready(mount: &str, scopes: &[&str], notices: &[&str]) -> UserMountStatus {
+        UserMountStatus::Ready(UserMountReadyStatus {
+            config_path: PathBuf::from(format!("/omnifs-home/mounts/{mount}.json")),
+            mount: mount.to_string(),
+            provider: mount.to_string(),
+            provider_present: true,
+            auth: AuthReadiness::Ready {
+                kind: "oauth".to_string(),
+                scopes: scopes.iter().map(ToString::to_string).collect(),
+                expires_at: Some("2026-08-01T00:00:00Z".to_string()),
+                refreshability: Refreshability::NotApplicable,
+                notices: notices.iter().map(ToString::to_string).collect(),
+            },
+        })
+    }
+
+    /// The `mounts ls` grid: one shared row owner covering every auth severity,
+    /// including an expired credential (a `!` warn split from healthy `●`) and
+    /// an invalid spec whose columns line up with the healthy rows.
+    #[test]
+    fn mounts_ls_grid() {
+        let statuses = vec![
+            ready("github", &["repo", "read:org"], &[]),
+            ready(
+                "linear",
+                &["read"],
+                &["expired; run `omnifs mounts reauth linear`"],
+            ),
+            UserMountStatus::Ready(UserMountReadyStatus {
+                config_path: PathBuf::from("/omnifs-home/mounts/rss.json"),
+                mount: "rss".to_string(),
+                provider: "rss".to_string(),
+                provider_present: true,
+                auth: AuthReadiness::None,
+            }),
+            UserMountStatus::Ready(UserMountReadyStatus {
+                config_path: PathBuf::from("/omnifs-home/mounts/notion.json"),
+                mount: "notion".to_string(),
+                provider: "notion".to_string(),
+                provider_present: true,
+                auth: AuthReadiness::Missing {
+                    command: "omnifs mounts reauth notion".to_string(),
+                },
+            }),
+            UserMountStatus::Invalid {
+                config_path: PathBuf::from("/omnifs-home/mounts/broken.json"),
+                error: "provider artifact missing".to_string(),
+            },
+        ];
+        let mut section = Section::new("Mounts").counted(statuses.len());
+        for status in &statuses {
+            section.push(mount_row(status));
+        }
+        let mut report = Report::new();
+        report.push(section);
+        insta::assert_snapshot!(strip_ansi(&report.render()));
+    }
+
+    #[test]
+    fn mounts_ls_json_preserves_wire_schema() {
+        let statuses = vec![
+            ready("github", &["repo"], &[]),
+            UserMountStatus::Ready(UserMountReadyStatus {
+                config_path: PathBuf::from("/omnifs-home/mounts/rss.json"),
+                mount: "rss".to_string(),
+                provider: "rss".to_string(),
+                provider_present: true,
+                auth: AuthReadiness::None,
+            }),
+            UserMountStatus::Invalid {
+                config_path: PathBuf::from("/omnifs-home/mounts/broken.json"),
+                error: "provider artifact missing".to_string(),
+            },
+        ];
+        insta::assert_snapshot!(serde_json::to_string_pretty(&statuses).unwrap());
+    }
 }

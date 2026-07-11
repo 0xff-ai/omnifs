@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_macros)] // migrates in wave 2 (cli-redesign)
 //! `omnifs frontend down`: tear down every frontend owned by this workspace.
 //!
 //! Attach listeners have no close route on the daemon side

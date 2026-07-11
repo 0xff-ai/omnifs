@@ -2,3 +2,20 @@
 # CI npm builds and local `rustup` both use the pinned channel rather than
 # `stable`, so clippy's MSRV-aware lints match what contributors actually run.
 msrv = "1.95.0"
+
+# omnifs-cli output drift gate. The CLI renders through `anstream` so NO_COLOR
+# and pipe stripping come free, so its user-facing output must go through the
+# `ui` toolkit rather than ad-hoc `anstream::*` prints. Only omnifs-cli uses
+# these macros, so this workspace-wide deny has no blast radius in other crates.
+# Files under `crates/omnifs-cli/src/ui/` (the sanctioned output owner) and files
+# awaiting migration carry a module-level allow. The std print macros are denied
+# separately, crate-scoped to omnifs-cli, via
+# `#![deny(clippy::print_stdout, clippy::print_stderr)]`, because a workspace
+# `disallowed-macros` entry for `std::println` would fire in every crate's bins,
+# examples, and tests.
+disallowed-macros = [
+    { path = "anstream::println", reason = "route user output through the ui toolkit" },
+    { path = "anstream::eprintln", reason = "route user output through the ui toolkit" },
+    { path = "anstream::print", reason = "route user output through the ui toolkit" },
+    { path = "anstream::eprint", reason = "route user output through the ui toolkit" },
+]

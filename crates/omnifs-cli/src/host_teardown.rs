@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_macros, clippy::print_stderr)] // migrates in wave 5 (cli-redesign)
 //! Local frontend teardown driven by runner-owned mount state.
 
 use std::path::{Path, PathBuf};

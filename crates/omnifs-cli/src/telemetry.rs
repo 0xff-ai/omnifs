@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_macros)] // migrates in wave 5 (cli-redesign)
 //! CLI-side dogfood telemetry.
 //!
 //! Records one line per CLI invocation to the workspace-local `cli.jsonl`. The

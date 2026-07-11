@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_macros)] // migrates in wave 2 (cli-redesign)
 use super::detect;
 use crate::auth::AuthSelection;
 use omnifs_workspace::authn::AuthManifest;

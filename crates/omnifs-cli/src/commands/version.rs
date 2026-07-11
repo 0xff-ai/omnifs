@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_macros)] // migrates in wave 4 (cli-redesign)
 //! `omnifs version` — print CLI and daemon version facts.
 
 use anyhow::Result;

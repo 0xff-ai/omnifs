@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_macros)] // migrates in wave 4 (cli-redesign)
 //! CLI type definitions: top-level parser and command enum.
 
 use clap::{Parser, Subcommand};

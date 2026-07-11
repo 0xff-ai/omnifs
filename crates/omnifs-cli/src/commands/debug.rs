@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_macros)] // migrates in wave 5 (cli-redesign)
 //! Hidden debug commands for inspecting generated provider metadata.
 
 use clap::{Args, Subcommand};

@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_macros)] // migrates in wave 5 (cli-redesign)
 //! Shared launch choreography for `omnifs up`.
 
 use std::net::SocketAddr;

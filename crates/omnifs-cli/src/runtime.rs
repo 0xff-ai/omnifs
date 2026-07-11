@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_macros)] // migrates in wave 5 (cli-redesign)
 //! The Docker client for the optional Docker-hosted FUSE frontend
 //! (`omnifs frontend up|down|status`). The daemon itself always runs
 //! host-native and has no Docker surface here.

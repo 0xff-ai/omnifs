@@ -1,0 +1,25 @@
+---
+source: crates/omnifs-cli/src/commands/doctor.rs
+expression: "serde_json::to_string_pretty(&payload).unwrap()"
+---
+{
+  "verdict": "warnings",
+  "probes": [
+    {
+      "name": "network",
+      "state": "warn",
+      "message": "ghcr.io unreachable"
+    }
+  ],
+  "live": {
+    "skipped": null,
+    "findings": [
+      {
+        "mount": "linear",
+        "state": "warn",
+        "message": "credential `linear:oauth:default` is expired",
+        "fix": "omnifs mounts reauth linear"
+      }
+    ]
+  }
+}

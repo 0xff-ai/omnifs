@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_macros)] // migrates in wave 2 (cli-redesign)
 //! Shared onboarding and lifecycle stages used by `setup`, `init`, and `up`.
 //!
 //! Commands own narration. This module owns the stage behavior so the guided
