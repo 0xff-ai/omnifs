@@ -179,8 +179,8 @@ fn invalidation_reaches_both_frontends_within_one_op() {
 
 /// A renderer serves the projected tree from a different process than the
 /// projection owner over the Omnifs VFS wire protocol. A
-/// namespace-only daemon serves an attach socket; a `wire-test-frontend` child
-/// (this crate's out-of-process NFS test double) mounts NFS over an Omnifs VFS
+/// namespace-only daemon serves an attach socket; an `omnifs-nfs` child
+/// (the shipped out-of-process NFS runner) mounts NFS over an Omnifs VFS
 /// wire-backed namespace. The full conformance row table runs against that
 /// out-of-process mount with the same expectations as the in-process macOS NFS
 /// loopback lane, scored as column `macos-nfs-wire`.

@@ -9,6 +9,11 @@ description = "Read-only NFSv4.0 loopback frontend for omnifs"
 categories = ["filesystem"]
 keywords = ["omnifs", "nfs", "filesystem"]
 
+[[bin]]
+name = "omnifs-nfs"
+path = "src/bin/omnifs_nfs.rs"
+required-features = ["bin"]
+
 [dependencies]
 omnifs-core = { workspace = true }
 omnifs-mtab = { workspace = true }
@@ -20,6 +25,17 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 dashmap = { workspace = true }
 getrandom = "0.3"
+
+# Runner-only dependencies. Library consumers do not need argument parsing,
+# VFS attach transport, or subscriber setup.
+anyhow = { workspace = true, optional = true }
+clap = { workspace = true, optional = true }
+omnifs-vfs-wire = { workspace = true, optional = true }
+tracing-subscriber = { workspace = true, optional = true }
+
+[features]
+default = ["bin"]
+bin = ["dep:anyhow", "dep:clap", "dep:omnifs-vfs-wire", "dep:tracing-subscriber"]
 
 [dev-dependencies]
 omnifs-engine = { workspace = true, features = ["runtime"] }

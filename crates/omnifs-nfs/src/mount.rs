@@ -11,15 +11,13 @@ use std::ffi::OsString;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Arc, mpsc};
+use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::runtime::Handle;
 use tokio::sync::broadcast;
 
 const MOUNT_WAIT_INTERVAL: Duration = Duration::from_millis(500);
-const UNMOUNT_SETTLE_INTERVAL: Duration = Duration::from_millis(100);
-const UNMOUNT_SETTLE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[cfg(unix)]
 const STATE_DIR_MODE: u32 = 0o700;
@@ -74,6 +72,43 @@ impl NfsMountOptions {
             }),
         ))
     }
+
+    fn bind_for_mount(&self, mount_point: &Path) -> Result<SocketAddr, NfsFrontendError> {
+        if !self.persist_filehandles || !mount_is_active_checked(mount_point)? {
+            return Ok(self.bind);
+        }
+        self.bind_for_active_mount(mount_point)
+    }
+
+    fn bind_for_active_mount(&self, mount_point: &Path) -> Result<SocketAddr, NfsFrontendError> {
+        let mut matching = NfsMountState::read_all(&self.state_dir)
+            .map_err(|error| NfsFrontendError::State(error.to_string()))?
+            .into_iter()
+            .filter(|state| state.mount_point == mount_point);
+        let persisted = matching.next().ok_or_else(|| {
+            NfsFrontendError::State(format!(
+                "active NFS mount {} has no persisted server address",
+                mount_point.display()
+            ))
+        })?;
+        if matching.next().is_some() {
+            return Err(NfsFrontendError::State(format!(
+                "active NFS mount {} has multiple persisted server addresses",
+                mount_point.display()
+            )));
+        }
+        let persisted = persisted.addr.parse().map_err(|error| {
+            NfsFrontendError::State(format!("invalid persisted NFS address: {error}"))
+        })?;
+        if self.bind.port() != 0 && self.bind != persisted {
+            return Err(NfsFrontendError::State(format!(
+                "active NFS mount {} is connected to {persisted}, not requested {}",
+                mount_point.display(),
+                self.bind
+            )));
+        }
+        Ok(persisted)
+    }
 }
 
 pub fn mount_blocking(
@@ -85,14 +120,15 @@ pub fn mount_blocking(
 ) -> Result<(), NfsFrontendError> {
     std::fs::create_dir_all(mount_point)?;
     ensure_private_state_dir(&options.state_dir)?;
+    let bind = options.bind_for_mount(mount_point)?;
     sweep_stale_states(&options.state_dir);
-    let signal_rx = ctrl_c_receiver(&rt);
 
     // A pinned filehandle generation persists across a restart so a kernel client
     // never sees `NFS4ERR_FHEXPIRED` for a handle it still holds. Off the runner
     // path, keep the fresh-per-process random generation.
     let (generation, persist_init) = options.filehandle_generation()?;
 
+    let task_runtime = rt.clone();
     let export = Arc::new(match persist_init {
         Some(init) => Export::with_persistence(rt, namespace, init),
         None => Export::new(rt, namespace),
@@ -101,20 +137,20 @@ pub fn mount_blocking(
     // On a daemon reattach (a wire reconnect onto a restarted daemon), every
     // cached NodeId is stale; drop them so subsequent ops re-resolve. Opens and
     // leases survive untouched.
-    if let Some(mut attach_events) = attach_events {
+    let reattach_task = attach_events.map(|mut attach_events| {
         let listener = Arc::clone(&export);
-        drop(export.handle().spawn(async move {
+        export.handle().spawn(async move {
             while let Ok(event) = attach_events.recv().await {
                 match event {
                     NsAttachEvent::Reattached => listener.on_reattach(),
                 }
             }
-        }));
-    }
+        })
+    });
 
     let server = start_server(
         Arc::clone(&export) as Arc<dyn crate::export::ReadOnlyExport>,
-        options.bind,
+        bind,
         generation,
         options.trace_path.clone(),
     )?;
@@ -145,14 +181,20 @@ pub fn mount_blocking(
         "NFS loopback mount established"
     );
 
-    wait_for_mount_exit(mount_point, signal_rx)?;
+    wait_for_mount_exit(mount_point);
+    if let Some(task) = reattach_task {
+        task.abort();
+        task_runtime.block_on(async {
+            let _ = task.await;
+        });
+    }
 
     drop(server);
     Ok(())
 }
 
 pub fn unmount(mount_point: &Path) -> Result<(), NfsFrontendError> {
-    UnmountCommand::graceful(Platform::current(), mount_point)
+    UnmountCommand::nfs_graceful(Platform::current(), mount_point)
         .run()
         .map_err(|error| NfsFrontendError::Unmount(error.to_string()))
 }
@@ -396,8 +438,8 @@ fn parse_macos_mounts(contents: &str) -> Vec<MountTableEntry> {
 /// live OS mount table (`/proc/mounts` on Linux, `mount` on macOS). The daemon
 /// uses this for readiness on hosts without `/proc`.
 pub fn mount_is_active(mount_point: &Path) -> bool {
-    match mount_table_entries() {
-        Ok(entries) => mount_table_contains(&entries, mount_point),
+    match mount_is_active_checked(mount_point) {
+        Ok(active) => active,
         Err(error) => {
             tracing::warn!(
                 mount = %mount_point.display(),
@@ -407,6 +449,12 @@ pub fn mount_is_active(mount_point: &Path) -> bool {
             false
         },
     }
+}
+
+fn mount_is_active_checked(mount_point: &Path) -> Result<bool, NfsFrontendError> {
+    mount_table_entries()
+        .map(|entries| mount_table_contains(&entries, mount_point))
+        .map_err(Into::into)
 }
 
 fn mount_table_contains(entries: &[MountTableEntry], mount_point: &Path) -> bool {
@@ -434,74 +482,24 @@ fn normalize_mount_path(path: &Path) -> PathBuf {
     path.components().collect()
 }
 
-fn ctrl_c_receiver(rt: &Handle) -> mpsc::Receiver<()> {
-    let (tx, rx) = mpsc::channel();
-    std::mem::drop(rt.spawn(async move {
-        match tokio::signal::ctrl_c().await {
-            Ok(()) => {
-                let _ = tx.send(());
-            },
-            Err(error) => {
-                tracing::warn!(error = %error, "failed to register Ctrl-C handler");
-            },
-        }
-    }));
-    rx
-}
-
-fn wait_for_mount_exit(
-    mount_point: &Path,
-    signal_rx: mpsc::Receiver<()>,
-) -> Result<(), NfsFrontendError> {
-    let mut signal_rx = Some(signal_rx);
-
+fn wait_for_mount_exit(mount_point: &Path) {
     loop {
-        if !mount_is_active(mount_point) {
-            tracing::info!("NFS mount exited");
-            return Ok(());
+        match mount_is_active_checked(mount_point) {
+            Ok(false) => {
+                tracing::info!("NFS mount exited");
+                return;
+            },
+            Ok(true) => {},
+            Err(error) => {
+                tracing::warn!(
+                    mount = %mount_point.display(),
+                    %error,
+                    "failed to inspect mount table; keeping NFS frontend alive"
+                );
+            },
         }
-
-        if wait_interval_or_signal(&mut signal_rx) {
-            tracing::info!(
-                mount = %mount_point.display(),
-                "Ctrl-C received, unmounting NFS loopback mount"
-            );
-            unmount(mount_point)?;
-            wait_until_inactive(mount_point)?;
-            tracing::info!("NFS mount interrupted and unmounted");
-            return Ok(());
-        }
-    }
-}
-
-fn wait_interval_or_signal(signal_rx: &mut Option<mpsc::Receiver<()>>) -> bool {
-    let Some(rx) = signal_rx else {
         thread::sleep(MOUNT_WAIT_INTERVAL);
-        return false;
-    };
-
-    match rx.recv_timeout(MOUNT_WAIT_INTERVAL) {
-        Ok(()) => true,
-        Err(mpsc::RecvTimeoutError::Timeout) => false,
-        Err(mpsc::RecvTimeoutError::Disconnected) => {
-            *signal_rx = None;
-            false
-        },
     }
-}
-
-fn wait_until_inactive(mount_point: &Path) -> Result<(), NfsFrontendError> {
-    let deadline = Instant::now() + UNMOUNT_SETTLE_TIMEOUT;
-    while mount_is_active(mount_point) {
-        if Instant::now() >= deadline {
-            return Err(NfsFrontendError::Unmount(format!(
-                "{} remained mounted after unmount",
-                mount_point.display()
-            )));
-        }
-        thread::sleep(UNMOUNT_SETTLE_INTERVAL);
-    }
-    Ok(())
 }
 
 fn ensure_private_state_dir(state_dir: &Path) -> Result<(), NfsFrontendError> {
@@ -555,8 +553,11 @@ fn pid_alive(pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        MountCommand, MountOptions, MountTableEntry, mount_table_contains, parse_macos_mounts,
+        MountCommand, MountOptions, MountTableEntry, NfsMountOptions, mount_is_active_checked,
+        mount_table_contains, parse_macos_mounts,
     };
+    use omnifs_mtab::StateFile;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::path::{Path, PathBuf};
 
     fn args_as_strings(command: &MountCommand) -> Vec<String> {
@@ -599,6 +600,48 @@ mod tests {
                 "/Volumes/omnifs",
             ]
         );
+    }
+
+    #[test]
+    fn active_mount_reuses_persisted_server_address() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mount = Path::new("/mnt/omnifs");
+        let persisted = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 2049);
+        let _state = StateFile::write(mount, persisted, dir.path()).expect("state");
+
+        let mut options = NfsMountOptions::loopback(dir.path().to_path_buf());
+        options.persist_filehandles = true;
+        assert_eq!(options.bind_for_active_mount(mount).unwrap(), persisted);
+
+        options.bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 2050);
+        assert!(options.bind_for_active_mount(mount).is_err());
+    }
+
+    #[test]
+    fn active_mount_rejects_ambiguous_server_state() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mount = Path::new("/mnt/omnifs");
+        let _first = StateFile::write(
+            mount,
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 2049),
+            dir.path(),
+        )
+        .expect("first state");
+        let _second = StateFile::write(
+            mount,
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 2050),
+            dir.path(),
+        )
+        .expect("second state");
+
+        let mut options = NfsMountOptions::loopback(dir.path().to_path_buf());
+        options.persist_filehandles = true;
+        assert!(options.bind_for_active_mount(mount).is_err());
+    }
+
+    #[test]
+    fn checked_mount_probe_reports_absent_mount() {
+        assert!(!mount_is_active_checked(Path::new("/definitely/not/an/omnifs/mount")).unwrap());
     }
 
     #[test]

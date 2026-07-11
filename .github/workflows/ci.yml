@@ -321,7 +321,11 @@ jobs:
         run: scripts/ci/build-linux-zigbuild.sh x86_64-unknown-linux-gnu.2.17
 
       - name: Package Linux x64 CLI
-        run: scripts/ci/package-cli.sh linux-x64 "${{ steps.build.outputs.artifact }}"
+        run: >-
+          scripts/ci/package-cli.sh linux-x64
+          "${{ steps.build.outputs.artifact }}"
+          "${{ steps.build.outputs.fuse_artifact }}"
+          "${{ steps.build.outputs.nfs_artifact }}"
 
       - name: Attest Linux x64 CLI archive
         if: env.CI_MAIN_PUSH == 'true'
@@ -396,12 +400,15 @@ jobs:
           mkdir -p dist-cli/bin
           tar -C dist-cli/bin -xJf dist-cli/omnifs-cli-linux-x64.tar.xz
           test -x dist-cli/bin/omnifs
+          test -x dist-cli/bin/omnifs-fuse
+          test -x dist-cli/bin/omnifs-nfs
 
       - name: Run frontend conformance matrix and control-plane acceptance
         run: |
           set -euo pipefail
           OMNIFS_ACCEPTANCE_LIVE=1 \
           OMNIFS_BIN="$(pwd)/dist-cli/bin/omnifs" \
+          OMNIFS_NFS_BIN="$(pwd)/dist-cli/bin/omnifs-nfs" \
           cargo nextest run -p omnifs-itest \
             -E 'binary(frontend_matrix) + binary(control_plane) + binary(multi_frontend) + binary(wire_reattach)' --no-capture
 
@@ -459,7 +466,11 @@ jobs:
         run: scripts/ci/build-linux-zigbuild.sh aarch64-unknown-linux-gnu.2.17
 
       - name: Package Linux arm64 CLI
-        run: scripts/ci/package-cli.sh linux-arm64 "${{ steps.build.outputs.artifact }}"
+        run: >-
+          scripts/ci/package-cli.sh linux-arm64
+          "${{ steps.build.outputs.artifact }}"
+          "${{ steps.build.outputs.fuse_artifact }}"
+          "${{ steps.build.outputs.nfs_artifact }}"
 
       - name: Attest Linux arm64 CLI archive
         if: env.CI_MAIN_PUSH == 'true'
@@ -523,8 +534,12 @@ jobs:
       - name: Package Darwin CLI archives
         run: |
           set -euo pipefail
-          scripts/ci/package-cli.sh darwin-x64 "${{ steps.build.outputs.x64_artifact }}"
-          scripts/ci/package-cli.sh darwin-arm64 "${{ steps.build.outputs.arm64_artifact }}"
+          scripts/ci/package-cli.sh darwin-x64 \
+            "${{ steps.build.outputs.x64_artifact }}" \
+            "${{ steps.build.outputs.x64_nfs_artifact }}"
+          scripts/ci/package-cli.sh darwin-arm64 \
+            "${{ steps.build.outputs.arm64_artifact }}" \
+            "${{ steps.build.outputs.arm64_nfs_artifact }}"
 
       - name: Attest Darwin CLI archives
         if: env.CI_MAIN_PUSH == 'true'
@@ -1047,6 +1062,8 @@ jobs:
           mkdir -p dist-cli/bin
           tar -C dist-cli/bin -xJf dist-cli/omnifs-cli-linux-x64.tar.xz
           test -x dist-cli/bin/omnifs
+          test -x dist-cli/bin/omnifs-fuse
+          test -x dist-cli/bin/omnifs-nfs
 
       - uses: ./.github/actions/omnifs-load-frontend
         with:
@@ -1058,6 +1075,7 @@ jobs:
           set -euo pipefail
           OMNIFS_ACCEPTANCE_LIVE=1 \
           OMNIFS_BIN="$(pwd)/dist-cli/bin/omnifs" \
+          OMNIFS_NFS_BIN="$(pwd)/dist-cli/bin/omnifs-nfs" \
           cargo nextest run -p omnifs-itest -E 'binary(frontend_docker)' --no-capture
 
       - name: Upload fuse-docker scorecards

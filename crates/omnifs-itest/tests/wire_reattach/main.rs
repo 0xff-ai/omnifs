@@ -1,17 +1,17 @@
 //! Restart survival for the out-of-process NFS frontend.
 //!
 //! This is the structural answer to the ESTALE row in the NFS quirk catalog. Two
-//! legs, run in order against one live mount:
+//! restart cases, run in order against one live mount:
 //!
-//! - **Leg A (frontend kill).** SIGKILL the `wire-test-frontend` runner (this
-//!   crate's out-of-process NFS test double over the Omnifs VFS wire protocol)
-//!   mid-workload
-//!   and relaunch it with the same argv (same pinned NFS port, same state dir).
+//! - **Frontend process restart.** SIGKILL `omnifs-nfs`, the shipped
+//!   out-of-process NFS runner over the Omnifs VFS wire protocol,
+//!   mid-workload and relaunch it with the same argv. The state directory
+//!   recovers the active mount's ephemeral NFS port.
 //!   The kernel client keeps the mount and its filehandles; the restarted runner
 //!   reloads the persisted filehandle table (same generation) and serves without
 //!   remounting. A held fd keeps reading, a fresh open works, and a previously
 //!   listed directory still lists. No unmount happened.
-//! - **Leg B (daemon kill).** SIGKILL the namespace-only daemon under the live
+//! - **Daemon restart.** SIGKILL the namespace-only daemon under the live
 //!   frontend and relaunch it. The frontend's VFS wire client reconnects onto a
 //!   fresh instance id, drops every cached `NodeId`, and re-resolves lazily. The
 //!   held fd
@@ -169,7 +169,6 @@ fn wire_reattach_survives_frontend_and_daemon_restart() {
     let ctrl_port = live::free_port();
     let ctrl_addr = format!("127.0.0.1:{ctrl_port}");
     let base = format!("http://{ctrl_addr}");
-    let nfs_port = live::free_port();
     let socket = home.join("frontends/nfs-wire.sock");
     let mount_point = home.join("mnt-reattach");
     std::fs::create_dir_all(&mount_point).expect("mount point");
@@ -193,20 +192,18 @@ fn wire_reattach_survives_frontend_and_daemon_restart() {
             .expect("spawn omnifs daemon")
     };
 
-    // Same argv every launch: a restart must rebind the same NFS port and reload
-    // the same filehandle state directory, or scenario A is impossible.
+    // Same argv every launch: port zero chooses an ephemeral address initially,
+    // then the active-mount restart must recover that address from state.
     let frontend_argv: Vec<String> = vec![
         "--attach".into(),
         socket.to_str().expect("socket utf-8").into(),
         "--mount-point".into(),
         mount_point.to_str().expect("mount utf-8").into(),
-        "--nfs-port".into(),
-        nfs_port.to_string(),
-        "--nfs-state-dir".into(),
+        "--state-dir".into(),
         state_dir.to_str().expect("state dir utf-8").into(),
     ];
     let spawn_frontend = || {
-        Command::new(live::wire_test_frontend_bin())
+        Command::new(live::nfs_runner_bin())
             .args(&frontend_argv)
             .env("OMNIFS_HOME", &home)
             .env(
@@ -214,7 +211,7 @@ fn wire_reattach_survives_frontend_and_daemon_restart() {
                 std::env::var("REATTACH_FRONTEND_LOG").unwrap_or_else(|_| "warn".into()),
             )
             .spawn()
-            .expect("spawn wire-test-frontend")
+            .expect("spawn omnifs-nfs")
     };
 
     let mut guard = Cleanup {
@@ -260,9 +257,7 @@ fn wire_reattach_survives_frontend_and_daemon_restart() {
     // SIGKILL.
     std::thread::sleep(Duration::from_millis(400));
 
-    // ---------------------------------------------------------------------
-    // Leg A: kill the frontend, relaunch with the same argv.
-    // ---------------------------------------------------------------------
+    // Restart the frontend process with the kernel mount still active.
     {
         let mut frontend = guard.frontend.take().expect("frontend running");
         frontend.kill().expect("SIGKILL frontend"); // std Child::kill sends SIGKILL
@@ -270,7 +265,7 @@ fn wire_reattach_survives_frontend_and_daemon_restart() {
     }
     assert!(
         omnifs_nfs::mount_is_active(&mount_point),
-        "leg A: the kernel client must keep the mount across a frontend kill"
+        "the kernel client must keep the mount across a frontend restart"
     );
 
     guard.frontend = Some(spawn_frontend());
@@ -287,47 +282,45 @@ fn wire_reattach_survives_frontend_and_daemon_restart() {
         }
         assert!(
             Instant::now() < deadline,
-            "leg A: the restarted frontend never served a fresh read"
+            "the restarted frontend never served a fresh read"
         );
         // A restarted runner exiting early is a hard failure.
         if let Some(child) = guard.frontend.as_mut()
             && matches!(child.try_wait(), Ok(Some(_)))
         {
-            panic!("leg A: the restarted frontend exited before serving");
+            panic!("the restarted frontend exited before serving");
         }
         std::thread::sleep(Duration::from_millis(250));
     }
 
-    // (1) The held fd keeps working and bytes match.
+    // The held fd keeps working and bytes match.
     let after_kill = read_held_timeout(&held, Duration::from_secs(30))
-        .expect("leg A: held fd must not hang after the frontend restart")
-        .expect("leg A: held fd must keep reading after frontend restart");
+        .expect("held fd must not hang after the frontend restart")
+        .expect("held fd must keep reading after frontend restart");
     assert_eq!(
         after_kill, baseline,
-        "leg A: held-fd bytes must be identical after the frontend restart"
+        "held-fd bytes must be identical after the frontend restart"
     );
-    // (2) A fresh open+read works.
+    // A fresh open+read works.
     let fresh = read_path_timeout(&message, Duration::from_secs(15))
-        .expect("leg A: fresh read must not hang")
-        .expect("leg A: fresh open+read after restart");
-    assert_eq!(fresh, baseline, "leg A: fresh read must match baseline");
-    // (3) The previously listed directory still lists.
+        .expect("fresh read must not hang")
+        .expect("fresh open+read after frontend restart");
+    assert_eq!(fresh, baseline, "fresh read must match baseline");
+    // The previously listed directory still lists.
     let listed_after: Vec<String> = std::fs::read_dir(&hello_dir)
-        .expect("leg A: relist hello dir")
+        .expect("relist hello dir after frontend restart")
         .filter_map(|entry| entry.ok().and_then(|e| e.file_name().into_string().ok()))
         .collect();
     assert!(
         listed_after.iter().any(|name| name == "message"),
-        "leg A: a previously listed directory must still list its entries"
+        "a previously listed directory must still list its entries"
     );
     assert!(
         omnifs_nfs::mount_is_active(&mount_point),
-        "leg A: no unmount happened across the frontend restart"
+        "no unmount happened across the frontend restart"
     );
 
-    // ---------------------------------------------------------------------
-    // Leg B: kill the daemon under the live frontend, relaunch it.
-    // ---------------------------------------------------------------------
+    // Restart the daemon under the live frontend and let the wire client reattach.
     {
         let mut daemon = guard.daemon.take().expect("daemon running");
         daemon.kill().expect("SIGKILL daemon");
@@ -339,7 +332,7 @@ fn wire_reattach_survives_frontend_and_daemon_restart() {
     while !curl_ready(&base) {
         assert!(
             Instant::now() < deadline,
-            "leg B: the relaunched daemon never became ready"
+            "the relaunched daemon never became ready"
         );
         std::thread::sleep(Duration::from_millis(200));
     }
@@ -362,14 +355,14 @@ fn wire_reattach_survives_frontend_and_daemon_restart() {
     };
     assert!(
         reattached,
-        "leg B: the frontend never re-resolved against the restarted daemon"
+        "the frontend never re-resolved against the restarted daemon"
     );
     let after_reattach = read_held_timeout(&held, Duration::from_secs(30))
-        .expect("leg B: held fd must not hang after the daemon restart")
-        .expect("leg B: held fd must keep reading after the daemon restart");
+        .expect("held fd must not hang after the daemon restart")
+        .expect("held fd must keep reading after the daemon restart");
     assert_eq!(
         after_reattach, baseline,
-        "leg B: held-fd bytes must be identical after the daemon reattach"
+        "held-fd bytes must be identical after the daemon reattach"
     );
 
     drop(guard);

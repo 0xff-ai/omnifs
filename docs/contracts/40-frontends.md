@@ -47,6 +47,8 @@ macOS host-native integration uses read-only NFSv4.0 loopback. NFS is a frontend
 
 Keep NFS filehandles, stateids, leases, and NFS protocol errors in `omnifs-nfs`. Preserve read-only behavior for mutation operations. Keep macOS mount readiness and teardown behavior in the NFS/CLI path.
 
+The slim `omnifs-nfs` runner attaches through the Omnifs VFS wire protocol. Its state directory owns both mount discovery records and the persistent filehandle table; an active-mount restart must reuse the recorded server address, never silently bind a new port and skip remounting.
+
 ### Mount-table mechanics
 
 Keep `/proc/mounts` parsing, NFS mount state-file schema/IO, and shared platform unmount command construction in `omnifs-mtab`. Frontends and lifecycle code call that crate instead of carrying duplicate parsers, state versions, or unmount argv builders.

@@ -7,34 +7,20 @@ repository.workspace = true
 homepage.workspace = true
 description = "Centralized integration tests and harnesses for omnifs providers"
 
-# The Omnifs VFS wire protocol test double the live acceptance lanes spawn: an
-# out-of-process NFS renderer over a wire-attached namespace, mirroring what
-# the retired `omnifs frontend run --kind nfs` runner did. Test-crate-owned on
-# purpose: the shipped runner binary (`omnifs-fuse`) is FUSE-only, and this
-# double exists so the wire reattach/perf/parity acceptance proofs keep a
-# spawnable out-of-process NFS leg.
-[[bin]]
-name = "wire-test-frontend"
-path = "src/bin/wire_test_frontend.rs"
-
 [dependencies]
 omnifs-api = { workspace = true }
 omnifs-engine = { workspace = true, features = ["runtime"] }
-omnifs-vfs-wire = { workspace = true }
 omnifs-wit = { path = "../omnifs-wit", features = ["host-bindings"] }
 omnifs-core = { path = "../omnifs-core" }
 omnifs-workspace = { workspace = true }
 omnifs-nfs = { workspace = true }
 wasmtime = { workspace = true }
 anyhow = { workspace = true }
-clap = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 time = { workspace = true, features = ["formatting"] }
-tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
 rusqlite = { version = "0.36", features = ["bundled"] }
 base64 = "0.22"
 hickory-proto = "0.26"

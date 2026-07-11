@@ -96,33 +96,28 @@ fn ensure_omnifs_built() {
     });
 }
 
-/// Resolve the `wire-test-frontend` binary the wire lanes spawn: this crate's
-/// own out-of-process NFS test double over the Omnifs VFS wire protocol
-/// (`src/bin/wire_test_frontend.rs`).
-///
-/// `CARGO_BIN_EXE_wire-test-frontend` is only set when compiling this
-/// package's integration tests, not this library, so the path is resolved the
-/// same build-on-demand way [`omnifs_bin`] resolves the CLI.
+/// Resolve the shipped `omnifs-nfs` runner the wire lanes spawn.
 #[must_use]
-pub fn wire_test_frontend_bin() -> PathBuf {
-    ensure_wire_test_frontend_built();
-    crate::workspace_root().join("target/debug/wire-test-frontend")
+pub fn nfs_runner_bin() -> PathBuf {
+    if let Some(path) = std::env::var_os("OMNIFS_NFS_BIN") {
+        return PathBuf::from(path);
+    }
+    ensure_nfs_runner_built();
+    crate::workspace_root().join("target/debug/omnifs-nfs")
 }
 
-/// Build the `wire-test-frontend` test double once per process at test
-/// runtime. Same pattern and rationale as [`ensure_omnifs_built`].
-fn ensure_wire_test_frontend_built() {
+/// Build the shipped NFS runner once per process at test runtime.
+fn ensure_nfs_runner_built() {
     static BUILT: OnceLock<()> = OnceLock::new();
     BUILT.get_or_init(|| {
         let status = Command::new("cargo")
-            .args(["build", "-p", "omnifs-itest", "--bin", "wire-test-frontend"])
+            .args(["build", "-p", "omnifs-nfs", "--bin", "omnifs-nfs"])
             .current_dir(crate::workspace_root())
             .status()
-            .expect("spawn `cargo build -p omnifs-itest --bin wire-test-frontend`");
+            .expect("spawn `cargo build -p omnifs-nfs --bin omnifs-nfs`");
         assert!(
             status.success(),
-            "`cargo build -p omnifs-itest --bin wire-test-frontend` failed; run it directly to \
-             see the error",
+            "`cargo build -p omnifs-nfs --bin omnifs-nfs` failed; run it directly to see the error",
         );
     });
 }
@@ -389,7 +384,7 @@ pub fn start_multi_frontend_daemon(kinds: &[&str]) -> Option<MultiFrontendDaemon
 }
 
 /// A namespace-only `omnifs daemon` (one attach socket, no in-process frontend)
-/// plus an out-of-process `wire-test-frontend` runner attached to it. Torn down
+/// plus an out-of-process `omnifs-nfs` runner attached to it. Torn down
 /// on drop: the frontend first (it owns the mount), then the daemon.
 pub struct WireFrontendDaemon {
     daemon: Child,
@@ -446,7 +441,7 @@ fn wait_briefly(child: &mut Child) {
 }
 
 /// Bring up a namespace-only daemon serving one attach socket, then the
-/// out-of-process `wire-test-frontend` NFS runner attached to it. Proves the
+/// out-of-process `omnifs-nfs` runner attached to it. Proves the
 /// projected tree serves out of process over the Omnifs VFS wire protocol.
 ///
 /// Returns `None` (skip) when the platform cannot mount or a surface never comes
@@ -580,10 +575,12 @@ fn wire_frontend(
     // The out-of-process renderer attaches over the requested transport and
     // mounts the tree: `--attach <socket>` for Unix, or the TCP env pair the
     // Docker-hosted frontend also uses.
-    let mut frontend_cmd = Command::new(wire_test_frontend_bin());
+    let mut frontend_cmd = Command::new(nfs_runner_bin());
     frontend_cmd
         .arg("--mount-point")
         .arg(&mount_point)
+        .arg("--state-dir")
+        .arg(home_path.join("cache/nfs-wire"))
         .env("OMNIFS_HOME", &home_path)
         .env("RUST_LOG", "warn");
     match transport {
@@ -614,7 +611,7 @@ fn wire_frontend(
     let mut frontend = match frontend {
         Ok(child) => child,
         Err(error) => {
-            eprintln!("skip: spawn wire-test-frontend failed: {error}");
+            eprintln!("skip: spawn omnifs-nfs failed: {error}");
             let _ = daemon.kill();
             let _ = daemon.wait();
             return None;

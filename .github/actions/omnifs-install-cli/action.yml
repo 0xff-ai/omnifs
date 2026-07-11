@@ -20,4 +20,6 @@ runs:
         mkdir -p dist-cli/bin
         tar -C dist-cli/bin -xJf "dist-cli/omnifs-cli-linux-${{ inputs.arch }}.tar.xz"
         test -x dist-cli/bin/omnifs
+        test -x dist-cli/bin/omnifs-fuse
+        test -x dist-cli/bin/omnifs-nfs
         echo "$GITHUB_WORKSPACE/dist-cli/bin" >> "$GITHUB_PATH"

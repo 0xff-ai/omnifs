@@ -3152,13 +3152,11 @@ version = "0.2.1"
 dependencies = [
  "anyhow",
  "base64",
- "clap",
  "hickory-proto",
  "omnifs-api",
  "omnifs-core",
  "omnifs-engine",
  "omnifs-nfs",
- "omnifs-vfs-wire",
  "omnifs-wit",
  "omnifs-workspace",
  "rusqlite",
@@ -3167,8 +3165,6 @@ dependencies = [
  "tempfile",
  "time",
  "tokio",
- "tracing",
- "tracing-subscriber",
  "wasmtime",
 ]
 
@@ -3185,11 +3181,14 @@ dependencies = [
 name = "omnifs-nfs"
 version = "0.2.1"
 dependencies = [
+ "anyhow",
+ "clap",
  "dashmap",
  "getrandom 0.3.4",
  "omnifs-core",
  "omnifs-engine",
  "omnifs-mtab",
+ "omnifs-vfs-wire",
  "omnifs-wit",
  "omnifs-workspace",
  "serde",
@@ -3198,6 +3197,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

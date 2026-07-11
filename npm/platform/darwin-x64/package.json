@@ -2,9 +2,10 @@
   "cpu": [
     "x64"
   ],
-  "description": "omnifs CLI binary for macOS x64",
+  "description": "omnifs CLI and frontend binaries for macOS x64",
   "files": [
     "bin/omnifs",
+    "bin/omnifs-nfs",
     "README.md"
   ],
   "homepage": "https://github.com/0xff-ai/omnifs",

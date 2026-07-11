@@ -53,6 +53,13 @@ impl UnmountCommand {
         }
     }
 
+    pub fn nfs_graceful(platform: Platform, mount_point: &Path) -> Self {
+        match platform {
+            Platform::Macos => Self::macos_graceful(mount_point),
+            Platform::Linux | Platform::Other => Self::other_graceful(mount_point),
+        }
+    }
+
     pub fn run(&self) -> Result<(), UnmountError> {
         self.run_with_output(CommandOutput::Inherit)
     }
@@ -223,5 +230,12 @@ mod tests {
             args_as_strings(&forced),
             vec!["unmount", "force", "/Volumes/omnifs"]
         );
+    }
+
+    #[test]
+    fn linux_nfs_unmount_commands_use_umount() {
+        let graceful = UnmountCommand::nfs_graceful(Platform::Linux, Path::new("/mnt/omnifs"));
+        assert_eq!(graceful.program, "umount");
+        assert_eq!(args_as_strings(&graceful), vec!["/mnt/omnifs"]);
     }
 }
