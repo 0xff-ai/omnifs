@@ -24,7 +24,7 @@ Do not add alternate local mount recipes unless explicitly requested.
 
 Package selection uses cargo `-p` / `--exclude` globs (`omnifs-provider-*`, `test-provider`), not a hand-maintained crate list.
 
-Host crates such as `omnifs-cli` and `omnifs-host` build for the native target. Providers build directly as components with the Rust `wasm32-wasip2` target. `cargo build --target wasm32-wasip2` emits provider component artifacts directly; WIT bindings are generated through the SDK.
+Host crates such as `omnifs-cli` and `omnifs-engine` build for the native target. Providers build directly as components with the Rust `wasm32-wasip2` target. `cargo build --target wasm32-wasip2` emits provider component artifacts directly; WIT bindings are generated through the SDK.
 
 Provider clippy and test commands must include `--target wasm32-wasip2` and `-p` globs:
 
@@ -37,7 +37,7 @@ WASM tests compile but cannot execute on the host because there is no WASM runti
 
 ### CI and release builds
 
-CI builds Rust artifacts natively and uses Docker only to assemble the runtime image. Linux CLI artifacts use `cargo-zigbuild` with a GNU glibc 2.17 baseline; Darwin CLI artifacts are cross-linked from Linux through the pinned `rust-cross/cargo-zigbuild` container. Provider and tool WASM artifacts are built by `just providers build`; its WASI SDK pin in `just/providers.just` is shared by local and CI builds.
+CI builds Rust artifacts natively and uses Docker only to assemble the optional frontend image. Linux CLI artifacts use `cargo-zigbuild` with a GNU glibc 2.17 baseline; Darwin CLI artifacts are cross-linked from Linux through the pinned `rust-cross/cargo-zigbuild` container. Provider and tool WASM artifacts are built by `just providers build`; its WASI SDK pin in `just/providers.just` is shared by local and CI builds.
 
 `Dockerfile`'s `frontend-dev` stage is the contributor image path for `just dev` (built by `scripts/dev.ts`, same as `just frontend-image`). It runs the slim `omnifs-fuse` binary (built by the `fuse-builder` stage), which needs no engine, no Wasmtime, and no provider bundle, so unlike the full `omnifs` CLI/daemon binary (`OMNIFS_PROVIDER_BUNDLE_DIR` embeds `just providers build`'s `target/omnifs-provider-store` output into that binary at compile time), the frontend image needs no provider-wasm build context at all. Release frontend image assembly uses `scripts/ci/build-frontend-image.sh`, which stages a prebuilt Linux `omnifs-fuse` binary rather than compiling in Docker. Release CLI binaries embed the compressed provider bundle and unpack it into the host `OMNIFS_HOME/providers`; do not make the image the owner of `/root/.omnifs/providers`. Keep `just dev` working when changing Docker-related files.
 
@@ -90,8 +90,8 @@ Prefer `From` and `TryFrom` at type boundaries instead of `foo_to_bar` free func
 
 Keep free functions when:
 
-- orphan rules block a cross-crate impl, for example `credential_entry_from_token` from oauth2 token to `omnifs_creds::CredentialEntry`
-- extra context is required, for example `io_context_into(context, err)` or `projected_file_from_projection(..., parent, name)`
+- orphan rules block a cross-crate impl, for example `credential_entry_from_token` from an oauth2 token to `omnifs_workspace::creds::CredentialEntry`
+- extra context is required, for example `io_context_into(context, error)` or `push_projected_file_content(records, path, file)`
 - the helper is callout-specific extraction for `CalloutFuture`, meaning `fn(CalloutResult) -> Result<T>`. Do not use `TryFrom<CalloutResult>` for single-variant unwraps.
 - the mapping is conditional or formatting-only, for example HTTP `status_error` with 429 and `retry-after` handling
 
@@ -101,4 +101,4 @@ In `omnifs-sdk`, `Result<T>` aliases `core::result::Result<T, ProviderError>`. `
 
 Host-only error enums may be supersets of WIT/guest types. For example, host `ExtractError` adds `SandboxTrapped` and setup failures. Do not re-export guest bindgen types as the host public error; map with `From` at the boundary.
 
-Existing conversion hubs: `omnifs-host/src/wit_protocol.rs`, `omnifs-sdk/file_attrs.rs`, `omnifs-sdk/browse.rs`, `omnifs-host/src/{blob,git,archive}.rs`.
+Existing conversion hubs: `crates/omnifs-engine/src/callouts/wit_convert.rs`, `crates/omnifs-sdk/src/file_attrs.rs`, `crates/omnifs-sdk/src/browse.rs`, and `crates/omnifs-engine/src/callouts/{blob,git,archive}.rs`.
