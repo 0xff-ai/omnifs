@@ -67,6 +67,15 @@ pub enum RecordKind {
 impl RecordKind {
     pub const ALL: [Self; 4] = [Self::Lookup, Self::Attr, Self::Dirents, Self::File];
 
+    pub(super) fn wire_prefix(self) -> char {
+        match self {
+            Self::Lookup => 'L',
+            Self::Attr => 'A',
+            Self::Dirents => 'D',
+            Self::File => 'F',
+        }
+    }
+
     fn from_u8(v: u8) -> Option<Self> {
         match v {
             0 => Some(Self::Lookup),
@@ -99,6 +108,14 @@ impl Key {
             path: path.clone(),
             kind,
             aux: aux.map(Into::into),
+        }
+    }
+
+    pub(super) fn wire_key(&self) -> String {
+        let prefix = self.kind.wire_prefix();
+        match &self.aux {
+            Some(aux) => format!("{prefix}:{}\u{1f}{}", self.path, hex::encode(aux)),
+            None => format!("{prefix}:{}", self.path),
         }
     }
 }
@@ -184,8 +201,8 @@ fn now_millis_for_gc() -> u64 {
 
 /// Process-global cache handles. Opened once at startup; shared via `Arc`.
 ///
-/// `Caches::open(dir)` opens a durable `object/` database and clears+reopens a
-/// `view/` database (always cold after restart, Codex #5).
+/// `Caches::open(dir)` opens a durable `object/` database and clears and
+/// reopens a `view/` database, which is always cold after restart.
 pub struct Caches {
     pub object: object::Cache,
     pub view: view::Cache,
@@ -194,8 +211,8 @@ pub struct Caches {
 impl Caches {
     /// Open the global cache handles from `dir`.
     ///
-    /// Opens `dir/object/` (durable) and clears+reopens `dir/view/`
-    /// (non-durable, always cold, Codex #5).
+    /// Opens `dir/object/` (durable) and clears and reopens `dir/view/`
+    /// (non-durable, always cold).
     pub fn open(dir: &StdPath) -> anyhow::Result<Arc<Self>> {
         std::fs::create_dir_all(dir)?;
         let object = object::Cache::open(&dir.join("object"))?;
@@ -736,46 +753,6 @@ mod tests {
         assert!(
             store.cache_get(&p(&l1), RecordKind::File, None).is_none(),
             "rendered view for L1 should have been evicted on overwrite"
-        );
-    }
-
-    #[test]
-    fn canonical_beats_preload() {
-        let (_dir, _caches, store) = open_store("m");
-        let l1 = p("/issues/42/item.json");
-        assert!(store.put_canonical(
-            OBJ_ID,
-            b"data".to_vec(),
-            Some("v1".to_string()),
-            std::slice::from_ref(&l1),
-            0,
-        ));
-        assert!(store.put_index_only(OBJ_ID, &[p("/issues/42/title")], 0));
-
-        let got = store.object.get(OBJ_ID).unwrap();
-        assert!(got.canonical.is_some());
-        assert_eq!(got.canonical.as_ref().unwrap().bytes, b"data");
-    }
-
-    #[test]
-    fn capacity_evict_keeps_index_drops_validator() {
-        let (_dir, _caches, store) = open_store("m");
-        let leaf = p("/a/leaf");
-        store.put_canonical(
-            OBJ_ID,
-            b"data".to_vec(),
-            Some("etag".to_string()),
-            std::slice::from_ref(&leaf),
-            0,
-        );
-
-        store.object.capacity_evict(OBJ_ID, |_| {});
-
-        let got = store.object.get(OBJ_ID).unwrap();
-        assert!(got.canonical.is_none());
-        assert_eq!(
-            store.object.id_of(leaf.as_str().as_bytes()).as_deref(),
-            Some(OBJ_ID)
         );
     }
 

@@ -1,10 +1,9 @@
 //! Git operations via the system `git` CLI.
 //!
-//! Implements provider git callouts. Today the host supports only
-//! `open_repo`, which clones a remote if needed and returns a tree-ref
-//! handle the subtree handoff resolves to a filesystem path. Tree
-//! traversal and blob reads run through FUSE bind-mount reads of the
-//! clone directory, not through the WIT.
+//! The `open_repo` callout clones a remote if needed and returns a tree-ref
+//! handle that the subtree handoff resolves to a filesystem path. Tree
+//! traversal and blob reads run through bind-mount reads of the clone
+//! directory, not through the WIT.
 
 use crate::callouts::{callout_denied, callout_network, record_outcome};
 use crate::capability::CapabilityChecker;
@@ -115,7 +114,7 @@ impl From<GitError> for wit_types::CalloutResult {
     fn from(error: GitError) -> Self {
         match error {
             GitError::Denied(msg) => callout_denied(msg),
-            // Preserve today's behavior: clone failures map to Network +
+            // Clone failures map to Network +
             // retryable=true. Transient network blips during git clone
             // are common and the runtime trusts the WIT-level retry hint.
             GitError::Clone(msg) => callout_network(msg),

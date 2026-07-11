@@ -15,8 +15,8 @@ use std::time::{Duration, Instant};
 
 use crossbeam_queue::ArrayQueue;
 use omnifs_api::events::{
-    CacheKind, CalloutKind, InspectorEvent, InspectorLineWriter, InspectorOutcome, InspectorRecord,
-    OpEnd, OutcomeFields, TraceId,
+    CalloutKind, InspectorEvent, InspectorLineWriter, InspectorOutcome, InspectorRecord, OpEnd,
+    OutcomeFields, TraceId,
 };
 use tokio::sync::broadcast;
 use tracing::warn;
@@ -41,11 +41,11 @@ pub fn init_global_from_env() -> Option<Arc<InspectorSink>> {
     Some(arc)
 }
 
-pub fn global() -> Option<Arc<InspectorSink>> {
+pub(crate) fn global() -> Option<Arc<InspectorSink>> {
     GLOBAL.get().cloned()
 }
 
-pub fn current_trace_id() -> Option<TraceId> {
+pub(crate) fn current_trace_id() -> Option<TraceId> {
     CURRENT_TRACE.get()
 }
 
@@ -53,21 +53,21 @@ pub fn current_trace_id() -> Option<TraceId> {
 /// resolved up-front so the sink and its socket server don't have to
 /// re-read the environment at startup.
 #[derive(Debug, Clone)]
-pub struct InspectorConfig {
+struct InspectorConfig {
     /// Set to `false` by `OMNIFS_INSPECTOR=0|false|off|no` to disable the
     /// stream entirely. When false, all other fields are ignored.
-    pub enabled: bool,
+    enabled: bool,
     /// History ring capacity. `OMNIFS_INSPECTOR_HISTORY_CAP` overrides.
-    pub history_cap: usize,
+    history_cap: usize,
     /// Broadcast channel capacity (per-subscriber lag tolerance).
     /// `OMNIFS_INSPECTOR_BROADCAST_CAP` overrides.
-    pub broadcast_cap: usize,
+    broadcast_cap: usize,
     /// Optional opt-in file tee path. `OMNIFS_INSPECTOR_PATH` sets it.
-    pub tee_path: Option<PathBuf>,
+    tee_path: Option<PathBuf>,
 }
 
 impl InspectorConfig {
-    pub fn from_env() -> Self {
+    fn from_env() -> Self {
         Self {
             enabled: !disabled_from_env(),
             history_cap: parse_env_positive_usize("OMNIFS_INSPECTOR_HISTORY_CAP")
@@ -100,7 +100,6 @@ pub struct InspectorSink {
     process_start: Instant,
     next_trace: AtomicU64,
     next_seq: AtomicU64,
-    dropped_history: AtomicU64,
 }
 
 /// One subscriber's view onto the sink: a snapshot of the history ring
@@ -116,7 +115,7 @@ impl InspectorSink {
     /// Construct a sink from an explicit config. Returns `None` when
     /// the config is disabled. The file tee, if requested, is opened
     /// here so caller can log success/failure once at startup.
-    pub fn open(config: InspectorConfig) -> Option<Self> {
+    fn open(config: InspectorConfig) -> Option<Self> {
         let InspectorConfig {
             enabled,
             history_cap,
@@ -141,7 +140,6 @@ impl InspectorSink {
             process_start: Instant::now(),
             next_trace: AtomicU64::new(1),
             next_seq: AtomicU64::new(1),
-            dropped_history: AtomicU64::new(0),
         })
     }
 
@@ -164,12 +162,6 @@ impl InspectorSink {
             .map(|t| t.lock().expect("live tee lock").path().to_path_buf())
     }
 
-    /// Count of records dropped from the history ring due to capacity
-    /// pressure. Surfaced for subscriber UIs.
-    pub fn dropped_history(&self) -> u64 {
-        self.dropped_history.load(Ordering::Relaxed)
-    }
-
     /// Snapshot the history ring without disturbing future emission.
     /// Records are returned in approximate emission order; subscribers
     /// that need strict ordering should sort by [`InspectorRecord::seq`].
@@ -180,8 +172,7 @@ impl InspectorSink {
         }
         // Re-insert into the ring so a subsequent subscriber still sees
         // the same history. Push order matches pop order, so the ring
-        // is restored to its pre-snapshot state (no `dropped_history`
-        // increment because we never exceeded capacity in steady state).
+        // is restored to its pre-snapshot state.
         // If a concurrent emit races the re-insert, drop the oldest of
         // the two to bias toward keeping the newest record.
         for record in &out {
@@ -195,7 +186,7 @@ impl InspectorSink {
         out
     }
 
-    pub fn next_trace_id(&self) -> TraceId {
+    fn next_trace_id(&self) -> TraceId {
         self.next_trace.fetch_add(1, Ordering::Relaxed)
     }
 
@@ -209,12 +200,9 @@ impl InspectorSink {
         if let Err(rejected) = self.history.push(Arc::clone(&record)) {
             // Pop oldest to free a slot and retry. If a concurrent
             // subscriber-snapshot is draining, the pop may fail; in
-            // that case we just drop the new record and count it.
+            // that case we just drop the new record.
             if self.history.pop().is_some() {
-                self.dropped_history.fetch_add(1, Ordering::Relaxed);
                 let _ = self.history.push(rejected);
-            } else {
-                self.dropped_history.fetch_add(1, Ordering::Relaxed);
             }
         }
 
@@ -244,7 +232,7 @@ impl InspectorSink {
     /// back-to-back so consumers see a discrete "this trace took a
     /// subtree handoff" record correlated by `trace_id` and
     /// `operation_id`.
-    pub fn emit_subtree_handoff(
+    pub(crate) fn emit_subtree_handoff(
         &self,
         trace_id: TraceId,
         operation_id: u64,
@@ -275,18 +263,16 @@ impl InspectorSink {
 
 /// Frontend request trace scope; binds the thread-local trace id for nested
 /// provider work and emits the `fuse.start`/`fuse.end` pair.
-pub struct InspectorRequestScope {
+pub(crate) struct InspectorRequestScope {
     sink: Arc<InspectorSink>,
     trace_id: TraceId,
     op: &'static str,
-    mount: String,
-    path: String,
     start: Instant,
     outcome: Cell<Option<OutcomeFields>>,
 }
 
 impl InspectorRequestScope {
-    pub fn begin(
+    pub(crate) fn begin(
         sink: Arc<InspectorSink>,
         op: &'static str,
         mount: impl Into<String>,
@@ -308,31 +294,16 @@ impl InspectorRequestScope {
             sink,
             trace_id,
             op,
-            mount,
-            path,
             start: Instant::now(),
             outcome: Cell::new(Some(OutcomeFields::ok())),
         }
     }
 
-    pub fn trace_id(&self) -> TraceId {
+    pub(crate) fn trace_id(&self) -> TraceId {
         self.trace_id
     }
 
-    pub fn emit_cache(&self, kind: CacheKind, elapsed: Duration) {
-        self.sink.emit(
-            self.trace_id,
-            InspectorEvent::CacheEvent {
-                operation_id: None,
-                mount: self.mount.clone(),
-                path: self.path.clone(),
-                kind,
-                elapsed_us: Some(to_us(elapsed)),
-            },
-        );
-    }
-
-    pub fn set_outcome(&self, outcome: InspectorOutcome) {
+    pub(crate) fn set_outcome(&self, outcome: InspectorOutcome) {
         self.outcome.set(Some(OutcomeFields::with_outcome(outcome)));
     }
 }

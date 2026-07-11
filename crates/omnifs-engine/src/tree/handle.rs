@@ -156,7 +156,7 @@ impl Tree {
     /// non-ranged source reports `InvalidInput`, and a path with no file route
     /// (an object representation or projected leaf) reports `NotFound`. Either
     /// way this returns `Ok(None)` so the renderer falls through to the full read
-    /// path. Faithful port of the FUSE `open_ranged_file` probe.
+    /// path.
     pub async fn open(&self, node: &Node) -> Result<Option<RangedHandle>> {
         let projected = node.attrs().ok_or_else(|| {
             TreeError::invalid_input(format!(

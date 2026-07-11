@@ -17,14 +17,14 @@ impl Runtime {
     pub(crate) async fn run_op(
         &self,
         op: Op,
-        fuse_trace: Option<TraceId>,
+        request_trace: Option<TraceId>,
     ) -> Result<wit_types::OpResult> {
         // The generation captured here fences any `canonical-write` this op
         // emits: a write is rejected if the anchor was invalidated after the
-        // op began (ADR-0001 §4.1).
+        // operation began.
         let op_gen = self.cache.current_generation();
         let id = self.next_operation_id();
-        let trace_id = fuse_trace.or_else(inspector::current_trace_id);
+        let trace_id = request_trace.or_else(inspector::current_trace_id);
         let live_op = trace_id.and_then(|t| {
             InspectorProviderOp::begin(&op, id, &self.mount_name, &self.provider_name, t)
         });
@@ -36,7 +36,7 @@ impl Runtime {
         // so the elapsed reflects the resolution work.
         if let (Some(trace), Ok(op_result)) = (trace_id, result.as_ref())
             && let Some(tree_ref) = inspector::subtree_tree_ref(op_result)
-            && let Some(sink) = self.inspector.as_ref()
+            && let Some(sink) = inspector::global()
         {
             sink.emit_subtree_handoff(trace, id, tree_ref, handoff_start.elapsed());
         }

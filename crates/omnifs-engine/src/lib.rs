@@ -26,10 +26,7 @@ pub(crate) mod tree_refs;
 pub mod view;
 
 pub use callouts::cloner::{CloneError, GitCloner};
-pub use inspect::{
-    InspectorConfig, InspectorRequestScope, InspectorSink, Subscription, current_trace_id, global,
-    init_global_from_env,
-};
+pub use inspect::{InspectorSink, Subscription, init_global_from_env};
 pub use namespace::{
     Attrs, DirCursor, DirEntry, DirPage, EntryKind as NsEntryKind, Epoch, EventStream, Namespace,
     NodeAnswer, NodeId, NsAttachEvent, NsError, NsEvent, NsRetryClass, ReadAnswer, ReadStyle,
@@ -60,4 +57,4 @@ pub(crate) use ops::op::Op;
 pub(crate) use ops::validate as op_validate;
 pub(crate) use runtime::wasm::component_engine;
 pub(crate) use runtime::{ProviderErrorClass, Runtime};
-pub(crate) use runtime::{instance, registry, wasi, wasm};
+pub(crate) use runtime::{instance, registry, wasi};

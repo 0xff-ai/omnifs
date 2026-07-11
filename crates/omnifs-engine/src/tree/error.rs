@@ -99,7 +99,7 @@ impl From<crate::EngineError> for TreeError {
         match err {
             crate::EngineError::ProviderProtocol(msg) => TreeError::internal(msg),
             crate::EngineError::ProviderError(e) => TreeError {
-                kind: tree_kind_from_provider_class(
+                kind: TreeErrorKind::from(
                     crate::EngineError::ProviderError(e.clone())
                         .provider_class()
                         .unwrap_or(ProviderErrorClass::Internal),
@@ -115,21 +115,21 @@ impl From<crate::EngineError> for TreeError {
     }
 }
 
-/// Map a provider error class to the renderer-neutral `TreeErrorKind`.
-/// Mirrors the FUSE `provider_error_errno` partition (e.g. `denied` folds onto
-/// `PermissionDenied`, `version-mismatch` onto `Internal`) so every renderer's
-/// kernel/protocol status matches what the pre-extraction frontends produced.
-fn tree_kind_from_provider_class(kind: ProviderErrorClass) -> TreeErrorKind {
-    match kind {
-        ProviderErrorClass::NotFound => TreeErrorKind::NotFound,
-        ProviderErrorClass::NotDirectory => TreeErrorKind::NotDirectory,
-        ProviderErrorClass::IsDirectory => TreeErrorKind::IsDirectory,
-        ProviderErrorClass::PermissionDenied => TreeErrorKind::PermissionDenied,
-        ProviderErrorClass::InvalidInput => TreeErrorKind::InvalidInput,
-        ProviderErrorClass::TooLarge => TreeErrorKind::TooLarge,
-        ProviderErrorClass::RateLimited => TreeErrorKind::RateLimited,
-        ProviderErrorClass::Network => TreeErrorKind::Network,
-        ProviderErrorClass::Timeout => TreeErrorKind::Timeout,
-        ProviderErrorClass::Internal => TreeErrorKind::Internal,
+/// Preserve the shared semantic partition across the engine and renderer-neutral
+/// tree layers. Each frontend maps this class to its own protocol status.
+impl From<ProviderErrorClass> for TreeErrorKind {
+    fn from(kind: ProviderErrorClass) -> Self {
+        match kind {
+            ProviderErrorClass::NotFound => Self::NotFound,
+            ProviderErrorClass::NotDirectory => Self::NotDirectory,
+            ProviderErrorClass::IsDirectory => Self::IsDirectory,
+            ProviderErrorClass::PermissionDenied => Self::PermissionDenied,
+            ProviderErrorClass::InvalidInput => Self::InvalidInput,
+            ProviderErrorClass::TooLarge => Self::TooLarge,
+            ProviderErrorClass::RateLimited => Self::RateLimited,
+            ProviderErrorClass::Network => Self::Network,
+            ProviderErrorClass::Timeout => Self::Timeout,
+            ProviderErrorClass::Internal => Self::Internal,
+        }
     }
 }

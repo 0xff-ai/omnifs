@@ -66,7 +66,7 @@ impl Namespace<'_> {
         &self,
         parent_path: &Path,
         name: &str,
-        fuse_trace: Option<TraceId>,
+        request_trace: Option<TraceId>,
     ) -> Result<LookupOutcome> {
         let name = Segment::try_from(name)
             .map_err(|error| EngineError::ProviderProtocol(error.to_string()))?;
@@ -82,7 +82,7 @@ impl Namespace<'_> {
         };
         let result = self
             .coalesced(NsKey::Path(child_path.clone()), || {
-                self.runtime.run_op(op.clone(), fuse_trace)
+                self.runtime.run_op(op.clone(), request_trace)
             })
             .await?;
 
@@ -101,7 +101,7 @@ impl Namespace<'_> {
         path: &Path,
         cached_validator: Option<String>,
         cursor: Option<CachedCursor>,
-        fuse_trace: Option<TraceId>,
+        request_trace: Option<TraceId>,
     ) -> Result<ListOutcome> {
         let is_continuation = cursor.is_some();
         let op_gen = self.runtime.cache().current_generation();
@@ -111,10 +111,10 @@ impl Namespace<'_> {
             cursor: cursor.map(crate::wit_protocol::cached_cursor_to_wit),
         };
         let result = if is_continuation {
-            self.runtime.run_op(op.clone(), fuse_trace).await?
+            self.runtime.run_op(op.clone(), request_trace).await?
         } else {
             self.coalesced(NsKey::Path(path.clone()), || {
-                self.runtime.run_op(op.clone(), fuse_trace)
+                self.runtime.run_op(op.clone(), request_trace)
             })
             .await?
         };
@@ -137,9 +137,9 @@ impl Namespace<'_> {
         &self,
         path: &Path,
         content_type: String,
-        fuse_trace: Option<TraceId>,
+        request_trace: Option<TraceId>,
     ) -> Result<ReadOutcome> {
-        self.read_file_with_mode(path, content_type, fuse_trace, ReadMode::Serve)
+        self.read_file_with_mode(path, content_type, request_trace, ReadMode::Serve)
             .await
     }
 
@@ -156,7 +156,7 @@ impl Namespace<'_> {
         &self,
         path: &Path,
         content_type: String,
-        fuse_trace: Option<TraceId>,
+        request_trace: Option<TraceId>,
         mode: ReadMode,
     ) -> Result<ReadOutcome> {
         let now = now_millis();
@@ -211,9 +211,9 @@ impl Namespace<'_> {
             None => NsKey::Path(path.clone()),
         };
         let result = if live {
-            self.runtime.run_op(op, fuse_trace).await?
+            self.runtime.run_op(op, request_trace).await?
         } else {
-            self.coalesced(coalesce_key, || self.runtime.run_op(op, fuse_trace))
+            self.coalesced(coalesce_key, || self.runtime.run_op(op, request_trace))
                 .await?
         };
 

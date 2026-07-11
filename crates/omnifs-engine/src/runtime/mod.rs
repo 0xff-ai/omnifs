@@ -16,7 +16,6 @@ use crate::coalesce::Coalesce;
 use crate::coalesce::ns::{Key as NsCoalesceKey, SharedOutcome};
 use crate::git;
 use crate::http::HttpStack;
-use crate::inspector::{self, InspectorSink};
 use crate::instance::Instance;
 use crate::invalidation::InvalidationState;
 use crate::tree_refs::TreeRefs;
@@ -147,9 +146,6 @@ pub struct Runtime {
     // cache instead of EAGAIN until it clears. std Mutex: the critical section
     // is a single set/get with no await held across it.
     rate_limit_until: std::sync::Mutex<Option<std::time::Instant>>,
-    /// Injected inspector sink. Defaults to the process-global configured sink
-    /// so production wiring is unchanged; tests can supply their own.
-    pub(crate) inspector: Option<Arc<InspectorSink>>,
     pub(crate) test_callouts: Option<std::sync::Mutex<mpsc::Receiver<TestSignal>>>,
 }
 
@@ -499,7 +495,6 @@ impl Runtime {
             recent_objects: parking_lot::Mutex::new(RecentObjects::new(RECENT_REVALIDATE_OBJECTS)),
             pagination_locks: DashMap::new(),
             rate_limit_until: std::sync::Mutex::new(None),
-            inspector: inspector::global(),
             test_callouts: test_rx.map(std::sync::Mutex::new),
         })
     }
@@ -626,18 +621,18 @@ impl Runtime {
     }
 
     /// Serve the canonical bytes for `path` from the anchor-keyed object
-    /// cache. Used by the FUSE read path when a `read-file` terminal answers
-    /// `byte-source::canonical`: the host resolves the longest covering
-    /// anchor and returns those bytes without copying across the WIT
-    /// (ADR-0001 §5.1). `None` when no stored anchor covers `path`.
+    /// cache. When a `read-file` terminal answers `byte-source::canonical`, the
+    /// tree resolves the longest covering anchor and returns those bytes
+    /// without copying across the WIT. `None` when no stored anchor covers
+    /// `path`.
     pub fn canonical_bytes_for(&self, path: &Path) -> Option<Vec<u8>> {
         self.cache
             .cached_canonical_for(path)
             .map(|canonical| canonical.bytes)
     }
 
-    /// Read the full bytes of a stored blob. Used by the FUSE read path
-    /// when a `read-file` terminal returns blob-backed file content.
+    /// Read the full bytes of a stored blob for a blob-backed `read-file`
+    /// terminal.
     pub fn read_blob_full(&self, blob_id: u64) -> Result<Vec<u8>> {
         let record = self
             .blob_cache

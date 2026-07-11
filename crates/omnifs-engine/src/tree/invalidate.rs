@@ -28,8 +28,8 @@ impl Tree {
     /// kernel notifier + prunes its inode/filehandle/stateid tables. NOT async:
     /// the underlying `Runtime::drain_invalidated_{prefixes,paths}` /
     /// `drain_changed_dirs` are sync queue drains touching no provider. Both
-    /// renderers call this at the top of each op. This is the first-phase
-    /// pull-based invalidation API.
+    /// renderers call this at the top of each op. This is the shared pull-based
+    /// invalidation API.
     pub fn drain_invalidations(&self, mount: &str) -> InvalidationReport {
         let Some(runtime) = self.ctx.registry_runtime(mount) else {
             return InvalidationReport::default();

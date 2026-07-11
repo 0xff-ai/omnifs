@@ -243,7 +243,7 @@ impl ArchiveExecutor {
             },
         };
 
-        if let Err(error) = publish::publish_dir_by_rename(&tmp, &dest) {
+        if let Err(error) = std::fs::rename(&tmp, &dest) {
             publish::remove_path_best_effort(&tmp);
             self.locks.remove(key);
             return Err(ArchiveError::Internal(format!(

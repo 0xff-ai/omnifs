@@ -60,7 +60,7 @@ impl MountRuntimes {
             .map_err(|e| RegistryError::RuntimeError(format!("provider engine init: {e}")))?;
 
         // Global cache handles: a durable object database and a disposable view
-        // database cleared + reopened on startup (Codex #5). Shared across all
+        // database cleared and reopened on startup. Shared across all
         // provider runtimes; the object tier isolates mounts by keyspace, the
         // view tier by a path prefix.
         let caches = Caches::open(context.cache_dir())
@@ -159,7 +159,7 @@ impl MountRuntimes {
                 &self.credential_service,
             )
         }
-        .map_err(|error| registry_error(&mount, error))?;
+        .map_err(|error| RegistryError::from_build(&mount, error))?;
         Ok(BuiltMount {
             mount,
             is_root,
@@ -975,15 +975,6 @@ fn mount_fingerprint(spec: &Spec) -> u64 {
     u64::from_le_bytes(prefix)
 }
 
-fn registry_error(mount: &str, error: BuildError) -> RegistryError {
-    match error {
-        BuildError::InvalidConfig(message) => {
-            RegistryError::ConfigError(format!("mount {mount}: {message}"))
-        },
-        other => RegistryError::RuntimeError(other.to_string()),
-    }
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum RegistryError {
     #[error("config error: {0}")]
@@ -999,7 +990,17 @@ pub enum RegistryError {
 }
 
 impl RegistryError {
-    fn failure_kind(&self) -> FailureKind {
+    fn from_build(mount: &str, error: BuildError) -> Self {
+        match error {
+            BuildError::InvalidConfig(message) => {
+                Self::ConfigError(format!("mount {mount}: {message}"))
+            },
+            other => Self::RuntimeError(other.to_string()),
+        }
+    }
+
+    /// Classify this registry error for mount-reconcile reporting.
+    pub fn failure_kind(&self) -> FailureKind {
         match self {
             Self::ConfigError(_) | Self::DuplicateMount(_) | Self::MountNotFound(_) => {
                 FailureKind::SpecInvalid

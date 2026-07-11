@@ -32,6 +32,20 @@ impl HasData for HostState {
     type Data<'a> = &'a mut HostState;
 }
 
+impl HostState {
+    async fn dispatch_callout<T>(
+        accessor: &Accessor<T, Self>,
+        id: u64,
+        callout: wit_types::Callout,
+    ) -> wit_types::CalloutResult {
+        let callouts = accessor.with(|mut access| access.get().callouts.clone());
+        match callouts {
+            Some(callouts) => callouts.dispatch(id, callout).await,
+            None => callout_internal("provider callouts are not initialized"),
+        }
+    }
+}
+
 impl TypesHost for HostState {}
 impl LogHost for HostState {
     fn log(&mut self, entry: wit_types::LogEntry) {
@@ -51,7 +65,7 @@ impl<T: Send + 'static> CalloutsHostWithStore<T> for HostState {
         id: u64,
         req: wit_types::HttpRequest,
     ) -> wit_types::CalloutResult {
-        dispatch_callout(accessor, id, wit_types::Callout::Fetch(req)).await
+        Self::dispatch_callout(accessor, id, wit_types::Callout::Fetch(req)).await
     }
 
     async fn git_open_repo(
@@ -59,7 +73,7 @@ impl<T: Send + 'static> CalloutsHostWithStore<T> for HostState {
         id: u64,
         req: wit_types::GitOpenRequest,
     ) -> wit_types::CalloutResult {
-        dispatch_callout(accessor, id, wit_types::Callout::GitOpenRepo(req)).await
+        Self::dispatch_callout(accessor, id, wit_types::Callout::GitOpenRepo(req)).await
     }
 
     async fn fetch_blob(
@@ -67,7 +81,7 @@ impl<T: Send + 'static> CalloutsHostWithStore<T> for HostState {
         id: u64,
         req: wit_types::BlobFetchRequest,
     ) -> wit_types::CalloutResult {
-        dispatch_callout(accessor, id, wit_types::Callout::FetchBlob(req)).await
+        Self::dispatch_callout(accessor, id, wit_types::Callout::FetchBlob(req)).await
     }
 
     async fn open_archive(
@@ -75,7 +89,7 @@ impl<T: Send + 'static> CalloutsHostWithStore<T> for HostState {
         id: u64,
         req: wit_types::ArchiveOpenRequest,
     ) -> wit_types::CalloutResult {
-        dispatch_callout(accessor, id, wit_types::Callout::OpenArchive(req)).await
+        Self::dispatch_callout(accessor, id, wit_types::Callout::OpenArchive(req)).await
     }
 
     async fn read_blob(
@@ -83,20 +97,8 @@ impl<T: Send + 'static> CalloutsHostWithStore<T> for HostState {
         id: u64,
         req: wit_types::ReadBlobRequest,
     ) -> wit_types::CalloutResult {
-        dispatch_callout(accessor, id, wit_types::Callout::ReadBlob(req)).await
+        Self::dispatch_callout(accessor, id, wit_types::Callout::ReadBlob(req)).await
     }
 }
 
 impl CalloutsHost for HostState {}
-
-async fn dispatch_callout<T>(
-    accessor: &Accessor<T, HostState>,
-    id: u64,
-    callout: wit_types::Callout,
-) -> wit_types::CalloutResult {
-    let callouts = accessor.with(|mut access| access.get().callouts.clone());
-    match callouts {
-        Some(callouts) => callouts.dispatch(id, callout).await,
-        None => callout_internal("provider callouts are not initialized"),
-    }
-}

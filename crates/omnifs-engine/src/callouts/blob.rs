@@ -87,6 +87,16 @@ enum BlobError {
     Internal(String),
 }
 
+impl BlobError {
+    /// Add operation context to an I/O error without relabeling typed failures.
+    fn with_io_context(self, context: &'static str) -> Self {
+        match self {
+            Self::Io(error) => Self::Internal(format!("{context}: {error}")),
+            other => other,
+        }
+    }
+}
+
 impl From<BlobCacheError> for BlobError {
     fn from(error: BlobCacheError) -> Self {
         match error {
@@ -202,7 +212,7 @@ impl BlobExecutor {
             self.limits.max_fetch_blob_bytes,
         )
         .await
-        .map_err(|e| io_context_into("fetch blob", e))?;
+        .map_err(|error| error.with_io_context("fetch blob"))?;
         let size = staged.size;
 
         let metadata = BlobMetadata {
@@ -214,11 +224,11 @@ impl BlobExecutor {
         };
         self.cache
             .store_metadata(cache_key, &metadata)
-            .map_err(|e| io_context_into("store blob metadata", e.into()))?;
+            .map_err(|error| BlobError::from(error).with_io_context("store blob metadata"))?;
         if let Err(error) = staged.persist(&blob_path) {
             // Best-effort: stranded metadata is overwritten by the next fetch for this key.
             let _ = std::fs::remove_file(self.cache.metadata_path(cache_key));
-            return Err(io_context_into("publish blob", error));
+            return Err(error.with_io_context("publish blob"));
         }
         Ok(self.cache.store(cache_key.to_string(), metadata))
     }
@@ -258,7 +268,7 @@ impl BlobExecutor {
             .ok_or_else(|| BlobError::NotFound(format!("blob {blob_id} not found")))?;
         let path = self.cache.blob_path(&record.cache_key);
         read_range(&path, offset, len, self.limits.max_read_blob_bytes)
-            .map_err(|e| io_context_into("read blob", e))
+            .map_err(|error| error.with_io_context("read blob"))
     }
 }
 
@@ -279,15 +289,6 @@ impl From<&BlobRecord> for wit_types::BlobFetched {
                 })
                 .collect(),
         }
-    }
-}
-
-/// Attach an io-context prefix to a `BlobError::Io` so the
-/// provider-visible message keeps today's `"{context}: {io}"` shape.
-fn io_context_into(context: &'static str, error: BlobError) -> BlobError {
-    match error {
-        BlobError::Io(e) => BlobError::Internal(format!("{context}: {e}")),
-        other => other,
     }
 }
 

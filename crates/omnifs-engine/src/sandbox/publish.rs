@@ -22,15 +22,6 @@ pub(crate) fn replace_file_via_temp_rename(path: &Path, bytes: &[u8]) -> std::io
     Ok(())
 }
 
-/// Rename a completed temporary directory into its published path.
-///
-/// The destination must not already exist. Callers that intentionally
-/// tolerate stale destinations should remove them before the final
-/// publish step so this helper remains a plain rename.
-pub(crate) fn publish_dir_by_rename(tmp: &Path, dest: &Path) -> std::io::Result<()> {
-    std::fs::rename(tmp, dest)
-}
-
 /// Return a unique sibling temp path for a later rename into `dest`.
 pub(crate) fn temp_sibling_path(dest: &Path) -> PathBuf {
     let name = dest

@@ -61,7 +61,7 @@ impl Disk {
     }
 
     fn get(&self, key: &Key) -> Result<Option<Record>> {
-        let wire_key = make_key(key);
+        let wire_key = key.wire_key();
         // For File records, check content first, then bulk.
         if key.kind == RecordKind::File {
             if let Some(record) = read_record(&self.content, &wire_key)? {
@@ -73,7 +73,7 @@ impl Disk {
     }
 
     fn put(&self, key: &Key, record: &Record) -> Result<()> {
-        let wire_key = make_key(key);
+        let wire_key = key.wire_key();
         let bytes = record.serialize();
         let target = self.keyspace_for(key.kind, record.payload.len());
         target.insert(wire_key.as_bytes(), bytes.as_slice())?;
@@ -102,7 +102,7 @@ impl Disk {
     where
         F: FnMut(Option<Record>) -> Option<Record>,
     {
-        let wire_key = make_key(key);
+        let wire_key = key.wire_key();
         let new_value = self
             .metadata
             .update_fetch(wire_key.as_bytes(), |existing| {
@@ -139,7 +139,7 @@ impl Disk {
         for ks in [&self.metadata, &self.content, &self.bulk] {
             let mut to_delete: Vec<Vec<u8>> = Vec::new();
             for kind in RecordKind::ALL {
-                let after_kind = format!("{}:", kind_prefix(kind));
+                let after_kind = format!("{}:", kind.wire_prefix());
                 let wire_prefix = format!("{after_kind}{scan_path}");
                 for guard in ks.inner().prefix(wire_prefix.as_bytes()) {
                     let wire_key = guard.key()?;
@@ -192,16 +192,16 @@ impl Cache {
 
     /// Open a view cache backed by the fjall database at `path` (a directory).
     ///
-    /// Always deletes and recreates `path` before opening (Codex #5): the view
-    /// is disposable — it is derived from the durable object cache and must
+    /// Always deletes and recreates `path` before opening: the view is
+    /// disposable. It is derived from the durable object cache and must
     /// never survive a restart to disagree with it. No sentinel, no crash
     /// detection; the host removes and reopens unconditionally.
     pub fn open(path: &StdPath) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        // Delete whatever was there — stale rendered bytes must not survive a
-        // restart (Codex #5).
+        // Delete whatever was there. Stale rendered bytes must not survive a
+        // restart.
         if path.exists() {
             std::fs::remove_dir_all(path)?;
         }
@@ -398,24 +398,5 @@ impl Cache {
 impl Default for Cache {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-// --- Key serialization helpers -----------------------------------------------
-
-fn make_key(key: &Key) -> String {
-    let prefix = kind_prefix(key.kind);
-    match &key.aux {
-        Some(aux) => format!("{prefix}:{}\u{1f}{}", key.path, hex::encode(aux)),
-        None => format!("{prefix}:{}", key.path),
-    }
-}
-
-fn kind_prefix(kind: RecordKind) -> char {
-    match kind {
-        RecordKind::Lookup => 'L',
-        RecordKind::Attr => 'A',
-        RecordKind::Dirents => 'D',
-        RecordKind::File => 'F',
     }
 }

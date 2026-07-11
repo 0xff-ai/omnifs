@@ -1,6 +1,6 @@
 //! Host clock and TTL constants for cache freshness and negative records.
 
-/// Default deadline for a Dynamic view leaf and a negative record (ms). Spec §6.2/§7.5.
+/// Default deadline for a dynamic view leaf and a negative record, in milliseconds.
 pub const DYNAMIC_TTL_MILLIS: u64 = 3_000;
 
 /// Wall-clock milliseconds since the Unix epoch for cache deadlines and negatives.

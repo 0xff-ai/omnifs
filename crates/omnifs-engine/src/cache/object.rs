@@ -47,6 +47,11 @@ impl ObjectRecord {
             leaves,
         }
     }
+
+    fn decode(bytes: &[u8]) -> Option<Self> {
+        let record: Self = postcard::from_bytes(bytes).ok()?;
+        (record.schema == SCHEMA).then_some(record)
+    }
 }
 
 /// One entry in a `MountObjects::store_batch` call. Fence checks and view
@@ -192,7 +197,7 @@ impl MountObjects {
 
     pub fn get(&self, id: &[u8]) -> Option<ObjectRecord> {
         let value = self.objects.get(id).ok()??;
-        decode_object(&value)
+        ObjectRecord::decode(&value)
     }
 
     /// Forward index: full path bytes → `ObjectId` bytes.
@@ -215,7 +220,7 @@ impl MountObjects {
         let mut entries = Vec::new();
         for row in self.objects.iter() {
             let (_key, value) = row.into_inner()?;
-            let Some(obj) = decode_object(&value) else {
+            let Some(obj) = ObjectRecord::decode(&value) else {
                 continue;
             };
             let Some(canonical) = obj.canonical else {
@@ -292,14 +297,6 @@ impl MountObjects {
             },
         }
     }
-}
-
-fn decode_object(bytes: &[u8]) -> Option<ObjectRecord> {
-    let obj: ObjectRecord = postcard::from_bytes(bytes).ok()?;
-    if obj.schema != SCHEMA {
-        return None;
-    }
-    Some(obj)
 }
 
 fn merge_leaves(existing: &[String], new_leaves: &[String]) -> Vec<String> {

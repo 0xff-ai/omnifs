@@ -1,9 +1,8 @@
 //! Whole-file read result types and the `Tree::read` body.
 //!
-//! This is the renderer-neutral home of the read-path DECISION logic that FUSE
-//! otherwise carries in `read.rs` + `read_helpers.rs`: the cache cascade, the
-//! per-mount `op_gen` write fence, the canonical-not-copied hybrid, and
-//! learned-size promotion. It is fully async (no `block_on`): the renderer
+//! This is the renderer-neutral read policy shared by FUSE and NFS: the cache
+//! cascade, the per-mount `op_gen` write fence, the canonical-not-copied hybrid,
+//! and learned-size promotion. It is fully async (no `block_on`): the renderer
 //! drives `Tree::read` from its own executor and turns the neutral
 //! `ReadResult` into kernel/protocol identity + reply encoding.
 
@@ -41,7 +40,7 @@ pub enum ReadResult {
 
 /// One ranged chunk from a `RangedHandle`. `learned_attrs` is `Some` on an
 /// EOF-short read when an exact size was learned, so the renderer promotes
-/// st_size (preserves today's `learned_ranged_eof_attrs` behavior).
+/// st_size.
 #[derive(Debug, Clone)]
 pub struct Chunk {
     pub bytes: Vec<u8>,
@@ -132,9 +131,9 @@ impl Tree {
         FileAttrStore::new(&runtime, path).publish(attrs)
     }
 
-    /// Whole-file read. Faithful port of the FUSE whole-file read DECISION
-    /// logic: the read cache cascade (exact-0 short-circuit, mem hit, durable
-    /// view hit, backing-fs read), then on a view miss the cold provider render
+    /// Whole-file read. Owns the shared read cache cascade (exact-0
+    /// short-circuit, mem hit, durable view hit, backing-fs read), then on a
+    /// view miss the cold provider render
     /// fenced by the per-mount `op_gen`, with the canonical-not-copied hybrid
     /// and learned-size promotion.
     ///
@@ -325,7 +324,7 @@ fn finish_read(
     // An identity representation answered by reference to the canonical store
     // (`byte-source::canonical`) is NEVER copied into the view cache: the
     // canonical store is its sole home, so caching it here would duplicate the
-    // bytes across both stores (ADR-0001 §4, hybrid policy).
+    // bytes across both stores.
     let from_canonical = matches!(result.bytes, ReadBytes::Canonical);
 
     let Some((data, result_attrs, content_type)) = resolve_read_payload(runtime, path, result)
@@ -406,8 +405,8 @@ fn cache_durable_file_payload(
 
 /// Materialize a `read-file` terminal into bytes. Inline content travels in the
 /// WIT; blob content is pulled from the host blob cache; `canonical` is served
-/// from the anchor-keyed canonical store without copying across the WIT
-/// (ADR-0001 §5.1). Returns `None` when the byte source can't be resolved
+/// from the anchor-keyed canonical store without copying across the WIT.
+/// Returns `None` when the byte source can't be resolved
 /// (logged at warn for diagnostics).
 fn resolve_read_payload(
     runtime: &Runtime,

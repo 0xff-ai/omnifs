@@ -10,14 +10,10 @@
 //! single-mount embedding form, because `MountRuntimes::add_mount` instantiates
 //! wasm itself and cannot be populated from a bare `Runtime`).
 //!
-//! # Carries no policy and no scope claims
+//! # Carries no access policy
 //!
-//! A `ServingContext` is pure mount plumbing: it holds NO access policy and
-//! makes NO scope claims. Scope enforcement must land on EVERY serving path
-//! before anything named Worldview ships; until that graduation rule is met,
-//! this type deliberately stays policy-free so no serving path can smuggle in a
-//! half-enforced scope check. Scope belongs here only as part of that
-//! graduation, applied uniformly, never as an incremental side effect.
+//! A `ServingContext` is pure mount plumbing. It resolves mounts and does not
+//! make or enforce access-policy decisions.
 
 use std::sync::Arc;
 
@@ -43,9 +39,7 @@ enum Backing {
     },
 }
 
-/// The mount-resolution context a [`Tree`](crate::Tree) serves. See the module
-/// docs for the no-policy / no-scope invariant and its Worldview graduation
-/// rule.
+/// The policy-free mount-resolution context a [`Tree`](crate::Tree) serves.
 pub struct ServingContext {
     backing: Backing,
 }
@@ -95,9 +89,9 @@ impl ServingContext {
     /// For a single-mount tree the mount is fixed and the whole input path is
     /// mount-relative (the itest drives mount-relative paths like "/" and
     /// "/hello"). For a registry-backed tree the mount is the first path
-    /// segment; the remainder (with a leading slash) is mount-relative. The
-    /// synthetic mount-enumeration root (a bare "/" against a registry) is
-    /// designed here but only the single-mount arm is exercised in slice 1.
+    /// segment; the remainder (with a leading slash) is mount-relative. A bare
+    /// "/" against a registry resolves to the synthetic mount-enumeration
+    /// root.
     pub(crate) fn split_mount_path(&self, path: &Path) -> Result<(String, Path)> {
         match &self.backing {
             Backing::Single { mount, .. } => Ok((mount.clone(), path.clone())),

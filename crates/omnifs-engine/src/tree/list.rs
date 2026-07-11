@@ -1,9 +1,6 @@
 //! Directory listing types and the `Tree::list` body.
 //!
-//! This is the renderer-neutral home of the listing DECISION logic FUSE
-//! otherwise carries in `listing.rs` (`opendir_check_caches`,
-//! `opendir_via_provider`, the cache-populate half of
-//! `snapshot_from_provider_listing`) and NFS duplicates in its adapter:
+//! This is the renderer-neutral listing policy shared by FUSE and NFS:
 //!
 //! - the authoritative-listing cache consult (mem then unified view cache),
 //! - the `Unchanged` -> serve-cached-dirents path (a revalidated listing whose

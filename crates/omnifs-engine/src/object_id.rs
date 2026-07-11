@@ -1,6 +1,6 @@
 //! Opaque `ObjectId` body: `postcard(logical-id)`. The host forms these bytes from a
 //! provider-supplied `logical-id` and reverses them when pushing a stored canonical
-//! back for a warm read. The host never inspects the contents (spec §3.2).
+//! back for a warm read. The host never inspects the contents.
 
 use omnifs_wit::provider::types as wit_types;
 

@@ -3,7 +3,7 @@
 //! `GitCloner` manages shallow clones of git repositories with
 //! locking to prevent concurrent clones of the same repo.
 //! Uses --depth=1 --single-branch --no-tags for fast first access;
-//! the FUSE passthrough only reads the HEAD working tree.
+//! the projected tree only reads the HEAD working tree.
 
 use crate::sandbox::publish;
 use dashmap::DashMap;

@@ -1,10 +1,10 @@
-//! The narrow, plain-data namespace surface the runtime redesign converges on.
+//! The narrow, plain-data namespace surface exposed to frontends.
 //!
 //! [`Namespace`] is the whole contract a frontend needs to project a mount: name
 //! resolution, attributes, directory paging, byte reads, and an invalidation
 //! event stream. Every type crossing this boundary is plain data (serde-friendly,
-//! no engine internals), because a later phase moves this surface across a wire:
-//! the frontend holds a `dyn Namespace` and nothing else.
+//! no engine internals), so in-process and wire-attached frontends both hold a
+//! `dyn Namespace` and nothing else.
 //!
 //! [`TreeNamespace`] is the in-engine implementation over [`Tree`]. It owns the
 //! things a frontend used to re-derive per protocol:
@@ -12,9 +12,8 @@
 //! - **Identity.** A [`NodeId`] is an opaque, engine-owned handle. The engine
 //!   table maps it to the (mount, mount-relative path) the projection speaks;
 //!   `NodeId(1)` is the namespace root. Ids are NOT stable across a daemon
-//!   restart (a restart renumbers; a re-attach re-resolves, which a later phase
-//!   handles); within a session an id keeps its meaning so a frontend can cache
-//!   it.
+//!   restart; within a session an id keeps its meaning so a frontend can cache
+//!   it. Consumers must not reuse ids after observing a daemon restart.
 //! - **Policy.** [`Attrs`] carries the already-decided protocol answer: the
 //!   sentinel/learned size, the cache TTL, the direct-I/O bit, a change counter,
 //!   and a stability class. The frontend copies these into its protocol reply
@@ -82,8 +81,8 @@ const ROOT_ID: u64 = 1;
 /// Opaque, engine-owned node handle. The engine maps it to a (mount, path); a
 /// frontend treats it as a token and never inspects the integer.
 ///
-/// No cross-restart persistence: a daemon restart may renumber ids. A frontend
-/// re-attaches by re-resolving from the root, which a later phase formalizes.
+/// No cross-restart persistence: a daemon restart may renumber ids, so consumers
+/// must discard ids associated with the old instance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct NodeId(pub u64);
 
@@ -101,17 +100,37 @@ pub struct Epoch(pub u64);
 /// Node kind at the namespace boundary. A plain mirror of the projection's kinds
 /// so the wire types never depend on `view`/`tree` internals.
 ///
-/// `Symlink` is reserved: the projection does not yet produce symlinks, so it is
-/// never returned today, but the variant keeps the wire shape complete.
-/// `Subtree` is a local-directory handoff (a resolved treeref clone/archive): an
-/// in-process frontend keeps serving the real `root`; the wire consequences are a
-/// later-phase concern.
+/// `Symlink` is reserved: the projection does not produce symlinks, but the
+/// variant keeps the wire shape complete.
+/// `Subtree` is a local-directory handoff (a resolved treeref clone/archive).
+/// The consumer can serve `root` only when that path is accessible in its
+/// filesystem namespace; virtualized frontends cannot dereference a host-local
+/// path.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EntryKind {
     Directory,
     File,
     Symlink,
     Subtree { root: PathBuf },
+}
+
+impl EntryKind {
+    fn from_node(node: &crate::Node) -> Self {
+        if let Some(root) = node.subtree_path() {
+            Self::Subtree { root: root.clone() }
+        } else if node.is_dir() {
+            Self::Directory
+        } else {
+            Self::File
+        }
+    }
+
+    fn from_meta(meta: &EntryMeta) -> Self {
+        match meta.kind() {
+            view_types::EntryKind::Directory => Self::Directory,
+            view_types::EntryKind::File => Self::File,
+        }
+    }
 }
 
 /// Freshness class of a file, plain-data mirror of `view::Stability`.
@@ -122,8 +141,7 @@ pub enum StabilityClass {
     Live,
 }
 
-/// How a frontend pulls a file's bytes, the pre-decided read shape a frontend
-/// used to derive from `view::ReadMode`/`FileAttrsCache::is_deferred_ranged`.
+/// How a frontend pulls a file's bytes, decided by the engine.
 ///
 /// - `Whole`: the engine serves the entire payload from a single
 ///   `read(node, 0, u32::MAX)`. A frontend materializes it once per open and
@@ -141,8 +159,8 @@ pub enum ReadStyle {
     Ranged,
 }
 
-/// The already-policied protocol attributes for a node. Every policy decision a
-/// frontend used to make is baked in here:
+/// The protocol attributes for a node. The engine bakes shared policy into this
+/// answer:
 ///
 /// - `size` is the protocol size after the sentinel and learned-size rules (an
 ///   unknown-length file reports `1`, a completed read promotes the exact size),
@@ -166,16 +184,33 @@ pub struct Attrs {
 
 impl Attrs {
     fn from_cache(kind: EntryKind, attrs: Option<&FileAttrsCache>, change: u64) -> Self {
+        let ttl = attrs.map_or(TTL_STATIC, |attrs| {
+            if matches!(attrs.size(), FileSize::Exact(_))
+                && matches!(attrs.stability(), view_types::Stability::Stable)
+            {
+                TTL_STATIC
+            } else {
+                TTL_DYNAMIC
+            }
+        });
+        let stability = attrs.map_or(StabilityClass::Stable, |attrs| match attrs.stability() {
+            view_types::Stability::Stable => StabilityClass::Stable,
+            view_types::Stability::Dynamic => StabilityClass::Dynamic,
+            view_types::Stability::Live => StabilityClass::Live,
+        });
+        let read_style = if attrs.is_some_and(FileAttrsCache::is_deferred_ranged) {
+            ReadStyle::Ranged
+        } else {
+            ReadStyle::Whole
+        };
         Self {
             kind,
             size: attrs.map_or(0, FileAttrsCache::st_size),
-            ttl: ttl_for(attrs),
+            ttl,
             change,
             direct_io: attrs.is_some_and(FileAttrsCache::should_direct_io),
-            stability: attrs.map_or(StabilityClass::Stable, |attrs| {
-                stability_class(attrs.stability())
-            }),
-            read_style: read_style_of(attrs),
+            stability,
+            read_style,
         }
     }
 }
@@ -259,7 +294,8 @@ pub struct ReadAnswer {
     pub attrs: Attrs,
 }
 
-/// A namespace event. Plain data so it can cross the wire in a later phase.
+/// A namespace event. Plain data so in-process and wire-attached frontends can
+/// consume the same stream.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NsEvent {
     /// The subtree rooted at `node` may have changed; drop protocol-cached state
@@ -529,8 +565,8 @@ pub struct TreeNamespace {
 
 impl TreeNamespace {
     /// Production constructor: build the [`Tree`] over the mount registry and
-    /// start the background invalidation drain, so a later step can hand a
-    /// frontend a `dyn Namespace` and nothing else.
+    /// start the background invalidation drain. The returned value is the
+    /// frontend's complete `dyn Namespace` implementation.
     pub fn new(registry: Arc<MountRuntimes>, rt: Handle) -> Arc<Self> {
         let ctx = ServingContext::from_runtimes(Arc::clone(&registry));
         Self::assemble(Tree::new(ctx), Some(registry), rt)
@@ -620,15 +656,12 @@ impl TreeNamespace {
     // engine-owned handle, not a (mount, path) pair), so FUSE, NFS, and the wire
     // server dispatching on a remote frontend's behalf cannot derive the mount
     // and path an inspector span needs to display; only this id table (via
-    // `record`) can. Minting here, once per `Namespace` call, restores the
-    // trace id every downstream engine/provider span (`Runtime::run_op`,
-    // callouts) already knows how to thread once `RequestCtx::trace` is
-    // `Some`, without re-coupling any frontend to tree internals.
+    // `record`) can. Minting here once per `Namespace` call gives downstream
+    // engine and provider spans (`Runtime::run_op`, callouts) the trace id
+    // without coupling a frontend to tree internals.
 
     /// Begin an inspector span for one `Namespace` call, when the process-wide
-    /// sink is attached. `None` when the inspector is disabled (the default),
-    /// in which case `RequestCtx::trace` stays `None` exactly as before this
-    /// restoration.
+    /// sink is attached. `None` when the inspector is disabled (the default).
     fn begin_span(op: &'static str, mount: &str, path: &str) -> Option<InspectorRequestScope> {
         inspect::global().map(|sink| InspectorRequestScope::begin(sink, op, mount, path))
     }
@@ -807,7 +840,7 @@ impl TreeNamespace {
     ) -> Attrs {
         let epoch = self.node_epochs.get(&id).map_or(0, |e| *e);
         Attrs::from_cache(
-            ns_kind(node),
+            EntryKind::from_node(node),
             attrs,
             self.root_aware_change(id, node, attrs, epoch),
         )
@@ -844,9 +877,8 @@ impl TreeNamespace {
     async fn read_inner(&self, id: NodeId, offset: u64, len: u32) -> Result<ReadAnswer, NsError> {
         // A live ranged handle already open on this node serves the read without
         // re-resolving, so a follow read reuses the single open. It bypasses
-        // tracing (same as before this fix): the handle is a raw provider
-        // handle, not driven through `Tree`/`Runtime::run_op`, so there is
-        // nothing here for a trace id to attach to.
+        // tracing because the raw provider handle is not driven through
+        // `Tree`/`Runtime::run_op`, leaving no span for a trace id to attach to.
         if let Some(handle) = self.take_cached_handle(id.0) {
             return self.read_ranged(id.0, &handle, offset, len).await;
         }
@@ -924,7 +956,7 @@ impl TreeNamespace {
                 let end = start.saturating_add(len as usize).min(data.len());
                 let bytes = data[start..end].to_vec();
                 let eof = end >= data.len();
-                let attrs = self.attrs_for_read(id, ns_kind(node), attrs.as_ref());
+                let attrs = self.attrs_for_read(id, EntryKind::from_node(node), attrs.as_ref());
                 Ok(ReadAnswer { bytes, eof, attrs })
             },
             // A subtree node is a directory; its files are served by the
@@ -1111,7 +1143,7 @@ impl TreeNamespace {
             },
         );
         let epoch = self.node_epochs.get(&id).map_or(0, |e| *e);
-        let kind = ns_kind_from_meta(meta);
+        let kind = EntryKind::from_meta(meta);
         let attrs = Attrs::from_cache(
             kind.clone(),
             merged.as_ref(),
@@ -1258,57 +1290,6 @@ impl Drop for TreeNamespace {
 // -----------------------------------------------------------------------------
 // Free helpers
 // -----------------------------------------------------------------------------
-
-fn ns_kind(node: &crate::Node) -> EntryKind {
-    if let Some(root) = node.subtree_path() {
-        EntryKind::Subtree { root: root.clone() }
-    } else if node.is_dir() {
-        EntryKind::Directory
-    } else {
-        EntryKind::File
-    }
-}
-
-fn ns_kind_from_meta(meta: &EntryMeta) -> EntryKind {
-    match meta.kind() {
-        view_types::EntryKind::Directory => EntryKind::Directory,
-        view_types::EntryKind::File => EntryKind::File,
-    }
-}
-
-fn stability_class(stability: view_types::Stability) -> StabilityClass {
-    match stability {
-        view_types::Stability::Stable => StabilityClass::Stable,
-        view_types::Stability::Dynamic => StabilityClass::Dynamic,
-        view_types::Stability::Live => StabilityClass::Live,
-    }
-}
-
-/// The pre-decided read shape for a node: a deferred-ranged source streams;
-/// every other byte source (and every directory) is materialized whole. Mirrors
-/// the `is_deferred_ranged` branch the FUSE/NFS read paths used to run.
-fn read_style_of(attrs: Option<&FileAttrsCache>) -> ReadStyle {
-    if attrs.is_some_and(FileAttrsCache::is_deferred_ranged) {
-        ReadStyle::Ranged
-    } else {
-        ReadStyle::Whole
-    }
-}
-
-/// Port of the FUSE `ttl_for_attrs` policy: a directory (no attrs) and a stable
-/// exact-size file cache indefinitely; anything that can move under the reader
-/// caches for zero seconds.
-fn ttl_for(attrs: Option<&FileAttrsCache>) -> Duration {
-    let Some(attrs) = attrs else {
-        return TTL_STATIC;
-    };
-    if !matches!(attrs.size(), FileSize::Exact(_))
-        || !matches!(attrs.stability(), view_types::Stability::Stable)
-    {
-        return TTL_DYNAMIC;
-    }
-    TTL_STATIC
-}
 
 /// Change counter over a resolved node, folding the node's last invalidation
 /// epoch into the same facts NFS's `entry_change` hashes.

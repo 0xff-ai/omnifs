@@ -17,7 +17,6 @@ use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
 
 use crate::Provider;
 use crate::wasi::HostState;
-use crate::wasm;
 use crate::{BuildError, EngineError, Op};
 use omnifs_caps::{PreopenMode, PreopenedPath};
 use omnifs_wit::provider::types as wit_types;
@@ -172,7 +171,7 @@ async fn build_driver_state(
     preopens: &[PreopenedPath],
 ) -> std::result::Result<(wasmtime::Store<HostState>, Provider), BuildError> {
     let mut linker = Linker::<HostState>::new(engine);
-    wasm::add_wasi_to_linker::<HostState>(&mut linker)?;
+    wasmtime_wasi::p2::add_to_linker_async::<HostState>(&mut linker)?;
     Provider::add_to_linker::<HostState, HostState>(&mut linker, |state| state)?;
 
     let component = Component::from_file(engine, wasm_path)?;

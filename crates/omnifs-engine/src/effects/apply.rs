@@ -2,7 +2,7 @@
 //!
 //! `EffectApplier` owns the translation from provider wire types (`wit_types`)
 //! into cache storage primitives. The cache (`crate::cache::Store`) is pure
-//! byte storage; it knows nothing about the wire protocol. All
+//! byte storage; it knows nothing about the provider component protocol. All
 //! wire→storage translation lives here.
 
 use std::collections::BTreeMap;
@@ -94,7 +94,12 @@ impl<'a> EffectApplier<'a> {
             .iter()
             .filter_map(|store| {
                 let id = ObjectId::from_wit(&store.id);
-                let view_leaves = match Path::parse_all(&store.view_leaves) {
+                let view_leaves = match store
+                    .view_leaves
+                    .iter()
+                    .map(|path| Path::parse(path))
+                    .collect::<Result<Vec<_>, _>>()
+                {
                     Ok(leaves) => leaves,
                     Err(error) => {
                         warn!(%error, "skipping canonical store: invalid wire path");

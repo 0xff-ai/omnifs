@@ -40,8 +40,14 @@ impl HttpStack {
         auth: Arc<AuthManager>,
         capability: Arc<CapabilityChecker>,
     ) -> Result<Self, reqwest::Error> {
-        let https_client = base_client_builder().build()?;
+        let https_client = Self::client_builder().build()?;
         Ok(Self::with_https_client(auth, capability, https_client))
+    }
+
+    fn client_builder() -> reqwest::ClientBuilder {
+        reqwest::Client::builder()
+            .user_agent("omnifs")
+            .connect_timeout(Duration::from_secs(10))
     }
 
     #[doc(hidden)]
@@ -167,7 +173,7 @@ impl HttpStack {
         if let Some(existing) = self.unix_clients.get(socket) {
             return Ok(existing.clone());
         }
-        let client = base_client_builder()
+        let client = Self::client_builder()
             .unix_socket(socket.to_path_buf())
             .build()?;
         Ok(self
@@ -226,12 +232,6 @@ impl HttpStack {
         record_outcome(&result);
         result
     }
-}
-
-fn base_client_builder() -> reqwest::ClientBuilder {
-    reqwest::Client::builder()
-        .user_agent("omnifs")
-        .connect_timeout(Duration::from_secs(10))
 }
 
 fn unix_request_url(parsed: &Url) -> Result<Url, wit_types::CalloutResult> {

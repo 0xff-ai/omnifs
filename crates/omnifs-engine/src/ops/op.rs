@@ -9,16 +9,15 @@ pub enum Op {
     },
     ListChildren {
         path: Path,
-        /// Listing validator the host holds for this path (OPEN-8), echoed
-        /// so the provider can answer `unchanged` (ADR-0001 §8).
+        /// Listing validator the host holds for this path, echoed so the
+        /// provider can answer `unchanged`.
         cached_validator: Option<String>,
         /// Resume token for a paged listing; `None` for a plain readdir.
         cursor: Option<wit_types::Cursor>,
     },
     ReadFile {
         path: Path,
-        /// Content type the host echoes opaquely into `read-file`
-        /// (ADR-0001 §5.1).
+        /// Content type the host echoes opaquely into `read-file`.
         content_type: String,
         /// Canonical bytes the host pushes for this path's anchor on a
         /// View-cache miss, so the SDK renders without an upstream call.

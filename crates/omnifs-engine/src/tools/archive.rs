@@ -416,7 +416,6 @@ mod tests {
     use super::*;
     use flate2::Compression;
     use flate2::write::GzEncoder;
-    use std::path::PathBuf;
 
     const CARGO_TOML_BYTES: &[u8] = b"[package]\nname = \"pkg\"\nversion = \"1.0.0\"\n";
     const LIB_RS_BYTES: &[u8] = b"pub fn answer() -> u32 { 42 }\n";
@@ -450,22 +449,20 @@ mod tests {
         format: ArchiveFormat,
         strip: Option<&str>,
         limits: ExtractorLimits,
-    ) -> (PathBuf, Result<ExtractStats, ExtractError>) {
+    ) -> (tempfile::TempDir, Result<ExtractStats, ExtractError>) {
         let tmp = tempfile::tempdir().unwrap();
         let blob_path = tmp.path().join("blob");
         std::fs::write(&blob_path, bytes).unwrap();
         let dest = tmp.path().join("dest");
         std::fs::create_dir_all(&dest).unwrap();
         let result = extract(format, &blob_path, &dest, strip, limits);
-        // Keep tmp alive for caller to inspect dest.
-        std::mem::forget(tmp);
-        (dest, result)
+        (tmp, result)
     }
 
     #[test]
     fn roundtrip_targz_extraction_writes_files_under_dest() {
         let bytes = synthesize_targz();
-        let (dest, result) = run_extract(
+        let (tmp, result) = run_extract(
             &bytes,
             ArchiveFormat::TarGz,
             Some("pkg-1.0/"),
@@ -477,6 +474,7 @@ mod tests {
             stats.bytes_written,
             (CARGO_TOML_BYTES.len() + LIB_RS_BYTES.len()) as u64
         );
+        let dest = tmp.path().join("dest");
         let cargo = std::fs::read_to_string(dest.join("Cargo.toml")).unwrap();
         assert!(cargo.contains("name = \"pkg\""));
         let lib = std::fs::read_to_string(dest.join("src").join("lib.rs")).unwrap();
@@ -487,7 +485,7 @@ mod tests {
     fn archive_limit_enforcement() {
         let bytes = synthesize_targz();
 
-        let (_dest, result) = run_extract(
+        let (_tmp, result) = run_extract(
             &bytes,
             ArchiveFormat::TarGz,
             Some("pkg-1.0/"),
@@ -498,7 +496,7 @@ mod tests {
         );
         assert!(matches!(result, Err(ExtractError::TooManyEntries)));
 
-        let (_dest, result) = run_extract(
+        let (_tmp, result) = run_extract(
             &bytes,
             ArchiveFormat::TarGz,
             Some("pkg-1.0/"),
@@ -509,7 +507,7 @@ mod tests {
         );
         assert!(matches!(result, Err(ExtractError::FileTooLarge(_))));
 
-        let (_dest, result) = run_extract(
+        let (_tmp, result) = run_extract(
             &bytes,
             ArchiveFormat::TarGz,
             Some("pkg-1.0/"),
@@ -567,13 +565,14 @@ mod tests {
     #[test]
     fn malicious_path_traversal_is_rejected() {
         let archive = raw_tar_with_path(b"../escape.txt", b"pwned");
-        let (dest, result) = run_extract(&archive, ArchiveFormat::Tar, None, DEFAULT_LIMITS);
+        let (tmp, result) = run_extract(&archive, ArchiveFormat::Tar, None, DEFAULT_LIMITS);
         match result {
             Err(ExtractError::UnsafePath(_) | ExtractError::Malformed(_)) => {},
             other => panic!("expected UnsafePath/Malformed, got {other:?}"),
         }
         // The sanitize check plus lexical containment keep the write inside
         // dest; nothing escapes to the parent.
+        let dest = tmp.path().join("dest");
         assert!(!dest.parent().unwrap().join("escape.txt").exists());
     }
 }

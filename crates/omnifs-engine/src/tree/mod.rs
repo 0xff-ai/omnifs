@@ -3,8 +3,8 @@
 //!
 //! `Tree` owns NO kernel state (no inode table, no handle table, no
 //! DirSnapshot, no notifier). It wraps the provider registry and re-homes the
-//! path-resolution / cache-consult-populate / pagination / invalidation-drain
-//! DECISION logic that FUSE and NFS otherwise duplicate. Renderers turn the
+//! path-resolution, cache, pagination, and invalidation policy that FUSE and NFS
+//! would otherwise duplicate. Renderers turn the
 //! neutral `Node` / `Listing` / `ReadResult` into their own kernel/protocol
 //! identity and reply encoding.
 //!
@@ -54,11 +54,8 @@ pub struct Tree {
     ctx: ServingContext,
 }
 
-/// Per-call observability context, kept optional so the inspector stream
-/// survives the extraction (every `Namespace` op already threads
-/// `fuse_trace: Option<TraceId>`). A struct (not a bare `Option<TraceId>`) so
-/// the later IPC phase can add session/deadline without changing every
-/// signature.
+/// Per-call observability context. The trace is optional because the inspector
+/// is not always attached.
 #[derive(Debug, Clone, Default)]
 pub struct RequestCtx {
     pub trace: Option<TraceId>,
