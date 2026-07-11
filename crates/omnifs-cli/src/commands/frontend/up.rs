@@ -1,6 +1,4 @@
-//! `omnifs frontend up`: bring up the optional virtualized FUSE frontend,
-//! either the Docker-hosted container (`--driver docker`, the default) or the
-//! krunkit microVM (`--driver krunkit`, macOS only).
+//! `omnifs frontend up`: start a local, Docker, or krunkit frontend process.
 //!
 //! The frontend is a separate, credential-free surface attached to a
 //! host-native daemon's shared namespace over its attach transport (TCP for
@@ -21,6 +19,8 @@ use crate::frontend_container::{frontend_container_name, resolve_frontend_image}
 use crate::krunkit_backend::{GuestImageSource, KrunkitBackend};
 use crate::launch::Launcher;
 use crate::launch_backend::{DockerTarget, GUEST_MOUNT};
+#[cfg(feature = "daemon")]
+use crate::local_backend::{LocalBackend, LocalProtocol};
 use crate::runtime::Runtime;
 use crate::workspace::Workspace;
 
@@ -38,8 +38,8 @@ const MOUNT_PROBE_INTERVAL: Duration = Duration::from_millis(200);
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct FrontendUpArgs {
-    /// Which virtualized runtime hosts the frontend. Defaults to the
-    /// `[frontend] driver` config value, or docker if that is unset too.
+    /// How to deliver the frontend. Defaults to the `[frontend] driver`
+    /// config value.
     #[arg(long, value_enum)]
     pub driver: Option<Driver>,
 }
@@ -64,10 +64,39 @@ impl FrontendUpArgs {
         let mount_name = first_mount_name(workspace)?;
 
         match driver {
+            #[cfg(feature = "daemon")]
+            Driver::Local => run_local(&paths, &mount_name).await,
+            #[cfg(not(feature = "daemon"))]
+            Driver::Local => anyhow::bail!("the local frontend requires the daemon feature"),
             Driver::Docker => run_docker(workspace, &paths, &config, &mount_name).await,
             Driver::Krunkit => run_krunkit(workspace, &paths, &config, &mount_name).await,
         }
     }
+}
+
+#[cfg(feature = "daemon")]
+async fn run_local(
+    paths: &omnifs_workspace::layout::WorkspaceLayout,
+    mount_name: &str,
+) -> anyhow::Result<()> {
+    let mount_point = omnifs_workspace::layout::resolve_mount_point()
+        .context("cannot resolve the local mount point: set HOME or OMNIFS_MOUNT_POINT")?;
+    let backend = LocalBackend::new(
+        paths.clone(),
+        mount_point.clone(),
+        LocalProtocol::platform_default(),
+    )?;
+    anstream::eprintln!("Starting the local {} frontend", backend.protocol());
+    backend.launch(mount_name).await?;
+
+    let probe_path = mount_point.join(mount_name);
+    anstream::eprintln!("✓ {} is mounted", probe_path.display());
+    anstream::eprintln!();
+    anstream::eprintln!(
+        "Run `{}` to browse the local mount.",
+        crate::style::bold("omnifs shell")
+    );
+    Ok(())
 }
 
 async fn run_docker(

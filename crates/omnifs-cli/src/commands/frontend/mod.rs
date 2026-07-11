@@ -1,13 +1,8 @@
-//! `omnifs frontend`: lifecycle for the optional virtualized FUSE frontend.
+//! `omnifs frontend`: lifecycle for local and guest frontend processes.
 //!
-//! There is no "room": the thing this group manages is the virtualized FUSE
-//! **frontend**, a separate, credential-free guest (a Docker container or a
-//! krunkit microVM, selected by `--driver`/`[frontend] driver`) attached to a
-//! host-native daemon's shared namespace over its attach listener (TCP or
-//! vsock). It is an opt-in attachment, not a daemon runtime mode:
-//! `[system].runtime` never references it. The guest's own entrypoint runs the
-//! separate `omnifs-fuse` binary (`crates/omnifs-fuse/src/bin/omnifs_fuse.rs`),
-//! not this CLI; there is no hidden runner subcommand here.
+//! Frontends attach to the daemon's shared namespace and contain no provider
+//! runtime or credentials. Local delivery starts a sibling runner binary;
+//! Docker and krunkit deliver the FUSE runner inside an isolated guest.
 
 pub mod down;
 pub mod status;

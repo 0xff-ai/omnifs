@@ -1,15 +1,13 @@
-//! `omnifs frontend down`: tear down the optional virtualized FUSE frontend,
-//! whichever backend it was launched with (Docker container or krunkit
-//! microVM).
+//! `omnifs frontend down`: tear down every frontend owned by this workspace.
 //!
-//! Neither backend's attach listener has a close route on the daemon side
+//! Attach listeners have no close route on the daemon side
 //! (`POST /v1/frontend/attach-target`/`/v1/frontend/attach-target/vsock` only
 //! ever bind, idempotently): the listener stays bound until the daemon itself
 //! restarts. This command says so rather than implying it closed something it
 //! did not.
 //!
-//! [`teardown`] is shared with `omnifs down`, which tears down a running
-//! frontend before stopping the daemon.
+//! [`teardown`] is shared with `omnifs down`, which tears down frontends before
+//! stopping the daemon.
 
 use clap::Args;
 use omnifs_workspace::layout::WorkspaceLayout;
@@ -42,6 +40,8 @@ impl FrontendDownArgs {
 
 /// Remove every frontend discoverable for this workspace.
 pub(crate) async fn teardown(paths: &WorkspaceLayout, force: bool) -> anyhow::Result<bool> {
+    #[cfg(not(feature = "daemon"))]
+    let _ = force;
     let mut failures = Vec::new();
     let krunkit = KrunkitBackend::new(paths.config_dir.clone());
     let krunkit_found = match krunkit.is_running().await {
@@ -70,41 +70,41 @@ pub(crate) async fn teardown(paths: &WorkspaceLayout, force: bool) -> anyhow::Re
         },
     };
 
-    #[cfg(all(feature = "daemon", not(target_os = "linux")))]
-    let nfs_found = {
+    #[cfg(feature = "daemon")]
+    let local_found = {
         let summary =
-            crate::host_teardown::teardown_host_native_nfs(&paths.nfs_state_dir(), force)?;
+            crate::host_teardown::teardown_local_frontends(&paths.nfs_state_dir(), force)?;
         if summary.unmounted > 0 {
-            anstream::println!("✓ Unmounted {} local NFS frontend(s)", summary.unmounted);
+            anstream::println!("✓ Unmounted {} local frontend(s)", summary.unmounted);
         }
         if summary.swept_orphans > 0 {
             anstream::println!(
-                "✓ Swept {} orphaned NFS mount-state file(s)",
+                "✓ Swept {} orphaned local frontend record(s)",
                 summary.swept_orphans
             );
         }
         if !summary.failed.is_empty() {
             failures.push(format!(
-                "{} NFS frontend(s) could not be safely unmounted",
+                "{} local frontend(s) could not be safely unmounted",
                 summary.failed.len()
             ));
         }
         if summary.skipped > 0 {
             failures.push(format!(
-                "{} NFS mount-state file(s) could not be read",
+                "{} local frontend record(s) could not be read",
                 summary.skipped
             ));
         }
         summary.unmounted > 0 || summary.swept_orphans > 0
     };
-    #[cfg(not(all(feature = "daemon", not(target_os = "linux"))))]
-    let nfs_found = false;
+    #[cfg(not(feature = "daemon"))]
+    let local_found = false;
 
     if !failures.is_empty() {
         anyhow::bail!("frontend teardown incomplete: {}", failures.join("; "));
     }
 
-    Ok(krunkit_found || found || nfs_found)
+    Ok(krunkit_found || found || local_found)
 }
 
 async fn teardown_docker(paths: &WorkspaceLayout) -> anyhow::Result<bool> {

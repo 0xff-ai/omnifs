@@ -42,10 +42,7 @@ pub struct ConfigSystem {
     pub frontend_image: Option<String>,
 }
 
-/// Driver selection for the optional virtualized FUSE frontend
-/// (`omnifs frontend up`). Kept apart from [`ConfigSystem`] since it names a
-/// choice of frontend delivery, not the daemon's own (always host-native)
-/// runtime.
+/// Frontend delivery settings for `omnifs frontend up`.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ConfigFrontend {
@@ -128,20 +125,20 @@ mod tests {
     }
 
     #[test]
-    fn frontend_driver_defaults_docker_and_parses_krunkit() {
+    fn frontend_driver_defaults_docker_and_parses_local() {
         use crate::frontend_backend::Driver;
 
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("config.toml");
 
-        // Absent config: the frontend driver defaults to docker.
+        // Absent config: the frontend driver defaults to Docker.
         let default = Config::load(&path).unwrap();
         assert_eq!(default.frontend.driver, Driver::Docker);
 
-        // Explicit krunkit selection parses, even with no implementation yet.
-        std::fs::write(&path, "[frontend]\ndriver = \"krunkit\"\n").unwrap();
-        let krunkit = Config::load(&path).unwrap();
-        assert_eq!(krunkit.frontend.driver, Driver::Krunkit);
+        for (value, expected) in [("local", Driver::Local), ("krunkit", Driver::Krunkit)] {
+            std::fs::write(&path, format!("[frontend]\ndriver = \"{value}\"\n")).unwrap();
+            assert_eq!(Config::load(&path).unwrap().frontend.driver, expected);
+        }
 
         // A typo'd key is rejected by the strict parser.
         std::fs::write(&path, "[frontend]\ndrver = \"docker\"\n").unwrap();

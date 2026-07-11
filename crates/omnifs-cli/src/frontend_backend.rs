@@ -2,7 +2,7 @@
 //! `omnifs shell` launch, probe, tear down, and shell into the optional FUSE
 //! frontend, independent of which runtime hosts it.
 //!
-//! Two backends implement the seam: `DockerBackend` (this module) and
+//! Two guest backends implement the seam: `DockerBackend` (this module) and
 //! `KrunkitBackend` (`crate::krunkit_backend`), a libkrun microVM on macOS.
 //! Both run the same `omnifs-fuse` binary and Omnifs VFS wire protocol; only
 //! the attach transport differs (Docker: TCP via `host.docker.internal`; krunkit: vsock,
@@ -26,12 +26,12 @@ use crate::frontend_container::{FrontendContainerSpec, assert_locked_down};
 use crate::launch_backend::GUEST_MOUNT;
 use crate::runtime::Runtime;
 
-/// Which virtualized runtime hosts the optional FUSE frontend. Selected by
-/// `--driver` (CLI flag) or `[frontend] driver` (config), defaulting to
-/// docker in both.
+/// How the frontend process is delivered. Selected by `--driver` (CLI flag)
+/// or `[frontend] driver` (config).
 #[derive(clap::ValueEnum, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum Driver {
+    Local,
     #[default]
     Docker,
     Krunkit,
@@ -41,6 +41,7 @@ impl Driver {
     /// The [`Via`] this choice records once a frontend launches under it.
     pub(crate) const fn as_via(self) -> Via {
         match self {
+            Self::Local => Via::Local,
             Self::Docker => Via::Docker,
             Self::Krunkit => Via::Krunkit,
         }

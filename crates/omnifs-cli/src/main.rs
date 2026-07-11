@@ -22,6 +22,8 @@ mod inspector;
 mod krunkit_backend;
 mod launch;
 mod launch_backend;
+#[cfg(feature = "daemon")]
+mod local_backend;
 mod mount_config;
 mod mount_report;
 mod mount_tree;

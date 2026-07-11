@@ -2,7 +2,9 @@
 //! health, whichever backend it was launched with.
 
 use clap::Args;
-use omnifs_workspace::runtime_record::{AttachRecord, RuntimeRecord, Via};
+#[cfg(feature = "daemon")]
+use omnifs_mtab::MountState;
+use omnifs_workspace::runtime_record::{AttachRecord, RuntimeRecord};
 
 use crate::error::ExitCode;
 use crate::frontend_backend::{DockerBackend, FrontendBackend};
@@ -23,11 +25,51 @@ impl FrontendStatusArgs {
         let record = RuntimeRecord::read(&paths.runtime_record_file())
             .ok()
             .flatten();
-        let recorded_via = record
-            .as_ref()
-            .and_then(|record| record.virtualized_frontend().map(|(via, _mount_point)| via));
-        if recorded_via == Some(Via::Krunkit) {
-            return Self::krunkit_status(&paths).await;
+        let mut degraded = false;
+        #[cfg(feature = "daemon")]
+        {
+            let local_states = match MountState::read_all(&paths.nfs_state_dir()) {
+                Ok(states) => states,
+                Err(error) => {
+                    anstream::eprintln!("⚠  Could not read local frontend records: {error}");
+                    degraded = true;
+                    Vec::new()
+                },
+            };
+            for state in local_states {
+                let kind = match &state.kind {
+                    omnifs_mtab::MountKind::Fuse => "FUSE",
+                    omnifs_mtab::MountKind::Nfs { .. } => "NFS",
+                };
+                if crate::host_teardown::local_mount_is_owned(&state) {
+                    anstream::println!(
+                        "local {kind} frontend at {}: running",
+                        state.mount_point.display()
+                    );
+                } else {
+                    anstream::println!(
+                        "local {kind} frontend at {}: stopped",
+                        state.mount_point.display()
+                    );
+                    degraded = true;
+                }
+            }
+        }
+
+        match KrunkitBackend::new(paths.config_dir.clone())
+            .is_running()
+            .await
+        {
+            Ok(Some(true)) => anstream::println!("krunkit frontend: running"),
+            Ok(Some(false)) => {
+                anstream::println!("krunkit frontend: stopped");
+                degraded = true;
+            },
+            Ok(None) => anstream::println!("krunkit frontend: not found"),
+            Err(error) => {
+                anstream::eprintln!("⚠  Could not inspect the krunkit frontend: {error:#}");
+                degraded = true;
+            },
         }
 
         let container_name = frontend_container_name(&paths)?;
@@ -57,7 +99,8 @@ impl FrontendStatusArgs {
             },
             Some(false) => {
                 anstream::println!("frontend container `{container_name}`: stopped");
-                ExitCode::Degraded
+                degraded = true;
+                ExitCode::Success
             },
             None => {
                 anstream::println!("frontend container: not found");
@@ -70,33 +113,10 @@ impl FrontendStatusArgs {
             None => anstream::println!("attach listener: not bound"),
         }
 
-        Ok(exit_code)
-    }
-
-    /// The krunkit guest's pidfile-based liveness. The daemon's vsock-attach
-    /// listener binding is never persisted into the runtime record (unlike
-    /// the TCP listener's `attach` field: see
-    /// `crates/omnifs-daemon/src/server.rs::ensure_attach_uds`), so there is
-    /// no attach-address line to report here.
-    async fn krunkit_status(
-        paths: &omnifs_workspace::layout::WorkspaceLayout,
-    ) -> anyhow::Result<ExitCode> {
-        let backend = KrunkitBackend::new(paths.config_dir.clone());
-        let running = backend.is_running().await?;
-        let exit_code = match running {
-            Some(true) => {
-                anstream::println!("krunkit frontend: running");
-                ExitCode::Success
-            },
-            Some(false) => {
-                anstream::println!("krunkit frontend: stopped");
-                ExitCode::Degraded
-            },
-            None => {
-                anstream::println!("krunkit frontend: not found");
-                ExitCode::Success
-            },
-        };
-        Ok(exit_code)
+        Ok(if degraded {
+            ExitCode::Degraded
+        } else {
+            exit_code
+        })
     }
 }
