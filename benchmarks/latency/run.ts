@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 
-// Latency measurement suite (K3 instrument) for the omnifs projected tree.
+// Warm-latency measurement suite for the omnifs projected tree.
 //
 // Times real toolbox commands (`ls`, `cat`, `grep -r`) against a mounted omnifs
 // directory and reports warm p50/p95 plus a single cold first-touch number, at
@@ -314,23 +314,23 @@ function renderMarkdown(report: {
   );
   lines.push("");
   lines.push(
-    "K3 threshold (recorded, not enforced): warm p95 <= 50 ms at concurrency 8.",
+    "Warm-latency target (recorded, not enforced): p95 <= 50 ms at concurrency 8.",
   );
   lines.push("");
   lines.push(
-    "| scenario | concurrency | warm p50 (ms) | warm p95 (ms) | n | cold first (ms) | K3 |",
+    "| scenario | concurrency | warm p50 (ms) | warm p95 (ms) | n | cold first (ms) | warm-latency target |",
   );
   lines.push("|---|---|---|---|---|---|---|");
   for (const row of report.scenarios) {
     const cold = row.cold_first_ms === null ? "" : row.cold_first_ms.toFixed(3);
-    const k3 =
+    const targetResult =
       row.concurrency === 8
         ? row.warm.p95_ms <= 50
           ? "within"
           : "over"
         : "";
     lines.push(
-      `| ${row.name} | ${row.concurrency} | ${row.warm.p50_ms.toFixed(3)} | ${row.warm.p95_ms.toFixed(3)} | ${row.warm.n} | ${cold} | ${k3} |`,
+      `| ${row.name} | ${row.concurrency} | ${row.warm.p50_ms.toFixed(3)} | ${row.warm.p95_ms.toFixed(3)} | ${row.warm.n} | ${cold} | ${targetResult} |`,
     );
   }
   lines.push("");

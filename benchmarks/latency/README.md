@@ -1,9 +1,8 @@
-# Latency measurement suite (K3)
+# Warm-latency measurement suite
 
 Reproducible warm p50/p95 and a cold first-touch number for `ls`, `cat`, and
-`grep -r` against a live omnifs mount, at concurrency 1/4/8. This is the K3
-instrument from the truth track: it answers "does the projected tree respond
-like real files, fast enough, under concurrency?"
+`grep -r` against a live omnifs mount, at concurrency 1/4/8. It answers "does
+the projected tree respond like real files, fast enough, under concurrency?"
 
 `run.ts` times **real spawned processes** (`ls`, `cat`, `grep -r`) with
 `performance.now()`. There are no shell pipelines: each sample is one
@@ -60,31 +59,38 @@ Per scenario:
 The suite must run on the same host as the mount so that per-op timing is not
 polluted by transport overhead. Concretely:
 
-- **Docker dev runtime** (`just dev`): the mount lives at `/omnifs` *inside* the
-  `omnifs` container. Driving one `docker exec` per operation would add hundreds
-  of milliseconds of exec startup to every sample and swamp millisecond-scale
-  filesystem ops. So the suite runs **inside the container**. The runtime image
-  has no Bun, so compile `run.ts` to a standalone Linux binary on the host and
-  copy it in.
-- **Host-native mount** (macOS NFSv4 loopback): the mount is a real host path,
-  so run `run.ts` directly with `bun`.
+- **Docker-hosted frontend** (`just dev`): the mount lives at `/omnifs` inside
+  the credential-free frontend container. Driving one `docker exec` per
+  operation would add hundreds of milliseconds of startup to every sample and
+  swamp millisecond-scale filesystem ops. Run the suite inside that container.
+  The frontend image has no Bun, so compile `run.ts` to a standalone Linux
+  binary on the host and copy it in.
+- **Host-native mount** (Linux FUSE or macOS NFSv4 loopback): the mount is a
+  host path, so run `run.ts` directly with `bun`.
 
-### Docker dev runtime
+### Docker-hosted frontend
+
+The concrete k8s fixture paths below are available on Linux. `scripts/dev.ts`
+skips the k8s mount on macOS because Docker Desktop cannot expose its Unix
+socket to the host-native daemon.
 
 ```bash
-# 1. Bring the runtime up and leave it running (no interactive shell).
-just dev -y --detach          # or --no-shell
+# 1. Bring the daemon and frontend up without opening an interactive shell,
+#    then discover the workspace-scoped frontend container.
+just dev -y --detach
+FRONTEND=$(docker ps --filter label=ai.0xff.omnifs.home="$HOME/.omnifs-dev" --format '{{.Names}}')
+test -n "$FRONTEND"
 
 # 2. Compile the suite for the container's arch (linux/arm64 on Apple silicon,
 #    linux/x64 on Intel) and copy the single self-contained binary in.
 bun build --compile --target=bun-linux-arm64 benchmarks/latency/run.ts \
   --outfile /tmp/latency-bench
-docker cp /tmp/latency-bench omnifs:/tmp/latency-bench
-docker exec omnifs chmod +x /tmp/latency-bench
+docker cp /tmp/latency-bench "${FRONTEND}:/tmp/latency-bench"
+docker exec "$FRONTEND" chmod +x /tmp/latency-bench
 
 # 3. Run it against the mount, pinning the paths for a clean cold number
 #    (see Cold protocol). Pass the host git sha since there is no repo inside.
-docker exec omnifs /tmp/latency-bench \
+docker exec "$FRONTEND" /tmp/latency-bench \
   --target /omnifs \
   --subdir /omnifs/k8s/cluster/apiservices \
   --file /omnifs/k8s/cluster/apiservices/v1.apps/manifest.json \
@@ -94,8 +100,8 @@ docker exec omnifs /tmp/latency-bench \
   --out /tmp/latency-$(date +%F).json
 
 # 4. Copy the report out and commit it under benchmarks/reports/.
-docker cp omnifs:/tmp/latency-$(date +%F).json benchmarks/reports/
-docker cp omnifs:/tmp/latency-$(date +%F).md   benchmarks/reports/
+docker cp "${FRONTEND}:/tmp/latency-$(date +%F).json" benchmarks/reports/
+docker cp "${FRONTEND}:/tmp/latency-$(date +%F).md" benchmarks/reports/
 ```
 
 Pin `--subdir` at a **local fixture** provider (the dev `k8s` mount is a local
@@ -117,14 +123,15 @@ bun benchmarks/latency/run.ts \
 `cold_first_ms` is only a true first touch if nothing read the path before the
 timed spawn. Two things guarantee that:
 
-1. **Restart the runtime so caches are fresh.** For the Docker runtime,
-   `docker restart omnifs` restarts the daemon; wait for readiness with
-   `omnifs status` (grep for `fuse serving`) rather than `ls`-ing the mount, so
-   the readiness check does not warm the tree. Caveat: the on-disk cache under
-   `OMNIFS_HOME` persists across a restart, so cold here means *fresh-daemon
-   cold* (in-memory/session state reset, first provider callout) rather than
-   *upstream-cold*. To also drop the on-disk cache, clear `$OMNIFS_HOME/cache`
-   before starting.
+1. **Restart the host-native daemon and reattach the frontend so caches are
+   fresh.** Use the same `OMNIFS_HOME` for `omnifs frontend down`, `omnifs down`,
+   `omnifs up --no-frontend`, and `omnifs frontend up`; then rediscover the
+   replacement frontend container and copy the runner back into it. Wait for
+   readiness with `omnifs status` rather than reading the mount. The on-disk
+   cache under `OMNIFS_HOME` persists, so this gives *fresh-daemon cold*
+   (in-memory/session state reset, first provider callout), not
+   *upstream-cold*. To drop durable cache too, remove that workspace's cache
+   while the daemon is down.
 2. **Pin `--subdir`, `--file`, and `--grep-literal`.** With all three set, the
    suite reads no tree bytes before timing (it only `stat`s the three paths to
    validate them, which is the `getattr` any `ls`/`cat` does anyway). Without
@@ -148,7 +155,7 @@ timed spawn. Two things guarantee that:
 
 ## Thresholds (recorded, not enforced)
 
-K3's target is **warm p95 <= 50 ms at concurrency 8**. The suite records the
-number and the Markdown table annotates each concurrency-8 row `within` or
-`over`; it never fails the run on a threshold. Evaluating the numbers is a human
-decision (see the truth-track plan, step T4).
+The warm-latency target is **p95 <= 50 ms at concurrency 8**. The suite records
+the number and the Markdown table annotates each concurrency-8 row `within` or
+`over`; it never fails the run on a threshold. Evaluating the numbers remains a
+human decision.

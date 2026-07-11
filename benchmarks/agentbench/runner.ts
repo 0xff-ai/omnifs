@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-// Agentbench runner: the K1 instrument.
+// Agentbench token-efficiency benchmark runner.
 //
 // Runs each task under two conditions with the same model and grades the
 // outcome, measuring success, tokens, wall clock, and turn count:
@@ -122,7 +122,7 @@ function printHelp(): void {
       `  --model <id>           model passed to the Claude CLI (default: opus)\n` +
       `  --out <file>           report path (default: ../reports/agentbench-<date>.json)\n` +
       `  --dry-run              skip the model call; use a canned transcript\n` +
-      `  --allow-judge          permit judge-type tasks (gated to T4; costs money)\n` +
+      `  --allow-judge          permit judge-type tasks as ungraded results\n` +
       `  --claude-bin <path>    Claude CLI binary (default: claude)\n` +
       `  --max-turns <n>        override the per-task soft turn cap\n`,
   );
@@ -298,13 +298,14 @@ async function main(): Promise<void> {
   const args = parseArgs(Bun.argv.slice(2));
   const tasks = loadTasks(args.tasks);
 
-  // Preflight: judge tasks are gated to T4. Refuse before any model call.
+  // Refuse judge tasks before any model call unless the operator explicitly
+  // accepts that their results will be ungraded.
   const judgeTasks = tasks.filter((t) => t.success.type === "judge");
   if (judgeTasks.length && !args.allowJudge) {
     process.stderr.write(
       `refusing to run judge task(s) [${judgeTasks
         .map((t) => t.id)
-        .join(", ")}] without --allow-judge (gated to T4)\n`,
+        .join(", ")}] without --allow-judge\n`,
     );
     process.exit(2);
   }
@@ -453,7 +454,7 @@ function markdown(report: Report): string {
   lines.push("");
 
   const h = aggregates.headline;
-  lines.push("## Headline (K1)");
+  lines.push("## Token-efficiency headline");
   lines.push("");
   lines.push(
     `- total-token ratio (mount / mcp): ${h.total_token_ratio === null ? "n/a" : h.total_token_ratio.toFixed(3)}`,

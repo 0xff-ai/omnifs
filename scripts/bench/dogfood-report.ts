@@ -3,10 +3,9 @@
 // Dogfood telemetry reporter.
 //
 // Reads the workspace-local, never-transmitted telemetry JSONL written by the
-// daemon and CLI (see `omnifs_home::telemetry`) and prints the kill-criteria
-// denominators: mount sessions and how often they needed manual recovery (K2),
-// and weekly-active use (K5). This reader only reads local files; it performs
-// no network I/O.
+// daemon and CLI (see `omnifs_workspace::telemetry`) and reports mount sessions
+// and manual recoveries for the manual-recovery rate, plus weekly-active use.
+// This reader only reads local files; it performs no network I/O.
 //
 // Usage:
 //   bun scripts/bench/dogfood-report.ts [--home <OMNIFS_HOME>] [--json]
@@ -17,7 +16,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-// Mirrors `omnifs_home::telemetry::TELEMETRY_SUBDIR` and the on-disk file names.
+// Mirrors `omnifs_workspace::telemetry::TELEMETRY_SUBDIR` and the on-disk file
+// names.
 const TELEMETRY_SUBDIR = "telemetry";
 const DAEMON_FILE = "daemon.jsonl";
 const CLI_FILE = "cli.jsonl";
@@ -69,7 +69,7 @@ function dayKey(ms) {
  *   `daemon_stop` before the next `daemon_start` (unfinished sessions excluded).
  * - recoveries: a `frontend_stopped` with no `daemon_stop` before the next
  *   `daemon_start`, where that next start lands within 5 minutes (an unplanned
- *   restart, the K2 signal).
+ *   restart, counted toward the manual-recovery rate).
  * - weeklyActiveDays: distinct UTC days with any event in the trailing 7 days.
  */
 export function computeReport(daemonRecords, cliRecords, now = Date.now()) {
@@ -188,7 +188,7 @@ function main() {
   console.log(`  daemon sessions:        ${report.sessions}`);
   console.log(`  completed sessions:     ${report.completedSessions}`);
   console.log(`  median session length:  ${formatDuration(report.medianSessionMs)}`);
-  console.log(`  recoveries (K2):        ${report.recoveries}`);
+  console.log(`  manual recoveries:      ${report.recoveries}`);
   console.log(`  active days (all time): ${report.activeDays}`);
   console.log(`  weekly-active days:     ${report.weeklyActiveDays}`);
   console.log(`  CLI invocations:        ${report.cliInvocations}`);

@@ -1,8 +1,8 @@
-# Agentbench: the K1 instrument
+# Agentbench token-efficiency benchmark
 
 Agentbench measures whether projecting external data as a filesystem (omnifs) lets an agent do the same work with fewer tokens and comparable success than the same data behind a tool-call MCP baseline. Same tasks, same model, two conditions.
 
-The deterministic v1 runs against a fixed fixture corpus so it is repeatable and free of upstream flakiness. The live variant (real GitHub and Linear providers, official vendor MCP servers) is T4 and spends money, so it is gated behind explicit approval.
+The checked-in runner uses a fixed fixture corpus so it is repeatable and free of upstream flakiness. It does not implement a live provider-versus-vendor-MCP comparison. A non-dry run invokes the configured model and spends tokens.
 
 ## Conditions
 
@@ -41,7 +41,7 @@ Notes on the fields, so a step is executable without any other document:
 - `prompt` is passed verbatim to the model. Prompts reference paths relative to the dataset root (for example `github/repos/acme-api/issues/3/body.md`) so both conditions can answer.
 - `success.type: contains` grades a case-insensitive substring match of `value` against the agent's final answer.
 - `success.type: regex` grades `new RegExp(value).test(answer)`. Write regex values single-quoted in YAML so backslashes stay literal (for example `value: '\b4\b'`).
-- `success.type: judge` recognizes the type but requires an extra model call to grade, which costs money and is gated to T4. The runner refuses to run a judge task unless `--allow-judge` is passed, and even then the judge model call is not implemented in this build.
+- `success.type: judge` is parsed, but its model-based grader is not implemented. The runner refuses judge tasks unless `--allow-judge` is passed, then records an ungraded result without making a grader model call.
 - `max_turns` is a soft cap. The current Claude CLI has no turn-limit flag (see the drift note below), so a run whose reported `num_turns` exceeds `max_turns` is failed after the fact.
 
 ## Fixture corpus
@@ -79,25 +79,25 @@ Full runner flags:
 --model <id>           model passed to the Claude CLI (default: opus)
 --out <file>           report path (default: ../reports/agentbench-<date>.json)
 --dry-run              skip the model call; use a canned transcript
---allow-judge          permit judge-type tasks (gated to T4; costs money)
+--allow-judge          permit judge-type tasks as ungraded results
 --claude-bin <path>    Claude CLI binary (default: claude)
 --max-turns <n>        override the per-task soft turn cap
 ```
 
-A real (non-dry) run invokes the model and spends tokens. That is T4's approved territory; do not run it in T3.
+A real (non-dry) run invokes the model and spends tokens. Use `--dry-run` to validate the pipeline without model cost.
 
 ## Serving the corpus through omnifs (condition mount)
 
 Condition `mount` needs the corpus served as a filesystem through omnifs, with `--mount-root` pointing at that mount. The runner does not stand up the mount; the operator provides it.
 
-There is no turnkey way to serve an arbitrary host directory through the test provider today, and adding one is a gated decision. A `TreeRef` (the host handle that becomes a served subtree) can only be minted by the host's internal registry, which is reachable solely through the git-clone and archive-extract callouts. A provider `preopen` puts bytes into the guest sandbox for `std::fs`, but a preopen is not a served subtree, so a treeref route cannot turn a preopened host directory into a bind mount. Wiring a config-driven treeref of an arbitrary host path would require a new host import plus a capability authorizing it, which changes the provider-authority security model and is a gated decision (see the repo AGENTS.md gated decisions). It is deliberately out of scope for T3.
+There is no turnkey way to serve an arbitrary host directory through the test provider, and adding one is a gated decision. A `TreeRef` (the host handle that becomes a served subtree) can only be minted by the host's internal registry, which is reachable solely through the git-clone and archive-extract callouts. A provider `preopen` puts bytes into the guest sandbox for `std::fs`, but a preopen is not a served subtree, so a treeref route cannot turn a preopened host directory into a bind mount. Wiring a config-driven treeref of an arbitrary host path would require a new host import plus a capability authorizing it, which changes the provider-authority security model (see the repo AGENTS.md gated decisions).
 
-Two non-gated ways to serve the corpus at a real mount, both using existing host plumbing, if a live run is wanted before T4 lands a proper path:
+Two non-gated ways to serve the corpus at a real mount use existing host plumbing:
 
 - archive-blob: tar the corpus, seed the archive into the host blob cache, and have a treeref route open it via the archive callout, which serves the extracted tree as a real bind mount.
 - preopen plus projection: declare a `preopened_path` capability and a dir config field, then write provider routes that walk the preopened directory and project each entry through the normal read path.
 
-Until one of those is wired, `--mount-root` can point at any directory an operator has arranged omnifs to serve (or, as a degenerate non-omnifs baseline, at `fixture-data/` directly). Serve only the corpus root so parent files (including `FIXTURE-FACTS.md`) are not reachable.
+Without one of those adapters, `--mount-root` can point at any directory an operator has arranged omnifs to serve (or, as a degenerate non-omnifs baseline, at `fixture-data/` directly). Serve only the corpus root so parent files (including `FIXTURE-FACTS.md`) are not reachable.
 
 ## Claude CLI flags (probe first; they drift)
 
@@ -114,7 +114,7 @@ The print-mode JSON result carries `result` (the answer text), `num_turns`, `dur
 
 ## Report
 
-`runner.ts` writes `../reports/agentbench-<date>.json` and a `.md` summary beside it. The JSON carries per-task rows `{id, family, condition, success, tokens_total, turns, wall_ms}`, per-family aggregates, and the two headline numbers K1 cares about:
+`runner.ts` writes `../reports/agentbench-<date>.json` and a `.md` summary beside it. The JSON carries per-task rows `{id, family, condition, success, tokens_total, turns, wall_ms}`, per-family aggregates, and the two token-efficiency headline numbers:
 
 - `total_token_ratio`: overall mount tokens divided by overall mcp tokens (below 1.0 means the mounted tree used fewer tokens).
 - `success_delta_pp`: mount success rate minus mcp success rate, in percentage points.

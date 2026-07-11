@@ -4,8 +4,9 @@
 // A stdio MCP server (newline-delimited JSON-RPC 2.0) exposing exactly two
 // tools, `list_dir(path)` and `read_file(path)`, backed by the same
 // `fixture-data/` directory that condition A serves through omnifs. This is the
-// v1 baseline: the same bytes, reached through a tool-call interaction model
-// instead of a filesystem. T4 upgrades condition B to real vendor MCP servers.
+// checked-in baseline: the same bytes, reached through a tool-call interaction
+// model instead of a filesystem. Real vendor MCP servers are outside this
+// deterministic fixture suite.
 //
 // Root is taken from FIXTURE_ROOT (env) or argv[2]. Every path is resolved and
 // prefix-checked against the root, so traversal outside the corpus is rejected.

@@ -1,11 +1,10 @@
 #!/usr/bin/env bun
 // Grading for agentbench tasks.
 //
-// T3 supports `contains` and `regex` grading locally and for free. The `judge`
-// type is recognized and parses, but grading a judge task requires an extra
-// model call (cost), which is gated to T4: `grade()` refuses a judge task
-// unless `allowJudge` is set, and even then reports it as unimplemented here so
-// no model spend can happen inside this step.
+// `contains` and `regex` grade locally. The `judge` type is recognized, but its
+// model-based grader is not implemented: `grade()` requires explicit
+// `allowJudge` acknowledgement and then returns an ungraded result without
+// spending tokens on another model call.
 
 export type SuccessType = "contains" | "regex" | "judge";
 
@@ -56,14 +55,13 @@ export function grade(
     case "judge": {
       if (!opts.allowJudge) {
         throw new Error(
-          `task ${task.id}: judge grading requires --allow-judge (gated to T4)`,
+          `task ${task.id}: judge grading requires --allow-judge`,
         );
       }
-      // --allow-judge acknowledged, but the judge model call is a T4 deliverable.
       // Fail closed rather than spend money implicitly.
       return {
         success: null,
-        reason: "judge grading is implemented in T4; not available in this build",
+        reason: "judge grading is not implemented",
       };
     }
     default: {

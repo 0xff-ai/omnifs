@@ -12,6 +12,6 @@ The planted facts that the `tasks/*.yaml` prompts ask about. This file lives out
 | agg-002 | aggregation | total comment files across `acme-cli` issues | 9 |
 | recon-001 | reconstruction | status before `Done` in `linear/issues/ENG-115/activity.md` | In Review |
 | recon-002 | reconstruction | config value proposed in `github/repos/acme-api/issues/3/comments/` | max_retries=5 |
-| judge-001 | navigation | theme of `acme-api#3` (judge-graded; gated to T4) | retry backoff; tracked as ENG-107 |
+| judge-001 | navigation | theme of `acme-api#3` (model-based grader not implemented) | retry backoff; tracked as ENG-107 |
 
 The aggregation family (agg-001, agg-002) is where a query tool or SQL should beat a filesystem. It is included deliberately so the report shows where files win and where they do not.
