@@ -23,10 +23,10 @@ pub struct TestExport {
 }
 
 pub fn test_export() -> TestExport {
-    test_export_with_mount("test", false)
+    test_export_with_mount("test")
 }
 
-pub fn test_export_with_mount(mount: &str, root_mount: bool) -> TestExport {
+pub fn test_export_with_mount(mount: &str) -> TestExport {
     let config_dir = tempfile::tempdir().expect("config dir");
     let cache_dir = tempfile::tempdir().expect("cache dir");
     let clone_dir = tempfile::tempdir().expect("clone dir");
@@ -40,7 +40,6 @@ pub fn test_export_with_mount(mount: &str, root_mount: bool) -> TestExport {
         r#"{{
             "provider": {reference},
             "mount": {mount:?},
-            "root_mount": {root_mount},
             "capabilities": {{
                 "domains": ["httpbin.org"]
             }}

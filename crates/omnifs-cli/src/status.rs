@@ -339,9 +339,6 @@ pub(crate) fn write_configured_providers(out: &mut String, providers: &[Provider
                     provider.domain_count,
                     provider.git_repo_count
                 );
-                if provider.root_mount {
-                    let _ = write!(out, " root=yes");
-                }
                 if let Some(max_memory_mb) = provider.max_memory_mb {
                     let _ = write!(out, " max_memory={max_memory_mb}MiB");
                 }

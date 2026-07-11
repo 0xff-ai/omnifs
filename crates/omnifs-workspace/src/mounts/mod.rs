@@ -43,8 +43,6 @@ pub struct Spec {
     /// Serving resolves the artifact by `provider.id`, never by name.
     pub provider: ProviderRef,
     pub mount: String,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub root_mount: bool,
     #[serde(default = "default_revalidate", skip_serializing_if = "is_true")]
     pub revalidate: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -106,17 +104,6 @@ impl<'a> ProviderMetadataInheritance<'a> {
             config: ConfigInheritance::Additive(added),
         }
     }
-}
-
-/// `skip_serializing_if` predicate: omit a `bool` field when it is `false`, so a
-/// `Registry`-written spec matches the compact authored form (no `root_mount`
-/// key unless the mount is a root mount).
-#[expect(
-    clippy::trivially_copy_pass_by_ref,
-    reason = "serde skip predicate ABI"
-)]
-fn is_false(value: &bool) -> bool {
-    !*value
 }
 
 #[expect(
@@ -883,13 +870,9 @@ mod tests {
         let path = mounts.join("github.json");
         let written = std::fs::read_to_string(&path).expect("spec written");
         // Compact authored shape: a lone auth entry stays a single object (not an
-        // array), default `root_mount`/absent `capabilities`/`config` are omitted,
+        // array), absent `capabilities`/`config`/`revalidate` are omitted,
         // and the file ends in a trailing newline.
         assert!(written.ends_with("}\n"), "trailing newline: {written:?}");
-        assert!(
-            !written.contains("root_mount"),
-            "default root_mount omitted: {written}"
-        );
         assert!(
             !written.contains("revalidate"),
             "default revalidate omitted: {written}"

@@ -311,7 +311,6 @@ pub struct MountInfo {
     pub provider_name: String,
     /// Pinned provider content hash for the exact WASM artifact this mount runs.
     pub provider_id: String,
-    pub root_mount: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_health: Option<CredentialHealth>,
 }

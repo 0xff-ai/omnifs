@@ -16,7 +16,6 @@ pub(crate) struct ProviderReadyStatus {
     pub(crate) mount: String,
     pub(crate) provider: String,
     pub(crate) provider_present: bool,
-    pub(crate) root_mount: bool,
     pub(crate) auth_count: usize,
     pub(crate) domain_count: usize,
     pub(crate) git_repo_count: usize,
@@ -77,7 +76,6 @@ pub(crate) fn scan_provider_configs(
             mount: spec.mount.clone(),
             provider: spec.provider_name().to_string(),
             provider_present,
-            root_mount: spec.root_mount,
             auth_count: usize::from(spec.auth.is_some()),
             domain_count: spec
                 .capabilities

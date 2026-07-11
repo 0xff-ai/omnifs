@@ -36,7 +36,6 @@ pub struct MountRuntimes {
     /// credential share one refresh state.
     credential_service: Arc<CredentialService>,
     instances: parking_lot::RwLock<HashMap<String, Arc<Runtime>>>,
-    root_mount: parking_lot::RwLock<Option<String>>,
     timer_shutdown: watch::Sender<bool>,
     timer_tasks: parking_lot::Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
     running_specs: parking_lot::RwLock<HashMap<String, Spec>>,
@@ -78,7 +77,6 @@ impl MountRuntimes {
             context,
             credential_service,
             instances: parking_lot::RwLock::new(HashMap::new()),
-            root_mount: parking_lot::RwLock::new(None),
             timer_shutdown,
             timer_tasks: parking_lot::Mutex::new(HashMap::new()),
             running_specs: parking_lot::RwLock::new(HashMap::new()),
@@ -135,7 +133,6 @@ impl MountRuntimes {
                 wasm_path.display().to_string(),
             ));
         }
-        let is_root = spec.root_mount;
 
         // Instantiation compiles WASM; keep it outside the instances lock.
         let runtime = if capture_test_callouts {
@@ -162,7 +159,6 @@ impl MountRuntimes {
         .map_err(|error| RegistryError::from_build(&mount, error))?;
         Ok(BuiltMount {
             mount,
-            is_root,
             revalidate: spec.revalidate,
             fingerprint: mount_fingerprint(spec),
             spec: spec.clone(),
@@ -177,35 +173,14 @@ impl MountRuntimes {
     ) -> Result<Arc<Runtime>, RegistryError> {
         let BuiltMount {
             mount,
-            is_root,
             revalidate,
             fingerprint,
             spec,
             runtime,
         } = built;
-        // Claim the root binding before the instance becomes visible: a
-        // concurrent root lookup must never observe "instance present, no
-        // root mount" for a root-mounted provider, or it would materialize
-        // the mount as a root child with an infinite-TTL dentry.
-        let mut claimed_root = false;
-        if is_root {
-            let mut root = self.root_mount.write();
-            if let Some(existing) = root.as_deref() {
-                warn!(
-                    mount = mount.as_str(),
-                    existing, "multiple root_mount providers; ignoring root_mount for this one"
-                );
-            } else {
-                *root = Some(mount.clone());
-                claimed_root = true;
-            }
-        }
         {
             let mut instances = self.instances.write();
             if instances.contains_key(&mount) {
-                if claimed_root {
-                    *self.root_mount.write() = None;
-                }
                 return Err(RegistryError::DuplicateMount(mount));
             }
             instances.insert(mount.clone(), Arc::clone(&runtime));
@@ -213,7 +188,7 @@ impl MountRuntimes {
         self.fingerprints.write().insert(mount.clone(), fingerprint);
         self.running_specs.write().insert(mount.clone(), spec);
         self.start_timer(&mount, &runtime, revalidate, handle);
-        info!(mount = mount.as_str(), root = is_root, "loaded provider");
+        info!(mount = mount.as_str(), "loaded provider");
         Ok(runtime)
     }
 
@@ -224,7 +199,6 @@ impl MountRuntimes {
     ) -> Result<(), RegistryError> {
         let BuiltMount {
             mount,
-            is_root,
             revalidate,
             fingerprint,
             spec,
@@ -235,31 +209,9 @@ impl MountRuntimes {
             task.abort();
         }
 
-        let mut claimed_root = false;
-        {
-            let mut root = self.root_mount.write();
-            if root.as_deref() == Some(mount.as_str()) {
-                *root = None;
-            }
-            if is_root {
-                if let Some(existing) = root.as_deref() {
-                    warn!(
-                        mount = mount.as_str(),
-                        existing, "multiple root_mount providers; ignoring root_mount for this one"
-                    );
-                } else {
-                    *root = Some(mount.clone());
-                    claimed_root = true;
-                }
-            }
-        }
-
         let old_runtime = {
             let mut instances = self.instances.write();
             let Some(old_runtime) = instances.insert(mount.clone(), Arc::clone(&runtime)) else {
-                if claimed_root {
-                    *self.root_mount.write() = None;
-                }
                 return Err(RegistryError::MountNotFound(mount));
             };
             old_runtime
@@ -285,12 +237,6 @@ impl MountRuntimes {
         }
         self.fingerprints.write().remove(mount);
         self.running_specs.write().remove(mount);
-        {
-            let mut root = self.root_mount.write();
-            if root.as_deref() == Some(mount) {
-                *root = None;
-            }
-        }
         if let Err(e) = runtime.shutdown() {
             warn!(mount, error = %e, "shutdown failed");
         }
@@ -331,11 +277,6 @@ impl MountRuntimes {
             return Ok(None);
         }
         MountSnapshot::from_caches(&self.caches, mount).map(Some)
-    }
-
-    /// Returns the mount name of the root-mounted provider, if any.
-    pub fn root_mount_name(&self) -> Option<String> {
-        self.root_mount.read().clone()
     }
 
     pub fn shutdown_all(&self) {
@@ -890,7 +831,6 @@ struct LoadWork {
 
 struct BuiltMount {
     mount: String,
-    is_root: bool,
     revalidate: bool,
     fingerprint: u64,
     spec: Spec,

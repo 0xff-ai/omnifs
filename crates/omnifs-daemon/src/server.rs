@@ -556,7 +556,6 @@ impl Daemon {
     }
 
     fn control_status(&self) -> DaemonStatus {
-        let root_mount = self.registry.root_mount_name();
         let entries = self.registry.runtime_entries();
         let mut mounts = Vec::with_capacity(entries.len());
         let mut credential_degraded = Vec::new();
@@ -565,7 +564,6 @@ impl Daemon {
                 credential_degraded.push((mount.clone(), warning.to_string()));
             }
             mounts.push(MountInfo {
-                root_mount: root_mount.as_deref() == Some(mount.as_str()),
                 provider_name: runtime.provider_name().to_string(),
                 provider_id: runtime.provider_id().to_string(),
                 auth_health: runtime

@@ -68,10 +68,9 @@ impl Tree {
         Self { ctx }
     }
 
-    /// The mount name of the namespace root (see
-    /// [`ServingContext::root_mount_name`]).
-    pub fn root_mount_name(&self) -> String {
-        self.ctx.root_mount_name()
+    /// The mount label for the namespace root node record.
+    pub fn root_node_mount(&self) -> String {
+        self.ctx.root_node_mount()
     }
 
     /// Every mount currently served (see [`ServingContext::served_mounts`]).

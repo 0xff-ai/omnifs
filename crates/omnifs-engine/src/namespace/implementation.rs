@@ -222,10 +222,10 @@ impl TreeNamespace {
         this
     }
 
-    /// The root record: the namespace root maps to the served root mount's root
-    /// (or the synthetic enumeration root, mount `""`).
+    /// The root record: the namespace root maps to the served root node's root
+    /// (synthetic enumeration root with mount `""`, or the single mount's root).
     fn install_root(&self) {
-        let mount = self.tree.root_mount_name();
+        let mount = self.tree.root_node_mount();
         let root = NodeRecord {
             full_path: Path::root(),
             mount: mount.clone(),
@@ -351,16 +351,18 @@ impl TreeNamespace {
         NodeId(id)
     }
 
-    /// The full protocol path for a freshly resolved node. For a single-mount or
-    /// root-mounted registry the mount-relative path already is the full path;
-    /// for the enumeration registry a mount-rooted child is `/<mount><rel>`.
+    /// The full protocol path for a freshly resolved node. For a single-mount
+    /// tree the mount-relative path is the full path; for the registry-backed
+    /// enumeration case a mount-rooted child is `/<mount><rel>`.
     fn full_path_for(&self, node: &crate::Node) -> Path {
         let mount = node.mount();
         let rel = node.path();
         // The enumeration registry is the only backing where a node's mount is a
         // real path segment: reconstruct `/<mount><rel>`. Every other backing
         // serves one namespace whose mount-relative path is the full path.
-        if self.tree.root_mount_name().is_empty() && !mount.is_empty() {
+        // We are in enumeration mode precisely when the root node uses the
+        // empty mount label.
+        if self.tree.root_node_mount().is_empty() && !mount.is_empty() {
             let joined = if rel.is_root() {
                 format!("/{mount}")
             } else {
@@ -481,7 +483,7 @@ impl TreeNamespace {
         epoch: u64,
     ) -> u64 {
         let change = change_counter(node, attrs, epoch);
-        if id != ROOT_ID || !self.tree.root_mount_name().is_empty() {
+        if id != ROOT_ID || !self.tree.root_node_mount().is_empty() {
             return change;
         }
         let mut hasher = DefaultHasher::new();

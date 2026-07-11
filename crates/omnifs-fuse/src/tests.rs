@@ -49,8 +49,8 @@ struct FuseHarness {
     _providers_dir: TempDir,
 }
 
-/// Build a `Frontend` over a `TreeNamespace` backed by the test provider mounted
-/// as the root mount, so paths are mount-relative (`hello/feed`).
+/// Build a `Frontend` over a `TreeNamespace` using the single-mount context
+/// so that paths are mount-relative (`hello/feed`) without a top-level mount dir.
 fn build_harness() -> FuseHarness {
     let cache_dir = tempfile::tempdir().expect("cache dir");
     let config_dir = tempfile::tempdir().expect("config dir");
@@ -84,7 +84,6 @@ fn build_harness() -> FuseHarness {
         r#"{{
                 "provider": {{ "id": "{id}", "meta": {{ "name": "test-provider" }} }},
                 "mount": "test",
-                "root_mount": true,
                 "capabilities": {{ "domains": ["httpbin.org"] }},
                 "config": {{}}
             }}"#
@@ -104,9 +103,9 @@ fn build_harness() -> FuseHarness {
 
     let rt = tokio::runtime::Handle::current();
     let spec = omnifs_workspace::mounts::Spec::parse(&mount_config).expect("parse mount spec");
-    registry.add_mount(&spec, &rt).expect("add test mount");
+    let runtime = registry.add_mount(&spec, &rt).expect("add test mount");
 
-    let ns = TreeNamespace::new(Arc::new(registry), rt.clone());
+    let ns = TreeNamespace::single("test".to_string(), runtime, rt.clone());
     let fs = Frontend::new(
         rt,
         Arc::clone(&ns) as Arc<dyn Namespace>,

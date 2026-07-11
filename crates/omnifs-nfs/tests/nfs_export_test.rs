@@ -171,7 +171,7 @@ fn mount_enumeration_root_change_tracks_loaded_mounts() {
 
 #[test]
 fn omnifs_export_treats_omnifs_as_a_normal_provider_mount_name() {
-    let harness = test_export_with_mount("omnifs", false);
+    let harness = test_export_with_mount("omnifs");
     let export = &harness.export;
 
     let omnifs_dir = export
@@ -244,37 +244,6 @@ fn omnifs_export_does_not_synthesize_top_level_omnifs_alias() {
         export.root()
     );
     assert_ne!(test_from_export_root, test_from_protocol_root);
-}
-
-#[test]
-fn omnifs_export_root_mount_projects_provider_at_volume_root() {
-    let harness = test_export_with_mount("test", true);
-    let export = &harness.export;
-
-    let root_listing = export.readdir(export.root()).expect("root listing");
-    assert!(
-        root_listing
-            .entries
-            .iter()
-            .any(|entry| entry.name == "hello")
-    );
-
-    let export_root = export
-        .lookup(export.root(), "omnifs")
-        .expect("hidden export lookup");
-    let export_listing = export.readdir(export_root).expect("export listing");
-    assert!(
-        export_listing
-            .entries
-            .iter()
-            .any(|entry| entry.name == "hello")
-    );
-    assert!(
-        !export_listing
-            .entries
-            .iter()
-            .any(|entry| entry.name == "test")
-    );
 }
 
 #[test]

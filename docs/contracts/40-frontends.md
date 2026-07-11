@@ -71,7 +71,7 @@ The `omnifs-mtab` state files under the per-mount state leaf are mount *discover
 
 - Call provider WIT directly from a frontend.
 - Construct fake provider DTOs to reuse frontend code paths.
-- Own root mount discovery, learned-size publication, inline-byte read policy, preload policy, or negative lookup policy.
+- Own mount enumeration at the root, learned-size publication, inline-byte read policy, preload policy, or negative lookup policy.
 - Put provider policy or cache schema knowledge in FUSE or NFS.
 - Add macOS-specific FUSE behavior.
 - Reintroduce macFUSE, `diskutil`, or macOS-specific FUSE mounting.

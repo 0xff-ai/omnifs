@@ -3,8 +3,8 @@
 //!
 //! A `ServingContext` answers the renderer-neutral mount questions: which
 //! runtime serves a mount, how a full protocol path splits into a (mount,
-//! mount-relative path) pair, and (for a registry with no root-mounted
-//! provider) what the synthetic mount-enumeration root lists. It wraps either
+//! mount-relative path) pair, and what the synthetic mount-enumeration root
+//! lists (for registry-backed trees). It wraps either
 //! the production `MountRuntimes` registry both renderers hold, or a single
 //! bare `Arc<Runtime>` under a fixed mount name (the kernel-free itest /
 //! single-mount embedding form, because `MountRuntimes::add_mount` instantiates
@@ -96,10 +96,6 @@ impl ServingContext {
         match &self.backing {
             Backing::Single { mount, .. } => Ok((mount.clone(), path.clone())),
             Backing::Registry(registry) => {
-                // A root-mounted provider claims the whole namespace.
-                if let Some(root) = registry.root_mount_name() {
-                    return Ok((root, path.clone()));
-                }
                 if path.is_root() {
                     return Ok((MOUNT_ENUMERATION_MOUNT.to_string(), Path::root()));
                 }
@@ -129,19 +125,18 @@ impl ServingContext {
     }
 
     pub(crate) fn is_mount_enumeration_root(&self, mount: &str, path: &Path) -> bool {
-        matches!(&self.backing, Backing::Registry(registry) if registry.root_mount_name().is_none())
+        matches!(&self.backing, Backing::Registry(_))
             && mount == MOUNT_ENUMERATION_MOUNT
             && path.is_root()
     }
 
-    /// The mount name of the namespace root: the single mount, a registry's
-    /// root-mounted provider, or `""` for the synthetic mount-enumeration root.
-    pub(crate) fn root_mount_name(&self) -> String {
+    /// The mount label recorded for the namespace root node.
+    /// For registry-backed trees this is the synthetic enumeration mount ("").
+    /// For single-mount trees it is the mount name itself.
+    pub(crate) fn root_node_mount(&self) -> String {
         match &self.backing {
             Backing::Single { mount, .. } => mount.clone(),
-            Backing::Registry(registry) => registry
-                .root_mount_name()
-                .unwrap_or_else(|| MOUNT_ENUMERATION_MOUNT.to_string()),
+            Backing::Registry(_) => MOUNT_ENUMERATION_MOUNT.to_string(),
         }
     }
 
@@ -156,12 +151,12 @@ impl ServingContext {
 
     pub(crate) fn mount_names(&self) -> Option<Vec<String>> {
         match &self.backing {
-            Backing::Registry(registry) if registry.root_mount_name().is_none() => {
+            Backing::Registry(registry) => {
                 let mut mounts = registry.mounts();
                 mounts.sort();
                 Some(mounts)
             },
-            Backing::Registry(_) | Backing::Single { .. } => None,
+            Backing::Single { .. } => None,
         }
     }
 }

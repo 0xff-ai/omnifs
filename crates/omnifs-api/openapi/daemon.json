@@ -1136,8 +1136,7 @@
         "required": [
           "mount",
           "provider_name",
-          "provider_id",
-          "root_mount"
+          "provider_id"
         ],
         "properties": {
           "auth_health": {
@@ -1160,9 +1159,6 @@
           "provider_name": {
             "type": "string",
             "description": "Provider NAME slug, e.g. `github`; credentials key on this value."
-          },
-          "root_mount": {
-            "type": "boolean"
           }
         }
       },

@@ -17,7 +17,7 @@ The NFS frontend owns NFS protocol state:
 - mount readiness and teardown
 - macOS loopback mount options
 
-It does not own projection semantics. It must not decide provider route precedence, cache schema, learned-size authority, root mount enumeration, or negative lookup policy.
+It does not own projection semantics. It must not decide provider route precedence, cache schema, learned-size authority, mount enumeration at the root, or negative lookup policy.
 
 ## Filehandles
 
