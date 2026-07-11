@@ -67,6 +67,32 @@ pub struct TreeCursor {
     pub path: String,
 }
 
+impl TreeCursor {
+    /// Locate this cursor in `rows`; if absent, fall back to its deepest
+    /// visible ancestor, then the mount root, then row zero.
+    fn locate_or_nearest_ancestor(&self, rows: &[super::tree::RenderRow]) -> usize {
+        if let Some(index) = rows
+            .iter()
+            .position(|row| row.mount == self.mount && row.path == self.path)
+        {
+            return index;
+        }
+        let mut probe = self.path.as_str();
+        while let Some(slash) = probe.rfind('/') {
+            probe = &probe[..slash];
+            if let Some(index) = rows
+                .iter()
+                .position(|row| row.mount == self.mount && row.path == probe)
+            {
+                return index;
+            }
+        }
+        rows.iter()
+            .position(|row| row.mount == self.mount && row.path.is_empty())
+            .unwrap_or(0)
+    }
+}
+
 impl App {
     pub fn new(mode: ConnectionMode, container: impl Into<String>, addr: Option<String>) -> Self {
         Self {
@@ -234,7 +260,7 @@ impl App {
                 // If the stored path was pruned by a collapse or active-focus
                 // eviction, fall back to its nearest visible ancestor (or
                 // the mount root) so Down doesn't silently teleport to row 0.
-                let current = locate_or_nearest_ancestor(&rows, &cursor.mount, &cursor.path);
+                let current = cursor.locate_or_nearest_ancestor(&rows);
                 step_clamped(current, delta, last)
             },
             None if delta < 0 => last,
@@ -316,30 +342,6 @@ impl App {
     fn select_prev(&mut self) {
         self.traces.select_prev(&self.filter);
     }
-}
-
-/// Find `(mount, path)` in `rows`; if absent, fall back to the deepest
-/// ancestor of `path` that exists in `rows`, then the mount root, then 0.
-fn locate_or_nearest_ancestor(rows: &[super::tree::RenderRow], mount: &str, path: &str) -> usize {
-    if let Some(idx) = rows
-        .iter()
-        .position(|row| row.mount == mount && row.path == path)
-    {
-        return idx;
-    }
-    let mut probe = path;
-    while let Some(slash) = probe.rfind('/') {
-        probe = &probe[..slash];
-        if let Some(idx) = rows
-            .iter()
-            .position(|row| row.mount == mount && row.path == probe)
-        {
-            return idx;
-        }
-    }
-    rows.iter()
-        .position(|row| row.mount == mount && row.path.is_empty())
-        .unwrap_or(0)
 }
 
 /// Apply `delta` to `current`, clamped to `[0, max_inclusive]`. Handles

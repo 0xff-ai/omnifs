@@ -1,7 +1,6 @@
 //! Mount and provider scan results shared by status, doctor, and the catalog.
 
 use omnifs_workspace::creds::CredentialStore;
-use omnifs_workspace::mounts::Name as MountName;
 use serde::Serialize;
 use std::path::PathBuf;
 
@@ -45,14 +44,6 @@ pub(crate) struct UserMountReadyStatus {
     pub(crate) provider: String,
     pub(crate) provider_present: bool,
     pub(crate) auth: AuthReadiness,
-}
-
-pub(crate) fn load_mount_by_name(mounts: &[MountConfig], name: &MountName) -> anyhow::Result<Spec> {
-    let mount = mounts
-        .iter()
-        .find(|m| &m.name == name)
-        .ok_or_else(|| anyhow::anyhow!("no mount config named `{name}`"))?;
-    Ok(mount.config.clone())
 }
 
 /// Whether the spec's pinned provider artifact is installed and its manifest

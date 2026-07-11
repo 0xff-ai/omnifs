@@ -149,7 +149,11 @@ impl MountAuth {
     ) -> anyhow::Result<Self> {
         let name = MountName::new(mount.to_owned())
             .with_context(|| format!("invalid mount name `{mount}`"))?;
-        let spec = crate::mount_report::load_mount_by_name(mounts, &name)
+        let spec = mounts
+            .iter()
+            .find(|configured| configured.name == name)
+            .map(|configured| configured.config.clone())
+            .ok_or_else(|| anyhow!("no mount config named `{name}`"))
             .with_context(|| format!("load mount config `{mount}`"))?;
         Ok(Self::from_spec(catalog, spec))
     }

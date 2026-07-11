@@ -44,6 +44,14 @@ struct HintedError {
     source: Box<dyn std::error::Error + Send + Sync + 'static>,
 }
 
+impl HintedError {
+    /// Find the wrapper anywhere in the cause chain so hints and exit codes
+    /// survive callers adding context above it.
+    fn find(error: &anyhow::Error) -> Option<&Self> {
+        error.chain().find_map(|cause| cause.downcast_ref::<Self>())
+    }
+}
+
 pub trait WithHint<T> {
     fn with_hint(self, hint: impl Into<Cow<'static, str>>) -> anyhow::Result<T>;
 }
@@ -100,18 +108,8 @@ where
     }
 }
 
-/// Find the `HintedError` anywhere in the cause chain. It is normally at the
-/// head, but a caller may add `.context(...)` on top (e.g. wrapping a daemon
-/// error), which pushes the wrapper deeper. Hints and exit codes must survive
-/// that, so the chain is searched rather than only the head inspected.
-fn find_hinted(error: &anyhow::Error) -> Option<&HintedError> {
-    error
-        .chain()
-        .find_map(|cause| cause.downcast_ref::<HintedError>())
-}
-
 pub(crate) fn exit_code(error: &anyhow::Error) -> ExitCode {
-    find_hinted(error).map_or(ExitCode::GenericFailure, |hinted| hinted.exit_code)
+    HintedError::find(error).map_or(ExitCode::GenericFailure, |hinted| hinted.exit_code)
 }
 
 /// Walks the error chain and renders it as:
@@ -131,7 +129,7 @@ pub fn render(error: &anyhow::Error) -> String {
     let mut out = String::new();
 
     // Collect hints from the HintedError wrapper if present.
-    let hints: &[Cow<'static, str>] = find_hinted(error).map_or(&[], |h| h.hints.as_slice());
+    let hints: &[Cow<'static, str>] = HintedError::find(error).map_or(&[], |h| h.hints.as_slice());
 
     // Build the message chain from anyhow's chain iterator, skipping empty
     // display strings (the HintedError itself delegates display to its source,

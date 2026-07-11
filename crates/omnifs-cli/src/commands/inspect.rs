@@ -5,7 +5,6 @@ use std::path::{Path, PathBuf};
 use anyhow::Context;
 use clap::Args;
 
-use crate::client::resolve_event_endpoint;
 use crate::inspector::{ConnectionMode, SourceKind, run_plain, run_tui};
 use crate::workspace::Workspace;
 
@@ -48,8 +47,10 @@ impl InspectArgs {
             // opening an empty canvas and exiting 0.
             workspace.daemon().require_compatible().await?;
             check_record_path(self.record.as_deref())?;
-            let endpoint =
-                resolve_event_endpoint(workspace.layout())?.context("daemon is not running")?;
+            let endpoint = workspace
+                .daemon()
+                .event_endpoint()?
+                .context("daemon is not running")?;
             (
                 ConnectionMode::Inspector,
                 SourceKind::Socket {
@@ -73,8 +74,10 @@ impl InspectArgs {
         let workspace = Workspace::resolve()?;
         workspace.daemon().require_compatible().await?;
         check_record_path(self.record.as_deref())?;
-        let endpoint =
-            resolve_event_endpoint(workspace.layout())?.context("daemon is not running")?;
+        let endpoint = workspace
+            .daemon()
+            .event_endpoint()?
+            .context("daemon is not running")?;
         let record = self.record.clone();
         tokio::task::spawn_blocking(move || run_plain(SourceKind::Socket { endpoint, record }))
             .await

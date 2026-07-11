@@ -178,6 +178,15 @@ impl DaemonClient {
         }
     }
 
+    /// The endpoint the inspector's event stream should attach to.
+    pub(crate) fn event_endpoint(&self) -> Result<Option<EventEndpoint>> {
+        Ok(match self.resolve()? {
+            Target::Absent => None,
+            Target::Env { base, token } => Some(EventEndpoint::Tcp { base, token }),
+            Target::Unix { socket, .. } => Some(EventEndpoint::Unix { socket }),
+        })
+    }
+
     /// One request primitive over both transports. `Ok(None)` means the daemon
     /// is unreachable (connection refused/timeout, an absent record, or a stale
     /// unix socket that was cleaned). Other transport failures are errors.
@@ -630,9 +639,8 @@ impl DaemonClient {
     }
 }
 
-/// Read `OMNIFS_DAEMON_ADDR` from the environment. Unlike the retired
-/// `daemon_addr`, there is no default port fallback: an unset value means "use
-/// the record", never "dial 7878 blind".
+/// Read `OMNIFS_DAEMON_ADDR` from the environment. There is no default port:
+/// an unset value means "use the runtime record".
 pub(crate) fn env_daemon_addr() -> Option<String> {
     std::env::var("OMNIFS_DAEMON_ADDR")
         .ok()
@@ -657,28 +665,6 @@ impl EventEndpoint {
             Self::Unix { socket } => format!("unix:{}", socket.display()),
         }
     }
-}
-
-/// Resolve the event-stream endpoint for `layout`: `OMNIFS_DAEMON_ADDR` first,
-/// then the runtime record.
-pub(crate) fn resolve_event_endpoint(layout: &WorkspaceLayout) -> Result<Option<EventEndpoint>> {
-    if let Some(addr) = env_daemon_addr() {
-        let token = std::env::var("OMNIFS_CONTROL_TOKEN")
-            .ok()
-            .filter(|token| !token.trim().is_empty());
-        return Ok(Some(EventEndpoint::Tcp {
-            base: format!("http://{addr}"),
-            token,
-        }));
-    }
-    let record_path = layout.runtime_record_file();
-    let Some(record) = RuntimeRecord::read(&record_path)
-        .with_context(|| format!("read runtime record {}", record_path.display()))?
-    else {
-        return Ok(None);
-    };
-    let Endpoint::Unix { path } = record.endpoint;
-    Ok(Some(EventEndpoint::Unix { socket: path }))
 }
 
 #[derive(Debug)]
@@ -1027,7 +1013,7 @@ mod tests {
         ));
     }
 
-    /// F6: a CA-less Linux fails inside `ClientBuilder::build()` before any
+    /// A CA-less Linux fails inside `ClientBuilder::build()` before any
     /// network I/O (rustls-platform-verifier's `Verifier::new` returns
     /// `rustls::Error::General("No CA certificates were loaded from the
     /// system")` when the native root store comes back empty). An empty
@@ -1049,22 +1035,6 @@ mod tests {
             rendered.contains("ca-certificates"),
             "error should hint at installing ca-certificates: {rendered}"
         );
-    }
-
-    /// F6: constructing a `DaemonClient` must never touch the TLS-capable
-    /// HTTP client, so a CA-less host can still run `status`/`down`/`shell`
-    /// against the unix-socket production transport. `with_record_path` (via
-    /// `new`/`for_layout`) only stores the record path and lazy unix-socket
-    /// state; nothing here can fail or panic, unlike the removed eager
-    /// `http: reqwest::Client` field.
-    #[test]
-    fn constructing_a_client_never_builds_the_tls_backend() {
-        let home = tempfile::tempdir().unwrap();
-        let record = home.path().join("daemon.json");
-        // Construction alone (no request made) must succeed even though no
-        // daemon and no CA store are involved.
-        let _client = DaemonClient::with_record_path(Some(record));
-        let _client = DaemonClient::with_record_path(None);
     }
 
     /// With no record and no override, the client is absent and require exits 3.

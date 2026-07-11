@@ -73,9 +73,9 @@ struct BlobDescriptor {
     size: u64,
 }
 
-/// Accepts both the OCI Image Manifest shape (`config` + `layers`) that
-/// `oras push --artifact-type` produces today, and the older, separate OCI
-/// Artifact Manifest shape (`blobs`, no `config`), per ghcr's own migration
+/// Accepts both the OCI Image Manifest shape (`config` + `layers`) emitted by
+/// `oras push --artifact-type` and the older, separate OCI Artifact Manifest
+/// shape (`blobs`, no `config`), per ghcr's own migration
 /// history between the two. Exactly one of the two lists is ever populated
 /// for a real manifest; [`Self::single_blob`] does not care which.
 #[derive(Debug, Deserialize)]
@@ -87,6 +87,10 @@ struct OciManifest {
 }
 
 impl OciManifest {
+    fn parse(bytes: &[u8]) -> Result<Self> {
+        serde_json::from_slice(bytes).context("parse the guest image OCI manifest")
+    }
+
     /// The guest image manifest carries exactly one blob (the `.raw.zst`);
     /// zero or more than one is a shape this puller does not understand.
     fn single_blob(&self) -> Result<&BlobDescriptor> {
@@ -193,11 +197,7 @@ async fn fetch_manifest(
         .bytes()
         .await
         .context("read the guest image manifest body")?;
-    parse_manifest(&bytes)
-}
-
-fn parse_manifest(bytes: &[u8]) -> Result<OciManifest> {
-    serde_json::from_slice(bytes).context("parse the guest image OCI manifest")
+    OciManifest::parse(&bytes)
 }
 
 /// Download the manifest's one blob, verify its sha256 digest against the
@@ -337,7 +337,7 @@ mod tests {
 
     #[test]
     fn parses_oci_image_manifest_shape() {
-        let manifest = parse_manifest(IMAGE_MANIFEST_FIXTURE.as_bytes()).unwrap();
+        let manifest = OciManifest::parse(IMAGE_MANIFEST_FIXTURE.as_bytes()).unwrap();
         let blob = manifest.single_blob().unwrap();
         assert_eq!(
             blob.digest,
@@ -348,7 +348,7 @@ mod tests {
 
     #[test]
     fn parses_legacy_artifact_manifest_shape() {
-        let manifest = parse_manifest(ARTIFACT_MANIFEST_FIXTURE.as_bytes()).unwrap();
+        let manifest = OciManifest::parse(ARTIFACT_MANIFEST_FIXTURE.as_bytes()).unwrap();
         let blob = manifest.single_blob().unwrap();
         assert_eq!(
             blob.digest,
@@ -359,7 +359,7 @@ mod tests {
 
     #[test]
     fn rejects_a_manifest_with_no_blobs() {
-        let manifest = parse_manifest(r#"{"layers": [], "blobs": []}"#.as_bytes()).unwrap();
+        let manifest = OciManifest::parse(r#"{"layers": [], "blobs": []}"#.as_bytes()).unwrap();
         let err = manifest.single_blob().unwrap_err();
         assert!(err.to_string().contains("no layers or blobs"));
     }
@@ -372,7 +372,7 @@ mod tests {
                 {"mediaType": "b", "digest": "sha256:bbbb", "size": 2}
             ]
         }"#;
-        let manifest = parse_manifest(two_layers.as_bytes()).unwrap();
+        let manifest = OciManifest::parse(two_layers.as_bytes()).unwrap();
         let err = manifest.single_blob().unwrap_err();
         assert!(err.to_string().contains("expected exactly one blob"));
     }

@@ -83,7 +83,7 @@ fn hash8(path: &Path) -> String {
     hex::encode(&digest.as_bytes()[..4])
 }
 
-/// Everything [`build_frontend_container_body`] needs, gathered so the
+/// Everything [`FrontendContainerSpec::build_body`] needs, gathered so the
 /// no-credentials contract (see `docs/contracts/50-control-plane.md`) is
 /// visible at one call site: no binds, no `OMNIFS_HOME`, no docker.sock, no
 /// SSH agent, no published ports.
@@ -103,45 +103,45 @@ pub(crate) struct FrontendContainerSpec<'a> {
     pub add_host_gateway: bool,
 }
 
-pub(crate) fn build_frontend_container_body(
-    spec: &FrontendContainerSpec<'_>,
-) -> ContainerCreateBody {
-    let mut labels = HashMap::new();
-    labels.insert(
-        FRONTEND_HOME_LABEL.to_string(),
-        spec.home.display().to_string(),
-    );
+impl FrontendContainerSpec<'_> {
+    pub(crate) fn build_body(&self) -> ContainerCreateBody {
+        let mut labels = HashMap::new();
+        labels.insert(
+            FRONTEND_HOME_LABEL.to_string(),
+            self.home.display().to_string(),
+        );
 
-    let extra_hosts = spec
-        .add_host_gateway
-        .then(|| vec!["host.docker.internal:host-gateway".to_string()]);
+        let extra_hosts = self
+            .add_host_gateway
+            .then(|| vec!["host.docker.internal:host-gateway".to_string()]);
 
-    let host_config = HostConfig {
-        devices: Some(vec![DeviceMapping {
-            path_on_host: Some("/dev/fuse".to_string()),
-            path_in_container: Some("/dev/fuse".to_string()),
-            cgroup_permissions: Some("rwm".to_string()),
-        }]),
-        cap_add: Some(vec!["SYS_ADMIN".to_string()]),
-        security_opt: Some(vec!["apparmor:unconfined".to_string()]),
-        extra_hosts,
-        ..Default::default()
-    };
+        let host_config = HostConfig {
+            devices: Some(vec![DeviceMapping {
+                path_on_host: Some("/dev/fuse".to_string()),
+                path_in_container: Some("/dev/fuse".to_string()),
+                cgroup_permissions: Some("rwm".to_string()),
+            }]),
+            cap_add: Some(vec!["SYS_ADMIN".to_string()]),
+            security_opt: Some(vec!["apparmor:unconfined".to_string()]),
+            extra_hosts,
+            ..Default::default()
+        };
 
-    let env = vec![
-        format!(
-            "{OMNIFS_ATTACH_ADDR_ENV}=host.docker.internal:{}",
-            spec.attach_port
-        ),
-        format!("{OMNIFS_ATTACH_TOKEN_ENV}={}", spec.attach_token),
-    ];
+        let env = vec![
+            format!(
+                "{OMNIFS_ATTACH_ADDR_ENV}=host.docker.internal:{}",
+                self.attach_port
+            ),
+            format!("{OMNIFS_ATTACH_TOKEN_ENV}={}", self.attach_token),
+        ];
 
-    ContainerCreateBody {
-        image: Some(spec.image.as_str().to_string()),
-        env: Some(env),
-        labels: Some(labels),
-        host_config: Some(host_config),
-        ..Default::default()
+        ContainerCreateBody {
+            image: Some(self.image.as_str().to_string()),
+            env: Some(env),
+            labels: Some(labels),
+            host_config: Some(host_config),
+            ..Default::default()
+        }
     }
 }
 
@@ -292,7 +292,7 @@ mod tests {
             attach_token: "test-token",
             add_host_gateway: true,
         };
-        let body = build_frontend_container_body(&spec);
+        let body = spec.build_body();
 
         assert_eq!(body.image.as_deref(), Some("omnifs-frontend:dev"));
 
@@ -344,7 +344,7 @@ mod tests {
             attach_token: "t",
             add_host_gateway: false,
         };
-        let body = build_frontend_container_body(&spec);
+        let body = spec.build_body();
         assert_eq!(body.host_config.unwrap().extra_hosts, None);
     }
 

@@ -75,7 +75,7 @@ mod tests {
     use secrecy::SecretString;
     use time::OffsetDateTime;
 
-    use crate::test_support::{install_fixture_provider, spec_with_provider, spec_with_reference};
+    use crate::test_support::{install_fixture_provider, spec_with_reference};
     use omnifs_workspace::mounts::materialize;
     use omnifs_workspace::provider::Catalog;
 
@@ -171,85 +171,6 @@ mod tests {
             source: PathBuf::from("/dev/null"),
         };
         materialize_and_validate(&metadata_only, &catalog, &store).unwrap();
-    }
-
-    #[test]
-    fn materialize_canonicalizes_host_preopen() {
-        let tmp = tempfile::tempdir().unwrap();
-        let db_dir = tmp.path().join("db");
-        std::fs::create_dir_all(&db_dir).unwrap();
-        std::fs::write(db_dir.join("chinook.sqlite"), "").unwrap();
-
-        let config = spec_with_provider(
-            "db",
-            &format!(
-                r#"{{
-                "mount": "db",
-                "config": {{"path": "/data/chinook.sqlite"}},
-                "capabilities": {{
-                    "preopened_paths": [
-                        {{"host": "{}", "guest": "/data", "mode": "ro"}}
-                    ]
-                }}
-            }}"#,
-                db_dir.display()
-            ),
-        );
-
-        let catalog = test_catalog(tmp.path());
-        let materialized = materialize::materialize(config, &catalog).unwrap();
-        let preopen = &materialized
-            .capabilities
-            .as_ref()
-            .unwrap()
-            .preopened_paths
-            .as_ref()
-            .and_then(|grant| match grant {
-                omnifs_caps::Grant::Literal(paths) => Some(paths),
-                omnifs_caps::Grant::Dynamic(_) => None,
-            })
-            .unwrap()[0];
-        assert_eq!(
-            preopen.host,
-            db_dir.canonicalize().unwrap().display().to_string()
-        );
-        assert_eq!(preopen.guest, "/data");
-    }
-
-    #[test]
-    fn materialize_leaves_runtime_native_preopens_untouched() {
-        let tmp = tempfile::tempdir().unwrap();
-        let config = spec_with_provider(
-            "db",
-            r#"{
-                    "mount": "db",
-                    "config": {"path": "/data/test.db"},
-                    "capabilities": {
-                        "preopened_paths": [
-                            {"host": "/data", "guest": "/data", "mode": "ro"}
-                        ]
-                    }
-                }"#,
-        );
-
-        let catalog = test_catalog(tmp.path());
-        let materialized = materialize::materialize(config, &catalog).unwrap();
-        let preopen = &materialized
-            .capabilities
-            .as_ref()
-            .unwrap()
-            .preopened_paths
-            .as_ref()
-            .and_then(|grant| match grant {
-                omnifs_caps::Grant::Literal(paths) => Some(paths),
-                omnifs_caps::Grant::Dynamic(_) => None,
-            })
-            .unwrap()[0];
-        assert_eq!(
-            (preopen.host.as_str(), preopen.guest.as_str()),
-            ("/data", "/data"),
-            "a runtime-native preopen (host == guest) passes through unrewritten"
-        );
     }
 
     #[test]

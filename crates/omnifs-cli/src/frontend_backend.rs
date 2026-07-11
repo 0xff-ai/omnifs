@@ -22,9 +22,7 @@ use anyhow::Result;
 use omnifs_workspace::runtime_record::Via;
 use serde::Deserialize;
 
-use crate::frontend_container::{
-    FrontendContainerSpec, assert_locked_down, build_frontend_container_body,
-};
+use crate::frontend_container::{FrontendContainerSpec, assert_locked_down};
 use crate::launch_backend::GUEST_MOUNT;
 use crate::runtime::Runtime;
 
@@ -118,7 +116,7 @@ impl FrontendBackend for DockerBackend {
         else {
             anyhow::bail!("internal: the docker backend received a krunkit launch spec");
         };
-        let body = build_frontend_container_body(&FrontendContainerSpec {
+        let body = FrontendContainerSpec {
             image: self.runtime.image(),
             home,
             attach_port: *attach_port,
@@ -129,7 +127,8 @@ impl FrontendBackend for DockerBackend {
             // function of the target OS, so it is computed here rather than
             // threaded through the backend-neutral spec.
             add_host_gateway: cfg!(target_os = "linux"),
-        });
+        }
+        .build_body();
         self.runtime.launch_frontend_container(body).await?;
 
         let (mounts, env) = self.runtime.inspect_mounts_and_env().await?;

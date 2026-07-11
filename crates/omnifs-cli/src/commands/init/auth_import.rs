@@ -50,10 +50,10 @@ impl<'a> AuthImportDecision<'a> {
                     "{}",
                     crate::ui::ok(
                         "credential",
-                        format!("imported from {}", credential_source(credential))
+                        format!("imported from {}", credential.source())
                     )
                 );
-                return self.promote(credential_value(credential));
+                return self.promote(credential.value());
             }
             return Ok(ImportOutcome {
                 auth: self.default_auth,
@@ -103,7 +103,7 @@ impl<'a> AuthImportDecision<'a> {
 
         let mut options: Vec<String> = detected
             .iter()
-            .map(|credential| format!("import from {}", credential_source(credential)))
+            .map(|credential| format!("import from {}", credential.source()))
             .collect();
         options.push("sign in with OAuth instead".to_string());
         options.push("skip auth for now".to_string());
@@ -116,7 +116,7 @@ impl<'a> AuthImportDecision<'a> {
 
         for (i, cred) in detected.iter().enumerate() {
             if chosen == options[i] {
-                return Ok(Some(credential_value(cred)));
+                return Ok(Some(cred.value()));
             }
         }
         Ok(None)
@@ -124,7 +124,7 @@ impl<'a> AuthImportDecision<'a> {
 }
 
 fn prompt_single_import(cred: &detect::DetectedCredential) -> anyhow::Result<Option<SecretString>> {
-    let import = format!("import from {}", credential_source(cred));
+    let import = format!("import from {}", cred.source());
     let options = vec![
         import.clone(),
         "sign in with OAuth instead".to_string(),
@@ -136,23 +136,8 @@ fn prompt_single_import(cred: &detect::DetectedCredential) -> anyhow::Result<Opt
         .prompt()
         .map_err(crate::ui::from_inquire)?;
     if answer == import {
-        Ok(Some(credential_value(cred)))
+        Ok(Some(cred.value()))
     } else {
         Ok(None)
     }
-}
-
-/// Where a detected credential comes from, for display. Env vars render as
-/// `$NAME`; a command renders its provider-supplied note.
-fn credential_source(cred: &detect::DetectedCredential) -> String {
-    match cred {
-        detect::DetectedCredential::EnvVar { name, .. } => format!("${name}"),
-        detect::DetectedCredential::Command { note, .. } => note.clone(),
-    }
-}
-
-fn credential_value(cred: &detect::DetectedCredential) -> SecretString {
-    let (detect::DetectedCredential::EnvVar { value, .. }
-    | detect::DetectedCredential::Command { value, .. }) = cred;
-    value.clone()
 }

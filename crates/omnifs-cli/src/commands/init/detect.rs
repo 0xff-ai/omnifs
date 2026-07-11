@@ -22,6 +22,20 @@ pub enum DetectedCredential {
     Command { note: String, value: SecretString },
 }
 
+impl DetectedCredential {
+    pub(super) fn source(&self) -> String {
+        match self {
+            Self::EnvVar { name, .. } => format!("${name}"),
+            Self::Command { note, .. } => note.clone(),
+        }
+    }
+
+    pub(super) fn value(&self) -> SecretString {
+        let (Self::EnvVar { value, .. } | Self::Command { value, .. }) = self;
+        value.clone()
+    }
+}
+
 /// Reads every ambient source declared across `manifest`'s static-token
 /// schemes and returns the credentials found, in declaration order.
 pub fn detect(manifest: Option<&AuthManifest>) -> Vec<DetectedCredential> {

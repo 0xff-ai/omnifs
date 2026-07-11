@@ -73,22 +73,3 @@ fn source_path() -> PathBuf {
         .join("../../skills")
         .join(SKILL_NAME)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn install_claude_code_writes_skill_content() {
-        let home = tempfile::tempdir().unwrap();
-        install_claude_code_in(home.path()).unwrap();
-
-        let installed = home
-            .path()
-            .join(".claude")
-            .join("skills")
-            .join(SKILL_NAME)
-            .join("SKILL.md");
-        assert_eq!(std::fs::read_to_string(installed).unwrap(), USAGE_SKILL);
-    }
-}

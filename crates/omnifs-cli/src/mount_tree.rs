@@ -38,6 +38,53 @@ pub struct MountTreeData {
 }
 
 impl MountTreeData {
+    pub fn read_from_wasm(path: &Path) -> Result<Self> {
+        let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+        let wasm = mts::ProviderWasm::from_bytes(bytes);
+
+        let section_bytes = wasm
+            .manifest_section()
+            .context("reading provider-manifest section")?;
+        if section_bytes.is_empty() {
+            bail!(
+                "no {} custom section found in {}",
+                mts::MANIFEST_SECTION_NAME,
+                path.display()
+            );
+        }
+
+        let records = wasm
+            .manifest_records()
+            .context("decoding provider manifest records")?
+            .into_iter()
+            .filter_map(|record| match record {
+                mts::ManifestRecord::Unknown { tag, .. } => {
+                    anstream::eprintln!(
+                        "warning: unknown provider-manifest tag 0x{tag:02x}, skipping"
+                    );
+                    None
+                },
+                other => Some(other),
+            })
+            .collect();
+
+        let resolved =
+            mts::ResolvedManifest::resolve(records).context("resolving provider manifest")?;
+
+        if resolved.handlers.is_empty() && resolved.mutations.is_empty() {
+            bail!(
+                "no handler or mutation records in {} custom section of {}",
+                mts::MANIFEST_SECTION_NAME,
+                path.display()
+            );
+        }
+
+        Ok(Self {
+            handlers: resolved.handlers,
+            mutations: resolved.mutations,
+        })
+    }
+
     pub fn render(&self, views: Views) -> String {
         let views = views.with_defaults();
         let sections = [
@@ -155,51 +202,6 @@ impl MountTreeData {
 
         format!("{}{}", section_header("Mutations"), body)
     }
-}
-
-pub fn read_from_wasm(path: &Path) -> Result<MountTreeData> {
-    let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-    let wasm = mts::ProviderWasm::from_bytes(bytes);
-
-    let section_bytes = wasm
-        .manifest_section()
-        .context("reading provider-manifest section")?;
-    if section_bytes.is_empty() {
-        bail!(
-            "no {} custom section found in {}",
-            mts::MANIFEST_SECTION_NAME,
-            path.display()
-        );
-    }
-
-    let records = wasm
-        .manifest_records()
-        .context("decoding provider manifest records")?
-        .into_iter()
-        .filter_map(|record| match record {
-            mts::ManifestRecord::Unknown { tag, .. } => {
-                anstream::eprintln!("warning: unknown provider-manifest tag 0x{tag:02x}, skipping");
-                None
-            },
-            other => Some(other),
-        })
-        .collect();
-
-    let resolved =
-        mts::ResolvedManifest::resolve(records).context("resolving provider manifest")?;
-
-    if resolved.handlers.is_empty() && resolved.mutations.is_empty() {
-        bail!(
-            "no handler or mutation records in {} custom section of {}",
-            mts::MANIFEST_SECTION_NAME,
-            path.display()
-        );
-    }
-
-    Ok(MountTreeData {
-        handlers: resolved.handlers,
-        mutations: resolved.mutations,
-    })
 }
 
 fn section_header(name: &str) -> String {

@@ -40,7 +40,8 @@ pub(crate) struct Runtime {
 impl Runtime {
     pub(crate) fn connect_for(target: &DockerTarget) -> Result<Self> {
         Ok(Self {
-            docker: connect_docker_client()?,
+            docker: Docker::connect_with_local_defaults()
+                .context("connect to Docker daemon (is it running?)")?,
             target: target.clone(),
         })
     }
@@ -53,9 +54,9 @@ impl Runtime {
         self.target.container_name()
     }
 
-    /// This runtime's own image, e.g. so
-    /// [`crate::frontend_backend::DockerBackend::launch`] can embed it in the
-    /// container body without duplicating it in
+    /// This runtime's own image, so
+    /// [`FrontendBackend::launch`](crate::frontend_backend::FrontendBackend::launch)
+    /// can embed it in the container body without duplicating it in
     /// [`crate::frontend_backend::FrontendLaunchSpec`].
     pub(crate) fn image(&self) -> &ImageRef {
         self.target.image()
@@ -390,7 +391,7 @@ impl Runtime {
                 // reach for a registry: refuse and point at the dev build.
                 anstream::eprintln!("missing");
                 let image = self.image();
-                Err(anyhow!(pull_refusal_reason(BUILD_CHANNEL)))
+                Err(anyhow!(BUILD_CHANNEL.pull_refusal_reason()))
                     .context(format!("image `{image}` is not present locally"))
                     .with_hint("build it with `just frontend-image`")
                     .with_hint("or set a specific image via the OMNIFS_FRONTEND_IMAGE env var or the `[system].frontend_image` config key")
@@ -425,27 +426,6 @@ impl Runtime {
             },
             Err(error) => Err(error).with_context(|| format!("inspect image `{}`", self.image())),
         }
-    }
-}
-
-fn connect_docker_client() -> Result<Docker> {
-    Docker::connect_with_local_defaults().context("connect to Docker daemon (is it running?)")
-}
-
-/// Why a registry-less image absent locally is not pulled, worded per build
-/// channel: only a dev binary defaults to `omnifs-frontend:dev`, so a release
-/// binary hitting this path chose a local tag explicitly and must not be told
-/// it is a dev build.
-const fn pull_refusal_reason(channel: BuildChannel) -> &'static str {
-    match channel {
-        BuildChannel::Dev => {
-            "this omnifs binary is a dev build; it uses the locally built frontend image \
-             and never pulls from a registry"
-        },
-        BuildChannel::Release => {
-            "registry-less image references are local build products; omnifs never pulls \
-             them from a registry"
-        },
     }
 }
 
@@ -486,9 +466,21 @@ mod tests {
 
     #[test]
     fn pull_refusal_reason_names_dev_build_only_on_the_dev_channel() {
-        assert!(pull_refusal_reason(BuildChannel::Dev).contains("dev build"));
-        assert!(!pull_refusal_reason(BuildChannel::Release).contains("dev build"));
-        assert!(pull_refusal_reason(BuildChannel::Release).contains("never pulls"));
+        assert!(
+            BuildChannel::Dev
+                .pull_refusal_reason()
+                .contains("dev build")
+        );
+        assert!(
+            !BuildChannel::Release
+                .pull_refusal_reason()
+                .contains("dev build")
+        );
+        assert!(
+            BuildChannel::Release
+                .pull_refusal_reason()
+                .contains("never pulls")
+        );
     }
 
     #[test]

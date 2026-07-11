@@ -37,7 +37,7 @@ impl DebugArgs {
                     paths,
                     by_type,
                 };
-                let data = crate::mount_tree::read_from_wasm(&path)?;
+                let data = crate::mount_tree::MountTreeData::read_from_wasm(&path)?;
                 anstream::print!("{}", data.render(views));
                 Ok(())
             },

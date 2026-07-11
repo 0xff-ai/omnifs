@@ -27,6 +27,21 @@ pub(crate) enum BuildChannel {
 }
 
 impl BuildChannel {
+    /// Why a missing registry-less image is never pulled. Only a dev binary
+    /// defaults to a local image, so release errors must not call it a dev build.
+    pub(crate) const fn pull_refusal_reason(self) -> &'static str {
+        match self {
+            Self::Dev => {
+                "this omnifs binary is a dev build; it uses the locally built frontend image \
+                 and never pulls from a registry"
+            },
+            Self::Release => {
+                "registry-less image references are local build products; omnifs never pulls \
+                 them from a registry"
+            },
+        }
+    }
+
     pub(crate) const fn word(self) -> &'static str {
         match self {
             Self::Dev => "dev",
