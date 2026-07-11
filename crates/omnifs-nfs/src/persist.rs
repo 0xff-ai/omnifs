@@ -13,8 +13,9 @@
 //! # Ownership
 //!
 //! This schema and its IO live in `omnifs-nfs`, not `omnifs-mtab`. The
-//! `omnifs-mtab` state file (`NfsMountState`) is mount *discovery/teardown* state
-//! (mount point, address, pid) shared by the CLI and daemon; this file is NFS
+//! `omnifs-mtab` state file (`MountState`) is mount *discovery/teardown* state
+//! (protocol kind, mount point, address when applicable, and pid) shared by
+//! frontend runners and the CLI; this file is NFS
 //! *protocol identity* (the filehandle decode table), which the frontend contract
 //! keeps in `omnifs-nfs`. It lands in the same NFS state directory next to the
 //! mtab mount-state files and follows the same discipline: a `version` field, an

@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 #[cfg(unix)]
+const STATE_DIR_MODE: u32 = 0o700;
+#[cfg(unix)]
 const STATE_FILE_MODE: u32 = 0o600;
 
 #[derive(Debug, Error)]
@@ -14,25 +16,44 @@ pub enum StateError {
     Io(#[from] io::Error),
     #[error("{0}")]
     Json(#[from] serde_json::Error),
+    #[error("unsupported mount state version {0}")]
+    UnsupportedVersion(u64),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct NfsMountState {
-    pub version: u8,
-    pub mount_point: PathBuf,
-    pub addr: String,
-    pub pid: u32,
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum MountKind {
+    Fuse,
+    Nfs { addr: SocketAddr },
 }
 
-impl NfsMountState {
-    pub const VERSION: u8 = 1;
+impl MountKind {
+    pub fn nfs_addr(&self) -> Option<SocketAddr> {
+        match self {
+            Self::Nfs { addr } => Some(*addr),
+            Self::Fuse => None,
+        }
+    }
+}
 
-    fn current(mount_point: &Path, addr: SocketAddr) -> Self {
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MountState {
+    pub version: u8,
+    pub mount_point: PathBuf,
+    pub pid: u32,
+    #[serde(flatten)]
+    pub kind: MountKind,
+}
+
+impl MountState {
+    pub const VERSION: u8 = 2;
+
+    fn current(mount_point: &Path, kind: MountKind) -> Self {
         Self {
             version: Self::VERSION,
             mount_point: mount_point.to_path_buf(),
-            addr: addr.to_string(),
             pid: std::process::id(),
+            kind,
         }
     }
 
@@ -43,26 +64,46 @@ impl NfsMountState {
             Err(error) => return Err(error.into()),
         };
 
-        let mut paths = entries
-            .filter_map(Result::ok)
-            .map(|entry| entry.path())
-            .filter(|path| {
-                path.extension()
-                    .is_some_and(|extension| extension == "json")
-            })
-            .collect::<Vec<_>>();
+        let mut paths = Vec::new();
+        for entry in entries {
+            let path = entry?.path();
+            if Self::is_file(&path) {
+                paths.push(path);
+            }
+        }
         paths.sort();
 
-        Ok(paths
+        paths
             .into_iter()
-            .filter_map(|path| Self::read_file(&path).ok())
-            .filter(|state| state.version == Self::VERSION)
-            .collect())
+            .map(|path| Self::read_file(&path))
+            .collect()
     }
 
     pub fn read_file(path: &Path) -> Result<Self, StateError> {
         let file = std::fs::File::open(path)?;
-        serde_json::from_reader(file).map_err(Into::into)
+        let value: serde_json::Value = serde_json::from_reader(file)?;
+        if value.get("version").and_then(serde_json::Value::as_u64)
+            != Some(u64::from(Self::VERSION))
+        {
+            return Err(StateError::UnsupportedVersion(
+                value
+                    .get("version")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or_default(),
+            ));
+        }
+        serde_json::from_value(value).map_err(Into::into)
+    }
+
+    pub fn is_file(path: &Path) -> bool {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| {
+                name.starts_with("mount-")
+                    && Path::new(name)
+                        .extension()
+                        .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
+            })
     }
 }
 
@@ -72,12 +113,36 @@ pub struct StateFile {
 }
 
 impl StateFile {
-    pub fn write(
+    pub fn write_fuse(mount_point: &Path, state_dir: &Path) -> Result<Self, StateError> {
+        Self::write(
+            &MountState::current(mount_point, MountKind::Fuse),
+            state_dir,
+            None,
+        )
+    }
+
+    pub fn write_nfs(
         mount_point: &Path,
         addr: SocketAddr,
         state_dir: &Path,
     ) -> Result<Self, StateError> {
-        let name = format!("mount-{}-{}.json", std::process::id(), addr.port());
+        Self::write(
+            &MountState::current(mount_point, MountKind::Nfs { addr }),
+            state_dir,
+            Some(addr.port()),
+        )
+    }
+
+    fn write(
+        state: &MountState,
+        state_dir: &Path,
+        discriminator: Option<u16>,
+    ) -> Result<Self, StateError> {
+        ensure_private_state_dir(state_dir)?;
+        let name = match discriminator {
+            Some(discriminator) => format!("mount-{}-{discriminator}.json", state.pid),
+            None => format!("mount-{}.json", state.pid),
+        };
         let path = state_dir.join(name);
         let mut file_options = OpenOptions::new();
         file_options.create(true).truncate(true).write(true);
@@ -87,8 +152,7 @@ impl StateFile {
             file_options.mode(STATE_FILE_MODE);
         }
         let mut file = file_options.open(&path)?;
-        let state = NfsMountState::current(mount_point, addr);
-        serde_json::to_writer_pretty(&mut file, &state)?;
+        serde_json::to_writer_pretty(&mut file, state)?;
         writeln!(file)?;
         #[cfg(unix)]
         {
@@ -109,9 +173,26 @@ impl Drop for StateFile {
     }
 }
 
+fn ensure_private_state_dir(state_dir: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(STATE_DIR_MODE)
+            .create(state_dir)?;
+        std::fs::set_permissions(state_dir, std::fs::Permissions::from_mode(STATE_DIR_MODE))?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(state_dir)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{NfsMountState, StateFile};
+    use super::{MountKind, MountState, StateFile};
     use serde_json::Value;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::path::{Path, PathBuf};
@@ -130,28 +211,79 @@ mod tests {
     }
 
     #[test]
-    fn state_file_is_json_and_removed_on_drop() {
+    fn nfs_state_file_is_json_and_removed_on_drop() {
         let dir = temp_state_dir();
-        let guard = StateFile::write(
-            Path::new("/mnt/omnifs"),
-            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 2049),
-            &dir,
-        )
-        .expect("state file");
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 2049);
+        let guard = StateFile::write_nfs(Path::new("/mnt/omnifs"), addr, &dir).expect("state file");
         let path = guard.path().to_path_buf();
         let state: Value =
             serde_json::from_slice(&std::fs::read(&path).expect("read state")).expect("json");
 
-        assert_eq!(state["version"], 1);
+        assert_eq!(state["version"], 2);
+        assert_eq!(state["kind"], "nfs");
         assert_eq!(state["mount_point"], "/mnt/omnifs");
         assert_eq!(state["addr"], "127.0.0.1:2049");
         assert!(state["pid"].as_u64().is_some());
-        let states = NfsMountState::read_all(&dir).expect("mount states");
+        let states = MountState::read_all(&dir).expect("mount states");
         assert_eq!(states.len(), 1);
         assert_eq!(states[0].mount_point, PathBuf::from("/mnt/omnifs"));
+        assert_eq!(states[0].kind.nfs_addr(), Some(addr));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
 
         drop(guard);
         assert!(!path.exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn fuse_state_has_no_nfs_address() {
+        let dir = temp_state_dir();
+        let guard = StateFile::write_fuse(Path::new("/mnt/omnifs"), &dir).expect("state file");
+        let states = MountState::read_all(&dir).expect("mount states");
+
+        assert_eq!(states.len(), 1);
+        assert_eq!(states[0].kind, MountKind::Fuse);
+        assert_eq!(states[0].kind.nfs_addr(), None);
+
+        drop(guard);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn read_all_ignores_non_mount_json() {
+        let dir = temp_state_dir();
+        std::fs::write(dir.join("filehandles.json"), b"{}\n").expect("write unrelated state");
+
+        assert!(MountState::read_all(&dir).expect("mount states").is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn old_schema_fails_by_version_before_shape() {
+        let dir = temp_state_dir();
+        let path = dir.join("mount-old.json");
+        std::fs::write(
+            &path,
+            br#"{"version":1,"mount_point":"/mnt/omnifs","addr":"127.0.0.1:2049","pid":1}"#,
+        )
+        .expect("write old state");
+
+        assert!(matches!(
+            MountState::read_all(&dir),
+            Err(super::StateError::UnsupportedVersion(1))
+        ));
         let _ = std::fs::remove_dir_all(dir);
     }
 }

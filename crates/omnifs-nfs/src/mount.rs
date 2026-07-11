@@ -6,7 +6,7 @@ use crate::server::start_server;
 use omnifs_engine::namespace::{Namespace, NsAttachEvent};
 #[cfg(target_os = "linux")]
 use omnifs_mtab::proc_mounts;
-use omnifs_mtab::{NfsMountState, Platform, StateError, StateFile, UnmountCommand};
+use omnifs_mtab::{MountKind, MountState, Platform, StateError, StateFile, UnmountCommand};
 use std::ffi::OsString;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -81,10 +81,11 @@ impl NfsMountOptions {
     }
 
     fn bind_for_active_mount(&self, mount_point: &Path) -> Result<SocketAddr, NfsFrontendError> {
-        let mut matching = NfsMountState::read_all(&self.state_dir)
+        let mut matching = MountState::read_all(&self.state_dir)
             .map_err(|error| NfsFrontendError::State(error.to_string()))?
             .into_iter()
-            .filter(|state| state.mount_point == mount_point);
+            .filter(|state| state.mount_point == mount_point)
+            .filter_map(|state| state.kind.nfs_addr());
         let persisted = matching.next().ok_or_else(|| {
             NfsFrontendError::State(format!(
                 "active NFS mount {} has no persisted server address",
@@ -97,9 +98,6 @@ impl NfsMountOptions {
                 mount_point.display()
             )));
         }
-        let persisted = persisted.addr.parse().map_err(|error| {
-            NfsFrontendError::State(format!("invalid persisted NFS address: {error}"))
-        })?;
         if self.bind.port() != 0 && self.bind != persisted {
             return Err(NfsFrontendError::State(format!(
                 "active NFS mount {} is connected to {persisted}, not requested {}",
@@ -154,12 +152,12 @@ pub fn mount_blocking(
         generation,
         options.trace_path.clone(),
     )?;
-    let _state_file =
-        StateFile::write(mount_point, server.addr(), &options.state_dir).map_err(|error| {
-            match error {
-                StateError::Io(error) => error.into(),
-                StateError::Json(error) => NfsFrontendError::State(error.to_string()),
-            }
+    let _state_file = StateFile::write_nfs(mount_point, server.addr(), &options.state_dir)
+        .map_err(|error| match error {
+            StateError::Io(error) => error.into(),
+            error @ (StateError::Json(_) | StateError::UnsupportedVersion(_)) => {
+                NfsFrontendError::State(error.to_string())
+            },
         })?;
 
     // Restart case: the kernel client still holds the mount, so serve the export
@@ -553,13 +551,13 @@ fn sweep_stale_states(state_dir: &Path) {
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+        if !MountState::is_file(&path) {
             continue;
         }
-        let Ok(state) = NfsMountState::read_file(&path) else {
+        let Ok(state) = MountState::read_file(&path) else {
             continue;
         };
-        if state.version != NfsMountState::VERSION {
+        if !matches!(state.kind, MountKind::Nfs { .. }) {
             continue;
         }
         if !pid_alive(state.pid) {
@@ -635,7 +633,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let mount = Path::new("/mnt/omnifs");
         let persisted = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 2049);
-        let _state = StateFile::write(mount, persisted, dir.path()).expect("state");
+        let _state = StateFile::write_nfs(mount, persisted, dir.path()).expect("state");
 
         let mut options = NfsMountOptions::loopback(dir.path().to_path_buf());
         options.persist_filehandles = true;
@@ -649,13 +647,13 @@ mod tests {
     fn active_mount_rejects_ambiguous_server_state() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mount = Path::new("/mnt/omnifs");
-        let _first = StateFile::write(
+        let _first = StateFile::write_nfs(
             mount,
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 2049),
             dir.path(),
         )
         .expect("first state");
-        let _second = StateFile::write(
+        let _second = StateFile::write_nfs(
             mount,
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 2050),
             dir.path(),

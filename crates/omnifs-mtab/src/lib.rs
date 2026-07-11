@@ -5,5 +5,5 @@ pub mod proc_mounts;
 pub mod state;
 pub mod unmount;
 
-pub use state::{NfsMountState, StateError, StateFile};
+pub use state::{MountKind, MountState, StateError, StateFile};
 pub use unmount::{Platform, UnmountCommand, UnmountError};

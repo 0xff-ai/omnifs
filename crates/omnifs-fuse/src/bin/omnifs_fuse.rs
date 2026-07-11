@@ -15,6 +15,7 @@ use std::sync::Arc;
 use anyhow::Context as _;
 use clap::Parser;
 use omnifs_engine::Namespace;
+use omnifs_mtab::StateFile;
 use omnifs_vfs_wire::{
     AttachEvent, AttachTarget, FrontendIdentity, FrontendKind, WireNamespace,
     resolve_ready_vsock_port,
@@ -33,6 +34,10 @@ struct Args {
     /// Host-visible mount point to serve the projected tree at.
     #[arg(long)]
     mount_point: PathBuf,
+    /// Directory for local-process mount discovery. Omit for guest/container
+    /// delivery, whose runtime owns process discovery and teardown.
+    #[arg(long)]
+    state_dir: Option<PathBuf>,
     /// Path to the daemon's namespace attach socket to connect to. Mutually
     /// exclusive with the TCP/vsock attach path: when absent,
     /// `OMNIFS_ATTACH_ADDR`/`OMNIFS_ATTACH_TOKEN` in the environment select it
@@ -86,6 +91,12 @@ fn main() -> anyhow::Result<()> {
 
     let namespace_dyn = Arc::clone(&namespace) as Arc<dyn Namespace>;
     let notifier = omnifs_fuse::new_notifier_handle();
+    let _state_file = args
+        .state_dir
+        .as_deref()
+        .map(|state_dir| StateFile::write_fuse(&args.mount_point, state_dir))
+        .transpose()
+        .context("write FUSE mount discovery state")?;
     omnifs_fuse::mount::run_blocking(&args.mount_point, namespace_dyn, &handle, &notifier)
         .context("serve the FUSE mount")?;
 
