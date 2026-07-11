@@ -216,7 +216,7 @@ async fn materialize_cap_rejects_full_read_but_allows_ranged_open() {
     );
     let handle = t
         .tree
-        .open(&ranged, &ctx)
+        .open(&ranged)
         .await
         .expect("ranged open should not apply materialize cap")
         .expect("test provider has a ranged route");
@@ -250,12 +250,11 @@ fn ranged_node(path_str: &str) -> Node {
 #[tokio::test(flavor = "multi_thread")]
 async fn open_ranged_then_read_chunks() {
     let t = test_tree();
-    let ctx = RequestCtx::default();
 
     let node = ranged_node("/hello/ranged");
     let handle = t
         .tree
-        .open(&node, &ctx)
+        .open(&node)
         .await
         .expect("open ranged file")
         .expect("file is ranged");
@@ -283,7 +282,6 @@ async fn open_ranged_then_read_chunks() {
 #[tokio::test(flavor = "multi_thread")]
 async fn open_unknown_ranged_learns_size_on_eof() {
     let t = test_tree();
-    let ctx = RequestCtx::default();
 
     // The unknown-ranged file is immutable + Unknown size.
     let meta = EntryMeta::file(
@@ -299,7 +297,7 @@ async fn open_unknown_ranged_learns_size_on_eof() {
 
     let handle = t
         .tree
-        .open(&node, &ctx)
+        .open(&node)
         .await
         .expect("open unknown-ranged")
         .expect("unknown-ranged is ranged");
@@ -330,7 +328,7 @@ async fn open_probe_returns_none_for_non_ranged_node() {
     let node = t.tree.resolve(&path("/hello/message"), &ctx).await.unwrap();
     let opened = t
         .tree
-        .open(&node, &ctx)
+        .open(&node)
         .await
         .expect("the open probe itself succeeds");
     assert!(

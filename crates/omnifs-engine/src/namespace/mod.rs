@@ -867,13 +867,12 @@ impl TreeNamespace {
             // full-read path. `Tree::open` returning `None` means the route
             // declared ranged but the handler answered full: fall through to
             // the full read.
-            if node.attrs().is_some_and(FileAttrsCache::is_deferred_ranged) {
-                let ctx = RequestCtx { trace };
-                if let Some(handle) = self.tree.open(&node, &ctx).await? {
-                    self.open_count.fetch_add(1, Ordering::Relaxed);
-                    let handle = self.cache_handle(id.0, &node, handle);
-                    return self.read_ranged(id.0, &handle, offset, len).await;
-                }
+            if node.attrs().is_some_and(FileAttrsCache::is_deferred_ranged)
+                && let Some(handle) = self.tree.open(&node).await?
+            {
+                self.open_count.fetch_add(1, Ordering::Relaxed);
+                let handle = self.cache_handle(id.0, &node, handle);
+                return self.read_ranged(id.0, &handle, offset, len).await;
             }
 
             self.read_full(id.0, &node, offset, len, trace).await

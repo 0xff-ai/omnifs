@@ -339,7 +339,7 @@ async fn reads_ranged_file_in_chunks() {
     let node = ranged_node("/hello/ranged");
     let handle = t
         .tree
-        .open(&node, &t.ctx)
+        .open(&node)
         .await
         .expect("open ranged file")
         .expect("file is ranged");

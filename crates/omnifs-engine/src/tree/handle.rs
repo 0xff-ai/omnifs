@@ -22,7 +22,7 @@ use tokio::runtime::Handle;
 use super::error::{Result, TreeError};
 use super::node::Node;
 use super::read::{Chunk, FileAttrStore, enforce_declared_materialize_cap};
-use crate::{RequestCtx, Tree};
+use crate::Tree;
 
 /// Runtime-owned ranged read handle for `Deferred(Ranged)` files. Holds an
 /// `Arc<Runtime>` so it is self-contained across renderer calls. The renderer
@@ -157,7 +157,7 @@ impl Tree {
     /// (an object representation or projected leaf) reports `NotFound`. Either
     /// way this returns `Ok(None)` so the renderer falls through to the full read
     /// path. Faithful port of the FUSE `open_ranged_file` probe.
-    pub async fn open(&self, node: &Node, _ctx: &RequestCtx) -> Result<Option<RangedHandle>> {
+    pub async fn open(&self, node: &Node) -> Result<Option<RangedHandle>> {
         let projected = node.attrs().ok_or_else(|| {
             TreeError::invalid_input(format!(
                 "open requires a deferred file projection: {}",

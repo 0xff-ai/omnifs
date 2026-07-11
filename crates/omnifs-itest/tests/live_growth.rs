@@ -21,14 +21,13 @@ use omnifs_core::path::Path;
 use omnifs_engine::Engine;
 use omnifs_engine::test_support::probe_live_growth;
 use omnifs_engine::view::{FileAttrsCache, FileSize, ReadMode, Stability};
-use omnifs_engine::{Node, RequestCtx, ServingContext, Tree};
+use omnifs_engine::{Node, ServingContext, Tree};
 use omnifs_itest::{RuntimeHarness, make_engine, make_runtime};
 use tempfile::TempDir;
 
 struct LiveTree {
     tree: Tree,
     runtime: Arc<Engine>,
-    ctx: RequestCtx,
     _clone_dir: TempDir,
     _cache_dir: TempDir,
     _config_dir: TempDir,
@@ -51,7 +50,6 @@ fn live_tree() -> LiveTree {
     LiveTree {
         tree,
         runtime,
-        ctx: RequestCtx::default(),
         _clone_dir: clone_dir,
         _cache_dir: cache_dir,
         _config_dir: config_dir,
@@ -81,7 +79,7 @@ async fn live_file_grows_and_follow_read_observes_appended_bytes() {
     let t = live_tree();
     let handle = t
         .tree
-        .open(&live_node("/hello/volatile-tail"), &t.ctx)
+        .open(&live_node("/hello/volatile-tail"))
         .await
         .expect("open volatile-tail")
         .expect("volatile-tail is a ranged source");
