@@ -49,12 +49,6 @@ pub fn is_reserved_provider_leaf(name: &str) -> bool {
     name.starts_with(CTRL_PREFIX)
 }
 
-/// True when `name` is one of the mount-root ignore files.
-#[must_use]
-fn is_ignore_name(name: &str) -> bool {
-    IGNORE_FILES.contains(&name)
-}
-
 /// The cached dirent records for pagination controls a paged directory carries.
 pub(crate) fn control_entries() -> [DirentRecord; 2] {
     [
@@ -206,7 +200,7 @@ pub(crate) fn resolve_synthetic_child(
         return Some((dirent.meta, Synthetic::pagination_control(action)));
     }
 
-    if is_ignore_name(name) && parent.is_root() && !provider_has_real {
+    if IGNORE_FILES.contains(&name) && parent.is_root() && !provider_has_real {
         return Some((Synthetic::root_ignore_meta(), Synthetic::root_ignore()));
     }
 
