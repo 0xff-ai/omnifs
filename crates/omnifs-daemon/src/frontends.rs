@@ -11,7 +11,7 @@
 //! exit (an error or an external unmount) takes the others down with it, so one
 //! mount dying stops the daemon the same way it does with a single frontend.
 
-use omnifs_api::{FrontendInfo, FsType};
+use omnifs_api::{FrontendDelivery, FrontendInfo, FsType};
 use omnifs_engine::Namespace;
 use omnifs_engine::TreeNamespace;
 #[cfg(target_os = "linux")]
@@ -21,16 +21,21 @@ use omnifs_fuse::mount;
 #[cfg(target_os = "linux")]
 use omnifs_mtab::proc_mounts;
 use omnifs_nfs::NfsMountOptions;
+use omnifs_vfs_wire::{AttachObserver, FrontendIdentity, FrontendKind as WireFrontendKind};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
+use std::time::SystemTime;
 use tokio::runtime::Handle;
 
 use crate::app::{FrontendKind, FrontendMount};
 use crate::context::DaemonContext;
 
 /// The daemon's frontend registry: every in-process renderer over the shared
-/// namespace. The namespace is built once in the startup path (post-reconcile)
+/// namespace, plus the live registry of virtualized frontends attached over
+/// the wire. The namespace is built once in the startup path (post-reconcile)
 /// and passed to `serve`, so the in-process renderers and the out-of-process
 /// attach listeners serve the same [`TreeNamespace`].
 pub(crate) struct Frontends {
@@ -39,6 +44,98 @@ pub(crate) struct Frontends {
     /// lifecycle) when `unmount` fires on shutdown.
     stop_tx: mpsc::Sender<()>,
     stop_rx: std::sync::Mutex<Option<mpsc::Receiver<()>>>,
+    /// Every virtualized frontend currently attached over any wire listener,
+    /// kept live via [`AttachObserver`] callbacks rather than polling.
+    attached: Arc<AttachedRegistry>,
+}
+
+/// One virtualized frontend currently attached over the wire.
+#[derive(Debug, Clone)]
+struct AttachedFrontend {
+    kind: WireFrontendKind,
+    mount_point: PathBuf,
+    delivery: FrontendDelivery,
+    /// Tracked for a future status surface; [`FrontendInfo`] does not expose
+    /// it yet, so this field is otherwise unread.
+    #[allow(dead_code)]
+    connected_at: SystemTime,
+}
+
+/// Assigns and tracks ids for every virtualized frontend attached over any of
+/// the daemon's wire listeners. Shared by every listener's own
+/// [`DeliveryObserver`], each stamping the connections it sees with its own
+/// [`FrontendDelivery`] label: the daemon decides that label per listener at
+/// bind time, never from anything the connecting guest claims in its `Hello`.
+struct AttachedRegistry {
+    next_id: AtomicU64,
+    entries: std::sync::Mutex<HashMap<u64, AttachedFrontend>>,
+}
+
+impl AttachedRegistry {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            next_id: AtomicU64::new(1),
+            entries: std::sync::Mutex::new(HashMap::new()),
+        })
+    }
+
+    /// Every currently attached frontend, for `/v1/status`.
+    fn snapshot(&self) -> Vec<FrontendInfo> {
+        self.entries
+            .lock()
+            .expect("attached-frontend registry lock")
+            .values()
+            .map(|frontend| FrontendInfo {
+                source: "wire".to_string(),
+                fs_type: api_fs_type(frontend.kind),
+                mount_point: frontend.mount_point.clone(),
+                delivery: frontend.delivery,
+            })
+            .collect()
+    }
+}
+
+fn api_fs_type(kind: WireFrontendKind) -> FsType {
+    match kind {
+        WireFrontendKind::Fuse => FsType::Fuse,
+        WireFrontendKind::Nfs => FsType::Nfs,
+    }
+}
+
+/// One wire listener's [`AttachObserver`]: shares the daemon-wide
+/// [`AttachedRegistry`] but stamps every connection through it with this
+/// listener's own [`FrontendDelivery`] label.
+struct DeliveryObserver {
+    registry: Arc<AttachedRegistry>,
+    delivery: FrontendDelivery,
+}
+
+impl AttachObserver for DeliveryObserver {
+    fn attached(&self, identity: &FrontendIdentity) -> u64 {
+        let id = self.registry.next_id.fetch_add(1, Ordering::Relaxed);
+        self.registry
+            .entries
+            .lock()
+            .expect("attached-frontend registry lock")
+            .insert(
+                id,
+                AttachedFrontend {
+                    kind: identity.kind,
+                    mount_point: identity.mount_point.clone(),
+                    delivery: self.delivery,
+                    connected_at: SystemTime::now(),
+                },
+            );
+        id
+    }
+
+    fn detached(&self, id: u64) {
+        self.registry
+            .entries
+            .lock()
+            .expect("attached-frontend registry lock")
+            .remove(&id);
+    }
 }
 
 /// One requested frontend: the renderer over the shared namespace at its mount
@@ -69,6 +166,8 @@ impl Nfs {
                 .map(|mount| FrontendInfo {
                     source: mount.device,
                     fs_type: FsType::Nfs,
+                    mount_point: self.mount_point.clone(),
+                    delivery: FrontendDelivery::Native,
                 })
         }
 
@@ -77,6 +176,8 @@ impl Nfs {
             omnifs_nfs::mount_is_active(&self.mount_point).then(|| FrontendInfo {
                 source: "omnifs".to_string(),
                 fs_type: FsType::Nfs,
+                mount_point: self.mount_point.clone(),
+                delivery: FrontendDelivery::Native,
             })
         }
     }
@@ -94,7 +195,24 @@ impl Frontends {
             instances,
             stop_tx,
             stop_rx: std::sync::Mutex::new(Some(stop_rx)),
+            attached: AttachedRegistry::new(),
         }
+    }
+
+    /// Build the [`AttachObserver`] for one wire listener, labeled with the
+    /// delivery mechanism the daemon assigned it at bind time (never
+    /// self-reported by the connecting guest).
+    pub(crate) fn attach_observer(&self, delivery: FrontendDelivery) -> Arc<dyn AttachObserver> {
+        Arc::new(DeliveryObserver {
+            registry: Arc::clone(&self.attached),
+            delivery,
+        })
+    }
+
+    /// Every virtualized frontend currently attached over the wire, tracked
+    /// live (not dependent on reconcile or polling).
+    pub(crate) fn attached(&self) -> Vec<FrontendInfo> {
+        self.attached.snapshot()
     }
 
     /// Serve every in-process frontend over `namespace`, each blocking on its own
@@ -246,6 +364,8 @@ impl Instance {
                 .map(|mount| FrontendInfo {
                     source: mount.device,
                     fs_type: FsType::Fuse,
+                    mount_point: frontend.mount_point.clone(),
+                    delivery: FrontendDelivery::Native,
                 }),
             Instance::Nfs(frontend) => frontend.serving(),
         }

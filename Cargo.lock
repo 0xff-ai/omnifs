@@ -3051,6 +3051,7 @@ dependencies = [
  "omnifs-vfs-wire",
  "omnifs-workspace",
  "serde_json",
+ "tempfile",
  "time",
  "tokio",
  "tokio-stream",

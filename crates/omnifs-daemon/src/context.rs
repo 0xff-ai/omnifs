@@ -385,13 +385,17 @@ impl DaemonContext {
         options
     }
 
-    /// `serving` is the subset of requested frontends currently present in the OS
-    /// mount table. `frontend` (singular) is kept as the first served entry for
-    /// pre-registry clients; `frontends` reports the whole served set.
+    /// `serving` is the subset of requested native frontends currently present
+    /// in the OS mount table. `attached` is every virtualized frontend
+    /// currently attached over the wire, tracked live by the frontend
+    /// registry. `DaemonStatus.frontends` is `serving` plus `attached`: the
+    /// authoritative list of every frontend currently reaching the shared
+    /// namespace, however it is delivered.
     pub(crate) fn status(
         &self,
         serving: Vec<FrontendInfo>,
         attach_serving: bool,
+        attached: Vec<FrontendInfo>,
         mounts: Vec<MountInfo>,
         failed: Vec<MountFailure>,
         credential_degraded: &[(String, String)],
@@ -399,10 +403,13 @@ impl DaemonContext {
         let health = self.health(
             &serving,
             attach_serving,
+            &attached,
             &mounts,
             &failed,
             credential_degraded,
         );
+        let mut frontends = serving;
+        frontends.extend(attached);
         DaemonStatus {
             version: env!("CARGO_PKG_VERSION").to_string(),
             api_major: API_MAJOR,
@@ -414,7 +421,7 @@ impl DaemonContext {
             config_dir: self.layout.config_dir.clone(),
             cache_dir: self.layout.cache_dir.clone(),
             providers_dir: self.layout.providers_dir.clone(),
-            frontends: serving,
+            frontends,
             backend: DaemonBackend::Native {
                 pid: self.process.pid,
             },
@@ -428,6 +435,7 @@ impl DaemonContext {
         &self,
         serving: &[FrontendInfo],
         attach_serving: bool,
+        attached: &[FrontendInfo],
         mounts: &[MountInfo],
         failed: &[MountFailure],
         credential_degraded: &[(String, String)],
@@ -449,7 +457,7 @@ impl DaemonContext {
                 HealthState::Healthy,
                 format!("native daemon pid {}", self.process.pid),
             ),
-            self.frontend_health(serving, attach_serving),
+            self.frontend_health(serving, attach_serving, attached),
             mount_health(mounts, failed, credential_degraded),
         ])
     }
@@ -459,8 +467,15 @@ impl DaemonContext {
     /// `Degraded` when some but not all are, `Starting` when none are yet. A
     /// namespace-only daemon (attach sockets, no in-process mount) is `Healthy`
     /// once its sockets are serving, which is what `/v1/ready` gates on. The
-    /// message lists the requested set so a partial outage names what is missing.
-    fn frontend_health(&self, serving: &[FrontendInfo], attach_serving: bool) -> SubsystemHealth {
+    /// requested/up counts are unaffected by `attached`, which only extends the
+    /// message: `attached` frontends are opportunistic wire clients, not part
+    /// of what the daemon was asked to serve.
+    fn frontend_health(
+        &self,
+        serving: &[FrontendInfo],
+        attach_serving: bool,
+        attached: &[FrontendInfo],
+    ) -> SubsystemHealth {
         let attach_requested = self.attach_sockets.len();
         let requested = self.frontends.len() + attach_requested;
         let attach_up = if attach_serving { attach_requested } else { 0 };
@@ -482,6 +497,14 @@ impl DaemonContext {
                 .iter()
                 .map(|name| format!("attach socket {name}")),
         );
+        listed.extend(attached.iter().map(|frontend| {
+            format!(
+                "attached {} at {} via {}",
+                frontend.fs_type,
+                frontend.mount_point.display(),
+                frontend.delivery
+            )
+        }));
         let listed = listed.join(", ");
 
         let (state, message) = if up == 0 {

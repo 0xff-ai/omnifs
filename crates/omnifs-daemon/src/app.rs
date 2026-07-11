@@ -254,8 +254,13 @@ pub fn run(args: DaemonArgs) -> anyhow::Result<()> {
     // Serve every requested attach socket over the shared namespace, before
     // `serve` (which blocks) so a namespace-only daemon comes up. With the
     // listeners up and mounts reconciled, report ready.
-    let attach_socket_paths =
-        spawn_attach_listeners(attach_sockets, &namespace, &attach_instance_id, &rt)?;
+    let attach_socket_paths = spawn_attach_listeners(
+        attach_sockets,
+        &namespace,
+        &attach_instance_id,
+        &rt,
+        &daemon.attach_observer(omnifs_api::FrontendDelivery::Local),
+    )?;
     if let Some(port) = attach_tcp_port
         && let Err(error) = daemon.ensure_attach_tcp(server::AttachBindAddr::loopback(), port, &rt)
     {
@@ -321,11 +326,15 @@ fn log_reconcile(report: &omnifs_api::ReconcileReport) {
 }
 
 /// Serve each bound attach socket over the shared namespace on the runtime.
+/// `observer` is shared by every socket: each is a plain, filesystem-permission
+/// `--attach-socket <name>` listener, so they all carry the same
+/// [`omnifs_api::FrontendDelivery::Local`] label.
 fn spawn_attach_listeners(
     sockets: Vec<crate::context::AttachSocket>,
     namespace: &Arc<omnifs_engine::TreeNamespace>,
     instance_id: &str,
     rt: &Handle,
+    observer: &Arc<dyn omnifs_vfs_wire::AttachObserver>,
 ) -> anyhow::Result<Vec<PathBuf>> {
     let mut paths = Vec::with_capacity(sockets.len());
     for crate::context::AttachSocket {
@@ -343,6 +352,7 @@ fn spawn_attach_listeners(
             listener,
             instance_id.to_string(),
             None,
+            Some(Arc::clone(observer)),
         ));
         paths.push(path);
     }

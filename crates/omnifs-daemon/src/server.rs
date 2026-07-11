@@ -16,9 +16,9 @@ use omnifs_api::{
     AddedField, ApiError, AuthDelta, AuthSchemeSurface, AuthSurface, CapabilityChange,
     CapabilityDirection, CredentialHealth, CredentialStatus, DaemonBackend, DaemonHealth,
     DaemonStatus, DaemonSubsystem, ErrorCode, FieldChange, FrontendAttachTargetReport,
-    FrontendAttachTargetRequest, FrontendAttachTargetVsockReport, FrontendInfo, FsType,
-    HealthState, LimitChange, LimitDirection, MountFailure, MountInfo, MountOutcome, MountReport,
-    MountUpdateRequest, ProviderArtifact, ProviderSummary, ReadyInfo, ReconcileReport,
+    FrontendAttachTargetRequest, FrontendAttachTargetVsockReport, FrontendDelivery, FrontendInfo,
+    FsType, HealthState, LimitChange, LimitDirection, MountFailure, MountInfo, MountOutcome,
+    MountReport, MountUpdateRequest, ProviderArtifact, ProviderSummary, ReadyInfo, ReconcileReport,
     ReconcileRequest, StopReport, SubsystemHealth, UpgradeDelta,
 };
 use omnifs_auth::{
@@ -133,6 +133,7 @@ impl ControlToken {
         DaemonSubsystem,
         HealthState,
         FrontendInfo,
+        FrontendDelivery,
         FsType,
         DaemonBackend,
         MountInfo,
@@ -331,12 +332,18 @@ impl Daemon {
         let ns = Arc::clone(namespace) as Arc<dyn omnifs_engine::Namespace>;
         let instance_id = self.context.instance_id().to_string();
         let serve_token = token.clone();
+        // Docker is the only delivery mechanism this route serves today (see
+        // `frontend_attach_target`'s `driver` validation); the label lives
+        // here, at bind time, rather than trusting anything a connecting
+        // guest claims about itself.
+        let observer = self.frontends.attach_observer(FrontendDelivery::Docker);
         info!(%addr, "serving namespace attach listener (tcp, token-authenticated)");
         rt.spawn(omnifs_vfs_wire::serve_listener_tcp(
             ns,
             listener,
             instance_id,
             serve_token,
+            Some(observer),
         ));
 
         let state = AttachTcpState { addr, token };
@@ -386,12 +393,14 @@ impl Daemon {
         let ns = Arc::clone(namespace) as Arc<dyn omnifs_engine::Namespace>;
         let instance_id = self.context.instance_id().to_string();
         let serve_token = token.clone();
+        let observer = self.frontends.attach_observer(FrontendDelivery::Krunkit);
         info!(path = %socket_path.display(), "serving namespace attach listener (uds, token-authenticated)");
         rt.spawn(omnifs_vfs_wire::serve_listener(
             ns,
             listener,
             instance_id,
             Some(serve_token),
+            Some(observer),
         ));
 
         let state = AttachUdsState { socket_path, token };
@@ -421,6 +430,17 @@ impl Daemon {
                 warn!(%error, path = %path.display(), "failed to persist the attach listener into the runtime record");
             },
         }
+    }
+
+    /// Build the [`omnifs_vfs_wire::AttachObserver`] for one wire listener,
+    /// labeled with the delivery mechanism the caller assigned it at bind
+    /// time. Exposed so `app.rs` can wire it into the named
+    /// `--attach-socket <name>` listeners it spawns directly.
+    pub(crate) fn attach_observer(
+        &self,
+        delivery: FrontendDelivery,
+    ) -> Arc<dyn omnifs_vfs_wire::AttachObserver> {
+        self.frontends.attach_observer(delivery)
     }
 
     /// Mark the namespace attach-socket listeners as serving. Called once, after
@@ -509,6 +529,7 @@ impl Daemon {
             self.frontends.serving(),
             self.attach_serving
                 .load(std::sync::atomic::Ordering::Acquire),
+            self.frontends.attached(),
             mounts,
             failed,
             &credential_degraded,
@@ -1196,7 +1217,7 @@ async fn reconcile(
 async fn shutdown(State(daemon): State<Arc<Daemon>>) -> Json<StopReport> {
     let status = daemon.control_status();
     let report = StopReport {
-        frontend: status.frontends.into_iter().next(),
+        frontends: status.frontends,
         mount_point: status.mount_point,
         providers_dropped: status.mounts.len(),
     };
@@ -1229,6 +1250,17 @@ async fn frontend_attach_target(
     request: Option<Json<FrontendAttachTargetRequest>>,
 ) -> Response {
     let request = request.map(|Json(request)| request).unwrap_or_default();
+    if request.driver != FrontendDelivery::Docker {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::SpecInvalid,
+            format!(
+                "unsupported attach driver `{}`; only `docker` is accepted on this route \
+                 (krunkit attaches over vsock instead, via /v1/frontend/attach-target/vsock)",
+                request.driver
+            ),
+        );
+    }
     let bind_addr = match AttachBindAddr::requested(request.bind_ip) {
         Ok(bind_addr) => bind_addr,
         Err(error) => {
@@ -1503,6 +1535,9 @@ fn upgrade_plan_from_api(delta: &UpgradeDelta) -> Result<UpgradePlan, serde_json
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
     use axum::Router;
     use axum::body::{Body, to_bytes};
     use axum::http::{StatusCode, header};
@@ -1659,6 +1694,168 @@ mod tests {
         assert!(super::AttachBindAddr::requested(Some(std::net::Ipv4Addr::UNSPECIFIED)).is_err());
         assert!(
             super::AttachBindAddr::requested(Some(std::net::Ipv4Addr::new(192, 0, 2, 1))).is_err()
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Attach registry: `/v1/status` reflects live wire attaches
+    // -----------------------------------------------------------------
+
+    /// Fetch and decode `/v1/status` from `router`.
+    async fn fetch_status(router: &Router) -> omnifs_api::DaemonStatus {
+        let response = router
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/v1/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 4 * 1024 * 1024)
+            .await
+            .unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    /// Poll `/v1/status` until `predicate` holds or the deadline passes. The
+    /// registry update is asynchronous (the observer callback runs on the
+    /// connection's own task), so a status assertion right after
+    /// connect/disconnect needs to tolerate a short delay rather than racing
+    /// it.
+    async fn wait_for_status(
+        router: &Router,
+        mut predicate: impl FnMut(&omnifs_api::DaemonStatus) -> bool,
+    ) -> omnifs_api::DaemonStatus {
+        for _ in 0..200 {
+            let status = fetch_status(router).await;
+            if predicate(&status) {
+                return status;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("status did not converge to the expected shape within the deadline");
+    }
+
+    /// The user-visible fix this phase delivers: a virtualized frontend
+    /// attaching over the TCP namespace listener shows up in `/v1/status`
+    /// with the `docker` delivery label the instant it connects, and
+    /// disappears the instant it disconnects, with no dependency on
+    /// reconcile or polling on the daemon side.
+    #[tokio::test]
+    #[allow(unsafe_code)] // env::set_var requires unsafe; see SAFETY below.
+    async fn attached_frontend_appears_and_disappears_in_status() {
+        let dir = tempfile::tempdir().unwrap();
+        // SAFETY: cargo-nextest isolates each test into its own process (the
+        // same pattern the omnifs-vfs-wire trace-propagation test documents
+        // for OMNIFS_INSPECTOR), so mutating OMNIFS_HOME here cannot race a
+        // parallel test.
+        unsafe {
+            std::env::set_var("OMNIFS_HOME", dir.path());
+        }
+
+        let args = crate::app::DaemonArgs {
+            nfs_port: 0,
+            nfs_state_dir: None,
+            nfs_trace: None,
+            listen: None,
+            frontends: Vec::new(),
+            // A non-empty attach-socket list makes this a namespace-only
+            // daemon (no in-process native frontend to mount), the cheapest
+            // shape for a status test: no real FUSE/NFS mount syscall.
+            attach_sockets: vec!["test".to_string()],
+            attach_tcp: None,
+        };
+        let context = crate::context::DaemonContext::resolve(args).unwrap();
+        context.prepare_startup_dirs().unwrap();
+
+        let cloner = Arc::new(omnifs_engine::GitCloner::new(
+            context.cache_dir().to_path_buf(),
+        ));
+        let registry =
+            Arc::new(omnifs_engine::MountRuntimes::new(context.host_context(), cloner).unwrap());
+        let frontends = crate::frontends::Frontends::from_context(&context);
+        let control_token = super::ControlToken::from_test_value("test-token");
+        let daemon = Arc::new(super::Daemon::new(
+            context,
+            Arc::clone(&registry),
+            None,
+            frontends,
+            control_token,
+        ));
+
+        let rt = tokio::runtime::Handle::current();
+        let namespace = omnifs_engine::TreeNamespace::new(Arc::clone(&registry), rt.clone());
+        daemon.set_namespace(Arc::clone(&namespace));
+
+        let bound = match daemon
+            .ensure_attach_tcp(super::AttachBindAddr::loopback(), 0, &rt)
+            .unwrap()
+        {
+            super::AttachOutcome::Bound(state) => state,
+            super::AttachOutcome::NamespaceNotReady => {
+                panic!("the namespace was set before binding the attach listener")
+            },
+        };
+
+        let router = super::Daemon::router(Arc::clone(&daemon), super::Auth::FilesystemPermissions);
+
+        let baseline = fetch_status(&router).await;
+        assert!(
+            baseline
+                .frontends
+                .iter()
+                .all(|frontend| frontend.delivery != omnifs_api::FrontendDelivery::Docker),
+            "no attached frontend before any client connects"
+        );
+
+        let identity = omnifs_vfs_wire::FrontendIdentity {
+            kind: omnifs_vfs_wire::FrontendKind::Fuse,
+            mount_point: PathBuf::from("/guest/omnifs"),
+        };
+        let wire = omnifs_vfs_wire::WireNamespace::attach(
+            omnifs_vfs_wire::AttachTarget::Tcp {
+                addr: bound.addr.to_string(),
+                token: bound.token.clone(),
+            },
+            identity,
+            rt.clone(),
+        )
+        .await
+        .unwrap();
+
+        let attached_status = wait_for_status(&router, |status| {
+            status
+                .frontends
+                .iter()
+                .any(|frontend| frontend.delivery == omnifs_api::FrontendDelivery::Docker)
+        })
+        .await;
+        let attached = attached_status
+            .frontends
+            .iter()
+            .find(|frontend| frontend.delivery == omnifs_api::FrontendDelivery::Docker)
+            .unwrap();
+        assert_eq!(attached.fs_type, omnifs_api::FsType::Fuse);
+        assert_eq!(attached.source, "wire");
+        assert_eq!(attached.mount_point, PathBuf::from("/guest/omnifs"));
+
+        drop(wire);
+
+        let after_disconnect = wait_for_status(&router, |status| {
+            status
+                .frontends
+                .iter()
+                .all(|frontend| frontend.delivery != omnifs_api::FrontendDelivery::Docker)
+        })
+        .await;
+        assert!(
+            after_disconnect
+                .frontends
+                .iter()
+                .all(|frontend| frontend.delivery != omnifs_api::FrontendDelivery::Docker)
         );
     }
 }

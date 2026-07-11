@@ -48,6 +48,7 @@ nix = { version = "0.30", features = ["net"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
+tempfile = { workspace = true }
 
 [lints]
 workspace = true
