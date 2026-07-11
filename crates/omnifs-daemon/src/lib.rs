@@ -10,5 +10,5 @@ mod context;
 mod frontends;
 mod server;
 
-pub use app::{DaemonArgs, FrontendKind, run};
+pub use app::{DaemonArgs, run};
 pub use server::openapi_json;

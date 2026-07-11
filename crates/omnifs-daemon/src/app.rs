@@ -4,7 +4,7 @@
 //! entrypoint); there is no standalone `omnifsd` binary. The daemon still
 //! runs as its own host-native process and speaks the HTTP control API.
 
-use clap::{Args, ValueEnum};
+use clap::Args;
 use omnifs_engine::GitCloner;
 use omnifs_engine::MountRuntimes;
 use omnifs_engine::init_global_from_env;
@@ -22,31 +22,31 @@ use crate::{context::DaemonContext, frontends, server};
 pub struct DaemonArgs {
     /// NFS loopback listen port. 0 asks the OS for an ephemeral port.
     #[arg(long, default_value_t = 0)]
-    pub nfs_port: u16,
+    pub(crate) nfs_port: u16,
     /// Directory for NFS mount-state files. Defaults under the cache dir.
     #[arg(long)]
-    pub nfs_state_dir: Option<PathBuf>,
+    pub(crate) nfs_state_dir: Option<PathBuf>,
     /// Optional NFS trace log.
     #[arg(long)]
-    pub nfs_trace: Option<PathBuf>,
+    pub(crate) nfs_trace: Option<PathBuf>,
     /// Optional TCP control API listen address. The daemon always serves its
     /// Unix socket and adds TCP only for this debug/test path.
     #[arg(long)]
-    pub listen: Option<SocketAddr>,
+    pub(crate) listen: Option<SocketAddr>,
     /// Serve a specific frontend at a mount point, as `<kind>=<mount_point>`
     /// (`fuse` or `nfs`), repeatable. Absent: the platform-default frontend at
     /// the resolved mount point. Present: serve exactly the listed set, each at
     /// its own mount point (duplicate mount points are rejected). This is a
     /// daemon surface only; the CLI does not expose it yet.
-    #[arg(long = "frontend", value_name = "KIND=MOUNT_POINT", value_parser = parse_frontend_mount)]
-    pub frontends: Vec<FrontendMount>,
+    #[arg(long = "frontend", value_name = "KIND=MOUNT_POINT")]
+    pub(crate) frontends: Vec<FrontendMount>,
     /// Serve the shared namespace over an attach socket at
     /// `$OMNIFS_HOME/frontends/<name>.sock`, repeatable. An out-of-process
     /// `omnifs-fuse` runner attaches to it. A daemon with an attach socket
     /// and no `--frontend` serves the namespace only (no in-process mount).
     /// `<name>` is a bare `[a-z0-9-]+` label.
     #[arg(long = "attach-socket", value_name = "NAME", value_parser = parse_attach_socket_name)]
-    pub attach_sockets: Vec<String>,
+    pub(crate) attach_sockets: Vec<String>,
     /// Additionally serve the shared namespace over a TCP loopback listener at
     /// `127.0.0.1:<port>` (`0` asks the OS for an ephemeral port), guarded by a
     /// per-instance attach token instead of filesystem permissions. This is the
@@ -55,7 +55,7 @@ pub struct DaemonArgs {
     /// no TCP attach listener at start (one can still be bound later on a
     /// running daemon via `POST /v1/frontend/attach-target`).
     #[arg(long = "attach-tcp", value_name = "PORT")]
-    pub attach_tcp: Option<u16>,
+    pub(crate) attach_tcp: Option<u16>,
 }
 
 /// Validate a `--attach-socket <name>` value: a non-empty `[a-z0-9-]+` label,
@@ -79,37 +79,39 @@ fn parse_attach_socket_name(value: &str) -> Result<String, String> {
 /// `--frontend <kind>=<mount_point>` flag and by [`DaemonContext`] when it fills
 /// in the platform default.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FrontendMount {
-    pub kind: FrontendKind,
-    pub mount_point: PathBuf,
+pub(crate) struct FrontendMount {
+    pub(crate) kind: FrontendKind,
+    pub(crate) mount_point: PathBuf,
 }
 
-/// Parse a `--frontend <kind>=<mount_point>` value. The kind is `fuse` or `nfs`;
-/// the mount point must be non-empty.
-fn parse_frontend_mount(value: &str) -> Result<FrontendMount, String> {
-    let (kind, mount) = value
-        .split_once('=')
-        .ok_or_else(|| format!("expected `<kind>=<mount_point>`, got `{value}`"))?;
-    let kind = match kind {
-        "fuse" => FrontendKind::Fuse,
-        "nfs" => FrontendKind::Nfs,
-        other => {
-            return Err(format!(
-                "unknown frontend kind `{other}`; expected `fuse` or `nfs`"
-            ));
-        },
-    };
-    if mount.is_empty() {
-        return Err("frontend mount point must not be empty".to_string());
+impl std::str::FromStr for FrontendMount {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let (kind, mount) = value
+            .split_once('=')
+            .ok_or_else(|| format!("expected `<kind>=<mount_point>`, got `{value}`"))?;
+        let kind = match kind {
+            "fuse" => FrontendKind::Fuse,
+            "nfs" => FrontendKind::Nfs,
+            other => {
+                return Err(format!(
+                    "unknown frontend kind `{other}`; expected `fuse` or `nfs`"
+                ));
+            },
+        };
+        if mount.is_empty() {
+            return Err("frontend mount point must not be empty".to_string());
+        }
+        Ok(Self {
+            kind,
+            mount_point: PathBuf::from(mount),
+        })
     }
-    Ok(FrontendMount {
-        kind,
-        mount_point: PathBuf::from(mount),
-    })
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
-pub enum FrontendKind {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FrontendKind {
     Fuse,
     Nfs,
 }
@@ -162,8 +164,8 @@ pub fn run(args: DaemonArgs) -> anyhow::Result<()> {
     let context = DaemonContext::resolve(args)?;
     context.prepare_startup_dirs()?;
 
-    // Local-only dogfood counters. No config channel reaches the daemon today,
-    // so the off-switch is the `OMNIFS_TELEMETRY` env var (the CLI propagates
+    // Local-only dogfood counters. The daemon's off-switch is the
+    // `OMNIFS_TELEMETRY` env var (the CLI propagates
     // its `[telemetry] enabled = false` into it when launching the daemon).
     let telemetry_backend = telemetry::Backend::Native;
     let telemetry = TelemetrySink::new(context.config_dir(), telemetry::enabled_from_env());
@@ -215,10 +217,7 @@ pub fn run(args: DaemonArgs) -> anyhow::Result<()> {
     let attach_sockets = context.bind_attach_sockets()?;
     let attach_instance_id = context.instance_id().to_string();
     let attach_tcp_port = context.attach_tcp_port();
-    let tcp_listener = context
-        .listen()
-        .map(crate::context::DaemonContext::bind_control_listener)
-        .transpose()?;
+    let tcp_listener = context.bind_control_listener()?;
 
     // The bearer token guards the optional TCP listener only. The Unix socket
     // relies on filesystem permissions and never checks it.

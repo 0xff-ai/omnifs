@@ -47,8 +47,7 @@ pub(crate) struct DaemonContext {
     /// The requested frontend set, each with its own mount point. An absent
     /// `--frontend` flag resolves to the single platform default at the resolved
     /// mount point, unless attach sockets make this a namespace-only daemon with
-    /// an empty set. The first entry is the primary, so a single-mount caller
-    /// keeps today's behavior.
+    /// an empty set. The first entry is the primary frontend.
     frontends: Vec<FrontendMount>,
     /// Optional debug/test TCP control listener beside the always-on Unix socket.
     listen: Option<SocketAddr>,
@@ -132,10 +131,6 @@ impl DaemonContext {
         Ok(())
     }
 
-    pub(crate) fn listen(&self) -> Option<SocketAddr> {
-        self.listen
-    }
-
     pub(crate) fn control_socket(&self) -> PathBuf {
         self.layout.control_socket()
     }
@@ -144,15 +139,19 @@ impl DaemonContext {
         self.layout.runtime_record_file()
     }
 
-    pub(crate) fn bind_control_listener(addr: SocketAddr) -> anyhow::Result<TcpListener> {
-        TcpListener::bind(addr).map_err(|error| {
-            anyhow::anyhow!(
-                "cannot bind control API listener on {addr}: {error}\n\
-                 \n\
-                 Likely cause: another omnifs daemon is already running on that port.\n\
-                 Run `omnifs down` to stop it, then try again."
-            )
-        })
+    pub(crate) fn bind_control_listener(&self) -> anyhow::Result<Option<TcpListener>> {
+        self.listen
+            .map(|addr| {
+                TcpListener::bind(addr).map_err(|error| {
+                    anyhow::anyhow!(
+                        "cannot bind control API listener on {addr}: {error}\n\
+                         \n\
+                         Likely cause: another omnifs daemon is already running on that port.\n\
+                         Run `omnifs down` to stop it, then try again."
+                    )
+                })
+            })
+            .transpose()
     }
 
     /// Bind the host-native control socket at `<config_dir>/control.sock`.
@@ -554,8 +553,8 @@ fn generate_instance_id() -> String {
 }
 
 /// Resolve the requested frontend set. An empty request injects the single
-/// platform-default frontend at the resolved mount point (today's end-to-end
-/// behavior) only when `inject_default` holds; a namespace-only daemon (attach
+/// platform-default frontend at the resolved mount point only when
+/// `inject_default` holds; a namespace-only daemon (attach
 /// sockets, no `--frontend`) passes `false` and gets an empty set. A non-empty
 /// request is served verbatim, after rejecting duplicate mount points and (off
 /// Linux) the Linux-only FUSE frontend.

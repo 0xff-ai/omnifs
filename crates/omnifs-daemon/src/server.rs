@@ -359,8 +359,7 @@ impl Daemon {
     /// Unlike the TCP listener, this binding is not persisted into the runtime
     /// record: the socket path is self-healing (a stale leftover from a crashed
     /// daemon is detected and unlinked on the next bind, same as
-    /// [`crate::context::DaemonContext::bind_attach_sockets`]), and the krunkit
-    /// launcher that will consume this listener is Phase 4 scope.
+    /// [`crate::context::DaemonContext::bind_attach_sockets`]).
     pub fn ensure_attach_uds(
         self: &Arc<Self>,
         rt: &tokio::runtime::Handle,
@@ -571,7 +570,7 @@ impl Daemon {
                 Ok(()) | Err(RegistryError::MountNotFound(_)) => outcome.removed.push(mount),
                 Err(error) => outcome.failed.push(omnifs_engine::MountFailure {
                     mount,
-                    kind: error_kind(&error),
+                    kind: error.failure_kind(),
                     reason: error.to_string(),
                     detail: None,
                 }),
@@ -647,7 +646,13 @@ impl Daemon {
             .map(Ok)
             .chain(BroadcastStream::new(subscription.live))
             .filter_map(|item| match item {
-                Ok(record) => record_line(&record),
+                Ok(record) => match record.to_json_line() {
+                    Ok(line) => Some(line),
+                    Err(error) => {
+                        warn!(%error, "failed to serialize inspector record");
+                        None
+                    },
+                },
                 Err(BroadcastStreamRecvError::Lagged(n)) => Some(format!("# dropped {n} events\n")),
             });
         let body = Body::from_stream(stream.map(Ok::<_, Infallible>));
@@ -900,7 +905,7 @@ async fn mount_create(
     }
 
     let report = daemon.converge_spec(spec, None).await;
-    Json(mount_report(name.as_str(), &report, None)).into_response()
+    Json(report.for_mount(name.as_str(), None)).into_response()
 }
 
 #[utoipa::path(
@@ -1034,7 +1039,7 @@ async fn mount_update(
     }
 
     let report = daemon.converge_spec(spec, approved).await;
-    Json(mount_report(mount_name.as_str(), &report, request.approved)).into_response()
+    Json(report.for_mount(mount_name.as_str(), request.approved)).into_response()
 }
 
 #[utoipa::path(
@@ -1094,7 +1099,7 @@ async fn mount_delete(
     }
 
     let report = daemon.remove_mount(mount_name.as_str()).await;
-    Json(mount_report(mount_name.as_str(), &report, None)).into_response()
+    Json(report.for_mount(mount_name.as_str(), None)).into_response()
 }
 
 #[utoipa::path(
@@ -1391,35 +1396,6 @@ fn validate_spec_mount_name(spec: &Spec) -> Result<MountName, Box<Response>> {
     })
 }
 
-fn mount_report(
-    mount: &str,
-    report: &ReconcileReport,
-    approved: Option<UpgradeDelta>,
-) -> MountReport {
-    let failure = report
-        .failed
-        .iter()
-        .find(|failure| failure.mount == mount)
-        .cloned();
-    let outcome = if failure.is_some() {
-        MountOutcome::Failed
-    } else if report.added.iter().any(|name| name == mount) {
-        MountOutcome::Added
-    } else if report.updated.iter().any(|name| name == mount) {
-        MountOutcome::Updated
-    } else if report.removed.iter().any(|name| name == mount) {
-        MountOutcome::Removed
-    } else {
-        MountOutcome::Unchanged
-    };
-    MountReport {
-        mount: mount.to_string(),
-        outcome,
-        failure,
-        approved,
-    }
-}
-
 fn api_mount_failure(failure: omnifs_engine::MountFailure) -> MountFailure {
     MountFailure {
         mount: failure.mount,
@@ -1438,16 +1414,6 @@ fn api_error_code(kind: FailureKind) -> ErrorCode {
         FailureKind::SpecInvalid => ErrorCode::SpecInvalid,
         FailureKind::ProviderMissing => ErrorCode::ProviderMissing,
         FailureKind::Internal => ErrorCode::Internal,
-    }
-}
-
-fn error_kind(error: &RegistryError) -> FailureKind {
-    match error {
-        RegistryError::ConfigError(_)
-        | RegistryError::DuplicateMount(_)
-        | RegistryError::MountNotFound(_) => FailureKind::SpecInvalid,
-        RegistryError::ProviderNotFound(_) => FailureKind::ProviderMissing,
-        RegistryError::RuntimeError(_) => FailureKind::Internal,
     }
 }
 
@@ -1533,19 +1499,6 @@ fn upgrade_delta_from_plan(plan: &UpgradePlan) -> UpgradeDelta {
 
 fn upgrade_plan_from_api(delta: &UpgradeDelta) -> Result<UpgradePlan, serde_json::Error> {
     serde_json::from_value(serde_json::to_value(delta)?)
-}
-
-fn record_line(record: &omnifs_api::events::InspectorRecord) -> Option<String> {
-    match record.to_json() {
-        Ok(mut line) => {
-            line.push('\n');
-            Some(line)
-        },
-        Err(error) => {
-            warn!(%error, "failed to serialize inspector record");
-            None
-        },
-    }
 }
 
 #[cfg(test)]
