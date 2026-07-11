@@ -4,9 +4,9 @@
 # namespace, so it reaches the API server at the default 127.0.0.1:6443 with
 # k3s's own admin kubeconfig (no TLS-SAN or server rewrite needed). The proxy
 # terminates TLS and auth and re-exposes the API as plain HTTP on a unix
-# socket. The omnifs container bind-mounts that socket and the kubernetes
-# provider reads it through its default `unix:///run/omnifs/k8s.sock` endpoint.
-# omnifs itself holds no cluster credential and needs no egress capability.
+# socket in a host bind directory. `scripts/dev.ts` points the host-native
+# daemon's kubernetes mount at that socket. Omnifs itself holds no cluster
+# credential and needs no egress capability.
 services:
   k3s:
     image: rancher/k3s:v1.31.5-k3s1
@@ -45,8 +45,8 @@ services:
         --accept-hosts='.*'
     volumes:
       - kubeconfig:/output:ro
-      # Shared host dir carrying the unix socket, also bind-mounted into the
-      # omnifs container at the same path. Set by `scripts/dev.ts`.
+      # Shared host directory carrying the unix socket. `scripts/dev.ts`
+      # renders this path into the host-native mount spec.
       - ${OMNIFS_K8S_SOCK_DIR:?set OMNIFS_K8S_SOCK_DIR}:/run/omnifs
 
 volumes:

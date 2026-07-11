@@ -85,7 +85,7 @@ The namespace wire also serves over token-authenticated TCP because a containeri
 
 ### Dev home
 
-`scripts/dev.ts` owns contributor dev state. It renders a dedicated `~/.omnifs-dev` home, bind-mounts it into the container as `OMNIFS_HOME`, and opens the developer inside that container. Host CLI commands use the normal workspace resolution unless `OMNIFS_HOME` is explicit; do not reintroduce a Rust-side dev command or dev-session owner.
+`scripts/dev.ts` owns contributor dev state. It renders a dedicated `~/.omnifs-dev` home, builds the CLI with its provider bundle, starts the host-native daemon through `omnifs up --no-frontend`, then attaches the credential-free frontend and opens the developer at `/omnifs` inside it. Host CLI commands use the normal workspace resolution unless `OMNIFS_HOME` is explicit; do not reintroduce a Rust-side dev command or dev-session owner.
 
 ### Provider bundles
 
