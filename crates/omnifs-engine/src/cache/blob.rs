@@ -80,13 +80,15 @@ impl BlobCache {
 
     /// Look up cached metadata by runtime-local id.
     pub fn lookup_by_id(&self, blob_id: u64) -> Option<Arc<BlobRecord>> {
-        self.blobs.get(&blob_id).map(|r| r.clone())
+        self.blobs
+            .get(&blob_id)
+            .map(|record| Arc::clone(record.value()))
     }
 
     /// Look up cached metadata by provider cache key.
     pub fn lookup_by_key(&self, cache_key: &str) -> Option<Arc<BlobRecord>> {
         let id = self.keys.get(cache_key).map(|entry| *entry)?;
-        self.blobs.get(&id).map(|entry| entry.clone())
+        self.lookup_by_id(id)
     }
 
     /// Return the filesystem path for a provider cache key.
