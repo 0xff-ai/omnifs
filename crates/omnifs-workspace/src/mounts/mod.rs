@@ -351,7 +351,7 @@ impl Registry {
     fn scan(&mut self) -> Result<(), SpecError> {
         self.specs.clear();
         self.failures.clear();
-        let paths = spec_paths_in(&self.mounts_dir).map_err(|source| SpecError::ScanMounts {
+        let paths = self.spec_paths().map_err(|source| SpecError::ScanMounts {
             path: self.mounts_dir.clone(),
             source,
         })?;
@@ -472,7 +472,7 @@ impl Registry {
                 source,
             })?;
         json.push('\n');
-        write_spec_atomic(&self.mounts_dir, &path, json.as_bytes())?;
+        self.write_spec_atomic(&path, json.as_bytes())?;
         self.specs.insert(name, spec.clone());
         Ok(())
     }
@@ -527,41 +527,39 @@ impl Registry {
             })?;
         Ok(lock)
     }
-}
 
-/// Write a spec to `path` atomically through the crate's one atomic writer
-/// (same-directory temp file, then `rename(2)`), so a concurrent reader never
-/// observes a partial spec. The staging temp file the writer creates is not
-/// named `*.json`, so [`spec_paths_in`] skips it even if a crash leaves it
-/// behind.
-fn write_spec_atomic(mounts_dir: &Path, path: &Path, bytes: &[u8]) -> Result<(), SpecError> {
-    fs::create_dir_all(mounts_dir).map_err(|source| SpecError::WriteSpec {
-        path: mounts_dir.to_path_buf(),
-        source,
-    })?;
-    crate::io::write_atomic(path, bytes, 0o644).map_err(|source| SpecError::WriteSpec {
-        path: path.to_path_buf(),
-        source,
-    })
-}
-
-fn spec_paths_in(dir: &Path) -> io::Result<Vec<PathBuf>> {
-    let read = match fs::read_dir(dir) {
-        Ok(read) => read,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(error),
-    };
-
-    let mut files = read
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+    /// Write a spec atomically through the crate's one atomic writer. The
+    /// staging file is not named `*.json`, so [`Self::spec_paths`] skips it if a
+    /// crash leaves it behind.
+    fn write_spec_atomic(&self, path: &Path, bytes: &[u8]) -> Result<(), SpecError> {
+        fs::create_dir_all(&self.mounts_dir).map_err(|source| SpecError::WriteSpec {
+            path: self.mounts_dir.clone(),
+            source,
+        })?;
+        crate::io::write_atomic(path, bytes, 0o644).map_err(|source| SpecError::WriteSpec {
+            path: path.to_path_buf(),
+            source,
         })
-        .collect::<Vec<_>>();
-    files.sort();
-    Ok(files)
+    }
+
+    fn spec_paths(&self) -> io::Result<Vec<PathBuf>> {
+        let read = match fs::read_dir(&self.mounts_dir) {
+            Ok(read) => read,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+
+        let mut files = read
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+            })
+            .collect::<Vec<_>>();
+        files.sort();
+        Ok(files)
+    }
 }
 
 #[cfg(test)]

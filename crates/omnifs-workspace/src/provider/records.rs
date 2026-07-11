@@ -54,32 +54,6 @@ pub struct SubtreeRouteRecord {
     pub capture_schema: Vec<ManifestCaptureRecord>,
 }
 
-#[must_use]
-pub fn frame_record(tag: u8, body: &[u8]) -> Vec<u8> {
-    let len = u32::try_from(body.len() + 2).expect("record body + header fits u32");
-    let mut out = Vec::with_capacity(4 + body.len() + 2);
-    out.extend_from_slice(&len.to_le_bytes());
-    out.push(tag);
-    out.push(0u8);
-    out.extend_from_slice(body);
-    out
-}
-
-pub fn encode_handler(rec: &HandlerRecord) -> Result<Vec<u8>, serde_json::Error> {
-    let body = serde_json::to_vec(rec)?;
-    Ok(frame_record(TAG_HANDLER, &body))
-}
-
-pub fn encode_mutation(rec: &MutationRecord) -> Result<Vec<u8>, serde_json::Error> {
-    let body = serde_json::to_vec(rec)?;
-    Ok(frame_record(TAG_MUTATION, &body))
-}
-
-pub fn encode_subtree_route(rec: &SubtreeRouteRecord) -> Result<Vec<u8>, serde_json::Error> {
-    let body = serde_json::to_vec(rec)?;
-    Ok(frame_record(TAG_SUBTREE_ROUTE, &body))
-}
-
 pub struct ManifestRecordIter<'a> {
     rest: &'a [u8],
 }
@@ -150,23 +124,30 @@ pub enum DecodeError {
 #[cfg(test)]
 mod tests {
     use super::{
-        HandlerKindRecord, HandlerRecord, ManifestRecord, ManifestRecordIter, encode_handler,
-        frame_record,
+        HandlerKindRecord, HandlerRecord, ManifestRecord, ManifestRecordIter, TAG_HANDLER,
     };
+
+    fn frame(tag: u8, body: &[u8]) -> Vec<u8> {
+        let len = u32::try_from(body.len() + 2).expect("record body + header fits u32");
+        let mut framed = Vec::with_capacity(4 + body.len() + 2);
+        framed.extend_from_slice(&len.to_le_bytes());
+        framed.extend_from_slice(&[tag, 0]);
+        framed.extend_from_slice(body);
+        framed
+    }
 
     #[test]
     fn manifest_record_iter_tolerates_unknown_tag() {
-        let mut bytes = frame_record(0xEF, b"arbitrary");
-        bytes.extend_from_slice(
-            &encode_handler(&HandlerRecord {
-                path_template: "/".to_string(),
-                handler_name: "Root".to_string(),
-                handler_kind: HandlerKindRecord::Dir,
-                capture_schema: Vec::new(),
-                subtree_type: None,
-            })
-            .unwrap(),
-        );
+        let mut bytes = frame(0xEF, b"arbitrary");
+        let handler = serde_json::to_vec(&HandlerRecord {
+            path_template: "/".to_string(),
+            handler_name: "Root".to_string(),
+            handler_kind: HandlerKindRecord::Dir,
+            capture_schema: Vec::new(),
+            subtree_type: None,
+        })
+        .unwrap();
+        bytes.extend_from_slice(&frame(TAG_HANDLER, &handler));
 
         let mut iter = ManifestRecordIter::new(&bytes);
         match iter.next().unwrap().unwrap() {

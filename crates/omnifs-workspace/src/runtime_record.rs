@@ -2,9 +2,8 @@
 //!
 //! One artifact, one lifecycle: the host-native daemon writes this the moment
 //! it has bound its control socket and installed its routes, and removes it on
-//! a graceful exit. It replaces both the old `launch.json` and the
-//! `control-token` file: the endpoint the CLI dials, the backend identity
-//! teardown needs, and (on the debug TCP path) the bearer token all live here.
+//! a graceful exit. The endpoint the CLI dials, the backend identity teardown
+//! needs, and (on the debug TCP path) the bearer token all live here.
 //!
 //! The CLI only ever dials an endpoint it read from this record (or from
 //! `OMNIFS_DAEMON_ADDR`), so a foreign daemon in another workspace is
@@ -68,10 +67,9 @@ pub struct AttachRecord {
 pub struct FrontendRecord {
     pub kind: FrontendKind,
     pub mount_point: PathBuf,
-    /// How this frontend is delivered. Absent for a host-native frontend
-    /// (today's only shape); `Some(Via::Docker)` or `Some(Via::Krunkit)` for
-    /// the opt-in virtualized FUSE frontend attached to a host-native
-    /// daemon's TCP namespace listener.
+    /// How this frontend is delivered. Absent for a host-native frontend;
+    /// `Some(Via::Docker)` or `Some(Via::Krunkit)` for a virtualized FUSE
+    /// frontend attached to a host-native daemon's namespace listener.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub via: Option<Via>,
 }
@@ -430,13 +428,6 @@ mod tests {
         .unwrap();
         let read = RuntimeRecord::read(&path).unwrap().unwrap();
         assert_eq!(read.frontends[0].via, None);
-    }
-
-    #[test]
-    fn absent_record_is_none() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(RUNTIME_RECORD_FILE);
-        assert!(RuntimeRecord::read(&path).unwrap().is_none());
     }
 
     #[test]

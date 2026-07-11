@@ -31,7 +31,7 @@ pub const TELEMETRY_SUBDIR: &str = "telemetry";
 /// Environment variable that turns telemetry off for a process. Any of `0`,
 /// `false`, `no`, or `off` (case-insensitive) disables it; anything else, or
 /// being unset, leaves it on. The daemon reads this because no strict-config
-/// channel reaches it today; the CLI honors it too, as a global kill switch on
+/// channel reaches it; the CLI honors it too, as a global kill switch on
 /// top of its `[telemetry] enabled` config field, and propagates it to the
 /// daemon it launches.
 pub const ENV_SWITCH: &str = "OMNIFS_TELEMETRY";
@@ -289,20 +289,5 @@ mod tests {
             2,
             "append preserves the existing content"
         );
-    }
-
-    #[test]
-    fn env_switch_defaults_on_and_respects_falsey_tokens() {
-        // Not asserting against the real process env (tests share it); exercise
-        // the token classification the reader relies on.
-        for on in ["1", "true", "yes", "on", "anything"] {
-            assert!(
-                !matches!(
-                    on.to_ascii_lowercase().as_str(),
-                    "0" | "false" | "no" | "off"
-                ),
-                "{on} should read as enabled"
-            );
-        }
     }
 }

@@ -584,8 +584,8 @@ mod tests {
 
     #[test]
     fn checked_in_provider_manifest_schema_matches_model() {
-        // Every provider now authors its manifest from `#[provider]` annotations
-        // (no `omnifs.provider.json`), so the checked-in JSON Schema is a pure
+        // Every provider authors its manifest from `#[provider]` annotations,
+        // so the checked-in JSON Schema is a pure
         // drift guard for the `ProviderManifest` model. Provider auth blocks are
         // exercised end-to-end by the `all_providers_initialize_and_seal` host
         // integration test, which loads every embedded manifest.

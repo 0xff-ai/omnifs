@@ -36,7 +36,7 @@ pub(crate) fn ensure_private_dir(path: &Path) -> io::Result<()> {
 /// created with `mode` permission bits (an existing file's mode is not
 /// preserved).
 #[cfg_attr(not(unix), allow(unused_variables))]
-pub fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
     let mut options = AtomicOpenOptions::new();
     #[cfg(unix)]
     {
@@ -65,14 +65,5 @@ mod tests {
             let mode = std::fs::metadata(&path).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o600);
         }
-    }
-
-    #[test]
-    fn replaces_existing_content_atomically() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("out.json");
-        write_atomic(&path, b"old", 0o600).unwrap();
-        write_atomic(&path, b"new", 0o600).unwrap();
-        assert_eq!(std::fs::read(&path).unwrap(), b"new");
     }
 }

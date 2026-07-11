@@ -11,7 +11,19 @@ pub struct Name(String);
 impl Name {
     pub fn new(name: impl Into<String>) -> Result<Self, NameError> {
         let name = name.into();
-        validate_name(&name)?;
+        if name.is_empty() || name.len() > 32 {
+            return Err(NameError::InvalidLength);
+        }
+        let mut chars = name.chars();
+        let first = chars.next().expect("non-empty checked above");
+        if !(first.is_ascii_lowercase() || first.is_ascii_digit()) {
+            return Err(NameError::InvalidStart);
+        }
+        for ch in chars {
+            if !(ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-') {
+                return Err(NameError::InvalidCharacter { ch });
+            }
+        }
         Ok(Self(name))
     }
 
@@ -64,21 +76,4 @@ pub enum NameError {
     InvalidStart,
     #[error("mount name contains invalid character `{ch}` ({MOUNT_NAME_HINT})")]
     InvalidCharacter { ch: char },
-}
-
-fn validate_name(name: &str) -> Result<(), NameError> {
-    if name.is_empty() || name.len() > 32 {
-        return Err(NameError::InvalidLength);
-    }
-    let mut chars = name.chars();
-    let first = chars.next().expect("non-empty checked above");
-    if !(first.is_ascii_lowercase() || first.is_ascii_digit()) {
-        return Err(NameError::InvalidStart);
-    }
-    for ch in chars {
-        if !(ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-') {
-            return Err(NameError::InvalidCharacter { ch });
-        }
-    }
-    Ok(())
 }

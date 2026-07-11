@@ -6,7 +6,7 @@
 pub mod authn;
 pub mod creds;
 pub mod ids;
-pub mod io;
+mod io;
 pub mod layout;
 pub mod mounts;
 pub mod provider;

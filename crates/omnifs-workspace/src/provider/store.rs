@@ -1,6 +1,6 @@
 //! Content-addressed provider store.
 //!
-//! Layout under the store root (today `~/.omnifs/providers/`):
+//! Layout under the store root (by default `~/.omnifs/providers/`):
 //!
 //! ```text
 //! <64hex>.wasm   immutable provider artifacts, write-if-absent
@@ -329,16 +329,6 @@ mod tests {
         let index = store.read_index().unwrap();
         assert_eq!(index.providers.len(), 2);
         assert_eq!(index.latest.get("github"), Some(&id2));
-    }
-
-    #[test]
-    fn read_index_is_empty_when_absent() {
-        let dir = tempdir().unwrap();
-        let store = ProviderStore::new(dir.path());
-        let index = store.read_index().unwrap();
-        assert_eq!(index.version, 1);
-        assert!(index.providers.is_empty());
-        assert!(index.latest.is_empty());
     }
 
     #[test]

@@ -25,7 +25,7 @@ pub use manifest::{ProviderAuthManifest, ProviderManifest};
 pub use records::{
     DecodeError, HandlerKindRecord, HandlerRecord, ManifestCaptureRecord, ManifestRecord,
     ManifestRecordIter, MutationRecord, SubtreeRouteRecord, TAG_HANDLER, TAG_MUTATION,
-    TAG_SUBTREE_ROUTE, encode_handler, encode_mutation, encode_subtree_route, frame_record,
+    TAG_SUBTREE_ROUTE,
 };
 pub use resolve::{ResolveError, ResolvedManifest};
 pub use sections::{

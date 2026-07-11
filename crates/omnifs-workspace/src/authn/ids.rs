@@ -121,9 +121,8 @@ impl CredentialId {
     /// `scheme` is the resolved scheme key: the spec's [`Auth::scheme`] value
     /// when present, otherwise the provider-manifest default resolved by the
     /// caller. The account comes from [`Auth::account`], defaulting to
-    /// [`AccountId::default_account`]. This is exactly the derivation the CLI
-    /// credential target and the host injector compute by hand today; both
-    /// rewire onto this function in a later step.
+    /// [`AccountId::default_account`]. Both the CLI credential target and the
+    /// host injector use this derivation.
     ///
     /// [`Auth::scheme`]: crate::mounts::Auth::scheme
     /// [`Auth::account`]: crate::mounts::Auth::account
@@ -318,8 +317,8 @@ mod tests {
         }
     }
 
-    /// Parity with the host injector derivation (`omnifs-engine/src/auth_inject.rs`),
-    /// which now calls `for_mount` directly: account from the mount auth config
+    /// Parity with the host injector derivation (`omnifs-engine/src/auth_inject.rs`):
+    /// account from the mount auth config
     /// or the literal "default", then `CredentialId::new(provider_name,
     /// scheme_key, account)` where the scheme key was resolved from the spec
     /// value or the manifest default.
