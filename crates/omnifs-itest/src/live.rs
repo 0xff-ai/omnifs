@@ -98,7 +98,7 @@ fn ensure_omnifs_built() {
 }
 
 /// Resolve the `wire-test-frontend` binary the wire lanes spawn: this crate's
-/// own out-of-process NFS wire-protocol test double
+/// own out-of-process NFS test double over the Omnifs VFS wire protocol
 /// (`src/bin/wire_test_frontend.rs`).
 ///
 /// `CARGO_BIN_EXE_wire-test-frontend` is only set when compiling this
@@ -448,7 +448,7 @@ fn wait_briefly(child: &mut Child) {
 
 /// Bring up a namespace-only daemon serving one attach socket, then the
 /// out-of-process `wire-test-frontend` NFS runner attached to it. Proves the
-/// projected tree serves out of process over the namespace wire.
+/// projected tree serves out of process over the Omnifs VFS wire protocol.
 ///
 /// Returns `None` (skip) when the platform cannot mount or a surface never comes
 /// up; panics only on a spawn error or a daemon that is alive but never ready

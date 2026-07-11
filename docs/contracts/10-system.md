@@ -41,7 +41,7 @@ OAuth client ids in provider declarations are public application identifiers, no
 
 ### Frontend attach authority
 
-The Docker-hosted frontend receives no credentials or host filesystem mounts. Its only host authority is the token-authenticated namespace wire. Docker Desktop reaches a loopback listener through its host forwarder; native Linux reaches a listener bound specifically to the address assigned to the default `docker0` bridge. The daemon validates that interface assignment rather than trusting a caller-supplied address. Do not bind the attach listener on every host interface or give the frontend host networking merely to cross the container boundary.
+The Docker-hosted frontend receives no credentials or host filesystem mounts. Its only host authority is the token-authenticated Omnifs VFS wire protocol. Docker Desktop reaches a loopback listener through its host forwarder; native Linux reaches a listener bound specifically to the address assigned to the default `docker0` bridge. The daemon validates that interface assignment rather than trusting a caller-supplied address. Do not bind the attach listener on every host interface or give the frontend host networking merely to cross the container boundary.
 
 ## Must not
 

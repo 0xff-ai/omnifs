@@ -1,10 +1,12 @@
-//! Client-side batching cache for [`WireNamespace`](crate::WireNamespace).
+//! Client-side wire cache for the Omnifs VFS wire protocol.
 //!
-//! Every out-of-process filesystem op crosses the wire as one round-trip, and
-//! the phase-3 perf lane measured that per-op serialization as the whole
-//! overhead (read-128k and find-readdir both blew their budgets). This cache
-//! closes the gap with two mechanisms, both keyed strictly off the
-//! engine-decided [`Attrs::ttl`]:
+//! [`WireNamespace`](crate::WireNamespace) uses it only to reduce transport
+//! round trips; cacheability and invalidation semantics remain engine-owned.
+//!
+//! Every uncached out-of-process filesystem op crosses the wire as one
+//! round-trip. Measurements identified per-op serialization as the dominant
+//! overhead, so this cache reduces round trips with two mechanisms, both keyed
+//! strictly off the engine-decided [`Attrs::ttl`]:
 //!
 //! - **Answer memo.** A bounded per-node memo of `getattr`/`getattr_exact`
 //!   answers (keyed [`NodeId`]) and `lookup` answers (keyed `(parent, name)`).
@@ -23,11 +25,11 @@
 //!
 //! # Consistency
 //!
-//! The plan's consistency rule (protocol caches are advisory, epoch-guarded, and
-//! fed by at-least-once events) licenses caching any `ttl > 0` answer: the engine
-//! has already decided such an answer cannot change without an invalidation. Any
+//! Protocol caches are advisory, epoch-guarded, and fed by at-least-once events.
+//! Any `ttl > 0` answer is cacheable because the engine has already decided it
+//! cannot change without an invalidation. Any
 //! [`NsEvent`] naming a node drops that node's memoized attrs, its cached window,
-//! and every `lookup` entry whose parent or child is that node. The wire client
+//! and every `lookup` entry whose parent or child is that node. The VFS wire client
 //! applies the event to this cache before it re-broadcasts it, so a subscriber
 //! that observes an event is guaranteed the stale answer is already gone.
 //!
@@ -49,7 +51,7 @@ use omnifs_engine::{Attrs, DirEntry, NodeAnswer, NodeId, NsEvent, ReadAnswer};
 /// boundary and serves subsequent in-window reads from the buffer.
 pub(crate) const WINDOW_BYTES: u64 = 2 * 1024 * 1024;
 /// Windows cached across nodes (LRU). Four 2 MiB windows cap window memory at
-/// 8 MiB, the ratified ceiling.
+/// 8 MiB, the configured ceiling.
 const MAX_WINDOWS: usize = 4;
 /// Young-generation cap per memo. Peak residency is about twice this across the
 /// young and old generations; a 32k young cap holds roughly 64k entries.

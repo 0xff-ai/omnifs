@@ -1,8 +1,8 @@
 //! `omnifs-fuse`: the out-of-process FUSE frontend runner.
 //!
-//! Attaches a wire-backed namespace to a host-native daemon's shared
-//! namespace (a Unix socket for the Docker-hosted frontend, or vsock for the
-//! krunkit guest) and serves a FUSE mount over it, blocking until unmount.
+//! Attaches to a host-native daemon's shared namespace through the Omnifs VFS
+//! wire protocol (a Unix socket for a local runner, TCP for Docker, or vsock
+//! for the krunkit guest) and serves a FUSE mount over it until unmount.
 //! This is the whole content of the Docker frontend image's `ENTRYPOINT` and
 //! the krunkit guest's `omnifs-frontend.service`: it runs no provider and
 //! needs no engine, so it ships without Wasmtime, the provider bundle, or any
@@ -15,13 +15,11 @@ use std::sync::Arc;
 use anyhow::Context as _;
 use clap::Parser;
 use omnifs_engine::Namespace;
-use omnifs_namespace_wire::{
-    AttachEvent, WireNamespace, resolve_attach_target, resolve_ready_vsock_port,
-};
+use omnifs_vfs_wire::{AttachEvent, AttachTarget, WireNamespace, resolve_ready_vsock_port};
 use tokio::runtime::Handle;
 use tracing::{info, warn};
 
-/// Attach a wire-backed namespace and serve a FUSE mount over it.
+/// Attach through the Omnifs VFS wire protocol and serve a FUSE mount.
 #[derive(Parser, Debug)]
 #[command(
     name = "omnifs-fuse",
@@ -50,7 +48,7 @@ fn main() -> anyhow::Result<()> {
     let ready_port =
         resolve_ready_vsock_port().context("resolve the readiness-beacon vsock port")?;
     let target =
-        resolve_attach_target(args.attach).context("resolve the namespace attach target")?;
+        AttachTarget::resolve(args.attach).context("resolve the namespace attach target")?;
     let target_label = target.to_string();
 
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -72,7 +70,7 @@ fn main() -> anyhow::Result<()> {
 
     #[cfg(target_os = "linux")]
     if let Some(port) = ready_port {
-        omnifs_namespace_wire::spawn_ready_signal(&handle, args.mount_point.clone(), port);
+        omnifs_vfs_wire::spawn_ready_signal(&handle, args.mount_point.clone(), port);
     }
     #[cfg(not(target_os = "linux"))]
     let _ = ready_port;

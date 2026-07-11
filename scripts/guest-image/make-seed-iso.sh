@@ -66,7 +66,7 @@ trap 'rm -rf "$staging"' EXIT
 # `vsock:<port>` instead of `host:port` for the krunkit transport
 # (docs/contracts/40-frontends.md). OMNIFS_READY_VSOCK_PORT is the port the
 # runner dials on host CID to signal the FUSE mount is serving
-# (crates/omnifs-daemon/src/frontend.rs). OMNIFS_SSH_PUBKEY, when given, is
+# (crates/omnifs-vfs-wire/src/beacon.rs). OMNIFS_SSH_PUBKEY, when given, is
 # installed into root's authorized_keys before the vsock ssh socket starts
 # (scripts/guest-image/mkosi/mkosi.extra/usr/local/lib/omnifs/setup-ssh.sh);
 # omitting it (the default here, since this script's only caller today is

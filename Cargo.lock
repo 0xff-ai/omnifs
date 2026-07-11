@@ -3048,6 +3048,7 @@ dependencies = [
  "hex",
  "http",
  "http-body-util",
+ "omnifs-vfs-wire",
  "hyper",
  "hyper-util",
  "hyperlocal",
@@ -3106,7 +3107,6 @@ dependencies = [
  "omnifs-engine",
  "omnifs-fuse",
  "omnifs-mtab",
- "omnifs-namespace-wire",
  "omnifs-nfs",
  "omnifs-workspace",
  "serde_json",
@@ -3157,6 +3157,7 @@ dependencies = [
  "omnifs-core",
  "omnifs-itest",
  "omnifs-wit",
+ "omnifs-vfs-wire",
  "omnifs-workspace",
  "parking_lot",
  "postcard",
@@ -3193,7 +3194,7 @@ dependencies = [
  "libc",
  "omnifs-engine",
  "omnifs-mtab",
- "omnifs-namespace-wire",
+ "omnifs-vfs-wire",
  "omnifs-wit",
  "omnifs-workspace",
  "parking_lot",
@@ -3216,7 +3217,6 @@ dependencies = [
  "omnifs-api",
  "omnifs-core",
  "omnifs-engine",
- "omnifs-namespace-wire",
  "omnifs-nfs",
  "omnifs-wit",
  "omnifs-workspace",
@@ -3238,24 +3238,6 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
-]
-
-[[package]]
-name = "omnifs-namespace-wire"
-version = "0.2.1"
-dependencies = [
- "constant_time_eq",
- "futures",
- "omnifs-api",
- "omnifs-engine",
- "omnifs-itest",
- "postcard",
- "serde",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-vsock",
- "tracing",
 ]
 
 [[package]]
@@ -3341,6 +3323,24 @@ dependencies = [
  "omnifs-sdk",
  "serde",
  "serde_json",
+[[package]]
+name = "omnifs-vfs-wire"
+version = "0.2.1"
+dependencies = [
+ "constant_time_eq",
+ "futures",
+ "omnifs-api",
+ "omnifs-engine",
+ "omnifs-itest",
+ "postcard",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-vsock",
+ "tracing",
+]
+
  "serde_yaml",
 ]
 

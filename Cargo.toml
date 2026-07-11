@@ -33,7 +33,7 @@ omnifs-fuse = { version = "0.2.1", path = "crates/omnifs-fuse" }
 omnifs-workspace = { version = "0.2.1", path = "crates/omnifs-workspace" }
 omnifs-core = { version = "0.2.1", path = "crates/omnifs-core" }
 omnifs-mtab = { version = "0.2.1", path = "crates/omnifs-mtab" }
-omnifs-namespace-wire = { version = "0.2.1", path = "crates/omnifs-namespace-wire" }
+omnifs-vfs-wire = { version = "0.2.1", path = "crates/omnifs-vfs-wire" }
 omnifs-nfs = { version = "0.2.1", path = "crates/omnifs-nfs" }
 omnifs-sdk = { version = "0.2.1", path = "crates/omnifs-sdk" }
 omnifs-sdk-macros = { version = "0.2.1", path = "crates/omnifs-sdk-macros" }

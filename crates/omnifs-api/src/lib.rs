@@ -527,7 +527,8 @@ pub struct FrontendAttachTargetRequest {
 /// `POST /v1/frontend/attach-target`: the TCP attach target a frontend dials
 /// (address plus per-instance attach token), whether just bound or already
 /// serving from an earlier call (or from `--attach-tcp` at daemon start).
-/// Named after what it returns: the wire client's `AttachTarget::Tcp`.
+/// Named after what it returns: the Omnifs VFS wire protocol client's
+/// `AttachTarget::Tcp`.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct FrontendAttachTargetReport {
     pub addr: String,
@@ -536,7 +537,8 @@ pub struct FrontendAttachTargetReport {
 
 /// `POST /v1/frontend/attach-target/vsock`: the vsock attach target's host
 /// side, a token-checking UDS listener's socket path plus the per-instance
-/// attach token the guest presents (the wire client's `AttachTarget::Vsock`).
+/// attach token the guest presents (the Omnifs VFS wire protocol client's
+/// `AttachTarget::Vsock`).
 /// This is the krunkit-on-macOS path: a guest VM has no shared host Unix
 /// socket and no Docker-style loopback either, so it dials host vsock instead,
 /// and krunkit proxies every vsock connection onto `socket_path`. Every

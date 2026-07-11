@@ -7,9 +7,8 @@
 //! - **Lane 1 (in-process).** The daemon serves the platform-default host-native
 //!   frontend itself (the native path the conformance matrix uses).
 //! - **Lane 2 (wire).** A namespace-only daemon (`--attach-socket`) plus an
-//!   out-of-process `wire-test-frontend` NFS runner (this crate's wire-protocol
-//!   test double) attached to it, so every filesystem op crosses the namespace
-//!   wire.
+//!   out-of-process `wire-test-frontend` NFS test double attached through the
+//!   Omnifs VFS wire protocol, so every filesystem op crosses the VFS wire.
 //!
 //! The lanes run sequentially, never two mounts at once, under one held NFS
 //! serial lock so no other test process interleaves a mount between them. Lane 1

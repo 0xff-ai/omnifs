@@ -4,15 +4,17 @@
 //! legs, run in order against one live mount:
 //!
 //! - **Leg A (frontend kill).** SIGKILL the `wire-test-frontend` runner (this
-//!   crate's out-of-process NFS wire-protocol test double) mid-workload
+//!   crate's out-of-process NFS test double over the Omnifs VFS wire protocol)
+//!   mid-workload
 //!   and relaunch it with the same argv (same pinned NFS port, same state dir).
 //!   The kernel client keeps the mount and its filehandles; the restarted runner
 //!   reloads the persisted filehandle table (same generation) and serves without
 //!   remounting. A held fd keeps reading, a fresh open works, and a previously
 //!   listed directory still lists. No unmount happened.
 //! - **Leg B (daemon kill).** SIGKILL the namespace-only daemon under the live
-//!   frontend and relaunch it. The frontend's wire client reconnects onto a fresh
-//!   instance id, drops every cached `NodeId`, and re-resolves lazily. The held fd
+//!   frontend and relaunch it. The frontend's VFS wire client reconnects onto a
+//!   fresh instance id, drops every cached `NodeId`, and re-resolves lazily. The
+//!   held fd
 //!   keeps working and a new open succeeds; no ESTALE for surviving handles.
 //!
 //! Gated on `OMNIFS_ACCEPTANCE_LIVE`. Holds the cross-process NFS serialization

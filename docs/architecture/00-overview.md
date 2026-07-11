@@ -75,6 +75,14 @@ NFSv4.0 loopback is the macOS host-native frontend. It is read-only today and ow
 
 Neither frontend owns projection semantics, provider WIT calls, cache schema, root enumeration, learned-size rules, preload policy, inline-byte policy, or negative lookup policy.
 
+An out-of-process frontend consumes the same `omnifs_engine::Namespace` through
+the Omnifs VFS wire protocol. `omnifs-engine` remains the semantic owner;
+`omnifs-vfs-wire` owns postcard serialization, framing, the handshake, attach
+target resolution and reconnect, readiness signaling, and its client-side wire
+cache. Unix sockets, token-authenticated TCP, and vsock are attach transports
+for this one internal protocol. The VFS wire protocol is separate from the
+provider WIT contract and does not define another projection model.
+
 ## Control plane
 
 There is one `omnifs` binary. The runtime loop lives behind hidden `omnifs daemon`. The CLI owns setup, credentials, lifecycle commands, and user-facing UX. The daemon owns runtime serving and exposes a REST API whose DTOs live in `omnifs-api`.

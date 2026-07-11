@@ -332,7 +332,7 @@ impl Daemon {
         let instance_id = self.context.instance_id().to_string();
         let serve_token = token.clone();
         info!(%addr, "serving namespace attach listener (tcp, token-authenticated)");
-        rt.spawn(omnifs_namespace_wire::serve_listener_tcp(
+        rt.spawn(omnifs_vfs_wire::serve_listener_tcp(
             ns,
             listener,
             instance_id,
@@ -388,7 +388,7 @@ impl Daemon {
         let instance_id = self.context.instance_id().to_string();
         let serve_token = token.clone();
         info!(path = %socket_path.display(), "serving namespace attach listener (uds, token-authenticated)");
-        rt.spawn(omnifs_namespace_wire::serve_listener(
+        rt.spawn(omnifs_vfs_wire::serve_listener(
             ns,
             listener,
             instance_id,

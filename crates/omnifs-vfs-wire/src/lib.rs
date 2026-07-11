@@ -1,15 +1,18 @@
-//! The namespace surface over a byte stream.
+//! The Omnifs VFS wire protocol.
 //!
-//! This crate serializes the phase-2 [`Namespace`](omnifs_engine::Namespace)
-//! trait so a frontend renderer can run out of process from the daemon that owns
-//! the projection. The daemon serves a [`TreeNamespace`](omnifs_engine::TreeNamespace)
-//! over a Unix socket with [`serve_listener`]; a renderer attaches a
-//! [`WireNamespace`] to that socket and holds a `dyn Namespace` that speaks
-//! frames instead of calling the engine directly.
+//! [`Namespace`](omnifs_engine::Namespace) in `omnifs-engine` owns shared VFS
+//! semantics. This crate owns only their transport representation: postcard
+//! serialization, length-delimited framing, handshake, attach target resolution
+//! and reconnect, readiness signaling, and the client wire cache.
 //!
-//! There is no RPC framework here by design (ratified decision D4). The wire is
-//! the length-delimited [`frame`] codec plus a fixed handshake: one request or
-//! response is one postcard-encoded frame, multiplexed by an id.
+//! The daemon serves a [`TreeNamespace`](omnifs_engine::TreeNamespace) over a
+//! byte stream with [`serve_listener`]; an out-of-process renderer attaches a
+//! [`WireNamespace`] and holds a `dyn Namespace` that speaks frames instead of
+//! calling the engine directly.
+//!
+//! There is no RPC framework. The wire is the length-delimited [`frame`] codec
+//! plus a fixed handshake: one request or response is one postcard-encoded
+//! frame, multiplexed by an id.
 //!
 //! # Handshake
 //!
@@ -48,13 +51,12 @@ use serde::{Deserialize, Serialize};
 #[cfg(target_os = "linux")]
 pub use beacon::spawn_ready_signal;
 pub use beacon::{ReadyPortError, resolve_ready_vsock_port};
-pub use client::{AttachTarget, AttachTargetError, WireNamespace, resolve_attach_target};
+pub use client::{AttachTarget, AttachTargetError, WireNamespace};
 pub use server::{serve_connection, serve_listener, serve_listener_tcp};
 
-/// The wire protocol version. Bumped on any incompatible change to the frame
-/// payloads or the handshake. A client and server that disagree refuse to
-/// serve: there is no negotiation ceremony (alpha, ratified D4), so v2 rejects
-/// a v1 peer outright rather than falling back.
+/// The Omnifs VFS wire protocol version. Bumped on any incompatible change to
+/// the frame payloads or handshake. A client and server that disagree refuse
+/// to serve: there is no version negotiation, so v2 rejects a v1 peer outright.
 pub const PROTOCOL: u32 = 2;
 
 /// One namespace call, mirroring the [`Namespace`](omnifs_engine::Namespace)
@@ -132,8 +134,8 @@ pub(crate) enum Handshake {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AttachEvent {
     /// The daemon restarted under the client: every [`NodeId`] the consumer holds
-    /// is invalid and must be re-resolved from the root. Part B teaches the NFS
-    /// renderer to act on this; today it is exposed for observation.
+    /// is invalid. The out-of-process NFS test runner translates this into a
+    /// namespace reattach event; FUSE records it for observability.
     Reattached {
         old_instance: String,
         new_instance: String,

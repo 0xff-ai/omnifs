@@ -273,7 +273,7 @@ impl DaemonContext {
     }
 
     /// This daemon start's instance id, reported in status, the runtime record,
-    /// and the namespace-wire handshake.
+    /// and the Omnifs VFS wire protocol handshake.
     pub(crate) fn instance_id(&self) -> &str {
         &self.instance_id
     }

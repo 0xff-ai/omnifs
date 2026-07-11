@@ -1,13 +1,13 @@
 [package]
-name = "omnifs-namespace-wire"
+name = "omnifs-vfs-wire"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "Length-delimited postcard wire for the omnifs namespace surface"
+description = "Omnifs VFS wire protocol and attach transport"
 categories = ["filesystem"]
-keywords = ["omnifs", "namespace", "wire", "postcard", "filesystem"]
+keywords = ["omnifs", "vfs", "wire", "postcard", "filesystem"]
 
 [dependencies]
 omnifs-engine = { workspace = true }
@@ -33,8 +33,7 @@ tokio-vsock = "0.7.2"
 
 [dev-dependencies]
 tempfile = { workspace = true }
-# For a real engine-backed `TreeNamespace` in the trace-propagation test: no
-# cycle, omnifs-itest does not depend on omnifs-namespace-wire.
+# Provides a real engine-backed `TreeNamespace` for the trace-propagation test.
 omnifs-itest = { path = "../omnifs-itest" }
 
 [lints]

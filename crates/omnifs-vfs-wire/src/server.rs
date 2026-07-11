@@ -1,4 +1,7 @@
-//! The wire server: it adapts a [`Namespace`] onto a byte stream.
+//! Server for the Omnifs VFS wire protocol.
+//!
+//! It adapts the engine-owned [`Namespace`] onto a byte stream without owning
+//! any VFS semantics.
 //!
 //! [`serve_connection`] runs one attached client; [`serve_listener`] accepts
 //! clients on a Unix socket, optionally checking a per-instance attach token

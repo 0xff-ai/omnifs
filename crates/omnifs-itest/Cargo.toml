@@ -7,7 +7,7 @@ repository.workspace = true
 homepage.workspace = true
 description = "Centralized integration tests and harnesses for omnifs providers"
 
-# The wire-protocol test double the live acceptance lanes spawn: an
+# The Omnifs VFS wire protocol test double the live acceptance lanes spawn: an
 # out-of-process NFS renderer over a wire-attached namespace, mirroring what
 # the retired `omnifs frontend run --kind nfs` runner did. Test-crate-owned on
 # purpose: the shipped runner binary (`omnifs-fuse`) is FUSE-only, and this
@@ -20,7 +20,7 @@ path = "src/bin/wire_test_frontend.rs"
 [dependencies]
 omnifs-api = { workspace = true }
 omnifs-engine = { workspace = true }
-omnifs-namespace-wire = { workspace = true }
+omnifs-vfs-wire = { workspace = true }
 omnifs-wit = { path = "../omnifs-wit", features = ["host-bindings"] }
 omnifs-core = { path = "../omnifs-core" }
 omnifs-workspace = { workspace = true }

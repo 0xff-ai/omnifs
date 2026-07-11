@@ -383,9 +383,9 @@ async fn handshake_version_mismatch_is_rejected() {
     }
 }
 
-/// v1 (the pre-attach-token protocol) is rejected outright by a v2 server, with
-/// no negotiation fallback (alpha, ratified D4): the client-visible error names
-/// the mismatch instead of leaving an ambiguous closed connection.
+/// v1 (the pre-attach-token protocol) is rejected outright by a v2 server. The
+/// client-visible error names the mismatch instead of leaving an ambiguous
+/// closed connection.
 #[tokio::test]
 async fn v1_client_is_rejected_outright() {
     let stub = StubNamespace::new();
@@ -650,8 +650,8 @@ async fn tcp_reconnect_fires_reattached_on_new_instance() {
     };
     let attach_task = rt.spawn(WireNamespace::attach(attach_target, rt.clone()));
 
-    // Phase A: answer the handshake as "inst-a", checking the presented token,
-    // then drop the stream outright to sever the connection.
+    // Establish the initial instance, check the presented token, then drop the
+    // stream outright to sever the connection.
     {
         let (mut stream, _) = listener.accept().await.unwrap();
         let hello_frame = read_frame(&mut stream).await.unwrap().expect("hello frame");
@@ -677,8 +677,8 @@ async fn tcp_reconnect_fires_reattached_on_new_instance() {
     assert_eq!(ns.instance_id(), "inst-a");
     let mut attach_events = ns.subscribe_attach_events();
 
-    // Phase B: the manager reconnects to the same address on its own; answer as
-    // "inst-b" this time and keep the connection open.
+    // The manager reconnects to the same address on its own. Identify the new
+    // connection as "inst-b" and keep it open.
     let (mut stream_b, _) = listener.accept().await.unwrap();
     let hello_frame = read_frame(&mut stream_b)
         .await
@@ -1128,7 +1128,7 @@ async fn concurrent_reads_do_not_deadlock_or_double_fetch() {
 }
 
 // ---------------------------------------------------------------------------
-// F7: inspector trace propagation across the wire
+// Inspector trace propagation across the wire
 // ---------------------------------------------------------------------------
 //
 // A real, engine-backed `TreeNamespace` (over the in-tree `test_provider`),
@@ -1168,12 +1168,9 @@ mod trace_propagation {
 
     /// A read served through a wire-attached namespace produces engine-side
     /// trace records spanning the whole causal chain: the wire dispatch's
-    /// "namespace request" (`FuseStart`/`FuseEnd`, named for the frontend the
-    /// event predates) and the provider callout underneath it
-    /// (`ProviderStart`/`ProviderEnd`), all tagged with the one id
-    /// `TreeNamespace` minted for this call. Before this fix, `RequestCtx`'s
-    /// `trace` was always `None` (severed at the namespace port), so none of
-    /// this ever fired for any caller, wire-relayed or in-process.
+    /// namespace request events (`FuseStart`/`FuseEnd`) and the provider
+    /// callout underneath them (`ProviderStart`/`ProviderEnd`), all tagged with
+    /// the one id `TreeNamespace` minted for this call.
     #[tokio::test(flavor = "multi_thread")]
     #[allow(unsafe_code)] // env::remove_var requires unsafe; see SAFETY below.
     async fn wire_relayed_read_produces_engine_side_trace_records() {

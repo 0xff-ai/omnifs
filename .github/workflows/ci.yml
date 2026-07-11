@@ -59,7 +59,7 @@ jobs:
             guest_image:
               - 'scripts/guest-image/**'
               - 'crates/omnifs-fuse/**'
-              - 'crates/omnifs-namespace-wire/**'
+              - 'crates/omnifs-vfs-wire/**'
               - '.github/workflows/ci.yml'
       - id: decide
         env:

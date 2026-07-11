@@ -339,7 +339,7 @@ fn spawn_attach_listeners(
         let listener = tokio::net::UnixListener::from_std(listener)?;
         let ns = Arc::clone(namespace) as Arc<dyn omnifs_engine::Namespace>;
         info!(%name, path = %path.display(), "serving namespace attach socket");
-        rt.spawn(omnifs_namespace_wire::serve_listener(
+        rt.spawn(omnifs_vfs_wire::serve_listener(
             ns,
             listener,
             instance_id.to_string(),

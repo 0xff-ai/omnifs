@@ -676,8 +676,8 @@ fn fuse_docker_lifecycle_and_matrix() {
 ///    container's own mount namespace, so killing it leaves nothing to clean
 ///    up host-side; the only observable effect is the container going away.
 ///    `frontend up` again creates a fresh container that serves.
-/// 2. **Kill the daemon, leaving the container alive.** The wire client
-///    reconnects with backoff forever (`omnifs-namespace-wire`), so the
+/// 2. **Kill the daemon, leaving the container alive.** The VFS wire client
+///    reconnects with backoff forever (`omnifs-vfs-wire`), so the
 ///    container process itself does not crash. But its `OMNIFS_ATTACH_ADDR`/
 ///    `OMNIFS_ATTACH_TOKEN` are baked in at container creation, and a fresh
 ///    daemon mints a new ephemeral attach port and a new per-instance token,

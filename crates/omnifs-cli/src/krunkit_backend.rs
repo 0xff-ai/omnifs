@@ -1,5 +1,5 @@
 //! The krunkit (libkrun) frontend backend: a macOS microVM hosting the same
-//! `omnifs-fuse` binary and wire protocol the Docker backend runs in a
+//! `omnifs-fuse` binary and Omnifs VFS wire protocol the Docker backend runs in a
 //! container, attached to the host-native daemon's namespace over vsock
 //! instead of TCP.
 //!
@@ -60,7 +60,7 @@ const SERIAL_LOG_NAME: &str = "serial.log";
 
 /// Guest vsock port the daemon's attach listener is proxied onto.
 const ATTACH_VSOCK_PORT: u32 = 1024;
-/// Guest vsock port the readiness beacon (see `omnifs-daemon/src/frontend.rs`)
+/// Guest vsock port used by the readiness beacon in `omnifs-vfs-wire`.
 /// dials once the FUSE mount is serving.
 const READY_VSOCK_PORT: u32 = 1025;
 /// Guest vsock port the image's socket-activated dropbear listens on.
@@ -679,10 +679,10 @@ impl FrontendBackend for KrunkitBackend {
 
     async fn mount_ready(&self, _path: &str) -> Result<bool> {
         // Krunkit has no docker-exec-equivalent channel to probe a specific
-        // guest path from outside the VM; the readiness beacon
-        // (`crates/omnifs-daemon/src/frontend.rs`) already gates on the FUSE
-        // mount being served before it dials in, so observing that beacon is
-        // the whole-guest equivalent of Docker's per-path probe.
+        // guest path from outside the VM; the VFS wire readiness beacon
+        // already gates on the FUSE mount being served before it dials in, so
+        // observing that beacon is the whole-guest equivalent of Docker's
+        // per-path probe.
         Ok(self.ready.load(Ordering::SeqCst))
     }
 

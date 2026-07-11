@@ -301,8 +301,8 @@ pub enum NsRetryClass {
 /// engine's tree errors plus the retry class, so a frontend maps to errno /
 /// nfsstat4 without importing engine internals.
 ///
-/// Serde-derived because it crosses the namespace wire inside every
-/// `WireResponse` (`omnifs-namespace-wire`): a server-side op failure is
+/// Serde-derived because it crosses the Omnifs VFS wire protocol inside every
+/// `WireResponse` (`omnifs-vfs-wire`): a server-side op failure is
 /// postcard-encoded and re-raised on the client renderer verbatim.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 pub enum NsError {
@@ -371,7 +371,7 @@ impl EventStream {
     /// Build an event stream over an arbitrary broadcast receiver.
     ///
     /// The in-engine [`TreeNamespace`] taps its own broadcast sender, but a
-    /// wire-backed client (`omnifs-namespace-wire`) re-broadcasts the events it
+    /// VFS wire client (`omnifs-vfs-wire`) re-broadcasts the events it
     /// decodes off the socket through a local channel and hands frontends an
     /// `EventStream` over that receiver; this is the constructor it needs.
     #[must_use]

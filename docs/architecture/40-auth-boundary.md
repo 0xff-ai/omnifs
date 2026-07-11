@@ -45,7 +45,7 @@ Refresh and retry are host protocol behavior. Providers should model permission 
 
 ## Runtime trust boundary
 
-The CLI and host-native daemon are trusted local control-plane code. Provider WASM is untrusted. A virtualized FUSE frontend is deliberately credential-free: it receives only the authority to attach to the daemon's namespace wire.
+The CLI and host-native daemon are trusted local control-plane code. Provider WASM is untrusted. A virtualized FUSE frontend is deliberately credential-free: it receives only the authority to attach through the daemon's Omnifs VFS wire protocol.
 
 Do not design credential boundaries around hiding `OMNIFS_HOME` from the trusted daemon, which owns that state. Do prevent provider WASM and optional frontend guests from reading secrets or escalating host resources.
 

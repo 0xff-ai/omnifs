@@ -6,9 +6,9 @@
 # was found, mounted, and the unit execed the binary). A successful attach is
 # not expected: the placeholder address has no route from inside the guest,
 # so `omnifs-fuse` retries its connect for up to 30s
-# (INITIAL_CONNECT_DEADLINE in crates/omnifs-namespace-wire/src/client.rs)
-# before giving up. Proving the daemon side of a real attach is a later
-# phase's krunkit driver work, not this smoke.
+# (INITIAL_CONNECT_DEADLINE in crates/omnifs-vfs-wire/src/client.rs)
+# before giving up. This smoke intentionally covers guest boot and service
+# startup only; it does not exercise a live attach.
 #
 # Requires target/guest-image/omnifs-guest.raw (`just guest-image`) and
 # krunkit on PATH.

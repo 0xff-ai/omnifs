@@ -43,10 +43,9 @@ pub enum ReadyPortError {
     UnsupportedPlatform { env: &'static str },
 }
 
-/// Parse `OMNIFS_READY_VSOCK_PORT` if set (only the krunkit guest's seed ever
-/// sets it). Absence is not an error — today's behavior for every other
-/// runner — but presence on a non-Linux target is: only the Linux krunkit
-/// guest can dial vsock at all.
+/// Parse `OMNIFS_READY_VSOCK_PORT` if set (only the krunkit guest's seed sets
+/// it). Absence is valid for every other runner, but presence on a non-Linux
+/// target is an error: only the Linux krunkit guest can dial vsock.
 pub fn resolve_ready_vsock_port() -> Result<Option<u32>, ReadyPortError> {
     ready_vsock_port_from_env(std::env::var(omnifs_api::OMNIFS_READY_VSOCK_PORT_ENV).ok())
 }

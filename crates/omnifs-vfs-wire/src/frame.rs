@@ -1,4 +1,4 @@
-//! The length-delimited frame codec shared by the wire server and client.
+//! Length-delimited framing for the Omnifs VFS wire protocol.
 //!
 //! On-stream layout, exactly:
 //!

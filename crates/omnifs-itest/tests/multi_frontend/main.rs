@@ -177,8 +177,8 @@ fn invalidation_reaches_both_frontends_within_one_op() {
 // Test C: out-of-process wire frontend (macOS NFS)
 // ===========================================================================
 
-/// The first live proof of gate 3: a renderer serving the projected tree from a
-/// different process than the projection owner, over the namespace wire. A
+/// A renderer serves the projected tree from a different process than the
+/// projection owner over the Omnifs VFS wire protocol. A
 /// namespace-only daemon serves an attach socket; a `wire-test-frontend` child
 /// (this crate's out-of-process NFS wire-protocol test double) mounts NFS over
 /// a wire-backed namespace. The full conformance row table runs against that

@@ -31,7 +31,7 @@ use crate::workspace::Workspace;
 const DOCKER_MOUNT_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 /// A krunkit microVM boots a kernel and reaches multi-user systemd before its
 /// frontend runner can even attach, which takes far longer than a container
-/// start; the readiness beacon (`crates/omnifs-namespace-wire/src/beacon.rs`,
+/// start; the readiness beacon (`crates/omnifs-vfs-wire/src/beacon.rs`,
 /// spawned by `omnifs-fuse`) only fires once that whole chain has completed
 /// and the FUSE mount is serving.
 const KRUNKIT_MOUNT_PROBE_TIMEOUT: Duration = Duration::from_secs(90);

@@ -3,7 +3,7 @@
 //! This crate owns the NFS frontend and adapts it to the existing
 //! `omnifs-engine` provider runtime without replacing the Linux FUSE path.
 //! The `Export` adapter intentionally depends on host runtime/cache
-//! types; the wire protocol code remains isolated behind `ReadOnlyExport`.
+//! types; the Omnifs VFS wire protocol remains isolated behind `ReadOnlyExport`.
 
 mod adapter;
 mod delayed;

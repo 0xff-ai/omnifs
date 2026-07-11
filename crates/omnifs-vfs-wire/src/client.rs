@@ -1,4 +1,6 @@
-//! The wire client: [`WireNamespace`] implements [`Namespace`] over a socket.
+//! Client for the Omnifs VFS wire protocol.
+//!
+//! [`WireNamespace`] implements the engine-owned [`Namespace`] over a socket.
 //!
 //! One background manager task owns the connection. It multiplexes: each caller
 //! request gets a fresh id and a oneshot reply slot; response frames are matched
@@ -72,6 +74,118 @@ pub enum AttachTarget {
     Vsock { port: u32, token: String },
 }
 
+impl AttachTarget {
+    /// Resolve the explicit `--attach <socket>` when given, otherwise the target
+    /// named by `OMNIFS_ATTACH_ADDR`/`OMNIFS_ATTACH_TOKEN`. Neither present is a
+    /// hard error: there is no default to fall back to silently.
+    pub fn resolve(attach: Option<PathBuf>) -> Result<Self, AttachTargetError> {
+        if let Some(socket) = attach {
+            return Ok(Self::Unix(socket));
+        }
+        Self::from_env(
+            std::env::var(omnifs_api::OMNIFS_ATTACH_ADDR_ENV).ok(),
+            std::env::var(omnifs_api::OMNIFS_ATTACH_TOKEN_ENV).ok(),
+        )
+    }
+
+    /// Parse the env-driven target from explicit values so validation remains
+    /// testable without mutating process environment.
+    ///
+    /// `addr` is `vsock:<port>` for a krunkit guest or `host:port` for TCP. TCP
+    /// targets remain unresolved because `host.docker.internal` exists only in
+    /// the frontend container's DNS and cannot be resolved by the host CLI.
+    fn from_env(addr: Option<String>, token: Option<String>) -> Result<Self, AttachTargetError> {
+        let addr = addr.ok_or(AttachTargetError::Missing {
+            env: omnifs_api::OMNIFS_ATTACH_ADDR_ENV,
+        })?;
+        let token = token.ok_or(AttachTargetError::MissingToken {
+            addr_env: omnifs_api::OMNIFS_ATTACH_ADDR_ENV,
+            token_env: omnifs_api::OMNIFS_ATTACH_TOKEN_ENV,
+        })?;
+        if let Some(port) = addr.strip_prefix("vsock:") {
+            let port: u32 = port
+                .parse()
+                .map_err(|source| AttachTargetError::InvalidVsockPort {
+                    env: omnifs_api::OMNIFS_ATTACH_ADDR_ENV,
+                    addr: addr.clone(),
+                    source,
+                })?;
+            return Ok(Self::Vsock { port, token });
+        }
+        if addr
+            .rsplit_once(':')
+            .is_none_or(|(_, port)| port.parse::<u16>().is_err())
+        {
+            return Err(AttachTargetError::InvalidAddr {
+                env: omnifs_api::OMNIFS_ATTACH_ADDR_ENV,
+                addr,
+            });
+        }
+        Ok(Self::Tcp { addr, token })
+    }
+
+    /// Connect with backoff. With a `deadline`, a transient failure past the
+    /// deadline surfaces as [`WireError::ConnectTimeout`]; without one,
+    /// transient failures retry forever.
+    async fn connect_with_backoff(
+        &self,
+        deadline: Option<Instant>,
+    ) -> Result<(Connection, String), WireError> {
+        let mut backoff = INITIAL_BACKOFF;
+        loop {
+            match self.connect_once().await {
+                Ok(value) => return Ok(value),
+                Err(error) if !error.is_retriable() => return Err(error),
+                Err(error) => {
+                    if let Some(deadline) = deadline
+                        && Instant::now() >= deadline
+                    {
+                        let source = match error {
+                            WireError::Io(io) => io,
+                            other => std::io::Error::other(other.to_string()),
+                        };
+                        return Err(WireError::ConnectTimeout {
+                            target: self.to_string(),
+                            source,
+                        });
+                    }
+                    sleep(backoff).await;
+                    backoff = (backoff * 2).min(MAX_BACKOFF);
+                },
+            }
+        }
+    }
+
+    /// Connect once, spawn the reader/writer pumps, and complete the handshake.
+    /// Vsock is Linux-only because the krunkit guest is Linux; other targets
+    /// fail without entering the reconnect loop.
+    async fn connect_once(&self) -> Result<(Connection, String), WireError> {
+        match self {
+            Self::Unix(path) => {
+                let stream = UnixStream::connect(path).await?;
+                handshake_over(stream, None).await
+            },
+            Self::Tcp { addr, token } => {
+                let stream = TcpStream::connect(addr.as_str()).await?;
+                handshake_over(stream, Some(token.clone())).await
+            },
+            Self::Vsock { port, token } => {
+                #[cfg(target_os = "linux")]
+                {
+                    let addr = tokio_vsock::VsockAddr::new(tokio_vsock::VMADDR_CID_HOST, *port);
+                    let stream = tokio_vsock::VsockStream::connect(addr).await?;
+                    handshake_over(stream, Some(token.clone())).await
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    let _ = (port, token);
+                    Err(WireError::VsockUnsupported)
+                }
+            },
+        }
+    }
+}
+
 impl std::fmt::Display for AttachTarget {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -103,68 +217,6 @@ pub enum AttachTargetError {
         #[source]
         source: std::num::ParseIntError,
     },
-}
-
-/// Resolve the attach target: the explicit `--attach <socket>` when given,
-/// otherwise the target named by `OMNIFS_ATTACH_ADDR`/`OMNIFS_ATTACH_TOKEN`
-/// (the Docker frontend launcher sets both for TCP; the krunkit launcher sets
-/// both for `vsock:<port>`). Neither present is a hard error: there is no
-/// default to fall back to silently.
-pub fn resolve_attach_target(attach: Option<PathBuf>) -> Result<AttachTarget, AttachTargetError> {
-    if let Some(socket) = attach {
-        return Ok(AttachTarget::Unix(socket));
-    }
-    attach_target_from_env(
-        std::env::var(omnifs_api::OMNIFS_ATTACH_ADDR_ENV).ok(),
-        std::env::var(omnifs_api::OMNIFS_ATTACH_TOKEN_ENV).ok(),
-    )
-}
-
-/// The env-driven half of [`resolve_attach_target`], pulled out as a pure
-/// function of its two inputs so the parse/validation logic is unit-testable
-/// without mutating process environment.
-///
-/// `addr` is `vsock:<port>` for the krunkit guest (there is no host name to
-/// resolve: the guest always dials `VMADDR_CID_HOST`, so only the port varies)
-/// or a plain `host:port` string for TCP, kept unparsed rather than a
-/// pre-resolved `SocketAddr`: the Docker-hosted frontend dials
-/// `host.docker.internal`, a name Docker injects into the container's DNS
-/// that only resolves inside the container, so the runner cannot validate it
-/// any earlier than `TcpStream::connect` does. A literal host named `vsock`
-/// (vanishingly unlikely, and never how Docker names its bridge) resolves to
-/// the vsock form; there is no way to address a real host by that name that
-/// this grammar would rather preserve.
-fn attach_target_from_env(
-    addr: Option<String>,
-    token: Option<String>,
-) -> Result<AttachTarget, AttachTargetError> {
-    let addr = addr.ok_or(AttachTargetError::Missing {
-        env: omnifs_api::OMNIFS_ATTACH_ADDR_ENV,
-    })?;
-    let token = token.ok_or(AttachTargetError::MissingToken {
-        addr_env: omnifs_api::OMNIFS_ATTACH_ADDR_ENV,
-        token_env: omnifs_api::OMNIFS_ATTACH_TOKEN_ENV,
-    })?;
-    if let Some(port) = addr.strip_prefix("vsock:") {
-        let port: u32 = port
-            .parse()
-            .map_err(|source| AttachTargetError::InvalidVsockPort {
-                env: omnifs_api::OMNIFS_ATTACH_ADDR_ENV,
-                addr: addr.clone(),
-                source,
-            })?;
-        return Ok(AttachTarget::Vsock { port, token });
-    }
-    if addr
-        .rsplit_once(':')
-        .is_none_or(|(_, port)| port.parse::<u16>().is_err())
-    {
-        return Err(AttachTargetError::InvalidAddr {
-            env: omnifs_api::OMNIFS_ATTACH_ADDR_ENV,
-            addr,
-        });
-    }
-    Ok(AttachTarget::Tcp { addr, token })
 }
 
 /// One caller request queued to the manager, with the slot its answer returns on.
@@ -203,7 +255,7 @@ impl WireNamespace {
     /// the attach token is rejected.
     pub async fn attach(target: AttachTarget, rt: Handle) -> Result<Arc<Self>, WireError> {
         let deadline = Instant::now() + INITIAL_CONNECT_DEADLINE;
-        let (connection, instance_id) = connect_with_backoff(&target, Some(deadline)).await?;
+        let (connection, instance_id) = target.connect_with_backoff(Some(deadline)).await?;
 
         let (outgoing_tx, outgoing_rx) = mpsc::unbounded_channel::<Outgoing>();
         let (events_tx, _) = broadcast::channel(EVENT_CAPACITY);
@@ -211,16 +263,19 @@ impl WireNamespace {
         let instance_slot = Arc::new(Mutex::new(instance_id.clone()));
         let cache = Arc::new(WireCache::new());
 
-        let manager = rt.spawn(manager_loop(ManagerState {
-            target,
-            connection,
-            instance: instance_id,
-            instance_slot: Arc::clone(&instance_slot),
-            outgoing_rx,
-            events: events_tx.clone(),
-            attach_events: attach_tx.clone(),
-            cache: Arc::clone(&cache),
-        }));
+        let manager = rt.spawn(
+            ManagerState {
+                target,
+                connection,
+                instance: instance_id,
+                instance_slot: Arc::clone(&instance_slot),
+                outgoing_rx,
+                events: events_tx.clone(),
+                attach_events: attach_tx.clone(),
+                cache: Arc::clone(&cache),
+            }
+            .run(),
+        );
 
         Ok(Arc::new(Self {
             outgoing: outgoing_tx,
@@ -441,7 +496,7 @@ impl Namespace for WireNamespace {
 // The connection manager
 // ---------------------------------------------------------------------------
 
-/// The manager's owned state, threaded into [`manager_loop`].
+/// The manager's owned connection and cache state.
 struct ManagerState {
     target: AttachTarget,
     connection: Connection,
@@ -453,118 +508,117 @@ struct ManagerState {
     cache: Arc<WireCache>,
 }
 
-/// The single task that owns the connection: it assigns request ids, tracks
-/// pending replies, decodes inbound frames, and reconnects on disconnect.
-async fn manager_loop(mut state: ManagerState) {
-    let mut pending: HashMap<u64, oneshot::Sender<Result<WireResponse, NsError>>> = HashMap::new();
-    let mut next_id: u64 = 1;
+impl ManagerState {
+    /// Assign request ids, track pending replies, decode inbound frames, and
+    /// reconnect after disconnects.
+    async fn run(mut self) {
+        let mut pending: HashMap<u64, oneshot::Sender<Result<WireResponse, NsError>>> =
+            HashMap::new();
+        let mut next_id: u64 = 1;
 
-    loop {
-        tokio::select! {
-            // Inbound frames win over new requests so a disconnect is handled
-            // before another request is queued onto a dead connection.
-            biased;
+        loop {
+            tokio::select! {
+                // Inbound frames win over new requests so a disconnect is handled
+                // before another request is queued onto a dead connection.
+                biased;
 
-            frame = state.connection.frame_rx.recv() => {
-                if let Some(frame) = frame {
-                    handle_inbound(&frame, &mut pending, &state.events, &state.cache);
-                } else {
-                    // The connection died: fail every in-flight request, then
-                    // reconnect forever (aborted only by dropping the namespace).
-                    for (_, reply) in pending.drain() {
-                        let _ = reply.send(Err(NsError::Network));
-                    }
-                    match connect_with_backoff(&state.target, None).await {
-                        Ok((connection, new_instance)) => {
-                            if new_instance != state.instance {
-                                // A restarted daemon renumbered every NodeId, so
-                                // every memoized answer is stale; drop the cache
-                                // before the frontend re-resolves from the root.
-                                state.cache.clear();
-                                let _ = state.attach_events.send(AttachEvent::Reattached {
-                                    old_instance: state.instance.clone(),
-                                    new_instance: new_instance.clone(),
-                                });
-                            }
-                            state.instance.clone_from(&new_instance);
-                            *state
-                                .instance_slot
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner) = new_instance;
-                            state.connection = connection;
-                        },
-                        Err(error) => {
-                            tracing::warn!(%error, "wire: gave up reconnecting; namespace is offline");
-                            return;
-                        },
-                    }
-                }
-            }
-
-            outgoing = state.outgoing_rx.recv() => {
-                let Some(Outgoing { request, reply }) = outgoing else {
-                    // The namespace was dropped: no more callers, stop.
-                    return;
-                };
-                let id = next_id;
-                next_id = next_id.checked_add(1).unwrap_or(1);
-                match postcard::to_allocvec(&request) {
-                    Ok(body) => {
-                        pending.insert(id, reply);
-                        if state
-                            .connection
-                            .frame_tx
-                            .send(Frame::new(id, KIND_REQUEST, body))
-                            .is_err()
-                            && let Some(reply) = pending.remove(&id)
-                        {
-                            // The writer is gone; the frame_rx `None` branch will
-                            // reconnect. Fail this request now.
+                frame = self.connection.frame_rx.recv() => {
+                    if let Some(frame) = frame {
+                        self.handle_inbound(&frame, &mut pending);
+                    } else {
+                        // The connection died: fail every in-flight request, then
+                        // reconnect forever (aborted only by dropping the namespace).
+                        for (_, reply) in pending.drain() {
                             let _ = reply.send(Err(NsError::Network));
                         }
-                    },
-                    Err(error) => {
-                        let _ = reply.send(Err(NsError::Internal {
-                            message: format!("wire: request encode failed: {error}"),
-                        }));
-                    },
+                        match self.target.connect_with_backoff(None).await {
+                            Ok((connection, new_instance)) => {
+                                if new_instance != self.instance {
+                                    // A restarted daemon renumbered every NodeId, so
+                                    // every memoized answer is stale; drop the cache
+                                    // before serving answers from the new instance.
+                                    self.cache.clear();
+                                    let _ = self.attach_events.send(AttachEvent::Reattached {
+                                        old_instance: self.instance.clone(),
+                                        new_instance: new_instance.clone(),
+                                    });
+                                }
+                                self.instance.clone_from(&new_instance);
+                                *self
+                                    .instance_slot
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner) = new_instance;
+                                self.connection = connection;
+                            },
+                            Err(error) => {
+                                tracing::warn!(%error, "wire: gave up reconnecting; namespace is offline");
+                                return;
+                            },
+                        }
+                    }
+                }
+
+                outgoing = self.outgoing_rx.recv() => {
+                    let Some(Outgoing { request, reply }) = outgoing else {
+                        // The namespace was dropped: no more callers, stop.
+                        return;
+                    };
+                    let id = next_id;
+                    next_id = next_id.checked_add(1).unwrap_or(1);
+                    match postcard::to_allocvec(&request) {
+                        Ok(body) => {
+                            pending.insert(id, reply);
+                            if self
+                                .connection
+                                .frame_tx
+                                .send(Frame::new(id, KIND_REQUEST, body))
+                                .is_err()
+                                && let Some(reply) = pending.remove(&id)
+                            {
+                                // The writer is gone; the frame_rx `None` branch will
+                                // reconnect. Fail this request now.
+                                let _ = reply.send(Err(NsError::Network));
+                            }
+                        },
+                        Err(error) => {
+                            let _ = reply.send(Err(NsError::Internal {
+                                message: format!("wire: request encode failed: {error}"),
+                            }));
+                        },
+                    }
                 }
             }
         }
     }
-}
 
-/// Route one inbound frame: a response completes its pending caller; an event
-/// re-broadcasts locally.
-fn handle_inbound(
-    frame: &Frame,
-    pending: &mut HashMap<u64, oneshot::Sender<Result<WireResponse, NsError>>>,
-    events: &broadcast::Sender<NsEvent>,
-    cache: &WireCache,
-) {
-    match frame.kind {
-        KIND_RESPONSE => {
-            if let Some(reply) = pending.remove(&frame.request_id) {
-                let answer = postcard::from_bytes::<WireResponse>(&frame.body).map_err(|error| {
-                    NsError::Internal {
-                        message: format!("wire: decode response failed: {error}"),
-                    }
-                });
-                let _ = reply.send(answer);
-            }
-        },
-        KIND_EVENT => {
-            if let Ok(event) = postcard::from_bytes::<NsEvent>(&frame.body) {
-                // Drop the named node's cached state before re-broadcasting, so a
-                // subscriber that observes the event never races a stale answer:
-                // if it saw the event, the memo is already pruned.
-                cache.apply_event(&event);
-                let _ = events.send(event);
-            }
-        },
-        other => {
-            tracing::debug!(kind = other, "wire: ignoring an unknown inbound frame kind");
-        },
+    /// Route a response to its caller or apply and re-broadcast an event.
+    fn handle_inbound(
+        &self,
+        frame: &Frame,
+        pending: &mut HashMap<u64, oneshot::Sender<Result<WireResponse, NsError>>>,
+    ) {
+        match frame.kind {
+            KIND_RESPONSE => {
+                if let Some(reply) = pending.remove(&frame.request_id) {
+                    let answer =
+                        postcard::from_bytes::<WireResponse>(&frame.body).map_err(|error| {
+                            NsError::Internal {
+                                message: format!("wire: decode response failed: {error}"),
+                            }
+                        });
+                    let _ = reply.send(answer);
+                }
+            },
+            KIND_EVENT => {
+                if let Ok(event) = postcard::from_bytes::<NsEvent>(&frame.body) {
+                    self.cache.apply_event(&event);
+                    let _ = self.events.send(event);
+                }
+            },
+            other => {
+                tracing::debug!(kind = other, "wire: ignoring an unknown inbound frame kind");
+            },
+        }
     }
 }
 
@@ -585,75 +639,6 @@ impl Drop for Connection {
     fn drop(&mut self) {
         self.reader.abort();
         self.writer.abort();
-    }
-}
-
-/// Retry [`connect_once`] with backoff. With a `deadline`, a transient failure
-/// past the deadline surfaces as [`WireError::ConnectTimeout`] naming the
-/// target; without one, transient failures retry forever. A non-retriable
-/// failure (a version mismatch, a rejected token) returns immediately.
-async fn connect_with_backoff(
-    target: &AttachTarget,
-    deadline: Option<Instant>,
-) -> Result<(Connection, String), WireError> {
-    let mut backoff = INITIAL_BACKOFF;
-    loop {
-        match connect_once(target).await {
-            Ok(value) => return Ok(value),
-            Err(error) if !error.is_retriable() => return Err(error),
-            Err(error) => {
-                if let Some(deadline) = deadline
-                    && Instant::now() >= deadline
-                {
-                    let source = match error {
-                        WireError::Io(io) => io,
-                        other => std::io::Error::other(other.to_string()),
-                    };
-                    return Err(WireError::ConnectTimeout {
-                        target: target.to_string(),
-                        source,
-                    });
-                }
-                sleep(backoff).await;
-                backoff = (backoff * 2).min(MAX_BACKOFF);
-            },
-        }
-    }
-}
-
-/// Connect once: open the target, spawn the reader/writer pumps, and complete
-/// the `Hello`/`Welcome` handshake. Returns the connection and the server's
-/// instance id.
-async fn connect_once(target: &AttachTarget) -> Result<(Connection, String), WireError> {
-    match target {
-        AttachTarget::Unix(path) => {
-            let stream = UnixStream::connect(path).await?;
-            handshake_over(stream, None).await
-        },
-        AttachTarget::Tcp { addr, token } => {
-            let stream = TcpStream::connect(addr.as_str()).await?;
-            handshake_over(stream, Some(token.clone())).await
-        },
-        // The vsock dial only builds on Linux, the krunkit guest's OS; any
-        // other target fails with a named, non-retriable error instead of
-        // silently hanging in the reconnect-forever loop. Inlined (rather than
-        // a separate `#[cfg(not(target_os = "linux"))]` async fn) so the
-        // never-awaits stub does not trip `clippy::unused_async`: it is a
-        // match arm inside this already-async function, not a function of its
-        // own.
-        AttachTarget::Vsock { port, token } => {
-            #[cfg(target_os = "linux")]
-            {
-                let addr = tokio_vsock::VsockAddr::new(tokio_vsock::VMADDR_CID_HOST, *port);
-                let stream = tokio_vsock::VsockStream::connect(addr).await?;
-                handshake_over(stream, Some(token.clone())).await
-            }
-            #[cfg(not(target_os = "linux"))]
-            {
-                let _ = (port, token);
-                Err(WireError::VsockUnsupported)
-            }
-        },
     }
 }
 
@@ -763,13 +748,13 @@ mod attach_target_tests {
 
     #[test]
     fn attach_prefers_explicit_unix_socket() {
-        let target = resolve_attach_target(Some(PathBuf::from("/tmp/x.sock"))).unwrap();
+        let target = AttachTarget::resolve(Some(PathBuf::from("/tmp/x.sock"))).unwrap();
         assert!(matches!(target, AttachTarget::Unix(path) if path == Path::new("/tmp/x.sock")));
     }
 
     #[test]
     fn attach_falls_back_to_tcp_env_vars() {
-        let target = attach_target_from_env(
+        let target = AttachTarget::from_env(
             Some("host.docker.internal:54321".to_string()),
             Some("secret".to_string()),
         )
@@ -785,16 +770,16 @@ mod attach_target_tests {
 
     #[test]
     fn attach_env_requires_both_addr_and_token() {
-        attach_target_from_env(None, None).expect_err("neither var set must fail");
-        attach_target_from_env(Some("host.docker.internal:1".to_string()), None)
+        AttachTarget::from_env(None, None).expect_err("neither var set must fail");
+        AttachTarget::from_env(Some("host.docker.internal:1".to_string()), None)
             .expect_err("addr without token must fail");
-        attach_target_from_env(None, Some("secret".to_string()))
+        AttachTarget::from_env(None, Some("secret".to_string()))
             .expect_err("token without addr must fail");
     }
 
     #[test]
     fn attach_env_rejects_a_portless_address() {
-        attach_target_from_env(
+        AttachTarget::from_env(
             Some("host.docker.internal".to_string()),
             Some("secret".to_string()),
         )
@@ -804,7 +789,7 @@ mod attach_target_tests {
     #[test]
     fn attach_falls_back_to_vsock_env_vars() {
         let target =
-            attach_target_from_env(Some("vsock:9000".to_string()), Some("secret".to_string()))
+            AttachTarget::from_env(Some("vsock:9000".to_string()), Some("secret".to_string()))
                 .unwrap();
         match target {
             AttachTarget::Vsock { port, token } => {
@@ -817,18 +802,18 @@ mod attach_target_tests {
 
     #[test]
     fn attach_env_rejects_vsock_with_no_port() {
-        attach_target_from_env(Some("vsock:".to_string()), Some("secret".to_string()))
+        AttachTarget::from_env(Some("vsock:".to_string()), Some("secret".to_string()))
             .expect_err("a vsock address with no port must fail");
     }
 
     #[test]
     fn attach_env_rejects_vsock_with_a_bad_port() {
-        attach_target_from_env(
+        AttachTarget::from_env(
             Some("vsock:not-a-port".to_string()),
             Some("secret".to_string()),
         )
         .expect_err("a non-numeric vsock port must fail");
-        attach_target_from_env(
+        AttachTarget::from_env(
             Some("vsock:99999999999".to_string()),
             Some("secret".to_string()),
         )
@@ -842,7 +827,7 @@ mod attach_target_tests {
         // there is no other way to address the vsock transport at all, while a
         // host named `vsock` is a name a caller could always change.
         let target =
-            attach_target_from_env(Some("vsock:8080".to_string()), Some("secret".to_string()))
+            AttachTarget::from_env(Some("vsock:8080".to_string()), Some("secret".to_string()))
                 .unwrap();
         assert!(matches!(target, AttachTarget::Vsock { port: 8080, .. }));
     }

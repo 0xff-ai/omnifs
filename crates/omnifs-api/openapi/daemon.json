@@ -989,7 +989,7 @@
       },
       "FrontendAttachTargetReport": {
         "type": "object",
-        "description": "`POST /v1/frontend/attach-target`: the TCP attach target a frontend dials\n(address plus per-instance attach token), whether just bound or already\nserving from an earlier call (or from `--attach-tcp` at daemon start).\nNamed after what it returns: the wire client's `AttachTarget::Tcp`.",
+        "description": "`POST /v1/frontend/attach-target`: the TCP attach target a frontend dials\n(address plus per-instance attach token), whether just bound or already\nserving from an earlier call (or from `--attach-tcp` at daemon start).\nNamed after what it returns: the Omnifs VFS wire protocol client's\n`AttachTarget::Tcp`.",
         "required": [
           "addr",
           "token"
@@ -1017,7 +1017,7 @@
       },
       "FrontendAttachTargetVsockReport": {
         "type": "object",
-        "description": "`POST /v1/frontend/attach-target/vsock`: the vsock attach target's host\nside, a token-checking UDS listener's socket path plus the per-instance\nattach token the guest presents (the wire client's `AttachTarget::Vsock`).\nThis is the krunkit-on-macOS path: a guest VM has no shared host Unix\nsocket and no Docker-style loopback either, so it dials host vsock instead,\nand krunkit proxies every vsock connection onto `socket_path`. Every\nconnection krunkit forwards looks like the same trusted local peer to that\nsocket, so `token` (not filesystem permissions) is this listener's real\nauth, checked the same way the TCP listener's is. Takes no request body:\nunlike the TCP listener, there is no bind address to choose, only the\ndaemon-picked path under the workspace. Idempotent, same as\n[`FrontendAttachTargetReport`]: a repeat call returns the already-bound\npath and token unchanged.",
+        "description": "`POST /v1/frontend/attach-target/vsock`: the vsock attach target's host\nside, a token-checking UDS listener's socket path plus the per-instance\nattach token the guest presents (the Omnifs VFS wire protocol client's\n`AttachTarget::Vsock`).\nThis is the krunkit-on-macOS path: a guest VM has no shared host Unix\nsocket and no Docker-style loopback either, so it dials host vsock instead,\nand krunkit proxies every vsock connection onto `socket_path`. Every\nconnection krunkit forwards looks like the same trusted local peer to that\nsocket, so `token` (not filesystem permissions) is this listener's real\nauth, checked the same way the TCP listener's is. Takes no request body:\nunlike the TCP listener, there is no bind address to choose, only the\ndaemon-picked path under the workspace. Idempotent, same as\n[`FrontendAttachTargetReport`]: a repeat call returns the already-bound\npath and token unchanged.",
         "required": [
           "socket_path",
           "token"

@@ -1,10 +1,10 @@
-//! `wire-test-frontend`: the out-of-process NFS wire-protocol test double.
+//! `wire-test-frontend`: the out-of-process NFS test double over the Omnifs VFS
+//! wire protocol.
 //!
-//! Attaches a wire-backed namespace to a daemon-served attach socket (or the
-//! `OMNIFS_ATTACH_ADDR`/`OMNIFS_ATTACH_TOKEN` env target) and runs the NFS
-//! renderer over it, blocking until unmount, exactly as the retired
-//! `omnifs frontend run --kind nfs` runner did. Test-crate-owned on purpose:
-//! the shipped runner binary (`omnifs-fuse`) is FUSE-only, while the wire
+//! Attaches through the Omnifs VFS wire protocol to a daemon-served attach
+//! socket (or the `OMNIFS_ATTACH_ADDR`/`OMNIFS_ATTACH_TOKEN` env target) and
+//! runs the NFS renderer over it, blocking until unmount. It is test-crate-owned
+//! because the shipped runner binary (`omnifs-fuse`) is FUSE-only, while the wire
 //! reattach/perf/parity acceptance lanes (`tests/wire_reattach`,
 //! `tests/wire_perf`, `tests/multi_frontend`, `tests/frontend_docker`) need a
 //! spawnable out-of-process NFS leg: a restartable unit that pins its NFS port
@@ -17,7 +17,7 @@ use std::sync::Arc;
 use anyhow::Context as _;
 use clap::Parser;
 use omnifs_engine::{Namespace, NsAttachEvent};
-use omnifs_namespace_wire::{AttachEvent, WireNamespace, resolve_attach_target};
+use omnifs_vfs_wire::{AttachEvent, AttachTarget, WireNamespace};
 use tokio::runtime::Handle;
 use tokio::sync::broadcast;
 use tracing::{info, warn};
@@ -26,11 +26,11 @@ use tracing::{info, warn};
 /// plenty and a lagging consumer re-syncs on the next reattach.
 const ATTACH_CAPACITY: usize = 16;
 
-/// Attach a wire-backed namespace and serve an NFS mount over it.
+/// Attach through the Omnifs VFS wire protocol and serve an NFS mount.
 #[derive(Parser, Debug)]
 #[command(
     name = "wire-test-frontend",
-    about = "The out-of-process omnifs NFS wire-protocol test double"
+    about = "An out-of-process NFS test double over the Omnifs VFS wire protocol"
 )]
 struct Args {
     /// Path to the daemon's namespace attach socket to connect to
@@ -57,7 +57,7 @@ fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
     let target =
-        resolve_attach_target(args.attach).context("resolve the namespace attach target")?;
+        AttachTarget::resolve(args.attach).context("resolve the namespace attach target")?;
     let target_label = target.to_string();
 
     let rt = tokio::runtime::Builder::new_multi_thread()
