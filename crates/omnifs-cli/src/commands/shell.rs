@@ -19,11 +19,15 @@
 //! exec` or ssh-over-vsock); Docker is checked before krunkit only because
 //! both are vanishingly unlikely to run at once and a deterministic order
 //! beats an arbitrary one. With no guest running, a live local mount is used
-//! instead; more than one live local mount with no guest attached is
-//! reported as an ambiguity rather than silently picked for the user.
+//! instead; more than one live local mount is selected with a TTY picker or
+//! reported as an ambiguity in headless mode. `--mount` accepts a unique local
+//! mount-point basename or exact path and always bypasses guest preference.
 
+use std::collections::BTreeSet;
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::Args;
@@ -38,6 +42,12 @@ use crate::runtime::Runtime;
 use crate::workspace::Workspace;
 use omnifs_workspace::layout::{OMNIFS_MOUNT_POINT_ENV, WorkspaceLayout};
 
+/// Shell should remain responsive when the daemon is down or wedged. The
+/// control client has a five-second request timeout for ordinary commands,
+/// which is too long for shell's best-effort status and attachment lookup.
+/// Runner-owned records provide the offline fallback for local mounts.
+const SHELL_STATUS_TIMEOUT: Duration = Duration::from_millis(750);
+
 #[derive(Args, Debug, Clone, Default)]
 pub struct ShellArgs {
     /// Start a clean shell that does not source your shell rc files.
@@ -46,6 +56,11 @@ pub struct ShellArgs {
     /// Shell to launch (defaults to `$SHELL`).
     #[arg(long)]
     pub shell: Option<String>,
+    /// Select a local frontend mount by its final path component or exact path.
+    /// This chooses the host mount root, not a provider mount beneath it, and
+    /// bypasses guest frontend preference.
+    #[arg(long, value_name = "NAME")]
+    pub mount: Option<String>,
     /// Run a command in the mount context instead of an interactive shell.
     #[arg(trailing_var_arg = true)]
     pub command: Vec<String>,
@@ -62,41 +77,160 @@ impl ShellArgs {
         let workspace = Workspace::resolve()?;
         let paths = workspace.layout();
 
-        // A guest frontend's mount is invisible on the host, so prefer a live
-        // one over a host subshell; probe rather than trust a single recorded
-        // choice, since several frontends can be configured at once.
-        if docker_frontend_is_running(paths).await {
-            let container_name = crate::frontend_container::frontend_container_name(paths)?;
-            return self.exec_in_container(&container_name);
-        }
-        if krunkit_frontend_is_running(paths).await {
-            return self.exec_in_krunkit_guest(paths);
-        }
+        // Probe guest state before asking the daemon for optional banner facts.
+        // A one-shot guest command does not need status at all, so a dead
+        // daemon cannot add its five-second control timeout to the useful path.
+        // Local target discovery still uses daemon attachments when status
+        // answers, and runner-owned state when it does not.
+        let guest = if self.mount.is_none() {
+            if docker_frontend_is_running(paths).await {
+                let container_name = crate::frontend_container::frontend_container_name(paths)?;
+                Some(ShellTarget::Docker(container_name))
+            } else if krunkit_frontend_is_running(paths).await {
+                Some(ShellTarget::Krunkit)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
-        // No guest frontend is live: fall back to a local mount. A live
-        // status call, when the daemon answers, supplies the mount→provider
-        // map for the prompt and the authoritative local attachment set; if
-        // it does not answer, discover local mounts from the runner-owned
-        // mount-state records directly and warn that they may be stale.
-        let live = workspace.daemon().status().await.ok();
-        if live.is_none() {
+        let status = if guest.is_some() && !self.command.is_empty() {
+            None
+        } else {
+            shell_status(&workspace).await
+        };
+        let configured_roots = if self.command.is_empty() && status.is_none() {
+            match workspace.mounts() {
+                Ok(mounts) => mounts
+                    .into_iter()
+                    .map(|mount| mount.name.to_string())
+                    .collect(),
+                Err(error) => {
+                    anstream::eprintln!(
+                        "note: could not read configured mounts for shell banner: {error:#}"
+                    );
+                    Vec::new()
+                },
+            }
+        } else {
+            Vec::new()
+        };
+        let context = ShellContext::new(status, configured_roots);
+
+        // The offline path is still useful, but tell the user before selection
+        // can fail so a missing/stale mount does not hide the actionable daemon
+        // recovery hint.
+        if context.status.is_none() && guest.is_none() {
             anstream::eprintln!(
                 "note: the daemon is not answering; its mount may be stale (try `omnifs up`)"
             );
         }
-        let mount_point = select_local_mount(paths, live.as_ref())?;
-        let mounts = live.map(|status| status.mounts).unwrap_or_default();
+
+        // When a guest target is live and no selector was requested, avoid
+        // probing host mount records at all. Otherwise resolve the local
+        // frontend from daemon attachments or runner-owned state.
+        let local = if self.mount.is_some() || guest.is_none() {
+            Some(LocalMounts::discover(paths, context.status.as_ref())?)
+        } else {
+            None
+        };
+
+        let target = context.choose_target(
+            local,
+            self.mount.as_deref(),
+            crate::ui::prompt::is_terminal(),
+            guest,
+        )?;
+
+        let mounts = context
+            .status
+            .as_ref()
+            .map(|status| status.mounts.clone())
+            .unwrap_or_default();
 
         // A one-shot command runs directly in the mount context; no rc or prompt
         // tuning is needed for a non-interactive invocation.
         if !self.command.is_empty() {
-            let mut cmd = Command::new(&self.command[0]);
-            cmd.args(&self.command[1..]);
-            apply_context_env(&mut cmd, &mount_point, &mounts, self.hermetic);
-            set_cwd_to_mount(&mut cmd, &mount_point);
-            return spawn_and_propagate(cmd, format!("run `{}`", self.command[0]));
+            return match target {
+                ShellTarget::Docker(container_name) => self.exec_in_container(&container_name),
+                ShellTarget::Krunkit => self.exec_in_krunkit_guest(paths),
+                ShellTarget::Local(mount_point) => {
+                    let mut cmd = Command::new(&self.command[0]);
+                    cmd.args(&self.command[1..]);
+                    apply_context_env(&mut cmd, &mount_point, &mounts, self.hermetic);
+                    set_cwd_to_mount(&mut cmd, &mount_point);
+                    spawn_and_propagate(cmd, format!("run `{}`", self.command[0]))
+                },
+            };
         }
 
+        match target {
+            ShellTarget::Docker(container_name) => {
+                self.exec_in_container_with_banner(&container_name, &context)
+            },
+            ShellTarget::Krunkit => self.exec_in_krunkit_guest_with_banner(paths, &context),
+            ShellTarget::Local(mount_point) => {
+                self.exec_local_shell(&mount_point, &mounts, paths, &context)
+            },
+        }
+    }
+
+    /// Attach to the optional FUSE frontend by execing into it, landing in
+    /// the projected tree. The minimal frontend image ships only `/bin/sh`,
+    /// so no host rc plumbing applies here; `--shell` overrides the default
+    /// and a trailing command runs non-interactively.
+    ///
+    /// Uses [`DockerBackend`] only for command construction; the image field of
+    /// its `DockerTarget`
+    /// is unused here, so the dev placeholder is fine regardless of build
+    /// channel, mirroring `frontend down`/`frontend status`.
+    fn exec_in_container(&self, container_name: &ContainerName) -> Result<()> {
+        let target = DockerTarget::new(
+            container_name.as_str().to_string(),
+            FRONTEND_DEV_IMAGE.to_string(),
+        )?;
+        let backend = DockerBackend::new(Runtime::connect_for(&target)?);
+        let cmd = backend.shell_command(self.shell.as_deref(), &self.command);
+        spawn_and_propagate(cmd, format!("open shell in container `{container_name}`"))
+    }
+
+    fn exec_in_container_with_banner(
+        &self,
+        container_name: &ContainerName,
+        context: &ShellContext,
+    ) -> Result<()> {
+        anstream::eprintln!("{}", context.banner("container", Path::new(GUEST_MOUNT)));
+        self.exec_in_container(container_name)
+    }
+
+    /// Attach to the krunkit guest over ssh-over-vsock, landing in the
+    /// projected tree. `shell_command` is pure construction (no I/O), so the
+    /// `socat` probe (an I/O check) happens here, at the one call site about
+    /// to actually run it.
+    fn exec_in_krunkit_guest(&self, paths: &WorkspaceLayout) -> Result<()> {
+        krunkit_backend::ensure_socat_available()?;
+        let backend = KrunkitBackend::new(paths.config_dir.clone());
+        let cmd = backend.shell_command(self.shell.as_deref(), &self.command);
+        spawn_and_propagate(cmd, "open shell in the krunkit guest".to_string())
+    }
+
+    fn exec_in_krunkit_guest_with_banner(
+        &self,
+        paths: &WorkspaceLayout,
+        context: &ShellContext,
+    ) -> Result<()> {
+        anstream::eprintln!("{}", context.banner("krunkit", Path::new(GUEST_MOUNT)));
+        self.exec_in_krunkit_guest(paths)
+    }
+
+    fn exec_local_shell(
+        &self,
+        mount_point: &Path,
+        mounts: &[MountInfo],
+        paths: &WorkspaceLayout,
+        context: &ShellContext,
+    ) -> Result<()> {
         let shell = resolve_shell(self.shell.as_deref());
         let shell_dir = paths.cache_dir.join("shell");
         let mut cmd = Command::new(&shell);
@@ -123,50 +257,11 @@ impl ShellArgs {
                 // mount as cwd, but leave its prompt alone.
             },
         }
-        apply_context_env(&mut cmd, &mount_point, &mounts, self.hermetic);
-        set_cwd_to_mount(&mut cmd, &mount_point);
+        apply_context_env(&mut cmd, mount_point, mounts, self.hermetic);
+        set_cwd_to_mount(&mut cmd, mount_point);
 
-        anstream::eprintln!(
-            "omnifs shell (local) at {} (type `exit` to leave)",
-            mount_point.display()
-        );
+        anstream::eprintln!("{}", context.banner("local", mount_point));
         spawn_and_propagate(cmd, "launch omnifs shell".to_string())
-    }
-
-    /// Attach to the optional FUSE frontend by execing into it, landing in
-    /// the projected tree. The minimal frontend image ships only `/bin/sh`,
-    /// so no host rc plumbing applies here; `--shell` overrides the default
-    /// and a trailing command runs non-interactively.
-    ///
-    /// Uses [`DockerBackend`] only for command construction; the image field of
-    /// its `DockerTarget`
-    /// is unused here, so the dev placeholder is fine regardless of build
-    /// channel, mirroring `frontend down`/`frontend status`.
-    fn exec_in_container(&self, container_name: &ContainerName) -> Result<()> {
-        let target = DockerTarget::new(
-            container_name.as_str().to_string(),
-            FRONTEND_DEV_IMAGE.to_string(),
-        )?;
-        let backend = DockerBackend::new(Runtime::connect_for(&target)?);
-        let cmd = backend.shell_command(self.shell.as_deref(), &self.command);
-        if self.command.is_empty() {
-            anstream::eprintln!("omnifs shell (container) at {GUEST_MOUNT} (type `exit` to leave)");
-        }
-        spawn_and_propagate(cmd, format!("open shell in container `{container_name}`"))
-    }
-
-    /// Attach to the krunkit guest over ssh-over-vsock, landing in the
-    /// projected tree. `shell_command` is pure construction (no I/O), so the
-    /// `socat` probe (an I/O check) happens here, at the one call site about
-    /// to actually run it.
-    fn exec_in_krunkit_guest(&self, paths: &WorkspaceLayout) -> Result<()> {
-        krunkit_backend::ensure_socat_available()?;
-        let backend = KrunkitBackend::new(paths.config_dir.clone());
-        let cmd = backend.shell_command(self.shell.as_deref(), &self.command);
-        if self.command.is_empty() {
-            anstream::eprintln!("omnifs shell (krunkit) at {GUEST_MOUNT} (type `exit` to leave)");
-        }
-        spawn_and_propagate(cmd, "open shell in the krunkit guest".to_string())
     }
 }
 
@@ -205,72 +300,279 @@ async fn krunkit_frontend_is_running(paths: &WorkspaceLayout) -> bool {
     )
 }
 
-/// The live local mount points: the daemon's own attachment list when it
-/// answers, else the runner-owned mount-state records on disk (the daemon
-/// may be down or unreachable, but a local frontend runner persists its own
-/// state independently).
-fn local_mount_candidates(
-    paths: &WorkspaceLayout,
-    live: Option<&DaemonStatus>,
-) -> Result<Vec<PathBuf>> {
-    if let Some(status) = live {
-        return Ok(status
-            .frontends
-            .iter()
-            .filter(|frontend| frontend.delivery == FrontendDelivery::Local)
-            .map(|frontend| frontend.mount_point.clone())
-            .collect());
-    }
-    let mut candidates = Vec::new();
-    for path in MountState::files_under(&paths.frontend_state_root())
-        .context("discover local frontend records")?
-    {
-        match MountState::read_file(&path) {
-            Ok(state) => {
-                // A record whose mount is no longer live is teardown debris,
-                // not a shell destination; counting it would also turn one
-                // live mount plus one stale record into a false ambiguity.
-                // Without the daemon feature the ownership probe (an
-                // omnifs-nfs dependency) does not exist, so records are
-                // trusted as-is there.
-                #[cfg(feature = "daemon")]
-                if !crate::host_teardown::local_mount_is_owned(&state) {
-                    continue;
-                }
-                candidates.push(state.mount_point);
-            },
-            Err(error) => {
-                anstream::eprintln!(
-                    "⚠  Skipping local frontend record {}: {error}",
-                    path.display()
-                );
-            },
-        }
-    }
-    Ok(candidates)
+/// Best-effort daemon facts for the shell banner and local attachment roster.
+/// Target selection must not inherit the control client's five-second request
+/// timeout when the daemon is unavailable, so bound this optional lookup to a
+/// short UX budget and fall back to runner-owned state on expiry.
+async fn shell_status(workspace: &Workspace) -> Option<DaemonStatus> {
+    tokio::time::timeout(SHELL_STATUS_TIMEOUT, workspace.daemon().status())
+        .await
+        .ok()
+        .and_then(Result::ok)
 }
 
-/// Pick the local mount `omnifs shell` should enter. Ambiguity — more than
-/// one live local mount with no guest frontend attached — is never silently
-/// resolved for the user; it is a distinct, equally-preferred choice, so the
-/// caller is asked to `cd` into one directly instead.
-fn select_local_mount(paths: &WorkspaceLayout, live: Option<&DaemonStatus>) -> Result<PathBuf> {
-    let mut candidates = local_mount_candidates(paths, live)?;
-    match candidates.len() {
-        0 => anyhow::bail!("no host mount is available; start it with `omnifs frontend up`"),
-        1 => Ok(candidates.remove(0)),
-        _ => {
-            candidates.sort();
-            let listed = candidates
-                .iter()
-                .map(|mount_point| WorkspaceLayout::display(mount_point))
-                .collect::<Vec<_>>()
-                .join(", ");
-            anyhow::bail!(
-                "multiple local frontends are live ({listed}); `cd` into the one you want instead of running `omnifs shell`"
-            )
-        },
+/// The target surface selected for one shell invocation. A local target is a
+/// host-visible frontend mount point. A guest target is deliberately opaque to
+/// the host because its mount lives in another namespace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ShellTarget {
+    Local(PathBuf),
+    Docker(ContainerName),
+    Krunkit,
+}
+
+/// Runtime facts and the root-mount roster used by one shell invocation.
+///
+/// `DaemonStatus.mounts` is authoritative when available. Configured names
+/// are used only when the daemon cannot answer and are labelled unverified in
+/// the banner, so a stale config cannot be presented as a live root.
+#[derive(Debug, Clone)]
+struct ShellContext {
+    status: Option<DaemonStatus>,
+    configured_roots: Vec<String>,
+}
+
+impl ShellContext {
+    fn new(status: Option<DaemonStatus>, configured_roots: Vec<String>) -> Self {
+        Self {
+            status,
+            configured_roots,
+        }
     }
+
+    /// Sorted, deduplicated root names for the interactive banner.
+    fn root_mounts(&self) -> Vec<String> {
+        let names = self.status.as_ref().map_or_else(
+            || self.configured_roots.clone(),
+            |status| {
+                status
+                    .mounts
+                    .iter()
+                    .map(|mount| mount.mount.clone())
+                    .collect()
+            },
+        );
+        sorted_unique(names)
+    }
+
+    /// Resolve an invocation target. Explicit local selection has precedence
+    /// over a guest target; this is what makes `--mount` a reliable escape hatch
+    /// when Docker or krunkit is also running.
+    fn choose_target(
+        &self,
+        local: Option<LocalMounts>,
+        selector: Option<&str>,
+        interactive: bool,
+        guest: Option<ShellTarget>,
+    ) -> Result<ShellTarget> {
+        if selector.is_some() {
+            let Some(local) = local else {
+                if self.status.is_some() {
+                    anyhow::bail!(
+                        "no local frontend is attached for `--mount`; start it with `omnifs frontend up`"
+                    );
+                }
+                anyhow::bail!("no host mount is available for `--mount`");
+            };
+            return local.select(selector, false);
+        }
+        if let Some(guest) = guest {
+            return Ok(guest);
+        }
+        let Some(local) = local else {
+            anyhow::bail!("no host mount is available");
+        };
+        local.select(None, interactive)
+    }
+
+    fn banner(&self, surface: &str, location: &Path) -> String {
+        let roots = self.root_mounts();
+        let (label, roster) = if self.status.is_some() {
+            (
+                "root mounts",
+                if roots.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    roots.join(", ")
+                },
+            )
+        } else if roots.is_empty() {
+            ("root mounts (unavailable)", "(unknown)".to_string())
+        } else {
+            ("configured roots (unverified)", roots.join(", "))
+        };
+        format!(
+            "omnifs shell ({surface}) at {} ({label}: {roster}; type `exit` to leave)",
+            location.display()
+        )
+    }
+}
+
+/// One host-visible local frontend mount point. The final path component is
+/// the short selector accepted by `--mount`; an exact path disambiguates two
+/// local frontends with the same basename.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct LocalMount(PathBuf);
+
+impl LocalMount {
+    fn new(path: PathBuf) -> Self {
+        Self(path)
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+
+    fn has_name(&self, name: &str) -> bool {
+        self.path()
+            .file_name()
+            .and_then(|component| component.to_str())
+            == Some(name)
+    }
+}
+
+impl fmt::Display for LocalMount {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.path().display().fmt(f)
+    }
+}
+
+/// The set of live local frontend mount points and their selection policy.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct LocalMounts(Vec<LocalMount>);
+
+impl LocalMounts {
+    fn from_paths(paths: impl IntoIterator<Item = PathBuf>) -> Self {
+        let mut paths = paths
+            .into_iter()
+            .filter(|path| !path.as_os_str().is_empty())
+            .collect::<Vec<_>>();
+        paths.sort();
+        paths.dedup();
+        Self(paths.into_iter().map(LocalMount::new).collect())
+    }
+
+    /// The daemon's attachment list is authoritative when it answers. When it
+    /// does not, use runner-owned records because the daemon may be down while
+    /// a local frontend is still mounted.
+    fn discover(paths: &WorkspaceLayout, live: Option<&DaemonStatus>) -> Result<Self> {
+        if let Some(status) = live {
+            return Ok(Self::from_paths(
+                status
+                    .frontends
+                    .iter()
+                    .filter(|frontend| {
+                        frontend.delivery == FrontendDelivery::Local
+                            && !frontend.mount_point.as_os_str().is_empty()
+                    })
+                    .map(|frontend| frontend.mount_point.clone()),
+            ));
+        }
+
+        let mut candidates = Vec::new();
+        for path in MountState::files_under(&paths.frontend_state_root())
+            .context("discover local frontend records")?
+        {
+            match MountState::read_file(&path) {
+                Ok(state) => {
+                    // A record whose mount is no longer live is teardown debris,
+                    // not a shell destination. Without the daemon feature the
+                    // ownership probe does not exist, so records are trusted.
+                    #[cfg(feature = "daemon")]
+                    if !crate::host_teardown::local_mount_is_owned(&state) {
+                        continue;
+                    }
+                    candidates.push(state.mount_point);
+                },
+                Err(error) => {
+                    anstream::eprintln!(
+                        "⚠  Skipping local frontend record {}: {error}",
+                        path.display()
+                    );
+                },
+            }
+        }
+        Ok(Self::from_paths(candidates))
+    }
+
+    /// Select a local frontend by exact path or unique basename. With no
+    /// selector, one candidate wins; multiple candidates use the interactive
+    /// picker only when a terminal is available.
+    fn select(&self, selector: Option<&str>, interactive: bool) -> Result<ShellTarget> {
+        if let Some(selector) = selector {
+            return self.select_named(selector);
+        }
+        match self.0.as_slice() {
+            [] => anyhow::bail!("no host mount is available; start it with `omnifs frontend up`"),
+            [mount] => Ok(ShellTarget::Local(mount.path().to_path_buf())),
+            mounts if interactive => {
+                let selected =
+                    crate::ui::prompt::Select::new("Which local frontend mount should omnifs use?")
+                        .items(mounts.iter().cloned())
+                        .ask()?;
+                Ok(ShellTarget::Local(selected.path().to_path_buf()))
+            },
+            mounts => anyhow::bail!(
+                "multiple local frontends are live ({}); pass `--mount <NAME>` to choose one",
+                mounts
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        }
+    }
+
+    fn select_named(&self, selector: &str) -> Result<ShellTarget> {
+        if let Some(mount) = self
+            .0
+            .iter()
+            .find(|mount| mount.path() == Path::new(selector))
+        {
+            return Ok(ShellTarget::Local(mount.path().to_path_buf()));
+        }
+
+        let matches = self
+            .0
+            .iter()
+            .filter(|mount| mount.has_name(selector))
+            .collect::<Vec<_>>();
+        match matches.as_slice() {
+            [mount] => Ok(ShellTarget::Local(mount.path().to_path_buf())),
+            [] => anyhow::bail!(
+                "no local frontend matches `--mount {selector}`; available mount paths: {}",
+                self.listed()
+            ),
+            _ => anyhow::bail!(
+                "mount name `{selector}` is ambiguous; pass an exact path: {}",
+                matches
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        }
+    }
+
+    fn listed(&self) -> String {
+        if self.0.is_empty() {
+            "(none)".to_string()
+        } else {
+            self.0
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+    }
+}
+
+fn sorted_unique(values: impl IntoIterator<Item = String>) -> Vec<String> {
+    values
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 /// Which rc lever, if any, omnifs can use to inject its prompt.
@@ -425,3 +727,174 @@ _omnifs_prompt() {
 }
 PROMPT_COMMAND=_omnifs_prompt
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::{CommandFactory, Parser};
+    use omnifs_api::{DaemonBackend, DaemonHealth, MountInfo};
+
+    use crate::cli::Cli;
+
+    fn status_with_mounts(names: &[&str]) -> DaemonStatus {
+        DaemonStatus {
+            version: "test".to_string(),
+            api_major: 0,
+            api_minor: 0,
+            pid: 0,
+            instance_id: String::new(),
+            executable: PathBuf::new(),
+            mount_point: PathBuf::new(),
+            config_dir: PathBuf::new(),
+            cache_dir: PathBuf::new(),
+            providers_dir: PathBuf::new(),
+            frontends: Vec::new(),
+            backend: DaemonBackend::default(),
+            mounts: names
+                .iter()
+                .map(|name| MountInfo {
+                    mount: (*name).to_string(),
+                    provider_name: "provider".to_string(),
+                    provider_id: "id".to_string(),
+                    auth_health: None,
+                })
+                .collect(),
+            failed: Vec::new(),
+            health: DaemonHealth::default(),
+        }
+    }
+
+    #[test]
+    fn local_mounts_normalize_zero_one_and_multiple_candidates() {
+        assert!(
+            LocalMounts::from_paths(Vec::<PathBuf>::new())
+                .select(None, false)
+                .is_err()
+        );
+
+        let one = LocalMounts::from_paths([PathBuf::from("/tmp/omnifs")]);
+        assert_eq!(
+            one.select(None, false).unwrap(),
+            ShellTarget::Local(PathBuf::from("/tmp/omnifs"))
+        );
+
+        let many = LocalMounts::from_paths([
+            PathBuf::from("/tmp/b"),
+            PathBuf::from("/tmp/a"),
+            PathBuf::from("/tmp/a"),
+        ]);
+        let error = many.select(None, false).unwrap_err().to_string();
+        assert!(error.contains("multiple local frontends"));
+        assert!(error.contains("--mount"));
+        assert!(error.contains("/tmp/a, /tmp/b"));
+    }
+
+    #[test]
+    fn explicit_selector_accepts_unique_basename_or_exact_path() {
+        let mounts =
+            LocalMounts::from_paths([PathBuf::from("/tmp/one"), PathBuf::from("/tmp/two")]);
+        assert_eq!(
+            mounts.select(Some("two"), false).unwrap(),
+            ShellTarget::Local(PathBuf::from("/tmp/two"))
+        );
+        assert_eq!(
+            mounts.select(Some("/tmp/one"), false).unwrap(),
+            ShellTarget::Local(PathBuf::from("/tmp/one"))
+        );
+    }
+
+    #[test]
+    fn explicit_selector_rejects_invalid_and_ambiguous_names() {
+        let mounts = LocalMounts::from_paths([
+            PathBuf::from("/tmp/one/mount"),
+            PathBuf::from("/tmp/two/mount"),
+        ]);
+        let ambiguous = mounts.select(Some("mount"), false).unwrap_err().to_string();
+        assert!(ambiguous.contains("ambiguous"));
+        assert!(ambiguous.contains("/tmp/one/mount"));
+        assert!(ambiguous.contains("/tmp/two/mount"));
+
+        let invalid = mounts
+            .select(Some("missing"), false)
+            .unwrap_err()
+            .to_string();
+        assert!(invalid.contains("no local frontend matches"));
+        assert!(invalid.contains("/tmp/one/mount"));
+    }
+
+    #[test]
+    fn explicit_selector_bypasses_a_guest_target() {
+        let context = ShellContext::new(None, Vec::new());
+        let target = context
+            .choose_target(
+                Some(LocalMounts::from_paths([PathBuf::from("/tmp/omnifs")])),
+                Some("omnifs"),
+                false,
+                Some(ShellTarget::Krunkit),
+            )
+            .unwrap();
+        assert_eq!(target, ShellTarget::Local(PathBuf::from("/tmp/omnifs")));
+    }
+
+    #[test]
+    fn root_mount_roster_is_sorted_and_deduplicated_with_configured_fallback() {
+        let live = ShellContext::new(
+            Some(status_with_mounts(&["zeta", "alpha", "alpha"])),
+            vec!["fallback".to_string()],
+        );
+        assert_eq!(
+            live.root_mounts(),
+            vec!["alpha".to_string(), "zeta".to_string()]
+        );
+
+        let fallback = ShellContext::new(
+            None,
+            vec!["zeta".to_string(), "alpha".to_string(), "alpha".to_string()],
+        );
+        assert_eq!(
+            fallback.root_mounts(),
+            vec!["alpha".to_string(), "zeta".to_string()]
+        );
+    }
+
+    #[test]
+    fn interactive_banner_lists_root_mounts() {
+        let context = ShellContext::new(Some(status_with_mounts(&["zeta", "alpha"])), vec![]);
+        let banner = context.banner("local", Path::new("/tmp/omnifs"));
+        assert!(banner.contains("omnifs shell (local) at /tmp/omnifs"));
+        assert!(banner.contains("root mounts: alpha, zeta"));
+    }
+
+    #[test]
+    fn offline_banner_does_not_call_configured_roots_live_mounts() {
+        let context = ShellContext::new(None, vec!["alpha".to_string()]);
+        let banner = context.banner("local", Path::new("/tmp/omnifs"));
+        assert!(banner.contains("configured roots (unverified): alpha"));
+        assert!(!banner.contains("root mounts: alpha"));
+    }
+
+    #[test]
+    fn shell_mount_flag_parses_before_trailing_command() {
+        let cli =
+            Cli::try_parse_from(["omnifs", "shell", "--mount", "omnifs", "--", "pwd"]).unwrap();
+        match cli.command {
+            Some(crate::cli::Commands::Shell(args)) => {
+                assert_eq!(args.mount.as_deref(), Some("omnifs"));
+                assert_eq!(args.command, vec!["pwd".to_string()]);
+            },
+            _ => panic!("expected shell command"),
+        }
+
+        let command = Cli::command();
+        let mut shell = command
+            .find_subcommand("shell")
+            .expect("shell command")
+            .clone();
+        assert!(
+            shell
+                .get_arguments()
+                .any(|argument| argument.get_long() == Some("mount"))
+        );
+        assert!(shell.render_help().to_string().contains("--mount <NAME>"));
+    }
+}

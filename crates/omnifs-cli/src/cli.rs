@@ -49,7 +49,10 @@ pub enum Commands {
     /// Open a shell at the projected tree
     ///
     /// The mount surface (Docker-hosted frontend or host-native mount) comes
-    /// from the runtime record `omnifs up` wrote.
+    /// from live frontend state. A local mount can be selected explicitly.
+    /// Use `--mount NAME` to select a local frontend mount by basename or exact
+    /// path, bypassing guest frontend preference when more than one surface is
+    /// available.
     Shell(commands::shell::ShellArgs),
 
     /// Export a mount's canonical cache to a directory
