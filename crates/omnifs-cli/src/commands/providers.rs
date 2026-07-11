@@ -133,7 +133,10 @@ fn render_providers(local: &[ProviderSummary], daemon: Option<&[ProviderSummary]
     out
 }
 
-fn provider_summaries(
+/// One summary per distinct provider name, the same view `providers ls`
+/// renders, so any other caller counting "distinct providers" matches it
+/// exactly instead of re-deriving the name-collapsing logic.
+pub(crate) fn provider_summaries(
     catalog: &omnifs_workspace::provider::Catalog,
 ) -> anyhow::Result<Vec<ProviderSummary>> {
     let mut by_name = BTreeMap::new();

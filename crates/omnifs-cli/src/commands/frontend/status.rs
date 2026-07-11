@@ -117,7 +117,7 @@ impl FrontendStatusArgs {
                 ExitCode::Success
             },
             None => {
-                anstream::println!("frontend container: not found");
+                anstream::println!("frontend container `{container_name}`: not found");
                 ExitCode::Success
             },
         };

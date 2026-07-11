@@ -169,7 +169,7 @@ async fn run_local(
     mount_point: std::path::PathBuf,
 ) -> anyhow::Result<()> {
     let backend = LocalBackend::new(paths.clone(), mount_point.clone(), kind.into())?;
-    anstream::eprintln!("Starting the local {} frontend", backend.protocol());
+    anstream::eprintln!("Starting the local {} frontend", kind.label());
     backend.launch(mount_name).await?;
 
     let probe_path = mount_point.join(mount_name);

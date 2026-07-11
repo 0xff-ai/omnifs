@@ -712,9 +712,11 @@ impl DaemonControlState {
         match self {
             Self::Compatible(status) => Ok(Some(*status)),
             Self::Absent => Ok(None),
-            Self::Sick { error } => Err(error.context(format!(
-                "a daemon answered at {label}, but its status could not be read"
-            ))),
+            Self::Sick { error } => Err(error.context(if label.is_empty() {
+                "a daemon answered, but its status could not be read".to_string()
+            } else {
+                format!("a daemon answered at {label}, but its status could not be read")
+            })),
             Self::Incompatible(status) => Err(incompatible_daemon_error(&status)),
         }
     }

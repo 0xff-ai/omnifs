@@ -48,11 +48,10 @@ impl InstallTarget {
 
 fn install_claude_code(home: Option<PathBuf>) -> anyhow::Result<()> {
     let Some(home) = home else {
-        anstream::eprintln!(
+        anyhow::bail!(
             "Could not determine ~/.claude; source skill is at {}",
             source_path().display()
         );
-        return Ok(());
     };
     install_claude_code_in(&home)
 }
@@ -72,4 +71,17 @@ fn source_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../skills")
         .join(SKILL_NAME)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn install_claude_code_errors_when_home_is_unset() {
+        let error = install_claude_code(None).expect_err("missing HOME must fail, not no-op");
+        let message = error.to_string();
+        assert!(message.contains("Could not determine ~/.claude"));
+        assert!(message.contains("source skill is at"));
+    }
 }

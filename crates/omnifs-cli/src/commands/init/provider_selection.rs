@@ -113,7 +113,7 @@ impl<'a> ProviderSelection<'a> {
                 "mount `{proposed}` already exists; pass --as explicitly (suggested: `{suggestion}`)"
             );
         }
-        anstream::println!("Mount `{proposed}` already exists.");
+        anstream::eprintln!("Mount `{proposed}` already exists.");
         let name = inquire::Text::new("New mount name")
             .with_default(suggestion.as_str())
             .prompt()

@@ -342,7 +342,13 @@ impl Doctor<'_> {
     fn probe_providers_discovered(&self) -> ProbeResult {
         match self.workspace.catalog().dir_status() {
             DirStatus::Present { wasm_count } if wasm_count > 0 => {
-                ProbeResult::Ok(format!("{wasm_count} provider(s) installed"))
+                match crate::commands::providers::provider_summaries(self.workspace.catalog()) {
+                    Ok(summaries) => ProbeResult::Ok(format!(
+                        "{} providers ({wasm_count} artifacts)",
+                        summaries.len()
+                    )),
+                    Err(error) => ProbeResult::Err(format!("provider store unreadable: {error}")),
+                }
             },
             DirStatus::Missing | DirStatus::Present { .. } => ProbeResult::Warn(
                 "no providers installed (run `omnifs up` or `omnifs setup`)".into(),

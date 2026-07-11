@@ -110,10 +110,6 @@ impl LocalBackend {
         })
     }
 
-    pub(crate) const fn protocol(&self) -> LocalProtocol {
-        self.protocol
-    }
-
     pub(crate) async fn launch(&self, mount_name: &str) -> Result<()> {
         std::fs::create_dir_all(&self.mount_point)
             .with_context(|| format!("create mount point {}", self.mount_point.display()))?;

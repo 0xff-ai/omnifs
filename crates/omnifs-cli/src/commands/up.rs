@@ -71,7 +71,6 @@ async fn launch_frontends(workspace: &Workspace) -> anyhow::Result<()> {
         .partition(|entry| entry.driver == Driver::Local);
 
     for entry in &locals {
-        announce(entry);
         launch_entry(workspace, entry, &mount_name)
             .await
             .with_context(|| format!("start the local {} frontend", entry.kind.label()))?;
