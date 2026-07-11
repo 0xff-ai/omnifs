@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::launch_backend::LaunchBackend;
+use crate::process::is_alive as pid_is_alive;
 use crate::workspace::Workspace;
 use anyhow::Context as _;
 use omnifs_workspace::runtime_record::{RecordedBackend, RuntimeRecord};
@@ -201,18 +202,6 @@ impl<'a> DaemonTeardown<'a> {
 
         Ok(None)
     }
-}
-
-/// True when `pid` names a live process (`kill -0` succeeds, or fails for a
-/// reason other than "no such process"). Used before trusting a native record's
-/// pid for a stale sweep.
-fn pid_is_alive(pid: u32) -> bool {
-    std::process::Command::new("kill")
-        .args(["-0", &pid.to_string()])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
 }
 
 enum RunningBackend {

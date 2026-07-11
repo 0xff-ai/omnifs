@@ -155,7 +155,7 @@ pub(crate) fn mount_point_resolution(
                 .with_default(&default_display)
                 .prompt()
                 .map_err(crate::ui::from_inquire)?;
-            Ok(expand_tilde_path(raw.trim()))
+            Ok(crate::ui::input_path(raw.trim()))
         },
     )
 }
@@ -609,15 +609,6 @@ fn browse_path(mount_name: &str) -> PathBuf {
     omnifs_workspace::layout::resolve_mount_point()
         .unwrap_or_else(|| PathBuf::from("~/omnifs"))
         .join(mount_name)
-}
-
-fn expand_tilde_path(raw: &str) -> PathBuf {
-    if let Some(stripped) = raw.strip_prefix("~/")
-        && let Some(home) = std::env::var_os("HOME")
-    {
-        return PathBuf::from(home).join(stripped);
-    }
-    PathBuf::from(raw)
 }
 
 fn approved_upgrade_for_existing_mount(

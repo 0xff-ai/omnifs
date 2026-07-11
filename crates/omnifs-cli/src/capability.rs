@@ -29,19 +29,6 @@ fn need_groups(manifest: &ProviderManifest) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Truncate `text` to `max` chars, appending `…` when it overflows.
-fn truncate_chars(text: &str, max: usize) -> String {
-    if text.chars().count() <= max {
-        return text.to_string();
-    }
-    if max == 0 {
-        return String::new();
-    }
-    let mut out: String = text.chars().take(max.saturating_sub(1)).collect();
-    out.push('…');
-    out
-}
-
 /// Compact one-line needs summary, e.g.
 /// `needs api.github.com (API calls), git@github.com:* (clones)`.
 ///
@@ -69,13 +56,13 @@ pub(crate) fn compact_needs(manifest: &ProviderManifest) -> Option<String> {
 
     let mut rendered: Vec<String> = shown
         .iter()
-        .map(|(values, why)| format!("{values} ({})", truncate_chars(why, why_budget)))
+        .map(|(values, why)| format!("{values} ({})", crate::ui::truncate(why, why_budget)))
         .collect();
     if overflow {
         rendered.push("…".to_string());
     }
     // Safety net for pathological value lists.
-    Some(truncate_chars(
+    Some(crate::ui::truncate(
         &format!("needs {}", rendered.join(", ")),
         COMPACT_NEEDS_WIDTH,
     ))

@@ -132,18 +132,9 @@ fn prompt_host_file(name: &str, field: &ConfigField) -> anyhow::Result<PathBuf> 
     let raw = inquire::Text::new(description)
         .prompt()
         .map_err(crate::ui::from_inquire)?;
-    let path = expand_tilde_path(raw.trim());
+    let path = crate::ui::input_path(raw.trim());
     if !path.is_file() {
         anyhow::bail!("{} is not a readable file", path.display());
     }
     Ok(path)
-}
-
-fn expand_tilde_path(raw: &str) -> PathBuf {
-    if let Some(stripped) = raw.strip_prefix("~/")
-        && let Some(home) = std::env::var_os("HOME")
-    {
-        return PathBuf::from(home).join(stripped);
-    }
-    PathBuf::from(raw)
 }

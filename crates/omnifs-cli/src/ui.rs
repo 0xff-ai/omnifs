@@ -8,6 +8,7 @@
 pub(crate) mod picker;
 
 use std::io::{IsTerminal, Write as _};
+use std::path::PathBuf;
 
 use crossterm::{
     queue,
@@ -23,6 +24,20 @@ pub(crate) const RULE_WIDTH: usize = 56; // hairline width
 const VALUE_COLUMN: usize = 2 + 1 + 1 + KEY_WIDTH;
 /// Command column width for `hint` rows.
 const HINT_WIDTH: usize = 16;
+
+/// Truncate plain text to `max_chars`, counting the ellipsis in that budget.
+pub(crate) fn truncate(text: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+    let mut chars = text.chars();
+    let mut out: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        let _ = out.pop();
+        out.push('…');
+    }
+    out
+}
 
 /// One ledger row: `  <glyph> <key padded>value`. The glyph is pre-colored (one
 /// visible column); padding happens on the plain key so the value lands at
@@ -178,6 +193,16 @@ pub(crate) fn from_inquire(error: inquire::InquireError) -> anyhow::Error {
     }
 }
 
+/// Parse a path typed at a prompt, expanding a leading `~/` when `HOME` is set.
+pub(crate) fn input_path(raw: &str) -> PathBuf {
+    if let Some(stripped) = raw.strip_prefix("~/")
+        && let Some(home) = std::env::var_os("HOME")
+    {
+        return PathBuf::from(home).join(stripped);
+    }
+    PathBuf::from(raw)
+}
+
 /// Install the inquire theme. Call once from `main` before any prompt so every
 /// prompt matches the ledger palette.
 pub(crate) fn install_prompt_theme() {
@@ -221,6 +246,17 @@ mod tests {
             }
         }
         out
+    }
+
+    #[test]
+    fn truncate_uses_a_total_character_budget() {
+        assert_eq!(truncate("hello", 5), "hello");
+        assert_eq!(truncate("hello!", 5), "hell…");
+        assert_eq!(truncate("éé", 3), "éé");
+        assert_eq!(truncate("éééé", 3), "éé…");
+        assert_eq!(truncate("🚀火é", 2), "🚀…");
+        assert_eq!(truncate("hi", 1), "…");
+        assert_eq!(truncate("hello", 0), "");
     }
 
     #[test]

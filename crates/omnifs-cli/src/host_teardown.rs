@@ -16,6 +16,8 @@ use std::process::Command;
 use std::process::Stdio;
 use std::time::Duration;
 
+#[cfg(not(target_os = "linux"))]
+use crate::process::is_alive as pid_alive;
 #[cfg(target_os = "linux")]
 use anyhow::Context as _;
 #[cfg(not(target_os = "linux"))]
@@ -275,17 +277,6 @@ fn signal_term(pid: u32) {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
-}
-
-#[cfg(not(target_os = "linux"))]
-fn pid_alive(pid: u32) -> bool {
-    Command::new("kill")
-        .arg("-0")
-        .arg(pid.to_string())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
 }
 
 /// Poll the OS mount table at `cadence` until `mount_point` is no longer active,

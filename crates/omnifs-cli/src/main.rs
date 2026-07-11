@@ -25,6 +25,7 @@ mod launch_backend;
 mod mount_config;
 mod mount_report;
 mod mount_tree;
+mod process;
 mod provider_bundle;
 mod runtime;
 mod stages;

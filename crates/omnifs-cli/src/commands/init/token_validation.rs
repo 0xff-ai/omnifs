@@ -62,7 +62,7 @@ impl<'a> StaticTokenValidator<'a> {
                 self.validation.expect_status,
                 status.as_u16(),
                 status.canonical_reason().unwrap_or("unknown"),
-                excerpt(&body, 300)
+                crate::ui::truncate(&body, 300)
             );
         }
         let body = response.text().await.context("read response body")?;
@@ -73,7 +73,7 @@ impl<'a> StaticTokenValidator<'a> {
             anyhow::bail!(
                 "validation failed: response did not contain `{}`. Response: {}",
                 pointer,
-                excerpt(&body, 300)
+                crate::ui::truncate(&body, 300)
             );
         }
         Ok(self.outcome_from(&parsed))
@@ -105,12 +105,4 @@ fn json_to_string(v: &Value) -> Option<String> {
         Value::Bool(b) => Some(b.to_string()),
         _ => None,
     }
-}
-
-fn excerpt(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        return s.to_string();
-    }
-    let cut: String = s.chars().take(max).collect();
-    format!("{cut}…")
 }

@@ -309,19 +309,6 @@ fn tags_plain(row: &PickerRow) -> String {
         .join(" ")
 }
 
-/// Truncate `text` to `max` columns, appending `…` when it overflows.
-fn truncate(text: &str, max: usize) -> String {
-    if text.chars().count() <= max {
-        return text.to_string();
-    }
-    if max == 0 {
-        return String::new();
-    }
-    let mut out: String = text.chars().take(max.saturating_sub(1)).collect();
-    out.push('…');
-    out
-}
-
 /// Render one list row to a colored string of exactly `width` visible columns.
 /// The single-select variant (`multi = false`) renders no checkbox glyph.
 fn render_row(
@@ -360,7 +347,7 @@ fn render_row(
 
     let avail = width.saturating_sub(prefix_visible);
     let summary_max = avail.saturating_sub(right_visible + 1);
-    let summary = truncate(&row.summary, summary_max);
+    let summary = crate::ui::truncate(&row.summary, summary_max);
     let summary_visible = summary.chars().count();
     let gap = avail.saturating_sub(summary_visible + right_visible);
 
@@ -413,23 +400,28 @@ fn color_enabled() -> bool {
     std::env::var_os("NO_COLOR").is_none() && std::io::stderr().is_terminal()
 }
 
+/// Iterate visible characters while consuming SGR escape sequences.
+fn visible_chars(input: &str) -> impl Iterator<Item = char> + '_ {
+    let mut in_escape = false;
+    input.chars().filter(move |&ch| {
+        if in_escape {
+            if ch.is_ascii_alphabetic() {
+                in_escape = false;
+            }
+            false
+        } else if ch == '\u{1b}' {
+            in_escape = true;
+            false
+        } else {
+            true
+        }
+    })
+}
+
 /// Strip SGR escape sequences from an already-styled line, for the color-off
 /// path where the raw codes would otherwise reach the terminal verbatim.
 fn strip_ansi(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    let mut chars = input.chars();
-    while let Some(ch) = chars.next() {
-        if ch == '\u{1b}' {
-            for next in chars.by_ref() {
-                if next.is_ascii_alphabetic() {
-                    break;
-                }
-            }
-        } else {
-            out.push(ch);
-        }
-    }
-    out
+    visible_chars(input).collect()
 }
 
 /// Restores raw mode and cursor visibility on every exit path, including panic.
@@ -707,20 +699,7 @@ fn merge_columns(list: &[String], panel: &[String], list_width: usize) -> Vec<St
 
 /// Visible width of a string, ignoring SGR escape sequences.
 fn visible_width(input: &str) -> usize {
-    let mut width = 0;
-    let mut chars = input.chars();
-    while let Some(ch) = chars.next() {
-        if ch == '\u{1b}' {
-            for next in chars.by_ref() {
-                if next.is_ascii_alphabetic() {
-                    break;
-                }
-            }
-        } else {
-            width += 1;
-        }
-    }
-    width
+    visible_chars(input).count()
 }
 
 /// Clip a possibly-colored line to `max` visible columns, preserving escape
@@ -781,34 +760,10 @@ pub(crate) fn select(question: &str, rows: Vec<PickerRow>) -> anyhow::Result<Str
 mod tests {
     use super::*;
 
-    fn strip_ansi(input: &str) -> String {
-        let mut out = String::new();
-        let mut chars = input.chars();
-        while let Some(ch) = chars.next() {
-            if ch == '\u{1b}' {
-                for next in chars.by_ref() {
-                    if next.is_ascii_alphabetic() {
-                        break;
-                    }
-                }
-            } else {
-                out.push(ch);
-            }
-        }
-        out
-    }
-
     #[test]
     fn canceled_is_detected_only_for_the_marker() {
         assert!(is_canceled(&anyhow::Error::new(Canceled)));
         assert!(!is_canceled(&anyhow!("some other failure")));
-    }
-
-    #[test]
-    fn truncate_appends_ellipsis() {
-        assert_eq!(truncate("hello", 10), "hello");
-        assert_eq!(truncate("hello world", 5), "hell…");
-        assert_eq!(truncate("hello", 5), "hello");
     }
 
     #[test]
@@ -825,6 +780,11 @@ mod tests {
         let clipped = clip_visible(&colored, 10);
         assert_eq!(visible_width(&clipped), 10);
         assert!(clipped.ends_with("\u{1b}[0m"));
+
+        // Multibyte characters count as characters, not bytes.
+        let clipped = clip_visible("éclair", 4);
+        assert_eq!(visible_width(&clipped), 4);
+        assert_eq!(strip_ansi(&clipped), "écl…");
     }
 
     // Archetype manifests for the four `default_on` branches. The names mirror

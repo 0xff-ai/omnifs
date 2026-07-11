@@ -47,6 +47,7 @@ use anyhow::{Context as _, Result};
 use crate::config::Config;
 use crate::frontend_backend::{FrontendBackend, FrontendLaunchSpec};
 use crate::launch_backend::{BUILD_CHANNEL, BuildChannel, GUEST_MOUNT, ImageRef};
+use crate::process::is_alive as process_alive;
 
 const KRUNKIT_SUBDIR: &str = "krunkit";
 const SSH_KEY_NAME: &str = "id_ed25519";
@@ -203,16 +204,6 @@ pub(crate) fn ensure_socat_available() -> Result<()> {
         ),
         Err(error) => Err(error).context("probe for socat on PATH"),
     }
-}
-
-fn process_alive(pid: u32) -> bool {
-    Command::new("kill")
-        .arg("-0")
-        .arg(pid.to_string())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
 }
 
 /// The libkrun microVM frontend backend. Instance state is workspace-scoped;
