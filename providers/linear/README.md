@@ -49,7 +49,7 @@ store.
 
 Run `omnifs status` after init to see whether the OAuth credential is
 ready. If credentials are missing, status prints the matching
-`omnifs init --reauth linear` recovery command.
+`omnifs mounts reauth linear` recovery command.
 
 ### Static-token fallback
 

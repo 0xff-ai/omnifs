@@ -28,7 +28,7 @@ omnifs up
 omnifs shell
 ```
 
-The CLI stores credentials and self-contained mount specs under `OMNIFS_HOME`. The daemon runs on the host. `omnifs frontend up` optionally attaches a credential-free virtualized FUSE frontend, and `omnifs shell` enters it at `/omnifs`.
+The CLI stores credentials and self-contained mount specs under `OMNIFS_HOME`. The daemon runs on the host. `omnifs frontend up` optionally attaches a credential-free virtualized FUSE frontend; `omnifs shell` enters it at `/omnifs` when attached and otherwise uses the native mount.
 
 ## Platform
 

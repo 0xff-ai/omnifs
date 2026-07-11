@@ -8,7 +8,7 @@
 <p align="center"><a href="#quickstart">quickstart</a> | <a href="https://omnifs.dev">homepage</a> | <a href="https://omnifs.dev/start">docs</a> | <a href="#things-to-try">things to try</a> | <a href="#providers">providers</a> | <a href="#how-it-works">how it works</a></p>
 </div>
 
-omnifs projects external systems into local filesystem paths. GitHub, DNS, arXiv, Docker, Linear, and SQLite become directories and files you can `cd`, `ls`, `cat`, `grep`, `find`, `jq`, and script against.
+omnifs projects external systems into local filesystem paths. GitHub, DNS, arXiv, Docker, Linear, SQLite, Kubernetes, web pages, and Oura become directories and files you can `cd`, `ls`, `cat`, `grep`, `find`, `jq`, and script against.
 
 The goal is simple: if a tool can read files, it can read the outside world without learning another SDK, auth flow, pagination model, or response schema.
 
@@ -20,7 +20,7 @@ The goal is simple: if a tool can read files, it can read the outside world with
 
 ## Quickstart
 
-omnifs is written in Rust. We ship prebuilt Linux and macOS binaries through the npm registry, so the npm installation path needs Node.js and npm. Docker or OrbStack is needed only for the default virtualized FUSE frontend and `omnifs shell`; macOS can use krunkit instead.
+omnifs is written in Rust. We ship prebuilt Linux and macOS binaries through the npm registry, so the npm installation path needs Node.js and npm. Docker or OrbStack is needed only for the optional Docker-hosted FUSE frontend; macOS can use krunkit instead.
 
 ```bash
 npm install -g @0xff-ai/omnifs
@@ -32,7 +32,7 @@ omnifs shell
 
 `omnifs setup` prepares the workspace and mount point. `omnifs init <provider>` creates a self-contained mount spec and completes any required authentication. `omnifs up` starts the host-native daemon.
 
-`omnifs frontend up` is optional; it starts the selected virtualized FUSE frontend (`docker` by default). `omnifs shell` opens an omnifs-aware shell inside it. Native mounts remain available without either command.
+`omnifs frontend up` is optional; it starts the selected virtualized FUSE frontend (`docker` by default). `omnifs shell` prefers that frontend when attached and otherwise opens at the native mount. Native mounts remain available without either command.
 
 ---
 
@@ -67,7 +67,7 @@ cd /github/ollama/ollama
 ls
 cat repo.json
 cat issues/open/12959/title
-cat pulls/all/9585/diff
+cat pulls/all/9585/diff.patch
 # repository trees are cloned on demand
 cd repo && ls
 
@@ -138,6 +138,9 @@ The current surface is read-only. Write-back is designed around explicit staged 
 | Docker | `/docker` | Docker daemon system state, container listings, per-container inspect output, state, and summaries |
 | Linear | `/linear` | Teams and issues, with title, state, priority, assignee, and description files |
 | SQLite | `/db` | Read-only SQLite metadata, table schemas, indexes, row counts, and samples |
+| Kubernetes | `/k8s` | Live namespaces, cluster resources, manifests, status, events, and pod logs |
+| Web | `/web` | Allowed HTTPS pages as readable Markdown and raw response bytes |
+| Oura | `/oura` | Daily health, sleep, readiness, workout, heart-rate, and ring-battery data |
 
 ### GitHub
 
@@ -149,7 +152,7 @@ The current surface is read-only. Write-back is designed around explicit staged 
 | `/github/{owner}/{repo}/issues/{open,all}/` | Issue listings |
 | `/github/{owner}/{repo}/issues/{filter}/{n}/title` | Issue title |
 | `/github/{owner}/{repo}/issues/{filter}/{n}/body` | Issue body |
-| `/github/{owner}/{repo}/pulls/{filter}/{n}/diff` | Pull request diff |
+| `/github/{owner}/{repo}/pulls/{filter}/{n}/diff.patch` | Pull request diff |
 | `/github/{owner}/{repo}/actions/runs/{id}/status` | Actions run status |
 | `/github/{owner}/{repo}/actions/runs/{id}/log` | Actions run log |
 
@@ -211,7 +214,7 @@ The host-native daemon owns providers, credentials, caching, callouts, and one s
 
 Providers are WebAssembly components implementing the [`omnifs:provider` WIT interface](crates/omnifs-wit/wit/provider.wit). Providers are self-contained: they declare identity, capabilities, config metadata, and auth via `#[omnifs_sdk::provider]` annotations, which the build assembles into the `omnifs.provider-metadata.v1` Wasm custom section. A provider's main job is to answer filesystem operations via entrypoint methods `lookup_child`, `list_children`, and `read_file`.
 
-Providers do not hold tokens, open sockets, or run Git themselves. They return callout requests such as HTTP fetches, blob downloads, archive opens, or repo tree handoffs. The host executes those requests, attaches credentials at the boundary, enforces declared capabilities, and owns caching.
+Providers do not hold tokens, open sockets, or run Git themselves. They await typed host callouts such as HTTP fetches, blob downloads, archive opens, or repo tree handoffs. The host executes those imports, attaches credentials at the boundary, enforces declared capabilities, and owns caching.
 
 The cache is host-owned plain byte storage. Providers can return canonical upstream bytes and derived filesystem entries together, so one upstream payload can populate multiple files and child entries. Invalidations come from explicit provider effects and runtime events.
 
@@ -248,7 +251,7 @@ tail -n 80 ~/.omnifs-dev/cache/daemon.log
 - A host CLI on npm that handles setup, auth, lifecycle, logs, status, and inspection.
 - Sandboxed Wasm providers that can only reach the network, Git, sockets, and files the host hands them.
 - Host-held credentials, layered caching, and `omnifs inspect` for a live view of what the runtime is doing.
-- Six live providers: GitHub, DNS, arXiv, Docker, Linear, and SQLite.
+- Nine live providers: GitHub, DNS, arXiv, Docker, Linear, SQLite, Kubernetes, Web, and Oura.
 
 ### 🚧 In progress
 
@@ -262,7 +265,7 @@ tail -n 80 ~/.omnifs-dev/cache/daemon.log
 ### 🔭 Planned
 
 - Write support: stage your intent first, then apply it upstream.
-- Many more providers, including object stores, Kubernetes, Postgres, Redis, Slack, Discord, Google Drive, Gmail, Notion, Stripe, Cloudflare, Vercel, and Telegram.
+- Many more providers, including object stores, Postgres, Redis, Slack, Discord, Google Drive, Gmail, Notion, Stripe, Cloudflare, Vercel, and Telegram.
 - A real provider ecosystem: standalone packaging, a community catalog, authoring docs, and sidecars for providers that need native dependencies.
 - Additional mount surfaces beyond Linux FUSE and macOS NFSv4, plus passthrough for host-backed subtrees.
 - Easier install and slimmer packaging: Homebrew or shell installers and smaller virtualized frontend artifacts.
