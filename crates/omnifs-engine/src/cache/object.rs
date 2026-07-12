@@ -83,7 +83,19 @@ impl Cache {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let db = Database::open(Config::new(path))?;
+        let db = Database::open(Config::new(path)).map_err(|error| match error {
+            // Fjall holds a single-writer lock on the database directory. A
+            // bare `FjallError: Locked` is opaque; name the real cause so the
+            // operator can act instead of reading it as data corruption.
+            fjall::Error::Locked => anyhow::anyhow!(
+                "object cache at {} is locked: another omnifs daemon is already \
+                 using this home. Stop it with `omnifs down`, or kill a stale \
+                 `omnifs daemon` process, then retry.",
+                path.display()
+            ),
+            other => anyhow::Error::new(other)
+                .context(format!("open object cache at {}", path.display())),
+        })?;
         Ok(Self { db })
     }
 
@@ -321,6 +333,24 @@ mod tests {
         let cache = Cache::open(&dir.path().join("object")).unwrap();
         let mount = cache.mount("m").unwrap();
         (dir, mount)
+    }
+
+    /// A second open while the first holds fjall's single-writer lock reports
+    /// the real cause and the fix, not a bare `FjallError: Locked`.
+    #[test]
+    fn locked_cache_names_the_cause_and_the_fix() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("object");
+        let _first = Cache::open(&path).expect("first open acquires the lock");
+        let Err(error) = Cache::open(&path) else {
+            panic!("second open must fail while the first holds the lock");
+        };
+        let rendered = format!("{error:#}");
+        assert!(rendered.contains("is locked"), "got: {rendered}");
+        assert!(
+            rendered.contains("omnifs down"),
+            "should point at the fix: {rendered}"
+        );
     }
 
     const OBJ: &[u8] = b"issue:42";

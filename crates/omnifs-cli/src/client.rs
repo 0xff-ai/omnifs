@@ -1,21 +1,25 @@
 #![allow(clippy::disallowed_macros)] // migrates in wave 5 (cli-redesign)
 //! HTTP client for the daemon control API.
 //!
-//! The client only ever dials an endpoint it read from its own workspace's
-//! runtime record (`$OMNIFS_HOME/daemon.json`), or an explicit
-//! `OMNIFS_DAEMON_ADDR`. It never dials a default port blind, so a daemon owned
-//! by a different `OMNIFS_HOME` is structurally unaddressable.
+//! The client only ever dials an endpoint within its own workspace: an endpoint
+//! read from the runtime record (`$OMNIFS_HOME/daemon.json`), the fixed control
+//! socket (`$OMNIFS_HOME/control.sock`), or an explicit `OMNIFS_DAEMON_ADDR`. It
+//! never dials a default port blind, so a daemon owned by a different
+//! `OMNIFS_HOME` is structurally unaddressable.
 //!
 //! Resolution (per request, so the launcher can poll for the record to appear):
 //! - `OMNIFS_DAEMON_ADDR` set: dial TCP, bearer token from `OMNIFS_CONTROL_TOKEN`
 //!   when set (the debug/test path; the ordinary host-native daemon never sets
 //!   this).
 //! - else read the record:
-//!   - absent -> the daemon is not running (exit 3).
-//!   - unix endpoint -> connect the socket; a refused/missing socket is a stale
+//!   - a unix endpoint -> connect the socket; a refused/missing socket is a stale
 //!     record, which is removed and reported.
-//! - the instance id echoed by `/v1/status` is asserted equal to the record's,
-//!   so a record overwritten by a restart mid-command is caught.
+//!   - no record -> fall back to the fixed control socket if it exists on disk,
+//!     so a daemon that outlived its record stays reachable; otherwise the daemon
+//!     is not running (exit 3).
+//! - the instance id echoed by `/v1/status` is asserted equal to the record's
+//!   (the control-socket fallback carries no instance id, so this check is
+//!   skipped for it), so a record overwritten by a restart mid-command is caught.
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -93,6 +97,9 @@ pub(crate) struct DaemonClient {
     /// Layout for record-based resolution. `None` only when the ambient
     /// workspace could not be resolved (then the client behaves as absent).
     record_path: Option<PathBuf>,
+    /// The daemon's fixed control socket, dialed when the runtime record is
+    /// absent. `None` in record-only test clients. See [`Self::resolve`].
+    control_socket: Option<PathBuf>,
     unix: OnceLock<HyperClient<UnixConnector, Full<Bytes>>>,
     /// Set once a stale unix socket has been cleaned, so the unavailable error
     /// can report the record was removed.
@@ -101,12 +108,19 @@ pub(crate) struct DaemonClient {
 
 impl DaemonClient {
     pub(crate) fn for_layout(layout: &WorkspaceLayout) -> Self {
-        Self::with_record_path(Some(layout.runtime_record_file()))
+        Self {
+            record_path: Some(layout.runtime_record_file()),
+            control_socket: Some(layout.control_socket()),
+            unix: OnceLock::new(),
+            cleaned_stale: AtomicBool::new(false),
+        }
     }
 
+    #[cfg(test)]
     fn with_record_path(record_path: Option<PathBuf>) -> Self {
         Self {
             record_path,
+            control_socket: None,
             unix: OnceLock::new(),
             cleaned_stale: AtomicBool::new(false),
         }
@@ -163,21 +177,37 @@ impl DaemonClient {
                 token,
             });
         }
-        let Some(record_path) = &self.record_path else {
-            return Ok(Target::Absent);
+        let record = match &self.record_path {
+            Some(record_path) => RuntimeRecord::read(record_path)
+                .with_context(|| format!("read runtime record {}", record_path.display()))?,
+            None => None,
         };
-        match RuntimeRecord::read(record_path)
-            .with_context(|| format!("read runtime record {}", record_path.display()))?
-        {
-            None => Ok(Target::Absent),
-            Some(record) => {
-                let Endpoint::Unix { path } = record.endpoint;
-                Ok(Target::Unix {
-                    socket: path,
-                    instance: Some(record.instance_id),
-                })
-            },
+        if let Some(record) = record {
+            let Endpoint::Unix { path } = record.endpoint;
+            return Ok(Target::Unix {
+                socket: path,
+                instance: Some(record.instance_id),
+            });
         }
+        // No runtime record: it was never written, or it was lost while the
+        // daemon process lived (a crash or a botched teardown). The control
+        // socket sits at a fixed path independent of the record, so probe it
+        // directly. A live daemon that outlived its record is reached and
+        // reported (so `up`/`setup` refuse to spawn a second daemon onto the
+        // same locked cache, and `down`/`status` can see it); a stale socket
+        // file refuses the connection and resolves to absence.
+        Ok(self.control_socket_target().unwrap_or(Target::Absent))
+    }
+
+    /// The fixed control socket as a dial target, when it exists on disk. The
+    /// existence check keeps a fresh workspace (no socket yet) resolving to
+    /// [`Target::Absent`] rather than dialing a path that was never bound.
+    fn control_socket_target(&self) -> Option<Target> {
+        let socket = self.control_socket.as_ref()?;
+        socket.exists().then(|| Target::Unix {
+            socket: socket.clone(),
+            instance: None,
+        })
     }
 
     /// The endpoint the inspector's event stream should attach to.
@@ -1097,5 +1127,50 @@ mod tests {
                 "mounts":[]
             }}"#
         )
+    }
+
+    fn client_without_record(record: PathBuf, control_socket: PathBuf) -> DaemonClient {
+        DaemonClient {
+            record_path: Some(record),
+            control_socket: Some(control_socket),
+            unix: OnceLock::new(),
+            cleaned_stale: AtomicBool::new(false),
+        }
+    }
+
+    /// A daemon that outlived its runtime record still binds the fixed control
+    /// socket. With the record gone, `resolve` must fall back to that socket so
+    /// the daemon stays visible (rather than resolving to absence and letting a
+    /// second daemon spawn onto the same locked cache).
+    #[test]
+    fn resolve_falls_back_to_control_socket_when_record_is_absent() {
+        let _env = EnvGuard::unset_daemon_addr();
+        let home = tempfile::tempdir().unwrap();
+        let socket = home.path().join("control.sock");
+        std::fs::write(&socket, b"").unwrap();
+        let client = client_without_record(home.path().join("daemon.json"), socket.clone());
+        match client.resolve().unwrap() {
+            Target::Unix {
+                socket: dialed,
+                instance,
+            } => {
+                assert_eq!(dialed, socket);
+                assert!(instance.is_none(), "fallback carries no record instance id");
+            },
+            _ => panic!("expected the control-socket fallback target"),
+        }
+    }
+
+    /// A fresh workspace has neither a record nor a bound control socket: the
+    /// fallback must not dial a path that was never created.
+    #[test]
+    fn resolve_is_absent_without_record_or_control_socket() {
+        let _env = EnvGuard::unset_daemon_addr();
+        let home = tempfile::tempdir().unwrap();
+        let client = client_without_record(
+            home.path().join("daemon.json"),
+            home.path().join("control.sock"),
+        );
+        assert!(matches!(client.resolve().unwrap(), Target::Absent));
     }
 }
