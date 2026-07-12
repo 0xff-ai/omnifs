@@ -127,9 +127,15 @@ fn attach_tcp_flag_binds_at_start_and_the_record_carries_it() {
     wait_ready(&daemon.control_socket(), Duration::from_secs(30));
 
     let record = daemon.record();
-    let attach = record.get("attach").expect("daemon.json must carry attach");
-    let addr = attach["addr"].as_str().expect("attach.addr").to_string();
-    let token = attach["token"].as_str().expect("attach.token").to_string();
+    let attach = record
+        .get("attach")
+        .and_then(serde_json::Value::as_array)
+        .expect("daemon.json must carry an attach array");
+    assert_eq!(attach.len(), 1, "exactly one attach target: {record}");
+    let entry = &attach[0];
+    assert_eq!(entry["transport"], "tcp", "the entry must be tcp: {entry}");
+    let addr = entry["addr"].as_str().expect("attach addr").to_string();
+    let token = entry["token"].as_str().expect("attach token").to_string();
     assert_looks_like_a_token(&token);
 
     // The listener is really up: a bare TCP connect succeeds (the handshake
@@ -188,8 +194,15 @@ fn frontend_attach_target_route_binds_on_demand_and_is_idempotent() {
     post_frontend_attach_target(&ctrl_socket, None);
     let after = daemon.record();
     assert_eq!(before["started_at"], after["started_at"]);
-    assert_eq!(after["attach"]["addr"], addr);
-    assert_eq!(after["attach"]["token"], token);
+    let attach = after
+        .get("attach")
+        .and_then(serde_json::Value::as_array)
+        .expect("daemon.json must carry an attach array");
+    assert_eq!(attach.len(), 1, "exactly one attach target: {after}");
+    let entry = &attach[0];
+    assert_eq!(entry["transport"], "tcp", "the entry must be tcp: {entry}");
+    assert_eq!(entry["addr"], addr);
+    assert_eq!(entry["token"], token);
 
     TcpStream::connect(&addr)
         .unwrap_or_else(|error| panic!("connect to the attach listener at {addr}: {error}"));
