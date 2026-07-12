@@ -553,7 +553,8 @@ async function runInitMount(
   credentialEnv: Record<string, string>,
 ): Promise<void> {
   const args = [
-    "init",
+    "mount",
+    "add",
     mount.provider,
     "--as",
     mount.name,
