@@ -296,9 +296,9 @@ fn scripted_setup_and_mount_add_do_not_prompt() {
     assert!(setup.stdout.is_empty(), "session prose belongs on stderr");
     let setup_stderr = String::from_utf8_lossy(&setup.stderr);
     assert!(setup_stderr.contains("┌ omnifs setup"), "{setup_stderr}");
-    assert!(setup_stderr.contains("1/5 environment"), "{setup_stderr}");
+    assert!(setup_stderr.contains("1/4 environment"), "{setup_stderr}");
     assert!(
-        setup_stderr.contains("3/5 what should omnifs mount?"),
+        setup_stderr.contains("2/4 what should omnifs mount?"),
         "{setup_stderr}"
     );
     assert!(setup_stderr.contains("└ You're set."), "{setup_stderr}");

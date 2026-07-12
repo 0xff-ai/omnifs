@@ -154,27 +154,6 @@ pub(crate) async fn probe_docker_reachability(
     }
 }
 
-pub(crate) fn mount_point_resolution(
-    requested: Option<PathBuf>,
-    mode: PromptMode,
-) -> anyhow::Result<PathBuf> {
-    let default = omnifs_workspace::layout::resolve_mount_point().ok_or_else(|| {
-        anyhow!("cannot resolve host mount point: set HOME or OMNIFS_MOUNT_POINT")
-    })?;
-    let default_display = WorkspaceLayout::display(&default);
-    mode.resolve(
-        requested,
-        || default.clone(),
-        "--mount-point <path>",
-        || {
-            let raw = crate::ui::prompt::Text::new("Mount point")
-                .with_default(&default_display)
-                .ask()?;
-            Ok(crate::ui::input_path(raw.trim()))
-        },
-    )
-}
-
 #[allow(clippy::too_many_lines)] // linear ledger narration reads best inline
 pub(crate) async fn configure_mount(
     args: AddArgs,

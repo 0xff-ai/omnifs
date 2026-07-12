@@ -277,7 +277,6 @@ mod tests {
         let table = [
             ("setup orientation", "setup", "yes"),
             ("setup environment check", "setup", "no-input"),
-            ("setup mount point", "setup", "mount-point"),
             ("setup provider picker", "setup", "providers"),
             ("setup provider confirmation", "setup", "yes"),
             ("mount add provider picker", "mount add", "provider"),

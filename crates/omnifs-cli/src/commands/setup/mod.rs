@@ -1,14 +1,15 @@
 //! `omnifs setup`: guided onboarding walkthrough.
 //!
-//! A single ledger drives the whole wizard: an environment summary, a mount
-//! point question, a provider picker, a per-provider block for each
-//! selection, and a launch. Every human line prints on stderr through the
-//! `crate::ui` design system; stdout is reserved for machine output. The
-//! daemon always runs host-native, so there is no runtime-backend stage: the
-//! wizard surfaces Docker reachability and asks for a host mount point only
-//! when the effective `[[frontends]]` plan (explicit config, else the
-//! platform default) actually launches those frontend kinds — a guest-only
-//! config, for instance, needs neither.
+//! A single ledger drives the whole wizard: an environment summary, a provider
+//! picker, a per-provider block for each selection, and a launch. Every human
+//! line prints on stderr through the `crate::ui` design system; stdout is
+//! reserved for machine output. The daemon always runs host-native, so there is
+//! no runtime-backend stage: the wizard surfaces Docker reachability only when
+//! the effective `[[frontends]]` plan (explicit config, else the platform
+//! default) actually launches a Docker frontend. The host mount point is not a
+//! wizard question: it is the local frontend's parameter, resolved at launch
+//! from the `[[frontends]]` config or `OMNIFS_MOUNT_POINT`, and the launch step
+//! only names where files will appear.
 
 pub mod host_os;
 
@@ -41,10 +42,6 @@ pub struct SetupArgs {
     /// Fail instead of prompting. Use flags or --yes for every answer.
     #[arg(long)]
     pub no_input: bool,
-    /// Mount point for the local frontend, when the effective `[[frontends]]`
-    /// plan includes one.
-    #[arg(long, value_name = "PATH")]
-    pub mount_point: Option<PathBuf>,
     /// Preselect providers and skip the picker.
     #[arg(long, value_delimiter = ',')]
     pub providers: Vec<String>,
@@ -63,7 +60,7 @@ enum StageStyle {
 impl StageStyle {
     fn phase(self, n: usize, title: &str) -> String {
         match self {
-            Self::Wizard => format!("{n}/5 {title}"),
+            Self::Wizard => format!("{n}/4 {title}"),
             Self::Hub => title.to_string(),
         }
     }
@@ -116,7 +113,7 @@ impl SetupArgs {
         if installed.is_empty() {
             anyhow::bail!("no built-in or plugin providers are available");
         }
-        session.phase("1/5 environment");
+        session.phase("1/4 environment");
         session.row(crate::ui::report::Row::new(
             crate::ui::style::Glyph::Done,
             "environment",
@@ -138,27 +135,15 @@ impl SetupArgs {
             Self::render_docker_row(&config, &mut session).await;
         }
 
-        session.phase("2/5 mount point");
-        let mount_point = if frontend_plan
-            .iter()
-            .any(|entry| entry.driver == Driver::Local)
-        {
-            Some(self.resolve_mount_point(mode, &mut session)?)
-        } else {
-            session.note(
-                "no local frontend is configured; skipping the host mount point (see `omnifs frontend up`)",
-            );
-            None
-        };
-
-        self.configure_and_launch(
-            &workspace,
-            mount_point,
-            mode,
-            StageStyle::Wizard,
-            &mut session,
-        )
-        .await
+        // The host mount point is not a setup question. It is the local
+        // frontend's parameter, and it varies per frontend: a local frontend
+        // mounts at a host path, a docker/krunkit frontend inside its guest.
+        // `omnifs up` resolves it from the `[[frontends]]` config or
+        // OMNIFS_MOUNT_POINT, never from a value typed here, so the launch step
+        // names where files will appear instead of prompting for a path that
+        // would not bind.
+        self.configure_and_launch(&workspace, mode, StageStyle::Wizard, &mut session)
+            .await
     }
 
     /// The informational Docker reachability row for the environment stage. It
@@ -188,43 +173,10 @@ impl SetupArgs {
         }
     }
 
-    /// Resolve the mount point and print the post-answer note. The daemon
-    /// always runs host-native, so this question always applies.
-    fn resolve_mount_point(
-        &self,
-        mode: PromptMode,
-        session: &mut crate::ui::session::Session,
-    ) -> anyhow::Result<PathBuf> {
-        let mount_point = crate::stages::mount_point_resolution(self.mount_point.clone(), mode)?;
-        let display = WorkspaceLayout::display(&mount_point);
-        // State the fact when the prompt was skipped (--mount-point or --yes).
-        if self.mount_point.is_some() || mode.yes {
-            session.row(crate::ui::report::Row::new(
-                crate::ui::style::Glyph::Done,
-                "mount point",
-                &display,
-            ));
-        }
-        session.note(format!("files appear at {display}"));
-        // Launch reads OMNIFS_MOUNT_POINT; a typed/flagged value only previews
-        // unless it is exported.
-        let already = crate::config::env_string("OMNIFS_MOUNT_POINT")
-            .is_some_and(|env| WorkspaceLayout::display(&PathBuf::from(env)) == display);
-        if !already {
-            session.note(format!(
-                "`export OMNIFS_MOUNT_POINT={display}` to persist it"
-            ));
-        }
-        Ok(mount_point)
-    }
-
     /// Shared tail: pick providers, configure each, launch, and close.
-    /// `mount_point` is `None` for a guest-only `[[frontends]]` plan (no
-    /// local frontend to report a host path for).
     async fn configure_and_launch(
         &self,
         workspace: &Workspace,
-        mount_point: Option<PathBuf>,
         mode: PromptMode,
         style: StageStyle,
         session: &mut crate::ui::session::Session,
@@ -233,7 +185,7 @@ impl SetupArgs {
         let mounts = workspace.mounts()?;
         let configured = crate::catalog::configured_mounts(workspace.catalog(), &mounts)?;
 
-        session.phase(style.phase(3, "what should omnifs mount?"));
+        session.phase(style.phase(2, "what should omnifs mount?"));
         let selected = self.resolve_selection(&installed, &configured, mode, session)?;
 
         // Nothing new to configure (all providers already configured, or the
@@ -255,7 +207,7 @@ impl SetupArgs {
             let (fast, rest) = Self::split_fast_lane(&selected, &installed);
             if !fast.is_empty() {
                 return self
-                    .fast_lane_launch(&fast, &rest, &installed, workspace, mount_point, session)
+                    .fast_lane_launch(&fast, &rest, &installed, workspace, session)
                     .await;
             }
         }
@@ -265,7 +217,7 @@ impl SetupArgs {
         // code and context for scripts and for the top-level renderer. Only an
         // explicit sign-in decline becomes `MountOutcome::Skipped`.
         let results = self
-            .run_init_loop(&selected, &installed, workspace, style, 4, session)
+            .run_init_loop(&selected, &installed, workspace, style, 3, session)
             .await?;
 
         let any_ready = results
@@ -284,7 +236,7 @@ impl SetupArgs {
         }
 
         let outcome = self
-            .launch_and_report(workspace, mount_point.as_deref(), &results, style, session)
+            .launch_and_report(workspace, &results, style, session)
             .await?;
         Self::print_closer(&results, Some(&outcome), session);
         Ok(())
@@ -304,9 +256,9 @@ impl SetupArgs {
         })
     }
 
-    /// The time-to-first-file spine: configure the no-auth mounts (phase 4),
-    /// launch the daemon and prove a read on the first of them (phase 5), then
-    /// sign the auth-requiring providers in afterward (phase 5, applied live to
+    /// The time-to-first-file spine: configure the no-auth mounts (phase 3),
+    /// launch the daemon and prove a read on the first of them (phase 4), then
+    /// sign the auth-requiring providers in afterward (phase 4, applied live to
     /// the running daemon). Only the fresh wizard reaches this path, and only
     /// when a launch is wanted (`!--no-up`) and `fast` is non-empty.
     async fn fast_lane_launch(
@@ -315,31 +267,24 @@ impl SetupArgs {
         rest: &[String],
         installed: &[(Provider, ProviderManifest)],
         workspace: &Workspace,
-        mount_point: Option<PathBuf>,
         session: &mut crate::ui::session::Session,
     ) -> anyhow::Result<()> {
         let mut results = self
-            .run_init_loop(fast, installed, workspace, StageStyle::Wizard, 4, session)
+            .run_init_loop(fast, installed, workspace, StageStyle::Wizard, 3, session)
             .await?;
 
         // Launch on the fast mounts alone. The daemon reads the specs just
         // written and serves them; the first-read proof runs against the first
         // Ready mount here, before any browser round trip.
         let outcome = self
-            .launch_and_report(
-                workspace,
-                mount_point.as_deref(),
-                &results,
-                StageStyle::Wizard,
-                session,
-            )
+            .launch_and_report(workspace, &results, StageStyle::Wizard, session)
             .await?;
 
         // The auth-requiring providers sign in below. `configure_mount`'s
         // persist step applies each spec to the now-running daemon (its
         // create-if-ready path), so these mounts go live without a relaunch.
         let rest_results = self
-            .run_init_loop(rest, installed, workspace, StageStyle::Wizard, 5, session)
+            .run_init_loop(rest, installed, workspace, StageStyle::Wizard, 4, session)
             .await?;
         results.extend(rest_results);
 
@@ -350,12 +295,11 @@ impl SetupArgs {
     async fn launch_and_report(
         &self,
         workspace: &Workspace,
-        mount_point: Option<&std::path::Path>,
         results: &[InitResult],
         style: StageStyle,
         session: &mut crate::ui::session::Session,
     ) -> anyhow::Result<LaunchOutcome> {
-        session.phase(style.phase(5, "launch"));
+        session.phase(style.phase(4, "launch"));
         // `Launcher::launch` writes its own stderr progress lines; a spinner
         // here would be overwritten mid-line by them. Print a plain note before
         // and settle into a static row after.
@@ -372,10 +316,14 @@ impl SetupArgs {
             },
         };
 
+        // Where files appear comes from the effective frontend plan, not a
+        // prompted value: the daemon reports its own mount point once serving,
+        // and the plan's first local entry is the fallback before it does.
+        let plan = frontend_plan(workspace);
         let mp = outcome
             .mount_point
             .clone()
-            .or_else(|| mount_point.map(std::path::Path::to_path_buf));
+            .or_else(|| plan.as_deref().and_then(first_local_mount_point));
         let daemon = match &mp {
             Some(mp) => format!("running; local mount at {}", WorkspaceLayout::display(mp)),
             None => "running (no local frontend attached; see `omnifs frontend up`)".to_string(),
@@ -385,6 +333,9 @@ impl SetupArgs {
             "daemon",
             daemon,
         ));
+        if let Some(plan) = &plan {
+            note_frontend_locations(plan, session);
+        }
 
         if let Some(mount) = results
             .iter()
@@ -622,13 +573,11 @@ fn to_resolver_os(os: HostOs) -> crate::config::HostOs {
     }
 }
 
-/// The effective `[[frontends]]` plan, for wizard stage gating only (whether
-/// to show the Docker reachability row, whether to ask for a host mount
-/// point). Falls back to `/` when the platform mount-point default itself is
-/// unresolvable (e.g. `HOME` unset): a local entry's driver/kind presence in
-/// the plan does not depend on which path it ultimately resolves to, only
-/// gating decisions read this plan, and the real mount-point question (when
-/// asked) resolves and validates the default itself.
+/// The effective `[[frontends]]` plan: which frontends the launch would start,
+/// each with its resolved mount point (`Some` host path for a local entry,
+/// `None` for a docker/krunkit guest). Falls back to `/` when the resolved
+/// home path is unavailable (e.g. `HOME` unset): a local entry's driver/kind
+/// presence does not depend on which path it resolves to.
 fn resolve_setup_frontend_plan(
     config: &crate::config::Config,
     os: HostOs,
@@ -638,23 +587,45 @@ fn resolve_setup_frontend_plan(
     crate::config::resolve_frontends(&config.frontends, to_resolver_os(os), &default_mount_point)
 }
 
-/// Mount point for the review-mode add-a-provider path, derived without any
-/// prompt: the resolved default (`OMNIFS_MOUNT_POINT` or the home-derived
-/// path), when the effective `[[frontends]]` plan includes a local frontend.
-/// A guest-only plan has no host mount path to derive.
-fn add_provider_mount_point(
-    config: &crate::config::Config,
-    os: HostOs,
-) -> anyhow::Result<Option<PathBuf>> {
-    let plan = resolve_setup_frontend_plan(config, os)?;
-    if !plan.iter().any(|entry| entry.driver == Driver::Local) {
-        return Ok(None);
+/// The first local frontend's resolved host mount point in the plan, if any.
+/// Docker/krunkit entries carry no host path, so they are skipped.
+fn first_local_mount_point(plan: &[crate::config::EffectiveFrontend]) -> Option<PathBuf> {
+    plan.iter().find_map(|entry| entry.mount_point.clone())
+}
+
+/// The effective `[[frontends]]` plan for the launch narration. Best-effort: a
+/// plan that fails to resolve simply drops the location note rather than the
+/// launch. See [`resolve_setup_frontend_plan`].
+fn frontend_plan(workspace: &Workspace) -> Option<Vec<crate::config::EffectiveFrontend>> {
+    let config = workspace.config().ok()?;
+    resolve_setup_frontend_plan(&config, HostOs::detect()).ok()
+}
+
+/// Name where each frontend's files appear, straight from the effective plan:
+/// a local frontend at its host mount point (already stated in the daemon row
+/// for the primary), a docker/krunkit frontend inside its guest. When a local
+/// frontend uses the default path (no `OMNIFS_MOUNT_POINT`), add the one hint
+/// a user might miss: how to move it.
+fn note_frontend_locations(
+    plan: &[crate::config::EffectiveFrontend],
+    session: &mut crate::ui::session::Session,
+) {
+    let mut local_seen = false;
+    for entry in plan {
+        match &entry.mount_point {
+            Some(_) => local_seen = true,
+            None => session.note(format!(
+                "the {} frontend mounts inside its guest; run `omnifs shell` to browse it",
+                entry.driver.as_via().label()
+            )),
+        }
     }
-    omnifs_workspace::layout::resolve_mount_point()
-        .map(Some)
-        .ok_or_else(|| {
-            anyhow::anyhow!("cannot resolve host mount point: set HOME or OMNIFS_MOUNT_POINT")
-        })
+    let customized = crate::config::env_string("OMNIFS_MOUNT_POINT").is_some();
+    if local_seen && !customized {
+        session.note(
+            "to mount elsewhere, set `mount_point` in a `[[frontends]]` config entry or export OMNIFS_MOUNT_POINT before `omnifs up`",
+        );
+    }
 }
 
 fn one_line(error: &anyhow::Error) -> String {
@@ -747,16 +718,8 @@ impl SetupArgs {
                 "add a provider" => {
                     // Jump straight to the shared configure tail. Esc at the
                     // provider picker returns to the hub, not out of setup.
-                    let mount_point =
-                        add_provider_mount_point(&workspace.config()?, HostOs::detect())?;
                     match self
-                        .configure_and_launch(
-                            workspace,
-                            mount_point,
-                            mode,
-                            StageStyle::Hub,
-                            session,
-                        )
+                        .configure_and_launch(workspace, mode, StageStyle::Hub, session)
                         .await
                     {
                         Ok(()) => {},
@@ -1014,23 +977,23 @@ fn mount_summary(status: &crate::mount_report::UserMountStatus) -> (String, &'st
 mod tests {
     use super::*;
 
-    /// The review-mode add-a-provider path must never prompt for a mount
-    /// point: it derives the resolved host default without asking, for the
-    /// default (locally-mounted) `[[frontends]]` plan.
+    /// The launch narration derives its host mount point from the effective
+    /// plan, not a prompt: the default (locally-mounted) plan resolves to the
+    /// host default.
     #[test]
-    fn add_provider_mount_point_is_prompt_free() {
+    fn first_local_mount_point_is_the_resolved_default() {
+        let plan = resolve_setup_frontend_plan(&crate::config::Config::default(), HostOs::detect())
+            .unwrap();
         assert_eq!(
-            add_provider_mount_point(&crate::config::Config::default(), HostOs::detect())
-                .unwrap()
-                .unwrap(),
-            omnifs_workspace::layout::resolve_mount_point().unwrap()
+            first_local_mount_point(&plan),
+            omnifs_workspace::layout::resolve_mount_point()
         );
     }
 
-    /// A guest-only `[[frontends]]` plan has no host mount path to derive:
-    /// the review-mode add-a-provider path must not fabricate one.
+    /// A guest-only `[[frontends]]` plan carries no host mount path: the launch
+    /// narration must not fabricate one.
     #[test]
-    fn add_provider_mount_point_is_none_for_a_guest_only_plan() {
+    fn first_local_mount_point_is_none_for_a_guest_only_plan() {
         let config = crate::config::Config {
             frontends: vec![crate::config::ConfigFrontendEntry {
                 kind: omnifs_workspace::runtime_record::FrontendKind::Fuse,
@@ -1039,10 +1002,8 @@ mod tests {
             }],
             ..Default::default()
         };
-        assert_eq!(
-            add_provider_mount_point(&config, HostOs::MacOs).unwrap(),
-            None
-        );
+        let plan = resolve_setup_frontend_plan(&config, HostOs::MacOs).unwrap();
+        assert_eq!(first_local_mount_point(&plan), None);
     }
 
     #[test]
@@ -1065,11 +1026,11 @@ mod tests {
     }
 
     #[test]
-    fn review_phases_do_not_claim_the_five_stage_wizard() {
+    fn review_phases_do_not_claim_the_wizard_stage_count() {
         assert_eq!(StageStyle::Hub.phase(4, "github sign in"), "github sign in");
         assert_eq!(
             StageStyle::Wizard.phase(4, "github sign in"),
-            "4/5 github sign in"
+            "4/4 github sign in"
         );
     }
 }
