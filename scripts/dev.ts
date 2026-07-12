@@ -212,7 +212,7 @@ async function main() {
     await run($`${omnifsCli} up --no-frontend`.env(cliEnv(devHome)));
 
     console.log("Starting the Docker-hosted FUSE frontend");
-    await run($`${omnifsCli} frontend up`.env(cliEnv(devHome)));
+    await run($`${omnifsCli} frontend up --driver docker`.env(cliEnv(devHome)));
 
     const frontendContainer = await discoverFrontendContainer(devHome);
     if (keepRunning(options)) {
