@@ -125,7 +125,8 @@ check scope='': (_install-wasi-sdk "check" scope)
       check_providers
       check_host
       test_host
-      git diff --check
+      base="$(git merge-base HEAD origin/main)"
+      git diff --check "$base"
     }
 
     case "{{ scope }}" in
