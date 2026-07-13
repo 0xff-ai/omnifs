@@ -76,3 +76,19 @@ guest-image:
 [group('dev')]
 guest-image-smoke:
     bash scripts/guest-image/smoke.sh
+
+# Run the krunkit driver's conformance lane against a live guest: builds the
+# guest image if missing, then runs `crates/omnifs-itest/tests/frontend_krunkit`
+# with the live-acceptance opt-in set. macOS (Apple Silicon) only, and
+# LOCAL-ONLY: GitHub-hosted macOS runners cannot nest virtualization, so this
+# never runs in CI (see docs/contracts/60-build-validation.md). Requires
+# `krunkit` and `socat` on PATH.
+[group('dev')]
+krunkit-conformance:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ ! -f target/guest-image/omnifs-guest.raw ]]; then
+      echo "guest image missing; building it now (run \`just guest-image\` yourself to rebuild after guest-image source changes)"
+      just guest-image
+    fi
+    OMNIFS_ACCEPTANCE_LIVE=1 cargo nextest run -p omnifs-itest --test frontend_krunkit

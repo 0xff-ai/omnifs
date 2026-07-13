@@ -63,6 +63,12 @@ CI builds the guest image on a native arm64 runner (`guest-image-arm64` in `ci.y
 
 The CLI's krunkit driver mirrors the frontend image's channel split (`GuestImageSource::resolve` in `crates/omnifs-cli/src/krunkit_backend.rs`): a release build defaults to `ghcr.io/0xff-ai/omnifs-guest:<version>` and pulls it on first use via `crate::guest_image_pull` (plain `reqwest`, not `oras`: anonymous ghcr token, manifest fetch accepting both the OCI image manifest and legacy artifact manifest media types, blob fetch, sha256 verification against the manifest before the file is trusted, cached under `<cache_dir>/guest-images/`); a dev build never downloads and defaults to the local `target/guest-image/omnifs-guest.raw`, naming `just guest-image` in its not-found error.
 
+### Krunkit conformance lane (local-only, never CI)
+
+`crates/omnifs-itest/tests/frontend_krunkit` runs the `fuse-krunkit` conformance column (the same shared row table and scorecard machinery `tests/frontend_docker` uses for the Docker-hosted frontend) against a live krunkit guest: `omnifs up --no-frontend`, `omnifs frontend up --driver krunkit`, the matrix over ssh-over-vsock via `omnifs shell -- <cmd>`, then `omnifs down` with a teardown-cleanliness assertion (no leftover krunkit process, pidfile, or socket). Run it with `just krunkit-conformance` (builds the guest image first if missing, then sets `OMNIFS_ACCEPTANCE_LIVE=1` and runs the suite). Gated on `cfg(target_os = "macos")` plus the `OMNIFS_ACCEPTANCE_LIVE` opt-in, mirroring the live NFS lanes' skip-not-pass convention, and serialized against every other live-mount lane through this crate's one cross-process lock (`omnifs_itest::live::nfs_serial_lock`).
+
+This lane can **never** run in GitHub-hosted CI: krunkit boots a libkrun microVM, and GitHub's hosted macOS runners do not support nested virtualization. It stays a declared local-only gate a contributor runs by hand before a krunkit-affecting change, not a lane that silently skips in CI and reads green.
+
 ### Documentation checks
 
 `just docs-check` verifies doc-to-doc links and the contract file template. It does not validate code symbols or code paths. It is a local convenience recipe only; CI does not run it, so it never blocks a merge.
@@ -85,6 +91,7 @@ The CLI's krunkit driver mirrors the frontend image's channel split (`GuestImage
 - Give the frontend image an `OMNIFS_HOME` or a provider store. It only ever runs `omnifs-fuse`.
 - Push the guest image to ghcr from a contributor machine; only the `guest-image-arm64` CI job and `release`'s `promote` job do that.
 - Weaken `check-guest-image.sh`'s release-profile assertions to make a build pass instead of fixing the image.
+- Expect `crates/omnifs-itest/tests/frontend_krunkit` to ever run in GitHub-hosted CI, or weaken its skip-when-not-opted-in behavior into a silent pass.
 
 ## Code
 
@@ -99,6 +106,8 @@ The CLI's krunkit driver mirrors the frontend image's channel split (`GuestImage
 - `crates/omnifs-api/openapi/daemon.json`
 - `crates/omnifs-workspace/schema/omnifs.provider.schema.json`
 - `crates/omnifs-itest/src/lib.rs`
+- `crates/omnifs-itest/src/matrix.rs`
+- `crates/omnifs-itest/tests/frontend_krunkit/main.rs`
 - `crates/omnifs-cli/src/provider_bundle.rs`
 - `Dockerfile`
 - `scripts/ci/common.sh`
@@ -127,6 +136,7 @@ The CLI's krunkit driver mirrors the frontend image's channel split (`GuestImage
 - `just schema`
 - `just openapi`
 - `just docs-check`
+- `just krunkit-conformance` (macOS Apple Silicon only, local-only, never CI: see "Krunkit conformance lane" above)
 
 Live runtime path (the daemon runs host-native; only the frontend needs `docker exec`):
 
