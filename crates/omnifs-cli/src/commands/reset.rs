@@ -63,11 +63,14 @@ impl ResetArgs {
             Decision::Apply => {},
         }
 
+        session.note("preparing teardown…");
+
         let store: Arc<dyn CredentialStore> = Arc::new(FileStore::new(&layout.credentials_file));
         let service = CredentialService::new(store, OAuthClient::new()?);
         let mut outcomes = Vec::with_capacity(plan.rows.len());
 
         for target in &targets {
+            session.note(format!("deleting mount {}…", target.name));
             let mut credential_outcomes = Vec::new();
             if !self.keep_credentials {
                 let credential = target
@@ -143,6 +146,7 @@ impl ResetArgs {
         }
 
         let mut teardown_outcomes: Vec<Outcome> = Vec::new();
+        session.note("tearing down frontends and daemon…");
         let planned_frontends = plan
             .rows
             .iter()

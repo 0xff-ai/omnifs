@@ -3,7 +3,7 @@
 use cliclack::{Theme, ThemeState};
 use std::fmt::Write as _;
 
-use super::consent::{Plan, Receipt};
+use super::consent::{Outcome, Plan, Receipt, Row as ConsentRow};
 use super::event::{Render, UiEvent};
 use super::output::Output;
 use super::report::Row;
@@ -224,10 +224,8 @@ impl Render for RailRenderer {
                     return;
                 }
                 let _ = cliclack::log::step("plan");
-                for row in rows {
-                    let rendered = row.render_plan().render();
-                    let _ = cliclack::log::remark(rendered.trim_start());
-                }
+                let rendered = rows.iter().map(ConsentRow::render_plan).collect::<Vec<_>>();
+                let _ = cliclack::log::remark(super::report::render_rows(&rendered));
                 let _ = cliclack::log::remark(super::style::dim(format!(
                     "{remove} to remove, {keep} kept"
                 )));
@@ -246,10 +244,8 @@ impl Render for RailRenderer {
                     return;
                 }
                 let _ = cliclack::log::step("apply");
-                for row in rows {
-                    let rendered = row.render_receipt().render();
-                    let _ = cliclack::log::remark(rendered.trim_start());
-                }
+                let rendered = rows.iter().map(Outcome::render_receipt).collect::<Vec<_>>();
+                let _ = cliclack::log::remark(super::report::render_rows(&rendered));
             },
             UiEvent::Outro { message } => {
                 if self.output.is_structured() {

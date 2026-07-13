@@ -39,6 +39,36 @@ impl Row {
     }
 }
 
+/// Render a group of rail rows as one borderless table so the key and value
+/// columns size to the complete operation, rather than truncating each key at
+/// a fixed width.
+pub(super) fn render_rows(rows: &[Row]) -> String {
+    use tabled::builder::Builder;
+    use tabled::settings::{Padding, Style};
+
+    if rows.is_empty() {
+        return String::new();
+    }
+
+    let mut builder = Builder::default();
+    for row in rows {
+        builder.push_record([
+            row.glyph.render(),
+            row.key.clone(),
+            style::accentuate(&row.value),
+        ]);
+    }
+
+    let mut table = builder.build();
+    table.with(Style::empty()).with(Padding::new(0, 1, 0, 0));
+    table
+        .to_string()
+        .lines()
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -49,5 +79,30 @@ mod tests {
         let row = Row::new(Glyph::Done, "providers discovered", "9 providers");
         let plain = strip_ansi(&row.render());
         assert!(plain.contains("providers dis… 9 providers"), "{plain:?}");
+    }
+
+    #[test]
+    fn grouped_rows_keep_full_keys_and_align_values() {
+        let rows = [
+            Row::new(
+                Glyph::Plan,
+                "frontend nfs (host)",
+                "tear down /Users/raul/omnifs",
+            ),
+            Row::new(Glyph::Plan, "frontend fuse (docker)", "tear down /omnifs"),
+            Row::new(Glyph::Plan, "daemon", "stop if running"),
+        ];
+        let plain = strip_ansi(&render_rows(&rows));
+        assert!(plain.contains("frontend nfs (host)"), "{plain:?}");
+        assert!(plain.contains("frontend fuse (docker)"), "{plain:?}");
+        let nfs = plain
+            .lines()
+            .find(|line| line.contains("frontend nfs"))
+            .unwrap();
+        let fuse = plain
+            .lines()
+            .find(|line| line.contains("frontend fuse"))
+            .unwrap();
+        assert_eq!(nfs.find("tear down"), fuse.find("tear down"), "{plain:?}");
     }
 }
