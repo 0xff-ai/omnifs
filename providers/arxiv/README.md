@@ -40,7 +40,7 @@ This is a wasm component. Build with:
 cargo build --target wasm32-wasip2 --release -p omnifs-provider-arxiv
 ```
 
-Release CLI binaries embed this provider and unpack it into `OMNIFS_HOME/providers`. Run `omnifs init arxiv` to create its mount spec.
+Release CLI binaries embed this provider and unpack it into `OMNIFS_HOME/providers`. Run `omnifs mount add arxiv` to create its mount spec.
 
 ## Status
 

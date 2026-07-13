@@ -37,7 +37,7 @@ Credentials live host-side. Providers declare auth needs; the host resolves, sto
 
 Keep credentials out of WIT payloads and daemon REST payloads. Route provider auth declarations through provider metadata and mount auth/config resolution. Keep human auth UX in `omnifs-cli`.
 
-OAuth client ids in provider declarations are public application identifiers, not secrets. User access tokens, refresh tokens, and client secrets remain sensitive host-side values. `omnifs init` owns first-run OAuth mount generation; `omnifs mounts reauth <mount>` owns repair and re-authentication. Credentials live only in the host credential store: a mount's auth declares identity (scheme, account) and never a sourcing mechanism, so there is no read-from-env or read-from-file path at serve time.
+OAuth client ids in provider declarations are public application identifiers, not secrets. User access tokens, refresh tokens, and client secrets remain sensitive host-side values. `omnifs mount add` owns first-run OAuth mount generation; `omnifs mount reauth <mount>` owns repair and re-authentication. Credentials live only in the host credential store: a mount's auth declares identity (scheme, account) and never a sourcing mechanism, so there is no read-from-env or read-from-file path at serve time.
 
 ### Frontend attach authority
 

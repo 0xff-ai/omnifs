@@ -55,7 +55,7 @@ token, so a sample of any size is served through one ranged session.
 
 ## Setup
 
-Run `omnifs init db` and enter the host path to the SQLite file. The
+Run `omnifs mount add db` and enter the host path to the SQLite file. The
 provider-owned config is:
 
 ```json

@@ -36,7 +36,7 @@ only ever issues `GET`). `kubectl proxy` already rejects pod `exec`/`attach`.
 
 ### Mount setup
 
-Run `omnifs init kubernetes` and enter the proxy endpoint when prompted. The
+Run `omnifs mount add kubernetes` and enter the proxy endpoint when prompted. The
 provider-owned config is:
 
 ```json

@@ -84,7 +84,7 @@ catalog.versions_by_name(name) -> Vec<Provider>
 ```
 
 Only `get(id)` is used for normal serving of an existing mount. The name and
-version indexes are for `omnifs init`, status/debug surfaces, and explicit
+version indexes are for `omnifs mount add`, status/debug surfaces, and explicit
 upgrade discovery.
 
 ## Normal mount resolution
@@ -152,7 +152,7 @@ deleted contract model.
 The manifest declares only what provider access *needs*
 (`caps::AccessNeed`); it is never a runtime grant source. A mount spec's
 `capabilities` block carries the explicit *grants* (`caps::Grants`), seeded from
-the manifest's needs at `omnifs init` (`Grants::from_needs`) and owned by the
+the manifest's needs at `omnifs mount add` (`Grants::from_needs`) and owned by the
 spec thereafter. The host resolves those grants into the enforcement allowlist
 (`CapabilityChecker::from_config`, resolving dynamic markers such as a unix
 socket from the mount endpoint). So the spec, not the provider's own

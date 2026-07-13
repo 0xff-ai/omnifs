@@ -5,7 +5,7 @@ installs the native `omnifs` CLI and daemon binary for your host platform.
 
 ```bash
 npm install -g @0xff-ai/omnifs
-omnifs init github
+omnifs mount add github
 omnifs up
 omnifs shell
 ```

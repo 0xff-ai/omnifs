@@ -25,22 +25,20 @@ omnifs is written in Rust. We ship prebuilt Linux and macOS binaries through the
 ```bash
 npm install -g @0xff-ai/omnifs
 omnifs setup
-omnifs init github
-omnifs up
 omnifs shell
 ```
 
-`omnifs setup` prepares the workspace and mount point. `omnifs init <provider>` creates a self-contained mount spec and completes any required authentication. `omnifs up` starts the host-native daemon and launches every effective frontend from the `[[frontends]]` config (or platform defaults). `--no-frontend` starts the daemon only. `omnifs shell` prefers a Docker frontend when present, then krunkit, then a local mount.
+`omnifs setup` prepares the workspace, creates the selected mounts, completes any required authentication, and launches the effective frontends. `omnifs up` starts the host-native daemon and launches every effective frontend from the `[[frontends]]` config (or platform defaults). `--no-frontend` starts the daemon only. `omnifs shell` prefers a Docker frontend when present, then krunkit, then a local mount.
 
 ---
 
-For a direct, scriptable path, initialize providers one at a time with `omnifs init <provider>`. Each command writes a mount spec under `~/.omnifs/mounts/`; `omnifs up` starts the daemon and reconciles those specs into the shared projected tree.
+For a direct, scriptable path, create mounts one at a time with `omnifs mount add <provider>`. Each command writes a mount spec under `~/.omnifs/mounts/`; `omnifs up` starts the daemon and reconciles those specs into the shared projected tree.
 
 ```bash
-omnifs init github
-omnifs init dns
-omnifs status
+omnifs mount add github
+omnifs mount add dns
 omnifs up
+omnifs status
 omnifs shell
 ```
 
@@ -90,7 +88,7 @@ cat /linear/teams/ENG/issues/open/ENG-123/title
 
 # SQLite -- download an example db and explore the data
 wget -O /tmp/chinook.sqlite https://github.com/lerocha/chinook-database/raw/refs/heads/master/ChinookDatabase/DataSources/Chinook_Sqlite.sqlite
-omnifs init db      # provide path: /tmp/chinook.sqlite
+omnifs mount add db # provide path: /tmp/chinook.sqlite
 ls /db/tables
 cat /db/tables/Album/schema.sql
 cat /db/tables/Album/sample.json | jq .
