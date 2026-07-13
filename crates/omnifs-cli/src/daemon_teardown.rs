@@ -50,9 +50,7 @@ impl TeardownOutcome {
         match self {
             Self::FrontendsRemoved => Outcome::done(self.id(), "torn down"),
             Self::FrontendsAbsent => Outcome::skip(self.id(), "none found"),
-            Self::FrontendsFailed { error } => {
-                Outcome::fail(self.id(), format!("teardown failed: {error}"))
-            },
+            Self::FrontendsFailed { error } => Outcome::fail(self.id(), error.clone()),
             Self::DaemonStopped { pid } => Outcome::done(self.id(), format!("stopped (pid {pid})")),
             Self::DaemonAlreadyStopped => Outcome::skip(self.id(), "already stopped"),
             Self::DaemonShutdownFailed { error } => {

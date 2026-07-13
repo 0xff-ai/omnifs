@@ -610,12 +610,15 @@ pub(crate) async fn teardown_all(
     match crate::host_teardown::teardown_local_frontends(&paths.frontend_state_root(), force) {
         Ok(summary) => {
             report.found |= summary.unmounted > 0 || summary.swept_orphans > 0;
-            report.failures.extend(
-                summary
-                    .failed
-                    .into_iter()
-                    .map(|path| format!("could not unmount {}", path.display())),
-            );
+            report
+                .failures
+                .extend(summary.failed.into_iter().map(|failure| {
+                    format!(
+                        "could not unmount {}: {}",
+                        failure.mount_point.display(),
+                        failure.reason
+                    )
+                }));
             report.failures.extend(summary.errors);
         },
         Err(error) => report

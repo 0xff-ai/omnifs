@@ -5,11 +5,22 @@ use std::time::Duration;
 
 use omnifs_mtab::{MountKind, MountState, Platform, UnmountCommand};
 
+const UNMOUNT_POLL_CADENCE: Duration = Duration::from_millis(500);
+const UNMOUNT_POLL_ATTEMPTS: usize = 12;
+
+/// A host frontend teardown failure with the reason that made it unsafe or
+/// impossible to remove the mount.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TeardownFailure {
+    pub(crate) mount_point: PathBuf,
+    pub(crate) reason: String,
+}
+
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct TeardownSummary {
     pub unmounted: usize,
     pub swept_orphans: usize,
-    pub failed: Vec<PathBuf>,
+    pub failed: Vec<TeardownFailure>,
     pub skipped: usize,
     pub errors: Vec<String>,
 }
@@ -24,21 +35,39 @@ impl TeardownSummary {
             return;
         }
         if !local_mount_is_owned(&state) {
-            self.failed.push(state.mount_point);
+            self.failed.push(TeardownFailure {
+                mount_point: state.mount_point,
+                reason: "mount is not owned by omnifs; refusing to unmount it".to_owned(),
+            });
             return;
         }
 
+        let mount_point = state.mount_point.clone();
         let command = match (&state.kind, force) {
             (MountKind::Nfs { .. }, false) => {
-                UnmountCommand::nfs_graceful(Platform::current(), &state.mount_point)
+                UnmountCommand::nfs_graceful(Platform::current(), &mount_point)
             },
-            (_, false) => UnmountCommand::graceful(Platform::current(), &state.mount_point),
-            (_, true) => UnmountCommand::forced(Platform::current(), &state.mount_point),
+            (_, false) => UnmountCommand::graceful(Platform::current(), &mount_point),
+            (_, true) => UnmountCommand::forced(Platform::current(), &mount_point),
         };
-        let _ = command.run_quiet();
+        if let Err(error) = command.run_quiet() {
+            self.failed.push(TeardownFailure {
+                mount_point,
+                reason: format!("unmount command failed: {error}"),
+            });
+            return;
+        }
 
-        if !poll_until_unmounted(&state.mount_point, Duration::from_millis(500), 12) {
-            self.failed.push(state.mount_point);
+        if !poll_until_unmounted(&mount_point, UNMOUNT_POLL_CADENCE, UNMOUNT_POLL_ATTEMPTS) {
+            self.failed.push(TeardownFailure {
+                mount_point,
+                reason: format!(
+                    "mount remained active after waiting {} seconds",
+                    UNMOUNT_POLL_CADENCE
+                        .as_secs()
+                        .saturating_mul(UNMOUNT_POLL_ATTEMPTS as u64)
+                ),
+            });
             return;
         }
         if let Some(error) = remove_state_file(state_file) {
@@ -107,8 +136,12 @@ pub(crate) fn teardown_local_frontend(
         if let Some(error) = summary.errors.into_iter().next() {
             anyhow::bail!(error)
         }
-        if !summary.failed.is_empty() {
-            anyhow::bail!("could not unmount {}", root.display())
+        if let Some(failure) = summary.failed.into_iter().next() {
+            anyhow::bail!(
+                "could not unmount {}: {}",
+                failure.mount_point.display(),
+                failure.reason
+            )
         }
         return Ok(());
     }

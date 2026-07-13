@@ -39,9 +39,11 @@ impl ResetArgs {
     pub async fn run(self, output: Output) -> anyhow::Result<ExitCode> {
         let workspace = Workspace::resolve()?;
         let layout = workspace.layout();
+        let mut session = crate::ui::session::Session::intro_with_output("omnifs reset", output)?;
+        let mut discovery = session.progress(0, "collecting workspace inventory…");
         let targets = workspace.reset_removal_targets()?;
         let inventory = Inventory::collect(&workspace).await?;
-        let mut session = crate::ui::session::Session::intro_with_output("omnifs reset", output)?;
+        discovery.stop("workspace inventory ready");
         let plan =
             reset_plan_with_inventory(&workspace, &targets, self.keep_credentials, &inventory);
         session.plan(&plan);
@@ -63,14 +65,14 @@ impl ResetArgs {
             Decision::Apply => {},
         }
 
-        session.note("preparing teardown…");
+        let mut progress = session.progress(plan.rows.len() as u64, "resetting workspace…");
 
         let store: Arc<dyn CredentialStore> = Arc::new(FileStore::new(&layout.credentials_file));
         let service = CredentialService::new(store, OAuthClient::new()?);
         let mut outcomes = Vec::with_capacity(plan.rows.len());
 
         for target in &targets {
-            session.note(format!("deleting mount {}…", target.name));
+            progress.set_message(format!("deleting mount {}…", target.name));
             let mut credential_outcomes = Vec::new();
             if !self.keep_credentials {
                 let credential = target
@@ -143,16 +145,21 @@ impl ResetArgs {
                 mount_outcome = mount_outcome.with_detail(credential);
             }
             outcomes.push(mount_outcome);
+            progress.inc(1);
         }
 
         let mut teardown_outcomes: Vec<Outcome> = Vec::new();
-        session.note("tearing down frontends and daemon…");
         let planned_frontends = plan
             .rows
             .iter()
             .filter(|row| row.id.starts_with("frontend:") || row.id == "frontends")
             .cloned()
             .collect::<Vec<_>>();
+        let frontend_steps = planned_frontends
+            .iter()
+            .filter(|row| row.id != "frontends")
+            .count();
+        progress.set_message("tearing down frontends and daemon…");
         for teardown in DaemonTeardown::new(&workspace, output)
             .reset_best_effort()
             .await
@@ -183,8 +190,10 @@ impl ResetArgs {
                             .with_key(planned.key.clone()),
                     );
                 }
+                progress.inc(frontend_steps as u64);
             } else {
                 teardown_outcomes.push(teardown.outcome());
+                progress.inc(1);
             }
         }
         outcomes.extend(teardown_outcomes);
@@ -192,14 +201,20 @@ impl ResetArgs {
             "provider-store",
             format!("kept ({})", provider_summary(&workspace)),
         ));
+        progress.inc(1);
 
         let receipt = plan.receipt(outcomes);
-        session.receipt(&receipt);
         let failed = receipt
             .rows
             .iter()
             .find(|row| row.state == crate::ui::consent::OutcomeState::Fail)
             .map(|row| row.value.clone());
+        if failed.is_some() {
+            progress.error("reset incomplete");
+        } else {
+            progress.stop("reset complete");
+        }
+        session.receipt(&receipt);
         if let Some(message) = failed {
             session.outro("Reset incomplete; see the failed rows above.");
             if output.is_structured() {

@@ -146,6 +146,10 @@ impl Session {
         self.renderer.output
     }
 
+    pub(crate) fn progress(&self, length: u64, message: impl std::fmt::Display) -> SessionProgress {
+        SessionProgress::new(self.output(), length, message)
+    }
+
     /// Emit one destructive-operation preview. The same [`Plan`] is later
     /// passed to [`Self::receipt`], preserving row identity across the rail.
     pub(crate) fn plan(&mut self, plan: &Plan) {
@@ -181,6 +185,59 @@ impl Session {
             message: message.into(),
         });
         self.closed = true;
+    }
+}
+
+/// A Cliclack progress bar owned by a conversational session. Structured and
+/// quiet output keep the same no-human-output policy as the rest of the UI.
+pub(crate) struct SessionProgress {
+    bar: Option<cliclack::ProgressBar>,
+}
+
+impl SessionProgress {
+    fn new(output: Output, length: u64, message: impl std::fmt::Display) -> Self {
+        let bar = (!output.is_structured() && !output.quiet()).then(|| {
+            let bar = if length == 0 {
+                cliclack::spinner()
+            } else {
+                cliclack::progress_bar(length)
+            };
+            bar.start(message);
+            bar
+        });
+        Self { bar }
+    }
+
+    pub(crate) fn set_message(&self, message: impl std::fmt::Display) {
+        if let Some(bar) = &self.bar {
+            bar.set_message(message);
+        }
+    }
+
+    pub(crate) fn inc(&self, delta: u64) {
+        if let Some(bar) = &self.bar {
+            bar.inc(delta);
+        }
+    }
+
+    pub(crate) fn stop(&mut self, message: impl std::fmt::Display) {
+        if let Some(bar) = self.bar.take() {
+            bar.stop(message);
+        }
+    }
+
+    pub(crate) fn error(&mut self, message: impl std::fmt::Display) {
+        if let Some(bar) = self.bar.take() {
+            bar.error(message);
+        }
+    }
+}
+
+impl Drop for SessionProgress {
+    fn drop(&mut self) {
+        if let Some(bar) = self.bar.take() {
+            bar.clear();
+        }
     }
 }
 
