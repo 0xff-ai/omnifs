@@ -9,6 +9,8 @@
 use std::borrow::Cow;
 use std::fmt::Write as _;
 
+pub(crate) use crate::ui::output::{ErrorEnvelope, ErrorPayload, ErrorVerdict};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ExitCode {
     Success,
@@ -151,51 +153,50 @@ fn message_chain(error: &anyhow::Error) -> Vec<String> {
         })
 }
 
-/// The machine error document for a `--json` command that failed before its
-/// receipt. Exactly one is emitted on stdout, and it carries the same stable
-/// `id` shown dim in the human block, plus the recovery `fix` (the first hint).
-#[derive(Debug, serde::Serialize)]
-pub(crate) struct ErrorJson {
-    pub(crate) error: ErrorBody,
-}
-
-#[derive(Debug, serde::Serialize)]
-pub(crate) struct ErrorBody {
-    pub(crate) id: &'static str,
-    pub(crate) message: String,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub(crate) causes: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) fix: Option<String>,
-}
-
-/// Build the JSON error document from any anyhow error, using the same exit
-/// class, message chain, and hints the human renderer draws from.
-pub(crate) fn to_json(error: &anyhow::Error) -> ErrorJson {
+/// Build the structured terminal envelope without writing to a stream. The
+/// command name is supplied by the invocation owner because errors can happen
+/// before a command-specific receipt exists.
+pub(crate) fn envelope(error: &anyhow::Error, command: impl Into<String>) -> ErrorEnvelope {
+    let code = exit_code(error);
     let messages = message_chain(error);
-    let hints = HintedError::find(error).map_or(&[][..], |h| h.hints.as_slice());
+    let hints: Vec<String> = HintedError::find(error)
+        .map(|hinted| hinted.hints.iter().map(ToString::to_string).collect())
+        .unwrap_or_default();
     let mut messages = messages.into_iter();
-    ErrorJson {
-        error: ErrorBody {
-            id: exit_code(error).slug(),
+    ErrorEnvelope::new(
+        command,
+        if code == ExitCode::Canceled {
+            ErrorVerdict::Canceled
+        } else {
+            ErrorVerdict::Failed
+        },
+        ErrorPayload {
+            id: code.slug().to_owned(),
+            exit_code: code.code(),
             message: messages.next().unwrap_or_default(),
             causes: messages.collect(),
-            fix: hints.first().map(ToString::to_string),
+            fix: hints.first().cloned(),
+            hints,
         },
-    }
+    )
 }
 
-/// Build a JSON error document for a bare exit class (the cancel path has no
-/// anyhow error to walk).
-pub(crate) fn to_json_for(exit_code: ExitCode, message: &str) -> ErrorJson {
-    ErrorJson {
-        error: ErrorBody {
-            id: exit_code.slug(),
-            message: message.to_owned(),
+pub(crate) fn canceled_envelope(
+    command: impl Into<String>,
+    message: impl Into<String>,
+) -> ErrorEnvelope {
+    ErrorEnvelope::new(
+        command,
+        ErrorVerdict::Canceled,
+        ErrorPayload {
+            id: ExitCode::Canceled.slug().to_owned(),
+            exit_code: ExitCode::Canceled.code(),
+            message: message.into(),
             causes: Vec::new(),
             fix: None,
+            hints: Vec::new(),
         },
-    }
+    )
 }
 
 /// Walks the error chain and renders it as:
@@ -275,17 +276,37 @@ mod tests {
     }
 
     #[test]
-    fn json_error_carries_id_and_fix() {
+    fn structured_error_envelope_keeps_failed_and_canceled_distinct() {
         let base = anyhow::anyhow!("daemon not running");
-        let error = WithHint::with_hint(Err::<(), anyhow::Error>(base), "omnifs up").unwrap_err();
         let error = WithExitCode::with_exit_code(
-            Err::<(), anyhow::Error>(error),
+            Err::<(), anyhow::Error>(base),
             ExitCode::DaemonUnavailable,
         )
         .unwrap_err();
-        let json = to_json(&error);
-        assert_eq!(json.error.id, "daemon-unavailable");
-        assert_eq!(json.error.message, "daemon not running");
-        assert_eq!(json.error.fix.as_deref(), Some("omnifs up"));
+        let failed = envelope(&error, "status");
+        assert_eq!(failed.verdict, ErrorVerdict::Failed);
+        assert_eq!(failed.error.exit_code, 3);
+        let canceled = canceled_envelope("status", "canceled");
+        assert_eq!(canceled.verdict, ErrorVerdict::Canceled);
+        assert_eq!(canceled.error.exit_code, 130);
+    }
+
+    #[test]
+    fn structured_error_json_omits_empty_optional_fields() {
+        let envelope = canceled_envelope("status", "canceled");
+        let value = serde_json::to_value(envelope).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "schema_version": 1,
+                "command": "status",
+                "verdict": "canceled",
+                "error": {
+                    "id": "canceled",
+                    "exit_code": 130,
+                    "message": "canceled"
+                }
+            })
+        );
     }
 }

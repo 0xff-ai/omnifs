@@ -1,10 +1,12 @@
 //! CLI type definitions: top-level parser and command enum.
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+use std::ffi::OsString;
 
 use crate::commands;
 use crate::commands::doctor::DoctorVerdict;
 use crate::error::ExitCode;
+use crate::ui::output::{Output, OutputMode};
 use crate::workspace::Workspace;
 
 #[derive(Parser)]
@@ -20,25 +22,25 @@ pub struct Cli {
     #[arg(short = 'v', long = "verbose", action = clap::ArgAction::Count)]
     pub verbose: u8,
 
-    /// Progress rendering. `text` animates a stderr row (the default); `json`
-    /// emits one NDJSON `UiEvent` per line on stdout for machine consumers.
-    #[arg(long, global = true, value_enum, default_value_t = ProgressFormat::Text)]
-    pub progress: ProgressFormat,
+    /// Output contract for this invocation.
+    #[arg(long, global = true, value_enum, default_value_t = OutputMode::Human)]
+    pub output: OutputMode,
 
     /// Suppress conversational narration on stderr. Receipts, progress settle
     /// lines, and errors are preserved.
     #[arg(short = 'q', long, global = true)]
     pub quiet: bool,
 
+    /// Reject prompts and browser handoffs.
+    #[arg(long, global = true)]
+    pub no_input: bool,
+
+    /// Approve confirmation-only decisions.
+    #[arg(long, global = true)]
+    pub yes: bool,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
-}
-
-/// Progress stream selection for the global `--progress` flag.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
-pub(crate) enum ProgressFormat {
-    Text,
-    Json,
 }
 
 #[derive(Subcommand)]
@@ -65,10 +67,8 @@ pub enum Commands {
     /// Open a shell at the projected tree
     ///
     /// The mount surface (Docker-hosted frontend or host-native mount) comes
-    /// from live frontend state. A local mount can be selected explicitly.
-    /// Use `--mount NAME` to select a local frontend mount by basename or exact
-    /// path, bypassing guest frontend preference when more than one surface is
-    /// available.
+    /// from live frontend state. Select a surface with `--environment` and,
+    /// for host frontends, an optional `--location`.
     Shell(commands::shell::ShellArgs),
 
     /// Guided setup: environment, providers, auth, launch
@@ -104,8 +104,7 @@ pub enum Commands {
 
     /// Print version information
     ///
-    /// Prints the one-line build identity. Use `--json` for structured CLI,
-    /// daemon, channel, and provider facts.
+    /// Prints the one-line build identity and provider facts.
     Version(commands::version::VersionArgs),
 
     /// Debug utilities. Hidden from `--help`.
@@ -121,24 +120,10 @@ pub enum Commands {
 
     /// Manage filesystem frontends attached to the host-native daemon
     ///
-    /// Start a local or guest-delivered FUSE or NFS frontend, list live
-    /// attachments, or tear down guest frontends. Every frontend renders the
-    /// daemon's same shared namespace and carries no provider credentials.
+    /// Enable, disable, restart, or list FUSE and NFS frontends. Every
+    /// frontend renders the daemon's same shared namespace and carries no
+    /// provider credentials.
     Frontend(commands::frontend::FrontendArgs),
-}
-
-/// Human (`Text`) vs machine (`Json`) output selection, shared by commands that
-/// support `--json`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum OutputFormat {
-    Text,
-    Json,
-}
-
-impl From<bool> for OutputFormat {
-    fn from(json: bool) -> Self {
-        if json { Self::Json } else { Self::Text }
-    }
 }
 
 impl Cli {
@@ -148,111 +133,198 @@ impl Cli {
             .map_or(Some("bare"), Commands::telemetry_label)
     }
 
-    pub async fn run(self) -> anyhow::Result<ExitCode> {
+    pub(crate) fn command_path(&self) -> &'static str {
+        self.command
+            .as_ref()
+            .map_or("status", Commands::command_path)
+    }
+
+    pub async fn run(self, output: Output) -> anyhow::Result<ExitCode> {
         match self.command {
-            Some(command) => {
-                if command.outputs_json() {
-                    crate::ui::output::expect_json();
-                }
-                command.run().await
-            },
-            None => run_bare().await,
+            Some(command) => command.run(output).await,
+            None => run_bare(output).await,
         }
     }
 }
 
 impl Commands {
-    /// Whether this invocation promises a JSON document on stdout.
-    ///
-    /// This is decided before dispatch so failures during workspace or client
-    /// construction still use the command's machine-readable error contract.
-    fn outputs_json(&self) -> bool {
+    fn labels(&self) -> (Option<&'static str>, &'static str) {
         match self {
-            Self::Status(args) => args.json,
-            Self::Up(args) => args.json,
-            Self::Down(args) => args.json,
-            Self::Mount(args) => match &args.command {
-                commands::mount::MountCommand::Add(args) => args.json,
-                commands::mount::MountCommand::Ls(args) => args.json,
-                commands::mount::MountCommand::Reauth(_)
-                | commands::mount::MountCommand::Rm { .. }
-                | commands::mount::MountCommand::Snapshot(_) => false,
-            },
-            Self::Provider(args) => match &args.command {
-                commands::provider::ProviderCommand::Ls(args) => args.json,
-                commands::provider::ProviderCommand::Add(_) => false,
-            },
-            Self::Reset(args) => args.json,
-            Self::Doctor(args) => args.json,
-            Self::Version(args) => args.json,
-            Self::Logs(_)
-            | Self::Inspect(_)
-            | Self::Shell(_)
-            | Self::Setup(_)
-            | Self::Skill(_)
-            | Self::Completions(_)
-            | Self::Debug(_)
-            | Self::Frontend(_) => false,
+            Self::Status(_) => (Some("status"), "status"),
+            Self::Up(_) => (Some("up"), "up"),
+            Self::Down(_) => (Some("down"), "down"),
+            Self::Logs(_) => (Some("logs"), "logs"),
+            Self::Inspect(_) => (Some("inspect"), "inspect"),
+            Self::Shell(_) => (Some("shell"), "shell"),
+            Self::Setup(_) => (Some("setup"), "setup"),
+            Self::Mount(args) => (
+                Some("mount"),
+                match &args.command {
+                    commands::mount::MountCommand::Add(_) => "mount.add",
+                    commands::mount::MountCommand::Ls(_) => "mount.ls",
+                    commands::mount::MountCommand::Show(_) => "mount.show",
+                    commands::mount::MountCommand::Upgrade(_) => "mount.upgrade",
+                    commands::mount::MountCommand::Reauth(_) => "mount.reauth",
+                    commands::mount::MountCommand::Rm { .. } => "mount.rm",
+                    commands::mount::MountCommand::Snapshot(_) => "mount.snapshot",
+                },
+            ),
+            Self::Provider(args) => (
+                Some("provider"),
+                match &args.command {
+                    commands::provider::ProviderCommand::Add(_) => "provider.add",
+                    commands::provider::ProviderCommand::Ls(_) => "provider.ls",
+                    commands::provider::ProviderCommand::Show(_) => "provider.show",
+                },
+            ),
+            Self::Skill(_) => (Some("skill"), "skill"),
+            Self::Reset(_) => (Some("reset"), "reset"),
+            Self::Doctor(_) => (Some("doctor"), "doctor"),
+            Self::Completions(_) => (Some("completions"), "completions"),
+            Self::Version(_) => (Some("version"), "version"),
+            Self::Debug(_) => (Some("debug"), "debug"),
             #[cfg(feature = "daemon")]
-            Self::Daemon(_) => false,
+            Self::Daemon(_) => (None, "daemon"),
+            // Every `frontend` subcommand shares one telemetry label; there is
+            // no longer a hidden internal one (like `daemon`'s) to exclude.
+            Self::Frontend(args) => (
+                Some("frontend"),
+                match &args.command {
+                    commands::frontend::FrontendCommand::Enable(_) => "frontend.enable",
+                    commands::frontend::FrontendCommand::Disable(_) => "frontend.disable",
+                    commands::frontend::FrontendCommand::Restart(_) => "frontend.restart",
+                    commands::frontend::FrontendCommand::Ls(_) => "frontend.ls",
+                },
+            ),
         }
+    }
+
+    pub(crate) fn command_path(&self) -> &'static str {
+        self.labels().1
     }
 
     /// Top-level subcommand label for `cli.jsonl` telemetry, or `None` for the
     /// internal `daemon` subcommand (which records `daemon.jsonl` instead of
     /// counting as CLI usage).
     pub(crate) fn telemetry_label(&self) -> Option<&'static str> {
-        Some(match self {
-            Self::Status(_) => "status",
-            Self::Up(_) => "up",
-            Self::Down(_) => "down",
-            Self::Logs(_) => "logs",
-            Self::Inspect(_) => "inspect",
-            Self::Shell(_) => "shell",
-            Self::Setup(_) => "setup",
-            Self::Mount(_) => "mount",
-            Self::Provider(_) => "provider",
-            Self::Skill(_) => "skill",
-            Self::Reset(_) => "reset",
-            Self::Doctor(_) => "doctor",
-            Self::Completions(_) => "completions",
-            Self::Version(_) => "version",
-            Self::Debug(_) => "debug",
-            #[cfg(feature = "daemon")]
-            Self::Daemon(_) => return None,
-            // Every `frontend` subcommand shares one telemetry label; there is
-            // no longer a hidden internal one (like `daemon`'s) to exclude.
-            Self::Frontend(_) => "frontend",
-        })
+        self.labels().0
     }
 
-    pub async fn run(self) -> anyhow::Result<ExitCode> {
+    pub async fn run(self, output: Output) -> anyhow::Result<ExitCode> {
         match self {
             Self::Doctor(args) => {
-                let verdict = args.run().await?;
+                let verdict = args.run(output).await?;
                 Ok(exit_for_verdict(verdict))
             },
-            Self::Status(args) => args.run().await,
-            Self::Setup(args) => args.run().await.map(|()| ExitCode::Success),
-            Self::Up(args) => args.run().await,
-            Self::Down(args) => args.run().await,
-            Self::Logs(args) => args.run().map(|()| ExitCode::Success),
-            Self::Inspect(args) => args.run().await.map(|()| ExitCode::Success),
-            Self::Shell(args) => args.run().await.map(|()| ExitCode::Success),
-            Self::Mount(args) => args.run().await,
-            Self::Provider(args) => args.run().await,
+            Self::Status(args) => args.run(output).await,
+            Self::Setup(args) => args.run(output).await.map(|()| ExitCode::Success),
+            Self::Up(args) => args.run(output).await,
+            Self::Down(args) => args.run(output).await,
+            Self::Logs(args) => args.run(output).map(|()| ExitCode::Success),
+            Self::Inspect(args) => args.run(output).await.map(|()| ExitCode::Success),
+            Self::Shell(args) => args.run(output).await.map(|()| ExitCode::Success),
+            Self::Mount(args) => args.run(output).await,
+            Self::Provider(args) => args.run(output).await,
             Self::Skill(args) => args.run().map(|()| ExitCode::Success),
-            Self::Reset(args) => args.run().await,
+            Self::Reset(args) => args.run(output).await,
             Self::Completions(args) => {
                 args.run();
                 Ok(ExitCode::Success)
             },
-            Self::Version(args) => args.run().await,
+            Self::Version(args) => args.run(output).await,
             Self::Debug(args) => args.run().map(|()| ExitCode::Success),
             #[cfg(feature = "daemon")]
             Self::Daemon(args) => omnifs_daemon::run(&args).map(|()| ExitCode::Success),
-            Self::Frontend(args) => args.run().await,
+            Self::Frontend(args) => args.run(output).await,
         }
+    }
+}
+
+/// Inspect raw argv just far enough to choose a structured error contract for
+/// a later Clap usage failure. Invalid, missing, duplicate, and post-`--`
+/// occurrences deliberately return `None`, leaving Clap's human error path in
+/// charge.
+pub(crate) fn raw_output_mode<I>(args: I) -> Option<OutputMode>
+where
+    I: IntoIterator<Item = OsString>,
+{
+    let args = args.into_iter().collect::<Vec<_>>();
+    let mut selected = None;
+    let mut occurrences = 0_u8;
+    let mut index = 0;
+    while index < args.len() {
+        let arg = args[index].to_string_lossy();
+        if arg == "--" {
+            break;
+        }
+        let value = if let Some(value) = arg.strip_prefix("--output=") {
+            occurrences = occurrences.saturating_add(1);
+            Some(value.to_owned())
+        } else if arg == "--output" {
+            occurrences = occurrences.saturating_add(1);
+            index = index.saturating_add(1);
+            args.get(index)
+                .map(|value| value.to_string_lossy().into_owned())
+        } else {
+            index = index.saturating_add(1);
+            continue;
+        };
+        if let Some(value) = value
+            && let Ok(mode) = OutputMode::from_str(&value, true)
+        {
+            selected = Some(mode);
+        } else {
+            selected = None;
+        }
+        index = index.saturating_add(1);
+    }
+    (occurrences == 1).then_some(selected).flatten()
+}
+
+pub(crate) fn raw_command_path<I>(args: I) -> String
+where
+    I: IntoIterator<Item = OsString>,
+{
+    let values = args
+        .into_iter()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    let mut positional = Vec::new();
+    let mut index = 0;
+    while index < values.len() {
+        let value = &values[index];
+        if value == "--" {
+            break;
+        }
+        if value == "--output" {
+            index = index.saturating_add(2);
+            continue;
+        }
+        if value.starts_with("--output=")
+            || value == "--quiet"
+            || value == "-q"
+            || value == "--yes"
+            || value == "--no-input"
+            || value == "--verbose"
+            || value.starts_with("-v")
+        {
+            index = index.saturating_add(1);
+            continue;
+        }
+        if !value.starts_with('-') {
+            positional.push(value.clone());
+            if positional.len() == 2 {
+                break;
+            }
+        }
+        index = index.saturating_add(1);
+    }
+    match positional.as_slice() {
+        [command, subcommand] if matches!(command.as_str(), "mount" | "provider" | "frontend") => {
+            format!("{command}.{subcommand}")
+        },
+        [command, ..] => command.clone(),
+        [] => "status".to_owned(),
     }
 }
 
@@ -261,37 +333,38 @@ impl Commands {
 /// `up` hint; a healthy daemon shows the full status report plus two next-step
 /// hints. It is a thin dispatcher over the shared status/report code, so it
 /// never drifts from `omnifs status`.
-async fn run_bare() -> anyhow::Result<ExitCode> {
+async fn run_bare(output: Output) -> anyhow::Result<ExitCode> {
     let workspace = Workspace::resolve()?;
-    let mounts = workspace.mounts().unwrap_or_default();
-    if mounts.is_empty() {
-        crate::ui::print_raw("omnifs is not set up. Run `omnifs setup` to get started.\n");
-        return Ok(ExitCode::Success);
+    let inventory = crate::inventory::Inventory::collect(&workspace).await?;
+    let exit_code = match inventory.verdict() {
+        crate::inventory::Verdict::Ok => ExitCode::Success,
+        crate::inventory::Verdict::Degraded => ExitCode::Degraded,
+    };
+    let running = inventory.workspace.daemon == crate::inventory::DaemonState::Running;
+    if output.is_structured() {
+        output.emit_result(inventory.verdict(), inventory)?;
+        return Ok(exit_code);
     }
-
-    let runtime = workspace.daemon().compatible_status_optional().await?;
-    let report = crate::status::StatusReport::collect(
-        workspace.catalog(),
-        workspace.layout().clone(),
-        runtime,
-        &mounts,
-    );
-    let exit_code = report.exit_code();
-    let running = report.runtime.is_some();
-    report.build_report(false).print();
+    let report = crate::status::InventoryReport { inventory };
+    report.render(false).print();
 
     // The status report is the record (stdout); these next-step hints are
     // conversational, so `-q` drops them.
-    if running {
-        crate::ui::narrate("");
-        crate::ui::narrate(crate::ui::hint("omnifs shell", "open a shell at the tree"));
-        crate::ui::narrate(crate::ui::hint(
+    if report.inventory.mounts.is_empty() {
+        output.narrate(crate::ui::hint(
+            "omnifs setup",
+            "configure your first mount",
+        ));
+    } else if running {
+        output.narrate("");
+        output.narrate(crate::ui::hint("omnifs shell", "open a shell at the tree"));
+        output.narrate(crate::ui::hint(
             "omnifs mount add <provider>",
             "add another mount",
         ));
     } else {
-        crate::ui::narrate("");
-        crate::ui::narrate(crate::ui::hint("omnifs up", "start the daemon"));
+        output.narrate("");
+        output.narrate(crate::ui::hint("omnifs up", "start the daemon"));
     }
     Ok(exit_code)
 }
@@ -307,8 +380,67 @@ fn exit_for_verdict(verdict: DoctorVerdict) -> ExitCode {
 #[cfg(test)]
 mod tests {
     use clap::CommandFactory;
+    use std::ffi::OsString;
 
-    use super::Cli;
+    use super::{Cli, raw_command_path, raw_output_mode};
+
+    fn argv(args: &[&str]) -> Vec<OsString> {
+        args.iter().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn raw_output_mode_accepts_global_flag_anywhere_before_double_dash() {
+        assert_eq!(
+            raw_output_mode(argv(&["omnifs", "status", "--output", "json"])),
+            Some(crate::ui::output::OutputMode::Json)
+        );
+        assert_eq!(
+            raw_output_mode(argv(&["omnifs", "--output=jsonl", "mount", "ls"])),
+            Some(crate::ui::output::OutputMode::Jsonl)
+        );
+        assert_eq!(
+            raw_output_mode(argv(&["omnifs", "status", "--", "--output", "json"])),
+            None
+        );
+    }
+
+    #[test]
+    fn raw_output_mode_rejects_ambiguous_or_invalid_occurrences() {
+        assert_eq!(
+            raw_output_mode(argv(&["omnifs", "status", "--output"])),
+            None
+        );
+        assert_eq!(
+            raw_output_mode(argv(&["omnifs", "status", "--output", "yaml"])),
+            None
+        );
+        assert_eq!(
+            raw_output_mode(argv(&[
+                "omnifs",
+                "status",
+                "--output",
+                "json",
+                "--output=jsonl"
+            ])),
+            None
+        );
+    }
+
+    #[test]
+    fn raw_command_path_skips_global_options_and_names_nested_commands() {
+        assert_eq!(
+            raw_command_path(argv(&["--output", "json", "mount", "show", "x"])),
+            "mount.show"
+        );
+        assert_eq!(
+            raw_command_path(argv(&["provider", "--output=jsonl", "ls"])),
+            "provider.ls"
+        );
+        assert_eq!(
+            raw_command_path(argv(&["--yes", "--no-input", "status"])),
+            "status"
+        );
+    }
 
     #[test]
     fn wizard_prompt_sites_have_non_interactive_flags() {
@@ -358,15 +490,19 @@ mod tests {
     /// Resolve a whitespace-separated subcommand path (for example `mount add`)
     /// and check whether the leaf subcommand declares the argument.
     fn has_arg(command: &clap::Command, subcommand: &str, arg: &str) -> bool {
+        let global = command
+            .get_arguments()
+            .any(|candidate| candidate.get_id() == arg || candidate.get_long() == Some(arg));
         let mut current = command;
         for segment in subcommand.split_whitespace() {
             let Some(next) = current.find_subcommand(segment) else {
-                return false;
+                return global;
             };
             current = next;
         }
-        current
-            .get_arguments()
-            .any(|candidate| candidate.get_id() == arg || candidate.get_long() == Some(arg))
+        global
+            || current
+                .get_arguments()
+                .any(|candidate| candidate.get_id() == arg || candidate.get_long() == Some(arg))
     }
 }

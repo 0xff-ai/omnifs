@@ -101,11 +101,11 @@ fn setup_init_up_wait_read_down_golden_path() {
     let started = Instant::now();
     let mut fixture = Fixture::new();
 
-    let setup = fixture.run(&["setup", "-y", "--no-up"]);
+    let setup = fixture.run(&["setup", "--yes", "--no-up"]);
     assert_eq!(
         exit_code(&setup),
         0,
-        "setup -y --no-up must exit 0\nstdout: {}\nstderr: {}",
+        "setup --yes --no-up must exit 0\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&setup.stdout),
         String::from_utf8_lossy(&setup.stderr)
     );

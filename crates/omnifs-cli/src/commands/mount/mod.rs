@@ -8,6 +8,7 @@ pub(crate) mod provider_selection;
 pub(crate) mod snapshot;
 pub(crate) mod spec_creation;
 mod token_validation;
+pub(crate) mod upgrade;
 
 pub(crate) use add::AddArgs;
 pub(crate) use add::{render_consent_block, run_static_token_init};
@@ -27,6 +28,7 @@ use crate::error::{ExitCode, WithExitCode};
 use crate::stages::PromptMode;
 use crate::token_source::TokenSource;
 use crate::ui::consent::{Decision, Outcome, Plan, Row};
+use crate::ui::output::Output;
 use crate::workspace::Workspace;
 use omnifs_workspace::layout::WorkspaceLayout;
 
@@ -42,14 +44,15 @@ pub enum MountCommand {
     Add(AddArgs),
     /// List configured mounts with their provider and auth state.
     Ls(LsArgs),
+    /// Show one configured mount and every derived frontend access path.
+    Show(ShowArgs),
+    /// Repin one mount to an explicit or semver-selected provider artifact.
+    Upgrade(upgrade::UpgradeArgs),
     /// Re-authenticate an existing mount.
     Reauth(ReauthArgs),
     /// Remove a mount config (and its stored credential, by default).
     Rm {
         name: String,
-        /// Skip the confirmation prompt.
-        #[arg(short = 'y', long)]
-        yes: bool,
         /// Skip the credential delete.
         #[arg(long)]
         keep_credentials: bool,
@@ -62,19 +65,18 @@ pub enum MountCommand {
 }
 
 #[derive(Args, Debug, Clone, Default)]
-pub struct LsArgs {
-    /// Emit machine-readable JSON.
-    #[arg(long)]
-    pub json: bool,
+pub struct LsArgs {}
+
+#[derive(Args, Debug, Clone)]
+pub struct ShowArgs {
+    /// Existing mount name.
+    pub name: String,
 }
 
 #[derive(Args, Debug, Clone)]
 pub struct ReauthArgs {
     /// Existing mount name to re-authenticate.
     pub name: String,
-    /// Skip prompts. Static-token mounts also require --token or --token-env.
-    #[arg(long)]
-    pub no_input: bool,
     /// Print the OAuth URL instead of opening a browser.
     #[arg(long)]
     pub no_browser: bool,
@@ -95,79 +97,167 @@ pub struct ReauthArgs {
 }
 
 impl MountArgs {
-    pub async fn run(self) -> anyhow::Result<ExitCode> {
+    pub async fn run(self, output: Output) -> anyhow::Result<ExitCode> {
         match self.command {
-            MountCommand::Add(args) => args.run().await,
-            MountCommand::Ls(args) => ls(&args),
-            MountCommand::Reauth(args) => args.run().await.map(|()| ExitCode::Success),
-            MountCommand::Snapshot(args) => args.run().await.map(|()| ExitCode::Success),
+            MountCommand::Add(args) => args.run(output).await,
+            MountCommand::Ls(args) => ls(&args, output).await,
+            MountCommand::Show(args) => show(&args, output).await,
+            MountCommand::Upgrade(args) => args.run(output).await,
+            MountCommand::Reauth(args) => args.run(output).await.map(|()| ExitCode::Success),
+            MountCommand::Snapshot(args) => args.run(output).await,
             MountCommand::Rm {
                 name,
-                yes,
                 keep_credentials,
                 dry_run,
             } => {
                 let workspace = Workspace::resolve()?;
-                rm_with_options(&workspace, &name, yes, keep_credentials, dry_run)
-                    .await
-                    .map(|()| ExitCode::Success)
+                rm_with_options(
+                    &workspace,
+                    &name,
+                    output.yes(),
+                    keep_credentials,
+                    dry_run,
+                    output,
+                )
+                .await
+                .map(|()| ExitCode::Success)
             },
         }
     }
 }
 
-#[derive(serde::Serialize)]
-struct MountsJson {
-    mounts: Vec<crate::status::UserMountStatus>,
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct MountsResult {
+    mounts: Vec<crate::inventory::MountStatus>,
+    verdict: crate::inventory::Verdict,
 }
 
-fn ls(args: &LsArgs) -> anyhow::Result<ExitCode> {
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct MountShowResult {
+    mount: crate::inventory::MountStatus,
+    frontends: Vec<crate::inventory::FrontendStatus>,
+    access_paths: Vec<crate::inventory::AccessPath>,
+    verdict: crate::inventory::Verdict,
+}
+
+async fn ls(_args: &LsArgs, output: Output) -> anyhow::Result<ExitCode> {
     let workspace = Workspace::resolve()?;
-    let layout = workspace.layout();
-    let mounts = workspace.mounts()?;
-    let store = FileStore::new(&layout.credentials_file);
-    let statuses =
-        crate::mount_report::scan_user_mount_configs(workspace.catalog(), &mounts, &store);
-    let exit_code = if statuses.iter().any(|status| match status {
-        crate::status::UserMountStatus::Ready(mount) => matches!(
-            mount.auth.terminal_row().kind,
-            crate::auth::AuthTerminalKind::Missing | crate::auth::AuthTerminalKind::Error
-        ),
-        crate::status::UserMountStatus::Invalid { .. } => true,
-    }) {
-        ExitCode::Degraded
-    } else {
-        ExitCode::Success
+    let result = list_with_output(&workspace).await?;
+    let exit_code = match result.verdict {
+        crate::inventory::Verdict::Ok => ExitCode::Success,
+        crate::inventory::Verdict::Degraded => ExitCode::Degraded,
     };
-    if args.json {
-        crate::ui::print_json(&MountsJson { mounts: statuses })?;
-        return Ok(exit_code);
-    }
-    // Same rendering as status's Mounts section, from the one shared row owner.
-    let mut section = crate::ui::report::Section::new("Mounts").counted(statuses.len());
-    if statuses.is_empty() {
-        section.push(crate::ui::report::Row::new(
-            crate::ui::style::Glyph::Skip,
-            "",
-            "no mounts configured; run `omnifs mount add <provider>`",
-        ));
+    if output.is_structured() {
+        output.emit_result(result.verdict, &result)?;
     } else {
-        for status in &statuses {
-            section.push(crate::mount_report::mount_row(status));
-        }
+        crate::ui::print_raw(&render_mounts(&result));
     }
-    let mut report = crate::ui::report::Report::new();
-    report.push(section);
-    report.print();
     Ok(exit_code)
 }
 
+async fn show(args: &ShowArgs, output: Output) -> anyhow::Result<ExitCode> {
+    let workspace = Workspace::resolve()?;
+    let result = show_with_output(&workspace, &args.name).await?;
+    if output.is_structured() {
+        output.emit_result(result.verdict, &result)?;
+    } else {
+        crate::ui::print_raw(&render_mount_show(&result));
+    }
+    Ok(match result.verdict {
+        crate::inventory::Verdict::Ok => ExitCode::Success,
+        crate::inventory::Verdict::Degraded => ExitCode::Degraded,
+    })
+}
+
+pub(crate) async fn list_with_output(workspace: &Workspace) -> anyhow::Result<MountsResult> {
+    let inventory = crate::inventory::Inventory::collect(workspace).await?;
+    let verdict = inventory.verdict();
+    Ok(MountsResult {
+        mounts: inventory.mounts,
+        verdict,
+    })
+}
+
+pub(crate) async fn show_with_output(
+    workspace: &Workspace,
+    name: &str,
+) -> anyhow::Result<MountShowResult> {
+    let inventory = crate::inventory::Inventory::collect(workspace).await?;
+    let mount = inventory
+        .mounts
+        .iter()
+        .find(|mount| mount.name == name)
+        .cloned()
+        .ok_or_else(|| anyhow!("no mount named `{name}`"))?;
+    let mount_name = MountName::new(name.to_owned())?;
+    let access_paths = inventory.access_paths(&mount_name);
+    let verdict = inventory.verdict();
+    Ok(MountShowResult {
+        mount,
+        frontends: inventory.frontends,
+        access_paths,
+        verdict,
+    })
+}
+
+fn render_mounts(result: &MountsResult) -> String {
+    let mut report = crate::ui::table::Report::new();
+    report.push(crate::ui::table::Block::Resources(
+        crate::status::mount_table(&result.mounts),
+    ));
+    report.render()
+}
+
+fn render_mount_show(result: &MountShowResult) -> String {
+    use crate::ui::table::{
+        Cell, Column, CountLabel, Priority, Report, ResourceRow, ResourceTable, StateToken,
+        WidthPolicy,
+    };
+    let mut table = ResourceTable::new(
+        "Access paths",
+        CountLabel::number(result.access_paths.len()),
+        vec![
+            Column::new("Filesystem", Priority::Identity, WidthPolicy::Auto),
+            Column::new("Environment", Priority::Essential, WidthPolicy::Auto),
+            Column::new("Path", Priority::Essential, WidthPolicy::Path),
+            Column::new("State", Priority::Secondary, WidthPolicy::Auto),
+        ],
+    );
+    for path in &result.access_paths {
+        let state = match path.state {
+            crate::inventory::AccessState::Available => StateToken::positive(path.state.label()),
+            crate::inventory::AccessState::FrontendStopped
+            | crate::inventory::AccessState::Offline => StateToken::neutral(path.state.label()),
+            crate::inventory::AccessState::Failed => StateToken::failure(path.state.label()),
+        };
+        let row_state = state.clone();
+        table.push(ResourceRow::new(
+            [
+                Cell::new(path.filesystem.label()),
+                Cell::new(path.environment.label()),
+                Cell::new(path.path.display().to_string()),
+                Cell::state(state),
+            ],
+            row_state,
+        ));
+    }
+    let mut report = Report::new();
+    report.push(crate::ui::table::Block::Resources(
+        crate::status::mount_table(std::slice::from_ref(&result.mount)),
+    ));
+    report.push(crate::ui::table::Block::Resources(table));
+    report.render()
+}
+
 impl ReauthArgs {
-    async fn run(self) -> anyhow::Result<()> {
+    async fn run(self, output: Output) -> anyhow::Result<()> {
         let workspace = Workspace::resolve()?;
-        let mut session =
-            crate::ui::session::Session::intro(format!("omnifs mount reauth {}", self.name))?;
-        let result = self.run_in_session(&workspace, &mut session).await;
+        let mut session = crate::ui::session::Session::intro_with_output(
+            format!("omnifs mount reauth {}", self.name),
+            output,
+        )?;
+        let prompt = PromptMode::from_flags(output.yes(), output.no_input());
+        let result = self.run_in_session(&workspace, &mut session, prompt).await;
         if result.is_ok() {
             session.outro(format!("Re-authenticated `{}`.", self.name));
         }
@@ -178,6 +268,7 @@ impl ReauthArgs {
         &self,
         workspace: &Workspace,
         session: &mut crate::ui::session::Session,
+        prompt: PromptMode,
     ) -> anyhow::Result<()> {
         let paths = workspace.layout();
         let mount_name = self.name.as_str();
@@ -210,7 +301,7 @@ impl ReauthArgs {
         // `--no-input` must never reach an OAuth browser handoff (it would hang
         // on the browser confirm or the manual-code paste). Mirror the add-side
         // guard: bail naming the interactive and static-token alternatives.
-        let interactive = !self.no_input && crate::ui::prompt::is_terminal();
+        let interactive = prompt.interactive;
         if !interactive && selection.is_oauth() {
             return Err(anyhow!(
                 "`omnifs mount reauth {mount_name}` cannot complete OAuth without a terminal; run it interactively, or use a static-token scheme with --token - or --token-env VAR"
@@ -225,7 +316,7 @@ impl ReauthArgs {
                 mount_name,
                 selection.account.as_deref(),
                 self.no_browser,
-                self.no_input,
+                prompt.no_input,
                 &self.scopes,
                 session,
             )
@@ -267,7 +358,7 @@ impl ReauthArgs {
                 },
             }
         }
-        crate::telemetry::maybe_print_health_nudge(workspace).await;
+        crate::telemetry::maybe_print_health_nudge(workspace, session.output()).await;
         Ok(())
     }
 }
@@ -279,7 +370,15 @@ pub async fn rm(
     yes: bool,
     keep_credentials: bool,
 ) -> anyhow::Result<()> {
-    rm_with_options(workspace, name, yes, keep_credentials, false).await
+    rm_with_options(
+        workspace,
+        name,
+        yes,
+        keep_credentials,
+        false,
+        Output::new(crate::ui::output::OutputMode::Human, false),
+    )
+    .await
 }
 
 #[allow(clippy::too_many_lines)] // plan, decision, and receipt stay linear
@@ -289,9 +388,11 @@ async fn rm_with_options(
     yes: bool,
     keep_credentials: bool,
     dry_run: bool,
+    output: Output,
 ) -> anyhow::Result<()> {
     let layout = workspace.layout();
-    let mut session = crate::ui::session::Session::intro(format!("omnifs mount rm {name}"))?;
+    let mut session =
+        crate::ui::session::Session::intro_with_output(format!("omnifs mount rm {name}"), output)?;
     let mounts = workspace.mounts()?;
     let name =
         MountName::new(name.to_owned()).with_context(|| format!("invalid mount name `{name}`"))?;
@@ -311,7 +412,11 @@ async fn rm_with_options(
             ),
         ));
         session.plan(&plan);
-        if let Some(suggestion) = crate::mount_report::closest_mount_name(&mounts, name.as_str()) {
+        if let Some(suggestion) = mounts
+            .iter()
+            .map(|mount| mount.name.to_string())
+            .find(|candidate| candidate.starts_with(name.as_str()))
+        {
             session.note(format!("Did you mean `{suggestion}`?"));
         }
         let receipt = plan.receipt([Outcome::skip("spec", "already absent")]);
@@ -331,7 +436,12 @@ async fn rm_with_options(
         keep_credentials,
     );
     session.plan(&plan);
-    match Decision::resolve(PromptMode::from_flags(yes, false), dry_run, "-y")? {
+    match Decision::resolve(
+        PromptMode::from_flags(yes || output.yes(), output.no_input()),
+        dry_run,
+        "-y",
+        output,
+    )? {
         Decision::DryRun => {
             session.outro("Dry run; no changes made.");
             return Ok(());

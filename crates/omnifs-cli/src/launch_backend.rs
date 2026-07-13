@@ -164,7 +164,7 @@ pub(crate) fn names_registry(image: &str) -> bool {
 }
 
 /// A Docker container's name and image, addressed together. Built directly by
-/// the frontend commands (`omnifs frontend up|down`); the daemon no
+/// the frontend commands (`omnifs frontend enable|disable`); the daemon no
 /// longer runs in a container, so there is no resolution chain here to guess
 /// its identity from config or environment.
 #[derive(Debug, Clone, PartialEq, Eq)]

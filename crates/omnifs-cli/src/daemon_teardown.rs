@@ -6,6 +6,7 @@
 
 use crate::ui::consent::Outcome;
 use crate::ui::event::{LedgerRenderer, Render, UiEvent};
+use crate::ui::output::Output;
 use crate::workspace::Workspace;
 use omnifs_workspace::runtime_record::{RecordedBackend, RuntimeRecord};
 use std::time::Duration;
@@ -82,11 +83,12 @@ impl TeardownOutcome {
 
 pub(crate) struct DaemonTeardown<'a> {
     workspace: &'a Workspace,
+    output: Output,
 }
 
 impl<'a> DaemonTeardown<'a> {
-    pub(crate) fn new(workspace: &'a Workspace) -> Self {
-        Self { workspace }
+    pub(crate) fn new(workspace: &'a Workspace, output: Output) -> Self {
+        Self { workspace, output }
     }
 
     /// Stop frontends before stopping the namespace daemon they depend on, and
@@ -102,7 +104,7 @@ impl<'a> DaemonTeardown<'a> {
     }
 
     /// Run the teardown workflow and return its typed outcomes without
-    /// rendering. `down` renders these to the ledger; the `--json` path settles
+    /// rendering. `down` renders these to the ledger; structured output settles
     /// them into a receipt. A frontend-teardown failure stops the workflow
     /// before the daemon is touched (fail-closed: a live frontend depends on
     /// the daemon namespace).
@@ -209,7 +211,8 @@ impl<'a> DaemonTeardown<'a> {
 
     async fn teardown_frontends(&self, force: bool) -> TeardownOutcome {
         let report =
-            crate::commands::frontend::down::teardown_report(self.workspace.layout(), force).await;
+            crate::commands::frontend::teardown_all(self.workspace.layout(), force, self.output)
+                .await;
         if let Some(error) = report.error() {
             TeardownOutcome::FrontendsFailed { error }
         } else if report.found {
@@ -267,7 +270,7 @@ fn render_outcomes(outcomes: &[TeardownOutcome]) {
             glyph: row.glyph,
             key: row.key,
             value: row.value,
-            fix: row.fix,
+            fix: None,
             duration: None,
         });
     }

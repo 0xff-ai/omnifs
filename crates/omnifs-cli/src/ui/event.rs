@@ -3,7 +3,7 @@
 //! No command prints directly; long-running and conversational surfaces emit a
 //! stream of [`UiEvent`]s, and a [`Render`] turns that stream into bytes. Three
 //! renderers consume the same stream: the flat [`LedgerRenderer`], the cliclack
-//! rail renderer, and the NDJSON renderer for `--progress=json`. Keeping the
+//! rail renderer, and the NDJSON renderer for structured JSONL output. Keeping the
 //! model an enum plus a trait is deliberate: there is no async bus, and
 //! progress is driven by the caller.
 
@@ -17,6 +17,8 @@ use super::style::{self, Glyph};
 use serde::Serialize;
 use std::time::Duration;
 
+use super::output::{ErrorEnvelope, ResultVerdict, SCHEMA_VERSION};
+
 /// One thing that happened, described so any renderer can present it. Narration
 /// and progress belong on stderr; the [`LedgerRenderer`] enforces that.
 #[derive(Debug, Clone, Serialize)]
@@ -24,8 +26,8 @@ use std::time::Duration;
 pub(crate) enum UiEvent {
     /// Explanatory prose inside a command transcript.
     Narration { message: String },
-    /// A titled block began (`Frontends (2)`), rendered as a heading.
-    PhaseStarted { title: String, count: Option<usize> },
+    /// A titled block began, rendered as a heading.
+    PhaseStarted { title: String },
     /// A destructive-operation preview. These rows are reused verbatim by the
     /// receipt event, with only their settled glyph/value changing.
     Plan {
@@ -46,7 +48,11 @@ pub(crate) enum UiEvent {
     Receipt { title: String, rows: Vec<Outcome> },
     /// A transient progress tick. The flat ledger paints its own in-place
     /// spinner and ignores this; an NDJSON renderer forwards it.
-    Progress { key: String, message: String },
+    Progress {
+        key: String,
+        message: String,
+        elapsed_ms: u64,
+    },
     /// A prompt was presented to the user.
     PromptShown { question: String },
     /// A prompt was answered; the flat ledger collapses it to one line.
@@ -56,6 +62,114 @@ pub(crate) enum UiEvent {
     },
     /// The closing hand-off line ("Files are live at ...").
     Outro { message: String },
+}
+
+/// Stable JSONL phase/progress envelope. The explicit structs keep
+/// `schema_version` first and the event tag second in serialized output.
+#[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
+pub(crate) enum JsonlEvent {
+    Phase(JsonlPhase),
+    Progress(JsonlProgress),
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct JsonlPhase {
+    pub(crate) schema_version: u8,
+    #[serde(rename = "type")]
+    pub(crate) kind: &'static str,
+    pub(crate) command: String,
+    pub(crate) phase: String,
+    pub(crate) state: String,
+}
+
+impl JsonlPhase {
+    pub(crate) fn new(
+        command: impl Into<String>,
+        phase: impl Into<String>,
+        state: impl Into<String>,
+    ) -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION,
+            kind: "phase",
+            command: command.into(),
+            phase: phase.into(),
+            state: state.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct JsonlProgress {
+    pub(crate) schema_version: u8,
+    #[serde(rename = "type")]
+    pub(crate) kind: &'static str,
+    pub(crate) command: String,
+    pub(crate) resource: String,
+    pub(crate) state: String,
+    pub(crate) elapsed_ms: u64,
+}
+
+impl JsonlProgress {
+    pub(crate) fn new(
+        command: impl Into<String>,
+        resource: impl Into<String>,
+        state: impl Into<String>,
+        elapsed_ms: u64,
+    ) -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION,
+            kind: "progress",
+            command: command.into(),
+            resource: resource.into(),
+            state: state.into(),
+            elapsed_ms,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct JsonlResult<T> {
+    pub(crate) schema_version: u8,
+    #[serde(rename = "type")]
+    pub(crate) kind: &'static str,
+    pub(crate) command: String,
+    pub(crate) verdict: ResultVerdict,
+    pub(crate) result: T,
+}
+
+impl<T> JsonlResult<T> {
+    pub(crate) fn new(command: impl Into<String>, verdict: ResultVerdict, result: T) -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION,
+            kind: "result",
+            command: command.into(),
+            verdict,
+            result,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct JsonlError {
+    pub(crate) schema_version: u8,
+    #[serde(rename = "type")]
+    pub(crate) kind: &'static str,
+    pub(crate) command: String,
+    pub(crate) verdict: super::output::ErrorVerdict,
+    pub(crate) error: super::output::ErrorPayload,
+}
+
+impl JsonlError {
+    pub(crate) fn from_envelope(envelope: ErrorEnvelope) -> Self {
+        Self {
+            schema_version: envelope.schema_version,
+            kind: "error",
+            command: envelope.command,
+            verdict: envelope.verdict,
+            error: envelope.error,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -82,23 +196,11 @@ impl Render for LedgerRenderer {
     fn event(&mut self, event: &UiEvent) {
         // Quiet drops conversational narration and prompt echoes; the record
         // (settled rows, plans, receipts, the outro hand-off) is preserved.
-        if super::output::quiet()
-            && matches!(
-                event,
-                UiEvent::Narration { .. } | UiEvent::PromptShown { .. }
-            )
-        {
-            return;
-        }
         match event {
             UiEvent::Narration { message } => anstream::eprintln!("{message}"),
-            UiEvent::PhaseStarted { title, count } => {
+            UiEvent::PhaseStarted { title } => {
                 anstream::eprintln!();
-                let heading = match count {
-                    Some(count) => format!("{title} ({count})"),
-                    None => title.clone(),
-                };
-                anstream::eprintln!("{}", style::bold(heading));
+                anstream::eprintln!("{}", style::bold(title));
             },
             UiEvent::Plan {
                 title,
@@ -153,44 +255,66 @@ impl Render for LedgerRenderer {
     }
 }
 
-/// The `--progress json` renderer: one serialized [`UiEvent`] per line on
-/// stdout. This is the machine face of the same event stream the flat ledger
-/// animates, so an agent sees every phase, progress tick, and settle as JSON
-/// lines.
+/// The JSONL renderer: one serialized public [`JsonlEvent`] per line on stdout.
+/// It exposes the phase and progress subset of the internal event stream, while
+/// terminal results and errors retain their own stable envelopes.
 ///
 /// Stream choice: NDJSON goes to stdout (machine output), the same stream a
-/// `--json` final receipt uses. A receipt is itself a single-line JSON
+/// structured final receipt uses. A receipt is itself a single-line JSON
 /// document, so when both flags are set the combined stdout stays a valid
 /// JSON-lines stream whose last line is the receipt.
-#[derive(Debug, Default, Clone, Copy)]
-pub(crate) struct NdjsonRenderer;
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct NdjsonRenderer {
+    output: super::output::Output,
+}
 
 impl Render for NdjsonRenderer {
     fn event(&mut self, event: &UiEvent) {
-        // A UiEvent is always serializable; drop the line rather than panic if
-        // that ever changes, so progress never aborts a command.
-        if let Ok(line) = serde_json::to_string(event) {
-            anstream::println!("{line}");
-        }
+        let event = match event {
+            UiEvent::PhaseStarted { title } => JsonlEvent::Phase(JsonlPhase::new(
+                self.output.command(),
+                title.clone(),
+                "started",
+            )),
+            UiEvent::Progress {
+                key,
+                message,
+                elapsed_ms,
+            } => JsonlEvent::Progress(JsonlProgress::new(
+                self.output.command(),
+                key.clone(),
+                message.clone(),
+                *elapsed_ms,
+            )),
+            UiEvent::Narration { .. }
+            | UiEvent::Plan { .. }
+            | UiEvent::RowSettled { .. }
+            | UiEvent::Receipt { .. }
+            | UiEvent::PromptShown { .. }
+            | UiEvent::PromptAnswered { .. }
+            | UiEvent::Outro { .. } => return,
+        };
+        let mut stdout = std::io::stdout().lock();
+        let _ = self.output.write_event(&mut stdout, &event);
     }
 }
 
 /// The renderer [`super::progress::LiveRow`] uses by default. It dispatches to
-/// the flat ledger or the NDJSON stream based on the global `--progress`
-/// selection, so every progress-bearing command routes through one type
-/// without threading a generic parameter down the call graph.
+/// the flat ledger or the NDJSON stream based on the invocation output policy,
+/// so every progress-bearing command routes through one type.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum StreamRenderer {
     Flat(LedgerRenderer),
     Ndjson(NdjsonRenderer),
+    Silent,
 }
 
 impl StreamRenderer {
-    pub(crate) fn from_global() -> Self {
-        if super::output::progress_is_json() {
-            Self::Ndjson(NdjsonRenderer)
-        } else {
-            Self::Flat(LedgerRenderer)
+    pub(crate) fn from_output(output: super::output::Output) -> Self {
+        match output.mode() {
+            super::output::OutputMode::Human => Self::Flat(LedgerRenderer),
+            super::output::OutputMode::Jsonl => Self::Ndjson(NdjsonRenderer { output }),
+            super::output::OutputMode::Json => Self::Silent,
         }
     }
 }
@@ -200,6 +324,7 @@ impl Render for StreamRenderer {
         match self {
             Self::Flat(renderer) => renderer.event(event),
             Self::Ndjson(renderer) => renderer.event(event),
+            Self::Silent => {},
         }
     }
 }
@@ -215,23 +340,44 @@ fn format_duration(duration: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::output::{ErrorEnvelope, ErrorPayload, ErrorVerdict, Output, ResultVerdict};
 
     #[test]
-    fn ndjson_serializes_one_tagged_object_per_event() {
-        // The NDJSON line is a single serialized UiEvent: a `type` tag plus the
-        // variant's fields, no trailing newline in the value itself.
-        let event = UiEvent::RowSettled {
-            glyph: Glyph::Done,
-            key: "daemon".to_owned(),
-            value: "running".to_owned(),
-            fix: None,
-            duration: Some(Duration::from_millis(12)),
-        };
+    fn jsonl_event_serializes_one_stable_tagged_object_per_event() {
+        // Public NDJSON carries only the documented phase/progress envelopes,
+        // never the internal UiEvent shape.
+        let event = JsonlEvent::Progress(JsonlProgress::new("status", "daemon", "starting", 12));
         let line = serde_json::to_string(&event).unwrap();
         assert!(!line.contains('\n'), "one event is one line: {line}");
         let value: serde_json::Value = serde_json::from_str(&line).unwrap();
-        assert_eq!(value["type"], "row_settled");
-        assert_eq!(value["key"], "daemon");
-        assert_eq!(value["glyph"], "done");
+        assert_eq!(value["type"], "progress");
+        assert_eq!(value["resource"], "daemon");
+        assert_eq!(value["elapsed_ms"], 12);
+    }
+
+    #[test]
+    fn jsonl_result_and_error_are_terminal_and_distinct() {
+        let result =
+            Output::jsonl_result_bytes("up", ResultVerdict::Ok, serde_json::json!({})).unwrap();
+        let error = Output::jsonl_error_bytes(ErrorEnvelope::new(
+            "up",
+            ErrorVerdict::Canceled,
+            ErrorPayload {
+                id: "canceled".into(),
+                exit_code: 130,
+                message: "canceled".into(),
+                causes: Vec::new(),
+                fix: None,
+                hints: Vec::new(),
+            },
+        ))
+        .unwrap();
+        let result: serde_json::Value = serde_json::from_slice(&result).unwrap();
+        let error: serde_json::Value = serde_json::from_slice(&error).unwrap();
+        assert_eq!(result["type"], "result");
+        assert_eq!(result["verdict"], "ok");
+        assert_eq!(error["type"], "error");
+        assert_eq!(error["verdict"], "canceled");
+        assert_ne!(result["type"], error["type"]);
     }
 }

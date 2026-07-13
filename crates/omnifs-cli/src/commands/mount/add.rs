@@ -19,7 +19,6 @@ use crate::credential_target::CredentialTarget;
 use crate::workspace::Workspace;
 
 #[derive(Args, Debug, Clone)]
-#[allow(clippy::struct_excessive_bools)] // mirrors CLI flags 1:1
 pub struct AddArgs {
     /// Provider to use (positional; picker if omitted).
     pub provider: Option<String>,
@@ -27,13 +26,6 @@ pub struct AddArgs {
     /// existing name may only repin a different artifact of the same provider.
     #[arg(long = "as")]
     pub as_name: Option<String>,
-    /// Skip prompts. Static-token providers also require --token or --token-env.
-    #[arg(long)]
-    pub no_input: bool,
-    /// Accept the suggested mount name on a collision (never overwrites), and
-    /// accept a detected ambient credential without prompting.
-    #[arg(short = 'y', long)]
-    pub yes: bool,
     /// Print the OAuth URL instead of opening a browser.
     #[arg(long)]
     pub no_browser: bool,
@@ -66,25 +58,30 @@ pub struct AddArgs {
     /// Full resource limits JSON object to write into the mount spec.
     #[arg(long = "limits-json", value_name = "JSON")]
     pub limits_json: Option<String>,
-    /// Emit a machine-readable JSON receipt (the mount name and its readiness)
-    /// on stdout.
-    #[arg(long)]
-    pub json: bool,
 }
 
 impl AddArgs {
-    pub async fn run(self) -> anyhow::Result<crate::error::ExitCode> {
+    pub async fn run(
+        self,
+        output: crate::ui::output::Output,
+    ) -> anyhow::Result<crate::error::ExitCode> {
         let workspace = Workspace::resolve()?;
-        self.run_in_workspace(&workspace).await
+        self.run_in_workspace(&workspace, output).await
     }
 
     pub(crate) async fn run_in_workspace(
         self,
         workspace: &Workspace,
+        output: crate::ui::output::Output,
     ) -> anyhow::Result<crate::error::ExitCode> {
-        let json = self.json;
-        let mut session = crate::ui::session::Session::intro("omnifs mount add")?;
-        let outcome = crate::stages::configure_mount(self, workspace, true, &mut session).await?;
+        let mut session =
+            crate::ui::session::Session::intro_with_output("omnifs mount add", output)?;
+        let prompt = crate::stages::PromptMode::from_flags(
+            output.yes(),
+            output.no_input() || output.is_structured(),
+        );
+        let outcome =
+            crate::stages::configure_mount(self, workspace, true, &mut session, prompt).await?;
         match outcome.status {
             crate::stages::MountInitStatus::Ready => {
                 session.outro(format!("Mounted `{}`.", outcome.mount_name));
@@ -96,12 +93,15 @@ impl AddArgs {
                 ));
             },
         }
-        if json {
-            crate::ui::print_json(&crate::commands::receipt::MountAddReceipt {
-                verdict: crate::commands::receipt::Verdict::Ok,
-                mount: outcome.mount_name,
-                status: outcome.status.into(),
-            })?;
+        if output.is_structured() {
+            output.emit_result(
+                crate::ui::output::ResultVerdict::Ok,
+                &crate::commands::receipt::MountAddReceipt {
+                    verdict: crate::commands::receipt::Verdict::Ok,
+                    mount: outcome.mount_name,
+                    status: outcome.status.into(),
+                },
+            )?;
         }
         Ok(crate::error::ExitCode::Success)
     }
@@ -120,10 +120,10 @@ pub(crate) fn render_consent_block(
         .unwrap_or(&manifest.display_name);
     session.note(description);
     if let Some(needs) = crate::capability::compact_needs(manifest) {
-        session.note(crate::style::dim(needs));
+        session.note(crate::ui::style::dim(needs));
     }
     if let Some(limits) = crate::capability::compact_limits(manifest) {
-        session.note(crate::style::dim(limits));
+        session.note(crate::ui::style::dim(limits));
     }
 }
 
@@ -368,8 +368,6 @@ mod tests {
         let args = AddArgs {
             provider: Some("dns".to_string()),
             as_name: None,
-            no_input: true,
-            yes: true,
             no_browser: true,
             token: None,
             token_env: None,
@@ -380,14 +378,16 @@ mod tests {
             config_json: None,
             capabilities_json: None,
             limits_json: None,
-            json: false,
         };
 
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap()
-            .block_on(args.run_in_workspace(&workspace))
+            .block_on(args.run_in_workspace(
+                &workspace,
+                crate::ui::output::Output::new(crate::ui::output::OutputMode::Human, false),
+            ))
             .unwrap();
 
         let spec = std::fs::read_to_string(workspace.layout().mounts_dir.join("dns.json")).unwrap();

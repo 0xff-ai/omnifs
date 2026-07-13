@@ -5,23 +5,20 @@ use clap::Args;
 use serde::Serialize;
 
 use crate::error::ExitCode;
+use crate::inventory::Inventory;
 use crate::launch_backend::BUILD_CHANNEL;
+use crate::ui::output::{Output, ResultVerdict};
 use crate::workspace::Workspace;
-use omnifs_workspace::provider::{Catalog, DirStatus};
 
 #[derive(Args, Debug, Clone, Default)]
-pub struct VersionArgs {
-    /// Emit machine-readable JSON.
-    #[arg(long)]
-    pub json: bool,
-}
+pub struct VersionArgs {}
 
 impl VersionArgs {
-    pub async fn run(self) -> Result<ExitCode> {
-        if self.json {
+    pub async fn run(self, output: Output) -> Result<ExitCode> {
+        if output.is_structured() {
             let workspace = Workspace::resolve()?;
             let payload = VersionJson::collect(&workspace).await?;
-            crate::ui::print_json(&payload)?;
+            output.emit_result(ResultVerdict::Ok, payload)?;
             return Ok(ExitCode::Success);
         }
         crate::ui::print_raw(&format!(
@@ -57,38 +54,29 @@ struct ProvidersJson {
 
 impl VersionJson {
     async fn collect(workspace: &Workspace) -> Result<Self> {
-        let daemon = workspace
-            .daemon()
-            .status_optional()
-            .await?
-            .map(|status| DaemonVersionJson {
-                version: status.version,
-                api_major: status.api_major,
-                api_minor: status.api_minor,
-                pid: status.pid,
+        let inventory = Inventory::collect(workspace).await?;
+        let daemon = inventory
+            .workspace
+            .api
+            .as_ref()
+            .map(|api| DaemonVersionJson {
+                version: env!("CARGO_PKG_VERSION").to_owned(),
+                api_major: api.major,
+                api_minor: api.minor,
+                pid: inventory.workspace.pid.unwrap_or_default(),
             });
         Ok(Self {
             cli: env!("CARGO_PKG_VERSION").to_string(),
             channel: BUILD_CHANNEL.word(),
             daemon,
-            providers: provider_summary(workspace.catalog()),
+            providers: ProvidersJson {
+                state: if inventory.providers.is_empty() {
+                    "missing"
+                } else {
+                    "present"
+                },
+                count: inventory.providers.len(),
+            },
         })
-    }
-}
-
-fn provider_summary(catalog: &Catalog) -> ProvidersJson {
-    match catalog.dir_status() {
-        DirStatus::Missing => ProvidersJson {
-            state: "missing",
-            count: 0,
-        },
-        DirStatus::Present { wasm_count } => ProvidersJson {
-            state: "present",
-            count: wasm_count,
-        },
-        DirStatus::Unreadable(_) => ProvidersJson {
-            state: "unreadable",
-            count: 0,
-        },
     }
 }

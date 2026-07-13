@@ -1,6 +1,6 @@
-//! The krunkit driver end to end: `omnifs frontend up --driver krunkit` boots
+//! The krunkit environment end to end: `omnifs frontend enable fuse --environment krunkit` boots
 //! the mkosi guest image under krunkit on Apple Silicon macOS, attaches the
-//! guest's `omnifs-fuse` runner to a host-native daemon's shared namespace
+//! guest's `omnifs-thin fuse` runner to a host-native daemon's shared namespace
 //! over vsock, and serves `/omnifs` inside the guest. This suite proves the
 //! guest mount behaves like a real filesystem for the standard toolbox (the
 //! `fuse-krunkit` conformance column, reusing the shared matrix machinery
@@ -151,8 +151,8 @@ fn workspace_root() -> PathBuf {
 // ===========================================================================
 
 /// Drives the real `omnifs` binary against a hermetic `OMNIFS_HOME`, exactly
-/// as a contributor would: `up --no-frontend`, `frontend up --driver
-/// krunkit`, `frontend status`, `down`. No test touches the user's real
+/// as a contributor would: `up --no-frontend`, `frontend enable fuse
+/// --environment krunkit`, `frontend ls`, `down`. No test touches the user's real
 /// `~/.omnifs` or default ports.
 struct Fixture {
     home: TempDir,
@@ -204,13 +204,12 @@ impl Fixture {
     }
 
     /// Run a CLI subcommand with the hermetic env, including the guest image
-    /// override so `frontend up --driver krunkit` never falls back to a
+    /// override so krunkit frontend enable never falls back to a
     /// cwd-relative default.
     fn run(&self, args: &[&str]) -> Output {
         Command::new(live::omnifs_bin())
             .args(args)
             .env("OMNIFS_HOME", self.home_path())
-            .env("OMNIFS_MOUNT_POINT", &self.mount_point)
             .env("OMNIFS_DAEMON_ADDR", &self.daemon_addr)
             .env("OMNIFS_CONTROL_TOKEN", CONTROL_TOKEN)
             .env(ENV_GUEST_IMAGE, &self.guest_image)
@@ -234,6 +233,24 @@ impl Fixture {
         );
         self.daemon_pid = self.daemon_pid_from_record();
 
+        let location = self.mount_point.to_str().expect("mount point utf8");
+        let out = self.run(&[
+            "frontend",
+            "enable",
+            "nfs",
+            "--environment",
+            "host",
+            "--location",
+            location,
+        ]);
+        assert!(
+            out.status.success(),
+            "host NFS frontend enable failed (exit {})\nstdout: {}\nstderr: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+        );
+
         let message = self.mount_point.join("test/hello/message");
         let deadline = Instant::now() + Duration::from_secs(30);
         while !message.is_file() {
@@ -246,15 +263,15 @@ impl Fixture {
         }
     }
 
-    fn frontend_up(&self) -> Output {
-        self.run(&["frontend", "up", "--driver", "krunkit"])
+    fn frontend_enable(&self) -> Output {
+        self.run(&["frontend", "enable", "fuse", "--environment", "krunkit"])
     }
 
-    /// Assert `frontend up` succeeded; on failure, dump the krunkit serial
+    /// Assert krunkit frontend enable succeeded; on failure, dump the krunkit serial
     /// console log first (the fixture Drop removes the whole `krunkit/` dir,
     /// so this is the only window to capture why the guest never served),
     /// then panic with the CLI's own output.
-    fn assert_frontend_up_ok(&self, out: &Output, context: &str) {
+    fn assert_frontend_enable_ok(&self, out: &Output, context: &str) {
         if out.status.success() {
             return;
         }
@@ -272,7 +289,7 @@ impl Fixture {
             eprintln!("--- {} (tail) ---\n{tail}\n---", serial.display());
         }
         panic!(
-            "omnifs frontend up --driver krunkit failed ({context}, exit {})\nstdout: {}\nstderr: {}",
+            "omnifs frontend enable fuse --environment krunkit failed ({context}, exit {})\nstdout: {}\nstderr: {}",
             out.status,
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr),
@@ -280,7 +297,7 @@ impl Fixture {
     }
 
     fn frontend_status(&self) -> Output {
-        self.run(&["frontend", "status"])
+        self.run(&["frontend", "ls"])
     }
 
     fn down(&self) -> Output {
@@ -289,7 +306,7 @@ impl Fixture {
 
     /// Every artifact `KrunkitBackend::launch` can lay down under
     /// `<config_dir>/krunkit/`. Used both to prove teardown removed them and,
-    /// before that, to prove `frontend up` created them.
+    /// before that, to prove frontend enable created them.
     fn krunkit_artifacts(&self) -> Vec<PathBuf> {
         let dir = self.krunkit_dir();
         [
@@ -351,16 +368,19 @@ fn force_unmount(mount_point: &Path) {
     }
 }
 
-/// `omnifs shell -- cat /omnifs/test/hello/message` returns the exact fixture
-/// bytes: the cheapest end-to-end proof the guest mount is really serving.
+/// `omnifs shell -- cat /omnifs/<mount>/hello/message` returns exact fixture
+/// bytes for every configured mount.
 fn assert_serves(fixture: &Fixture) {
-    let out = fixture.run(&["shell", "--", "cat", "/omnifs/test/hello/message"]);
-    assert!(
-        out.status.success(),
-        "omnifs shell -- cat /omnifs/test/hello/message failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert_eq!(String::from_utf8_lossy(&out.stdout), "Hello, world!");
+    for root in ["test", "test2"] {
+        let guest_path = format!("/omnifs/{root}/hello/message");
+        let out = fixture.run(&["shell", "--", "cat", &guest_path]);
+        assert!(
+            out.status.success(),
+            "omnifs shell -- cat {guest_path} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "Hello, world!");
+    }
 }
 
 // ===========================================================================
@@ -431,18 +451,18 @@ fn krunkit_lifecycle_and_matrix() {
     // Cold start: the daemon is already warm, so the timed span isolates
     // krunkit-boot-to-served-mount latency from daemon bring-up cost.
     let started = Instant::now();
-    let up_out = fixture.frontend_up();
+    let up_out = fixture.frontend_enable();
     let elapsed = started.elapsed();
-    fixture.assert_frontend_up_ok(&up_out, "cold start");
+    fixture.assert_frontend_enable_ok(&up_out, "cold start");
     record_cold_start(elapsed);
 
-    // `frontend status` is truthful.
+    // `frontend ls` is truthful.
     let status_out = fixture.frontend_status();
     assert!(status_out.status.success());
     let status_text = String::from_utf8_lossy(&status_out.stdout);
     assert!(
-        status_text.contains("krunkit frontend: running"),
-        "frontend status must report the krunkit guest running: {status_text}"
+        status_text.contains("krunkit") && status_text.contains("attached"),
+        "frontend ls must report the krunkit guest attached: {status_text}"
     );
 
     assert_serves(&fixture);
@@ -484,7 +504,7 @@ fn krunkit_lifecycle_and_matrix() {
     );
 
     // `omnifs down` tears the krunkit guest down (`teardown_frontend`, which
-    // is exactly what `omnifs frontend down` runs) before stopping the
+    // is exactly what selected frontend disable runs) before stopping the
     // daemon, so this one call proves both the frontend-down contract and
     // the daemon-then-frontend teardown ordering. Bounded retries: the
     // host-native NFS mount can be transiently busy at shutdown (macOS

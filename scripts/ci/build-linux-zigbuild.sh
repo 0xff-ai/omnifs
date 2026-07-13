@@ -122,13 +122,10 @@ artifact="$(find_artifact "$bin")"
 emit_output artifact "$artifact"
 artifacts=("$artifact")
 if [[ "$package" == "omnifs-cli" && "$bin" == "omnifs" ]]; then
-  cargo zigbuild --release -p omnifs-fuse --target "$target" --bin omnifs-fuse
-  cargo zigbuild --release -p omnifs-nfs --target "$target" --bin omnifs-nfs
-  fuse_artifact="$(find_artifact omnifs-fuse)"
-  nfs_artifact="$(find_artifact omnifs-nfs)"
-  emit_output fuse_artifact "$fuse_artifact"
-  emit_output nfs_artifact "$nfs_artifact"
-  artifacts+=("$fuse_artifact" "$nfs_artifact")
+  cargo zigbuild --release -p omnifs-thin --target "$target" --bin omnifs-thin
+  thin_artifact="$(find_artifact omnifs-thin)"
+  emit_output thin_artifact "$thin_artifact"
+  artifacts+=("$thin_artifact")
 fi
 file "${artifacts[@]}"
 inspect_linux_artifacts "${artifacts[@]}"

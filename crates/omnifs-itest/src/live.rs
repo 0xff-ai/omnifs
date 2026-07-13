@@ -116,72 +116,37 @@ fn ensure_omnifs_built() {
     });
 }
 
-/// Resolve the shipped `omnifs-nfs` runner the wire lanes spawn.
+/// Resolve the shipped `omnifs-thin` runner the live lanes spawn.
 #[must_use]
-pub fn nfs_runner_bin() -> PathBuf {
-    if let Some(path) = std::env::var_os("OMNIFS_NFS_BIN") {
+pub fn thin_runner_bin() -> PathBuf {
+    if let Some(path) = std::env::var_os("OMNIFS_THIN_BIN") {
         return PathBuf::from(path);
     }
-    if let Some(path) = std::env::var_os("NEXTEST_BIN_EXE_omnifs-nfs") {
+    if let Some(path) = std::env::var_os("NEXTEST_BIN_EXE_omnifs-thin") {
         return PathBuf::from(path);
     }
-    if let Some(path) = std::env::var_os("NEXTEST_BIN_EXE_omnifs_nfs") {
+    if let Some(path) = std::env::var_os("NEXTEST_BIN_EXE_omnifs_thin") {
         return PathBuf::from(path);
     }
-    if let Some(path) = nextest_workspace_binary("omnifs-nfs") {
+    if let Some(path) = nextest_workspace_binary("omnifs-thin") {
         return path;
     }
-    ensure_nfs_runner_built();
-    crate::workspace_root().join("target/debug/omnifs-nfs")
+    ensure_thin_runner_built();
+    crate::workspace_root().join("target/debug/omnifs-thin")
 }
 
-/// Resolve the shipped `omnifs-fuse` runner the live lanes spawn.
-#[must_use]
-pub fn fuse_runner_bin() -> PathBuf {
-    if let Some(path) = std::env::var_os("OMNIFS_FUSE_BIN") {
-        return PathBuf::from(path);
-    }
-    if let Some(path) = std::env::var_os("NEXTEST_BIN_EXE_omnifs-fuse") {
-        return PathBuf::from(path);
-    }
-    if let Some(path) = std::env::var_os("NEXTEST_BIN_EXE_omnifs_fuse") {
-        return PathBuf::from(path);
-    }
-    if let Some(path) = nextest_workspace_binary("omnifs-fuse") {
-        return path;
-    }
-    ensure_fuse_runner_built();
-    crate::workspace_root().join("target/debug/omnifs-fuse")
-}
-
-/// Build the shipped FUSE runner once per process at test runtime.
-fn ensure_fuse_runner_built() {
+/// Build the shipped thin runner once per process at test runtime.
+fn ensure_thin_runner_built() {
     static BUILT: OnceLock<()> = OnceLock::new();
     BUILT.get_or_init(|| {
         let status = Command::new("cargo")
-            .args(["build", "-p", "omnifs-fuse", "--bin", "omnifs-fuse"])
+            .args(["build", "-p", "omnifs-thin", "--bin", "omnifs-thin"])
             .current_dir(crate::workspace_root())
             .status()
-            .expect("spawn `cargo build -p omnifs-fuse --bin omnifs-fuse`");
+            .expect("spawn `cargo build -p omnifs-thin --bin omnifs-thin`");
         assert!(
             status.success(),
-            "`cargo build -p omnifs-fuse --bin omnifs-fuse` failed; run it directly to see the error",
-        );
-    });
-}
-
-/// Build the shipped NFS runner once per process at test runtime.
-fn ensure_nfs_runner_built() {
-    static BUILT: OnceLock<()> = OnceLock::new();
-    BUILT.get_or_init(|| {
-        let status = Command::new("cargo")
-            .args(["build", "-p", "omnifs-nfs", "--bin", "omnifs-nfs"])
-            .current_dir(crate::workspace_root())
-            .status()
-            .expect("spawn `cargo build -p omnifs-nfs --bin omnifs-nfs`");
-        assert!(
-            status.success(),
-            "`cargo build -p omnifs-nfs --bin omnifs-nfs` failed; run it directly to see the error",
+            "`cargo build -p omnifs-thin --bin omnifs-thin` failed; run it directly to see the error",
         );
     });
 }
@@ -212,8 +177,16 @@ pub fn install_test_provider(providers_dir: &Path) -> ProviderId {
 /// tree under `test/`.
 #[must_use]
 pub fn test_mount_spec(id: &ProviderId) -> String {
+    test_mount_spec_at(id, "test")
+}
+
+/// No-auth mount spec for the test provider under an arbitrary namespace root.
+/// Live shared-namespace fixtures install two copies (`test` and `test2`) so
+/// every frontend must expose the same known bytes from both roots.
+#[must_use]
+pub fn test_mount_spec_at(id: &ProviderId, mount: &str) -> String {
     format!(
-        r#"{{"provider":{{"id":"{id}","meta":{{"name":"test-provider"}}}},"mount":"test","capabilities":{{"domains":["httpbin.org"]}}}}"#
+        r#"{{"provider":{{"id":"{id}","meta":{{"name":"test-provider"}}}},"mount":"{mount}","capabilities":{{"domains":["httpbin.org"]}}}}"#
     )
 }
 
@@ -226,7 +199,7 @@ pub struct HermeticHome {
 }
 
 /// Build a hermetic home: install the test provider into `providers/`, write
-/// its pinned spec to `mounts/test.json`, and create the mount point.
+/// two pinned specs (`test` and `test2`), and create the frontend mount point.
 #[must_use]
 pub fn hermetic_home() -> HermeticHome {
     let home = tempfile::tempdir().expect("home tempdir");
@@ -238,6 +211,11 @@ pub fn hermetic_home() -> HermeticHome {
     std::fs::create_dir_all(&mounts_dir).expect("mounts dir");
     std::fs::write(mounts_dir.join("test.json"), test_mount_spec(&test_id))
         .expect("write test mount spec");
+    std::fs::write(
+        mounts_dir.join("test2.json"),
+        test_mount_spec_at(&test_id, "test2"),
+    )
+    .expect("write second test mount spec");
 
     let mount_point = home.path().join("mnt");
     std::fs::create_dir_all(&mount_point).expect("mount point");
@@ -442,8 +420,9 @@ pub fn start_multi_frontend_daemon(kinds: &[&str]) -> Option<MultiFrontendDaemon
     for ((index, kind), mount_point) in kinds.iter().enumerate().zip(&mount_points) {
         let mut command = match *kind {
             "fuse" => {
-                let mut command = Command::new(fuse_runner_bin());
+                let mut command = Command::new(thin_runner_bin());
                 command
+                    .arg("fuse")
                     .arg("--mount-point")
                     .arg(mount_point)
                     .arg("--attach")
@@ -451,8 +430,9 @@ pub fn start_multi_frontend_daemon(kinds: &[&str]) -> Option<MultiFrontendDaemon
                 command
             },
             "nfs" => {
-                let mut command = Command::new(nfs_runner_bin());
+                let mut command = Command::new(thin_runner_bin());
                 command
+                    .arg("nfs")
                     .arg("--mount-point")
                     .arg(mount_point)
                     .arg("--state-dir")
@@ -475,7 +455,7 @@ pub fn start_multi_frontend_daemon(kinds: &[&str]) -> Option<MultiFrontendDaemon
                 }
                 let _ = daemon.kill();
                 let _ = daemon.wait();
-                eprintln!("skip: spawn omnifs-{kind} failed: {error}");
+                eprintln!("skip: spawn omnifs-thin {kind} failed: {error}");
                 return None;
             },
         }
@@ -535,7 +515,7 @@ pub fn start_multi_frontend_daemon(kinds: &[&str]) -> Option<MultiFrontendDaemon
     }
 }
 
-/// An `omnifs daemon` plus an out-of-process `omnifs-nfs` runner attached to
+/// An `omnifs daemon` plus an out-of-process `omnifs-thin nfs` runner attached to
 /// its fixed local namespace socket. Torn down on drop: the frontend first,
 /// then the daemon.
 pub struct WireFrontendDaemon {
@@ -592,7 +572,7 @@ fn wait_briefly(child: &mut Child) {
     }
 }
 
-/// Bring up a daemon and an `omnifs-nfs` runner attached to its fixed local
+/// Bring up a daemon and an `omnifs-thin nfs` runner attached to its fixed local
 /// namespace socket. Proves the projected tree serves out of process over the
 /// Omnifs VFS wire protocol.
 ///
@@ -724,8 +704,9 @@ fn wire_frontend(
     // The out-of-process renderer attaches over the requested transport and
     // mounts the tree: `--attach <socket>` for Unix, or the TCP env pair the
     // Docker-hosted frontend also uses.
-    let mut frontend_cmd = Command::new(nfs_runner_bin());
+    let mut frontend_cmd = Command::new(thin_runner_bin());
     frontend_cmd
+        .arg("nfs")
         .arg("--mount-point")
         .arg(&mount_point)
         .arg("--state-dir")
@@ -767,7 +748,7 @@ fn wire_frontend(
     let mut frontend = match frontend {
         Ok(child) => child,
         Err(error) => {
-            eprintln!("skip: spawn omnifs-nfs failed: {error}");
+            eprintln!("skip: spawn omnifs-thin nfs failed: {error}");
             let _ = daemon.kill();
             let _ = daemon.wait();
             return None;
@@ -914,8 +895,9 @@ fn native_daemon(nfs_lock: Option<TcpListener>) -> Option<NativeDaemon> {
     let attach_socket = hermetic.home.path().join("frontends/local.sock");
     #[cfg(target_os = "linux")]
     let mut frontend_command = {
-        let mut command = Command::new(fuse_runner_bin());
+        let mut command = Command::new(thin_runner_bin());
         command
+            .arg("fuse")
             .arg("--mount-point")
             .arg(&mount_point)
             .arg("--attach")
@@ -924,8 +906,9 @@ fn native_daemon(nfs_lock: Option<TcpListener>) -> Option<NativeDaemon> {
     };
     #[cfg(not(target_os = "linux"))]
     let mut frontend_command = {
-        let mut command = Command::new(nfs_runner_bin());
+        let mut command = Command::new(thin_runner_bin());
         command
+            .arg("nfs")
             .arg("--mount-point")
             .arg(&mount_point)
             .arg("--state-dir")

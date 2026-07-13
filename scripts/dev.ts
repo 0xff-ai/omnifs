@@ -212,12 +212,29 @@ async function main() {
     await run($`${omnifsCli} up --no-frontend`.env(cliEnv(devHome)));
 
     console.log("Starting the Docker-hosted FUSE frontend");
-    await run($`${omnifsCli} frontend up --driver docker`.env(cliEnv(devHome)));
+    const hostFilesystem = process.platform === "linux" ? "fuse" : "nfs";
+    const hostLocation = join(devHome, "mnt");
+    mkdirSync(hostLocation, { recursive: true });
+    console.log(`Starting the host ${hostFilesystem.toUpperCase()} frontend`);
+    await run(
+      $`${omnifsCli} frontend enable ${hostFilesystem} --environment host --location ${hostLocation}`.env(
+        cliEnv(devHome),
+      ),
+    );
+
+    await run(
+      $`${omnifsCli} frontend enable fuse --environment docker`.env({
+        ...cliEnv(devHome),
+        OMNIFS_FRONTEND_IMAGE: frontendImage,
+      }),
+    );
 
     const frontendContainer = await discoverFrontendContainer(devHome);
     if (keepRunning(options)) {
       if (options.detach) {
-        console.log(`Detached. Stop with \`${omnifsCli} frontend down && ${omnifsCli} down\`.`);
+        console.log(
+          `Detached. Stop with \`${omnifsCli} frontend disable fuse --environment docker && ${omnifsCli} down\`.`,
+        );
       }
       return;
     }
@@ -315,21 +332,15 @@ function commandExists(command: string): boolean {
   return Bun.which(command) !== null;
 }
 
-/// Resolve the `omnifs` binary this script drives: a fresh local build first,
-/// else whatever `omnifs` is on `PATH` (the CI smoke lane installs a prebuilt
-/// release CLI there via the `omnifs-install-cli` action and passes
-/// `--skip-cli-build`).
+/// Resolve the compiled worktree binary this script drives. The control-plane
+/// fixtures must never accidentally invoke a stale globally-installed shim.
 function resolveCli(): string {
   const built = join(workspace, "target/debug/omnifs");
   if (existsSync(built)) {
     return built;
   }
-  const onPath = Bun.which("omnifs");
-  if (onPath) {
-    return onPath;
-  }
   throw new Error(
-    "no omnifs CLI found: build one (drop --skip-cli-build) or put a prebuilt `omnifs` on PATH",
+    `no compiled omnifs CLI found at ${built}: build one (drop --skip-cli-build)`,
   );
 }
 
@@ -530,12 +541,21 @@ async function writeDevHome(
   mkdirSync(mountsDir, { recursive: true });
   cpSync(providerStore, providersDir, { recursive: true });
 
-  // The daemon always runs host-native; there is no runtime choice to
-  // persist for this throwaway dev home. The only setting the native flow
-  // needs is where to find the frontend image `omnifs frontend up` attaches.
+  // The daemon always runs host-native. Persist the desired host and Docker
+  // frontends using the public filesystem/environment/location vocabulary.
   writeFileSync(
     join(devHome, "config.toml"),
-    `[system]\nfrontend_image = ${JSON.stringify(frontendImage)}\n`,
+    [
+      `[[frontends]]`,
+      `filesystem = "${process.platform === "linux" ? "fuse" : "nfs"}"`,
+      `environment = "host"`,
+      `location = ${JSON.stringify(join(devHome, "mnt"))}`,
+      ``,
+      `[[frontends]]`,
+      `filesystem = "fuse"`,
+      `environment = "docker"`,
+      ``,
+    ].join("\n"),
   );
 
   for (const mount of render.mounts) {
@@ -639,7 +659,7 @@ async function discoverFrontendContainer(devHome: string): Promise<string> {
   )).trim();
   if (!name) {
     throw new Error(
-      `no frontend container found for home ${devHome}; \`omnifs frontend up\` may have exited without one`,
+      `no frontend container found for home ${devHome}; the Docker frontend may have exited without one`,
     );
   }
   return name;
@@ -651,7 +671,10 @@ async function teardownSession(
   fixturePaths: FixturePaths,
   fixtures: Fixtures,
 ): Promise<void> {
-  await $`${omnifsCli} frontend down`.env(cliEnv(devHome)).quiet().nothrow();
+  await $`${omnifsCli} frontend disable fuse --environment docker`
+    .env(cliEnv(devHome))
+    .quiet()
+    .nothrow();
   await $`${omnifsCli} down --force`.env(cliEnv(devHome)).quiet().nothrow();
   if (fixtures.k8s) {
     await run(
@@ -681,7 +704,7 @@ async function tagFloatingFrontendImage(image: string): Promise<void> {
 
 function buildFrontendImage(image: string): Promise<void> {
   // No `provider-wasm` build context: the frontend image runs the slim
-  // `omnifs-fuse` binary (`fuse-builder` stage), which needs no engine, no
+  // `omnifs-thin fuse` binary (`thin-builder` stage), which needs no engine runtime, no
   // Wasmtime, and no provider bundle.
   return run($`docker build -t ${image} --target frontend-dev .`);
 }

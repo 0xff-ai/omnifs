@@ -16,6 +16,7 @@ use clap::Args;
 use crate::commands::receipt::TeardownReceipt;
 use crate::daemon_teardown::DaemonTeardown;
 use crate::error::ExitCode;
+use crate::ui::output::{Output, ResultVerdict};
 use crate::workspace::Workspace;
 
 #[derive(Args, Debug, Clone, Default)]
@@ -23,18 +24,15 @@ pub struct DownArgs {
     /// Force the host-native unmount if a clean shutdown leaves the mount busy.
     #[arg(long)]
     pub force: bool,
-    /// Emit a machine-readable JSON receipt of the teardown on stdout.
-    #[arg(long)]
-    pub json: bool,
 }
 
 impl DownArgs {
-    pub async fn run(self) -> anyhow::Result<ExitCode> {
-        let DownArgs { force, json } = self;
+    pub async fn run(self, output: Output) -> anyhow::Result<ExitCode> {
+        let DownArgs { force } = self;
         let workspace = Workspace::resolve()?;
 
-        let teardown = DaemonTeardown::new(&workspace);
-        let exit = if json {
+        let teardown = DaemonTeardown::new(&workspace, output);
+        let exit = if output.is_structured() {
             // The receipt is the whole story: a failed row already conveys the
             // failure, so this returns a non-zero exit code rather than an
             // error that would print a second JSON document.
@@ -47,7 +45,14 @@ impl DownArgs {
             let failed = outcomes
                 .iter()
                 .any(crate::daemon_teardown::TeardownOutcome::is_failure);
-            crate::ui::print_json(&receipt)?;
+            output.emit_result(
+                if failed {
+                    ResultVerdict::Degraded
+                } else {
+                    ResultVerdict::Ok
+                },
+                receipt,
+            )?;
             if failed {
                 ExitCode::GenericFailure
             } else {
@@ -57,7 +62,7 @@ impl DownArgs {
             teardown.down(force).await?;
             ExitCode::Success
         };
-        crate::telemetry::maybe_print_health_nudge(&workspace).await;
+        crate::telemetry::maybe_print_health_nudge(&workspace, output).await;
         Ok(exit)
     }
 }

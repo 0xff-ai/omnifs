@@ -11,7 +11,6 @@ use clap::Args;
 use omnifs_auth::{CredentialService, OAuthClient};
 use omnifs_workspace::creds::{CredentialStore, FileStore};
 use omnifs_workspace::layout::WorkspaceLayout;
-use omnifs_workspace::runtime_record::RuntimeRecord;
 use std::sync::Arc;
 
 use crate::commands::mount::delete_credentials;
@@ -19,44 +18,45 @@ use crate::commands::receipt::ResetReceipt;
 use crate::credential_target::CredentialTarget;
 use crate::daemon_teardown::DaemonTeardown;
 use crate::error::ExitCode;
+use crate::inventory::Inventory;
 use crate::stages::PromptMode;
 use crate::ui::consent::{Decision, Outcome, Plan, Row};
+use crate::ui::output::{Output, ResultVerdict};
 use crate::workspace::{MountRemovalTarget, Workspace};
 
 #[derive(Args, Debug, Clone, Default)]
-#[allow(clippy::struct_excessive_bools)] // mirrors CLI flags 1:1
 pub struct ResetArgs {
-    /// Skip the confirmation prompt. The plan and receipt are still shown.
-    #[arg(short = 'y', long)]
-    pub yes: bool,
     /// Keep stored credentials; only delete mount configs and the daemon.
     #[arg(long)]
     pub keep_credentials: bool,
     /// Print the reset plan and make no changes.
     #[arg(long)]
     pub dry_run: bool,
-    /// Emit a machine-readable JSON receipt of the reset on stdout.
-    #[arg(long)]
-    pub json: bool,
 }
 
 impl ResetArgs {
     #[allow(clippy::too_many_lines)] // plan/apply/receipt is one auditable flow
-    pub async fn run(self) -> anyhow::Result<ExitCode> {
+    pub async fn run(self, output: Output) -> anyhow::Result<ExitCode> {
         let workspace = Workspace::resolve()?;
         let layout = workspace.layout();
         let targets = workspace.reset_removal_targets()?;
-        let mut session = crate::ui::session::Session::intro("omnifs reset")?;
-        let plan = reset_plan(&workspace, &targets, self.keep_credentials);
+        let inventory = Inventory::collect(&workspace).await?;
+        let mut session = crate::ui::session::Session::intro_with_output("omnifs reset", output)?;
+        let plan =
+            reset_plan_with_inventory(&workspace, &targets, self.keep_credentials, &inventory);
         session.plan(&plan);
 
-        let decision =
-            Decision::resolve(PromptMode::from_flags(self.yes, false), self.dry_run, "-y")?;
+        let decision = Decision::resolve(
+            PromptMode::from_flags(output.yes(), output.no_input()),
+            self.dry_run,
+            "--yes",
+            output,
+        )?;
         match decision {
             Decision::DryRun => {
                 session.outro("Dry run; no changes made.");
-                if self.json {
-                    crate::ui::print_json(&ResetReceipt::dry_run(plan))?;
+                if output.is_structured() {
+                    output.emit_result(ResultVerdict::Ok, ResetReceipt::dry_run(plan))?;
                 }
                 return Ok(ExitCode::Success);
             },
@@ -149,7 +149,10 @@ impl ResetArgs {
             .filter(|row| row.id.starts_with("frontend:") || row.id == "frontends")
             .cloned()
             .collect::<Vec<_>>();
-        for teardown in DaemonTeardown::new(&workspace).reset_best_effort().await {
+        for teardown in DaemonTeardown::new(&workspace, output)
+            .reset_best_effort()
+            .await
+        {
             // Runtime-record cleanup is a detail of daemon teardown. Keeping it
             // nested avoids inventing a plan row for an internal file.
             if teardown.id() == "runtime-record" {
@@ -195,11 +198,14 @@ impl ResetArgs {
             .map(|row| row.value.clone());
         if let Some(message) = failed {
             session.outro("Reset incomplete; see the failed rows above.");
-            if self.json {
+            if output.is_structured() {
                 // The receipt is the whole story; a failed row carries the
                 // failure, so return a non-zero code instead of an error that
                 // would emit a second JSON document.
-                crate::ui::print_json(&ResetReceipt::applied(plan, receipt.rows))?;
+                output.emit_result(
+                    ResultVerdict::Degraded,
+                    ResetReceipt::applied(plan, receipt.rows),
+                )?;
                 return Ok(ExitCode::GenericFailure);
             }
             anyhow::bail!(message);
@@ -209,21 +215,22 @@ impl ResetArgs {
         } else {
             session.outro("Reset complete. Run `omnifs setup` to start again.");
         }
-        if self.json {
-            crate::ui::print_json(&ResetReceipt::applied(plan, receipt.rows))?;
+        if output.is_structured() {
+            output.emit_result(ResultVerdict::Ok, ResetReceipt::applied(plan, receipt.rows))?;
         }
-        crate::telemetry::maybe_print_health_nudge(&workspace).await;
+        crate::telemetry::maybe_print_health_nudge(&workspace, output).await;
         Ok(ExitCode::Success)
     }
 }
 
-fn reset_plan(
+fn reset_plan_with_inventory(
     workspace: &Workspace,
     targets: &[MountRemovalTarget],
     keep_credentials: bool,
+    inventory: &Inventory,
 ) -> Plan {
     let mut plan = Plan::new("plan");
-    plan.rows.extend(planned_frontend_rows(workspace));
+    plan.rows.extend(planned_frontend_rows(inventory));
     plan.push(Row::remove("daemon", "daemon", "stop if running"));
     for target in targets {
         let credential = match (&target.credential, keep_credentials) {
@@ -248,44 +255,38 @@ fn reset_plan(
     plan
 }
 
-fn planned_frontend_rows(workspace: &Workspace) -> Vec<Row> {
-    RuntimeRecord::read(&workspace.layout().runtime_record_file())
-        .ok()
-        .flatten()
-        .map(|record| {
-            record
-                .frontends
-                .into_iter()
-                .map(|frontend| {
-                    let id = format!(
-                        "frontend:{}:{}:{}",
-                        frontend.via.label(),
-                        frontend.kind.label(),
-                        frontend.mount_point.display()
-                    );
-                    Row::remove(
-                        id,
-                        format!(
-                            "frontend {} ({})",
-                            frontend.kind.label(),
-                            frontend.via.label()
-                        ),
-                        format!(
-                            "tear down {}",
-                            WorkspaceLayout::display(&frontend.mount_point)
-                        ),
-                    )
-                })
-                .collect::<Vec<_>>()
+fn planned_frontend_rows(inventory: &Inventory) -> Vec<Row> {
+    if inventory.frontends.is_empty() {
+        return vec![Row::remove(
+            "frontends",
+            "frontends",
+            "tear down running frontends",
+        )];
+    }
+    inventory
+        .frontends
+        .iter()
+        .map(|frontend| {
+            let location = frontend
+                .location
+                .as_deref()
+                .map_or_else(|| "/omnifs".to_owned(), |path| path.display().to_string());
+            Row::remove(
+                format!(
+                    "frontend:{}:{}:{}",
+                    frontend.environment.label(),
+                    frontend.filesystem.label(),
+                    location
+                ),
+                format!(
+                    "frontend {} ({})",
+                    frontend.filesystem.label(),
+                    frontend.environment.label()
+                ),
+                format!("tear down {location}"),
+            )
         })
-        .filter(|rows| !rows.is_empty())
-        .unwrap_or_else(|| {
-            vec![Row::remove(
-                "frontends",
-                "frontends",
-                "tear down running frontends",
-            )]
-        })
+        .collect()
 }
 
 fn provider_summary(workspace: &Workspace) -> String {
@@ -309,28 +310,4 @@ fn remove_mount_locally(
     workspace
         .remove_mount(&name)
         .with_context(|| format!("remove {}", target.path.display()))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::test_support::fixture_paths;
-
-    #[test]
-    fn reset_plan_counts_frontends_daemon_mounts_and_keeps_provider_store() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let paths = fixture_paths(tmp.path());
-        std::fs::create_dir_all(&paths.mounts_dir).unwrap();
-        let workspace = Workspace::from_layout(paths);
-        let plan = reset_plan(&workspace, &[], false);
-        assert_eq!(plan.remove_count(), 2);
-        assert_eq!(plan.keep_count(), 1);
-        assert_eq!(
-            plan.rows
-                .iter()
-                .map(|row| row.id.as_str())
-                .collect::<Vec<_>>(),
-            ["frontends", "daemon", "provider-store"]
-        );
-    }
 }

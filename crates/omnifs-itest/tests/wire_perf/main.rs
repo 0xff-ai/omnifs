@@ -4,7 +4,7 @@
 //! Two lanes serve the same test-provider tree over NFS and run the same two
 //! workloads; the only difference is the frontend's attach transport:
 //!
-//! - **Lane 1 (Unix).** `omnifs-nfs` attaches to `frontends/local.sock`.
+//! - **Lane 1 (Unix).** `omnifs-thin nfs` attaches to `frontends/local.sock`.
 //! - **Lane 2 (TCP).** The same runner attaches to the token-guarded loopback
 //!   listener used by Docker-delivered frontends.
 //!

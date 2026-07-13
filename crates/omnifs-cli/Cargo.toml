@@ -43,6 +43,7 @@ blake3 = { workspace = true }
 sha2 = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+semver = { workspace = true }
 toml = "0.8"
 secrecy = "0.10"
 anstream = "1"
@@ -58,6 +59,7 @@ crossterm = "0.28"
 tar = { workspace = true }
 zstd = { workspace = true }
 tabled = { version = "0.21.0", features = ["ansi"] }
+unicode-width = { workspace = true }
 
 [features]
 default = ["daemon"]

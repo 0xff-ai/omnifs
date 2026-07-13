@@ -312,8 +312,7 @@ impl DaemonContext {
         Ok(listener)
     }
 
-    /// Build status from the live attach registry. The compatibility
-    /// `mount_point` field is derived from the first local attachment.
+    /// Build status from the live attach registry.
     pub(crate) fn status(
         &self,
         attach_serving: bool,
@@ -329,10 +328,6 @@ impl DaemonContext {
             &failed,
             credential_degraded,
         );
-        let mount_point = frontends
-            .iter()
-            .find(|frontend| frontend.delivery == omnifs_api::FrontendDelivery::Local)
-            .map_or_else(PathBuf::new, |frontend| frontend.mount_point.clone());
         DaemonStatus {
             version: env!("CARGO_PKG_VERSION").to_string(),
             api_major: API_MAJOR,
@@ -340,7 +335,6 @@ impl DaemonContext {
             pid: self.process.pid,
             instance_id: self.instance_id.clone(),
             executable: self.process.executable.clone(),
-            mount_point,
             config_dir: self.layout.config_dir.clone(),
             cache_dir: self.layout.cache_dir.clone(),
             providers_dir: self.layout.providers_dir.clone(),

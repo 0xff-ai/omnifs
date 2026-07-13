@@ -46,23 +46,23 @@ docker run --rm \
 
     cargo zigbuild --release \
       -p omnifs-cli \
-      -p omnifs-nfs \
+      -p omnifs-thin \
       --target x86_64-apple-darwin \
       --target aarch64-apple-darwin \
       --bin omnifs \
-      --bin omnifs-nfs
+      --bin omnifs-thin
   '
 
 if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
   {
     echo "x64_artifact=$target_dir/x86_64-apple-darwin/release/omnifs"
     echo "arm64_artifact=$target_dir/aarch64-apple-darwin/release/omnifs"
-    echo "x64_nfs_artifact=$target_dir/x86_64-apple-darwin/release/omnifs-nfs"
-    echo "arm64_nfs_artifact=$target_dir/aarch64-apple-darwin/release/omnifs-nfs"
+    echo "x64_thin_artifact=$target_dir/x86_64-apple-darwin/release/omnifs-thin"
+    echo "arm64_thin_artifact=$target_dir/aarch64-apple-darwin/release/omnifs-thin"
   } >>"$GITHUB_OUTPUT"
 fi
 
 file "$target_dir/x86_64-apple-darwin/release/omnifs"
 file "$target_dir/aarch64-apple-darwin/release/omnifs"
-file "$target_dir/x86_64-apple-darwin/release/omnifs-nfs"
-file "$target_dir/aarch64-apple-darwin/release/omnifs-nfs"
+file "$target_dir/x86_64-apple-darwin/release/omnifs-thin"
+file "$target_dir/aarch64-apple-darwin/release/omnifs-thin"

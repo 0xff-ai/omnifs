@@ -7,7 +7,7 @@
       "name": "MIT OR Apache-2.0",
       "identifier": "MIT OR Apache-2.0"
     },
-    "version": "0.2.1"
+    "version": "6.0"
   },
   "paths": {
     "/v1/credentials": {
@@ -783,7 +783,6 @@
         "description": "`GET /v1/status`: the daemon's runtime facts, loaded mounts, and non-secret\noperational health. Credentials are represented only by coarse health.",
         "required": [
           "version",
-          "mount_point",
           "config_dir",
           "cache_dir",
           "providers_dir",
@@ -836,10 +835,6 @@
           "instance_id": {
             "type": "string",
             "description": "Random 16-hex-character id generated per daemon start. The CLI asserts it\nagainst the runtime record it resolved from, so a record overwritten by a\nrestart mid-command is detected instead of silently trusted."
-          },
-          "mount_point": {
-            "type": "string",
-            "description": "Derived, not authoritative: the first local attached frontend's mount\npoint, or empty when none is connected. `frontends` is authoritative."
           },
           "mounts": {
             "type": "array",
@@ -1256,16 +1251,6 @@
               "$ref": "#/components/schemas/ProviderArtifact"
             }
           },
-          "latest": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/ProviderArtifact"
-              }
-            ]
-          },
           "name": {
             "type": "string"
           }
@@ -1336,7 +1321,6 @@
         "description": "`POST /v1/shutdown`: daemon state immediately before exit.",
         "required": [
           "frontends",
-          "mount_point",
           "providers_dropped"
         ],
         "properties": {
@@ -1346,9 +1330,6 @@
               "$ref": "#/components/schemas/FrontendInfo"
             },
             "description": "Every attached frontend at the moment of shutdown."
-          },
-          "mount_point": {
-            "type": "string"
           },
           "providers_dropped": {
             "type": "integer",

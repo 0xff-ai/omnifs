@@ -82,6 +82,39 @@ pub(crate) fn teardown_local_frontends(
     Ok(summary)
 }
 
+/// Tear down exactly one host frontend location. The location is the identity
+/// boundary; no sibling state leaf is touched when a caller disables one of
+/// several host frontends.
+pub(crate) fn teardown_local_frontend(
+    state_root: &Path,
+    location: &Path,
+    nfs: bool,
+) -> anyhow::Result<()> {
+    let root = location;
+    for path in MountState::files_under(state_root)? {
+        let Ok(state) = MountState::read_file(&path) else {
+            continue;
+        };
+        if state.mount_point != root {
+            continue;
+        }
+        let is_nfs = matches!(state.kind, MountKind::Nfs { .. });
+        if is_nfs != nfs {
+            continue;
+        }
+        let mut summary = TeardownSummary::default();
+        summary.tear_down_one(&path, state, false);
+        if let Some(error) = summary.errors.into_iter().next() {
+            anyhow::bail!(error)
+        }
+        if !summary.failed.is_empty() {
+            anyhow::bail!("could not unmount {}", root.display())
+        }
+        return Ok(());
+    }
+    Ok(())
+}
+
 pub(crate) fn poll_until_unmounted(mount_point: &Path, cadence: Duration, attempts: usize) -> bool {
     for attempt in 0..attempts {
         if !omnifs_nfs::mount_is_active(mount_point) {

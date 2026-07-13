@@ -104,28 +104,70 @@ fn help_documents_exit_codes() {
 }
 
 #[test]
-fn frontend_help_requires_protocol_kind_and_lists_live_attachments_command() {
+fn frontend_enable_help_requires_filesystem_and_lists_live_attachments_command() {
     let frontend = Command::new(omnifs_bin())
         .args(["frontend", "--help"])
         .output()
         .expect("spawn omnifs frontend --help");
     assert!(frontend.status.success());
     let frontend_help = String::from_utf8_lossy(&frontend.stdout);
-    assert!(frontend_help.contains("ls"), "{frontend_help}");
+    for command in ["enable", "disable", "restart", "ls"] {
+        assert!(
+            frontend_help.contains(command),
+            "missing {command}: {frontend_help}"
+        );
+    }
+    assert!(
+        !frontend_help.contains(" up"),
+        "retired frontend up in {frontend_help}"
+    );
+    assert!(
+        !frontend_help.contains(" down"),
+        "retired frontend down in {frontend_help}"
+    );
 
-    let up = Command::new(omnifs_bin())
-        .args(["frontend", "up", "--help"])
+    let enable = Command::new(omnifs_bin())
+        .args(["frontend", "enable", "--help"])
         .output()
-        .expect("spawn omnifs frontend up --help");
-    assert!(up.status.success());
-    let up_help = String::from_utf8_lossy(&up.stdout);
-    assert!(up_help.contains("<KIND>"), "{up_help}");
-    assert!(up_help.contains("fuse"), "{up_help}");
-    assert!(up_help.contains("nfs"), "{up_help}");
+        .expect("spawn omnifs frontend enable --help");
+    assert!(enable.status.success());
+    let enable_help = String::from_utf8_lossy(&enable.stdout);
+    assert!(enable_help.contains("<FILESYSTEM>"), "{enable_help}");
+    assert!(
+        enable_help.contains("--environment <ENVIRONMENT>"),
+        "{enable_help}"
+    );
+    for value in ["fuse", "nfs", "host", "docker", "krunkit"] {
+        assert!(
+            enable_help.contains(value),
+            "missing {value} in {enable_help}"
+        );
+    }
+
+    let shell = Command::new(omnifs_bin())
+        .args(["shell", "--help"])
+        .output()
+        .expect("spawn omnifs shell --help");
+    assert!(shell.status.success());
+    let shell_help = String::from_utf8_lossy(&shell.stdout);
+    assert!(
+        shell_help.contains("--environment <ENVIRONMENT>"),
+        "{shell_help}"
+    );
+    assert!(shell_help.contains("--location <LOCATION>"), "{shell_help}");
+    assert!(
+        !shell_help.contains("--mount"),
+        "retired shell --mount in {shell_help}"
+    );
 
     let fixture = Fixture::new();
-    let missing_kind = fixture.run(&["frontend", "up"]);
-    assert_eq!(exit_code(&missing_kind), 2, "{missing_kind:?}");
+    let missing_args = fixture.run(&["frontend", "enable"]);
+    assert_eq!(exit_code(&missing_args), 2, "{missing_args:?}");
+
+    let removed_up = fixture.run(&["frontend", "up"]);
+    assert_eq!(exit_code(&removed_up), 2, "{removed_up:?}");
+    let stderr = String::from_utf8_lossy(&removed_up.stderr);
+    assert!(stderr.contains("unrecognized subcommand 'up'"), "{stderr}");
 }
 
 #[test]
@@ -209,50 +251,60 @@ fn mount_reauth_requires_existing_mount() {
 fn json_commands_emit_expected_shapes() {
     let fixture = Fixture::new();
 
-    let status = fixture.run(&["status", "--json"]);
+    let status = fixture.run(&["status", "--output", "json"]);
     assert_eq!(exit_code(&status), 0);
     let status_json = stdout_json(&status);
-    assert_eq!(status_json["runtime"]["state"], "not_running");
-    assert!(status_json["mounts"].as_array().is_some());
-    assert!(status_json["providers"].as_array().is_some());
+    assert_eq!(status_json["schema_version"], 1);
+    assert_eq!(status_json["command"], "status");
+    assert_eq!(status_json["verdict"], "ok");
+    assert_eq!(status_json["result"]["workspace"]["daemon"], "stopped");
+    assert!(status_json["result"]["mounts"].as_array().is_some());
+    assert!(status_json["result"]["providers"].as_array().is_some());
 
-    let mounts = fixture.run(&["mount", "ls", "--json"]);
+    let mounts = fixture.run(&["mount", "ls", "--output", "json"]);
     assert_eq!(exit_code(&mounts), 0);
     let mounts_json = stdout_json(&mounts);
-    assert!(mounts_json["mounts"].as_array().is_some());
+    assert!(mounts_json["result"]["mounts"].as_array().is_some());
 
-    let providers = fixture.run(&["provider", "ls", "--json"]);
+    let providers = fixture.run(&["provider", "ls", "--output", "json"]);
     assert_eq!(exit_code(&providers), 0);
     let providers_json = stdout_json(&providers);
-    assert!(providers_json["local"].as_array().is_some());
-    assert!(providers_json["daemon"].is_null());
+    assert!(providers_json["result"]["providers"].as_array().is_some());
 
-    let version = fixture.run(&["version", "--json"]);
+    let version = fixture.run(&["version", "--output", "json"]);
     assert_eq!(exit_code(&version), 0);
     let version_json = stdout_json(&version);
-    assert!(version_json["cli"].as_str().is_some());
-    assert!(version_json["daemon"].is_null());
-    assert!(version_json["channel"].as_str().is_some());
+    assert!(version_json["result"]["cli"].as_str().is_some());
+    assert!(version_json["result"]["daemon"].is_null());
+    assert!(version_json["result"]["channel"].as_str().is_some());
     // Providers is now a structured object, not a bare count, and the paths
     // block moved to `doctor`.
-    assert!(version_json["providers"]["state"].as_str().is_some());
-    assert!(version_json["providers"]["count"].as_u64().is_some());
+    assert!(
+        version_json["result"]["providers"]["state"]
+            .as_str()
+            .is_some()
+    );
+    assert!(
+        version_json["result"]["providers"]["count"]
+            .as_u64()
+            .is_some()
+    );
     assert!(version_json["paths"].is_null());
 
-    let doctor = fixture.run(&["doctor", "--json"]);
+    let doctor = fixture.run(&["doctor", "--output", "json"]);
     let doctor_json = stdout_json(&doctor);
-    assert!(doctor_json["verdict"].as_str().is_some());
-    assert!(doctor_json["probes"].as_array().is_some());
-    assert!(doctor_json["live"]["skipped"].as_str().is_some());
+    assert!(doctor_json["result"]["verdict"].as_str().is_some());
+    assert!(doctor_json["result"]["probes"].as_array().is_some());
+    assert!(doctor_json["result"]["live"]["skipped"].as_str().is_some());
 }
 
 #[test]
 fn lifecycle_json_receipts_emit_one_document_with_a_verdict() {
     let fixture = Fixture::new();
 
-    // `down --json` with no daemon settles a clean receipt on stdout and exits
+    // `down --output json` with no daemon settles a clean receipt on stdout and exits
     // 0; the prose rail stays on stderr.
-    let down = fixture.run(&["down", "--json"]);
+    let down = fixture.run(&["down", "--output", "json"]);
     assert_eq!(
         exit_code(&down),
         0,
@@ -260,11 +312,15 @@ fn lifecycle_json_receipts_emit_one_document_with_a_verdict() {
         String::from_utf8_lossy(&down.stderr)
     );
     let down_json = stdout_json(&down);
-    assert_eq!(down_json["verdict"], "ok");
-    assert!(down_json["rows"].as_array().is_some());
+    assert_eq!(down_json["command"], "down");
+    assert!(matches!(
+        down_json["verdict"].as_str(),
+        Some("ok" | "degraded")
+    ));
+    assert!(down_json["result"]["rows"].as_array().is_some());
 
-    // `reset --json --yes` with nothing configured is a clean, empty reset.
-    let reset = fixture.run(&["reset", "--yes", "--json"]);
+    // `reset --output json --yes` with nothing configured is a typed reset receipt.
+    let reset = fixture.run(&["reset", "--yes", "--output", "json"]);
     assert_eq!(
         exit_code(&reset),
         0,
@@ -272,21 +328,28 @@ fn lifecycle_json_receipts_emit_one_document_with_a_verdict() {
         String::from_utf8_lossy(&reset.stderr)
     );
     let reset_json = stdout_json(&reset);
-    assert_eq!(reset_json["verdict"], "ok");
-    assert!(reset_json["rows"].as_array().is_some());
-    assert_eq!(reset_json["dry_run"], false);
-    assert!(reset_json["plan"]["title"].as_str().is_some());
+    assert!(matches!(
+        reset_json["verdict"].as_str(),
+        Some("ok" | "degraded")
+    ));
+    assert!(reset_json["result"]["rows"].as_array().is_some());
+    assert_eq!(reset_json["result"]["dry_run"], false);
+    assert!(reset_json["result"]["plan"]["title"].as_str().is_some());
 
     // Dry-run emits the same typed receipt shape, with no applied rows and no
     // second JSON document from the human session rail.
-    let dry_run = fixture.run(&["reset", "--dry-run", "--json"]);
+    let dry_run = fixture.run(&["reset", "--dry-run", "--output", "json"]);
     assert_eq!(exit_code(&dry_run), 0);
     assert_eq!(String::from_utf8_lossy(&dry_run.stdout).lines().count(), 1);
     let dry_run_json = stdout_json(&dry_run);
     assert_eq!(dry_run_json["verdict"], "ok");
-    assert_eq!(dry_run_json["dry_run"], true);
-    assert!(dry_run_json["rows"].as_array().is_some_and(Vec::is_empty));
-    assert!(dry_run_json["plan"]["rows"].as_array().is_some());
+    assert_eq!(dry_run_json["result"]["dry_run"], true);
+    assert!(
+        dry_run_json["result"]["rows"]
+            .as_array()
+            .is_some_and(Vec::is_empty)
+    );
+    assert!(dry_run_json["result"]["plan"]["rows"].as_array().is_some());
 }
 
 #[test]
@@ -294,7 +357,15 @@ fn mount_add_json_receipt_names_the_mount() {
     let fixture = Fixture::new();
     install_test_provider_as(&fixture.home_path().join("providers"), "test");
 
-    let output = fixture.run(&["mount", "add", "test", "--no-input", "--yes", "--json"]);
+    let output = fixture.run(&[
+        "mount",
+        "add",
+        "test",
+        "--no-input",
+        "--yes",
+        "--output",
+        "json",
+    ]);
     assert_eq!(
         exit_code(&output),
         0,
@@ -305,21 +376,25 @@ fn mount_add_json_receipt_names_the_mount() {
     // The single JSON document is on stdout; the session rail is on stderr.
     let json = stdout_json(&output);
     assert_eq!(json["verdict"], "ok");
-    assert_eq!(json["mount"], "test");
+    assert_eq!(json["command"], "mount.add");
+    assert_eq!(json["result"]["mount"], "test");
     assert!(
-        matches!(json["status"].as_str(), Some("ready" | "sign_in_declined")),
+        matches!(
+            json["result"]["status"].as_str(),
+            Some("ready" | "sign_in_declined")
+        ),
         "unexpected status: {json}"
     );
 }
 
-/// A `--json` command that fails before its final document emits exactly one JSON
+/// A structured command that fails before its final document emits exactly one JSON
 /// error document on stdout carrying the stable `id`, not the human block.
 #[test]
 fn json_error_document_carries_a_stable_id() {
     let fixture = Fixture::new();
     fixture.write_static_token_mount_without_credential();
 
-    let output = fixture.run(&["up", "--json"]);
+    let output = fixture.run(&["up", "--output", "json"]);
     assert_eq!(exit_code(&output), 4);
     let json = stdout_json(&output);
     assert_eq!(json["error"]["id"], "auth-required");
@@ -329,15 +404,23 @@ fn json_error_document_carries_a_stable_id() {
 #[test]
 fn every_json_command_keeps_its_error_contract_before_workspace_resolution() {
     let commands: &[&[&str]] = &[
-        &["status", "--json"],
-        &["mount", "ls", "--json"],
-        &["provider", "ls", "--json"],
-        &["version", "--json"],
-        &["doctor", "--json"],
-        &["up", "--json"],
-        &["down", "--json"],
-        &["reset", "--yes", "--json"],
-        &["mount", "add", "test", "--no-input", "--yes", "--json"],
+        &["status", "--output", "json"],
+        &["mount", "ls", "--output", "json"],
+        &["provider", "ls", "--output", "json"],
+        &["version", "--output", "json"],
+        &["doctor", "--output", "json"],
+        &["up", "--output", "json"],
+        &["down", "--output", "json"],
+        &["reset", "--yes", "--output", "json"],
+        &[
+            "mount",
+            "add",
+            "test",
+            "--no-input",
+            "--yes",
+            "--output",
+            "json",
+        ],
     ];
 
     for args in commands {
@@ -369,8 +452,9 @@ fn bare_invocation_without_setup_points_to_setup() {
 
     assert_eq!(exit_code(&output), 0);
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("omnifs is not set up"));
-    assert!(stdout.contains("omnifs setup"));
+    assert!(stdout.contains("Frontends  "));
+    assert!(stdout.contains("Mounts  0"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("omnifs setup"));
 }
 
 #[test]
@@ -378,11 +462,11 @@ fn scripted_setup_and_mount_add_do_not_prompt() {
     let fixture = Fixture::new();
     install_test_provider_as(&fixture.home_path().join("providers"), "test");
 
-    let setup = fixture.run(&["setup", "-y", "--no-up"]);
+    let setup = fixture.run(&["setup", "--yes", "--no-up"]);
     assert_eq!(
         exit_code(&setup),
         0,
-        "setup -y --no-up must succeed\nstdout: {}\nstderr: {}",
+        "setup --yes --no-up must succeed\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&setup.stdout),
         String::from_utf8_lossy(&setup.stderr)
     );

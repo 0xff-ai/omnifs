@@ -24,12 +24,10 @@ use tempfile::TempDir;
 struct Daemon {
     child: Child,
     home: TempDir,
-    mount_point: PathBuf,
 }
 
 impl Drop for Daemon {
     fn drop(&mut self) {
-        self.detach_mount();
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
@@ -38,10 +36,6 @@ impl Drop for Daemon {
 impl Daemon {
     fn record_path(&self) -> PathBuf {
         self.home.path().join("daemon.json")
-    }
-
-    fn message_path(&self) -> PathBuf {
-        self.mount_point.join("test/hello/message")
     }
 
     fn pid(&self) -> u32 {
@@ -54,11 +48,9 @@ impl Daemon {
     /// its own workspace's record.
     fn spawn() -> Option<Self> {
         let hermetic = hermetic_home();
-        let mount_point = hermetic.mount_point.clone();
         let child = Command::new(omnifs_bin())
             .arg("daemon")
             .env("OMNIFS_HOME", hermetic.home.path())
-            .env("OMNIFS_MOUNT_POINT", &mount_point)
             .env_remove("OMNIFS_DAEMON_ADDR")
             .env_remove("OMNIFS_CONTROL_TOKEN")
             .env("RUST_LOG", "warn")
@@ -73,85 +65,41 @@ impl Daemon {
         Some(Self {
             child,
             home: hermetic.home,
-            mount_point,
         })
     }
 
-    /// Wait for the daemon to publish its record and serve the projected tree.
-    /// `None` (skip) if the mount never comes up on this platform.
+    /// Wait for the daemon to publish its record. This fixture intentionally
+    /// starts the pure namespace daemon without a frontend: the control-plane
+    /// assertion is socket ownership, not a frontend mount.
     fn wait_serving(&mut self) -> Option<()> {
         let record = self.record_path();
-        let message = self.message_path();
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
-            if record.exists() && message.is_file() {
+            if record.exists() {
                 return Some(());
             }
             if let Ok(Some(status)) = self.child.try_wait() {
-                eprintln!("skip: daemon exited ({status}) before it served its mount");
+                eprintln!("skip: daemon exited ({status}) before publishing its record");
                 return None;
             }
             if Instant::now() >= deadline {
-                eprintln!("skip: daemon never served {} within 30s", message.display());
+                eprintln!(
+                    "skip: daemon never published {} within 30s",
+                    record.display()
+                );
                 return None;
             }
             std::thread::sleep(Duration::from_millis(150));
         }
     }
-
-    fn detach_mount(&self) {
-        force_unmount(&self.mount_point);
-    }
 }
 
-/// Force-unmount `mount_point`. On macOS a `SIGKILL`ed daemon leaves a
-/// dead-server NFS mount where a plain `umount` blocks in an uninterruptible
-/// syscall, so `sudo -n umount -f` is the only teardown that returns promptly;
-/// it is also safe for a still-live mount. The parent is canonicalized so the
-/// dead mount itself is never stat-ed.
-fn force_unmount(mount_point: &std::path::Path) {
-    #[cfg(target_os = "macos")]
-    {
-        if !omnifs_nfs::mount_is_active(mount_point) {
-            return;
-        }
-        if let Some(canonical) = mount_point
-            .parent()
-            .and_then(|parent| std::fs::canonicalize(parent).ok())
-            .and_then(|parent| mount_point.file_name().map(|leaf| parent.join(leaf)))
-        {
-            let _ = Command::new("sudo")
-                .args(["-n", "umount", "-f"])
-                .arg(&canonical)
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status();
-        }
-    }
-    #[cfg(target_os = "linux")]
-    {
-        use std::ffi::OsStr;
-        let mp = mount_point.as_os_str();
-        let _ = Command::new("fusermount")
-            .args([OsStr::new("-uz"), mp])
-            .status();
-        let _ = Command::new("umount").arg(mp).status();
-    }
-    #[cfg(all(not(target_os = "linux"), not(target_os = "macos")))]
-    {
-        if omnifs_nfs::mount_is_active(mount_point) {
-            let _ = Command::new("umount").arg("-f").arg(mount_point).status();
-        }
-    }
-}
-
-/// Run `omnifs status --json` against `home`, with the daemon-address override
+/// Run `omnifs status --output json` against `home`, with the daemon-address override
 /// and token stripped so resolution goes through the workspace's record.
-fn run_status(home: &std::path::Path, mount_point: &std::path::Path) -> Output {
+fn run_status(home: &std::path::Path) -> Output {
     Command::new(omnifs_bin())
-        .args(["status", "--json"])
+        .args(["status", "--output", "json"])
         .env("OMNIFS_HOME", home)
-        .env("OMNIFS_MOUNT_POINT", mount_point)
         .env_remove("OMNIFS_DAEMON_ADDR")
         .env_remove("OMNIFS_CONTROL_TOKEN")
         .env("RUST_LOG", "warn")
@@ -166,7 +114,7 @@ fn exit_code(output: &Output) -> i32 {
 fn status_json(output: &Output) -> serde_json::Value {
     serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
         panic!(
-            "status --json must produce valid JSON: {error}\nstdout: {}\nstderr: {}",
+            "status --output json must produce valid JSON: {error}\nstdout: {}\nstderr: {}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr),
         )
@@ -201,7 +149,7 @@ fn two_daemons_two_homes_resolve_through_their_own_records() {
     }
 
     // Each home resolves its own daemon over its own socket.
-    let out_a = run_status(daemon_a.home.path(), &daemon_a.mount_point);
+    let out_a = run_status(daemon_a.home.path());
     assert_eq!(
         exit_code(&out_a),
         0,
@@ -209,32 +157,36 @@ fn two_daemons_two_homes_resolve_through_their_own_records() {
         String::from_utf8_lossy(&out_a.stderr)
     );
     let json_a = status_json(&out_a);
-    assert_eq!(json_a["runtime"]["state"], "running");
-    let pid_a = json_a["runtime"]["pid"].as_u64().expect("A pid");
+    let result_a = json_a["result"].as_object().expect("status result");
+    assert_eq!(result_a["workspace"]["daemon_state"], "running");
+    let pid_a = result_a["workspace"]["pid"].as_u64().expect("A pid");
     assert_eq!(
         pid_a,
         u64::from(daemon_a.pid()),
         "status A must report A's pid"
     );
-    assert_eq!(
-        json_a["runtime"]["mount_point"].as_str().unwrap_or(""),
-        daemon_a.mount_point.to_str().unwrap(),
-        "status A must name A's mount point"
+    assert!(result_a["frontends"].as_array().is_some_and(Vec::is_empty));
+    assert!(
+        result_a["mounts"]
+            .as_array()
+            .is_some_and(|mounts| mounts.len() >= 2)
     );
 
-    let out_b = run_status(daemon_b.home.path(), &daemon_b.mount_point);
+    let out_b = run_status(daemon_b.home.path());
     assert_eq!(exit_code(&out_b), 0, "status for home B must exit 0");
     let json_b = status_json(&out_b);
-    let pid_b = json_b["runtime"]["pid"].as_u64().expect("B pid");
+    let pid_b = json_b["result"]["workspace"]["pid"]
+        .as_u64()
+        .expect("B pid");
     assert_eq!(
         pid_b,
         u64::from(daemon_b.pid()),
         "status B must report B's pid"
     );
-    assert_eq!(
-        json_b["runtime"]["mount_point"].as_str().unwrap_or(""),
-        daemon_b.mount_point.to_str().unwrap(),
-        "status B must name B's mount point"
+    assert!(
+        json_b["result"]["frontends"]
+            .as_array()
+            .is_some_and(Vec::is_empty)
     );
 
     assert_ne!(pid_a, pid_b, "the two daemons must be distinct processes");
@@ -247,7 +199,7 @@ fn two_daemons_two_homes_resolve_through_their_own_records() {
     // never dials A or B: with no record and no override, resolution short
     // circuits to absent, so it can only ever report its own (missing) daemon.
     let fresh = hermetic_home();
-    let out_fresh = run_status(fresh.home.path(), &fresh.mount_point);
+    let out_fresh = run_status(fresh.home.path());
     assert_eq!(
         exit_code(&out_fresh),
         0,
@@ -255,8 +207,8 @@ fn two_daemons_two_homes_resolve_through_their_own_records() {
         String::from_utf8_lossy(&out_fresh.stderr)
     );
     assert_eq!(
-        status_json(&out_fresh)["runtime"]["state"],
-        "not_running",
+        status_json(&out_fresh)["result"]["workspace"]["daemon_state"],
+        "stopped",
         "a home with no record must report not_running, never a foreign daemon"
     );
 
@@ -278,12 +230,11 @@ fn two_daemons_two_homes_resolve_through_their_own_records() {
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    daemon_a.detach_mount();
 
     // A's record still points at its now-dead socket. Resolving through it, the
     // status probe hits a refused socket, removes the stale record, and reports
     // the daemon as not running.
-    let out_dead = run_status(daemon_a.home.path(), &daemon_a.mount_point);
+    let out_dead = run_status(daemon_a.home.path());
     assert_eq!(
         exit_code(&out_dead),
         0,
@@ -291,8 +242,8 @@ fn two_daemons_two_homes_resolve_through_their_own_records() {
         String::from_utf8_lossy(&out_dead.stderr)
     );
     assert_eq!(
-        status_json(&out_dead)["runtime"]["state"],
-        "not_running",
+        status_json(&out_dead)["result"]["workspace"]["daemon_state"],
+        "stopped",
         "the killed home A must report not_running"
     );
     assert!(
@@ -301,14 +252,14 @@ fn two_daemons_two_homes_resolve_through_their_own_records() {
     );
 
     // Home B still answers correctly.
-    let out_b2 = run_status(daemon_b.home.path(), &daemon_b.mount_point);
+    let out_b2 = run_status(daemon_b.home.path());
     assert_eq!(
         exit_code(&out_b2),
         0,
         "home B must still answer after A is gone"
     );
     assert_eq!(
-        status_json(&out_b2)["runtime"]["pid"].as_u64(),
+        status_json(&out_b2)["result"]["workspace"]["pid"].as_u64(),
         Some(u64::from(daemon_b.pid())),
     );
 
@@ -327,7 +278,6 @@ fn two_daemons_two_homes_resolve_through_their_own_records() {
         "a gracefully stopped daemon must remove its runtime record"
     );
 
-    // Drop guards force-unmount both mount points.
     drop(daemon_a);
     drop(daemon_b);
 }

@@ -18,9 +18,9 @@
 //! exec` or ssh-over-vsock); Docker is checked before krunkit only because
 //! both are vanishingly unlikely to run at once and a deterministic order
 //! beats an arbitrary one. With no guest running, a live local mount is used
-//! instead; more than one live local mount is selected with a TTY picker or
-//! reported as an ambiguity in headless mode. `--mount` accepts a unique local
-//! mount-point basename or exact path and always bypasses guest preference.
+//! instead; more than one live local mount is selected with a TTY picker or a
+//! normalized deterministic path in headless mode. `--location` selects a
+//! host mount-point basename or exact path and always bypasses guest preference.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -29,7 +29,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use clap::Args;
+use clap::{Args, ValueEnum};
 use omnifs_api::{DaemonStatus, FrontendDelivery, MountInfo};
 use omnifs_mtab::MountState;
 
@@ -38,6 +38,7 @@ use crate::frontend_container::FRONTEND_DEV_IMAGE;
 use crate::krunkit_backend::{self, KrunkitBackend};
 use crate::launch_backend::{ContainerName, DockerTarget, GUEST_MOUNT};
 use crate::runtime::Runtime;
+use crate::ui::output::Output;
 use crate::workspace::Workspace;
 use omnifs_workspace::layout::{OMNIFS_MOUNT_POINT_ENV, WorkspaceLayout};
 
@@ -55,92 +56,65 @@ pub struct ShellArgs {
     /// Shell to launch (defaults to `$SHELL`).
     #[arg(long)]
     pub shell: Option<String>,
-    /// Select a local frontend mount by its final path component or exact path.
-    /// This chooses the host mount root, not a provider mount beneath it, and
-    /// bypasses guest frontend preference.
-    #[arg(long, value_name = "NAME")]
-    pub mount: Option<String>,
+    /// Select the shell execution environment.
+    #[arg(long, value_enum)]
+    pub environment: Option<ShellEnvironment>,
+    /// Select a host frontend location. This implies `--environment host`.
+    #[arg(long)]
+    pub location: Option<PathBuf>,
     /// Run a command in the mount context instead of an interactive shell.
     #[arg(trailing_var_arg = true)]
     pub command: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ShellEnvironment {
+    Host,
+    Docker,
+    Krunkit,
+}
+
+impl ShellEnvironment {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Host => "host",
+            Self::Docker => "docker",
+            Self::Krunkit => "krunkit",
+        }
+    }
+
+    fn accepts(self, target: &ShellTarget) -> bool {
+        matches!(
+            (self, target),
+            (Self::Docker, ShellTarget::Docker(_)) | (Self::Krunkit, ShellTarget::Krunkit)
+        )
+    }
+}
+
 impl ShellArgs {
-    pub async fn run(self) -> Result<()> {
+    pub async fn run(self, output: Output) -> Result<()> {
+        if output.is_structured() {
+            anyhow::bail!("shell is a passthrough command and only supports human output")
+        }
         if std::env::var_os("OMNIFS_IN_SHELL").is_some() {
-            crate::ui::narrate(
+            output.narrate(
                 "note: already inside an omnifs shell; opening a nested one (exit twice to return)",
             );
         }
 
         let workspace = Workspace::resolve()?;
         let paths = workspace.layout();
+        let ShellPlan { target, context } = self.plan(&workspace, output).await?;
 
-        // Probe guest state before asking the daemon for optional banner facts.
-        // A one-shot guest command does not need status at all, so a dead
-        // daemon cannot add its five-second control timeout to the useful path.
-        // Local target discovery still uses daemon attachments when status
-        // answers, and runner-owned state when it does not.
-        let guest = if self.mount.is_none() {
-            if docker_frontend_is_running(paths).await {
-                let container_name = crate::frontend_container::frontend_container_name(paths)?;
-                Some(ShellTarget::Docker(container_name))
-            } else if krunkit_frontend_is_running(paths).await {
-                Some(ShellTarget::Krunkit)
-            } else {
-                None
-            }
+        let action = if self.command.is_empty() {
+            "launch shell"
         } else {
-            None
+            "run command"
         };
-
-        let status = if guest.is_some() && !self.command.is_empty() {
-            None
-        } else {
-            shell_status(&workspace).await
-        };
-        let configured_roots = if self.command.is_empty() && status.is_none() {
-            match workspace.mounts() {
-                Ok(mounts) => mounts
-                    .into_iter()
-                    .map(|mount| mount.name.to_string())
-                    .collect(),
-                Err(error) => {
-                    crate::ui::narrate(format!(
-                        "note: could not read configured mounts for shell banner: {error:#}"
-                    ));
-                    Vec::new()
-                },
-            }
-        } else {
-            Vec::new()
-        };
-        let context = ShellContext::new(status, configured_roots);
-
-        // The offline path is still useful, but tell the user before selection
-        // can fail so a missing/stale mount does not hide the actionable daemon
-        // recovery hint.
-        if context.status.is_none() && guest.is_none() {
-            crate::ui::narrate(
-                "note: the daemon is not answering; its mount may be stale (try `omnifs up`)",
-            );
-        }
-
-        // When a guest target is live and no selector was requested, avoid
-        // probing host mount records at all. Otherwise resolve the local
-        // frontend from daemon attachments or runner-owned state.
-        let local = if self.mount.is_some() || guest.is_none() {
-            Some(LocalMounts::discover(paths, context.status.as_ref())?)
-        } else {
-            None
-        };
-
-        let target = context.choose_target(
-            local,
-            self.mount.as_deref(),
-            crate::ui::prompt::is_terminal(),
-            guest,
-        )?;
+        output.narrate(format!(
+            "planned shell target: {} ({action})",
+            target.description()
+        ));
 
         let mounts = context
             .status
@@ -152,8 +126,10 @@ impl ShellArgs {
         // tuning is needed for a non-interactive invocation.
         if !self.command.is_empty() {
             return match target {
-                ShellTarget::Docker(container_name) => self.exec_in_container(&container_name),
-                ShellTarget::Krunkit => self.exec_in_krunkit_guest(paths),
+                ShellTarget::Docker(container_name) => {
+                    self.exec_in_container(&container_name, output)
+                },
+                ShellTarget::Krunkit => self.exec_in_krunkit_guest(paths, output),
                 ShellTarget::Local(mount_point) => {
                     let mut cmd = Command::new(&self.command[0]);
                     cmd.args(&self.command[1..]);
@@ -166,12 +142,103 @@ impl ShellArgs {
 
         match target {
             ShellTarget::Docker(container_name) => {
-                self.exec_in_container_with_banner(&container_name, &context)
+                self.exec_in_container_with_banner(&container_name, &context, output)
             },
-            ShellTarget::Krunkit => self.exec_in_krunkit_guest_with_banner(paths, &context),
+            ShellTarget::Krunkit => self.exec_in_krunkit_guest_with_banner(paths, &context, output),
             ShellTarget::Local(mount_point) => {
-                self.exec_local_shell(&mount_point, &mounts, paths, &context)
+                self.exec_local_shell(&mount_point, &mounts, paths, &context, output)
             },
+        }
+    }
+
+    async fn plan(&self, workspace: &Workspace, output: Output) -> Result<ShellPlan> {
+        if self.location.is_some()
+            && self
+                .environment
+                .is_some_and(|environment| !matches!(environment, ShellEnvironment::Host))
+        {
+            anyhow::bail!("--location requires --environment host")
+        }
+        let paths = workspace.layout();
+        let guests = self.guest_targets(paths, output).await?;
+        let interactive = crate::ui::prompt::is_terminal();
+        let status = if guests.len() == 1 && !self.command.is_empty() && !interactive {
+            None
+        } else {
+            shell_status(workspace).await
+        };
+        let configured_roots = if self.command.is_empty() && status.is_none() {
+            match workspace.mounts() {
+                Ok(mounts) => mounts
+                    .into_iter()
+                    .map(|mount| mount.name.to_string())
+                    .collect(),
+                Err(error) => {
+                    output.narrate(format!(
+                        "note: could not read configured mounts for shell banner: {error:#}"
+                    ));
+                    Vec::new()
+                },
+            }
+        } else {
+            Vec::new()
+        };
+        let context = ShellContext::new(status, configured_roots);
+        if context.status.is_none() && guests.is_empty() {
+            output.narrate(
+                "note: the daemon is not answering; its mount may be stale (try `omnifs up`)",
+            );
+        }
+        let local = if self.location.is_some()
+            || self.environment == Some(ShellEnvironment::Host)
+            || guests.is_empty()
+            || (self.environment.is_none() && interactive)
+        {
+            Some(LocalMounts::discover(paths, context.status.as_ref())?)
+        } else {
+            None
+        };
+        let target = context.choose_target(
+            local,
+            self.location.as_deref().and_then(|path| path.to_str()),
+            interactive,
+            self.environment,
+            guests,
+        )?;
+        Ok(ShellPlan { target, context })
+    }
+
+    async fn guest_targets(
+        &self,
+        paths: &WorkspaceLayout,
+        output: Output,
+    ) -> Result<Vec<ShellTarget>> {
+        match self.environment {
+            Some(ShellEnvironment::Docker) => {
+                if !docker_frontend_is_running(paths, output).await {
+                    anyhow::bail!("docker frontend is unavailable")
+                }
+                let name = crate::frontend_container::frontend_container_name(paths)?;
+                Ok(vec![ShellTarget::Docker(name)])
+            },
+            Some(ShellEnvironment::Krunkit) => {
+                if !krunkit_frontend_is_running(paths).await {
+                    anyhow::bail!("krunkit frontend is unavailable")
+                }
+                Ok(vec![ShellTarget::Krunkit])
+            },
+            None if self.location.is_none() => {
+                let mut targets = Vec::new();
+                if docker_frontend_is_running(paths, output).await {
+                    let name = crate::frontend_container::frontend_container_name(paths)?;
+                    targets.push(ShellTarget::Docker(name));
+                }
+                if krunkit_frontend_is_running(paths).await {
+                    targets.push(ShellTarget::Krunkit);
+                }
+                Ok(targets)
+            },
+            Some(ShellEnvironment::Host) | None => Ok(Vec::new()),
         }
     }
 
@@ -183,13 +250,13 @@ impl ShellArgs {
     /// Uses [`DockerBackend`] only for command construction; the image field of
     /// its `DockerTarget`
     /// is unused here, so the dev placeholder is fine regardless of build
-    /// channel, mirroring `frontend down`.
-    fn exec_in_container(&self, container_name: &ContainerName) -> Result<()> {
+    /// channel, mirroring `frontend disable`.
+    fn exec_in_container(&self, container_name: &ContainerName, output: Output) -> Result<()> {
         let target = DockerTarget::new(
             container_name.as_str().to_string(),
             FRONTEND_DEV_IMAGE.to_string(),
         )?;
-        let backend = DockerBackend::new(Runtime::connect_for(&target)?);
+        let backend = DockerBackend::new(Runtime::connect_for(&target, output)?);
         let cmd = backend.shell_command(self.shell.as_deref(), &self.command);
         spawn_and_propagate(cmd, format!("open shell in container `{container_name}`"))
     }
@@ -198,16 +265,17 @@ impl ShellArgs {
         &self,
         container_name: &ContainerName,
         context: &ShellContext,
+        output: Output,
     ) -> Result<()> {
-        crate::ui::narrate(context.banner("container", Path::new(GUEST_MOUNT)));
-        self.exec_in_container(container_name)
+        output.narrate(context.banner("container", Path::new(GUEST_MOUNT)));
+        self.exec_in_container(container_name, output)
     }
 
     /// Attach to the krunkit guest over ssh-over-vsock, landing in the
     /// projected tree. `shell_command` is pure construction (no I/O), so the
     /// `socat` probe (an I/O check) happens here, at the one call site about
     /// to actually run it.
-    fn exec_in_krunkit_guest(&self, paths: &WorkspaceLayout) -> Result<()> {
+    fn exec_in_krunkit_guest(&self, paths: &WorkspaceLayout, _output: Output) -> Result<()> {
         krunkit_backend::ensure_socat_available()?;
         let backend = KrunkitBackend::new(paths.config_dir.clone());
         let cmd = backend.shell_command(self.shell.as_deref(), &self.command);
@@ -218,9 +286,10 @@ impl ShellArgs {
         &self,
         paths: &WorkspaceLayout,
         context: &ShellContext,
+        output: Output,
     ) -> Result<()> {
-        crate::ui::narrate(context.banner("krunkit", Path::new(GUEST_MOUNT)));
-        self.exec_in_krunkit_guest(paths)
+        output.narrate(context.banner("krunkit", Path::new(GUEST_MOUNT)));
+        self.exec_in_krunkit_guest(paths, output)
     }
 
     fn exec_local_shell(
@@ -229,6 +298,7 @@ impl ShellArgs {
         mounts: &[MountInfo],
         paths: &WorkspaceLayout,
         context: &ShellContext,
+        output: Output,
     ) -> Result<()> {
         let shell = resolve_shell(self.shell.as_deref());
         let shell_dir = paths.cache_dir.join("shell");
@@ -259,7 +329,7 @@ impl ShellArgs {
         apply_context_env(&mut cmd, mount_point, mounts, self.hermetic);
         set_cwd_to_mount(&mut cmd, mount_point);
 
-        crate::ui::narrate(context.banner("local", mount_point));
+        output.narrate(context.banner("local", mount_point));
         spawn_and_propagate(cmd, "launch omnifs shell".to_string())
     }
 }
@@ -269,7 +339,7 @@ impl ShellArgs {
 /// rather than a hard error, since `omnifs shell` should still fall through
 /// to krunkit or a local mount when Docker is simply unavailable. Mirrors the
 /// discovery in `commands/frontend/status.rs`.
-async fn docker_frontend_is_running(paths: &WorkspaceLayout) -> bool {
+async fn docker_frontend_is_running(paths: &WorkspaceLayout, output: Output) -> bool {
     let Ok(container_name) = crate::frontend_container::frontend_container_name(paths) else {
         return false;
     };
@@ -279,7 +349,7 @@ async fn docker_frontend_is_running(paths: &WorkspaceLayout) -> bool {
     ) else {
         return false;
     };
-    let Ok(runtime) = Runtime::connect_for(&target) else {
+    let Ok(runtime) = Runtime::connect_for(&target, output) else {
         return false;
     };
     matches!(
@@ -320,6 +390,27 @@ enum ShellTarget {
     Krunkit,
 }
 
+struct ShellPlan {
+    target: ShellTarget,
+    context: ShellContext,
+}
+
+impl ShellTarget {
+    fn description(&self) -> String {
+        match self {
+            Self::Local(path) => format!("local at {}", path.display()),
+            Self::Docker(container) => format!("docker container `{container}`"),
+            Self::Krunkit => "krunkit guest".to_owned(),
+        }
+    }
+}
+
+impl fmt::Display for ShellTarget {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.description())
+    }
+}
+
 /// Runtime facts and the root-mount roster used by one shell invocation.
 ///
 /// `DaemonStatus.mounts` is authoritative when available. Configured names
@@ -355,33 +446,71 @@ impl ShellContext {
     }
 
     /// Resolve an invocation target. Explicit local selection has precedence
-    /// over a guest target; this is what makes `--mount` a reliable escape hatch
+    /// over a guest target; this is what makes `--location` a reliable escape hatch
     /// when Docker or krunkit is also running.
     fn choose_target(
         &self,
         local: Option<LocalMounts>,
         selector: Option<&str>,
         interactive: bool,
-        guest: Option<ShellTarget>,
+        requested: Option<ShellEnvironment>,
+        guests: Vec<ShellTarget>,
     ) -> Result<ShellTarget> {
         if selector.is_some() {
+            if requested.is_some_and(|environment| !matches!(environment, ShellEnvironment::Host)) {
+                anyhow::bail!("--location requires --environment host");
+            }
             let Some(local) = local else {
                 if self.status.is_some() {
                     anyhow::bail!(
-                        "no local frontend is attached for `--mount`; start it with `omnifs frontend up`"
+                        "no host frontend is attached for `--location`; start it with `omnifs frontend enable`"
                     );
                 }
-                anyhow::bail!("no host mount is available for `--mount`");
+                anyhow::bail!("no host mount is available for `--location`");
             };
             return local.select(selector, false);
         }
-        if let Some(guest) = guest {
-            return Ok(guest);
+        match requested {
+            Some(ShellEnvironment::Host) => {
+                let Some(local) = local else {
+                    anyhow::bail!("no host mount is available");
+                };
+                local.select(None, interactive)
+            },
+            Some(environment) => guests
+                .into_iter()
+                .find(|target| environment.accepts(target))
+                .with_context(|| format!("{} frontend is unavailable", environment.label())),
+            None => {
+                let mut candidates = Self::automatic_candidates(local.as_ref(), &guests);
+                match candidates.as_slice() {
+                    [] => anyhow::bail!("no host mount is available"),
+                    [_] if !interactive => Ok(candidates.remove(0)),
+                    _ if interactive => {
+                        crate::ui::prompt::Select::new("Which frontend should omnifs use?")
+                            .items(candidates)
+                            .ask()
+                    },
+                    _ => Ok(candidates.remove(0)),
+                }
+            },
         }
-        let Some(local) = local else {
-            anyhow::bail!("no host mount is available");
-        };
-        local.select(None, interactive)
+    }
+
+    fn automatic_candidates(
+        local: Option<&LocalMounts>,
+        guests: &[ShellTarget],
+    ) -> Vec<ShellTarget> {
+        let mut candidates = guests.to_vec();
+        if let Some(local) = local {
+            candidates.extend(local.targets());
+        }
+        candidates.sort_by_key(|target| match target {
+            ShellTarget::Docker(_) => 0,
+            ShellTarget::Krunkit => 1,
+            ShellTarget::Local(_) => 2,
+        });
+        candidates
     }
 
     fn banner(&self, surface: &str, location: &Path) -> String {
@@ -408,7 +537,7 @@ impl ShellContext {
 }
 
 /// One host-visible local frontend mount point. The final path component is
-/// the short selector accepted by `--mount`; an exact path disambiguates two
+/// the short selector accepted by `--location`; an exact path disambiguates two
 /// local frontends with the same basename.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct LocalMount(PathBuf);
@@ -446,8 +575,12 @@ impl LocalMounts {
             .into_iter()
             .filter(|path| !path.as_os_str().is_empty())
             .collect::<Vec<_>>();
-        paths.sort();
-        paths.dedup();
+        paths.sort_by(|left, right| {
+            normalized_location(left)
+                .cmp(&normalized_location(right))
+                .then_with(|| left.cmp(right))
+        });
+        paths.dedup_by(|left, right| normalized_location(left) == normalized_location(right));
         Self(paths.into_iter().map(LocalMount::new).collect())
     }
 
@@ -495,14 +628,16 @@ impl LocalMounts {
     }
 
     /// Select a local frontend by exact path or unique basename. With no
-    /// selector, one candidate wins; multiple candidates use the interactive
-    /// picker only when a terminal is available.
+    /// selector, one candidate wins; interactive callers can choose, while
+    /// headless callers use the normalized first path deterministically.
     fn select(&self, selector: Option<&str>, interactive: bool) -> Result<ShellTarget> {
         if let Some(selector) = selector {
             return self.select_named(selector);
         }
         match self.0.as_slice() {
-            [] => anyhow::bail!("no host mount is available; start it with `omnifs frontend up`"),
+            [] => {
+                anyhow::bail!("no host mount is available; start it with `omnifs frontend enable`")
+            },
             [mount] => Ok(ShellTarget::Local(mount.path().to_path_buf())),
             mounts if interactive => {
                 let selected =
@@ -511,15 +646,15 @@ impl LocalMounts {
                         .ask()?;
                 Ok(ShellTarget::Local(selected.path().to_path_buf()))
             },
-            mounts => anyhow::bail!(
-                "multiple local frontends are live ({}); pass `--mount <NAME>` to choose one",
-                mounts
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
+            [mount, ..] => Ok(ShellTarget::Local(mount.path().to_path_buf())),
         }
+    }
+
+    fn targets(&self) -> Vec<ShellTarget> {
+        self.0
+            .iter()
+            .map(|mount| ShellTarget::Local(mount.path().to_path_buf()))
+            .collect()
     }
 
     fn select_named(&self, selector: &str) -> Result<ShellTarget> {
@@ -539,11 +674,11 @@ impl LocalMounts {
         match matches.as_slice() {
             [mount] => Ok(ShellTarget::Local(mount.path().to_path_buf())),
             [] => anyhow::bail!(
-                "no local frontend matches `--mount {selector}`; available mount paths: {}",
+                "no local frontend matches `--location {selector}`; available mount paths: {}",
                 self.listed()
             ),
             _ => anyhow::bail!(
-                "mount name `{selector}` is ambiguous; pass an exact path: {}",
+                "location `{selector}` is ambiguous; pass an exact path: {}",
                 matches
                     .iter()
                     .map(ToString::to_string)
@@ -564,6 +699,20 @@ impl LocalMounts {
                 .join(", ")
         }
     }
+}
+
+fn normalized_location(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {},
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            },
+            component => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
 }
 
 fn sorted_unique(values: impl IntoIterator<Item = String>) -> Vec<String> {
@@ -743,7 +892,6 @@ mod tests {
             pid: 0,
             instance_id: String::new(),
             executable: PathBuf::new(),
-            mount_point: PathBuf::new(),
             config_dir: PathBuf::new(),
             cache_dir: PathBuf::new(),
             providers_dir: PathBuf::new(),
@@ -782,10 +930,10 @@ mod tests {
             PathBuf::from("/tmp/a"),
             PathBuf::from("/tmp/a"),
         ]);
-        let error = many.select(None, false).unwrap_err().to_string();
-        assert!(error.contains("multiple local frontends"));
-        assert!(error.contains("--mount"));
-        assert!(error.contains("/tmp/a, /tmp/b"));
+        assert_eq!(
+            many.select(None, false).unwrap(),
+            ShellTarget::Local(PathBuf::from("/tmp/a"))
+        );
     }
 
     #[test]
@@ -829,10 +977,62 @@ mod tests {
                 Some(LocalMounts::from_paths([PathBuf::from("/tmp/omnifs")])),
                 Some("omnifs"),
                 false,
-                Some(ShellTarget::Krunkit),
+                None,
+                vec![ShellTarget::Krunkit],
             )
             .unwrap();
         assert_eq!(target, ShellTarget::Local(PathBuf::from("/tmp/omnifs")));
+    }
+
+    #[test]
+    fn explicit_unavailable_guest_does_not_fall_back_to_local() {
+        let context = ShellContext::new(None, Vec::new());
+        let error = context
+            .choose_target(
+                Some(LocalMounts::from_paths([PathBuf::from("/tmp/omnifs")])),
+                None,
+                false,
+                Some(ShellEnvironment::Docker),
+                Vec::new(),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("docker frontend is unavailable"));
+    }
+
+    #[test]
+    fn headless_local_selection_uses_normalized_location_order() {
+        let mounts = LocalMounts::from_paths([
+            PathBuf::from("/tmp/z/../b"),
+            PathBuf::from("/tmp/a"),
+            PathBuf::from("/tmp/b"),
+        ]);
+        assert_eq!(
+            mounts.select(None, false).unwrap(),
+            ShellTarget::Local(PathBuf::from("/tmp/a"))
+        );
+        assert_eq!(mounts.0.len(), 2);
+    }
+
+    #[test]
+    fn automatic_candidates_have_stable_cross_environment_order() {
+        let local = LocalMounts::from_paths([PathBuf::from("/tmp/z"), PathBuf::from("/tmp/a")]);
+        let candidates = ShellContext::automatic_candidates(
+            Some(&local),
+            &[
+                ShellTarget::Krunkit,
+                ShellTarget::Docker(ContainerName::new("frontend").unwrap()),
+            ],
+        );
+        assert_eq!(
+            candidates,
+            vec![
+                ShellTarget::Docker(ContainerName::new("frontend").unwrap()),
+                ShellTarget::Krunkit,
+                ShellTarget::Local(PathBuf::from("/tmp/a")),
+                ShellTarget::Local(PathBuf::from("/tmp/z")),
+            ]
+        );
     }
 
     #[test]
@@ -873,12 +1073,22 @@ mod tests {
     }
 
     #[test]
-    fn shell_mount_flag_parses_before_trailing_command() {
-        let cli =
-            Cli::try_parse_from(["omnifs", "shell", "--mount", "omnifs", "--", "pwd"]).unwrap();
+    fn shell_environment_and_location_parse_before_trailing_command() {
+        let cli = Cli::try_parse_from([
+            "omnifs",
+            "shell",
+            "--environment",
+            "host",
+            "--location",
+            "/tmp/omnifs",
+            "--",
+            "pwd",
+        ])
+        .unwrap();
         match cli.command {
             Some(crate::cli::Commands::Shell(args)) => {
-                assert_eq!(args.mount.as_deref(), Some("omnifs"));
+                assert_eq!(args.environment, Some(ShellEnvironment::Host));
+                assert_eq!(args.location.as_deref(), Some(Path::new("/tmp/omnifs")));
                 assert_eq!(args.command, vec!["pwd".to_string()]);
             },
             _ => panic!("expected shell command"),
@@ -892,8 +1102,13 @@ mod tests {
         assert!(
             shell
                 .get_arguments()
-                .any(|argument| argument.get_long() == Some("mount"))
+                .any(|argument| argument.get_long() == Some("environment"))
         );
-        assert!(shell.render_help().to_string().contains("--mount <NAME>"));
+        assert!(
+            shell
+                .render_help()
+                .to_string()
+                .contains("--environment <ENVIRONMENT>")
+        );
     }
 }

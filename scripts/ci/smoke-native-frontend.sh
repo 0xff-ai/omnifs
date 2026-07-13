@@ -12,6 +12,11 @@
 set -euo pipefail
 
 : "${FRONTEND_IMAGE:?FRONTEND_IMAGE must be set to the frontend image ref}"
+OMNIFS_CLI="${OMNIFS_CLI:-$PWD/target/debug/omnifs}"
+test -x "$OMNIFS_CLI" || {
+  echo "compiled omnifs CLI not found at $OMNIFS_CLI" >&2
+  exit 1
+}
 
 if [[ -z "${GITHUB_TOKEN:-}" ]]; then
   echo "GITHUB_TOKEN must be set: scripts/dev.ts provisions the github dev mount from it" >&2
@@ -25,14 +30,14 @@ cleanup() {
   local exit_code=$?
   if [[ "$exit_code" != 0 ]]; then
     echo "== omnifs status ==" >&2
-    omnifs status --detail >&2 || true
+    "$OMNIFS_CLI" status --detail >&2 || true
     echo "== daemon.log (tail) ==" >&2
     tail -n 200 "$OMNIFS_HOME/cache/daemon.log" >&2 || true
   fi
   local frontend
   frontend="$(docker ps --filter "label=ai.0xff.omnifs.home=$OMNIFS_HOME" --format '{{.Names}}' 2>/dev/null || true)"
   [[ -n "$frontend" ]] && docker rm -f "$frontend" >/dev/null 2>&1
-  omnifs down --force >/dev/null 2>&1 || true
+  "$OMNIFS_CLI" down --force >/dev/null 2>&1 || true
   rm -rf "$OMNIFS_HOME"
 }
 trap cleanup EXIT
@@ -58,7 +63,16 @@ read_first_open_issue_title() {
 }
 
 echo "== host mount read (native daemon) =="
-mount_point="$(omnifs status --json | jq -r '.runtime.mount_point')"
+host_filesystem="$(uname -s | tr '[:upper:]' '[:lower:]')"
+if [[ "$host_filesystem" == "linux" ]]; then
+  host_filesystem=fuse
+else
+  host_filesystem=nfs
+fi
+status_json="$("$OMNIFS_CLI" status --output json)"
+mount_point="$(jq -er --arg filesystem "$host_filesystem" \
+  '.result.frontends[] | select(.environment == "host" and .filesystem == $filesystem) | .location' \
+  <<<"$status_json" | head -n 1)"
 test -n "$mount_point" && test "$mount_point" != "null"
 read_first_open_issue_title "$mount_point/github"
 

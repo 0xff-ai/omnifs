@@ -1,8 +1,8 @@
 //! `omnifs status` verb handler.
 
-use crate::cli::OutputFormat;
 use crate::error::ExitCode;
-use crate::status::StatusReport;
+use crate::status::InventoryReport;
+use crate::ui::output::Output;
 use crate::workspace::Workspace;
 use clap::Args;
 
@@ -11,26 +11,17 @@ pub struct StatusArgs {
     /// Reveal configured provider detail.
     #[arg(long = "detail")]
     pub detail: bool,
-    /// Emit machine-readable JSON.
-    #[arg(long)]
-    pub json: bool,
 }
 
 impl StatusArgs {
-    pub async fn run(self) -> anyhow::Result<ExitCode> {
+    pub async fn run(self, output: Output) -> anyhow::Result<ExitCode> {
         let workspace = Workspace::resolve()?;
-        let mounts = workspace.mounts()?;
-        let runtime = workspace.daemon().compatible_status_optional().await?;
-        let report = StatusReport::collect(
-            workspace.catalog(),
-            workspace.layout().clone(),
-            runtime,
-            &mounts,
-        );
+        let report = InventoryReport::collect(&workspace).await?;
         let exit_code = report.exit_code();
-        match OutputFormat::from(self.json) {
-            OutputFormat::Json => crate::ui::print_json(&report.into_json())?,
-            OutputFormat::Text => report.build_report(self.detail).print(),
+        if output.is_structured() {
+            output.emit_result(report.inventory.verdict(), report.inventory)?;
+        } else {
+            crate::ui::print_raw(&format!("{}\n", report.render(self.detail).render()));
         }
         Ok(exit_code)
     }

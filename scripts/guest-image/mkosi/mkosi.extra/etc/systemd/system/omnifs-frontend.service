@@ -13,7 +13,7 @@ Type=exec
 # a missing or unreadable file fails this unit's start with a clear journal
 # message instead of running the frontend with no attach target.
 EnvironmentFile=/mnt/seed/omnifs-seed.conf
-ExecStart=/usr/local/bin/omnifs-fuse --mount-point /omnifs
+ExecStart=/usr/local/bin/omnifs-thin fuse --mount-point /omnifs
 StandardOutput=journal+console
 StandardError=journal+console
 

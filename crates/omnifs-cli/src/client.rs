@@ -35,8 +35,7 @@ use hyperlocal::{UnixConnector, Uri as UnixUri};
 use omnifs_api::{
     API_MAJOR, API_MINOR, ApiError, CredentialStatus, DaemonStatus, ErrorCode,
     FrontendAttachTargetReport, FrontendAttachTargetRequest, FrontendAttachTargetVsockReport,
-    FrontendDelivery, MountReport, MountUpdateRequest, ProviderSummary, ReconcileReport,
-    StopReport, UpgradeDelta,
+    FrontendDelivery, MountReport, MountUpdateRequest, ReconcileReport, StopReport, UpgradeDelta,
 };
 use omnifs_workspace::authn::CredentialId;
 use omnifs_workspace::layout::WorkspaceLayout;
@@ -388,12 +387,10 @@ impl DaemonClient {
             Ok(None) => return DaemonControlState::Absent,
             Err(error) => return DaemonControlState::Sick { error },
         };
-        let state = match self.status_from_raw(&raw, &target) {
+        match self.status_from_raw(&raw, &target) {
             Ok(status) => DaemonControlState::from_status(status),
             Err(error) => DaemonControlState::Sick { error },
-        };
-        state.warn_minor_skew();
-        state
+        }
     }
 
     /// Raw daemon status probe. Connection absence is `None`; a reachable
@@ -621,30 +618,6 @@ impl DaemonClient {
         Self::parse_ok_json(&raw, "daemon credential reload request failed").map(Some)
     }
 
-    pub(crate) async fn providers_if_ready(&self) -> Result<Option<Vec<ProviderSummary>>> {
-        if !self.ready().await {
-            return Ok(None);
-        }
-        self.require_compatible().await?;
-        let raw = self
-            .request(Method::GET, "/v1/providers", None, REQUEST_TIMEOUT)
-            .await?
-            .ok_or_else(|| self.unavailable_error())?;
-        Self::parse_ok_json(&raw, "daemon providers request failed").map(Some)
-    }
-
-    pub(crate) async fn credentials_if_ready(&self) -> Result<Option<Vec<CredentialStatus>>> {
-        if !self.ready().await {
-            return Ok(None);
-        }
-        self.require_compatible().await?;
-        let raw = self
-            .request(Method::GET, "/v1/credentials", None, REQUEST_TIMEOUT)
-            .await?
-            .ok_or_else(|| self.unavailable_error())?;
-        Self::parse_ok_json(&raw, "daemon credentials request failed").map(Some)
-    }
-
     /// Export a mount snapshot tar only when a compatible daemon is running.
     pub(crate) async fn export_mount_if_running(&self, mount: &str) -> Result<Option<Vec<u8>>> {
         let Some(status) = self.compatible_status_optional().await? else {
@@ -735,19 +708,6 @@ impl DaemonControlState {
             Self::Compatible(Box::new(status))
         } else {
             Self::Incompatible(Box::new(status))
-        }
-    }
-
-    fn warn_minor_skew(&self) {
-        let Self::Compatible(status) = self else {
-            return;
-        };
-        if status.api_minor != API_MINOR {
-            crate::ui::narrate(format!(
-                "note: daemon API minor v{}.{}, CLI expects v{API_MAJOR}.{API_MINOR}; \
-                 proceeding (minor skew is non-breaking)",
-                status.api_major, status.api_minor,
-            ));
         }
     }
 
@@ -1131,11 +1091,10 @@ mod tests {
                 "api_major":{api_major},
                 "api_minor":{api_minor},
                 "instance_id":"testinstance0000",
-                "mount_point":"/tmp/omnifs",
                 "config_dir":"/tmp/omnifs-home",
                 "cache_dir":"/tmp/omnifs-home/cache",
                 "providers_dir":"/tmp/omnifs-home/providers",
-                "frontend":null,
+                "frontends":[],
                 "mounts":[]
             }}"#
         )

@@ -27,27 +27,27 @@ RUN --mount=type=cache,id=omnifs-cargo-registry,target=/usr/local/cargo/registry
     --mount=type=cache,id=omnifs-host-target,target=/src/target,sharing=locked \
     cargo chef cook --release --recipe-path recipe.json
 
-# --- Build the slim omnifs-fuse frontend runner ---
+# --- Build the slim omnifs-thin frontend runner ---
 #
-# `omnifs-fuse` is a dedicated `[[bin]]` target of the `omnifs-fuse` crate: it
-# attaches a wire-backed namespace and serves a FUSE mount, and needs no
+# `omnifs-thin` is the dedicated credential-free frontend runner: it attaches
+# a wire-backed namespace and serves FUSE or NFS, and needs no
 # engine, no Wasmtime, and no provider bundle. This stage builds it alone, so
 # the frontend images below need no provider artifacts.
 
-FROM deps AS fuse-builder
+FROM deps AS thin-builder
 WORKDIR /src
 COPY . .
 RUN --mount=type=cache,id=omnifs-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=omnifs-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=omnifs-host-target,target=/src/target,sharing=locked \
-    cargo build --release -p omnifs-fuse --bin omnifs-fuse \
-    && cp /src/target/release/omnifs-fuse /omnifs-fuse
+    cargo build --release -p omnifs-thin --bin omnifs-thin \
+    && cp /src/target/release/omnifs-thin /omnifs-thin
 
 # --- Docker-hosted FUSE frontend ---
 #
 # `omnifs frontend up` (see `crates/omnifs-cli/src/frontend_container.rs`)
 # launches a separate, credential-free container that only ever runs the slim
-# `omnifs-fuse` binary, attached over TCP to a host-native daemon's shared
+# `omnifs-thin fuse` binary, attached over TCP to a host-native daemon's shared
 # namespace. It never runs a provider, so it gets its own minimal base: no
 # `OMNIFS_HOME`, no provider store, no control API, none of an
 # interactive-shell toolbox (zsh, gum, git, ripgrep, nfs-common...) — and,
@@ -65,14 +65,14 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir /omnifs
 
-ENTRYPOINT ["/usr/local/bin/omnifs-fuse", "--mount-point", "/omnifs"]
+ENTRYPOINT ["/usr/local/bin/omnifs-thin", "fuse", "--mount-point", "/omnifs"]
 
-# Contributor image: the binary compiled in this Dockerfile's `fuse-builder`
+# Contributor image: the binary compiled in this Dockerfile's `thin-builder`
 # stage. `just frontend-image` builds this target.
 FROM frontend-base AS frontend-dev
-COPY --from=fuse-builder /omnifs-fuse /usr/local/bin/
+COPY --from=thin-builder /omnifs-thin /usr/local/bin/
 
-# Release image: a prebuilt binary injected as the `omnifs-fuse-bin` build
+# Release image: a prebuilt binary injected as the `omnifs-thin-bin` build
 # context. `scripts/ci/build-frontend-image.sh` builds this target.
 FROM frontend-base AS frontend-release
-COPY --from=omnifs-fuse-bin omnifs-fuse /usr/local/bin/omnifs-fuse
+COPY --from=omnifs-thin-bin omnifs-thin /usr/local/bin/omnifs-thin

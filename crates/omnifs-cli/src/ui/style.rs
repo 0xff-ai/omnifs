@@ -110,9 +110,8 @@ pub(crate) fn accentuate(text: &str) -> String {
 }
 
 /// The closed glyph set. One owner per meaning; a single space always follows a
-/// glyph in a row. The liveness dots (`LiveDot`/`IdleDot`) are for status lists
-/// only and never carry failure: failures get `Warn`/`Fail` so shape carries
-/// severity independent of color.
+/// glyph in a row. Failures get `Warn`/`Fail` so shape carries severity
+/// independent of color.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Glyph {
@@ -124,10 +123,6 @@ pub(crate) enum Glyph {
     Fail,
     /// `•` dim: skipped / informational.
     Skip,
-    /// `●` green: live liveness dot (attached), status lists only.
-    LiveDot,
-    /// `◌` dim: idle liveness dot (no auth needed / idle), status lists only.
-    IdleDot,
     /// `-` dim: planned removal in a consent plan; flips to `Done`/`Warn` in the
     /// receipt.
     Plan,
@@ -141,8 +136,6 @@ impl Glyph {
             Self::Warn => "!",
             Self::Fail => "✗",
             Self::Skip => "•",
-            Self::LiveDot => "●",
-            Self::IdleDot => "◌",
             Self::Plan => "-",
         }
     }
@@ -151,28 +144,16 @@ impl Glyph {
     /// pad the plain key beside it without disturbing column math.
     pub(crate) fn render(self) -> String {
         match self {
-            Self::Done | Self::LiveDot => success(self.symbol()),
+            Self::Done => success(self.symbol()),
             Self::Warn => warn(self.symbol()),
             Self::Fail => error(self.symbol()),
-            Self::Skip | Self::IdleDot | Self::Plan => dim(self.symbol()),
-        }
-    }
-
-    /// Stable machine name for the row's severity, used by the `Report` JSON
-    /// path and by NDJSON renderers.
-    pub(crate) const fn json_state(self) -> &'static str {
-        match self {
-            Self::Done | Self::LiveDot => "ok",
-            Self::Warn => "warn",
-            Self::Fail => "fail",
-            Self::Skip | Self::IdleDot => "skip",
-            Self::Plan => "plan",
+            Self::Skip | Self::Plan => dim(self.symbol()),
         }
     }
 }
 
 /// Render a digest short and dim for human output: the first eight hex
-/// characters. The full digest is machine-only (`--json`).
+/// characters. The full digest is retained for structured output.
 // Kept for compact provider artifact labels.
 #[allow(dead_code)]
 pub(crate) fn short_digest(digest: &str) -> String {
@@ -200,8 +181,6 @@ mod tests {
             Glyph::Warn,
             Glyph::Fail,
             Glyph::Skip,
-            Glyph::LiveDot,
-            Glyph::IdleDot,
             Glyph::Plan,
         ] {
             assert_eq!(glyph.symbol().chars().count(), 1, "{glyph:?}");

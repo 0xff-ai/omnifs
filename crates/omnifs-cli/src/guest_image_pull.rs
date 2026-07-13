@@ -34,11 +34,11 @@ use sha2::{Digest as _, Sha256};
 
 use crate::launch_backend::ImageRef;
 use crate::ui::LiveRow;
+use crate::ui::output::Output;
 
 const GUEST_IMAGE_CACHE_SUBDIR: &str = "guest-images";
 
-const ACCEPT_MANIFEST: &str =
-    "application/vnd.oci.image.manifest.v1+json, application/vnd.oci.artifact.manifest.v1+json";
+const ACCEPT_MANIFEST: &str = "application/vnd.oci.image.manifest.v1+json";
 
 /// The registry, repository, and reference (tag) parsed out of an
 /// `ImageRef` like `ghcr.io/0xff-ai/omnifs-guest:0.5.0`.
@@ -74,17 +74,10 @@ struct BlobDescriptor {
     size: u64,
 }
 
-/// Accepts both the OCI Image Manifest shape (`config` + `layers`) emitted by
-/// `oras push --artifact-type` and the older, separate OCI Artifact Manifest
-/// shape (`blobs`, no `config`), per ghcr's own migration
-/// history between the two. Exactly one of the two lists is ever populated
-/// for a real manifest; [`Self::single_blob`] does not care which.
+/// The guest image is published as an OCI Image Manifest with exactly one layer.
 #[derive(Debug, Deserialize)]
 struct OciManifest {
-    #[serde(default)]
     layers: Vec<BlobDescriptor>,
-    #[serde(default)]
-    blobs: Vec<BlobDescriptor>,
 }
 
 impl OciManifest {
@@ -92,20 +85,15 @@ impl OciManifest {
         serde_json::from_slice(bytes).context("parse the guest image OCI manifest")
     }
 
-    /// The guest image manifest carries exactly one blob (the `.raw.zst`);
-    /// zero or more than one is a shape this puller does not understand.
+    /// The guest image manifest carries exactly one layer (the `.raw.zst`).
     fn single_blob(&self) -> Result<&BlobDescriptor> {
-        match (self.layers.as_slice(), self.blobs.as_slice()) {
-            ([one], []) | ([], [one]) => Ok(one),
-            ([], []) => anyhow::bail!(
-                "guest image manifest has no layers or blobs; expected exactly one blob"
-            ),
-            (layers, blobs) => anyhow::bail!(
-                "guest image manifest has {} layer(s) and {} blob(s); expected exactly one blob total",
-                layers.len(),
-                blobs.len()
-            ),
-        }
+        let [one] = self.layers.as_slice() else {
+            anyhow::bail!(
+                "guest image manifest has {} layers; expected exactly one layer",
+                self.layers.len()
+            );
+        };
+        Ok(one)
     }
 }
 
@@ -119,7 +107,11 @@ struct TokenResponse {
 /// decompressed local `.raw` file under `cache_dir`, pulling and caching it
 /// on first use. Returns the local path a launch can hand straight to
 /// krunkit.
-pub(crate) async fn ensure_guest_image(image: &ImageRef, cache_dir: &Path) -> Result<PathBuf> {
+pub(crate) async fn ensure_guest_image(
+    image: &ImageRef,
+    cache_dir: &Path,
+    output: Output,
+) -> Result<PathBuf> {
     let oci_ref = OciRef::parse(image.as_str())?;
     let images_dir = cache_dir.join(GUEST_IMAGE_CACHE_SUBDIR);
     std::fs::create_dir_all(&images_dir)
@@ -134,7 +126,7 @@ pub(crate) async fn ensure_guest_image(image: &ImageRef, cache_dir: &Path) -> Re
     let client = reqwest::Client::new();
 
     if !zst_path.is_file() {
-        download_and_verify(&client, &oci_ref, &zst_path).await?;
+        download_and_verify(&client, &oci_ref, &zst_path, output).await?;
     }
 
     match decompress(&zst_path, &raw_path) {
@@ -143,14 +135,14 @@ pub(crate) async fn ensure_guest_image(image: &ImageRef, cache_dir: &Path) -> Re
             // The cached .zst may be a leftover from an interrupted prior
             // decompress; re-download once before giving up, rather than
             // leaving the caller stuck on a permanently corrupt cache entry.
-            let mut retry = LiveRow::start("guest image", "retrying");
+            let mut retry = LiveRow::start_with_output("guest image", "retrying", output);
             retry.update("retrying");
             retry.settle_warn(format!(
                 "cached image at {} is corrupt ({decompress_error:#}); retrying",
                 zst_path.display()
             ));
             let _ = std::fs::remove_file(&zst_path);
-            download_and_verify(&client, &oci_ref, &zst_path).await?;
+            download_and_verify(&client, &oci_ref, &zst_path, output).await?;
             decompress(&zst_path, &raw_path)?;
             Ok(raw_path)
         },
@@ -209,8 +201,9 @@ async fn download_and_verify(
     client: &reqwest::Client,
     oci_ref: &OciRef,
     dest: &Path,
+    output: Output,
 ) -> Result<()> {
-    let mut row = LiveRow::start("guest image", "downloading");
+    let mut row = LiveRow::start_with_output("guest image", "downloading", output);
     let result: Result<u64> = async {
         let token = fetch_pull_token(client, oci_ref).await?;
         let manifest = fetch_manifest(client, oci_ref, &token).await?;
@@ -341,18 +334,6 @@ mod tests {
         ]
     }"#;
 
-    const ARTIFACT_MANIFEST_FIXTURE: &str = r#"{
-        "mediaType": "application/vnd.oci.artifact.manifest.v1+json",
-        "artifactType": "application/vnd.omnifs.guest-image.v1+zstd",
-        "blobs": [
-            {
-                "mediaType": "application/vnd.omnifs.guest-image.v1+zstd",
-                "digest": "sha256:2d24b9eb82aa02a06ac3a487489a17083ec337a613ccb2a1f1ca610ec37370ca",
-                "size": 18
-            }
-        ]
-    }"#;
-
     #[test]
     fn parses_oci_image_manifest_shape() {
         let manifest = OciManifest::parse(IMAGE_MANIFEST_FIXTURE.as_bytes()).unwrap();
@@ -365,25 +346,14 @@ mod tests {
     }
 
     #[test]
-    fn parses_legacy_artifact_manifest_shape() {
-        let manifest = OciManifest::parse(ARTIFACT_MANIFEST_FIXTURE.as_bytes()).unwrap();
-        let blob = manifest.single_blob().unwrap();
-        assert_eq!(
-            blob.digest,
-            "sha256:2d24b9eb82aa02a06ac3a487489a17083ec337a613ccb2a1f1ca610ec37370ca"
-        );
-        assert_eq!(blob.size, 18);
-    }
-
-    #[test]
-    fn rejects_a_manifest_with_no_blobs() {
-        let manifest = OciManifest::parse(r#"{"layers": [], "blobs": []}"#.as_bytes()).unwrap();
+    fn rejects_a_manifest_with_no_layers() {
+        let manifest = OciManifest::parse(r#"{"layers": []}"#.as_bytes()).unwrap();
         let err = manifest.single_blob().unwrap_err();
-        assert!(err.to_string().contains("no layers or blobs"));
+        assert!(err.to_string().contains("expected exactly one layer"));
     }
 
     #[test]
-    fn rejects_a_manifest_with_multiple_blobs() {
+    fn rejects_a_manifest_with_multiple_layers() {
         let two_layers = r#"{
             "layers": [
                 {"mediaType": "a", "digest": "sha256:aaaa", "size": 1},
@@ -392,7 +362,7 @@ mod tests {
         }"#;
         let manifest = OciManifest::parse(two_layers.as_bytes()).unwrap();
         let err = manifest.single_blob().unwrap_err();
-        assert!(err.to_string().contains("expected exactly one blob"));
+        assert!(err.to_string().contains("expected exactly one layer"));
     }
 
     #[test]

@@ -24,7 +24,7 @@ use omnifs_caps::AccessNeed;
 use omnifs_workspace::authn::AuthScheme;
 use omnifs_workspace::provider::{Provider, ProviderManifest};
 
-use crate::style;
+use crate::ui::style;
 
 /// Marker error returned by [`select`]/[`multiselect`] when the user cancels
 /// (Esc or Ctrl-C). Callers that treat cancel as a normal exit downcast via

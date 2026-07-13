@@ -8,7 +8,10 @@ use omnifs_workspace::mounts::Name as MountName;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
+use crate::commands::receipt::{SnapshotReceipt, SnapshotSource, Verdict};
+use crate::error::ExitCode;
 use crate::ui::LiveRow;
+use crate::ui::output::Output;
 use crate::workspace::Workspace;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -113,13 +116,14 @@ pub struct SnapshotArgs {
 }
 
 impl SnapshotArgs {
-    pub async fn run(self) -> anyhow::Result<()> {
+    pub async fn run(self, output: Output) -> anyhow::Result<ExitCode> {
         let workspace = Workspace::resolve()?;
         let mount = MountName::new(self.mount.clone())
             .with_context(|| format!("invalid mount name `{}` for snapshot export", self.mount))?;
         require_configured_mount(&workspace, &mount)?;
+        let output_existed = self.out.exists();
 
-        let mut row = LiveRow::start("snapshot", "preparing");
+        let mut row = LiveRow::start_with_output("snapshot", "preparing", output);
         row.update("preparing");
         let result: anyhow::Result<(&str, ExportProgress)> = async {
             if let Some(tar) = workspace
@@ -158,7 +162,23 @@ impl SnapshotArgs {
             progress.files_written,
             LiveRow::human_bytes(progress.bytes_written),
         ));
-        Ok(())
+        let receipt = SnapshotReceipt {
+            verdict: Verdict::Ok,
+            mount: mount.to_string(),
+            output: self.out,
+            source: match source {
+                "daemon" => SnapshotSource::Daemon,
+                "cache" => SnapshotSource::Cache,
+                _ => unreachable!("snapshot source is fixed by the export branches"),
+            },
+            files: progress.files_written,
+            bytes: progress.bytes_written,
+            changed: !output_existed || progress.files_written > 0,
+        };
+        if output.is_structured() {
+            output.emit_result(crate::ui::output::ResultVerdict::Ok, receipt)?;
+        }
+        Ok(ExitCode::Success)
     }
 }
 
@@ -198,6 +218,7 @@ mod tests {
     use std::io::Write as _;
 
     use super::*;
+    use crate::ui::output::OutputMode;
 
     fn fixture_tar() -> Vec<u8> {
         let mut bytes = Vec::new();
@@ -244,7 +265,11 @@ mod tests {
     #[test]
     fn unpack_reports_the_complete_export() {
         let temp = tempfile::tempdir().unwrap();
-        let mut row = LiveRow::start("snapshot", "preparing");
+        let mut row = LiveRow::start_with_output(
+            "snapshot",
+            "preparing",
+            Output::new(OutputMode::Human, false),
+        );
         let progress = SnapshotTar::new(&fixture_tar())
             .unpack(temp.path(), &mut row)
             .unwrap();
@@ -266,7 +291,11 @@ mod tests {
             .unwrap()
             .write_all(b"kept")
             .unwrap();
-        let mut row = LiveRow::start("snapshot", "preparing");
+        let mut row = LiveRow::start_with_output(
+            "snapshot",
+            "preparing",
+            Output::new(OutputMode::Human, false),
+        );
 
         let error = SnapshotTar::new(&fixture_tar())
             .unpack(temp.path(), &mut row)
@@ -283,7 +312,11 @@ mod tests {
     fn unpack_rejects_unsafe_entries_instead_of_counting_them() {
         let temp = tempfile::tempdir().unwrap();
         let out = temp.path().join("out");
-        let mut row = LiveRow::start("snapshot", "preparing");
+        let mut row = LiveRow::start_with_output(
+            "snapshot",
+            "preparing",
+            Output::new(OutputMode::Human, false),
+        );
 
         let error = SnapshotTar::new(&unsafe_fixture_tar())
             .unpack(&out, &mut row)

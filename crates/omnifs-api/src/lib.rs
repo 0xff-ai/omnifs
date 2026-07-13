@@ -17,14 +17,14 @@ pub mod events;
 
 /// Control API major version. The CLI refuses to talk to a daemon with a
 /// different major. Bump when routes or payloads change incompatibly.
-pub const API_MAJOR: u16 = 5;
+pub const API_MAJOR: u16 = 6;
 
 /// Control API minor version. The CLI warns but proceeds when the daemon's
 /// minor differs. Bump for additive, backward-compatible additions.
 pub const API_MINOR: u16 = 0;
 
 /// TCP namespace attach address, injected by the frontend container launcher
-/// and read by the out-of-process `omnifs-fuse` runner when no `--attach`
+/// and read by the out-of-process `omnifs-thin fuse` runner when no `--attach`
 /// unix path is given. Carries `host.docker.internal:<port>` so a
 /// containerized frontend reaches the host-native daemon's TCP attach
 /// listener.
@@ -97,10 +97,6 @@ pub struct DaemonStatus {
     #[serde(default)]
     #[schema(value_type = String)]
     pub executable: PathBuf,
-    /// Derived, not authoritative: the first local attached frontend's mount
-    /// point, or empty when none is connected. `frontends` is authoritative.
-    #[schema(value_type = String)]
-    pub mount_point: PathBuf,
     #[schema(value_type = String)]
     pub config_dir: PathBuf,
     #[schema(value_type = String)]
@@ -366,8 +362,6 @@ pub struct ProviderArtifact {
 pub struct ProviderSummary {
     pub name: String,
     pub installed: Vec<ProviderArtifact>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub latest: Option<ProviderArtifact>,
 }
 
 /// One mount that did not converge during a reconcile. `mount` is the mount
@@ -562,8 +556,6 @@ pub struct ReconcileRequest {
 pub struct StopReport {
     /// Every attached frontend at the moment of shutdown.
     pub frontends: Vec<FrontendInfo>,
-    #[schema(value_type = String)]
-    pub mount_point: PathBuf,
     pub providers_dropped: usize,
 }
 

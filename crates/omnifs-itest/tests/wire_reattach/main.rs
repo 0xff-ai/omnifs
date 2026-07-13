@@ -3,7 +3,7 @@
 //! This is the structural answer to the ESTALE row in the NFS quirk catalog. Two
 //! restart cases, run in order against one live mount:
 //!
-//! - **Frontend process restart.** SIGKILL `omnifs-nfs`, the shipped
+//! - **Frontend process restart.** SIGKILL `omnifs-thin nfs`, the shipped
 //!   out-of-process NFS runner over the Omnifs VFS wire protocol,
 //!   mid-workload and relaunch it with the same argv. The state directory
 //!   recovers the active mount's ephemeral NFS port.
@@ -189,6 +189,7 @@ fn wire_reattach_survives_frontend_and_daemon_restart() {
     // Same argv every launch: port zero chooses an ephemeral address initially,
     // then the active-mount restart must recover that address from state.
     let frontend_argv: Vec<String> = vec![
+        "nfs".into(),
         "--attach".into(),
         socket.to_str().expect("socket utf-8").into(),
         "--mount-point".into(),
@@ -197,7 +198,7 @@ fn wire_reattach_survives_frontend_and_daemon_restart() {
         state_dir.to_str().expect("state dir utf-8").into(),
     ];
     let spawn_frontend = || {
-        Command::new(live::nfs_runner_bin())
+        Command::new(live::thin_runner_bin())
             .args(&frontend_argv)
             .env("OMNIFS_HOME", &home)
             .env(
@@ -205,7 +206,7 @@ fn wire_reattach_survives_frontend_and_daemon_restart() {
                 std::env::var("REATTACH_FRONTEND_LOG").unwrap_or_else(|_| "warn".into()),
             )
             .spawn()
-            .expect("spawn omnifs-nfs")
+            .expect("spawn omnifs-thin nfs")
     };
 
     let mut guard = Cleanup {

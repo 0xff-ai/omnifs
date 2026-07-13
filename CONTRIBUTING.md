@@ -4,14 +4,14 @@ Reference for the contributor workflow, build and validation commands, runtime d
 
 ## Getting started
 
-The primary contributor workflow is `just dev`, which runs `scripts/dev.ts`. The script checks prerequisites, builds provider WASM into a content-addressed provider-store bundle, builds the omnifs CLI natively, starts a host-native daemon (`omnifs up --no-frontend`) with dev mounts and credentials rendered into `~/.omnifs-dev`, launches the Docker FUSE frontend (via driver), and opens a shell inside that frontend container at `/omnifs`.
+The primary contributor workflow is `just dev`, which runs `scripts/dev.ts`. The script checks prerequisites, builds provider WASM into a content-addressed provider-store bundle, builds the omnifs CLI natively, starts a host-native daemon (`omnifs up --no-frontend`) with dev mounts and credentials rendered into `~/.omnifs-dev`, launches the Docker FUSE frontend environment, and opens a shell inside that frontend container at `/omnifs`.
 
 ```bash
 just dev            # build providers and the CLI, start the native daemon, attach the frontend, open /omnifs
-omnifs status                                  # host-native: runs directly, no docker exec needed
+target/debug/omnifs status                     # host-native: runs directly, no docker exec needed
 FRONTEND=$(docker ps --filter label=ai.0xff.omnifs.home="$HOME/.omnifs-dev" --format '{{.Names}}')
 docker exec -it -w /omnifs "$FRONTEND" /bin/sh # reattach to the browsing shell
-omnifs frontend down && omnifs down            # tear both down
+target/debug/omnifs down                       # stop all frontends, then the daemon
 ```
 
 `scripts/dev.ts` is contributor-only and requires a source checkout. It resolves a dedicated dev home at `~/.omnifs-dev`, copies the provider-store bundle into `~/.omnifs-dev/providers`, writes pinned mount specs under `~/.omnifs-dev/mounts`, interpolates host tokens into the `contrib/dev-credentials.json` template to produce `~/.omnifs-dev/credentials.json`, and pins `[system].frontend_image` in `~/.omnifs-dev/config.toml` at an image tagged `omnifs-frontend:<short-sha>-dev`. The daemon itself is host-native, not containerized: no home bind mount, no daemon container. Dev auth uses host tokens: set `GITHUB_TOKEN` or `LINEAR_API_KEY`, or allow the script to read `gh auth token` for GitHub when prompted. Authenticated mounts without a token are skipped rather than started broken.
@@ -39,7 +39,7 @@ WASM tests compile but cannot execute on the host because there is no WASM runti
 
 CI builds Rust artifacts natively and uses Docker only to assemble the optional frontend image. Linux CLI artifacts use `cargo-zigbuild` with a GNU glibc 2.17 baseline; Darwin CLI artifacts are cross-linked from Linux through the pinned `rust-cross/cargo-zigbuild` container. Provider and tool WASM artifacts are built by `just build providers`; its WASI SDK pin in `justfile` is shared by local and CI builds.
 
-`Dockerfile`'s `frontend-dev` stage is the contributor image path for `just dev` (built by `scripts/dev.ts`, same as `just frontend-image`). It runs the slim `omnifs-fuse` binary (built by the `fuse-builder` stage), which needs no engine, no Wasmtime, and no provider bundle, so unlike the full `omnifs` CLI/daemon binary (`OMNIFS_PROVIDER_BUNDLE_DIR` embeds `just build providers`'s `target/omnifs-provider-store` output into that binary at compile time), the frontend image needs no provider-wasm build context at all. Release frontend image assembly uses `scripts/ci/build-frontend-image.sh`, which stages a prebuilt Linux `omnifs-fuse` binary rather than compiling in Docker. Release CLI binaries embed the compressed provider bundle and unpack it into the host `OMNIFS_HOME/providers`; do not make the image the owner of `/root/.omnifs/providers`. Keep `just dev` working when changing Docker-related files.
+`Dockerfile`'s `frontend-dev` stage is the contributor image path for `just dev` (built by `scripts/dev.ts`, same as `just frontend-image`). It runs `omnifs-thin fuse` (built by the `thin-builder` stage), which needs no engine runtime, Wasmtime, or provider bundle, so unlike the full `omnifs` CLI/daemon binary (`OMNIFS_PROVIDER_BUNDLE_DIR` embeds `just build providers`'s `target/omnifs-provider-store` output into that binary at compile time), the frontend image needs no provider-wasm build context at all. Release frontend image assembly uses `scripts/ci/build-frontend-image.sh`, which stages a prebuilt Linux `omnifs-thin` binary rather than compiling in Docker. Release CLI binaries embed the compressed provider bundle and unpack it into the host `OMNIFS_HOME/providers`; do not make the image the owner of `/root/.omnifs/providers`. Keep `just dev` working when changing Docker-related files.
 
 CI orchestration shells live in `scripts/ci/`, with `scripts/ci/common.sh` factoring out repo-root discovery. Npm version sync and OpenAPI generation are just recipes. The release flow is git-cliff plus the `release-pr.yml` coordinator (see `RELEASING.md`); the repo carries no Bun.
 
@@ -49,7 +49,8 @@ For mount, provider, clone, traversal, or runtime behavior changes, do not stop 
 
 ```bash
 just dev -y
-omnifs status
+target/debug/omnifs status
+target/debug/omnifs --output json status | jq '.result | {frontends, mounts, providers}'
 FRONTEND=$(docker ps --filter label=ai.0xff.omnifs.home="$HOME/.omnifs-dev" --format '{{.Names}}')
 docker exec "$FRONTEND" sh -c 'ls /omnifs/github/0xff-ai/omnifs/issues/open'
 tail -n 80 ~/.omnifs-dev/cache/daemon.log
@@ -62,7 +63,7 @@ For provider path-surface changes, test the whole shell traversal, not only the 
 ## Runtime debugging
 
 - The daemon is host-native: its log is `~/.omnifs-dev/cache/daemon.log` on the host, not inside any container.
-- `docker logs "$FRONTEND"` shows the frontend container's own stdout/stderr; it only ever runs `omnifs-fuse`, so a mount-serving failure is almost always in the daemon log instead.
+- `docker logs "$FRONTEND"` shows the frontend container's own stdout/stderr; it only ever runs `omnifs-thin fuse`, so a mount-serving failure is almost always in the daemon log instead.
 - Clone failures should surface in the daemon log with `git clone` stderr.
 - FUSE `access(...)` warnings are expected noise unless they correlate with a real failure.
 - Use `omnifs status` directly (host-native, no `docker exec` needed) for fast mount/config/provider/cache triage.
@@ -80,7 +81,7 @@ When debugging hangs or slow paths, start with user-visible probes before theory
 2. `cat /dns/@google/<domain>/MX`
 3. `tail -n 80 ~/.omnifs-dev/cache/daemon.log`
 
-The frontend image is a minimal `debian:trixie-slim` (GNU coreutils/findutils, fuse3, jq, rsync, tar, xxd; `Dockerfile`'s `frontend-base`), deliberately without zsh, gum, or any shell rc customization: it only ever runs `omnifs-fuse`, and an interactive session there is `/bin/sh`. Do not add interactive-shell tooling to it; that belongs to the host shell the contributor already has.
+The frontend image is a minimal `debian:trixie-slim` (GNU coreutils/findutils, fuse3, jq, rsync, tar, xxd; `Dockerfile`'s `frontend-base`), deliberately without zsh, gum, or any shell rc customization: it only ever runs `omnifs-thin fuse`, and an interactive session there is `/bin/sh`. Do not add interactive-shell tooling to it; that belongs to the host shell the contributor already has.
 
 ## Code conventions
 

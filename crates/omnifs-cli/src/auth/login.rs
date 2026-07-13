@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 
 use super::explain::AuthMode;
 use crate::credential_target::CredentialTarget;
-use crate::style;
+use crate::ui::style;
 use crate::workspace::Workspace;
 use omnifs_workspace::authn::SchemeGuidance;
 use omnifs_workspace::mounts::Spec;
@@ -230,7 +230,7 @@ fn present_device_prompt(prompt: &DeviceCodePrompt, no_browser: bool) {
         .verification_uri_complete
         .as_deref()
         .unwrap_or(&prompt.verification_uri);
-    let _ = cliclack::log::remark(crate::style::accent(url));
+    let _ = cliclack::log::remark(crate::ui::style::accent(url));
 
     // Clipboard copy is best effort only. Failure must not prevent showing
     // the code or continuing the flow.
@@ -238,10 +238,10 @@ fn present_device_prompt(prompt: &DeviceCodePrompt, no_browser: bool) {
         match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(prompt.user_code.clone())) {
             Ok(()) => format!(
                 "{} {}",
-                crate::style::bold(&prompt.user_code),
-                crate::style::dim("(copied to clipboard)")
+                crate::ui::style::bold(&prompt.user_code),
+                crate::ui::style::dim("(copied to clipboard)")
             ),
-            Err(_) => crate::style::bold(&prompt.user_code),
+            Err(_) => crate::ui::style::bold(&prompt.user_code),
         };
     let _ = cliclack::log::remark(code_line);
 
@@ -254,24 +254,24 @@ fn present_device_prompt(prompt: &DeviceCodePrompt, no_browser: bool) {
         let mins = secs / 60;
         format!("expires in {mins}m")
     };
-    let _ = cliclack::log::remark(crate::style::dim(expiry_text));
+    let _ = cliclack::log::remark(crate::ui::style::dim(expiry_text));
 
     // Only attempt browser open when allowed and a complete uri is present.
     // Report outcome only on real success so we never overstate what happened.
     if !no_browser && let Some(complete_url) = &prompt.verification_uri_complete {
         match webbrowser::open(complete_url) {
             Ok(()) => {
-                let _ = cliclack::log::remark(crate::style::dim("(opened your browser)"));
+                let _ = cliclack::log::remark(crate::ui::style::dim("(opened your browser)"));
             },
             Err(_) => {
-                let _ = cliclack::log::remark(crate::style::dim(
+                let _ = cliclack::log::remark(crate::ui::style::dim(
                     "(could not open a browser; visit the URL above)",
                 ));
             },
         }
     }
 
-    let _ = cliclack::log::remark(crate::style::dim("waiting for confirmation"));
+    let _ = cliclack::log::remark(crate::ui::style::dim("waiting for confirmation"));
 }
 
 fn print_oauth_consent_summary(
@@ -281,9 +281,9 @@ fn print_oauth_consent_summary(
 ) {
     let scheme = request.scheme();
     let mode = AuthMode::from_oauth_flow(&scheme.flow);
-    session.note(crate::style::dim(mode.experience()));
+    session.note(crate::ui::style::dim(mode.experience()));
     if !guidance.setup_steps.is_empty() {
-        session.note(crate::style::dim("Setup:"));
+        session.note(crate::ui::style::dim("Setup:"));
         for (index, step) in guidance.setup_steps.iter().enumerate() {
             session.note(format!("{}. {step}", index + 1));
         }

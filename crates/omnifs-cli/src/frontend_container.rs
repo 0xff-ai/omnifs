@@ -13,8 +13,8 @@ use bollard::models::{ContainerCreateBody, DeviceMapping, HostConfig, MountPoint
 use omnifs_api::{OMNIFS_ATTACH_ADDR_ENV, OMNIFS_ATTACH_TOKEN_ENV};
 use omnifs_workspace::layout::{OMNIFS_HOME_ENV, WorkspaceLayout};
 
-use crate::config::{Config, resolve_setting};
 use crate::launch_backend::{BUILD_CHANNEL, BuildChannel, ContainerName, ImageRef};
+use omnifs_workspace::config::Config;
 
 /// Base container name for the default workspace. A non-default workspace
 /// (an explicit `OMNIFS_HOME`) disambiguates with an 8-hex-char content hash
@@ -41,19 +41,17 @@ pub(crate) const fn default_frontend_image_for(channel: BuildChannel) -> &'stati
 }
 
 /// Resolve the frontend image through the flag > env > config > default
-/// precedence chain (see [`crate::config::resolve_setting`]), gated on the
+/// precedence chain (CLI flag, environment, workspace config, then default), gated on the
 /// build channel: a release binary defaults to the pinned registry tag, a dev
 /// binary defaults to the local `omnifs-frontend:dev` tag and never pulls.
 pub(crate) fn resolve_frontend_image(
     image: Option<String>,
     config: &Config,
 ) -> anyhow::Result<ImageRef> {
-    let image = resolve_setting(
-        image,
-        ENV_FRONTEND_IMAGE,
-        || config.system.frontend_image.clone(),
-        default_frontend_image_for(BUILD_CHANNEL).to_string(),
-    );
+    let image = image
+        .or_else(|| std::env::var(ENV_FRONTEND_IMAGE).ok())
+        .or_else(|| config.system.frontend_image.clone())
+        .unwrap_or_else(|| default_frontend_image_for(BUILD_CHANNEL).to_string());
     ImageRef::new(image)
 }
 
@@ -183,7 +181,7 @@ fn env_var_allowed(var: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::ConfigSystem;
+    use omnifs_workspace::config::System;
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -234,7 +232,7 @@ mod tests {
     fn frontend_image_resolution_precedence() {
         with_env(&[(ENV_FRONTEND_IMAGE, None)], || {
             let config = Config {
-                system: ConfigSystem {
+                system: System {
                     frontend_image: Some("ghcr.io/example/frontend-config:1.0.0".into()),
                 },
                 ..Default::default()

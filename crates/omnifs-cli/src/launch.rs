@@ -12,6 +12,7 @@ use omnifs_workspace::provider::Catalog;
 
 use crate::client::{DaemonClient, env_daemon_addr};
 use crate::mount_config::MountConfig;
+use crate::ui::output::Output;
 use crate::workspace::Workspace;
 
 /// Command-owned daemon launcher.
@@ -23,17 +24,23 @@ use crate::workspace::Workspace;
 pub(crate) struct Launcher<'a> {
     workspace: &'a Workspace,
     verb: &'static str,
+    output: Output,
 }
 
 impl<'a> Launcher<'a> {
-    pub(crate) fn new(workspace: &'a Workspace, verb: &'static str) -> Self {
-        Self { workspace, verb }
+    pub(crate) fn new(workspace: &'a Workspace, verb: &'static str, output: Output) -> Self {
+        Self {
+            workspace,
+            verb,
+            output,
+        }
     }
 
     pub(crate) async fn launch(self) -> anyhow::Result<LaunchOutcome> {
         let paths = self.workspace.layout();
         let config = self.workspace.config()?;
-        let telemetry_enabled = config.telemetry_enabled();
+        let telemetry_enabled =
+            config.telemetry.enabled && omnifs_workspace::telemetry::enabled_from_env();
 
         let configs = self.workspace.mounts()?;
         if configs.is_empty() {
@@ -44,7 +51,6 @@ impl<'a> Launcher<'a> {
         }
 
         crate::provider_bundle::ensure_providers_installed(&paths.providers_dir)?;
-        crate::upgrade::run_upgrade_check(&paths.providers_dir, &configs)?;
 
         // Fail fast, before the daemon spawns, when a configured mount's
         // host-managed credential is missing or its spec under-grants the
@@ -53,11 +59,11 @@ impl<'a> Launcher<'a> {
         let store = FileStore::new(&paths.credentials_file);
         preflight_mounts(&configs, self.workspace.catalog(), &store)?;
 
-        crate::ui::narrate(format!(
+        self.output.narrate(format!(
             "Using mount configs from {}",
             paths.mounts_dir.display()
         ));
-        launch_host_native(paths, self.verb, telemetry_enabled).await
+        launch_host_native(paths, self.verb, telemetry_enabled, self.output).await
     }
 }
 
@@ -82,7 +88,7 @@ fn preflight_mounts(
 
 #[derive(Debug, Clone)]
 pub(crate) struct LaunchOutcome {
-    pub mount_point: Option<PathBuf>,
+    pub local_mount_points: Vec<PathBuf>,
 }
 
 /// The loopback address the debug `OMNIFS_DAEMON_ADDR` TCP path serves on,
@@ -105,9 +111,10 @@ async fn launch_host_native(
     paths: &WorkspaceLayout,
     verb: &str,
     telemetry_enabled: bool,
+    output: Output,
 ) -> anyhow::Result<LaunchOutcome> {
     reject_existing_host_daemon(paths, verb).await?;
-    crate::ui::narrate("Starting omnifs daemon (host-native)");
+    output.narrate("Starting omnifs daemon (host-native)");
 
     let tcp_addr = env_control_addr()?;
     crate::launch_backend::launch_native(paths, tcp_addr, telemetry_enabled).await?;
@@ -124,11 +131,20 @@ async fn launch_host_native(
     if let Some(status) = &status {
         report_launch_status(status);
     }
-    Ok(LaunchOutcome {
-        mount_point: status
-            .map(|status| status.mount_point)
-            .filter(|mount_point| !mount_point.as_os_str().is_empty()),
-    })
+    let mut local_mount_points = status
+        .map(|status| {
+            status
+                .frontends
+                .into_iter()
+                .filter(|frontend| frontend.delivery == omnifs_api::FrontendDelivery::Local)
+                .map(|frontend| frontend.mount_point)
+                .filter(|mount_point| !mount_point.as_os_str().is_empty())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    local_mount_points.sort();
+    local_mount_points.dedup();
+    Ok(LaunchOutcome { local_mount_points })
 }
 
 async fn reject_existing_host_daemon(paths: &WorkspaceLayout, verb: &str) -> anyhow::Result<()> {

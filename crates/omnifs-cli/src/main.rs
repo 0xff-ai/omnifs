@@ -15,7 +15,6 @@ mod catalog;
 mod cli;
 mod client;
 mod commands;
-mod config;
 mod credential_target;
 mod daemon_teardown;
 mod error;
@@ -25,40 +24,68 @@ mod guest_image_pull;
 #[cfg(feature = "daemon")]
 mod host_teardown;
 mod inspector;
+mod inventory;
 mod krunkit_backend;
 mod launch;
 mod launch_backend;
 #[cfg(feature = "daemon")]
 mod local_backend;
 mod mount_config;
-mod mount_report;
 mod mount_tree;
 mod process;
 mod provider_bundle;
 mod runtime;
 mod stages;
 mod status;
-mod style;
 mod telemetry;
 #[cfg(test)]
 mod test_support;
 mod token_source;
 mod ui;
-mod upgrade;
 mod workspace;
 
 use clap::Parser;
-use cli::{Cli, ProgressFormat};
+use cli::{Cli, raw_command_path, raw_output_mode};
 use error::ExitCode;
+use ui::output::{ErrorEnvelope, ErrorPayload, ErrorVerdict, Output};
 
 #[tokio::main]
 async fn main() {
+    let raw_args = std::env::args_os().skip(1).collect::<Vec<_>>();
+    let provisional_mode = raw_output_mode(raw_args.clone());
     // Map clap's parse outcome at the boundary, not per command: a usage error
     // exits 2, while `--help`/`--version` display exits 0. clap picks the right
     // stream (stdout for help/version, stderr for errors).
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(error) => {
+            let display_error = matches!(
+                error.kind(),
+                clap::error::ErrorKind::DisplayHelp
+                    | clap::error::ErrorKind::DisplayVersion
+                    | clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+            );
+            if let Some(mode) = provisional_mode
+                && !display_error
+            {
+                let output = Output::new(mode, false);
+                let envelope = ErrorEnvelope::new(
+                    raw_command_path(raw_args),
+                    ErrorVerdict::Failed,
+                    ErrorPayload {
+                        id: ExitCode::Usage.slug().to_owned(),
+                        exit_code: ExitCode::Usage.code(),
+                        message: error.to_string(),
+                        causes: Vec::new(),
+                        fix: None,
+                        hints: Vec::new(),
+                    },
+                );
+                if output.emit_error(envelope).is_err() {
+                    let _ = error.print();
+                }
+                std::process::exit(ExitCode::Usage.code());
+            }
             let _ = error.print();
             let code = match error.kind() {
                 clap::error::ErrorKind::DisplayHelp
@@ -73,13 +100,17 @@ async fn main() {
     };
     init_tracing(cli.verbose);
     ui::session::install_theme();
-    ui::output::configure(cli.progress == ProgressFormat::Json, cli.quiet);
+    let command_path = cli.command_path();
+    let output = Output::new(cli.output, cli.quiet)
+        .with_command(command_path)
+        .with_no_input(cli.no_input)
+        .with_yes(cli.yes);
     // Capture the telemetry label before `run` consumes `cli`. `None` for the
     // internal `daemon` subcommand, which records `daemon.jsonl` itself.
     // Subcommands that `std::process::exit` on their own (shell, doctor) record
     // at their exit site; this covers every command that returns to `main`.
     let telemetry_label = cli.telemetry_label();
-    match run(cli).await {
+    match run(cli, output).await {
         Ok(exit_code) => {
             let code = exit_code.code();
             if let Some(cmd) = telemetry_label {
@@ -98,10 +129,10 @@ async fn main() {
                 if let Some(cmd) = telemetry_label {
                     telemetry::record_cli_exit(cmd, code.code());
                 }
-                if ui::output::json_expected() {
-                    emit_json_error(&error::to_json_for(code, "canceled"));
+                if output.is_structured() {
+                    let _ = output.emit_error(error::canceled_envelope(command_path, "canceled"));
                 } else {
-                    ui::eprint_raw(&format!("{}\n", style::dim("canceled")));
+                    ui::eprint_raw(&format!("{}\n", ui::style::dim("canceled")));
                 }
                 std::process::exit(code.code());
             }
@@ -109,25 +140,20 @@ async fn main() {
             if let Some(cmd) = telemetry_label {
                 telemetry::record_cli_exit(cmd, exit_code);
             }
-            // A `--json` command that failed before its document emits exactly
-            // one JSON error document on stdout (with the stable `id`), rather
-            // than the human `Error:` block on stderr.
-            if ui::output::json_expected() {
-                emit_json_error(&error::to_json(&error));
+            // A structured invocation that fails before its result emits one
+            // terminal error envelope on stdout rather than a human block.
+            if output.is_structured() {
+                if output
+                    .emit_error(error::envelope(&error, command_path))
+                    .is_err()
+                {
+                    ui::eprint_raw("Error: failed to serialize error document\n");
+                }
             } else {
                 ui::eprint_raw(&error::render(&error));
             }
             std::process::exit(exit_code);
         },
-    }
-}
-
-fn emit_json_error(document: &error::ErrorJson) {
-    match ui::print_json(document) {
-        Ok(()) => {},
-        // Falling back to the human block keeps the failure visible if the
-        // error document itself cannot be serialized.
-        Err(_) => ui::eprint_raw("Error: failed to serialize error document\n"),
     }
 }
 
@@ -153,6 +179,6 @@ fn init_tracing(verbose: u8) {
     builder.init();
 }
 
-async fn run(cli: Cli) -> anyhow::Result<error::ExitCode> {
-    cli.run().await
+async fn run(cli: Cli, output: Output) -> anyhow::Result<error::ExitCode> {
+    cli.run(output).await
 }

@@ -54,18 +54,18 @@ dev *args:
     bun scripts/dev.ts {{ args }}
 
 # Build the omnifs-frontend:dev image from the working tree. Compiles inside
-# Docker via the `fuse-builder` stage `just dev` never touches: the slim
-# `omnifs-fuse` binary needs no engine or Wasmtime, so unlike the full `omnifs`
+# Docker via the `thin-builder` stage `just dev` never touches: the slim
+# `omnifs-thin` binary needs no engine runtime or Wasmtime, so unlike the full `omnifs`
 # binary's `builder` stage, no provider-store build context is needed here.
 [group('dev')]
 frontend-image:
     docker build -t omnifs-frontend:dev --target frontend-dev .
 
 # Build the krunkit guest disk image: an EFI-bootable Debian trixie arm64 raw
-# disk with fuse3 and the linux/arm64 `omnifs-fuse` binary baked in, whose init
+# disk with fuse3 and the linux/arm64 `omnifs-thin` binary baked in, whose init
 # starts the FUSE frontend runner once a per-launch seed volume delivers the
 # attach parameters. Mirrors `frontend-image`'s reuse of the shared
-# `fuse-builder` Dockerfile stage; see scripts/guest-image/build.sh.
+# `thin-builder` Dockerfile stage; see scripts/guest-image/build.sh.
 [group('dev')]
 guest-image:
     bash scripts/guest-image/build.sh

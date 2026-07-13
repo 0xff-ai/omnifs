@@ -221,7 +221,7 @@ impl Drop for Fixture {
 #[test]
 fn scenario_1_status_nothing_running() {
     let fixture = Fixture::new();
-    let out = fixture.run(&["status", "--json"]);
+    let out = fixture.run(&["status", "--output", "json"]);
 
     assert!(
         out.status.success(),
@@ -231,11 +231,11 @@ fn scenario_1_status_nothing_running() {
     );
 
     let json: serde_json::Value =
-        serde_json::from_slice(&out.stdout).expect("status --json must produce valid JSON");
+        serde_json::from_slice(&out.stdout).expect("status --output json must produce valid JSON");
     assert_eq!(
-        json["runtime"]["state"].as_str().unwrap_or(""),
-        "not_running",
-        "runtime.state must be 'not_running' when no daemon is up; got:\n{json:#}"
+        json["result"]["workspace"]["daemon"].as_str().unwrap_or(""),
+        "stopped",
+        "workspace.daemon must be 'stopped' when no daemon is up; got:\n{json:#}"
     );
 }
 
@@ -324,7 +324,7 @@ fn scenarios_3_to_6_lifecycle_cycle() {
 
     // Status reports the running daemon.
 
-    let out = fixture.run(&["status", "--json"]);
+    let out = fixture.run(&["status", "--output", "json"]);
     assert!(
         out.status.success(),
         "omnifs status should exit 0 while running (exit {})\nstderr: {}",
@@ -333,21 +333,21 @@ fn scenarios_3_to_6_lifecycle_cycle() {
     );
 
     let json: serde_json::Value =
-        serde_json::from_slice(&out.stdout).expect("status --json must produce valid JSON");
+        serde_json::from_slice(&out.stdout).expect("status --output json must produce valid JSON");
 
     assert_eq!(
-        json["runtime"]["state"].as_str().unwrap_or(""),
+        json["result"]["workspace"]["daemon"].as_str().unwrap_or(""),
         "running",
-        "runtime.state must be 'running'; got:\n{json:#}"
+        "workspace.daemon must be 'running'; got:\n{json:#}"
     );
 
     // The `test` mount is loaded.
-    let mounts = json["runtime"]["mounts"]
+    let mounts = json["result"]["mounts"]
         .as_array()
-        .expect("runtime.mounts must be an array");
+        .expect("result.mounts must be an array");
     assert!(
-        mounts.iter().any(|m| m.as_str().unwrap_or("") == "test"),
-        "runtime.mounts must include 'test'; got: {mounts:?}"
+        mounts.iter().any(|m| m["name"].as_str() == Some("test")),
+        "result.mounts must include 'test'; got: {mounts:?}"
     );
 
     // Verify backend is native via the daemon status API directly. The debug
@@ -412,7 +412,7 @@ fn scenarios_3_to_6_lifecycle_cycle() {
 
     // `down` does not return until the daemon control surface is gone, so an
     // immediate status probe must already report the settled not-running state.
-    let immediate_status = fixture.run(&["status", "--json"]);
+    let immediate_status = fixture.run(&["status", "--output", "json"]);
     assert!(
         immediate_status.status.success(),
         "status immediately after down must succeed\nstdout: {}\nstderr: {}",
@@ -420,10 +420,10 @@ fn scenarios_3_to_6_lifecycle_cycle() {
         String::from_utf8_lossy(&immediate_status.stderr),
     );
     let immediate_json: serde_json::Value = serde_json::from_slice(&immediate_status.stdout)
-        .expect("immediate status --json must produce valid JSON");
+        .expect("immediate status --output json must produce valid JSON");
     assert_eq!(
-        immediate_json["runtime"]["state"], "not_running",
-        "status immediately after down must report not_running: {immediate_json:#}"
+        immediate_json["result"]["workspace"]["daemon"], "stopped",
+        "status immediately after down must report stopped: {immediate_json:#}"
     );
 
     // Mount is gone from the OS mount table.
@@ -565,9 +565,9 @@ fn scenario_8_failed_mount_surfaced() {
         "test/hello/message content mismatch after partial failure"
     );
 
-    // `status --json` surfaces the broken mount in the failed set and exits
+    // `status --output json` surfaces the broken mount in the failed set and exits
     // degraded.
-    let out = fixture.run(&["status", "--json"]);
+    let out = fixture.run(&["status", "--output", "json"]);
     assert_eq!(
         out.status.code(),
         Some(5),
@@ -577,44 +577,34 @@ fn scenario_8_failed_mount_surfaced() {
     );
 
     let json: serde_json::Value =
-        serde_json::from_slice(&out.stdout).expect("status --json must produce valid JSON");
+        serde_json::from_slice(&out.stdout).expect("status --output json must produce valid JSON");
 
     assert_eq!(
-        json["runtime"]["state"].as_str().unwrap_or(""),
+        json["result"]["workspace"]["daemon"].as_str().unwrap_or(""),
         "running",
-        "runtime.state must be 'running' even with a broken mount; got:\n{json:#}"
+        "workspace.daemon must be 'running' even with a broken mount; got:\n{json:#}"
     );
 
-    let failed_mounts = json["runtime"]["failed_mounts"]
+    let mounts = json["result"]["mounts"]
         .as_array()
-        .expect("runtime.failed_mounts must be an array");
-    assert!(
-        !failed_mounts.is_empty(),
-        "runtime.failed_mounts must be non-empty when a broken mount spec exists; got:\n{json:#}"
-    );
-
-    // The broken mount must have a non-empty reason.
-    let broken = failed_mounts
+        .expect("result.mounts must be an array");
+    let broken = mounts
         .iter()
-        .find(|m| m["mount"].as_str().unwrap_or("") == "broken")
-        .unwrap_or_else(|| {
-            panic!("failed_mounts must include an entry for 'broken'; got: {failed_mounts:?}")
-        });
-    let reason = broken["reason"].as_str().unwrap_or("");
-    assert!(
-        !reason.is_empty(),
-        "failed mount 'broken' must have a non-empty reason; got: {broken:#}"
+        .find(|m| m["name"].as_str() == Some("broken"))
+        .unwrap_or_else(|| panic!("mounts must include 'broken'; got: {mounts:?}"));
+    assert_eq!(
+        broken["serving"]["state"].as_str(),
+        Some("failed"),
+        "broken mount must report serving failure: {broken:#}"
     );
 
     // `test` is still in the working mounts list.
-    let running_mounts = json["runtime"]["mounts"]
-        .as_array()
-        .expect("runtime.mounts must be an array");
+    let running_mounts = mounts;
     assert!(
         running_mounts
             .iter()
-            .any(|m| m.as_str().unwrap_or("") == "test"),
-        "runtime.mounts must still include 'test' despite the broken peer; got: {running_mounts:?}"
+            .any(|m| m["name"].as_str() == Some("test")),
+        "result.mounts must still include 'test' despite the broken peer; got: {running_mounts:?}"
     );
 
     // Clean up: use --force so a tardy NFS unmount does not block.

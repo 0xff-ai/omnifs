@@ -921,7 +921,7 @@ pub const LINUX_NFS_LOOPBACK: Column = Column {
     ],
 };
 
-/// The Docker-hosted FUSE frontend (`omnifs frontend up`): a separate,
+/// The Docker-hosted FUSE frontend (`omnifs frontend enable fuse --environment docker`): a separate,
 /// credential-free container attached to a host-native daemon's
 /// shared namespace over TCP, running kernel FUSE inside the container. This
 /// frontend ships its own minimal `debian:trixie-slim` image (`Dockerfile`'s
@@ -934,8 +934,8 @@ pub const FUSE_DOCKER_FRONTEND: Column = Column {
     expectations: &[GREP_R_PAGINATION_CONTROLS],
 };
 
-/// The krunkit driver's guest FUSE frontend (`omnifs frontend up --driver
-/// krunkit`), a libkrun microVM on Apple Silicon macOS, reached over
+/// The krunkit guest FUSE frontend (`omnifs frontend enable fuse
+/// --environment krunkit`), a libkrun microVM on Apple Silicon macOS, reached over
 /// ssh-over-vsock via the real `omnifs shell -- <cmd>` CLI path
 /// (`crates/omnifs-itest/tests/frontend_krunkit`). LOCAL-ONLY: GitHub-hosted
 /// macOS runners cannot nest virtualization, so this column never runs in CI

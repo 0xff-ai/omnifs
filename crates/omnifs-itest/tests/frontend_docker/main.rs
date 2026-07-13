@@ -1,12 +1,12 @@
 //! The Docker-hosted FUSE frontend end to end.
 //!
-//! `omnifs frontend up` attaches a separate, credential-free container to a
+//! `omnifs frontend enable fuse --environment docker` attaches a separate, credential-free container to a
 //! host-native daemon's shared namespace over TCP and renders kernel FUSE
 //! inside it. This suite proves the container behaves like a real mount for
 //! the standard toolbox (the `fuse-docker` conformance column, reusing the
 //! shared matrix machinery from `omnifs_itest::matrix` rather than forking
 //! it), plus the surrounding lifecycle, timing, and security guarantees:
-//! `omnifs frontend {up,down,status}`, `omnifs down` teardown ordering, a
+//! `omnifs frontend {enable,disable,ls}`, `omnifs down` teardown ordering, a
 //! cold-start budget, cross-mount byte identity, kill/reattach behavior, and
 //! the no-credentials contract.
 //!
@@ -125,7 +125,7 @@ fn docker_output(args: &[&str]) -> Option<String> {
 // ===========================================================================
 
 /// Drives the real `omnifs` binary against a hermetic `OMNIFS_HOME`, exactly
-/// as a contributor would: `up`, `frontend up/down/status`, `down`. No test
+/// as a contributor would: `up`, `frontend enable/disable/ls`, `down`. No test
 /// touches the user's real `~/.omnifs` or default ports.
 struct Fixture {
     home: TempDir,
@@ -166,7 +166,7 @@ impl Fixture {
     }
 
     /// Run a CLI subcommand with the hermetic env, including the frontend
-    /// image override so `frontend up` never reaches for a registry.
+    /// image override so Docker enable never reaches for a registry.
     fn run(&self, args: &[&str]) -> Output {
         Command::new(live::omnifs_bin())
             .args(args)
@@ -195,6 +195,29 @@ impl Fixture {
         );
         self.daemon_pid = self.daemon_pid_from_record();
 
+        let filesystem = if cfg!(target_os = "linux") {
+            "fuse"
+        } else {
+            "nfs"
+        };
+        let location = self.mount_point.to_str().expect("mount point utf8");
+        let out = self.run(&[
+            "frontend",
+            "enable",
+            filesystem,
+            "--environment",
+            "host",
+            "--location",
+            location,
+        ]);
+        assert!(
+            out.status.success(),
+            "host frontend enable failed (exit {})\nstdout: {}\nstderr: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+        );
+
         let message = self.mount_point.join("test/hello/message");
         let deadline = Instant::now() + Duration::from_secs(30);
         while !message.is_file() {
@@ -207,15 +230,15 @@ impl Fixture {
         }
     }
 
-    fn frontend_up(&self) -> Output {
-        self.run(&["frontend", "up"])
+    fn frontend_enable(&self) -> Output {
+        self.run(&["frontend", "enable", "fuse", "--environment", "docker"])
     }
 
-    /// Assert `frontend up` succeeded; on failure, dump the runner logs of
+    /// Assert Docker frontend enable succeeded; on failure, dump the runner logs of
     /// every labeled container first (the fixture Drop removes them, so this
     /// is the only window to capture why the mount never served), then panic
     /// with the CLI's own output.
-    fn assert_frontend_up_ok(&self, out: &Output, context: &str) {
+    fn assert_frontend_enable_ok(&self, out: &Output, context: &str) {
         if out.status.success() {
             return;
         }
@@ -224,7 +247,7 @@ impl Fixture {
             eprintln!("--- docker logs {name} (tail) ---\n{logs}\n---");
         }
         panic!(
-            "omnifs frontend up failed ({context}, exit {})\nstdout: {}\nstderr: {}",
+            "omnifs frontend enable fuse --environment docker failed ({context}, exit {})\nstdout: {}\nstderr: {}",
             out.status,
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr),
@@ -232,7 +255,7 @@ impl Fixture {
     }
 
     fn frontend_status(&self) -> Output {
-        self.run(&["frontend", "status"])
+        self.run(&["frontend", "ls"])
     }
 
     fn down(&self) -> Output {
@@ -371,19 +394,22 @@ fn wait_for_pid_gone(pid: u32, timeout: Duration) {
     }
 }
 
-/// `docker exec <container> cat /omnifs/test/hello/message` returns the exact
-/// fixture bytes: the cheapest end-to-end proof the mount is really serving.
+/// `docker exec <container> cat /omnifs/<mount>/hello/message` returns exact
+/// fixture bytes for every configured mount.
 fn assert_serves(container: &str) {
-    let out = Command::new("docker")
-        .args(["exec", container, "cat", "/omnifs/test/hello/message"])
-        .output()
-        .unwrap_or_else(|error| panic!("docker exec cat: {error}"));
-    assert!(
-        out.status.success(),
-        "docker exec cat /omnifs/test/hello/message failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert_eq!(String::from_utf8_lossy(&out.stdout), "Hello, world!");
+    for root in ["test", "test2"] {
+        let guest_path = format!("/omnifs/{root}/hello/message");
+        let out = Command::new("docker")
+            .args(["exec", container, "cat", &guest_path])
+            .output()
+            .unwrap_or_else(|error| panic!("docker exec cat {guest_path}: {error}"));
+        assert!(
+            out.status.success(),
+            "docker exec cat {guest_path} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "Hello, world!");
+    }
 }
 
 // ===========================================================================
@@ -507,7 +533,7 @@ fn assert_byte_identity(host_path: &Path, container: &str, guest_path: &str, lim
 // (c) Cold start: docker-run-to-served-mount
 // ===========================================================================
 
-/// Gate: `omnifs frontend up` must go from container start to a served mount
+/// Gate: Docker frontend enable must go from container start to a served mount
 /// in under 15s. Timed with the daemon already warm (a prior `up_native` call),
 /// so the span isolates container start cost from daemon bring-up. Sized for
 /// shared CI runners (measured ~7.5s on GitHub-hosted Linux); the scorecard
@@ -578,18 +604,24 @@ fn fuse_docker_lifecycle_and_matrix() {
     // (c) cold start: the daemon is already warm, so the timed span isolates
     // container-run-to-served-mount latency from daemon bring-up cost.
     let started = Instant::now();
-    let up_out = fixture.frontend_up();
+    let up_out = fixture.frontend_enable();
     let elapsed = started.elapsed();
-    fixture.assert_frontend_up_ok(&up_out, "cold start");
+    fixture.assert_frontend_enable_ok(&up_out, "cold start");
     record_cold_start(elapsed);
 
-    // (a) `frontend status` is truthful.
+    // (a) `frontend ls` is truthful.
     let status_out = fixture.frontend_status();
-    assert!(status_out.status.success());
+    assert!(
+        status_out.status.success(),
+        "frontend ls failed (exit {})\nstdout: {}\nstderr: {}",
+        status_out.status,
+        String::from_utf8_lossy(&status_out.stdout),
+        String::from_utf8_lossy(&status_out.stderr),
+    );
     let status_text = String::from_utf8_lossy(&status_out.stdout);
     assert!(
-        status_text.contains(": running"),
-        "frontend status must report running: {status_text}"
+        status_text.contains("attached"),
+        "frontend ls must report an attached Docker frontend: {status_text}"
     );
 
     let container = fixture.container_name();
@@ -611,6 +643,12 @@ fn fuse_docker_lifecycle_and_matrix() {
         &container,
         "/omnifs/test/hello/large-ranged",
         256 * 1024,
+    );
+    assert_byte_identity(
+        &fixture.mount_point.join("test2/hello/message"),
+        &container,
+        "/omnifs/test2/hello/message",
+        13,
     );
 
     let _ = Command::new("docker")
@@ -644,6 +682,30 @@ fn fuse_docker_lifecycle_and_matrix() {
         mismatches.join("\n  ")
     );
 
+    // Disabling Docker leaves the host frontend serving every mount; enabling
+    // it again restores the same whole-namespace view.
+    let disabled = fixture.run(&["frontend", "disable", "fuse", "--environment", "docker"]);
+    assert!(
+        disabled.status.success(),
+        "disabling Docker frontend failed (exit {})\nstdout: {}\nstderr: {}",
+        disabled.status,
+        String::from_utf8_lossy(&disabled.stdout),
+        String::from_utf8_lossy(&disabled.stderr),
+    );
+    for root in ["test", "test2"] {
+        assert!(
+            fixture
+                .mount_point
+                .join(root)
+                .join("hello/message")
+                .is_file(),
+            "host frontend lost mount {root} while Docker frontend was disabled"
+        );
+    }
+    let reenabled = fixture.frontend_enable();
+    fixture.assert_frontend_enable_ok(&reenabled, "re-enable after disable");
+    assert_serves(&fixture.container_name());
+
     // `omnifs down` tears the frontend container down before stopping the
     // daemon (`DaemonTeardown::down`).
     let down_out = fixture.down();
@@ -669,14 +731,14 @@ fn fuse_docker_lifecycle_and_matrix() {
 /// 1. **Kill the container.** The FUSE mount lives entirely inside the
 ///    container's own mount namespace, so killing it leaves nothing to clean
 ///    up host-side; the only observable effect is the container going away.
-///    `frontend up` again creates a fresh container that serves.
+///    Docker frontend enable again creates a fresh container that serves.
 /// 2. **Kill the daemon, leaving the container alive.** The VFS wire client
 ///    reconnects with backoff forever (`omnifs-vfs-wire`), so the
 ///    container process itself does not crash. But its `OMNIFS_ATTACH_ADDR`/
 ///    `OMNIFS_ATTACH_TOKEN` are baked in at container creation, and a fresh
 ///    daemon mints a new ephemeral attach port and a new per-instance token,
 ///    so the stale container can never rediscover it: recovery is
-///    `frontend up` again (a fresh container), not automatic. This test
+///    Docker frontend enable again (a fresh container), not automatic. This test
 ///    proves the container survives and that recovery path, but deliberately
 ///    never issues a filesystem read through the stale mount: a live FUSE
 ///    read against an attach whose TCP target is unreachable can block in an
@@ -696,8 +758,8 @@ fn kill_and_reattach_fuse_semantics() {
     let mut fixture = Fixture::new(image);
     fixture.up_native();
 
-    let up1 = fixture.frontend_up();
-    fixture.assert_frontend_up_ok(&up1, "first bring-up");
+    let up1 = fixture.frontend_enable();
+    fixture.assert_frontend_enable_ok(&up1, "first bring-up");
     let container = fixture.container_name();
     assert_serves(&container);
     let id_1 = container_id(&container);
@@ -712,12 +774,12 @@ fn kill_and_reattach_fuse_semantics() {
     );
     wait_for_container_state(&container, "exited", Duration::from_secs(10));
 
-    let up2 = fixture.frontend_up();
-    fixture.assert_frontend_up_ok(&up2, "after a killed container");
+    let up2 = fixture.frontend_enable();
+    fixture.assert_frontend_enable_ok(&up2, "after a killed container");
     let id_2 = container_id(&container);
     assert_ne!(
         id_1, id_2,
-        "`frontend up` must create a genuinely fresh container, not reuse the killed one"
+        "frontend enable must create a genuinely fresh container, not reuse the killed one"
     );
     assert_serves(&container);
 
@@ -765,8 +827,8 @@ fn kill_and_reattach_fuse_semantics() {
         "a restarted daemon must mint a new instance id"
     );
 
-    let up3 = fixture.frontend_up();
-    fixture.assert_frontend_up_ok(&up3, "after a daemon restart");
+    let up3 = fixture.frontend_enable();
+    fixture.assert_frontend_enable_ok(&up3, "after a daemon restart");
     let id_3 = container_id(&container);
     assert_ne!(
         id_2, id_3,

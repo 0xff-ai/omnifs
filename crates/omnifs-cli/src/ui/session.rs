@@ -5,6 +5,7 @@ use std::fmt::Write as _;
 
 use super::consent::{Plan, Receipt};
 use super::event::{Render, UiEvent};
+use super::output::Output;
 use super::report::Row;
 
 struct DefaultTheme;
@@ -115,10 +116,22 @@ pub(crate) struct Session {
 }
 
 impl Session {
-    pub(crate) fn intro(title: impl std::fmt::Display) -> anyhow::Result<Self> {
+    /// Construct a conversational session only after the invocation policy
+    /// allows interactive output. This keeps structured and no-input modes
+    /// from rendering even the intro rail before failing.
+    pub(crate) fn intro_with_output(
+        title: impl std::fmt::Display,
+        output: Output,
+    ) -> anyhow::Result<Self> {
+        if output.is_structured() {
+            return Ok(Self {
+                renderer: RailRenderer::new(output),
+                closed: false,
+            });
+        }
         cliclack::intro(title)?;
         Ok(Self {
-            renderer: RailRenderer,
+            renderer: RailRenderer::new(output),
             closed: false,
         })
     }
@@ -126,8 +139,11 @@ impl Session {
     pub(crate) fn phase(&mut self, title: impl Into<String>) {
         self.renderer.event(&UiEvent::PhaseStarted {
             title: title.into(),
-            count: None,
         });
+    }
+
+    pub(crate) const fn output(&self) -> Output {
+        self.renderer.output
     }
 
     /// Emit one destructive-operation preview. The same [`Plan`] is later
@@ -146,7 +162,7 @@ impl Session {
             glyph: row.glyph,
             key: row.key,
             value: row.value,
-            fix: row.fix,
+            fix: None,
             duration: None,
         });
     }
@@ -168,22 +184,45 @@ impl Session {
     }
 }
 
-pub(crate) struct RailRenderer;
+pub(crate) struct RailRenderer {
+    output: Output,
+}
+
+impl RailRenderer {
+    pub(crate) fn new(output: Output) -> Self {
+        Self { output }
+    }
+}
 
 impl Render for RailRenderer {
     fn event(&mut self, event: &UiEvent) {
         match event {
             UiEvent::Narration { message } => {
-                if !super::output::quiet() {
+                if !self.output.quiet() && !self.output.is_structured() {
                     let _ = cliclack::log::remark(message);
                 }
             },
-            UiEvent::PhaseStarted { title, .. } => {
+            UiEvent::PhaseStarted { title } => {
+                if self.output.is_structured() {
+                    if self.output.mode() == super::output::OutputMode::Jsonl {
+                        let event = super::event::JsonlEvent::Phase(super::event::JsonlPhase::new(
+                            self.output.command(),
+                            title.clone(),
+                            "started",
+                        ));
+                        let mut stdout = std::io::stdout().lock();
+                        let _ = self.output.write_event(&mut stdout, &event);
+                    }
+                    return;
+                }
                 let _ = cliclack::log::step(title);
             },
             UiEvent::Plan {
                 rows, remove, keep, ..
             } => {
+                if self.output.is_structured() {
+                    return;
+                }
                 let _ = cliclack::log::step("plan");
                 for row in rows {
                     let rendered = row.render_plan().render();
@@ -196,10 +235,16 @@ impl Render for RailRenderer {
             UiEvent::RowSettled {
                 glyph, key, value, ..
             } => {
+                if self.output.is_structured() {
+                    return;
+                }
                 let row = Row::new(*glyph, key.clone(), value.clone()).render();
                 let _ = cliclack::log::remark(row.trim_start());
             },
             UiEvent::Receipt { rows, .. } => {
+                if self.output.is_structured() {
+                    return;
+                }
                 let _ = cliclack::log::step("apply");
                 for row in rows {
                     let rendered = row.render_receipt().render();
@@ -207,6 +252,9 @@ impl Render for RailRenderer {
                 }
             },
             UiEvent::Outro { message } => {
+                if self.output.is_structured() {
+                    return;
+                }
                 let _ = cliclack::outro(message);
             },
             UiEvent::Progress { .. }

@@ -65,7 +65,7 @@ Day-to-day dev uses the relevant CI-shaped just lanes, `just build providers`, a
 ## What gets released
 
 - **CLI**: `omnifs-cli-linux-*.tar.xz` from `cargo-zigbuild` with glibc 2.17, and `omnifs-cli-darwin-*.tar.xz` cross-linked from Linux through the pinned `rust-cross/cargo-zigbuild` container. These binaries embed the compressed provider/tool WASM bundle and unpack it into `OMNIFS_HOME/providers`.
-- **Frontend**: `ghcr.io/0xff-ai/omnifs-frontend:<version>` promoted from the multi-platform `sha-<commit>` manifest (also `v<version>` on GHCR). It contains only the credential-free `omnifs-fuse` frontend.
+- **Frontend**: `ghcr.io/0xff-ai/omnifs-frontend:<version>` promoted from the multi-platform `sha-<commit>` manifest (also `v<version>` on GHCR). It contains only the credential-free `omnifs-thin fuse` frontend.
 - **Guest**: `ghcr.io/0xff-ai/omnifs-guest:<version>` promoted from the arm64 `sha-<commit>` OCI artifact (also `v<version>` on GHCR). It is the compressed libkrun disk image, not a container image.
 - **npm**: `@0xff-ai/omnifs` + four platform packages.
 

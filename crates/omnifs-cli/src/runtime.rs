@@ -1,5 +1,5 @@
 //! The Docker client for the optional Docker-hosted FUSE frontend
-//! (`omnifs frontend up|down`). The daemon itself always runs
+//! (`omnifs frontend enable|disable`). The daemon itself always runs
 //! host-native and has no Docker surface here.
 
 use std::collections::HashMap;
@@ -24,6 +24,7 @@ use crate::launch_backend::{
     BUILD_CHANNEL, BuildChannel, ContainerName, DockerTarget, ImageRef, names_registry,
 };
 use crate::ui::LiveRow;
+use crate::ui::output::{Output, OutputMode};
 
 #[derive(Debug, Default)]
 struct LayerProgress {
@@ -44,14 +45,16 @@ pub(crate) enum DockerProbeOutcome {
 pub(crate) struct Runtime {
     docker: Docker,
     target: DockerTarget,
+    output: Output,
 }
 
 impl Runtime {
-    pub(crate) fn connect_for(target: &DockerTarget) -> Result<Self> {
+    pub(crate) fn connect_for(target: &DockerTarget, output: Output) -> Result<Self> {
         Ok(Self {
             docker: Docker::connect_with_local_defaults()
                 .context("connect to Docker daemon (is it running?)")?,
             target: target.clone(),
+            output,
         })
     }
 
@@ -64,9 +67,8 @@ impl Runtime {
     }
 
     /// This runtime's own image, so
-    /// [`FrontendBackend::launch`](crate::frontend_backend::FrontendBackend::launch)
-    /// can embed it in the container body without duplicating it in
-    /// [`crate::frontend_backend::FrontendLaunchSpec`].
+    /// the concrete Docker backend can embed it in the container body without
+    /// duplicating it in the caller.
     pub(crate) fn image(&self) -> &ImageRef {
         self.target.image()
     }
@@ -74,9 +76,10 @@ impl Runtime {
     pub(crate) async fn connect_ready(
         target: &DockerTarget,
         command: &'static str,
+        output: Output,
     ) -> Result<Self> {
-        crate::ui::eprint_raw("Connecting to Docker\n");
-        let runtime = Self::connect_for(target)?;
+        output.narrate("Connecting to Docker");
+        let runtime = Self::connect_for(target, output)?;
         runtime
             .ping()
             .await
@@ -125,7 +128,7 @@ impl Runtime {
     /// Used by `omnifs doctor` so the probe result carries a typed outcome and
     /// the resulting `Runtime` can be reused for image inspection.
     pub(crate) async fn probe_docker(target: &DockerTarget) -> DockerProbeOutcome {
-        let runtime = match Self::connect_for(target) {
+        let runtime = match Self::connect_for(target, Output::new(OutputMode::Human, false)) {
             Ok(r) => r,
             Err(e) => {
                 // connect_for wraps bollard errors in anyhow; downcast to the
@@ -163,7 +166,7 @@ impl Runtime {
             ..Default::default()
         };
         let source = image.split('/').next().unwrap_or(image);
-        let mut row = LiveRow::start("frontend image", "pulling");
+        let mut row = LiveRow::start_with_output("frontend image", "pulling", self.output);
         let mut layers: HashMap<String, LayerProgress> = HashMap::new();
         let mut stream = self.docker.create_image(Some(opts), None, None);
         let result: Result<()> = async {

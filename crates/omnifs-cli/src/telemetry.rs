@@ -10,10 +10,8 @@
 //! self-contained and never fail or block: a broken workspace or config simply
 //! skips the record.
 
-use crate::config::Config;
 use crate::workspace::Workspace;
 use omnifs_api::CredentialHealth;
-use omnifs_workspace::creds::FileStore;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Record a completed CLI invocation. `cmd` is the top-level subcommand and
@@ -25,12 +23,17 @@ pub(crate) fn record_cli_exit(cmd: &str, exit: i32) {
     };
     // A malformed config disables telemetry rather than guessing: telemetry is
     // never allowed to surface an error, and off is the safe default.
-    let enabled = Config::load(&layout.config_file).is_ok_and(|config| config.telemetry_enabled());
+    let enabled = omnifs_workspace::config::Config::load(&layout.config_file).is_ok_and(|config| {
+        config.telemetry.enabled && omnifs_workspace::telemetry::enabled_from_env()
+    });
     omnifs_workspace::telemetry::TelemetrySink::new(&layout.config_dir, enabled)
         .cli_event(cmd, exit);
 }
 
-pub(crate) async fn maybe_print_health_nudge(workspace: &Workspace) {
+pub(crate) async fn maybe_print_health_nudge(
+    workspace: &Workspace,
+    output: crate::ui::output::Output,
+) {
     let path = workspace
         .layout()
         .config_dir
@@ -43,7 +46,7 @@ pub(crate) async fn maybe_print_health_nudge(workspace: &Workspace) {
         return;
     };
     // The nudge is a conversational aside; `-q` drops it.
-    crate::ui::narrate(line);
+    output.narrate(line);
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -91,28 +94,28 @@ async fn health_nudge(workspace: &Workspace) -> Option<String> {
         }
     }
 
-    let mounts = workspace.mounts().ok()?;
-    let store = FileStore::new(&workspace.layout().credentials_file);
-    let statuses =
-        crate::mount_report::scan_user_mount_configs(workspace.catalog(), &mounts, &store);
-    for status in statuses {
-        match status {
-            crate::status::UserMountStatus::Ready(mount) => match mount.auth.terminal_row().kind {
-                crate::auth::AuthTerminalKind::Missing => {
-                    return Some(format!(
-                        "mount `{}` has a missing credential; run `omnifs mount reauth {}`",
-                        mount.mount, mount.mount
-                    ));
-                },
-                crate::auth::AuthTerminalKind::Error => {
-                    return Some(format!(
-                        "mount `{}` has a credential error; run `omnifs mount reauth {}`",
-                        mount.mount, mount.mount
-                    ));
-                },
-                crate::auth::AuthTerminalKind::None | crate::auth::AuthTerminalKind::Ready => {},
+    let inventory = crate::inventory::Inventory::collect(workspace).await.ok()?;
+    for mount in inventory.mounts {
+        match mount.auth {
+            crate::inventory::AuthState::Missing { .. } => {
+                return Some(format!(
+                    "mount `{}` has a missing credential; run `omnifs mount reauth {}`",
+                    mount.name, mount.name
+                ));
             },
-            crate::status::UserMountStatus::Invalid { .. } => {},
+            crate::inventory::AuthState::Expired { .. } => {
+                return Some(format!(
+                    "mount `{}` has an expired credential; run `omnifs mount reauth {}`",
+                    mount.name, mount.name
+                ));
+            },
+            crate::inventory::AuthState::Error { .. } => {
+                return Some(format!(
+                    "mount `{}` has a credential error; run `omnifs mount reauth {}`",
+                    mount.name, mount.name
+                ));
+            },
+            crate::inventory::AuthState::NotNeeded | crate::inventory::AuthState::Ready => {},
         }
     }
     None

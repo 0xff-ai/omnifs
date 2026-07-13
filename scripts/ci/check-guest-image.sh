@@ -72,8 +72,8 @@ mkdir -p /mnt/root /mnt/esp
 mount -o ro "/dev/${base}p2" /mnt/root
 mount -o ro "/dev/${base}p1" /mnt/esp
 
-note "checking /usr/local/bin/omnifs-fuse"
-bin=/mnt/root/usr/local/bin/omnifs-fuse
+note "checking /usr/local/bin/omnifs-thin"
+bin=/mnt/root/usr/local/bin/omnifs-thin
 if [[ ! -f "$bin" ]]; then
   violation "missing $bin"
 elif [[ ! -x "$bin" ]]; then

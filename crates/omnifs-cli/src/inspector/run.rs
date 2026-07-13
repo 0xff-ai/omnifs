@@ -70,7 +70,7 @@ pub fn run_tui(mode: ConnectionMode, container: String, source: SourceKind) -> a
     Ok(())
 }
 
-pub fn run_plain(source: SourceKind) -> anyhow::Result<()> {
+pub fn run_plain(source: SourceKind, output: crate::ui::output::Output) -> anyhow::Result<()> {
     use super::source::SourceMessage;
 
     match source {
@@ -81,16 +81,16 @@ pub fn run_plain(source: SourceKind) -> anyhow::Result<()> {
         },
         SourceKind::Socket { endpoint, record } => {
             let addr = endpoint.label();
-            crate::ui::narrate(format!("omnifs inspect: connecting to {addr}..."));
+            output.narrate(format!("omnifs inspect: connecting to {addr}..."));
             let event_source = EventSource::spawn(SourceKind::Socket { endpoint, record });
             while let Some(message) = event_source.recv() {
                 match message {
                     SourceMessage::Line(line) => emit_plain_line(&line),
                     SourceMessage::Connected => {
-                        crate::ui::narrate(format!("omnifs inspect: connected to {addr}"));
+                        output.narrate(format!("omnifs inspect: connected to {addr}"));
                     },
                     SourceMessage::Disconnected => {
-                        crate::ui::narrate(format!(
+                        output.narrate(format!(
                             "omnifs inspect: disconnected from {addr}, reconnecting..."
                         ));
                     },

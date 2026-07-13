@@ -1,11 +1,11 @@
-//! `omnifs-nfs`: the out-of-process NFS frontend runner.
+//! NFS runner command for `omnifs-thin`.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Context as _;
-use clap::Parser;
+use clap::Args as ClapArgs;
 use omnifs_engine::{Namespace, NsAttachEvent};
 use omnifs_vfs_wire::{
     AttachEvent, AttachTarget, FrontendIdentity, FrontendKind, WireNamespace,
@@ -17,13 +17,9 @@ use tracing::{info, warn};
 
 const ATTACH_CAPACITY: usize = 16;
 
-#[derive(Parser, Debug)]
-#[command(
-    name = "omnifs-nfs",
-    version,
-    about = "The out-of-process omnifs NFS frontend runner"
-)]
-struct Args {
+/// Arguments for the `NFSv4` loopback frontend.
+#[derive(Debug, ClapArgs)]
+pub(crate) struct Args {
     /// Host-visible mount point to serve.
     #[arg(long)]
     mount_point: PathBuf,
@@ -31,7 +27,7 @@ struct Args {
     #[arg(long)]
     state_dir: PathBuf,
     /// Path to the daemon's local VFS attach socket. When absent, the attach
-    /// target comes from `OMNIFS_ATTACH_ADDR` and `OMNIFS_ATTACH_TOKEN`.
+    /// target comes from the environment.
     #[arg(long)]
     attach: Option<PathBuf>,
     /// Loopback NFS server port. Zero asks the OS for an ephemeral port.
@@ -39,9 +35,8 @@ struct Args {
     port: u16,
 }
 
-fn main() -> anyhow::Result<()> {
-    init_tracing();
-    let args = Args::parse();
+pub(crate) fn run(args: Args) -> anyhow::Result<()> {
+    crate::init_tracing();
     let ready_port =
         resolve_ready_vsock_port().context("resolve the readiness-beacon vsock port")?;
     let target = AttachTarget::resolve(args.attach).context("resolve the VFS attach target")?;
@@ -87,17 +82,6 @@ fn main() -> anyhow::Result<()> {
 
     info!(mount = %args.mount_point.display(), "frontend exited");
     Ok(())
-}
-
-fn init_tracing() {
-    use tracing_subscriber::EnvFilter;
-
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_target(false)
-        .with_env_filter(filter)
-        .init();
 }
 
 fn attach_events(

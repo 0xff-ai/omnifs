@@ -1,5 +1,5 @@
 //! The krunkit (libkrun) frontend backend: a macOS microVM hosting the same
-//! `omnifs-fuse` binary and Omnifs VFS wire protocol the Docker backend runs in a
+//! `omnifs-thin fuse` runner and Omnifs VFS wire protocol the Docker backend runs in a
 //! container, attached to the host-native daemon's namespace over vsock
 //! instead of TCP.
 //!
@@ -8,7 +8,7 @@
 //! independent of any one VM instance) plus per-launch artifacts (pidfile,
 //! seed ISO, the three unix sockets krunkit bridges vsock onto, and the
 //! serial log). Every path lives under the workspace config dir, never a
-//! system temp dir, so `omnifs down`/`frontend down` can find and remove
+//! system temp dir, so `omnifs down`/`frontend disable` can find and remove
 //! exactly what this backend owns.
 //!
 //! Three vsock devices bridge the guest to the host, each on its own
@@ -44,10 +44,11 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result};
 
-use crate::config::Config;
-use crate::frontend_backend::{FrontendBackend, FrontendLaunchSpec};
+use crate::frontend_backend::FrontendBackend;
 use crate::launch_backend::{BUILD_CHANNEL, BuildChannel, GUEST_MOUNT, ImageRef};
 use crate::process::is_alive as process_alive;
+use crate::ui::output::Output;
+use omnifs_workspace::config::Config;
 
 const KRUNKIT_SUBDIR: &str = "krunkit";
 const SSH_KEY_NAME: &str = "id_ed25519";
@@ -101,23 +102,21 @@ impl GuestImageSource {
     /// krunkit needs. Dev images are already local; release images are pulled
     /// into the workspace cache on first use.
     pub(crate) fn resolve(image: Option<String>, config: &Config) -> Result<Self> {
-        let resolved = crate::config::resolve_setting(
-            image,
-            ENV_GUEST_IMAGE,
-            || config.frontend.guest_image.clone(),
-            default_guest_image_for(BUILD_CHANNEL).to_string(),
-        );
+        let resolved = image
+            .or_else(|| std::env::var(ENV_GUEST_IMAGE).ok())
+            .or_else(|| config.frontend.guest_image.clone())
+            .unwrap_or_else(|| default_guest_image_for(BUILD_CHANNEL).to_string());
         match BUILD_CHANNEL {
             BuildChannel::Dev => Ok(Self::Local(PathBuf::from(resolved))),
             BuildChannel::Release => Ok(Self::Registry(ImageRef::new(resolved)?)),
         }
     }
 
-    pub(crate) async fn into_local_path(self, cache_dir: &Path) -> Result<PathBuf> {
+    pub(crate) async fn into_local_path(self, cache_dir: &Path, output: Output) -> Result<PathBuf> {
         match self {
             Self::Local(path) => Ok(path),
             Self::Registry(image) => {
-                crate::guest_image_pull::ensure_guest_image(&image, cache_dir).await
+                crate::guest_image_pull::ensure_guest_image(&image, cache_dir, output).await
             },
         }
     }
@@ -207,7 +206,7 @@ pub(crate) fn ensure_socat_available() -> Result<()> {
 }
 
 /// The libkrun microVM frontend backend. Instance state is workspace-scoped;
-/// launch-only inputs such as the guest image live in `FrontendLaunchSpec`.
+/// launch-only inputs such as the guest image are passed to [`Self::launch`].
 pub(crate) struct KrunkitBackend {
     home: PathBuf,
     /// Flipped by the readiness accept-loop thread `launch` spawns, once the
@@ -564,17 +563,14 @@ fn assert_krunkit_locked_down(
     Ok(())
 }
 
-impl FrontendBackend for KrunkitBackend {
-    async fn launch(&self, spec: &FrontendLaunchSpec) -> Result<()> {
+impl KrunkitBackend {
+    pub(crate) async fn launch(
+        &self,
+        daemon_attach_socket: &Path,
+        attach_token: &str,
+        guest_image: PathBuf,
+    ) -> Result<()> {
         ensure_krunkit_available()?;
-        let FrontendLaunchSpec::Krunkit {
-            attach_socket: daemon_attach_socket,
-            attach_token,
-            guest_image,
-        } = spec
-        else {
-            anyhow::bail!("internal: the krunkit backend received a docker launch spec");
-        };
         anyhow::ensure!(
             guest_image.is_file(),
             "guest image not found at {}; build it with `just guest-image` \
@@ -593,7 +589,7 @@ impl FrontendBackend for KrunkitBackend {
             .with_context(|| format!("restrict {} to 0700", dir.display()))?;
 
         for path in [
-            daemon_attach_socket.as_path(),
+            daemon_attach_socket,
             self.ready_socket().as_path(),
             self.ssh_socket().as_path(),
             self.restful_socket().as_path(),
@@ -667,7 +663,9 @@ impl FrontendBackend for KrunkitBackend {
 
         Ok(())
     }
+}
 
+impl FrontendBackend for KrunkitBackend {
     async fn mount_ready(&self, _path: &str) -> Result<bool> {
         // Krunkit has no docker-exec-equivalent channel to probe a specific
         // guest path from outside the VM; the VFS wire readiness beacon

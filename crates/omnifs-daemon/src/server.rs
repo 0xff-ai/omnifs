@@ -124,7 +124,7 @@ impl ControlToken {
 
 #[derive(OpenApi)]
 #[openapi(
-    info(title = "omnifs daemon control API", version = env!("CARGO_PKG_VERSION")),
+    info(title = "omnifs daemon control API", version = "6.0"),
     components(schemas(
         ReadyInfo,
         ApiError,
@@ -1257,7 +1257,6 @@ async fn shutdown(State(daemon): State<Arc<Daemon>>) -> Json<StopReport> {
     let status = daemon.control_status();
     let report = StopReport {
         frontends: status.frontends,
-        mount_point: status.mount_point,
         providers_dropped: status.mounts.len(),
     };
     daemon.trigger_shutdown();
@@ -1544,13 +1543,9 @@ fn provider_summaries(catalog: &Catalog) -> Result<Vec<ProviderSummary>, Catalog
     names
         .into_iter()
         .map(|name| {
-            let latest = catalog
-                .latest_by_name(&name)?
-                .map(|provider| api_provider_artifact(&provider));
             Ok(ProviderSummary {
                 installed: by_name.remove(&name).unwrap_or_default(),
                 name: name.to_string(),
-                latest,
             })
         })
         .collect()

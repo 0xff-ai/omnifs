@@ -1,7 +1,5 @@
 //! Auth readiness state for configured mounts.
 
-use std::fmt::Write as _;
-
 use omnifs_workspace::authn::AuthKind;
 use omnifs_workspace::creds::{CredentialEntry, CredentialStore, Refreshability};
 use serde::Serialize;
@@ -25,33 +23,6 @@ pub(crate) enum AuthReadiness {
     Error {
         message: String,
     },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum AuthProbeSeverity {
-    Ok,
-    Warn,
-    Err,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct AuthProbeSummary {
-    pub(crate) severity: AuthProbeSeverity,
-    pub(crate) message: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum AuthTerminalKind {
-    None,
-    Ready,
-    Missing,
-    Error,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct AuthTerminalRow {
-    pub(crate) kind: AuthTerminalKind,
-    pub(crate) summary: String,
 }
 
 impl AuthReadiness {
@@ -86,90 +57,6 @@ impl AuthReadiness {
             expires_at,
             refreshability,
             notices,
-        }
-    }
-
-    pub(crate) fn probe_summary(&self) -> AuthProbeSummary {
-        match self {
-            Self::None => AuthProbeSummary {
-                severity: AuthProbeSeverity::Ok,
-                message: "no auth required".into(),
-            },
-            Self::Ready {
-                kind,
-                scopes,
-                notices,
-                ..
-            } => {
-                let scopes_str = if scopes.is_empty() {
-                    String::new()
-                } else {
-                    format!(" scopes={}", scopes.join(","))
-                };
-                let notice_str = if notices.is_empty() {
-                    String::new()
-                } else {
-                    format!(" {}", notices.join("; "))
-                };
-                AuthProbeSummary {
-                    severity: if notices.is_empty() {
-                        AuthProbeSeverity::Ok
-                    } else {
-                        AuthProbeSeverity::Warn
-                    },
-                    message: format!("{kind}{scopes_str}{notice_str}"),
-                }
-            },
-            Self::Missing { command } => AuthProbeSummary {
-                severity: AuthProbeSeverity::Warn,
-                message: format!("run `{command}`"),
-            },
-            Self::Error { message } => AuthProbeSummary {
-                severity: AuthProbeSeverity::Err,
-                message: message.clone(),
-            },
-        }
-    }
-
-    pub(crate) fn terminal_row(&self) -> AuthTerminalRow {
-        match self {
-            Self::None => AuthTerminalRow {
-                kind: AuthTerminalKind::None,
-                summary: "no auth required".into(),
-            },
-            Self::Ready {
-                kind,
-                scopes,
-                expires_at,
-                refreshability,
-                notices,
-            } => {
-                let mut summary = kind.clone();
-                if !scopes.is_empty() {
-                    let _ = write!(&mut summary, "  {} scopes", scopes.len());
-                }
-                if let Some(expires_at) = expires_at {
-                    let _ = write!(&mut summary, "  expires {expires_at}");
-                }
-                if *refreshability != Refreshability::NotApplicable {
-                    let _ = write!(&mut summary, "  {refreshability}");
-                }
-                if !notices.is_empty() {
-                    let _ = write!(&mut summary, "  {}", notices.join("; "));
-                }
-                AuthTerminalRow {
-                    kind: AuthTerminalKind::Ready,
-                    summary,
-                }
-            },
-            Self::Missing { command } => AuthTerminalRow {
-                kind: AuthTerminalKind::Missing,
-                summary: format!("missing — run `{command}`"),
-            },
-            Self::Error { message } => AuthTerminalRow {
-                kind: AuthTerminalKind::Error,
-                summary: format!("error: {message}"),
-            },
         }
     }
 }

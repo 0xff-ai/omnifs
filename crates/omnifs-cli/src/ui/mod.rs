@@ -1,7 +1,8 @@
 //! Commands construct typed values while this module owns every byte that
-//! reaches the terminal: the closed vocabulary ([`style`]), typed state
-//! [`report`]s, the [`event`] model, flat [`progress`], and the cliclack
-//! [`session`] rail. Stream discipline is owned here, not by commands:
+//! reaches the terminal: the closed vocabulary ([`style`]), human-only
+//! responsive [`table`]s, live rail rows in [`report`], the [`event`] model,
+//! flat [`progress`], and the cliclack [`session`] rail. Stream discipline is
+//! owned here, not by commands:
 //! reports go to stdout, while narration, prompts, and progress go to stderr.
 //!
 //! Commands that can ask a question own a [`session::Session`] for the whole
@@ -21,28 +22,14 @@ pub(crate) mod prompt;
 pub(crate) mod report;
 pub(crate) mod session;
 pub(crate) mod style;
+pub(crate) mod table;
 
 pub(crate) use progress::LiveRow;
 
 use std::path::PathBuf;
 
-use anyhow::Context as _;
-
-pub(crate) const KEY_WIDTH: usize = 14; // ledger key column
-
-/// Column at which every value/note aligns: 2 gutter + 1 glyph + 1 space + key.
-const VALUE_COLUMN: usize = 2 + 1 + 1 + KEY_WIDTH;
 /// Command column width for `hint` rows.
 const HINT_WIDTH: usize = 16;
-
-/// Serialize a value and print it as exactly one JSON document on stdout. The
-/// single machine-output path, so `--json` commands never call a print macro
-/// themselves.
-pub(crate) fn print_json(value: &impl serde::Serialize) -> anyhow::Result<()> {
-    let serialized = serde_json::to_string(value).context("serialize JSON output")?;
-    anstream::println!("{serialized}");
-    Ok(())
-}
 
 /// Emit a complete pre-rendered document to stdout.
 pub(crate) fn print_raw(text: &str) {
@@ -54,19 +41,6 @@ pub(crate) fn print_raw(text: &str) {
 /// allow, never calls a print macro itself.
 pub(crate) fn eprint_raw(text: &str) {
     anstream::eprint!("{text}");
-}
-
-/// Conversational narration on stderr, dropped under `-q`/`--quiet`. This is the
-/// one path for the prose lines that lifecycle commands print directly (outside
-/// the event stream); the record lines (settle rows, receipts, errors) never
-/// route through here, so quiet keeps them.
-pub(crate) fn narrate(line: impl std::fmt::Display) {
-    if output::quiet() {
-        return;
-    }
-    // Command spans (`` `cmd` ``) render in the cyan accent, never as literal
-    // backticks: prose on the terminal is not markdown.
-    anstream::eprintln!("{}", style::accentuate(&line.to_string()));
 }
 
 /// Truncate plain text to `max_chars`, counting the ellipsis in that budget.
@@ -81,11 +55,6 @@ pub(crate) fn truncate(text: &str, max_chars: usize) -> String {
         out.push('…');
     }
     out
-}
-
-/// Dim continuation aligned to the value column.
-pub(crate) fn note(text: impl std::fmt::Display) -> String {
-    format!("{:pad$}{}", "", style::dim(text), pad = VALUE_COLUMN)
 }
 
 /// Command hint row: `  <cmd padded to 16><desc>`.
@@ -111,9 +80,7 @@ pub(crate) fn input_path(raw: &str) -> PathBuf {
     PathBuf::from(raw)
 }
 
-/// Strip SGR ANSI escape sequences so column math can be asserted on the plain
-/// glyphs the toolkit aligns. Shared by the toolkit's grid tests.
-#[cfg(test)]
+/// Strip SGR ANSI escape sequences before measuring or asserting terminal text.
 pub(crate) fn strip_ansi(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let mut chars = input.chars().peekable();
@@ -145,17 +112,6 @@ mod tests {
         assert_eq!(truncate("🚀火é", 2), "🚀…");
         assert_eq!(truncate("hi", 1), "…");
         assert_eq!(truncate("hello", 0), "");
-    }
-
-    #[test]
-    fn note_aligns_to_value_column() {
-        let plain = strip_ansi(&note("hello"));
-        let prefix: String = plain.chars().take(18).collect();
-        assert!(
-            prefix.chars().all(|c| c == ' '),
-            "note prefix not blank: {plain:?}"
-        );
-        assert_eq!(plain.chars().nth(18), Some('h'));
     }
 
     #[test]

@@ -11,6 +11,7 @@ use omnifs_auth::RevokeOutcome;
 use serde::Serialize;
 
 use super::event::UiEvent;
+use super::output::Output;
 use super::report;
 use super::style::Glyph;
 use crate::stages::PromptMode;
@@ -148,6 +149,7 @@ impl Decision {
         mode: PromptMode,
         dry_run: bool,
         flag_hint: &str,
+        output: Output,
     ) -> anyhow::Result<Self> {
         if dry_run {
             return Ok(Self::DryRun);
@@ -159,7 +161,7 @@ impl Decision {
             || {
                 super::prompt::Confirm::new("Proceed?")
                     .with_default(false)
-                    .ask()
+                    .ask_with_output(output)
             },
         )?;
         Self::from_confirmation(proceed)
@@ -387,10 +389,22 @@ mod tests {
             no_input: false,
         };
         assert_eq!(
-            Decision::resolve(mode, true, "-y").unwrap(),
+            Decision::resolve(
+                mode,
+                true,
+                "-y",
+                Output::new(crate::ui::output::OutputMode::Human, false)
+            )
+            .unwrap(),
             Decision::DryRun
         );
-        let error = Decision::resolve(mode, false, "-y").unwrap_err();
+        let error = Decision::resolve(
+            mode,
+            false,
+            "-y",
+            Output::new(crate::ui::output::OutputMode::Human, false),
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("pass -y or --yes"));
     }
 

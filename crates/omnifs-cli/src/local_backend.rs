@@ -14,6 +14,7 @@ use omnifs_workspace::runtime_record::FrontendKind;
 
 const MOUNT_TIMEOUT: Duration = Duration::from_secs(10);
 const MOUNT_POLL_INTERVAL: Duration = Duration::from_millis(200);
+const THIN_RUNNER_NAME: &str = "omnifs-thin";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LocalProtocol {
@@ -22,10 +23,10 @@ pub(crate) enum LocalProtocol {
 }
 
 impl LocalProtocol {
-    const fn binary_name(self) -> &'static str {
+    const fn subcommand(self) -> &'static str {
         match self {
-            Self::Fuse => "omnifs-fuse",
-            Self::Nfs => "omnifs-nfs",
+            Self::Fuse => "fuse",
+            Self::Nfs => "nfs",
         }
     }
 
@@ -46,11 +47,11 @@ impl LocalProtocol {
         )
     }
 
-    fn runner_beside(self, current_exe: &Path) -> Result<PathBuf> {
+    fn runner_beside(current_exe: &Path) -> Result<PathBuf> {
         Ok(current_exe
             .parent()
             .context("the omnifs executable has no parent directory")?
-            .join(self.binary_name()))
+            .join(THIN_RUNNER_NAME))
     }
 }
 
@@ -86,10 +87,10 @@ impl LocalBackend {
         protocol: LocalProtocol,
     ) -> Result<Self> {
         let current_exe = std::env::current_exe().context("resolve the omnifs executable")?;
-        let runner = protocol.runner_beside(&current_exe)?;
+        let runner = LocalProtocol::runner_beside(&current_exe)?;
         if !runner.is_file() {
             anyhow::bail!(
-                "local {protocol} runner not found at {}; install it beside {}",
+                "local {protocol} thin runner not found at {}; install it beside {}",
                 runner.display(),
                 current_exe.display()
             );
@@ -102,7 +103,7 @@ impl LocalBackend {
         })
     }
 
-    pub(crate) async fn launch(&self, mount_name: &str) -> Result<()> {
+    pub(crate) async fn launch(&self, mount_name: Option<&str>) -> Result<()> {
         std::fs::create_dir_all(&self.mount_point)
             .with_context(|| format!("create mount point {}", self.mount_point.display()))?;
         if omnifs_nfs::mount_is_active_checked(&self.mount_point)
@@ -112,10 +113,10 @@ impl LocalBackend {
         }
         std::fs::create_dir_all(&self.paths.cache_dir)
             .with_context(|| format!("create {}", self.paths.cache_dir.display()))?;
-        let log_path = self.paths.cache_dir.join(format!(
-            "frontend-{}.log",
-            self.protocol.binary_name().trim_start_matches("omnifs-")
-        ));
+        let log_path = self
+            .paths
+            .cache_dir
+            .join(format!("frontend-{}.log", self.protocol.subcommand()));
         let log = OpenOptions::new()
             .create(true)
             .append(true)
@@ -149,6 +150,7 @@ impl LocalBackend {
     fn runner_command(&self) -> Command {
         let mut command = Command::new(&self.runner);
         command
+            .arg(self.protocol.subcommand())
             .arg("--mount-point")
             .arg(&self.mount_point)
             .arg("--state-dir")
@@ -195,13 +197,16 @@ impl LocalBackend {
     async fn wait_until_mounted(
         &self,
         child: &mut Child,
-        mount_name: &str,
+        mount_name: Option<&str>,
         log_path: &Path,
     ) -> Result<()> {
         let deadline = tokio::time::Instant::now() + MOUNT_TIMEOUT;
         loop {
             if omnifs_nfs::mount_is_active(&self.mount_point) {
-                let probe = self.mount_point.join(mount_name);
+                let probe = mount_name.map_or_else(
+                    || self.mount_point.clone(),
+                    |name| self.mount_point.join(name),
+                );
                 match probe.try_exists() {
                     Ok(true) => return Ok(()),
                     Ok(false) => {},
@@ -280,10 +285,8 @@ mod tests {
 
     #[test]
     fn runner_is_resolved_only_beside_current_executable() {
-        let path = LocalProtocol::Fuse
-            .runner_beside(Path::new("/opt/omnifs/bin/omnifs"))
-            .unwrap();
-        assert_eq!(path, Path::new("/opt/omnifs/bin/omnifs-fuse"));
+        let path = LocalProtocol::runner_beside(Path::new("/opt/omnifs/bin/omnifs")).unwrap();
+        assert_eq!(path, Path::new("/opt/omnifs/bin").join(THIN_RUNNER_NAME));
     }
 
     #[test]
@@ -291,7 +294,7 @@ mod tests {
         let paths = WorkspaceLayout::under_root(Path::new("/home/user/.omnifs"));
         for protocol in [LocalProtocol::Fuse, LocalProtocol::Nfs] {
             let backend = LocalBackend {
-                runner: PathBuf::from(protocol.binary_name()),
+                runner: PathBuf::from(THIN_RUNNER_NAME),
                 paths: paths.clone(),
                 mount_point: PathBuf::from("/home/user/omnifs"),
                 protocol,
@@ -301,23 +304,40 @@ mod tests {
                 .get_args()
                 .map(|arg| arg.to_string_lossy().into_owned())
                 .collect::<Vec<_>>();
+            assert_eq!(args[0], protocol.subcommand());
             assert_eq!(
-                args[0..3],
+                args[1..4],
                 ["--mount-point", "/home/user/omnifs", "--state-dir"]
             );
-            assert_eq!(Path::new(&args[3]), backend.state_dir());
+            assert_eq!(Path::new(&args[4]), backend.state_dir());
             assert_eq!(
-                args[4..],
+                args[5..],
                 ["--attach", "/home/user/.omnifs/frontends/local.sock"]
             );
         }
     }
 
     #[test]
+    fn both_protocols_use_one_thin_runner_with_distinct_subcommands() {
+        let paths = WorkspaceLayout::under_root(Path::new("/home/user/.omnifs"));
+        let backend = |protocol: LocalProtocol| LocalBackend {
+            runner: LocalProtocol::runner_beside(Path::new("/opt/omnifs/bin/omnifs")).unwrap(),
+            paths: paths.clone(),
+            mount_point: PathBuf::from("/home/user/omnifs"),
+            protocol,
+        };
+        let fuse = backend(LocalProtocol::Fuse).runner_command();
+        let nfs = backend(LocalProtocol::Nfs).runner_command();
+        assert_eq!(fuse.get_program(), nfs.get_program());
+        assert_eq!(fuse.get_args().next().unwrap(), "fuse");
+        assert_eq!(nfs.get_args().next().unwrap(), "nfs");
+    }
+
+    #[test]
     fn state_dirs_are_stable_and_isolated_by_protocol_and_mount() {
         let paths = WorkspaceLayout::under_root(Path::new("/home/user/.omnifs"));
         let backend = |protocol: LocalProtocol, mount_point: &'static str| LocalBackend {
-            runner: PathBuf::from(protocol.binary_name()),
+            runner: PathBuf::from(THIN_RUNNER_NAME),
             paths: paths.clone(),
             mount_point: PathBuf::from(mount_point),
             protocol,
@@ -340,7 +360,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let paths = WorkspaceLayout::under_root(tmp.path());
         let backend = LocalBackend {
-            runner: PathBuf::from("omnifs-nfs"),
+            runner: PathBuf::from("omnifs-thin"),
             paths,
             mount_point: PathBuf::from("/mnt/omnifs"),
             protocol: LocalProtocol::Nfs,

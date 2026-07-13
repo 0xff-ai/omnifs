@@ -24,8 +24,8 @@ use crossterm::{
     terminal::{Clear, ClearType},
 };
 
-use super::KEY_WIDTH;
 use super::event::{Render, StreamRenderer, UiEvent};
+use super::output::Output;
 use super::style::{self, Glyph};
 
 /// Braille spinner frames, advanced by [`LiveRow::update`].
@@ -38,13 +38,14 @@ const APPEARANCE_DELAY: Duration = Duration::from_millis(150);
 /// Bound repaint and progress-event frequency when a producer yields chunks
 /// faster than a terminal (or an NDJSON consumer) can usefully display them.
 const UPDATE_INTERVAL: Duration = Duration::from_millis(100);
+const LEDGER_KEY_WIDTH: usize = 14;
 
 /// The transient in-place line: `  <spinner> <key padded>text`, on the same grid
 /// as a settled row so the spinner and the line that replaces it align. The
 /// spinner is dim (machinery), never the cyan accent, which is reserved for
 /// actionable things.
 fn spinner_line(frame: &str, key: &str, text: &str) -> String {
-    let key_pad = KEY_WIDTH.saturating_sub(key.chars().count()).max(1);
+    let key_pad = LEDGER_KEY_WIDTH.saturating_sub(key.chars().count()).max(1);
     format!(
         "  {} {key}{:pad$}{text}",
         style::dim(frame),
@@ -82,18 +83,17 @@ pub(crate) struct LiveRow<R = StreamRenderer> {
     /// Whether a transient spinner line is currently on screen and must be
     /// cleared before the settle line is written.
     drawn: bool,
+    transient: bool,
     renderer: R,
 }
 
 impl LiveRow<StreamRenderer> {
-    /// Begin a live row. Nothing is drawn yet: a fast step must not flicker, so
-    /// the spinner waits for [`APPEARANCE_DELAY`] and the first [`update`]. The
-    /// renderer is chosen from the global `--progress` selection, so the same
-    /// call site animates a stderr row or emits NDJSON without any change here.
-    ///
-    /// [`update`]: LiveRow::update
-    pub(crate) fn start(key: &str, _text: &str) -> Self {
-        Self::with_renderer(key, StreamRenderer::from_global())
+    pub(crate) fn start_with_output(key: &str, _text: &str, output: Output) -> Self {
+        Self::with_renderer_policy(
+            key,
+            StreamRenderer::from_output(output),
+            output.mode().is_human(),
+        )
     }
 
     pub(crate) fn human_bytes(bytes: u64) -> String {
@@ -105,7 +105,12 @@ impl<R: Render> LiveRow<R> {
     /// Begin a live row whose events are delivered to `renderer`. Later skins
     /// and the NDJSON stream can consume the same progress lifecycle without
     /// replacing this state machine.
+    #[cfg(test)]
     pub(crate) fn with_renderer(key: &str, renderer: R) -> Self {
+        Self::with_renderer_policy(key, renderer, true)
+    }
+
+    fn with_renderer_policy(key: &str, renderer: R, transient: bool) -> Self {
         Self {
             key: key.to_string(),
             tty: std::io::stderr().is_terminal(),
@@ -113,6 +118,7 @@ impl<R: Render> LiveRow<R> {
             frame: 0,
             next_update: Instant::now(),
             drawn: false,
+            transient,
             renderer,
         }
     }
@@ -128,13 +134,11 @@ impl<R: Render> LiveRow<R> {
         self.renderer.event(&UiEvent::Progress {
             key: self.key.clone(),
             message: text.to_string(),
+            elapsed_ms: u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX),
         });
-        // Under `--progress json` the renderer already emitted the tick as a
-        // JSON line on stdout; drawing the animated stderr row would be noise.
-        if super::output::progress_is_json()
-            || !self.tty
-            || self.started.elapsed() < APPEARANCE_DELAY
-        {
+        // Structured callers can select an event renderer through the output
+        // policy; the human row remains silent when stderr is not a terminal.
+        if !self.transient || !self.tty || self.started.elapsed() < APPEARANCE_DELAY {
             return;
         }
         self.frame = (self.frame + 1) % SPINNER_FRAMES.len();
@@ -258,7 +262,11 @@ mod tests {
     fn non_tty_stays_silent_until_settle() {
         // Under nextest stderr is captured, so this exercises the non-terminal
         // path: start and update draw nothing; settle emits the static row.
-        let mut row = LiveRow::start("daemon", "starting");
+        let mut row = LiveRow::start_with_output(
+            "daemon",
+            "starting",
+            Output::new(crate::ui::output::OutputMode::Human, false),
+        );
         assert!(!row.tty, "captured stderr must be treated as non-terminal");
         row.update("still going");
         row.update_elapsed("booting");

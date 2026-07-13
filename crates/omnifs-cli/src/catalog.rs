@@ -26,7 +26,7 @@ pub(crate) fn installed_providers(
                 let name = &provider.meta.name;
                 crate::ui::eprint_raw(&format!(
                     "{}\n",
-                    crate::style::warn(format!(
+                    crate::ui::style::warn(format!(
                         "skipping provider `{name}`: its embedded manifest failed to load; reinstall it. Re-run with `-vv` for details."
                     ))
                 ));

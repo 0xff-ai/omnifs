@@ -17,31 +17,25 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 use clap::Args;
+use omnifs_workspace::config::{Config, EffectiveFrontend, Environment, HostOs as ResolverHostOs};
 use omnifs_workspace::layout::WorkspaceLayout;
 use omnifs_workspace::provider::{Provider, ProviderManifest};
 
 use crate::commands::mount;
-use crate::frontend_backend::Driver;
 use crate::launch::{LaunchOutcome, Launcher};
 use crate::stages::PromptMode;
 use crate::ui;
+use crate::ui::output::{Output, ResultVerdict};
 use crate::ui::picker::PickerRow;
 use crate::workspace::Workspace;
 
 use self::host_os::HostOs;
 
 #[derive(Args, Debug, Clone, Default)]
-#[allow(clippy::struct_excessive_bools)] // mirrors CLI flags 1:1
 pub struct SetupArgs {
     /// Skip the final daemon launch.
     #[arg(long)]
     pub no_up: bool,
-    /// Skip confirmations; auto-accept detected ambient credentials.
-    #[arg(short = 'y', long)]
-    pub yes: bool,
-    /// Fail instead of prompting. Use flags or --yes for every answer.
-    #[arg(long)]
-    pub no_input: bool,
     /// Preselect providers and skip the picker.
     #[arg(long, value_delimiter = ',')]
     pub providers: Vec<String>,
@@ -86,10 +80,20 @@ struct InitResult {
     outcome: MountOutcome,
 }
 
+struct InitLoopArgs<'a> {
+    installed: &'a [(Provider, ProviderManifest)],
+    workspace: &'a Workspace,
+    style: StageStyle,
+    phase_num: usize,
+    mode: PromptMode,
+    session: &'a mut crate::ui::session::Session,
+}
+
 impl SetupArgs {
-    pub async fn run(self) -> anyhow::Result<()> {
-        let mode = PromptMode::from_flags(self.yes, self.no_input);
-        let mut session = crate::ui::session::Session::intro("omnifs setup")?;
+    pub async fn run(self, output: Output) -> anyhow::Result<()> {
+        let mode =
+            PromptMode::from_flags(output.yes(), output.no_input() || output.is_structured());
+        let mut session = crate::ui::session::Session::intro_with_output("omnifs setup", output)?;
 
         let os = HostOs::detect();
         let workspace = Workspace::resolve()?;
@@ -102,7 +106,7 @@ impl SetupArgs {
 
         // Review mode: a configured workspace, no explicit providers, no --yes.
         // A looping hub that owns its own actions.
-        if environment.configured && self.providers.is_empty() && !self.yes {
+        if environment.configured && self.providers.is_empty() && !mode.yes {
             return self.review_mode(&workspace, mode, &mut session).await;
         }
 
@@ -130,7 +134,7 @@ impl SetupArgs {
         // guest-only config needs no container.
         if frontend_plan
             .iter()
-            .any(|entry| entry.driver == Driver::Docker)
+            .any(|entry| entry.environment == Environment::Docker)
         {
             Self::render_docker_row(&config, &mut session).await;
         }
@@ -143,15 +147,17 @@ impl SetupArgs {
         // names where files will appear instead of prompting for a path that
         // would not bind.
         self.configure_and_launch(&workspace, mode, StageStyle::Wizard, &mut session)
-            .await
+            .await?;
+        if output.is_structured() {
+            let inventory = crate::inventory::Inventory::collect(&workspace).await?;
+            output.emit_result(ResultVerdict::from(inventory.verdict()), inventory)?;
+        }
+        Ok(())
     }
 
     /// The informational Docker reachability row for the environment stage. It
     /// never fails setup; an unreachable daemon just notes the retry hint.
-    async fn render_docker_row(
-        config: &crate::config::Config,
-        session: &mut crate::ui::session::Session,
-    ) {
+    async fn render_docker_row(config: &Config, session: &mut crate::ui::session::Session) {
         match crate::stages::probe_docker_reachability(config).await {
             crate::stages::DockerReachability::Running { version } => {
                 session.row(crate::ui::report::Row::new(
@@ -207,7 +213,7 @@ impl SetupArgs {
             let (fast, rest) = Self::split_fast_lane(&selected, &installed);
             if !fast.is_empty() {
                 return self
-                    .fast_lane_launch(&fast, &rest, &installed, workspace, session)
+                    .fast_lane_launch(&fast, &rest, &installed, workspace, mode, session)
                     .await;
             }
         }
@@ -217,7 +223,17 @@ impl SetupArgs {
         // code and context for scripts and for the top-level renderer. Only an
         // explicit sign-in decline becomes `MountOutcome::Skipped`.
         let results = self
-            .run_init_loop(&selected, &installed, workspace, style, 3, session)
+            .run_init_loop(
+                &selected,
+                InitLoopArgs {
+                    installed: &installed,
+                    workspace,
+                    style,
+                    phase_num: 3,
+                    mode,
+                    session,
+                },
+            )
             .await?;
 
         let any_ready = results
@@ -267,10 +283,21 @@ impl SetupArgs {
         rest: &[String],
         installed: &[(Provider, ProviderManifest)],
         workspace: &Workspace,
+        mode: PromptMode,
         session: &mut crate::ui::session::Session,
     ) -> anyhow::Result<()> {
         let mut results = self
-            .run_init_loop(fast, installed, workspace, StageStyle::Wizard, 3, session)
+            .run_init_loop(
+                fast,
+                InitLoopArgs {
+                    installed,
+                    workspace,
+                    style: StageStyle::Wizard,
+                    phase_num: 3,
+                    mode,
+                    session,
+                },
+            )
             .await?;
 
         // Launch on the fast mounts alone. The daemon reads the specs just
@@ -284,7 +311,17 @@ impl SetupArgs {
         // persist step applies each spec to the now-running daemon (its
         // create-if-ready path), so these mounts go live without a relaunch.
         let rest_results = self
-            .run_init_loop(rest, installed, workspace, StageStyle::Wizard, 4, session)
+            .run_init_loop(
+                rest,
+                InitLoopArgs {
+                    installed,
+                    workspace,
+                    style: StageStyle::Wizard,
+                    phase_num: 4,
+                    mode,
+                    session,
+                },
+            )
             .await?;
         results.extend(rest_results);
 
@@ -304,7 +341,10 @@ impl SetupArgs {
         // here would be overwritten mid-line by them. Print a plain note before
         // and settle into a static row after.
         session.note("starting the daemon");
-        let outcome = match Launcher::new(workspace, "omnifs setup").launch().await {
+        let outcome = match Launcher::new(workspace, "omnifs setup", session.output())
+            .launch()
+            .await
+        {
             Ok(outcome) => outcome,
             Err(error) => {
                 session.row(crate::ui::report::Row::new(
@@ -317,16 +357,19 @@ impl SetupArgs {
         };
 
         // Where files appear comes from the effective frontend plan, not a
-        // prompted value: the daemon reports its own mount point once serving,
+        // prompted value: the daemon reports local mount points once serving,
         // and the plan's first local entry is the fallback before it does.
         let plan = frontend_plan(workspace);
         let mp = outcome
-            .mount_point
-            .clone()
+            .local_mount_points
+            .first()
+            .cloned()
             .or_else(|| plan.as_deref().and_then(first_local_mount_point));
         let daemon = match &mp {
             Some(mp) => format!("running; local mount at {}", WorkspaceLayout::display(mp)),
-            None => "running (no local frontend attached; see `omnifs frontend up`)".to_string(),
+            None => {
+                "running (no local frontend attached; see `omnifs frontend enable`)".to_string()
+            },
         };
         session.row(crate::ui::report::Row::new(
             crate::ui::style::Glyph::Done,
@@ -504,12 +547,16 @@ impl SetupArgs {
     async fn run_init_loop(
         &self,
         selected: &[String],
-        installed: &[(Provider, ProviderManifest)],
-        workspace: &Workspace,
-        style: StageStyle,
-        phase_num: usize,
-        session: &mut crate::ui::session::Session,
+        args: InitLoopArgs<'_>,
     ) -> anyhow::Result<Vec<InitResult>> {
+        let InitLoopArgs {
+            installed,
+            workspace,
+            style,
+            phase_num,
+            mode,
+            session,
+        } = args;
         let mut out = Vec::new();
         for provider_name in selected {
             let Some((_, manifest)) = crate::catalog::find_installed(installed, provider_name)
@@ -529,8 +576,6 @@ impl SetupArgs {
             let init_args = mount::AddArgs {
                 provider: Some(provider_name.clone()),
                 as_name: None,
-                no_input: self.no_input || self.yes,
-                yes: self.yes,
                 no_browser: self.no_browser,
                 token: None,
                 token_env: None,
@@ -541,9 +586,8 @@ impl SetupArgs {
                 config_json: None,
                 capabilities_json: None,
                 limits_json: None,
-                json: false,
             };
-            match crate::stages::configure_mount(init_args, workspace, false, session).await {
+            match crate::stages::configure_mount(init_args, workspace, false, session, mode).await {
                 Ok(outcome) => out.push(InitResult {
                     mount_name: outcome.mount_name,
                     outcome: MountOutcome::from_status(outcome.status),
@@ -565,38 +609,44 @@ impl SetupArgs {
 /// Map the setup wizard's OS detection onto the frontend resolver's coarser
 /// OS axis. WSL counts as Linux: it hosts a real Linux kernel FUSE stack, the
 /// same distinction the resolver cares about.
-fn to_resolver_os(os: HostOs) -> crate::config::HostOs {
+fn to_resolver_os(os: HostOs) -> ResolverHostOs {
     match os {
-        HostOs::MacOs => crate::config::HostOs::MacOs,
-        HostOs::LinuxNative | HostOs::LinuxWsl => crate::config::HostOs::Linux,
-        HostOs::Unsupported => crate::config::HostOs::Other,
+        HostOs::MacOs => ResolverHostOs::MacOs,
+        HostOs::LinuxNative | HostOs::LinuxWsl => ResolverHostOs::Linux,
+        HostOs::Unsupported => ResolverHostOs::Other,
     }
 }
 
 /// The effective `[[frontends]]` plan: which frontends the launch would start,
 /// each with its resolved mount point (`Some` host path for a local entry,
 /// `None` for a docker/krunkit guest). Falls back to `/` when the resolved
-/// home path is unavailable (e.g. `HOME` unset): a local entry's driver/kind
+/// home path is unavailable (e.g. `HOME` unset): a local entry's
+/// environment/filesystem
 /// presence does not depend on which path it resolves to.
 fn resolve_setup_frontend_plan(
-    config: &crate::config::Config,
+    config: &Config,
     os: HostOs,
-) -> anyhow::Result<Vec<crate::config::EffectiveFrontend>> {
+) -> anyhow::Result<Vec<EffectiveFrontend>> {
     let default_mount_point =
         omnifs_workspace::layout::resolve_mount_point().unwrap_or_else(|| PathBuf::from("/"));
-    crate::config::resolve_frontends(&config.frontends, to_resolver_os(os), &default_mount_point)
+    config
+        .frontends
+        .effective(to_resolver_os(os), &default_mount_point)
+        .map_err(Into::into)
 }
 
 /// The first local frontend's resolved host mount point in the plan, if any.
 /// Docker/krunkit entries carry no host path, so they are skipped.
-fn first_local_mount_point(plan: &[crate::config::EffectiveFrontend]) -> Option<PathBuf> {
-    plan.iter().find_map(|entry| entry.mount_point.clone())
+fn first_local_mount_point(plan: &[EffectiveFrontend]) -> Option<PathBuf> {
+    plan.iter()
+        .find(|entry| entry.environment == Environment::Host)
+        .and_then(|entry| entry.location.clone())
 }
 
 /// The effective `[[frontends]]` plan for the launch narration. Best-effort: a
 /// plan that fails to resolve simply drops the location note rather than the
 /// launch. See [`resolve_setup_frontend_plan`].
-fn frontend_plan(workspace: &Workspace) -> Option<Vec<crate::config::EffectiveFrontend>> {
+fn frontend_plan(workspace: &Workspace) -> Option<Vec<EffectiveFrontend>> {
     let config = workspace.config().ok()?;
     resolve_setup_frontend_plan(&config, HostOs::detect()).ok()
 }
@@ -606,24 +656,21 @@ fn frontend_plan(workspace: &Workspace) -> Option<Vec<crate::config::EffectiveFr
 /// for the primary), a docker/krunkit frontend inside its guest. When a local
 /// frontend uses the default path (no `OMNIFS_MOUNT_POINT`), add the one hint
 /// a user might miss: how to move it.
-fn note_frontend_locations(
-    plan: &[crate::config::EffectiveFrontend],
-    session: &mut crate::ui::session::Session,
-) {
+fn note_frontend_locations(plan: &[EffectiveFrontend], session: &mut crate::ui::session::Session) {
     let mut local_seen = false;
     for entry in plan {
-        match &entry.mount_point {
+        match &entry.location {
             Some(_) => local_seen = true,
             None => session.note(format!(
                 "the {} frontend mounts inside its guest; run `omnifs shell` to browse it",
-                entry.driver.as_via().label()
+                entry.environment.label()
             )),
         }
     }
-    let customized = crate::config::env_string("OMNIFS_MOUNT_POINT").is_some();
+    let customized = std::env::var_os(omnifs_workspace::layout::OMNIFS_MOUNT_POINT_ENV).is_some();
     if local_seen && !customized {
         session.note(
-            "to mount elsewhere, set `mount_point` in a `[[frontends]]` config entry or export OMNIFS_MOUNT_POINT before `omnifs up`",
+            "to mount elsewhere, set `location` in a `[[frontends]]` config entry or export OMNIFS_MOUNT_POINT before `omnifs up`",
         );
     }
 }
@@ -635,8 +682,9 @@ fn one_line(error: &anyhow::Error) -> String {
 /// Where a Ready mount's files live for the graduation card.
 fn ready_mount_location(outcome: &LaunchOutcome, mount: &str) -> String {
     let base = outcome
-        .mount_point
-        .clone()
+        .local_mount_points
+        .first()
+        .cloned()
         .or_else(omnifs_workspace::layout::resolve_mount_point)
         .unwrap_or_else(|| PathBuf::from("/"));
     WorkspaceLayout::display(&base.join(mount))
@@ -729,7 +777,12 @@ impl SetupArgs {
                 },
                 "run checks" => {
                     session.note("running `omnifs doctor`");
-                    crate::commands::doctor::DoctorArgs::default().run().await?;
+                    crate::commands::doctor::DoctorArgs::default()
+                        .run(crate::ui::output::Output::new(
+                            crate::ui::output::OutputMode::Human,
+                            false,
+                        ))
+                        .await?;
                 },
                 "exit" => {
                     session.outro("Leaving setup.");
@@ -769,14 +822,16 @@ impl SetupArgs {
         };
         let reauth = crate::commands::mount::ReauthArgs {
             name: target,
-            no_input: false,
             no_browser: self.no_browser,
             token: None,
             token_env: None,
             no_validate: false,
             scopes: Vec::new(),
         };
-        if let Err(error) = reauth.run_in_session(workspace, session).await {
+        if let Err(error) = reauth
+            .run_in_session(workspace, session, PromptMode::from_flags(false, false))
+            .await
+        {
             session.note(one_line(&error));
         }
     }
@@ -787,11 +842,10 @@ impl SetupArgs {
 async fn render_review_ledger(
     workspace: &Workspace,
     session: &mut crate::ui::session::Session,
-) -> anyhow::Result<Vec<crate::mount_report::UserMountStatus>> {
-    let store = omnifs_workspace::creds::FileStore::new(&workspace.layout().credentials_file);
-    let mounts = workspace.mounts()?;
-    let summaries =
-        crate::mount_report::scan_user_mount_configs(workspace.catalog(), &mounts, &store);
+) -> anyhow::Result<Vec<crate::inventory::MountStatus>> {
+    let summaries = crate::inventory::Inventory::collect(workspace)
+        .await?
+        .mounts;
     if summaries.is_empty() {
         session.row(crate::ui::report::Row::new(
             crate::ui::style::Glyph::Warn,
@@ -843,20 +897,11 @@ async fn render_review_ledger(
 }
 
 /// Mounts whose credential is missing or errored, and so can be reauthed.
-fn reauth_candidates(summaries: &[crate::mount_report::UserMountStatus]) -> Vec<String> {
-    use crate::auth::AuthReadiness;
-    use crate::mount_report::UserMountStatus;
+fn reauth_candidates(summaries: &[crate::inventory::MountStatus]) -> Vec<String> {
     summaries
         .iter()
-        .filter_map(|status| match status {
-            UserMountStatus::Ready(ready) => match &ready.auth {
-                AuthReadiness::Missing { .. } | AuthReadiness::Error { .. } => {
-                    Some(ready.mount.clone())
-                },
-                _ => None,
-            },
-            UserMountStatus::Invalid { .. } => None,
-        })
+        .filter(|status| status.auth.command().is_some())
+        .map(|status| status.name.clone())
         .collect()
 }
 
@@ -949,41 +994,28 @@ fn reauth_target_rows(candidates: &[String]) -> Vec<PickerRow> {
 }
 
 /// A review-ledger entry for one mount: `(name, state word)`.
-fn mount_summary(status: &crate::mount_report::UserMountStatus) -> (String, &'static str) {
-    use crate::auth::AuthReadiness;
-    use crate::mount_report::UserMountStatus;
-    match status {
-        UserMountStatus::Invalid { config_path, .. } => {
-            let name = config_path
-                .file_stem()
-                .and_then(|stem| stem.to_str())
-                .unwrap_or("?")
-                .to_string();
-            (name, "invalid")
-        },
-        UserMountStatus::Ready(ready) => {
-            let state = match &ready.auth {
-                AuthReadiness::None => "no auth needed",
-                AuthReadiness::Ready { .. } => "ready",
-                AuthReadiness::Missing { .. } => "needs auth",
-                AuthReadiness::Error { .. } => "auth error",
-            };
-            (ready.mount.clone(), state)
-        },
-    }
+fn mount_summary(status: &crate::inventory::MountStatus) -> (String, &'static str) {
+    let state = match &status.auth {
+        crate::inventory::AuthState::NotNeeded => "no auth needed",
+        crate::inventory::AuthState::Ready => "ready",
+        crate::inventory::AuthState::Missing { .. } => "needs auth",
+        crate::inventory::AuthState::Expired { .. } => "expired",
+        crate::inventory::AuthState::Error { .. } => "auth error",
+    };
+    (status.name.clone(), state)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use omnifs_workspace::config::{Filesystem, FrontendSpec};
 
     /// The launch narration derives its host mount point from the effective
     /// plan, not a prompt: the default (locally-mounted) plan resolves to the
     /// host default.
     #[test]
     fn first_local_mount_point_is_the_resolved_default() {
-        let plan = resolve_setup_frontend_plan(&crate::config::Config::default(), HostOs::detect())
-            .unwrap();
+        let plan = resolve_setup_frontend_plan(&Config::default(), HostOs::detect()).unwrap();
         assert_eq!(
             first_local_mount_point(&plan),
             omnifs_workspace::layout::resolve_mount_point()
@@ -994,14 +1026,30 @@ mod tests {
     /// narration must not fabricate one.
     #[test]
     fn first_local_mount_point_is_none_for_a_guest_only_plan() {
-        let config = crate::config::Config {
-            frontends: vec![crate::config::ConfigFrontendEntry {
-                kind: omnifs_workspace::runtime_record::FrontendKind::Fuse,
-                driver: crate::frontend_backend::Driver::Docker,
-                mount_point: None,
-            }],
-            ..Default::default()
-        };
+        let mut config = Config::default();
+        let default_location = "/home/user/omnifs";
+        for entry in config
+            .frontends
+            .effective(ResolverHostOs::MacOs, default_location)
+            .unwrap()
+        {
+            config
+                .frontends
+                .disable(&entry.id(), ResolverHostOs::MacOs, default_location)
+                .unwrap();
+        }
+        config
+            .frontends
+            .enable(
+                FrontendSpec {
+                    filesystem: Filesystem::Fuse,
+                    environment: Environment::Docker,
+                    location: None,
+                },
+                ResolverHostOs::MacOs,
+                default_location,
+            )
+            .unwrap();
         let plan = resolve_setup_frontend_plan(&config, HostOs::MacOs).unwrap();
         assert_eq!(first_local_mount_point(&plan), None);
     }
@@ -1009,7 +1057,7 @@ mod tests {
     #[test]
     fn ready_mount_location_uses_host_path() {
         let outcome = LaunchOutcome {
-            mount_point: Some(PathBuf::from("/mnt/omnifs")),
+            local_mount_points: vec![PathBuf::from("/mnt/omnifs")],
         };
         assert_eq!(
             ready_mount_location(&outcome, "github"),

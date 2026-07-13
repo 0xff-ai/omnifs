@@ -3,6 +3,7 @@
 use std::io::{self, IsTerminal};
 
 use super::event::{PromptAnswer, Render as _, UiEvent};
+use super::output::Output;
 use super::picker::Canceled;
 use super::session::RailRenderer;
 
@@ -48,7 +49,7 @@ impl Text {
     }
 
     pub(crate) fn ask(self) -> anyhow::Result<String> {
-        let mut renderer = RailRenderer;
+        let mut renderer = RailRenderer::new(Output::new(super::output::OutputMode::Human, false));
         renderer.event(&UiEvent::PromptShown {
             question: self.question.clone(),
         });
@@ -84,7 +85,7 @@ impl Confirm {
     }
 
     pub(crate) fn ask(self) -> anyhow::Result<bool> {
-        let mut renderer = RailRenderer;
+        let mut renderer = RailRenderer::new(Output::new(super::output::OutputMode::Human, false));
         renderer.event(&UiEvent::PromptShown {
             question: self.question.clone(),
         });
@@ -97,6 +98,12 @@ impl Confirm {
             answer: PromptAnswer::Visible(if answer { "yes" } else { "no" }.to_string()),
         });
         Ok(answer)
+    }
+
+    /// Check the invocation policy before rendering any prompt bytes.
+    pub(crate) fn ask_with_output(self, output: Output) -> anyhow::Result<bool> {
+        output.ensure_prompt_allowed()?;
+        self.ask()
     }
 }
 
@@ -112,7 +119,7 @@ impl Password {
     }
 
     pub(crate) fn ask(self) -> anyhow::Result<String> {
-        let mut renderer = RailRenderer;
+        let mut renderer = RailRenderer::new(Output::new(super::output::OutputMode::Human, false));
         renderer.event(&UiEvent::PromptShown {
             question: self.question.clone(),
         });
@@ -152,7 +159,7 @@ impl<T: Clone + Eq + std::fmt::Display> Select<T> {
     }
 
     pub(crate) fn ask(self) -> anyhow::Result<T> {
-        let mut renderer = RailRenderer;
+        let mut renderer = RailRenderer::new(Output::new(super::output::OutputMode::Human, false));
         renderer.event(&UiEvent::PromptShown {
             question: self.question.clone(),
         });
@@ -199,5 +206,17 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn structured_prompt_policy_fails_before_display() {
+        let error = Confirm::new("Proceed?")
+            .ask_with_output(Output::new(super::super::output::OutputMode::Json, false))
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("interactive input is unavailable")
+        );
     }
 }

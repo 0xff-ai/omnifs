@@ -5,7 +5,7 @@ Owns: FUSE and NFS frontend adapter boundaries, protocol state, mount behavior, 
 
 ## Read when
 
-Read this before touching `omnifs-fuse`, `omnifs-nfs`, `omnifs-mtab`, frontend startup, protocol replies, filehandles, stateids, inode tables, kernel notifications, NFS leases, macOS mount readiness, or live mount tests.
+Read this before touching `omnifs-thin`, the `omnifs-fuse` or `omnifs-nfs` protocol crates, `omnifs-mtab`, frontend startup, protocol replies, filehandles, stateids, inode tables, kernel notifications, NFS leases, macOS mount readiness, or live mount tests.
 
 ## Rules
 
@@ -17,19 +17,21 @@ A frontend consumes the narrow `omnifs_engine::namespace` surface (`Namespace`, 
 
 ### Frontend registry
 
-The daemon constructs one `TreeNamespace` over the shared mount registry and serves it to separate frontend processes over the Omnifs VFS wire protocol. It tracks live attachments but never builds, mounts, supervises, or unmounts a renderer. Each frontend process owns one protocol surface and its own lifetime; the CLI owns launch and teardown through the frontend backend seam.
+The daemon constructs one `TreeNamespace` over the shared mount registry and serves it to separate frontend processes over the Omnifs VFS wire protocol. Every frontend exposes that complete namespace, so adding or removing a mount changes every frontend together. Frontends never store mount membership, selection, or filtering. The daemon tracks live attachments but never builds, mounts, supervises, or unmounts a renderer. Each frontend process owns one protocol surface and its own lifetime; the CLI owns launch and teardown through the frontend backend seam.
 
 ### FUSE
 
-FUSE is the Linux frontend protocol. The slim `omnifs-fuse` runner can be delivered as a local process, Docker container, or krunkit guest; see `docs/contracts/60-build-validation.md` for image build and publish contracts.
+FUSE is the Linux frontend protocol. The slim `omnifs-thin fuse` mode can be delivered as a local process, Docker container, or krunkit guest; see `docs/contracts/60-build-validation.md` for image build and publish contracts.
 
-The Docker-hosted FUSE frontend's mount lives entirely inside the container's own mount namespace, so killing the container is an accepted, clean failure mode: the mount disappears with it, with nothing left to unmount host-side, and `omnifs frontend up` creates a fresh container that serves again.
+The Docker-hosted FUSE frontend's mount lives entirely inside the container's own mount namespace, so killing the container is an accepted, clean failure mode: the mount disappears with it, with nothing left to unmount host-side, and `omnifs frontend restart fuse --environment docker` creates a fresh container that serves again.
 
 Keep FUSE inode tables, kernel notifications, mount/unmount mechanics, and FUSE reply types in `omnifs-fuse`. Keep shared projection behavior in `omnifs-engine/src/tree`.
 
 ### Frontend processes and drivers
 
-Every frontend is a separate slim runner process. `omnifs-fuse` and `omnifs-nfs` contain their protocol mechanics but no engine, Wasmtime runtime, provider bundle, or daemon control plane. A driver only chooses how the CLI delivers that process: `local` on the host, `docker` in a container, or `krunkit` in a guest. `omnifs_engine::Namespace` owns shared VFS semantics; `omnifs-vfs-wire` owns serialization, framing, handshake, attach transport and reconnect, readiness signaling, and the client wire cache.
+Every frontend is a separate slim runner process. `omnifs-thin` contains the protocol mechanics selected by its `fuse` or `nfs` mode, with no engine runtime, Wasmtime runtime, provider bundle, or daemon control plane. It links the `omnifs_engine::Namespace` interface and wire-backed client implementation, while the daemon remains the only process that executes providers and owns shared VFS semantics. A driver only chooses how the CLI delivers that process: `local` on the host, `docker` in a container, or `krunkit` in a guest. `omnifs-vfs-wire` owns serialization, framing, handshake, attach transport and reconnect, readiness signaling, and the client wire cache.
+
+The public frontend identity is `(filesystem, environment, location)`: filesystem is `fuse` or `nfs`; environment is `host`, `docker`, or `krunkit`; location is caller-selected only for host frontends. Low-level code may retain `Driver::Local`, `FrontendDelivery::Local`, and `mount_point` where those names describe launch or protocol mechanics. Public commands, config, tables, and help use filesystem, environment, and location. `omnifs frontend enable`, `disable`, `restart`, and `ls` own targeted lifecycle; top-level `omnifs down` stops every live frontend.
 
 ### Frontend delivery backend seam
 
@@ -47,17 +49,17 @@ macOS host-native integration uses read-only NFSv4.0 loopback. NFS is a frontend
 
 Keep NFS filehandles, stateids, leases, and NFS protocol errors in `omnifs-nfs`. Preserve read-only behavior for mutation operations. Keep macOS mount readiness and teardown behavior in the NFS/CLI path.
 
-The slim `omnifs-nfs` runner attaches through the Omnifs VFS wire protocol. Mount discovery records and the persistent filehandle table live under per-mount state leaves (`cache/frontends/<kind>/<blake3-of-mount-path>`); an active-mount restart must reuse the recorded server address for that leaf, never silently bind a new port and skip remounting. Corrupt leaves degrade individually.
+The `omnifs-thin nfs` mode attaches through the Omnifs VFS wire protocol. Frontend discovery records and the persistent filehandle table live under per-location state leaves (`cache/frontends/<kind>/<blake3-of-location>`); restarting an active frontend location must reuse the recorded server address for that leaf, never silently bind a new port and skip remounting. Corrupt leaves degrade individually.
 
 ### Mount-table mechanics
 
 Keep `/proc/mounts` parsing, NFS mount state-file schema/IO, and shared platform unmount command construction in `omnifs-mtab`. Frontends and lifecycle code call that crate instead of carrying duplicate parsers, state versions, or unmount argv builders.
 
-The `omnifs-mtab` state files under the per-mount state leaf are mount *discovery and teardown* state (mount point, address, pid), shared by frontend runners and the CLI. The NFS filehandle-identity table (`omnifs-nfs/src/persist.rs`, persisted so a restarted out-of-process frontend decodes handles a kernel client still holds) is *protocol identity*, not mount discovery, so it stays in `omnifs-nfs` with the filehandles, stateids, and inode table. It lives in the same per-mount leaf (`cache/frontends/nfs/<hash>`) alongside the mtab files and mirrors their discipline (version field, unknown version is an error, atomic write, 0600 mode), but its schema and IO are NFS-crate-owned. Discovery records degrade individually; healthy siblings are never hidden.
+The `omnifs-mtab` state files under a per-location leaf are frontend *discovery and teardown* state (location, address, pid), shared by frontend runners and the CLI. The NFS filehandle-identity table (`omnifs-nfs/src/persist.rs`, persisted so a restarted out-of-process frontend decodes handles a kernel client still holds) is *protocol identity*, not frontend discovery, so it stays in `omnifs-nfs` with the filehandles, stateids, and inode table. It lives in the same location leaf (`cache/frontends/nfs/<hash>`) alongside the mtab files and mirrors their discipline (version field, unknown version is an error, atomic write, 0600 mode), but its schema and IO are NFS-crate-owned. Discovery records degrade individually; healthy siblings are never hidden.
 
 ### NFS deferral and `NFS4ERR_DELAY`
 
-`omnifs-nfs` uses `NFS4ERR_DELAY` in two distinct ways. Do not conflate them.
+The NFS mode of `omnifs-thin` uses `NFS4ERR_DELAY` in two distinct ways. Do not conflate them.
 
 **Reactive delay.** When the namespace returns a transient upstream error (`RateLimited`, `Timeout`, `Network`), the NFS adapter maps it to `NFS4ERR_DELAY` through `Status::from(&NsError)`. The client retry starts fresh; no background work continues past the reply.
 

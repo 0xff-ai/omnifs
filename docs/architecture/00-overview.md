@@ -67,7 +67,7 @@ Unknown and non-zero sizes use truthful sentinel behavior until exact size is le
 
 ## Frontends
 
-FUSE and NFS are protocol adapters over the same projected tree. Every frontend is a separate slim runner binary (`omnifs-fuse` for FUSE, `omnifs-nfs` for NFSv4 loopback) that contains protocol mechanics only and attaches to the daemon over the Omnifs VFS wire protocol. The CLI owns launch and teardown through drivers (`local`, `docker`, `krunkit`); the daemon is only a namespace server and attachment registry and never mounts or supervises a frontend.
+FUSE and NFS are protocol adapters over the same projected tree. Every frontend is a separate slim `omnifs-thin` runner selected with `fuse` or `nfs`; it contains protocol mechanics only and attaches to the daemon over the Omnifs VFS wire protocol. The CLI owns launch and teardown through drivers (`local`, `docker`, `krunkit`); the daemon is only a namespace server and attachment registry and never mounts or supervises a frontend.
 
 FUSE owns inode tables, kernel notifications, mount/unmount mechanics, and FUSE reply construction. NFSv4.0 loopback (macOS host-native) owns filehandles, stateids, leases, NFS protocol errors, mount readiness, and teardown. Mount discovery and NFS filehandle state live under per-mount leaves under `cache/frontends/<kind>/<hash>`.
 

@@ -2,16 +2,15 @@
 
 use anyhow::{Context, bail};
 use clap::{Args, Subcommand};
-use omnifs_api::{ProviderArtifact, ProviderSummary};
-use omnifs_workspace::ids::ProviderName;
 use omnifs_workspace::provider::{
     Artifact, ArtifactLoadError, IndexEntry, ProviderStore, StoreError,
 };
-use std::collections::{BTreeMap, BTreeSet};
-use std::fmt::Write as _;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::error::ExitCode;
+use crate::inventory::{Inventory, ProviderState, ProviderStatus};
+use crate::ui::output::{Output, ResultVerdict};
 use crate::workspace::Workspace;
 
 #[derive(Args, Debug, Clone)]
@@ -26,6 +25,8 @@ pub enum ProviderCommand {
     Add(AddArgs),
     /// List installed provider WASM artifacts.
     Ls(LsArgs),
+    /// Inspect one provider and its exact retained artifacts.
+    Show(ShowArgs),
 }
 
 #[derive(Args, Debug, Clone)]
@@ -36,24 +37,66 @@ pub struct AddArgs {
 }
 
 #[derive(Args, Debug, Clone, Default)]
-pub struct LsArgs {
-    /// Emit machine-readable JSON.
+pub struct LsArgs {}
+
+#[derive(Args, Debug, Clone)]
+pub struct ShowArgs {
+    /// Provider name to inspect.
+    pub provider: String,
+    /// Exact artifact digest, or a unique digest prefix.
     #[arg(long)]
-    pub json: bool,
+    pub artifact: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub(crate) struct ProviderAddReceipt {
+    pub(crate) providers: Vec<ProviderStatus>,
+    pub(crate) mount_created: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct ProviderListResult {
+    providers: Vec<ProviderStatus>,
+    verdict: crate::inventory::Verdict,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct ProviderShowResult {
+    providers: Vec<ProviderStatus>,
+    mounts: Vec<crate::inventory::MountStatus>,
+    verdict: crate::inventory::Verdict,
 }
 
 impl ProviderArgs {
-    pub async fn run(self) -> anyhow::Result<ExitCode> {
+    pub async fn run(self, output: Output) -> anyhow::Result<ExitCode> {
         match self.command {
-            ProviderCommand::Add(args) => args.run().map(|()| ExitCode::Success),
-            ProviderCommand::Ls(args) => args.run().await,
+            ProviderCommand::Add(args) => args.run(output).await.map(|()| ExitCode::Success),
+            ProviderCommand::Ls(args) => args.run(output).await,
+            ProviderCommand::Show(args) => args.run(output).await,
         }
     }
 }
 
 impl AddArgs {
-    fn run(self) -> anyhow::Result<()> {
+    async fn run(self, output: Output) -> anyhow::Result<()> {
         let workspace = Workspace::resolve()?;
+        let receipt = self.install(&workspace).await?;
+        if output.is_structured() {
+            output.emit_result(ResultVerdict::Ok, receipt)?;
+        } else {
+            print_provider_receipt(&receipt.providers);
+            output.narrate("No mount was created. Run `omnifs mount add <provider>`.");
+        }
+        Ok(())
+    }
+
+    /// Install artifacts and return the post-operation inventory receipt. The
+    /// caller owns output mode and can serialize this value without probing the
+    /// workspace a second time.
+    pub(crate) async fn install(
+        &self,
+        workspace: &Workspace,
+    ) -> anyhow::Result<ProviderAddReceipt> {
         let store = ProviderStore::new(&workspace.layout().providers_dir);
         let mut report = AddReport::default();
         for path in &self.paths {
@@ -62,144 +105,172 @@ impl AddArgs {
         match (report.installed, report.found) {
             (0, 0) => bail!("no provider WASM artifacts found"),
             (0, _) => bail!("no valid provider WASM artifacts installed"),
-            _ => Ok(()),
+            _ => {},
         }
-    }
-}
 
-#[derive(serde::Serialize)]
-struct ProvidersJson {
-    local: Vec<ProviderSummary>,
-    daemon: Option<Vec<ProviderSummary>>,
+        // Re-collect after installation. Inventory joins exact mount pins, so
+        // newly installed artifacts are reported as installed without ever
+        // creating or mutating a mount.
+        let inventory = Inventory::collect(workspace).await?;
+        let installed = receipt_rows(&inventory.providers, &report.installed_ids);
+        let receipt = ProviderAddReceipt {
+            providers: installed,
+            mount_created: false,
+        };
+        Ok(receipt)
+    }
 }
 
 impl LsArgs {
-    async fn run(self) -> anyhow::Result<ExitCode> {
+    async fn run(self, output: Output) -> anyhow::Result<ExitCode> {
         let workspace = Workspace::resolve()?;
-        let local = provider_summaries(workspace.catalog())?;
-        let daemon = workspace.daemon().providers_if_ready().await?;
-        if self.json {
-            let payload = ProvidersJson { local, daemon };
-            crate::ui::print_json(&payload)?;
+        let inventory = Inventory::collect(&workspace).await?;
+        let rows = &inventory.providers;
+        let exit_code = if rows.iter().any(|row| row.state == ProviderState::Missing) {
+            ExitCode::Degraded
         } else {
-            crate::ui::print_raw(&render_providers(&local, daemon.as_deref()));
-        }
-        Ok(ExitCode::Success)
-    }
-}
-
-fn render_providers(local: &[ProviderSummary], daemon: Option<&[ProviderSummary]>) -> String {
-    let mut out = String::new();
-    if local.is_empty() {
-        let _ = writeln!(out, "No providers installed.");
-    } else {
-        let _ = writeln!(out, "Providers ({})", local.len());
-        for provider in local {
-            let latest = provider
-                .latest
-                .as_ref()
-                .map_or_else(|| "none".to_string(), provider_artifact_label);
-            let retained = provider
-                .installed
-                .iter()
-                .map(provider_artifact_label)
-                .collect::<Vec<_>>()
-                .join(", ");
-            let _ = writeln!(
-                out,
-                "  {:<14} latest={} retained={}",
-                provider.name,
-                latest,
-                if retained.is_empty() {
-                    "none"
+            ExitCode::Success
+        };
+        if output.is_structured() {
+            output.emit_result(
+                if exit_code == ExitCode::Degraded {
+                    ResultVerdict::Degraded
                 } else {
-                    &retained
-                }
-            );
+                    ResultVerdict::Ok
+                },
+                ProviderListResult {
+                    providers: rows.clone(),
+                    verdict: inventory.verdict(),
+                },
+            )?;
+        } else {
+            print_provider_receipt(rows);
         }
+        Ok(exit_code)
     }
-
-    if let Some(daemon) = daemon {
-        let _ = writeln!(out);
-        let _ = writeln!(out, "Daemon providers ({})", daemon.len());
-        for provider in daemon {
-            let latest = provider
-                .latest
-                .as_ref()
-                .map_or_else(|| "none".to_string(), provider_artifact_label);
-            let _ = writeln!(out, "  {:<14} latest={}", provider.name, latest);
-        }
-    }
-    out
 }
 
-/// One summary per distinct provider name, the same view `provider ls`
-/// renders, so any other caller counting "distinct providers" matches it
-/// exactly instead of re-deriving the name-collapsing logic.
-pub(crate) fn provider_summaries(
-    catalog: &omnifs_workspace::provider::Catalog,
-) -> anyhow::Result<Vec<ProviderSummary>> {
-    let mut by_name = BTreeMap::new();
-    for provider in catalog.installed()? {
-        by_name
-            .entry(provider.meta.name.clone())
-            .or_insert_with(Vec::new)
-            .push(provider_artifact(&provider));
+impl ShowArgs {
+    async fn run(self, output: Output) -> anyhow::Result<ExitCode> {
+        let workspace = Workspace::resolve()?;
+        let inventory = Inventory::collect(&workspace).await?;
+        let rows = select_rows(
+            &inventory.providers,
+            &self.provider,
+            self.artifact.as_deref(),
+        )?;
+        let exit_code = if rows.iter().any(|row| row.state == ProviderState::Missing) {
+            ExitCode::Degraded
+        } else {
+            ExitCode::Success
+        };
+        if output.is_structured() {
+            let provider_name = self.provider.as_str();
+            let mounts = inventory
+                .mounts
+                .iter()
+                .filter(|mount| mount.provider.name == provider_name)
+                .cloned()
+                .collect();
+            output.emit_result(
+                if exit_code == ExitCode::Degraded {
+                    ResultVerdict::Degraded
+                } else {
+                    ResultVerdict::Ok
+                },
+                ProviderShowResult {
+                    providers: rows.clone(),
+                    mounts,
+                    verdict: inventory.verdict(),
+                },
+            )?;
+        } else {
+            print_provider_receipt(&rows);
+        }
+        Ok(exit_code)
     }
-    for artifacts in by_name.values_mut() {
-        artifacts.sort_by(|a, b| {
-            a.version
-                .cmp(&b.version)
-                .then_with(|| a.id_hash.cmp(&b.id_hash))
-        });
+}
+
+/// Resolve a provider selector against exact inventory rows. A name selects
+/// every retained artifact for that provider; an artifact selector must match
+/// exactly one digest (or one unique prefix), and never falls back to recency.
+pub(crate) fn select_rows(
+    rows: &[ProviderStatus],
+    provider: &str,
+    artifact: Option<&str>,
+) -> anyhow::Result<Vec<ProviderStatus>> {
+    let named = rows
+        .iter()
+        .filter(|row| row.name == provider)
+        .cloned()
+        .collect::<Vec<_>>();
+    if named.is_empty() {
+        bail!(
+            "provider `{provider}` was not found; candidates:\n{}",
+            candidate_rows(rows)
+        );
     }
+    let Some(selector) = artifact else {
+        return Ok(named);
+    };
 
-    let mut names = catalog
-        .installable()?
-        .into_iter()
-        .map(|provider| provider.meta.name)
-        .collect::<BTreeSet<_>>();
-    names.extend(by_name.keys().cloned());
+    let matches = named
+        .iter()
+        .filter(|row| row.artifact == selector || row.artifact.starts_with(selector))
+        .cloned()
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [row] => Ok(vec![row.clone()]),
+        [] => bail!(
+            "artifact `{selector}` for provider `{provider}` was not found; candidates:\n{}",
+            candidate_rows(&named)
+        ),
+        _ => bail!(
+            "artifact selector `{selector}` is ambiguous for provider `{provider}`; candidates:\n{}",
+            candidate_rows(&matches)
+        ),
+    }
+}
 
-    names
-        .into_iter()
-        .map(|name| provider_summary(catalog, &name, &mut by_name))
+fn candidate_rows(rows: &[ProviderStatus]) -> String {
+    rows.iter()
+        .map(|row| {
+            format!(
+                "  {} {} {}",
+                row.name,
+                row.version.as_deref().unwrap_or("unversioned"),
+                row.artifact
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn receipt_rows(rows: &[ProviderStatus], artifact_ids: &[String]) -> Vec<ProviderStatus> {
+    artifact_ids
+        .iter()
+        .filter_map(|id| rows.iter().find(|row| row.artifact == *id))
+        .map(|row| (row.artifact.clone(), row.clone()))
+        .collect::<BTreeMap<_, _>>()
+        .into_values()
         .collect()
 }
 
-fn provider_summary(
-    catalog: &omnifs_workspace::provider::Catalog,
-    name: &ProviderName,
-    by_name: &mut BTreeMap<ProviderName, Vec<ProviderArtifact>>,
-) -> anyhow::Result<ProviderSummary> {
-    let latest = catalog
-        .latest_by_name(name)?
-        .map(|provider| provider_artifact(&provider));
-    Ok(ProviderSummary {
-        installed: by_name.remove(name).unwrap_or_default(),
-        name: name.to_string(),
-        latest,
-    })
-}
-
-fn provider_artifact(provider: &omnifs_workspace::provider::Provider) -> ProviderArtifact {
-    ProviderArtifact {
-        version: provider.meta.version.as_ref().map(ToString::to_string),
-        id_hash: provider.id.to_string(),
-    }
-}
-
-fn provider_artifact_label(artifact: &ProviderArtifact) -> String {
-    match &artifact.version {
-        Some(version) => format!("{version}@{}", artifact.id_hash),
-        None => artifact.id_hash.clone(),
-    }
+fn print_provider_receipt(rows: &[ProviderStatus]) {
+    use crate::ui::table::{Block, Report};
+    let mut report = Report::new();
+    report.push(Block::Resources(crate::status::provider_rows_table(
+        "Providers",
+        rows,
+    )));
+    report.print();
 }
 
 #[derive(Default)]
 struct AddReport {
     found: usize,
     installed: usize,
+    installed_ids: Vec<String>,
 }
 
 fn add_path(store: &ProviderStore, path: &Path, report: &mut AddReport) -> anyhow::Result<()> {
@@ -212,7 +283,7 @@ fn add_path(store: &ProviderStore, path: &Path, report: &mut AddReport) -> anyho
         match add_file(store, path) {
             Ok(entry) => {
                 report.installed += 1;
-                print_installed(&entry);
+                report.installed_ids.push(entry.id.to_string());
                 Ok(())
             },
             Err(AddError::Load(ArtifactLoadError::Artifact(error))) => {
@@ -248,7 +319,7 @@ fn add_dir(store: &ProviderStore, path: &Path, report: &mut AddReport) -> anyhow
         match add_file(store, &path) {
             Ok(entry) => {
                 report.installed += 1;
-                print_installed(&entry);
+                report.installed_ids.push(entry.id.to_string());
             },
             Err(AddError::Load(ArtifactLoadError::Artifact(error))) => {
                 crate::ui::eprint_raw(&format!(
@@ -266,15 +337,6 @@ fn add_dir(store: &ProviderStore, path: &Path, report: &mut AddReport) -> anyhow
 fn add_file(store: &ProviderStore, path: &Path) -> Result<IndexEntry, AddError> {
     let artifact = Artifact::from_file(path)?;
     Ok(store.add_artifact(artifact)?)
-}
-
-fn print_installed(entry: &IndexEntry) {
-    crate::ui::eprint_raw(&format!(
-        "Installed provider `{}` {} from {}\n",
-        entry.name,
-        crate::style::dim(entry.id.to_string()),
-        entry.file
-    ));
 }
 
 fn display_path(path: &Path) -> String {
@@ -297,5 +359,144 @@ impl From<ArtifactLoadError> for AddError {
 impl From<StoreError> for AddError {
     fn from(error: StoreError) -> Self {
         Self::Store(error)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(
+        name: &str,
+        version: Option<&str>,
+        artifact: &str,
+        state: ProviderState,
+    ) -> ProviderStatus {
+        ProviderStatus {
+            name: name.into(),
+            version: version.map(str::to_owned),
+            artifact: artifact.into(),
+            pinned_by: Vec::new(),
+            state,
+            fix: state.fix().map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn show_selects_all_exact_artifacts_for_a_provider() {
+        let rows = vec![
+            row("github", Some("0.4.0"), "aaaa", ProviderState::Installed),
+            row("github", Some("0.4.1"), "bbbb", ProviderState::Pinned),
+            row("linear", None, "cccc", ProviderState::Installed),
+        ];
+        let selected = select_rows(&rows, "github", None).unwrap();
+        assert_eq!(selected.len(), 2);
+    }
+
+    #[test]
+    fn show_preserves_multiple_versions_and_unversioned_artifacts() {
+        let rows = vec![
+            row("github", Some("0.4.0"), "aaaa", ProviderState::Installed),
+            row("github", None, "bbbb", ProviderState::Installed),
+        ];
+        let selected = select_rows(&rows, "github", None).unwrap();
+        assert_eq!(selected[0].version.as_deref(), Some("0.4.0"));
+        assert_eq!(selected[1].version, None);
+    }
+
+    #[test]
+    fn duplicate_install_ids_produce_one_receipt_row() {
+        let rows = vec![row(
+            "github",
+            Some("0.4.1"),
+            "bbbb",
+            ProviderState::Installed,
+        )];
+        let ids = vec!["bbbb".to_owned(), "bbbb".to_owned()];
+        assert_eq!(receipt_rows(&rows, &ids).len(), 1);
+    }
+
+    #[test]
+    fn show_keeps_missing_artifacts_and_reverse_pin_facts() {
+        let mut pinned = row("github", Some("0.4.1"), "bbbb", ProviderState::Pinned);
+        pinned.pinned_by = vec!["main".into(), "mirror".into()];
+        let missing = row("github", Some("0.3.0"), "cccc", ProviderState::Missing);
+        let rows = vec![pinned, missing];
+        let selected = select_rows(&rows, "github", Some("cccc")).unwrap();
+        assert_eq!(selected[0].state, ProviderState::Missing);
+        assert_eq!(
+            rows[0].pinned_by,
+            vec!["main".to_owned(), "mirror".to_owned()]
+        );
+    }
+
+    #[test]
+    fn invalid_wasm_is_reported_at_the_artifact_boundary() {
+        use std::io::Write as _;
+
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("invalid.wasm");
+        std::fs::File::create(&path)
+            .unwrap()
+            .write_all(b"not wasm")
+            .unwrap();
+        let store = ProviderStore::new(temp.path().join("providers"));
+        let result = add_file(&store, &path);
+        assert!(matches!(
+            result,
+            Err(AddError::Load(ArtifactLoadError::Artifact(_)))
+        ));
+    }
+
+    #[test]
+    fn directory_with_invalid_wasm_keeps_found_count_truthful() {
+        use std::io::Write as _;
+
+        let temp = tempfile::tempdir().unwrap();
+        for name in ["a.wasm", "b.wasm"] {
+            let mut file = std::fs::File::create(temp.path().join(name)).unwrap();
+            file.write_all(b"not wasm").unwrap();
+        }
+        let store = ProviderStore::new(temp.path().join("providers"));
+        let mut report = AddReport::default();
+        add_dir(&store, temp.path(), &mut report).unwrap();
+        assert_eq!(report.found, 2);
+        assert_eq!(report.installed, 0);
+    }
+
+    #[test]
+    fn show_accepts_unique_digest_prefix_and_rejects_ambiguous_prefix() {
+        let rows = vec![
+            row("github", None, "aaaa1111", ProviderState::Installed),
+            row("github", None, "aaaa2222", ProviderState::Installed),
+        ];
+        let error = select_rows(&rows, "github", Some("aaaa")).unwrap_err();
+        assert!(error.to_string().contains("ambiguous"));
+        let selected = select_rows(&rows, "github", Some("aaaa1")).unwrap();
+        assert_eq!(selected[0].artifact, "aaaa1111");
+    }
+
+    #[test]
+    fn show_reports_candidates_for_an_absent_provider_or_artifact() {
+        let rows = vec![row("github", Some("0.4.1"), "bbbb", ProviderState::Pinned)];
+        let error = select_rows(&rows, "linear", None).unwrap_err();
+        assert!(error.to_string().contains("github"));
+        let error = select_rows(&rows, "github", Some("cccc")).unwrap_err();
+        assert!(error.to_string().contains("bbbb"));
+    }
+
+    #[test]
+    fn add_receipt_never_claims_a_mount() {
+        let receipt = ProviderAddReceipt {
+            providers: vec![row(
+                "github",
+                Some("0.4.1"),
+                "bbbb",
+                ProviderState::Installed,
+            )],
+            mount_created: false,
+        };
+        let json = serde_json::to_value(receipt).unwrap();
+        assert_eq!(json["mount_created"], false);
     }
 }

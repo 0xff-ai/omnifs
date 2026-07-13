@@ -4,6 +4,7 @@
 #![forbid(unsafe_code)]
 
 pub mod authn;
+pub mod config;
 pub mod creds;
 pub mod ids;
 mod io;

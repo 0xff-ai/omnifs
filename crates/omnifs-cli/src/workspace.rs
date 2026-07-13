@@ -11,9 +11,9 @@ use std::cell::{OnceCell, Ref, RefCell};
 use std::path::PathBuf;
 
 use crate::client::DaemonClient;
-use crate::config::Config;
 use crate::credential_target::CredentialTarget;
 use crate::mount_config::MountConfig;
+use omnifs_workspace::config::Config;
 use omnifs_workspace::mounts::Spec;
 
 /// Resolved local omnifs home for one CLI command.
@@ -46,7 +46,7 @@ impl Workspace {
     }
 
     pub(crate) fn from_layout(layout: WorkspaceLayout) -> Self {
-        Self::from_home(HomeWorkspace::from_layout(layout))
+        Self::from_home(HomeWorkspace::from_layout(absolute_layout(layout)))
     }
 
     pub(crate) fn from_home(home: HomeWorkspace) -> Self {
@@ -97,7 +97,7 @@ impl Workspace {
     }
 
     pub(crate) fn config(&self) -> anyhow::Result<Config> {
-        Config::load(self.home.config_file())
+        Ok(Config::load(self.home.config_file())?)
     }
 
     pub(crate) fn catalog(&self) -> &Catalog {
@@ -175,6 +175,30 @@ impl Workspace {
     }
 }
 
+/// Keep command-facing workspace paths absolute even when `OMNIFS_HOME` (or a
+/// test fixture root) was supplied as a relative path. The workspace crate
+/// owns the layout shape; this CLI boundary owns the serialized command view,
+/// so normalize once before constructing any handles.
+fn absolute_layout(mut layout: WorkspaceLayout) -> WorkspaceLayout {
+    let Ok(current_dir) = std::env::current_dir() else {
+        return layout;
+    };
+    let absolute = |path: PathBuf| {
+        if path.is_absolute() {
+            path
+        } else {
+            current_dir.join(path)
+        }
+    };
+    layout.config_dir = absolute(layout.config_dir);
+    layout.cache_dir = absolute(layout.cache_dir);
+    layout.mounts_dir = absolute(layout.mounts_dir);
+    layout.providers_dir = absolute(layout.providers_dir);
+    layout.credentials_file = absolute(layout.credentials_file);
+    layout.config_file = absolute(layout.config_file);
+    layout
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -232,5 +256,14 @@ mod tests {
             workspace.mounts().unwrap().is_empty(),
             "a mount removed after an earlier read must be gone from a later read"
         );
+    }
+
+    #[test]
+    fn relative_layout_paths_are_absolute_at_the_cli_boundary() {
+        let root = PathBuf::from(".omnifs");
+        let workspace = Workspace::from_layout(WorkspaceLayout::under_root(&root));
+        assert!(workspace.layout().config_dir.is_absolute());
+        assert!(workspace.layout().config_file.is_absolute());
+        assert!(workspace.layout().providers_dir.is_absolute());
     }
 }

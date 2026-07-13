@@ -6,6 +6,7 @@ use anyhow::Context;
 use clap::Args;
 
 use crate::inspector::{ConnectionMode, SourceKind, run_plain, run_tui};
+use crate::ui::output::Output;
 use crate::workspace::Workspace;
 
 /// The inspector's connection label for a live daemon. The daemon always runs
@@ -29,9 +30,12 @@ pub struct InspectArgs {
 }
 
 impl InspectArgs {
-    pub async fn run(self) -> anyhow::Result<()> {
+    pub async fn run(self, output: Output) -> anyhow::Result<()> {
+        if output.is_structured() {
+            anyhow::bail!("inspect is a passthrough command and only supports human output")
+        }
         if self.plain {
-            return self.run_plain().await;
+            return self.run_plain(output).await;
         }
 
         let (mode, source, label) = if let Some(path) = self.replay.clone() {
@@ -67,9 +71,9 @@ impl InspectArgs {
         Ok(())
     }
 
-    async fn run_plain(self) -> anyhow::Result<()> {
+    async fn run_plain(self, output: Output) -> anyhow::Result<()> {
         if let Some(path) = self.replay {
-            return run_plain(SourceKind::Replay(path));
+            return run_plain(SourceKind::Replay(path), output);
         }
         let workspace = Workspace::resolve()?;
         workspace.daemon().require_compatible().await?;
@@ -79,9 +83,11 @@ impl InspectArgs {
             .event_endpoint()?
             .context("daemon is not running")?;
         let record = self.record.clone();
-        tokio::task::spawn_blocking(move || run_plain(SourceKind::Socket { endpoint, record }))
-            .await
-            .context("inspector plain task")?
+        tokio::task::spawn_blocking(move || {
+            run_plain(SourceKind::Socket { endpoint, record }, output)
+        })
+        .await
+        .context("inspector plain task")?
     }
 }
 

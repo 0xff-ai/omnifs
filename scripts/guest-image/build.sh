@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build the arm64 krunkit guest with containerized mkosi. By default the script
-# extracts `omnifs-fuse` from Dockerfile's shared `fuse-builder`; CI supplies
-# the already-built binary through OMNIFS_FUSE_BIN. The dev profile is local
+# extracts `omnifs-thin` from Dockerfile's shared `thin-builder`; CI supplies
+# the already-built binary through OMNIFS_THIN_BIN. The dev profile is local
 # and autologins on the console, while the published release profile does not.
 set -euo pipefail
 
@@ -21,29 +21,29 @@ fi
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 out_dir="${OUT_DIR:-$root/target/guest-image}"
 builder_image="omnifs-guest-image-builder:local"
-fuse_builder_image="omnifs-guest-fuse-builder:local"
+thin_builder_image="omnifs-guest-thin-builder:local"
 
 mkdir -p "$out_dir"
 
 bin_dir="$(mktemp -d)"
 trap 'rm -rf "$bin_dir"' EXIT
 
-if [[ -n "${OMNIFS_FUSE_BIN:-}" ]]; then
-  echo "== using prebuilt omnifs-fuse binary: $OMNIFS_FUSE_BIN =="
-  cp "$OMNIFS_FUSE_BIN" "$bin_dir/omnifs-fuse"
-  chmod 0755 "$bin_dir/omnifs-fuse"
+if [[ -n "${OMNIFS_THIN_BIN:-}" ]]; then
+  echo "== using prebuilt omnifs-thin binary: $OMNIFS_THIN_BIN =="
+  cp "$OMNIFS_THIN_BIN" "$bin_dir/omnifs-thin"
+  chmod 0755 "$bin_dir/omnifs-thin"
 else
-  echo "== extracting the linux/arm64 omnifs-fuse binary (top-level Dockerfile fuse-builder stage) =="
+  echo "== extracting the linux/arm64 omnifs-thin binary (top-level Dockerfile thin-builder stage) =="
   docker build \
-    --target fuse-builder \
+    --target thin-builder \
     --platform linux/arm64 \
-    -t "$fuse_builder_image" \
+    -t "$thin_builder_image" \
     "$root"
 
-  cid="$(docker create "$fuse_builder_image")"
-  docker cp "$cid:/omnifs-fuse" "$bin_dir/omnifs-fuse"
+  cid="$(docker create "$thin_builder_image")"
+  docker cp "$cid:/omnifs-thin" "$bin_dir/omnifs-thin"
   docker rm -v "$cid" >/dev/null
-  chmod 0755 "$bin_dir/omnifs-fuse"
+  chmod 0755 "$bin_dir/omnifs-thin"
 fi
 
 echo "== building the mkosi container =="

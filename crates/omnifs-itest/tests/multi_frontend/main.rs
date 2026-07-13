@@ -31,8 +31,6 @@ use omnifs_workspace::runtime_record::RuntimeRecord;
 /// The live-growth file the test provider serves: `hello/live-log` grows one
 /// 12-byte line per 500ms from its first read, capped well above what these
 /// bounded polls need.
-const LIVE_LOG: &str = "test/hello/live-log";
-
 fn acceptance_gated() -> bool {
     if std::env::var_os("OMNIFS_ACCEPTANCE_LIVE").is_none() {
         eprintln!("skip: set OMNIFS_ACCEPTANCE_LIVE=1 to run multi-frontend acceptance");
@@ -102,18 +100,20 @@ fn dual_frontend_serves_one_namespace() {
         matrix::render_table(&[fuse_card.clone(), nfs_card.clone()])
     );
 
-    // Cross-frontend byte identity: the two roots project the same bytes.
-    assert_bytes_identical(
-        &fuse_root.join("hello/message"),
-        &nfs_root.join("hello/message"),
-        usize::MAX,
-    );
-    // A 256 KiB slice of the ranged file is identical across frontends.
-    assert_bytes_identical(
-        &fuse_root.join("hello/large-ranged"),
-        &nfs_root.join("hello/large-ranged"),
-        256 * 1024,
-    );
+    // Cross-frontend byte identity: both frontends expose every configured
+    // mount. There is no per-mount frontend assignment to special-case.
+    for root in ["test", "test2"] {
+        assert_bytes_identical(
+            &daemon.mount_points[0].join(root).join("hello/message"),
+            &daemon.mount_points[1].join(root).join("hello/message"),
+            usize::MAX,
+        );
+        assert_bytes_identical(
+            &daemon.mount_points[0].join(root).join("hello/large-ranged"),
+            &daemon.mount_points[1].join(root).join("hello/large-ranged"),
+            256 * 1024,
+        );
+    }
 
     // Assert both columns last, so the byte-identity evidence is captured first.
     assert_column_honest(&fuse_card);
@@ -145,8 +145,10 @@ fn invalidation_reaches_both_frontends_within_one_op() {
     // The live-follow pump emits an `AttrsChanged` invalidation on the shared
     // namespace event stream; both frontends subscribe independently, so each
     // sees the grown file. Assert fresh (grown) content through both mounts.
-    assert_live_growth_visible(&daemon.mount_points[0]);
-    assert_live_growth_visible(&daemon.mount_points[1]);
+    for mount in ["test", "test2"] {
+        assert_live_growth_visible(&daemon.mount_points[0], mount);
+        assert_live_growth_visible(&daemon.mount_points[1], mount);
+    }
     drop(daemon);
 }
 
@@ -161,13 +163,15 @@ fn invalidation_reaches_both_frontends_within_one_op() {
     let Some(daemon) = live::start_native_daemon() else {
         return;
     };
-    assert_live_growth_visible(&daemon.mount_point);
+    for mount in ["test", "test2"] {
+        assert_live_growth_visible(&daemon.mount_point, mount);
+    }
     drop(daemon);
 }
 
 /// A renderer serves the projected tree from a different process than the
 /// projection owner over the Omnifs VFS wire protocol. A
-/// daemon serves its fixed local attach socket; an `omnifs-nfs` child
+/// daemon serves its fixed local attach socket; an `omnifs-thin nfs` child
 /// (the shipped out-of-process NFS runner) mounts NFS over an Omnifs VFS
 /// wire-backed namespace. The full conformance row table runs against that
 /// mount with the same expectations as the regular macOS NFS loopback lane,
@@ -236,8 +240,8 @@ fn wire_frontend_nfs_parity() {
 /// Assert the live-growth file at `<mount_point>/test/hello/live-log` delivers
 /// fresh (grown) content through this mount within a bounded readiness poll: an
 /// initial read, then a later read that returns strictly more bytes.
-fn assert_live_growth_visible(mount_point: &Path) {
-    let path = mount_point.join(LIVE_LOG);
+fn assert_live_growth_visible(mount_point: &Path, mount: &str) {
+    let path = mount_point.join(mount).join("hello/live-log");
     let baseline = read_len(&path).unwrap_or_else(|| {
         panic!(
             "live-log must be readable through {}",

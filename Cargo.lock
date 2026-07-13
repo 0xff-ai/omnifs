@@ -2985,6 +2985,7 @@ dependencies = [
  "ratatui",
  "reqwest 0.13.4",
  "secrecy",
+ "semver",
  "serde",
  "serde_json",
  "sha2",
@@ -2997,6 +2998,7 @@ dependencies = [
  "toml 0.8.23",
  "tracing",
  "tracing-subscriber",
+ "unicode-width 0.2.0",
  "webbrowser",
  "zstd",
 ]
@@ -3103,14 +3105,11 @@ dependencies = [
 name = "omnifs-fuse"
 version = "0.2.1"
 dependencies = [
- "anyhow",
- "clap",
  "dashmap",
  "fuser",
  "libc",
  "omnifs-engine",
  "omnifs-mtab",
- "omnifs-vfs-wire",
  "omnifs-wit",
  "omnifs-workspace",
  "parking_lot",
@@ -3118,7 +3117,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -3156,14 +3154,11 @@ dependencies = [
 name = "omnifs-nfs"
 version = "0.2.1"
 dependencies = [
- "anyhow",
- "clap",
  "dashmap",
  "getrandom 0.3.4",
  "omnifs-core",
  "omnifs-engine",
  "omnifs-mtab",
- "omnifs-vfs-wire",
  "omnifs-wit",
  "omnifs-workspace",
  "serde",
@@ -3172,7 +3167,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -3301,6 +3295,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "omnifs-thin"
+version = "0.2.1"
+dependencies = [
+ "anyhow",
+ "clap",
+ "omnifs-engine",
+ "omnifs-fuse",
+ "omnifs-mtab",
+ "omnifs-nfs",
+ "omnifs-vfs-wire",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "omnifs-vfs-wire"
 version = "0.2.1"
 dependencies = [
@@ -3346,6 +3356,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "time",
+ "toml_edit 0.22.27",
  "tracing",
  "utoipa",
  "wasmparser 0.247.0",

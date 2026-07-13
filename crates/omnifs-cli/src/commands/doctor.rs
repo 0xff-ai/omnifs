@@ -1,30 +1,28 @@
 //! `omnifs doctor` — environment + auth diagnostics. No auto-fix.
 
 use clap::Args;
-use omnifs_api::{CredentialHealth, CredentialStatus, DaemonStatus};
 use serde::Serialize;
 use std::path::Path;
 
 use omnifs_workspace::creds::{CredentialStore, FileStore};
 
-use crate::auth::{AuthProbeSeverity, AuthProbeSummary};
-use crate::cli::OutputFormat;
 use crate::frontend_container::{frontend_container_name, resolve_frontend_image};
+use crate::inventory::{Inventory, Severity};
 use crate::launch_backend::{DockerTarget, ImageRef, names_registry};
 use crate::runtime::Runtime;
-use crate::status::UserMountStatus;
-use crate::ui::report::{Report, Row, Section};
-use crate::ui::style::Glyph;
+use crate::ui::output::{Output, ResultVerdict};
+use crate::ui::table::{
+    Action as TableAction, Block as TableBlock, Cell as TableCell, Column as TableColumn,
+    ContextStrip as TableContext, Priority as TablePriority, Report as TableReport,
+    ResourceRow as TableRow, ResourceTable as TableResources, StateToken as TableState,
+    WidthPolicy as TableWidth,
+};
 use crate::workspace::Workspace;
 use omnifs_workspace::layout::WorkspaceLayout;
 use omnifs_workspace::provider::DirStatus;
 
 #[derive(Args, Debug, Clone, Default)]
-pub struct DoctorArgs {
-    /// Emit machine-readable JSON.
-    #[arg(long)]
-    pub json: bool,
-}
+pub struct DoctorArgs {}
 
 /// Aggregate result of a completed diagnostic run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,16 +43,16 @@ impl DoctorVerdict {
 }
 
 impl DoctorArgs {
-    pub async fn run(self) -> anyhow::Result<DoctorVerdict> {
+    pub async fn run(self, output: Output) -> anyhow::Result<DoctorVerdict> {
         let workspace = Workspace::resolve()?;
-        let mounts = workspace.mounts()?;
+        let inventory = Inventory::collect(&workspace).await?;
         let docker_target = resolve_frontend_target(&workspace)
             .map_err(|error: anyhow::Error| format!("resolve target: {error:#}"));
         Doctor {
             workspace: &workspace,
-            mounts,
+            inventory,
             docker_target,
-            output: OutputFormat::from(self.json),
+            output,
         }
         .run()
         .await
@@ -77,10 +75,10 @@ fn resolve_frontend_target(workspace: &Workspace) -> anyhow::Result<DockerTarget
 
 struct Doctor<'a> {
     workspace: &'a Workspace,
-    mounts: Vec<crate::mount_config::MountConfig>,
+    inventory: Inventory,
     /// The frontend's Docker target, or the error resolving it.
     docker_target: Result<DockerTarget, String>,
-    output: OutputFormat,
+    output: Output,
 }
 
 #[derive(Serialize)]
@@ -114,43 +112,45 @@ struct LiveFinding {
 struct DoctorReport {
     verdict: DoctorVerdict,
     probes: Vec<ProbeJson>,
-    /// The human grid rows, collected in lockstep with `probes` so the same
-    /// facts drive the text report and the JSON.
-    rows: Vec<Row>,
-    output: OutputFormat,
+    human_probes: Vec<HumanProbe>,
+    output: Output,
+}
+
+struct HumanProbe {
+    name: String,
+    result: ProbeResult,
 }
 
 impl DoctorReport {
-    fn new(output: OutputFormat) -> Self {
+    fn new(output: Output) -> Self {
         Self {
             verdict: DoctorVerdict::Clean,
             probes: Vec::new(),
-            rows: Vec::new(),
+            human_probes: Vec::new(),
             output,
         }
     }
 
     fn record(&mut self, name: impl Into<String>, result: ProbeResult) {
         let name = name.into();
-        self.rows.push(Row::new(
-            result.glyph(),
-            name.clone(),
-            result.message().to_string(),
-        ));
-        let (state, message) = match result {
-            ProbeResult::Ok(message) => ("ok", message),
+        let (state, message) = match &result {
+            ProbeResult::Ok(message) => ("ok", message.clone()),
             ProbeResult::Warn(message) => {
                 if self.verdict == DoctorVerdict::Clean {
                     self.verdict = DoctorVerdict::Warnings;
                 }
-                ("warn", message)
+                ("warn", message.clone())
             },
             ProbeResult::Err(message) => {
                 self.verdict = DoctorVerdict::Failures;
-                ("err", message)
+                ("err", message.clone())
             },
-            ProbeResult::Skipped(reason) => ("skipped", reason.to_string()),
+            ProbeResult::Skipped(reason) => ("skipped", (*reason).to_owned()),
         };
+        self.human_probes.push(HumanProbe {
+            name: name.clone(),
+            result,
+        });
         self.probes.push(ProbeJson {
             name,
             state,
@@ -169,31 +169,37 @@ impl DoctorReport {
         }
     }
 
-    fn finish(self, live: LiveSection, paths: Section) -> anyhow::Result<DoctorVerdict> {
-        match self.output {
-            OutputFormat::Json => {
-                crate::ui::print_json(&DoctorJson {
+    fn finish(self, live: LiveSection, paths: &WorkspaceLayout) -> anyhow::Result<DoctorVerdict> {
+        if self.output.is_structured() {
+            self.output.emit_result(
+                match self.verdict {
+                    DoctorVerdict::Clean => ResultVerdict::Ok,
+                    DoctorVerdict::Warnings | DoctorVerdict::Failures => ResultVerdict::Degraded,
+                },
+                DoctorJson {
                     verdict: self.verdict.label(),
                     probes: self.probes,
                     live,
-                })?;
-            },
-            OutputFormat::Text => {
-                let failures = self.count("err") + live_count(&live, "err");
-                let warnings = self.count("warn") + live_count(&live, "warn");
-                let mut report = Report::new();
-                let mut diagnostics = Section::new("Diagnostics").counted(self.probes.len());
-                for row in self.rows {
-                    diagnostics.push(row);
-                }
-                report.push(diagnostics);
-                report.push(live_section(&live));
-                // The workspace paths block lives here, not on `version`: it is
-                // diagnostic detail, and doctor ends with its verdict line.
-                report.push(paths);
-                report.push(Section::new(verdict_line(self.verdict, warnings, failures)));
-                report.print();
-            },
+                },
+            )?;
+        } else {
+            let failures = self.count("err") + live_count(&live, "err");
+            let warnings = self.count("warn") + live_count(&live, "warn");
+            let mut report = TableReport::new();
+            report.push(TableBlock::Resources(diagnostics_table(&self.human_probes)));
+            report.push(TableBlock::Resources(live_table(&live)));
+            report.push(TableBlock::Resources(paths_table(paths)));
+            let state = match self.verdict {
+                DoctorVerdict::Clean => TableState::positive("clean"),
+                DoctorVerdict::Warnings => TableState::attention("warnings"),
+                DoctorVerdict::Failures => TableState::failure("failures"),
+            };
+            report.push(TableBlock::Context(TableContext::new(
+                "Verdict",
+                verdict_line(self.verdict, warnings, failures),
+                state,
+            )));
+            report.print();
         }
         Ok(self.verdict)
     }
@@ -221,35 +227,6 @@ fn live_count(live: &LiveSection, state: &str) -> usize {
         .count()
 }
 
-/// The `Live daemon` section: a skip row when no daemon answered, a single
-/// healthy row when every mount is fine, or one row per finding with its fix.
-fn live_section(live: &LiveSection) -> Section {
-    let mut section = Section::new("Live daemon");
-    if let Some(reason) = &live.skipped {
-        section.push(Row::new(Glyph::Skip, "", format!("skipped: {reason}")));
-    } else if live.findings.is_empty() {
-        section.push(Row::new(Glyph::Done, "", "all live mounts are healthy"));
-    } else {
-        for finding in &live.findings {
-            let glyph = if finding.state == "err" {
-                Glyph::Fail
-            } else {
-                Glyph::Warn
-            };
-            section.push(
-                Row::new(
-                    glyph,
-                    finding.mount.clone(),
-                    format!("{}; run `{}`", finding.message, finding.fix),
-                )
-                .identity()
-                .with_fix(finding.fix.clone()),
-            );
-        }
-    }
-    section
-}
-
 /// The closing verdict line, pluralized: `verdict: clean`, `verdict: 1 warning`,
 /// `verdict: 2 failures`.
 fn verdict_line(verdict: DoctorVerdict, warnings: usize, failures: usize) -> String {
@@ -268,6 +245,116 @@ fn plural(count: usize, word: &str) -> String {
     }
 }
 
+fn diagnostics_table(probes: &[HumanProbe]) -> TableResources {
+    let mut table = TableResources::new(
+        "Diagnostics",
+        probes.len(),
+        vec![
+            TableColumn::new("Check", TablePriority::Identity, TableWidth::Auto),
+            TableColumn::new("Details", TablePriority::Essential, TableWidth::Auto),
+            TableColumn::new("State", TablePriority::Essential, TableWidth::Auto),
+        ],
+    );
+    for probe in probes {
+        let state = probe.result.state_token();
+        table.push(TableRow::new(
+            [
+                TableCell::new(probe.name.clone()),
+                TableCell::new(probe.result.message()),
+                TableCell::state(state.clone()),
+            ],
+            state,
+        ));
+    }
+    table
+}
+
+fn live_table(live: &LiveSection) -> TableResources {
+    let count = live.findings.len().max(1);
+    let mut table = TableResources::new(
+        "Live daemon",
+        count,
+        vec![
+            TableColumn::new("Mount", TablePriority::Identity, TableWidth::Auto),
+            TableColumn::new("Details", TablePriority::Essential, TableWidth::Auto),
+            TableColumn::new("State", TablePriority::Essential, TableWidth::Auto),
+        ],
+    );
+    if let Some(reason) = &live.skipped {
+        let state = TableState::neutral("skipped");
+        table.push(TableRow::new(
+            [
+                TableCell::new("daemon"),
+                TableCell::new(reason.clone()),
+                TableCell::state(state.clone()),
+            ],
+            state,
+        ));
+    } else if live.findings.is_empty() {
+        let state = TableState::positive("healthy");
+        table.push(TableRow::new(
+            [
+                TableCell::new("all mounts"),
+                TableCell::new("all live mounts are healthy"),
+                TableCell::state(state.clone()),
+            ],
+            state,
+        ));
+    } else {
+        for finding in &live.findings {
+            let state = if finding.state == "err" {
+                TableState::failure("err")
+            } else {
+                TableState::attention("warn")
+            };
+            table.push(
+                TableRow::new(
+                    [
+                        TableCell::new(finding.mount.clone()),
+                        TableCell::new(finding.message.clone()),
+                        TableCell::state(state.clone()),
+                    ],
+                    state,
+                )
+                .with_action(TableAction::fix(finding.fix.clone())),
+            );
+        }
+    }
+    table
+}
+
+fn paths_table(layout: &WorkspaceLayout) -> TableResources {
+    let paths = [
+        ("config", &layout.config_dir),
+        ("cache", &layout.cache_dir),
+        ("mounts", &layout.mounts_dir),
+        ("providers", &layout.providers_dir),
+        ("credentials", &layout.credentials_file),
+        ("config file", &layout.config_file),
+    ];
+    let mut table = TableResources::new(
+        "Paths",
+        paths.len(),
+        vec![
+            TableColumn::new("Path", TablePriority::Identity, TableWidth::Auto),
+            TableColumn::new("Location", TablePriority::Essential, TableWidth::Path),
+            TableColumn::new("State", TablePriority::Essential, TableWidth::Auto),
+        ],
+    );
+    for (key, path) in paths {
+        let state = TableState::neutral("configured");
+        table.push(TableRow::new(
+            [
+                TableCell::new(key),
+                TableCell::new(WorkspaceLayout::display(path)),
+                TableCell::state(state.clone()),
+            ],
+            state,
+        ));
+    }
+    table
+}
+
 #[derive(Debug)]
 enum ProbeResult {
     Ok(String),
@@ -277,28 +364,19 @@ enum ProbeResult {
 }
 
 impl ProbeResult {
-    fn from_auth_summary(summary: AuthProbeSummary) -> Self {
-        match summary.severity {
-            AuthProbeSeverity::Ok => Self::Ok(summary.message),
-            AuthProbeSeverity::Warn => Self::Warn(summary.message),
-            AuthProbeSeverity::Err => Self::Err(summary.message),
-        }
-    }
-
-    /// The closed-vocabulary glyph for this probe outcome.
-    fn glyph(&self) -> Glyph {
-        match self {
-            Self::Ok(_) => Glyph::Done,
-            Self::Warn(_) => Glyph::Warn,
-            Self::Err(_) => Glyph::Fail,
-            Self::Skipped(_) => Glyph::Skip,
-        }
-    }
-
     fn message(&self) -> &str {
         match self {
             Self::Ok(m) | Self::Warn(m) | Self::Err(m) => m.as_str(),
             Self::Skipped(reason) => reason,
+        }
+    }
+
+    fn state_token(&self) -> TableState {
+        match self {
+            Self::Ok(_) => TableState::positive("ok"),
+            Self::Warn(_) => TableState::attention("warn"),
+            Self::Err(_) => TableState::failure("err"),
+            Self::Skipped(_) => TableState::neutral("skipped"),
         }
     }
 }
@@ -338,29 +416,9 @@ impl Doctor<'_> {
 
         report.record("network", self.probe_network().await);
 
-        let live = self.probe_live().await?;
+        let live = self.probe_live();
         report.record_live(&live);
-        let paths = self.paths_section();
-        report.finish(live, paths)
-    }
-
-    /// The workspace paths block: config, cache, mounts, providers, credentials,
-    /// and the config file, each on its own informational row. Moved here from
-    /// `version --detail`; it is diagnostic detail, not a version fact.
-    fn paths_section(&self) -> Section {
-        let layout = self.workspace.layout();
-        let mut section = Section::new("Paths");
-        for (key, path) in [
-            ("config", &layout.config_dir),
-            ("cache", &layout.cache_dir),
-            ("mounts", &layout.mounts_dir),
-            ("providers", &layout.providers_dir),
-            ("credentials", &layout.credentials_file),
-            ("config file", &layout.config_file),
-        ] {
-            section.push(Row::new(Glyph::Skip, key, WorkspaceLayout::display(path)));
-        }
-        section
+        report.finish(live, self.workspace.layout())
     }
 
     async fn probe_docker_reachable(&self) -> (Option<Runtime>, ProbeResult) {
@@ -414,12 +472,12 @@ impl Doctor<'_> {
             Err(bollard::errors::Error::DockerResponseServerError {
                 status_code: 404, ..
             }) if names_registry(image.as_str()) => ProbeResult::Warn(format!(
-                "{image} not cached (will pull on `omnifs frontend up`)"
+                "{image} not cached (will pull on `omnifs frontend enable`)"
             )),
             Err(bollard::errors::Error::DockerResponseServerError {
                 status_code: 404, ..
             }) => ProbeResult::Err(format!(
-                "{image} not present locally; a dev image is never pulled, so `omnifs frontend up` \
+                "{image} not present locally; a dev image is never pulled, so `omnifs frontend enable` \
                  cannot start (build it with `just frontend-image`)"
             )),
             Err(error) => ProbeResult::Err(format!("inspect: {error}")),
@@ -429,10 +487,10 @@ impl Doctor<'_> {
     fn probe_providers_discovered(&self) -> ProbeResult {
         match self.workspace.catalog().dir_status() {
             DirStatus::Present { wasm_count } if wasm_count > 0 => {
-                match crate::commands::provider::provider_summaries(self.workspace.catalog()) {
-                    Ok(summaries) => ProbeResult::Ok(format!(
+                match self.workspace.catalog().installable() {
+                    Ok(providers) => ProbeResult::Ok(format!(
                         "{} providers ({wasm_count} artifacts)",
-                        summaries.len()
+                        providers.len()
                     )),
                     Err(error) => ProbeResult::Err(format!("provider store unreadable: {error}")),
                 }
@@ -507,55 +565,34 @@ impl Doctor<'_> {
     }
 
     fn probe_mount_configs(&self) -> (ProbeResult, Vec<(String, ProbeResult)>) {
-        let store = FileStore::new(&self.workspace.layout().credentials_file);
-        let mounts = crate::mount_report::scan_user_mount_configs(
-            self.workspace.catalog(),
-            &self.mounts,
-            &store,
-        );
-        let invalid: Vec<_> = mounts
+        let invalid = self
+            .inventory
+            .mounts
             .iter()
-            .filter_map(|m| match m {
-                UserMountStatus::Invalid { config_path, error } => Some((
-                    config_path
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("<unknown>")
-                        .to_string(),
-                    error.clone(),
-                )),
-                UserMountStatus::Ready(_) => None,
-            })
-            .collect();
-        let valid_count = mounts.len() - invalid.len();
-
-        let configs_result = if invalid.is_empty() {
-            ProbeResult::Ok(format!("{valid_count} mount(s) valid"))
+            .filter(|mount| mount.auth.severity() == Severity::Error)
+            .count();
+        let valid = self.inventory.mounts.len().saturating_sub(invalid);
+        let configs = if invalid == 0 {
+            ProbeResult::Ok(format!("{valid} mount(s) valid"))
         } else {
-            // One-line detail keeps the message on the shared grid.
-            let detail = invalid
-                .iter()
-                .map(|(name, error)| format!("{name}: {error}"))
-                .collect::<Vec<_>>()
-                .join("; ");
-            ProbeResult::Err(format!(
-                "{valid_count} valid, {} invalid: {detail}",
-                invalid.len()
-            ))
+            ProbeResult::Err(format!("{valid} valid, {invalid} invalid"))
         };
-
-        let auth_results = mounts
+        let auth = self
+            .inventory
+            .mounts
             .iter()
-            .filter_map(|mount| {
-                let UserMountStatus::Ready(mount) = mount else {
-                    return None;
+            .map(|mount| {
+                let result = match mount.auth.severity() {
+                    Severity::Positive | Severity::Neutral => {
+                        ProbeResult::Ok(mount.auth.label().to_owned())
+                    },
+                    Severity::Attention => ProbeResult::Warn(mount.auth.label().to_owned()),
+                    Severity::Error => ProbeResult::Err(mount.auth.label().to_owned()),
                 };
-                let result = ProbeResult::from_auth_summary(mount.auth.probe_summary());
-                Some((mount.mount.clone(), result))
+                (mount.name.clone(), result)
             })
             .collect();
-
-        (configs_result, auth_results)
+        (configs, auth)
     }
 
     async fn probe_network(&self) -> ProbeResult {
@@ -572,110 +609,41 @@ impl Doctor<'_> {
         }
     }
 
-    async fn probe_live(&self) -> anyhow::Result<LiveSection> {
-        if !self.workspace.daemon().ready().await {
-            return Ok(LiveSection {
-                skipped: Some("no ready compatible daemon answered".to_string()),
+    fn probe_live(&self) -> LiveSection {
+        if self.inventory.workspace.daemon == crate::inventory::DaemonState::Stopped {
+            return LiveSection {
+                skipped: Some("daemon is stopped".to_string()),
                 findings: Vec::new(),
-            });
+            };
         }
-        let Some(status) = self.workspace.daemon().compatible_status_optional().await? else {
-            return Ok(LiveSection {
-                skipped: Some("no compatible daemon answered".to_string()),
-                findings: Vec::new(),
-            });
-        };
-        let credentials = self
-            .workspace
-            .daemon()
-            .credentials_if_ready()
-            .await?
-            .unwrap_or_default();
-        let provider_by_mount: std::collections::BTreeMap<String, String> = self
-            .workspace
-            .mounts()
-            .unwrap_or_default()
-            .into_iter()
-            .map(|mount| {
-                let provider = mount.config.provider_name().to_string();
-                (mount.name.to_string(), provider)
+        let findings = self
+            .inventory
+            .mounts
+            .iter()
+            .filter_map(|mount| {
+                let state = if mount.serving.severity() == Severity::Error {
+                    "err"
+                } else if mount.auth.severity() >= Severity::Attention {
+                    "warn"
+                } else {
+                    return None;
+                };
+                Some(LiveFinding {
+                    mount: mount.name.clone(),
+                    state,
+                    message: format!(
+                        "auth={} serving={}",
+                        mount.auth.label(),
+                        mount.serving.label()
+                    ),
+                    fix: mount.fix.clone().unwrap_or_else(|| "omnifs logs".into()),
+                })
             })
             .collect();
-        Ok(LiveSection {
+        LiveSection {
             skipped: None,
-            findings: live_findings(&status, &credentials, &provider_by_mount),
-        })
-    }
-}
-
-fn live_findings(
-    status: &DaemonStatus,
-    credentials: &[CredentialStatus],
-    provider_by_mount: &std::collections::BTreeMap<String, String>,
-) -> Vec<LiveFinding> {
-    let mut findings = Vec::new();
-    for failure in &status.failed {
-        // A load failure is not necessarily an auth problem (capability
-        // under-grants land here too), so the fix is spec recreation, which is
-        // also what the daemon's own error text recommends.
-        let fix = match provider_by_mount.get(&failure.mount) {
-            Some(provider) => format!("omnifs mount add {provider} --as {}", failure.mount),
-            None => "omnifs logs".to_string(),
-        };
-        findings.push(LiveFinding {
-            mount: failure.mount.clone(),
-            state: "err",
-            message: format!("failed to load: {}", failure.reason),
-            fix,
-        });
-    }
-    for mount in &status.mounts {
-        let mut credential_findings = credentials
-            .iter()
-            .filter(|credential| {
-                credential
-                    .id
-                    .starts_with(&format!("{}:", mount.provider_name))
-                    && credential.health.needs_attention()
-            })
-            .map(|credential| LiveFinding {
-                mount: mount.mount.clone(),
-                state: "warn",
-                message: format!(
-                    "credential `{}` is {}",
-                    credential.id,
-                    credential_health_label(credential.health)
-                ),
-                fix: format!("omnifs mount reauth {}", mount.mount),
-            })
-            .peekable();
-        // The aggregate mount health is derived from the same credentials, so
-        // only fall back to it when no per-credential finding names the cause.
-        if credential_findings.peek().is_some() {
-            findings.extend(credential_findings);
-        } else if let Some(health) = mount.auth_health
-            && health.needs_attention()
-        {
-            findings.push(LiveFinding {
-                mount: mount.mount.clone(),
-                state: "warn",
-                message: format!("credential health is {}", credential_health_label(health)),
-                fix: format!("omnifs mount reauth {}", mount.mount),
-            });
+            findings,
         }
-    }
-    findings
-}
-
-fn credential_health_label(health: CredentialHealth) -> &'static str {
-    match health {
-        CredentialHealth::Ready => "ready",
-        CredentialHealth::ExpiringSoon => "expiring soon",
-        CredentialHealth::Expired => "expired",
-        CredentialHealth::RefreshFailed => "refresh failed",
-        CredentialHealth::NeedsConsent => "needs consent",
-        CredentialHealth::Missing => "missing",
-        CredentialHealth::StaticUnvalidated => "static unvalidated",
     }
 }
 
@@ -726,21 +694,21 @@ mod golden {
     #[test]
     fn doctor_grid() {
         let probes = probes();
-        let mut diagnostics = Section::new("Diagnostics").counted(probes.len());
-        for (name, result) in &probes {
-            diagnostics.push(Row::new(
-                result.glyph(),
-                *name,
-                result.message().to_string(),
-            ));
-        }
+        let human = probes
+            .into_iter()
+            .map(|(name, result)| HumanProbe {
+                name: name.to_owned(),
+                result,
+            })
+            .collect::<Vec<_>>();
         let live = live();
-        let mut report = Report::new();
-        report.push(diagnostics);
-        report.push(live_section(&live));
-        // One err probe drives the failure verdict.
-        report.push(Section::new(verdict_line(DoctorVerdict::Failures, 1, 1)));
-        insta::assert_snapshot!(strip_ansi(&report.render()));
+        let mut report = TableReport::new();
+        report.push(TableBlock::Resources(diagnostics_table(&human)));
+        report.push(TableBlock::Resources(live_table(&live)));
+        let rendered = strip_ansi(&report.render());
+        assert!(rendered.contains("Diagnostics  5"));
+        assert!(rendered.contains("Live daemon  1"));
+        assert!(rendered.contains("Fix  omnifs mount reauth linear"));
     }
 
     #[test]
@@ -767,7 +735,8 @@ mod golden {
                 fix: "omnifs logs".to_string(),
             }],
         };
-        let mut report = DoctorReport::new(OutputFormat::Text);
+        let mut report =
+            DoctorReport::new(Output::new(crate::ui::output::OutputMode::Human, false));
         report.record_live(&live);
         assert_eq!(report.verdict, DoctorVerdict::Failures);
     }
@@ -789,12 +758,24 @@ mod golden {
 
     fn probe_credential_result(root: &std::path::Path) -> ProbeResult {
         let layout = fixture_paths(root);
-        let workspace = Workspace::from_layout(layout);
+        let workspace = Workspace::from_layout(layout.clone());
         let doctor = Doctor {
             workspace: &workspace,
-            mounts: Vec::new(),
+            inventory: Inventory {
+                workspace: crate::inventory::WorkspaceStatus {
+                    home: layout.config_dir.clone(),
+                    daemon: crate::inventory::DaemonState::Stopped,
+                    namespace: crate::inventory::NamespaceState::Offline,
+                    pid: None,
+                    api: None,
+                    runtime_expected: false,
+                },
+                frontends: Vec::new(),
+                mounts: Vec::new(),
+                providers: Vec::new(),
+            },
             docker_target: Err("test".to_owned()),
-            output: OutputFormat::Text,
+            output: Output::new(crate::ui::output::OutputMode::Human, false),
         };
         doctor.probe_credential_store()
     }

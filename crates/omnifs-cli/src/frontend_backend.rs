@@ -1,80 +1,27 @@
-//! The frontend backend seam: how `omnifs frontend up|down` and
+//! The frontend backend seam: how `omnifs frontend enable|disable` and
 //! `omnifs shell` launch, probe, tear down, and shell into the optional FUSE
 //! frontend, independent of which runtime hosts it.
 //!
 //! Two guest backends implement the seam: `DockerBackend` (this module) and
 //! `KrunkitBackend` (`crate::krunkit_backend`), a libkrun microVM on macOS.
-//! Both run the same `omnifs-fuse` binary and Omnifs VFS wire protocol; only
+//! Both run the same `omnifs-thin fuse` runner and Omnifs VFS wire protocol; only
 //! the attach transport differs (Docker: TCP via `host.docker.internal`; krunkit: vsock,
 //! bridged onto a unix socket by krunkit itself). Keeping the seam here,
 //! rather than letting the frontend commands call bollard or krunkit
 //! directly, is what let the second backend land without touching them
-//! beyond a driver-selected constructor.
-//!
-//! [`Driver`] is the user-facing selector (`--driver` / `[frontend]
-//! driver`); [`Via`] is the on-disk record of which backend a running
-//! frontend was launched with.
+//! beyond an environment-selected constructor.
 
-use std::path::PathBuf;
 use std::process::Command;
-
-use anyhow::Result;
-use omnifs_workspace::runtime_record::Via;
-use serde::Deserialize;
 
 use crate::frontend_container::{FrontendContainerSpec, assert_locked_down};
 use crate::launch_backend::GUEST_MOUNT;
 use crate::runtime::Runtime;
-
-/// How the frontend process is delivered. Selected by `--driver` (CLI flag)
-/// or a `[[frontends]]` entry's `driver` field (config).
-#[derive(clap::ValueEnum, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub(crate) enum Driver {
-    Local,
-    Docker,
-    Krunkit,
-}
-
-impl Driver {
-    /// The [`Via`] this choice records once a frontend launches under it.
-    pub(crate) const fn as_via(self) -> Via {
-        match self {
-            Self::Local => Via::Local,
-            Self::Docker => Via::Docker,
-            Self::Krunkit => Via::Krunkit,
-        }
-    }
-}
-
-/// Backend-specific launch inputs. Keeping the variants whole prevents
-/// impossible combinations such as a Docker launch with a Unix attach socket
-/// or a krunkit launch without a guest disk image.
-pub(crate) enum FrontendLaunchSpec {
-    Docker {
-        /// Recorded as a label only; it is never bind-mounted.
-        home: PathBuf,
-        attach_port: u16,
-        attach_token: String,
-    },
-    Krunkit {
-        /// Daemon-owned socket onto which krunkit proxies guest vsock traffic.
-        attach_socket: PathBuf,
-        attach_token: String,
-        guest_image: PathBuf,
-    },
-}
+use anyhow::Result;
 
 /// How the CLI launches, probes, tears down, and shells into the optional
 /// FUSE frontend. Docker uses the host bridge; krunkit implements the same
 /// contract over a vsock transport.
 pub(crate) trait FrontendBackend {
-    /// Ensure the runnable artifact is present, replace any existing
-    /// frontend of this backend's identity, start it, and verify the
-    /// fail-closed lockdown contract before returning. A backend must never
-    /// report success without having verified its own confinement.
-    async fn launch(&self, spec: &FrontendLaunchSpec) -> Result<()>;
-
     /// Whether `path` is visible inside the running frontend. Used to poll
     /// for the FUSE mount coming up after launch.
     async fn mount_ready(&self, path: &str) -> Result<bool>;
@@ -104,28 +51,21 @@ impl DockerBackend {
     pub(crate) fn new(runtime: Runtime) -> Self {
         Self { runtime }
     }
-}
 
-impl FrontendBackend for DockerBackend {
-    async fn launch(&self, spec: &FrontendLaunchSpec) -> Result<()> {
-        let FrontendLaunchSpec::Docker {
-            home,
-            attach_port,
-            attach_token,
-        } = spec
-        else {
-            anyhow::bail!("internal: the docker backend received a krunkit launch spec");
-        };
+    pub(crate) async fn launch(
+        &self,
+        home: &std::path::Path,
+        attach_port: u16,
+        attach_token: &str,
+    ) -> Result<()> {
         let body = FrontendContainerSpec {
             image: self.runtime.image(),
             home,
-            attach_port: *attach_port,
+            attach_port,
             attach_token,
             // Docker Desktop (macOS) resolves `host.docker.internal` on its
             // own; native Linux does not predefine the name, so the
-            // container needs the extra `--add-host` mapping. A pure
-            // function of the target OS, so it is computed here rather than
-            // threaded through the backend-neutral spec.
+            // container needs the extra `--add-host` mapping.
             add_host_gateway: cfg!(target_os = "linux"),
         }
         .build_body();
@@ -138,7 +78,9 @@ impl FrontendBackend for DockerBackend {
         }
         Ok(())
     }
+}
 
+impl FrontendBackend for DockerBackend {
     async fn mount_ready(&self, path: &str) -> Result<bool> {
         self.runtime.exec_path_exists(path).await
     }

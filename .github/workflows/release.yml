@@ -306,13 +306,9 @@ jobs:
               exit 1
             fi
 
-            nfs_binary="$extract_dir/omnifs-nfs"
-            if [[ ! -x "$nfs_binary" ]]; then
-              echo "missing omnifs-nfs binary in $archive" >&2
-              exit 1
-            fi
-            if [[ "$platform" == linux-* && ! -x "$extract_dir/omnifs-fuse" ]]; then
-              echo "missing omnifs-fuse binary in $archive" >&2
+            thin_binary="$extract_dir/omnifs-thin"
+            if [[ ! -x "$thin_binary" ]]; then
+              echo "missing omnifs-thin binary in $archive" >&2
               exit 1
             fi
 
@@ -323,29 +319,25 @@ jobs:
                 printf 'CLI version mismatch: expected %s, got %s\n' "$expected" "$actual" >&2
                 exit 1
               fi
-              actual="$("$nfs_binary" --version)"
-              expected="omnifs-nfs ${VERSION}"
+              actual="$("$thin_binary" --version)"
+              expected="omnifs-thin ${VERSION}"
               if [[ "$actual" != "$expected" ]]; then
-                printf 'NFS runner version mismatch: expected %s, got %s\n' "$expected" "$actual" >&2
+                printf 'thin runner version mismatch: expected %s, got %s\n' "$expected" "$actual" >&2
                 exit 1
               fi
-              actual="$("$extract_dir/omnifs-fuse" --version)"
-              expected="omnifs-fuse ${VERSION}"
+              actual="$("$thin_binary" fuse --version)"
+              expected="omnifs-thin ${VERSION}"
               if [[ "$actual" != "$expected" ]]; then
-                printf 'FUSE runner version mismatch: expected %s, got %s\n' "$expected" "$actual" >&2
+                printf 'thin FUSE mode version mismatch: expected %s, got %s\n' "$expected" "$actual" >&2
                 exit 1
               fi
             fi
 
             mkdir -p "$pkg/bin"
             cp "$binary" "$pkg/bin/omnifs"
-            cp "$nfs_binary" "$pkg/bin/omnifs-nfs"
-            if [[ -x "$extract_dir/omnifs-fuse" ]]; then
-              cp "$extract_dir/omnifs-fuse" "$pkg/bin/omnifs-fuse"
-            fi
+            cp "$thin_binary" "$pkg/bin/omnifs-thin"
             chmod 755 "$pkg/bin/omnifs"
-            chmod 755 "$pkg/bin/omnifs-nfs"
-            [[ ! -e "$pkg/bin/omnifs-fuse" ]] || chmod 755 "$pkg/bin/omnifs-fuse"
+            chmod 755 "$pkg/bin/omnifs-thin"
             npm pack "$pkg" --pack-destination "$RUNNER_TEMP"
 
             if [[ "$SHOULD_PUBLISH" == "true" ]]; then

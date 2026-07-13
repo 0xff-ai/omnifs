@@ -7,6 +7,7 @@ use std::process::Command;
 use anyhow::Context as _;
 use clap::Args;
 
+use crate::ui::output::Output;
 use crate::workspace::Workspace;
 
 #[derive(Args, Debug, Clone, Default)]
@@ -16,7 +17,10 @@ pub struct LogsArgs {
 }
 
 impl LogsArgs {
-    pub fn run(self) -> anyhow::Result<()> {
+    pub fn run(self, output: Output) -> anyhow::Result<()> {
+        if output.is_structured() {
+            anyhow::bail!("logs is a passthrough command and only supports human output")
+        }
         let workspace = Workspace::resolve()?;
         let paths = workspace.layout();
         tail_native_log(&paths.cache_dir.join("daemon.log"), self.follow)

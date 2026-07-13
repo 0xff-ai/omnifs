@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use anyhow::{Context, anyhow};
 use omnifs_caps::{Grants, Limits};
+use omnifs_workspace::config::Config;
 use omnifs_workspace::layout::WorkspaceLayout;
 use omnifs_workspace::mounts::{Name as MountName, Spec, UpgradePlan};
 use omnifs_workspace::provider::{Catalog, ProviderManifest};
@@ -125,9 +126,7 @@ pub(crate) enum DockerReachability {
     Unreachable,
 }
 
-pub(crate) async fn probe_docker_reachability(
-    config: &crate::config::Config,
-) -> DockerReachability {
+pub(crate) async fn probe_docker_reachability(config: &Config) -> DockerReachability {
     use crate::frontend_container::{FRONTEND_CONTAINER_BASE, resolve_frontend_image};
     use crate::launch_backend::DockerTarget;
     use crate::runtime::{DockerProbeOutcome, Runtime};
@@ -161,13 +160,14 @@ pub(crate) async fn configure_mount(
     workspace: &Workspace,
     standalone: bool,
     session: &mut crate::ui::session::Session,
+    prompt: PromptMode,
 ) -> anyhow::Result<MountInitOutcome> {
-    let mut plan = spec_creation(&args, workspace, session)?;
+    let mut plan = spec_creation(&args, workspace, session, prompt)?;
     if standalone {
         session.phase(plan.manifest.id.as_str());
     }
     persist_mount_spec(workspace, &plan, session).await?;
-    let status = plan.authenticate(&args, workspace, session).await?;
+    let status = plan.authenticate(&args, workspace, session, prompt).await?;
 
     match status {
         MountInitStatus::Ready => session.row(crate::ui::report::Row::new(
@@ -201,7 +201,7 @@ pub(crate) async fn configure_mount(
         }
     }
 
-    crate::telemetry::maybe_print_health_nudge(workspace).await;
+    crate::telemetry::maybe_print_health_nudge(workspace, session.output()).await;
 
     Ok(MountInitOutcome {
         mount_name: plan.mount_name.to_string(),
@@ -213,8 +213,8 @@ pub(crate) async fn configure_mount(
 /// `--no-input`. A piped stdin is non-interactive even without the flag, so
 /// prompt sites bail cleanly (naming the satisfying flags) instead of hitting
 /// a prompt library's raw "not a terminal" error. Mirrors setup's terminal derivation.
-fn init_interactive(args: &AddArgs) -> bool {
-    !args.no_input && crate::ui::prompt::is_terminal()
+fn init_interactive(prompt: PromptMode) -> bool {
+    prompt.interactive
 }
 
 #[allow(clippy::too_many_lines)] // one linear spec-assembly path
@@ -222,10 +222,11 @@ pub(crate) fn spec_creation(
     args: &AddArgs,
     workspace: &Workspace,
     session: &mut crate::ui::session::Session,
+    prompt: PromptMode,
 ) -> anyhow::Result<MountInitPlan> {
     let paths = workspace.layout();
     crate::provider_bundle::ensure_providers_installed(&paths.providers_dir)?;
-    let interactive = init_interactive(args);
+    let interactive = init_interactive(prompt);
     let catalog = workspace.catalog();
     let mounts = workspace.mounts()?;
     let installed = crate::catalog::installed_providers(catalog)?;
@@ -246,7 +247,7 @@ pub(crate) fn spec_creation(
         args.provider.as_deref().or(picked.as_deref()),
         args.as_name.as_deref(),
         interactive,
-        args.yes,
+        prompt.yes,
         session,
     )?;
 
@@ -299,7 +300,7 @@ pub(crate) fn spec_creation(
         auth_manifest.as_ref(),
         &provider_name,
         interactive,
-        args.yes,
+        prompt.yes,
     )
     .resolve(Some(session))?;
     let ImportOutcome { auth, token } = import_outcome;
@@ -355,13 +356,14 @@ impl MountInitPlan {
         args: &AddArgs,
         workspace: &Workspace,
         session: &mut crate::ui::session::Session,
+        prompt: PromptMode,
     ) -> anyhow::Result<MountInitStatus> {
         crate::commands::mount::render_consent_block(session, &self.manifest);
         let plan = self;
         let Some(auth) = plan.effective_auth.as_ref() else {
             return Ok(MountInitStatus::Ready);
         };
-        let interactive = init_interactive(args);
+        let interactive = init_interactive(prompt);
         if let Some(token) = plan.imported_token.take() {
             crate::commands::mount::run_static_token_init(
                 &plan.manifest,
@@ -375,7 +377,7 @@ impl MountInitPlan {
         } else if auth.is_oauth() {
             // Gate the browser handoff when interactive: a decline is a clean skip,
             // not a failure.
-            if interactive && !args.yes {
+            if interactive && !prompt.yes {
                 let proceed = crate::ui::prompt::Confirm::new(format!(
                     "Sign in to {} in your browser now?",
                     plan.mount_name
@@ -391,7 +393,7 @@ impl MountInitPlan {
                 &plan.spec,
                 auth.account.as_deref(),
                 args.no_browser,
-                args.no_input,
+                prompt.no_input,
                 &args.scopes,
                 session,
             )
@@ -450,8 +452,9 @@ pub(crate) fn verify_first_read(
     mount_name: &str,
 ) -> anyhow::Result<FirstRead> {
     let mount_point = outcome
-        .mount_point
-        .clone()
+        .local_mount_points
+        .first()
+        .cloned()
         .or_else(omnifs_workspace::layout::resolve_mount_point)
         .ok_or_else(|| anyhow!("cannot resolve mount point for first read"))?;
     run_host_ls(&mount_point.join(mount_name))
@@ -523,8 +526,13 @@ async fn persist_mount_spec(
             workspace.daemon().create_mount_if_ready(&plan.spec).await
         }
     };
-    let (result, progress) =
-        await_with_elapsed_progress("mount", &format!("saving {}", plan.mount_name), request).await;
+    let (result, progress) = await_with_elapsed_progress(
+        "mount",
+        &format!("saving {}", plan.mount_name),
+        request,
+        session.output(),
+    )
+    .await;
 
     match result {
         Ok(Some(report)) if report.failure.is_none() => {
@@ -566,11 +574,12 @@ async fn await_with_elapsed_progress<F, T>(
     key: &str,
     verb: &str,
     future: F,
+    output: crate::ui::output::Output,
 ) -> (T, crate::ui::LiveRow)
 where
     F: Future<Output = T>,
 {
-    let mut progress = crate::ui::LiveRow::start(key, verb);
+    let mut progress = crate::ui::LiveRow::start_with_output(key, verb, output);
     progress.update(verb);
     tokio::pin!(future);
     let mut ticks = tokio::time::interval(Duration::from_millis(200));
@@ -677,7 +686,7 @@ fn approved_upgrade_for_existing_mount(
     }
 
     session.note(format!("{provider_name} now requests different access:"));
-    for change in crate::upgrade::describe_upgrade_plan(&plan) {
+    for change in crate::commands::mount::upgrade::describe_upgrade_plan(&plan) {
         session.note(change);
     }
     let approved = crate::ui::prompt::Confirm::new("Approve this provider upgrade?")

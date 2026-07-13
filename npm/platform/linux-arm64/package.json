@@ -5,8 +5,7 @@
   "description": "omnifs CLI and frontend binaries for Linux arm64",
   "files": [
     "bin/omnifs",
-    "bin/omnifs-fuse",
-    "bin/omnifs-nfs",
+    "bin/omnifs-thin",
     "README.md"
   ],
   "homepage": "https://github.com/0xff-ai/omnifs",
