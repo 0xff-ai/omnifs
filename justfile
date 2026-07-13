@@ -106,8 +106,30 @@ check scope='': (_install-wasi-sdk "check" scope)
         -- -D warnings
     }
 
+    test_host() {
+      OMNIFS_ITEST_SKIP_PROVIDER_BUILD=1 cargo nextest run --profile ci --workspace \
+        --exclude 'omnifs-provider-*' \
+        --exclude test-provider \
+        --exclude omnifs-embed-metadata
+    }
+
+    check_repository() {
+      cargo fmt --all --check
+      just --fmt --check
+      for justfile in just/*.just; do
+        just --fmt --check --justfile "$justfile" --working-directory .
+      done
+      bash scripts/ci/check-doc-links.sh
+      bash scripts/ci/check-doc-contracts.sh
+      actionlint
+      check_providers
+      check_host
+      test_host
+      git diff --check
+    }
+
     case "{{ scope }}" in
-      '') check_providers; check_host ;;
+      '') check_repository ;;
       providers) check_providers ;;
       host) check_host ;;
       *) printf 'unknown check scope: %s (expected providers or host)\n' "{{ scope }}" >&2; exit 1 ;;

@@ -180,7 +180,7 @@ cargo nextest run
 
 Use the right wider gate for the change:
 
-- **Before a push or PR handoff.** Run the relevant CI-shaped lanes directly rather than relying on a local aggregate: formatting/npm preflight, provider gates for WASM changes, and host gates for host-target changes.
+- **Before a push or PR handoff.** Run `just check`; it composes formatting, justfile and docs checks, workflow linting, provider gates, host clippy and tests, and whitespace validation. CI keeps the scoped lanes separate for parallelism.
 - **WASM toolchain.** Provider WASM builds need wasi-sdk. Provider build and check recipes install the pinned version when needed.
 - **Fresh worktree or missing artifacts.** Run `just build providers` before treating missing provider artifacts as product failures.
 - **Host gate.** Use `just check host` and `just test host`; both exclude provider/test-provider WASM crates from host-target builds.

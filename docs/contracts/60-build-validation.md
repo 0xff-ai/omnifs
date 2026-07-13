@@ -35,7 +35,7 @@ Use `just dev -y` for the supported contributor runtime path. Check status with 
 
 Use the repo gates instead of ad hoc workspace commands. Host-target gates exclude provider/test-provider WASM crates; WASM crates use provider-specific gates.
 
-Run the relevant CI-shaped lanes before a push or PR handoff. Use `just fmt-check` and `just just-check` for preflight parity. Use `just check host` and `just test host` for host-target iteration. Use `just check providers`, `just build providers`, and `just validate providers` for WASM iteration.
+Run `just check` before a push or PR handoff; it composes formatting, justfile and docs checks, workflow linting, provider checks, host clippy and tests, and whitespace validation. CI keeps those lanes separate for parallelism. Use `just check host` and `just test host` for host-target iteration. Use `just check providers`, `just build providers`, and `just validate providers` for WASM iteration.
 
 ### Cross-language facts on the container boundary
 
@@ -125,6 +125,7 @@ This lane can **never** run in GitHub-hosted CI: krunkit boots a libkrun microVM
 
 ## Validation
 
+- `just check`
 - `just build providers`
 - `just check providers`
 - `just validate providers`
