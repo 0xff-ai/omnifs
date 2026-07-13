@@ -10,7 +10,7 @@ use serde::Serialize;
 
 use crate::stages::MountInitStatus;
 use crate::status::{FrontendJson, RuntimeJson, StatusJson, UserMountStatus};
-use crate::ui::consent::Outcome;
+use crate::ui::consent::{Outcome, Plan};
 
 /// The overall health of a completed operation. `up` reports `degraded` (and
 /// exits 5) when any mount, frontend, or subsystem needs attention.
@@ -20,6 +20,19 @@ pub(crate) enum Verdict {
     Ok,
     Degraded,
     Failed,
+}
+
+impl Verdict {
+    fn from_rows(rows: &[Outcome]) -> Self {
+        if rows
+            .iter()
+            .any(|row| row.state == crate::ui::consent::OutcomeState::Fail)
+        {
+            Self::Failed
+        } else {
+            Self::Ok
+        }
+    }
 }
 
 /// `omnifs up --json`: the daemon, its mounts and frontends, and a verdict.
@@ -58,13 +71,41 @@ pub(crate) struct TeardownReceipt {
     pub(crate) rows: Vec<Outcome>,
 }
 
+/// `omnifs reset --json`: the approved plan plus its settled rows. The
+/// existing `verdict` and `rows` fields remain unchanged for applied resets;
+/// `dry_run` and `plan` make plan-only invocations self-describing.
+#[derive(Debug, Serialize)]
+pub(crate) struct ResetReceipt {
+    pub(crate) verdict: Verdict,
+    pub(crate) rows: Vec<Outcome>,
+    pub(crate) dry_run: bool,
+    pub(crate) plan: Plan,
+}
+
+impl ResetReceipt {
+    pub(crate) fn dry_run(plan: Plan) -> Self {
+        Self {
+            verdict: Verdict::Ok,
+            rows: Vec::new(),
+            dry_run: true,
+            plan,
+        }
+    }
+
+    pub(crate) fn applied(plan: Plan, rows: Vec<Outcome>) -> Self {
+        Self {
+            verdict: Verdict::from_rows(&rows),
+            rows,
+            dry_run: false,
+            plan,
+        }
+    }
+}
+
 impl TeardownReceipt {
     pub(crate) fn new(rows: Vec<Outcome>) -> Self {
-        let failed = rows
-            .iter()
-            .any(|row| row.state == crate::ui::consent::OutcomeState::Fail);
         Self {
-            verdict: if failed { Verdict::Failed } else { Verdict::Ok },
+            verdict: Verdict::from_rows(&rows),
             rows,
         }
     }

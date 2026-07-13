@@ -1108,7 +1108,7 @@ mod tests {
         let base_wasm = test_provider_wasm_path();
         assert!(
             base_wasm.exists(),
-            "test provider missing at {}. Run `just providers build` first.",
+            "test provider missing at {}. Run `just build providers` first.",
             base_wasm.display()
         );
 
@@ -1223,7 +1223,7 @@ mod tests {
         let base_wasm = test_provider_wasm_path();
         assert!(
             base_wasm.exists(),
-            "test provider missing at {}. Run `just providers build` first.",
+            "test provider missing at {}. Run `just build providers` first.",
             base_wasm.display()
         );
 
@@ -1299,7 +1299,7 @@ mod tests {
         let base_wasm = test_provider_wasm_path();
         assert!(
             base_wasm.exists(),
-            "test provider missing at {}. Run `just providers build` first.",
+            "test provider missing at {}. Run `just build providers` first.",
             base_wasm.display()
         );
         let spec = pin_spec(
@@ -1429,7 +1429,7 @@ mod tests {
         let base_wasm = test_provider_wasm_path();
         assert!(
             base_wasm.exists(),
-            "test provider missing at {}. Run `just providers build` first.",
+            "test provider missing at {}. Run `just build providers` first.",
             base_wasm.display()
         );
 

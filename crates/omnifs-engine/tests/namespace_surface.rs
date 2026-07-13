@@ -9,7 +9,7 @@
 //! policied attrs, ranged-handle reuse, paging, and the invalidation event
 //! stream) consumed by both kernel adapters.
 //!
-//! Precondition: `just providers build` has produced
+//! Precondition: `just build providers` has produced
 //! `target/wasm32-wasip2/release/test_provider.wasm`.
 
 #![cfg(not(target_os = "wasi"))]

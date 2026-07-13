@@ -112,29 +112,32 @@ impl<S> Router<S> {
     }
 
     /// Begin a directory route at `template`; finish with
-    /// [`DirRoute::handler`].
-    pub fn dir(&mut self, template: &'static str) -> DirRoute<'_, S> {
+    /// [`DirRoute::handler`]. The template may be a borrowed literal or an
+    /// owned `String`.
+    pub fn dir(&mut self, template: impl Into<String>) -> DirRoute<'_, S> {
         DirRoute {
             router: self,
-            template,
+            template: template.into(),
         }
     }
 
     /// Begin a file route at `template`; finish with [`FileRoute::handler`].
-    pub fn file(&mut self, template: &'static str) -> FileRoute<'_, S> {
+    /// The template may be a borrowed literal or an owned `String`.
+    pub fn file(&mut self, template: impl Into<String>) -> FileRoute<'_, S> {
         FileRoute {
             router: self,
-            template,
+            template: template.into(),
             ranged: false,
         }
     }
 
     /// Begin a subtree-handoff route at `template`; finish with
-    /// [`TreeRefRoute::handler`].
-    pub fn treeref(&mut self, template: &'static str) -> TreeRefRoute<'_, S> {
+    /// [`TreeRefRoute::handler`]. The template may be a borrowed literal or an
+    /// owned `String`.
+    pub fn treeref(&mut self, template: impl Into<String>) -> TreeRefRoute<'_, S> {
         TreeRefRoute {
             router: self,
-            template,
+            template: template.into(),
         }
     }
 
@@ -601,26 +604,26 @@ impl<S> Router<S> {
 /// A pending [`Router::dir`] registration.
 pub struct DirRoute<'r, S> {
     pub(super) router: &'r mut Router<S>,
-    pub(super) template: &'static str,
+    pub(super) template: String,
 }
 
 /// A pending [`Router::file`] registration.
 pub struct FileRoute<'r, S> {
     pub(super) router: &'r mut Router<S>,
-    pub(super) template: &'static str,
+    pub(super) template: String,
     pub(super) ranged: bool,
 }
 
 /// A pending [`Router::treeref`] registration.
 pub struct TreeRefRoute<'r, S> {
     pub(super) router: &'r mut Router<S>,
-    pub(super) template: &'static str,
+    pub(super) template: String,
 }
 
 impl<'r, S> DirRoute<'r, S> {
     /// Register the directory handler and claim the template as a leaf.
     pub fn handler<Marker, H: IntoDirHandler<S, Marker>>(self, h: H) -> Result<&'r mut Router<S>> {
-        self.router.dir_at(self.template, h)?;
+        self.router.dir_at(&self.template, h)?;
         Ok(self.router)
     }
 }
@@ -636,7 +639,7 @@ impl<'r, S> FileRoute<'r, S> {
 
     /// Register the file handler and claim the template as a leaf.
     pub fn handler<Marker, H: IntoFileHandler<S, Marker>>(self, h: H) -> Result<&'r mut Router<S>> {
-        self.router.file_at(self.template, self.ranged, h)?;
+        self.router.file_at(&self.template, self.ranged, h)?;
         Ok(self.router)
     }
 }
@@ -647,7 +650,7 @@ impl<'r, S> TreeRefRoute<'r, S> {
         self,
         h: H,
     ) -> Result<&'r mut Router<S>> {
-        self.router.treeref_at(self.template, h)?;
+        self.router.treeref_at(&self.template, h)?;
         Ok(self.router)
     }
 }

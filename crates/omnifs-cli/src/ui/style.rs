@@ -129,8 +129,7 @@ pub(crate) enum Glyph {
     /// `◌` dim: idle liveness dot (no auth needed / idle), status lists only.
     IdleDot,
     /// `-` dim: planned removal in a consent plan; flips to `Done`/`Warn` in the
-    /// receipt. Consumed by the consent kit in a later wave.
-    #[allow(dead_code)]
+    /// receipt.
     Plan,
 }
 
@@ -174,7 +173,7 @@ impl Glyph {
 
 /// Render a digest short and dim for human output: the first eight hex
 /// characters. The full digest is machine-only (`--json`).
-// Consumed by the provider list migration in a later cli-redesign wave.
+// Kept for compact provider artifact labels.
 #[allow(dead_code)]
 pub(crate) fn short_digest(digest: &str) -> String {
     let short: String = digest.chars().take(8).collect();

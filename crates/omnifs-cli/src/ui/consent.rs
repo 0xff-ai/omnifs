@@ -136,8 +136,6 @@ impl Plan {
 pub(crate) enum Decision {
     /// Apply the plan. `--yes` selects this without invoking a prompt.
     Apply,
-    /// The operator declined the plan.
-    Decline,
     /// `--dry-run` selected a plan-only execution.
     DryRun,
 }
@@ -164,7 +162,18 @@ impl Decision {
                     .ask()
             },
         )?;
-        Ok(if proceed { Self::Apply } else { Self::Decline })
+        Self::from_confirmation(proceed)
+    }
+
+    /// A negative confirmation is cancellation, not successful application.
+    /// Returning the shared marker keeps exit-code and JSON handling at the
+    /// top-level CLI boundary for every consent-driven command.
+    fn from_confirmation(proceed: bool) -> anyhow::Result<Self> {
+        if proceed {
+            Ok(Self::Apply)
+        } else {
+            Err(super::picker::Canceled.into())
+        }
     }
 }
 
@@ -383,5 +392,12 @@ mod tests {
         );
         let error = Decision::resolve(mode, false, "-y").unwrap_err();
         assert!(error.to_string().contains("pass -y or --yes"));
+    }
+
+    #[test]
+    fn declined_confirmation_is_cancellation() {
+        let error = Decision::from_confirmation(false).unwrap_err();
+        assert!(super::super::picker::is_canceled(&error));
+        assert_eq!(Decision::from_confirmation(true).unwrap(), Decision::Apply);
     }
 }

@@ -49,6 +49,16 @@ pub fn is_reserved_provider_leaf(name: &str) -> bool {
     name.starts_with(CTRL_PREFIX)
 }
 
+/// True when `name` is a host-owned ignore file at a mount root.
+///
+/// This predicate is intentionally separate from [`is_reserved_provider_leaf`]:
+/// providers may project these names below the root, while the host owns them
+/// only at the mount root.
+#[must_use]
+pub(crate) fn is_root_ignore_name(name: &str) -> bool {
+    IGNORE_FILES.contains(&name)
+}
+
 /// The cached dirent records for pagination controls a paged directory carries.
 pub(crate) fn control_entries() -> [DirentRecord; 2] {
     [
@@ -155,13 +165,10 @@ impl Synthetic {
         )
     }
 
-    /// The mount-root ignore `Entry`s to append to a root listing, skipping any
-    /// name the provider already projects (a real `.gitignore` wins and is NOT
-    /// shadowed).
-    pub(crate) fn root_ignore_entries(existing: &[Entry]) -> Vec<Entry> {
+    /// The mount-root ignore `Entry`s to append to a root listing.
+    pub(crate) fn root_ignore_entries() -> Vec<Entry> {
         IGNORE_FILES
             .iter()
-            .filter(|name| !existing.iter().any(|e| &e.name == *name))
             .map(|name| Self::root_ignore_entry(name))
             .collect()
     }
@@ -171,9 +178,8 @@ impl Synthetic {
 /// `(meta, synthetic)` pair when `name` is a host-synthesized entry that should
 /// resolve at `parent`:
 ///
-/// - a mount-root ignore file ONLY at the mount root, and ONLY when the provider
-///   does not project a real one (`provider_has_real` is the caller's signal that
-///   a provider lookup already resolved the name positively);
+/// - a mount-root ignore file at the mount root (the host owns these names even
+///   when a provider projects a colliding entry);
 /// - a pagination control whenever `parent`'s cached dirents have EVER carried
 ///   it, looked up from the host view cache.
 ///
@@ -188,8 +194,11 @@ pub(crate) fn resolve_synthetic_child(
     runtime: &Runtime,
     parent: &Path,
     name: &str,
-    provider_has_real: bool,
 ) -> Option<(EntryMeta, Synthetic)> {
+    if parent.is_root() && is_root_ignore_name(name) {
+        return Some((Synthetic::root_ignore_meta(), Synthetic::root_ignore()));
+    }
+
     if is_control_name(name) {
         let action = PaginationControl::from_name(name)?;
         // Probe the view cache for the control dirent; absent => this
@@ -198,10 +207,6 @@ pub(crate) fn resolve_synthetic_child(
         // a resume cursor remains (the record outlives exhaustion).
         let dirent = cached_control_dirent(runtime, parent, name)?;
         return Some((dirent.meta, Synthetic::pagination_control(action)));
-    }
-
-    if IGNORE_FILES.contains(&name) && parent.is_root() && !provider_has_real {
-        return Some((Synthetic::root_ignore_meta(), Synthetic::root_ignore()));
     }
 
     None

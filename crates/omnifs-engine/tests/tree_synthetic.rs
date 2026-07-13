@@ -12,7 +12,7 @@
 //! dirents directly, and wraps the same `Engine` in a `Tree` via
 //! `ServingContext::single`.
 //!
-//! Precondition: `just providers build` has produced
+//! Precondition: `just build providers` has produced
 //! `target/wasm32-wasip2/release/test_provider.wasm` (`provider_wasm_path`
 //! asserts this through the harness).
 
@@ -23,15 +23,15 @@
 use std::sync::Arc;
 
 use omnifs_core::path::Path;
-use omnifs_engine::test_support::cache::RecordKind;
+use omnifs_engine::test_support::cache::{Record as CacheRecord, RecordKind};
 use omnifs_engine::test_support::clock::now_millis;
 use omnifs_engine::test_support::{PaginationControl, Synthetic, SyntheticContent};
-use omnifs_engine::view::{CachedCursor, DirentsPayload};
+use omnifs_engine::view::{CachedCursor, DirentRecord, DirentsPayload, EntryMeta};
 use omnifs_engine::{
     Cursor, Engine, ListOutcome, Listing, Node, ReadResult, RequestCtx, ServingContext, Tree,
     TreeErrorKind,
 };
-use omnifs_itest::{RuntimeHarness, make_engine, make_runtime};
+use omnifs_itest::{RuntimeHarness, make_engine, make_initialized_runtime, make_runtime};
 use tempfile::TempDir;
 
 struct TestTree {
@@ -59,6 +59,28 @@ fn test_tree() -> TestTree {
     TestTree {
         tree,
         runtime,
+        _clone_dir: clone_dir,
+        _cache_dir: cache_dir,
+        _config_dir: config_dir,
+    }
+}
+
+fn test_tree_with_config(config: &str) -> TestTree {
+    let RuntimeHarness {
+        clone_dir,
+        cache_dir,
+        config_dir,
+        runtime,
+        ..
+    } = make_initialized_runtime(config);
+    let engine = Arc::new(runtime);
+    let tree = Tree::new(ServingContext::single(
+        "test".to_string(),
+        Arc::clone(&engine),
+    ));
+    TestTree {
+        tree,
+        runtime: engine,
         _clone_dir: clone_dir,
         _cache_dir: cache_dir,
         _config_dir: config_dir,
@@ -383,6 +405,110 @@ async fn root_ignore_not_synthesized_below_root() {
         .await
         .expect_err("a non-root ignore file is not synthesized");
     assert_eq!(err.kind, TreeErrorKind::NotFound);
+}
+
+/// A provider collision at the mount root is filtered from a fresh listing and
+/// replaced by exactly one host-owned synthetic file.
+#[tokio::test(flavor = "multi_thread")]
+async fn root_ignore_provider_collision_is_host_owned() {
+    let t = test_tree_with_config(
+        r#"{"provider":"test_provider.wasm","mount":"test","config":{"root_ignore":true},"capabilities":{"domains":["httpbin.org"]}}"#,
+    );
+    let ctx = RequestCtx::default();
+    let root = t.tree.resolve(&path("/"), &ctx).await.unwrap();
+    let listing = listing(&t, &root, None, &ctx).await;
+
+    for name in [".gitignore", ".ignore", ".rgignore"] {
+        let matching: Vec<_> = listing.entries.iter().filter(|e| e.name == name).collect();
+        assert_eq!(matching.len(), 1, "root listing must contain one {name}");
+        assert!(matching[0].is_synthetic(), "{name} must be synthetic");
+    }
+    let node = t.tree.resolve(&path("/.gitignore"), &ctx).await.unwrap();
+    assert!(node.is_file() && node.is_synthetic());
+}
+
+/// Cached provider-shaped metadata cannot change a root ignore file's kind,
+/// and repeated path resolution rehydrates the same synthetic file identity.
+#[tokio::test(flavor = "multi_thread")]
+async fn root_ignore_cached_directory_is_replaced_before_lookup() {
+    let t = test_tree();
+    let ctx = RequestCtx::default();
+    let root = t.tree.resolve(&path("/"), &ctx).await.unwrap();
+    let payload = DirentsPayload {
+        entries: vec![
+            DirentRecord {
+                name: ".gitignore".to_string(),
+                meta: EntryMeta::directory(),
+            },
+            DirentRecord {
+                name: ".ignore".to_string(),
+                meta: EntryMeta::directory(),
+            },
+        ],
+        exhaustive: true,
+        validator: None,
+        next_cursor: None,
+        paginated: false,
+    }
+    .serialize()
+    .expect("serialize root dirents");
+    t.runtime.cache().cache_put(
+        root.path(),
+        RecordKind::Dirents,
+        None,
+        &CacheRecord::new(RecordKind::Dirents, payload),
+    );
+
+    let listing = listing(&t, &root, None, &ctx).await;
+    for name in [".gitignore", ".ignore", ".rgignore"] {
+        let matching: Vec<_> = listing.entries.iter().filter(|e| e.name == name).collect();
+        assert_eq!(
+            matching.len(),
+            1,
+            "cached root listing must contain one {name}"
+        );
+        assert!(matching[0].is_synthetic(), "{name} must be synthetic");
+    }
+
+    for _ in 0..2 {
+        let node = t.tree.resolve(&path("/.gitignore"), &ctx).await.unwrap();
+        assert!(node.is_file() && node.is_synthetic());
+    }
+}
+
+/// The host reservation is root-scoped: a provider-shaped child below the
+/// mount root remains a provider directory and is not intercepted.
+#[tokio::test(flavor = "multi_thread")]
+async fn root_ignore_names_below_root_remain_provider_owned() {
+    let t = test_tree();
+    let ctx = RequestCtx::default();
+    let hello = t.tree.resolve(&path("/hello"), &ctx).await.unwrap();
+    let payload = DirentsPayload {
+        entries: vec![DirentRecord {
+            name: ".gitignore".to_string(),
+            meta: EntryMeta::directory(),
+        }],
+        exhaustive: true,
+        validator: None,
+        next_cursor: None,
+        paginated: false,
+    }
+    .serialize()
+    .expect("serialize nested dirents");
+    t.runtime.cache().cache_put(
+        hello.path(),
+        RecordKind::Dirents,
+        None,
+        &CacheRecord::new(RecordKind::Dirents, payload),
+    );
+
+    let node = t
+        .tree
+        .resolve(&path("/hello/.gitignore"), &ctx)
+        .await
+        .unwrap();
+    assert!(node.is_dir());
+    assert!(!node.is_synthetic());
 }
 
 // --- Serve-cached listing ----------------------------------------------------

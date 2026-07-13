@@ -1,4 +1,3 @@
-#![allow(clippy::disallowed_macros)] // migrates in wave 4 (cli-redesign)
 //! `omnifs mount-tree` subcommand implementation.
 //!
 //! Reads the `omnifs.provider-manifest.v1` custom section from a provider
@@ -60,9 +59,9 @@ impl MountTreeData {
             .into_iter()
             .filter_map(|record| match record {
                 mts::ManifestRecord::Unknown { tag, .. } => {
-                    anstream::eprintln!(
-                        "warning: unknown provider-manifest tag 0x{tag:02x}, skipping"
-                    );
+                    crate::ui::eprint_raw(&format!(
+                        "warning: unknown provider-manifest tag 0x{tag:02x}, skipping\n"
+                    ));
                     None
                 },
                 other => Some(other),

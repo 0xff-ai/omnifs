@@ -2,10 +2,10 @@
 //!
 //! No command prints directly; long-running and conversational surfaces emit a
 //! stream of [`UiEvent`]s, and a [`Render`] turns that stream into bytes. Three
-//! renderers can exist over one stream: the flat [`LedgerRenderer`] built here,
-//! a rail/session renderer (a later wave, on cliclack), and an NDJSON renderer
-//! for `--progress=json` (a later wave). Keeping the model an enum plus a trait
-//! is deliberate: there is no async bus, and progress is driven by the caller.
+//! renderers consume the same stream: the flat [`LedgerRenderer`], the cliclack
+//! rail renderer, and the NDJSON renderer for `--progress=json`. Keeping the
+//! model an enum plus a trait is deliberate: there is no async bus, and
+//! progress is driven by the caller.
 
 // This module is the sanctioned output owner; the drift gate denies print
 // macros everywhere else. The NDJSON renderer is the one stdout writer here.
@@ -19,11 +19,6 @@ use std::time::Duration;
 
 /// One thing that happened, described so any renderer can present it. Narration
 /// and progress belong on stderr; the [`LedgerRenderer`] enforces that.
-///
-// The session (rail) and NDJSON renderers land in later cli-redesign waves and
-// construct every variant and read every field; the flat ledger built here
-// consumes the subset it needs today.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum UiEvent {

@@ -12,7 +12,7 @@ use omnifs_workspace::layout::{Daemon, Workspace, WorkspaceLayout};
 use omnifs_workspace::runtime_record::{Endpoint, RecordedBackend, RuntimeRecord};
 use std::fmt::Write as _;
 use std::net::{SocketAddr, TcpListener};
-use std::os::unix::fs::PermissionsExt as _;
+use std::os::unix::fs::{FileTypeExt as _, PermissionsExt as _};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 
@@ -137,8 +137,25 @@ impl DaemonContext {
             )
         })?;
 
-        if path.exists() {
-            match UnixStream::connect(&path) {
+        Self::prepare_control_path(&path)?;
+
+        let listener = UnixListener::bind(&path)
+            .with_context(|| format!("bind control socket {}", path.display()))?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("restrict control socket {} to 0600", path.display()))?;
+        Ok(listener)
+    }
+
+    fn prepare_control_path(path: &Path) -> anyhow::Result<()> {
+        match std::fs::symlink_metadata(path) {
+            Ok(metadata) if !metadata.file_type().is_socket() => {
+                // Remove only the directory entry. `remove_file` unlinks a
+                // symlink itself and never follows its target.
+                std::fs::remove_file(path).with_context(|| {
+                    format!("remove non-socket control path {}", path.display())
+                })?;
+            },
+            Ok(_) => match UnixStream::connect(path) {
                 Ok(_) => {
                     anyhow::bail!(
                         "another omnifs daemon is already serving this workspace on {}.\n\
@@ -154,7 +171,7 @@ impl DaemonContext {
                         std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
                     ) =>
                 {
-                    std::fs::remove_file(&path).with_context(|| {
+                    std::fs::remove_file(path).with_context(|| {
                         format!("remove stale control socket {}", path.display())
                     })?;
                 },
@@ -162,14 +179,14 @@ impl DaemonContext {
                     return Err(error)
                         .with_context(|| format!("probe control socket {}", path.display()));
                 },
-            }
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("inspect control path {}", path.display()));
+            },
         }
-
-        let listener = UnixListener::bind(&path)
-            .with_context(|| format!("bind control socket {}", path.display()))?;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("restrict control socket {} to 0600", path.display()))?;
-        Ok(listener)
+        Ok(())
     }
 
     /// Assemble the initial runtime record for a host-native daemon.
@@ -451,5 +468,52 @@ impl ProcessInfo {
             pid: std::process::id(),
             executable: std::env::current_exe().unwrap_or_else(|_| PathBuf::new()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::symlink;
+    use tempfile::TempDir;
+
+    fn context(root: &Path) -> DaemonContext {
+        DaemonContext {
+            layout: WorkspaceLayout::under_root(root),
+            listen: None,
+            instance_id: "test-instance".to_owned(),
+            attach_tcp: None,
+            process: ProcessInfo {
+                pid: std::process::id(),
+                executable: PathBuf::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn prepare_control_path_replaces_reserved_regular_file() {
+        let temp = TempDir::new().unwrap();
+        let daemon = context(temp.path());
+        std::fs::create_dir_all(&daemon.layout.config_dir).unwrap();
+        let path = daemon.control_socket();
+        std::fs::write(&path, b"reserved").unwrap();
+
+        DaemonContext::prepare_control_path(&path).unwrap();
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn prepare_control_path_unlinks_symlink_without_touching_target() {
+        let temp = TempDir::new().unwrap();
+        let daemon = context(temp.path());
+        std::fs::create_dir_all(&daemon.layout.config_dir).unwrap();
+        let target = temp.path().join("target");
+        std::fs::write(&target, b"keep").unwrap();
+        let path = daemon.control_socket();
+        symlink(&target, &path).unwrap();
+
+        DaemonContext::prepare_control_path(&path).unwrap();
+        assert!(target.exists(), "symlink target must not be removed");
+        assert!(!path.exists());
     }
 }

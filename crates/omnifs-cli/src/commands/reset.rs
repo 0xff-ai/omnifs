@@ -15,7 +15,7 @@ use omnifs_workspace::runtime_record::RuntimeRecord;
 use std::sync::Arc;
 
 use crate::commands::mount::delete_credentials;
-use crate::commands::receipt::TeardownReceipt;
+use crate::commands::receipt::ResetReceipt;
 use crate::credential_target::CredentialTarget;
 use crate::daemon_teardown::DaemonTeardown;
 use crate::error::ExitCode;
@@ -43,9 +43,6 @@ pub struct ResetArgs {
 impl ResetArgs {
     #[allow(clippy::too_many_lines)] // plan/apply/receipt is one auditable flow
     pub async fn run(self) -> anyhow::Result<ExitCode> {
-        if self.json {
-            crate::ui::output::note_json_receipt();
-        }
         let workspace = Workspace::resolve()?;
         let layout = workspace.layout();
         let targets = workspace.reset_removal_targets()?;
@@ -56,12 +53,11 @@ impl ResetArgs {
         let decision =
             Decision::resolve(PromptMode::from_flags(self.yes, false), self.dry_run, "-y")?;
         match decision {
-            Decision::Decline => {
-                session.outro("Reset aborted.");
-                return Ok(ExitCode::Success);
-            },
             Decision::DryRun => {
                 session.outro("Dry run; no changes made.");
+                if self.json {
+                    crate::ui::print_json(&ResetReceipt::dry_run(plan))?;
+                }
                 return Ok(ExitCode::Success);
             },
             Decision::Apply => {},
@@ -203,7 +199,7 @@ impl ResetArgs {
                 // The receipt is the whole story; a failed row carries the
                 // failure, so return a non-zero code instead of an error that
                 // would emit a second JSON document.
-                crate::ui::print_json(&TeardownReceipt::new(receipt.rows))?;
+                crate::ui::print_json(&ResetReceipt::applied(plan, receipt.rows))?;
                 return Ok(ExitCode::GenericFailure);
             }
             anyhow::bail!(message);
@@ -214,7 +210,7 @@ impl ResetArgs {
             session.outro("Reset complete. Run `omnifs setup` to start again.");
         }
         if self.json {
-            crate::ui::print_json(&TeardownReceipt::new(receipt.rows))?;
+            crate::ui::print_json(&ResetReceipt::applied(plan, receipt.rows))?;
         }
         crate::telemetry::maybe_print_health_nudge(&workspace).await;
         Ok(ExitCode::Success)

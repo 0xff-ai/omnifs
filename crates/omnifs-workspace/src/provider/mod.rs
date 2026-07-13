@@ -30,8 +30,8 @@ pub use records::{
 pub use resolve::{ResolveError, ResolvedManifest};
 pub use sections::{
     MANIFEST_SECTION_NAME, ManifestSectionError, PROVIDER_METADATA_SECTION_NAME,
-    ProviderMetadataError, embed_provider_metadata_section, provider_manifest_json,
-    read_manifest_section, read_provider_metadata_section,
+    ProviderMetadataError, embed_provider_metadata_section, is_hostname_only,
+    provider_manifest_json, read_manifest_section, read_provider_metadata_section,
 };
 pub use store::{Index, IndexEntry, ProviderStore, StoreError};
 pub use wasm::{Artifact, ArtifactError, ArtifactLoadError, ProviderWasm, ProviderWasmError};

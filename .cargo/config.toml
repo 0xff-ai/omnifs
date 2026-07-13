@@ -3,7 +3,8 @@
 # The SQLite provider compiles `sqlite3.c` for wasm through cc-rs, which needs
 # the WASI sysroot. cc-rs reads `WASI_SYSROOT` and adds `--sysroot` itself, so a
 # plain path value (resolved relative to this workspace root) is enough; no
-# `CFLAGS` flag-string with a baked-in absolute path. `just providers wasi-sdk`
+# `CFLAGS` flag-string with a baked-in absolute path. Provider build and check
+# recipes install the pinned SDK when needed.
 # installs the pinned SDK into `.cache/wasi-sdk`.
 [env]
 WASI_SYSROOT = { value = ".cache/wasi-sdk/share/wasi-sysroot", relative = true }

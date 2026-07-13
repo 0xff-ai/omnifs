@@ -288,6 +288,38 @@ fn seal_rejects_overlapping_routes() {
 }
 
 #[test]
+fn owned_path_route_templates_register_and_dispatch_like_literals() {
+    let mut router = Router::<()>::new();
+    let host = "example.test".to_owned();
+    router
+        .file(format!("/https/{host}/item"))
+        .handler(|_cx: Cx<()>| async { Ok(FileProjection::inline(b"owned").build()) })
+        .unwrap();
+    router
+        .file("/static/item")
+        .handler(|_cx: Cx<()>| async { Ok(FileProjection::inline(b"static").build()) })
+        .unwrap();
+    router.seal().unwrap();
+
+    let entries = list_entries(&router, "/https/example.test");
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect::<Vec<_>>(),
+        ["item"]
+    );
+    assert_eq!(
+        lookup_child_entry(&router, "/https/example.test", "item")
+            .target
+            .name,
+        "item"
+    );
+    assert_eq!(read_text(&router, "/https/example.test/item"), "owned");
+    assert_eq!(read_text(&router, "/static/item"), "static");
+}
+
+#[test]
 fn object_mount_lists_canonical_render_and_computed_leaves() {
     let handle = object("/items/{id}", |o| {
         o.dynamic();

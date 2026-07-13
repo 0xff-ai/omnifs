@@ -7,9 +7,9 @@ msrv = "1.95.0"
 # and pipe stripping come free, so its user-facing output must go through the
 # `ui` toolkit rather than ad-hoc `anstream::*` prints. Only omnifs-cli uses
 # these macros, so this workspace-wide deny has no blast radius in other crates.
-# Files under `crates/omnifs-cli/src/ui/` (the sanctioned output owner) and files
-# awaiting migration carry a module-level allow. The std print macros are denied
-# separately, crate-scoped to omnifs-cli, via
+# Files under `crates/omnifs-cli/src/ui/` are the sanctioned output owner. The
+# raw log and shell-completion passthroughs carry narrow module-level allows.
+# The std print macros are denied separately, crate-scoped to omnifs-cli, via
 # `#![deny(clippy::print_stdout, clippy::print_stderr)]`, because a workspace
 # `disallowed-macros` entry for `std::println` would fire in every crate's bins,
 # examples, and tests.

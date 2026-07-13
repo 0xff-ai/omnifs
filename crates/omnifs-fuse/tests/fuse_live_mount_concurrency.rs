@@ -44,7 +44,7 @@ fn fuse_live_mount_serves_fast_ops_while_provider_read_is_parked() {
     }
     let wasm = provider_wasm_path("test_provider.wasm");
     if !wasm.exists() {
-        eprintln!("skip: test_provider.wasm missing (run `just providers build`)");
+        eprintln!("skip: test_provider.wasm missing (run `just build providers`)");
         return;
     }
 

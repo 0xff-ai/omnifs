@@ -5,7 +5,7 @@ use omnifs_api::{CredentialHealth, CredentialStatus, DaemonStatus};
 use serde::Serialize;
 use std::path::Path;
 
-use omnifs_workspace::creds::FileStore;
+use omnifs_workspace::creds::{CredentialStore, FileStore};
 
 use crate::auth::{AuthProbeSeverity, AuthProbeSummary};
 use crate::cli::OutputFormat;
@@ -454,16 +454,32 @@ impl Doctor<'_> {
                 credentials_file.display()
             ));
         };
-        if parent.exists() {
-            ProbeResult::Ok(format!(
-                "file {}",
-                WorkspaceLayout::display(credentials_file)
-            ))
-        } else {
+        if !parent.exists() {
             ProbeResult::Warn(format!(
                 "credential directory will be created on first write: {}",
                 WorkspaceLayout::display(parent)
             ))
+        } else if !credentials_file.exists() {
+            ProbeResult::Warn(format!(
+                "credential store not created yet: {}",
+                WorkspaceLayout::display(credentials_file)
+            ))
+        } else {
+            match FileStore::new(credentials_file).list() {
+                Ok(Some(keys)) => ProbeResult::Ok(format!(
+                    "{} credential(s) in {}",
+                    keys.len(),
+                    WorkspaceLayout::display(credentials_file)
+                )),
+                Ok(None) => ProbeResult::Ok(format!(
+                    "credential store available at {}",
+                    WorkspaceLayout::display(credentials_file)
+                )),
+                Err(error) => ProbeResult::Err(format!(
+                    "credential store {} unreadable: {error}",
+                    WorkspaceLayout::display(credentials_file)
+                )),
+            }
         }
     }
 
@@ -666,7 +682,9 @@ fn credential_health_label(health: CredentialHealth) -> &'static str {
 #[cfg(test)]
 mod golden {
     use super::*;
+    use crate::test_support::fixture_paths;
     use crate::ui::strip_ansi;
+    use tempfile::TempDir;
 
     fn probes() -> Vec<(&'static str, ProbeResult)> {
         vec![
@@ -767,5 +785,63 @@ mod golden {
             live,
         };
         insta::assert_snapshot!(serde_json::to_string_pretty(&payload).unwrap());
+    }
+
+    fn probe_credential_result(root: &std::path::Path) -> ProbeResult {
+        let layout = fixture_paths(root);
+        let workspace = Workspace::from_layout(layout);
+        let doctor = Doctor {
+            workspace: &workspace,
+            mounts: Vec::new(),
+            docker_target: Err("test".to_owned()),
+            output: OutputFormat::Text,
+        };
+        doctor.probe_credential_store()
+    }
+
+    #[test]
+    fn credential_store_probe_distinguishes_missing_valid_and_invalid_files() {
+        let missing = TempDir::new().unwrap();
+        let result = probe_credential_result(missing.path());
+        assert!(
+            matches!(result, ProbeResult::Warn(message) if message.contains("not created yet"))
+        );
+
+        let valid = TempDir::new().unwrap();
+        let valid_path = fixture_paths(valid.path()).credentials_file;
+        std::fs::create_dir_all(valid.path()).unwrap();
+        std::fs::write(&valid_path, r#"{"version":1,"entries":{}}"#).unwrap();
+        let result = probe_credential_result(valid.path());
+        assert!(
+            matches!(result, ProbeResult::Ok(message) if message.contains("0 credential(s)") && message.contains("credentials.json"))
+        );
+
+        let invalid = TempDir::new().unwrap();
+        let invalid_path = fixture_paths(invalid.path()).credentials_file;
+        std::fs::write(&invalid_path, "not json").unwrap();
+        let result = probe_credential_result(invalid.path());
+        assert!(
+            matches!(result, ProbeResult::Err(message) if message.contains("credentials.json") && message.contains("unreadable"))
+        );
+
+        let unsupported = TempDir::new().unwrap();
+        let unsupported_path = fixture_paths(unsupported.path()).credentials_file;
+        std::fs::write(&unsupported_path, r#"{"version":99,"entries":{}}"#).unwrap();
+        let result = probe_credential_result(unsupported.path());
+        assert!(
+            matches!(result, ProbeResult::Err(message) if message.contains("version") && message.contains("99"))
+        );
+
+        let bad_key = TempDir::new().unwrap();
+        let bad_key_path = fixture_paths(bad_key.path()).credentials_file;
+        std::fs::write(
+            &bad_key_path,
+            r#"{"version":1,"entries":{"not-a-credential-key":{"kind":"static-token","access_token":"x","stored_at":"1970-01-01T00:00:00Z"}}}"#,
+        )
+        .unwrap();
+        let result = probe_credential_result(bad_key.path());
+        assert!(
+            matches!(result, ProbeResult::Err(message) if message.contains("credential") && message.contains("key"))
+        );
     }
 }

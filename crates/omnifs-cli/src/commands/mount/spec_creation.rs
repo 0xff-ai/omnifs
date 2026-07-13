@@ -3,7 +3,7 @@ use omnifs_caps::{Grants, Limits};
 use omnifs_workspace::ids::ProviderRef;
 use omnifs_workspace::mounts::{Name as MountName, ProviderMetadataInheritance, Spec};
 use omnifs_workspace::provider::{
-    ConfigField, ConfigMetadata, HostResourceBinding, ProviderManifest,
+    ConfigField, ConfigMetadata, HostResourceBinding, ProviderManifest, is_hostname_only,
 };
 use serde_json::Value;
 use std::path::PathBuf;
@@ -100,7 +100,11 @@ impl<'a> MountSpecCreator<'a> {
             .ok_or_else(|| anyhow!("provider `{}` has no config metadata", self.manifest.id))?;
         config_metadata
             .validate_config(config)
-            .map_err(|error| anyhow!("generated provider config failed validation: {error}"))
+            .map_err(|error| anyhow!("provider config failed validation: {error}"))?;
+        if let Some(field) = self.manifest.dynamic_domain_field() {
+            validate_dynamic_domains(config, field)?;
+        }
+        Ok(())
     }
 }
 
@@ -171,7 +175,7 @@ fn parse_domain_list(raw: &str) -> anyhow::Result<Vec<String>> {
         if token.is_empty() {
             continue;
         }
-        if !is_bare_hostname(token) {
+        if !is_hostname_only(token) {
             anyhow::bail!(
                 "invalid domain `{token}`: use bare hostnames only, without scheme, port, path, or wildcard"
             );
@@ -181,13 +185,24 @@ fn parse_domain_list(raw: &str) -> anyhow::Result<Vec<String>> {
     Ok(domains)
 }
 
-fn is_bare_hostname(value: &str) -> bool {
-    !value.is_empty()
-        && value != "*"
-        && !value.contains("://")
-        && !value.contains('/')
-        && !value.contains(':')
-        && !value.contains('*')
+fn validate_dynamic_domains(config: &Value, field: &str) -> anyhow::Result<()> {
+    let Some(domains) = config.get(field).and_then(Value::as_array) else {
+        anyhow::bail!("dynamic domain config `{field}` must be a non-empty array of hostnames");
+    };
+    if domains.is_empty() {
+        anyhow::bail!("dynamic domain config `{field}` must be a non-empty array of hostnames");
+    }
+    for domain in domains {
+        let Some(domain) = domain.as_str() else {
+            anyhow::bail!("dynamic domain config `{field}` must contain only bare hostnames");
+        };
+        if !is_hostname_only(domain) {
+            anyhow::bail!(
+                "invalid domain `{domain}` in `{field}`: use bare hostnames only, without scheme, port, path, or wildcard"
+            );
+        }
+    }
+    Ok(())
 }
 
 fn prompt_host_file(name: &str, field: &ConfigField) -> anyhow::Result<PathBuf> {
@@ -202,7 +217,10 @@ fn prompt_host_file(name: &str, field: &ConfigField) -> anyhow::Result<PathBuf> 
 
 #[cfg(test)]
 mod tests {
-    use super::{is_bare_hostname, parse_domain_list};
+    use super::{MountSpecCreator, parse_domain_list};
+    use omnifs_workspace::ids::{ProviderId, ProviderMeta, ProviderName, ProviderRef};
+    use omnifs_workspace::mounts::Name as MountName;
+    use omnifs_workspace::provider::ProviderManifest;
 
     #[test]
     fn parses_and_validates_a_domain_list() {
@@ -225,8 +243,63 @@ mod tests {
             "example.com:443",
             "*",
         ] {
-            assert!(!is_bare_hostname(bad), "`{bad}` must be rejected");
             assert!(parse_domain_list(bad).is_err(), "`{bad}` must be rejected");
+        }
+    }
+
+    #[test]
+    fn accepts_uppercase_hostnames() {
+        assert_eq!(
+            parse_domain_list("API.Example.COM").unwrap(),
+            ["API.Example.COM"]
+        );
+    }
+
+    #[test]
+    fn validate_rejects_invalid_dynamic_domain_config() {
+        let manifest: ProviderManifest = serde_json::from_value(serde_json::json!({
+            "id": "web",
+            "displayName": "Web",
+            "provider": "web.wasm",
+            "defaultMount": "web",
+            "capabilities": [{
+                "kind": "domain",
+                "value": "resolved from config",
+                "why": "fetch configured domains",
+                "dynamic": true
+            }],
+            "config": {"fields": [{
+                "name": "domains",
+                "type": {"kind": "array", "items": {"kind": "string"}}
+            }]}
+        }))
+        .unwrap();
+        let reference = ProviderRef {
+            id: ProviderId::from_wasm_bytes(b"web"),
+            meta: ProviderMeta {
+                name: ProviderName::new("web").unwrap(),
+                version: None,
+            },
+        };
+        let mount_name = MountName::try_from("web").unwrap();
+        let creator = MountSpecCreator::new(&reference, &mount_name, &manifest);
+
+        assert!(
+            creator
+                .validate(&serde_json::json!({"domains": ["API.Example.COM"]}))
+                .is_ok()
+        );
+        for value in [
+            serde_json::json!({"domains": []}),
+            serde_json::json!({"domains": [""]}),
+            serde_json::json!({"domains": ["example.com/path"]}),
+            serde_json::json!({"domains": ["example.com:443"]}),
+            serde_json::json!({"domains": ["*"]}),
+        ] {
+            assert!(
+                creator.validate(&value).is_err(),
+                "expected {value} to fail"
+            );
         }
     }
 }

@@ -1,4 +1,3 @@
-#![allow(clippy::disallowed_macros)] // migrates in wave 5 (cli-redesign)
 //! The Docker client for the optional Docker-hosted FUSE frontend
 //! (`omnifs frontend up|down`). The daemon itself always runs
 //! host-native and has no Docker surface here.
@@ -76,7 +75,7 @@ impl Runtime {
         target: &DockerTarget,
         command: &'static str,
     ) -> Result<Self> {
-        anstream::eprintln!("Connecting to Docker");
+        crate::ui::eprint_raw("Connecting to Docker\n");
         let runtime = Self::connect_for(target)?;
         runtime
             .ping()
@@ -279,7 +278,7 @@ impl Runtime {
     }
 
     pub(crate) async fn remove_existing(&self, name: &ContainerName) -> Result<()> {
-        anstream::eprint!("Checking for existing container `{name}` ");
+        crate::ui::eprint_raw(&format!("Checking for existing container `{name}` "));
         std::io::stderr().flush().ok();
         match self
             .docker
@@ -287,10 +286,12 @@ impl Runtime {
             .await
         {
             Ok(_) => {
-                anstream::eprintln!("found");
+                crate::ui::eprint_raw("found\n");
                 // Best-effort stop, then remove. Bollard returns errors for
                 // already-stopped containers; we don't care about that case.
-                anstream::eprintln!("Stopping existing container `{name}` (1s timeout)");
+                crate::ui::eprint_raw(&format!(
+                    "Stopping existing container `{name}` (1s timeout)\n"
+                ));
                 let _ = self
                     .docker
                     .stop_container(
@@ -301,7 +302,7 @@ impl Runtime {
                         }),
                     )
                     .await;
-                anstream::eprintln!("Removing existing container `{name}`");
+                crate::ui::eprint_raw(&format!("Removing existing container `{name}`\n"));
                 self.docker
                     .remove_container(
                         name.as_str(),
@@ -316,7 +317,7 @@ impl Runtime {
             },
             Err(bollard::errors::Error::DockerResponseServerError {
                 status_code: 404, ..
-            }) => anstream::eprintln!("none"),
+            }) => crate::ui::eprint_raw("none\n"),
             Err(error) => {
                 return Err(error).with_context(|| format!("inspect container `{name}`"));
             },
@@ -331,11 +332,11 @@ impl Runtime {
         self.ensure_image().await?;
         self.remove().await?;
 
-        anstream::eprintln!(
-            "Creating frontend container `{}` from image `{}`",
+        crate::ui::eprint_raw(&format!(
+            "Creating frontend container `{}` from image `{}`\n",
             self.container_name(),
             self.image()
-        );
+        ));
         self.docker
             .create_container(
                 Some(CreateContainerOptions {
@@ -346,7 +347,10 @@ impl Runtime {
             )
             .await
             .with_context(|| format!("create frontend container `{}`", self.container_name()))?;
-        anstream::eprintln!("Starting frontend container `{}`", self.container_name());
+        crate::ui::eprint_raw(&format!(
+            "Starting frontend container `{}`\n",
+            self.container_name()
+        ));
         self.docker
             .start_container(
                 self.container_name().as_str(),
@@ -418,7 +422,7 @@ impl Runtime {
     }
 
     async fn ensure_image(&self) -> Result<()> {
-        anstream::eprint!("Checking image `{}` ", self.image());
+        crate::ui::eprint_raw(&format!("Checking image `{}` ", self.image()));
         std::io::stderr().flush().ok();
         match self.docker.inspect_image(self.image().as_str()).await {
             Ok(inspect) => {
@@ -426,9 +430,9 @@ impl Runtime {
                 // visible; release channel keeps the terse `present`.
                 match (BUILD_CHANNEL, image_age_words(inspect.created.as_deref())) {
                     (BuildChannel::Dev, Some(age)) => {
-                        anstream::eprintln!("present (built {age} ago)");
+                        crate::ui::eprint_raw(&format!("present (built {age} ago)\n"));
                     },
-                    _ => anstream::eprintln!("present"),
+                    _ => crate::ui::eprint_raw("present\n"),
                 }
                 Ok(())
             },
@@ -437,7 +441,7 @@ impl Runtime {
             }) if !names_registry(self.image().as_str()) => {
                 // A registry-less reference is a local build product. Never
                 // reach for a registry: refuse and point at the dev build.
-                anstream::eprintln!("missing");
+                crate::ui::eprint_raw("missing\n");
                 let image = self.image();
                 Err(anyhow!(BUILD_CHANNEL.pull_refusal_reason()))
                     .context(format!("image `{image}` is not present locally"))
@@ -447,7 +451,7 @@ impl Runtime {
             Err(bollard::errors::Error::DockerResponseServerError {
                 status_code: 404, ..
             }) => {
-                anstream::eprintln!("missing");
+                crate::ui::eprint_raw("missing\n");
                 self.pull_image_with_progress(self.image().as_str())
                     .await
                     .map_err(|pull_err| {

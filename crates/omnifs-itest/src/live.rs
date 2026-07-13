@@ -383,7 +383,7 @@ pub fn start_multi_frontend_daemon(kinds: &[&str]) -> Option<MultiFrontendDaemon
     let test_wasm = crate::provider_artifact_dir().join("test_provider.wasm");
     if !test_wasm.exists() {
         eprintln!(
-            "skip: {} missing (run `just providers build`)",
+            "skip: {} missing (run `just build providers`)",
             test_wasm.display()
         );
         return None;
@@ -643,7 +643,7 @@ fn wire_frontend(
     let test_wasm = crate::provider_artifact_dir().join("test_provider.wasm");
     if !test_wasm.exists() {
         eprintln!(
-            "skip: {} missing (run `just providers build`)",
+            "skip: {} missing (run `just build providers`)",
             test_wasm.display()
         );
         return None;
@@ -841,7 +841,7 @@ fn native_daemon(nfs_lock: Option<TcpListener>) -> Option<NativeDaemon> {
     let test_wasm = crate::provider_artifact_dir().join("test_provider.wasm");
     if !test_wasm.exists() {
         eprintln!(
-            "skip: {} missing (run `just providers build`)",
+            "skip: {} missing (run `just build providers`)",
             test_wasm.display()
         );
         return None;

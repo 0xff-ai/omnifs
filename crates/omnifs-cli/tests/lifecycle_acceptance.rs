@@ -143,7 +143,7 @@ impl Fixture {
     fn up_and_wait(&mut self) -> Option<()> {
         let wasm_dir = release_wasm_dir();
         if !wasm_dir.join("test_provider.wasm").exists() {
-            eprintln!("skip: test_provider.wasm missing (run `just providers build`)");
+            eprintln!("skip: test_provider.wasm missing (run `just build providers`)");
             return None;
         }
         if !platform_can_mount() {
@@ -279,7 +279,7 @@ fn scenarios_3_to_6_lifecycle_cycle() {
     }
     let wasm_dir = release_wasm_dir();
     if !wasm_dir.join("test_provider.wasm").exists() {
-        eprintln!("skip: test_provider.wasm missing (run `just providers build`)");
+        eprintln!("skip: test_provider.wasm missing (run `just build providers`)");
         return;
     }
     if !platform_can_mount() {
@@ -410,6 +410,22 @@ fn scenarios_3_to_6_lifecycle_cycle() {
         String::from_utf8_lossy(&out.stderr),
     );
 
+    // `down` does not return until the daemon control surface is gone, so an
+    // immediate status probe must already report the settled not-running state.
+    let immediate_status = fixture.run(&["status", "--json"]);
+    assert!(
+        immediate_status.status.success(),
+        "status immediately after down must succeed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&immediate_status.stdout),
+        String::from_utf8_lossy(&immediate_status.stderr),
+    );
+    let immediate_json: serde_json::Value = serde_json::from_slice(&immediate_status.stdout)
+        .expect("immediate status --json must produce valid JSON");
+    assert_eq!(
+        immediate_json["runtime"]["state"], "not_running",
+        "status immediately after down must report not_running: {immediate_json:#}"
+    );
+
     // Mount is gone from the OS mount table.
     // Poll briefly: the OS may take a moment to acknowledge the unmount.
     let settled = {
@@ -517,7 +533,7 @@ fn scenario_8_failed_mount_surfaced() {
     }
     let wasm_dir = release_wasm_dir();
     if !wasm_dir.join("test_provider.wasm").exists() {
-        eprintln!("skip: test_provider.wasm missing (run `just providers build`)");
+        eprintln!("skip: test_provider.wasm missing (run `just build providers`)");
         return;
     }
     if !platform_can_mount() {

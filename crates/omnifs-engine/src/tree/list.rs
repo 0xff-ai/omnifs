@@ -137,7 +137,7 @@ impl Tree {
             .await?;
         match result {
             crate::ops::namespace::ListOutcome::Entries(listing) => Ok(Listing {
-                entries: provider_entries(&listing.entries),
+                entries: provider_entries(path, &listing.entries),
                 exhaustive: listing.exhaustive && listing.next_cursor.is_none(),
                 next_cursor: listing.next_cursor.map(Cursor),
             }),
@@ -240,6 +240,14 @@ fn snapshot_from_provider_listing(
             );
             continue;
         }
+        if path.is_root() && synthetic::is_root_ignore_name(&e.name) {
+            warn!(
+                name = e.name.as_str(),
+                path = path.as_str(),
+                "provider listing yielded a host-owned root ignore entry; skipping"
+            );
+            continue;
+        }
         dirent_records.push(DirentRecord {
             name: e.name.clone(),
             meta: e.meta.clone(),
@@ -276,7 +284,7 @@ fn snapshot_from_provider_listing(
         .into_iter()
         .map(|r| Entry::provider(r.name, r.meta))
         .collect();
-    entries.extend(synthetic_entries_for(node, paginated, &entries));
+    entries.extend(synthetic_entries_for(node, paginated));
     Listing {
         entries,
         exhaustive: dirents_payload.exhaustive,
@@ -286,23 +294,26 @@ fn snapshot_from_provider_listing(
 
 /// The host-synthesized entries for a first-page browse listing: `@next`/`@all`
 /// controls when the directory is paged, plus the mount-root ignore files at the
-/// mount root (skipping any the provider already projects).
-fn synthetic_entries_for(node: &Node, paginated: bool, provider_entries: &[Entry]) -> Vec<Entry> {
+/// mount root.
+fn synthetic_entries_for(node: &Node, paginated: bool) -> Vec<Entry> {
     let mut out = Vec::new();
     if paginated {
         out.extend(PaginationControl::entries());
     }
     if node.path().is_root() {
-        out.extend(Synthetic::root_ignore_entries(provider_entries));
+        out.extend(Synthetic::root_ignore_entries());
     }
     out
 }
 
 /// Provider-projected entries with reserved-`@` names dropped.
-fn provider_entries(entries: &[ProviderEntry]) -> Vec<Entry> {
+fn provider_entries(path: &omnifs_core::path::Path, entries: &[ProviderEntry]) -> Vec<Entry> {
     entries
         .iter()
-        .filter(|e| !synthetic::is_reserved_provider_leaf(&e.name))
+        .filter(|e| {
+            !(synthetic::is_reserved_provider_leaf(&e.name)
+                || path.is_root() && synthetic::is_root_ignore_name(&e.name))
+        })
         .map(|e| Entry::provider(e.name.clone(), e.meta.clone()))
         .collect()
 }
@@ -319,7 +330,9 @@ fn provider_entries(entries: &[ProviderEntry]) -> Vec<Entry> {
 fn listing_from_dirents(node: &Node, dirents: &DirentsPayload) -> Listing {
     let mut entries = Vec::with_capacity(dirents.entries.len());
     for record in &dirents.entries {
-        if synthetic::is_reserved_provider_leaf(&record.name) {
+        if synthetic::is_reserved_provider_leaf(&record.name)
+            || (node.path().is_root() && synthetic::is_root_ignore_name(&record.name))
+        {
             continue;
         }
         entries.push(Entry::provider(record.name.clone(), record.meta.clone()));
@@ -330,7 +343,7 @@ fn listing_from_dirents(node: &Node, dirents: &DirentsPayload) -> Listing {
         synthetic_entries.extend(PaginationControl::entries());
     }
     if node.path().is_root() {
-        synthetic_entries.extend(Synthetic::root_ignore_entries(&entries));
+        synthetic_entries.extend(Synthetic::root_ignore_entries());
     }
     entries.extend(synthetic_entries);
 

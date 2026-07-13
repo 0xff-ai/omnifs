@@ -83,7 +83,7 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
         String::new()
     };
     let title = format!(
-        " omnifs inspect │ {source}{pause} │ {:.1} evt/s │ dropped {} ",
+        " omnifs inspect · recent activity │ {source}{pause} │ {:.1} evt/s │ dropped {} ",
         app.events_per_sec, app.dropped_events
     );
     let keys = " q quit  tab focus  ↑/↓ navigate  ↵ collapse  space pause  e errors  i idle  / filter  r reset ";
@@ -167,7 +167,7 @@ fn render_main(frame: &mut Frame, app: &App, area: Rect) {
 fn render_tree(frame: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" tree ")
+        .title(" recent paths ")
         .border_style(pane_border_style(app, PaneFocus::Tree));
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -215,7 +215,7 @@ impl TreeRowView<'_> {
             NodeStatus::InFlight => Color::LightYellow,
             NodeStatus::RecentHit => Color::LightGreen,
             NodeStatus::Cached => mount_color,
-            NodeStatus::Untouched => Color::DarkGray,
+            NodeStatus::Miss | NodeStatus::Untouched => Color::DarkGray,
         };
         let name_style = if row.depth == 0 {
             Style::default()
@@ -253,7 +253,7 @@ impl TreeRowView<'_> {
         }
         if row.errors_below > 0 && row.status != NodeStatus::Error {
             spans.push(Span::styled(
-                format!("  ✗{}", row.errors_below),
+                format!("  {} failed paths", row.errors_below),
                 Style::default().fg(Color::LightRed),
             ));
         }
@@ -560,5 +560,33 @@ impl StageView<'_> {
             ));
         }
         Line::from(spans)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::inspector::app::{App, ConnectionMode};
+
+    #[test]
+    fn tree_rollup_badge_explains_failure_count() {
+        let app = App::new(ConnectionMode::Replay, "test", None);
+        let row = RenderRow {
+            depth: 0,
+            name: "github".to_string(),
+            path: String::new(),
+            mount: "github".to_string(),
+            status: NodeStatus::Cached,
+            is_subtree_handoff: false,
+            last_latency_us: None,
+            in_flight: 0,
+            errors_below: 12,
+        };
+        let line = TreeRowView {
+            app: &app,
+            row: &row,
+        }
+        .into_line();
+        assert!(line.to_string().contains("12 failed paths"));
     }
 }

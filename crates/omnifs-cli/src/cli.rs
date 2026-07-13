@@ -1,4 +1,3 @@
-#![allow(clippy::disallowed_macros)] // migrates in wave 4 (cli-redesign)
 //! CLI type definitions: top-level parser and command enum.
 
 use clap::{Parser, Subcommand};
@@ -120,12 +119,11 @@ pub enum Commands {
     #[cfg(feature = "daemon")]
     Daemon(omnifs_daemon::DaemonArgs),
 
-    /// Manage the optional Docker-hosted FUSE frontend attached to a
-    /// host-native daemon
+    /// Manage filesystem frontends attached to the host-native daemon
     ///
-    /// The daemon always runs host-native. `omnifs frontend up` launches a
-    /// separate, credential-free Docker container that renders FUSE over the
-    /// daemon's shared namespace; `down` tears it down.
+    /// Start a local or guest-delivered FUSE or NFS frontend, list live
+    /// attachments, or tear down guest frontends. Every frontend renders the
+    /// daemon's same shared namespace and carries no provider credentials.
     Frontend(commands::frontend::FrontendArgs),
 }
 
@@ -152,13 +150,54 @@ impl Cli {
 
     pub async fn run(self) -> anyhow::Result<ExitCode> {
         match self.command {
-            Some(command) => command.run().await,
+            Some(command) => {
+                if command.outputs_json() {
+                    crate::ui::output::expect_json();
+                }
+                command.run().await
+            },
             None => run_bare().await,
         }
     }
 }
 
 impl Commands {
+    /// Whether this invocation promises a JSON document on stdout.
+    ///
+    /// This is decided before dispatch so failures during workspace or client
+    /// construction still use the command's machine-readable error contract.
+    fn outputs_json(&self) -> bool {
+        match self {
+            Self::Status(args) => args.json,
+            Self::Up(args) => args.json,
+            Self::Down(args) => args.json,
+            Self::Mount(args) => match &args.command {
+                commands::mount::MountCommand::Add(args) => args.json,
+                commands::mount::MountCommand::Ls(args) => args.json,
+                commands::mount::MountCommand::Reauth(_)
+                | commands::mount::MountCommand::Rm { .. }
+                | commands::mount::MountCommand::Snapshot(_) => false,
+            },
+            Self::Provider(args) => match &args.command {
+                commands::provider::ProviderCommand::Ls(args) => args.json,
+                commands::provider::ProviderCommand::Add(_) => false,
+            },
+            Self::Reset(args) => args.json,
+            Self::Doctor(args) => args.json,
+            Self::Version(args) => args.json,
+            Self::Logs(_)
+            | Self::Inspect(_)
+            | Self::Shell(_)
+            | Self::Setup(_)
+            | Self::Skill(_)
+            | Self::Completions(_)
+            | Self::Debug(_)
+            | Self::Frontend(_) => false,
+            #[cfg(feature = "daemon")]
+            Self::Daemon(_) => false,
+        }
+    }
+
     /// Top-level subcommand label for `cli.jsonl` telemetry, or `None` for the
     /// internal `daemon` subcommand (which records `daemon.jsonl` instead of
     /// counting as CLI usage).
@@ -226,7 +265,7 @@ async fn run_bare() -> anyhow::Result<ExitCode> {
     let workspace = Workspace::resolve()?;
     let mounts = workspace.mounts().unwrap_or_default();
     if mounts.is_empty() {
-        anstream::println!("omnifs is not set up. Run `omnifs setup` to get started.");
+        crate::ui::print_raw("omnifs is not set up. Run `omnifs setup` to get started.\n");
         return Ok(ExitCode::Success);
     }
 
@@ -301,6 +340,19 @@ mod tests {
                 "prompt site `{prompt}` must be covered by `{subcommand}` arg `{arg}`"
             );
         }
+    }
+
+    #[test]
+    fn help_wraps_at_requested_terminal_width() {
+        let help = Cli::command().term_width(35).render_help().to_string();
+        assert!(
+            help.lines().any(|line| line.contains("Increase tracing")),
+            "expected the verbose option in help:\n{help}"
+        );
+        assert!(
+            help.contains("Increase tracing\n") && help.contains("          verbosity."),
+            "expected the verbose description to wrap at 35 columns:\n{help}"
+        );
     }
 
     /// Resolve a whitespace-separated subcommand path (for example `mount add`)

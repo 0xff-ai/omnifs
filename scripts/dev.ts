@@ -147,7 +147,7 @@ async function main() {
 
   console.log(`Workspace: ${workspace}`);
   if (!options.providerStore) {
-    await run($`just providers build`);
+    await run($`just build providers`);
   }
   assertFile(join(providerStore, "index.json"), "provider store bundle");
 

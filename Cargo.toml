@@ -54,7 +54,7 @@ tracing = "0.1"
 bollard = "0.20.0"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "2"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "wrap_help"] }
 dashmap = "6"
 parking_lot = "0.12"
 tempfile = "3"

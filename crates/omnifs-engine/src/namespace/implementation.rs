@@ -286,6 +286,14 @@ impl TreeNamespace {
         inspect::global().map(|sink| InspectorRequestScope::begin(sink, op, mount, path))
     }
 
+    /// Inspector paths are mount-relative, while namespace records keep the
+    /// full protocol path needed to resolve a node. In enumeration mode the
+    /// synthetic root has no mount, so give it an explicit identity instead of
+    /// emitting a blank mount row in the inspector.
+    fn inspector_identity(&self, mount: &str, full_path: &Path) -> (String, String) {
+        inspector_identity(self.tree.root_node_mount().is_empty(), mount, full_path)
+    }
+
     /// The trace id a span minted, for threading into `RequestCtx`.
     fn span_trace(span: Option<&InspectorRequestScope>) -> Option<TraceId> {
         span.map(InspectorRequestScope::trace_id)
@@ -507,7 +515,8 @@ impl TreeNamespace {
 
         let (full_path, mount) = self.record(id)?;
         self.process_invalidations(&mount);
-        let span = Self::begin_span("read", &mount, full_path.as_str());
+        let (display_mount, display_path) = self.inspector_identity(&mount, &full_path);
+        let span = Self::begin_span("read", &display_mount, &display_path);
         let trace = Self::span_trace(span.as_ref());
         let result = async {
             let node = self.resolve_node(&full_path, trace).await?;
@@ -681,7 +690,8 @@ impl TreeNamespace {
 
         let (full_path, mount) = self.record(id)?;
         self.process_invalidations(&mount);
-        let span = Self::begin_span("readdir", &mount, full_path.as_str());
+        let (display_mount, display_path) = self.inspector_identity(&mount, &full_path);
+        let span = Self::begin_span("readdir", &display_mount, &display_path);
         let trace = Self::span_trace(span.as_ref());
         let result = async {
             let node = self.resolve_node(&full_path, trace).await?;
@@ -786,7 +796,8 @@ impl TreeNamespace {
         let (full_path, mount) = self.record(id)?;
         self.process_invalidations(&mount);
         let op = if exact { "getattr_exact" } else { "getattr" };
-        let span = Self::begin_span(op, &mount, full_path.as_str());
+        let (display_mount, display_path) = self.inspector_identity(&mount, &full_path);
+        let span = Self::begin_span(op, &display_mount, &display_path);
         let trace = Self::span_trace(span.as_ref());
         let result = async {
             let node = self.resolve_node(&full_path, trace).await?;
@@ -842,7 +853,8 @@ impl Namespace for TreeNamespace {
             let (parent_full, mount) = self.record(parent)?;
             self.process_invalidations(&mount);
             let child_full = parent_full.join(name).map_err(|_| NsError::Invalid)?;
-            let span = Self::begin_span("lookup", &mount, child_full.as_str());
+            let (display_mount, display_path) = self.inspector_identity(&mount, &child_full);
+            let span = Self::begin_span("lookup", &display_mount, &display_path);
             let trace = Self::span_trace(span.as_ref());
             let result = async {
                 let node = self.resolve_node(&child_full, trace).await?;
@@ -914,6 +926,36 @@ impl Drop for TreeNamespace {
 // Free helpers
 // -----------------------------------------------------------------------------
 
+const INSPECTOR_SYNTHETIC_ROOT: &str = "<root>";
+
+fn inspector_identity(enum_root: bool, mount: &str, full_path: &Path) -> (String, String) {
+    if mount.is_empty() {
+        if !enum_root || full_path.is_root() {
+            return (INSPECTOR_SYNTHETIC_ROOT.to_string(), "/".to_string());
+        }
+
+        let mut segments = full_path.as_str().trim_start_matches('/').splitn(2, '/');
+        let mount = segments.next().unwrap_or(INSPECTOR_SYNTHETIC_ROOT);
+        let rel = segments
+            .next()
+            .map_or_else(|| "/".to_string(), |path| format!("/{path}"));
+        return (mount.to_string(), rel);
+    }
+
+    if enum_root {
+        let prefix = format!("/{mount}");
+        let full = full_path.as_str();
+        if full == prefix {
+            return (mount.to_string(), "/".to_string());
+        }
+        if let Some(rel) = full.strip_prefix(&(prefix + "/")) {
+            return (mount.to_string(), format!("/{rel}"));
+        }
+    }
+
+    (mount.to_string(), full_path.as_str().to_string())
+}
+
 /// Change counter over a resolved node, folding the node's last invalidation
 /// epoch into the same facts NFS's `entry_change` hashes.
 fn change_counter(node: &crate::Node, attrs: Option<&FileAttrsCache>, epoch: u64) -> u64 {
@@ -940,5 +982,29 @@ fn hash_attr_facts(hasher: &mut DefaultHasher, attrs: Option<&FileAttrsCache>, e
         std::mem::discriminant(&attrs.size()).hash(hasher);
         std::mem::discriminant(&attrs.byte_source()).hash(hasher);
         std::mem::discriminant(&attrs.stability()).hash(hasher);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{INSPECTOR_SYNTHETIC_ROOT, inspector_identity};
+    use omnifs_core::path::Path;
+
+    #[test]
+    fn inspector_identity_normalizes_enumerated_mount_root() {
+        let path = Path::parse("/github/notifications").expect("path");
+        assert_eq!(
+            inspector_identity(true, "github", &path),
+            ("github".to_string(), "/notifications".to_string())
+        );
+    }
+
+    #[test]
+    fn inspector_identity_labels_synthetic_enumeration_root() {
+        let path = Path::root();
+        assert_eq!(
+            inspector_identity(true, "", &path),
+            (INSPECTOR_SYNTHETIC_ROOT.to_string(), "/".to_string())
+        );
     }
 }

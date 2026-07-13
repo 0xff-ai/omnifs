@@ -1,4 +1,3 @@
-#![allow(clippy::disallowed_macros)] // migrates in wave 5 (cli-redesign)
 //! Shared launch choreography for `omnifs up`.
 
 use std::net::SocketAddr;
@@ -54,7 +53,10 @@ impl<'a> Launcher<'a> {
         let store = FileStore::new(&paths.credentials_file);
         preflight_mounts(&configs, self.workspace.catalog(), &store)?;
 
-        anstream::eprintln!("Using mount configs from {}", paths.mounts_dir.display());
+        crate::ui::narrate(format!(
+            "Using mount configs from {}",
+            paths.mounts_dir.display()
+        ));
         launch_host_native(paths, self.verb, telemetry_enabled).await
     }
 }
@@ -105,7 +107,7 @@ async fn launch_host_native(
     telemetry_enabled: bool,
 ) -> anyhow::Result<LaunchOutcome> {
     reject_existing_host_daemon(paths, verb).await?;
-    anstream::eprintln!("Starting omnifs daemon (host-native)");
+    crate::ui::narrate("Starting omnifs daemon (host-native)");
 
     let tcp_addr = env_control_addr()?;
     crate::launch_backend::launch_native(paths, tcp_addr, telemetry_enabled).await?;
@@ -260,24 +262,26 @@ fn display_path(path: &Path) -> String {
 /// failed mount does not abort the launch, since the rest are serving.
 fn report_reconcile_failures(report: &omnifs_api::ReconcileReport) {
     for failure in &report.failed {
-        anstream::eprintln!(
-            "warning: mount `{}` did not load: {}",
-            failure.mount,
-            failure.reason
-        );
+        crate::ui::eprint_raw(&format!(
+            "warning: mount `{}` did not load: {}\n",
+            failure.mount, failure.reason
+        ));
     }
 }
 
 fn report_launch_status(status: &DaemonStatus) {
     if let Some(frontend) = status.health.subsystem(DaemonSubsystem::Frontend) {
-        anstream::eprintln!("✓ {}", frontend.message);
+        crate::ui::eprint_raw(&format!("✓ {}\n", frontend.message));
     } else {
-        anstream::eprintln!("✓ Namespace daemon is serving");
+        crate::ui::eprint_raw("✓ Namespace daemon is serving\n");
     }
 
     if let Some(mounts) = status.health.subsystem(DaemonSubsystem::Mounts) {
-        anstream::eprintln!("✓ {}", mounts.message);
+        crate::ui::eprint_raw(&format!("✓ {}\n", mounts.message));
     } else {
-        anstream::eprintln!("✓ Runtime sees {} provider(s)", status.mounts.len());
+        crate::ui::eprint_raw(&format!(
+            "✓ Runtime sees {} provider(s)\n",
+            status.mounts.len()
+        ));
     }
 }

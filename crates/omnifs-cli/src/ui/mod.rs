@@ -1,7 +1,5 @@
-//! The CLI output toolkit: commands construct typed values, this module owns
-//! every byte that reaches the terminal.
-//!
-//! The CLI output toolkit: the closed vocabulary ([`style`]), typed state
+//! Commands construct typed values while this module owns every byte that
+//! reaches the terminal: the closed vocabulary ([`style`]), typed state
 //! [`report`]s, the [`event`] model, flat [`progress`], and the cliclack
 //! [`session`] rail. Stream discipline is owned here, not by commands:
 //! reports go to stdout, while narration, prompts, and progress go to stderr.
@@ -11,7 +9,7 @@
 //! already-flat command surfaces and should not be used to start a rail.
 
 // This module is the sanctioned output owner; the drift gate denies print
-// macros everywhere else. Only `print_json` and `eprint_raw` print here.
+// macros everywhere else. Only the raw and JSON output helpers print here.
 #![allow(clippy::disallowed_macros, clippy::print_stdout)]
 
 pub(crate) mod consent;
@@ -44,6 +42,11 @@ pub(crate) fn print_json(value: &impl serde::Serialize) -> anyhow::Result<()> {
     let serialized = serde_json::to_string(value).context("serialize JSON output")?;
     anstream::println!("{serialized}");
     Ok(())
+}
+
+/// Emit a complete pre-rendered document to stdout.
+pub(crate) fn print_raw(text: &str) {
+    anstream::print!("{text}");
 }
 
 /// Emit pre-rendered text to stderr. The top-level error and cancel handler

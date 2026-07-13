@@ -1,4 +1,3 @@
-#![allow(clippy::disallowed_macros)] // migrates in wave 4 (cli-redesign)
 //! Skill installation commands for agent harnesses.
 
 use anyhow::Context;
@@ -64,7 +63,10 @@ fn install_claude_code_in(home: &Path) -> anyhow::Result<()> {
     let skill = target.join("SKILL.md");
     std::fs::write(&skill, USAGE_SKILL)
         .with_context(|| format!("write skill file {}", skill.display()))?;
-    anstream::eprintln!("Installed `{SKILL_NAME}` skill at {}", target.display());
+    crate::ui::eprint_raw(&format!(
+        "Installed `{SKILL_NAME}` skill at {}\n",
+        target.display()
+    ));
     Ok(())
 }
 

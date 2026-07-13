@@ -17,6 +17,7 @@ use crate::credential_target::CredentialTarget;
 use crate::style;
 use crate::workspace::Workspace;
 use omnifs_workspace::authn::SchemeGuidance;
+use omnifs_workspace::mounts::Spec;
 use omnifs_workspace::provider::Catalog;
 
 const MANUAL_PROMPT_CANCELED: &str = "omnifs-manual-oauth-prompt-canceled";
@@ -32,9 +33,8 @@ struct LoginInteractivity<'a> {
 
 async fn login(
     catalog: &Catalog,
-    mounts: &[crate::mount_config::MountConfig],
+    mount_auth: crate::auth::MountAuth,
     store: Box<dyn CredentialStore>,
-    mount: &str,
     account: Option<&str>,
     interactivity: LoginInteractivity<'_>,
     session: &mut crate::ui::session::Session,
@@ -44,7 +44,7 @@ async fn login(
         no_input,
         scopes,
     } = interactivity;
-    let mount_auth = crate::auth::MountAuth::load(catalog, mounts, mount)?;
+    let mount = mount_auth.spec().mount.clone();
     let (request, target) = mount_auth.oauth_request(account, scopes)?;
     let guidance = omnifs_workspace::mounts::pinned_manifest(catalog, mount_auth.spec())
         .ok()
@@ -83,7 +83,9 @@ async fn login(
             ))
             .with_exit_code(ExitCode::AuthRequired);
         },
-        LoginRequest::ManualCode(request) => login_manual(&client, request, mount, session).await?,
+        LoginRequest::ManualCode(request) => {
+            login_manual(&client, request, &mount, session).await?
+        },
         LoginRequest::DeviceCode(request) => {
             // The callback runs before the await inside login_device_code, so we cannot
             // borrow &mut session across the future. Emit directly with cliclack log
@@ -174,11 +176,41 @@ pub(crate) async fn login_with_workspace(
 ) -> anyhow::Result<CredentialTarget> {
     let store = Box::new(FileStore::new(&workspace.layout().credentials_file));
     let mounts = workspace.mounts()?;
+    let mount_auth = crate::auth::MountAuth::load(workspace.catalog(), &mounts, mount)?;
     login(
         workspace.catalog(),
-        &mounts,
+        mount_auth,
         store,
-        mount,
+        account,
+        LoginInteractivity {
+            no_browser,
+            no_input,
+            scopes,
+        },
+        session,
+    )
+    .await
+}
+
+/// Authenticate a mount that is still being created from its already-resolved
+/// spec. Setup must not reload this spec by name: when a live daemon persisted
+/// it in another process, this command's mount registry can still hold the
+/// snapshot from before the create.
+pub(crate) async fn login_with_spec(
+    workspace: &Workspace,
+    spec: &Spec,
+    account: Option<&str>,
+    no_browser: bool,
+    no_input: bool,
+    scopes: &[String],
+    session: &mut crate::ui::session::Session,
+) -> anyhow::Result<CredentialTarget> {
+    let store = Box::new(FileStore::new(&workspace.layout().credentials_file));
+    let mount_auth = crate::auth::MountAuth::from_spec(workspace.catalog(), spec.clone());
+    login(
+        workspace.catalog(),
+        mount_auth,
+        store,
         account,
         LoginInteractivity {
             no_browser,
@@ -318,5 +350,37 @@ fn format_scopes(scopes: &[String]) -> String {
         "<none>".to_owned()
     } else {
         scopes.join(", ")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{fixture_paths, install_fixture_provider, spec_with_reference};
+
+    #[test]
+    fn planned_spec_constructs_oauth_without_reloading_workspace_mounts() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = fixture_paths(tmp.path());
+        std::fs::create_dir_all(&paths.mounts_dir).unwrap();
+        std::fs::create_dir_all(&paths.providers_dir).unwrap();
+        let reference = install_fixture_provider(&paths.providers_dir, "planned-oauth");
+        let workspace = Workspace::from_layout(paths);
+
+        assert!(workspace.mounts().unwrap().is_empty());
+        let spec = spec_with_reference(
+            &reference,
+            r#"{
+                "mount": "planned-oauth",
+                "auth": { "type": "oauth", "scheme": "device" }
+            }"#,
+        );
+
+        let mount_auth = crate::auth::MountAuth::from_spec(workspace.catalog(), spec);
+        let (request, target) = mount_auth.oauth_request(None, &[]).unwrap();
+
+        assert_eq!(request.scheme().key, "device");
+        assert!(target.primary_key().is_some());
+        assert!(workspace.mounts().unwrap().is_empty());
     }
 }

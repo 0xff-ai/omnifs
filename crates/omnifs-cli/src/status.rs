@@ -60,14 +60,7 @@ impl StatusReport {
                 .runtime
                 .as_ref()
                 .map_or(&[][..], |runtime| runtime.frontends.as_slice());
-            let mut section = Section::new("Frontends").counted(frontends.len());
-            if frontends.is_empty() {
-                section.push(Row::new(Glyph::Skip, "", "no frontends attached"));
-            }
-            for frontend in frontends {
-                section.push(frontend_row(frontend));
-            }
-            report.push(section);
+            report.push(frontend_section(frontends));
         }
 
         // A healthy daemon omits the subsystem block (matching 4.2); a subsystem
@@ -240,6 +233,17 @@ impl StatusReport {
 /// One row per live frontend attachment. Docker and krunkit mount points live
 /// inside their guest, so they are marked `(guest)` rather than presented as
 /// host-visible paths. The green liveness dot means attached.
+pub(crate) fn frontend_section(frontends: &[FrontendInfo]) -> Section {
+    let mut section = Section::new("Frontends").counted(frontends.len());
+    if frontends.is_empty() {
+        section.push(Row::new(Glyph::Skip, "", "no frontends attached"));
+    }
+    for frontend in frontends {
+        section.push(frontend_row(frontend));
+    }
+    section
+}
+
 fn frontend_row(frontend: &FrontendInfo) -> Row {
     let location = WorkspaceLayout::display(&frontend.mount_point);
     let location = match frontend.delivery {

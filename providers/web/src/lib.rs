@@ -6,6 +6,7 @@ use std::str::FromStr;
 use dom_smoothie::{Config as ReadabilityConfig, Readability, TextMode};
 use omnifs_sdk::http::ResponseExt;
 use omnifs_sdk::prelude::*;
+use percent_encoding::percent_decode_str;
 
 #[omnifs_sdk::config]
 struct Config {
@@ -13,17 +14,24 @@ struct Config {
     domains: Vec<String>,
 }
 
+#[derive(Clone)]
+struct State {
+    domains: Vec<Host>,
+}
+
 #[omnifs_sdk::path_segment(validate = is_domain_segment, normalize = str::to_ascii_lowercase)]
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct Host(String);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct WebPath(String);
+struct WebPath {
+    encoded: String,
+    decoded: String,
+}
 
 #[omnifs_sdk::path_captures]
-struct WebKey {
-    host: Host,
-    rest: WebPath,
+struct WebPathKey {
+    path: WebPath,
 }
 
 #[omnifs_sdk::provider(
@@ -41,22 +49,66 @@ struct WebKey {
     ),)
 )]
 impl WebProvider {
-    fn start(config: Config, r: &mut Router) -> Result<()> {
-        for domain in &config.domains {
-            let _: Host = domain.parse().map_err(|()| {
-                ProviderError::invalid_input(format!(
-                    "invalid configured domain {domain:?}; use hostnames only, without scheme, port, path, or wildcard"
-                ))
-            })?;
+    fn start(config: Config, r: &mut Router<State>) -> Result<State> {
+        let mut domains = config
+            .domains
+            .into_iter()
+            .map(|domain| {
+                domain.parse::<Host>().map_err(|()| {
+                    ProviderError::invalid_input(format!(
+                        "invalid configured domain {domain:?}; use hostnames only, without scheme, port, path, or wildcard"
+                    ))
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        domains.sort();
+        domains.dedup();
+
+        r.dir("/https").handler(list_hosts)?;
+        r.dir("/raw/https").handler(list_hosts)?;
+
+        for host in domains.iter().cloned() {
+            r.dir(format!("/https/{host}")).handler(open_host)?;
+            r.dir(format!("/raw/https/{host}")).handler(open_host)?;
+
+            let markdown_host = host.clone();
+            r.file(format!("/https/{host}/{{path}}")).handler(
+                move |cx: Cx<State>, key: WebPathKey| {
+                    let host = markdown_host.clone();
+                    async move { markdown(cx, host, key.path).await }
+                },
+            )?;
+
+            let raw_host = host;
+            r.file(format!("/raw/https/{raw_host}/{{path}}")).handler(
+                move |cx: Cx<State>, key: WebPathKey| {
+                    let host = raw_host.clone();
+                    async move { raw(cx, host, key.path).await }
+                },
+            )?;
         }
-        r.file("/https/{host}/{*rest}").handler(markdown)?;
-        r.file("/raw/https/{host}/{*rest}").handler(raw)?;
-        Ok(())
+
+        Ok(State { domains })
     }
 }
 
-async fn markdown(cx: Cx, key: WebKey) -> Result<FileProjection> {
-    let url = key.url();
+async fn list_hosts(cx: DirCx<State>) -> Result<DirListing> {
+    let entries = cx.state(|state| {
+        state
+            .domains
+            .iter()
+            .map(|host| Entry::dir(host.to_string()))
+            .collect::<Vec<_>>()
+    });
+    Ok(DirListing::exhaustive(entries))
+}
+
+async fn open_host(_cx: DirCx<State>) -> Result<DirListing> {
+    Ok(DirListing::open(std::iter::empty::<Entry>()))
+}
+
+async fn markdown(cx: Cx<State>, host: Host, path: WebPath) -> Result<FileProjection> {
+    let url = path.url(&host);
     let response = cx.http().get(&url).send().await?.error_for_status()?;
     let html = String::from_utf8_lossy(response.body());
     let config = ReadabilityConfig {
@@ -75,26 +127,25 @@ async fn markdown(cx: Cx, key: WebKey) -> Result<FileProjection> {
     ))
 }
 
-async fn raw(cx: Cx, key: WebKey) -> Result<FileProjection> {
-    let response = cx.http().get(key.url()).send().await?.error_for_status()?;
+async fn raw(cx: Cx<State>, host: Host, path: WebPath) -> Result<FileProjection> {
+    let response = cx
+        .http()
+        .get(path.url(&host))
+        .send()
+        .await?
+        .error_for_status()?;
     Ok(FileProjection::dynamic_body_with_type(
         response.into_body(),
         ContentType::Octet,
     ))
 }
 
-impl WebKey {
-    fn url(&self) -> String {
-        self.rest.url(&self.host)
-    }
-}
-
 impl WebPath {
     fn url(&self, host: &Host) -> String {
-        if self.0.is_empty() {
+        if self.encoded == "@root" {
             format!("https://{host}/")
         } else {
-            format!("https://{host}/{}", self.0)
+            format!("https://{host}/{}", self.decoded)
         }
     }
 }
@@ -103,22 +154,91 @@ impl FromStr for WebPath {
     type Err = ();
 
     fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
-        if value.contains(['?', '#']) {
+        if value.is_empty() || value.contains('#') || !has_valid_percent_encoding(value) {
             return Err(());
         }
-        if value
-            .split('/')
-            .any(|segment| segment == "." || segment == "..")
-        {
+
+        let (path, query) = value.split_once('?').unwrap_or((value, ""));
+        let decoded_path = decode_slashes(path).ok_or(())?;
+        if decoded_path.starts_with('/') || decoded_path.split('/').any(is_traversal_segment) {
             return Err(());
         }
-        Ok(Self(value.to_string()))
+        let decoded = if value.contains('?') {
+            format!("{decoded_path}?{query}")
+        } else {
+            decoded_path
+        };
+        Ok(Self {
+            encoded: value.to_string(),
+            decoded,
+        })
     }
 }
 
 impl fmt::Display for WebPath {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(&self.encoded)
+    }
+}
+
+fn has_valid_percent_encoding(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            if index + 2 >= bytes.len()
+                || !bytes[index + 1].is_ascii_hexdigit()
+                || !bytes[index + 2].is_ascii_hexdigit()
+            {
+                return false;
+            }
+            index += 3;
+        } else {
+            index += 1;
+        }
+    }
+    true
+}
+
+fn decode_slashes(value: &str) -> Option<String> {
+    let bytes = value.as_bytes();
+    let mut decoded = String::with_capacity(value.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let hi = hex_value(bytes[index + 1])?;
+            let lo = hex_value(bytes[index + 2])?;
+            if hi == 2 && lo == 15 {
+                decoded.push('/');
+            } else {
+                decoded.push('%');
+                decoded.push(char::from(bytes[index + 1]));
+                decoded.push(char::from(bytes[index + 2]));
+            }
+            index += 3;
+        } else {
+            decoded.push(char::from(bytes[index]));
+            index += 1;
+        }
+    }
+    Some(decoded)
+}
+
+fn is_traversal_segment(segment: &str) -> bool {
+    if segment == "." || segment == ".." {
+        return true;
+    }
+    percent_decode_str(segment)
+        .decode_utf8()
+        .is_ok_and(|decoded| decoded == "." || decoded == "..")
+}
+
+fn hex_value(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
     }
 }
 

@@ -71,6 +71,6 @@ The Docker-hosted frontend receives no credentials or host filesystem mounts. It
 
 ## Validation
 
-- For authority or callout changes, run `just providers build` and host tests that initialize providers.
+- For authority or callout changes, run `just build providers` and host tests that initialize providers.
 - For auth changes, test status/readiness output, credential resolution, and the callout path that receives injected auth.
 - For WIT or cache boundary changes, add a WIT-boundary or host integration test that asserts lowered bytes, attrs, and effects without provider-specific host decoding.

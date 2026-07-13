@@ -60,7 +60,7 @@ fn build_harness() -> FuseHarness {
     let test_src = wasm_artifact_path("test_provider.wasm");
     assert!(
         test_src.exists(),
-        "test_provider.wasm missing at {}. Run `just providers build` first.",
+        "test_provider.wasm missing at {}. Run `just build providers` first.",
         test_src.display()
     );
     let test_bytes = std::fs::read(&test_src).expect("read test provider");

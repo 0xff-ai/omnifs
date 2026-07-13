@@ -17,7 +17,7 @@
 //! `Store::write_fenced` mechanism is covered by engine cache's
 //! `fence_rejects_stale_write`.
 //!
-//! Precondition: `just providers build` has produced
+//! Precondition: `just build providers` has produced
 //! `target/wasm32-wasip2/release/test_provider.wasm` (`provider_wasm_path`
 //! asserts this through the harness).
 

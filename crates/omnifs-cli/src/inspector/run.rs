@@ -1,4 +1,3 @@
-#![allow(clippy::disallowed_macros)] // permanent: full-screen ratatui TUI, not ledger output
 //! Ratatui main loop.
 
 use std::time::Duration;
@@ -82,18 +81,18 @@ pub fn run_plain(source: SourceKind) -> anyhow::Result<()> {
         },
         SourceKind::Socket { endpoint, record } => {
             let addr = endpoint.label();
-            anstream::eprintln!("omnifs inspect: connecting to {addr}...");
+            crate::ui::narrate(format!("omnifs inspect: connecting to {addr}..."));
             let event_source = EventSource::spawn(SourceKind::Socket { endpoint, record });
             while let Some(message) = event_source.recv() {
                 match message {
                     SourceMessage::Line(line) => emit_plain_line(&line),
                     SourceMessage::Connected => {
-                        anstream::eprintln!("omnifs inspect: connected to {addr}");
+                        crate::ui::narrate(format!("omnifs inspect: connected to {addr}"));
                     },
                     SourceMessage::Disconnected => {
-                        anstream::eprintln!(
+                        crate::ui::narrate(format!(
                             "omnifs inspect: disconnected from {addr}, reconnecting..."
-                        );
+                        ));
                     },
                 }
             }
@@ -111,7 +110,7 @@ fn emit_plain_line(line: &str) {
         return;
     }
     match InspectorRecord::parse_line(trimmed) {
-        Ok(record) => anstream::println!("{}", format_record(&record)),
-        Err(_) => anstream::println!("{trimmed}"),
+        Ok(record) => crate::ui::print_raw(&format!("{}\n", format_record(&record))),
+        Err(_) => crate::ui::print_raw(&format!("{trimmed}\n")),
     }
 }

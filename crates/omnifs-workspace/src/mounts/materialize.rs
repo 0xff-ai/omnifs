@@ -13,7 +13,7 @@
 
 use std::path::Path;
 
-use crate::provider::{Catalog, ConfigMetadata};
+use crate::provider::{Catalog, ConfigMetadata, is_hostname_only};
 use omnifs_caps::Grant;
 
 use crate::mounts::{Spec, SpecError, pinned_manifest};
@@ -188,14 +188,7 @@ fn config_string_array<'a>(spec: &'a Spec, field: &str) -> Option<&'a [serde_jso
 }
 
 fn is_dynamic_domain(value: &serde_json::Value) -> bool {
-    let Some(domain) = value.as_str() else {
-        return false;
-    };
-    domain != "*"
-        && !domain.is_empty()
-        && !domain.contains("://")
-        && !domain.contains('/')
-        && !domain.contains(':')
+    value.as_str().is_some_and(is_hostname_only)
 }
 
 #[cfg(test)]
@@ -262,6 +255,68 @@ mod dynamic_socket_tests {
             ),
             Err(MaterializeError::UnresolvedDynamicSocket { .. })
         ));
+    }
+}
+
+#[cfg(test)]
+mod dynamic_domain_tests {
+    use super::*;
+    use crate::ids::{ProviderId, ProviderMeta, ProviderName, ProviderRef};
+
+    fn dynamic_domain_spec(domains: &serde_json::Value) -> Spec {
+        let provider = ProviderRef {
+            id: ProviderId::from_wasm_bytes(b"web"),
+            meta: ProviderMeta {
+                name: ProviderName::new("web").unwrap(),
+                version: None,
+            },
+        };
+        serde_json::from_value(serde_json::json!({
+            "provider": provider,
+            "mount": "web",
+            "capabilities": { "domains": { "dynamic": true } },
+            "config": { "domains": domains },
+        }))
+        .expect("spec parses")
+    }
+
+    fn domain_metadata() -> ConfigMetadata {
+        serde_json::from_value(serde_json::json!({
+            "fields": [{
+                "name": "domains",
+                "type": { "kind": "array", "items": { "kind": "string" } }
+            }]
+        }))
+        .expect("config metadata parses")
+    }
+
+    #[test]
+    fn dynamic_domains_require_non_empty_bare_hostnames() {
+        let metadata = domain_metadata();
+        assert!(
+            check_dynamic_domains(
+                &dynamic_domain_spec(&serde_json::json!(["API.Example.COM"])),
+                Some(&metadata)
+            )
+            .is_ok()
+        );
+
+        for domains in [
+            serde_json::json!([]),
+            serde_json::json!([""]),
+            serde_json::json!(["example.com/path"]),
+            serde_json::json!(["example.com:443"]),
+            serde_json::json!(["*"]),
+            serde_json::json!(["example..com"]),
+        ] {
+            assert!(
+                matches!(
+                    check_dynamic_domains(&dynamic_domain_spec(&domains), Some(&metadata)),
+                    Err(MaterializeError::UnresolvedDynamicDomains { .. })
+                ),
+                "expected invalid dynamic domains to fail"
+            );
+        }
     }
 }
 

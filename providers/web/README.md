@@ -5,15 +5,17 @@
 ## Mount layout
 
 ```text
-/web/https/{host}/{path}
-/web/raw/https/{host}/{path}
+/web/https/{host}/@root
+/web/https/{host}/{percent-encoded-path}
+/web/raw/https/{host}/@root
+/web/raw/https/{host}/{percent-encoded-path}
 ```
 
-`/web/https/{host}/{path}` fetches `https://{host}/{path}`, extracts the readable article content in the provider WASM guest with `dom_smoothie`, and returns Markdown.
+Each URL resource is one filename beneath its configured host directory. `@root` is the explicit site-root leaf and fetches `https://{host}/`. A multi-segment URL path percent-encodes each slash in that filename, so `docs%2Fguide` fetches `https://{host}/docs/guide`.
 
-`/web/raw/https/{host}/{path}` fetches the same URL and returns the response bytes verbatim.
+`/web/https/{host}/{resource}` fetches the URL, extracts the readable article content in the provider WASM guest with `dom_smoothie`, and returns Markdown. `/web/raw/https/{host}/{resource}` fetches the same URL and returns the response bytes verbatim.
 
-The empty rest path maps to the site root URL, so `/web/https/example.com` fetches `https://example.com/`.
+Query strings stay in the filename, so `/web/raw/https/news.ycombinator.com/item?id=48884815` fetches exactly `https://news.ycombinator.com/item?id=48884815`. Fragments and traversal segments are rejected.
 
 ## Capabilities
 
@@ -21,7 +23,7 @@ The provider declares a dynamic domain need. Each mount lists allowed hostnames 
 
 ## Limitations
 
-Only HTTPS URLs are projected. Query strings and fragments are not supported.
+Only HTTPS URLs are projected. The provider does not enumerate upstream pages beneath a host; host directories are enumerable from the mount's configured `domains` list, while page listings remain open and lookup-driven.
 
 ## Install
 

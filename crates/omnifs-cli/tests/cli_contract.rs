@@ -7,7 +7,7 @@ mod common;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use common::{install_test_provider, install_test_provider_as, omnifs_bin};
+use common::{install_test_provider, install_test_provider_as, omnifs_bin, release_wasm_dir};
 
 struct Fixture {
     home: tempfile::TempDir,
@@ -55,6 +55,25 @@ impl Fixture {
     }
 }
 
+fn install_web_provider(fixture: &Fixture) {
+    let providers_dir = fixture.home_path().join("providers");
+    let wasm = std::fs::read(release_wasm_dir().join("omnifs_provider_web.wasm"))
+        .expect("read web provider wasm");
+    let id = omnifs_workspace::ids::ProviderId::from_wasm_bytes(&wasm);
+    let store = omnifs_workspace::provider::ProviderStore::new(&providers_dir);
+    store.put_if_absent(&id, &wasm).expect("store web provider");
+    store
+        .install(
+            id,
+            omnifs_workspace::ids::ProviderMeta {
+                name: omnifs_workspace::ids::ProviderName::new("web").unwrap(),
+                version: None,
+            },
+            "omnifs_provider_web.wasm".into(),
+        )
+        .expect("install web provider");
+}
+
 fn exit_code(output: &Output) -> i32 {
     output.status.code().unwrap_or(128)
 }
@@ -82,6 +101,31 @@ fn help_documents_exit_codes() {
     assert!(stdout.contains("3  daemon unreachable"));
     assert!(stdout.contains("4  auth or consent required"));
     assert!(stdout.contains("5  degraded health"));
+}
+
+#[test]
+fn frontend_help_requires_protocol_kind_and_lists_live_attachments_command() {
+    let frontend = Command::new(omnifs_bin())
+        .args(["frontend", "--help"])
+        .output()
+        .expect("spawn omnifs frontend --help");
+    assert!(frontend.status.success());
+    let frontend_help = String::from_utf8_lossy(&frontend.stdout);
+    assert!(frontend_help.contains("ls"), "{frontend_help}");
+
+    let up = Command::new(omnifs_bin())
+        .args(["frontend", "up", "--help"])
+        .output()
+        .expect("spawn omnifs frontend up --help");
+    assert!(up.status.success());
+    let up_help = String::from_utf8_lossy(&up.stdout);
+    assert!(up_help.contains("<KIND>"), "{up_help}");
+    assert!(up_help.contains("fuse"), "{up_help}");
+    assert!(up_help.contains("nfs"), "{up_help}");
+
+    let fixture = Fixture::new();
+    let missing_kind = fixture.run(&["frontend", "up"]);
+    assert_eq!(exit_code(&missing_kind), 2, "{missing_kind:?}");
 }
 
 #[test]
@@ -230,6 +274,19 @@ fn lifecycle_json_receipts_emit_one_document_with_a_verdict() {
     let reset_json = stdout_json(&reset);
     assert_eq!(reset_json["verdict"], "ok");
     assert!(reset_json["rows"].as_array().is_some());
+    assert_eq!(reset_json["dry_run"], false);
+    assert!(reset_json["plan"]["title"].as_str().is_some());
+
+    // Dry-run emits the same typed receipt shape, with no applied rows and no
+    // second JSON document from the human session rail.
+    let dry_run = fixture.run(&["reset", "--dry-run", "--json"]);
+    assert_eq!(exit_code(&dry_run), 0);
+    assert_eq!(String::from_utf8_lossy(&dry_run.stdout).lines().count(), 1);
+    let dry_run_json = stdout_json(&dry_run);
+    assert_eq!(dry_run_json["verdict"], "ok");
+    assert_eq!(dry_run_json["dry_run"], true);
+    assert!(dry_run_json["rows"].as_array().is_some_and(Vec::is_empty));
+    assert!(dry_run_json["plan"]["rows"].as_array().is_some());
 }
 
 #[test]
@@ -255,7 +312,7 @@ fn mount_add_json_receipt_names_the_mount() {
     );
 }
 
-/// A `--json` command that fails before its receipt emits exactly one JSON
+/// A `--json` command that fails before its final document emits exactly one JSON
 /// error document on stdout carrying the stable `id`, not the human block.
 #[test]
 fn json_error_document_carries_a_stable_id() {
@@ -267,6 +324,42 @@ fn json_error_document_carries_a_stable_id() {
     let json = stdout_json(&output);
     assert_eq!(json["error"]["id"], "auth-required");
     assert!(json["error"]["message"].as_str().is_some());
+}
+
+#[test]
+fn every_json_command_keeps_its_error_contract_before_workspace_resolution() {
+    let commands: &[&[&str]] = &[
+        &["status", "--json"],
+        &["mount", "ls", "--json"],
+        &["provider", "ls", "--json"],
+        &["version", "--json"],
+        &["doctor", "--json"],
+        &["up", "--json"],
+        &["down", "--json"],
+        &["reset", "--yes", "--json"],
+        &["mount", "add", "test", "--no-input", "--yes", "--json"],
+    ];
+
+    for args in commands {
+        let output = Command::new(omnifs_bin())
+            .args(*args)
+            .env_remove("HOME")
+            .env_remove("OMNIFS_HOME")
+            .env("NO_COLOR", "1")
+            .env("RUST_LOG", "warn")
+            .output()
+            .unwrap_or_else(|error| panic!("spawn omnifs {}: {error}", args.join(" ")));
+
+        assert_eq!(exit_code(&output), 1, "{args:?}: {output:?}");
+        let json = stdout_json(&output);
+        assert_eq!(json["error"]["id"], "generic-failure", "{args:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).lines().count(),
+            1,
+            "{args:?}"
+        );
+        assert!(output.stderr.is_empty(), "{args:?}: {output:?}");
+    }
 }
 
 #[test]
@@ -327,4 +420,91 @@ fn scripted_setup_and_mount_add_do_not_prompt() {
         fixture.home_path().join("mounts/test-2.json").is_file(),
         "collision rename must write the suggested mount spec"
     );
+}
+
+#[test]
+fn mount_add_same_artifact_collision_preserves_existing_spec() {
+    let fixture = Fixture::new();
+    install_web_provider(&fixture);
+
+    let first = fixture.run(&[
+        "mount",
+        "add",
+        "web",
+        "--as",
+        "web",
+        "--no-input",
+        "--no-auth",
+        "--config-json",
+        r#"{"domains":["example.com"]}"#,
+    ]);
+    assert_eq!(
+        exit_code(&first),
+        0,
+        "first mount add failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&first.stdout),
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let mount_path = fixture.home_path().join("mounts/web.json");
+    let before = std::fs::read(&mount_path).expect("read first mount spec");
+
+    let second = fixture.run(&[
+        "mount",
+        "add",
+        "web",
+        "--as",
+        "web",
+        "--no-input",
+        "--no-auth",
+        "--config-json",
+        r#"{"domains":["example.org"]}"#,
+    ]);
+    assert_ne!(exit_code(&second), 0, "same-artifact collision must fail");
+    let stderr = String::from_utf8_lossy(&second.stderr);
+    assert!(
+        stderr.contains("already exists for this provider artifact"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("remove it first") && stderr.contains("different name"),
+        "{stderr}"
+    );
+    assert_eq!(
+        before,
+        std::fs::read(&mount_path).expect("read unchanged mount spec")
+    );
+}
+
+#[test]
+fn mount_add_invalid_dynamic_domain_config_never_writes_spec() {
+    let fixture = Fixture::new();
+    install_web_provider(&fixture);
+    let mount_path = fixture.home_path().join("mounts/web.json");
+
+    for config in [
+        r#"{"domains":[""]}"#,
+        r#"{"domains":[" "]}"#,
+        r#"{"domains":["."]}"#,
+        r#"{"domains":["example.com/path"]}"#,
+        r#"{"domains":["example.com:443"]}"#,
+        r#"{"domains":["*"]}"#,
+    ] {
+        let output = fixture.run(&[
+            "mount",
+            "add",
+            "web",
+            "--as",
+            "web",
+            "--no-input",
+            "--no-auth",
+            "--config-json",
+            config,
+        ]);
+        assert_ne!(exit_code(&output), 0, "invalid config must fail: {config}");
+        assert!(
+            !mount_path.exists(),
+            "invalid config must not write {}",
+            mount_path.display()
+        );
+    }
 }

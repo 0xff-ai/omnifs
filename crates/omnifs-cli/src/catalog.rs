@@ -1,4 +1,3 @@
-#![allow(clippy::disallowed_macros)] // migrates in wave 4 (cli-redesign)
 //! Discovery helpers over the provider [`Catalog`] and the configured mounts.
 //!
 //! These wrap the CLI-facing shapes: the picker's installed-provider list, the
@@ -25,12 +24,12 @@ pub(crate) fn installed_providers(
             Ok(manifest) => providers.push((provider, manifest)),
             Err(error) => {
                 let name = &provider.meta.name;
-                anstream::eprintln!(
-                    "{}",
+                crate::ui::eprint_raw(&format!(
+                    "{}\n",
                     crate::style::warn(format!(
                         "skipping provider `{name}`: its embedded manifest failed to load; reinstall it. Re-run with `-vv` for details."
                     ))
-                );
+                ));
                 tracing::debug!(provider = %name, error = ?error, "skipping provider with unreadable manifest");
             },
         }

@@ -181,9 +181,9 @@ cargo nextest run
 Use the right wider gate for the change:
 
 - **Before a push or PR handoff.** Run the relevant CI-shaped lanes directly rather than relying on a local aggregate: formatting/npm preflight, provider gates for WASM changes, and host gates for host-target changes.
-- **WASM toolchain.** Provider WASM builds need wasi-sdk. Install the pinned version with `just providers wasi-sdk`.
-- **Fresh worktree or missing artifacts.** Run `RUSTC_WRAPPER= just providers build` before treating missing provider artifacts as product failures.
-- **Host gate.** Use `just host clippy` and `just host test`; both exclude provider/test-provider WASM crates from host-target builds.
+- **WASM toolchain.** Provider WASM builds need wasi-sdk. Provider build and check recipes install the pinned version when needed.
+- **Fresh worktree or missing artifacts.** Run `just build providers` before treating missing provider artifacts as product failures.
+- **Host gate.** Use `just check host` and `just test host`; both exclude provider/test-provider WASM crates from host-target builds.
 - **Provider or broad-surface change.** Run the affected provider, host, generated-artifact, and docs gates explicitly.
 - **Mount, provider, clone, traversal, or runtime behavior.** Rust checks are not enough. Validate through the live runtime with `just dev -y`, `omnifs status`, and the smoke path in `CONTRIBUTING.md`.
 - **Route-surface change.** Run the host integration path that initializes and seals providers, especially `all_providers_initialize_and_seal`.
@@ -196,11 +196,11 @@ Do not use `cargo check --workspace --all-targets` as the host gate. If validati
 ## Footguns
 
 - **Bare `omnifs` on PATH may be the stale npm release.** A global `@0xff-ai/omnifs` shim under the node/fnm tree can shadow the worktree binary and serve a stale published build with retired behavior, such as the pre-host-native Docker-daemon model. When operating the daemon, mounts, or any CLI command from this worktree, always run the compiled `target/debug/omnifs` or `target/release/omnifs`, never bare `omnifs`; a stale shim answering `omnifs status` or `omnifs shell` with errors like a missing `omnifs` Docker container is this footgun, not a real regression.
-- **Default members, not workspace.** `cargo check --workspace --all-targets` forces WASM guest crates onto the host target and fails on `main` too. Guest crates build through `just providers build` and `just providers check`.
+- **Default members, not workspace.** `cargo check --workspace --all-targets` forces WASM guest crates onto the host target and fails on `main` too. Guest crates build through `just build providers` and `just check providers`.
 - **Stale wit-bindgen after `.wit` edits.** Incremental builds can serve stale codegen. Run `cargo clean -p omnifs-wit` or a clean build before trusting downstream errors.
-- **Provider rebuild contention under nextest.** Some `omnifs-engine` integration tests shell out to `just providers build`. Reliable flow: `just providers wasi-sdk`, `just providers build`, then `OMNIFS_ITEST_SKIP_PROVIDER_BUILD=1 cargo nextest run ...` (or `just host test`, which sets that flag for you).
+- **Provider rebuild contention under nextest.** Some `omnifs-engine` integration tests shell out to `just build providers`. Reliable flow: `just build providers`, then `OMNIFS_ITEST_SKIP_PROVIDER_BUILD=1 cargo nextest run ...` (or `just test host`, which sets that flag for you).
 - **Host checks may need generated provider artifacts.** If a host check fails because provider WASM is missing, build providers first or point the check at an existing artifact directory.
-- **Provider metadata is injected at build time, not compiled into the Wasm.** The `#[provider]` macro emits the typed `Provider::METADATA` const plus a native `provider_metadata()` accessor (non-wasm only); `omnifs-embed-metadata` (run by `just providers build`) links the provider crates, converts each const into the host `ProviderManifest`, and injects the JSON as the `omnifs.provider-metadata.v1` custom section. Missing metadata means the harvester did not run, build providers with `just providers build`. The host reads the section pre-instantiation; it never instantiates a component to read it.
+- **Provider metadata is injected at build time, not compiled into the Wasm.** The `#[provider]` macro emits the typed `Provider::METADATA` const plus a native `provider_metadata()` accessor (non-wasm only); `omnifs-embed-metadata` (run by `just build providers`) links the provider crates, converts each const into the host `ProviderManifest`, and injects the JSON as the `omnifs.provider-metadata.v1` custom section. Missing metadata means the harvester did not run, build providers with `just build providers`. The host reads the section pre-instantiation; it never instantiates a component to read it.
 - **Host resource bindings must stay per-field.** `HostFile` and `HostSocket` are string config fields with host-resource bindings. Keep the binding on the field metadata; hiding it in the type shape makes host resource lookup miss it.
 - **Object anchors mount at their `r.object` template.** Mount directory-shaped objects at the real anchor path, or use a detached object handle plus `r.object`/`r.alias`.
 - **Seal-time route errors are component-init errors.** `cargo check --target wasm32-wasip2` can compile incoherent route trees. Provider route validity is proved when the host initializes and seals the provider.
@@ -223,3 +223,26 @@ Do not use `cargo check --workspace --all-targets` as the host gate. If validati
 - Delete stale footguns in this file when their condition no longer holds.
 - Update current shape when the implementation shape changes.
 - Fix or add a rule here when the work proves one wrong or missing.
+
+# Writing style
+
+Write in flowing technical prose, the way a sharp senior engineer talks in chat - direct, conversational, and confident. Not documentation, not a report, not a slide deck.
+
+Rules:
+
+1. **Answer exactly what was asked, at the length it deserves - err short.** A yes/no or confirmation question gets 2-4 sentences. A "which one should I pick" gets a few paragraphs. Only a genuinely multi-part design question earns a long answer. Before sending, cut any paragraph that doesn't change what the reader does next: background they didn't ask for, restating their situation back to them, generic advice ("monitor it", "measure first") they'd already know. Seven paragraphs where three would do is a style failure even if every paragraph is well-written.
+2. **Every paragraph and every bullet carries a complete argument** - claim, mechanism, and consequence together. Never state a fact without saying why it matters in the same breath. Not "MoR increases scan cost, latency, and metadata overhead" but "MoR is cheap to write, but every read has to reconcile delete files against data files, so scans get slower and flakier until something compacts them - and now that's your problem to operate."
+3. **Match the form to the content - and vary it.** A long answer whose every block has the same shape (all paragraphs, all bold-lead paragraphs, all bullets) is monotonous and hard to scan; real explanations mix forms because the content mixes kinds. Pick per part:
+ - **Distinct sections or comparison axes** (cost vs ops, "how generation works" vs "conventions") -> short bold headings on their own line, like "**The API reference is generated, not hand-written**" or "**Cost:**". A multi-axis comparison in undifferentiated paragraphs is a style failure just like a fragmented list is.
+ - **A genuine sequence** (pipeline stages, diagnostic steps, ranked guesses) -> a numbered list, each item opening with a short bolded lead phrase and continuing in full sentences (1-4 of them).
+ - **Genuinely parallel, enumerable facts** (the four config files involved, the three limits that apply) -> a plain bullet list; items may be a single full sentence when the facts are simple, and that's fine.
+ - **Reasoning, causality, narrative** -> paragraphs.
+ Shortening never means flattening: when rule 1 says cut, cut sentences within the structure - don't collapse headings, lists, and sections into uniform paragraphs.
+4. **Don't shred connected reasoning into bullets.** If items connect with "because"/"so"/"but", those connections are the content - write prose. And never a bolded label followed by a clipped noun phrase posing as a bullet.
+5. **Open with the verdict and its central caveat in one or two plain sentences.** Not a bolded headline.
+6. **Conversational but not dramatic.** Use contractions (it's, you'd, don't). Say "so" and "but", not "therefore" and "however". Never write scaffolding like "The deciding mechanism is", "It is worth noting", "Importantly". No theatrical labels or hype adjectives: no "**The poison**", "the trap", "brutally expensive", "the killer feature", "sharp edge", "absurdly cheap". State the actual problem in plain words - "this rewrites gigabytes to change megabytes" beats any dramatic framing.
+ - No staccato, short dramatic sentences. Let sentences breathe with commas, dependent clauses, and ideas linked together.
+ - No cheesy setup phrases that introduce a point instead of stating it. Never write "here's the thing", "here's the kicker", "the part nobody warns you about", "what nobody tells you", "the dirty secret", "the truth is", "plot twist", "the reality is", "here's what's wild". State the claim directly.
+ - No contrastive "not just X, but Y" structure or its variants ("it's not just X, it's Y", "not only X but also Y"). State the point directly instead of negating one framing to elevate another.
+7. **No compression.** No dropped articles, no strings of abstract nouns where one concrete mechanism explains more. Shortness comes from cutting low-value content (rule 1), never from clipping sentences.
+8. **End with a bottom line only when the answer weighed a real decision.** One plain-prose sentence: the call plus the condition that would flip it. Short factual or confirmation answers just end - no formulaic closer.

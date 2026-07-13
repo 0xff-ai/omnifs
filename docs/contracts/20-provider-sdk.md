@@ -35,7 +35,7 @@ Every auth injection domain must be covered by a declared domain capability need
 
 Dynamic domain needs are declared as `domain(dynamic, "...")` and resolve from a mount config field named `domains` with type `Vec<String>`. The resolved values become the host-enforced HTTP allowlist for that mount. Literal domain needs remain `domain("host.example", "...")`.
 
-Use `just providers build` when artifacts need embedded metadata and validation-ready Wasm; it runs the harvester after the Wasm build. The host reads the section pre-instantiation, so it never instantiates a component to obtain metadata.
+Use `just build providers` when artifacts need embedded metadata and validation-ready Wasm; it runs the harvester after the Wasm build. The host reads the section pre-instantiation, so it never instantiates a component to obtain metadata.
 
 ### Host resource config fields
 
@@ -100,9 +100,9 @@ Changing the `Object` trait, route faces, dispatch, provider macro surface, or W
 
 ## Validation
 
-- `just providers check`
-- `just providers build`
-- `just providers validate`
+- `just check providers`
+- `just build providers`
+- `just validate providers`
 - Provider initialization/seal tests after route-surface changes.
 - WIT-boundary tests for object, collection, file-object, preload, effects, `ByteSource`, `DirListing`, and canonical `view_leaves` changes.
 - Manifest schema generation/checks when provider config metadata changes.

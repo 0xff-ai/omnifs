@@ -57,9 +57,9 @@ impl Tree {
     /// `lookup_check_caches` and `synthesize_root_ignore_lookup`: a
     /// `@next`/`@all` pagination control resolves ONLY from the parent's cached
     /// dirents (absent => NotFound, never a provider round trip), and a
-    /// mount-root ignore file is synthesized ONLY after a negative provider
-    /// result (a real provider `.gitignore` wins). Subtree outcomes resolve
-    /// through `Runtime::resolve_tree_ref` into `NodeBody::Subtree`.
+    /// mount-root ignore file is always synthesized at the root before cached
+    /// dirents or provider lookup (the host-owned file wins). Subtree outcomes
+    /// resolve through `Runtime::resolve_tree_ref` into `NodeBody::Subtree`.
     pub async fn resolve_child(&self, parent: &Node, name: &str, ctx: &RequestCtx) -> Result<Node> {
         let runtime = self.ctx.runtime_for(parent.mount())?;
         self.resolve_child_in(
@@ -101,6 +101,14 @@ impl Tree {
             ));
         }
 
+        // Root ignore files are host-owned. Resolve them before cached dirents
+        // or provider lookup so a provider capture cannot change their kind.
+        if parent.is_root() && synthetic::is_root_ignore_name(name) {
+            let (meta, syn) = synthetic::resolve_synthetic_child(runtime, parent, name)
+                .expect("root ignore name must resolve synthetically");
+            return Ok(Node::synthetic(mount, rel, meta, syn));
+        }
+
         // A pagination control (`@next`/`@all`) resolves ONLY from the parent's
         // cached dirents, and does so for the directory's whole paginated
         // lifetime: the record persists past exhaustion so a name a consumer
@@ -109,7 +117,7 @@ impl Tree {
         // directory that never paged (no cached record) is NotFound; we never
         // consult the provider for it.
         if synthetic::is_control_name(name) {
-            return match synthetic::resolve_synthetic_child(runtime, parent, name, false) {
+            return match synthetic::resolve_synthetic_child(runtime, parent, name) {
                 Some((meta, syn)) => Ok(Node::synthetic(mount, rel, meta, syn)),
                 None => Err(TreeError::not_found(rel.as_str())),
             };
@@ -141,11 +149,10 @@ impl Tree {
                     NodeBody::Subtree(dir),
                 ))
             },
-            // The provider has no such child: synthesize a mount-root ignore file
-            // only now, never shadowing a real one (the provider was consulted
-            // and returned negative). Otherwise surface NotFound.
+            // Controls may have been cached by a prior paged listing. Root
+            // ignore names were handled before provider lookup above.
             LookupOutcome::NotFound => {
-                match synthetic::resolve_synthetic_child(runtime, parent, name, false) {
+                match synthetic::resolve_synthetic_child(runtime, parent, name) {
                     Some((meta, syn)) => Ok(Node::synthetic(mount, rel, meta, syn)),
                     None => Err(TreeError::not_found(rel.as_str())),
                 }

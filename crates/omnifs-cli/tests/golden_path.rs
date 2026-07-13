@@ -131,7 +131,7 @@ fn setup_init_up_wait_read_down_golden_path() {
         return;
     }
     if !release_wasm_dir().join("test_provider.wasm").exists() {
-        eprintln!("skip: test_provider.wasm missing (run `just providers build`)");
+        eprintln!("skip: test_provider.wasm missing (run `just build providers`)");
         let elapsed = started.elapsed();
         record_wall_clock(fixture.home_path(), elapsed);
         assert!(elapsed < Duration::from_mins(2));

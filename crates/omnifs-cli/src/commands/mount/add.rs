@@ -23,7 +23,8 @@ use crate::workspace::Workspace;
 pub struct AddArgs {
     /// Provider to use (positional; picker if omitted).
     pub provider: Option<String>,
-    /// Mount name override. Auto-generated from the provider if absent.
+    /// Mount name override. Auto-generated from the provider if absent. An
+    /// existing name may only repin a different artifact of the same provider.
     #[arg(long = "as")]
     pub as_name: Option<String>,
     /// Skip prompts. Static-token providers also require --token or --token-env.
@@ -82,9 +83,6 @@ impl AddArgs {
         workspace: &Workspace,
     ) -> anyhow::Result<crate::error::ExitCode> {
         let json = self.json;
-        if json {
-            crate::ui::output::note_json_receipt();
-        }
         let mut session = crate::ui::session::Session::intro("omnifs mount add")?;
         let outcome = crate::stages::configure_mount(self, workspace, true, &mut session).await?;
         match outcome.status {

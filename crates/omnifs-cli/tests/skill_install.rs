@@ -12,7 +12,7 @@ fn skill_install_claude_code_round_trips_in_temp_home() {
     let omnifs_home = home.path().join(".omnifs");
 
     let output = Command::new(omnifs_bin())
-        .args(["skill", "install", "claude-code"])
+        .args(["-q", "skill", "install", "claude-code"])
         .env("HOME", home.path())
         .env("OMNIFS_HOME", &omnifs_home)
         .env_remove("RUST_LOG")
@@ -35,5 +35,9 @@ fn skill_install_claude_code_round_trips_in_temp_home() {
     assert_eq!(
         std::fs::read_to_string(installed).unwrap(),
         include_str!("../../../skills/omnifs-usage/SKILL.md")
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("Installed `omnifs-usage` skill"),
+        "quiet must preserve the completed-operation receipt"
     );
 }

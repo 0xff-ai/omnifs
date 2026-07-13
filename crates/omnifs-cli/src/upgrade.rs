@@ -1,4 +1,3 @@
-#![allow(clippy::disallowed_macros)] // migrates in wave 5 (cli-redesign)
 //! Provider upgrade check: classify and route a newer provider artifact before
 //! a reconcile runs.
 //!
@@ -47,12 +46,12 @@ pub(crate) fn run_upgrade_check(
         let name = &spec.provider.meta.name;
 
         let Some(pinned) = catalog.get(&spec.provider.id)? else {
-            anstream::eprintln!(
+            crate::ui::eprint_raw(&format!(
                 "warning: mount `{mount}` provider artifact is missing (pinned id {id}); \
                  the daemon will report this mount as failed. \
-                 Run `omnifs mount add {name} --as {mount}` to re-pin it.",
+                 Run `omnifs mount add {name} --as {mount}` to re-pin it.\n",
                 id = spec.provider.id,
-            );
+            ));
             continue;
         };
 
@@ -75,26 +74,26 @@ pub(crate) fn run_upgrade_check(
                     &added,
                 )?;
                 migrated.push(mount.to_owned());
-                anstream::println!(
-                    "✓ Mount `{mount}`: upgraded `{name}` and filled {} new optional field(s): {}",
+                crate::ui::print_raw(&format!(
+                    "✓ Mount `{mount}`: upgraded `{name}` and filled {} new optional field(s): {}\n",
                     added.len(),
                     added
                         .iter()
                         .map(|field| field.name.as_str())
                         .collect::<Vec<_>>()
                         .join(", "),
-                );
+                ));
             },
             UpgradePlan::BreakingConfig { changes } => {
                 let descriptions: Vec<_> = changes.iter().map(FieldChange::describe).collect();
-                anstream::eprintln!(
+                crate::ui::eprint_raw(&format!(
                     "warning: mount `{mount}` keeps its pinned `{name}`: a newer artifact has a \
                      breaking config change ({}) and cannot be adopted automatically.\n\
                      Run `omnifs mount add {name} --as {mount}` to re-initialise with the new schema, \
-                     or edit {} manually.",
+                     or edit {} manually.\n",
                     descriptions.join(", "),
                     config.source.display(),
-                );
+                ));
             },
             UpgradePlan::CapabilityLimitOrAuth {
                 capabilities,
@@ -102,12 +101,12 @@ pub(crate) fn run_upgrade_check(
                 auth,
             } => {
                 let parts = describe_upgrade_changes(&capabilities, &limits, auth.as_ref());
-                anstream::eprintln!(
+                crate::ui::eprint_raw(&format!(
                     "warning: mount `{mount}` keeps its pinned `{name}`: a newer artifact changed \
                      its access or runtime surface and needs re-consent.\nChanges: {}\n\
-                     Run `omnifs mount add {name} --as {mount}` to review and accept the new surface.",
+                     Run `omnifs mount add {name} --as {mount}` to review and accept the new surface.\n",
                     parts.join("; "),
-                );
+                ));
             },
         }
     }

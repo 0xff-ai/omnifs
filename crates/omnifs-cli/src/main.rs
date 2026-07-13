@@ -5,8 +5,8 @@
 
 // The output drift gate. Direct std printing is denied crate-wide so a new
 // command cannot bypass the `ui` toolkit; the anstream print macros are denied
-// through `.clippy.toml`'s `disallowed-macros`. Files under `src/ui/` and files
-// awaiting migration carry a module-level allow.
+// through `.clippy.toml`'s `disallowed-macros`. Files under `src/ui/` own the
+// sanctioned render paths; raw logs and completions are the only passthroughs.
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 
 mod auth;
@@ -98,7 +98,7 @@ async fn main() {
                 if let Some(cmd) = telemetry_label {
                     telemetry::record_cli_exit(cmd, code.code());
                 }
-                if ui::output::json_receipt() {
+                if ui::output::json_expected() {
                     emit_json_error(&error::to_json_for(code, "canceled"));
                 } else {
                     ui::eprint_raw(&format!("{}\n", style::dim("canceled")));
@@ -109,10 +109,10 @@ async fn main() {
             if let Some(cmd) = telemetry_label {
                 telemetry::record_cli_exit(cmd, exit_code);
             }
-            // A `--json` command that failed before its receipt emits exactly
+            // A `--json` command that failed before its document emits exactly
             // one JSON error document on stdout (with the stable `id`), rather
             // than the human `Error:` block on stderr.
-            if ui::output::json_receipt() {
+            if ui::output::json_expected() {
                 emit_json_error(&error::to_json(&error));
             } else {
                 ui::eprint_raw(&error::render(&error));

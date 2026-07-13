@@ -14,7 +14,7 @@ pub(crate) use add::{render_consent_block, run_static_token_init};
 pub(crate) use auth_import::AuthImportDecision;
 pub(crate) use auth_import::ImportOutcome;
 
-use anyhow::{Context, anyhow, bail};
+use anyhow::{Context, anyhow};
 use clap::{Args, Subcommand};
 use omnifs_auth::{CredentialService, OAuthClient};
 use omnifs_workspace::creds::{CredentialStore, FileStore};
@@ -24,7 +24,6 @@ use std::sync::Arc;
 
 use crate::credential_target::CredentialTarget;
 use crate::error::{ExitCode, WithExitCode};
-use crate::mount_config::MountConfig;
 use crate::stages::PromptMode;
 use crate::token_source::TokenSource;
 use crate::ui::consent::{Decision, Outcome, Plan, Row};
@@ -297,9 +296,29 @@ async fn rm_with_options(
     let name =
         MountName::new(name.to_owned()).with_context(|| format!("invalid mount name `{name}`"))?;
 
-    let mount = mounts.iter().find(|m| m.name == name).ok_or_else(|| {
-        missing_mount_error(&layout.config_file, &mounts, name.as_str()).unwrap_err()
-    })?;
+    let Some(mount) = mounts.iter().find(|m| m.name == name) else {
+        // Removing an already-absent valid mount is an idempotent cleanup
+        // operation. Emit the same plan/receipt shape as other destructive
+        // commands, but never construct a credential service or touch the
+        // credential store when there is no spec to remove.
+        let mut plan = Plan::new("plan");
+        plan.push(Row::keep(
+            "spec",
+            "spec",
+            format!(
+                "{} (already absent)",
+                WorkspaceLayout::display(&layout.mounts_dir.join(format!("{name}.json")))
+            ),
+        ));
+        session.plan(&plan);
+        if let Some(suggestion) = crate::mount_report::closest_mount_name(&mounts, name.as_str()) {
+            session.note(format!("Did you mean `{suggestion}`?"));
+        }
+        let receipt = plan.receipt([Outcome::skip("spec", "already absent")]);
+        session.receipt(&receipt);
+        session.outro(format!("Mount `{name}` already absent."));
+        return Ok(());
+    };
     let config_path = mount.source.clone();
     // Build the plan without constructing an HTTP client or registering an
     // OAuth revocation. A dry run must stop before any apply-only setup.
@@ -313,10 +332,6 @@ async fn rm_with_options(
     );
     session.plan(&plan);
     match Decision::resolve(PromptMode::from_flags(yes, false), dry_run, "-y")? {
-        Decision::Decline => {
-            session.outro("Removal aborted.");
-            return Ok(());
-        },
         Decision::DryRun => {
             session.outro("Dry run; no changes made.");
             return Ok(());
@@ -482,25 +497,6 @@ fn mount_remove_plan(
     plan
 }
 
-fn missing_mount_error(
-    config_file: &Path,
-    mounts: &[MountConfig],
-    name: &str,
-) -> anyhow::Result<()> {
-    let suggestion = crate::mount_report::closest_mount_name(mounts, name);
-    let mut message = format!(
-        "no mount config named `{name}` in {}",
-        WorkspaceLayout::display(config_file)
-    );
-    if let Some(suggestion) = suggestion {
-        let _ = std::fmt::Write::write_fmt(
-            &mut message,
-            format_args!("\nDid you mean `{suggestion}`?"),
-        );
-    }
-    bail!(message)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -525,6 +521,16 @@ mod tests {
         let err = rm(&workspace, "../leak", true, false).await.unwrap_err();
         assert!(format!("{err:#}").contains("invalid mount name"));
     }
+
+    #[tokio::test]
+    async fn removing_missing_valid_mount_is_a_noop_without_credentials() {
+        let tmp = TempDir::new().unwrap();
+        let paths = fixture_paths(tmp.path());
+        let workspace = Workspace::from_layout(paths.clone());
+        rm(&workspace, "missing", true, false).await.unwrap();
+        assert!(!paths.credentials_file.exists());
+    }
+
     #[tokio::test]
     async fn delete_credentials_deletes_internal_key() {
         let store = Arc::new(MemoryStore::new());

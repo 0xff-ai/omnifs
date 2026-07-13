@@ -1,4 +1,3 @@
-#![allow(clippy::disallowed_macros)] // migrates in wave 5 (cli-redesign)
 //! Hidden debug commands for inspecting generated provider metadata.
 
 use clap::{Args, Subcommand};
@@ -39,7 +38,7 @@ impl DebugArgs {
                     by_type,
                 };
                 let data = crate::mount_tree::MountTreeData::read_from_wasm(&path)?;
-                anstream::print!("{}", data.render(views));
+                crate::ui::print_raw(&data.render(views));
                 Ok(())
             },
         }

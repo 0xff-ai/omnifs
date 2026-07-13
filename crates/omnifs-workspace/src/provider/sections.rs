@@ -204,7 +204,10 @@ pub fn provider_manifest_json() -> Schema {
     schema_for!(ProviderManifest)
 }
 
-pub(crate) fn is_hostname_only(domain: &str) -> bool {
+/// Return whether `domain` is a bare hostname suitable for a capability
+/// allowlist. Schemes, ports, paths, wildcards, empty labels, and labels that
+/// start or end with `-` are rejected; uppercase ASCII hostnames remain valid.
+pub fn is_hostname_only(domain: &str) -> bool {
     !domain.is_empty()
         && !domain.contains(['*', '/', ':', '?', '#', '@'])
         && domain.split('.').all(is_hostname_label)

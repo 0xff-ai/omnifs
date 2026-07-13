@@ -1,8 +1,10 @@
 #![cfg(not(target_os = "wasi"))]
 
-use omnifs_engine::EngineError;
-use omnifs_itest::{RuntimeHarness, TestOpExt, into_inline, make_initialized_runtime, parse_path};
-use omnifs_wit::provider::types::{CalloutResult, ErrorKind, Header, HttpResponse};
+use omnifs_itest::{RuntimeHarness, TestOpExt, into_inline, make_initialized_runtime};
+use omnifs_wit::provider::types::{
+    CalloutResult, EntryKind, ErrorKind, Header, HttpResponse, ListChildrenResult,
+    LookupChildResult, OpResult, ReadFileOutcome,
+};
 
 fn web_harness() -> RuntimeHarness {
     make_initialized_runtime(
@@ -25,7 +27,7 @@ fn web_harness() -> RuntimeHarness {
 fn web_provider_extracts_fixture_html_to_markdown() {
     let harness = web_harness();
     let mut op = harness
-        .read("/https/example.test/articles/readable")
+        .read("/https/example.test/articles%2Freadable")
         .unwrap();
     let fetch = op.expect_single_fetch();
     assert_eq!(fetch.url, "https://example.test/articles/readable");
@@ -71,7 +73,7 @@ fn web_provider_raw_route_preserves_fixture_response_bytes() {
     let harness = web_harness();
     let body = b"<html><body><p>raw fixture</p></body></html>\n".to_vec();
     let mut op = harness
-        .read("/raw/https/example.test/articles/raw")
+        .read("/raw/https/example.test/articles%2Fraw")
         .unwrap();
     let fetch = op.expect_single_fetch();
     assert_eq!(fetch.url, "https://example.test/articles/raw");
@@ -87,10 +89,72 @@ fn web_provider_raw_route_preserves_fixture_response_bytes() {
 }
 
 #[test]
-fn web_provider_empty_rest_fetches_site_root() {
+fn web_provider_host_directories_are_enumerable_and_open() {
+    let harness = web_harness();
+
+    let listing = harness.list("/https").unwrap();
+    match listing.into_list_children().unwrap() {
+        ListChildrenResult::Entries(entries) => {
+            assert!(entries.exhaustive);
+            let host = entries
+                .entries
+                .iter()
+                .find(|entry| entry.name == "example.test")
+                .expect("configured host entry");
+            assert!(matches!(host.kind, EntryKind::Directory));
+        },
+        other => panic!("expected host directory listing, got {other:?}"),
+    }
+
+    let lookup = harness.lookup("/https", "example.test").unwrap();
+    match lookup.into_lookup_child().unwrap() {
+        LookupChildResult::Entry(entry) => {
+            assert_eq!(entry.target.name, "example.test");
+            assert!(matches!(entry.target.kind, EntryKind::Directory));
+        },
+        other => panic!("expected host directory lookup, got {other:?}"),
+    }
+
+    let host_listing = harness.list("/https/example.test").unwrap();
+    match host_listing.into_list_children().unwrap() {
+        ListChildrenResult::Entries(entries) => assert!(!entries.exhaustive),
+        other => panic!("expected open host listing, got {other:?}"),
+    }
+}
+
+#[test]
+fn web_provider_query_path_builds_exact_url() {
+    let harness = web_harness();
+    let mut op = harness
+        .read("/raw/https/example.test/item?id=48884815")
+        .unwrap();
+    let fetch = op.expect_single_fetch();
+    assert_eq!(fetch.url, "https://example.test/item?id=48884815");
+
+    let body = b"query fixture".to_vec();
+    op.answer_callouts(vec![html_response(&body)]).unwrap();
+    assert_eq!(into_inline(op.into_read_file().unwrap()), body);
+}
+
+#[test]
+fn web_provider_encoded_path_builds_multi_segment_url() {
+    let harness = web_harness();
+    let mut op = harness
+        .read("/raw/https/example.test/docs%2Fguide")
+        .unwrap();
+    let fetch = op.expect_single_fetch();
+    assert_eq!(fetch.url, "https://example.test/docs/guide");
+
+    let body = b"encoded path fixture".to_vec();
+    op.answer_callouts(vec![html_response(&body)]).unwrap();
+    assert_eq!(into_inline(op.into_read_file().unwrap()), body);
+}
+
+#[test]
+fn web_provider_root_leaf_fetches_site_root() {
     let harness = web_harness();
     let body = b"<html><body><p>site root</p></body></html>\n".to_vec();
-    let mut op = harness.read("/raw/https/example.test").unwrap();
+    let mut op = harness.read("/raw/https/example.test/@root").unwrap();
     let fetch = op.expect_single_fetch();
     assert_eq!(fetch.url, "https://example.test/");
 
@@ -100,9 +164,27 @@ fn web_provider_empty_rest_fetches_site_root() {
     assert_eq!(into_inline(result), body);
 }
 
-#[tokio::test]
-async fn web_provider_denies_domains_outside_mount_config() {
-    let harness = RuntimeHarness::new_real_callouts(
+#[test]
+fn web_provider_rejects_fragments_and_traversal() {
+    let harness = web_harness();
+
+    for path in [
+        "/raw/https/example.test/item#fragment",
+        "/raw/https/example.test/%2e%2e",
+        "/raw/https/example.test/foo%2F%2e%2E",
+    ] {
+        let op = harness.read(path).unwrap();
+        match op.into_result().unwrap() {
+            OpResult::ReadFile(ReadFileOutcome::NotFound(_)) => {},
+            OpResult::Error(error) if error.kind == ErrorKind::NotFound => {},
+            other => panic!("expected rejected web path for {path}, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn web_provider_only_exposes_configured_hosts() {
+    let harness = RuntimeHarness::new(
         r#"
         {
             "provider": "omnifs_provider_web.wasm",
@@ -111,30 +193,57 @@ async fn web_provider_denies_domains_outside_mount_config() {
                 "domains": { "dynamic": true }
             },
             "config": {
-                "domains": ["allowed.test"]
+                "domains": ["EXAMPLE.test", "example.test", "second.test"]
             }
         }
     "#,
     )
     .unwrap();
 
-    let path = parse_path("/https/denied.test/articles/readable");
-    let error = harness
-        .runtime
-        .namespace()
-        .read_file(&path, path.content_type_mime(None).to_string(), None)
-        .await
-        .unwrap_err();
-
-    match error {
-        EngineError::ProviderError(error) => {
-            assert_eq!(error.kind, ErrorKind::Denied);
-            assert!(
-                error.message.contains("domain not in allowlist"),
-                "unexpected denied error: {error:?}"
-            );
+    let listing = harness.list("/https").unwrap();
+    match listing.into_list_children().unwrap() {
+        ListChildrenResult::Entries(entries) => {
+            let names = entries
+                .entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .filter(|name| *name != "README.md")
+                .collect::<Vec<_>>();
+            assert_eq!(names, ["example.test", "second.test"]);
+            assert!(entries.exhaustive);
         },
-        other => panic!("expected denied provider error, got {other:?}"),
+        other => panic!("expected configured host listing, got {other:?}"),
+    }
+
+    let configured = harness
+        .read("/https/second.test/articles%2Freadable")
+        .unwrap();
+    assert_eq!(
+        configured.expect_single_fetch().url,
+        "https://second.test/articles/readable"
+    );
+
+    for prefix in ["/https", "/raw/https"] {
+        let lookup = harness.lookup(prefix, "denied.test").unwrap();
+        assert_not_found(lookup.into_result().unwrap());
+
+        let read = harness
+            .read(&format!("{prefix}/denied.test/@root"))
+            .unwrap();
+        assert!(
+            read.callouts().is_empty(),
+            "denied host must not fetch upstream"
+        );
+        assert_not_found(read.into_result().unwrap());
+    }
+}
+
+fn assert_not_found(result: OpResult) {
+    match result {
+        OpResult::Error(error) => assert_eq!(error.kind, ErrorKind::NotFound),
+        OpResult::LookupChild(LookupChildResult::NotFound(_))
+        | OpResult::ReadFile(ReadFileOutcome::NotFound(_)) => {},
+        other => panic!("expected not-found result, got {other:?}"),
     }
 }
 

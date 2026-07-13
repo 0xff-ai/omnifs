@@ -1,10 +1,9 @@
-#![allow(clippy::disallowed_macros)] // migrates in wave 5 (cli-redesign)
 //! `omnifs up`: daemon lifecycle start.
 
 use anyhow::Context as _;
 use clap::Args;
 
-use crate::commands::frontend::up::{first_mount_name, launch_entry};
+use crate::commands::frontend::up::{launch_entry, readiness_probe_mount};
 use crate::commands::receipt::UpReceipt;
 use crate::config::{EffectiveFrontend, HostOs, Provenance, resolve_frontends};
 use crate::error::ExitCode;
@@ -32,9 +31,6 @@ pub struct UpArgs {
 
 impl UpArgs {
     pub async fn run(self) -> anyhow::Result<ExitCode> {
-        if self.json {
-            crate::ui::output::note_json_receipt();
-        }
         let workspace = Workspace::resolve()?;
         let wait = self
             .wait
@@ -100,7 +96,7 @@ async fn launch_frontends(workspace: &Workspace) -> anyhow::Result<()> {
     let default_mount_point = omnifs_workspace::layout::resolve_mount_point()
         .context("cannot resolve the default mount point: set HOME or OMNIFS_MOUNT_POINT")?;
     let plan = resolve_frontends(&config.frontends, HostOs::current(), &default_mount_point)?;
-    let mount_name = first_mount_name(workspace)?;
+    let mount_name = readiness_probe_mount(workspace)?;
 
     let (locals, guests): (Vec<_>, Vec<_>) = plan
         .into_iter()

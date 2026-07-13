@@ -3,6 +3,7 @@
 //! Commands own narration. This module owns the stage behavior so the guided
 //! setup wizard and express `mount add` lane cannot drift from each other.
 
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -165,7 +166,7 @@ pub(crate) async fn configure_mount(
     if standalone {
         session.phase(plan.manifest.id.as_str());
     }
-    let daemon_report = persist_mount_spec(workspace, &plan, session).await?;
+    persist_mount_spec(workspace, &plan, session).await?;
     let status = plan.authenticate(&args, workspace, session).await?;
 
     match status {
@@ -183,28 +184,8 @@ pub(crate) async fn configure_mount(
             ),
         )),
     }
-    match &daemon_report {
-        Some(report) if report.failure.is_none() => {
-            session.note("applied to the running daemon");
-        },
-        Some(report) => {
-            let reason = report
-                .failure
-                .as_ref()
-                .map_or("unknown error", |failure| failure.reason.as_str());
-            session.row(crate::ui::report::Row::new(
-                crate::ui::style::Glyph::Warn,
-                "daemon",
-                reason,
-            ));
-            session.note("saved locally; run `omnifs up` to restart with the new mount");
-        },
-        None if standalone => {
-            session.note("run `omnifs up` to start serving it");
-        },
-        // Inside setup the launch section owns "start the daemon" messaging;
-        // repeating it under every provider block is noise.
-        None => {},
+    if standalone && !workspace.daemon().ready().await {
+        session.note("run `omnifs up` to start serving it");
     }
 
     if standalone {
@@ -284,6 +265,11 @@ pub(crate) fn spec_creation(
     let reference = provider.reference();
     let existing_mount = mounts.iter().find(|mount| mount.name == mount_name);
     let upgrade_approval = match existing_mount {
+        Some(existing) if existing.config.provider.id == provider.id => {
+            anyhow::bail!(
+                "mount `{mount_name}` already exists for this provider artifact; remove it first or choose a different name"
+            );
+        },
         Some(existing) => approved_upgrade_for_existing_mount(
             catalog,
             existing,
@@ -400,9 +386,9 @@ impl MountInitPlan {
                     return Ok(MountInitStatus::SignInDeclined);
                 }
             }
-            crate::auth::login_with_workspace(
+            crate::auth::login::login_with_spec(
                 workspace,
-                plan.mount_name.as_str(),
+                &plan.spec,
                 auth.account.as_deref(),
                 args.no_browser,
                 args.no_input,
@@ -526,37 +512,76 @@ async fn persist_mount_spec(
     workspace: &Workspace,
     plan: &MountInitPlan,
     session: &mut crate::ui::session::Session,
-) -> anyhow::Result<Option<omnifs_api::MountReport>> {
-    let report = match if plan.existing_mount {
-        workspace
-            .daemon()
-            .update_mount_if_ready(&plan.spec, plan.upgrade_approval.as_ref())
-            .await
-    } else {
-        workspace.daemon().create_mount_if_ready(&plan.spec).await
-    } {
-        Ok(Some(report)) => Some(report),
+) -> anyhow::Result<()> {
+    let request = async {
+        if plan.existing_mount {
+            workspace
+                .daemon()
+                .update_mount_if_ready(&plan.spec, plan.upgrade_approval.as_ref())
+                .await
+        } else {
+            workspace.daemon().create_mount_if_ready(&plan.spec).await
+        }
+    };
+    let (result, progress) =
+        await_with_elapsed_progress("mount", &format!("saving {}", plan.mount_name), request).await;
+
+    match result {
+        Ok(Some(report)) if report.failure.is_none() => {
+            progress.settle_ok(format!("{} applied to daemon", plan.mount_name));
+        },
+        Ok(Some(report)) => {
+            let reason = report
+                .failure
+                .as_ref()
+                .map_or("unknown error", |failure| failure.reason.as_str());
+            progress.settle_warn(format!("{} saved; daemon: {reason}", plan.mount_name));
+            session.note("saved locally; run `omnifs up` to restart with the new mount");
+        },
         Ok(None) => {
             workspace.put_mount(&plan.spec)?;
-            None
+            progress.settle_ok(format!("{} saved locally", plan.mount_name));
         },
         Err(error) => {
             workspace.put_mount(&plan.spec)?;
-            session.row(crate::ui::report::Row::new(
-                crate::ui::style::Glyph::Warn,
-                "daemon",
-                format!("could not save mount `{}`: {error:#}", plan.mount_name),
+            progress.settle_warn(format!("{} saved; daemon unavailable", plan.mount_name));
+            session.note(format!(
+                "could not apply mount `{}`: {error:#}",
+                plan.mount_name
             ));
             session.note("saved locally; run `omnifs up` to restart with the new mount");
-            None
         },
-    };
+    }
     // `Wrote <path>` collapses to a single dim continuation, printed once.
     session.note(format!(
         "wrote {}",
         WorkspaceLayout::display(&plan.mount_path)
     ));
-    Ok(report)
+    Ok(())
+}
+
+/// Drive a future while emitting elapsed progress often enough for the text
+/// spinner and NDJSON event stream to remain live during a slow operation.
+async fn await_with_elapsed_progress<F, T>(
+    key: &str,
+    verb: &str,
+    future: F,
+) -> (T, crate::ui::LiveRow)
+where
+    F: Future<Output = T>,
+{
+    let mut progress = crate::ui::LiveRow::start(key, verb);
+    progress.update(verb);
+    tokio::pin!(future);
+    let mut ticks = tokio::time::interval(Duration::from_millis(200));
+    ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    ticks.tick().await;
+    loop {
+        tokio::select! {
+            output = &mut future => return (output, progress),
+            _ = ticks.tick() => progress.update_elapsed(verb),
+        }
+    }
 }
 
 fn apply_mount_overrides(

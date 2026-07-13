@@ -33,6 +33,12 @@ Host revalidation is a cache safety backstop, not a second invalidation channel.
 
 Lookup, listing, and read must use one shared target-resolution model. Listing must be honest about what is currently knowable without inventing provider-specific frontend behavior.
 
+At each mount root, `.gitignore`, `.ignore`, and `.rgignore` are host-owned
+synthetic regular files. Root lookup, listing, and read must agree on that
+file kind and fixed content even when a provider or cached dirent projects a
+colliding entry; below the mount root, providers may project those names
+normally.
+
 Keep ordered route precedence in one dispatcher. Model negative lookups once in tree or host policy if they become needed. Verify parent-directory traversal, not only intended leaf reads.
 
 ### Live growth

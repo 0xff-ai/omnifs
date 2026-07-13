@@ -359,7 +359,7 @@ fn provider_wasm_path(plugin_name: &str) -> PathBuf {
         .join(plugin_name);
     assert!(
         path.exists(),
-        "{plugin_name} not found at {path}. Run `just providers build` first.",
+        "{plugin_name} not found at {path}. Run `just build providers` first.",
         path = path.display()
     );
     path

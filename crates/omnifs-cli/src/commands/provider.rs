@@ -1,4 +1,3 @@
-#![allow(clippy::disallowed_macros)] // migrates in wave 4 (cli-redesign)
 //! Provider artifact management commands.
 
 use anyhow::{Context, bail};
@@ -81,9 +80,9 @@ impl LsArgs {
         let daemon = workspace.daemon().providers_if_ready().await?;
         if self.json {
             let payload = ProvidersJson { local, daemon };
-            anstream::println!("{}", serde_json::to_string(&payload)?);
+            crate::ui::print_json(&payload)?;
         } else {
-            anstream::print!("{}", render_providers(&local, daemon.as_deref()));
+            crate::ui::print_raw(&render_providers(&local, daemon.as_deref()));
         }
         Ok(ExitCode::Success)
     }
@@ -252,10 +251,10 @@ fn add_dir(store: &ProviderStore, path: &Path, report: &mut AddReport) -> anyhow
                 print_installed(&entry);
             },
             Err(AddError::Load(ArtifactLoadError::Artifact(error))) => {
-                anstream::eprintln!(
-                    "Skipped invalid provider WASM {}: {error}",
+                crate::ui::eprint_raw(&format!(
+                    "Skipped invalid provider WASM {}: {error}\n",
                     display_path(&path)
-                );
+                ));
             },
             Err(AddError::Load(error)) => return Err(error.into()),
             Err(AddError::Store(error)) => return Err(error.into()),
@@ -270,12 +269,12 @@ fn add_file(store: &ProviderStore, path: &Path) -> Result<IndexEntry, AddError> 
 }
 
 fn print_installed(entry: &IndexEntry) {
-    anstream::eprintln!(
-        "Installed provider `{}` {} from {}",
+    crate::ui::eprint_raw(&format!(
+        "Installed provider `{}` {} from {}\n",
         entry.name,
         crate::style::dim(entry.id.to_string()),
         entry.file
-    );
+    ));
 }
 
 fn display_path(path: &Path) -> String {

@@ -8,6 +8,10 @@ use crate::ui::consent::Outcome;
 use crate::ui::event::{LedgerRenderer, Render, UiEvent};
 use crate::workspace::Workspace;
 use omnifs_workspace::runtime_record::{RecordedBackend, RuntimeRecord};
+use std::time::Duration;
+
+const SHUTDOWN_SETTLE_TIMEOUT: Duration = Duration::from_secs(5);
+const SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// One observable teardown result. The variants retain enough context for a
 /// command to choose severity and wording without parsing internal prose.
@@ -111,13 +115,7 @@ impl<'a> DaemonTeardown<'a> {
         let record_path = self.workspace.layout().runtime_record_file();
         match self.workspace.daemon().status_optional().await {
             Ok(Some(status)) => {
-                let outcome = match self.workspace.daemon().shutdown().await {
-                    Ok(Some(_)) => TeardownOutcome::DaemonStopped { pid: status.pid },
-                    Ok(None) => TeardownOutcome::DaemonAlreadyStopped,
-                    Err(error) => TeardownOutcome::DaemonShutdownFailed {
-                        error: format!("{error:#}"),
-                    },
-                };
+                let outcome = self.shutdown_and_wait(status.pid).await;
                 if matches!(
                     outcome,
                     TeardownOutcome::DaemonStopped { .. } | TeardownOutcome::DaemonAlreadyStopped
@@ -153,13 +151,7 @@ impl<'a> DaemonTeardown<'a> {
         let mut outcomes = vec![self.teardown_frontends(false).await];
         match self.workspace.daemon().status_optional().await {
             Ok(Some(status)) => {
-                outcomes.push(match self.workspace.daemon().shutdown().await {
-                    Ok(Some(_)) => TeardownOutcome::DaemonStopped { pid: status.pid },
-                    Ok(None) => TeardownOutcome::DaemonAlreadyStopped,
-                    Err(error) => TeardownOutcome::DaemonShutdownFailed {
-                        error: format!("{error:#}"),
-                    },
-                });
+                outcomes.push(self.shutdown_and_wait(status.pid).await);
                 if let Some(TeardownOutcome::DaemonShutdownFailed { .. }) = outcomes.last() {
                     // Keep the runtime record so a later `down` can still make
                     // an ownership decision.
@@ -177,6 +169,42 @@ impl<'a> DaemonTeardown<'a> {
             }),
         }
         outcomes
+    }
+
+    /// Request shutdown and wait until the control surface is observably gone.
+    /// The daemon acknowledges shutdown before its serving task exits, so a
+    /// successful POST alone is not enough to report `DaemonStopped`.
+    async fn shutdown_and_wait(&self, pid: u32) -> TeardownOutcome {
+        match self.workspace.daemon().shutdown().await {
+            Ok(Some(_)) => {
+                let deadline = tokio::time::Instant::now() + SHUTDOWN_SETTLE_TIMEOUT;
+                let mut last_error = None;
+                loop {
+                    match self.workspace.daemon().status_optional().await {
+                        Ok(None) => return TeardownOutcome::DaemonStopped { pid },
+                        Ok(Some(_)) => {},
+                        Err(error) => last_error = Some(format!("{error:#}")),
+                    }
+                    if tokio::time::Instant::now() >= deadline {
+                        let detail = last_error.map_or_else(
+                            || "the control surface remained reachable".to_owned(),
+                            |error| format!("the control surface could not be verified: {error}"),
+                        );
+                        return TeardownOutcome::DaemonShutdownFailed {
+                            error: format!(
+                                "shutdown acknowledged but daemon did not become unavailable within {}s; {detail}",
+                                SHUTDOWN_SETTLE_TIMEOUT.as_secs()
+                            ),
+                        };
+                    }
+                    tokio::time::sleep(SHUTDOWN_POLL_INTERVAL).await;
+                }
+            },
+            Ok(None) => TeardownOutcome::DaemonAlreadyStopped,
+            Err(error) => TeardownOutcome::DaemonShutdownFailed {
+                error: format!("{error:#}"),
+            },
+        }
     }
 
     async fn teardown_frontends(&self, force: bool) -> TeardownOutcome {

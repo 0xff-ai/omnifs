@@ -31,9 +31,6 @@ pub struct DownArgs {
 impl DownArgs {
     pub async fn run(self) -> anyhow::Result<ExitCode> {
         let DownArgs { force, json } = self;
-        if json {
-            crate::ui::output::note_json_receipt();
-        }
         let workspace = Workspace::resolve()?;
 
         let teardown = DaemonTeardown::new(&workspace);

@@ -1,4 +1,3 @@
-#![allow(clippy::disallowed_macros)] // migrates in wave 2 (cli-redesign)
 use crate::catalog::mount_exists;
 use crate::error::WithHint;
 use crate::mount_config::MountConfig;
@@ -65,8 +64,10 @@ impl<'a> ProviderSelection<'a> {
         let proposed = explicit_name.map_or_else(|| manifest.default_mount.clone(), str::to_string);
         let proposed_name = MountName::new(proposed.as_str())?;
 
-        // An explicit --as collision is the update/re-consent path. Accidental
-        // default-name collisions still go through the unique-name flow below.
+        // An explicit --as collision is the provider upgrade/re-consent path;
+        // the caller rejects a same-artifact collision before auth or config
+        // side effects. Accidental default-name collisions still go through
+        // the unique-name flow below.
         if explicit_name.is_some() {
             return Ok((provider, proposed_name));
         }

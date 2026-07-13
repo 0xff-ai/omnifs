@@ -57,7 +57,7 @@ fn preconditions() -> Option<String> {
     let test_wasm = provider_artifact_dir().join("test_provider.wasm");
     if !test_wasm.exists() {
         eprintln!(
-            "skip: {} missing (run `just providers build`)",
+            "skip: {} missing (run `just build providers`)",
             test_wasm.display()
         );
         return None;

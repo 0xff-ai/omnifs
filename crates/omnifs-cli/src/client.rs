@@ -1,4 +1,3 @@
-#![allow(clippy::disallowed_macros)] // migrates in wave 5 (cli-redesign)
 //! HTTP client for the daemon control API.
 //!
 //! The client only ever dials an endpoint within its own workspace: an endpoint
@@ -166,7 +165,9 @@ impl DaemonClient {
     }
 
     /// Resolve the endpoint to dial for this request. `OMNIFS_DAEMON_ADDR` wins
-    /// over the record; an unparseable record is a hard error.
+    /// over the record. A corrupt record cannot strand a daemon that is still
+    /// serving on the workspace's fixed control socket, so resolution falls
+    /// back to that socket without trusting any fields from the record.
     fn resolve(&self) -> Result<Target> {
         if let Some(addr) = env_daemon_addr() {
             let token = std::env::var("OMNIFS_CONTROL_TOKEN")
@@ -178,8 +179,20 @@ impl DaemonClient {
             });
         }
         let record = match &self.record_path {
-            Some(record_path) => RuntimeRecord::read(record_path)
-                .with_context(|| format!("read runtime record {}", record_path.display()))?,
+            Some(record_path) => match RuntimeRecord::read(record_path) {
+                Ok(record) => record,
+                Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
+                    if let Some(target) = self.control_socket_target() {
+                        return Ok(target);
+                    }
+                    self.clean_stale_record();
+                    return Ok(Target::Absent);
+                },
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("read runtime record {}", record_path.display()));
+                },
+            },
             None => None,
         };
         if let Some(record) = record {
@@ -730,12 +743,11 @@ impl DaemonControlState {
             return;
         };
         if status.api_minor != API_MINOR {
-            anstream::eprintln!(
+            crate::ui::narrate(format!(
                 "note: daemon API minor v{}.{}, CLI expects v{API_MAJOR}.{API_MINOR}; \
                  proceeding (minor skew is non-breaking)",
-                status.api_major,
-                status.api_minor,
-            );
+                status.api_major, status.api_minor,
+            ));
         }
     }
 
@@ -785,7 +797,7 @@ fn hint_for(code: ErrorCode) -> &'static str {
         ErrorCode::SpecInvalid => {
             "Try: edit the mount spec or recreate it with `omnifs mount add <provider> --as <name>`"
         },
-        ErrorCode::ProviderMissing => "Try: just providers build",
+        ErrorCode::ProviderMissing => "Try: just build providers",
         ErrorCode::ReconcileBusy => "Try: rerun the command after reconcile finishes",
         ErrorCode::Unauthorized => {
             "Try: a daemon on this control address rejected this workspace's credentials; \
@@ -991,7 +1003,7 @@ mod tests {
         );
         assert_eq!(
             hint_for(ErrorCode::ProviderMissing),
-            "Try: just providers build"
+            "Try: just build providers"
         );
         assert_eq!(
             hint_for(ErrorCode::ReconcileBusy),
@@ -1172,5 +1184,50 @@ mod tests {
             home.path().join("control.sock"),
         );
         assert!(matches!(client.resolve().unwrap(), Target::Absent));
+    }
+
+    #[test]
+    fn corrupt_runtime_record_falls_back_to_fixed_control_socket() {
+        let _env = EnvGuard::unset_daemon_addr();
+        let home = tempfile::tempdir().unwrap();
+        let record = home.path().join("daemon.json");
+        let socket = home.path().join("control.sock");
+        std::fs::write(&record, b"not json").unwrap();
+        std::fs::write(&socket, b"reserved").unwrap();
+        let client = client_without_record(record, socket.clone());
+        assert!(matches!(
+            client.resolve().unwrap(),
+            Target::Unix {
+                socket: dialed,
+                instance: None
+            } if dialed == socket
+        ));
+    }
+
+    #[test]
+    fn corrupt_runtime_record_without_socket_is_cleaned_and_absent() {
+        let _env = EnvGuard::unset_daemon_addr();
+        let home = tempfile::tempdir().unwrap();
+        let record = home.path().join("daemon.json");
+        std::fs::write(&record, b"not json").unwrap();
+        let client = client_without_record(record.clone(), home.path().join("control.sock"));
+        assert!(matches!(client.resolve().unwrap(), Target::Absent));
+        assert!(!record.exists());
+    }
+
+    #[test]
+    fn unreadable_runtime_record_io_error_is_not_treated_as_stale() {
+        let _env = EnvGuard::unset_daemon_addr();
+        let home = tempfile::tempdir().unwrap();
+        let record = home.path().join("daemon.json");
+        std::fs::create_dir(&record).unwrap();
+        let socket = home.path().join("control.sock");
+        std::fs::write(&socket, b"reserved").unwrap();
+        let client = client_without_record(record.clone(), socket);
+        let Err(error) = client.resolve() else {
+            panic!("directory runtime record must not resolve via socket fallback");
+        };
+        assert!(format!("{error:#}").contains("read runtime record"));
+        assert!(record.exists(), "unreadable state must not be removed");
     }
 }

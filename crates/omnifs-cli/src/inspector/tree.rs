@@ -108,7 +108,7 @@ impl PathNode {
     /// policy: an in-flight op, an error, a recent touch, or any
     /// descendant matching those.
     pub fn is_in_active_focus(&self, now_mono: u64, window_us: u64) -> bool {
-        if !self.in_flight.is_empty() || matches!(self.status, NodeStatus::Error) {
+        if !self.in_flight.is_empty() {
             return true;
         }
         let touched_recently = now_mono.saturating_sub(self.last_touched_mono) <= window_us;
@@ -140,6 +140,7 @@ pub enum NodeStatus {
     Untouched,
     Cached,
     RecentHit,
+    Miss,
     InFlight,
     Error,
 }
@@ -150,6 +151,7 @@ impl NodeStatus {
             Self::Untouched => "□",
             Self::Cached => "▣",
             Self::RecentHit => "◐",
+            Self::Miss => "?",
             Self::InFlight => "▦",
             Self::Error => "✗",
         }
@@ -172,6 +174,20 @@ impl MountTree {
             root: PathNode::new(mount.clone(), ""),
             mount,
             last_activity_mono: 0,
+        }
+    }
+
+    /// Normalize an event path that accidentally includes the mount segment.
+    /// Inspector events identify the mount separately, so retaining that
+    /// prefix would render `github/github/...` and create a duplicate root.
+    pub fn normalize_path(&self, path: &str) -> String {
+        let prefix = format!("/{}", self.mount);
+        if path == prefix {
+            String::new()
+        } else if let Some(relative) = path.strip_prefix(&(prefix + "/")) {
+            format!("/{relative}")
+        } else {
+            path.to_string()
         }
     }
 
@@ -227,15 +243,41 @@ impl MountTree {
         ok: bool,
         mono_us: u64,
     ) {
+        self.complete_with_status(
+            path,
+            trace_id,
+            latency_us,
+            if ok {
+                NodeStatus::Cached
+            } else {
+                NodeStatus::Error
+            },
+            mono_us,
+        );
+    }
+
+    /// Mark a negative lookup. Misses remain visible during the active window
+    /// but are visually distinct from both successful cache activity and hard
+    /// failures, and they never contribute to failure rollups.
+    pub fn complete_miss(&mut self, path: &str, trace_id: TraceId, latency_us: u64, mono_us: u64) {
+        self.complete_with_status(path, trace_id, latency_us, NodeStatus::Miss, mono_us);
+    }
+
+    fn complete_with_status(
+        &mut self,
+        path: &str,
+        trace_id: TraceId,
+        latency_us: u64,
+        completed_status: NodeStatus,
+        mono_us: u64,
+    ) {
         self.last_activity_mono = mono_us;
         let node = self.ensure(path);
         node.in_flight.remove(&trace_id);
         node.last_latency_us = Some(latency_us);
         node.last_touched_mono = mono_us;
-        node.status = if !ok {
-            NodeStatus::Error
-        } else if node.in_flight.is_empty() {
-            NodeStatus::Cached
+        node.status = if node.in_flight.is_empty() {
+            completed_status
         } else {
             NodeStatus::InFlight
         };
@@ -448,7 +490,7 @@ mod tests {
     }
 
     #[test]
-    fn error_status_pins_node_into_visible_set() {
+    fn completed_error_ages_out_of_visible_set() {
         let mut forest = MountForest::default();
         let tree = forest.mount_tree_mut("arxiv");
         tree.mark_in_flight("2401.99999/title", 1, 100);
@@ -456,9 +498,6 @@ mod tests {
 
         let rows = forest.render_rows(10_000_000_000, 1_000_000);
         let names: Vec<_> = rows.iter().map(|r| r.name.as_str()).collect();
-        assert!(
-            names.contains(&"title"),
-            "errored node should stay pinned regardless of age"
-        );
+        assert!(!names.contains(&"title"), "old errors should age out");
     }
 }

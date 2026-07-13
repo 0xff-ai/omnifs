@@ -1,4 +1,3 @@
-#![allow(clippy::disallowed_macros)] // migrates in wave 4 (cli-redesign)
 //! `omnifs version` — print CLI and daemon version facts.
 
 use anyhow::Result;
@@ -22,14 +21,14 @@ impl VersionArgs {
         if self.json {
             let workspace = Workspace::resolve()?;
             let payload = VersionJson::collect(&workspace).await?;
-            anstream::println!("{}", serde_json::to_string(&payload)?);
+            crate::ui::print_json(&payload)?;
             return Ok(ExitCode::Success);
         }
-        anstream::println!(
-            "omnifs {}{}",
+        crate::ui::print_raw(&format!(
+            "omnifs {}{}\n",
             env!("CARGO_PKG_VERSION"),
             BUILD_CHANNEL.version_suffix()
-        );
+        ));
         Ok(ExitCode::Success)
     }
 }

@@ -5,6 +5,7 @@
 //! Docker and krunkit deliver the FUSE runner inside an isolated guest.
 
 pub mod down;
+pub mod ls;
 pub mod up;
 
 use clap::Subcommand;
@@ -23,6 +24,8 @@ pub enum FrontendCommand {
     Up(up::FrontendUpArgs),
     /// Tear down a Docker or krunkit frontend
     Down(down::FrontendDownArgs),
+    /// List live frontend attachments
+    Ls(ls::FrontendLsArgs),
 }
 
 impl FrontendArgs {
@@ -30,6 +33,7 @@ impl FrontendArgs {
         match self.command {
             FrontendCommand::Up(args) => args.run().await.map(|()| ExitCode::Success),
             FrontendCommand::Down(args) => args.run().await.map(|()| ExitCode::Success),
+            FrontendCommand::Ls(args) => args.run().await,
         }
     }
 }

@@ -379,13 +379,20 @@ impl TraceReducer {
         path: &str,
         mono_us: u64,
     ) {
-        let operation = Operation::new(trace_id, mount.to_string(), path.to_string(), op, mono_us);
+        let normalized_path = self.forest.mount_tree_mut(mount).normalize_path(path);
+        let operation = Operation::new(
+            trace_id,
+            mount.to_string(),
+            normalized_path.clone(),
+            op,
+            mono_us,
+        );
         self.operations.insert(trace_id, operation);
         self.push_trace(trace_id);
         self.palette.color_for(mount);
         self.forest
             .mount_tree_mut(mount)
-            .mark_in_flight(path, trace_id, mono_us);
+            .mark_in_flight(&normalized_path, trace_id, mono_us);
         if self.selected.is_none() {
             self.selected = Some(trace_id);
         }
@@ -409,13 +416,22 @@ impl TraceReducer {
             .entry(mount.clone())
             .or_default()
             .record_completion(mono_us, elapsed_us, outcome);
-        self.forest.mount_tree_mut(&mount).complete(
-            &path,
-            trace_id,
-            elapsed_us,
-            outcome == InspectorOutcome::Ok,
-            mono_us,
-        );
+        // A negative lookup is expected while browsing a projected namespace;
+        // keep it in the operation log, but don't make the path look like a
+        // permanent hard failure in the activity tree.
+        if outcome == InspectorOutcome::NotFound {
+            self.forest
+                .mount_tree_mut(&mount)
+                .complete_miss(&path, trace_id, elapsed_us, mono_us);
+        } else {
+            self.forest.mount_tree_mut(&mount).complete(
+                &path,
+                trace_id,
+                elapsed_us,
+                outcome == InspectorOutcome::Ok,
+                mono_us,
+            );
+        }
     }
 
     fn on_provider_start(
@@ -497,10 +513,11 @@ impl TraceReducer {
         elapsed_us: Option<u64>,
         mono_us: u64,
     ) {
+        let normalized_path = self.forest.mount_tree_mut(mount).normalize_path(path);
         if let Some(operation) = self.operations.get_mut(&trace_id) {
             operation.stages.push(Stage {
                 kind: StageKind::Cache(kind),
-                detail: format::shorten_path(path, 48),
+                detail: format::shorten_path(&normalized_path, 48),
                 elapsed_us,
                 outcome: Some(InspectorOutcome::Ok),
                 in_flight: false,
@@ -516,7 +533,9 @@ impl TraceReducer {
                 .entry(mount.to_string())
                 .or_default()
                 .record_cache_hit(mono_us);
-            self.forest.mount_tree_mut(mount).cache_hit(path, mono_us);
+            self.forest
+                .mount_tree_mut(mount)
+                .cache_hit(&normalized_path, mono_us);
         }
     }
 
@@ -726,5 +745,60 @@ mod tests {
         assert_eq!(op.fuse_elapsed_us, Some(3_000));
         assert_eq!(op.provider_name.as_deref(), Some("github"));
         assert!(op.stages.iter().all(|stage| !stage.in_flight));
+    }
+
+    #[test]
+    fn duplicate_mount_root_is_normalized_in_tree_and_operation() {
+        let mut traces = TraceReducer::default();
+        traces.apply_record(&record(
+            8,
+            10,
+            InspectorEvent::FuseStart {
+                op: "lookup".into(),
+                mount: "github".into(),
+                path: "/github/notifications".into(),
+            },
+        ));
+        let op = traces.operation(8).expect("trace");
+        assert_eq!(op.path, "/notifications");
+        let rows = traces.forest.render_rows(10, 30_000_000);
+        let paths: Vec<_> = rows.iter().map(|row| row.path.as_str()).collect();
+        assert!(paths.contains(&"notifications"));
+        assert!(!paths.contains(&"github/notifications"));
+    }
+
+    #[test]
+    fn not_found_is_retained_in_log_but_benign_in_tree() {
+        let mut traces = TraceReducer::default();
+        traces.apply_record(&record(
+            9,
+            10,
+            InspectorEvent::FuseStart {
+                op: "lookup".into(),
+                mount: "github".into(),
+                path: "/notifications/missing".into(),
+            },
+        ));
+        traces.apply_record(&record(
+            9,
+            20,
+            InspectorEvent::FuseEnd {
+                op: "lookup".into(),
+                end: OpEnd {
+                    elapsed_us: 10,
+                    result: OutcomeFields::with_outcome(InspectorOutcome::NotFound),
+                },
+            },
+        ));
+        assert_eq!(
+            traces.operation(9).expect("trace").outcome,
+            Some(InspectorOutcome::NotFound)
+        );
+        let rows = traces.forest.render_rows(20, 30_000_000);
+        let missing = rows
+            .iter()
+            .find(|row| row.path == "notifications/missing")
+            .expect("missing path row");
+        assert_eq!(missing.status, super::super::tree::NodeStatus::Miss);
     }
 }

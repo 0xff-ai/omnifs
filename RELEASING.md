@@ -60,7 +60,7 @@ The `just` surface for release-adjacent tasks is npm-only; the release itself is
 | **`just npm sync`** | CI before npm publish; optional locally | Set all `npm/**/package.json` versions from the Cargo workspace version through npm workspace-aware `npm pkg set` |
 | **`just npm pack`** | local verification, ship | Pack the root npm package locally |
 
-Day-to-day dev uses the relevant CI-shaped just lanes, `just providers build`, and `just dev`.
+Day-to-day dev uses the relevant CI-shaped just lanes, `just build providers`, and `just dev`.
 
 ## What gets released
 
@@ -173,7 +173,7 @@ Gates that must be in place:
 | `justfile`, `just/` | Maintainer command surface used locally and in CI |
 | `cliff.toml` | git-cliff config: changelog areas, filters, and the version-bump policy |
 | `npm/package.json` | private npm workspace root for the CLI and platform packages |
-| `just/providers.just` | WASI SDK install (`wasi-sdk` recipe) and provider/tool WASM builds |
+| `justfile`, `scripts/ci/build-providers.sh` | Action-first build recipes, the pinned WASI SDK installer, and provider/tool WASM builds |
 | `scripts/ci/common.sh` | Repo-root discovery shared by CI helper scripts |
 | `.github/actions/omnifs-just` | Installs the pinned `just` version in CI |
 | `scripts/ci/build-linux-zigbuild.sh` | Native Linux CLI build helper for the glibc baseline |

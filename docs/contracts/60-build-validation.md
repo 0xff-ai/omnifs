@@ -11,9 +11,9 @@ Read this before touching CI, `just` recipes, provider artifact generation, wasi
 
 ### Provider build artifacts
 
-Provider WASM artifacts are built with the pinned wasi-sdk. `just providers build` compiles providers, then runs the native `omnifs-embed-metadata` harvester, which converts each provider's `Provider::METADATA` const into the host `ProviderManifest` and injects it as the `omnifs.provider-metadata.v1` custom section, and emits `target/omnifs-provider-store` with content-addressed WASM files plus `index.json`. `just dev` runs `scripts/dev.ts`, so dev mount pinning and the dev image both consume the same provider-store bundle.
+Provider WASM artifacts are built with the pinned wasi-sdk. `just build providers` compiles providers, then runs the native `omnifs-embed-metadata` harvester, which converts each provider's `Provider::METADATA` const into the host `ProviderManifest` and injects it as the `omnifs.provider-metadata.v1` custom section, and emits `target/omnifs-provider-store` with content-addressed WASM files plus `index.json`. `just dev` runs `scripts/dev.ts`, so dev mount pinning and the dev image both consume the same provider-store bundle.
 
-Install the pinned wasi-sdk with `just providers wasi-sdk` when needed. Run `just providers build` before host tests that need generated provider artifacts. Use `OMNIFS_ITEST_SKIP_PROVIDER_BUILD=1` after prebuilding providers for nextest runs that would otherwise contend (`just host test` sets it for you).
+Provider build and check recipes install the pinned wasi-sdk when needed. Run `just build providers` before host tests that need generated provider artifacts. Use `OMNIFS_ITEST_SKIP_PROVIDER_BUILD=1` after prebuilding providers for nextest runs that would otherwise contend (`just test host` sets it for you).
 
 Provider runtime changes must validate both binding surfaces separately: `omnifs-wit` host bindings with `--features host-bindings`, and SDK/provider guest bindings without that feature. Do not combine those into one Cargo invocation that enables host bindings while compiling the SDK.
 
@@ -35,7 +35,7 @@ Use `just dev -y` for the supported contributor runtime path. Check status with 
 
 Use the repo gates instead of ad hoc workspace commands. Host-target gates exclude provider/test-provider WASM crates; WASM crates use provider-specific gates.
 
-Run the relevant CI-shaped lanes before a push or PR handoff. Use `just fmt-check` and `just just-check` for preflight parity. Use `just host clippy` and `just host test` for host-target iteration. Use `just providers check`, `just providers build`, and `just providers validate` for WASM iteration.
+Run the relevant CI-shaped lanes before a push or PR handoff. Use `just fmt-check` and `just just-check` for preflight parity. Use `just check host` and `just test host` for host-target iteration. Use `just check providers`, `just build providers`, and `just validate providers` for WASM iteration.
 
 ### Cross-language facts on the container boundary
 
@@ -77,7 +77,7 @@ This lane can **never** run in GitHub-hosted CI: krunkit boots a libkrun microVM
 
 - Treat missing provider WASM in a fresh worktree as a product regression.
 - Use `cargo check --workspace --all-targets` as a host gate.
-- Treat host-target provider checks as proof the metadata section was injected; only `just providers build` runs the harvester that injects it.
+- Treat host-target provider checks as proof the metadata section was injected; only `just build providers` runs the harvester that injects it.
 - Hand-edit generated OpenAPI or schema files as the primary fix.
 - Change API/model code without regenerating the corresponding checked-in artifact and running its focused parity test.
 - Validate only the intended leaf path when parent traversal changed.
@@ -96,9 +96,8 @@ This lane can **never** run in GitHub-hosted CI: krunkit boots a libkrun microVM
 ## Code
 
 - `just/dev.just`
-- `just/host.just`
-- `just/providers.just`
 - `just/npm.just`
+- `scripts/ci/build-providers.sh`
 - `npm/package.json`
 - `scripts/ci/check-doc-links.sh`
 - `scripts/ci/check-doc-contracts.sh`
@@ -126,12 +125,11 @@ This lane can **never** run in GitHub-hosted CI: krunkit boots a libkrun microVM
 
 ## Validation
 
-- `just providers wasi-sdk`
-- `just providers build`
-- `just providers check`
-- `just providers validate`
-- `just host clippy`
-- `just host test`
+- `just build providers`
+- `just check providers`
+- `just validate providers`
+- `just check host`
+- `just test host`
 - `just refresh`
 - `just schema`
 - `just openapi`

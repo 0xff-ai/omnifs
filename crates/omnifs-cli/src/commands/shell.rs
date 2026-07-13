@@ -1,4 +1,3 @@
-#![allow(clippy::disallowed_macros)] // migrates in wave 3 (cli-redesign)
 //! `omnifs shell` — drop into a subshell tuned for exploring the projected tree.
 //!
 //! Launches the user's `$SHELL` as a child process pointed at an omnifs-owned rc
@@ -69,8 +68,8 @@ pub struct ShellArgs {
 impl ShellArgs {
     pub async fn run(self) -> Result<()> {
         if std::env::var_os("OMNIFS_IN_SHELL").is_some() {
-            anstream::eprintln!(
-                "note: already inside an omnifs shell; opening a nested one (exit twice to return)"
+            crate::ui::narrate(
+                "note: already inside an omnifs shell; opening a nested one (exit twice to return)",
             );
         }
 
@@ -107,9 +106,9 @@ impl ShellArgs {
                     .map(|mount| mount.name.to_string())
                     .collect(),
                 Err(error) => {
-                    anstream::eprintln!(
+                    crate::ui::narrate(format!(
                         "note: could not read configured mounts for shell banner: {error:#}"
-                    );
+                    ));
                     Vec::new()
                 },
             }
@@ -122,8 +121,8 @@ impl ShellArgs {
         // can fail so a missing/stale mount does not hide the actionable daemon
         // recovery hint.
         if context.status.is_none() && guest.is_none() {
-            anstream::eprintln!(
-                "note: the daemon is not answering; its mount may be stale (try `omnifs up`)"
+            crate::ui::narrate(
+                "note: the daemon is not answering; its mount may be stale (try `omnifs up`)",
             );
         }
 
@@ -200,7 +199,7 @@ impl ShellArgs {
         container_name: &ContainerName,
         context: &ShellContext,
     ) -> Result<()> {
-        anstream::eprintln!("{}", context.banner("container", Path::new(GUEST_MOUNT)));
+        crate::ui::narrate(context.banner("container", Path::new(GUEST_MOUNT)));
         self.exec_in_container(container_name)
     }
 
@@ -220,7 +219,7 @@ impl ShellArgs {
         paths: &WorkspaceLayout,
         context: &ShellContext,
     ) -> Result<()> {
-        anstream::eprintln!("{}", context.banner("krunkit", Path::new(GUEST_MOUNT)));
+        crate::ui::narrate(context.banner("krunkit", Path::new(GUEST_MOUNT)));
         self.exec_in_krunkit_guest(paths)
     }
 
@@ -260,7 +259,7 @@ impl ShellArgs {
         apply_context_env(&mut cmd, mount_point, mounts, self.hermetic);
         set_cwd_to_mount(&mut cmd, mount_point);
 
-        anstream::eprintln!("{}", context.banner("local", mount_point));
+        crate::ui::narrate(context.banner("local", mount_point));
         spawn_and_propagate(cmd, "launch omnifs shell".to_string())
     }
 }
@@ -485,10 +484,10 @@ impl LocalMounts {
                     candidates.push(state.mount_point);
                 },
                 Err(error) => {
-                    anstream::eprintln!(
-                        "⚠  Skipping local frontend record {}: {error}",
+                    crate::ui::eprint_raw(&format!(
+                        "⚠  Skipping local frontend record {}: {error}\n",
                         path.display()
-                    );
+                    ));
                 },
             }
         }

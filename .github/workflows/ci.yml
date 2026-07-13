@@ -139,9 +139,9 @@ jobs:
       - name: Check, build, and validate WASM components
         run: |
           set -euo pipefail
-          just providers check
-          just providers build
-          just providers validate
+          just check providers
+          just build providers
+          just validate providers
 
       - name: Stage WASM components
         run: |
@@ -217,7 +217,7 @@ jobs:
           set -euo pipefail
           rm -rf dist/host-tests
           mkdir -p dist/host-tests
-          just host clippy
+          just check host
           cargo nextest archive --profile ci --workspace \
             --exclude 'omnifs-provider-*' \
             --exclude test-provider \

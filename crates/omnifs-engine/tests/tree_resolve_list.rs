@@ -6,7 +6,7 @@
 //! `ServingContext::single`, and drives `Tree::resolve` / `Tree::list` through
 //! the same neutral surface used by FUSE and NFS.
 //!
-//! Precondition: `just providers build` has produced
+//! Precondition: `just build providers` has produced
 //! `target/wasm32-wasip2/release/test_provider.wasm` (`provider_wasm_path`
 //! asserts this through the harness).
 

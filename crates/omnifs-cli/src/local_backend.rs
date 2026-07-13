@@ -22,14 +22,6 @@ pub(crate) enum LocalProtocol {
 }
 
 impl LocalProtocol {
-    pub(crate) const fn platform_default() -> Self {
-        if cfg!(target_os = "linux") {
-            Self::Fuse
-        } else {
-            Self::Nfs
-        }
-    }
-
     const fn binary_name(self) -> &'static str {
         match self {
             Self::Fuse => "omnifs-fuse",
@@ -285,18 +277,6 @@ impl LocalBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn platform_default_selects_a_packaged_runner() {
-        let expected = if cfg!(target_os = "linux") {
-            (LocalProtocol::Fuse, "omnifs-fuse")
-        } else {
-            (LocalProtocol::Nfs, "omnifs-nfs")
-        };
-        let protocol = LocalProtocol::platform_default();
-        assert_eq!(protocol, expected.0);
-        assert_eq!(protocol.binary_name(), expected.1);
-    }
 
     #[test]
     fn runner_is_resolved_only_beside_current_executable() {
