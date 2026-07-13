@@ -160,6 +160,8 @@ pub fn mount_blocking(
         mount_client(mount_point, server.addr())?;
     }
 
+    disable_spotlight(mount_point);
+
     tracing::info!(
         mount = %mount_point.display(),
         addr = %server.addr(),
@@ -260,8 +262,8 @@ impl MountCommand {
             Ok(())
         } else {
             Err(NfsFrontendError::Mount(format!(
-                "{} exited with {status}",
-                self.failure_context
+                "{} exited with {}",
+                self.failure_context, status
             )))
         }
     }
@@ -300,6 +302,10 @@ impl MountOptions {
                 ),
                 MountOption::new("sec=sys", "use local AUTH_SYS credentials only"),
                 MountOption::new("ro", "preserve omnifs' read-only provider contract"),
+                MountOption::new(
+                    "nobrowse",
+                    "keep Finder from presenting the projected mount as a browsable volume",
+                ),
                 MountOption::new(
                     "intr",
                     "allow interrupted client operations during teardown",
@@ -365,6 +371,70 @@ impl MountOptions {
             .collect::<Vec<_>>()
             .join(",")
     }
+}
+
+#[cfg(any(target_os = "macos", test))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SpotlightCommand {
+    program: &'static str,
+    args: Vec<OsString>,
+    failure_context: &'static str,
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl SpotlightCommand {
+    fn macos(mount_point: &Path) -> Self {
+        Self {
+            program: "sudo",
+            args: vec![
+                OsString::from("-n"),
+                OsString::from("mdutil"),
+                OsString::from("-d"),
+                OsString::from("-i"),
+                OsString::from("off"),
+                mount_point.as_os_str().to_owned(),
+            ],
+            failure_context: "mdutil Spotlight exclusion via `sudo -n`",
+        }
+    }
+
+    fn run(&self) -> Result<(), NfsFrontendError> {
+        let output = Command::new(self.program)
+            .args(&self.args)
+            .output()
+            .map_err(|error| NfsFrontendError::Mount(error.to_string()))?;
+        let details = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if output.status.success() || details.contains("Indexing and searching disabled.") {
+            Ok(())
+        } else {
+            Err(NfsFrontendError::Mount(format!(
+                "{} exited with {}",
+                self.failure_context, output.status
+            )))
+        }
+    }
+}
+
+fn disable_spotlight(mount_point: &Path) {
+    #[cfg(target_os = "macos")]
+    match SpotlightCommand::macos(mount_point).run() {
+        Ok(()) => tracing::info!(
+            mount = %mount_point.display(),
+            "disabled Spotlight activity and indexing"
+        ),
+        Err(error) => tracing::warn!(
+            mount = %mount_point.display(),
+            %error,
+            "could not disable Spotlight activity and indexing"
+        ),
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    let _ = mount_point;
 }
 
 fn export_source() -> String {
@@ -536,8 +606,8 @@ fn ensure_private_state_dir(state_dir: &Path) -> Result<(), NfsFrontendError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        MountCommand, MountOptions, MountTableEntry, NfsMountOptions, mount_is_active_checked,
-        mount_table_contains, parse_macos_mounts,
+        MountCommand, MountOptions, MountTableEntry, NfsMountOptions, SpotlightCommand,
+        mount_is_active_checked, mount_table_contains, parse_macos_mounts,
     };
     use omnifs_mtab::StateFile;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -578,10 +648,24 @@ mod tests {
                 "-n",
                 "mount_nfs",
                 "-o",
-                "vers=4,tcp,port=2050,sec=sys,ro,intr,nocallback,noac,nonegnamecache,retrycnt=0,timeo=5,retrans=1",
+                "vers=4,tcp,port=2050,sec=sys,ro,nobrowse,intr,nocallback,noac,nonegnamecache,retrycnt=0,timeo=5,retrans=1",
                 "127.0.0.1:/omnifs",
                 "/Volumes/omnifs",
             ]
+        );
+    }
+
+    #[test]
+    fn macos_spotlight_command_disables_search_and_indexing() {
+        let command = SpotlightCommand::macos(Path::new("/Volumes/omnifs"));
+        assert_eq!(command.program, "sudo");
+        assert_eq!(
+            command
+                .args
+                .iter()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+            vec!["-n", "mdutil", "-d", "-i", "off", "/Volumes/omnifs",]
         );
     }
 

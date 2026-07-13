@@ -45,7 +45,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::adapter::{ColdEntry, Inode};
 use crate::export::NodeKind;
-use crate::protocol::consts::{EXPORT_ROOT_ID, ROOT_ID};
+use crate::protocol::consts::{EXPORT_ROOT_ID, ROOT_ID, is_reserved_inode};
 
 /// Basename of the filehandle-table state file inside the NFS state directory. A
 /// restart must find its predecessor by a name stable across pids, so this is a
@@ -194,7 +194,7 @@ impl PersistTables {
         }
         for entry in self.inodes.iter() {
             let id = *entry.key();
-            if id == ROOT_ID || id == EXPORT_ROOT_ID {
+            if id == ROOT_ID || id == EXPORT_ROOT_ID || is_reserved_inode(id) {
                 continue;
             }
             by_id.insert(id, FhEntry::from_inode(id, entry.value()));

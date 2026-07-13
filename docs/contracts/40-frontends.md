@@ -47,6 +47,17 @@ The krunkit guest's ssh access is keyed, not passworded: `launch` generates a pe
 
 macOS host-native integration uses read-only NFSv4.0 loopback. NFS is a frontend protocol boundary, not a provider protocol.
 
+The macOS NFS mount is excluded from Spotlight as part of frontend startup. The
+mount requests `nobrowse`, and the NFS export exposes a synthetic,
+lookup-only `/.metadata_never_index` marker at its root without adding that
+entry to provider listings. The runner also invokes the host `mdutil` control
+when available; macOS may return a non-zero status for an NFS export with no
+local metadata store even while reporting that indexing and searching are
+disabled, which is an accepted success state. This policy prevents a host
+indexer from recursively traversing provider-backed paths and holding the
+mount during teardown; it does not special-case Spotlight in namespace or
+provider semantics.
+
 Keep NFS filehandles, stateids, leases, and NFS protocol errors in `omnifs-nfs`. Preserve read-only behavior for mutation operations. Keep macOS mount readiness and teardown behavior in the NFS/CLI path.
 
 The `omnifs-thin nfs` mode attaches through the Omnifs VFS wire protocol. Frontend discovery records and the persistent filehandle table live under per-location state leaves (`cache/frontends/<kind>/<blake3-of-location>`); restarting an active frontend location must reuse the recorded server address for that leaf, never silently bind a new port and skip remounting. Corrupt leaves degrade individually.

@@ -59,6 +59,15 @@ Mitigated by mount options today:
 - **Hangs against a dead server.** A default NFS mount blocks processes indefinitely when the server dies. Mitigation: `soft`, `timeo=5`, `retrans=1` (Linux) and `intr`, `timeo=5`, `retrans=1`, `retrycnt=0` (macOS) bound the wait; teardown force-unmounts and sweeps state files for daemon crashes.
 - **Delegation and callback complexity.** `nocallback` (macOS) disables delegations, so no callback channel or recall handling exists to get wrong.
 
+- **Host metadata traversal.** macOS Spotlight can recursively walk a mounted
+  NFS namespace and retain directory references after the serving process dies,
+  which makes a dead loopback mount harder to tear down. The macOS mount uses
+  `nobrowse`, the export serves a synthetic lookup-only
+  `/.metadata_never_index` marker, and the runner asks `mdutil` to disable
+  indexing and searching. The marker is frontend-owned and omitted from
+  provider listings; the `mdutil` command is best effort because macOS can
+  report a disabled NFS volume as having no manageable metadata store.
+
 Deferred by the read-only contract (these arrive with any write path and must be designed for, not discovered):
 
 - **Silly rename.** Open-unlink becomes a client-issued rename to `.nfsXXXX`, visible in listings until last close. A write-capable frontend must decide whether the server hides these names from readdir.

@@ -34,6 +34,16 @@ pub(crate) const NFS_VERSION_MAX: u32 = 4;
 pub(crate) const PROC_NULL: u32 = 0;
 pub(crate) const PROC_COMPOUND: u32 = 1;
 
+// macOS Spotlight recognizes this root marker as a request not to index the
+// mounted filesystem. It is synthetic and read-only: it never enters the
+// provider namespace or the upstream cache.
+pub(crate) const SPOTLIGHT_MARKER_NAME: &str = ".metadata_never_index";
+pub(crate) const SPOTLIGHT_MARKER_ID: u64 = u64::MAX - 1;
+
+pub(crate) fn is_reserved_inode(id: u64) -> bool {
+    id == SPOTLIGHT_MARKER_ID
+}
+
 // Fragment reassembly: cumulative record cap. Single ONC RPC fragments are
 // capped at 2 GiB by the header bit-width, but multi-fragment records have
 // no inherent bound. 16 MiB covers NFSv4 READDIR replies and small file

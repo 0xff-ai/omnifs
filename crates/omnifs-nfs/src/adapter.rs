@@ -26,7 +26,10 @@ use crate::export::{
     ReadOnlyExport, StateId, Status, StatusResult, ensure_read_access,
 };
 use crate::persist::{PersistInit, PersistTables, Persister};
-use crate::protocol::consts::{EXPORT_ROOT_ID, MAX_NFS_READ_BYTES, NFS_EXPORT_NAME, ROOT_ID};
+use crate::protocol::consts::{
+    EXPORT_ROOT_ID, MAX_NFS_READ_BYTES, NFS_EXPORT_NAME, ROOT_ID, SPOTLIGHT_MARKER_ID,
+    SPOTLIGHT_MARKER_NAME, is_reserved_inode,
+};
 use dashmap::DashMap;
 use omnifs_core::path::Segment;
 use omnifs_engine::namespace::{
@@ -99,6 +102,8 @@ enum Body {
     Subtree { node: NodeId, root: PathBuf },
     /// A pure filesystem child under a subtree, served entirely from `path`.
     Backing(PathBuf),
+    /// A frontend-owned hidden marker, served without entering the namespace.
+    Synthetic(&'static [u8]),
 }
 
 impl Body {
@@ -108,7 +113,7 @@ impl Body {
         match self {
             Self::Subtree { root, .. } => Some(root),
             Self::Backing(path) => Some(path),
-            Self::Node(_) => None,
+            Self::Node(_) | Self::Synthetic(_) => None,
         }
     }
 
@@ -117,7 +122,7 @@ impl Body {
     fn node(&self) -> Option<NodeId> {
         match self {
             Self::Node(node) | Self::Subtree { node, .. } => Some(*node),
-            Self::Backing(_) => None,
+            Self::Backing(_) | Self::Synthetic(_) => None,
         }
     }
 }
@@ -202,6 +207,18 @@ impl Export {
             );
             by_node.insert((scope, NodeId::ROOT), scope);
         }
+        // Keep the marker inode stable across frontend restarts without
+        // persisting it as a namespace path that would need re-resolution.
+        inodes.insert(
+            SPOTLIGHT_MARKER_ID,
+            Inode {
+                scope: EXPORT_ROOT_ID,
+                parent: EXPORT_ROOT_ID,
+                name: SPOTLIGHT_MARKER_NAME.to_string(),
+                kind: NodeKind::File,
+                body: Body::Synthetic(b""),
+            },
+        );
 
         // Resume the allocation cursor and cold-entry table from a reloaded state
         // file, so old filehandles decode to the same ids they were minted under.
@@ -212,7 +229,8 @@ impl Export {
         let cold = Arc::new(DashMap::new());
         if let Some(init) = &persist {
             for entry in &init.entries {
-                if entry.id == ROOT_ID || entry.id == EXPORT_ROOT_ID {
+                if entry.id == ROOT_ID || entry.id == EXPORT_ROOT_ID || is_reserved_inode(entry.id)
+                {
                     continue;
                 }
                 cold.insert(
@@ -284,7 +302,11 @@ impl Export {
         let live: Vec<(u64, ColdEntry)> = self
             .inodes
             .iter()
-            .filter(|entry| *entry.key() != ROOT_ID && *entry.key() != EXPORT_ROOT_ID)
+            .filter(|entry| {
+                *entry.key() != ROOT_ID
+                    && *entry.key() != EXPORT_ROOT_ID
+                    && !is_reserved_inode(*entry.key())
+            })
             .map(|entry| {
                 let inode = entry.value();
                 (
@@ -743,6 +765,18 @@ impl ReadOnlyExport for Export {
         let body = inode.body.clone();
         drop(inode);
 
+        if let Body::Synthetic(data) = body {
+            return Ok(Attr {
+                id,
+                parent,
+                kind: NodeKind::File,
+                size: data.len() as u64,
+                mode: NodeKind::File.mode(),
+                change: 0,
+                mtime_sec: 0,
+            });
+        }
+
         if let Some(backing) = body.backing() {
             self.apply_pending_events();
             self.inodes.get(&id).ok_or(Status::Stale)?;
@@ -795,6 +829,10 @@ impl ReadOnlyExport for Export {
         let scope = inode.scope;
         let body = inode.body.clone();
         drop(inode);
+
+        if parent == EXPORT_ROOT_ID && name.as_str() == SPOTLIGHT_MARKER_NAME {
+            return Ok(SPOTLIGHT_MARKER_ID);
+        }
 
         if let Some(backing) = body.backing() {
             return self.lookup_backing_child(scope, parent, backing, name.as_str());
@@ -912,6 +950,7 @@ impl ReadOnlyExport for Export {
             // A subtree root is a directory.
             Body::Subtree { .. } => Err(Status::IsDir),
             Body::Node(node) => self.read_node_all(node),
+            Body::Synthetic(data) => Ok(data.to_vec()),
         }
     }
 
@@ -966,6 +1005,7 @@ impl ReadOnlyExport for Export {
                 }
             },
             Body::Subtree { .. } => return Err(Status::IsDir),
+            Body::Synthetic(_) => {},
         }
         // The open records only the inode id; each read re-resolves the read
         // target from the inode, so a reattach that clears `NodeId`s never has to
@@ -1019,6 +1059,16 @@ impl ReadOnlyExport for Export {
             Body::Node(node) => self.read_node_chunk(inode_id, node, offset, count),
             Body::Backing(path) => Self::read_backing_state(inode_id, &path, offset, count),
             Body::Subtree { .. } => Err(Status::IsDir),
+            Body::Synthetic(data) => {
+                let start = usize::try_from(offset).map_err(|_| Status::Invalid)?;
+                let count = usize::try_from(count).map_err(|_| Status::Invalid)?;
+                let end = start.saturating_add(count).min(data.len());
+                Ok(OpenRead {
+                    id: inode_id,
+                    data: data.get(start..end).unwrap_or_default().to_vec(),
+                    eof: end >= data.len(),
+                })
+            },
         }
     }
 
@@ -1541,6 +1591,33 @@ mod tests {
         assert_eq!(
             attr.size, 5,
             "attrs served after lookup must reflect the size learned by the probe"
+        );
+    }
+
+    #[test]
+    fn spotlight_marker_is_hidden_lookup_only_and_read_only() {
+        let harness = empty_export();
+        let export_root = harness
+            .export
+            .lookup(harness.export.root(), NFS_EXPORT_NAME)
+            .expect("lookup export root");
+        let marker = harness
+            .export
+            .lookup(export_root, SPOTLIGHT_MARKER_NAME)
+            .expect("lookup Spotlight marker");
+
+        assert_eq!(marker, SPOTLIGHT_MARKER_ID);
+        assert_eq!(harness.export.read(marker).expect("read marker"), b"");
+        assert_eq!(harness.export.attr(marker).expect("marker attrs").size, 0);
+        assert!(
+            !harness
+                .export
+                .readdir(export_root)
+                .expect("list export root")
+                .entries
+                .iter()
+                .any(|entry| entry.name == SPOTLIGHT_MARKER_NAME),
+            "the marker must not pollute normal directory listings"
         );
     }
 
