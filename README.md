@@ -32,7 +32,7 @@ omnifs shell
 
 ---
 
-For a direct, scriptable path, create mounts one at a time with `omnifs mount add <provider>`. Each command writes a mount spec under `~/.omnifs/mounts/`; `omnifs up` starts the daemon and reconciles those specs into the shared projected tree.
+For a direct, scriptable path, create mounts one at a time with `omnifs mount add <provider>`. Each command records a desired-state commit in the Git repository at `~/.omnifs/mounts/`; `omnifs up` starts or restarts the daemon against that complete revision. `omnifs apply` is an exact alias of `omnifs up`.
 
 ```bash
 omnifs mount add github
@@ -67,7 +67,7 @@ filesystem = "fuse"
 environment = "docker"
 ```
 
-Use `omnifs frontend enable`, `disable`, and `restart` to update or converge this durable plan. Every frontend exposes every configured mount. Provider installation and mount creation are separate, and existing mounts change provider pins only through `omnifs mount upgrade`.
+Use `omnifs frontend enable`, `disable`, and `restart` to update or converge this durable plan. Every frontend exposes every configured mount. Provider installation and mount creation are separate, and `omnifs up` applies each desired spec's exact provider pin without selecting upgrades.
 
 For automation, select one invocation-owned output contract. JSON prints one envelope and keeps resource collections plural; JSONL adds progress events before one terminal result or error.
 

@@ -197,6 +197,8 @@ pub(crate) async fn launch_native(
     paths: &omnifs_workspace::layout::WorkspaceLayout,
     tcp_addr: Option<std::net::SocketAddr>,
     telemetry_enabled: bool,
+    mount_revision: &omnifs_workspace::mounts::Revision,
+    mount_snapshot: &std::path::Path,
 ) -> Result<()> {
     use std::process::Stdio;
     use std::time::Duration;
@@ -221,7 +223,12 @@ pub(crate) async fn launch_native(
         .with_context(|| format!("clone daemon log handle {}", log_path.display()))?;
 
     let mut command = Command::new(&binary);
-    command.arg("daemon");
+    command
+        .arg("daemon")
+        .arg("--mount-revision")
+        .arg(mount_revision.to_string())
+        .arg("--mount-snapshot")
+        .arg(mount_snapshot);
     if let Some(tcp_addr) = tcp_addr {
         command.arg("--listen").arg(tcp_addr.to_string());
     }
@@ -319,6 +326,8 @@ pub(crate) async fn launch_native(
     _paths: &omnifs_workspace::layout::WorkspaceLayout,
     _tcp_addr: Option<std::net::SocketAddr>,
     _telemetry_enabled: bool,
+    _mount_revision: &omnifs_workspace::mounts::Revision,
+    _mount_snapshot: &std::path::Path,
 ) -> Result<()> {
     anyhow::bail!(
         "this omnifs binary was built without host-native daemon support; \

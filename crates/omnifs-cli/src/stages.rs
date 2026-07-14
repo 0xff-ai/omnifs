@@ -3,7 +3,6 @@
 //! Commands own narration. This module owns the stage behavior so the guided
 //! setup wizard and express `mount add` lane cannot drift from each other.
 
-use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -12,8 +11,8 @@ use anyhow::{Context, anyhow};
 use omnifs_caps::{Grants, Limits};
 use omnifs_workspace::config::Config;
 use omnifs_workspace::layout::WorkspaceLayout;
-use omnifs_workspace::mounts::{Name as MountName, Spec, UpgradePlan};
-use omnifs_workspace::provider::{Catalog, ProviderAuthManifest, ProviderManifest};
+use omnifs_workspace::mounts::{Name as MountName, Spec};
+use omnifs_workspace::provider::{ProviderAuthManifest, ProviderManifest};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
@@ -25,7 +24,6 @@ use crate::commands::mount::{AddArgs, AuthImportDecision, ImportOutcome};
 use crate::commands::setup::host_os::HostOs;
 use crate::error::{ExitCode, WithExitCode, WithHint};
 use crate::launch::LaunchOutcome;
-use crate::mount_config::MountConfig;
 use crate::token_source::TokenSource;
 use crate::workspace::Workspace;
 
@@ -56,8 +54,6 @@ pub(crate) struct MountInitPlan {
     imported_token: Option<secrecy::SecretString>,
     spec: Spec,
     mount_path: PathBuf,
-    existing_mount: bool,
-    upgrade_approval: Option<UpgradePlan>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -166,7 +162,7 @@ pub(crate) async fn configure_mount(
     if standalone {
         session.phase(plan.manifest.id.as_str());
     }
-    persist_mount_spec(workspace, &plan, session).await?;
+    persist_mount_spec(workspace, &plan, standalone, session)?;
     let status = plan.authenticate(&args, workspace, session, prompt).await?;
 
     match status {
@@ -264,24 +260,11 @@ pub(crate) fn spec_creation(
             paths.providers_dir.display()
         ))?;
     let reference = provider.reference();
-    let existing_mount = mounts.iter().find(|mount| mount.name == mount_name);
-    let upgrade_approval = match existing_mount {
-        Some(existing) if existing.config.provider.id == provider.id => {
-            anyhow::bail!(
-                "mount `{mount_name}` already exists for this provider artifact; remove it first or choose a different name"
-            );
-        },
-        Some(existing) => approved_upgrade_for_existing_mount(
-            catalog,
-            existing,
-            manifest,
-            &provider_name,
-            &mount_name,
-            interactive,
-            session,
-        )?,
-        None => None,
-    };
+    if mounts.iter().any(|mount| mount.name == mount_name) {
+        anyhow::bail!(
+            "mount `{mount_name}` already exists; remove it first or choose a different name"
+        );
+    }
 
     let auth_manifest = manifest
         .auth
@@ -348,8 +331,6 @@ pub(crate) fn spec_creation(
         imported_token: token,
         spec,
         mount_path,
-        existing_mount: existing_mount.is_some(),
-        upgrade_approval,
     })
 }
 
@@ -514,86 +495,27 @@ fn selected_auth(
     ))
 }
 
-async fn persist_mount_spec(
+fn persist_mount_spec(
     workspace: &Workspace,
     plan: &MountInitPlan,
+    standalone: bool,
     session: &mut crate::ui::session::Session,
 ) -> anyhow::Result<()> {
-    let request = async {
-        if plan.existing_mount {
-            workspace
-                .daemon()
-                .update_mount_if_ready(&plan.spec, plan.upgrade_approval.as_ref())
-                .await
-        } else {
-            workspace.daemon().create_mount_if_ready(&plan.spec).await
-        }
-    };
-    let (result, progress) = await_with_elapsed_progress(
-        "mount",
-        &format!("saving {}", plan.mount_name),
-        request,
-        session.output(),
-    )
-    .await;
-
-    match result {
-        Ok(Some(report)) if report.failure.is_none() => {
-            progress.settle_ok(format!("{} applied to daemon", plan.mount_name));
-        },
-        Ok(Some(report)) => {
-            let reason = report
-                .failure
-                .as_ref()
-                .map_or("unknown error", |failure| failure.reason.as_str());
-            progress.settle_warn(format!("{} saved; daemon: {reason}", plan.mount_name));
-            session.note("saved locally; run `omnifs up` to restart with the new mount");
-        },
-        Ok(None) => {
-            workspace.put_mount(&plan.spec)?;
-            progress.settle_ok(format!("{} saved locally", plan.mount_name));
-        },
-        Err(error) => {
-            workspace.put_mount(&plan.spec)?;
-            progress.settle_warn(format!("{} saved; daemon unavailable", plan.mount_name));
-            session.note(format!(
-                "could not apply mount `{}`: {error:#}",
-                plan.mount_name
-            ));
-            session.note("saved locally; run `omnifs up` to restart with the new mount");
-        },
+    workspace.put_mount_uncommitted(&plan.spec)?;
+    if standalone {
+        workspace.commit_mounts()?;
     }
+    session.row(crate::ui::report::Row::new(
+        crate::ui::style::Glyph::Done,
+        "desired state",
+        format!("{} recorded", plan.mount_name),
+    ));
     // `Wrote <path>` collapses to a single dim continuation, printed once.
     session.note(format!(
         "wrote {}",
         WorkspaceLayout::display(&plan.mount_path)
     ));
     Ok(())
-}
-
-/// Drive a future while emitting elapsed progress often enough for the text
-/// spinner and NDJSON event stream to remain live during a slow operation.
-async fn await_with_elapsed_progress<F, T>(
-    key: &str,
-    verb: &str,
-    future: F,
-    output: crate::ui::output::Output,
-) -> (T, crate::ui::LiveRow)
-where
-    F: Future<Output = T>,
-{
-    let mut progress = crate::ui::LiveRow::start_with_output(key, verb, output);
-    progress.update(verb);
-    tokio::pin!(future);
-    let mut ticks = tokio::time::interval(Duration::from_millis(200));
-    ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    ticks.tick().await;
-    loop {
-        tokio::select! {
-            output = &mut future => return (output, progress),
-            _ = ticks.tick() => progress.update_elapsed(verb),
-        }
-    }
 }
 
 fn apply_mount_overrides(
@@ -649,54 +571,4 @@ fn browse_path(mount_name: &str) -> PathBuf {
     omnifs_workspace::layout::resolve_mount_point()
         .unwrap_or_else(|| PathBuf::from("~/omnifs"))
         .join(mount_name)
-}
-
-fn approved_upgrade_for_existing_mount(
-    catalog: &Catalog,
-    existing: &MountConfig,
-    candidate_manifest: &ProviderManifest,
-    provider_name: &str,
-    mount_name: &MountName,
-    interactive: bool,
-    session: &mut crate::ui::session::Session,
-) -> anyhow::Result<Option<UpgradePlan>> {
-    let existing_provider = existing.config.provider_name();
-    if existing_provider.as_str() != provider_name {
-        anyhow::bail!(
-            "mount `{mount_name}` already exists for provider `{existing_provider}`; remove it first or choose a different name"
-        );
-    }
-
-    let Some(pinned) = catalog
-        .get(&existing.config.provider.id)
-        .with_context(|| format!("load pinned provider for mount `{mount_name}`"))?
-    else {
-        anyhow::bail!(
-            "the provider version mount `{mount_name}` was created with is no longer installed"
-        );
-    };
-    let pinned_manifest = pinned
-        .manifest()
-        .with_context(|| format!("read pinned provider manifest for mount `{mount_name}`"))?;
-    let plan = UpgradePlan::diff(&pinned_manifest, candidate_manifest);
-    if !plan.requires_approval() {
-        return Ok(None);
-    }
-    if !interactive {
-        anyhow::bail!(
-            "`omnifs mount add --no-input` cannot approve provider upgrade changes for existing mount `{mount_name}`"
-        );
-    }
-
-    session.note(format!("{provider_name} now requests different access:"));
-    for change in crate::commands::mount::upgrade::describe_upgrade_plan(&plan) {
-        session.note(change);
-    }
-    let approved = crate::ui::prompt::Confirm::new("Approve this provider upgrade?")
-        .with_default(false)
-        .ask()?;
-    if !approved {
-        anyhow::bail!("aborted");
-    }
-    Ok(Some(plan))
 }

@@ -79,7 +79,7 @@ A frontend (always out-of-process) consumes the same `omnifs_engine::Namespace` 
 
 There is one `omnifs` binary. The runtime loop lives behind hidden `omnifs daemon`. The CLI owns setup, credentials, lifecycle commands, and user-facing UX. The daemon owns runtime serving and exposes a REST API whose DTOs live in `omnifs-api`.
 
-Mount delivery uses the control API while a compatible daemon is running and the on-disk registry while it is not. Online create, update, and delete requests go through the daemon; offline changes write specs under `mounts/`, and startup or `/v1/reconcile` converges them. New non-secret interactions should prefer REST API extensions over new direct workspace coupling.
+Mount desired state is the Git `HEAD` of `$OMNIFS_HOME/mounts`; no other workspace state is versioned. The CLI writes specs through `mounts::Registry`, records desired-state commits through `mounts::Repository`, and applies one complete revision through `omnifs up` or its exact `apply` alias. The daemon receives a revision-named immutable snapshot at process start, loads it completely before readiness, and exposes no mount mutation or reconcile API.
 
 The daemon has one runtime mode: host-native. It is a pure namespace server and attachment registry. Docker and krunkit deliver only FUSE frontends (as separate processes); they are not daemon runtime modes. Contributor dev sessions run through `scripts/dev.ts`, which writes a dedicated `~/.omnifs-dev` home and starts the daemon on the host directly.
 

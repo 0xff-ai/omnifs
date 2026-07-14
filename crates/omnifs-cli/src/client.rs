@@ -35,11 +35,10 @@ use hyperlocal::{UnixConnector, Uri as UnixUri};
 use omnifs_api::{
     API_MAJOR, API_MINOR, ApiError, CredentialStatus, DaemonStatus, ErrorCode,
     FrontendAttachTargetReport, FrontendAttachTargetRequest, FrontendAttachTargetVsockReport,
-    FrontendDelivery, MountReport, MountUpdateRequest, ReconcileReport, StopReport, UpgradeDelta,
+    FrontendDelivery, StopReport,
 };
 use omnifs_workspace::authn::CredentialId;
 use omnifs_workspace::layout::WorkspaceLayout;
-use omnifs_workspace::mounts::{Spec, UpgradePlan};
 use omnifs_workspace::runtime_record::{Endpoint, RuntimeRecord};
 use serde::de::DeserializeOwned;
 
@@ -304,7 +303,7 @@ impl DaemonClient {
         };
         let mut builder = hyper::Request::builder().method(method.clone()).uri(uri);
         // Only claim a JSON content type when there is a body. A bodyless POST
-        // (e.g. `reconcile()`'s no-argument call) with this header set anyway
+        // with this header set anyway
         // makes axum's `Option<Json<T>>` extractor attempt (and fail) to parse
         // zero bytes as JSON, rejecting the request with 400 instead of the
         // `None` the handler expects for "no request body".
@@ -491,15 +490,6 @@ impl DaemonClient {
         }
     }
 
-    /// Converge the running daemon's mount set to the on-disk desired state.
-    pub(crate) async fn reconcile(&self) -> Result<ReconcileReport> {
-        let raw = self
-            .request(Method::POST, "/v1/reconcile", None, Duration::from_mins(3))
-            .await?
-            .ok_or_else(|| self.unavailable_error())?;
-        Self::parse_ok_json(&raw, "daemon reconcile request failed")
-    }
-
     /// Fetch the TCP attach target a frontend dials, binding the daemon's
     /// listener if needed (idempotent: a repeat call returns the already-bound
     /// address and token). Native Linux supplies its Docker bridge gateway;
@@ -547,59 +537,6 @@ impl DaemonClient {
             .await?
             .ok_or_else(|| self.unavailable_error())?;
         Self::parse_ok_json(&raw, "daemon attach-target vsock request failed")
-    }
-
-    pub(crate) async fn create_mount_if_ready(&self, spec: &Spec) -> Result<Option<MountReport>> {
-        if !self.ready().await {
-            return Ok(None);
-        }
-        self.require_compatible().await?;
-        let body = serde_json::to_value(spec).context("serialize mount spec")?;
-        let raw = self
-            .request(
-                Method::POST,
-                "/v1/mounts",
-                Some(&body),
-                Duration::from_mins(3),
-            )
-            .await?
-            .ok_or_else(|| self.unavailable_error())?;
-        Self::parse_ok_json(&raw, "daemon mount create request failed").map(Some)
-    }
-
-    pub(crate) async fn update_mount_if_ready(
-        &self,
-        spec: &Spec,
-        approved: Option<&UpgradePlan>,
-    ) -> Result<Option<MountReport>> {
-        if !self.ready().await {
-            return Ok(None);
-        }
-        self.require_compatible().await?;
-        let request = MountUpdateRequest {
-            spec: serde_json::to_value(spec).context("serialize mount spec")?,
-            approved: approved.map(upgrade_delta_to_api).transpose()?,
-        };
-        let body = serde_json::to_value(&request).context("serialize mount update request")?;
-        let path = format!("/v1/mounts/{}", spec.mount);
-        let raw = self
-            .request(Method::PUT, &path, Some(&body), Duration::from_mins(3))
-            .await?
-            .ok_or_else(|| self.unavailable_error())?;
-        Self::parse_ok_json(&raw, "daemon mount update request failed").map(Some)
-    }
-
-    pub(crate) async fn delete_mount_if_ready(&self, mount: &str) -> Result<Option<MountReport>> {
-        if !self.ready().await {
-            return Ok(None);
-        }
-        self.require_compatible().await?;
-        let path = format!("/v1/mounts/{mount}");
-        let raw = self
-            .request(Method::DELETE, &path, None, Duration::from_mins(3))
-            .await?
-            .ok_or_else(|| self.unavailable_error())?;
-        Self::parse_ok_json(&raw, "daemon mount delete request failed").map(Some)
     }
 
     pub(crate) async fn reload_credential_if_ready(
@@ -744,42 +681,30 @@ pub(crate) fn foreign_daemon_error(base: &str) -> anyhow::Error {
     }
 }
 
-fn upgrade_delta_to_api(plan: &UpgradePlan) -> Result<UpgradeDelta> {
-    serde_json::from_value(serde_json::to_value(plan).context("serialize approved upgrade delta")?)
-        .context("convert approved upgrade delta to API DTO")
-}
-
 fn hint_for(code: ErrorCode) -> &'static str {
     match code {
-        ErrorCode::AuthRequired | ErrorCode::ConsentRequired => "Try: omnifs mount reauth <name>",
+        ErrorCode::AuthRequired => "Try: omnifs mount reauth <name>",
         ErrorCode::CredentialNotFound => "Try: omnifs mount reauth <mount>",
-        ErrorCode::MountNotFound => "Try: omnifs mount ls",
-        ErrorCode::SpecInvalid => {
-            "Try: edit the mount spec or recreate it with `omnifs mount add <provider> --as <name>`"
-        },
-        ErrorCode::ProviderMissing => "Try: just build providers",
-        ErrorCode::ReconcileBusy => "Try: rerun the command after reconcile finishes",
         ErrorCode::Unauthorized => {
             "Try: a daemon on this control address rejected this workspace's credentials; \
              run `omnifs down` from the workspace that owns it, or set OMNIFS_DAEMON_ADDR to point elsewhere"
         },
         ErrorCode::DaemonShuttingDown => "Try: omnifs up",
+        ErrorCode::MountNotFound => "Try: omnifs status",
+        ErrorCode::SpecInvalid => "Try: inspect the mount spec and rerun omnifs up",
         ErrorCode::Internal => "Try: omnifs doctor",
     }
 }
 
 fn exit_code_for(code: ErrorCode) -> ExitCode {
     match code {
-        ErrorCode::Unauthorized
-        | ErrorCode::AuthRequired
-        | ErrorCode::ConsentRequired
-        | ErrorCode::CredentialNotFound => ExitCode::AuthRequired,
+        ErrorCode::Unauthorized | ErrorCode::AuthRequired | ErrorCode::CredentialNotFound => {
+            ExitCode::AuthRequired
+        },
         ErrorCode::DaemonShuttingDown => ExitCode::DaemonUnavailable,
-        ErrorCode::MountNotFound
-        | ErrorCode::SpecInvalid
-        | ErrorCode::ProviderMissing
-        | ErrorCode::ReconcileBusy
-        | ErrorCode::Internal => ExitCode::GenericFailure,
+        ErrorCode::MountNotFound | ErrorCode::SpecInvalid | ErrorCode::Internal => {
+            ExitCode::GenericFailure
+        },
     }
 }
 
@@ -949,25 +874,8 @@ mod tests {
             "Try: omnifs mount reauth <name>"
         );
         assert_eq!(
-            hint_for(ErrorCode::ConsentRequired),
-            "Try: omnifs mount reauth <name>"
-        );
-        assert_eq!(
             hint_for(ErrorCode::CredentialNotFound),
             "Try: omnifs mount reauth <mount>"
-        );
-        assert_eq!(hint_for(ErrorCode::MountNotFound), "Try: omnifs mount ls");
-        assert_eq!(
-            hint_for(ErrorCode::SpecInvalid),
-            "Try: edit the mount spec or recreate it with `omnifs mount add <provider> --as <name>`"
-        );
-        assert_eq!(
-            hint_for(ErrorCode::ProviderMissing),
-            "Try: just build providers"
-        );
-        assert_eq!(
-            hint_for(ErrorCode::ReconcileBusy),
-            "Try: rerun the command after reconcile finishes"
         );
         assert_eq!(hint_for(ErrorCode::DaemonShuttingDown), "Try: omnifs up");
         assert_eq!(hint_for(ErrorCode::Internal), "Try: omnifs doctor");

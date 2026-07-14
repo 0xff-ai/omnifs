@@ -1,7 +1,7 @@
 //! Control API server:
-//! `/v1/{ready,status,credentials,providers,mounts,reconcile,shutdown,events}`.
+//! `/v1/{ready,status,credentials,providers,mounts,shutdown,events}`.
 //!
-//! Serves daemon runtime facts, mount reconciliation and shutdown, and the
+//! Serves daemon runtime facts and shutdown, and the
 //! inspector event stream over HTTP on the control listener. See
 //! `docs/contracts/50-control-plane.md`.
 
@@ -13,23 +13,16 @@ use axum::http::{Method, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Json, Response};
 use omnifs_api::{
-    AddedField, ApiError, AuthDelta, AuthSchemeSurface, AuthSurface, CapabilityChange,
-    CapabilityDirection, CredentialHealth, CredentialStatus, DaemonBackend, DaemonHealth,
-    DaemonStatus, DaemonSubsystem, ErrorCode, FieldChange, FrontendAttachTargetReport,
-    FrontendAttachTargetRequest, FrontendAttachTargetVsockReport, FrontendDelivery, FrontendInfo,
-    FsType, HealthState, LimitChange, LimitDirection, MountFailure, MountInfo, MountOutcome,
-    MountReport, MountUpdateRequest, ProviderArtifact, ProviderSummary, ReadyInfo, ReconcileReport,
-    ReconcileRequest, StopReport, SubsystemHealth, UpgradeDelta,
+    ApiError, CredentialHealth, CredentialStatus, DaemonBackend, DaemonHealth, DaemonStatus,
+    DaemonSubsystem, ErrorCode, FrontendAttachTargetReport, FrontendAttachTargetRequest,
+    FrontendAttachTargetVsockReport, FrontendDelivery, FrontendInfo, FsType, HealthState,
+    MountInfo, ProviderArtifact, ProviderSummary, ReadyInfo, StopReport, SubsystemHealth,
 };
 use omnifs_auth::{
     CredentialHealth as AuthCredentialHealth, CredentialStatus as AuthCredentialStatus,
 };
-use omnifs_engine::{
-    FailureKind, InspectorSink, MountRuntimes, ReconcileBusy, ReconcileOutcome, RegistryError,
-};
+use omnifs_engine::{InspectorSink, MountRuntimes};
 use omnifs_workspace::authn::CredentialId;
-use omnifs_workspace::mounts::materialize::materialize;
-use omnifs_workspace::mounts::{Name as MountName, Registry, Spec, UpgradePlan};
 use omnifs_workspace::provider::{Catalog, CatalogError, Provider};
 use omnifs_workspace::runtime_record::{
     AttachRecord, FrontendKind as RecordFrontendKind, FrontendRecord, RuntimeRecord, Via,
@@ -124,7 +117,7 @@ impl ControlToken {
 
 #[derive(OpenApi)]
 #[openapi(
-    info(title = "omnifs daemon control API", version = "6.0"),
+    info(title = "omnifs daemon control API", version = "7.0"),
     components(schemas(
         ReadyInfo,
         ApiError,
@@ -143,22 +136,6 @@ impl ControlToken {
         CredentialStatus,
         ProviderArtifact,
         ProviderSummary,
-        MountFailure,
-        MountReport,
-        MountOutcome,
-        MountUpdateRequest,
-        UpgradeDelta,
-        AddedField,
-        FieldChange,
-        CapabilityChange,
-        CapabilityDirection,
-        LimitChange,
-        LimitDirection,
-        AuthDelta,
-        AuthSurface,
-        AuthSchemeSurface,
-        ReconcileReport,
-        ReconcileRequest,
         StopReport,
         FrontendAttachTargetRequest,
         FrontendAttachTargetReport,
@@ -225,7 +202,7 @@ impl AttachBindAddr {
 
 /// The outcome of binding either attach transport. `NamespaceNotReady` is not an
 /// error: it is the same transient window `/v1/ready` already reports before
-/// startup reconcile finishes, so the caller renders it as a 503 rather than a
+/// startup loading finishes, so the caller renders it as a 503 rather than a
 /// 500.
 pub(crate) enum AttachOutcome<T> {
     Bound(T),
@@ -317,15 +294,11 @@ pub struct Daemon {
     frontends: Frontends,
     runtime_record: Arc<RuntimeRecordStore>,
     control_token: ControlToken,
-    /// The last reconcile's failed mounts, surfaced in `status` so a dark mount
-    /// is visible with its reason instead of silently absent.
-    last_failed: std::sync::Mutex<Vec<MountFailure>>,
-    /// Set once all startup namespace listeners are serving. Mount reconcile
-    /// precedes listener spawn, so this is the final startup readiness gate.
+    /// Set once all startup namespace listeners are serving.
     attach_serving: std::sync::atomic::AtomicBool,
     /// The shared namespace every attach listener serves. Set once via
     /// [`Self::set_namespace`], right after startup
-    /// reconcile builds it (see `run` in `app.rs`); read by
+    /// startup loading builds it (see `run` in `app.rs`); read by
     /// [`Self::ensure_attach_tcp`] so a `POST /v1/frontend/attach-target` call can
     /// bind a TCP attach listener on a running daemon without a restart.
     namespace: OnceLock<Arc<omnifs_engine::TreeNamespace>>,
@@ -359,7 +332,6 @@ impl Daemon {
             frontends,
             runtime_record,
             control_token,
-            last_failed: std::sync::Mutex::new(Vec::new()),
             attach_serving: std::sync::atomic::AtomicBool::new(false),
             namespace: OnceLock::new(),
             attach_tcp: Mutex::new(None),
@@ -367,7 +339,7 @@ impl Daemon {
         }
     }
 
-    /// Record the shared namespace once it is built (after startup reconcile).
+    /// Record the shared namespace once it is built after atomic startup load.
     /// A second call is a no-op: the namespace is built exactly once per daemon
     /// start.
     pub fn set_namespace(&self, namespace: Arc<omnifs_engine::TreeNamespace>) {
@@ -506,7 +478,7 @@ impl Daemon {
     }
 
     /// Mark all startup namespace listeners as serving. Called once after mount
-    /// reconcile and every requested listener bind succeeds.
+    /// loading and every requested listener bind succeeds.
     pub fn mark_attach_serving(&self) {
         self.attach_serving
             .store(true, std::sync::atomic::Ordering::Release);
@@ -575,114 +547,13 @@ impl Daemon {
         mounts.sort_by(|a, b| a.mount.cmp(&b.mount));
         credential_degraded.sort_by(|a, b| a.0.cmp(&b.0));
 
-        let failed = self
-            .last_failed
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
         self.context.status(
             self.attach_serving
                 .load(std::sync::atomic::Ordering::Acquire),
             self.frontends.attached(),
             mounts,
-            failed,
             &credential_degraded,
         )
-    }
-
-    /// Converge the running mount set to `mounts/*.json`, synchronously. Runs
-    /// `registry.reconcile`, then records failures for status. Callable directly
-    /// from the blocking startup path.
-    pub fn reconcile_blocking(&self, handle: &tokio::runtime::Handle) -> ReconcileReport {
-        let outcome = self.registry.reconcile(handle);
-        self.apply_reconcile_outcome(outcome)
-    }
-
-    pub async fn try_reconcile(
-        self: &Arc<Self>,
-        mounts: Option<Vec<String>>,
-    ) -> Result<ReconcileReport, ReconcileBusy> {
-        let daemon = Arc::clone(self);
-        let handle = tokio::runtime::Handle::current();
-        tokio::task::spawn_blocking(move || {
-            let outcome = daemon.registry.try_reconcile_scoped(&handle, mounts)?;
-            Ok(daemon.apply_reconcile_outcome(outcome))
-        })
-        .await
-        .unwrap_or_else(|join_error| {
-            warn!(%join_error, "reconcile task failed");
-            Ok(ReconcileReport::default())
-        })
-    }
-
-    pub async fn converge_spec(
-        self: &Arc<Self>,
-        spec: Spec,
-        approved: Option<UpgradePlan>,
-    ) -> ReconcileReport {
-        let daemon = Arc::clone(self);
-        let handle = tokio::runtime::Handle::current();
-        tokio::task::spawn_blocking(move || {
-            let outcome = daemon.registry.converge_spec(&handle, spec, approved);
-            daemon.apply_reconcile_outcome(outcome)
-        })
-        .await
-        .unwrap_or_else(|join_error| {
-            warn!(%join_error, "mount converge task failed");
-            ReconcileReport::default()
-        })
-    }
-
-    pub async fn remove_mount(self: &Arc<Self>, mount: &str) -> ReconcileReport {
-        let daemon = Arc::clone(self);
-        let mount = mount.to_string();
-        tokio::task::spawn_blocking(move || {
-            let mut outcome = ReconcileOutcome::default();
-            match daemon.registry.remove_mount(&mount) {
-                // Removing an already-absent mount is convergent: report removed.
-                Ok(()) | Err(RegistryError::MountNotFound(_)) => outcome.removed.push(mount),
-                Err(error) => outcome.failed.push(omnifs_engine::MountFailure {
-                    mount,
-                    kind: error.failure_kind(),
-                    reason: error.to_string(),
-                    detail: None,
-                }),
-            }
-            daemon.apply_reconcile_outcome(outcome)
-        })
-        .await
-        .unwrap_or_else(|join_error| {
-            warn!(%join_error, "mount removal task failed");
-            ReconcileReport::default()
-        })
-    }
-
-    fn validate_spec(&self, spec: &Spec) -> Result<(), Box<Response>> {
-        let catalog = Catalog::open(self.context.providers_dir());
-        materialize(spec.clone(), &catalog)
-            .map(|_| ())
-            .map_err(|error| {
-                Box::new(error_response(
-                    StatusCode::BAD_REQUEST,
-                    ErrorCode::SpecInvalid,
-                    error.to_string(),
-                ))
-            })
-    }
-
-    fn apply_reconcile_outcome(&self, outcome: ReconcileOutcome) -> ReconcileReport {
-        let failed: Vec<MountFailure> = outcome.failed.into_iter().map(api_mount_failure).collect();
-        let mut last = self
-            .last_failed
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        last.clone_from(&failed);
-        ReconcileReport {
-            added: outcome.added,
-            updated: outcome.updated,
-            removed: outcome.removed,
-            failed,
-        }
     }
 
     /// Release the process-lifetime serving latch after giving the HTTP response
@@ -734,12 +605,8 @@ impl Daemon {
             .routes(routes!(credential_reload))
             .routes(routes!(providers_list))
             .routes(routes!(mounts_list))
-            .routes(routes!(mount_create))
             .routes(routes!(mount_inspect))
-            .routes(routes!(mount_update))
-            .routes(routes!(mount_delete))
             .routes(routes!(mount_export))
-            .routes(routes!(reconcile))
             .routes(routes!(shutdown))
             .routes(routes!(events))
             .routes(routes!(frontend_attach_target))
@@ -901,77 +768,6 @@ async fn mounts_list(State(daemon): State<Arc<Daemon>>) -> Json<Vec<MountInfo>> 
 }
 
 #[utoipa::path(
-    post,
-    path = "/v1/mounts",
-    operation_id = "mount_create",
-    request_body = serde_json::Value,
-    responses(
-        (status = 200, description = "mount create result", body = MountReport),
-        (status = 400, description = "invalid mount spec", body = ApiError),
-    ),
-)]
-async fn mount_create(
-    State(daemon): State<Arc<Daemon>>,
-    Json(spec_json): Json<serde_json::Value>,
-) -> Response {
-    let spec = match parse_spec_json(spec_json) {
-        Ok(spec) => spec,
-        Err(response) => return *response,
-    };
-    let name = match validate_spec_mount_name(&spec) {
-        Ok(name) => name,
-        Err(response) => return *response,
-    };
-    if let Err(response) = daemon.validate_spec(&spec) {
-        return *response;
-    }
-    let mounts_dir = daemon.context.mounts_dir().to_path_buf();
-    let spec_for_write = spec.clone();
-    let existing = match Registry::load(&mounts_dir).map(|registry| registry.get(&name).is_some()) {
-        Ok(existing) => existing,
-        Err(error) => {
-            return error_response(
-                StatusCode::BAD_REQUEST,
-                ErrorCode::SpecInvalid,
-                error.to_string(),
-            );
-        },
-    };
-    if existing {
-        return error_response(
-            StatusCode::BAD_REQUEST,
-            ErrorCode::SpecInvalid,
-            format!("mount `{name}` already exists; use PUT to update it"),
-        );
-    }
-    match tokio::task::spawn_blocking(move || {
-        let mut registry = Registry::load(&mounts_dir)?;
-        registry.put(&spec_for_write)
-    })
-    .await
-    {
-        Ok(Ok(())) => {},
-        Ok(Err(error)) => {
-            return error_response(
-                StatusCode::BAD_REQUEST,
-                ErrorCode::SpecInvalid,
-                error.to_string(),
-            );
-        },
-        Err(error) => {
-            return error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                ErrorCode::Internal,
-                format!("mount create task failed: {error}"),
-            );
-        },
-    }
-
-    let report = daemon.converge_spec(spec, None).await;
-    Json(report.for_mount(name.as_str(), None)).into_response()
-}
-
-#[utoipa::path(
     get,
     path = "/v1/mounts/{name}",
     operation_id = "mount_inspect",
@@ -998,171 +794,6 @@ async fn mount_inspect(
             format!("mount `{name}` not found"),
         ),
     }
-}
-
-#[utoipa::path(
-    put,
-    path = "/v1/mounts/{name}",
-    operation_id = "mount_update",
-    params(("name" = String, Path, description = "mount name")),
-    request_body = MountUpdateRequest,
-    responses(
-        (status = 200, description = "mount update result", body = MountReport),
-        (status = 400, description = "invalid mount spec or approval", body = ApiError),
-        (status = 404, description = "mount not found", body = ApiError),
-    ),
-)]
-async fn mount_update(
-    State(daemon): State<Arc<Daemon>>,
-    UrlPath(name): UrlPath<String>,
-    Json(request): Json<MountUpdateRequest>,
-) -> Response {
-    let mount_name = match MountName::new(name.clone()) {
-        Ok(name) => name,
-        Err(error) => {
-            return error_response(
-                StatusCode::BAD_REQUEST,
-                ErrorCode::SpecInvalid,
-                format!("invalid mount name `{name}`: {error}"),
-            );
-        },
-    };
-    let spec = match parse_spec_json(request.spec) {
-        Ok(spec) => spec,
-        Err(response) => return *response,
-    };
-    if spec.mount != mount_name.as_str() {
-        return error_response(
-            StatusCode::BAD_REQUEST,
-            ErrorCode::SpecInvalid,
-            format!(
-                "request path mount `{}` does not match spec mount `{}`",
-                mount_name, spec.mount
-            ),
-        );
-    }
-    if let Err(response) = daemon.validate_spec(&spec) {
-        return *response;
-    }
-    let approved = match request
-        .approved
-        .as_ref()
-        .map(upgrade_plan_from_api)
-        .transpose()
-    {
-        Ok(approved) => approved,
-        Err(error) => {
-            return error_response(
-                StatusCode::BAD_REQUEST,
-                ErrorCode::SpecInvalid,
-                format!("invalid approved upgrade delta: {error}"),
-            );
-        },
-    };
-    let mounts_dir = daemon.context.mounts_dir().to_path_buf();
-    let spec_for_write = spec.clone();
-    let exists = match Registry::load(&mounts_dir) {
-        Ok(registry) => registry.get(&mount_name).is_some(),
-        Err(error) => {
-            return error_response(
-                StatusCode::BAD_REQUEST,
-                ErrorCode::SpecInvalid,
-                error.to_string(),
-            );
-        },
-    };
-    if !exists {
-        return error_response(
-            StatusCode::NOT_FOUND,
-            ErrorCode::MountNotFound,
-            format!("mount `{mount_name}` not found"),
-        );
-    }
-    match tokio::task::spawn_blocking(move || {
-        let mut registry = Registry::load(&mounts_dir)?;
-        registry.put(&spec_for_write)
-    })
-    .await
-    {
-        Ok(Ok(())) => {},
-        Ok(Err(error)) => {
-            return error_response(
-                StatusCode::BAD_REQUEST,
-                ErrorCode::SpecInvalid,
-                error.to_string(),
-            );
-        },
-        Err(error) => {
-            return error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                ErrorCode::Internal,
-                format!("mount update task failed: {error}"),
-            );
-        },
-    }
-
-    let report = daemon.converge_spec(spec, approved).await;
-    Json(report.for_mount(mount_name.as_str(), request.approved)).into_response()
-}
-
-#[utoipa::path(
-    delete,
-    path = "/v1/mounts/{name}",
-    operation_id = "mount_delete",
-    params(("name" = String, Path, description = "mount name")),
-    responses(
-        (status = 200, description = "mount delete result", body = MountReport),
-        (status = 404, description = "mount not found", body = ApiError),
-    ),
-)]
-async fn mount_delete(
-    State(daemon): State<Arc<Daemon>>,
-    UrlPath(name): UrlPath<String>,
-) -> Response {
-    let mount_name = match MountName::new(name.clone()) {
-        Ok(name) => name,
-        Err(error) => {
-            return error_response(
-                StatusCode::BAD_REQUEST,
-                ErrorCode::SpecInvalid,
-                format!("invalid mount name `{name}`: {error}"),
-            );
-        },
-    };
-    let mounts_dir = daemon.context.mounts_dir().to_path_buf();
-    let mount_for_task = mount_name.clone();
-    match tokio::task::spawn_blocking(move || {
-        let mut registry = Registry::load(&mounts_dir)?;
-        registry.remove(&mount_for_task)
-    })
-    .await
-    {
-        Ok(Ok(true)) => {},
-        Ok(Ok(false)) => {
-            return error_response(
-                StatusCode::NOT_FOUND,
-                ErrorCode::MountNotFound,
-                format!("mount `{mount_name}` not found"),
-            );
-        },
-        Ok(Err(error)) => {
-            return error_response(
-                StatusCode::BAD_REQUEST,
-                ErrorCode::SpecInvalid,
-                error.to_string(),
-            );
-        },
-        Err(error) => {
-            return error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                ErrorCode::Internal,
-                format!("mount delete task failed: {error}"),
-            );
-        },
-    }
-
-    let report = daemon.remove_mount(mount_name.as_str()).await;
-    Json(report.for_mount(mount_name.as_str(), None)).into_response()
 }
 
 #[utoipa::path(
@@ -1211,39 +842,6 @@ async fn mount_export(
             format!("snapshot export task failed for mount `{name}`: {error}\n"),
         )
             .into_response(),
-    }
-}
-
-/// `POST /v1/reconcile`: converge the running mount set to `mounts/*.json`.
-#[utoipa::path(
-    post,
-    path = "/v1/reconcile",
-    operation_id = "reconcile",
-    request_body = Option<ReconcileRequest>,
-    responses(
-        (status = 200, description = "what the reconcile changed", body = ReconcileReport),
-        (status = 409, description = "another reconcile is already in progress", body = ApiError),
-    ),
-)]
-async fn reconcile(
-    State(daemon): State<Arc<Daemon>>,
-    request: Option<Json<ReconcileRequest>>,
-) -> Response {
-    let mounts = request.map(|Json(request)| request.mounts);
-    if let Some(mounts) = &mounts {
-        for mount in mounts {
-            if let Err(error) = MountName::new(mount.clone()) {
-                return error_response(
-                    StatusCode::BAD_REQUEST,
-                    ErrorCode::SpecInvalid,
-                    format!("invalid mount name `{mount}`: {error}"),
-                );
-            }
-        }
-    }
-    match daemon.try_reconcile(mounts).await {
-        Ok(report) => Json(report).into_response(),
-        Err(ReconcileBusy) => reconcile_busy_response(),
     }
 }
 
@@ -1435,60 +1033,6 @@ fn error_response(status: StatusCode, code: ErrorCode, message: impl Into<String
         .into_response()
 }
 
-fn reconcile_busy_response() -> Response {
-    (
-        StatusCode::CONFLICT,
-        [(header::RETRY_AFTER, "2")],
-        Json(ApiError {
-            code: ErrorCode::ReconcileBusy,
-            message: "another reconcile is already in progress".to_string(),
-            detail: None,
-        }),
-    )
-        .into_response()
-}
-
-fn parse_spec_json(value: serde_json::Value) -> Result<Spec, Box<Response>> {
-    serde_json::from_value(value).map_err(|error| {
-        Box::new(error_response(
-            StatusCode::BAD_REQUEST,
-            ErrorCode::SpecInvalid,
-            format!("invalid mount spec: {error}"),
-        ))
-    })
-}
-
-fn validate_spec_mount_name(spec: &Spec) -> Result<MountName, Box<Response>> {
-    MountName::new(spec.mount.clone()).map_err(|error| {
-        Box::new(error_response(
-            StatusCode::BAD_REQUEST,
-            ErrorCode::SpecInvalid,
-            format!("invalid mount name `{}`: {error}", spec.mount),
-        ))
-    })
-}
-
-fn api_mount_failure(failure: omnifs_engine::MountFailure) -> MountFailure {
-    MountFailure {
-        mount: failure.mount,
-        kind: api_error_code(failure.kind),
-        reason: failure.reason,
-        detail: failure.detail.as_ref().map(|plan| {
-            serde_json::to_value(upgrade_delta_from_plan(plan))
-                .expect("upgrade approval DTO serializes")
-        }),
-    }
-}
-
-fn api_error_code(kind: FailureKind) -> ErrorCode {
-    match kind {
-        FailureKind::ConsentRequired => ErrorCode::ConsentRequired,
-        FailureKind::SpecInvalid => ErrorCode::SpecInvalid,
-        FailureKind::ProviderMissing => ErrorCode::ProviderMissing,
-        FailureKind::Internal => ErrorCode::Internal,
-    }
-}
-
 fn api_credential_status(status: AuthCredentialStatus) -> CredentialStatus {
     let refresh_failed_attempts = match &status.health {
         AuthCredentialHealth::RefreshFailed { attempts } => Some(*attempts),
@@ -1560,15 +1104,6 @@ fn api_provider_artifact(provider: &Provider) -> ProviderArtifact {
     }
 }
 
-fn upgrade_delta_from_plan(plan: &UpgradePlan) -> UpgradeDelta {
-    serde_json::from_value(serde_json::to_value(plan).expect("workspace upgrade plan serializes"))
-        .expect("workspace and API upgrade delta shapes match")
-}
-
-fn upgrade_plan_from_api(delta: &UpgradeDelta) -> Result<UpgradePlan, serde_json::Error> {
-    serde_json::from_value(serde_json::to_value(delta)?)
-}
-
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -1604,6 +1139,7 @@ mod tests {
         let store = super::RuntimeRecordStore::new(
             path.clone(),
             RuntimeRecord::new(
+                omnifs_workspace::mounts::Revision::new("a".repeat(40)).unwrap(),
                 Endpoint::Unix {
                     path: dir.path().join("control.sock"),
                 },
@@ -1632,37 +1168,6 @@ mod tests {
             delivery: omnifs_api::FrontendDelivery::Local,
         }]);
         assert!(!path.exists());
-    }
-
-    #[test]
-    fn create_mount_rejects_secret_field_in_auth_block() {
-        let spec = serde_json::json!({
-            "provider": {
-                "id": "0000000000000000000000000000000000000000000000000000000000000000",
-                "meta": { "name": "demo" }
-            },
-            "mount": "demo",
-            "auth": {
-                "type": "oauth",
-                "scheme": "oauth",
-                "clientSecret": "literal-secret"
-            }
-        });
-
-        let response = super::parse_spec_json(spec).expect_err("spec must be rejected");
-
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    }
-
-    #[test]
-    fn reconcile_busy_response_sets_retry_after() {
-        let response = super::reconcile_busy_response();
-
-        assert_eq!(response.status(), StatusCode::CONFLICT);
-        assert_eq!(
-            response.headers().get(axum::http::header::RETRY_AFTER),
-            Some(&axum::http::HeaderValue::from_static("2"))
-        );
     }
 
     #[tokio::test]
@@ -1744,22 +1249,6 @@ mod tests {
         let token = super::ControlToken::resolve().unwrap();
         assert_eq!(token.value.len(), super::CONTROL_TOKEN_BYTES * 2);
         assert!(token.value.chars().all(|c| c.is_ascii_hexdigit()));
-    }
-
-    #[test]
-    fn create_mount_rejects_unknown_top_level_spec_field() {
-        let spec = serde_json::json!({
-            "provider": {
-                "id": "0000000000000000000000000000000000000000000000000000000000000000",
-                "meta": { "name": "demo" }
-            },
-            "mount": "demo",
-            "moutn": "typo"
-        });
-
-        let response = super::parse_spec_json(spec).expect_err("spec must be rejected");
-
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[test]
@@ -1883,9 +1372,12 @@ mod tests {
         }
 
         let args = crate::app::DaemonArgs {
+            mount_revision: omnifs_workspace::mounts::Revision::new("a".repeat(40)).unwrap(),
+            mount_snapshot: dir.path().join("mounts"),
             listen: None,
             attach_tcp: None,
         };
+        std::fs::create_dir_all(&args.mount_snapshot).unwrap();
         let context = crate::context::DaemonContext::resolve(&args).unwrap();
         context.prepare_startup_dirs().unwrap();
 

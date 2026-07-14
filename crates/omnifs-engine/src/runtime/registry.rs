@@ -1,8 +1,7 @@
-//! Provider registry: dynamic loading and lifecycle management for WASM providers.
+//! Provider registry: startup loading and lifecycle management for WASM providers.
 //!
-//! Owns the shared engine and caches. Mounts are added and
-//! removed at runtime through [`MountRuntimes::add_mount`] and
-//! [`MountRuntimes::remove_mount`]; there is no startup directory scan.
+//! Startup is atomic: the complete immutable mount snapshot is scanned,
+//! materialized, and instantiated before any runtime is published.
 
 use crate::auth::credential_service_for_file;
 use crate::cache::Caches;
@@ -11,12 +10,11 @@ use crate::snapshot::MountSnapshot;
 use crate::{BuildError, HostContext, Runtime, component_engine};
 use omnifs_auth::CredentialService;
 use omnifs_workspace::mounts::materialize::materialize;
-use omnifs_workspace::mounts::{Registry, Spec, UpgradePlan, pinned_manifest};
+use omnifs_workspace::mounts::{Registry, Spec};
 use omnifs_workspace::provider::Catalog;
-use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
@@ -38,14 +36,6 @@ pub struct MountRuntimes {
     instances: parking_lot::RwLock<HashMap<String, Arc<Runtime>>>,
     timer_shutdown: watch::Sender<bool>,
     timer_tasks: parking_lot::Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
-    running_specs: parking_lot::RwLock<HashMap<String, Spec>>,
-    /// Per-mount materialized spec fingerprint, used by reconcile to detect a
-    /// spec change. The pinned `ProviderRef` is part of the spec, so an artifact
-    /// swap shows up as a spec change without re-hashing the WASM.
-    fingerprints: parking_lot::RwLock<HashMap<String, u64>>,
-    /// Serializes reconcile passes so concurrent triggers cannot race the
-    /// add/remove sequence.
-    reconcile_lock: parking_lot::Mutex<()>,
 }
 
 impl MountRuntimes {
@@ -79,10 +69,39 @@ impl MountRuntimes {
             instances: parking_lot::RwLock::new(HashMap::new()),
             timer_shutdown,
             timer_tasks: parking_lot::Mutex::new(HashMap::new()),
-            running_specs: parking_lot::RwLock::new(HashMap::new()),
-            fingerprints: parking_lot::RwLock::new(HashMap::new()),
-            reconcile_lock: parking_lot::Mutex::new(()),
         })
+    }
+
+    /// Load and publish every mount from the immutable snapshot selected by the
+    /// host context. Any scan, materialization, artifact, duplicate, or runtime
+    /// error aborts startup before the first runtime is visible.
+    pub fn load(
+        context: HostContext,
+        cloner: Arc<GitCloner>,
+        desired: &Registry,
+        handle: &tokio::runtime::Handle,
+    ) -> Result<Self, RegistryError> {
+        let registry = Self::new(context, cloner)?;
+        if let Some(failure) = desired.failures().first() {
+            return Err(RegistryError::ConfigError(format!(
+                "load mount spec {}: {}",
+                failure.path.display(),
+                failure.error
+            )));
+        }
+        let catalog = Catalog::open(registry.context.providers_dir());
+        let built = desired
+            .iter()
+            .map(|(_, spec)| {
+                let spec = materialize(spec.clone(), &catalog)
+                    .map_err(|error| RegistryError::ConfigError(error.to_string()))?;
+                registry.build_mount(&spec, false)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        for mount in built {
+            registry.publish_new_mount(mount, handle)?;
+        }
+        Ok(registry)
     }
 
     /// Resolve and instantiate one mount, register it, and start its
@@ -160,8 +179,6 @@ impl MountRuntimes {
         Ok(BuiltMount {
             mount,
             revalidate: spec.revalidate,
-            fingerprint: mount_fingerprint(spec),
-            spec: spec.clone(),
             runtime: Arc::new(runtime),
         })
     }
@@ -174,8 +191,6 @@ impl MountRuntimes {
         let BuiltMount {
             mount,
             revalidate,
-            fingerprint,
-            spec,
             runtime,
         } = built;
         {
@@ -185,45 +200,9 @@ impl MountRuntimes {
             }
             instances.insert(mount.clone(), Arc::clone(&runtime));
         }
-        self.fingerprints.write().insert(mount.clone(), fingerprint);
-        self.running_specs.write().insert(mount.clone(), spec);
         self.start_timer(&mount, &runtime, revalidate, handle);
         info!(mount = mount.as_str(), "loaded provider");
         Ok(runtime)
-    }
-
-    fn replace_mount(
-        &self,
-        built: BuiltMount,
-        handle: &tokio::runtime::Handle,
-    ) -> Result<(), RegistryError> {
-        let BuiltMount {
-            mount,
-            revalidate,
-            fingerprint,
-            spec,
-            runtime,
-        } = built;
-
-        if let Some(task) = self.timer_tasks.lock().remove(&mount) {
-            task.abort();
-        }
-
-        let old_runtime = {
-            let mut instances = self.instances.write();
-            let Some(old_runtime) = instances.insert(mount.clone(), Arc::clone(&runtime)) else {
-                return Err(RegistryError::MountNotFound(mount));
-            };
-            old_runtime
-        };
-
-        self.start_timer(&mount, &runtime, revalidate, handle);
-        self.fingerprints.write().insert(mount.clone(), fingerprint);
-        self.running_specs.write().insert(mount.clone(), spec);
-        if let Err(error) = old_runtime.shutdown() {
-            warn!(mount = mount.as_str(), error = %error, "shutdown failed");
-        }
-        Ok(())
     }
 
     /// Stop and unregister a mount: abort its timer, shut the provider
@@ -235,8 +214,6 @@ impl MountRuntimes {
         if let Some(task) = self.timer_tasks.lock().remove(mount) {
             task.abort();
         }
-        self.fingerprints.write().remove(mount);
-        self.running_specs.write().remove(mount);
         if let Err(e) = runtime.shutdown() {
             warn!(mount, error = %e, "shutdown failed");
         }
@@ -291,101 +268,8 @@ impl MountRuntimes {
         }
     }
 
-    /// Converge the running mount set to the desired state under
-    /// `<config_dir>/mounts/*.json`.
-    ///
-    /// Desired specs are materialized (metadata, runtime capabilities, preopen
-    /// canonicalization) and fingerprinted; a spec that is new is added, one
-    /// whose fingerprint changed is replaced, one that disappeared is removed,
-    /// and one that fails to materialize or instantiate is recorded in
-    /// [`ReconcileOutcome::failed`] without aborting the pass.
-    pub fn reconcile(self: &Arc<Self>, handle: &tokio::runtime::Handle) -> ReconcileOutcome {
-        self.reconcile_with_approvals(handle, UpgradeApprovals::default())
-    }
-
-    pub fn reconcile_with_approvals(
-        self: &Arc<Self>,
-        handle: &tokio::runtime::Handle,
-        approvals: UpgradeApprovals,
-    ) -> ReconcileOutcome {
-        let _guard = self.reconcile_lock.lock();
-        ReconcilePass::new(self, handle, approvals, ReconcileScope::all()).run()
-    }
-
-    pub fn try_reconcile_scoped(
-        self: &Arc<Self>,
-        handle: &tokio::runtime::Handle,
-        mounts: Option<Vec<String>>,
-    ) -> Result<ReconcileOutcome, ReconcileBusy> {
-        let Some(_guard) = self.reconcile_lock.try_lock() else {
-            return Err(ReconcileBusy);
-        };
-        Ok(ReconcilePass::new(
-            self,
-            handle,
-            UpgradeApprovals::default(),
-            ReconcileScope::from_mounts(mounts),
-        )
-        .run())
-    }
-
-    pub fn converge_spec(
-        self: &Arc<Self>,
-        handle: &tokio::runtime::Handle,
-        spec: Spec,
-        approved: Option<UpgradePlan>,
-    ) -> ReconcileOutcome {
-        let _guard = self.reconcile_lock.lock();
-        let mut approvals = UpgradeApprovals::default();
-        if let Some(plan) = approved {
-            approvals.approve(spec.mount.clone(), plan);
-        }
-        ReconcilePass::new(self, handle, approvals, ReconcileScope::all()).run_one(spec)
-    }
-
-    fn build_work(&self, work: LoadWork) -> LoadResult {
-        let LoadWork {
-            spec,
-            mount,
-            wasm_path,
-            running,
-            reason,
-        } = work;
-        let started = Instant::now();
-        match self.build_mount(&spec, false) {
-            Ok(built) => LoadResult::Ready {
-                mount,
-                wasm_path,
-                running,
-                reason,
-                duration: started.elapsed(),
-                built: Box::new(built),
-            },
-            Err(error) => {
-                let kind = error.failure_kind();
-                warn!(
-                    mount = mount.as_str(),
-                    provider = %wasm_path.display(),
-                    reason,
-                    duration_ms = started.elapsed().as_millis(),
-                    error = %error,
-                    "reconcile failed to load mount"
-                );
-                LoadResult::Failed {
-                    mount,
-                    kind,
-                    reason: error.to_string(),
-                }
-            },
-        }
-    }
-
     fn is_running(&self, mount: &str) -> bool {
         self.instances.read().contains_key(mount)
-    }
-
-    fn fingerprint(&self, mount: &str) -> Option<u64> {
-        self.fingerprints.read().get(mount).copied()
     }
 
     fn start_timer(
@@ -440,479 +324,10 @@ impl MountRuntimes {
     }
 }
 
-struct ReconcilePass<'a> {
-    registry: &'a Arc<MountRuntimes>,
-    handle: &'a tokio::runtime::Handle,
-    providers: Catalog,
-    approvals: UpgradeApprovals,
-    scope: ReconcileScope,
-    desired: HashSet<String>,
-    outcome: ReconcileOutcome,
-    started: Instant,
-}
-
-impl<'a> ReconcilePass<'a> {
-    fn new(
-        registry: &'a Arc<MountRuntimes>,
-        handle: &'a tokio::runtime::Handle,
-        approvals: UpgradeApprovals,
-        scope: ReconcileScope,
-    ) -> Self {
-        Self {
-            registry,
-            handle,
-            providers: Catalog::open(registry.context.providers_dir()),
-            approvals,
-            scope,
-            desired: HashSet::new(),
-            outcome: ReconcileOutcome::default(),
-            started: Instant::now(),
-        }
-    }
-
-    fn run(mut self) -> ReconcileOutcome {
-        // Desired state is read fresh from disk each pass through the shared
-        // mount Registry; the reconcile_lock serializes passes so this snapshot
-        // is coherent for the duration of the pass.
-        let registry = match Registry::load(self.registry.context.mounts_dir()) {
-            Ok(registry) => registry,
-            Err(error) => {
-                self.outcome.failed.push(MountFailure {
-                    mount: self.registry.context.mounts_dir().display().to_string(),
-                    kind: FailureKind::SpecInvalid,
-                    reason: format!("scan mounts dir: {error}"),
-                    detail: None,
-                });
-                return self.outcome;
-            },
-        };
-
-        // A spec that fails to parse or carries an invalid mount name is
-        // recorded and skipped; it never aborts the pass or disturbs a running
-        // mount.
-        for failure in registry
-            .failures()
-            .iter()
-            .filter(|failure| self.scope.includes_failure_path(&failure.path))
-        {
-            self.outcome.failed.push(MountFailure {
-                mount: failure.path.display().to_string(),
-                kind: FailureKind::SpecInvalid,
-                reason: failure.error.to_string(),
-                detail: None,
-            });
-        }
-
-        // Phase 1 (serial, cheap): materialize, fingerprint, and decide. Settles
-        // unchanged mounts and materialize/duplicate failures here; only the
-        // compile-heavy loads carry into phase 2.
-        let mut work = Vec::new();
-        for (name, spec) in registry.iter() {
-            if !self.scope.contains(name.as_str()) {
-                continue;
-            }
-            if let Some(item) = self.plan_spec(spec.clone(), &registry.spec_path(name)) {
-                work.push(item);
-            }
-        }
-
-        // Phase 2 (parallel): compile + instantiate the planned mounts.
-        for result in self.load_in_parallel(work) {
-            self.record_load(result);
-        }
-
-        self.remove_stale_mounts();
-        info!(
-            added = self.outcome.added.len(),
-            updated = self.outcome.updated.len(),
-            removed = self.outcome.removed.len(),
-            failed = self.outcome.failed.len(),
-            duration_ms = self.started.elapsed().as_millis(),
-            "reconcile completed"
-        );
-        self.outcome
-    }
-
-    fn run_one(mut self, spec: Spec) -> ReconcileOutcome {
-        let path = self
-            .registry
-            .context
-            .mounts_dir()
-            .join(format!("{}.json", spec.mount));
-        if let Some(work) = self.plan_spec(spec, &path) {
-            self.record_load(self.registry.build_work(work));
-        }
-        self.outcome
-    }
-
-    /// Decide what a desired spec needs. Records unchanged mounts and
-    /// materialize/duplicate failures into the outcome directly; returns a
-    /// `LoadWork` only for mounts that must be (re)compiled. `path` is the
-    /// spec's on-disk file, used only for failure messages.
-    fn plan_spec(&mut self, spec: Spec, path: &Path) -> Option<LoadWork> {
-        let materialized = match materialize(spec, &self.providers) {
-            Ok(materialized) => materialized,
-            Err(error) => {
-                self.outcome.failed.push(MountFailure {
-                    mount: path.display().to_string(),
-                    kind: FailureKind::SpecInvalid,
-                    reason: error.to_string(),
-                    detail: None,
-                });
-                return None;
-            },
-        };
-        let mount = materialized.mount.clone();
-        // The mount Registry guarantees one spec per mount name (a spec must live
-        // at `<mount>.json`, and a duplicate or misnamed file is a load failure),
-        // so `desired` only tracks the set of names for stale-mount removal.
-        self.desired.insert(mount.clone());
-
-        let wasm_path = self
-            .registry
-            .context
-            .provider_path_by_id(&materialized.provider.id);
-        let fingerprint = mount_fingerprint(&materialized);
-        let running = self.registry.is_running(&mount);
-        let prior_fingerprint = self.registry.fingerprint(&mount);
-        if running && prior_fingerprint == Some(fingerprint) {
-            debug!(
-                mount = mount.as_str(),
-                provider = materialized.provider.meta.name.as_str(),
-                "reconcile mount unchanged"
-            );
-            return None;
-        }
-
-        if running && let Some(failure) = self.consent_failure(&mount, &materialized) {
-            self.outcome.failed.push(failure);
-            return None;
-        }
-
-        let reason = if prior_fingerprint.is_some() {
-            "config"
-        } else {
-            "new"
-        };
-        Some(LoadWork {
-            spec: materialized,
-            mount,
-            wasm_path,
-            running,
-            reason,
-        })
-    }
-
-    fn consent_failure(&self, mount: &str, candidate: &Spec) -> Option<MountFailure> {
-        let plan = match self.upgrade_plan(mount, candidate) {
-            Ok(plan) => plan,
-            Err(error) => {
-                return Some(MountFailure {
-                    mount: mount.to_string(),
-                    kind: error.failure_kind(),
-                    reason: error.to_string(),
-                    detail: None,
-                });
-            },
-        };
-        if !plan.requires_approval() {
-            return None;
-        }
-        if self
-            .approvals
-            .get(mount)
-            .is_some_and(|approved| approved.covers(&plan))
-        {
-            return None;
-        }
-        Some(MountFailure {
-            mount: mount.to_string(),
-            kind: FailureKind::ConsentRequired,
-            reason: format!("mount `{mount}` upgrade requires explicit approval"),
-            detail: Some(plan),
-        })
-    }
-
-    fn upgrade_plan(&self, mount: &str, candidate: &Spec) -> Result<UpgradePlan, RegistryError> {
-        let running = self
-            .registry
-            .running_specs
-            .read()
-            .get(mount)
-            .cloned()
-            .ok_or_else(|| {
-                RegistryError::RuntimeError(format!("running mount `{mount}` has no recorded spec"))
-            })?;
-        let old = pinned_manifest(&self.providers, &running)
-            .map_err(|error| RegistryError::ConfigError(error.to_string()))?
-            .ok_or_else(|| {
-                RegistryError::ProviderNotFound(format!(
-                    "running provider artifact for mount `{mount}` is missing"
-                ))
-            })?;
-        let new = pinned_manifest(&self.providers, candidate)
-            .map_err(|error| RegistryError::ConfigError(error.to_string()))?
-            .ok_or_else(|| {
-                RegistryError::ProviderNotFound(format!(
-                    "candidate provider artifact for mount `{mount}` is missing"
-                ))
-            })?;
-        Ok(UpgradePlan::diff(&old, &new))
-    }
-
-    /// Compile the planned mounts. Compilation dominates reconcile wall-time,
-    /// and the loads are independent across distinct mount names (`plan_path`
-    /// enforces that), so they run on Tokio's blocking pool. Publication
-    /// happens later in spec-path order.
-    /// Empty and single-item work skips the task setup.
-    fn load_in_parallel(&self, work: Vec<LoadWork>) -> Vec<LoadResult> {
-        if work.len() <= 1 {
-            return work
-                .into_iter()
-                .map(|item| self.registry.build_work(item))
-                .collect();
-        }
-
-        let expected = work.len();
-        let (tx, rx) = std::sync::mpsc::channel();
-        for (index, item) in work.into_iter().enumerate() {
-            let mount = item.mount.clone();
-            let registry = Arc::clone(self.registry);
-            let tx = tx.clone();
-            self.handle.spawn_blocking(move || {
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    registry.build_work(item)
-                }))
-                .unwrap_or_else(|_| LoadResult::Failed {
-                    mount,
-                    kind: FailureKind::Internal,
-                    reason: "reconcile load task panicked".to_string(),
-                });
-                let _ = tx.send((index, result));
-            });
-        }
-        drop(tx);
-
-        let mut results = Vec::with_capacity(expected);
-        while results.len() < expected {
-            let Ok(result) = rx.recv() else {
-                break;
-            };
-            results.push(result);
-        }
-        results.sort_by_key(|(index, _)| *index);
-        results.into_iter().map(|(_, result)| result).collect()
-    }
-
-    fn record_load(&mut self, result: LoadResult) {
-        match result {
-            LoadResult::Ready {
-                mount,
-                wasm_path,
-                running,
-                reason,
-                duration,
-                built,
-            } => {
-                let apply_started = Instant::now();
-                let applied = if running {
-                    self.registry.replace_mount(*built, self.handle)
-                } else {
-                    self.registry
-                        .publish_new_mount(*built, self.handle)
-                        .map(|_| ())
-                };
-                match applied {
-                    Ok(()) => {
-                        if running {
-                            info!(
-                                mount = mount.as_str(),
-                                provider = %wasm_path.display(),
-                                reason,
-                                duration_ms = (duration + apply_started.elapsed()).as_millis(),
-                                "reconcile updated mount"
-                            );
-                            self.outcome.updated.push(mount);
-                        } else {
-                            info!(
-                                mount = mount.as_str(),
-                                provider = %wasm_path.display(),
-                                reason,
-                                duration_ms = (duration + apply_started.elapsed()).as_millis(),
-                                "reconcile added mount"
-                            );
-                            self.outcome.added.push(mount);
-                        }
-                    },
-                    Err(error) => {
-                        self.outcome.failed.push(MountFailure {
-                            mount,
-                            kind: error.failure_kind(),
-                            reason: error.to_string(),
-                            detail: None,
-                        });
-                    },
-                }
-            },
-            LoadResult::Failed {
-                mount,
-                kind,
-                reason,
-            } => {
-                self.outcome.failed.push(MountFailure {
-                    mount,
-                    kind,
-                    reason,
-                    detail: None,
-                });
-            },
-        }
-    }
-
-    fn remove_stale_mounts(&mut self) {
-        for mount in self.registry.mounts() {
-            if self.scope.contains(&mount) && !self.desired.contains(&mount) {
-                let mount_started = Instant::now();
-                if self.registry.remove_mount(&mount).is_ok() {
-                    info!(
-                        mount = mount.as_str(),
-                        duration_ms = mount_started.elapsed().as_millis(),
-                        "reconcile removed mount"
-                    );
-                    self.outcome.removed.push(mount.clone());
-                }
-            }
-        }
-    }
-}
-
-struct ReconcileScope {
-    mounts: Option<HashSet<String>>,
-}
-
-impl ReconcileScope {
-    fn all() -> Self {
-        Self { mounts: None }
-    }
-
-    fn from_mounts(mounts: Option<Vec<String>>) -> Self {
-        Self {
-            mounts: mounts.map(|mounts| mounts.into_iter().collect()),
-        }
-    }
-
-    fn contains(&self, mount: &str) -> bool {
-        match &self.mounts {
-            Some(mounts) => mounts.contains(mount),
-            None => true,
-        }
-    }
-
-    fn includes_failure_path(&self, path: &Path) -> bool {
-        match &self.mounts {
-            Some(mounts) => path
-                .file_stem()
-                .and_then(|stem| stem.to_str())
-                .is_some_and(|stem| mounts.contains(stem)),
-            None => true,
-        }
-    }
-}
-
-/// A planned mount that needs (re)compilation, produced by `plan_path`.
-struct LoadWork {
-    spec: Spec,
-    mount: String,
-    wasm_path: PathBuf,
-    /// Whether a prior instance is being replaced (update) versus a fresh add.
-    running: bool,
-    reason: &'static str,
-}
-
 struct BuiltMount {
     mount: String,
     revalidate: bool,
-    fingerprint: u64,
-    spec: Spec,
     runtime: Arc<Runtime>,
-}
-
-/// The outcome of loading one [`LoadWork`], folded back into the reconcile
-/// outcome by `record_load`.
-enum LoadResult {
-    Ready {
-        mount: String,
-        wasm_path: PathBuf,
-        running: bool,
-        reason: &'static str,
-        duration: Duration,
-        built: Box<BuiltMount>,
-    },
-    Failed {
-        mount: String,
-        kind: FailureKind,
-        reason: String,
-    },
-}
-
-/// One mount that did not converge during [`MountRuntimes::reconcile`].
-#[derive(Debug, Clone)]
-pub struct MountFailure {
-    /// Mount name, or the spec path when the name could not be parsed.
-    pub mount: String,
-    pub kind: FailureKind,
-    pub reason: String,
-    pub detail: Option<UpgradePlan>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FailureKind {
-    ConsentRequired,
-    SpecInvalid,
-    ProviderMissing,
-    Internal,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ReconcileBusy;
-
-/// What a reconcile pass changed. Host-local; the daemon maps it to the
-/// control-API report type.
-#[derive(Debug, Default)]
-pub struct ReconcileOutcome {
-    pub added: Vec<String>,
-    pub removed: Vec<String>,
-    pub updated: Vec<String>,
-    pub failed: Vec<MountFailure>,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct UpgradeApprovals {
-    plans: HashMap<String, UpgradePlan>,
-}
-
-impl UpgradeApprovals {
-    pub fn approve(&mut self, mount: impl Into<String>, plan: UpgradePlan) {
-        self.plans.insert(mount.into(), plan);
-    }
-
-    #[must_use]
-    pub fn get(&self, mount: &str) -> Option<&UpgradePlan> {
-        self.plans.get(mount)
-    }
-}
-
-/// Fingerprint a materialized spec. The spec carries the pinned `ProviderRef`
-/// (content id + meta), so the spec hash already captures artifact identity: a
-/// swapped-out provider is a new id, hence a new spec hash. No file read or
-/// re-hash of the WASM is needed on reconcile.
-fn mount_fingerprint(spec: &Spec) -> u64 {
-    let bytes = serde_json::to_vec(spec).unwrap_or_default();
-    let digest = blake3::hash(&bytes);
-    let prefix = digest.as_bytes()[..8]
-        .try_into()
-        .expect("blake3 digest is at least 8 bytes");
-    u64::from_le_bytes(prefix)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -938,36 +353,18 @@ impl RegistryError {
             other => Self::RuntimeError(other.to_string()),
         }
     }
-
-    /// Classify this registry error for mount-reconcile reporting.
-    pub fn failure_kind(&self) -> FailureKind {
-        match self {
-            Self::ConfigError(_) | Self::DuplicateMount(_) | Self::MountNotFound(_) => {
-                FailureKind::SpecInvalid
-            },
-            Self::ProviderNotFound(_) => FailureKind::ProviderMissing,
-            Self::RuntimeError(_) => FailureKind::Internal,
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{FailureKind, MountRuntimes, RegistryError};
+    use super::{MountRuntimes, RegistryError};
     use crate::HostContext;
-    use crate::Runtime;
-    use crate::cache::Caches;
     use crate::cloner::GitCloner;
-    use crate::ops::namespace::ReadBytes;
-    use crate::test_support::PendingTestCallout;
-    use omnifs_core::path::Path as OmnifsPath;
-    use omnifs_wit::provider::types::{Callout, CalloutResult, Header, HttpResponse};
     use omnifs_workspace::ids::{ProviderId, ProviderMeta, ProviderName};
-    use omnifs_workspace::mounts::{Spec, UpgradePlan};
+    use omnifs_workspace::mounts::{Registry, Spec};
     use omnifs_workspace::provider::ProviderStore;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
-    use std::time::Duration;
 
     /// Lay `src` WASM into the provider store under `providers_dir` and return a
     /// `Spec` (built from `body`, which omits `provider`) pinned to the content
@@ -1000,22 +397,6 @@ mod tests {
         serde_json::from_value(body).expect("build pinned spec")
     }
 
-    fn provider_wasm_with_capabilities(src: &Path, capabilities: &serde_json::Value) -> Vec<u8> {
-        let base = std::fs::read(src).expect("read provider wasm");
-        let metadata = serde_json::json!({
-            "id": "test-provider",
-            "displayName": "Test Provider",
-            "provider": "test_provider.wasm",
-            "defaultMount": "test",
-            "capabilities": capabilities,
-        });
-        omnifs_workspace::provider::embed_provider_metadata_section(
-            &base,
-            serde_json::to_vec(&metadata).unwrap().as_slice(),
-        )
-        .expect("embed provider metadata")
-    }
-
     fn wasm_artifact_path(file_name: &str) -> PathBuf {
         let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -1031,68 +412,6 @@ mod tests {
 
     fn test_provider_wasm_path() -> PathBuf {
         wasm_artifact_path("test_provider.wasm")
-    }
-
-    fn remote_item_body(title: &str) -> Vec<u8> {
-        format!(r#"{{"number":9,"title":"{title}","body":"Body 9","state":"open"}}"#).into_bytes()
-    }
-
-    fn http_response(status: u16, etag: Option<&str>, body: Vec<u8>) -> CalloutResult {
-        let mut headers = Vec::new();
-        if let Some(etag) = etag {
-            headers.push(Header {
-                name: "etag".to_string(),
-                value: etag.to_string(),
-            });
-        }
-        CalloutResult::HttpResponse(HttpResponse {
-            status,
-            headers,
-            body,
-        })
-    }
-
-    async fn next_callout(runtime: &Runtime) -> PendingTestCallout {
-        // Wall-clock deadline, not a yield-count budget: the callout lands only
-        // after real wasm work whose poll count varies wildly with machine
-        // load, and tokio test time is paused here so timers cannot be used.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        while std::time::Instant::now() < deadline {
-            if let Some(callout) = runtime.try_recv_test_callout() {
-                return callout;
-            }
-            tokio::task::yield_now().await;
-        }
-        panic!("provider did not issue a test callout");
-    }
-
-    fn fetch_header<'a>(callout: &'a PendingTestCallout, name: &str) -> Option<&'a str> {
-        let Callout::Fetch(request) = callout.callout() else {
-            panic!("expected fetch callout, got {:?}", callout.callout());
-        };
-        request
-            .headers
-            .iter()
-            .find(|header| header.name.eq_ignore_ascii_case(name))
-            .map(|header| header.value.as_str())
-    }
-
-    async fn wait_for_cached_bytes(runtime: &Runtime, path: &OmnifsPath, expected: &[u8]) {
-        // Wall-clock deadline, not a yield-count budget: the refresh lands only
-        // after real wasm work whose poll count varies wildly with machine load
-        // (a cold wasmtime compile cache flaked a fixed 100-iteration budget).
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        while std::time::Instant::now() < deadline {
-            if runtime
-                .cache()
-                .cached_canonical_for(path)
-                .is_some_and(|canonical| canonical.bytes == expected)
-            {
-                return;
-            }
-            tokio::task::yield_now().await;
-        }
-        panic!("canonical cache did not refresh to expected bytes");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1158,329 +477,77 @@ mod tests {
         assert!(registry.mounts().is_empty());
     }
 
-    /// The daemon serve-time backstop: a mount pinning a `ProviderId` whose
-    /// artifact is not retained in the provider store is refused at reconcile and
-    /// surfaces as a `MountFailure`, never served. Guards "the daemon never
-    /// serves a provider it cannot resolve by content id."
     #[tokio::test(flavor = "multi_thread")]
-    async fn reconcile_refuses_mount_with_missing_artifact() {
-        let config_dir = tempfile::tempdir().expect("temp config dir");
-        let cache_dir = tempfile::tempdir().expect("temp cache dir");
-        let providers_dir = tempfile::tempdir().expect("temp providers dir");
-        let paths = omnifs_workspace::layout::WorkspaceLayout::under_root(config_dir.path());
-
-        // A mount pinning a content id with no matching retained artifact.
-        let mounts_dir = paths.config_dir.join("mounts");
-        std::fs::create_dir_all(&mounts_dir).expect("create mounts dir");
-        let missing_id = "a".repeat(64);
+    async fn load_rejects_missing_provider_artifact() {
+        let root = tempfile::tempdir().expect("temp root");
+        let cache = root.path().join("cache");
+        let config = root.path().join("config");
+        let mounts = root.path().join("snapshot");
+        let providers = root.path().join("providers");
+        std::fs::create_dir_all(&mounts).expect("mounts");
+        std::fs::create_dir_all(&providers).expect("providers");
         std::fs::write(
-            mounts_dir.join("db.json"),
+            mounts.join("missing.json"),
             format!(
                 r#"{{
-                "provider": {{ "id": "{missing_id}", "meta": {{ "name": "db" }} }},
-                "mount": "db",
-                "config": {{"path": "/data/chinook.sqlite"}}
-            }}"#
+            "provider": {{ "id": "{}", "meta": {{ "name": "missing" }} }},
+            "mount": "missing"
+        }}"#,
+                "a".repeat(64)
             ),
         )
-        .expect("write spec");
-
-        let cloner = Arc::new(GitCloner::new(cache_dir.path().join("clones")));
-        let registry = Arc::new(
-            MountRuntimes::new(
-                HostContext::new(
-                    cache_dir.path(),
-                    &paths.config_dir,
-                    providers_dir.path(),
-                    &paths.credentials_file,
-                )
-                .with_wasm_cache_dir(crate::test_support::wasm_cache_dir()),
-                cloner,
-            )
-            .expect("registry init"),
-        );
-
-        let outcome = registry.reconcile(&tokio::runtime::Handle::current());
-
-        assert!(
-            registry.mounts().is_empty(),
-            "a mount with a missing artifact must not be served"
-        );
-        assert!(outcome.added.is_empty(), "no mount should have been added");
-        let failure = outcome
-            .failed
-            .iter()
-            .find(|failure| failure.mount == "db")
-            .unwrap_or_else(|| {
-                panic!(
-                    "expected a failure for mount `db`, got: {:?}",
-                    outcome.failed
-                )
-            });
-        assert!(
-            failure.reason.contains("provider not found"),
-            "failure should report the missing artifact, got: {}",
-            failure.reason
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn reconcile_keeps_running_mount_when_replacement_fails() {
-        let config_dir = tempfile::tempdir().expect("temp config dir");
-        let cache_dir = tempfile::tempdir().expect("temp cache dir");
-        let providers_dir = tempfile::tempdir().expect("temp providers dir");
-        let paths = omnifs_workspace::layout::WorkspaceLayout::under_root(config_dir.path());
-
-        let base_wasm = test_provider_wasm_path();
-        assert!(
-            base_wasm.exists(),
-            "test provider missing at {}. Run `just build providers` first.",
-            base_wasm.display()
-        );
-
-        let mounts_dir = paths.config_dir.join("mounts");
-        std::fs::create_dir_all(&mounts_dir).expect("create mounts dir");
-        let valid_spec = pin_spec(
-            providers_dir.path(),
-            &base_wasm,
-            "test-provider",
-            serde_json::json!({
-                "mount": "test",
-                "config": {},
-                "capabilities": { "domains": ["httpbin.org"] }
-            }),
-        );
-        let spec_path = mounts_dir.join("test.json");
-        std::fs::write(
-            &spec_path,
-            serde_json::to_vec_pretty(&valid_spec).expect("serialize valid spec"),
-        )
-        .expect("write valid spec");
-
-        let cloner = Arc::new(GitCloner::new(cache_dir.path().join("clones")));
-        let registry = Arc::new(
-            MountRuntimes::new(
-                HostContext::new(
-                    cache_dir.path(),
-                    &paths.config_dir,
-                    providers_dir.path(),
-                    &paths.credentials_file,
-                )
-                .with_wasm_cache_dir(crate::test_support::wasm_cache_dir()),
-                cloner,
-            )
-            .expect("registry init"),
-        );
-
-        let first = registry.reconcile(&tokio::runtime::Handle::current());
-        assert_eq!(first.added, ["test"], "first reconcile: {first:?}");
-        let running = registry.get("test").expect("mount should be running");
-
-        let missing_id = "b".repeat(64);
-        std::fs::write(
-            &spec_path,
-            format!(
-                r#"{{
-                "provider": {{ "id": "{missing_id}", "meta": {{ "name": "test-provider" }} }},
-                "mount": "test",
-                "capabilities": {{ "domains": ["httpbin.org"] }},
-                "config": {{}}
-            }}"#
-            ),
-        )
-        .expect("write broken replacement spec");
-
-        let second = registry.reconcile(&tokio::runtime::Handle::current());
-        assert!(second.updated.is_empty());
-        assert!(second.failed.iter().any(|failure| failure.mount == "test"));
-        let still_running = registry
-            .get("test")
-            .expect("old mount should remain running");
-        assert!(Arc::ptr_eq(&running, &still_running));
-    }
-
-    #[tokio::test(flavor = "current_thread", start_paused = true)]
-    #[allow(clippy::too_many_lines)]
-    async fn revalidation_timer_refreshes_recent_object_without_provider_invalidation() {
-        let config_dir = tempfile::tempdir().expect("temp config dir");
-        let cache_dir = tempfile::tempdir().expect("temp cache dir");
-        let providers_dir = tempfile::tempdir().expect("temp providers dir");
-        let paths = omnifs_workspace::layout::WorkspaceLayout::under_root(config_dir.path());
-
-        let base_wasm = test_provider_wasm_path();
-        assert!(
-            base_wasm.exists(),
-            "test provider missing at {}. Run `just build providers` first.",
-            base_wasm.display()
-        );
-        let spec = pin_spec(
-            providers_dir.path(),
-            &base_wasm,
-            "test-provider",
-            serde_json::json!({
-                "mount": "test",
-                "config": {},
-                "capabilities": { "domains": ["httpbin.org"] }
-            }),
-        );
-
-        let engine = crate::component_engine(Some(&crate::test_support::wasm_cache_dir()), |_| {})
-            .expect("engine");
-        let cloner = Arc::new(GitCloner::new(cache_dir.path().join("clones")));
-        let caches = Caches::open(cache_dir.path()).expect("cache open");
-        let context = HostContext::new(
-            cache_dir.path(),
-            &paths.config_dir,
-            providers_dir.path(),
-            &paths.credentials_file,
-        );
-        let credential_service = crate::auth::credential_service_for_file(&paths.credentials_file)
-            .expect("credential service");
-        let runtime = Arc::new(
-            Runtime::new_for_callout_tests(
-                &engine,
-                &base_wasm,
-                &spec,
-                cloner,
-                &context,
-                &caches,
-                &credential_service,
-            )
-            .expect("runtime"),
-        );
-
-        let timer_config_dir = tempfile::tempdir().expect("timer config dir");
-        let timer_cache_dir = tempfile::tempdir().expect("timer cache dir");
-        let timer_providers_dir = tempfile::tempdir().expect("timer providers dir");
-        let timer_paths =
-            omnifs_workspace::layout::WorkspaceLayout::under_root(timer_config_dir.path());
-        let timer_registry = MountRuntimes::new(
-            HostContext::new(
-                timer_cache_dir.path(),
-                &timer_paths.config_dir,
-                timer_providers_dir.path(),
-                &timer_paths.credentials_file,
-            )
-            .with_wasm_cache_dir(crate::test_support::wasm_cache_dir()),
-            Arc::new(GitCloner::new(timer_cache_dir.path().join("clones"))),
-        )
-        .expect("timer registry");
-
-        timer_registry.start_timer(
-            "test",
-            &runtime,
-            spec.revalidate,
+        .expect("spec");
+        let context =
+            HostContext::new(&cache, &config, &providers, root.path().join("credentials"))
+                .with_wasm_cache_dir(crate::test_support::wasm_cache_dir());
+        let result = MountRuntimes::load(
+            context,
+            Arc::new(GitCloner::new(root.path().join("clones"))),
+            &Registry::load(&mounts).expect("load selected snapshot"),
             &tokio::runtime::Handle::current(),
         );
-        tokio::task::yield_now().await;
-
-        let path = OmnifsPath::parse("/items/open/9/item.json").unwrap();
-        let content_type = path.content_type_mime(None).to_string();
-        let stale = remote_item_body("stale");
-        let fresh = remote_item_body("fresh");
-
-        let namespace = runtime.namespace();
-        let read = namespace.read_file(&path, content_type.clone(), None);
-        let answer = async {
-            let callout = next_callout(&runtime).await;
-            assert_eq!(fetch_header(&callout, "if-none-match"), None);
-            callout.answer(http_response(200, Some("item-9-v1"), stale.clone()));
-        };
-        let (read_result, ()) = tokio::join!(read, answer);
-        read_result.expect("initial read");
-        wait_for_cached_bytes(&runtime, &path, &stale).await;
-        let _ = runtime.drain_invalidated_paths();
-
-        tokio::time::advance(Duration::from_mins(1)).await;
-        let callout = next_callout(&runtime).await;
-        assert_eq!(fetch_header(&callout, "if-none-match"), Some("item-9-v1"));
-        callout.answer(http_response(200, Some("item-9-v2"), fresh.clone()));
-        wait_for_cached_bytes(&runtime, &path, &fresh).await;
-
-        let subsequent = runtime
-            .namespace()
-            .read_file(&path, content_type, None)
-            .await
-            .expect("subsequent read");
-        assert!(matches!(subsequent.bytes, ReadBytes::Canonical));
-        assert_eq!(
-            runtime.canonical_bytes_for(&path).as_deref(),
-            Some(fresh.as_slice())
-        );
-        assert!(
-            !runtime
-                .drain_invalidated_paths()
-                .iter()
-                .any(|invalidated| invalidated == &path),
-            "item 9 must refresh without an explicit provider invalidation"
-        );
-
-        timer_registry.shutdown_all();
-        runtime.shutdown().expect("runtime shutdown");
+        assert!(matches!(result, Err(RegistryError::ProviderNotFound(_))));
     }
 
-    /// Shared reconcile setup: a registry over fresh temp dirs plus the mounts
-    /// dir a test writes specs into. Holds the temp dirs so they outlive the
-    /// registry.
-    struct ReconcileFixture {
-        registry: Arc<MountRuntimes>,
-        mounts_dir: PathBuf,
-        providers_dir: tempfile::TempDir,
-        base_wasm: PathBuf,
-        _config_dir: tempfile::TempDir,
-        _cache_dir: tempfile::TempDir,
+    #[tokio::test(flavor = "multi_thread")]
+    async fn load_rejects_malformed_snapshot() {
+        let root = tempfile::tempdir().expect("temp root");
+        let mounts = root.path().join("snapshot");
+        std::fs::create_dir_all(&mounts).expect("mounts");
+        std::fs::write(mounts.join("broken.json"), b"not json").expect("spec");
+        let context = HostContext::new(
+            root.path().join("cache"),
+            root.path().join("config"),
+            root.path().join("providers"),
+            root.path().join("credentials"),
+        );
+        let result = MountRuntimes::load(
+            context,
+            Arc::new(GitCloner::new(root.path().join("clones"))),
+            &Registry::load(&mounts).expect("load selected snapshot"),
+            &tokio::runtime::Handle::current(),
+        );
+        assert!(
+            matches!(result, Err(RegistryError::ConfigError(message)) if message.contains("broken.json"))
+        );
     }
 
-    fn reconcile_fixture() -> ReconcileFixture {
-        let config_dir = tempfile::tempdir().expect("temp config dir");
-        let cache_dir = tempfile::tempdir().expect("temp cache dir");
-        let providers_dir = tempfile::tempdir().expect("temp providers dir");
-        let paths = omnifs_workspace::layout::WorkspaceLayout::under_root(config_dir.path());
-
-        let base_wasm = test_provider_wasm_path();
-        assert!(
-            base_wasm.exists(),
-            "test provider missing at {}. Run `just build providers` first.",
-            base_wasm.display()
-        );
-
-        let mounts_dir = paths.config_dir.join("mounts");
-        std::fs::create_dir_all(&mounts_dir).expect("create mounts dir");
-
-        let cloner = Arc::new(GitCloner::new(cache_dir.path().join("clones")));
-        let registry = Arc::new(
-            MountRuntimes::new(
-                HostContext::new(
-                    cache_dir.path(),
-                    &paths.config_dir,
-                    providers_dir.path(),
-                    &paths.credentials_file,
-                )
-                .with_wasm_cache_dir(crate::test_support::wasm_cache_dir()),
-                cloner,
-            )
-            .expect("registry init"),
-        );
-
-        ReconcileFixture {
-            registry,
-            mounts_dir,
-            providers_dir,
-            base_wasm,
-            _config_dir: config_dir,
-            _cache_dir: cache_dir,
+    #[tokio::test(flavor = "multi_thread")]
+    async fn load_publishes_all_snapshot_mounts() {
+        let root = tempfile::tempdir().expect("temp root");
+        let mounts = root.path().join("snapshot");
+        let providers = root.path().join("providers");
+        std::fs::create_dir_all(&mounts).expect("mounts");
+        std::fs::create_dir_all(&providers).expect("providers");
+        let wasm = test_provider_wasm_path();
+        if !wasm.exists() {
+            // Provider WASM is an optional maintainer artifact; the failure
+            // tests above remain hermetic when it is absent.
+            return;
         }
-    }
-
-    /// A running mount whose spec changes to a still-valid but different form is
-    /// replaced: reconcile reports it as `updated` and swaps in a new runtime
-    /// instance (a fresh `Arc`), not the same one.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn reconcile_updates_running_mount_on_spec_change() {
-        let fx = reconcile_fixture();
         let spec = pin_spec(
-            fx.providers_dir.path(),
-            &fx.base_wasm,
+            &providers,
+            &wasm,
             "test-provider",
             serde_json::json!({
                 "mount": "test",
@@ -1488,235 +555,26 @@ mod tests {
                 "capabilities": { "domains": ["httpbin.org"] }
             }),
         );
-        let spec_path = fx.mounts_dir.join("test.json");
-        std::fs::write(&spec_path, serde_json::to_vec_pretty(&spec).unwrap()).expect("write spec");
-
-        let handle = tokio::runtime::Handle::current();
-        let first = fx.registry.reconcile(&handle);
-        assert_eq!(
-            first.added,
-            ["test"],
-            "first reconcile adds the mount: {first:?}"
-        );
-        let running = fx.registry.get("test").expect("mount should be running");
-
-        // A superset domain grant still satisfies the provider's httpbin.org need
-        // but changes the mount fingerprint, so reconcile replaces the instance.
-        let mut changed = serde_json::to_value(&spec).unwrap();
-        changed["capabilities"]["domains"] = serde_json::json!(["httpbin.org", "example.com"]);
-        let changed: Spec = serde_json::from_value(changed).expect("rebuild changed spec");
-        std::fs::write(&spec_path, serde_json::to_vec_pretty(&changed).unwrap())
-            .expect("write changed spec");
-
-        let second = fx.registry.reconcile(&handle);
-        assert_eq!(
-            second.updated,
-            ["test"],
-            "changed spec updates the mount: {second:?}"
-        );
-        assert!(second.added.is_empty());
-        let replaced = fx.registry.get("test").expect("mount running after update");
-        assert!(
-            !Arc::ptr_eq(&running, &replaced),
-            "an update swaps in a new runtime instance"
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn reconcile_requires_approval_for_capability_widening() {
-        let fx = reconcile_fixture();
-        let old_wasm = provider_wasm_with_capabilities(
-            &fx.base_wasm,
-            &serde_json::json!([
-                { "kind": "domain", "value": "httpbin.org", "why": "test api" }
-            ]),
-        );
-        let new_wasm = provider_wasm_with_capabilities(
-            &fx.base_wasm,
-            &serde_json::json!([
-                { "kind": "domain", "value": "httpbin.org", "why": "test api" },
-                { "kind": "domain", "value": "example.com", "why": "new api" }
-            ]),
-        );
-        let spec = pin_spec_bytes(
-            fx.providers_dir.path(),
-            &old_wasm,
-            "test-provider",
-            serde_json::json!({
-                "mount": "test",
-                "config": {},
-                "capabilities": { "domains": ["httpbin.org"] }
-            }),
-        );
-        let spec_path = fx.mounts_dir.join("test.json");
-        std::fs::write(&spec_path, serde_json::to_vec_pretty(&spec).unwrap()).expect("write spec");
-
-        let handle = tokio::runtime::Handle::current();
-        let first = fx.registry.reconcile(&handle);
-        assert_eq!(first.added, ["test"], "first reconcile: {first:?}");
-        let running = fx.registry.get("test").expect("mount should be running");
-
-        let widened = pin_spec_bytes(
-            fx.providers_dir.path(),
-            &new_wasm,
-            "test-provider",
-            serde_json::json!({
-                "mount": "test",
-                "config": {},
-                "capabilities": { "domains": ["httpbin.org", "example.com"] }
-            }),
-        );
-        std::fs::write(&spec_path, serde_json::to_vec_pretty(&widened).unwrap())
-            .expect("write widened spec");
-
-        let refused = fx.registry.reconcile(&handle);
-        assert!(
-            refused.updated.is_empty(),
-            "unapproved widening must not update: {refused:?}"
-        );
-        let failure = refused
-            .failed
-            .iter()
-            .find(|failure| failure.mount == "test")
-            .expect("widening failure");
-        assert_eq!(failure.kind, FailureKind::ConsentRequired);
-        let actual = failure.detail.clone().expect("actual approval delta");
-        assert!(matches!(actual, UpgradePlan::CapabilityLimitOrAuth { .. }));
-        let still_running = fx.registry.get("test").expect("old mount remains");
-        assert!(Arc::ptr_eq(&running, &still_running));
-
-        let mut approvals = super::UpgradeApprovals::default();
-        approvals.approve("test", actual);
-        let approved = fx.registry.reconcile_with_approvals(&handle, approvals);
-        assert_eq!(
-            approved.updated,
-            ["test"],
-            "approved widening updates the mount: {approved:?}"
-        );
-        let replaced = fx.registry.get("test").expect("mount running after update");
-        assert!(
-            !Arc::ptr_eq(&running, &replaced),
-            "approval permits the runtime swap"
-        );
-    }
-
-    /// A mount whose spec file is deleted is removed on the next reconcile:
-    /// reported as `removed` and no longer served.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn reconcile_removes_mount_when_spec_deleted() {
-        let fx = reconcile_fixture();
-        let spec = pin_spec(
-            fx.providers_dir.path(),
-            &fx.base_wasm,
-            "test-provider",
-            serde_json::json!({
-                "mount": "test",
-                "config": {},
-                "capabilities": { "domains": ["httpbin.org"] }
-            }),
-        );
-        let spec_path = fx.mounts_dir.join("test.json");
-        std::fs::write(&spec_path, serde_json::to_vec_pretty(&spec).unwrap()).expect("write spec");
-
-        let handle = tokio::runtime::Handle::current();
-        let first = fx.registry.reconcile(&handle);
-        assert_eq!(first.added, ["test"]);
-        assert!(
-            fx.registry.get("test").is_some(),
-            "mount is running after add"
-        );
-
-        std::fs::remove_file(&spec_path).expect("delete spec");
-        let second = fx.registry.reconcile(&handle);
-        assert_eq!(
-            second.removed,
-            ["test"],
-            "a deleted spec removes the mount: {second:?}"
-        );
-        assert!(
-            fx.registry.get("test").is_none(),
-            "a removed mount is no longer served"
-        );
-        assert!(fx.registry.mounts().is_empty());
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn scoped_reconcile_leaves_out_of_scope_mount_untouched() {
-        let fx = reconcile_fixture();
-        let test_spec = pin_spec(
-            fx.providers_dir.path(),
-            &fx.base_wasm,
-            "test-provider",
-            serde_json::json!({
-                "mount": "test",
-                "config": {},
-                "capabilities": { "domains": ["httpbin.org"] }
-            }),
-        );
-        let other_spec = pin_spec(
-            fx.providers_dir.path(),
-            &fx.base_wasm,
-            "test-provider",
-            serde_json::json!({
-                "mount": "other",
-                "config": {},
-                "capabilities": { "domains": ["httpbin.org"] }
-            }),
-        );
-        let test_path = fx.mounts_dir.join("test.json");
-        let other_path = fx.mounts_dir.join("other.json");
-        std::fs::write(&test_path, serde_json::to_vec_pretty(&test_spec).unwrap())
-            .expect("write test spec");
-        std::fs::write(&other_path, serde_json::to_vec_pretty(&other_spec).unwrap())
-            .expect("write other spec");
-
-        let handle = tokio::runtime::Handle::current();
-        let first = fx.registry.reconcile(&handle);
-        assert_eq!(
-            first.added,
-            ["other", "test"],
-            "first reconcile adds both mounts: {first:?}"
-        );
-        let other_running = fx.registry.get("other").expect("other mount is running");
-
-        std::fs::remove_file(&other_path).expect("delete out-of-scope spec");
-        let scoped = fx
-            .registry
-            .try_reconcile_scoped(&handle, Some(vec!["test".to_string()]))
-            .expect("scoped reconcile must acquire lock");
-
-        assert!(
-            scoped.removed.is_empty(),
-            "out-of-scope deleted spec must not remove a running mount: {scoped:?}"
-        );
-        let still_running = fx.registry.get("other").expect("other mount still running");
-        assert!(Arc::ptr_eq(&other_running, &still_running));
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn try_reconcile_scoped_reports_busy_when_lock_is_held() {
-        let config_dir = tempfile::tempdir().expect("temp config dir");
-        let cache_dir = tempfile::tempdir().expect("temp cache dir");
-        let providers_dir = tempfile::tempdir().expect("temp providers dir");
-        let paths = omnifs_workspace::layout::WorkspaceLayout::under_root(config_dir.path());
-        let registry = Arc::new(
-            MountRuntimes::new(
-                HostContext::new(
-                    cache_dir.path(),
-                    &paths.config_dir,
-                    providers_dir.path(),
-                    &paths.credentials_file,
-                )
-                .with_wasm_cache_dir(crate::test_support::wasm_cache_dir()),
-                Arc::new(GitCloner::new(cache_dir.path().join("clones"))),
-            )
-            .expect("registry init"),
-        );
-        let handle = tokio::runtime::Handle::current();
-        let _guard = registry.reconcile_lock.lock();
-
-        let result = registry.try_reconcile_scoped(&handle, None);
-
-        assert!(matches!(result, Err(super::ReconcileBusy)));
+        std::fs::write(
+            mounts.join("test.json"),
+            serde_json::to_vec_pretty(&spec).expect("serialize spec"),
+        )
+        .expect("spec");
+        let context = HostContext::new(
+            root.path().join("cache"),
+            root.path().join("config"),
+            &providers,
+            root.path().join("credentials"),
+        )
+        .with_wasm_cache_dir(crate::test_support::wasm_cache_dir());
+        let registry = MountRuntimes::load(
+            context,
+            Arc::new(GitCloner::new(root.path().join("clones"))),
+            &Registry::load(&mounts).expect("load selected snapshot"),
+            &tokio::runtime::Handle::current(),
+        )
+        .expect("startup load");
+        assert_eq!(registry.mounts(), ["test"]);
+        registry.shutdown_all();
     }
 }

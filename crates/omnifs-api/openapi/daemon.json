@@ -7,7 +7,7 @@
       "name": "MIT OR Apache-2.0",
       "identifier": "MIT OR Apache-2.0"
     },
-    "version": "6.0"
+    "version": "7.0"
   },
   "paths": {
     "/v1/credentials": {
@@ -226,39 +226,6 @@
             }
           }
         }
-      },
-      "post": {
-        "operationId": "mount_create",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {}
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "mount create result",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/MountReport"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "invalid mount spec",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          }
-        }
       }
     },
     "/v1/mounts/{name}": {
@@ -282,98 +249,6 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/MountInfo"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "mount not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          }
-        }
-      },
-      "put": {
-        "operationId": "mount_update",
-        "parameters": [
-          {
-            "name": "name",
-            "in": "path",
-            "description": "mount name",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/MountUpdateRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "mount update result",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/MountReport"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "invalid mount spec or approval",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "mount not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          }
-        }
-      },
-      "delete": {
-        "operationId": "mount_delete",
-        "parameters": [
-          {
-            "name": "name",
-            "in": "path",
-            "description": "mount name",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "mount delete result",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/MountReport"
                 }
               }
             }
@@ -496,50 +371,6 @@
         }
       }
     },
-    "/v1/reconcile": {
-      "post": {
-        "summary": "`POST /v1/reconcile`: converge the running mount set to `mounts/*.json`.",
-        "operationId": "reconcile",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "oneOf": [
-                  {
-                    "type": "null"
-                  },
-                  {
-                    "$ref": "#/components/schemas/ReconcileRequest"
-                  }
-                ]
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "what the reconcile changed",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ReconcileReport"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "another reconcile is already in progress",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/v1/shutdown": {
       "post": {
         "summary": "`POST /v1/shutdown`: release the daemon's serving latch and exit. Frontend\nprocesses have independent lifetimes and are torn down by the CLI.",
@@ -578,18 +409,6 @@
   },
   "components": {
     "schemas": {
-      "AddedField": {
-        "type": "object",
-        "required": [
-          "name"
-        ],
-        "properties": {
-          "default": {},
-          "name": {
-            "type": "string"
-          }
-        }
-      },
       "ApiError": {
         "type": "object",
         "required": [
@@ -605,88 +424,6 @@
             "type": "string"
           }
         }
-      },
-      "AuthDelta": {
-        "type": "object",
-        "properties": {
-          "new": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/AuthSurface"
-              }
-            ]
-          },
-          "old": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/AuthSurface"
-              }
-            ]
-          }
-        }
-      },
-      "AuthSchemeSurface": {
-        "type": "object",
-        "required": [
-          "key",
-          "scheme"
-        ],
-        "properties": {
-          "key": {
-            "type": "string"
-          },
-          "scheme": {}
-        }
-      },
-      "AuthSurface": {
-        "type": "object",
-        "required": [
-          "default",
-          "schemes"
-        ],
-        "properties": {
-          "default": {
-            "type": "string"
-          },
-          "schemes": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/AuthSchemeSurface"
-            }
-          }
-        }
-      },
-      "CapabilityChange": {
-        "type": "object",
-        "required": [
-          "kind",
-          "value",
-          "direction"
-        ],
-        "properties": {
-          "direction": {
-            "$ref": "#/components/schemas/CapabilityDirection"
-          },
-          "kind": {
-            "type": "string"
-          },
-          "value": {
-            "type": "string"
-          }
-        }
-      },
-      "CapabilityDirection": {
-        "type": "string",
-        "enum": [
-          "added",
-          "removed"
-        ]
       },
       "CredentialHealth": {
         "type": "string",
@@ -814,13 +551,6 @@
           "executable": {
             "type": "string"
           },
-          "failed": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/MountFailure"
-            },
-            "description": "Mounts that did not converge at the last reconcile, with reasons. Empty\nwhen every desired mount is serving; a dark mount appears here, not as a\nsilent absence from `mounts`."
-          },
           "frontends": {
             "type": "array",
             "items": {
@@ -871,116 +601,10 @@
           "unauthorized",
           "auth_required",
           "credential_not_found",
-          "consent_required",
           "mount_not_found",
           "spec_invalid",
-          "provider_missing",
-          "reconcile_busy",
           "daemon_shutting_down",
           "internal"
-        ]
-      },
-      "FieldChange": {
-        "oneOf": [
-          {
-            "type": "object",
-            "required": [
-              "name",
-              "required",
-              "kind"
-            ],
-            "properties": {
-              "default": {},
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "added"
-                ]
-              },
-              "name": {
-                "type": "string"
-              },
-              "required": {
-                "type": "boolean"
-              }
-            }
-          },
-          {
-            "type": "object",
-            "required": [
-              "name",
-              "kind"
-            ],
-            "properties": {
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "removed"
-                ]
-              },
-              "name": {
-                "type": "string"
-              }
-            }
-          },
-          {
-            "type": "object",
-            "required": [
-              "name",
-              "kind"
-            ],
-            "properties": {
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "became_required"
-                ]
-              },
-              "name": {
-                "type": "string"
-              }
-            }
-          },
-          {
-            "type": "object",
-            "required": [
-              "name",
-              "kind"
-            ],
-            "properties": {
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "became_optional"
-                ]
-              },
-              "name": {
-                "type": "string"
-              }
-            }
-          },
-          {
-            "type": "object",
-            "required": [
-              "name",
-              "old",
-              "new",
-              "kind"
-            ],
-            "properties": {
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "type_changed"
-                ]
-              },
-              "name": {
-                "type": "string"
-              },
-              "new": {},
-              "old": {}
-            }
-          }
         ]
       },
       "FrontendAttachTargetReport": {
@@ -1079,53 +703,6 @@
           "unhealthy"
         ]
       },
-      "LimitChange": {
-        "type": "object",
-        "required": [
-          "name",
-          "value",
-          "direction"
-        ],
-        "properties": {
-          "direction": {
-            "$ref": "#/components/schemas/LimitDirection"
-          },
-          "name": {
-            "type": "string"
-          },
-          "value": {
-            "type": "string"
-          }
-        }
-      },
-      "LimitDirection": {
-        "type": "string",
-        "enum": [
-          "added",
-          "removed"
-        ]
-      },
-      "MountFailure": {
-        "type": "object",
-        "description": "One mount that did not converge during a reconcile. `mount` is the mount\nname, or the spec path when the name could not be parsed.",
-        "required": [
-          "mount",
-          "kind",
-          "reason"
-        ],
-        "properties": {
-          "detail": {},
-          "kind": {
-            "$ref": "#/components/schemas/ErrorCode"
-          },
-          "mount": {
-            "type": "string"
-          },
-          "reason": {
-            "type": "string"
-          }
-        }
-      },
       "MountInfo": {
         "type": "object",
         "required": [
@@ -1155,70 +732,6 @@
             "type": "string",
             "description": "Provider NAME slug, e.g. `github`; credentials key on this value."
           }
-        }
-      },
-      "MountOutcome": {
-        "type": "string",
-        "enum": [
-          "added",
-          "updated",
-          "removed",
-          "unchanged",
-          "failed"
-        ]
-      },
-      "MountReport": {
-        "type": "object",
-        "required": [
-          "mount",
-          "outcome"
-        ],
-        "properties": {
-          "approved": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/UpgradeDelta"
-              }
-            ]
-          },
-          "failure": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/MountFailure"
-              }
-            ]
-          },
-          "mount": {
-            "type": "string"
-          },
-          "outcome": {
-            "$ref": "#/components/schemas/MountOutcome"
-          }
-        }
-      },
-      "MountUpdateRequest": {
-        "type": "object",
-        "required": [
-          "spec"
-        ],
-        "properties": {
-          "approved": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/UpgradeDelta"
-              }
-            ]
-          },
-          "spec": {}
         }
       },
       "ProviderArtifact": {
@@ -1258,61 +771,13 @@
       },
       "ReadyInfo": {
         "type": "object",
-        "description": "`GET /v1/ready`: 200 with `ready: true` once startup reconcile completes\nand every requested namespace listener is serving.\nNon-ready responses use [`ApiError`].",
+        "description": "`GET /v1/ready`: 200 with `ready: true` once the immutable mount revision loads\nand every requested namespace listener is serving.\nNon-ready responses use [`ApiError`].",
         "required": [
           "ready"
         ],
         "properties": {
           "ready": {
             "type": "boolean"
-          }
-        }
-      },
-      "ReconcileReport": {
-        "type": "object",
-        "description": "`POST /v1/reconcile`: what converging the running mount set to the on-disk\ndesired state changed.",
-        "required": [
-          "added",
-          "removed",
-          "updated",
-          "failed"
-        ],
-        "properties": {
-          "added": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "failed": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/MountFailure"
-            }
-          },
-          "removed": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "updated": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          }
-        }
-      },
-      "ReconcileRequest": {
-        "type": "object",
-        "description": "Optional request body for `POST /v1/reconcile`.",
-        "properties": {
-          "mounts": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
           }
         }
       },
@@ -1355,105 +820,6 @@
             "$ref": "#/components/schemas/DaemonSubsystem"
           }
         }
-      },
-      "UpgradeDelta": {
-        "oneOf": [
-          {
-            "type": "object",
-            "required": [
-              "kind"
-            ],
-            "properties": {
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "identical"
-                ]
-              }
-            }
-          },
-          {
-            "type": "object",
-            "required": [
-              "added",
-              "kind"
-            ],
-            "properties": {
-              "added": {
-                "type": "array",
-                "items": {
-                  "$ref": "#/components/schemas/AddedField"
-                }
-              },
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "additive_config"
-                ]
-              }
-            }
-          },
-          {
-            "type": "object",
-            "required": [
-              "changes",
-              "kind"
-            ],
-            "properties": {
-              "changes": {
-                "type": "array",
-                "items": {
-                  "$ref": "#/components/schemas/FieldChange"
-                }
-              },
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "breaking_config"
-                ]
-              }
-            }
-          },
-          {
-            "type": "object",
-            "required": [
-              "capabilities",
-              "limits",
-              "kind"
-            ],
-            "properties": {
-              "auth": {
-                "oneOf": [
-                  {
-                    "type": "null"
-                  },
-                  {
-                    "$ref": "#/components/schemas/AuthDelta"
-                  }
-                ]
-              },
-              "capabilities": {
-                "type": "array",
-                "items": {
-                  "$ref": "#/components/schemas/CapabilityChange"
-                }
-              },
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "capability_limit_or_auth"
-                ]
-              },
-              "limits": {
-                "type": "array",
-                "items": {
-                  "$ref": "#/components/schemas/LimitChange"
-                }
-              }
-            }
-          }
-        ],
-        "description": "Wire representation of a reviewed provider-upgrade delta.\n\nThe control API keeps this as transport data, not as a credential-bearing\nmount spec. The daemon converts it back into the workspace upgrade model and\nchecks that it covers the actual diff computed at the hot-swap boundary."
       }
     }
   }

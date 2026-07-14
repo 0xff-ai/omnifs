@@ -4,10 +4,13 @@
 //! entrypoint); there is no standalone `omnifsd` binary. The daemon still
 //! runs as its own host-native process and speaks the HTTP control API.
 
+use anyhow::Context as _;
 use clap::Args;
 use omnifs_engine::GitCloner;
 use omnifs_engine::MountRuntimes;
 use omnifs_engine::init_global_from_env;
+use omnifs_workspace::mounts::Registry;
+use omnifs_workspace::mounts::Revision;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -19,6 +22,12 @@ use crate::{context::DaemonContext, server};
 /// Arguments for the `omnifs daemon` subcommand (the runtime daemon).
 #[derive(Args, Debug)]
 pub struct DaemonArgs {
+    /// Revision of the immutable mount snapshot served by this daemon start.
+    #[arg(long, value_name = "REVISION")]
+    pub(crate) mount_revision: Revision,
+    /// Immutable mount snapshot directory to load before readiness.
+    #[arg(long, value_name = "PATH")]
+    pub(crate) mount_snapshot: PathBuf,
     /// Optional TCP control API listen address. The daemon always serves its
     /// Unix socket and adds TCP only for this debug/test path.
     #[arg(long)]
@@ -54,20 +63,31 @@ pub fn run(args: &DaemonArgs) -> anyhow::Result<()> {
 
     let registry = {
         let host_context = context.host_context();
+        let desired = Registry::load(&args.mount_snapshot).with_context(|| {
+            format!(
+                "load selected mount revision {} from {}",
+                args.mount_revision,
+                args.mount_snapshot.display()
+            )
+        })?;
         info!(
             config = %host_context.config_dir().display(),
             cache = %cloner.cache_dir().display(),
             providers = %host_context.providers_dir().display(),
             "starting daemon"
         );
-        Arc::new(MountRuntimes::new(host_context, Arc::clone(&cloner))?)
+        Arc::new(MountRuntimes::load(
+            host_context,
+            Arc::clone(&cloner),
+            &desired,
+            &Handle::current(),
+        )?)
     };
 
     // Proactively refreshes every registered OAuth credential before it enters
     // its refresh window, so a request-path authorization call almost never
     // has to await a live refresh. Spawned on the shared credential service
-    // (not per-mount) so a credential registered by any later reconcile is
-    // picked up without restarting the loop.
+    // (not per-mount) so all startup credentials share one refresh owner.
     let refresh_loop = registry.credential_service().spawn_refresh_loop();
 
     let rt = Handle::current();
@@ -91,7 +111,7 @@ pub fn run(args: &DaemonArgs) -> anyhow::Result<()> {
 
     // Bind the namespace attach sockets (fail fast on a collision), capturing the
     // per-start id and socket paths before the context moves into the daemon. The
-    // listeners are spawned post-reconcile so a client sees a populated tree.
+    // listeners are spawned after atomic mount loading so a client sees a populated tree.
     let local_attach_socket = context.bind_local_attach_socket()?;
     let attach_instance_id = context.instance_id().to_string();
     let attach_tcp_port = context.attach_tcp_port();
@@ -114,20 +134,15 @@ pub fn run(args: &DaemonArgs) -> anyhow::Result<()> {
 
     runtime_record.write();
 
-    // Load desired state from `mounts/*.json` before serving, so the tree is
-    // populated when the frontend comes up.
-    log_reconcile(&daemon.reconcile_blocking(&rt));
-
-    // Build the one shared namespace after reconcile, so its root record reflects
-    // the converged mount set (the identity table's root is installed at
-    // construction). Every attach listener serves this same `TreeNamespace`.
+    // Build the one shared namespace after atomic startup loading, so its root
+    // record reflects the complete mount set.
     let namespace = omnifs_engine::TreeNamespace::new(Arc::clone(&registry), rt.clone());
     // Give the daemon a handle to the namespace so `POST /v1/frontend/attach-target`
     // can bind a TCP attach listener on a running daemon without a restart.
     daemon.set_namespace(Arc::clone(&namespace));
 
     // Serve the fixed local attach socket over the shared namespace. With every
-    // startup listener bound and mounts reconciled, report ready.
+    // startup listener bound and mounts loaded, report ready.
     let attach_socket_path = spawn_attach_listener(
         local_attach_socket,
         &namespace,
@@ -168,21 +183,6 @@ pub fn run(args: &DaemonArgs) -> anyhow::Result<()> {
     remove_socket(&vsock_attach_socket_path);
     remove_socket(&control_socket_path);
     Ok(())
-}
-
-/// Log the outcome of the startup reconcile: a warning per dark mount, then a
-/// one-line summary.
-fn log_reconcile(report: &omnifs_api::ReconcileReport) {
-    for failure in &report.failed {
-        warn!(mount = %failure.mount, reason = %failure.reason, "mount did not converge");
-    }
-    info!(
-        added = report.added.len(),
-        updated = report.updated.len(),
-        removed = report.removed.len(),
-        failed = report.failed.len(),
-        "reconciled mounts on start"
-    );
 }
 
 /// Serve the fixed local attach socket over the shared namespace.

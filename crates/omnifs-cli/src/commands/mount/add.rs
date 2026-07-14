@@ -22,8 +22,7 @@ use crate::workspace::Workspace;
 pub struct AddArgs {
     /// Provider to use (positional; picker if omitted).
     pub provider: Option<String>,
-    /// Mount name override. Auto-generated from the provider if absent. An
-    /// existing name may only repin a different artifact of the same provider.
+    /// Mount name override. Auto-generated from the provider if absent.
     #[arg(long = "as")]
     pub as_name: Option<String>,
     /// Print the OAuth URL instead of opening a browser.

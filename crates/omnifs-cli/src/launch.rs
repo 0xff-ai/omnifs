@@ -7,10 +7,12 @@ use anyhow::Context as _;
 use omnifs_api::{API_MAJOR, API_MINOR, DaemonStatus, DaemonSubsystem};
 use omnifs_workspace::creds::{CredentialStore, FileStore};
 use omnifs_workspace::layout::WorkspaceLayout;
-use omnifs_workspace::mounts::materialize;
+use omnifs_workspace::mounts::{Registry, Revision, materialize};
 use omnifs_workspace::provider::Catalog;
+use omnifs_workspace::runtime_record::RuntimeRecord;
 
 use crate::client::{DaemonClient, env_daemon_addr};
+use crate::daemon_teardown::DaemonTeardown;
 use crate::mount_config::MountConfig;
 use crate::ui::output::Output;
 use crate::workspace::Workspace;
@@ -42,7 +44,12 @@ impl<'a> Launcher<'a> {
         let telemetry_enabled =
             config.telemetry.enabled && omnifs_workspace::telemetry::enabled_from_env();
 
-        let configs = self.workspace.mounts()?;
+        let revision = self.workspace.commit_mounts()?;
+        let snapshot = self
+            .workspace
+            .repository()?
+            .materialize(&revision, &paths.cache_dir)?;
+        let configs = mount_configs(&snapshot);
         if configs.is_empty() {
             anyhow::bail!(
                 "no mount configs found in {}; run `omnifs setup` for guided onboarding, or `omnifs mount add <provider>` to add one directly",
@@ -52,26 +59,49 @@ impl<'a> Launcher<'a> {
 
         crate::provider_bundle::ensure_providers_installed(&paths.providers_dir)?;
 
-        // Fail fast, before the daemon spawns, when a configured mount's
+        // Fail fast, before a healthy daemon is stopped or a new daemon spawns,
+        // when a configured mount's
         // host-managed credential is missing or its spec under-grants the
-        // pinned provider's declared needs. A daemon spawned anyway would
-        // only surface this later as a silent reconcile warning.
+        // pinned provider's declared needs.
         let store = FileStore::new(&paths.credentials_file);
         preflight_mounts(&configs, self.workspace.catalog(), &store)?;
 
         self.output.narrate(format!(
-            "Using mount configs from {}",
-            paths.mounts_dir.display()
+            "Applying mount revision {} from {}",
+            revision,
+            snapshot.mounts_dir().display()
         ));
-        launch_host_native(paths, self.verb, telemetry_enabled, self.output).await
+        let outcome = launch_host_native(
+            self.workspace,
+            self.verb,
+            telemetry_enabled,
+            self.output,
+            &revision,
+            snapshot.mounts_dir(),
+        )
+        .await?;
+        self.workspace.repository()?.mark_applied(&revision)?;
+        Ok(outcome)
     }
 }
 
-/// Validate every configured mount before the daemon spawns: materialize its
-/// spec (capability satisfaction, dynamic-grant resolution) and confirm its
-/// host-managed credential, if any, is present. Mirrors the checks the
-/// daemon's own reconcile performs per mount, but aborts the whole launch on
-/// the first failure instead of recording it and continuing.
+fn mount_configs(registry: &Registry) -> Vec<MountConfig> {
+    registry
+        .iter()
+        .map(|(name, spec)| MountConfig {
+            name: name.clone(),
+            config: spec.clone(),
+            source: registry.spec_path(name),
+        })
+        .collect()
+}
+
+/// Validate every configured mount before the running daemon is touched:
+/// materialize its spec (capability satisfaction, dynamic-grant resolution)
+/// and confirm its
+/// host-managed credential, if any, is present. The daemon repeats the mount
+/// construction from this same immutable snapshot, but a failure here leaves
+/// a healthy prior revision serving.
 fn preflight_mounts(
     configs: &[MountConfig],
     catalog: &Catalog,
@@ -89,6 +119,14 @@ fn preflight_mounts(
 #[derive(Debug, Clone)]
 pub(crate) struct LaunchOutcome {
     pub local_mount_points: Vec<PathBuf>,
+    pub(crate) daemon_restarted: bool,
+}
+
+impl LaunchOutcome {
+    #[must_use]
+    pub(crate) fn daemon_restarted(&self) -> bool {
+        self.daemon_restarted
+    }
 }
 
 /// The loopback address the debug `OMNIFS_DAEMON_ADDR` TCP path serves on,
@@ -102,60 +140,67 @@ fn env_control_addr() -> anyhow::Result<Option<SocketAddr>> {
     }
 }
 
-/// Spawn a detached host-native daemon and wait for it to serve. The daemon
-/// serves its Unix socket and writes the runtime record itself; the CLI reads
-/// that record to reach it, triggers one more reconcile to converge any change
-/// since start, and surfaces per-mount failures. Only the debug/test path
-/// (`OMNIFS_DAEMON_ADDR` set) adds a TCP listener.
+/// Leave a daemon already serving `revision` alone, or replace only the daemon
+/// process and wait for the immutable snapshot to become ready. Frontend
+/// convergence happens after this returns.
 async fn launch_host_native(
-    paths: &WorkspaceLayout,
+    workspace: &Workspace,
     verb: &str,
     telemetry_enabled: bool,
     output: Output,
+    revision: &Revision,
+    snapshot: &Path,
 ) -> anyhow::Result<LaunchOutcome> {
-    reject_existing_host_daemon(paths, verb).await?;
-    output.narrate("Starting omnifs daemon (host-native)");
+    let paths = workspace.layout();
+    let client = DaemonClient::for_layout(paths);
+    let current = client.status_optional().await?;
+
+    if let Some(status) = &current {
+        let existing = ExistingDaemon::new(status.clone(), paths, verb);
+        if !existing.can_apply() {
+            anyhow::bail!(existing);
+        }
+        let serves_revision =
+            RuntimeRecord::read(&paths.runtime_record_file())?.is_some_and(|record| {
+                record.instance_id == status.instance_id && record.mount_revision == *revision
+            });
+        if serves_revision {
+            report_launch_status(status);
+            return Ok(launch_outcome(status.clone(), false));
+        }
+
+        output.narrate("Restarting omnifs daemon for changed mount revision");
+        DaemonTeardown::new(workspace, output).stop_daemon().await?;
+    } else {
+        output.narrate("Starting omnifs daemon (host-native)");
+    }
 
     let tcp_addr = env_control_addr()?;
-    crate::launch_backend::launch_native(paths, tcp_addr, telemetry_enabled).await?;
+    crate::launch_backend::launch_native(paths, tcp_addr, telemetry_enabled, revision, snapshot)
+        .await?;
 
-    let client = DaemonClient::for_layout(paths);
-    match client.reconcile().await {
-        Ok(report) => report_reconcile_failures(&report),
-        Err(error) => {
-            return Err(error);
-        },
-    }
+    let status = client.status().await?;
+    report_launch_status(&status);
+    Ok(launch_outcome(status, true))
+}
 
-    let status = client.status().await.ok();
-    if let Some(status) = &status {
-        report_launch_status(status);
-    }
+fn launch_outcome(status: DaemonStatus, daemon_restarted: bool) -> LaunchOutcome {
     let mut local_mount_points = status
-        .map(|status| {
-            status
-                .frontends
-                .into_iter()
-                .filter(|frontend| frontend.delivery == omnifs_api::FrontendDelivery::Local)
-                .map(|frontend| frontend.mount_point)
-                .filter(|mount_point| !mount_point.as_os_str().is_empty())
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+        .frontends
+        .into_iter()
+        .filter(|frontend| frontend.delivery == omnifs_api::FrontendDelivery::Local)
+        .map(|frontend| frontend.mount_point)
+        .filter(|mount_point| !mount_point.as_os_str().is_empty())
+        .collect::<Vec<_>>();
     local_mount_points.sort();
     local_mount_points.dedup();
-    Ok(LaunchOutcome { local_mount_points })
+    LaunchOutcome {
+        local_mount_points,
+        daemon_restarted,
+    }
 }
 
-async fn reject_existing_host_daemon(paths: &WorkspaceLayout, verb: &str) -> anyhow::Result<()> {
-    let client = DaemonClient::for_layout(paths);
-    let Some(status) = client.status_optional().await? else {
-        return Ok(());
-    };
-
-    anyhow::bail!("{}", ExistingDaemon::new(status, paths, verb))
-}
-
+#[derive(Debug)]
 struct ExistingDaemon {
     status: DaemonStatus,
     paths: WorkspaceLayout,
@@ -194,6 +239,10 @@ impl ExistingDaemon {
     /// this CLI's, i.e. an upgrade boundary rather than a duplicate launch.
     fn version_skew(&self) -> bool {
         self.status.api_major != API_MAJOR || self.status.version != env!("CARGO_PKG_VERSION")
+    }
+
+    fn can_apply(&self) -> bool {
+        !self.version_skew() && self.paths_match() && self.executable_matches() != Some(false)
     }
 
     fn title(&self) -> &'static str {
@@ -271,17 +320,6 @@ fn display_path(path: &Path) -> String {
         "<unknown>".to_string()
     } else {
         path.display().to_string()
-    }
-}
-
-/// Print any mounts that failed to converge during reconcile as warnings; a
-/// failed mount does not abort the launch, since the rest are serving.
-fn report_reconcile_failures(report: &omnifs_api::ReconcileReport) {
-    for failure in &report.failed {
-        crate::ui::eprint_raw(&format!(
-            "warning: mount `{}` did not load: {}\n",
-            failure.mount, failure.reason
-        ));
     }
 }
 

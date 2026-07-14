@@ -1,7 +1,8 @@
 //! The omnifs mount: the user-authored mount `Spec` (which bakes in its
 //! provider-manifest defaults at creation), the `Registry` that owns specs on
-//! disk, materialization against the provider manifest in [`crate::provider`],
-//! and provider upgrade classification. Plus the sparse user `Auth` config.
+//! disk, the Git-backed `Repository` that versions desired state, and
+//! materialization against the provider manifest in [`crate::provider`]. Plus
+//! the sparse user `Auth` config.
 //!
 //! `Spec` represents the mount JSON. Provider-manifest defaults (the auth scheme
 //! and config defaults) are baked into the spec at creation time by the CLI's
@@ -11,14 +12,11 @@
 pub mod auth;
 pub mod materialize;
 pub mod name;
-pub mod upgrade;
+pub mod repository;
 
 pub use auth::{Auth, OAuth, StaticToken};
 pub use name::{Name, NameError};
-pub use upgrade::{
-    AddedField, AuthDelta, CapabilityChange, CapabilityDirection, FieldChange, LimitChange,
-    LimitDirection, UpgradePlan,
-};
+pub use repository::{Repository, RepositoryError, Revision};
 
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
@@ -60,19 +58,18 @@ pub struct Spec {
 /// Selects which manifest-declared defaults [`Spec::apply_provider_metadata`]
 /// folds into a spec.
 #[derive(Debug, Clone, Copy)]
-pub struct ProviderMetadataInheritance<'a> {
+pub struct ProviderMetadataInheritance {
     auth: bool,
-    config: ConfigInheritance<'a>,
+    config: ConfigInheritance,
 }
 
 #[derive(Debug, Clone, Copy)]
-enum ConfigInheritance<'a> {
+enum ConfigInheritance {
     None,
     All,
-    Additive(&'a [AddedField]),
 }
 
-impl<'a> ProviderMetadataInheritance<'a> {
+impl ProviderMetadataInheritance {
     #[must_use]
     pub const fn all() -> Self {
         Self {
@@ -94,14 +91,6 @@ impl<'a> ProviderMetadataInheritance<'a> {
         Self {
             auth: false,
             config: ConfigInheritance::All,
-        }
-    }
-
-    #[must_use]
-    pub const fn additive_config(added: &'a [AddedField]) -> Self {
-        Self {
-            auth: false,
-            config: ConfigInheritance::Additive(added),
         }
     }
 }
@@ -158,7 +147,7 @@ impl Spec {
     pub fn apply_provider_metadata(
         &mut self,
         manifest: &crate::provider::ProviderManifest,
-        inheritance: ProviderMetadataInheritance<'_>,
+        inheritance: ProviderMetadataInheritance,
     ) -> Result<(), serde_json::Error> {
         if inheritance.auth
             && self.auth.is_none()
@@ -187,23 +176,6 @@ impl Spec {
                 {
                     self.config_raw = Some(config.defaults());
                 }
-            },
-            ConfigInheritance::Additive(added) => {
-                // Fill additive upgrade defaults without overwriting user values.
-                // Existing non-object config is replaced by the additive object,
-                // matching the former upgrade path.
-                let mut config = match self.config_raw.take() {
-                    Some(serde_json::Value::Object(map)) => map,
-                    _ => serde_json::Map::new(),
-                };
-                for field in added {
-                    if !config.contains_key(&field.name)
-                        && let Some(default) = &field.default
-                    {
-                        config.insert(field.name.clone(), default.clone());
-                    }
-                }
-                self.config_raw = (!config.is_empty()).then_some(serde_json::Value::Object(config));
             },
         }
         Ok(())
@@ -287,27 +259,27 @@ pub fn pinned_manifest(
 /// mount specs.
 ///
 /// `Registry` reads every `mounts/*.json` once into memory and serves lookups;
-/// it replaces the two duplicated scan-and-parse pipelines (the CLI's
-/// `Workspace::mounts` and the host reconcile scan). Parsing is tolerant: a file
+/// it replaces the two duplicated scan-and-parse pipelines formerly used by the
+/// CLI and daemon. Parsing is tolerant: a file
 /// that fails to parse or carries an invalid mount name is recorded in
 /// [`failures`](Self::failures) rather than aborting the load, so one malformed
 /// file cannot hide every other mount. Callers that want strict behavior inspect
 /// `failures` themselves.
 ///
-/// A `Registry` is a per-process snapshot, not a shared singleton; disk stays
-/// the source of truth across the CLI and daemon processes. The CLI mutates
-/// through its `Registry` then triggers a daemon reconcile, which rebuilds its
-/// own `Registry` from disk via [`reload`](Self::reload).
+/// A `Registry` is a per-process snapshot, not a shared singleton. The CLI
+/// mutates desired state through [`Repository`], while the daemon loads a
+/// registry from the immutable revision snapshot selected at startup.
 #[derive(Debug)]
 pub struct Registry {
     mounts_dir: PathBuf,
     lock_path: PathBuf,
+    lock_guard: Option<File>,
     specs: BTreeMap<name::Name, Spec>,
     failures: Vec<SpecLoadFailure>,
 }
 
 /// A `mounts/*.json` file that failed to load, retained so a tolerant reader
-/// (host reconcile, `omnifs reset`) can still account for it.
+/// (startup validation, `omnifs reset`) can still account for it.
 #[derive(Debug)]
 pub struct SpecLoadFailure {
     pub path: PathBuf,
@@ -322,9 +294,26 @@ impl Registry {
         let mut registry = Self {
             mounts_dir: mounts_dir.as_ref().to_path_buf(),
             lock_path: Self::lock_path_for(mounts_dir.as_ref()),
+            lock_guard: None,
             specs: BTreeMap::new(),
             failures: Vec::new(),
         };
+        registry.scan()?;
+        Ok(registry)
+    }
+
+    /// Read and parse every spec while retaining the sibling lock for the
+    /// lifetime of the registry. Repository owns this operation boundary;
+    /// ordinary read-only callers should use [`Self::load`].
+    pub(crate) fn load_locked(mounts_dir: impl AsRef<Path>) -> Result<Self, SpecError> {
+        let mut registry = Self {
+            mounts_dir: mounts_dir.as_ref().to_path_buf(),
+            lock_path: Self::lock_path_for(mounts_dir.as_ref()),
+            lock_guard: None,
+            specs: BTreeMap::new(),
+            failures: Vec::new(),
+        };
+        registry.lock_guard = Some(registry.lock()?);
         registry.scan()?;
         Ok(registry)
     }
@@ -391,7 +380,7 @@ impl Registry {
         Ok(())
     }
 
-    /// Re-read the directory from disk (daemon reconcile, post-write refresh).
+    /// Re-read the directory from disk after a write or manual edit.
     pub fn reload(&mut self) -> Result<(), SpecError> {
         self.scan()
     }
@@ -422,13 +411,15 @@ impl Registry {
     /// Persist `spec` and update the in-memory mirror. The spec's mount name
     /// (validated here) names the file `mounts_dir/<name>.json`; the write is
     /// atomic (a same-directory temp file renamed into place), so a concurrent
-    /// reader (the daemon reconcile) sees either the old file or the new one,
-    /// never a torn write.
+    /// reader sees either the old file or the new one, never a torn write.
     ///
     /// The registry lock serializes CLI and daemon writers across the
     /// scan-modify-write sequence, while the same-directory rename keeps each
     /// individual file replacement atomic for concurrent readers.
     pub fn put(&mut self, spec: &Spec) -> Result<(), SpecError> {
+        if self.lock_guard.is_some() {
+            return self.put_locked(spec);
+        }
         let lock = self.lock()?;
         let result = self.put_locked(spec);
         match (result, lock.unlock()) {
@@ -463,6 +454,9 @@ impl Registry {
     /// Remove a mount's spec file and drop it from the mirror. Returns whether a
     /// file was present (a missing file is not an error).
     pub fn remove(&mut self, name: &name::Name) -> Result<bool, SpecError> {
+        if self.lock_guard.is_some() {
+            return self.remove_locked(name);
+        }
         let lock = self.lock()?;
         let result = self.remove_locked(name);
         match (result, lock.unlock()) {
@@ -523,6 +517,67 @@ impl Registry {
             path: path.to_path_buf(),
             source,
         })
+    }
+
+    /// Restore one validated revision file through the same parser, naming
+    /// checks, and atomic writer used for live specs. Repository uses this when
+    /// materializing Git snapshots; callers cannot bypass Spec validation.
+    pub(crate) fn write_snapshot_file(
+        root: &Path,
+        relative: &Path,
+        bytes: &[u8],
+    ) -> Result<(), SpecError> {
+        let path = root.join(relative);
+        let stem = relative
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .ok_or_else(|| SpecError::FilenameMismatch {
+                path: path.clone(),
+                mount: relative.display().to_string(),
+            })?;
+        if relative.extension().and_then(|ext| ext.to_str()) != Some("json")
+            || relative.components().count() != 1
+        {
+            return Err(SpecError::FilenameMismatch {
+                path,
+                mount: stem.to_string(),
+            });
+        }
+        let spec =
+            Spec::parse(
+                std::str::from_utf8(bytes).map_err(|error| SpecError::ParseSpec {
+                    path: root.join(relative),
+                    source: serde_json::Error::io(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        error,
+                    )),
+                })?,
+            )
+            .map_err(|source| SpecError::ParseSpec {
+                path: root.join(relative),
+                source,
+            })?;
+        let name = name::Name::new(spec.mount.clone()).map_err(|source| SpecError::MountName {
+            path: root.join(relative),
+            mount: spec.mount.clone(),
+            source,
+        })?;
+        if name.as_str() != stem {
+            return Err(SpecError::FilenameMismatch {
+                path: root.join(relative),
+                mount: spec.mount,
+            });
+        }
+        fs::create_dir_all(root).map_err(|source| SpecError::WriteSpec {
+            path: root.to_path_buf(),
+            source,
+        })?;
+        crate::io::write_atomic(&root.join(format!("{name}.json")), bytes, 0o444).map_err(
+            |source| SpecError::WriteSpec {
+                path: root.join(format!("{name}.json")),
+                source,
+            },
+        )
     }
 
     fn spec_paths(&self) -> io::Result<Vec<PathBuf>> {

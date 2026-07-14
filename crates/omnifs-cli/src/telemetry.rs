@@ -84,14 +84,6 @@ async fn health_nudge(workspace: &Workspace) -> Option<String> {
                 ));
             }
         }
-        if let Some(failure) = status.failed.first() {
-            // Load failures are not necessarily auth problems; doctor's live
-            // section names the cause and the right fix per mount.
-            return Some(format!(
-                "mount `{}` failed to load; run `omnifs doctor` for details",
-                failure.mount
-            ));
-        }
     }
 
     let inventory = crate::inventory::Inventory::collect(workspace).await.ok()?;

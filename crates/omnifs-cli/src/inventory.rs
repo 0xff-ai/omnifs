@@ -471,10 +471,10 @@ fn workspace_status(
                 HealthState::Degraded => DaemonState::Degraded,
                 HealthState::Unhealthy => DaemonState::Failed,
             },
-            if status.failed.is_empty() && status.health.overall_state() != HealthState::Unhealthy {
-                NamespaceState::Serving
-            } else {
+            if status.health.overall_state() == HealthState::Unhealthy {
                 NamespaceState::Failed
+            } else {
+                NamespaceState::Serving
             },
             Some(status.pid),
             Some(ApiVersion {
@@ -680,15 +680,6 @@ fn mount_statuses(
         .iter()
         .map(|(name, _)| name.to_string())
         .collect::<BTreeSet<_>>();
-    let failed = daemon
-        .map(|status| {
-            status
-                .failed
-                .iter()
-                .map(|failure| (failure.mount.clone(), failure.reason.clone()))
-                .collect::<BTreeMap<_, _>>()
-        })
-        .unwrap_or_default();
     let loaded = daemon
         .map(|status| {
             status
@@ -698,10 +689,10 @@ fn mount_statuses(
                 .collect::<BTreeSet<_>>()
         })
         .unwrap_or_default();
-    let mut rows = desired_mount_rows(registry, catalog, credentials, daemon, &failed, &loaded);
+    let mut rows = desired_mount_rows(registry, catalog, credentials, daemon, &loaded);
     rows.extend(invalid_mount_rows(registry));
     if let Some(status) = daemon {
-        rows.extend(observed_mount_rows(status, &desired, &failed));
+        rows.extend(observed_mount_rows(status, &desired));
     }
     rows.sort_by(|left, right| {
         left.root
@@ -716,7 +707,6 @@ fn desired_mount_rows(
     catalog: &Catalog,
     credentials: &FileStore,
     daemon: Option<&DaemonStatus>,
-    failed: &BTreeMap<String, String>,
     loaded: &BTreeSet<&str>,
 ) -> Vec<MountStatus> {
     let daemon_failed =
@@ -752,7 +742,6 @@ fn desired_mount_rows(
                 } else {
                     Presence::Absent
                 },
-                failure: failed.get(&name_string),
                 health: if daemon_failed {
                     Health::Unhealthy
                 } else {
@@ -812,20 +801,11 @@ fn invalid_mount_rows(registry: &Registry) -> Vec<MountStatus> {
         .collect()
 }
 
-fn observed_mount_rows(
-    status: &DaemonStatus,
-    desired: &BTreeSet<String>,
-    failed: &BTreeMap<String, String>,
-) -> Vec<MountStatus> {
-    let observed = status
+fn observed_mount_rows(status: &DaemonStatus, desired: &BTreeSet<String>) -> Vec<MountStatus> {
+    status
         .mounts
         .iter()
-        .map(|mount| mount.mount.as_str())
-        .collect::<BTreeSet<_>>();
-    let mut rows = status
-        .mounts
-        .iter()
-        .filter(|mount| !desired.contains(&mount.mount) && !failed.contains_key(&mount.mount))
+        .filter(|mount| !desired.contains(&mount.mount))
         .map(|mount| MountStatus {
             name: mount.mount.clone(),
             root: PathBuf::from(format!("/{}", mount.mount.trim_start_matches('/'))),
@@ -839,40 +819,12 @@ fn observed_mount_rows(
             access_count: 0,
             fix: None,
         })
-        .collect::<Vec<_>>();
-    rows.extend(
-        status
-            .failed
-            .iter()
-            .filter(|failure| {
-                !desired.contains(&failure.mount) && !observed.contains(failure.mount.as_str())
-            })
-            .map(|failure| MountStatus {
-                name: failure.mount.clone(),
-                root: PathBuf::from(format!("/{}", failure.mount.trim_start_matches('/'))),
-                provider: ProviderPin {
-                    name: "<unknown>".into(),
-                    version: None,
-                    artifact: String::new(),
-                },
-                auth: AuthState::NotNeeded,
-                serving: ServingState::Failed {
-                    message: failure.reason.clone(),
-                },
-                access_count: 0,
-                fix: ServingState::Failed {
-                    message: failure.reason.clone(),
-                }
-                .fix()
-                .map(str::to_owned),
-            }),
-    );
-    rows
+        .collect()
 }
 
 /// Join one desired mount with daemon observations. A reachable daemon is not
-/// evidence that every spec converged: only the explicit loaded and failed
-/// mount lists are authoritative.
+/// evidence that every spec converged: only the explicit loaded mount list is
+/// authoritative.
 #[derive(Clone, Copy)]
 enum Presence {
     Present,
@@ -886,22 +838,16 @@ enum Health {
 }
 
 #[derive(Clone, Copy)]
-struct MountObservation<'a> {
+struct MountObservation {
     provider: Presence,
     daemon: Presence,
     loaded: Presence,
-    failure: Option<&'a String>,
     health: Health,
 }
 
-fn derive_serving_state(observation: MountObservation<'_>) -> ServingState {
+fn derive_serving_state(observation: MountObservation) -> ServingState {
     if matches!(observation.provider, Presence::Absent) {
         return ServingState::NotLoaded;
-    }
-    if let Some(reason) = observation.failure {
-        return ServingState::Failed {
-            message: reason.clone(),
-        };
     }
     if matches!(observation.health, Health::Unhealthy) {
         return ServingState::Failed {
@@ -1191,14 +1137,12 @@ mod tests {
     }
 
     #[test]
-    fn serving_state_matrix_joins_loaded_and_failed_mounts() {
-        let failure = "provider rejected config".to_string();
+    fn serving_state_matrix_joins_loaded_mounts() {
         assert_eq!(
             derive_serving_state(MountObservation {
                 provider: Presence::Absent,
                 daemon: Presence::Present,
                 loaded: Presence::Absent,
-                failure: None,
                 health: Health::Unhealthy,
             }),
             ServingState::NotLoaded,
@@ -1209,18 +1153,6 @@ mod tests {
                 provider: Presence::Present,
                 daemon: Presence::Present,
                 loaded: Presence::Absent,
-                failure: Some(&failure),
-                health: Health::Healthy,
-            }),
-            ServingState::Failed { message: failure },
-            "daemon failure row outranks not-loaded"
-        );
-        assert_eq!(
-            derive_serving_state(MountObservation {
-                provider: Presence::Present,
-                daemon: Presence::Present,
-                loaded: Presence::Absent,
-                failure: None,
                 health: Health::Unhealthy,
             }),
             ServingState::Failed {
@@ -1232,7 +1164,6 @@ mod tests {
                 provider: Presence::Present,
                 daemon: Presence::Present,
                 loaded: Presence::Absent,
-                failure: None,
                 health: Health::Healthy,
             }),
             ServingState::NotLoaded,
@@ -1243,7 +1174,6 @@ mod tests {
                 provider: Presence::Present,
                 daemon: Presence::Present,
                 loaded: Presence::Present,
-                failure: None,
                 health: Health::Healthy,
             }),
             ServingState::Live
@@ -1253,7 +1183,6 @@ mod tests {
                 provider: Presence::Present,
                 daemon: Presence::Absent,
                 loaded: Presence::Absent,
-                failure: None,
                 health: Health::Healthy,
             }),
             ServingState::Offline
@@ -1272,6 +1201,7 @@ mod tests {
         };
         let probe = Err(anyhow::anyhow!("connection refused"));
         let expected = RuntimeRecord::new(
+            omnifs_workspace::mounts::Revision::new("a".repeat(40)).unwrap(),
             omnifs_workspace::runtime_record::Endpoint::Unix {
                 path: PathBuf::from("/home/.omnifs/frontends/local.sock"),
             },
@@ -1311,7 +1241,6 @@ mod tests {
                 frontends: Vec::new(),
                 backend: omnifs_api::DaemonBackend::Native { pid: 1 },
                 mounts: Vec::new(),
-                failed: Vec::new(),
                 health: omnifs_api::DaemonHealth::new(vec![omnifs_api::SubsystemHealth::new(
                     omnifs_api::DaemonSubsystem::Control,
                     health,
@@ -1581,7 +1510,6 @@ mod tests {
             ],
             backend: omnifs_api::DaemonBackend::Native { pid: 1 },
             mounts: vec![],
-            failed: vec![],
             health: omnifs_api::DaemonHealth::default(),
         };
         let rows = frontend_statuses(&effective, Some(&daemon), 4, &[]);

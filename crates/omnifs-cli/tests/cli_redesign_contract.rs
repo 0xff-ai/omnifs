@@ -380,14 +380,14 @@ fn cli_redesign_contract_old_commands_and_flags_are_usage_errors() {
 }
 
 #[test]
-fn cli_redesign_contract_api_6_json_and_openapi_remove_singular_fields() {
+fn cli_redesign_contract_api_7_json_and_openapi_remove_hot_mount_fields() {
     let fixture = Fixture::new();
     let output = fixture.run(&["status", "--output", "json"]);
     let status = stdout_json(&output);
     assert!(
         status["result"]["workspace"]["api"].is_null()
-            || status["result"]["workspace"]["api"] == "6.0",
-        "offline status may omit API; a live status must report API 6.0: {status}"
+            || status["result"]["workspace"]["api"] == "7.0",
+        "offline status may omit API; a live status must report API 7.0: {status}"
     );
     assert!(status["result"].get("mount").is_none());
     assert!(status["result"].get("mount_point").is_none());
@@ -397,7 +397,7 @@ fn cli_redesign_contract_api_6_json_and_openapi_remove_singular_fields() {
     let openapi: Value =
         serde_json::from_slice(&std::fs::read(&openapi_path).expect("checked-in OpenAPI document"))
             .expect("OpenAPI JSON");
-    assert_eq!(openapi["info"]["version"], "6.0");
+    assert_eq!(openapi["info"]["version"], "7.0");
     let schemas = &openapi["components"]["schemas"];
     for schema in ["DaemonStatus", "StopReport"] {
         assert!(

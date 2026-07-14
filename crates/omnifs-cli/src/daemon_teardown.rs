@@ -101,6 +101,33 @@ impl<'a> DaemonTeardown<'a> {
         Ok(())
     }
 
+    /// Stop only the namespace daemon, leaving every frontend process in
+    /// place. Apply uses this path when switching desired mount revisions:
+    /// host frontends reconnect to the fresh local socket, while guest
+    /// frontends are relaunched separately with the new start-scoped attach
+    /// authority.
+    pub(crate) async fn stop_daemon(&self) -> anyhow::Result<()> {
+        let record_path = self.workspace.layout().runtime_record_file();
+        let outcome = match self.workspace.daemon().status_optional().await {
+            Ok(Some(status)) => self.shutdown_and_wait(status.pid).await,
+            Ok(None) => self.remove_stale_record(),
+            Err(error) => anyhow::bail!(
+                "cannot stop the running daemon before applying desired state: {error:#}"
+            ),
+        };
+
+        match outcome {
+            TeardownOutcome::DaemonStopped { .. }
+            | TeardownOutcome::DaemonAlreadyStopped
+            | TeardownOutcome::StaleRecordRemoved
+            | TeardownOutcome::StaleRecordAbsent => {
+                RuntimeRecord::remove(&record_path)?;
+                Ok(())
+            },
+            failure => anyhow::bail!(failure.outcome().value),
+        }
+    }
+
     /// Run the teardown workflow and return its typed outcomes without
     /// rendering. `down` renders these to the ledger; structured output settles
     /// them into a receipt. A frontend-teardown failure stops the workflow

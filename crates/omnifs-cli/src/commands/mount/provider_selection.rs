@@ -64,10 +64,10 @@ impl<'a> ProviderSelection<'a> {
         let proposed = explicit_name.map_or_else(|| manifest.default_mount.clone(), str::to_string);
         let proposed_name = MountName::new(proposed.as_str())?;
 
-        // An explicit --as collision is the provider upgrade/re-consent path;
-        // the caller rejects a same-artifact collision before auth or config
-        // side effects. Accidental default-name collisions still go through
-        // the unique-name flow below.
+        // Explicit names are always returned as requested; the caller applies
+        // the create-only collision check before auth or config side effects.
+        // Accidental default-name collisions still go through the unique-name
+        // flow below.
         if explicit_name.is_some() {
             return Ok((provider, proposed_name));
         }

@@ -5,7 +5,7 @@ Owns: CLI/daemon split, REST API, mount delivery, runtime modes, workspace layou
 
 ## Read when
 
-Read this before touching `omnifs-cli`, `omnifs-daemon`, `omnifs-api`, lifecycle commands, daemon status, REST routes, mount delivery, reconcile behavior, the optional Docker-hosted FUSE frontend, provider bundle installation, or dev workspace behavior.
+Read this before touching `omnifs-cli`, `omnifs-daemon`, `omnifs-api`, lifecycle commands, daemon status, REST routes, mount delivery, desired-state application, the optional Docker-hosted FUSE frontend, provider bundle installation, or dev workspace behavior.
 
 ## Rules
 
@@ -13,11 +13,11 @@ Read this before touching `omnifs-cli`, `omnifs-daemon`, `omnifs-api`, lifecycle
 
 A single `omnifs` binary is both CLI and daemon. The runtime loop lives behind hidden `omnifs daemon`; there is no separate public `omnifsd` binary.
 
-The daemon exposes REST API 6.0, whose schema lives in `omnifs-api` and whose checked-in OpenAPI document is generated from the daemon implementation. API 6 removes the false singular daemon/shutdown mount-point projections and provider-level latest pointer; `FrontendInfo.mount_point` remains authoritative for that frontend. Credential material is never transmitted on the wire.
+The daemon exposes REST API 7.0, whose schema lives in `omnifs-api` and whose checked-in OpenAPI document is generated from the daemon implementation. API 7 removes mount mutation, explicit reconcile, hot-reconcile reporting, and failed-mount projections because desired state now crosses the daemon boundary only as an immutable startup revision. `FrontendInfo.mount_point` remains authoritative for that frontend, and credential material is never transmitted on the wire.
 
 A host-native daemon serves the control API over a Unix domain socket at `$OMNIFS_HOME/control.sock`. Auth on that socket is filesystem permissions: the config directory is forced to `0700` and the socket to `0600`, so only the owning user can connect, and there is no bearer token on that path. The bearer-token middleware survives but is enforced only on a TCP listener, which the daemon binds only for the `OMNIFS_DAEMON_ADDR` debug/test path (there is no other TCP control listener). There, the token lives in daemon memory only (no token file); its value comes from `OMNIFS_CONTROL_TOKEN` when the caller injects one, else is generated per start.
 
-`$OMNIFS_HOME/daemon.json` is the single daemon-owned runtime record, replacing both `launch.json` and the `control-token` file. It records the endpoint to dial (`{ "kind": "unix", "path": ... }`), the backend identity (the native process id), a per-start `instance_id`, the serving frontends, `started_at`, and any token-authenticated attach listeners. It is written mode `0600` because attach records carry tokens. The daemon writes it the moment its socket is bound and routes are installed, and removes it on graceful exit. A crash may leave it stale. When the record says a daemon should exist but the control probe fails, inventory reports the daemon as unreachable and status exits 3; a cleanly absent daemon is stopped. Teardown (`omnifs down`, `omnifs reset`) removes the record after liveness-checking its pid before trusting it for a stale sweep.
+`$OMNIFS_HOME/daemon.json` is the single daemon-owned runtime record, replacing both `launch.json` and the `control-token` file. It records the endpoint to dial (`{ "kind": "unix", "path": ... }`), the backend identity (the native process id), a per-start `instance_id`, the exact mount revision loaded by that daemon, the serving frontends, `started_at`, and any token-authenticated attach listeners. It is written mode `0600` because attach records carry tokens. The daemon writes it the moment its socket is bound and routes are installed, and removes it on graceful exit. A crash may leave it stale. When the record says a daemon should exist but the control probe fails, inventory reports the daemon as unreachable and status exits 3; a cleanly absent daemon is stopped. Teardown (`omnifs down`, `omnifs reset`) removes the record after liveness-checking its pid before trusting it for a stale sweep.
 
 The CLI resolves which endpoint to dial in one order: `OMNIFS_DAEMON_ADDR` when set (TCP, bearer token from `OMNIFS_CONTROL_TOKEN`), else the workspace's `daemon.json` (unix socket), else the fixed `$OMNIFS_HOME/control.sock` when present, else the daemon is stopped. It never dials a default control port blind. An unreadable runtime record is stale metadata and permits only the fixed-socket fallback. The CLI asserts the `instance_id` echoed by `/v1/status` against the record's, so a record overwritten by a restart mid-command is caught. Because it only dials an endpoint from its own workspace's record, fixed socket, or explicit debug override, a daemon owned by a different `OMNIFS_HOME` is structurally unaddressable.
 
@@ -29,13 +29,15 @@ Mount wire payloads distinguish provider identity from provider naming. `provide
 
 ### Mount delivery
 
-Current mount delivery is control-API when the daemon is running and disk reconcile when it is not. The CLI probes the daemon and sends mount create/update/delete requests to the REST API when a compatible daemon is ready. With no ready daemon, the CLI writes specs under `mounts/` directly and the next daemon startup converges them through `/v1/reconcile`.
+Only `$OMNIFS_HOME/mounts` is a local Git repository. Its `HEAD` is desired mount state and `refs/omnifs/applied` is the last revision that reached daemon readiness. Credentials, provider artifacts, cache data, sockets, logs, and runtime records remain outside Git. First use initializes the repository without a remote and commits existing valid specs with a stable Omnifs-local author, so behavior never depends on the operator's Git configuration.
 
-Specs are one file per mount, and a spec file's stem is its mount name: `mounts::Registry` (in `omnifs-workspace`) rejects any file whose stem does not match the spec's `mount`. The Registry is the sole spec owner. The daemon writes through it for running-daemon create/update/delete requests; the CLI writes through it only for offline config changes. Registry writes are atomic (same-dir temp plus rename) and serialized by the mount-registry advisory lock. A spec inherits its provider-manifest defaults (the auth scheme and config defaults) at creation time, so serving reads it as-is, with no read-time resolution step. Materialization still reads the pinned manifest, but only to check the spec's capability grants against the provider's declared needs, never to fill defaults.
+Specs are one file per mount, and a spec file's stem is its mount name. `mounts::Registry` remains the sole owner of parsing, naming, and atomic file writes, while `mounts::Repository` owns Git revisions, snapshots, and the shared advisory lock around an official write or apply operation. Mount-writing commands record the resulting desired-state commit. `mount add` is create-only, and `mount rm` deletes only the spec because rollback can restore its credential reference; credential removal remains an explicit reauthentication/reset concern. Setup may write several specs before recording one coherent commit at its launch boundary.
 
-`POST /v1/reconcile` converges the daemon to the on-disk specs. With no body it is a full pass. With `{ "mounts": ["name"] }` it is scoped to those mount names for planning, build, and stale removal. HTTP-triggered reconcile is non-queueing: if another reconcile holds the engine lock, the daemon returns `409 ReconcileBusy` with `Retry-After: 2`. Internal daemon calls that intentionally serialize still wait on the engine lock.
+`omnifs up` is the sole apply implementation, and visible `omnifs apply` is an alias of that exact clap command, args type, handler, telemetry label, and receipt. It may commit valid manual `*.json` edits before application. It rejects malformed specs, unexpected tracked paths, missing provider artifacts, insufficient grants, and unusable credentials before stopping a healthy daemon.
 
-Mount specs strict-parse their top-level JSON fields. Unknown top-level keys are invalid in on-disk specs and in daemon mount CRUD requests, while the provider-owned `config` object remains opaque to the host.
+The CLI materializes `HEAD` under cache storage and starts the daemon with that immutable snapshot plus its exact revision. The daemon never invokes Git or chooses desired state. If a healthy daemon already records `HEAD`, `up` leaves it running and only converges the frontend plan. Otherwise it stops only the daemon, starts the new revision, waits for readiness, and then advances `refs/omnifs/applied`; a failed start never advances the ref. Existing host, Docker, and krunkit frontend processes reconnect through the wire protocol and are never replaced merely because the daemon restarted. `up` may launch a configured frontend only after proving its runner is absent. `down` remains the explicit full stop.
+
+Mount specs strict-parse their top-level JSON fields. Unknown top-level keys are invalid, while the provider-owned `config` object remains opaque to the host. The control API has no mount mutation or reconcile routes; it retains read-only inspection/export plus credential, frontend, status, event, and shutdown surfaces.
 
 Prefer REST API extensions for new non-secret interactions. Keep credential material off the REST API.
 
@@ -80,7 +82,7 @@ filesystem = "fuse"
 environment = "docker"
 ```
 
-`filesystem` is `fuse` or `nfs`; `environment` is `host`, `docker`, or `krunkit`; `location` is host-only and resolves absolute. Docker and krunkit deliver FUSE only, NFS is host-only, and host FUSE is Linux-only. At most one Docker and one krunkit entry may exist, and two host entries cannot resolve to the same location. An absent or empty list uses platform defaults: Linux gets host FUSE; macOS gets host NFS plus Docker FUSE; other hosts get host NFS. An explicit non-empty list replaces the defaults. Before the first mutation of implicit defaults, the CLI materializes the complete effective plan so editing one entry never drops another default. `omnifs up` launches every effective entry unless `--no-frontend`; it never repins or rewrites mount specs.
+`filesystem` is `fuse` or `nfs`; `environment` is `host`, `docker`, or `krunkit`; `location` is host-only and resolves absolute. Docker and krunkit deliver FUSE only, NFS is host-only, and host FUSE is Linux-only. At most one Docker and one krunkit entry may exist, and two host entries cannot resolve to the same location. An absent or empty list uses platform defaults: Linux gets host FUSE; macOS gets host NFS plus Docker FUSE; other hosts get host NFS. An explicit non-empty list replaces the defaults. Before the first mutation of implicit defaults, the CLI materializes the complete effective plan so editing one entry never drops another default. `omnifs up` launches every effective entry unless `--no-frontend`; applying desired state never selects or repins a provider on the operator's behalf.
 
 `DaemonStatus.backend` is the daemon-reported backend fact, not a config echo: it reports the daemon's own process id. `daemon.json` is only a cache of that daemon-reported fact for stale teardown.
 
@@ -90,7 +92,7 @@ Keep frontend-specific Docker policy (image resolution, container naming, the no
 
 The daemon always serves its shared namespace over `$OMNIFS_HOME/frontends/local.sock` for local frontend runners. The `frontends/` directory is forced to `0700` and the socket to `0600`; filesystem permissions are its authentication. A refused stale socket is removed before binding, while any ambiguous probe error fails closed. The socket is removed on graceful exit. There is no named attach-socket flag. The Omnifs VFS wire protocol uses length-delimited postcard framing from `omnifs-vfs-wire`, not an RPC framework. It transports the engine-owned `Namespace` surface and does not own projection semantics.
 
-`/v1/ready` reports ready only after startup reconcile completes and every requested namespace listener has bound. Listener readiness does not require a frontend to be attached. `DaemonStatus.frontends` is the authoritative location set; API 6 has no singular daemon mount-point projection.
+`/v1/ready` reports ready only after the immutable mount revision loads completely and every requested namespace listener has bound. Listener readiness does not require a frontend to be attached. `DaemonStatus.frontends` is the authoritative location set; API 7 has no singular daemon mount-point projection or failed-mount collection.
 
 The separate `omnifs-thin` binary runs either `fuse` or `nfs`, attaches a VFS-wire-backed namespace, and serves one frontend location until teardown. It runs no provider and its normal dependency graph excludes Wasmtime, the provider bundle, and the daemon control plane. `omnifs-thin fuse --attach <socket> --mount-point <path>` is the Docker image and krunkit guest entrypoint; with `--attach` absent, `OMNIFS_ATTACH_ADDR` and `OMNIFS_ATTACH_TOKEN` select TCP or vsock. `omnifs-thin nfs --attach <socket> --mount-point <path>` additionally persists filehandle identity and mount discovery state so a restarted runner can resume an active kernel mount. Both modes consume attach resolution, reconnect, and readiness signaling from `omnifs-vfs-wire`.
 
@@ -146,7 +148,7 @@ Every JSON result uses one envelope:
 }
 ```
 
-Inventory and receipt models are typed and sorted before both rendering and serialization. Status owns plural `frontends`, `mounts`, and `providers`; focused mutation receipts add plural `access_paths` where relevant. Frontends always carry `scope: "all"` and a mount count because they expose the complete namespace. Provider state is derived from exact reverse pins as `pinned`, `installed`, or `missing`; `up` never repins, and only explicit `mount upgrade` changes an existing pin.
+Inventory and receipt models are typed and sorted before both rendering and serialization. Status owns plural `frontends`, `mounts`, and `providers`; focused mutation receipts add plural `access_paths` where relevant. Frontends always carry `scope: "all"` and a mount count because they expose the complete namespace. Provider state is derived from exact reverse pins as `pinned`, `installed`, or `missing`; `up` applies the committed pin exactly and never chooses a replacement artifact.
 
 Observation commands exit 0 when collection succeeds and every resource is positive or neutral, including a deliberately stopped daemon, stopped planned frontends, offline mounts while stopped, unpinned installed artifacts, and unnecessary auth. A complete inventory with an actionable or failed row exits 5. When a runtime record says the daemon should be live but its control probe is unavailable, status emits the trustworthy degraded inventory and exits 3. Human, JSON, and JSONL derive the same resource verdict; the exit mapper applies the unreachable override.
 
@@ -166,9 +168,9 @@ whose destination streams are owned by the invoked tools.
 
 ## Must not
 
-- Bypass the daemon mount CRUD API for config changes while a compatible daemon is ready.
-- Add a second spec read or write path that bypasses `mount::Registry`, or write a spec to a file whose stem is not its mount name.
-- Add more direct workspace coupling when a REST API extension fits.
+- Make any directory above `$OMNIFS_HOME/mounts` a Git repository, or place credentials, provider artifacts, cache data, sockets, logs, or daemon records under mount-version control.
+- Add a second spec read or write path that bypasses `mounts::Registry`, or write a spec to a file whose stem is not its mount name.
+- Add a second apply command path, args type, receipt, lifecycle branch, or telemetry label for the `apply` spelling.
 - Put credential material or provider secrets in snapshot export routes or snapshot
   indexes.
 - Reintroduce a persisted daemon runtime-backend choice (a `[system].runtime`-shaped config field or a `--runtime` flag); the daemon has exactly one runtime.

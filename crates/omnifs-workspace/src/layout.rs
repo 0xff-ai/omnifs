@@ -25,6 +25,8 @@ pub const CREDENTIALS_FILE: &str = "credentials.json";
 pub const MOUNTS_SUBDIR: &str = "mounts";
 pub const PROVIDERS_SUBDIR: &str = "providers";
 pub const CACHE_SUBDIR: &str = "cache";
+/// Subdirectory of `cache_dir` holding immutable mount-spec revision snapshots.
+pub const MOUNT_REVISIONS_SUBDIR: &str = "mount-revisions";
 /// Subdirectory of `cache_dir` holding local frontend state.
 pub const FRONTEND_STATE_SUBDIR: &str = "frontends";
 /// Subdirectory of `config_dir` holding the daemon's namespace attach sockets
@@ -121,6 +123,11 @@ impl WorkspaceLayout {
     /// Discoverable parent of all local frontend state directories.
     pub fn frontend_state_root(&self) -> PathBuf {
         self.cache_dir.join(FRONTEND_STATE_SUBDIR)
+    }
+
+    /// Root of immutable mount desired-state snapshots keyed by Git revision.
+    pub fn mount_revisions_root(&self) -> PathBuf {
+        self.cache_dir.join(MOUNT_REVISIONS_SUBDIR)
     }
 
     /// Stable state directory for one local frontend mount.

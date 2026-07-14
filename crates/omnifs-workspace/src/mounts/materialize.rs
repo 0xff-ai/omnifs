@@ -1,7 +1,7 @@
 //! Mount materialization: turn an authored `Spec` into a runtime-ready one.
 //!
 //! Shared by the CLI (for the pre-launch credential/capability preflight) and
-//! the daemon (to reconcile `mounts/*.json` into the registry). The steps, in
+//! the daemon (to load an immutable revision snapshot at startup). The steps, in
 //! order: read the pinned manifest's capability needs, check that the spec's
 //! grants satisfy them, then canonicalize preopens. The spec already carries
 //! its provider-manifest defaults (baked in at creation), so materialization

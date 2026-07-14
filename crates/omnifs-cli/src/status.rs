@@ -329,14 +329,14 @@ mod tests {
     #[test]
     fn context_api_and_actions_follow_observed_daemon_state() {
         let mut healthy = report(DaemonState::Running, false);
-        healthy.inventory.workspace.api = Some(ApiVersion { major: 6, minor: 0 });
+        healthy.inventory.workspace.api = Some(ApiVersion { major: 7, minor: 0 });
         let healthy_text = healthy
             .render(false)
             .render_with(crate::ui::table::RenderOptions {
                 width: 120,
                 color: false,
             });
-        assert!(healthy_text.contains("API 6.0"));
+        assert!(healthy_text.contains("API 7.0"));
         assert!(!healthy_text.contains("Fix  omnifs"));
 
         let unreachable = report(DaemonState::Unreachable, false)

@@ -57,10 +57,7 @@ pub use namespace::{
     StabilityClass,
 };
 #[cfg(feature = "runtime")]
-pub use runtime::registry::{
-    FailureKind, MountFailure, MountRuntimes, ReconcileBusy, ReconcileOutcome, RegistryError,
-    UpgradeApprovals,
-};
+pub use runtime::registry::{MountRuntimes, RegistryError};
 #[cfg(feature = "runtime")]
 pub use runtime::{BuildError, EngineError, HostContext, Runtime as Engine};
 #[cfg(feature = "runtime")]

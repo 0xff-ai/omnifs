@@ -58,7 +58,7 @@ const BLOB_CACHE_SUBDIR: &str = "blobs";
 const ARCHIVE_CACHE_SUBDIR: &str = "archives";
 const RECENT_REVALIDATE_OBJECTS: usize = 32;
 
-/// Host-owned filesystem context for provider runtime and mount lifecycle.
+/// Host-owned filesystem context for provider runtime.
 #[derive(Clone, Debug)]
 pub struct HostContext {
     cache_dir: PathBuf,
@@ -110,11 +110,6 @@ impl HostContext {
 
     pub fn credentials_file(&self) -> &StdPath {
         &self.credentials_file
-    }
-
-    pub(crate) fn mounts_dir(&self) -> PathBuf {
-        self.config_dir
-            .join(omnifs_workspace::layout::MOUNTS_SUBDIR)
     }
 
     pub(crate) fn wasm_cache_dir(&self) -> &StdPath {

@@ -906,7 +906,6 @@ mod tests {
                     auth_health: None,
                 })
                 .collect(),
-            failed: Vec::new(),
             health: DaemonHealth::default(),
         }
     }

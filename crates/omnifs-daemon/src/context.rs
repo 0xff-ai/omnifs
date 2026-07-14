@@ -5,10 +5,11 @@ use anyhow::Context as _;
 use crate::app::DaemonArgs;
 use omnifs_api::{
     API_MAJOR, API_MINOR, DaemonBackend, DaemonHealth, DaemonStatus, DaemonSubsystem, FrontendInfo,
-    HealthState, MountFailure, MountInfo, SubsystemHealth,
+    HealthState, MountInfo, SubsystemHealth,
 };
 use omnifs_engine::HostContext;
 use omnifs_workspace::layout::{Daemon, Workspace, WorkspaceLayout};
+use omnifs_workspace::mounts::Revision;
 use omnifs_workspace::runtime_record::{Endpoint, RecordedBackend, RuntimeRecord};
 use std::fmt::Write as _;
 use std::net::{SocketAddr, TcpListener};
@@ -41,6 +42,7 @@ fn check_uds_path_length(path: &Path) -> anyhow::Result<()> {
 #[derive(Debug)]
 pub(crate) struct DaemonContext {
     layout: WorkspaceLayout,
+    mount_revision: Revision,
     /// Optional debug/test TCP control listener beside the always-on Unix socket.
     listen: Option<SocketAddr>,
     /// Random per-start id reported in status and written to the runtime record.
@@ -72,9 +74,15 @@ impl DaemonContext {
         let workspace: Workspace<Daemon> = Workspace::resolve()?;
         let layout = workspace.into_layout();
         let process = ProcessInfo::current();
+        anyhow::ensure!(
+            args.mount_snapshot.is_dir(),
+            "mount snapshot {} is not a directory",
+            args.mount_snapshot.display()
+        );
 
         Ok(Self {
             layout,
+            mount_revision: args.mount_revision.clone(),
             listen,
             instance_id: generate_instance_id(),
             attach_tcp,
@@ -192,6 +200,7 @@ impl DaemonContext {
     /// Assemble the initial runtime record for a host-native daemon.
     pub(crate) fn runtime_record(&self) -> RuntimeRecord {
         RuntimeRecord::new(
+            self.mount_revision.clone(),
             Endpoint::Unix {
                 path: self.control_socket(),
             },
@@ -218,10 +227,6 @@ impl DaemonContext {
 
     pub(crate) fn config_dir(&self) -> &Path {
         &self.layout.config_dir
-    }
-
-    pub(crate) fn mounts_dir(&self) -> &Path {
-        &self.layout.mounts_dir
     }
 
     pub(crate) fn providers_dir(&self) -> &Path {
@@ -318,16 +323,9 @@ impl DaemonContext {
         attach_serving: bool,
         frontends: Vec<FrontendInfo>,
         mounts: Vec<MountInfo>,
-        failed: Vec<MountFailure>,
         credential_degraded: &[(String, String)],
     ) -> DaemonStatus {
-        let health = self.health(
-            attach_serving,
-            &frontends,
-            &mounts,
-            &failed,
-            credential_degraded,
-        );
+        let health = self.health(attach_serving, &frontends, &mounts, credential_degraded);
         DaemonStatus {
             version: env!("CARGO_PKG_VERSION").to_string(),
             api_major: API_MAJOR,
@@ -343,7 +341,6 @@ impl DaemonContext {
                 pid: self.process.pid,
             },
             mounts,
-            failed,
             health,
         }
     }
@@ -353,7 +350,6 @@ impl DaemonContext {
         attach_serving: bool,
         frontends: &[FrontendInfo],
         mounts: &[MountInfo],
-        failed: &[MountFailure],
         credential_degraded: &[(String, String)],
     ) -> DaemonHealth {
         DaemonHealth::new(vec![
@@ -374,12 +370,12 @@ impl DaemonContext {
                 format!("native daemon pid {}", self.process.pid),
             ),
             Self::frontend_health(attach_serving, frontends),
-            mount_health(mounts, failed, credential_degraded),
+            mount_health(mounts, credential_degraded),
         ])
     }
 
     /// Listener readiness is independent of whether a frontend is currently
-    /// attached. Startup flips this subsystem healthy only after reconcile and
+    /// attached. Startup flips this subsystem healthy only after mount loading and
     /// every requested listener bind have completed.
     fn frontend_health(attach_serving: bool, frontends: &[FrontendInfo]) -> SubsystemHealth {
         let mut listed = vec!["attach socket local".to_string()];
@@ -409,23 +405,13 @@ impl DaemonContext {
 /// ready at mount-start (see `Runtime::credential_warning`). Unlike `failed`,
 /// a credential-degraded mount is still loaded and present in `mounts`; it
 /// only pulls the Mounts subsystem down to `Degraded`, never `Unhealthy`.
-fn mount_health(
-    mounts: &[MountInfo],
-    failed: &[MountFailure],
-    credential_degraded: &[(String, String)],
-) -> SubsystemHealth {
-    let state = if !failed.is_empty() && mounts.is_empty() {
-        HealthState::Unhealthy
-    } else if !failed.is_empty() || !credential_degraded.is_empty() {
-        HealthState::Degraded
-    } else {
+fn mount_health(mounts: &[MountInfo], credential_degraded: &[(String, String)]) -> SubsystemHealth {
+    let state = if credential_degraded.is_empty() {
         HealthState::Healthy
-    };
-    let mut message = if failed.is_empty() {
-        format!("{} mount(s) loaded", mounts.len())
     } else {
-        format!("{} mount(s) loaded, {} failed", mounts.len(), failed.len())
+        HealthState::Degraded
     };
+    let mut message = format!("{} mount(s) loaded", mounts.len());
     if !credential_degraded.is_empty() {
         let detail = credential_degraded
             .iter()
@@ -474,6 +460,7 @@ mod tests {
     fn context(root: &Path) -> DaemonContext {
         DaemonContext {
             layout: WorkspaceLayout::under_root(root),
+            mount_revision: Revision::new("a".repeat(40)).unwrap(),
             listen: None,
             instance_id: "test-instance".to_owned(),
             attach_tcp: None,

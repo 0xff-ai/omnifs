@@ -7,6 +7,7 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, bail, ensure};
 use clap::{Args, ValueEnum};
 use omnifs_api::{FrontendDelivery, FrontendInfo, FsType};
+use omnifs_mtab::{MountKind, MountState};
 use omnifs_workspace::config::{
     ConfigDocument, EffectiveFrontend, Environment, Filesystem, FrontendId, FrontendPlan,
     FrontendSpec, HostOs,
@@ -28,6 +29,9 @@ use serde::Serialize;
 const DOCKER_TIMEOUT: Duration = Duration::from_secs(5);
 const KRUNKIT_TIMEOUT: Duration = Duration::from_secs(90);
 const POLL: Duration = Duration::from_millis(200);
+// The wire client's reconnect backoff tops out at two seconds. Allow more than
+// one ceiling interval before deciding a desired local runner is absent.
+const RECONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum FrontendFilesystem {
@@ -349,27 +353,58 @@ impl<'a> FrontendController<'a> {
         Ok(results)
     }
 
-    pub async fn launch_all(&self) -> Result<Vec<FrontendResult>> {
+    /// Converge the durable frontend plan after `up` applies desired mount
+    /// state. Existing frontend processes are never replaced as a consequence
+    /// of daemon startup: they get a bounded reconnect window, and only a
+    /// runner proven absent is launched.
+    pub async fn converge(&self, daemon_restarted: bool) -> Result<Vec<FrontendResult>> {
         let targets = self.desired()?;
-        let mut failures = Vec::new();
-        for target in targets
-            .iter()
-            .filter(|entry| entry.environment == Environment::Host)
-        {
-            if let Err(error) = self.launch(target).await {
-                failures.push(FrontendResult {
-                    id: target.id(),
-                    state: RuntimeState::Failed,
-                    changed: false,
-                    fix: Some(restart_fix(target)),
-                    detail: Some(format!("{error:#}")),
-                });
+        let mut attached = self.attached_ids().await?;
+        if daemon_restarted {
+            let deadline = tokio::time::Instant::now() + RECONNECT_TIMEOUT;
+            while targets
+                .iter()
+                .any(|target| !attached.contains(&target.id()))
+                && tokio::time::Instant::now() < deadline
+            {
+                tokio::time::sleep(POLL).await;
+                attached = self.attached_ids().await?;
             }
         }
-        for target in targets
-            .iter()
-            .filter(|entry| entry.environment != Environment::Host)
-        {
+
+        let mut failures = Vec::new();
+        for target in &targets {
+            if attached.contains(&target.id()) {
+                continue;
+            }
+            if daemon_restarted {
+                match self.runner_is_running(target).await {
+                    Ok(true) => {
+                        failures.push(FrontendResult {
+                            id: target.id(),
+                            state: RuntimeState::Failed,
+                            changed: false,
+                            fix: Some(restart_fix(target)),
+                            detail: Some(
+                                "frontend process is still running but did not reconnect to the new daemon"
+                                    .to_owned(),
+                            ),
+                        });
+                        continue;
+                    },
+                    Ok(false) => {},
+                    Err(error) => {
+                        failures.push(FrontendResult {
+                            id: target.id(),
+                            state: RuntimeState::Failed,
+                            changed: false,
+                            fix: Some(restart_fix(target)),
+                            detail: Some(format!("inspect existing frontend process: {error:#}")),
+                        });
+                        continue;
+                    },
+                }
+            }
             if let Err(error) = self.launch(target).await {
                 failures.push(FrontendResult {
                     id: target.id(),
@@ -381,6 +416,63 @@ impl<'a> FrontendController<'a> {
             }
         }
         Ok(failures)
+    }
+
+    async fn runner_is_running(&self, target: &EffectiveFrontend) -> Result<bool> {
+        match target.environment {
+            Environment::Host => {
+                let location = target
+                    .location
+                    .as_deref()
+                    .context("host frontend has no location")?;
+                let state_dir = self.workspace.layout().frontend_state_dir(
+                    match target.filesystem {
+                        Filesystem::Fuse => FrontendKind::Fuse,
+                        Filesystem::Nfs => FrontendKind::Nfs,
+                    },
+                    location,
+                );
+                if !state_dir.try_exists()? {
+                    return Ok(false);
+                }
+                let state = MountState::read_unique(&state_dir)?;
+                let same_kind = matches!(
+                    (target.filesystem, &state.kind),
+                    (Filesystem::Fuse, MountKind::Fuse) | (Filesystem::Nfs, MountKind::Nfs { .. })
+                );
+                Ok(state.mount_point == location
+                    && same_kind
+                    && crate::host_teardown::local_mount_is_owned(&state))
+            },
+            Environment::Docker => {
+                let name = frontend_container_name(self.workspace.layout())?;
+                let image = resolve_frontend_image(None, self.document.config())?;
+                let target =
+                    DockerTarget::new(name.as_str().to_owned(), image.as_str().to_owned())?;
+                let runtime = Runtime::connect_for(&target, self.output)?;
+                Ok(DockerBackend::new(runtime)
+                    .is_running()
+                    .await?
+                    .unwrap_or(false))
+            },
+            Environment::Krunkit => Ok(KrunkitBackend::new(
+                self.workspace.layout().config_dir.clone(),
+            )
+            .is_running()
+            .await?
+            .unwrap_or(false)),
+        }
+    }
+
+    async fn attached_ids(&self) -> Result<Vec<FrontendId>> {
+        Ok(self
+            .workspace
+            .daemon()
+            .compatible_status_optional()
+            .await?
+            .map_or_else(Vec::new, |status| {
+                status.frontends.iter().map(observed_id).collect()
+            }))
     }
 
     async fn launch_result(&self, target: EffectiveFrontend) -> FrontendResult {

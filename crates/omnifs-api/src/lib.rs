@@ -17,7 +17,7 @@ pub mod events;
 
 /// Control API major version. The CLI refuses to talk to a daemon with a
 /// different major. Bump when routes or payloads change incompatibly.
-pub const API_MAJOR: u16 = 6;
+pub const API_MAJOR: u16 = 7;
 
 /// Control API minor version. The CLI warns but proceeds when the daemon's
 /// minor differs. Bump for additive, backward-compatible additions.
@@ -59,16 +59,13 @@ pub enum ErrorCode {
     Unauthorized,
     AuthRequired,
     CredentialNotFound,
-    ConsentRequired,
     MountNotFound,
     SpecInvalid,
-    ProviderMissing,
-    ReconcileBusy,
     DaemonShuttingDown,
     Internal,
 }
 
-/// `GET /v1/ready`: 200 with `ready: true` once startup reconcile completes
+/// `GET /v1/ready`: 200 with `ready: true` once the immutable mount revision loads
 /// and every requested namespace listener is serving.
 /// Non-ready responses use [`ApiError`].
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -113,11 +110,6 @@ pub struct DaemonStatus {
     pub backend: DaemonBackend,
     /// Provider mounts loaded in the registry.
     pub mounts: Vec<MountInfo>,
-    /// Mounts that did not converge at the last reconcile, with reasons. Empty
-    /// when every desired mount is serving; a dark mount appears here, not as a
-    /// silent absence from `mounts`.
-    #[serde(default)]
-    pub failed: Vec<MountFailure>,
     /// Daemon-owned health for runtime subsystems. CLI status renders these
     /// entries instead of reconstructing daemon health from raw fields.
     #[serde(default)]
@@ -362,193 +354,6 @@ pub struct ProviderArtifact {
 pub struct ProviderSummary {
     pub name: String,
     pub installed: Vec<ProviderArtifact>,
-}
-
-/// One mount that did not converge during a reconcile. `mount` is the mount
-/// name, or the spec path when the name could not be parsed.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct MountFailure {
-    pub mount: String,
-    pub kind: ErrorCode,
-    pub reason: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub detail: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct MountReport {
-    pub mount: String,
-    pub outcome: MountOutcome,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub failure: Option<MountFailure>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub approved: Option<UpgradeDelta>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum MountOutcome {
-    Added,
-    Updated,
-    Removed,
-    Unchanged,
-    Failed,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct MountUpdateRequest {
-    pub spec: serde_json::Value,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub approved: Option<UpgradeDelta>,
-}
-
-/// Wire representation of a reviewed provider-upgrade delta.
-///
-/// The control API keeps this as transport data, not as a credential-bearing
-/// mount spec. The daemon converts it back into the workspace upgrade model and
-/// checks that it covers the actual diff computed at the hot-swap boundary.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum UpgradeDelta {
-    Identical,
-    AdditiveConfig {
-        added: Vec<AddedField>,
-    },
-    BreakingConfig {
-        changes: Vec<FieldChange>,
-    },
-    CapabilityLimitOrAuth {
-        capabilities: Vec<CapabilityChange>,
-        limits: Vec<LimitChange>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        auth: Option<AuthDelta>,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-pub struct AddedField {
-    pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub default: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum FieldChange {
-    Added {
-        name: String,
-        required: bool,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        default: Option<serde_json::Value>,
-    },
-    Removed {
-        name: String,
-    },
-    BecameRequired {
-        name: String,
-    },
-    BecameOptional {
-        name: String,
-    },
-    TypeChanged {
-        name: String,
-        old: serde_json::Value,
-        new: serde_json::Value,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-pub struct CapabilityChange {
-    pub kind: String,
-    pub value: String,
-    pub direction: CapabilityDirection,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum CapabilityDirection {
-    Added,
-    Removed,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-pub struct LimitChange {
-    pub name: String,
-    pub value: String,
-    pub direction: LimitDirection,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum LimitDirection {
-    Added,
-    Removed,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-pub struct AuthDelta {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub old: Option<AuthSurface>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub new: Option<AuthSurface>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-pub struct AuthSurface {
-    pub default: String,
-    pub schemes: Vec<AuthSchemeSurface>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-pub struct AuthSchemeSurface {
-    pub key: String,
-    pub scheme: serde_json::Value,
-}
-
-/// `POST /v1/reconcile`: what converging the running mount set to the on-disk
-/// desired state changed.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
-pub struct ReconcileReport {
-    pub added: Vec<String>,
-    pub removed: Vec<String>,
-    pub updated: Vec<String>,
-    pub failed: Vec<MountFailure>,
-}
-
-impl ReconcileReport {
-    /// Derive the outcome for one mount, preserving failure precedence over
-    /// successful changes.
-    pub fn for_mount(&self, mount: &str, approved: Option<UpgradeDelta>) -> MountReport {
-        let failure = self
-            .failed
-            .iter()
-            .find(|failure| failure.mount == mount)
-            .cloned();
-        let outcome = if failure.is_some() {
-            MountOutcome::Failed
-        } else if self.added.iter().any(|name| name == mount) {
-            MountOutcome::Added
-        } else if self.updated.iter().any(|name| name == mount) {
-            MountOutcome::Updated
-        } else if self.removed.iter().any(|name| name == mount) {
-            MountOutcome::Removed
-        } else {
-            MountOutcome::Unchanged
-        };
-        MountReport {
-            mount: mount.to_string(),
-            outcome,
-            failure,
-            approved,
-        }
-    }
-}
-
-/// Optional request body for `POST /v1/reconcile`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
-pub struct ReconcileRequest {
-    #[serde(default)]
-    pub mounts: Vec<String>,
 }
 
 /// `POST /v1/shutdown`: daemon state immediately before exit.

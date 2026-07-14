@@ -54,6 +54,7 @@ pub enum Commands {
     /// every frontend in the effective `[[frontends]]` plan (explicit config,
     /// else the platform default). `--no-frontend` starts the daemon only,
     /// on every OS.
+    #[command(visible_alias = "apply")]
     Up(commands::up::UpArgs),
     /// Stop the daemon and clean up
     ///
@@ -159,7 +160,6 @@ impl Commands {
                     commands::mount::MountCommand::Add(_) => "mount.add",
                     commands::mount::MountCommand::Ls(_) => "mount.ls",
                     commands::mount::MountCommand::Show(_) => "mount.show",
-                    commands::mount::MountCommand::Upgrade(_) => "mount.upgrade",
                     commands::mount::MountCommand::Reauth(_) => "mount.reauth",
                     commands::mount::MountCommand::Rm { .. } => "mount.rm",
                     commands::mount::MountCommand::Snapshot(_) => "mount.snapshot",
@@ -317,6 +317,7 @@ where
         [command, subcommand] if matches!(command.as_str(), "mount" | "provider" | "frontend") => {
             format!("{command}.{subcommand}")
         },
+        [command, ..] if command == "apply" => "up".to_owned(),
         [command, ..] => command.clone(),
         [] => "status".to_owned(),
     }
@@ -373,10 +374,10 @@ fn exit_for_verdict(verdict: DoctorVerdict) -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use clap::CommandFactory;
+    use clap::{CommandFactory, Parser};
     use std::ffi::OsString;
 
-    use super::{Cli, raw_command_path, raw_output_mode};
+    use super::{Cli, Commands, raw_command_path, raw_output_mode};
 
     fn argv(args: &[&str]) -> Vec<OsString> {
         args.iter().map(OsString::from).collect()
@@ -434,6 +435,10 @@ mod tests {
             raw_command_path(argv(&["--yes", "--no-input", "status"])),
             "status"
         );
+        assert_eq!(
+            raw_command_path(argv(&["apply", "--output", "json", "--unknown"])),
+            "up"
+        );
     }
 
     #[test]
@@ -466,6 +471,19 @@ mod tests {
                 "prompt site `{prompt}` must be covered by `{subcommand}` arg `{arg}`"
             );
         }
+    }
+
+    #[test]
+    fn apply_alias_parses_identically_to_up() {
+        let up = Cli::try_parse_from(["omnifs", "up", "--no-frontend", "--wait", "3s"]).unwrap();
+        let apply =
+            Cli::try_parse_from(["omnifs", "apply", "--no-frontend", "--wait", "3s"]).unwrap();
+        let (Commands::Up(up), Commands::Up(apply)) = (up.command.unwrap(), apply.command.unwrap())
+        else {
+            panic!("up and apply must parse to Commands::Up");
+        };
+        assert_eq!(up.no_frontend, apply.no_frontend);
+        assert_eq!(up.wait, apply.wait);
     }
 
     #[test]

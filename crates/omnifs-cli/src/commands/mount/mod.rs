@@ -8,7 +8,6 @@ pub(crate) mod provider_selection;
 pub(crate) mod snapshot;
 pub(crate) mod spec_creation;
 mod token_validation;
-pub(crate) mod upgrade;
 
 pub(crate) use add::AddArgs;
 pub(crate) use add::{render_consent_block, run_static_token_init};
@@ -17,13 +16,9 @@ pub(crate) use auth_import::ImportOutcome;
 
 use anyhow::{Context, anyhow};
 use clap::{Args, Subcommand};
-use omnifs_auth::{CredentialService, OAuthClient};
-use omnifs_workspace::creds::{CredentialStore, FileStore};
 use omnifs_workspace::mounts::Name as MountName;
 use std::path::Path;
-use std::sync::Arc;
 
-use crate::credential_target::CredentialTarget;
 use crate::error::{ExitCode, WithExitCode};
 use crate::stages::PromptMode;
 use crate::token_source::TokenSource;
@@ -46,16 +41,11 @@ pub enum MountCommand {
     Ls(LsArgs),
     /// Show one configured mount and every derived frontend access path.
     Show(ShowArgs),
-    /// Repin one mount to an explicit or semver-selected provider artifact.
-    Upgrade(upgrade::UpgradeArgs),
     /// Re-authenticate an existing mount.
     Reauth(ReauthArgs),
-    /// Remove a mount config (and its stored credential, by default).
+    /// Remove a mount config.
     Rm {
         name: String,
-        /// Skip the credential delete.
-        #[arg(long)]
-        keep_credentials: bool,
         /// Print the removal plan without changing the workspace.
         #[arg(long)]
         dry_run: bool,
@@ -102,24 +92,17 @@ impl MountArgs {
             MountCommand::Add(args) => args.run(output).await,
             MountCommand::Ls(args) => ls(&args, output).await,
             MountCommand::Show(args) => show(&args, output).await,
-            MountCommand::Upgrade(args) => args.run(output).await,
             MountCommand::Reauth(args) => args.run(output).await.map(|()| ExitCode::Success),
             MountCommand::Snapshot(args) => args.run(output).await,
-            MountCommand::Rm {
-                name,
-                keep_credentials,
-                dry_run,
-            } => {
+            MountCommand::Rm { name, dry_run } => {
                 let workspace = Workspace::resolve()?;
                 let receipt = rm_with_options(
                     &workspace,
                     &name,
                     output.yes(),
-                    keep_credentials,
                     dry_run,
                     output,
-                )
-                .await?;
+                )?;
                 if output.is_structured() {
                     output.emit_result(receipt.output_verdict(), &receipt)?;
                 }
@@ -367,30 +350,22 @@ impl ReauthArgs {
 }
 
 #[allow(dead_code)]
-pub async fn rm(
-    workspace: &Workspace,
-    name: &str,
-    yes: bool,
-    keep_credentials: bool,
-) -> anyhow::Result<()> {
+pub fn rm(workspace: &Workspace, name: &str, yes: bool) -> anyhow::Result<()> {
     rm_with_options(
         workspace,
         name,
         yes,
-        keep_credentials,
         false,
         Output::new(crate::ui::output::OutputMode::Human, false),
     )
-    .await
     .map(|_| ())
 }
 
 #[allow(clippy::too_many_lines)] // plan, decision, and receipt stay linear
-async fn rm_with_options(
+fn rm_with_options(
     workspace: &Workspace,
     name: &str,
     yes: bool,
-    keep_credentials: bool,
     dry_run: bool,
     output: Output,
 ) -> anyhow::Result<crate::commands::receipt::MountRemoveReceipt> {
@@ -435,14 +410,7 @@ async fn rm_with_options(
     let config_path = mount.source.clone();
     // Build the plan without constructing an HTTP client or registering an
     // OAuth revocation. A dry run must stop before any apply-only setup.
-    let planned_credential_target = CredentialTarget::for_mount(&mount.config);
-
-    let plan = mount_remove_plan(
-        name.as_str(),
-        &config_path,
-        &planned_credential_target,
-        keep_credentials,
-    );
+    let plan = mount_remove_plan(&config_path);
     session.plan(&plan);
     match Decision::resolve(
         PromptMode::from_flags(yes || output.yes(), output.no_input()),
@@ -460,90 +428,20 @@ async fn rm_with_options(
         Decision::Apply => {},
     }
 
-    let (service, credential_target) = if keep_credentials {
-        (None, planned_credential_target)
-    } else {
-        let store: Arc<dyn CredentialStore> = Arc::new(FileStore::new(&layout.credentials_file));
-        let service = CredentialService::new(store, OAuthClient::new()?);
-        let target = crate::auth::MountAuth::from_spec(workspace.catalog(), mount.config.clone())
-            .register_revocation(&service)?;
-        (Some(service), target)
+    let spec_outcome = match workspace.remove_mount_uncommitted(&name) {
+        Ok(true) => Outcome::done("spec", "desired-state deletion recorded"),
+        Ok(false) => Outcome::skip("spec", "already absent"),
+        Err(error) => Outcome::fail("spec", format!("spec kept; local delete failed: {error:#}")),
     };
-    let credential_outcomes = if keep_credentials {
-        if matches!(credential_target, CredentialTarget::Internal(_)) {
-            vec![Outcome::skip("credential", "kept (--keep-credentials)")]
-        } else {
-            Vec::new()
-        }
-    } else {
-        let service = service
-            .as_ref()
-            .ok_or_else(|| anyhow!("credential service missing during mount removal"))?;
-        delete_credentials(service, &credential_target).await
-    };
-    let credential_outcomes = credential_outcomes
-        .into_iter()
-        .map(|outcome| outcome.with_id("credential"))
-        .collect::<Vec<_>>();
-    if let Some(failure) = credential_outcomes
-        .iter()
-        .find(|outcome| outcome.state == crate::ui::consent::OutcomeState::Fail)
+    let mut outcomes = vec![spec_outcome];
+    if outcomes[0].state != crate::ui::consent::OutcomeState::Fail
+        && let Err(error) = workspace.commit_mounts()
     {
-        // Credential deletion happens before spec mutation so a store failure
-        // never leaves an on-disk mount pointing at a missing credential. The
-        // plan has already been shown; settle its credential row before
-        // returning the error instead of dropping the receipt on the floor.
-        let message = failure.value.clone();
-        let receipt = plan.receipt(credential_outcomes);
-        session.receipt(&receipt);
-        session.outro(format!("Removal failed for `{name}`."));
-        anyhow::bail!(message);
+        outcomes[0] = Outcome::fail(
+            "spec",
+            format!("deleted locally; desired-state commit failed: {error:#}"),
+        );
     }
-
-    let spec_id = "spec";
-    let spec_outcome = match workspace
-        .daemon()
-        .delete_mount_if_ready(name.as_str())
-        .await
-    {
-        Ok(Some(report)) if report.failure.is_none() => {
-            Outcome::done(spec_id, "deleted (hot unload from running daemon)")
-        },
-        Ok(Some(report)) => {
-            let reason = report
-                .failure
-                .as_ref()
-                .map_or("unknown daemon error", |failure| failure.reason.as_str());
-            Outcome::warn(spec_id, format!("deleted; hot unload failed ({reason})"))
-        },
-        Ok(None) => match workspace.remove_mount(&name) {
-            Ok(true) => Outcome::done(spec_id, "deleted (cold delete; daemon not running)"),
-            Ok(false) => Outcome::skip(spec_id, "already absent (cold delete)"),
-            Err(error) => Outcome::fail(
-                spec_id,
-                format!("spec kept; local delete failed: {error:#}"),
-            ),
-        },
-        Err(error) => match workspace.remove_mount(&name) {
-            Ok(true) => Outcome::warn(
-                spec_id,
-                format!("deleted (cold delete; hot unload unavailable: {error:#})"),
-            ),
-            Ok(false) => Outcome::skip(
-                spec_id,
-                format!("already absent (cold delete; hot unload unavailable: {error:#})"),
-            ),
-            Err(local_error) => Outcome::fail(
-                spec_id,
-                format!(
-                    "spec kept; hot unload failed ({error:#}); local delete failed: {local_error:#}"
-                ),
-            ),
-        },
-    };
-    let mut outcomes = Vec::with_capacity(1 + credential_outcomes.len());
-    outcomes.push(spec_outcome);
-    outcomes.extend(credential_outcomes);
     let receipt = plan.receipt(outcomes);
     session.receipt(&receipt);
     session.outro(format!("Removed `{name}`."));
@@ -570,55 +468,13 @@ async fn rm_with_options(
     ))
 }
 
-pub(crate) async fn delete_credentials(
-    service: &CredentialService,
-    target: &CredentialTarget,
-) -> Vec<Outcome> {
-    // Credential delete happens before the mount-file delete so that on
-    // store failure we don't orphan the mount config.
-    let mut outcomes = Vec::new();
-    for key in target.keys() {
-        let outcome = service.revoke_and_delete(key).await;
-        let typed = Outcome::credential(key, &outcome);
-        let failed = typed.state == crate::ui::consent::OutcomeState::Fail;
-        outcomes.push(typed);
-        if failed {
-            // The caller must settle this failure before touching the mount
-            // spec. Keep any earlier per-key outcomes so the receipt is a
-            // complete account of what happened.
-            break;
-        }
-    }
-    outcomes
-}
-
-fn mount_remove_plan(
-    name: &str,
-    config_path: &Path,
-    target: &CredentialTarget,
-    keep_credentials: bool,
-) -> Plan {
+fn mount_remove_plan(config_path: &Path) -> Plan {
     let mut plan = Plan::new("plan");
     plan.push(Row::remove(
         "spec",
         "spec",
         WorkspaceLayout::display(config_path).clone(),
     ));
-    if matches!(target, CredentialTarget::Internal(_)) {
-        if keep_credentials {
-            plan.push(Row::keep(
-                "credential",
-                "credential",
-                "kept (--keep-credentials)",
-            ));
-        } else {
-            plan.push(Row::remove(
-                "credential",
-                "credential",
-                format!("oauth `{name}` (revoke upstream)"),
-            ));
-        }
-    }
     plan
 }
 
@@ -626,11 +482,7 @@ fn mount_remove_plan(
 mod tests {
     use super::*;
     use crate::test_support::fixture_paths as base_fixture_paths;
-    use omnifs_workspace::authn::CredentialId;
-    use omnifs_workspace::creds::{CredentialEntry, MemoryStore};
-    use secrecy::SecretString;
     use tempfile::TempDir;
-    use time::OffsetDateTime;
 
     fn fixture_paths(root: &Path) -> WorkspaceLayout {
         let paths = base_fixture_paths(root);
@@ -643,7 +495,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let paths = fixture_paths(tmp.path());
         let workspace = Workspace::from_layout(paths);
-        let err = rm(&workspace, "../leak", true, false).await.unwrap_err();
+        let err = rm(&workspace, "../leak", true).unwrap_err();
         assert!(format!("{err:#}").contains("invalid mount name"));
     }
 
@@ -652,34 +504,15 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let paths = fixture_paths(tmp.path());
         let workspace = Workspace::from_layout(paths.clone());
-        rm(&workspace, "missing", true, false).await.unwrap();
+        rm(&workspace, "missing", true).unwrap();
         assert!(!paths.credentials_file.exists());
     }
 
-    #[tokio::test]
-    async fn delete_credentials_deletes_internal_key() {
-        let store = Arc::new(MemoryStore::new());
-        let key = CredentialId::new("github", "device", "default").unwrap();
-        let entry = CredentialEntry::static_token(
-            SecretString::from("secret".to_owned()),
-            OffsetDateTime::now_utc(),
-        );
-        store.put(&key, &entry).unwrap();
-
-        let target = CredentialTarget::Internal(key.clone());
-        let service = CredentialService::new(store.clone(), OAuthClient::new().unwrap());
-        delete_credentials(&service, &target).await;
-
-        assert!(store.get(&key).unwrap().is_none());
-    }
-
     #[test]
-    fn removal_plan_names_hot_unload_and_credential_rows() {
+    fn removal_plan_names_desired_state_row() {
         let path = Path::new("/tmp/omnifs/mounts/github.json");
-        let key = CredentialId::new("github", "oauth", "default").unwrap();
-        let plan = mount_remove_plan("github", path, &CredentialTarget::Internal(key), false);
-        assert_eq!(plan.remove_count(), 2);
+        let plan = mount_remove_plan(path);
+        assert_eq!(plan.remove_count(), 1);
         assert_eq!(plan.rows[0].id, "spec");
-        assert!(plan.rows[1].value.contains("revoke upstream"));
     }
 }

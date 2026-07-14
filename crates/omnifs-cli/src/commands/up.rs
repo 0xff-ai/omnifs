@@ -50,7 +50,7 @@ impl UpArgs {
             false
         } else {
             let report = FrontendController::new(&workspace, output)?
-                .launch_all()
+                .converge(outcome.daemon_restarted())
                 .await?;
             for failure in &report {
                 if !output.is_structured() {

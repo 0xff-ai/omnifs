@@ -14,7 +14,7 @@
 //! Skip (not fail) only when the platform genuinely cannot mount. A daemon
 //! that exits due to a CLI parse error or bad argument is a real failure.
 //!
-//! Tests that involve live NFS mounts (scenarios 3-8 on macOS) run under a
+//! Tests that involve live NFS mounts (scenarios 3-6 on macOS) run under a
 //! process-global mutex to avoid concurrent NFS mount/unmount operations that
 //! can serialize through the macOS kernel's NFS state and cause timeouts.
 
@@ -36,16 +36,6 @@ use common::{
 /// Shared bearer token for the debug TCP path. `omnifs up` spawns the daemon
 /// with this in its environment, and every CLI invocation dials with it.
 const CONTROL_TOKEN: &str = "lifecycle-acceptance-token";
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-/// A broken spec: pins a content id with no installed artifact.
-fn broken_mount_spec() -> String {
-    let bogus = "0".repeat(64);
-    format!(
-        r#"{{"provider":{{"id":"{bogus}","meta":{{"name":"broken"}}}},"mount":"broken","capabilities":{{"domains":[]}}}}"#
-    )
-}
 
 // ── Fixture ───────────────────────────────────────────────────────────────────
 
@@ -111,10 +101,11 @@ impl Fixture {
         .expect("write test mount spec");
     }
 
-    /// Write a broken mount spec (`broken.json`) into `<home>/mounts/`.
-    fn write_broken_spec(&self) {
-        std::fs::write(self.mounts_dir().join("broken.json"), broken_mount_spec())
-            .expect("write broken mount spec");
+    /// Write a second valid mount spec pinned to the test provider.
+    fn write_other_spec(&self) {
+        let spec = test_mount_spec(&self.test_provider_id)
+            .replace(r#""mount":"test""#, r#""mount":"other""#);
+        std::fs::write(self.mounts_dir().join("other.json"), spec).expect("write other mount spec");
     }
 
     /// Run a CLI subcommand with the hermetic env. Returns the captured output.
@@ -375,23 +366,19 @@ fn scenarios_3_to_6_lifecycle_cycle() {
         status_json["backend"]
     );
 
-    // Starting an already-running daemon is rejected.
-
+    // Applying the same revision is a no-op and retains the daemon process.
+    let original_pid = recorded_pid(fixture.home_path()).expect("running daemon pid");
     let out = fixture.run(&["up"]);
     assert!(
-        !out.status.success(),
-        "omnifs up while already running must exit non-zero"
-    );
-    let combined = format!(
-        "{}{}",
+        out.status.success(),
+        "omnifs up while already serving HEAD must succeed\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr),
     );
-    // The error message must name a running daemon.
-    assert!(
-        combined.to_lowercase().contains("already running")
-            || combined.to_lowercase().contains("daemon"),
-        "up-while-running error must mention 'already running' or 'daemon'; got:\n{combined}"
+    assert_eq!(
+        recorded_pid(fixture.home_path()),
+        Some(original_pid),
+        "applying the served revision must retain the daemon pid"
     );
 
     // Shutdown cleans up the daemon and mount.
@@ -501,9 +488,8 @@ fn scenario_7_dead_daemon_record_fallback() {
     // not actually mounted. No control listener answers, so `down` takes the
     // record-fallback path and liveness-checks the dead pid before sweeping.
     let record = format!(
-        r#"{{"version":1,"endpoint":{{"kind":"unix","path":"{}"}},"backend":"native","pid":2000000,"instance_id":"deadbeefdeadbeef","frontends":[{{"kind":"nfs","mount_point":"{}"}}],"started_at":"2026-07-07T00:00:00Z"}}"#,
+        r#"{{"version":3,"mount_revision":"0000000000000000000000000000000000000000","endpoint":{{"kind":"unix","path":"{}"}},"backend":"native","pid":2000000,"instance_id":"deadbeefdeadbeef","frontends":[],"started_at":"2026-07-07T00:00:00Z"}}"#,
         fixture.home_path().join("control.sock").display(),
-        fixture.mount_point.display(),
     );
     std::fs::write(fixture.runtime_record_path(), record).expect("write synthetic runtime record");
 
@@ -521,12 +507,12 @@ fn scenario_7_dead_daemon_record_fallback() {
     );
 }
 
-// Failed mounts remain visible in status.
+// Revision application is atomic at the daemon lifecycle boundary.
 
-/// Add a spec with a missing provider, `up`, `status` shows the broken mount
-/// in the failed set with a reason; `test` still serves; `down` cleans up.
+/// A changed valid revision restarts the daemon and advances the applied ref;
+/// malformed desired state fails before stopping it and leaves the ref alone.
 #[test]
-fn scenario_8_failed_mount_surfaced() {
+fn scenario_8_revision_restart_and_preflight_failure() {
     if !live_acceptance_enabled() {
         eprintln!("skip: set OMNIFS_ACCEPTANCE_LIVE=1 to run live-mount acceptance tests");
         return;
@@ -536,79 +522,87 @@ fn scenario_8_failed_mount_surfaced() {
         eprintln!("skip: test_provider.wasm missing (run `just build providers`)");
         return;
     }
-    if !platform_can_mount() {
-        eprintln!("skip: platform cannot mount (no /dev/fuse)");
-        return;
-    }
-
-    // Serialize mount-involving tests across processes to avoid concurrent NFS
-    // state contention (held for the rest of the test).
-    let _guard = nfs_serial_lock();
 
     let mut fixture = Fixture::new();
     fixture.write_test_spec();
-    fixture.write_broken_spec();
-
-    // `up` must exit 0 even with a partially-broken mount set: the daemon
-    // starts and serves the working mounts; the broken one is surfaced in the
-    // reconcile report.
-    let Some(()) = fixture.up_and_wait() else {
-        return; // skip: platform could not mount
-    };
-
-    // `test/hello/message` is still readable.
-    let message_path = fixture.mount_point.join("test/hello/message");
-    let content = std::fs::read(&message_path)
-        .expect("test/hello/message must be readable even with a broken peer");
-    assert_eq!(
-        content, b"Hello, world!",
-        "test/hello/message content mismatch after partial failure"
-    );
-
-    // `status --output json` surfaces the broken mount in the failed set and exits
-    // degraded.
-    let out = fixture.run(&["status", "--output", "json"]);
-    assert_eq!(
-        out.status.code(),
-        Some(5),
-        "omnifs status must exit degraded when a mount failed (exit {})\nstderr: {}",
+    let out = fixture.run(&["up", "--no-frontend"]);
+    assert!(
+        out.status.success(),
+        "initial up failed (exit {})\nstdout: {}\nstderr: {}",
         out.status,
+        String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr),
     );
+    fixture.update_pid_from_record();
+    let first =
+        omnifs_workspace::runtime_record::RuntimeRecord::read(&fixture.runtime_record_path())
+            .expect("read initial runtime record")
+            .expect("initial runtime record");
 
-    let json: serde_json::Value =
-        serde_json::from_slice(&out.stdout).expect("status --output json must produce valid JSON");
-
-    assert_eq!(
-        json["result"]["workspace"]["daemon"].as_str().unwrap_or(""),
-        "running",
-        "workspace.daemon must be 'running' even with a broken mount; got:\n{json:#}"
-    );
-
-    let mounts = json["result"]["mounts"]
-        .as_array()
-        .expect("result.mounts must be an array");
-    let broken = mounts
-        .iter()
-        .find(|m| m["name"].as_str() == Some("broken"))
-        .unwrap_or_else(|| panic!("mounts must include 'broken'; got: {mounts:?}"));
-    assert_eq!(
-        broken["serving"]["state"].as_str(),
-        Some("failed"),
-        "broken mount must report serving failure: {broken:#}"
-    );
-
-    // `test` is still in the working mounts list.
-    let running_mounts = mounts;
+    fixture.write_other_spec();
+    let out = fixture.run(&["apply", "--no-frontend"]);
     assert!(
-        running_mounts
-            .iter()
-            .any(|m| m["name"].as_str() == Some("test")),
-        "result.mounts must still include 'test' despite the broken peer; got: {running_mounts:?}"
+        out.status.success(),
+        "changed-revision apply failed (exit {})\nstdout: {}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
     );
+    fixture.update_pid_from_record();
+    let second =
+        omnifs_workspace::runtime_record::RuntimeRecord::read(&fixture.runtime_record_path())
+            .expect("read changed runtime record")
+            .expect("changed runtime record");
+    assert_ne!(
+        first.backend, second.backend,
+        "changed revision must restart the daemon"
+    );
+    assert_ne!(
+        first.mount_revision, second.mount_revision,
+        "changed desired state must load a new revision"
+    );
+    let repository = omnifs_workspace::mounts::Repository::open(fixture.mounts_dir())
+        .expect("open mount repository after apply");
+    assert_eq!(
+        repository.applied().expect("read applied ref"),
+        Some(second.mount_revision.clone()),
+        "readiness must advance refs/omnifs/applied to the running revision"
+    );
+    drop(repository);
 
-    // Clean up: use --force so a tardy NFS unmount does not block.
-    let out = fixture.run(&["down", "--force"]);
+    std::fs::write(fixture.mounts_dir().join("malformed.json"), b"{")
+        .expect("write malformed desired state");
+    let out = fixture.run(&["up", "--no-frontend"]);
+    assert!(
+        !out.status.success(),
+        "malformed desired state must reject up"
+    );
+    let after_failure =
+        omnifs_workspace::runtime_record::RuntimeRecord::read(&fixture.runtime_record_path())
+            .expect("read runtime record after rejected apply")
+            .expect("healthy daemon must remain recorded after rejected apply");
+    assert_eq!(
+        after_failure.backend, second.backend,
+        "preflight failure must not stop the healthy daemon"
+    );
+    assert_eq!(
+        after_failure.mount_revision, second.mount_revision,
+        "preflight failure must not change the running revision"
+    );
+    let alive = recorded_pid(fixture.home_path()).is_some_and(|pid| {
+        Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .output()
+            .is_ok_and(|output| output.status.success())
+    });
+    assert!(
+        alive,
+        "preflight failure must leave the healthy daemon alive"
+    );
+    std::fs::remove_file(fixture.mounts_dir().join("malformed.json"))
+        .expect("remove malformed desired state");
+
+    let out = fixture.run(&["down"]);
     assert!(
         out.status.success(),
         "omnifs down must exit 0 after scenario 8 (exit {})\nstdout: {}\nstderr: {}",

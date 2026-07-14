@@ -20,11 +20,12 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 use crate::io::write_atomic;
+use crate::mounts::Revision;
 
 /// Schema version this build understands. A record carrying a different version
 /// was written by a build that knows something this one does not, and is
 /// reported rather than silently reinterpreted.
-pub const RUNTIME_RECORD_VERSION: u32 = 2;
+pub const RUNTIME_RECORD_VERSION: u32 = 3;
 
 /// How a client reaches the daemon's control API. The daemon always serves a
 /// Unix domain socket; kept as a named type (rather than a bare path) for the
@@ -121,6 +122,7 @@ impl FrontendKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeRecord {
     pub version: u32,
+    pub mount_revision: Revision,
     pub endpoint: Endpoint,
     #[serde(flatten)]
     pub backend: RecordedBackend,
@@ -139,6 +141,7 @@ impl RuntimeRecord {
     /// daemon's serialized record owner as listeners bind.
     #[must_use]
     pub fn new(
+        mount_revision: Revision,
         endpoint: Endpoint,
         backend: RecordedBackend,
         instance_id: String,
@@ -149,6 +152,7 @@ impl RuntimeRecord {
             .unwrap_or_default();
         Self {
             version: RUNTIME_RECORD_VERSION,
+            mount_revision,
             endpoint,
             backend,
             instance_id,
@@ -252,6 +256,7 @@ mod tests {
 
     fn sample_native() -> RuntimeRecord {
         RuntimeRecord::new(
+            Revision::new("0123456789abcdef0123456789abcdef01234567").unwrap(),
             Endpoint::Unix {
                 path: PathBuf::from("/home/u/.omnifs/control.sock"),
             },
@@ -385,7 +390,7 @@ mod tests {
         // No token-authenticated attach targets were bound.
         std::fs::write(
             &path,
-            r#"{"version":2,"endpoint":{"kind":"unix","path":"/x"},"backend":"native","pid":1,"instance_id":"x","frontends":[],"started_at":"2026-07-07T00:00:00Z"}"#,
+            r#"{"version":3,"mount_revision":"0123456789abcdef0123456789abcdef01234567","endpoint":{"kind":"unix","path":"/x"},"backend":"native","pid":1,"instance_id":"x","frontends":[],"started_at":"2026-07-07T00:00:00Z"}"#,
         )
         .unwrap();
         let read = RuntimeRecord::read(&path).unwrap().unwrap();

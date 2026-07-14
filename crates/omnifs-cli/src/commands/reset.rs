@@ -13,7 +13,6 @@ use omnifs_workspace::creds::{CredentialStore, FileStore};
 use omnifs_workspace::layout::WorkspaceLayout;
 use std::sync::Arc;
 
-use crate::commands::mount::delete_credentials;
 use crate::commands::receipt::ResetReceipt;
 use crate::credential_target::CredentialTarget;
 use crate::daemon_teardown::DaemonTeardown;
@@ -70,6 +69,7 @@ impl ResetArgs {
         let store: Arc<dyn CredentialStore> = Arc::new(FileStore::new(&layout.credentials_file));
         let service = CredentialService::new(store, OAuthClient::new()?);
         let mut outcomes = Vec::with_capacity(plan.rows.len());
+        let mut mutations_succeeded = true;
 
         for target in &targets {
             progress.set_message(format!("deleting mount {}…", target.name));
@@ -92,52 +92,21 @@ impl ResetArgs {
                 .iter()
                 .find(|outcome| outcome.state == crate::ui::consent::OutcomeState::Fail)
             {
+                mutations_succeeded = false;
                 Outcome::fail(
                     &mount_id,
                     format!("spec kept; credential deletion failed: {}", failure.value),
                 )
             } else {
-                match workspace.daemon().delete_mount_if_ready(&target.name).await {
-                    Ok(Some(report)) if report.failure.is_none() => {
-                        Outcome::done(&mount_id, "spec deleted (hot unload from running daemon)")
-                    },
-                    Ok(Some(report)) => {
-                        let reason = report
-                            .failure
-                            .as_ref()
-                            .map_or("unknown daemon error", |failure| failure.reason.as_str());
-                        Outcome::warn(
-                            &mount_id,
-                            format!("spec deleted; hot unload failed ({reason})"),
-                        )
-                    },
-                    Ok(None) => match remove_mount_locally(&workspace, target) {
-                        Ok(true) => {
-                            Outcome::done(&mount_id, "spec deleted (cold delete; daemon stopped)")
-                        },
-                        Ok(false) => Outcome::skip(&mount_id, "spec already absent (cold delete)"),
-                        Err(error) => Outcome::fail(
+                match remove_mount_locally(&workspace, target) {
+                    Ok(true) => Outcome::done(&mount_id, "desired-state deletion recorded"),
+                    Ok(false) => Outcome::skip(&mount_id, "spec already absent"),
+                    Err(error) => {
+                        mutations_succeeded = false;
+                        Outcome::fail(
                             &mount_id,
                             format!("spec kept; local delete failed: {error:#}"),
-                        ),
-                    },
-                    Err(error) => match remove_mount_locally(&workspace, target) {
-                        Ok(true) => Outcome::warn(
-                            &mount_id,
-                            format!("deleted (cold delete; hot unload unavailable: {error:#})"),
-                        ),
-                        Ok(false) => Outcome::skip(
-                            &mount_id,
-                            format!(
-                                "already absent (cold delete; hot unload unavailable: {error:#})"
-                            ),
-                        ),
-                        Err(local_error) => Outcome::fail(
-                            &mount_id,
-                            format!(
-                                "spec kept; hot unload failed ({error:#}); local delete failed: {local_error:#}"
-                            ),
-                        ),
+                        )
                     },
                 }
             };
@@ -146,6 +115,19 @@ impl ResetArgs {
             }
             outcomes.push(mount_outcome);
             progress.inc(1);
+        }
+
+        if mutations_succeeded
+            && !targets.is_empty()
+            && let Err(error) = workspace.commit_mounts()
+        {
+            let message = format!("deleted locally; desired-state commit failed: {error:#}");
+            for outcome in &mut outcomes {
+                if outcome.id.starts_with("mount:") {
+                    outcome.state = crate::ui::consent::OutcomeState::Fail;
+                    outcome.value.clone_from(&message);
+                }
+            }
         }
 
         let mut teardown_outcomes: Vec<Outcome> = Vec::new();
@@ -327,6 +309,23 @@ fn remove_mount_locally(
     let name = omnifs_workspace::mounts::Name::new(target.name.clone())
         .with_context(|| format!("invalid mount name `{}`", target.name))?;
     workspace
-        .remove_mount(&name)
+        .remove_mount_uncommitted(&name)
         .with_context(|| format!("remove {}", target.path.display()))
+}
+
+async fn delete_credentials(
+    service: &CredentialService,
+    target: &CredentialTarget,
+) -> Vec<Outcome> {
+    let mut outcomes = Vec::new();
+    for key in target.keys() {
+        let outcome = service.revoke_and_delete(key).await;
+        let typed = Outcome::credential(key, &outcome);
+        let failed = typed.state == crate::ui::consent::OutcomeState::Fail;
+        outcomes.push(typed);
+        if failed {
+            break;
+        }
+    }
+    outcomes
 }
