@@ -102,6 +102,10 @@ fn help_documents_exit_codes() {
     assert!(stdout.contains("4  auth or consent required"));
     assert!(stdout.contains("5  degraded health"));
     assert!(
+        !stdout.contains("\n  setup "),
+        "retired setup command in help: {stdout}"
+    );
+    assert!(
         !stdout.contains("reset"),
         "retired reset command in help: {stdout}"
     );
@@ -201,6 +205,7 @@ fn removed_top_level_commands_are_usage_errors() {
             ["providers", "ls"].as_slice(),
             "unrecognized subcommand 'providers'",
         ),
+        (["setup"].as_slice(), "unrecognized subcommand 'setup'"),
     ] {
         let output = fixture.run(args);
         assert_eq!(exit_code(&output), 2, "{args:?}: {output:?}");
@@ -453,7 +458,7 @@ fn every_json_command_keeps_its_error_contract_before_workspace_resolution() {
 }
 
 #[test]
-fn bare_invocation_without_setup_points_to_setup() {
+fn bare_invocation_without_mounts_points_to_mount_add() {
     let fixture = Fixture::new();
     let output = fixture.run(&[]);
 
@@ -461,56 +466,7 @@ fn bare_invocation_without_setup_points_to_setup() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Frontends  "));
     assert!(stdout.contains("Mounts  0"));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("omnifs setup"));
-}
-
-#[test]
-fn scripted_setup_and_mount_add_do_not_prompt() {
-    let fixture = Fixture::new();
-    install_test_provider_as(&fixture.home_path().join("providers"), "test");
-
-    let setup = fixture.run(&["setup", "--yes", "--no-up"]);
-    assert_eq!(
-        exit_code(&setup),
-        0,
-        "setup --yes --no-up must succeed\nstdout: {}\nstderr: {}",
-        String::from_utf8_lossy(&setup.stdout),
-        String::from_utf8_lossy(&setup.stderr)
-    );
-    assert!(setup.stdout.is_empty(), "session prose belongs on stderr");
-    let setup_stderr = String::from_utf8_lossy(&setup.stderr);
-    assert!(setup_stderr.contains("┌ omnifs setup"), "{setup_stderr}");
-    assert!(setup_stderr.contains("1/4 environment"), "{setup_stderr}");
-    assert!(
-        setup_stderr.contains("2/4 what should omnifs mount?"),
-        "{setup_stderr}"
-    );
-    assert!(setup_stderr.contains("└ You're set."), "{setup_stderr}");
-
-    let init = fixture.run(&["mount", "add", "test", "--no-input", "--yes"]);
-    assert_eq!(
-        exit_code(&init),
-        0,
-        "mount add test --no-input --yes must succeed\nstdout: {}\nstderr: {}",
-        String::from_utf8_lossy(&init.stdout),
-        String::from_utf8_lossy(&init.stderr)
-    );
-    assert!(init.stdout.is_empty(), "session prose belongs on stderr");
-    let init_stderr = String::from_utf8_lossy(&init.stderr);
-    assert!(init_stderr.contains("┌ omnifs mount add"), "{init_stderr}");
-    assert!(
-        init_stderr.contains("mount name") && init_stderr.contains("test taken, using test-2"),
-        "--yes collision rename must stay visible: {init_stderr}"
-    );
-    assert!(init_stderr.contains("└ Mounted `test-2`."), "{init_stderr}");
-    assert!(
-        fixture.home_path().join("mounts/test.json").is_file(),
-        "mount add must write the test mount spec"
-    );
-    assert!(
-        fixture.home_path().join("mounts/test-2.json").is_file(),
-        "collision rename must write the suggested mount spec"
-    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("omnifs mount add <provider>"));
 }
 
 #[test]

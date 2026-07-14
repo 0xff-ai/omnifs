@@ -24,11 +24,13 @@ omnifs is written in Rust. We ship prebuilt Linux and macOS binaries through the
 
 ```bash
 npm install -g @0xff-ai/omnifs
-omnifs setup
-omnifs frontend shell fuse --environment docker
+omnifs mount add github
+omnifs up
+omnifs frontend enable fuse --environment host --location "$HOME/omnifs"
+omnifs status
 ```
 
-`omnifs setup` prepares the workspace, creates the selected mounts, completes any required authentication, and may offer a one-time platform frontend after the daemon starts. `omnifs up` starts the host-native daemon only. Host frontends are ordinary mounted paths. Use `omnifs frontend shell` to enter one explicit Docker or krunkit frontend.
+`omnifs mount add <provider>` creates one desired mount and handles its auth and config. `omnifs up` starts the host-native daemon only, and `omnifs frontend enable` imperatively starts one explicit frontend. Host frontends are ordinary mounted paths; use `omnifs frontend shell` only for a Docker or krunkit frontend.
 
 ---
 
@@ -266,7 +268,7 @@ tail -n 80 ~/.omnifs-dev/cache/daemon.log
 ### ✅ Working today
 
 - FUSE (Linux) and read-only NFSv4 loopback (macOS) frontends in host, Docker, or krunkit environments; enabled explicitly with the frontend lifecycle commands.
-- A host CLI on npm that handles setup, auth, lifecycle, logs, status, and inspection.
+- A host CLI on npm that handles mounts, auth, lifecycle, logs, status, and inspection.
 - Sandboxed Wasm providers that can only reach the network, Git, sockets, and files the host hands them.
 - Host-held credentials, layered caching, and `omnifs inspect` for a live view of what the runtime is doing.
 - Nine live providers: GitHub, DNS, arXiv, Docker, Linear, SQLite, Kubernetes, Web, and Oura.
@@ -277,7 +279,7 @@ tail -n 80 ~/.omnifs-dev/cache/daemon.log
 - Letting providers build paths from their registered routes instead of hand-formatting strings.
 - Caching polish: clearer traces, bounded disk usage, and identities that survive a remount.
 - Better behavior under stuck reads and aggressive directory walkers (shells, prompt tools, crawlers).
-- Smoother setup, auth, status, and `doctor` output, plus stronger frontend acceptance tests.
+- Smoother mount, auth, status, and `doctor` output, plus stronger frontend acceptance tests.
 - Provider reference docs generated straight from each provider's manifest and routes.
 
 ### 🔭 Planned

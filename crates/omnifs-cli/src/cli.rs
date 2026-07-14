@@ -63,16 +63,6 @@ pub enum Commands {
     Logs(commands::logs::LogsArgs),
     /// Stream FUSE, provider, and callout events
     Inspect(commands::inspect::InspectArgs),
-    /// Guided setup: environment, providers, auth, launch
-    ///
-    /// First-run wizard: detect the OS, pick several providers, authenticate
-    /// each, and launch in one pass.
-    ///
-    /// Run this once to get started; use `omnifs mount add` to add a single
-    /// provider later. Re-runnable: already-configured providers are listed
-    /// but excluded from provider selection.
-    Setup(commands::setup::SetupArgs),
-
     /// Add, list, reauthenticate, snapshot, or remove mounts
     Mount(commands::mount::MountArgs),
 
@@ -145,7 +135,6 @@ impl Commands {
             Self::Down(_) => (Some("down"), "down"),
             Self::Logs(_) => (Some("logs"), "logs"),
             Self::Inspect(_) => (Some("inspect"), "inspect"),
-            Self::Setup(_) => (Some("setup"), "setup"),
             Self::Mount(args) => (
                 Some("mount"),
                 match &args.command {
@@ -204,7 +193,6 @@ impl Commands {
                 Ok(exit_for_verdict(verdict))
             },
             Self::Status(args) => args.run(output).await,
-            Self::Setup(args) => args.run(output).await.map(|()| ExitCode::Success),
             Self::Up(args) => args.run(output).await,
             Self::Down(args) => args.run(output).await,
             Self::Logs(args) => args.run(output).map(|()| ExitCode::Success),
@@ -314,7 +302,7 @@ where
 }
 
 /// Bare `omnifs` adapts to the workspace: an unconfigured workspace points at
-/// `setup`; a configured-but-stopped daemon shows the status report plus an
+/// `mount add`; a configured-but-stopped daemon shows the status report plus an
 /// `up` hint; a healthy daemon shows the full status report plus two next-step
 /// hints. It is a thin dispatcher over the shared status/report code, so it
 /// never drifts from `omnifs status`.
@@ -337,7 +325,7 @@ async fn run_bare(output: Output) -> anyhow::Result<ExitCode> {
     // conversational, so `-q` drops them.
     if report.inventory.mounts.is_empty() {
         output.narrate(crate::ui::hint(
-            "omnifs setup",
+            "omnifs mount add <provider>",
             "configure your first mount",
         ));
     } else if running {
@@ -435,13 +423,9 @@ mod tests {
     }
 
     #[test]
-    fn wizard_prompt_sites_have_non_interactive_flags() {
+    fn prompt_sites_have_non_interactive_flags() {
         let command = Cli::command();
         let table = [
-            ("setup orientation", "setup", "yes"),
-            ("setup environment check", "setup", "no-input"),
-            ("setup provider selection", "setup", "providers"),
-            ("setup provider confirmation", "setup", "yes"),
             ("mount add provider selection", "mount add", "provider"),
             ("mount add mount name collision", "mount add", "as"),
             ("mount add auth scheme", "mount add", "scheme"),

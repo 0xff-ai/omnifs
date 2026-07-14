@@ -7,7 +7,6 @@ pub mod logs;
 pub mod mount;
 pub mod provider;
 pub mod receipt;
-pub mod setup;
 pub mod shell;
 pub mod skill;
 pub mod status;

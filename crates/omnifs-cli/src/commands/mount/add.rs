@@ -1,4 +1,4 @@
-//! `omnifs mount add` — interactive setup for a new mount.
+//! `omnifs mount add` — interactive creation of a new mount.
 //!
 //! Walks the user through naming a mount, discovers provider defaults from
 //! the built-in catalog or provider wasm metadata, writes the resulting mount config to
@@ -79,8 +79,7 @@ impl AddArgs {
             output.yes(),
             output.no_input() || output.is_structured(),
         );
-        let outcome =
-            crate::stages::configure_mount(self, workspace, true, &mut session, prompt).await?;
+        let outcome = crate::stages::configure_mount(self, workspace, &mut session, prompt).await?;
         match outcome.status {
             crate::stages::MountInitStatus::Ready => {
                 session.outro(format!("Mounted `{}`.", outcome.mount_name));
@@ -106,8 +105,8 @@ impl AddArgs {
     }
 }
 
-/// The per-provider consent block shared by setup's loop and standalone
-/// `mount add`: a plain description line, then compact needs and limits lines.
+/// The per-provider consent block for `mount add`: a plain description line,
+/// then compact needs and limits lines.
 /// All on stderr.
 pub(crate) fn render_consent_block(
     session: &mut crate::ui::session::Session,

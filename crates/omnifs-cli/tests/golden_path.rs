@@ -1,4 +1,4 @@
-//! Golden path: setup defaults, mount add fixture provider, up --wait, read, down.
+//! Golden path: mount add fixture provider, up --wait, read, down.
 
 #![cfg(not(target_os = "wasi"))]
 
@@ -97,19 +97,10 @@ fn record_wall_clock(home: &Path, elapsed: Duration) {
 }
 
 #[test]
-#[allow(clippy::too_many_lines)] // one continuous setup and daemon lifecycle
-fn setup_init_up_wait_read_down_golden_path() {
+#[allow(clippy::too_many_lines)] // one continuous mount and daemon lifecycle
+fn mount_add_up_wait_read_down_golden_path() {
     let started = Instant::now();
     let mut fixture = Fixture::new();
-
-    let setup = fixture.run(&["setup", "--yes", "--no-up"]);
-    assert_eq!(
-        exit_code(&setup),
-        0,
-        "setup --yes --no-up must exit 0\nstdout: {}\nstderr: {}",
-        String::from_utf8_lossy(&setup.stdout),
-        String::from_utf8_lossy(&setup.stderr)
-    );
 
     let init = fixture.run(&["mount", "add", "test", "--no-input", "--yes"]);
     assert_eq!(

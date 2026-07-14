@@ -205,7 +205,7 @@ mod tests {
         assert!(workspace.mounts().unwrap().is_empty());
 
         // Write a spec the way `persist_mount_spec` does when the daemon is
-        // not yet running (the common case during first-run `omnifs setup`).
+        // not yet running (the common case before the first `omnifs up`).
         let spec = spec_with_provider("github", r#"{ "mount": "github" }"#);
         workspace.put_mount_uncommitted(&spec).unwrap();
         assert!(paths.mounts_dir.join(".git").is_dir());

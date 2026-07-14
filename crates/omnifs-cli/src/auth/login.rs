@@ -193,7 +193,7 @@ pub(crate) async fn login_with_workspace(
 }
 
 /// Authenticate a mount that is still being created from its already-resolved
-/// spec. Setup must not reload this spec by name: when a live daemon persisted
+/// spec. Mount creation must not reload this spec by name: when a live daemon persisted
 /// it in another process, this command's mount registry can still hold the
 /// snapshot from before the create.
 pub(crate) async fn login_with_spec(
@@ -283,7 +283,7 @@ fn print_oauth_consent_summary(
     let mode = AuthMode::from_oauth_flow(&scheme.flow);
     session.note(crate::ui::style::dim(mode.experience()));
     if !guidance.setup_steps.is_empty() {
-        session.note(crate::ui::style::dim("Setup:"));
+        session.note(crate::ui::style::dim("Guidance:"));
         for (index, step) in guidance.setup_steps.iter().enumerate() {
             session.note(format!("{}. {step}", index + 1));
         }

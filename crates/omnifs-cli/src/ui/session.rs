@@ -267,7 +267,10 @@ mod tests {
     #[test]
     fn theme_renders_the_session_rail() {
         let theme = OmnifsTheme;
-        assert_eq!(theme.format_intro("omnifs setup"), "┌ omnifs setup\n│\n");
+        assert_eq!(
+            theme.format_intro("omnifs mount add"),
+            "┌ omnifs mount add\n│\n"
+        );
         // A phase marker opens a section: lead with a blank spine, bold the
         // title, and carry no trailing spine so the section's rows pack under it.
         let step = crate::ui::strip_ansi(&theme.format_log("1/5 environment", "◇"));

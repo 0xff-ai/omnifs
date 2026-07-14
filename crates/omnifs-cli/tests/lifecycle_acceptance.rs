@@ -286,7 +286,7 @@ fn scenario_2_down_nothing_running() {
 
 /// Up serves the mount through an explicitly enabled host frontend, status
 /// shows it running, and down leaves that frontend alive. Scenarios 3-6 share
-/// a single daemon lifecycle so we do not pay 4x mount setup latency.
+/// a single daemon lifecycle so we do not pay 4x mount creation latency.
 #[test]
 #[allow(clippy::too_many_lines)] // one shared daemon lifecycle across scenarios 3-6
 fn scenarios_3_to_6_lifecycle_cycle() {

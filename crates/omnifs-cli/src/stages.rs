@@ -1,14 +1,13 @@
-//! Shared onboarding and lifecycle stages used by `setup`, `mount add`, and `up`.
+//! Shared mount-creation and lifecycle stages used by `mount add` and `up`.
 //!
-//! Commands own narration. This module owns the stage behavior so the guided
-//! setup wizard and express `mount add` lane cannot drift from each other.
+//! Commands own narration. This module owns the stage behavior so mount
+//! creation and authentication stay in one path.
 
 use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context, anyhow};
 use omnifs_caps::{Grants, Limits};
-use omnifs_workspace::config::Config;
 use omnifs_workspace::layout::WorkspaceLayout;
 use omnifs_workspace::mounts::{Name as MountName, Spec};
 use omnifs_workspace::provider::{ProviderAuthManifest, ProviderManifest};
@@ -87,57 +86,16 @@ impl PromptMode {
     }
 }
 
-/// Informational Docker reachability, for setup's environment stage (the
-/// daemon always runs host-native; setup shows this row only when its selected
-/// platform defaults include a Docker frontend.
-/// Never fails setup: an unreachable daemon (or an unresolvable target) is
-/// reported, not raised.
-pub(crate) enum DockerReachability {
-    Running { version: String },
-    Unreachable,
-}
-
-pub(crate) async fn probe_docker_reachability(config: &Config) -> DockerReachability {
-    use crate::frontend_container::{FRONTEND_CONTAINER_BASE, resolve_frontend_image};
-    use crate::launch_backend::DockerTarget;
-    use crate::runtime::{DockerProbeOutcome, Runtime};
-
-    let Ok(image) = resolve_frontend_image(None, config) else {
-        return DockerReachability::Unreachable;
-    };
-    let Ok(target) = DockerTarget::new(
-        FRONTEND_CONTAINER_BASE.to_string(),
-        image.as_str().to_string(),
-    ) else {
-        return DockerReachability::Unreachable;
-    };
-    match Runtime::probe_docker(&target).await {
-        DockerProbeOutcome::Reachable(runtime) => {
-            let version = runtime
-                .server_version()
-                .await
-                .unwrap_or_else(|| "running".to_string());
-            DockerReachability::Running { version }
-        },
-        DockerProbeOutcome::ConnectFailed(_) | DockerProbeOutcome::PingFailed(_) => {
-            DockerReachability::Unreachable
-        },
-    }
-}
-
 #[allow(clippy::too_many_lines)] // linear ledger narration reads best inline
 pub(crate) async fn configure_mount(
     args: AddArgs,
     workspace: &Workspace,
-    standalone: bool,
     session: &mut crate::ui::session::Session,
     prompt: PromptMode,
 ) -> anyhow::Result<MountInitOutcome> {
     let mut plan = spec_creation(&args, workspace, session, prompt)?;
-    if standalone {
-        session.phase(plan.manifest.id.as_str());
-    }
-    persist_mount_spec(workspace, &plan, standalone, session)?;
+    session.phase(plan.manifest.id.as_str());
+    persist_mount_spec(workspace, &plan, session)?;
     let status = plan.authenticate(&args, workspace, session, prompt).await?;
 
     match status {
@@ -155,21 +113,19 @@ pub(crate) async fn configure_mount(
             ),
         )),
     }
-    if standalone && !workspace.daemon().ready().await {
+    if !workspace.daemon().ready().await {
         session.note("run `omnifs up` to start serving it");
     }
 
-    if standalone {
-        let running = workspace.daemon().ready().await;
-        if running {
-            let path = browse_path(plan.mount_name.as_str());
-            session.note(crate::ui::hint(
-                &format!("ls {}", path.display()),
-                "browse it",
-            ));
-        } else {
-            session.note(crate::ui::hint("omnifs up", "start serving"));
-        }
+    let running = workspace.daemon().ready().await;
+    if running {
+        let path = browse_path(plan.mount_name.as_str());
+        session.note(crate::ui::hint(
+            &format!("ls {}", path.display()),
+            "browse it",
+        ));
+    } else {
+        session.note(crate::ui::hint("omnifs up", "start serving"));
     }
 
     crate::telemetry::maybe_print_health_nudge(workspace, session.output()).await;
@@ -183,7 +139,7 @@ pub(crate) async fn configure_mount(
 /// Init is interactive only with real stdin and stderr terminals and without
 /// `--no-input`. A piped stdin is non-interactive even without the flag, so
 /// prompt sites bail cleanly (naming the satisfying flags) instead of hitting
-/// a prompt library's raw "not a terminal" error. Mirrors setup's terminal derivation.
+/// a prompt library's raw "not a terminal" error.
 fn init_interactive(prompt: PromptMode) -> bool {
     prompt.interactive
 }
@@ -468,13 +424,10 @@ fn selected_auth(
 fn persist_mount_spec(
     workspace: &Workspace,
     plan: &MountInitPlan,
-    standalone: bool,
     session: &mut crate::ui::session::Session,
 ) -> anyhow::Result<()> {
     workspace.put_mount_uncommitted(&plan.spec)?;
-    if standalone {
-        workspace.commit_mounts()?;
-    }
+    workspace.commit_mounts()?;
     session.row(crate::ui::report::Row::new(
         crate::ui::style::Glyph::Done,
         "desired state",

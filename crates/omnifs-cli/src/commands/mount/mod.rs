@@ -402,7 +402,7 @@ fn rm_with_options(
     };
     let config_path = mount.source.clone();
     // Build the plan without constructing an HTTP client or registering an
-    // OAuth revocation. A dry run must stop before any apply-only setup.
+    // OAuth revocation. A dry run must stop before any apply-only work.
     let plan = mount_remove_plan(&config_path);
     session.plan(&plan);
     match Decision::resolve(

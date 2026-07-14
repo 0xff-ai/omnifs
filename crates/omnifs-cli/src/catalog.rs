@@ -11,7 +11,7 @@ use omnifs_workspace::provider::{Catalog, Provider, ProviderAuthManifest, Provid
 use crate::mount_config::MountConfig;
 
 /// The latest installed artifact per provider name, each paired with its loaded
-/// manifest, for the `mount add` and `setup` provider selections. A corrupt artifact is
+/// manifest, for the `mount add` provider selection. A corrupt artifact is
 /// skipped with a warning rather than bricking enumeration.
 pub(crate) fn installed_providers(
     catalog: &Catalog,
@@ -56,7 +56,7 @@ pub(crate) struct ProviderOption {
     pub(crate) default_selected: bool,
 }
 
-/// Build the provider choices shared by `mount add` and `setup`.
+/// Build the provider choices for `mount add`.
 pub(crate) fn provider_options(
     installed: &[(Provider, ProviderManifest)],
     configured: &std::collections::BTreeMap<String, String>,
@@ -84,9 +84,9 @@ pub(crate) fn provider_options(
     options
 }
 
-/// A provider is initially selected when setup can proceed without an
+/// A provider is initially selected when mount creation can proceed without an
 /// interactive config prompt or an unavailable ambient credential. OAuth is
-/// intentionally considered selectable here because setup can complete its
+/// intentionally considered selectable here because an interactive mount can complete its
 /// browser flow interactively; `--yes` keeps its stricter ambient-only policy.
 fn default_selected(manifest: &ProviderManifest) -> bool {
     if manifest.requires_mount_input() {

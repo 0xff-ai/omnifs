@@ -92,12 +92,6 @@ impl Runtime {
         self.docker.ping().await.map(|_| ()).map_err(Into::into)
     }
 
-    /// The Docker server version string, if the daemon reports one. Used only
-    /// for the informational reachability row in `omnifs setup`.
-    pub(crate) async fn server_version(&self) -> Option<String> {
-        self.docker.version().await.ok()?.version
-    }
-
     /// Address on which the host daemon must accept the frontend container's
     /// attach connection. Docker Desktop forwards `host.docker.internal` to
     /// host loopback. Native Linux maps that name to the default bridge

@@ -204,7 +204,7 @@ impl DaemonClient {
         // daemon process lived (a crash or a botched teardown). The control
         // socket sits at a fixed path independent of the record, so probe it
         // directly. A live daemon that outlived its record is reached and
-        // reported (so `up`/`setup` refuse to spawn a second daemon onto the
+        // reported (so `up` refuses to spawn a second daemon onto the
         // same locked cache, and `down`/`status` can see it); a stale socket
         // file refuses the connection and resolves to absence.
         Ok(self.control_socket_target().unwrap_or(Target::Absent))

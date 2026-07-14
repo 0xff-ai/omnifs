@@ -1,9 +1,8 @@
 //! Human-readable formatting for provider capability manifest entries.
 //!
-//! This module is the single owner of capability prose. The setup per-provider
-//! block and standalone `omnifs mount add` both render a
-//! manifest's needs and limits through these helpers, so the wording cannot
-//! drift between surfaces.
+//! This module is the single owner of capability prose. `omnifs mount add`
+//! renders a manifest's needs and limits through these helpers, so the wording
+//! stays consistent.
 
 use omnifs_caps::{AccessNeed, LimitDeclarations, PreopenMode, PreopenedPath};
 use omnifs_workspace::provider::ProviderManifest;

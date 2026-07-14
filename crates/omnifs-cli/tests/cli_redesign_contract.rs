@@ -310,19 +310,6 @@ fn cli_redesign_contract_jsonl_ends_with_one_terminal_result_envelope() {
 }
 
 #[test]
-fn cli_redesign_contract_structured_no_input_fails_before_prompt_bytes() {
-    let fixture = Fixture::new();
-    write_frontend_config(&fixture, "[[frontends]]\nfilesystem = \"nfs\"\n");
-    let output = fixture.run(&["setup", "--no-up", "--output", "json", "--no-input"]);
-    assert_eq!(output.status.code(), Some(1));
-    assert_eq!(output.stderr, b"", "structured errors must stay on stdout");
-    let json = stdout_json(&output);
-    assert_eq!(json["error"]["id"], "generic-failure");
-    assert_eq!(stdout_text(&output).lines().count(), 1);
-    assert!(!stdout_text(&output).contains("Continue?"));
-}
-
-#[test]
 fn cli_redesign_contract_state_rows_pair_symbols_with_lowercase_labels() {
     let fixture = Fixture::new();
     write_runner_observation(&fixture, &fixture.mount_point);
@@ -345,7 +332,7 @@ fn cli_redesign_contract_state_rows_pair_symbols_with_lowercase_labels() {
 fn cli_redesign_contract_frontend_config_is_rejected_as_removed_field() {
     let fixture = Fixture::new();
     write_frontend_config(&fixture, "[[frontends]]\nfilesystem = \"nfs\"\n");
-    let output = fixture.run(&["setup", "--no-up", "--output", "json", "--no-input"]);
+    let output = fixture.run(&["status", "--output", "json"]);
     assert!(
         !output.status.success(),
         "removed frontend config must fail"
