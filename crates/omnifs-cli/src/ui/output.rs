@@ -132,6 +132,16 @@ struct OutputState {
     failure: Option<String>,
 }
 
+type OutputWriter = Box<dyn Write + Send>;
+
+impl OutputState {
+    fn sticky_error(&self) -> Option<anyhow::Error> {
+        self.failure
+            .as_ref()
+            .map(|message| anyhow::Error::new(OutputFailure(message.clone())))
+    }
+}
+
 #[derive(Debug)]
 struct OutputFailure(String);
 
@@ -146,6 +156,13 @@ impl std::error::Error for OutputFailure {}
 fn state(output: &Output) -> MutexGuard<'_, OutputState> {
     output
         .state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn stdout(output: &Output) -> MutexGuard<'_, OutputWriter> {
+    output
+        .stdout
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
@@ -367,7 +384,7 @@ impl Output {
 /// Output policy owned by one CLI invocation. Commands clone this handle and
 /// pass it through short-lived progress handles instead of consulting
 /// process-global switches.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct Output {
     mode: OutputMode,
     quiet: bool,
@@ -375,6 +392,20 @@ pub(crate) struct Output {
     yes: bool,
     command: &'static str,
     state: Arc<Mutex<OutputState>>,
+    stdout: Arc<Mutex<OutputWriter>>,
+}
+
+impl std::fmt::Debug for Output {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Output")
+            .field("mode", &self.mode)
+            .field("quiet", &self.quiet)
+            .field("no_input", &self.no_input)
+            .field("yes", &self.yes)
+            .field("command", &self.command)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Output {
@@ -386,7 +417,14 @@ impl Output {
             yes: false,
             command: "invocation",
             state: Arc::new(Mutex::new(OutputState::default())),
+            stdout: Arc::new(Mutex::new(Box::new(io::stdout()))),
         }
+    }
+
+    #[cfg(test)]
+    fn with_writer(mut self, writer: impl Write + Send + 'static) -> Self {
+        self.stdout = Arc::new(Mutex::new(Box::new(writer)));
+        self
     }
 
     pub(crate) const fn is_structured(&self) -> bool {
@@ -529,8 +567,8 @@ impl Output {
         if current.failure.is_some() || current.terminal {
             return;
         }
-        let mut stdout = io::stdout().lock();
-        if let Err(error) = self.write_event(&mut stdout, event) {
+        let mut stdout = stdout(self);
+        if let Err(error) = self.write_event(&mut *stdout, event) {
             current.failure = Some(error.to_string());
         }
     }
@@ -545,11 +583,20 @@ impl Output {
             anyhow::bail!("structured terminal output is unavailable in human mode");
         }
         let mut current = state(self);
-        if let Some(error) = current
-            .failure
-            .as_ref()
-            .map(|message| anyhow::Error::new(OutputFailure(message.clone())))
-        {
+        self.settle_result_locked(&mut current, writer, verdict, result)
+    }
+
+    fn settle_result_locked<W: Write, T: Serialize>(
+        &self,
+        current: &mut OutputState,
+        writer: &mut W,
+        verdict: impl Into<ResultVerdict>,
+        result: T,
+    ) -> anyhow::Result<()> {
+        if !self.mode.is_structured() {
+            anyhow::bail!("structured terminal output is unavailable in human mode");
+        }
+        if let Some(error) = current.sticky_error() {
             return Err(error);
         }
         if current.terminal {
@@ -573,16 +620,16 @@ impl Output {
         }
     }
 
-    fn settle_error<W: Write>(&self, writer: &mut W, error: ErrorEnvelope) -> anyhow::Result<()> {
+    fn settle_error_locked<W: Write>(
+        &self,
+        current: &mut OutputState,
+        writer: &mut W,
+        error: ErrorEnvelope,
+    ) -> anyhow::Result<()> {
         if !self.mode.is_structured() {
             anyhow::bail!("structured terminal output is unavailable in human mode");
         }
-        let mut current = state(self);
-        if let Some(error) = current
-            .failure
-            .as_ref()
-            .map(|message| anyhow::Error::new(OutputFailure(message.clone())))
-        {
+        if let Some(error) = current.sticky_error() {
             return Err(error);
         }
         if current.terminal {
@@ -622,13 +669,15 @@ impl Output {
         verdict: impl Into<ResultVerdict>,
         result: T,
     ) -> anyhow::Result<()> {
-        let mut stdout = io::stdout().lock();
-        self.settle_result(&mut stdout, verdict, result)
+        let mut current = state(self);
+        let mut stdout = stdout(self);
+        self.settle_result_locked(&mut current, &mut *stdout, verdict, result)
     }
 
     pub(crate) fn emit_error(&self, error: ErrorEnvelope) -> anyhow::Result<()> {
-        let mut stdout = io::stdout().lock();
-        self.settle_error(&mut stdout, error)
+        let mut current = state(self);
+        let mut stdout = stdout(self);
+        self.settle_error_locked(&mut current, &mut *stdout, error)
     }
 }
 
@@ -853,36 +902,60 @@ mod tests {
     }
 
     #[test]
-    fn terminal_settlement_is_single_across_concurrent_clones() {
+    fn event_and_terminal_share_one_stdout_lock_across_clones() {
         use std::sync::{Arc, Barrier, mpsc};
         use std::thread;
 
-        let output = Output::new(OutputMode::Json, false).with_command("status");
+        struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+
+        impl Write for SharedWriter {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.0
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let output = Output::new(OutputMode::Jsonl, false)
+            .with_command("status")
+            .with_writer(SharedWriter(Arc::clone(&bytes)));
         let barrier = Arc::new(Barrier::new(2));
         let (sender, receiver) = mpsc::channel();
         thread::scope(|scope| {
-            for output in [output.clone(), output.clone()] {
-                let barrier = Arc::clone(&barrier);
-                let sender = sender.clone();
-                scope.spawn(move || {
-                    barrier.wait();
-                    let mut bytes = Vec::new();
-                    let result =
-                        output.settle_result(&mut bytes, ResultVerdict::Ok, serde_json::json!({}));
-                    sender.send((result.is_ok(), bytes)).unwrap();
-                });
-            }
+            let event_output = output.clone();
+            let event_barrier = Arc::clone(&barrier);
+            scope.spawn(move || {
+                event_barrier.wait();
+                event_output.phase("working");
+            });
+
+            let terminal_output = output.clone();
+            let terminal_barrier = Arc::clone(&barrier);
+            scope.spawn(move || {
+                terminal_barrier.wait();
+                sender
+                    .send(terminal_output.emit_result(ResultVerdict::Ok, serde_json::json!({})))
+                    .unwrap();
+            });
         });
 
-        drop(sender);
-        let outcomes = receiver.iter().collect::<Vec<_>>();
-        assert_eq!(outcomes.iter().filter(|(ok, _)| *ok).count(), 1);
+        assert!(receiver.recv().unwrap().is_ok());
+        let lines = String::from_utf8(bytes.lock().unwrap().clone())
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .collect::<Vec<_>>();
         assert_eq!(
-            outcomes
-                .iter()
-                .map(|(_, bytes)| usize::from(bytes.last() == Some(&b'\n')))
-                .sum::<usize>(),
+            lines.iter().filter(|line| line["type"] == "result").count(),
             1
         );
+        assert!(lines.iter().all(|line| line["type"] != "error"));
     }
 }
