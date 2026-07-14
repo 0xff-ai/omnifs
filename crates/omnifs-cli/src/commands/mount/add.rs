@@ -73,19 +73,18 @@ impl AddArgs {
         workspace: &Workspace,
         output: crate::ui::output::Output,
     ) -> anyhow::Result<crate::error::ExitCode> {
-        let mut session =
-            crate::ui::session::Session::intro_with_output("omnifs mount add", output)?;
+        output.intro("omnifs mount add")?;
         let prompt = crate::stages::PromptMode::from_flags(
             output.yes(),
             output.no_input() || output.is_structured(),
         );
-        let outcome = crate::stages::configure_mount(self, workspace, &mut session, prompt).await?;
+        let outcome = crate::stages::configure_mount(self, workspace, &output, prompt).await?;
         match outcome.status {
             crate::stages::MountInitStatus::Ready => {
-                session.outro(format!("Mounted `{}`.", outcome.mount_name));
+                output.outro(format!("Mounted `{}`.", outcome.mount_name));
             },
             crate::stages::MountInitStatus::SignInDeclined => {
-                session.outro(format!(
+                output.outro(format!(
                     "Saved `{}`. Run `omnifs mount reauth {}` to sign in later.",
                     outcome.mount_name, outcome.mount_name
                 ));
@@ -109,7 +108,7 @@ impl AddArgs {
 /// then compact needs and limits lines.
 /// All on stderr.
 pub(crate) fn render_consent_block(
-    session: &mut crate::ui::session::Session,
+    session: &crate::ui::output::Output,
     manifest: &ProviderManifest,
 ) {
     let description = manifest
@@ -131,7 +130,7 @@ pub(crate) async fn run_static_token_init(
     token: SecretString,
     credentials_file: &Path,
     validate: bool,
-    session: &mut crate::ui::session::Session,
+    session: &crate::ui::output::Output,
 ) -> anyhow::Result<CredentialTarget> {
     let static_token_scheme = auth.static_token_scheme(manifest)?;
 

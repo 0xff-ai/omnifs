@@ -1,13 +1,12 @@
 //! Commands construct typed values while this module owns every byte that
 //! reaches the terminal: the closed vocabulary ([`style`]), human-only
-//! responsive [`table`]s, live rail rows in [`report`], the [`event`] model,
-//! flat [`progress`], and the cliclack [`session`] rail. Stream discipline is
+//! responsive [`table`]s, report rows, the [`event`] wire model, direct
+//! [`progress`] handles, and the cliclack theme. Stream discipline is
 //! owned here, not by commands:
 //! reports go to stdout, while narration, prompts, and progress go to stderr.
 //!
-//! Commands that can ask a question own a [`session::Session`] for the whole
-//! conversation. The small [`note`] and [`hint`] helpers remain only for
-//! already-flat command surfaces and should not be used to start a rail.
+//! Output owns the invocation presentation lifecycle. Commands retain typed
+//! plans, receipts, and domain facts, then report them through `Output`.
 
 // This module is the sanctioned output owner; the drift gate denies print
 // macros everywhere else. Only the raw and JSON output helpers print here.
@@ -19,11 +18,8 @@ pub(crate) mod output;
 pub(crate) mod progress;
 pub(crate) mod prompt;
 pub(crate) mod report;
-pub(crate) mod session;
 pub(crate) mod style;
 pub(crate) mod table;
-
-pub(crate) use progress::LiveRow;
 
 use std::path::PathBuf;
 

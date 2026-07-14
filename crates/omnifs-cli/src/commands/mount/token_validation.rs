@@ -33,7 +33,7 @@ impl<'a> StaticTokenValidator<'a> {
     pub(super) async fn validate(
         &self,
         token: &str,
-        session: &mut crate::ui::session::Session,
+        session: &crate::ui::output::Output,
     ) -> anyhow::Result<ValidationOutcome> {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(15))

@@ -1,6 +1,6 @@
 //! Shared plan/decision/receipt vocabulary for destructive commands.
 //!
-//! A consent session has one deliberately boring shape: construct a [`Plan`],
+//! A consent flow has one deliberately boring shape: construct a [`Plan`],
 //! render it, resolve a [`Decision`], and render a [`Receipt`] made from the
 //! same row identities.  Commands own the side effects; this module owns the
 //! invariant that the thing the user approved is the thing the receipt settles.
@@ -9,7 +9,6 @@ use std::collections::BTreeMap;
 
 use serde::Serialize;
 
-use super::event::UiEvent;
 use super::output::Output;
 use super::report;
 use super::style::Glyph;
@@ -85,15 +84,12 @@ impl Plan {
         self.rows.len().saturating_sub(self.remove_count())
     }
 
-    /// Convert the plan into an event. Keeping this on the plan means every
-    /// renderer sees the same rows and counts.
-    pub(crate) fn event(&self) -> UiEvent {
-        UiEvent::Plan {
-            title: self.title.clone(),
-            rows: self.rows.clone(),
-            remove: self.remove_count(),
-            keep: self.keep_count(),
-        }
+    pub(crate) fn summary(&self) -> String {
+        format!(
+            "{} to remove, {} kept",
+            self.remove_count(),
+            self.keep_count()
+        )
     }
 
     /// Settle outcomes in plan order. An operation that did not produce a
@@ -258,15 +254,6 @@ impl Outcome {
 pub(crate) struct Receipt {
     pub(crate) title: String,
     pub(crate) rows: Vec<Outcome>,
-}
-
-impl Receipt {
-    pub(crate) fn event(&self) -> UiEvent {
-        UiEvent::Receipt {
-            title: self.title.clone(),
-            rows: self.rows.clone(),
-        }
-    }
 }
 
 #[cfg(test)]

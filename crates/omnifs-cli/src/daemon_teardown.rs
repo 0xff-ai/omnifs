@@ -1,12 +1,12 @@
 //! Daemon shutdown workflow.
 //!
-//! Teardown is deliberately a typed collection step. Commands render these
-//! outcomes through the UI event stream, so a receipt cannot claim the daemon
-//! was stopped when the cleanup only produced a warning.
+//! Teardown is deliberately a typed collection step. Output renders these
+//! outcomes directly, so a receipt cannot claim the daemon was stopped when
+//! the cleanup only produced a warning.
 
 use crate::inventory::{DaemonProbe, Inventory};
 use crate::ui::consent::Outcome;
-use crate::ui::event::{LedgerRenderer, Render, UiEvent};
+use crate::ui::output::Output;
 use crate::workspace::Workspace;
 use omnifs_workspace::runtime_record::{RecordedBackend, RuntimeRecord};
 use std::time::Duration;
@@ -89,12 +89,12 @@ impl<'a> DaemonTeardown<'a> {
         }
     }
 
-    /// Stop the namespace daemon and render the typed outcomes to the flat
-    /// ledger. Bails on the first failure so the exit code reflects an
+    /// Stop the namespace daemon and render the typed outcomes through Output.
+    /// Bails on the first failure so the exit code reflects an
     /// incomplete teardown.
-    pub(crate) async fn down(&self) -> anyhow::Result<()> {
+    pub(crate) async fn down(&self, output: &Output) -> anyhow::Result<()> {
         let outcomes = self.down_collect().await?;
-        render_outcomes(&outcomes);
+        render_outcomes(output, &outcomes);
         if let Some(outcome) = outcomes.iter().find(|outcome| outcome.is_failure()) {
             anyhow::bail!(outcome.outcome().value);
         }
@@ -127,7 +127,7 @@ impl<'a> DaemonTeardown<'a> {
     }
 
     /// Run the daemon teardown workflow and return its typed outcomes without
-    /// rendering. `down` renders these to the ledger; structured output settles
+    /// rendering. `down` renders these through Output; structured output settles
     /// them into a receipt.
     pub(crate) async fn down_collect(&self) -> anyhow::Result<Vec<TeardownOutcome>> {
         let mut outcomes = Vec::new();
@@ -237,25 +237,16 @@ impl<'a> DaemonTeardown<'a> {
     }
 }
 
-fn render_outcomes(outcomes: &[TeardownOutcome]) {
-    let mut renderer = LedgerRenderer;
+fn render_outcomes(output: &Output, outcomes: &[TeardownOutcome]) {
     if outcomes
         .iter()
         .all(|outcome| matches!(outcome, TeardownOutcome::StaleRecordAbsent))
     {
-        renderer.event(&UiEvent::Narration {
-            message: "Nothing to tear down.".to_owned(),
-        });
+        output.narrate("Nothing to tear down.");
     }
     for outcome in outcomes {
         let row = outcome.outcome().render_receipt();
-        renderer.event(&UiEvent::RowSettled {
-            glyph: row.glyph,
-            key: row.key,
-            value: row.value,
-            fix: None,
-            duration: None,
-        });
+        output.row(row);
     }
 }
 

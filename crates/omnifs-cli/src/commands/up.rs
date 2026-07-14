@@ -27,7 +27,7 @@ impl UpArgs {
             .as_deref()
             .map(crate::stages::parse_wait_duration)
             .transpose()?;
-        Launcher::new(workspace, "omnifs up", output)
+        Launcher::new(workspace, "omnifs up", output.clone())
             .launch()
             .await?;
 
@@ -42,8 +42,8 @@ impl UpArgs {
 
     pub async fn run(self, output: Output) -> anyhow::Result<ExitCode> {
         let workspace = Workspace::resolve()?;
-        self.start_in_workspace(&workspace, output).await?;
-        crate::telemetry::maybe_print_health_nudge(&workspace, output).await;
+        self.start_in_workspace(&workspace, output.clone()).await?;
+        crate::telemetry::maybe_print_health_nudge(&workspace, output.clone()).await;
 
         if output.is_structured() {
             return emit_receipt(&workspace, output).await;

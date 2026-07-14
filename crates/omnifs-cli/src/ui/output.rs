@@ -1,16 +1,154 @@
 //! Invocation-owned output policy for the machine contract.
 //!
 //! [`Output`] owns mode, quiet, prompt, and command-path policy for one
-//! invocation. Commands clone it and pass it to the session/progress layers.
+//! invocation. Commands clone it and pass it to short-lived progress handles.
 //!
 //! No command should add another boolean cluster or process-global switch.
 
 use serde::Serialize;
-use std::io::Write;
+use std::fmt::Write as _;
+use std::io::{self, Write};
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
 
 use super::event::{JsonlError, JsonlEvent, JsonlResult};
+use super::style::Glyph;
 
 pub(crate) const SCHEMA_VERSION: u8 = 1;
+
+struct DefaultTheme;
+impl cliclack::Theme for DefaultTheme {}
+
+struct OmnifsTheme;
+
+impl cliclack::Theme for OmnifsTheme {
+    fn format_intro(&self, title: &str) -> String {
+        format!("┌ {title}\n│\n")
+    }
+
+    fn format_outro(&self, message: &str) -> String {
+        format!("└ {message}\n")
+    }
+
+    fn remark_symbol(&self) -> String {
+        String::new()
+    }
+
+    fn format_log(&self, text: &str, symbol: &str) -> String {
+        let mut lines = text.lines();
+        let Some(first) = lines.next() else {
+            return "│\n".to_string();
+        };
+        let mut out = if symbol.is_empty() {
+            format!("│  {first}\n")
+        } else {
+            format!("│\n{symbol} {}\n", super::style::heading(first))
+        };
+        for line in lines {
+            let _ = writeln!(out, "│  {line}");
+        }
+        out
+    }
+
+    fn format_header(&self, state: &cliclack::ThemeState, prompt: &str) -> String {
+        if matches!(state, cliclack::ThemeState::Cancel) {
+            String::new()
+        } else {
+            format!(
+                "│\n{}",
+                <DefaultTheme as cliclack::Theme>::format_header(&DefaultTheme, state, prompt)
+            )
+        }
+    }
+
+    fn format_footer(&self, state: &cliclack::ThemeState) -> String {
+        if matches!(state, cliclack::ThemeState::Cancel) {
+            String::new()
+        } else {
+            <DefaultTheme as cliclack::Theme>::format_footer(&DefaultTheme, state)
+        }
+    }
+
+    fn format_input(
+        &self,
+        state: &cliclack::ThemeState,
+        cursor: &cliclack::StringCursor,
+    ) -> String {
+        if matches!(state, cliclack::ThemeState::Cancel) {
+            String::new()
+        } else {
+            <DefaultTheme as cliclack::Theme>::format_input(&DefaultTheme, state, cursor)
+        }
+    }
+
+    fn format_placeholder(
+        &self,
+        state: &cliclack::ThemeState,
+        cursor: &cliclack::StringCursor,
+    ) -> String {
+        if matches!(state, cliclack::ThemeState::Cancel) {
+            String::new()
+        } else {
+            <DefaultTheme as cliclack::Theme>::format_placeholder(&DefaultTheme, state, cursor)
+        }
+    }
+
+    fn format_select_item(
+        &self,
+        state: &cliclack::ThemeState,
+        selected: bool,
+        label: &str,
+        hint: &str,
+    ) -> String {
+        if matches!(state, cliclack::ThemeState::Cancel) {
+            String::new()
+        } else {
+            <DefaultTheme as cliclack::Theme>::format_select_item(
+                &DefaultTheme,
+                state,
+                selected,
+                label,
+                hint,
+            )
+        }
+    }
+
+    fn format_confirm(&self, state: &cliclack::ThemeState, confirm: bool) -> String {
+        if matches!(state, cliclack::ThemeState::Cancel) {
+            String::new()
+        } else {
+            <DefaultTheme as cliclack::Theme>::format_confirm(&DefaultTheme, state, confirm)
+        }
+    }
+}
+pub(crate) fn install_theme() {
+    cliclack::set_theme(OmnifsTheme);
+}
+
+#[derive(Debug, Default)]
+struct OutputState {
+    terminal: bool,
+    closed: bool,
+    failure: Option<String>,
+}
+
+#[derive(Debug)]
+struct OutputFailure(String);
+
+impl std::fmt::Display for OutputFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for OutputFailure {}
+
+fn state(output: &Output) -> MutexGuard<'_, OutputState> {
+    output
+        .state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 /// Verdict for a completed command result. Degraded is a successful terminal
 /// document with actionable resources, not an error envelope.
@@ -227,49 +365,51 @@ impl Output {
 }
 
 /// Output policy owned by one CLI invocation. Commands clone this handle and
-/// pass it through session/progress code instead of consulting process-global
-/// switches.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// pass it through short-lived progress handles instead of consulting
+/// process-global switches.
+#[derive(Debug, Clone)]
 pub(crate) struct Output {
     mode: OutputMode,
     quiet: bool,
     no_input: bool,
     yes: bool,
     command: &'static str,
+    state: Arc<Mutex<OutputState>>,
 }
 
 impl Output {
-    pub(crate) const fn new(mode: OutputMode, quiet: bool) -> Self {
+    pub(crate) fn new(mode: OutputMode, quiet: bool) -> Self {
         Self {
             mode,
             quiet,
             no_input: false,
             yes: false,
             command: "invocation",
+            state: Arc::new(Mutex::new(OutputState::default())),
         }
     }
 
-    pub(crate) const fn mode(self) -> OutputMode {
+    pub(crate) const fn mode(&self) -> OutputMode {
         self.mode
     }
 
-    pub(crate) const fn is_structured(self) -> bool {
+    pub(crate) const fn is_structured(&self) -> bool {
         self.mode.is_structured()
     }
 
-    pub(crate) const fn quiet(self) -> bool {
+    pub(crate) const fn quiet(&self) -> bool {
         self.quiet
     }
 
-    pub(crate) const fn no_input(self) -> bool {
+    pub(crate) const fn no_input(&self) -> bool {
         self.no_input
     }
 
-    pub(crate) const fn yes(self) -> bool {
+    pub(crate) const fn yes(&self) -> bool {
         self.yes
     }
 
-    pub(crate) const fn command(self) -> &'static str {
+    pub(crate) const fn command(&self) -> &'static str {
         self.command
     }
 
@@ -280,12 +420,109 @@ impl Output {
 
     /// Optional narration belongs to the invocation policy: it is human-only
     /// and quiet suppresses it, while structured streams stay machine-clean.
-    pub(crate) fn narrate(self, line: impl std::fmt::Display) {
+    pub(crate) fn narrate(&self, line: impl std::fmt::Display) {
         if self.mode == OutputMode::Human && !self.quiet {
-            crate::ui::eprint_raw(&format!(
-                "{}\n",
-                crate::ui::style::accentuate(&line.to_string())
+            let _ = cliclack::log::remark(crate::ui::style::accentuate(&line.to_string()));
+        }
+    }
+
+    pub(crate) fn note(&self, line: impl std::fmt::Display) {
+        self.narrate(line);
+    }
+
+    pub(crate) fn answer(&self, question: &str, answer: impl std::fmt::Display) {
+        if self.mode == OutputMode::Human && !self.quiet {
+            let _ = cliclack::log::remark(format!(
+                "{} {question} {}",
+                Glyph::Done.render(),
+                crate::ui::style::accent(answer)
             ));
+        }
+    }
+
+    pub(crate) fn intro(&self, title: impl std::fmt::Display) -> anyhow::Result<()> {
+        if self.mode == OutputMode::Human && !self.quiet {
+            cliclack::intro(title)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn phase(&self, title: impl Into<String>) {
+        let title = title.into();
+        if self.mode == OutputMode::Human {
+            if !self.quiet {
+                let _ = cliclack::log::step(&title);
+            }
+        } else if self.mode == OutputMode::Jsonl {
+            self.emit_event(JsonlEvent::Phase(super::event::JsonlPhase::new(
+                self.command,
+                title,
+                "started",
+            )));
+        }
+    }
+
+    pub(crate) fn row(&self, row: super::report::Row) {
+        if self.mode == OutputMode::Human {
+            let _ = cliclack::log::remark(row.render().trim_start());
+        }
+    }
+
+    pub(crate) fn plan(&self, plan: &super::consent::Plan) {
+        if self.mode != OutputMode::Human {
+            return;
+        }
+        let _ = cliclack::log::step("plan");
+        let rows = plan
+            .rows
+            .iter()
+            .map(super::consent::Row::render_plan)
+            .collect::<Vec<_>>();
+        let _ = cliclack::log::remark(super::report::render_rows(&rows));
+        let _ = cliclack::log::remark(crate::ui::style::dim(plan.summary()));
+    }
+
+    pub(crate) fn receipt(&self, receipt: &super::consent::Receipt) {
+        if self.mode != OutputMode::Human {
+            return;
+        }
+        let _ = cliclack::log::step("apply");
+        let rows = receipt
+            .rows
+            .iter()
+            .map(super::consent::Outcome::render_receipt)
+            .collect::<Vec<_>>();
+        let _ = cliclack::log::remark(super::report::render_rows(&rows));
+    }
+
+    pub(crate) fn outro(&self, message: impl Into<String>) {
+        let mut current = state(self);
+        if current.closed {
+            return;
+        }
+        current.closed = true;
+        drop(current);
+        if self.mode == OutputMode::Human && !self.quiet {
+            let _ = cliclack::outro(message.into());
+        }
+    }
+
+    pub(crate) fn progress(
+        &self,
+        length: u64,
+        message: impl std::fmt::Display,
+    ) -> crate::ui::progress::Progress {
+        crate::ui::progress::Progress::start(self.clone(), length, message)
+    }
+
+    pub(crate) fn progress_event(&self, resource: String, message: String, elapsed: Duration) {
+        if self.mode == OutputMode::Jsonl {
+            self.emit_event(JsonlEvent::Progress(super::event::JsonlProgress::new(
+                self.command,
+                resource,
+                message,
+                u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+            )));
         }
     }
 
@@ -297,6 +534,92 @@ impl Output {
     pub(crate) const fn with_yes(mut self, yes: bool) -> Self {
         self.yes = yes;
         self
+    }
+
+    fn failure(&self) -> Option<anyhow::Error> {
+        state(self)
+            .failure
+            .as_ref()
+            .map(|message| anyhow::Error::new(OutputFailure(message.clone())))
+    }
+
+    fn fail(&self, error: impl std::fmt::Display) {
+        let mut current = state(self);
+        if current.failure.is_none() {
+            current.failure = Some(error.to_string());
+        }
+    }
+
+    fn ensure_terminal_open(&self) -> anyhow::Result<()> {
+        if let Some(error) = self.failure() {
+            return Err(error);
+        }
+        if state(self).terminal {
+            anyhow::bail!("terminal output has already been settled")
+        }
+        Ok(())
+    }
+
+    fn mark_terminal(&self) {
+        state(self).terminal = true;
+    }
+
+    fn emit_event(&self, event: JsonlEvent) {
+        if let Err(error) = self.write_event_to_stdout(&event) {
+            self.fail(error);
+        }
+    }
+
+    fn write_event_to_stdout(&self, event: &JsonlEvent) -> anyhow::Result<()> {
+        self.ensure_terminal_open()?;
+        let mut stdout = io::stdout().lock();
+        self.write_event(&mut stdout, event)?;
+        Ok(())
+    }
+
+    fn settle_result<W: Write, T: Serialize>(
+        &self,
+        writer: &mut W,
+        verdict: impl Into<ResultVerdict>,
+        result: T,
+    ) -> anyhow::Result<()> {
+        if !self.mode.is_structured() {
+            anyhow::bail!("structured terminal output is unavailable in human mode");
+        }
+        self.ensure_terminal_open()?;
+        let emitted =
+            self.write_result_with_fallback(writer, self.command(), verdict.into(), result);
+        match emitted {
+            Ok(true) => {
+                self.mark_terminal();
+                Ok(())
+            },
+            Ok(false) => {
+                self.mark_terminal();
+                anyhow::bail!("failed to serialize structured result")
+            },
+            Err(error) => {
+                self.fail(&error);
+                Err(error)
+            },
+        }
+    }
+
+    fn settle_error<W: Write>(&self, writer: &mut W, error: ErrorEnvelope) -> anyhow::Result<()> {
+        if !self.mode.is_structured() {
+            anyhow::bail!("structured terminal output is unavailable in human mode");
+        }
+        self.ensure_terminal_open()?;
+        match self.write_error(writer, error) {
+            Ok(()) => {
+                self.mark_terminal();
+                Ok(())
+            },
+            Err(error) => {
+                self.fail(&error);
+                Err(error)
+            },
+        }
     }
 }
 
@@ -321,24 +644,17 @@ impl Output {
     /// Emit one terminal result on stdout. Human output remains owned by the
     /// existing table/receipt renderers and never calls this method.
     pub(crate) fn emit_result<T: Serialize>(
-        self,
+        &self,
         verdict: impl Into<ResultVerdict>,
         result: T,
     ) -> anyhow::Result<()> {
-        if !self.mode.is_structured() {
-            anyhow::bail!("structured terminal output is unavailable in human mode");
-        }
-        let mut stdout = std::io::stdout().lock();
-        self.write_result_with_fallback(&mut stdout, self.command(), verdict.into(), result)?;
-        Ok(())
+        let mut stdout = io::stdout().lock();
+        self.settle_result(&mut stdout, verdict, result)
     }
 
-    pub(crate) fn emit_error(self, error: ErrorEnvelope) -> anyhow::Result<()> {
-        if !self.mode.is_structured() {
-            anyhow::bail!("structured terminal output is unavailable in human mode");
-        }
-        let mut stdout = std::io::stdout().lock();
-        self.write_error(&mut stdout, error)
+    pub(crate) fn emit_error(&self, error: ErrorEnvelope) -> anyhow::Result<()> {
+        let mut stdout = io::stdout().lock();
+        self.settle_error(&mut stdout, error)
     }
 }
 
@@ -361,7 +677,7 @@ mod tests {
         let output = Output::new(OutputMode::Jsonl, true)
             .with_no_input(true)
             .with_yes(true);
-        assert_eq!(output.clone(), output);
+        assert_eq!(output.clone().mode(), output.mode());
         assert_eq!(output.mode(), OutputMode::Jsonl);
         assert!(output.quiet());
         assert!(output.no_input());
@@ -534,5 +850,49 @@ mod tests {
         assert_eq!(value["type"], "error");
         assert_eq!(value["verdict"], "failed");
         assert_eq!(value["error"]["id"], "serialization-failed");
+    }
+
+    #[test]
+    fn terminal_settlement_is_single_and_writer_failure_is_sticky() {
+        struct Broken;
+        impl Write for Broken {
+            fn write(&mut self, _buffer: &[u8]) -> io::Result<usize> {
+                Err(io::Error::other("broken stdout"))
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let output = Output::new(OutputMode::Jsonl, false).with_command("status");
+        let mut broken = Broken;
+        assert!(
+            output
+                .settle_result(&mut broken, ResultVerdict::Ok, serde_json::json!({}))
+                .is_err()
+        );
+
+        let mut bytes = Vec::new();
+        let error = output
+            .settle_result(&mut bytes, ResultVerdict::Ok, serde_json::json!({}))
+            .unwrap_err();
+        assert!(error.to_string().contains("broken stdout"));
+        assert!(bytes.is_empty());
+    }
+
+    #[test]
+    fn terminal_settlement_rejects_a_second_document() {
+        let output = Output::new(OutputMode::Json, false).with_command("status");
+        let mut bytes = Vec::new();
+        output
+            .settle_result(&mut bytes, ResultVerdict::Ok, serde_json::json!({}))
+            .unwrap();
+        assert!(
+            output
+                .settle_error(&mut bytes, ErrorEnvelope::serialization_failure("status"),)
+                .is_err()
+        );
+        assert_eq!(bytes.iter().filter(|byte| **byte == b'\n').count(), 1);
     }
 }

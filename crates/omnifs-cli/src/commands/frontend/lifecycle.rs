@@ -358,7 +358,7 @@ impl FrontendEnableArgs {
             EnableAction::Stopped => unreachable!("daemon state checked above"),
             EnableAction::Launch => {},
         }
-        let runner_running = match backend_running(workspace, &id, output).await {
+        let runner_running = match backend_running(workspace, &id, output.clone()).await {
             Ok(running) => running,
             Err(error) => {
                 let fix = restart_fix(&id);
@@ -380,7 +380,7 @@ impl FrontendEnableArgs {
             EnableAction::Launch => {},
         }
         let mount = inventory.mounts.first().map(|mount| mount.name.as_str());
-        match launch(workspace, &id, mount, output).await {
+        match launch(workspace, &id, mount, output.clone()).await {
             Ok(()) if id.environment() == FrontendEnvironment::Krunkit => {
                 Ok(attached_result(id, true))
             },
@@ -394,7 +394,7 @@ impl FrontendEnableArgs {
 
     pub async fn run(self, output: Output) -> Result<crate::error::ExitCode> {
         let workspace = Workspace::resolve()?;
-        let result = self.enable(&workspace, output).await?;
+        let result = self.enable(&workspace, output.clone()).await?;
         let inventory = Inventory::collect(&workspace).await?;
         finish_receipt(
             output,
@@ -420,7 +420,7 @@ impl FrontendDisableArgs {
             self.location,
         )?;
         let observed = inventory.frontends.iter().any(|row| matches(row, &id));
-        let running = match backend_running(workspace, &id, output).await {
+        let running = match backend_running(workspace, &id, output.clone()).await {
             Ok(value) => value,
             Err(error) => {
                 let fix = disable_fix(&id);
@@ -430,7 +430,7 @@ impl FrontendDisableArgs {
         if !running && (!observed || id.environment() != FrontendEnvironment::Host) {
             return Ok(stopped(id, false));
         }
-        match stop(workspace, &id, output).await {
+        match stop(workspace, &id, output.clone()).await {
             Ok(()) => Ok(stopped(id, true)),
             Err(error) => {
                 let fix = disable_fix(&id);
@@ -441,7 +441,7 @@ impl FrontendDisableArgs {
 
     pub async fn run(self, output: Output) -> Result<crate::error::ExitCode> {
         let workspace = Workspace::resolve()?;
-        let result = self.disable(&workspace, output).await?;
+        let result = self.disable(&workspace, output.clone()).await?;
         let inventory = Inventory::collect(&workspace).await?;
         finish_receipt(
             output,
@@ -489,17 +489,17 @@ impl FrontendRestartArgs {
         }
         let mut results = Vec::with_capacity(targets.len());
         for id in targets {
-            match backend_running(workspace, &id, output).await {
+            match backend_running(workspace, &id, output.clone()).await {
                 Ok(true) if id.environment() == FrontendEnvironment::Krunkit => {},
                 Ok(true) => {
-                    if let Err(error) = stop(workspace, &id, output).await {
+                    if let Err(error) = stop(workspace, &id, output.clone()).await {
                         let fix = restart_fix(&id);
                         results.push(failed(id, false, fix, error));
                         continue;
                     }
                 },
                 Ok(false) if id.environment() == FrontendEnvironment::Host => {
-                    if let Err(error) = stop(workspace, &id, output).await {
+                    if let Err(error) = stop(workspace, &id, output.clone()).await {
                         let fix = restart_fix(&id);
                         results.push(failed(id, false, fix, error));
                         continue;
@@ -518,7 +518,7 @@ impl FrontendRestartArgs {
                     workspace,
                     &id,
                     inventory.mounts.first().map(|mount| mount.name.as_str()),
-                    output,
+                    output.clone(),
                 )
                 .await
                 {
@@ -535,7 +535,7 @@ impl FrontendRestartArgs {
 
     pub async fn run(self, output: Output) -> Result<crate::error::ExitCode> {
         let workspace = Workspace::resolve()?;
-        let results = self.restart(&workspace, output).await?;
+        let results = self.restart(&workspace, output.clone()).await?;
         let inventory = Inventory::collect(&workspace).await?;
         finish_receipt(
             output,

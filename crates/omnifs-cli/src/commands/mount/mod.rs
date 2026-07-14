@@ -92,7 +92,8 @@ impl MountArgs {
             MountCommand::Reauth(args) => args.run(output).await.map(|()| ExitCode::Success),
             MountCommand::Rm { name, dry_run } => {
                 let workspace = Workspace::resolve()?;
-                let receipt = rm_with_options(&workspace, &name, output.yes(), dry_run, output)?;
+                let receipt =
+                    rm_with_options(&workspace, &name, output.yes(), dry_run, output.clone())?;
                 if output.is_structured() {
                     output.emit_result(receipt.output_verdict(), &receipt)?;
                 }
@@ -227,14 +228,11 @@ fn render_mount_show(result: &MountShowResult) -> String {
 impl ReauthArgs {
     async fn run(self, output: Output) -> anyhow::Result<()> {
         let workspace = Workspace::resolve()?;
-        let mut session = crate::ui::session::Session::intro_with_output(
-            format!("omnifs mount reauth {}", self.name),
-            output,
-        )?;
+        output.intro(format!("omnifs mount reauth {}", self.name))?;
         let prompt = PromptMode::from_flags(output.yes(), output.no_input());
-        let result = self.run_in_session(&workspace, &mut session, prompt).await;
+        let result = self.run_in_session(&workspace, &output, prompt).await;
         if result.is_ok() {
-            session.outro(format!("Re-authenticated `{}`.", self.name));
+            output.outro(format!("Re-authenticated `{}`.", self.name));
         }
         result
     }
@@ -242,7 +240,7 @@ impl ReauthArgs {
     pub(crate) async fn run_in_session(
         &self,
         workspace: &Workspace,
-        session: &mut crate::ui::session::Session,
+        session: &crate::ui::output::Output,
         prompt: PromptMode,
     ) -> anyhow::Result<()> {
         let paths = workspace.layout();
@@ -333,7 +331,7 @@ impl ReauthArgs {
                 },
             }
         }
-        crate::telemetry::maybe_print_health_nudge(workspace, session.output()).await;
+        crate::telemetry::maybe_print_health_nudge(workspace, session.clone()).await;
         Ok(())
     }
 }
@@ -359,8 +357,8 @@ fn rm_with_options(
     output: Output,
 ) -> anyhow::Result<crate::commands::receipt::MountRemoveReceipt> {
     let layout = workspace.layout();
-    let mut session =
-        crate::ui::session::Session::intro_with_output(format!("omnifs mount rm {name}"), output)?;
+    output.intro(format!("omnifs mount rm {name}"))?;
+    let session = output.clone();
     let mounts = workspace.mounts()?;
     let name =
         MountName::new(name.to_owned()).with_context(|| format!("invalid mount name `{name}`"))?;

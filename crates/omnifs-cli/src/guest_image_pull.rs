@@ -32,8 +32,8 @@ use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
 
 use crate::launch_backend::ImageRef;
-use crate::ui::LiveRow;
 use crate::ui::output::Output;
+use crate::ui::progress::Progress;
 
 const GUEST_IMAGE_CACHE_SUBDIR: &str = "guest-images";
 
@@ -125,7 +125,7 @@ pub(crate) async fn ensure_guest_image(
     let client = reqwest::Client::new();
 
     if !zst_path.is_file() {
-        download_and_verify(&client, &oci_ref, &zst_path, output).await?;
+        download_and_verify(&client, &oci_ref, &zst_path, output.clone()).await?;
     }
 
     match decompress(&zst_path, &raw_path) {
@@ -134,7 +134,7 @@ pub(crate) async fn ensure_guest_image(
             // The cached .zst may be a leftover from an interrupted prior
             // decompress; re-download once before giving up, rather than
             // leaving the caller stuck on a permanently corrupt cache entry.
-            let mut retry = LiveRow::start_with_output("guest image", "retrying", output);
+            let mut retry = Progress::start_with_output("guest image", "retrying", output.clone());
             retry.update("retrying");
             retry.settle_warn(format!(
                 "cached image at {} is corrupt ({decompress_error:#}); retrying",
@@ -202,7 +202,7 @@ async fn download_and_verify(
     dest: &Path,
     output: Output,
 ) -> Result<()> {
-    let mut row = LiveRow::start_with_output("guest image", "downloading", output);
+    let mut row = Progress::start_with_output("guest image", "downloading", output);
     let result: Result<u64> = async {
         let token = fetch_pull_token(client, oci_ref).await?;
         let manifest = fetch_manifest(client, oci_ref, &token).await?;
@@ -266,7 +266,7 @@ async fn download_and_verify(
         Ok(downloaded) => {
             row.settle_ok(format!(
                 "{}, verified (cached for next time)",
-                LiveRow::human_bytes(downloaded)
+                Progress::human_bytes(downloaded)
             ));
             Ok(())
         },

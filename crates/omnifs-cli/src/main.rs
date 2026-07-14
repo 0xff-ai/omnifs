@@ -102,7 +102,7 @@ async fn main() {
         .then(omnifs_engine::init_global_from_env)
         .flatten();
     init_tracing(cli.verbose, inspector.as_ref());
-    ui::session::install_theme();
+    ui::output::install_theme();
     let command_path = cli.command_path();
     let output = Output::new(cli.output, cli.quiet)
         .with_command(command_path)
@@ -113,7 +113,7 @@ async fn main() {
     // Subcommands that `std::process::exit` on their own (shell, doctor) record
     // at their exit site; this covers every command that returns to `main`.
     let telemetry_label = cli.telemetry_label();
-    match run(cli, output).await {
+    match run(cli, output.clone()).await {
         Ok(exit_code) => {
             let code = exit_code.code();
             if let Some(cmd) = telemetry_label {

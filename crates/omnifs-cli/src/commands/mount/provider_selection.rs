@@ -42,9 +42,9 @@ impl<'a> ProviderSelection<'a> {
         explicit_name: Option<&str>,
         interactive: bool,
         yes: bool,
-        session: &mut crate::ui::session::Session,
+        session: &crate::ui::output::Output,
     ) -> anyhow::Result<(String, MountName)> {
-        let provider = self.resolve_provider(provider_arg, interactive)?;
+        let provider = self.resolve_provider(provider_arg, interactive, session)?;
         // An unknown positional provider bails here (before the caller's own
         // catalog lookup), so the available-provider list and install hint must
         // ride on this error or they never reach the user.
@@ -80,6 +80,7 @@ impl<'a> ProviderSelection<'a> {
         &self,
         provider_arg: Option<&str>,
         interactive: bool,
+        output: &crate::ui::output::Output,
     ) -> anyhow::Result<String> {
         if let Some(provider) = provider_arg {
             return Ok(provider.to_string());
@@ -93,7 +94,7 @@ impl<'a> ProviderSelection<'a> {
         }
         crate::ui::prompt::Select::new("Which provider does this mount use?")
             .items(providers)
-            .ask()
+            .ask_with_output(output.clone())
     }
 
     fn ensure_unique_name(
@@ -101,7 +102,7 @@ impl<'a> ProviderSelection<'a> {
         proposed: MountName,
         interactive: bool,
         yes: bool,
-        session: &mut crate::ui::session::Session,
+        session: &crate::ui::output::Output,
     ) -> anyhow::Result<MountName> {
         if !mount_exists(self.mounts, &proposed) {
             return Ok(proposed);
@@ -124,7 +125,7 @@ impl<'a> ProviderSelection<'a> {
         }
         let name = crate::ui::prompt::Text::new("New mount name")
             .with_default(suggestion.as_str())
-            .ask()?;
+            .ask_with_output(session.clone())?;
         Ok(MountName::new(name)?)
     }
 

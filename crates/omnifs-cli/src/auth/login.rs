@@ -37,7 +37,7 @@ async fn login(
     store: Box<dyn CredentialStore>,
     account: Option<&str>,
     interactivity: LoginInteractivity<'_>,
-    session: &mut crate::ui::session::Session,
+    session: &crate::ui::output::Output,
 ) -> anyhow::Result<CredentialTarget> {
     let LoginInteractivity {
         no_browser,
@@ -89,7 +89,7 @@ async fn login(
         LoginRequest::DeviceCode(request) => {
             // The callback runs before the await inside login_device_code, so we cannot
             // borrow &mut session across the future. Emit directly with cliclack log
-            // remark (the same rail renderer used by Session).
+            // remark on the same output rail used by the command.
             let result = client
                 .login_device_code(request, move |prompt| {
                     present_device_prompt(&prompt, no_browser);
@@ -134,14 +134,16 @@ async fn login_manual(
     client: &OAuthClient,
     request: ManualCodeLoginRequest,
     mount: &str,
-    session: &mut crate::ui::session::Session,
+    session: &crate::ui::output::Output,
 ) -> anyhow::Result<CredentialEntry> {
     let result = client
         .login_manual_code(request, |url| {
             session.note(format!("Open {url}"));
             async move {
+                let prompt_output = session.clone();
                 let pasted = tokio::task::spawn_blocking(|| {
-                    crate::ui::prompt::Text::new("Paste redirect URL or `code state`").ask()
+                    crate::ui::prompt::Text::new("Paste redirect URL or `code state`")
+                        .ask_with_output(prompt_output)
                 })
                 .await
                 .unwrap_or_else(|error| Err(anyhow::anyhow!("prompt task panicked: {error}")))
@@ -172,7 +174,7 @@ pub(crate) async fn login_with_workspace(
     no_browser: bool,
     no_input: bool,
     scopes: &[String],
-    session: &mut crate::ui::session::Session,
+    session: &crate::ui::output::Output,
 ) -> anyhow::Result<CredentialTarget> {
     let store = Box::new(FileStore::new(&workspace.layout().credentials_file));
     let mounts = workspace.mounts()?;
@@ -203,7 +205,7 @@ pub(crate) async fn login_with_spec(
     no_browser: bool,
     no_input: bool,
     scopes: &[String],
-    session: &mut crate::ui::session::Session,
+    session: &crate::ui::output::Output,
 ) -> anyhow::Result<CredentialTarget> {
     let store = Box::new(FileStore::new(&workspace.layout().credentials_file));
     let mount_auth = crate::auth::MountAuth::from_spec(workspace.catalog(), spec.clone());
@@ -224,7 +226,7 @@ pub(crate) async fn login_with_spec(
 
 fn present_device_prompt(prompt: &DeviceCodePrompt, no_browser: bool) {
     // Each line goes through cliclack log remark. This produces the same
-    // rail-framed stderr that Session uses and drops the spinner bar from
+    // rail-framed stderr used by the command and drops the spinner bar from
     // the device-code path.
     let url = prompt
         .verification_uri_complete
@@ -275,7 +277,7 @@ fn present_device_prompt(prompt: &DeviceCodePrompt, no_browser: bool) {
 }
 
 fn print_oauth_consent_summary(
-    session: &mut crate::ui::session::Session,
+    session: &crate::ui::output::Output,
     request: &OAuthRequest,
     guidance: &SchemeGuidance,
 ) {

@@ -2,9 +2,7 @@
 
 use std::io::{self, IsTerminal};
 
-use super::event::{PromptAnswer, Render as _, UiEvent};
 use super::output::Output;
-use super::session::RailRenderer;
 
 /// Marker error returned when an interactive prompt is canceled with Esc or
 /// Ctrl-C. The top-level command boundary treats this as a normal exit.
@@ -66,19 +64,17 @@ impl Text {
     }
 
     pub(crate) fn ask(self) -> anyhow::Result<String> {
-        let mut renderer = RailRenderer::new(Output::new(super::output::OutputMode::Human, false));
-        renderer.event(&UiEvent::PromptShown {
-            question: self.question.clone(),
-        });
+        self.ask_with_output(Output::new(super::output::OutputMode::Human, false))
+    }
+
+    pub(crate) fn ask_with_output(self, output: Output) -> anyhow::Result<String> {
+        output.ensure_prompt_allowed()?;
         let mut prompt = cliclack::input(&self.question);
         if let Some(default) = &self.default {
             prompt = prompt.default_input(default);
         }
         let answer: String = prompt.interact().map_err(prompt_error)?;
-        renderer.event(&UiEvent::PromptAnswered {
-            question: self.question,
-            answer: PromptAnswer::Visible(answer.clone()),
-        });
+        output.answer(&self.question, &answer);
         Ok(answer)
     }
 }
@@ -102,25 +98,17 @@ impl Confirm {
     }
 
     pub(crate) fn ask(self) -> anyhow::Result<bool> {
-        let mut renderer = RailRenderer::new(Output::new(super::output::OutputMode::Human, false));
-        renderer.event(&UiEvent::PromptShown {
-            question: self.question.clone(),
-        });
+        self.ask_with_output(Output::new(super::output::OutputMode::Human, false))
+    }
+
+    pub(crate) fn ask_with_output(self, output: Output) -> anyhow::Result<bool> {
+        output.ensure_prompt_allowed()?;
         let answer = cliclack::confirm(&self.question)
             .initial_value(self.default)
             .interact()
             .map_err(prompt_error)?;
-        renderer.event(&UiEvent::PromptAnswered {
-            question: self.question,
-            answer: PromptAnswer::Visible(if answer { "yes" } else { "no" }.to_string()),
-        });
+        output.answer(&self.question, if answer { "yes" } else { "no" });
         Ok(answer)
-    }
-
-    /// Check the invocation policy before rendering any prompt bytes.
-    pub(crate) fn ask_with_output(self, output: Output) -> anyhow::Result<bool> {
-        output.ensure_prompt_allowed()?;
-        self.ask()
     }
 }
 
@@ -136,17 +124,15 @@ impl Password {
     }
 
     pub(crate) fn ask(self) -> anyhow::Result<String> {
-        let mut renderer = RailRenderer::new(Output::new(super::output::OutputMode::Human, false));
-        renderer.event(&UiEvent::PromptShown {
-            question: self.question.clone(),
-        });
+        self.ask_with_output(Output::new(super::output::OutputMode::Human, false))
+    }
+
+    pub(crate) fn ask_with_output(self, output: Output) -> anyhow::Result<String> {
+        output.ensure_prompt_allowed()?;
         let answer = cliclack::password(&self.question)
             .interact()
             .map_err(prompt_error)?;
-        renderer.event(&UiEvent::PromptAnswered {
-            question: self.question,
-            answer: PromptAnswer::Secret,
-        });
+        output.answer(&self.question, "answered");
         Ok(answer)
     }
 }
@@ -183,19 +169,17 @@ impl<T: Clone + Eq + std::fmt::Display> Select<T> {
     }
 
     pub(crate) fn ask(self) -> anyhow::Result<T> {
-        let mut renderer = RailRenderer::new(Output::new(super::output::OutputMode::Human, false));
-        renderer.event(&UiEvent::PromptShown {
-            question: self.question.clone(),
-        });
+        self.ask_with_output(Output::new(super::output::OutputMode::Human, false))
+    }
+
+    pub(crate) fn ask_with_output(self, output: Output) -> anyhow::Result<T> {
+        output.ensure_prompt_allowed()?;
         let mut prompt = cliclack::select(&self.question);
         for (value, label, hint) in self.items {
             prompt = prompt.item(value, label, hint);
         }
         let answer = prompt.interact().map_err(prompt_error)?;
-        renderer.event(&UiEvent::PromptAnswered {
-            question: self.question,
-            answer: PromptAnswer::Visible(answer.to_string()),
-        });
+        output.answer(&self.question, answer.to_string());
         Ok(answer)
     }
 }
@@ -228,13 +212,14 @@ impl<T: Clone + Eq + std::fmt::Display> MultiSelect<T> {
     }
 
     pub(crate) fn ask(self) -> anyhow::Result<Vec<T>> {
+        self.ask_with_output(Output::new(super::output::OutputMode::Human, false))
+    }
+
+    pub(crate) fn ask_with_output(self, output: Output) -> anyhow::Result<Vec<T>> {
         if self.items.is_empty() {
             anyhow::bail!("no providers available to choose from");
         }
-        let mut renderer = RailRenderer::new(Output::new(super::output::OutputMode::Human, false));
-        renderer.event(&UiEvent::PromptShown {
-            question: self.question.clone(),
-        });
+        output.ensure_prompt_allowed()?;
         let mut prompt = cliclack::multiselect(&self.question).required(false);
         for (value, label, hint) in self.items {
             prompt = prompt.item(value, label, hint);
@@ -243,16 +228,14 @@ impl<T: Clone + Eq + std::fmt::Display> MultiSelect<T> {
             .initial_values(self.initial_values)
             .interact()
             .map_err(prompt_error)?;
-        renderer.event(&UiEvent::PromptAnswered {
-            question: self.question,
-            answer: PromptAnswer::Visible(
-                answer
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", "),
-            ),
-        });
+        output.answer(
+            &self.question,
+            answer
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
         Ok(answer)
     }
 }
@@ -272,21 +255,6 @@ mod tests {
         let error = prompt_error(io::ErrorKind::NotConnected.into());
         assert!(!is_canceled(&error));
         assert!(error.to_string().contains("pass --yes or --no-input"));
-    }
-
-    #[test]
-    fn password_event_is_redacted() {
-        let event = crate::ui::event::UiEvent::PromptAnswered {
-            question: "Token".to_string(),
-            answer: crate::ui::event::PromptAnswer::Secret,
-        };
-        assert!(matches!(
-            event,
-            crate::ui::event::UiEvent::PromptAnswered {
-                answer: crate::ui::event::PromptAnswer::Secret,
-                ..
-            }
-        ));
     }
 
     #[test]

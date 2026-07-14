@@ -60,9 +60,9 @@ impl PromptMode {
         }
     }
 
-    /// The single decision combinator for every wizard prompt site: an explicit
+    /// The single decision combinator for every guided prompt site: an explicit
     /// value wins; `--yes` takes the default; `--no-input` and non-interactive
-    /// sessions bail with a flag hint; otherwise prompt.
+    /// runs bail with a flag hint; otherwise prompt.
     pub(crate) fn resolve<T>(
         self,
         explicit: Option<T>,
@@ -86,11 +86,11 @@ impl PromptMode {
     }
 }
 
-#[allow(clippy::too_many_lines)] // linear ledger narration reads best inline
+#[allow(clippy::too_many_lines)] // linear narration reads best inline
 pub(crate) async fn configure_mount(
     args: AddArgs,
     workspace: &Workspace,
-    session: &mut crate::ui::session::Session,
+    session: &crate::ui::output::Output,
     prompt: PromptMode,
 ) -> anyhow::Result<MountInitOutcome> {
     let mut plan = spec_creation(&args, workspace, session, prompt)?;
@@ -128,7 +128,7 @@ pub(crate) async fn configure_mount(
         session.note(crate::ui::hint("omnifs up", "start serving"));
     }
 
-    crate::telemetry::maybe_print_health_nudge(workspace, session.output()).await;
+    crate::telemetry::maybe_print_health_nudge(workspace, session.clone()).await;
 
     Ok(MountInitOutcome {
         mount_name: plan.mount_name.to_string(),
@@ -148,7 +148,7 @@ fn init_interactive(prompt: PromptMode) -> bool {
 pub(crate) fn spec_creation(
     args: &AddArgs,
     workspace: &Workspace,
-    session: &mut crate::ui::session::Session,
+    session: &crate::ui::output::Output,
     prompt: PromptMode,
 ) -> anyhow::Result<MountInitPlan> {
     let paths = workspace.layout();
@@ -172,7 +172,7 @@ pub(crate) fn spec_creation(
         Some(
             crate::ui::prompt::Select::new("Which provider?")
                 .options(choices)
-                .ask()?,
+                .ask_with_output(session.clone())?,
         )
     } else {
         None
@@ -278,7 +278,7 @@ impl MountInitPlan {
         &mut self,
         args: &AddArgs,
         workspace: &Workspace,
-        session: &mut crate::ui::session::Session,
+        session: &crate::ui::output::Output,
         prompt: PromptMode,
     ) -> anyhow::Result<MountInitStatus> {
         crate::commands::mount::render_consent_block(session, &self.manifest);
@@ -306,7 +306,7 @@ impl MountInitPlan {
                     plan.mount_name
                 ))
                 .with_default(true)
-                .ask()?;
+                .ask_with_output(session.clone())?;
                 if !proceed {
                     return Ok(MountInitStatus::SignInDeclined);
                 }
@@ -424,7 +424,7 @@ fn selected_auth(
 fn persist_mount_spec(
     workspace: &Workspace,
     plan: &MountInitPlan,
-    session: &mut crate::ui::session::Session,
+    session: &crate::ui::output::Output,
 ) -> anyhow::Result<()> {
     workspace.put_mount_uncommitted(&plan.spec)?;
     workspace.commit_mounts()?;
