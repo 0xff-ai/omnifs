@@ -2,7 +2,7 @@
 //!
 //! These are invoked by the `omnifs daemon` subcommand (the single-binary
 //! entrypoint); there is no standalone `omnifsd` binary. The daemon still
-//! runs as its own host-native process and speaks the local HTTP control API.
+//! runs as its own host-native process and speaks the local typed control protocol.
 
 use anyhow::Context as _;
 use clap::Args;
@@ -33,7 +33,7 @@ pub struct DaemonArgs {
     /// Docker Desktop path: a containerized frontend cannot share a host Unix
     /// socket into the Linux VM it runs in, so it dials TCP instead. Absent:
     /// no TCP attach listener at start (one can still be bound later on a
-    /// running daemon via `POST /v1/frontend/attach-target`).
+    /// running daemon through the local control socket).
     #[arg(long = "attach-tcp", value_name = "PORT")]
     pub(crate) attach_tcp: Option<u16>,
 }
@@ -105,7 +105,7 @@ pub async fn run(args: &DaemonArgs) -> anyhow::Result<()> {
     // Build the one shared namespace after atomic startup loading, so its root
     // record reflects the complete mount set.
     let namespace = omnifs_engine::TreeNamespace::new(Arc::clone(&registry), rt.clone());
-    // Give the daemon's VfsServer a handle to the namespace so REST attach
+    // Give the daemon's VfsServer a handle to the namespace so typed attach
     // requests can bind a TCP listener on a running daemon without a restart.
     daemon.set_namespace(Arc::clone(&namespace));
     let result = daemon.run(previous).await;

@@ -1,26 +1,19 @@
-//! Control API types shared by the `omnifs` CLI and daemon runtime.
-//!
-//! The daemon serves these under `/v1/` on its control listener: a Unix
-//! domain socket for the host-native daemon. See
-//! `docs/contracts/50-control-plane.md`.
+//! Shared control-plane domain and wire types for the `omnifs` CLI and daemon.
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use utoipa::ToSchema;
+
+mod control;
+
+pub use control::{
+    CONTROL_MAX_LINE_BYTES, CONTROL_PROTOCOL_VERSION, CONTROL_REQUEST_TIMEOUT_SECS, ControlError,
+    ControlErrorCode, ControlOperation, ControlOutcome, ControlReply, ControlRequest,
+    TcpAttachTarget, VsockAttachTarget,
+};
 
 /// JSONL activity-event schema and redaction for the inspector observability
-/// subsystem: the daemon emits [`events::InspectorRecord`] lines and the CLI
-/// `inspect` command reads them. This is the events half of the same control-plane
-/// wire contract the REST DTOs below describe.
+/// subsystem.
 pub mod events;
-
-/// Control API major version. The CLI refuses to talk to a daemon with a
-/// different major. Bump when routes or payloads change incompatibly.
-pub const API_MAJOR: u16 = 8;
-
-/// Control API minor version. The CLI warns but proceeds when the daemon's
-/// minor differs. Bump for additive, backward-compatible additions.
-pub const API_MINOR: u16 = 0;
 
 /// TCP namespace attach address, injected by the frontend container launcher
 /// and read by the out-of-process `omnifs-thin fuse` runner when no `--attach`
@@ -45,42 +38,10 @@ pub const OMNIFS_ATTACH_TOKEN_ENV: &str = "OMNIFS_ATTACH_TOKEN";
 /// guest can dial vsock.
 pub const OMNIFS_READY_VSOCK_PORT_ENV: &str = "OMNIFS_READY_VSOCK_PORT";
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct ApiError {
-    pub code: ErrorCode,
-    pub message: String,
-    pub detail: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum ErrorCode {
-    AuthRequired,
-    MountNotFound,
-    SpecInvalid,
-    DaemonShuttingDown,
-    Internal,
-}
-
-/// `GET /v1/ready`: 200 with `ready: true` once the immutable mount revision loads
-/// and every requested namespace listener is serving.
-/// Non-ready responses use [`ApiError`].
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct ReadyInfo {
-    pub ready: bool,
-}
-
-/// `GET /v1/status`: the daemon's runtime facts, loaded mounts, and non-secret
-/// operational health. Credentials are represented only by coarse health.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+/// The daemon's runtime facts, loaded mounts, and non-secret operational health.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonStatus {
     pub version: String,
-    /// Control API major version. Incompatible change when this differs.
-    #[serde(default)]
-    pub api_major: u16,
-    /// Control API minor version. Additive change; CLI warns and proceeds.
-    #[serde(default)]
-    pub api_minor: u16,
     #[serde(default)]
     pub pid: u32,
     /// Random 16-hex-character id generated per daemon start. The CLI asserts it
@@ -89,13 +50,9 @@ pub struct DaemonStatus {
     #[serde(default)]
     pub instance_id: String,
     #[serde(default)]
-    #[schema(value_type = String)]
     pub executable: PathBuf,
-    #[schema(value_type = String)]
     pub config_dir: PathBuf,
-    #[schema(value_type = String)]
     pub cache_dir: PathBuf,
-    #[schema(value_type = String)]
     pub providers_dir: PathBuf,
     /// Every filesystem frontend currently attached to the shared namespace.
     #[serde(default)]
@@ -103,7 +60,7 @@ pub struct DaemonStatus {
     /// Backend serving this daemon, so the CLI tears down and reports the right
     /// backend without inferring it from configuration. Missing identity is not
     /// reclaimable; teardown stops instead of guessing.
-    #[serde(default, alias = "launch")]
+    #[serde(default)]
     pub backend: DaemonBackend,
     /// Provider mounts loaded in the registry.
     pub mounts: Vec<MountInfo>,
@@ -124,7 +81,7 @@ impl DaemonStatus {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DaemonHealth {
     pub subsystems: Vec<SubsystemHealth>,
 }
@@ -168,7 +125,7 @@ impl DaemonHealth {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubsystemHealth {
     pub subsystem: DaemonSubsystem,
     pub state: HealthState,
@@ -186,7 +143,7 @@ impl SubsystemHealth {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DaemonSubsystem {
     Control,
@@ -195,7 +152,7 @@ pub enum DaemonSubsystem {
     Mounts,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HealthState {
     Starting,
@@ -206,7 +163,7 @@ pub enum HealthState {
 
 /// Backend serving a daemon. The daemon always runs host-native; the CLI reads
 /// this (and the runtime record) rather than assuming it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DaemonBackend {
     /// Daemon spawned as a host-native child process.
@@ -219,7 +176,7 @@ impl Default for DaemonBackend {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FsType {
     Fuse,
@@ -235,14 +192,13 @@ impl std::fmt::Display for FsType {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FrontendInfo {
     pub source: String,
     pub fs_type: FsType,
     /// The frontend-reported mount point. It is host-visible for the local
     /// driver and display-only for Docker and krunkit guests.
     #[serde(default)]
-    #[schema(value_type = String)]
     pub mount_point: PathBuf,
     /// How this frontend reaches the shared namespace. The host assigns this
     /// from which listener the connection arrived on, never from anything a
@@ -254,28 +210,22 @@ pub struct FrontendInfo {
 /// How a frontend is delivered to the shared namespace. Assigned by the host
 /// at bind time per listener, never
 /// self-reported by the connecting guest.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FrontendDelivery {
     /// Attached over the fixed `frontends/local.sock` Unix domain socket.
     Local,
-    /// Attached over the TCP namespace listener (`POST
-    /// /v1/frontend/attach-target`), the Docker Desktop delivery path. The
-    /// default: `FrontendAttachTargetRequest.driver` defaults to it, and it
-    /// is the only value that route accepts today.
+    /// Attached over the TCP namespace listener, the Docker Desktop delivery
+    /// path.
     Docker,
-    /// Attached over the token-checking UDS vsock-proxy listener (`POST
-    /// /v1/frontend/attach-target/vsock`), the krunkit-on-macOS delivery path.
+    /// Attached over the token-checking UDS vsock-proxy listener, the
+    /// krunkit-on-macOS delivery path.
     Krunkit,
 }
 
 impl FrontendDelivery {
     const fn default_local() -> Self {
         Self::Local
-    }
-
-    fn default_attach() -> Self {
-        Self::Docker
     }
 }
 
@@ -289,7 +239,7 @@ impl std::fmt::Display for FrontendDelivery {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MountInfo {
     pub mount: String,
     /// Provider NAME slug, e.g. `github`; credentials key on this value.
@@ -300,7 +250,7 @@ pub struct MountInfo {
     pub auth_health: Option<CredentialHealth>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CredentialHealth {
     Ready,
@@ -327,94 +277,9 @@ impl CredentialHealth {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-pub struct ProviderArtifact {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub version: Option<String>,
-    pub id_hash: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-pub struct ProviderSummary {
-    pub name: String,
-    pub installed: Vec<ProviderArtifact>,
-}
-
-/// `POST /v1/shutdown`: daemon state immediately before exit.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct StopReport {
-    /// Every attached frontend at the moment of shutdown.
-    pub frontends: Vec<FrontendInfo>,
-    pub providers_dropped: usize,
-}
-
-/// Optional request body for `POST /v1/frontend/attach-target`. The address is
-/// honored only on the first bind (the listener is idempotent thereafter).
-/// An absent `bind_ip` selects loopback; native Linux may request the default
-/// Docker bridge gateway, which the daemon validates before binding.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct FrontendAttachTargetRequest {
-    #[serde(default)]
-    #[schema(value_type = Option<String>)]
-    pub bind_ip: Option<std::net::Ipv4Addr>,
-    /// The delivery mechanism attaching over this listener. Only `docker` is
-    /// accepted today (krunkit attaches over vsock instead, through the
-    /// separate `/v1/frontend/attach-target/vsock` route); any other value is
-    /// a 400. Defaults to `docker` when omitted.
-    #[serde(default = "FrontendDelivery::default_attach")]
-    pub driver: FrontendDelivery,
-}
-
-impl Default for FrontendAttachTargetRequest {
-    fn default() -> Self {
-        Self {
-            bind_ip: None,
-            driver: FrontendDelivery::default_attach(),
-        }
-    }
-}
-
-/// `POST /v1/frontend/attach-target`: the TCP attach target a frontend dials
-/// (address plus per-instance attach token), whether just bound or already
-/// serving from an earlier call (or from `--attach-tcp` at daemon start).
-/// Named after what it returns: the Omnifs VFS wire protocol client's
-/// `AttachTarget::Tcp`.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct FrontendAttachTargetReport {
-    pub addr: String,
-    pub token: String,
-}
-
-/// `POST /v1/frontend/attach-target/vsock`: the vsock attach target's host
-/// side, a token-checking UDS listener's socket path plus the per-instance
-/// attach token the guest presents (the Omnifs VFS wire protocol client's
-/// `AttachTarget::Vsock`).
-/// This is the krunkit-on-macOS path: a guest VM has no shared host Unix
-/// socket and no Docker-style loopback either, so it dials host vsock instead,
-/// and krunkit proxies every vsock connection onto `socket_path`. Every
-/// connection krunkit forwards looks like the same trusted local peer to that
-/// socket, so `token` (not filesystem permissions) is this listener's real
-/// auth, checked the same way the TCP listener's is. Takes no request body:
-/// unlike the TCP listener, there is no bind address to choose, only the
-/// daemon-picked path under the workspace. Idempotent, same as
-/// [`FrontendAttachTargetReport`]: a repeat call returns the already-bound
-/// path and token unchanged.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct FrontendAttachTargetVsockReport {
-    pub socket_path: String,
-    pub token: String,
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{CredentialHealth, FrontendAttachTargetRequest, FrontendDelivery, FrontendInfo};
-
-    #[test]
-    fn frontend_attach_request_defaults_to_docker() {
-        let request: FrontendAttachTargetRequest =
-            serde_json::from_value(serde_json::json!({})).unwrap();
-        assert_eq!(request.driver, FrontendDelivery::Docker);
-    }
+    use super::{CredentialHealth, FrontendDelivery, FrontendInfo};
 
     #[test]
     fn legacy_frontend_info_defaults_to_local_delivery() {

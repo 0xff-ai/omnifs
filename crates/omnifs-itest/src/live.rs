@@ -5,12 +5,18 @@
 //! construction, and native-daemon bring-up/readiness/teardown. The matrix and
 //! CLI lifecycle suite share this lock owner and daemon contract.
 
+use std::io::{Read, Write};
 use std::net::TcpListener;
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
+use omnifs_api::{
+    CONTROL_MAX_LINE_BYTES, CONTROL_PROTOCOL_VERSION, ControlOperation, ControlOutcome,
+    ControlReply, ControlRequest,
+};
 use omnifs_workspace::ids::{ProviderId, ProviderMeta, ProviderName};
 use omnifs_workspace::provider::ProviderStore;
 use tempfile::TempDir;
@@ -180,8 +186,8 @@ pub fn test_mount_spec_at(id: &ProviderId, mount: &str) -> String {
 }
 
 /// A hermetic `OMNIFS_HOME` with the test provider installed and its mount spec
-/// written to `mounts/`, plus an empty mount point. The daemon reconciles from
-/// `mounts/` on startup, so no `POST /v1/mounts` is needed.
+/// written to `mounts/`, plus an empty mount point. The daemon loads from
+/// `mounts/` on startup, so no control-plane mount mutation is needed.
 pub struct HermeticHome {
     pub home: TempDir,
     pub mount_point: PathBuf,
@@ -312,18 +318,15 @@ impl MultiFrontendDaemon {
     /// Live daemon observations for this hermetic home.
     #[must_use]
     pub fn status(&self) -> omnifs_api::DaemonStatus {
-        let output = Command::new("curl")
-            .args(["-fsS", "--unix-socket"])
-            .arg(self.home.path().join("control.sock"))
-            .arg("http://localhost/v1/status")
-            .output()
-            .expect("query daemon status");
-        assert!(
-            output.status.success(),
-            "query daemon status: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        serde_json::from_slice(&output.stdout).expect("daemon status is JSON")
+        let reply = control_request(
+            &self.home.path().join("control.sock"),
+            ControlOperation::Status,
+        )
+        .expect("query daemon status");
+        match reply.outcome {
+            ControlOutcome::Status(status) => status,
+            other => panic!("unexpected status reply: {other:?}"),
+        }
     }
 
     /// The projected test-provider root under the frontend at `index`.
@@ -403,7 +406,7 @@ pub fn start_multi_frontend_daemon(kinds: &[&str]) -> Option<MultiFrontendDaemon
     };
 
     let deadline = Instant::now() + Duration::from_secs(30);
-    while !curl_socket_ok(&control_socket) {
+    while !control_socket_ready(&control_socket) {
         match daemon.try_wait() {
             Ok(Some(status)) => panic!("omnifs daemon exited with {status} before ready"),
             Ok(None) => {},
@@ -672,7 +675,7 @@ fn wire_frontend(
             Ok(Some(status)) => {
                 let _ = daemon.wait();
                 panic!(
-                    "daemon exited with {status} before /v1/ready on {}; \
+                    "daemon exited with {status} before Ready on {}; \
                      this is a startup regression, not a skip",
                     control_socket.display()
                 );
@@ -680,7 +683,7 @@ fn wire_frontend(
             Ok(None) => {},
             Err(error) => panic!("poll daemon child status: {error}"),
         }
-        if curl_socket_ok(&control_socket) {
+        if control_socket_ready(&control_socket) {
             break true;
         }
         if Instant::now() >= deadline {
@@ -692,7 +695,7 @@ fn wire_frontend(
         let _ = daemon.kill();
         let _ = daemon.wait();
         panic!(
-            "daemon never reported /v1/ready on {} after 30s; \
+            "daemon never reported Ready on {} after 30s; \
              the attach-listener ready path regressed. Check the daemon log.",
             control_socket.display()
         );
@@ -791,13 +794,40 @@ fn wire_frontend(
     }
 }
 
-fn curl_socket_ok(socket: &Path) -> bool {
-    Command::new("curl")
-        .args(["-fs", "-o", "/dev/null", "--unix-socket"])
-        .arg(socket)
-        .arg("http://localhost/v1/ready")
-        .status()
-        .is_ok_and(|status| status.success())
+pub fn control_request(socket: &Path, operation: ControlOperation) -> Option<ControlReply> {
+    let mut stream = UnixStream::connect(socket).ok()?;
+    stream.set_read_timeout(Some(Duration::from_secs(5))).ok()?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .ok()?;
+    let request = ControlRequest {
+        version: CONTROL_PROTOCOL_VERSION,
+        operation,
+    };
+    let mut line = serde_json::to_vec(&request).ok()?;
+    line.push(b'\n');
+    stream.write_all(&line).ok()?;
+    let mut reply = Vec::with_capacity(256);
+    loop {
+        let mut byte = [0_u8; 1];
+        let read = stream.read(&mut byte).ok()?;
+        if read == 0 || reply.len() >= CONTROL_MAX_LINE_BYTES {
+            return None;
+        }
+        reply.push(byte[0]);
+        if byte[0] == b'\n' {
+            return serde_json::from_slice(&reply).ok();
+        }
+    }
+}
+
+pub fn control_ready(socket: &Path) -> bool {
+    control_request(socket, ControlOperation::Ready)
+        .is_some_and(|reply| matches!(reply.outcome, ControlOutcome::Ready))
+}
+
+fn control_socket_ready(socket: &Path) -> bool {
+    control_ready(socket)
 }
 
 /// Bring up `omnifs daemon` with an explicit local frontend runner and only the
@@ -859,11 +889,11 @@ fn native_daemon(nfs_lock: Option<TcpListener>) -> Option<NativeDaemon> {
         match daemon.try_wait() {
             Ok(Some(status)) => {
                 if status.success() {
-                    eprintln!("skip: daemon exited cleanly before the control API was ready");
+                    eprintln!("skip: daemon exited cleanly before the control socket was ready");
                     return None;
                 }
                 panic!(
-                    "omnifs daemon exited with {status} before the control API became ready on \
+                    "omnifs daemon exited with {status} before the control socket became ready on \
                      {}; this is a CLI or startup error, not a skip.",
                     control_socket.display()
                 );
@@ -871,7 +901,7 @@ fn native_daemon(nfs_lock: Option<TcpListener>) -> Option<NativeDaemon> {
             Ok(None) => {},
             Err(error) => panic!("poll daemon child status: {error}"),
         }
-        if curl_socket_ok(&control_socket) {
+        if control_socket_ready(&control_socket) {
             break true;
         }
         if Instant::now() >= deadline {
@@ -883,7 +913,7 @@ fn native_daemon(nfs_lock: Option<TcpListener>) -> Option<NativeDaemon> {
         let _ = daemon.kill();
         let _ = daemon.wait();
         panic!(
-            "omnifs daemon control API never became ready on {} after 30s; \
+            "omnifs daemon control socket never became ready on {} after 30s; \
              the daemon is alive but not serving. Check the daemon log.",
             control_socket.display()
         );

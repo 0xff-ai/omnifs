@@ -15,8 +15,8 @@ Read this first when deciding which contract applies. Do not load every contract
 | Provider SDK, provider macros, objects, routes, WIT, metadata, provider config, endpoints | `20-provider-sdk.md` |
 | Projection tree, cache, attrs, listing, lookup, traversal, learned sizes, live growth | `30-projection-tree.md` |
 | FUSE, NFS, mount protocol behavior, frontend state, protocol replies | `40-frontends.md` |
-| CLI, daemon, REST API, runtime modes, workspace layout, mount delivery, dev home | `50-control-plane.md` |
-| CI, validation commands, provider artifacts, generated OpenAPI/schema, docs checks | `60-build-validation.md` |
+| CLI, daemon, typed local control protocol, runtime modes, workspace layout, mount delivery, dev home | `50-control-plane.md` |
+| CI, validation commands, provider artifacts, generated schema, docs checks | `60-build-validation.md` |
 
 Documentation types:
 

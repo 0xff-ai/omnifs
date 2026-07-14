@@ -41,8 +41,6 @@ struct VersionJson {
 #[derive(Serialize)]
 struct DaemonVersionJson {
     version: String,
-    api_major: u16,
-    api_minor: u16,
     pid: u32,
 }
 
@@ -55,12 +53,14 @@ struct ProvidersJson {
 impl VersionJson {
     async fn collect(workspace: &Workspace) -> Result<Self> {
         let inventory = Inventory::collect(workspace).await?;
-        let daemon = inventory.daemon.api().map(|api| DaemonVersionJson {
-            version: env!("CARGO_PKG_VERSION").to_owned(),
-            api_major: api.major,
-            api_minor: api.minor,
-            pid: inventory.daemon.pid().unwrap_or_default(),
-        });
+        let daemon = inventory
+            .daemon
+            .status
+            .as_ref()
+            .map(|status| DaemonVersionJson {
+                version: env!("CARGO_PKG_VERSION").to_owned(),
+                pid: status.pid,
+            });
         Ok(Self {
             cli: env!("CARGO_PKG_VERSION").to_string(),
             channel: BUILD_CHANNEL.word(),

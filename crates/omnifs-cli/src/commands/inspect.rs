@@ -49,7 +49,7 @@ impl InspectArgs {
             // Probe readiness before entering the TUI so a down daemon exits 3
             // (DaemonUnavailable) the same as the `--plain` path, instead of
             // opening an empty canvas and exiting 0.
-            workspace.daemon().require_compatible().await?;
+            workspace.daemon().require_status().await?;
             check_record_path(self.record.as_deref())?;
             let endpoint = workspace
                 .daemon()
@@ -76,7 +76,7 @@ impl InspectArgs {
             return run_plain(SourceKind::Replay(path), output);
         }
         let workspace = Workspace::resolve()?;
-        workspace.daemon().require_compatible().await?;
+        workspace.daemon().require_status().await?;
         check_record_path(self.record.as_deref())?;
         let endpoint = workspace
             .daemon()

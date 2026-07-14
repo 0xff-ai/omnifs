@@ -36,17 +36,11 @@ refresh:
     done
     just npm sync
     just schema
-    just openapi
 
 # Regenerate the provider JSON schema.
 [group('dev')]
 schema:
     cargo run -q -p omnifs-workspace --example write_provider > crates/omnifs-workspace/schema/omnifs.provider.schema.json
-
-# Regenerate the control API OpenAPI spec from the daemon implementation.
-[group('dev')]
-openapi:
-    cargo run -p omnifs-daemon --bin omnifsd-openapi --quiet > crates/omnifs-api/openapi/daemon.json
 
 # Build provider artifacts and launch the supported contributor runtime.
 [group('dev')]

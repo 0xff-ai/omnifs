@@ -94,15 +94,6 @@ fn detach_mount(mount_point: &Path) {
     }
 }
 
-fn curl_ready(socket: &Path) -> bool {
-    Command::new("curl")
-        .args(["-fs", "-o", "/dev/null", "--unix-socket"])
-        .arg(socket)
-        .arg("http://localhost/v1/ready")
-        .status()
-        .is_ok_and(|status| status.success())
-}
-
 /// Read `path` to EOF through the mount, but never block longer than `timeout`.
 /// A hard NFS mount blocks a read while the server is unreachable; running it on
 /// a helper thread bounds the wait so the test fails cleanly (and its teardown
@@ -216,7 +207,7 @@ fn wire_reattach_survives_frontend_and_daemon_restart() {
 
     // The daemon reports ready once its fixed local attach socket serves.
     let deadline = Instant::now() + Duration::from_secs(30);
-    while !curl_ready(&control_socket) {
+    while !live::control_ready(&control_socket) {
         if Instant::now() >= deadline {
             eprintln!("skip: daemon never became ready");
             return;
@@ -322,7 +313,7 @@ fn wire_reattach_survives_frontend_and_daemon_restart() {
     std::thread::sleep(Duration::from_secs(2));
     guard.daemon = Some(spawn_daemon());
     let deadline = Instant::now() + Duration::from_secs(30);
-    while !curl_ready(&control_socket) {
+    while !live::control_ready(&control_socket) {
         assert!(
             Instant::now() < deadline,
             "the relaunched daemon never became ready"

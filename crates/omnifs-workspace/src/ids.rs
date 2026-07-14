@@ -10,7 +10,6 @@ const KEY_PART_HINT: &str = "letters, digits, dashes, underscores, or dots; 1-12
 /// This is the human-facing provider name (e.g. `github`), the slug
 /// credentials are keyed by, distinct from the content [`ProviderId`] hash.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct ProviderName(String);
 
 impl ProviderName {
@@ -105,8 +104,6 @@ pub(crate) fn validate_account(value: &str) -> Result<(), IdError> {
 /// bytes the host holds. Mounts pin this so serving resolves by content, never
 /// by name. Distinct from the [`ProviderName`] slug.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "utoipa", schema(value_type = String, pattern = "^[0-9a-f]{64}$"))]
 pub struct ProviderId([u8; 32]);
 
 impl ProviderId {
@@ -179,7 +176,6 @@ impl<'de> Deserialize<'de> for ProviderId {
 /// Provider-stated version label, taken from the manifest `version` field.
 /// Informational catalog/UI context, never identity.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct ProviderVersion(String);
 
 impl ProviderVersion {
@@ -200,7 +196,6 @@ impl fmt::Display for ProviderVersion {
 
 /// Catalog/UI context carried alongside a pinned provider; never identity.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct ProviderMeta {
     pub name: ProviderName,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -211,7 +206,6 @@ pub struct ProviderMeta {
 /// [`ProviderMeta`] context resolved at pin time. This is what a mount spec
 /// stores and what the daemon resolves to serve.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct ProviderRef {
     pub id: ProviderId,
     pub meta: ProviderMeta,

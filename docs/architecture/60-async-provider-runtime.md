@@ -105,8 +105,9 @@ a second Inspector lifecycle.
 
 `InspectorLayer` is the sole producer of the existing Inspector record stream.
 It translates span open, record, event, and close callbacks into typed records,
-retains bounded history, and broadcasts live records to the control API. JSON
-serialization happens only at the file tee or `/v1/events` consumer boundary.
+retains bounded history, and broadcasts live records to the typed local control
+protocol. JSON serialization happens only at the file tee or Inspector
+subscription boundary.
 Dropping a future closes its span and produces one terminal internal outcome
 unless the operation recorded a more specific result first.
 

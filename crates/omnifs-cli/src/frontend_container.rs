@@ -2,7 +2,7 @@
 //! the container body it launches with.
 //!
 //! Kept apart from `runtime.rs` because the frontend container is a separate
-//! delivery mechanism: no home bind mount, no credentials, no control API
+//! delivery mechanism: no home bind mount, no credentials, no control socket
 //! exposure. It attaches to a host-native daemon's TCP namespace listener
 //! instead of running the daemon itself. See `docs/contracts/50-control-plane.md`.
 

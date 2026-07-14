@@ -365,41 +365,11 @@ fn cli_redesign_contract_old_commands_and_flags_are_usage_errors() {
 }
 
 #[test]
-fn cli_redesign_contract_api_8_json_and_openapi_remove_hot_mount_fields() {
+fn cli_redesign_contract_json_removes_retired_control_fields() {
     let fixture = Fixture::new();
     let output = fixture.run(&["status", "--output", "json"]);
     let status = stdout_json(&output);
-    assert!(
-        status["result"]["workspace"]["api"].is_null()
-            || status["result"]["workspace"]["api"] == "8.0",
-        "offline status may omit API; a live status must report API 8.0: {status}"
-    );
+    assert!(status["result"]["workspace"]["api"].is_null());
     assert!(status["result"].get("mount").is_none());
     assert!(status["result"].get("mount_point").is_none());
-
-    let openapi_path =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../omnifs-api/openapi/daemon.json");
-    let openapi: Value =
-        serde_json::from_slice(&std::fs::read(&openapi_path).expect("checked-in OpenAPI document"))
-            .expect("OpenAPI JSON");
-    assert_eq!(openapi["info"]["version"], "8.0");
-    let schemas = &openapi["components"]["schemas"];
-    for schema in ["DaemonStatus", "StopReport"] {
-        assert!(
-            schemas[schema]["properties"].get("mount_point").is_none(),
-            "{schema} still exposes mount_point"
-        );
-    }
-    assert!(
-        schemas["ProviderSummary"]["properties"]
-            .get("latest")
-            .is_none(),
-        "ProviderSummary still exposes latest"
-    );
-    assert!(
-        schemas["FrontendInfo"]["properties"]
-            .get("mount_point")
-            .is_some(),
-        "FrontendInfo must retain its per-frontend mount_point"
-    );
 }

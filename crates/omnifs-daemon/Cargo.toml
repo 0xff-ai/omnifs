@@ -9,10 +9,6 @@ description = "omnifs runtime daemon: provider registry and namespace server"
 categories = ["filesystem"]
 keywords = ["omnifs", "fuse", "filesystem", "wasm", "daemon"]
 
-[[bin]]
-name = "omnifsd-openapi"
-path = "src/bin/openapi.rs"
-
 [dependencies]
 omnifs-api = { workspace = true }
 omnifs-auth = { workspace = true }
@@ -20,15 +16,11 @@ omnifs-workspace = { workspace = true }
 omnifs-engine = { workspace = true, features = ["runtime"] }
 omnifs-vfs-wire = { workspace = true }
 anyhow = { workspace = true }
-axum = "0.8"
 clap = { workspace = true }
 getrandom = "0.3"
 hex = { workspace = true }
 tokio = { workspace = true }
-tokio-stream = { version = "0.1", features = ["sync"] }
 tracing = { workspace = true }
-utoipa = { workspace = true }
-utoipa-axum = { workspace = true }
 serde_json = { workspace = true }
 time = { workspace = true, features = ["formatting"] }
 

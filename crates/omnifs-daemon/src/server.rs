@@ -1,69 +1,24 @@
-//! Control API server:
-//! `/v1/{ready,status,providers,mounts,shutdown,events}`.
-//!
-//! Serves daemon runtime facts and shutdown, and the
-//! inspector event stream over HTTP on the local control socket. See
-//! `docs/contracts/50-control-plane.md`.
+//! Typed local control protocol server.
 
 use anyhow::Context as _;
-use axum::Router;
-use axum::body::Body;
-use axum::extract::{Path as UrlPath, State};
-use axum::http::{StatusCode, header};
-use axum::response::{IntoResponse, Json, Response};
+use omnifs_api::events::InspectorLine;
 use omnifs_api::{
-    ApiError, CredentialHealth, DaemonBackend, DaemonHealth, DaemonStatus, DaemonSubsystem,
-    ErrorCode, FrontendAttachTargetReport, FrontendAttachTargetRequest,
-    FrontendAttachTargetVsockReport, FrontendDelivery, FrontendInfo, FsType, HealthState,
-    MountInfo, ProviderArtifact, ProviderSummary, ReadyInfo, StopReport, SubsystemHealth,
+    CONTROL_MAX_LINE_BYTES, CONTROL_PROTOCOL_VERSION, ControlError, ControlErrorCode,
+    ControlOperation, ControlOutcome, ControlReply, ControlRequest, CredentialHealth, DaemonStatus,
+    MountInfo,
 };
 use omnifs_engine::{Inspector, MountRuntimes};
-use omnifs_workspace::provider::{Catalog, CatalogError, Provider};
 use omnifs_workspace::runtime_record::{AttachRecord, RuntimeRecord};
-use std::collections::{BTreeMap, BTreeSet};
-use std::convert::Infallible;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use tokio_stream::StreamExt as _;
-use tokio_stream::wrappers::BroadcastStream;
-use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+use tokio::net::UnixStream;
 use tracing::{info, warn};
-use utoipa::OpenApi;
-use utoipa_axum::router::OpenApiRouter;
-use utoipa_axum::routes;
 
 use crate::context::DaemonContext;
 use omnifs_vfs_wire::ListenerTarget;
-
-#[derive(OpenApi)]
-#[openapi(
-    info(title = "omnifs daemon control API", version = "8.0"),
-    components(schemas(
-        ReadyInfo,
-        ApiError,
-        ErrorCode,
-        DaemonStatus,
-        DaemonHealth,
-        SubsystemHealth,
-        DaemonSubsystem,
-        HealthState,
-        FrontendInfo,
-        FrontendDelivery,
-        FsType,
-        DaemonBackend,
-        MountInfo,
-        CredentialHealth,
-        ProviderArtifact,
-        ProviderSummary,
-        StopReport,
-        FrontendAttachTargetRequest,
-        FrontendAttachTargetReport,
-        FrontendAttachTargetVsockReport,
-    ))
-)]
-struct ApiDoc;
 
 /// A host address approved for the namespace attach listener. Loopback is
 /// always valid. On native Linux, the only additional authority is the IPv4
@@ -228,7 +183,7 @@ fn check_startup_events(
 ) -> anyhow::Result<()> {
     while let Ok(event) = events_rx.try_recv() {
         match event {
-            TaskEvent::Control => anyhow::bail!("control API listener exited before readiness"),
+            TaskEvent::Control => anyhow::bail!("control listener exited before readiness"),
         }
     }
     Ok(())
@@ -515,7 +470,7 @@ impl Daemon {
                     }
                 }
                 event = events_rx.recv() => match event {
-                    Some(TaskEvent::Control) => anyhow::bail!("control API listener exited"),
+                    Some(TaskEvent::Control) => anyhow::bail!("control listener exited"),
                     None => anyhow::bail!("daemon task supervision channel closed"),
                 },
                 event = listener_events.recv() => match event {
@@ -567,8 +522,7 @@ impl Daemon {
         self.track_task(task);
     }
 
-    /// Serve the control API over the Unix socket, where auth is filesystem
-    /// permissions on the workspace-owned socket.
+    /// Serve the typed control protocol over the workspace-owned Unix socket.
     pub fn spawn_control_unix(
         self: &Arc<Self>,
         listener: std::os::unix::net::UnixListener,
@@ -577,8 +531,7 @@ impl Daemon {
     ) -> std::io::Result<()> {
         listener.set_nonblocking(true)?;
         let listener = tokio::net::UnixListener::from_std(listener)?;
-        info!("control API listening (unix socket, filesystem-permission auth)");
-        let app = Self::router(Arc::clone(self));
+        info!("control socket listening (filesystem-permission auth)");
         let daemon = Arc::clone(self);
         let task = rt.spawn(async move {
             let cancelled = if *startup_gate.borrow() {
@@ -590,10 +543,31 @@ impl Daemon {
                 daemon.send_event(TaskEvent::Control);
                 return;
             }
-            if let Err(error) = axum::serve(listener, app).await {
-                warn!(%error, "control API server exited");
+            let mut shutdown = daemon.shutdown_tx.subscribe();
+            loop {
+                tokio::select! {
+                    changed = shutdown.changed() => {
+                        if changed.is_ok() && *shutdown.borrow() {
+                            return;
+                        }
+                    }
+                    accepted = listener.accept() => match accepted {
+                        Ok((stream, _)) => {
+                            let connection_daemon = Arc::clone(&daemon);
+                            daemon.track_task(tokio::spawn(async move {
+                                if let Err(error) = handle_control_connection(connection_daemon, stream).await {
+                                    warn!(%error, "control connection closed");
+                                }
+                            }));
+                        }
+                        Err(error) => {
+                            warn!(%error, "control listener exited");
+                            daemon.send_event(TaskEvent::Control);
+                            return;
+                        }
+                    }
+                }
             }
-            daemon.send_event(TaskEvent::Control);
         });
         self.track_task(task);
         Ok(())
@@ -622,342 +596,262 @@ impl Daemon {
     pub fn trigger_shutdown(self: &Arc<Self>) {
         let _ = self.shutdown_tx.send(true);
     }
-
-    fn event_stream(&self) -> Response {
-        let Some(inspector) = self.inspector.clone() else {
-            return error_response(
-                StatusCode::NOT_FOUND,
-                ErrorCode::Internal,
-                "inspector stream disabled (OMNIFS_INSPECTOR=0)",
-            );
-        };
-
-        let subscription = inspector.subscribe();
-        let stream = tokio_stream::iter(subscription.history)
-            .map(Ok)
-            .chain(BroadcastStream::new(subscription.live))
-            .filter_map(|item| match item {
-                Ok(record) => match record.to_json_line() {
-                    Ok(line) => Some(line),
-                    Err(error) => {
-                        warn!(%error, "failed to serialize inspector record");
-                        None
-                    },
-                },
-                Err(BroadcastStreamRecvError::Lagged(n)) => Some(format!("# dropped {n} events\n")),
-            });
-        let body = Body::from_stream(stream.map(Ok::<_, Infallible>));
-
-        Response::builder()
-            .header(header::CONTENT_TYPE, "application/x-ndjson")
-            .body(body)
-            .expect("static response parts are valid")
-    }
-
-    fn api_router() -> OpenApiRouter<Arc<Self>> {
-        OpenApiRouter::new()
-            .routes(routes!(ready))
-            .routes(routes!(status))
-            .routes(routes!(providers_list))
-            .routes(routes!(mounts_list))
-            .routes(routes!(mount_inspect))
-            .routes(routes!(shutdown))
-            .routes(routes!(events))
-            .routes(routes!(frontend_attach_target))
-            .routes(routes!(frontend_attach_target_vsock))
-    }
-
-    fn router(state: Arc<Self>) -> Router {
-        let (router, _) = Self::api_router().with_state(state).split_for_parts();
-        router
-            .fallback(route_not_found)
-            .method_not_allowed_fallback(method_not_allowed)
-    }
 }
 
-pub fn openapi() -> utoipa::openapi::OpenApi {
-    let mut openapi = ApiDoc::openapi();
-    let (_, paths) = Daemon::api_router().split_for_parts();
-    openapi.merge(paths);
-    openapi
-}
-
-pub fn openapi_json() -> String {
-    openapi()
-        .to_pretty_json()
-        .expect("OpenAPI document serializes")
-}
-
-#[utoipa::path(
-    get,
-    path = "/v1/ready",
-    operation_id = "ready",
-    responses(
-        (status = 200, description = "namespace listeners are serving", body = ReadyInfo),
-        (status = 503, description = "namespace listeners are not serving yet", body = ApiError),
-    ),
-)]
-async fn ready(State(daemon): State<Arc<Daemon>>) -> Response {
-    let ready = daemon.control_status().ready();
-    if ready {
-        Json(ReadyInfo { ready }).into_response()
-    } else {
-        error_response(
-            StatusCode::SERVICE_UNAVAILABLE,
-            ErrorCode::Internal,
-            "namespace listeners are not serving yet",
-        )
-    }
-}
-
-#[utoipa::path(
-    get,
-    path = "/v1/status",
-    operation_id = "status",
-    responses((status = 200, description = "daemon runtime facts", body = DaemonStatus)),
-)]
-async fn status(State(daemon): State<Arc<Daemon>>) -> Json<DaemonStatus> {
-    Json(daemon.control_status())
-}
-
-#[utoipa::path(
-    get,
-    path = "/v1/providers",
-    operation_id = "providers_list",
-    responses(
-        (status = 200, description = "installed provider catalog", body = [ProviderSummary]),
-        (status = 500, description = "provider catalog unavailable", body = ApiError),
-    ),
-)]
-async fn providers_list(State(daemon): State<Arc<Daemon>>) -> Response {
-    let catalog = Catalog::open(daemon.context.providers_dir());
-    match provider_summaries(&catalog) {
-        Ok(providers) => Json(providers).into_response(),
-        Err(error) => error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            ErrorCode::Internal,
-            format!("provider catalog unavailable: {error}"),
-        ),
-    }
-}
-
-#[utoipa::path(
-    get,
-    path = "/v1/mounts",
-    operation_id = "mounts_list",
-    responses((status = 200, description = "loaded provider mounts", body = [MountInfo])),
-)]
-async fn mounts_list(State(daemon): State<Arc<Daemon>>) -> Json<Vec<MountInfo>> {
-    Json(daemon.control_status().mounts)
-}
-
-#[utoipa::path(
-    get,
-    path = "/v1/mounts/{name}",
-    operation_id = "mount_inspect",
-    params(("name" = String, Path, description = "mount name")),
-    responses(
-        (status = 200, description = "the mount", body = MountInfo),
-        (status = 404, description = "mount not found", body = ApiError),
-    ),
-)]
-async fn mount_inspect(
-    State(daemon): State<Arc<Daemon>>,
-    UrlPath(name): UrlPath<String>,
-) -> Response {
-    match daemon
-        .control_status()
-        .mounts
-        .into_iter()
-        .find(|mount| mount.mount == name)
-    {
-        Some(info) => Json(info).into_response(),
-        None => error_response(
-            StatusCode::NOT_FOUND,
-            ErrorCode::MountNotFound,
-            format!("mount `{name}` not found"),
-        ),
-    }
-}
-
-/// `POST /v1/shutdown`: release the daemon's serving latch and exit. Frontend
-/// processes have independent lifetimes and are torn down by the CLI.
-#[utoipa::path(
-    post,
-    path = "/v1/shutdown",
-    operation_id = "shutdown",
-    responses((status = 200, description = "daemon state at shutdown", body = StopReport)),
-)]
-async fn shutdown(State(daemon): State<Arc<Daemon>>) -> Json<StopReport> {
-    let status = daemon.control_status();
-    let report = StopReport {
-        frontends: status.frontends,
-        providers_dropped: status.mounts.len(),
+async fn handle_control_connection(
+    daemon: Arc<Daemon>,
+    mut stream: UnixStream,
+) -> anyhow::Result<()> {
+    let line = match read_control_line(&mut stream).await {
+        Ok(line) => line,
+        Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
+            let code = if error.to_string().contains("maximum size") {
+                ControlErrorCode::LineTooLarge
+            } else {
+                ControlErrorCode::MalformedJson
+            };
+            write_control_reply(
+                &mut stream,
+                ControlReply::error(ControlError::new(code, error.to_string())),
+            )
+            .await?;
+            return Ok(());
+        },
+        Err(error) => return Err(error.into()),
     };
-    daemon.trigger_shutdown();
-    Json(report)
-}
 
-/// `POST /v1/frontend/attach-target`: bind the TCP namespace attach listener on a
-/// running daemon, so a containerized frontend (the Docker Desktop path, which
-/// cannot share a host Unix socket into its Linux VM) can be started later
-/// without restarting the daemon. Docker Desktop uses loopback; native Linux
-/// asks for the Docker bridge gateway so the container can cross network
-/// namespaces without exposing the listener on every host interface.
-/// Idempotent: a repeat call returns the already-bound address and token
-/// unchanged, since a listener cannot be re-pointed once serving.
-#[utoipa::path(
-    post,
-    path = "/v1/frontend/attach-target",
-    operation_id = "frontend_attach_target",
-    request_body = Option<FrontendAttachTargetRequest>,
-    responses(
-        (status = 200, description = "the TCP attach listener's address and per-instance token", body = FrontendAttachTargetReport),
-        (status = 400, description = "the requested address is not an approved attach boundary", body = ApiError),
-        (status = 503, description = "the namespace is not ready yet", body = ApiError),
-        (status = 500, description = "failed to bind the attach listener", body = ApiError),
-    ),
-)]
-async fn frontend_attach_target(
-    State(daemon): State<Arc<Daemon>>,
-    request: Option<Json<FrontendAttachTargetRequest>>,
-) -> Response {
-    let request = request.map(|Json(request)| request).unwrap_or_default();
-    if request.driver != FrontendDelivery::Docker {
-        return error_response(
-            StatusCode::BAD_REQUEST,
-            ErrorCode::SpecInvalid,
-            format!(
-                "unsupported attach driver `{}`; only `docker` is accepted on this route \
-                 (krunkit attaches over vsock instead, via /v1/frontend/attach-target/vsock)",
-                request.driver
-            ),
-        );
-    }
-    let bind_addr = match AttachBindAddr::requested(request.bind_ip) {
-        Ok(bind_addr) => bind_addr,
+    let value: serde_json::Value = match serde_json::from_slice(&line) {
+        Ok(value) => value,
         Err(error) => {
-            return error_response(
-                StatusCode::BAD_REQUEST,
-                ErrorCode::SpecInvalid,
-                error.to_string(),
-            );
+            write_control_reply(
+                &mut stream,
+                ControlReply::error(ControlError::new(
+                    ControlErrorCode::MalformedJson,
+                    format!("malformed control request: {error}"),
+                )),
+            )
+            .await?;
+            return Ok(());
         },
     };
-    match daemon.ensure_attach_tcp(bind_addr, 0) {
-        Ok(AttachOutcome::Bound(omnifs_vfs_wire::ListenerTarget::Tcp { addr, token })) => {
-            Json(FrontendAttachTargetReport {
-                addr: addr.to_string(),
-                token,
-            })
-            .into_response()
-        },
-        Ok(AttachOutcome::Bound(_)) => error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            ErrorCode::Internal,
-            "unexpected listener target",
-        ),
-        Ok(AttachOutcome::NamespaceNotReady) => error_response(
-            StatusCode::SERVICE_UNAVAILABLE,
-            ErrorCode::Internal,
-            "the namespace is not ready yet",
-        ),
-        Err(error) => error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            ErrorCode::Internal,
-            error.to_string(),
-        ),
+    let operation_name = value.get("operation").and_then(serde_json::Value::as_str);
+    let known_operation = matches!(
+        operation_name,
+        Some(
+            "ready" | "status" | "shutdown" | "attach_tcp" | "attach_vsock" | "subscribe_inspector"
+        )
+    );
+    if !known_operation {
+        write_control_reply(
+            &mut stream,
+            ControlReply::error(ControlError::new(
+                ControlErrorCode::UnknownOperation,
+                "unknown control operation",
+            )),
+        )
+        .await?;
+        return Ok(());
     }
-}
 
-/// `POST /v1/frontend/attach-target/vsock`: bind the token-checking UDS namespace
-/// attach listener on a running daemon, for the krunkit vsock-proxy path (a
-/// macOS guest VM with no shared host Unix socket and no Docker-style loopback
-/// either; it dials host vsock instead, and krunkit proxies every connection
-/// onto this socket). Takes no request body: unlike the TCP listener there is
-/// no bind address to choose, only the daemon-picked path under the
-/// workspace. Idempotent: a repeat call returns the already-bound path and
-/// token unchanged, since a listener cannot be re-pointed once serving.
-#[utoipa::path(
-    post,
-    path = "/v1/frontend/attach-target/vsock",
-    operation_id = "frontend_attach_target_vsock",
-    responses(
-        (status = 200, description = "the UDS attach listener's socket path and per-instance token", body = FrontendAttachTargetVsockReport),
-        (status = 503, description = "the namespace is not ready yet", body = ApiError),
-        (status = 500, description = "failed to bind the attach listener", body = ApiError),
-    ),
-)]
-async fn frontend_attach_target_vsock(State(daemon): State<Arc<Daemon>>) -> Response {
-    match daemon.ensure_attach_uds() {
-        Ok(AttachOutcome::Bound(omnifs_vfs_wire::ListenerTarget::Vsock { socket_path, token })) => {
-            Json(FrontendAttachTargetVsockReport {
-                socket_path: socket_path.display().to_string(),
-                token,
-            })
-            .into_response()
+    let request: ControlRequest = match serde_json::from_value(value) {
+        Ok(request) => request,
+        Err(error) => {
+            write_control_reply(
+                &mut stream,
+                ControlReply::error(ControlError::new(
+                    ControlErrorCode::InvalidRequest,
+                    format!("invalid control request: {error}"),
+                )),
+            )
+            .await?;
+            return Ok(());
         },
-        Ok(AttachOutcome::Bound(_)) => error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            ErrorCode::Internal,
-            "unexpected listener target",
-        ),
-        Ok(AttachOutcome::NamespaceNotReady) => error_response(
-            StatusCode::SERVICE_UNAVAILABLE,
-            ErrorCode::Internal,
-            "the namespace is not ready yet",
-        ),
-        Err(error) => error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            ErrorCode::Internal,
-            error.to_string(),
-        ),
+    };
+    if request.version != CONTROL_PROTOCOL_VERSION {
+        write_control_reply(
+            &mut stream,
+            ControlReply::error(ControlError::new(
+                ControlErrorCode::UnsupportedVersion,
+                format!("unsupported control protocol version {}", request.version),
+            )),
+        )
+        .await?;
+        return Ok(());
     }
+
+    match request.operation {
+        ControlOperation::Ready => {
+            let reply = if daemon.vfs.get().is_some_and(|vfs| vfs.ready()) {
+                ControlReply::ready()
+            } else {
+                ControlReply::error(ControlError::new(
+                    ControlErrorCode::NotReady,
+                    "namespace listeners are not serving yet",
+                ))
+            };
+            write_control_reply(&mut stream, reply).await?;
+        },
+        ControlOperation::Status => {
+            write_control_reply(
+                &mut stream,
+                ControlReply {
+                    version: CONTROL_PROTOCOL_VERSION,
+                    outcome: ControlOutcome::Status(daemon.control_status()),
+                },
+            )
+            .await?;
+        },
+        ControlOperation::Shutdown => {
+            daemon.trigger_shutdown();
+            write_control_reply(
+                &mut stream,
+                ControlReply {
+                    version: CONTROL_PROTOCOL_VERSION,
+                    outcome: ControlOutcome::Shutdown,
+                },
+            )
+            .await?;
+        },
+        ControlOperation::AttachTcp { bind_ip } => {
+            let reply = match AttachBindAddr::requested(bind_ip)
+                .and_then(|bind_addr| daemon.ensure_attach_tcp(bind_addr, 0))
+            {
+                Ok(AttachOutcome::Bound(ListenerTarget::Tcp { addr, token })) => ControlReply {
+                    version: CONTROL_PROTOCOL_VERSION,
+                    outcome: ControlOutcome::AttachTcp(omnifs_api::TcpAttachTarget {
+                        addr: addr.to_string(),
+                        token,
+                    }),
+                },
+                Ok(AttachOutcome::Bound(_)) => ControlReply::error(ControlError::new(
+                    ControlErrorCode::Internal,
+                    "unexpected TCP attach target",
+                )),
+                Ok(AttachOutcome::NamespaceNotReady) => ControlReply::error(ControlError::new(
+                    ControlErrorCode::NotReady,
+                    "namespace listeners are not serving yet",
+                )),
+                Err(error) => ControlReply::error(ControlError::new(
+                    ControlErrorCode::InvalidRequest,
+                    error.to_string(),
+                )),
+            };
+            write_control_reply(&mut stream, reply).await?;
+        },
+        ControlOperation::AttachVsock => {
+            let reply = match daemon.ensure_attach_uds() {
+                Ok(AttachOutcome::Bound(ListenerTarget::Vsock { socket_path, token })) => {
+                    ControlReply {
+                        version: CONTROL_PROTOCOL_VERSION,
+                        outcome: ControlOutcome::AttachVsock(omnifs_api::VsockAttachTarget {
+                            socket_path,
+                            token,
+                        }),
+                    }
+                },
+                Ok(AttachOutcome::Bound(_)) => ControlReply::error(ControlError::new(
+                    ControlErrorCode::Internal,
+                    "unexpected vsock attach target",
+                )),
+                Ok(AttachOutcome::NamespaceNotReady) => ControlReply::error(ControlError::new(
+                    ControlErrorCode::NotReady,
+                    "namespace listeners are not serving yet",
+                )),
+                Err(error) => ControlReply::error(ControlError::new(
+                    ControlErrorCode::Internal,
+                    error.to_string(),
+                )),
+            };
+            write_control_reply(&mut stream, reply).await?;
+        },
+        ControlOperation::SubscribeInspector => {
+            let Some(inspector) = daemon.inspector.clone() else {
+                write_control_reply(
+                    &mut stream,
+                    ControlReply::error(ControlError::new(
+                        ControlErrorCode::Internal,
+                        "inspector stream disabled",
+                    )),
+                )
+                .await?;
+                return Ok(());
+            };
+            write_control_reply(&mut stream, ControlReply::inspector_ready()).await?;
+            let subscription = inspector.subscribe();
+            for record in subscription.history {
+                write_inspector_line(&mut stream, InspectorLine::Record((*record).clone())).await?;
+            }
+            let mut live = subscription.live;
+            loop {
+                match live.recv().await {
+                    Ok(record) => {
+                        write_inspector_line(&mut stream, InspectorLine::Record((*record).clone()))
+                            .await?;
+                    },
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
+                        write_inspector_line(&mut stream, InspectorLine::Dropped { count }).await?;
+                    },
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return Ok(()),
+                }
+            }
+        },
+    }
+    Ok(())
 }
 
-/// Stream the inspector history snapshot followed by live records as
-/// newline-framed JSON using the same wire format the raw TCP listener used to
-/// speak, now chunk-encoded by HTTP. A lagged subscriber gets a
-/// `# dropped N events` comment line and resumes from the newest record.
-#[utoipa::path(
-    get,
-    path = "/v1/events",
-    operation_id = "events",
-    responses(
-        (status = 200, description = "newline-framed inspector event stream", content_type = "application/x-ndjson", body = String),
-        (status = 404, description = "inspector stream disabled", body = ApiError),
-    ),
-)]
-async fn events(State(daemon): State<Arc<Daemon>>) -> Response {
-    daemon.event_stream()
+async fn write_inspector_line(stream: &mut UnixStream, line: InspectorLine) -> anyhow::Result<()> {
+    let line = serde_json::to_vec(&line).context("serialize inspector line")?;
+    write_json_line(stream, line).await
 }
 
-async fn route_not_found() -> Response {
-    error_response(
-        StatusCode::NOT_FOUND,
-        ErrorCode::Internal,
-        "control route not found",
-    )
+async fn write_control_reply(stream: &mut UnixStream, reply: ControlReply) -> anyhow::Result<()> {
+    let line = serde_json::to_vec(&reply).context("serialize control reply")?;
+    write_json_line(stream, line).await
 }
 
-async fn method_not_allowed() -> Response {
-    error_response(
-        StatusCode::METHOD_NOT_ALLOWED,
-        ErrorCode::Internal,
-        "method not allowed",
-    )
+async fn write_json_line(stream: &mut UnixStream, mut line: Vec<u8>) -> anyhow::Result<()> {
+    line.push(b'\n');
+    anyhow::ensure!(
+        line.len() <= CONTROL_MAX_LINE_BYTES,
+        "control line exceeds the maximum size"
+    );
+    stream
+        .write_all(&line)
+        .await
+        .context("write control line")?;
+    stream.flush().await.context("flush control line")?;
+    Ok(())
 }
 
-fn error_response(status: StatusCode, code: ErrorCode, message: impl Into<String>) -> Response {
-    (
-        status,
-        Json(ApiError {
-            code,
-            message: message.into(),
-            detail: None,
-        }),
-    )
-        .into_response()
+async fn read_control_line<R: AsyncRead + Unpin>(reader: &mut R) -> std::io::Result<Vec<u8>> {
+    let mut line = Vec::with_capacity(256);
+    let mut chunk = [0_u8; 8192];
+    loop {
+        let read = reader.read(&mut chunk).await?;
+        if read == 0 {
+            if line.is_empty() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "control connection closed before a line was received",
+                ));
+            }
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "control line is missing its newline terminator",
+            ));
+        }
+        line.extend_from_slice(&chunk[..read]);
+        if line.len() > CONTROL_MAX_LINE_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "control line exceeds the maximum size",
+            ));
+        }
+        if let Some(end) = line.iter().position(|byte| *byte == b'\n') {
+            line.truncate(end + 1);
+            return Ok(line);
+        }
+    }
 }
 
 fn api_credential_health_kind(health: &omnifs_auth::CredentialHealth) -> CredentialHealth {
@@ -972,66 +866,62 @@ fn api_credential_health_kind(health: &omnifs_auth::CredentialHealth) -> Credent
     }
 }
 
-fn provider_summaries(catalog: &Catalog) -> Result<Vec<ProviderSummary>, CatalogError> {
-    let mut by_name = BTreeMap::new();
-    for provider in catalog.installed()? {
-        by_name
-            .entry(provider.meta.name.clone())
-            .or_insert_with(Vec::new)
-            .push(api_provider_artifact(&provider));
-    }
-    for artifacts in by_name.values_mut() {
-        artifacts.sort_by(|a, b| {
-            a.version
-                .cmp(&b.version)
-                .then_with(|| a.id_hash.cmp(&b.id_hash))
-        });
-    }
-
-    let mut names = catalog
-        .installable()?
-        .into_iter()
-        .map(|provider| provider.meta.name)
-        .collect::<BTreeSet<_>>();
-    names.extend(by_name.keys().cloned());
-
-    names
-        .into_iter()
-        .map(|name| {
-            Ok(ProviderSummary {
-                installed: by_name.remove(&name).unwrap_or_default(),
-                name: name.to_string(),
-            })
-        })
-        .collect()
-}
-
-fn api_provider_artifact(provider: &Provider) -> ProviderArtifact {
-    ProviderArtifact {
-        version: provider.meta.version.as_ref().map(ToString::to_string),
-        id_hash: provider.id.to_string(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
-    use axum::Router;
-    use axum::body::{Body, to_bytes};
-    use axum::http::{StatusCode, header};
-    use tower::ServiceExt as _;
+    use omnifs_api::{
+        CONTROL_MAX_LINE_BYTES, CONTROL_PROTOCOL_VERSION, ControlErrorCode, ControlOperation,
+        ControlOutcome, ControlReply, ControlRequest,
+    };
+    use tokio::io::AsyncWriteExt as _;
 
-    #[test]
-    fn checked_in_openapi_matches_implementation() {
-        let checked_in: serde_json::Value =
-            serde_json::from_str(include_str!("../../omnifs-api/openapi/daemon.json"))
-                .expect("checked-in OpenAPI spec parses");
-        let generated: serde_json::Value =
-            serde_json::from_str(&super::openapi_json()).expect("generated OpenAPI spec parses");
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-        assert_eq!(checked_in, generated);
+    async fn request(path: &std::path::Path, operation: ControlOperation) -> ControlReply {
+        let mut stream = tokio::net::UnixStream::connect(path).await.unwrap();
+        let request = ControlRequest {
+            version: CONTROL_PROTOCOL_VERSION,
+            operation,
+        };
+        let mut line = serde_json::to_vec(&request).unwrap();
+        line.push(b'\n');
+        stream.write_all(&line).await.unwrap();
+        let line = super::read_control_line(&mut stream).await.unwrap();
+        serde_json::from_slice(&line).unwrap()
+    }
+
+    async fn raw_request(path: &std::path::Path, line: Vec<u8>) -> ControlReply {
+        let mut stream = tokio::net::UnixStream::connect(path).await.unwrap();
+        stream.write_all(&line).await.unwrap();
+        let line = super::read_control_line(&mut stream).await.unwrap();
+        serde_json::from_slice(&line).unwrap()
+    }
+
+    fn test_daemon(dir: &tempfile::TempDir) -> Arc<super::Daemon> {
+        let args = crate::app::DaemonArgs {
+            mount_revision: omnifs_workspace::mounts::Revision::new("a".repeat(40)).unwrap(),
+            mount_snapshot: dir.path().join("mounts"),
+            attach_tcp: None,
+        };
+        std::fs::create_dir_all(&args.mount_snapshot).unwrap();
+        let context = crate::context::DaemonContext::resolve(&args).unwrap();
+        context.prepare_startup_dirs().unwrap();
+        let cloner =
+            Arc::new(omnifs_engine::GitCloner::new(context.cache_dir().join("clones")).unwrap());
+        let desired = omnifs_workspace::mounts::Registry::load(&args.mount_snapshot).unwrap();
+        let registry = Arc::new(
+            omnifs_engine::MountRuntimes::load(
+                context.host_context(),
+                cloner,
+                &desired,
+                &tokio::runtime::Handle::current(),
+            )
+            .unwrap(),
+        );
+        let runtime_record =
+            super::RuntimeRecordStore::new(context.runtime_record_file(), context.runtime_record());
+        Arc::new(super::Daemon::new(context, registry, None, runtime_record))
     }
 
     #[test]
@@ -1119,7 +1009,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("control API listener exited before readiness")
+                .contains("control listener exited before readiness")
         );
     }
 
@@ -1135,229 +1025,63 @@ mod tests {
         );
     }
 
-    /// Fetch and decode `/v1/status` from `router`.
-    async fn fetch_status(router: &Router) -> omnifs_api::DaemonStatus {
-        let response = router
-            .clone()
-            .oneshot(
-                axum::http::Request::builder()
-                    .uri("/v1/status")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = to_bytes(response.into_body(), 4 * 1024 * 1024)
-            .await
-            .unwrap();
-        serde_json::from_slice(&body).unwrap()
-    }
-
-    /// Poll `/v1/status` until `predicate` holds or the deadline passes. The
-    /// registry update is asynchronous (the observer callback runs on the
-    /// connection's own task), so a status assertion right after
-    /// connect/disconnect needs to tolerate a short delay rather than racing
-    /// it.
-    async fn wait_for_status(
-        router: &Router,
-        mut predicate: impl FnMut(&omnifs_api::DaemonStatus) -> bool,
-    ) -> omnifs_api::DaemonStatus {
-        for _ in 0..200 {
-            let status = fetch_status(router).await;
-            if predicate(&status) {
-                return status;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        panic!("status did not converge to the expected shape within the deadline");
-    }
-
-    async fn assert_non_docker_attach_is_rejected(router: &Router) {
-        let response = router
-            .clone()
-            .oneshot(
-                axum::http::Request::builder()
-                    .method("POST")
-                    .uri("/v1/frontend/attach-target")
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(r#"{"driver":"local"}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    }
-
-    async fn shutdown_report(router: &Router) -> omnifs_api::StopReport {
-        let response = router
-            .clone()
-            .oneshot(
-                axum::http::Request::builder()
-                    .method("POST")
-                    .uri("/v1/shutdown")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        serde_json::from_slice(
-            &to_bytes(response.into_body(), 4 * 1024 * 1024)
-                .await
-                .unwrap(),
-        )
-        .unwrap()
-    }
-
-    fn assert_attached_frontend(status: &omnifs_api::DaemonStatus) {
-        let attached = status
-            .frontends
-            .iter()
-            .find(|frontend| frontend.delivery == omnifs_api::FrontendDelivery::Docker)
-            .unwrap();
-        assert_eq!(attached.fs_type, omnifs_api::FsType::Fuse);
-        assert_eq!(attached.source, "wire");
-        assert_eq!(attached.mount_point, PathBuf::from("/guest/omnifs"));
-        assert!(
-            status
-                .health
-                .subsystem(omnifs_api::DaemonSubsystem::Frontend)
-                .unwrap()
-                .message
-                .contains("attached fuse at /guest/omnifs via docker")
-        );
-    }
-
-    /// A frontend attached through the TCP namespace listener appears in
-    /// `/v1/status` with the listener-owned `docker` delivery label, then
-    /// disappears when its connection closes.
     #[tokio::test]
-    #[allow(unsafe_code)] // env::set_var requires unsafe; see SAFETY below.
-    async fn attached_frontend_appears_and_disappears_in_status() {
+    #[allow(unsafe_code)]
+    async fn control_socket_dispatches_ready_status_attach_and_shutdown() {
         let dir = tempfile::tempdir().unwrap();
-        // SAFETY: cargo-nextest isolates each test into its own process (the
-        // same pattern the omnifs-vfs-wire trace-propagation test documents
-        // for OMNIFS_INSPECTOR), so mutating OMNIFS_HOME here cannot race a
-        // parallel test.
+        let _env_guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = std::fs::canonicalize(dir.path()).unwrap();
         unsafe {
-            std::env::set_var("OMNIFS_HOME", dir.path());
+            std::env::set_var("OMNIFS_HOME", &home);
         }
 
-        let args = crate::app::DaemonArgs {
-            mount_revision: omnifs_workspace::mounts::Revision::new("a".repeat(40)).unwrap(),
-            mount_snapshot: dir.path().join("mounts"),
-            attach_tcp: None,
-        };
-        std::fs::create_dir_all(&args.mount_snapshot).unwrap();
-        let context = crate::context::DaemonContext::resolve(&args).unwrap();
-        context.prepare_startup_dirs().unwrap();
-
-        let cloner =
-            Arc::new(omnifs_engine::GitCloner::new(context.cache_dir().join("clones")).unwrap());
-        let desired = omnifs_workspace::mounts::Registry::load(&args.mount_snapshot).unwrap();
-        let registry = Arc::new(
-            omnifs_engine::MountRuntimes::load(
-                context.host_context(),
-                cloner,
-                &desired,
-                &tokio::runtime::Handle::current(),
-            )
-            .unwrap(),
-        );
-        let runtime_record =
-            super::RuntimeRecordStore::new(context.runtime_record_file(), context.runtime_record());
-        let daemon = Arc::new(super::Daemon::new(
-            context,
-            Arc::clone(&registry),
-            None,
-            Arc::clone(&runtime_record),
-        ));
-
+        let daemon = test_daemon(&dir);
         let rt = tokio::runtime::Handle::current();
-        let namespace = omnifs_engine::TreeNamespace::new(Arc::clone(&registry), rt.clone());
-        daemon.set_namespace(Arc::clone(&namespace));
-
-        let router = super::Daemon::router(Arc::clone(&daemon));
-        let response = router
-            .clone()
-            .oneshot(
-                axum::http::Request::builder()
-                    .method("POST")
-                    .uri("/v1/frontend/attach-target")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let namespace = omnifs_engine::TreeNamespace::new(Arc::clone(&daemon.registry), rt.clone());
+        daemon.set_namespace(namespace);
 
         let vfs = daemon.vfs.get().unwrap();
-        vfs.serve_local(dir.path().join("local.sock")).unwrap();
+        let local_socket = dir.path().join("local.sock");
+        vfs.serve_local(local_socket).unwrap();
         vfs.mark_ready();
 
-        runtime_record.publish().unwrap();
-        std::fs::remove_file(&runtime_record.path).unwrap();
-        std::fs::create_dir(&runtime_record.path).unwrap();
-        let response = router
-            .clone()
-            .oneshot(
-                axum::http::Request::builder()
-                    .method("POST")
-                    .uri("/v1/frontend/attach-target")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-        assert!(
-            vfs.ready(),
-            "rolling back a newly bound listener must preserve readiness"
-        );
-        std::fs::remove_dir(&runtime_record.path).unwrap();
-        runtime_record.publish().unwrap();
-        assert!(
-            omnifs_workspace::runtime_record::RuntimeRecord::read(&runtime_record.path)
-                .unwrap()
-                .unwrap()
-                .attach
-                .is_empty(),
-            "failed persistence must not retain the rolled-back listener"
-        );
+        let control_socket = dir.path().join("control.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&control_socket).unwrap();
+        let (_gate_tx, gate_rx) = tokio::sync::watch::channel(true);
+        daemon.spawn_control_unix(listener, &rt, gate_rx).unwrap();
 
-        let target = match daemon
-            .ensure_attach_tcp(super::AttachBindAddr::loopback(), 0)
-            .unwrap()
+        assert!(matches!(
+            request(&control_socket, ControlOperation::Ready)
+                .await
+                .outcome,
+            ControlOutcome::Ready
+        ));
+        assert!(matches!(
+            request(&control_socket, ControlOperation::Status)
+                .await
+                .outcome,
+            ControlOutcome::Status(_)
+        ));
+
+        let target = match request(
+            &control_socket,
+            ControlOperation::AttachTcp { bind_ip: None },
+        )
+        .await
+        .outcome
         {
-            super::AttachOutcome::Bound(target) => target,
-            super::AttachOutcome::NamespaceNotReady => {
-                panic!("the namespace was set before binding the attach listener")
-            },
+            ControlOutcome::AttachTcp(target) => target,
+            outcome => panic!("unexpected attach reply: {outcome:?}"),
         };
-
-        assert_non_docker_attach_is_rejected(&router).await;
-
-        let baseline = fetch_status(&router).await;
-        assert!(
-            baseline
-                .frontends
-                .iter()
-                .all(|frontend| frontend.delivery != omnifs_api::FrontendDelivery::Docker),
-            "no attached frontend before any client connects"
-        );
-
+        let attach_target = omnifs_vfs_wire::AttachTarget::Tcp {
+            addr: target.addr,
+            token: target.token,
+        };
         let identity = omnifs_vfs_wire::FrontendIdentity {
             kind: omnifs_vfs_wire::FrontendKind::Fuse,
-            mount_point: PathBuf::from("/guest/omnifs"),
-        };
-        let attach_target = match &target {
-            omnifs_vfs_wire::ListenerTarget::Tcp { addr, token } => {
-                omnifs_vfs_wire::AttachTarget::Tcp {
-                    addr: addr.to_string(),
-                    token: token.clone(),
-                }
-            },
-            _ => panic!("TCP attach returned a non-TCP target"),
+            mount_point: std::path::PathBuf::from("/guest/omnifs"),
         };
         let wire =
             omnifs_vfs_wire::WireNamespace::attach(attach_target.clone(), identity, rt.clone())
@@ -1367,54 +1091,103 @@ mod tests {
             attach_target,
             omnifs_vfs_wire::FrontendIdentity {
                 kind: omnifs_vfs_wire::FrontendKind::Fuse,
-                mount_point: PathBuf::from("/guest/omnifs"),
+                mount_point: std::path::PathBuf::from("/guest/omnifs"),
             },
             rt.clone(),
         )
         .await
         .unwrap();
 
-        let attached_status = wait_for_status(&router, |status| {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        let status = loop {
+            let reply = request(&control_socket, ControlOperation::Status).await;
+            if let ControlOutcome::Status(status) = reply.outcome
+                && status
+                    .frontends
+                    .iter()
+                    .any(|frontend| frontend.delivery == omnifs_api::FrontendDelivery::Docker)
+            {
+                break status;
+            }
+            assert!(tokio::time::Instant::now() < deadline);
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        };
+        assert!(
             status
-                .frontends
-                .iter()
-                .any(|frontend| frontend.delivery == omnifs_api::FrontendDelivery::Docker)
-        })
-        .await;
-        assert_attached_frontend(&attached_status);
-
-        let report = shutdown_report(&router).await;
-        assert_eq!(report.frontends.len(), 1);
-        assert_eq!(
-            report.frontends[0].delivery,
-            omnifs_api::FrontendDelivery::Docker
+                .health
+                .subsystem(omnifs_api::DaemonSubsystem::Frontend)
+                .unwrap()
+                .message
+                .contains("attached fuse at /guest/omnifs via docker")
         );
 
         drop(wire);
-
-        let retained = wait_for_status(&router, |status| {
-            status
-                .frontends
-                .iter()
-                .any(|frontend| frontend.delivery == omnifs_api::FrontendDelivery::Docker)
-        })
-        .await;
-        assert_attached_frontend(&retained);
-
         drop(wire2);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        let status = loop {
+            let reply = request(&control_socket, ControlOperation::Status).await;
+            if let ControlOutcome::Status(status) = reply.outcome
+                && status
+                    .frontends
+                    .iter()
+                    .all(|frontend| frontend.delivery != omnifs_api::FrontendDelivery::Docker)
+            {
+                break status;
+            }
+            assert!(tokio::time::Instant::now() < deadline);
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        };
+        assert!(status.frontends.is_empty());
 
-        let after_disconnect = wait_for_status(&router, |status| {
-            status
-                .frontends
-                .iter()
-                .all(|frontend| frontend.delivery != omnifs_api::FrontendDelivery::Docker)
-        })
+        assert!(matches!(
+            request(&control_socket, ControlOperation::Shutdown)
+                .await
+                .outcome,
+            ControlOutcome::Shutdown
+        ));
+    }
+
+    #[tokio::test]
+    #[allow(unsafe_code)]
+    async fn control_socket_rejects_malformed_and_oversized_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env_guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = std::fs::canonicalize(dir.path()).unwrap();
+        unsafe {
+            std::env::set_var("OMNIFS_HOME", &home);
+        }
+        let daemon = test_daemon(&dir);
+        let control_socket = dir.path().join("control.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&control_socket).unwrap();
+        let (_gate_tx, gate_rx) = tokio::sync::watch::channel(true);
+        daemon
+            .spawn_control_unix(listener, &tokio::runtime::Handle::current(), gate_rx)
+            .unwrap();
+
+        let malformed = raw_request(&control_socket, b"{not-json}\n".to_vec()).await;
+        assert!(matches!(
+            malformed.outcome,
+            ControlOutcome::Error(error) if error.code == ControlErrorCode::MalformedJson
+        ));
+
+        let unknown = raw_request(
+            &control_socket,
+            br#"{"version":1,"operation":"unknown"}
+"#
+            .to_vec(),
+        )
         .await;
-        assert!(
-            after_disconnect
-                .frontends
-                .iter()
-                .all(|frontend| frontend.delivery != omnifs_api::FrontendDelivery::Docker)
-        );
+        assert!(matches!(
+            unknown.outcome,
+            ControlOutcome::Error(error) if error.code == ControlErrorCode::UnknownOperation
+        ));
+
+        let oversized = raw_request(&control_socket, vec![b'x'; CONTROL_MAX_LINE_BYTES + 1]).await;
+        assert!(matches!(
+            oversized.outcome,
+            ControlOutcome::Error(error) if error.code == ControlErrorCode::LineTooLarge
+        ));
     }
 }

@@ -40,7 +40,7 @@ pub const FRONTENDS_SUBDIR: &str = "frontends";
 pub const LOCAL_ATTACH_SOCKET_NAME: &str = "local.sock";
 /// Filename of the token-checking UDS namespace attach listener under
 /// `frontends/` (`<config_dir>/frontends/vsock-attach.sock`). Bound on demand
-/// via `POST /v1/frontend/attach-target/vsock`, one per daemon instance;
+/// via the daemon's `AttachVsock` control operation, one per daemon instance;
 /// unlike the fixed local socket, whose auth is filesystem permissions, a
 /// connection here proves itself with a per-instance token, because the
 /// krunkit vsock-proxy path terminates every guest vsock dial on this socket

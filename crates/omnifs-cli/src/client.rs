@@ -1,51 +1,31 @@
-//! HTTP client for the daemon control API.
+//! Typed client for the daemon's local control socket.
 //!
-//! The client only ever dials an endpoint within its own workspace: an endpoint
-//! read from the runtime record (`$OMNIFS_HOME/daemon.json`), the fixed control
-//! socket (`$OMNIFS_HOME/control.sock`). It never dials a default port blind,
-//! so a daemon owned by a different `OMNIFS_HOME` is structurally
-//! unaddressable.
-//!
-//! Resolution (per request, so the launcher can poll for the record to appear):
-//! - read the record: a unix endpoint connects the socket; a refused/missing
-//!   socket is a stale record, which is removed and reported.
-//! - no record -> fall back to the fixed control socket if it exists on disk, so
-//!   a daemon that outlived its record stays reachable; otherwise the daemon is
-//!   not running (exit 3).
-//! - the instance id echoed by `/v1/status` is asserted equal to the record's
-//!   (the control-socket fallback carries no instance id, so this check is
-//!   skipped for it), so a record overwritten by a restart mid-command is caught.
+//! The client resolves a workspace-local Unix socket for every operation,
+//! sends one versioned JSON line, and reads one versioned reply line. Inspector
+//! uses the same socket with a persistent subscription connection.
 
 use std::path::PathBuf;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result};
-use bytes::Bytes;
-use http::{Method, StatusCode};
-use http_body_util::{BodyExt as _, Full};
-use hyper_util::client::legacy::Client as HyperClient;
-use hyper_util::rt::TokioExecutor;
-use hyperlocal::{UnixConnector, Uri as UnixUri};
 use omnifs_api::{
-    API_MAJOR, API_MINOR, ApiError, DaemonStatus, ErrorCode, FrontendAttachTargetReport,
-    FrontendAttachTargetRequest, FrontendAttachTargetVsockReport, FrontendDelivery, StopReport,
+    CONTROL_MAX_LINE_BYTES, CONTROL_PROTOCOL_VERSION, CONTROL_REQUEST_TIMEOUT_SECS, ControlError,
+    ControlErrorCode, ControlOperation, ControlOutcome, ControlReply, ControlRequest, DaemonStatus,
+    TcpAttachTarget, VsockAttachTarget,
 };
 use omnifs_workspace::layout::WorkspaceLayout;
 use omnifs_workspace::runtime_record::{Endpoint, RuntimeRecord};
-use serde::de::DeserializeOwned;
+use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::net::UnixStream;
 
-use crate::error::{ExitCode, WithExitCode, WithHint};
+use crate::error::{ExitCode, WithExitCode};
 
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(CONTROL_REQUEST_TIMEOUT_SECS);
 
-/// Where and how to reach the daemon, resolved fresh for each request.
+#[derive(Debug)]
 enum Target {
-    /// No runtime record: the daemon is not running.
     Absent,
-    /// Unix-socket endpoint read from the record (the daemon's only production
-    /// transport).
     Unix {
         socket: PathBuf,
         instance: Option<String>,
@@ -53,7 +33,6 @@ enum Target {
 }
 
 impl Target {
-    /// A human label for the endpoint, used in error and diagnostic messages.
     fn label(&self) -> String {
         match self {
             Self::Absent => "the daemon".to_string(),
@@ -61,7 +40,6 @@ impl Target {
         }
     }
 
-    /// The record's instance id, for the mid-flight-overwrite assertion.
     fn instance(&self) -> Option<&str> {
         match self {
             Self::Unix { instance, .. } => instance.as_deref(),
@@ -70,22 +48,9 @@ impl Target {
     }
 }
 
-/// A buffered control-API response: status plus the whole body.
-struct RawResponse {
-    status: StatusCode,
-    body: Bytes,
-}
-
 pub(crate) struct DaemonClient {
-    /// Layout for record-based resolution. `None` only when the ambient
-    /// workspace could not be resolved (then the client behaves as absent).
     record_path: Option<PathBuf>,
-    /// The daemon's fixed control socket, dialed when the runtime record is
-    /// absent. `None` in record-only test clients. See [`Self::resolve`].
     control_socket: Option<PathBuf>,
-    unix: OnceLock<HyperClient<UnixConnector, Full<Bytes>>>,
-    /// Set once a stale unix socket has been cleaned, so the unavailable error
-    /// can report the record was removed.
     cleaned_stale: AtomicBool,
 }
 
@@ -94,7 +59,6 @@ impl DaemonClient {
         Self {
             record_path: Some(layout.runtime_record_file()),
             control_socket: Some(layout.control_socket()),
-            unix: OnceLock::new(),
             cleaned_stale: AtomicBool::new(false),
         }
     }
@@ -104,20 +68,10 @@ impl DaemonClient {
         Self {
             record_path,
             control_socket: None,
-            unix: OnceLock::new(),
             cleaned_stale: AtomicBool::new(false),
         }
     }
 
-    fn unix_client(&self) -> &HyperClient<UnixConnector, Full<Bytes>> {
-        self.unix
-            .get_or_init(|| HyperClient::builder(TokioExecutor::new()).build(UnixConnector))
-    }
-
-    /// Resolve the endpoint to dial for this request. A corrupt record cannot
-    /// strand a daemon that is still
-    /// serving on the workspace's fixed control socket, so resolution falls
-    /// back to that socket without trusting any fields from the record.
     fn resolve(&self) -> Result<Target> {
         let record = match &self.record_path {
             Some(record_path) => match RuntimeRecord::read(record_path) {
@@ -143,19 +97,9 @@ impl DaemonClient {
                 instance: Some(record.instance_id),
             });
         }
-        // No runtime record: it was never written, or it was lost while the
-        // daemon process lived (a crash or a botched teardown). The control
-        // socket sits at a fixed path independent of the record, so probe it
-        // directly. A live daemon that outlived its record is reached and
-        // reported (so `up` refuses to spawn a second daemon onto the
-        // same locked cache, and `down`/`status` can see it); a stale socket
-        // file refuses the connection and resolves to absence.
         Ok(self.control_socket_target().unwrap_or(Target::Absent))
     }
 
-    /// The fixed control socket as a dial target, when it exists on disk. The
-    /// existence check keeps a fresh workspace (no socket yet) resolving to
-    /// [`Target::Absent`] rather than dialing a path that was never bound.
     fn control_socket_target(&self) -> Option<Target> {
         let socket = self.control_socket.as_ref()?;
         socket.exists().then(|| Target::Unix {
@@ -164,7 +108,6 @@ impl DaemonClient {
         })
     }
 
-    /// The endpoint the inspector's event stream should attach to.
     pub(crate) fn event_endpoint(&self) -> Result<Option<EventEndpoint>> {
         Ok(match self.resolve()? {
             Target::Absent => None,
@@ -172,89 +115,36 @@ impl DaemonClient {
         })
     }
 
-    /// One request primitive over both transports. `Ok(None)` means the daemon
-    /// is unreachable (connection refused/timeout, an absent record, or a stale
-    /// unix socket that was cleaned). Other transport failures are errors.
-    async fn request(
-        &self,
-        method: Method,
-        path: &str,
-        body: Option<&serde_json::Value>,
-        timeout: Duration,
-    ) -> Result<Option<RawResponse>> {
+    async fn request(&self, operation: ControlOperation) -> Result<Option<ControlReply>> {
         let target = self.resolve()?;
-        match &target {
-            Target::Absent => Ok(None),
-            Target::Unix { socket, .. } => {
-                self.request_unix(socket, method, path, body, timeout).await
-            },
-        }
-    }
-
-    async fn request_unix(
-        &self,
-        socket: &std::path::Path,
-        method: Method,
-        path: &str,
-        body: Option<&serde_json::Value>,
-        timeout: Duration,
-    ) -> Result<Option<RawResponse>> {
-        let uri: hyper::Uri = UnixUri::new(socket, path).into();
-        let body_bytes = match body {
-            Some(value) => {
-                Bytes::from(serde_json::to_vec(value).context("serialize request body")?)
-            },
-            None => Bytes::new(),
+        let Target::Unix { socket, .. } = &target else {
+            return Ok(None);
         };
-        let mut builder = hyper::Request::builder().method(method.clone()).uri(uri);
-        // Only claim a JSON content type when there is a body. A bodyless POST
-        // with this header set anyway
-        // makes axum's `Option<Json<T>>` extractor attempt (and fail) to parse
-        // zero bytes as JSON, rejecting the request with 400 instead of the
-        // `None` the handler expects for "no request body".
-        if body.is_some() {
-            builder = builder.header(http::header::CONTENT_TYPE, "application/json");
-        }
-        let request = builder
-            .body(Full::new(body_bytes))
-            .context("build unix-socket request")?;
-
-        let send = self.unix_client().request(request);
-        let response = match tokio::time::timeout(timeout, send).await {
-            // Timed out: treat the local control socket as unreachable.
-            Err(_) => return Ok(None),
-            Ok(Ok(response)) => response,
-            // A connect error means the socket is gone or refused: the record is
-            // stale. Remove it and report absence so the caller falls to the
-            // offline path or the "not running" error.
-            Ok(Err(error)) if error.is_connect() => {
+        let request = ControlRequest {
+            version: CONTROL_PROTOCOL_VERSION,
+            operation,
+        };
+        let result = tokio::time::timeout(REQUEST_TIMEOUT, async {
+            let mut stream = UnixStream::connect(socket).await?;
+            let mut line = serde_json::to_vec(&request).context("serialize control request")?;
+            line.push(b'\n');
+            stream.write_all(&line).await?;
+            let reply = read_control_line(&mut stream).await?;
+            serde_json::from_slice(&reply).context("parse control reply")
+        })
+        .await;
+        match result {
+            Err(_) => Ok(None),
+            Ok(Ok(reply)) => Ok(Some(reply)),
+            Ok(Err(error)) if is_connection_error(&error) => {
                 self.clean_stale_record();
-                return Ok(None);
+                Ok(None)
             },
-            Ok(Err(error)) => {
-                return Err(anyhow::anyhow!(
-                    "request {method} over control socket {}: {error}",
-                    socket.display()
-                ));
-            },
-        };
-        let status = response.status();
-        let body = response
-            .into_body()
-            .collect()
-            .await
-            .with_context(|| {
-                format!(
-                    "read response body from control socket {}",
-                    socket.display()
-                )
-            })?
-            .to_bytes();
-        Ok(Some(RawResponse { status, body }))
+            Ok(Err(error)) => Err(error)
+                .with_context(|| format!("request over control socket {}", socket.display())),
+        }
     }
 
-    /// Remove a stale runtime record after a refused/missing unix socket, so the
-    /// next command sees the daemon as absent rather than dialing a dead socket.
     fn clean_stale_record(&self) {
         if let Some(path) = &self.record_path {
             let _ = RuntimeRecord::remove(path);
@@ -262,71 +152,61 @@ impl DaemonClient {
         self.cleaned_stale.store(true, Ordering::Relaxed);
     }
 
-    /// The daemon-not-running error, tailored to whether a stale record was just
-    /// cleaned. Exit code 3 (`DaemonUnavailable`).
     fn unavailable_error(&self) -> anyhow::Error {
         let message = if self.cleaned_stale.load(Ordering::Relaxed) {
             "daemon not running (cleaned up a stale record)"
         } else {
             "daemon not running"
         };
-        match Err::<(), _>(anyhow::anyhow!("{message}")).with_exit_code(ExitCode::DaemonUnavailable)
-        {
+        match Err::<(), _>(anyhow::anyhow!(message)).with_exit_code(ExitCode::DaemonUnavailable) {
             Ok(()) => unreachable!("daemon unavailable construction always starts from Err"),
             Err(error) => error,
         }
     }
 
-    /// Probe for a daemon and classify its control state in one step.
     async fn probe(&self) -> DaemonControlState {
         let target = match self.resolve() {
             Ok(target) => target,
             Err(error) => return DaemonControlState::Sick { error },
         };
-        let raw = match self
-            .request(Method::GET, "/v1/status", None, REQUEST_TIMEOUT)
-            .await
-        {
-            Ok(Some(raw)) => raw,
+        let reply = match self.request(ControlOperation::Status).await {
+            Ok(Some(reply)) => reply,
             Ok(None) => return DaemonControlState::Absent,
             Err(error) => return DaemonControlState::Sick { error },
         };
-        match self.status_from_raw(&raw, &target) {
-            Ok(status) => DaemonControlState::from_status(status),
+        match self.status_from_reply(&reply, &target) {
+            Ok(status) => DaemonControlState::Responding(status),
             Err(error) => DaemonControlState::Sick { error },
         }
     }
 
-    /// Raw daemon status probe. Connection absence is `None`; a reachable
-    /// daemon's HTTP status and JSON errors are propagated.
     pub(crate) async fn status_optional(&self) -> Result<Option<DaemonStatus>> {
         let target = self.resolve()?;
-        let Some(raw) = self
-            .request(Method::GET, "/v1/status", None, REQUEST_TIMEOUT)
-            .await?
-        else {
+        let Some(reply) = self.request(ControlOperation::Status).await? else {
             return Ok(None);
         };
-        self.status_from_raw(&raw, &target).map(Some)
+        self.status_from_reply(&reply, &target).map(Some)
     }
 
-    /// Verify the daemon is reachable and speaks this CLI's control API.
-    pub(crate) async fn require_compatible(&self) -> Result<DaemonStatus> {
-        let label = self.resolve().map(|t| t.label()).unwrap_or_default();
-        match self.probe().await.compatible_optional(&label)? {
+    pub(crate) async fn require_status(&self) -> Result<DaemonStatus> {
+        let label = self
+            .resolve()
+            .map(|target| target.label())
+            .unwrap_or_default();
+        match self.probe().await.into_optional(&label)? {
             Some(status) => Ok(status),
             None => Err(self.unavailable_error()),
         }
     }
 
-    /// Daemon status when a compatible daemon answers; `None` when no daemon
-    /// answered.
-    pub(crate) async fn compatible_status_optional(&self) -> Result<Option<DaemonStatus>> {
-        let label = self.resolve().map(|t| t.label()).unwrap_or_default();
-        self.probe().await.compatible_optional(&label)
+    pub(crate) async fn status_optional_checked(&self) -> Result<Option<DaemonStatus>> {
+        let label = self
+            .resolve()
+            .map(|target| target.label())
+            .unwrap_or_default();
+        self.probe().await.into_optional(&label)
     }
 
-    /// Daemon runtime facts from a reachable, compatible daemon.
     pub(crate) async fn status(&self) -> Result<DaemonStatus> {
         match self.status_optional().await? {
             Some(status) => Ok(status),
@@ -334,17 +214,18 @@ impl DaemonClient {
         }
     }
 
-    /// Parse a `/v1/status` response, mapping HTTP errors to hints and asserting
-    /// the daemon's instance id against the record we resolved from.
-    fn status_from_raw(&self, raw: &RawResponse, target: &Target) -> Result<DaemonStatus> {
-        let status: DaemonStatus = Self::parse_ok_json(raw, "daemon status request failed")?;
-        self.verify_instance(&status, target)?;
-        Ok(status)
+    fn status_from_reply(&self, reply: &ControlReply, target: &Target) -> Result<DaemonStatus> {
+        self.check_version(reply)?;
+        if let ControlOutcome::Error(error) = &reply.outcome {
+            return Err(control_error("daemon status request failed", error));
+        }
+        let ControlOutcome::Status(status) = &reply.outcome else {
+            return Err(unexpected_reply("status"));
+        };
+        self.verify_instance(status, target)?;
+        Ok(status.clone())
     }
 
-    /// Assert the connected daemon's instance id matches the record we dialed.
-    /// On mismatch (a restart overwrote the record mid-command), re-read the
-    /// record once; if it has caught up to the live daemon, accept, else error.
     fn verify_instance(&self, status: &DaemonStatus, target: &Target) -> Result<()> {
         let Some(expected) = target.instance() else {
             return Ok(());
@@ -359,121 +240,87 @@ impl DaemonClient {
             return Ok(());
         }
         Err(anyhow::anyhow!(
-            "the daemon runtime record was overwritten mid-command \
-             (daemon instance {}, record instance {expected}); rerun the command",
+            "the daemon runtime record was overwritten mid-command (daemon instance {}, record instance {expected}); rerun the command",
             status.instance_id,
         ))
     }
 
-    /// Deserialize a successful JSON response, mapping a non-success status to an
-    /// `ApiError`-derived error with hints.
-    fn parse_ok_json<T: DeserializeOwned>(raw: &RawResponse, context: &'static str) -> Result<T> {
-        if raw.status.is_success() {
-            return serde_json::from_slice(&raw.body).context("parse daemon response JSON");
+    fn check_version(&self, reply: &ControlReply) -> Result<()> {
+        if reply.version != CONTROL_PROTOCOL_VERSION {
+            return Err(anyhow::anyhow!(
+                "daemon speaks control protocol v{}, this CLI speaks v{}; stop it with `omnifs down`, then rerun",
+                reply.version,
+                CONTROL_PROTOCOL_VERSION,
+            ));
         }
-        Err(Self::error_from_body(raw, context))
+        Ok(())
     }
 
-    fn error_from_body(raw: &RawResponse, context: &'static str) -> anyhow::Error {
-        match serde_json::from_slice::<ApiError>(&raw.body) {
-            Ok(api_error) => Self::api_error(context, &api_error),
-            Err(error) => anyhow::anyhow!(
-                "{context}: daemon returned {} with invalid ApiError JSON: {error}",
-                raw.status
-            ),
+    fn reply_result<'a>(
+        &self,
+        reply: &'a ControlReply,
+        operation: &str,
+    ) -> Result<&'a ControlOutcome> {
+        self.check_version(reply)?;
+        if let ControlOutcome::Error(error) = &reply.outcome {
+            return Err(control_error(operation, error));
         }
+        Ok(&reply.outcome)
     }
 
-    fn api_error(context: &'static str, api_error: &ApiError) -> anyhow::Error {
-        let error = anyhow::anyhow!("{context}: {}", api_error.message);
-        match Err::<(), _>(error)
-            .with_hint(hint_for(api_error.code))
-            .with_exit_code(exit_code_for(api_error.code))
-        {
-            Ok(()) => unreachable!("api error construction always starts from Err"),
-            Err(error) => error,
-        }
-    }
-
-    /// Fetch the TCP attach target a frontend dials, binding the daemon's
-    /// listener if needed (idempotent: a repeat call returns the already-bound
-    /// address and token). Native Linux supplies its Docker bridge gateway;
-    /// Docker Desktop uses the default loopback bind.
     pub(crate) async fn frontend_attach_target(
         &self,
         bind_ip: Option<std::net::Ipv4Addr>,
-    ) -> Result<FrontendAttachTargetReport> {
-        let body = serde_json::to_value(FrontendAttachTargetRequest {
-            bind_ip,
-            // The only driver this route serves today; the daemon rejects
-            // anything else with a 400 (krunkit attaches over vsock instead,
-            // through the separate `.../attach-target/vsock` route).
-            driver: FrontendDelivery::Docker,
-        })
-        .context("serialize attach-target request")?;
-        let raw = self
-            .request(
-                Method::POST,
-                "/v1/frontend/attach-target",
-                Some(&body),
-                REQUEST_TIMEOUT,
-            )
-            .await?
-            .ok_or_else(|| self.unavailable_error())?;
-        Self::parse_ok_json(&raw, "daemon attach-target request failed")
-    }
-
-    /// Fetch the vsock attach target a frontend dials, binding the daemon's
-    /// token-checking UDS namespace attach listener if needed (idempotent: a
-    /// repeat call returns the already-bound path and token). This is the
-    /// krunkit-on-macOS path: the guest dials host vsock and krunkit proxies
-    /// every connection onto this socket, so `token` (not filesystem
-    /// permissions) authenticates every attach handshake it carries.
-    pub(crate) async fn frontend_attach_target_vsock(
-        &self,
-    ) -> Result<FrontendAttachTargetVsockReport> {
-        let raw = self
-            .request(
-                Method::POST,
-                "/v1/frontend/attach-target/vsock",
-                None,
-                REQUEST_TIMEOUT,
-            )
-            .await?
-            .ok_or_else(|| self.unavailable_error())?;
-        Self::parse_ok_json(&raw, "daemon attach-target vsock request failed")
-    }
-
-    /// Ask the daemon to unmount its frontend and exit. `None` when no daemon
-    /// answered, so the caller can fall back to a stale-mount sweep.
-    pub(crate) async fn shutdown(&self) -> Result<Option<StopReport>> {
-        let Some(raw) = self
-            .request(Method::POST, "/v1/shutdown", None, REQUEST_TIMEOUT)
+    ) -> Result<TcpAttachTarget> {
+        let Some(reply) = self
+            .request(ControlOperation::AttachTcp { bind_ip })
             .await?
         else {
-            return Ok(None);
+            return Err(self.unavailable_error());
         };
-        Self::parse_ok_json(&raw, "daemon shutdown request failed").map(Some)
+        match self.reply_result(&reply, "daemon attach-target request failed")? {
+            ControlOutcome::AttachTcp(target) => Ok(target.clone()),
+            _ => Err(unexpected_reply("attach_tcp")),
+        }
     }
 
-    /// True once the daemon reports the filesystem is serving.
+    pub(crate) async fn frontend_attach_target_vsock(&self) -> Result<VsockAttachTarget> {
+        let Some(reply) = self.request(ControlOperation::AttachVsock).await? else {
+            return Err(self.unavailable_error());
+        };
+        match self.reply_result(&reply, "daemon attach-target vsock request failed")? {
+            ControlOutcome::AttachVsock(target) => Ok(target.clone()),
+            _ => Err(unexpected_reply("attach_vsock")),
+        }
+    }
+
+    pub(crate) async fn shutdown(&self) -> Result<Option<()>> {
+        let Some(reply) = self.request(ControlOperation::Shutdown).await? else {
+            return Ok(None);
+        };
+        match self.reply_result(&reply, "daemon shutdown request failed")? {
+            ControlOutcome::Shutdown => Ok(Some(())),
+            _ => Err(unexpected_reply("shutdown")),
+        }
+    }
+
     pub(crate) async fn ready(&self) -> bool {
+        let Ok(Some(reply)) = self.request(ControlOperation::Ready).await else {
+            return false;
+        };
         matches!(
-            self.request(Method::GET, "/v1/ready", None, REQUEST_TIMEOUT).await,
-            Ok(Some(raw)) if raw.status.is_success()
+            self.reply_result(&reply, "daemon readiness request failed"),
+            Ok(ControlOutcome::Ready)
         )
     }
 }
 
-/// The endpoint the inspector's `GET /v1/events` stream should attach to.
-/// `None` means no daemon is running.
 #[derive(Clone)]
 pub(crate) enum EventEndpoint {
     Unix { socket: PathBuf },
 }
 
 impl EventEndpoint {
-    /// A short human label for status lines in the inspector.
     pub(crate) fn label(&self) -> String {
         match self {
             Self::Unix { socket } => format!("unix:{}", socket.display()),
@@ -484,72 +331,86 @@ impl EventEndpoint {
 #[derive(Debug)]
 pub(crate) enum DaemonControlState {
     Absent,
-    /// A daemon answered but its status could not be read.
-    Sick {
-        error: anyhow::Error,
-    },
-    Incompatible(Box<DaemonStatus>),
-    Compatible(Box<DaemonStatus>),
+    Responding(DaemonStatus),
+    Sick { error: anyhow::Error },
 }
 
 impl DaemonControlState {
-    fn from_status(status: DaemonStatus) -> Self {
-        if status.api_major == API_MAJOR {
-            Self::Compatible(Box::new(status))
-        } else {
-            Self::Incompatible(Box::new(status))
-        }
-    }
-
-    fn compatible_optional(self, label: &str) -> Result<Option<DaemonStatus>> {
+    fn into_optional(self, label: &str) -> Result<Option<DaemonStatus>> {
         match self {
-            Self::Compatible(status) => Ok(Some(*status)),
             Self::Absent => Ok(None),
+            Self::Responding(status) => Ok(Some(status)),
             Self::Sick { error } => Err(error.context(if label.is_empty() {
                 "a daemon answered, but its status could not be read".to_string()
             } else {
                 format!("a daemon answered at {label}, but its status could not be read")
             })),
-            Self::Incompatible(status) => Err(incompatible_daemon_error(&status)),
         }
     }
 }
 
-fn hint_for(code: ErrorCode) -> &'static str {
-    match code {
-        ErrorCode::AuthRequired => "Try: omnifs mount reauth <name>",
-        ErrorCode::DaemonShuttingDown => "Try: omnifs up",
-        ErrorCode::MountNotFound => "Try: omnifs status",
-        ErrorCode::SpecInvalid => "Try: inspect the mount spec and rerun omnifs up",
-        ErrorCode::Internal => "Try: omnifs doctor",
-    }
-}
-
-fn exit_code_for(code: ErrorCode) -> ExitCode {
-    match code {
-        ErrorCode::AuthRequired => ExitCode::AuthRequired,
-        ErrorCode::DaemonShuttingDown => ExitCode::DaemonUnavailable,
-        ErrorCode::MountNotFound | ErrorCode::SpecInvalid | ErrorCode::Internal => {
-            ExitCode::GenericFailure
-        },
-    }
-}
-
-fn incompatible_daemon_error(status: &DaemonStatus) -> anyhow::Error {
-    let detail = if status.api_major == 0 {
-        "this daemon predates major/minor API versioning".to_string()
-    } else {
-        format!(
-            "daemon speaks control API v{}.{}",
-            status.api_major, status.api_minor
-        )
+fn control_error(context: &str, error: &ControlError) -> anyhow::Error {
+    let exit_code = match error.code {
+        ControlErrorCode::NotReady => ExitCode::DaemonUnavailable,
+        ControlErrorCode::UnsupportedVersion
+        | ControlErrorCode::MalformedJson
+        | ControlErrorCode::UnknownOperation
+        | ControlErrorCode::LineTooLarge
+        | ControlErrorCode::InvalidRequest
+        | ControlErrorCode::Internal => ExitCode::GenericFailure,
     };
-    anyhow::anyhow!(
-        "{detail}; this CLI speaks v{API_MAJOR}.{API_MINOR} (daemon binary v{}). \
-         Stop it with `omnifs down`, or upgrade the runtime image so the CLI and \
-         daemon versions match, then rerun.",
-        status.version,
-    )
+    match Err::<(), _>(anyhow::anyhow!("{context}: {}", error.message)).with_exit_code(exit_code) {
+        Ok(()) => unreachable!("control error construction starts from Err"),
+        Err(error) => error,
+    }
+}
+
+fn unexpected_reply(operation: &str) -> anyhow::Error {
+    anyhow::anyhow!("daemon returned an unexpected reply for {operation}")
+}
+
+fn is_connection_error(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<std::io::Error>().is_some_and(|error| {
+        matches!(
+            error.kind(),
+            std::io::ErrorKind::ConnectionRefused
+                | std::io::ErrorKind::NotFound
+                | std::io::ErrorKind::ConnectionReset
+                | std::io::ErrorKind::UnexpectedEof
+        )
+    })
+}
+
+pub(crate) async fn read_control_line<R: AsyncRead + Unpin>(
+    reader: &mut R,
+) -> std::io::Result<Vec<u8>> {
+    let mut line = Vec::with_capacity(256);
+    loop {
+        let mut byte = [0_u8; 1];
+        let read = reader.read(&mut byte).await?;
+        if read == 0 {
+            if line.is_empty() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "control connection closed before a line was received",
+                ));
+            }
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "control line is missing its newline terminator",
+            ));
+        }
+        line.push(byte[0]);
+        if line.len() > CONTROL_MAX_LINE_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "control line exceeds the maximum size",
+            ));
+        }
+        if byte[0] == b'\n' {
+            return Ok(line);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -557,23 +418,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hint_table_covers_every_error_code() {
-        assert_eq!(
-            hint_for(ErrorCode::AuthRequired),
-            "Try: omnifs mount reauth <name>"
-        );
-        assert_eq!(hint_for(ErrorCode::DaemonShuttingDown), "Try: omnifs up");
-        assert_eq!(hint_for(ErrorCode::Internal), "Try: omnifs doctor");
-    }
-
-    /// With no record and no control socket, the client is absent and require exits 3.
-    #[tokio::test]
-    async fn absent_record_is_daemon_unavailable() {
+    fn absent_record_is_daemon_unavailable() {
         let home = tempfile::tempdir().unwrap();
         let record = home.path().join("daemon.json");
         let client = DaemonClient::with_record_path(Some(record));
-        assert!(client.status_optional().await.unwrap().is_none());
-        let error = client.require_compatible().await.unwrap_err();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let error = runtime.block_on(client.require_status()).unwrap_err();
         assert_eq!(crate::error::exit_code(&error), ExitCode::DaemonUnavailable);
     }
 
@@ -581,15 +431,10 @@ mod tests {
         DaemonClient {
             record_path: Some(record),
             control_socket: Some(control_socket),
-            unix: OnceLock::new(),
             cleaned_stale: AtomicBool::new(false),
         }
     }
 
-    /// A daemon that outlived its runtime record still binds the fixed control
-    /// socket. With the record gone, `resolve` must fall back to that socket so
-    /// the daemon stays visible (rather than resolving to absence and letting a
-    /// second daemon spawn onto the same locked cache).
     #[test]
     fn resolve_falls_back_to_control_socket_when_record_is_absent() {
         let home = tempfile::tempdir().unwrap();
@@ -602,14 +447,12 @@ mod tests {
                 instance,
             } => {
                 assert_eq!(dialed, socket);
-                assert!(instance.is_none(), "fallback carries no record instance id");
+                assert!(instance.is_none());
             },
-            _ => panic!("expected the control-socket fallback target"),
+            Target::Absent => panic!("expected control-socket fallback target"),
         }
     }
 
-    /// A fresh workspace has neither a record nor a bound control socket: the
-    /// fallback must not dial a path that was never created.
     #[test]
     fn resolve_is_absent_without_record_or_control_socket() {
         let home = tempfile::tempdir().unwrap();
@@ -630,10 +473,7 @@ mod tests {
         let client = client_without_record(record, socket.clone());
         assert!(matches!(
             client.resolve().unwrap(),
-            Target::Unix {
-                socket: dialed,
-                instance: None
-            } if dialed == socket
+            Target::Unix { socket: dialed, instance: None } if dialed == socket
         ));
     }
 
@@ -648,17 +488,15 @@ mod tests {
     }
 
     #[test]
-    fn unreadable_runtime_record_io_error_is_not_treated_as_stale() {
+    fn unreadable_runtime_record_is_not_treated_as_stale() {
         let home = tempfile::tempdir().unwrap();
         let record = home.path().join("daemon.json");
         std::fs::create_dir(&record).unwrap();
         let socket = home.path().join("control.sock");
         std::fs::write(&socket, b"reserved").unwrap();
         let client = client_without_record(record.clone(), socket);
-        let Err(error) = client.resolve() else {
-            panic!("directory runtime record must not resolve via socket fallback");
-        };
+        let error = client.resolve().unwrap_err();
         assert!(format!("{error:#}").contains("read runtime record"));
-        assert!(record.exists(), "unreadable state must not be removed");
+        assert!(record.exists());
     }
 }

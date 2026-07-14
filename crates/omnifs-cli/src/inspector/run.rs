@@ -109,8 +109,15 @@ fn emit_plain_line(line: &str) {
     if trimmed.is_empty() {
         return;
     }
-    match InspectorRecord::parse_line(trimmed) {
-        Ok(record) => crate::ui::print_raw(&format!("{}\n", format_record(&record))),
-        Err(_) => crate::ui::print_raw(&format!("{trimmed}\n")),
+    if let Ok(record) = InspectorRecord::parse_line(trimmed) {
+        crate::ui::print_raw(&format!("{}\n", format_record(&record)))
+    } else if let Some(count) = trimmed
+        .strip_prefix("# dropped ")
+        .and_then(|value| value.strip_suffix(" events"))
+        .and_then(|value| value.parse::<u64>().ok())
+    {
+        crate::ui::print_raw(&format!("# dropped {count} events\n"));
+    } else {
+        crate::ui::print_raw(&format!("{trimmed}\n"));
     }
 }

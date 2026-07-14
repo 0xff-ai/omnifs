@@ -5,9 +5,9 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "Control API types shared by the omnifs CLI and daemon runtime"
+description = "Typed local control protocol types shared by the omnifs CLI and daemon runtime"
 categories = ["filesystem", "api-bindings"]
-keywords = ["omnifs", "daemon", "api"]
+keywords = ["omnifs", "daemon", "protocol"]
 
 [dependencies]
 serde = { workspace = true }
@@ -15,7 +15,6 @@ serde_json = { workspace = true }
 strum = { workspace = true }
 thiserror = { workspace = true }
 url = { workspace = true }
-utoipa = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -30,6 +30,8 @@ use common::{
     force_unmount, install_test_provider, live_acceptance_enabled, nfs_serial_lock, omnifs_bin,
     platform_can_mount, recorded_pid, release_wasm_dir, test_mount_spec,
 };
+use omnifs_api::{ControlOperation, ControlOutcome};
+use omnifs_itest::live::control_request;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -353,30 +355,18 @@ fn scenarios_3_to_6_lifecycle_cycle() {
         "result.mounts must include 'test'; got: {mounts:?}"
     );
 
-    // Verify backend is native through the daemon's local control socket.
-    let status_url = "http://localhost/v1/status";
+    // Verify backend is native through the daemon's typed local control socket.
     let control_socket = fixture.home_path().join("control.sock");
-    let status_resp = Command::new("curl")
-        .args(["-fs", "--unix-socket"])
-        .arg(&control_socket)
-        .arg(status_url)
-        .output()
-        .expect("curl /v1/status");
-    let status_json: serde_json::Value = serde_json::from_slice(&status_resp.stdout)
-        .expect("daemon /v1/status must return valid JSON");
-    assert_eq!(
-        status_json["backend"]["kind"].as_str().unwrap_or(""),
-        "native",
-        "daemon backend must be 'native'; got: {:?}",
-        status_json["backend"]
-    );
+    let status = control_request(&control_socket, ControlOperation::Status)
+        .expect("daemon status control reply");
+    let ControlOutcome::Status(status) = status.outcome else {
+        panic!("daemon status request returned an unexpected reply");
+    };
     assert!(
-        status_json["backend"]["pid"]
-            .as_u64()
-            .is_some_and(|pid| pid > 0),
-        "daemon backend must report its pid; got: {:?}",
-        status_json["backend"]
+        matches!(&status.backend, omnifs_api::DaemonBackend::Native { pid } if *pid == status.pid),
+        "daemon backend must be native"
     );
+    assert!(status.pid > 0, "daemon backend must report its pid");
 
     // Applying the same revision is a no-op and retains the daemon process.
     let original_pid = recorded_pid(fixture.home_path()).expect("running daemon pid");
@@ -540,7 +530,7 @@ fn scenarios_3_to_6_lifecycle_cycle() {
 
 // Recovery from a dead daemon.
 
-/// No daemon answers the control port; `down` falls back to the runtime record
+/// No daemon answers the control socket; `down` falls back to the runtime record
 /// to identify the backend, reclaims, and removes the record, without hanging.
 ///
 /// Uses a synthetic record (dead pid, no live mount) so the test never strands a

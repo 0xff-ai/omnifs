@@ -1,4 +1,4 @@
-//! Event sources: replay file, live `GET /v1/events` subscriber.
+//! Event sources: replay file, live typed control-plane subscriber.
 
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
@@ -8,13 +8,14 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use bytes::Bytes;
-use http_body_util::{BodyExt as _, Full};
-use hyper_util::client::legacy::Client as HyperClient;
-use hyper_util::rt::TokioExecutor;
-use hyperlocal::{UnixConnector, Uri as UnixUri};
+use omnifs_api::events::InspectorLine;
+use omnifs_api::{
+    CONTROL_PROTOCOL_VERSION, ControlOperation, ControlOutcome, ControlReply, ControlRequest,
+};
+use tokio::io::AsyncWriteExt as _;
+use tokio::net::UnixStream;
 
-use crate::client::EventEndpoint;
+use crate::client::{EventEndpoint, read_control_line};
 
 /// Outcome of one [`EventsClient::attach`] call.
 pub enum AttachOutcome {
@@ -24,9 +25,9 @@ pub enum AttachOutcome {
     Ended,
 }
 
-/// Blocking line-oriented client for the daemon's `GET /v1/events`
-/// stream. Owns a single-thread tokio runtime so callers can drive the
-/// HTTP stream from plain threads over the host-native Unix socket.
+/// Blocking line-oriented client for the daemon's inspector subscription.
+/// Owns a single-thread tokio runtime so callers can drive the stream from
+/// plain threads over the host-native Unix socket.
 pub struct EventsClient {
     rt: tokio::runtime::Runtime,
     endpoint: EventEndpoint,
@@ -49,40 +50,62 @@ impl EventsClient {
         on_connect: impl FnOnce(),
         mut on_line: impl FnMut(&str) -> std::result::Result<(), E>,
     ) -> std::result::Result<AttachOutcome, E> {
-        use omnifs_api::events::split_complete_lines;
-
         self.rt.block_on(async {
             match &self.endpoint {
                 EventEndpoint::Unix { socket } => {
-                    let client: HyperClient<UnixConnector, Full<Bytes>> =
-                        HyperClient::builder(TokioExecutor::new()).build(UnixConnector);
-                    let uri: hyper::Uri = UnixUri::new(socket, "/v1/events").into();
-                    let Ok(request) = hyper::Request::builder()
-                        .uri(uri)
-                        .body(Full::new(Bytes::new()))
-                    else {
+                    let mut stream = match UnixStream::connect(socket).await {
+                        Ok(stream) => stream,
+                        Err(_) => return Ok(AttachOutcome::Unreachable),
+                    };
+                    let request = ControlRequest {
+                        version: CONTROL_PROTOCOL_VERSION,
+                        operation: ControlOperation::SubscribeInspector,
+                    };
+                    let mut request_line = match serde_json::to_vec(&request) {
+                        Ok(line) => line,
+                        Err(_) => return Ok(AttachOutcome::Unreachable),
+                    };
+                    request_line.push(b'\n');
+                    if stream.write_all(&request_line).await.is_err() {
                         return Ok(AttachOutcome::Unreachable);
+                    }
+                    let reply_line = match read_control_line(&mut stream).await {
+                        Ok(line) => line,
+                        Err(_) => return Ok(AttachOutcome::Unreachable),
                     };
-                    let mut response = match client.request(request).await {
-                        Ok(response) if response.status().is_success() => response,
-                        _ => return Ok(AttachOutcome::Unreachable),
+                    let reply: ControlReply = match serde_json::from_slice(&reply_line) {
+                        Ok(reply) => reply,
+                        Err(_) => return Ok(AttachOutcome::Unreachable),
                     };
+                    if reply.version != CONTROL_PROTOCOL_VERSION
+                        || !matches!(reply.outcome, ControlOutcome::InspectorReady)
+                    {
+                        return Ok(AttachOutcome::Unreachable);
+                    }
                     on_connect();
-                    let mut buf = String::new();
-                    while let Some(frame) = response.body_mut().frame().await {
-                        let Ok(frame) = frame else {
-                            return Ok(AttachOutcome::Ended);
+                    loop {
+                        let line = match read_control_line(&mut stream).await {
+                            Ok(line) => line,
+                            Err(_) => return Ok(AttachOutcome::Ended),
                         };
-                        if let Some(chunk) = frame.data_ref() {
-                            buf.push_str(&String::from_utf8_lossy(chunk));
-                            let (lines, rest) = split_complete_lines(&buf);
-                            for line in &lines {
-                                on_line(line)?;
-                            }
-                            buf = rest.to_string();
+                        let envelope = match serde_json::from_slice::<InspectorLine>(&line) {
+                            Ok(envelope) => envelope,
+                            Err(_) => return Ok(AttachOutcome::Ended),
+                        };
+                        match envelope {
+                            InspectorLine::Record(record) => {
+                                let line = match serde_json::to_string(&record) {
+                                    Ok(line) => line,
+                                    Err(_) => return Ok(AttachOutcome::Ended),
+                                };
+                                on_line(&line)?;
+                            },
+                            InspectorLine::Dropped { count } => {
+                                let line = format!("# dropped {count} events");
+                                on_line(&line)?;
+                            },
                         }
                     }
-                    Ok(AttachOutcome::Ended)
                 },
             }
         })

@@ -11,7 +11,7 @@ use crate::workspace::Workspace;
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct UpArgs {
-    /// Wait until /v1/ready answers, failing with exit code 3 on timeout.
+    /// Wait until the daemon reports Ready, failing with exit code 3 on timeout.
     #[arg(long, value_name = "DURATION")]
     pub wait: Option<String>,
 }

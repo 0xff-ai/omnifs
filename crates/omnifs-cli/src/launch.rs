@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
-use omnifs_api::{API_MAJOR, API_MINOR, DaemonStatus, DaemonSubsystem};
+use omnifs_api::{DaemonStatus, DaemonSubsystem};
 use omnifs_workspace::creds::{CredentialStore, FileStore};
 use omnifs_workspace::layout::WorkspaceLayout;
 use omnifs_workspace::mounts::{Registry, Revision, materialize};
@@ -191,10 +191,9 @@ impl ExistingDaemon {
             .ok()
     }
 
-    /// True when the running daemon's API major or build version differs from
-    /// this CLI's, i.e. an upgrade boundary rather than a duplicate launch.
+    /// True when the running daemon's build version differs from this CLI's.
     fn version_skew(&self) -> bool {
-        self.status.api_major != API_MAJOR || self.status.version != env!("CARGO_PKG_VERSION")
+        self.status.version != env!("CARGO_PKG_VERSION")
     }
 
     fn can_apply(&self) -> bool {
@@ -219,19 +218,15 @@ impl std::fmt::Display for ExistingDaemon {
         writeln!(f, "{}", self.title())?;
         writeln!(
             f,
-            "  daemon  v{}  API {}.{}  pid {}  {}",
+            "  daemon  v{}  pid {}  {}",
             self.status.version,
-            self.status.api_major,
-            self.status.api_minor,
             self.status.pid,
             display_path(self.daemon_executable())
         )?;
         writeln!(
             f,
-            "  this    v{}  API {}.{}       {}",
+            "  this    v{}       {}",
             env!("CARGO_PKG_VERSION"),
-            API_MAJOR,
-            API_MINOR,
             display_path(&std::env::current_exe().unwrap_or_else(|_| PathBuf::new()))
         )?;
         writeln!(f)?;

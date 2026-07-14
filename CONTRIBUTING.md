@@ -43,7 +43,7 @@ CI builds Rust artifacts natively and uses Docker only to assemble the optional 
 
 `Dockerfile`'s `frontend-dev` stage is the contributor image path for `just dev` (built by `scripts/dev.ts`, same as `just frontend-image`). It runs `omnifs-thin fuse` (built by the `thin-builder` stage), which needs no engine runtime, Wasmtime, or provider bundle, so unlike the full `omnifs` CLI/daemon binary (`OMNIFS_PROVIDER_BUNDLE_DIR` embeds `just build providers`'s `target/omnifs-provider-store` output into that binary at compile time), the frontend image needs no provider-wasm build context at all. Release frontend image assembly uses `scripts/ci/build-frontend-image.sh`, which stages a prebuilt Linux `omnifs-thin` binary rather than compiling in Docker. Release CLI binaries embed the compressed provider bundle and unpack it into the host `OMNIFS_HOME/providers`; do not make the image the owner of `/root/.omnifs/providers`. Keep `just dev` working when changing Docker-related files.
 
-CI orchestration shells live in `scripts/ci/`, with `scripts/ci/common.sh` factoring out repo-root discovery. Npm version sync and OpenAPI generation are just recipes. The release flow is git-cliff plus the `release-pr.yml` coordinator (see `RELEASING.md`); the repo carries no Bun.
+CI orchestration shells live in `scripts/ci/`, with `scripts/ci/common.sh` factoring out repo-root discovery. Npm version sync is a just recipe. The release flow is git-cliff plus the `release-pr.yml` coordinator (see `RELEASING.md`); the repo carries no Bun.
 
 ## Validate through the live runtime
 

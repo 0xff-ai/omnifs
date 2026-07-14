@@ -169,9 +169,17 @@ impl App {
     }
 
     pub fn apply_line(&mut self, line: &str) {
-        match InspectorRecord::parse_line(line.trim()) {
-            Ok(record) => self.apply_record(&record),
-            Err(_) => self.dropped_events += 1,
+        let line = line.trim();
+        if let Ok(record) = InspectorRecord::parse_line(line) {
+            self.apply_record(&record);
+        } else if let Some(count) = line
+            .strip_prefix("# dropped ")
+            .and_then(|value| value.strip_suffix(" events"))
+            .and_then(|value| value.parse::<u64>().ok())
+        {
+            self.dropped_events = self.dropped_events.saturating_add(count);
+        } else {
+            self.dropped_events += 1;
         }
     }
 

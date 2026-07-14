@@ -61,12 +61,6 @@ impl InventoryReport {
             ),
             TableMeta::new("namespace", "/"),
         ];
-        if let Some(api) = self.inventory.daemon.api() {
-            metadata.push(TableMeta::new(
-                "API",
-                format!("{}.{}", api.major, api.minor),
-            ));
-        }
         let mut context = TableContext::new(
             "omnifs",
             omnifs_workspace::layout::WorkspaceLayout::display(&self.inventory.home),
@@ -304,7 +298,7 @@ mod tests {
     }
 
     #[test]
-    fn context_metadata_uses_namespace_identity_and_omits_unknown_api() {
+    fn context_metadata_uses_namespace_identity() {
         let rendered = report(DaemonState::Stopped, false)
             .render(false)
             .render_with(crate::ui::table::RenderOptions {
@@ -313,21 +307,18 @@ mod tests {
             });
         assert!(rendered.contains("Daemon stopped · namespace /"));
         assert!(!rendered.contains("Namespace namespace"));
-        assert!(!rendered.contains("API -"));
         assert!(rendered.contains("Fix  omnifs up"));
     }
 
     #[test]
-    fn context_api_and_actions_follow_observed_daemon_state() {
-        let mut healthy = report(DaemonState::Running, false);
-        healthy.inventory.daemon.status.as_mut().unwrap().api_major = 7;
+    fn context_actions_follow_observed_daemon_state() {
+        let healthy = report(DaemonState::Running, false);
         let healthy_text = healthy
             .render(false)
             .render_with(crate::ui::table::RenderOptions {
                 width: 120,
                 color: false,
             });
-        assert!(healthy_text.contains("API 8.0"));
         assert!(!healthy_text.contains("Fix  omnifs"));
 
         let unreachable = report(DaemonState::Unreachable, false)

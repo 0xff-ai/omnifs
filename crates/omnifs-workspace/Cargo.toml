@@ -26,12 +26,6 @@ wasmparser = { version = "0.247", default-features = false, features = ["std", "
 hex = { workspace = true }
 blake3 = { workspace = true }
 strum = { workspace = true }
-utoipa = { workspace = true, optional = true }
-
-[features]
-# Enables utoipa::ToSchema derives on the id types for crates that generate
-# OpenAPI schemas. Default off: the gated OpenAPI surface is opt-in.
-utoipa = ["dep:utoipa"]
 
 [dev-dependencies]
 tempfile = { workspace = true }

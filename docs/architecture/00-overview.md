@@ -77,7 +77,7 @@ A frontend (always out-of-process) consumes the same `omnifs_engine::Namespace` 
 
 ## Control plane
 
-There is one `omnifs` binary. The runtime loop lives behind hidden `omnifs daemon`. The CLI owns setup, credentials, lifecycle commands, and user-facing UX. The daemon owns runtime serving and exposes a REST API whose DTOs live in `omnifs-api`.
+There is one `omnifs` binary. The runtime loop lives behind hidden `omnifs daemon`. The CLI owns setup, credentials, lifecycle commands, and user-facing UX. The daemon owns runtime serving and exposes a typed local control protocol whose wire types live in `omnifs-api`.
 
 Mount desired state is the Git `HEAD` of `$OMNIFS_HOME/mounts`; no other workspace state is versioned. The CLI writes specs through `mounts::Registry`, records desired-state commits through `mounts::Repository`, and applies one complete revision through `omnifs up` or its exact `apply` alias. The daemon receives a revision-named immutable snapshot at process start, loads it completely before readiness, and exposes no mount mutation or reconcile API.
 

@@ -30,14 +30,6 @@ tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 reqwest = { workspace = true }
-# Unix-socket control transport for the host-native daemon. reqwest speaks only
-# TCP, so the UDS path uses hyper + hyperlocal directly.
-hyper = { version = "1", features = ["client", "http1"] }
-hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "tokio"] }
-http-body-util = "0.1"
-hyperlocal = "0.9"
-http = { workspace = true }
-bytes = "1"
 hex = { workspace = true }
 blake3 = { workspace = true }
 sha2 = { workspace = true }

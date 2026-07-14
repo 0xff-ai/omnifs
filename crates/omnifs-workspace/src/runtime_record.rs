@@ -23,7 +23,7 @@ use crate::mounts::Revision;
 /// reported rather than silently reinterpreted.
 pub const RUNTIME_RECORD_VERSION: u32 = 3;
 
-/// How a client reaches the daemon's control API. The daemon always serves a
+/// How a client reaches the daemon's control socket. The daemon always serves a
 /// Unix domain socket; kept as a named type (rather than a bare path) for the
 /// same reason [`RecordedBackend`] stays an enum: the on-disk schema's `kind`
 /// tag is a stable wire contract, not a Rust-only convenience.

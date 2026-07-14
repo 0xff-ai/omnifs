@@ -1,5 +1,5 @@
-//! The TCP namespace-attach transport: `--attach-tcp` and
-//! `POST /v1/frontend/attach-target`.
+//! The TCP namespace-attach transport: `--attach-tcp` and the typed local
+//! control operation that ensures the VFS TCP target.
 //!
 //! Both entry points converge on one binding. No frontend runner is launched,
 //! so no OS mount is served and this suite needs no acceptance gate.
@@ -11,7 +11,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
+use omnifs_api::{ControlOperation, ControlOutcome};
 use omnifs_itest::live::omnifs_bin;
+use omnifs_itest::live::{control_ready, control_request};
 use tempfile::TempDir;
 
 /// A host-native daemon with no frontend runner. It reconciles an empty mount
@@ -60,19 +62,14 @@ fn spawn_namespace_only(extra_args: &[&str]) -> NamespaceOnlyDaemon {
     NamespaceOnlyDaemon { child, home }
 }
 
-/// Poll `/v1/ready` over the Unix control socket until it succeeds. Ready means
+/// Poll the typed Ready operation over the Unix control socket until it succeeds. Ready means
 /// mounts reconciled and every requested surface (including a startup
 /// `--attach-tcp` bind) is up, so once this returns, `daemon.json` reflects
 /// every startup flag.
 fn wait_ready(ctrl_socket: &Path, deadline: Duration) {
     let start = Instant::now();
     loop {
-        let ok = Command::new("curl")
-            .args(["-fs", "-o", "/dev/null", "--unix-socket"])
-            .arg(ctrl_socket)
-            .arg("http://localhost/v1/ready")
-            .status()
-            .is_ok_and(|status| status.success());
+        let ok = control_ready(ctrl_socket);
         if ok {
             return;
         }
@@ -85,26 +82,19 @@ fn wait_ready(ctrl_socket: &Path, deadline: Duration) {
     }
 }
 
-/// `POST /v1/frontend/attach-target` over the Unix control socket, with an optional
-/// JSON body, returning the parsed response. Panics on a non-2xx status (the
-/// namespace-not-ready 503 included) since every call in this suite happens
-/// after `wait_ready`.
+/// Ensure the VFS TCP target over the typed local control socket, with an
+/// optional JSON-shaped bind address retained for the existing fixture calls.
 fn post_frontend_attach_target(ctrl_socket: &Path, body: Option<&str>) -> serde_json::Value {
-    let mut cmd = Command::new("curl");
-    cmd.args(["-fsS", "--unix-socket"]).arg(ctrl_socket);
-    if let Some(body) = body {
-        cmd.args(["-H", "content-type: application/json", "-d", body]);
-    } else {
-        cmd.args(["-X", "POST"]);
+    let bind_ip = body
+        .and_then(|body| serde_json::from_str::<serde_json::Value>(body).ok())
+        .and_then(|body| body.get("bind_ip").and_then(serde_json::Value::as_str))
+        .map(|ip| ip.parse().expect("bind_ip is IPv4"));
+    let reply = control_request(ctrl_socket, ControlOperation::AttachTcp { bind_ip })
+        .expect("attach target control reply");
+    match reply.outcome {
+        ControlOutcome::AttachTcp(target) => serde_json::to_value(target).unwrap(),
+        other => panic!("unexpected attach target reply: {other:?}"),
     }
-    cmd.arg("http://localhost/v1/frontend/attach-target");
-    let output = cmd.output().expect("spawn curl");
-    assert!(
-        output.status.success(),
-        "POST /v1/frontend/attach-target failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    serde_json::from_slice(&output.stdout).expect("attach-target response is JSON")
 }
 
 fn assert_looks_like_a_token(token: &str) {

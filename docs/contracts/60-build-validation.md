@@ -1,11 +1,11 @@
 # Build and validation contracts
 
 Status: current-contract
-Owns: local and CI gates, provider build artifacts, generated OpenAPI/schema files, live runtime validation, and documentation checks.
+Owns: local and CI gates, provider build artifacts, generated schema files, live runtime validation, and documentation checks.
 
 ## Read when
 
-Read this before touching CI, `just` recipes, provider artifact generation, wasi-sdk setup, OpenAPI/schema generation, docs checks, runtime smoke paths, or validation guidance.
+Read this before touching CI, `just` recipes, provider artifact generation, wasi-sdk setup, schema generation, docs checks, runtime smoke paths, or validation guidance.
 
 ## Rules
 
@@ -19,13 +19,13 @@ Provider runtime changes must validate both binding surfaces separately: `omnifs
 
 Provider component validation must enable the component-model async validation features used by provider exports.
 
-### Generated OpenAPI and schemas
+### Generated schemas
 
-OpenAPI is generated from daemon implementation, and provider manifest schema is generated from provider model types. Keep generated artifacts synchronized with code.
+The provider manifest schema is generated from provider model types. The local control protocol is handwritten typed wire code in `omnifs-api`, so it has no generated control-plane artifact. Keep the provider schema synchronized with its source model.
 
-Run `just openapi` after daemon API changes. Run `just schema` after provider manifest schema changes. Keep generated files checked in when their source model changes.
+Run `just schema` after provider manifest schema changes. Keep the generated provider schema checked in when its source model changes.
 
-The current control API is 6.0. Its checked-in schema has plural frontend locations and installed provider artifacts: `DaemonStatus` and `StopReport` have no singular mount-point field, `ProviderSummary` has no latest pointer, and `FrontendInfo.mount_point` remains the per-frontend wire field. After generation, run the daemon's `checked_in_openapi_matches_implementation` test and inspect the diff rather than editing JSON by hand.
+The control protocol has one current version in every request and reply envelope. `DaemonStatus` retains operational nested types consumed by Inventory, and `FrontendInfo.mount_point` remains the per-frontend wire field. Protocol tests exercise the typed request/reply shapes directly.
 
 ### Live runtime validation
 
@@ -80,8 +80,8 @@ This lane can **never** run in GitHub-hosted CI: krunkit boots a libkrun microVM
 - Treat missing provider WASM in a fresh worktree as a product regression.
 - Use `cargo check --workspace --all-targets` as a host gate.
 - Treat host-target provider checks as proof the metadata section was injected; only `just build providers` runs the harvester that injects it.
-- Hand-edit generated OpenAPI or schema files as the primary fix.
-- Change API/model code without regenerating the corresponding checked-in artifact and running its focused parity test.
+- Hand-edit generated schema files as the primary fix.
+- Change provider model code without regenerating the corresponding checked-in schema and running its focused schema test.
 - Validate only the intended leaf path when parent traversal changed.
 - Treat Rust type-checking as enough for `Router::compile` behavior.
 - Ignore runtime logs when the mount returns `Input/output error`.
@@ -103,8 +103,7 @@ This lane can **never** run in GitHub-hosted CI: krunkit boots a libkrun microVM
 - `npm/package.json`
 - `scripts/ci/check-doc-links.sh`
 - `scripts/ci/check-doc-contracts.sh`
-- `crates/omnifs-daemon/src/bin/openapi.rs`
-- `crates/omnifs-api/openapi/daemon.json`
+- `crates/omnifs-api/src/control.rs`
 - `crates/omnifs-workspace/schema/omnifs.provider.schema.json`
 - `crates/omnifs-itest/src/lib.rs`
 - `crates/omnifs-itest/src/matrix.rs`
@@ -135,7 +134,6 @@ This lane can **never** run in GitHub-hosted CI: krunkit boots a libkrun microVM
 - `just test host`
 - `just refresh`
 - `just schema`
-- `just openapi`
 - `just docs-check`
 - `just krunkit-conformance` (macOS Apple Silicon only, local-only, never CI: see "Krunkit conformance lane" above)
 

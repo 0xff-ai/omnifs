@@ -4,8 +4,8 @@ use anyhow::Context as _;
 
 use crate::app::DaemonArgs;
 use omnifs_api::{
-    API_MAJOR, API_MINOR, CredentialHealth, DaemonBackend, DaemonHealth, DaemonStatus,
-    DaemonSubsystem, FrontendInfo, HealthState, MountInfo, SubsystemHealth,
+    CredentialHealth, DaemonBackend, DaemonHealth, DaemonStatus, DaemonSubsystem, FrontendInfo,
+    HealthState, MountInfo, SubsystemHealth,
 };
 use omnifs_engine::HostContext;
 use omnifs_workspace::layout::{Daemon, Workspace, WorkspaceLayout};
@@ -24,7 +24,7 @@ pub(crate) struct DaemonContext {
     instance_id: String,
     /// `--attach-tcp <port>`: bind a TCP namespace attach listener eagerly at
     /// start (`0` = ephemeral). `None` when the flag was not passed; a TCP
-    /// attach listener can still be bound later via `POST /v1/frontend/attach-target`.
+    /// attach listener can still be bound later through the control socket.
     attach_tcp: Option<u16>,
     process: ProcessInfo,
 }
@@ -183,10 +183,6 @@ impl DaemonContext {
         &self.layout.config_dir
     }
 
-    pub(crate) fn providers_dir(&self) -> &Path {
-        &self.layout.providers_dir
-    }
-
     /// This daemon start's instance id, reported in status, the runtime record,
     /// and the Omnifs VFS wire protocol handshake.
     pub(crate) fn instance_id(&self) -> &str {
@@ -209,8 +205,6 @@ impl DaemonContext {
         let health = self.health(attach_serving, &frontends, &mounts);
         DaemonStatus {
             version: env!("CARGO_PKG_VERSION").to_string(),
-            api_major: API_MAJOR,
-            api_minor: API_MINOR,
             pid: self.process.pid,
             instance_id: self.instance_id.clone(),
             executable: self.process.executable.clone(),
@@ -237,7 +231,7 @@ impl DaemonContext {
                 DaemonSubsystem::Control,
                 HealthState::Healthy,
                 format!(
-                    "control API serving on {}",
+                    "control socket serving on {}",
                     self.layout.control_socket().display()
                 ),
             ),

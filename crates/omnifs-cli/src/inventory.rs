@@ -69,12 +69,6 @@ pub(crate) enum RunnerState {
     Failed,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub(crate) struct ApiVersion {
-    pub(crate) major: u16,
-    pub(crate) minor: u16,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum DaemonState {
     Running,
@@ -114,13 +108,6 @@ impl DaemonObservation {
         })
     }
 
-    pub(crate) fn api(&self) -> Option<ApiVersion> {
-        self.status.as_ref().map(|status| ApiVersion {
-            major: status.api_major,
-            minor: status.api_minor,
-        })
-    }
-
     #[cfg(test)]
     pub(crate) fn test(state: DaemonState) -> Self {
         let probe = match state {
@@ -137,8 +124,6 @@ impl DaemonObservation {
             DaemonState::Stopped | DaemonState::Unreachable => None,
             _ => Some(DaemonStatus {
                 version: "test".to_owned(),
-                api_major: 1,
-                api_minor: 0,
                 pid: 1,
                 instance_id: "test-instance".to_owned(),
                 executable: "/bin/omnifs".into(),
@@ -478,7 +463,7 @@ impl Inventory {
         let applied_revision = repository.applied()?;
         let catalog = workspace.catalog();
         let credentials = FileStore::new(&layout.credentials_file);
-        let daemon_probe = workspace.daemon().compatible_status_optional().await;
+        let daemon_probe = workspace.daemon().status_optional_checked().await;
         let daemon_status = daemon_probe.as_ref().ok().and_then(Option::as_ref);
         let runtime = RuntimeRecord::read(&layout.runtime_record_file())
             .ok()
@@ -1252,8 +1237,6 @@ mod tests {
         ] {
             let status = DaemonStatus {
                 version: "test".into(),
-                api_major: 1,
-                api_minor: 0,
                 pid: 1,
                 instance_id: "instance".into(),
                 executable: "/bin/omnifs".into(),

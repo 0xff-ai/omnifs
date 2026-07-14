@@ -55,8 +55,8 @@ Allowed, but never as a side effect. Surface the tradeoff and get sign-off in th
 | Provider SDK, provider macros, objects, routes, WIT, metadata, provider config, endpoints | `docs/contracts/20-provider-sdk.md` |
 | Projection tree, cache, attrs, listing, lookup, traversal, learned sizes, live growth | `docs/contracts/30-projection-tree.md` |
 | FUSE, NFS, mount protocol behavior, frontend state, protocol replies | `docs/contracts/40-frontends.md` |
-| CLI, daemon, REST API, runtime modes, workspace layout, mount delivery, dev home | `docs/contracts/50-control-plane.md` |
-| CI, validation commands, provider artifacts, generated OpenAPI/schema, docs checks | `docs/contracts/60-build-validation.md` |
+| CLI, daemon, typed local control protocol, runtime modes, workspace layout, mount delivery, dev home | `docs/contracts/50-control-plane.md` |
+| CI, validation commands, provider artifacts, generated schema, docs checks | `docs/contracts/60-build-validation.md` |
 | System model or rationale | `docs/architecture/00-overview.md` |
 
 ## Load architecture detail when needed
@@ -113,8 +113,8 @@ Allowed, but never as a side effect. Surface the tradeoff and get sign-off in th
 ## Current shape
 
 - A single `omnifs` binary is both CLI and daemon. The runtime loop lives behind hidden `omnifs daemon`.
-- The CLI owns setup, credentials, lifecycle, and user-facing commands. It talks to the daemon through the REST API and the on-disk workspace under `OMNIFS_HOME`.
-- The REST API schema lives in `omnifs-api`. Credential material is never transmitted on the wire; credential health is non-secret operational state.
+- The CLI owns setup, credentials, lifecycle, and user-facing commands. It talks to the daemon through the typed local control protocol and the on-disk workspace under `OMNIFS_HOME`.
+- The control protocol wire types live in `omnifs-api`. Credential material is never transmitted on the wire; credential health is non-secret operational state.
 - Mount specs are one file per mount under `mounts/`, and a spec file's stem is its mount name. Only this directory is a local Git repository: `HEAD` is desired state and `refs/omnifs/applied` is the last revision that reached daemon readiness. `mounts::Registry` owns spec parsing, naming, and atomic writes; `mounts::Repository` owns the shared lock, Git operations, revision validation, and immutable snapshots under cache storage. The daemon receives one snapshot path and revision at startup and never invokes Git or reads the mutable worktree.
 - Provider installation and mount creation are separate. `provider add` retains artifacts only, and create-only `mount add` chooses an exact initial pin. Existing pins change only through an explicit desired-spec edit; `omnifs up` and its exact `apply` alias validate and apply the committed pin without choosing another artifact. Provider state is derived from exact reverse pins as `pinned`, `installed`, or `missing`, never from version or install recency.
 - The daemon is a pure namespace server and control-plane owner; `omnifs_vfs_wire::VfsServer` owns the fixed local, requested TCP/vsock listeners, attach tokens, listener and connection tasks, readiness, and live attachment observation. The daemon never builds, mounts, supervises, or unmounts a renderer and has no `--frontend` or named attach-socket flags. Every filesystem frontend is a separate slim `omnifs-thin` runner, selected with `fuse` or `nfs`. It contains protocol mechanics only: no engine runtime, no Wasmtime, no provider bundle, no daemon control plane. It attaches over the Omnifs VFS wire protocol.
@@ -192,7 +192,7 @@ Use the right wider gate for the change:
 - **Provider or broad-surface change.** Run the affected provider, host, generated-artifact, and docs gates explicitly.
 - **Mount, provider, clone, traversal, or runtime behavior.** Rust checks are not enough. Validate through the live runtime with `just dev -y`, `omnifs status`, and the smoke path in `CONTRIBUTING.md`.
 - **Route-surface change.** Run the host integration path that initializes and compiles provider routers, especially `all_providers_initialize_and_compile`.
-- **Control API change.** Run `just openapi` to regenerate the checked-in spec, then run the daemon OpenAPI parity test.
+- **Control protocol change.** Run the focused typed request/reply and lifecycle tests for the daemon, CLI, Inspector, and existing control-plane fixtures.
 - **Provider manifest schema change.** Run `just schema` and keep the checked-in schema synchronized.
 - **Documentation-heavy change.** Run `just docs-check` locally. It is not a CI gate and does not block a merge, so run it yourself when you touch `docs/`.
 
