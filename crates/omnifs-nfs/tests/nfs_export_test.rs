@@ -241,7 +241,7 @@ fn omnifs_export_ranged_read_contract() {
 
     let ranged = export.lookup(hello, "ranged").expect("ranged lookup");
     assert_eq!(export.attr(ranged).expect("ranged attr").size, 26);
-    let opened = export.open_state(7, ranged, 1, 1).expect("ranged open");
+    let opened = export.open_state(ranged, 1, 1).expect("ranged open");
     let chunk = export
         .read_state(opened.stateid, 2, 4)
         .expect("ranged chunk");
@@ -261,9 +261,7 @@ fn omnifs_export_ranged_read_contract() {
         export.attr(large).expect("large ranged attr").size,
         OLD_OPEN_MATERIALIZE_LIMIT_BYTES + 1
     );
-    let opened = export
-        .open_state(7, large, 1, 1)
-        .expect("large ranged open");
+    let opened = export.open_state(large, 1, 1).expect("large ranged open");
     assert_eq!(opened.attr.size, OLD_OPEN_MATERIALIZE_LIMIT_BYTES + 1);
     let head = export
         .read_state(opened.stateid, 0, 4)
@@ -284,7 +282,7 @@ fn omnifs_export_ranged_read_contract() {
         .expect("unknown ranged lookup");
     assert_eq!(export.attr(unknown).expect("pre-open attr").size, 1);
     let opened = export
-        .open_state(7, unknown, 1, 1)
+        .open_state(unknown, 1, 1)
         .expect("unknown ranged open");
     let tail = export
         .read_state(opened.stateid, 8, 32)
@@ -387,7 +385,7 @@ fn omnifs_export_invalidates_path_state_and_open_cache() {
         .expect("top-level mount lookup");
     let scoped = export.lookup(test_root, "scoped").expect("scoped lookup");
     let item = export.lookup(scoped, "item").expect("item lookup");
-    let opened = export.open_state(7, item, 1, 1).expect("item open");
+    let opened = export.open_state(item, 1, 1).expect("item open");
     let read = export
         .read_state(opened.stateid, 0, 32)
         .expect("open-state read before invalidation");

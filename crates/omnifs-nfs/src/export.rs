@@ -392,19 +392,17 @@ fn lease_duration() -> Duration {
 }
 
 pub trait ReadOnlyExport: Send + Sync {
+    fn generation(&self) -> u64;
+    fn set_clientid(&self, verifier: [u8; 8], owner: Vec<u8>) -> (u64, [u8; 8]);
+    fn confirm_client(&self, clientid: u64, verifier: &[u8]) -> StatusResult<()>;
+    fn client_confirmed(&self, clientid: u64) -> bool;
     fn root(&self) -> u64;
     fn attr(&self, id: u64) -> StatusResult<Attr>;
     fn lookup(&self, parent: u64, name: &str) -> StatusResult<u64>;
     fn readdir(&self, id: u64) -> StatusResult<DirListing>;
     fn read(&self, id: u64) -> StatusResult<Vec<u8>>;
     fn readlink(&self, id: u64) -> StatusResult<Vec<u8>>;
-    fn open_state(
-        &self,
-        generation: u64,
-        id: u64,
-        clientid: u64,
-        access: u32,
-    ) -> StatusResult<OpenResult>;
+    fn open_state(&self, id: u64, clientid: u64, access: u32) -> StatusResult<OpenResult>;
     fn validate_state(&self, stateid: StateId) -> StatusResult<()>;
     fn read_state(&self, stateid: StateId, offset: u64, count: u32) -> StatusResult<OpenRead>;
     fn close_state(&self, stateid: StateId) -> StatusResult<StateId>;

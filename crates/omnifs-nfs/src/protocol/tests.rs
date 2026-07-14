@@ -14,7 +14,7 @@ use crate::protocol::consts::{
     OP_READLINK, OP_SECINFO,
 };
 use crate::protocol::filehandle::{client_id, decode_file_handle, file_handle, now_sec};
-use crate::protocol::ops::handle_readdir;
+use crate::protocol::ops::readdir;
 use crate::protocol::xdr::{XdrError, XdrReader, XdrWriter};
 use crate::trace::Trace;
 use std::collections::BTreeMap;
@@ -37,6 +37,7 @@ enum StaticData {
 
 struct StaticExport {
     nodes: BTreeMap<u64, StaticNode>,
+    clients: ClientTable,
     opens: OpenTable<Vec<u8>>,
     exhaustive_listings: bool,
 }
@@ -95,6 +96,7 @@ impl StaticExport {
         );
         Self {
             nodes,
+            clients: ClientTable::with_confirmed_default(TEST_GENERATION),
             opens: OpenTable::new(),
             exhaustive_listings: true,
         }
@@ -115,6 +117,22 @@ impl StaticExport {
 }
 
 impl ReadOnlyExport for StaticExport {
+    fn generation(&self) -> u64 {
+        TEST_GENERATION
+    }
+
+    fn set_clientid(&self, verifier: [u8; 8], owner: Vec<u8>) -> (u64, [u8; 8]) {
+        self.clients.set_clientid(verifier, owner)
+    }
+
+    fn confirm_client(&self, clientid: u64, verifier: &[u8]) -> StatusResult<()> {
+        self.clients.confirm(clientid, verifier)
+    }
+
+    fn client_confirmed(&self, clientid: u64) -> bool {
+        self.clients.is_confirmed(clientid)
+    }
+
     fn root(&self) -> u64 {
         1
     }
@@ -178,17 +196,11 @@ impl ReadOnlyExport for StaticExport {
         }
     }
 
-    fn open_state(
-        &self,
-        generation: u64,
-        id: u64,
-        clientid: u64,
-        access: u32,
-    ) -> StatusResult<OpenResult> {
+    fn open_state(&self, id: u64, clientid: u64, access: u32) -> StatusResult<OpenResult> {
         let data = self.read(id)?;
         let attr = self.attr(id)?;
         let stateid = self.opens.open(OpenSeed {
-            generation,
+            generation: TEST_GENERATION,
             inode: id,
             clientid,
             access,
@@ -342,29 +354,9 @@ fn decode_readdir_result(result: &[u8]) -> ReaddirResult {
 }
 
 fn compound_status(export: &dyn ReadOnlyExport, ops: &[Vec<u8>]) -> u32 {
-    compound_status_with_clients(
-        export,
-        &ClientTable::with_confirmed_default(TEST_GENERATION),
-        ops,
-    )
-}
-
-fn compound_status_with_clients(
-    export: &dyn ReadOnlyExport,
-    clients: &ClientTable,
-    ops: &[Vec<u8>],
-) -> u32 {
     let payload = compound_payload(ops);
     let mut reader = XdrReader::new(&payload);
-    let result = handle_compound(
-        &mut reader,
-        TEST_GENERATION,
-        clients,
-        export,
-        1,
-        &Trace::new(None).unwrap(),
-    )
-    .unwrap();
+    let result = handle_compound(&mut reader, export, 1, &Trace::new(None).unwrap()).unwrap();
     let mut reader = XdrReader::new(&result);
     reader.u32().unwrap()
 }
@@ -377,16 +369,7 @@ fn compound_result_with_minor(export: &dyn ReadOnlyExport, minor: u32, ops: &[Ve
     let mut payload = compound_payload(ops);
     payload[8..12].copy_from_slice(&minor.to_be_bytes());
     let mut reader = XdrReader::new(&payload);
-    let clients = ClientTable::with_confirmed_default(TEST_GENERATION);
-    handle_compound(
-        &mut reader,
-        TEST_GENERATION,
-        &clients,
-        export,
-        1,
-        &Trace::new(None).unwrap(),
-    )
-    .unwrap()
+    handle_compound(&mut reader, export, 1, &Trace::new(None).unwrap()).unwrap()
 }
 
 #[test]
@@ -404,17 +387,8 @@ fn open_create_fattr_with_malformed_bitmap_returns_decode_error() {
     op.u32(u32::MAX);
     let payload = compound_payload(&[op.into_inner()]);
     let mut reader = XdrReader::new(&payload);
-    let clients = ClientTable::with_confirmed_default(TEST_GENERATION);
-
-    let error = handle_compound(
-        &mut reader,
-        TEST_GENERATION,
-        &clients,
-        &export,
-        1,
-        &Trace::new(None).unwrap(),
-    )
-    .expect_err("malformed OPEN create fattr should preserve its XDR decode error");
+    let error = handle_compound(&mut reader, &export, 1, &Trace::new(None).unwrap())
+        .expect_err("malformed OPEN create fattr should preserve its XDR decode error");
 
     assert!(matches!(error, XdrError::Underflow));
 }
@@ -451,9 +425,8 @@ fn synthetic_protocol_edge_cases() {
     );
     assert_eq!(status, NFS4_OK);
 
-    let (status, _result) = handle_readdir(
+    let (status, _result) = readdir(
         &export,
-        7,
         Some(export.root()),
         0,
         &[0xcc; 8],
@@ -468,9 +441,8 @@ fn synthetic_protocol_edge_cases() {
     );
     assert_eq!(status, NFS4ERR_NOTDIR);
 
-    let (status, _result) = handle_readdir(
+    let (status, _result) = readdir(
         &export,
-        7,
         Some(export.root()),
         5,
         &[0xbb; 8],
@@ -536,9 +508,8 @@ fn synthetic_lookup_rejects_invalid_components() {
 #[test]
 fn synthetic_readdir_respects_maxcount() {
     let export = StaticExport::fixture();
-    let (status, result) = handle_readdir(
+    let (status, result) = readdir(
         &export,
-        7,
         Some(export.root()),
         0,
         &[0; 8],
@@ -555,9 +526,8 @@ fn synthetic_readdir_respects_maxcount() {
 #[test]
 fn synthetic_readdir_uses_snapshot_verifier_for_continuation() {
     let export = StaticExport::fixture();
-    let (status, first) = handle_readdir(
+    let (status, first) = readdir(
         &export,
-        7,
         Some(export.root()),
         0,
         &[0xaa; 8],
@@ -569,9 +539,8 @@ fn synthetic_readdir_uses_snapshot_verifier_for_continuation() {
     assert_eq!(first.entries.len(), 1);
     assert_eq!(first.entries[0].1, "README.txt");
 
-    let (status, second) = handle_readdir(
+    let (status, second) = readdir(
         &export,
-        7,
         Some(export.root()),
         first.entries[0].0,
         &first.verifier,
@@ -592,9 +561,8 @@ fn synthetic_readdir_non_exhaustive_listing_returns_known_snapshot() {
     // listing so shell tools can still traverse known entries; explicit LOOKUP
     // remains responsible for named dynamic children.
     let export = StaticExport::fixture_non_exhaustive();
-    let (status, result) = handle_readdir(
+    let (status, result) = readdir(
         &export,
-        7,
         Some(export.root()),
         0,
         &[0; 8],
@@ -618,6 +586,22 @@ fn synthetic_readdir_can_return_delay() {
     struct DelayExport(StaticExport);
 
     impl ReadOnlyExport for DelayExport {
+        fn generation(&self) -> u64 {
+            self.0.generation()
+        }
+
+        fn set_clientid(&self, verifier: [u8; 8], owner: Vec<u8>) -> (u64, [u8; 8]) {
+            self.0.set_clientid(verifier, owner)
+        }
+
+        fn confirm_client(&self, clientid: u64, verifier: &[u8]) -> StatusResult<()> {
+            self.0.confirm_client(clientid, verifier)
+        }
+
+        fn client_confirmed(&self, clientid: u64) -> bool {
+            self.0.client_confirmed(clientid)
+        }
+
         fn root(&self) -> u64 {
             self.0.root()
         }
@@ -642,14 +626,8 @@ fn synthetic_readdir_can_return_delay() {
             self.0.readlink(id)
         }
 
-        fn open_state(
-            &self,
-            generation: u64,
-            id: u64,
-            clientid: u64,
-            access: u32,
-        ) -> StatusResult<OpenResult> {
-            self.0.open_state(generation, id, clientid, access)
+        fn open_state(&self, id: u64, clientid: u64, access: u32) -> StatusResult<OpenResult> {
+            self.0.open_state(id, clientid, access)
         }
 
         fn validate_state(&self, stateid: StateId) -> StatusResult<()> {
@@ -679,9 +657,8 @@ fn synthetic_readdir_can_return_delay() {
 #[test]
 fn synthetic_readdir_sorts_entries_before_assigning_cookies() {
     let export = StaticExport::fixture_with_root_children(vec![3, 2]);
-    let (status, result) = handle_readdir(
+    let (status, result) = readdir(
         &export,
-        7,
         Some(export.root()),
         0,
         &[0; 8],
@@ -702,9 +679,8 @@ fn synthetic_readdir_sorts_entries_before_assigning_cookies() {
 #[test]
 fn synthetic_readdir_maxcount_exact_boundary_includes_trailer() {
     let export = StaticExport::fixture_with_root_children(vec![2]);
-    let (status, full) = handle_readdir(
+    let (status, full) = readdir(
         &export,
-        7,
         Some(export.root()),
         0,
         &[0; 8],
@@ -714,9 +690,8 @@ fn synthetic_readdir_maxcount_exact_boundary_includes_trailer() {
     assert_eq!(status, NFS4_OK);
     let maxcount = u32::try_from(full.len() - 8).expect("test READDIR result body fits u32");
 
-    let (status, exact) = handle_readdir(
+    let (status, exact) = readdir(
         &export,
-        7,
         Some(export.root()),
         0,
         &[0; 8],
@@ -726,9 +701,8 @@ fn synthetic_readdir_maxcount_exact_boundary_includes_trailer() {
     assert_eq!(status, NFS4_OK);
     assert_eq!(exact.len(), full.len());
 
-    let (status, _too_small) = handle_readdir(
+    let (status, _too_small) = readdir(
         &export,
-        7,
         Some(export.root()),
         0,
         &[0; 8],
@@ -749,10 +723,10 @@ fn synthetic_open_rejections() {
         assert_eq!(status, NFS4ERR_INVAL, "share_access={share_access}");
     }
 
-    let clients = ClientTable::new(TEST_GENERATION);
-    let status = compound_status_with_clients(
-        &export,
-        &clients,
+    let mut stale_client_export = StaticExport::fixture();
+    stale_client_export.clients = ClientTable::new(TEST_GENERATION);
+    let status = compound_status(
+        &stale_client_export,
         &[op_only(OP_PUTROOTFH), op_open("README.txt", 1)],
     );
     assert_eq!(status, NFS4ERR_STALE_CLIENTID);

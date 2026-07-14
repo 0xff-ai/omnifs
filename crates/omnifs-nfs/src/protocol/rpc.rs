@@ -1,5 +1,4 @@
 use crate::export::ReadOnlyExport;
-use crate::protocol::client::ClientTable;
 use crate::protocol::compound::handle_compound;
 use crate::protocol::consts::{
     AUTH_BADCRED, AUTH_ERROR, AUTH_NONE, AUTH_SYS, MAX_RPC_RECORD_BYTES, NFS_PROGRAM,
@@ -88,8 +87,6 @@ pub(crate) fn write_rpc_record(stream: &mut TcpStream, payload: &[u8]) -> io::Re
 
 pub(crate) fn handle_rpc_record(
     record: &[u8],
-    generation: u64,
-    clients: &ClientTable,
     export: &dyn ReadOnlyExport,
     trace: &Trace,
 ) -> Vec<u8> {
@@ -150,7 +147,7 @@ pub(crate) fn handle_rpc_record(
         return rpc_reply_accepted(xid, AcceptStat::ProcUnavailable, &[]);
     }
 
-    match handle_compound(&mut reader, generation, clients, export, xid, trace) {
+    match handle_compound(&mut reader, export, xid, trace) {
         Ok(compound) => rpc_reply_accepted(xid, AcceptStat::Success, &compound),
         Err(error) => {
             trace.line(&format!(
@@ -248,11 +245,26 @@ mod tests {
     use crate::export::{
         Attr, DirListing, OpenRead, OpenResult, ReadOnlyExport, StateId, Status, StatusResult,
     };
-    use crate::protocol::client::ClientTable;
     use crate::protocol::xdr::XdrWriter;
 
     struct NullExport;
     impl ReadOnlyExport for NullExport {
+        fn generation(&self) -> u64 {
+            0
+        }
+
+        fn set_clientid(&self, _verifier: [u8; 8], _owner: Vec<u8>) -> (u64, [u8; 8]) {
+            (0, [0; 8])
+        }
+
+        fn confirm_client(&self, _clientid: u64, _verifier: &[u8]) -> StatusResult<()> {
+            Err(Status::StaleClientId)
+        }
+
+        fn client_confirmed(&self, _clientid: u64) -> bool {
+            false
+        }
+
         fn root(&self) -> u64 {
             0
         }
@@ -271,13 +283,7 @@ mod tests {
         fn readlink(&self, _id: u64) -> StatusResult<Vec<u8>> {
             Err(Status::Invalid)
         }
-        fn open_state(
-            &self,
-            _generation: u64,
-            _id: u64,
-            _clientid: u64,
-            _access: u32,
-        ) -> StatusResult<OpenResult> {
+        fn open_state(&self, _id: u64, _clientid: u64, _access: u32) -> StatusResult<OpenResult> {
             Err(Status::Invalid)
         }
         fn validate_state(&self, _stateid: StateId) -> StatusResult<()> {
@@ -301,10 +307,6 @@ mod tests {
 
     fn trace() -> Trace {
         Trace::new(None).unwrap()
-    }
-
-    fn clients() -> ClientTable {
-        ClientTable::with_confirmed_default(0)
     }
 
     fn build_rpc_call(
@@ -364,7 +366,7 @@ mod tests {
             (3, 999_999, NFS_VERSION_4, PROC_NULL, RPC_PROG_UNAVAIL),
         ] {
             let call = build_rpc_call(xid, program, version, proc, &[]);
-            let reply = handle_rpc_record(&call, 0, &clients(), &export, &trace());
+            let reply = handle_rpc_record(&call, &export, &trace());
             assert_eq!(
                 reply_accept_stat(&reply),
                 Some(expected),
@@ -377,7 +379,7 @@ mod tests {
     fn wrong_nfs_version_returns_prog_mismatch_with_range() {
         let export = NullExport;
         let call = build_rpc_call(4, NFS_PROGRAM, 3, PROC_NULL, &[]);
-        let reply = handle_rpc_record(&call, 0, &clients(), &export, &trace());
+        let reply = handle_rpc_record(&call, &export, &trace());
         assert_eq!(reply_accept_stat(&reply), Some(RPC_PROG_MISMATCH));
         // Body should contain low=4, high=4.
         let mut r = XdrReader::new(&reply);
@@ -406,7 +408,7 @@ mod tests {
         w.u32(AUTH_NONE);
         w.u32(0);
         let call = w.into_inner();
-        let reply = handle_rpc_record(&call, 0, &clients(), &export, &trace());
+        let reply = handle_rpc_record(&call, &export, &trace());
         assert_eq!(reply_reject_stat(&reply), Some(AUTH_ERROR));
         // Body is auth_stat = AUTH_BADCRED.
         let mut r = XdrReader::new(&reply);
@@ -432,7 +434,7 @@ mod tests {
         w.u32(AUTH_NONE);
         w.u32(0);
         let call = w.into_inner();
-        let reply = handle_rpc_record(&call, 0, &clients(), &export, &trace());
+        let reply = handle_rpc_record(&call, &export, &trace());
         assert_eq!(reply_reject_stat(&reply), Some(RPC_MISMATCH));
         let mut r = XdrReader::new(&reply);
         r.u32().unwrap(); // xid
@@ -452,7 +454,7 @@ mod tests {
             w.u32(RPC_CALL);
             w.into_inner()
         };
-        let reply = handle_rpc_record(&short, 0, &clients(), &export, &trace());
+        let reply = handle_rpc_record(&short, &export, &trace());
         assert_eq!(reply_accept_stat(&reply), Some(RPC_GARBAGE_ARGS));
 
         let mut w = XdrWriter::new();
@@ -461,7 +463,7 @@ mod tests {
         w.u32(2);
         w.u32(NFS_PROGRAM);
         let truncated_auth = w.into_inner();
-        let reply = handle_rpc_record(&truncated_auth, 0, &clients(), &export, &trace());
+        let reply = handle_rpc_record(&truncated_auth, &export, &trace());
         assert_eq!(reply_accept_stat(&reply), Some(RPC_GARBAGE_ARGS));
     }
 
@@ -481,7 +483,7 @@ mod tests {
             PROC_COMPOUND,
             &body.into_inner(),
         );
-        let reply = handle_rpc_record(&call, 0, &clients(), &export, &trace());
+        let reply = handle_rpc_record(&call, &export, &trace());
         assert_eq!(reply_accept_stat(&reply), Some(RPC_GARBAGE_ARGS));
     }
 

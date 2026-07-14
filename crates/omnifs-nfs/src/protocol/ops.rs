@@ -3,8 +3,7 @@ use crate::protocol::attrs::{
     encode_access, encode_attrs, encode_bitmap, encode_getattr, encode_getfh, op_status,
     status_to_u32,
 };
-use crate::protocol::client::ClientTable;
-use crate::protocol::compound::CompoundState;
+use crate::protocol::compound::CompoundDecoder;
 use crate::protocol::consts::{
     ACCESS4_DELETE, ACCESS4_EXECUTE, ACCESS4_EXTEND, ACCESS4_LOOKUP, ACCESS4_MODIFY, ACCESS4_READ,
     AUTH_NONE, AUTH_SYS, CLAIM_DELEGATE_CUR, CLAIM_DELEGATE_PREV, CLAIM_FH, CLAIM_NULL,
@@ -133,442 +132,389 @@ impl ClaimType {
     }
 }
 
-pub(crate) fn handle_op(
-    op: u32,
-    reader: &mut XdrReader<'_>,
-    generation: u64,
-    clients: &ClientTable,
-    export: &dyn ReadOnlyExport,
-    state: &mut CompoundState,
-) -> Result<(u32, Vec<u8>), XdrError> {
-    match op {
-        OP_ACCESS => handle_access(reader, export, state),
-        OP_CLOSE => handle_close(reader, export),
-        OP_COMMIT | OP_CREATE | OP_LINK | OP_REMOVE | OP_RENAME | OP_SETATTR | OP_WRITE => {
-            Ok(error_reply(op, Status::ReadOnlyFs))
-        },
-        OP_GETATTR => handle_getattr(reader, generation, export, state),
-        OP_GETFH => Ok(handle_getfh(generation, export, state)),
-        OP_LOCK | OP_LOCKT | OP_LOCKU | OP_RELEASE_LOCKOWNER => {
-            Ok(error_reply(op, Status::LockNotSupported))
-        },
-        OP_LOOKUP => handle_lookup(reader, export, state),
-        OP_LOOKUPP => Ok(handle_lookupp(export, state)),
-        OP_OPEN => handle_open(reader, generation, clients, export, state),
-        OP_OPEN_CONFIRM => handle_open_confirm(reader, export),
-        OP_PUTFH => handle_putfh(reader, generation, export, state),
-        OP_PUTPUBFH | OP_PUTROOTFH => {
-            state.current = Some(export.root());
-            Ok((NFS4_OK, op_status(op, NFS4_OK).into_inner()))
-        },
-        OP_READ => handle_read_op(reader, export, state),
-        OP_READDIR => handle_readdir_op(reader, generation, export, state),
-        OP_READLINK => Ok(handle_readlink(export, state.current)),
-        OP_RENEW => handle_renew(reader, clients, export),
-        OP_RESTOREFH => Ok(handle_restorefh(state)),
-        OP_SAVEFH => Ok(handle_savefh(state)),
-        OP_SECINFO => handle_secinfo(reader, export, state),
-        OP_SETCLIENTID => handle_setclientid(reader, clients),
-        OP_SETCLIENTID_CONFIRM => handle_setclientid_confirm(reader, clients),
-        OP_VERIFY => handle_verify(reader),
-        _ => Ok(error_reply(OP_ILLEGAL, Status::OpIllegal)),
+impl CompoundDecoder<'_, '_> {
+    pub(crate) fn dispatch(&mut self, op: u32) -> Result<(u32, Vec<u8>), XdrError> {
+        match op {
+            OP_ACCESS => self.access(),
+            OP_CLOSE => self.close(),
+            OP_COMMIT | OP_CREATE | OP_LINK | OP_REMOVE | OP_RENAME | OP_SETATTR | OP_WRITE => {
+                Ok(error_reply(op, Status::ReadOnlyFs))
+            },
+            OP_GETATTR => self.getattr(),
+            OP_GETFH => Ok(self.getfh()),
+            OP_LOCK | OP_LOCKT | OP_LOCKU | OP_RELEASE_LOCKOWNER => {
+                Ok(error_reply(op, Status::LockNotSupported))
+            },
+            OP_LOOKUP => self.lookup(),
+            OP_LOOKUPP => Ok(self.lookupp()),
+            OP_OPEN => self.open(),
+            OP_OPEN_CONFIRM => self.open_confirm(),
+            OP_PUTFH => self.putfh(),
+            OP_PUTPUBFH | OP_PUTROOTFH => {
+                self.state.current = Some(self.export.root());
+                Ok((NFS4_OK, op_status(op, NFS4_OK).into_inner()))
+            },
+            OP_READ => self.read_op(),
+            OP_READDIR => self.readdir_op(),
+            OP_READLINK => Ok(readlink(self.export, self.state.current)),
+            OP_RENEW => self.renew(),
+            OP_RESTOREFH => Ok(self.restorefh()),
+            OP_SAVEFH => Ok(self.savefh()),
+            OP_SECINFO => self.secinfo(),
+            OP_SETCLIENTID => self.setclientid(),
+            OP_SETCLIENTID_CONFIRM => self.setclientid_confirm(),
+            OP_VERIFY => self.verify(),
+            _ => Ok(error_reply(OP_ILLEGAL, Status::OpIllegal)),
+        }
     }
-}
 
-fn handle_access(
-    reader: &mut XdrReader<'_>,
-    export: &dyn ReadOnlyExport,
-    state: &CompoundState,
-) -> Result<(u32, Vec<u8>), XdrError> {
-    let requested = AccessMask(reader.u32()?);
-    let status = state.current.ok_or(Status::NoFileHandle).and_then(|id| {
-        let attr = export.attr(id)?;
+    fn access(&mut self) -> Result<(u32, Vec<u8>), XdrError> {
+        let requested = AccessMask(self.reader.u32()?);
+        let status = self
+            .state
+            .current
+            .ok_or(Status::NoFileHandle)
+            .and_then(|id| {
+                let attr = self.export.attr(id)?;
+                Ok((
+                    AccessMask::READ_ONLY_SUPPORTED.raw(),
+                    requested.allowed_for(attr.kind).raw(),
+                ))
+            });
+        Ok(encode_access(status))
+    }
+
+    fn close(&mut self) -> Result<(u32, Vec<u8>), XdrError> {
+        let _seqid = self.reader.u32()?;
+        let raw = self.reader.fixed_opaque(16)?;
+        let status = StateId::from_wire(&raw).and_then(|stateid| self.export.close_state(stateid));
+        match status {
+            Ok(next) => {
+                let mut res = op_status(OP_CLOSE, NFS4_OK);
+                res.bytes(&next.to_wire());
+                Ok((NFS4_OK, res.into_inner()))
+            },
+            Err(status) => Ok(error_reply(OP_CLOSE, status)),
+        }
+    }
+
+    fn getattr(&mut self) -> Result<(u32, Vec<u8>), XdrError> {
+        let request = self.reader.bitmap()?;
+        let status = self
+            .state
+            .current
+            .ok_or(Status::NoFileHandle)
+            .and_then(|id| self.export.attr(id))
+            .map(|attr| encode_attrs(self.export.generation(), &attr, &request));
+        Ok(encode_getattr(status))
+    }
+
+    fn getfh(&self) -> (u32, Vec<u8>) {
+        let status = self
+            .state
+            .current
+            .ok_or(Status::NoFileHandle)
+            .and_then(|id| {
+                self.export
+                    .attr(id)
+                    .map(|_| file_handle(self.export.generation(), id))
+            });
+        encode_getfh(status)
+    }
+
+    fn lookup(&mut self) -> Result<(u32, Vec<u8>), XdrError> {
+        let raw = self.reader.string()?;
+        self.state
+            .events
+            .push(format!("lookup={}", raw.escape_debug()));
+        let status = match ComponentName::parse(&raw) {
+            Ok(name) => match self.state.current {
+                Some(parent) => self.export.lookup(parent, name.as_ref()).map(|child| {
+                    self.state.current = Some(child);
+                }),
+                None => Err(Status::NoFileHandle),
+            },
+            Err(_) => Err(Status::Invalid),
+        };
         Ok((
-            AccessMask::READ_ONLY_SUPPORTED.raw(),
-            requested.allowed_for(attr.kind).raw(),
+            status_to_u32(status),
+            op_status(OP_LOOKUP, status_to_u32(status)).into_inner(),
         ))
-    });
-    Ok(encode_access(status))
-}
-
-fn handle_close(
-    reader: &mut XdrReader<'_>,
-    export: &dyn ReadOnlyExport,
-) -> Result<(u32, Vec<u8>), XdrError> {
-    let _seqid = reader.u32()?;
-    let raw = reader.fixed_opaque(16)?;
-    let status = StateId::from_wire(&raw).and_then(|stateid| export.close_state(stateid));
-    match status {
-        Ok(next) => {
-            let mut res = op_status(OP_CLOSE, NFS4_OK);
-            res.bytes(&next.to_wire());
-            Ok((NFS4_OK, res.into_inner()))
-        },
-        Err(status) => Ok(error_reply(OP_CLOSE, status)),
     }
-}
 
-fn handle_getattr(
-    reader: &mut XdrReader<'_>,
-    generation: u64,
-    export: &dyn ReadOnlyExport,
-    state: &CompoundState,
-) -> Result<(u32, Vec<u8>), XdrError> {
-    let request = reader.bitmap()?;
-    let status = state
-        .current
-        .ok_or(Status::NoFileHandle)
-        .and_then(|id| export.attr(id))
-        .map(|attr| encode_attrs(generation, &attr, &request));
-    Ok(encode_getattr(status))
-}
-
-fn handle_getfh(
-    generation: u64,
-    export: &dyn ReadOnlyExport,
-    state: &CompoundState,
-) -> (u32, Vec<u8>) {
-    let status = state
-        .current
-        .ok_or(Status::NoFileHandle)
-        .and_then(|id| export.attr(id).map(|_| file_handle(generation, id)));
-    encode_getfh(status)
-}
-
-fn handle_lookup(
-    reader: &mut XdrReader<'_>,
-    export: &dyn ReadOnlyExport,
-    state: &mut CompoundState,
-) -> Result<(u32, Vec<u8>), XdrError> {
-    let raw = reader.string()?;
-    state.events.push(format!("lookup={}", raw.escape_debug()));
-    let status = match ComponentName::parse(&raw) {
-        Ok(name) => match state.current {
-            Some(parent) => export.lookup(parent, name.as_ref()).map(|child| {
-                state.current = Some(child);
+    fn lookupp(&mut self) -> (u32, Vec<u8>) {
+        let status = match self.state.current {
+            Some(id) => self.export.parent(id).map(|parent| {
+                self.state.current = Some(parent);
             }),
             None => Err(Status::NoFileHandle),
-        },
-        Err(_) => Err(Status::Invalid),
-    };
-    Ok((
-        status_to_u32(status),
-        op_status(OP_LOOKUP, status_to_u32(status)).into_inner(),
-    ))
-}
+        };
+        (
+            status_to_u32(status),
+            op_status(OP_LOOKUPP, status_to_u32(status)).into_inner(),
+        )
+    }
 
-fn handle_lookupp(export: &dyn ReadOnlyExport, state: &mut CompoundState) -> (u32, Vec<u8>) {
-    let status = match state.current {
-        Some(id) => export.parent(id).map(|parent| {
-            state.current = Some(parent);
-        }),
-        None => Err(Status::NoFileHandle),
-    };
-    (
-        status_to_u32(status),
-        op_status(OP_LOOKUPP, status_to_u32(status)).into_inner(),
-    )
-}
-
-fn handle_open_confirm(
-    reader: &mut XdrReader<'_>,
-    export: &dyn ReadOnlyExport,
-) -> Result<(u32, Vec<u8>), XdrError> {
-    let raw = reader.fixed_opaque(16)?;
-    let _seqid = reader.u32()?;
-    let status = match StateId::from_wire(&raw) {
-        Ok(stateid) => match export.validate_state(stateid) {
-            Ok(()) => Status::NotSupported,
+    fn open_confirm(&mut self) -> Result<(u32, Vec<u8>), XdrError> {
+        let raw = self.reader.fixed_opaque(16)?;
+        let _seqid = self.reader.u32()?;
+        let status = match StateId::from_wire(&raw) {
+            Ok(stateid) => match self.export.validate_state(stateid) {
+                Ok(()) => Status::NotSupported,
+                Err(status) => status,
+            },
             Err(status) => status,
-        },
-        Err(status) => status,
-    };
-    Ok(error_reply(OP_OPEN_CONFIRM, status))
-}
-
-fn handle_putfh(
-    reader: &mut XdrReader<'_>,
-    generation: u64,
-    export: &dyn ReadOnlyExport,
-    state: &mut CompoundState,
-) -> Result<(u32, Vec<u8>), XdrError> {
-    let fh = reader.opaque()?;
-    let status = decode_file_handle(generation, &fh)
-        .and_then(|id| export.attr(id).map(|_| id))
-        .map(|id| {
-            state.current = Some(id);
-        });
-    Ok((
-        status_to_u32(status),
-        op_status(OP_PUTFH, status_to_u32(status)).into_inner(),
-    ))
-}
-
-fn handle_read_op(
-    reader: &mut XdrReader<'_>,
-    export: &dyn ReadOnlyExport,
-    state: &mut CompoundState,
-) -> Result<(u32, Vec<u8>), XdrError> {
-    let raw = reader.fixed_opaque(16)?;
-    let offset = reader.u64()?;
-    let count = reader.u32()?;
-    Ok(match StateId::from_wire(&raw) {
-        Ok(stateid) => handle_read(
-            export,
-            state.current,
-            stateid,
-            offset,
-            count,
-            &mut state.events,
-        ),
-        Err(status) => error_reply(OP_READ, status),
-    })
-}
-
-fn handle_readdir_op(
-    reader: &mut XdrReader<'_>,
-    generation: u64,
-    export: &dyn ReadOnlyExport,
-    state: &CompoundState,
-) -> Result<(u32, Vec<u8>), XdrError> {
-    let cookie = reader.u64()?;
-    let verifier = reader.fixed_opaque(8)?;
-    let _dircount = reader.u32()?;
-    let maxcount = reader.u32()?;
-    let attrs = reader.bitmap()?;
-    Ok(handle_readdir(
-        export,
-        generation,
-        state.current,
-        cookie,
-        &verifier,
-        maxcount,
-        &attrs,
-    ))
-}
-
-fn handle_renew(
-    reader: &mut XdrReader<'_>,
-    clients: &ClientTable,
-    export: &dyn ReadOnlyExport,
-) -> Result<(u32, Vec<u8>), XdrError> {
-    let clientid = reader.u64()?;
-    if clients.is_confirmed(clientid) {
-        match export.renew_client(clientid) {
-            Ok(()) => Ok((NFS4_OK, op_status(OP_RENEW, NFS4_OK).into_inner())),
-            Err(status) => Ok(error_reply(OP_RENEW, status)),
-        }
-    } else {
-        Ok(error_reply(OP_RENEW, Status::StaleClientId))
+        };
+        Ok(error_reply(OP_OPEN_CONFIRM, status))
     }
-}
 
-fn handle_restorefh(state: &mut CompoundState) -> (u32, Vec<u8>) {
-    let status = match state.saved {
-        Some(saved) => {
-            state.current = Some(saved);
-            NFS4_OK
-        },
-        None => Status::NoFileHandle.wire(),
-    };
-    (status, op_status(OP_RESTOREFH, status).into_inner())
-}
-
-fn handle_savefh(state: &mut CompoundState) -> (u32, Vec<u8>) {
-    let status = match state.current {
-        Some(current) => {
-            state.saved = Some(current);
-            NFS4_OK
-        },
-        None => Status::NoFileHandle.wire(),
-    };
-    (status, op_status(OP_SAVEFH, status).into_inner())
-}
-
-fn handle_secinfo(
-    reader: &mut XdrReader<'_>,
-    export: &dyn ReadOnlyExport,
-    state: &CompoundState,
-) -> Result<(u32, Vec<u8>), XdrError> {
-    let raw = reader.string()?;
-    let status = match ComponentName::parse(&raw) {
-        Ok(name) => match state.current {
-            Some(parent) => export.lookup(parent, name.as_ref()).map(|_| ()),
-            None => Err(Status::NoFileHandle),
-        },
-        Err(_) => Err(Status::Invalid),
-    };
-    if let Err(status) = status {
-        return Ok(error_reply(OP_SECINFO, status));
+    fn putfh(&mut self) -> Result<(u32, Vec<u8>), XdrError> {
+        let fh = self.reader.opaque()?;
+        let status = decode_file_handle(self.export.generation(), &fh)
+            .and_then(|id| self.export.attr(id).map(|_| id))
+            .map(|id| {
+                self.state.current = Some(id);
+            });
+        Ok((
+            status_to_u32(status),
+            op_status(OP_PUTFH, status_to_u32(status)).into_inner(),
+        ))
     }
-    let mut res = op_status(OP_SECINFO, NFS4_OK);
-    res.u32(2);
-    res.u32(AUTH_SYS);
-    res.u32(AUTH_NONE);
-    Ok((NFS4_OK, res.into_inner()))
-}
 
-// SETCLIENTID is intentionally a deterministic stub: every caller is handed
-// back the same process-generation-derived client id and a fixed confirm
-// verifier. The client's own verifier, owner, and callback advertisement are
-// read and discarded. This makes two simultaneous clients indistinguishable
-// at the protocol level, which is only acceptable because `start_server`
-// (see `server.rs`) refuses non-loopback binds. If the server is ever
-// exposed beyond the local host, this handler must grow real per-client
-// state with verifier-based identity reuse and conflict handling.
-fn handle_setclientid(
-    reader: &mut XdrReader<'_>,
-    clients: &ClientTable,
-) -> Result<(u32, Vec<u8>), XdrError> {
-    let verifier = reader.fixed_opaque(8)?;
-    let owner = reader.opaque()?;
-    let _callback_program = reader.u32()?;
-    let _callback_netid = reader.string()?;
-    let _callback_addr = reader.string()?;
-    let _callback_ident = reader.u32()?;
-    let mut verifier_bytes = [0_u8; 8];
-    verifier_bytes.copy_from_slice(&verifier);
-    let assignment = clients.set_clientid(verifier_bytes, owner);
-    let mut res = op_status(OP_SETCLIENTID, NFS4_OK);
-    res.u64(assignment.clientid);
-    res.bytes(&assignment.confirm);
-    Ok((NFS4_OK, res.into_inner()))
-}
-
-fn handle_setclientid_confirm(
-    reader: &mut XdrReader<'_>,
-    clients: &ClientTable,
-) -> Result<(u32, Vec<u8>), XdrError> {
-    let clientid = reader.u64()?;
-    let verifier = reader.fixed_opaque(8)?;
-    let status = clients
-        .confirm(clientid, &verifier)
-        .map_or_else(Status::wire, |()| NFS4_OK);
-    Ok((
-        status,
-        op_status(OP_SETCLIENTID_CONFIRM, status).into_inner(),
-    ))
-}
-
-fn handle_verify(reader: &mut XdrReader<'_>) -> Result<(u32, Vec<u8>), XdrError> {
-    let _ = reader.fattr()?;
-    Ok(error_reply(OP_VERIFY, Status::NotSupported))
-}
-
-pub(crate) fn handle_open(
-    reader: &mut XdrReader<'_>,
-    generation: u64,
-    clients: &ClientTable,
-    export: &dyn ReadOnlyExport,
-    state: &mut CompoundState,
-) -> Result<(u32, Vec<u8>), XdrError> {
-    let _seqid = reader.u32()?;
-    let share_access = ShareAccess(reader.u32()?);
-    let share_deny = ShareDeny(reader.u32()?);
-    let owner_clientid = reader.u64()?;
-    let _owner = reader.opaque()?;
-    if !clients.is_confirmed(owner_clientid) {
-        return Ok(error_reply(OP_OPEN, Status::StaleClientId));
+    fn read_op(&mut self) -> Result<(u32, Vec<u8>), XdrError> {
+        let raw = self.reader.fixed_opaque(16)?;
+        let offset = self.reader.u64()?;
+        let count = self.reader.u32()?;
+        Ok(match StateId::from_wire(&raw) {
+            Ok(stateid) => read(
+                self.export,
+                self.state.current,
+                stateid,
+                offset,
+                count,
+                &mut self.state.events,
+            ),
+            Err(status) => error_reply(OP_READ, status),
+        })
     }
-    let open_type = OpenType::read(reader)?;
-    if open_type == OpenType::Unsupported {
-        return Ok(error_reply(OP_OPEN, Status::ReadOnlyFs));
+
+    fn readdir_op(&mut self) -> Result<(u32, Vec<u8>), XdrError> {
+        let cookie = self.reader.u64()?;
+        let verifier = self.reader.fixed_opaque(8)?;
+        let _dircount = self.reader.u32()?;
+        let maxcount = self.reader.u32()?;
+        let attrs = self.reader.bitmap()?;
+        Ok(readdir(
+            self.export,
+            self.state.current,
+            cookie,
+            &verifier,
+            maxcount,
+            &attrs,
+        ))
     }
-    let claim_type = ClaimType::from_wire(reader.u32()?);
-    let target = match claim_type {
-        ClaimType::Null => {
-            let raw = reader.string()?;
-            state.events.push(format!(
-                "open={} share_access={} opentype={open_type:?}",
-                raw.escape_debug(),
-                share_access.raw()
-            ));
-            match ComponentName::parse(&raw) {
-                Ok(name) => match state.current {
-                    Some(parent) => export.lookup(parent, name.as_ref()),
-                    None => Err(Status::NoFileHandle),
-                },
-                Err(_) => Err(Status::Invalid),
+
+    fn renew(&mut self) -> Result<(u32, Vec<u8>), XdrError> {
+        let clientid = self.reader.u64()?;
+        if self.export.client_confirmed(clientid) {
+            match self.export.renew_client(clientid) {
+                Ok(()) => Ok((NFS4_OK, op_status(OP_RENEW, NFS4_OK).into_inner())),
+                Err(status) => Ok(error_reply(OP_RENEW, status)),
             }
-        },
-        ClaimType::Fh => state.current.ok_or(Status::NoFileHandle),
-        ClaimType::Previous => {
-            let _delegate_type = reader.u32()?;
-            // A CLAIM_PREVIOUS reclaim arrives when a client detects a server
-            // restart (stale clientid) and tries to reclaim its opens during a
-            // grace period. This read-only server keeps no grace period, so it
-            // answers NFS4ERR_NO_GRACE per RFC 7530, which tells the client to
-            // re-open the file normally (CLAIM_NULL) against its still-valid
-            // filehandle. Returning NFS4ERR_NOTSUPP instead wedges the macOS
-            // client's post-restart recovery.
-            Err(Status::NoGrace)
-        },
-        ClaimType::DelegateCur => {
-            let _stateid = reader.fixed_opaque(16)?;
-            let _file = reader.string()?;
-            Err(Status::NotSupported)
-        },
-        ClaimType::DelegatePrev => {
-            let _file = reader.string()?;
-            Err(Status::NotSupported)
-        },
-        ClaimType::Unsupported => Err(Status::NotSupported),
-    };
-
-    if !share_access.is_valid() {
-        return Ok(error_reply(OP_OPEN, Status::Invalid));
-    }
-    if open_type.is_create() || share_access.allows_write() {
-        return Ok(error_reply(OP_OPEN, Status::ReadOnlyFs));
-    }
-    if !share_access.allows_read() {
-        return Ok(error_reply(OP_OPEN, Status::Invalid));
-    }
-    if !share_deny.is_none() {
-        return Ok(error_reply(OP_OPEN, Status::NotSupported));
+        } else {
+            Ok(error_reply(OP_RENEW, Status::StaleClientId))
+        }
     }
 
-    let id = match target {
-        Ok(id) => id,
-        Err(status) => return Ok(error_reply(OP_OPEN, status)),
-    };
-    let attr = match export.attr(id) {
-        Ok(attr) => attr,
-        Err(status) => return Ok(error_reply(OP_OPEN, status)),
-    };
-    if attr.kind == NodeKind::Directory {
-        return Ok(error_reply(OP_OPEN, Status::IsDir));
-    }
-    if attr.kind == NodeKind::Symlink {
-        return Ok(error_reply(OP_OPEN, Status::Symlink));
+    fn restorefh(&mut self) -> (u32, Vec<u8>) {
+        let status = match self.state.saved {
+            Some(saved) => {
+                self.state.current = Some(saved);
+                NFS4_OK
+            },
+            None => Status::NoFileHandle.wire(),
+        };
+        (status, op_status(OP_RESTOREFH, status).into_inner())
     }
 
-    let open = match export.open_state(generation, id, owner_clientid, share_access.raw()) {
-        Ok(open) => open,
-        Err(status) => return Ok(error_reply(OP_OPEN, status)),
-    };
-    state
-        .events
-        .push(format!("open_materialized={} bytes", open.attr.size));
-    state.current = Some(id);
+    fn savefh(&mut self) -> (u32, Vec<u8>) {
+        let status = match self.state.current {
+            Some(current) => {
+                self.state.saved = Some(current);
+                NFS4_OK
+            },
+            None => Status::NoFileHandle.wire(),
+        };
+        (status, op_status(OP_SAVEFH, status).into_inner())
+    }
 
-    let mut res = op_status(OP_OPEN, NFS4_OK);
-    res.bytes(&open.stateid.to_wire());
-    // change_info4 { bool atomic; changeid4 before; changeid4 after } — for a
-    // read-only OPEN no parent directory change happens, so emit
-    // (atomic=true, before=0, after=0) per RFC 7530 convention. The file's
-    // change attribute belongs in GETATTR replies, not here.
-    res.bool(true);
-    res.u64(0);
-    res.u64(0);
-    // rflags=0: server requires no OPEN_CONFIRM round trip.
-    res.u32(0);
-    encode_bitmap(&mut res, &[]);
-    res.u32(OPEN_DELEGATE_NONE);
-    Ok((NFS4_OK, res.into_inner()))
+    fn secinfo(&mut self) -> Result<(u32, Vec<u8>), XdrError> {
+        let raw = self.reader.string()?;
+        let status = match ComponentName::parse(&raw) {
+            Ok(name) => match self.state.current {
+                Some(parent) => self.export.lookup(parent, name.as_ref()).map(|_| ()),
+                None => Err(Status::NoFileHandle),
+            },
+            Err(_) => Err(Status::Invalid),
+        };
+        if let Err(status) = status {
+            return Ok(error_reply(OP_SECINFO, status));
+        }
+        let mut res = op_status(OP_SECINFO, NFS4_OK);
+        res.u32(2);
+        res.u32(AUTH_SYS);
+        res.u32(AUTH_NONE);
+        Ok((NFS4_OK, res.into_inner()))
+    }
+
+    // SETCLIENTID keeps callback advertisement out of the loopback protocol, while
+    // Export owns verifier-based client identity allocation and confirmation.
+    fn setclientid(&mut self) -> Result<(u32, Vec<u8>), XdrError> {
+        let verifier = self.reader.fixed_opaque(8)?;
+        let owner = self.reader.opaque()?;
+        let _callback_program = self.reader.u32()?;
+        let _callback_netid = self.reader.string()?;
+        let _callback_addr = self.reader.string()?;
+        let _callback_ident = self.reader.u32()?;
+        let mut verifier_bytes = [0_u8; 8];
+        verifier_bytes.copy_from_slice(&verifier);
+        let (clientid, confirm) = self.export.set_clientid(verifier_bytes, owner);
+        let mut res = op_status(OP_SETCLIENTID, NFS4_OK);
+        res.u64(clientid);
+        res.bytes(&confirm);
+        Ok((NFS4_OK, res.into_inner()))
+    }
+
+    fn setclientid_confirm(&mut self) -> Result<(u32, Vec<u8>), XdrError> {
+        let clientid = self.reader.u64()?;
+        let verifier = self.reader.fixed_opaque(8)?;
+        let status = self
+            .export
+            .confirm_client(clientid, &verifier)
+            .map_or_else(Status::wire, |()| NFS4_OK);
+        Ok((
+            status,
+            op_status(OP_SETCLIENTID_CONFIRM, status).into_inner(),
+        ))
+    }
+
+    fn verify(&mut self) -> Result<(u32, Vec<u8>), XdrError> {
+        let _ = self.reader.fattr()?;
+        Ok(error_reply(OP_VERIFY, Status::NotSupported))
+    }
+
+    fn open(&mut self) -> Result<(u32, Vec<u8>), XdrError> {
+        let _seqid = self.reader.u32()?;
+        let share_access = ShareAccess(self.reader.u32()?);
+        let share_deny = ShareDeny(self.reader.u32()?);
+        let owner_clientid = self.reader.u64()?;
+        let _owner = self.reader.opaque()?;
+        if !self.export.client_confirmed(owner_clientid) {
+            return Ok(error_reply(OP_OPEN, Status::StaleClientId));
+        }
+        let open_type = OpenType::read(&mut *self.reader)?;
+        if open_type == OpenType::Unsupported {
+            return Ok(error_reply(OP_OPEN, Status::ReadOnlyFs));
+        }
+        let claim_type = ClaimType::from_wire(self.reader.u32()?);
+        let target = match claim_type {
+            ClaimType::Null => {
+                let raw = self.reader.string()?;
+                self.state.events.push(format!(
+                    "open={} share_access={} opentype={open_type:?}",
+                    raw.escape_debug(),
+                    share_access.raw()
+                ));
+                match ComponentName::parse(&raw) {
+                    Ok(name) => match self.state.current {
+                        Some(parent) => self.export.lookup(parent, name.as_ref()),
+                        None => Err(Status::NoFileHandle),
+                    },
+                    Err(_) => Err(Status::Invalid),
+                }
+            },
+            ClaimType::Fh => self.state.current.ok_or(Status::NoFileHandle),
+            ClaimType::Previous => {
+                let _delegate_type = self.reader.u32()?;
+                // A CLAIM_PREVIOUS reclaim arrives when a client detects a server
+                // restart (stale clientid) and tries to reclaim its opens during a
+                // grace period. This read-only server keeps no grace period, so it
+                // answers NFS4ERR_NO_GRACE per RFC 7530, which tells the client to
+                // re-open the file normally (CLAIM_NULL) against its still-valid
+                // filehandle. Returning NFS4ERR_NOTSUPP instead wedges the macOS
+                // client's post-restart recovery.
+                Err(Status::NoGrace)
+            },
+            ClaimType::DelegateCur => {
+                let _stateid = self.reader.fixed_opaque(16)?;
+                let _file = self.reader.string()?;
+                Err(Status::NotSupported)
+            },
+            ClaimType::DelegatePrev => {
+                let _file = self.reader.string()?;
+                Err(Status::NotSupported)
+            },
+            ClaimType::Unsupported => Err(Status::NotSupported),
+        };
+
+        if !share_access.is_valid() {
+            return Ok(error_reply(OP_OPEN, Status::Invalid));
+        }
+        if open_type.is_create() || share_access.allows_write() {
+            return Ok(error_reply(OP_OPEN, Status::ReadOnlyFs));
+        }
+        if !share_access.allows_read() {
+            return Ok(error_reply(OP_OPEN, Status::Invalid));
+        }
+        if !share_deny.is_none() {
+            return Ok(error_reply(OP_OPEN, Status::NotSupported));
+        }
+
+        let id = match target {
+            Ok(id) => id,
+            Err(status) => return Ok(error_reply(OP_OPEN, status)),
+        };
+        let attr = match self.export.attr(id) {
+            Ok(attr) => attr,
+            Err(status) => return Ok(error_reply(OP_OPEN, status)),
+        };
+        if attr.kind == NodeKind::Directory {
+            return Ok(error_reply(OP_OPEN, Status::IsDir));
+        }
+        if attr.kind == NodeKind::Symlink {
+            return Ok(error_reply(OP_OPEN, Status::Symlink));
+        }
+
+        let open = match self
+            .export
+            .open_state(id, owner_clientid, share_access.raw())
+        {
+            Ok(open) => open,
+            Err(status) => return Ok(error_reply(OP_OPEN, status)),
+        };
+        self.state
+            .events
+            .push(format!("open_materialized={} bytes", open.attr.size));
+        self.state.current = Some(id);
+
+        let mut res = op_status(OP_OPEN, NFS4_OK);
+        res.bytes(&open.stateid.to_wire());
+        // change_info4 { bool atomic; changeid4 before; changeid4 after } — for a
+        // read-only OPEN no parent directory change happens, so emit
+        // (atomic=true, before=0, after=0) per RFC 7530 convention. The file's
+        // change attribute belongs in GETATTR replies, not here.
+        res.bool(true);
+        res.u64(0);
+        res.u64(0);
+        // rflags=0: server requires no OPEN_CONFIRM round trip.
+        res.u32(0);
+        encode_bitmap(&mut res, &[]);
+        res.u32(OPEN_DELEGATE_NONE);
+        Ok((NFS4_OK, res.into_inner()))
+    }
 }
 
-pub(crate) fn handle_read(
+pub(crate) fn read(
     export: &dyn ReadOnlyExport,
     current: Option<u64>,
     stateid: StateId,
@@ -648,9 +594,8 @@ fn readdir_cookie_verifier(id: u64, change: u64, entries: &[DirEntry]) -> [u8; 8
     hasher.finish().to_be_bytes()
 }
 
-pub(crate) fn handle_readdir(
+pub(crate) fn readdir(
     export: &dyn ReadOnlyExport,
-    generation: u64,
     current: Option<u64>,
     cookie: u64,
     verifier: &[u8],
@@ -704,7 +649,7 @@ pub(crate) fn handle_readdir(
         encoded_entry.bool(true);
         encoded_entry.u64(u64::try_from(idx).expect("READDIR index exceeds u64") + 3);
         encoded_entry.string(&entry.name);
-        encoded_entry.bytes(&encode_attrs(generation, &entry.attr, attrs));
+        encoded_entry.bytes(&encode_attrs(export.generation(), &entry.attr, attrs));
         let encoded_entry = encoded_entry.into_inner();
         if (res.len() - prefix_len)
             .saturating_add(encoded_entry.len())
@@ -724,7 +669,7 @@ pub(crate) fn handle_readdir(
     (NFS4_OK, res.into_inner())
 }
 
-pub(crate) fn handle_readlink(export: &dyn ReadOnlyExport, current: Option<u64>) -> (u32, Vec<u8>) {
+pub(crate) fn readlink(export: &dyn ReadOnlyExport, current: Option<u64>) -> (u32, Vec<u8>) {
     let Some(id) = current else {
         return error_reply(OP_READLINK, Status::NoFileHandle);
     };

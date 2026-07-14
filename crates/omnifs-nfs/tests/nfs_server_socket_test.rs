@@ -42,7 +42,6 @@ fn nfs_tcp_server_lists_reads_and_closes_through_runtime() {
     let server = start_server(
         export,
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
-        1,
         Some(trace_path.clone()),
     )
     .expect("start loopback NFS server");
@@ -99,7 +98,6 @@ fn nfs_tcp_server_dispatches_rpcs_concurrently() {
     let server = start_server(
         export,
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
-        1,
         None,
     )
     .expect("start loopback NFS server");
@@ -178,6 +176,22 @@ struct GateExport {
 }
 
 impl ReadOnlyExport for GateExport {
+    fn generation(&self) -> u64 {
+        1
+    }
+
+    fn set_clientid(&self, _verifier: [u8; 8], _owner: Vec<u8>) -> (u64, [u8; 8]) {
+        (0, [0; 8])
+    }
+
+    fn confirm_client(&self, _clientid: u64, _verifier: &[u8]) -> StatusResult<()> {
+        Err(Status::StaleClientId)
+    }
+
+    fn client_confirmed(&self, _clientid: u64) -> bool {
+        false
+    }
+
     fn root(&self) -> u64 {
         1
     }
@@ -215,13 +229,7 @@ impl ReadOnlyExport for GateExport {
         Err(Status::Invalid)
     }
 
-    fn open_state(
-        &self,
-        _generation: u64,
-        _id: u64,
-        _clientid: u64,
-        _access: u32,
-    ) -> StatusResult<OpenResult> {
+    fn open_state(&self, _id: u64, _clientid: u64, _access: u32) -> StatusResult<OpenResult> {
         Err(Status::Invalid)
     }
 

@@ -20,12 +20,6 @@ struct ClientRecord {
     confirmed: bool,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct ClientAssignment {
-    pub(crate) clientid: u64,
-    pub(crate) confirm: [u8; 8],
-}
-
 impl ClientTable {
     pub(crate) fn new(generation: u64) -> Self {
         Self {
@@ -35,16 +29,13 @@ impl ClientTable {
         }
     }
 
-    pub(crate) fn set_clientid(&self, verifier: [u8; 8], owner: Vec<u8>) -> ClientAssignment {
+    pub(crate) fn set_clientid(&self, verifier: [u8; 8], owner: Vec<u8>) -> (u64, [u8; 8]) {
         let mut records = self.records.lock().expect("NFS client table lock");
         if let Some((clientid, record)) = records
             .iter()
             .find(|(_, record)| record.verifier == verifier && record.owner == owner)
         {
-            return ClientAssignment {
-                clientid: *clientid,
-                confirm: record.confirm,
-            };
+            return (*clientid, record.confirm);
         }
 
         let slot = self.next_slot.fetch_add(1, Ordering::Relaxed);
@@ -59,7 +50,7 @@ impl ClientTable {
                 confirmed: false,
             },
         );
-        ClientAssignment { clientid, confirm }
+        (clientid, confirm)
     }
 
     pub(crate) fn confirm(&self, clientid: u64, verifier: &[u8]) -> StatusResult<()> {

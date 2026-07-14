@@ -1,6 +1,5 @@
 use crate::error::NfsFrontendError;
 use crate::export::ReadOnlyExport;
-use crate::protocol::client::ClientTable;
 use crate::protocol::filehandle::now_sec;
 use crate::protocol::rpc::{handle_rpc_record, read_rpc_record, write_rpc_record};
 use crate::trace::Trace;
@@ -53,7 +52,6 @@ impl Drop for RunningNfsServer {
 pub fn start_server(
     export: Arc<dyn ReadOnlyExport>,
     bind: SocketAddr,
-    generation: u64,
     trace_path: Option<PathBuf>,
 ) -> Result<RunningNfsServer, NfsFrontendError> {
     if !bind.ip().is_loopback() {
@@ -66,9 +64,9 @@ pub fn start_server(
     let listener = TcpListener::bind(bind)?;
     let addr = listener.local_addr()?;
     let trace = Trace::new(trace_path)?;
-    let clients = Arc::new(ClientTable::new(generation));
     trace.line(&format!(
-        "ready addr={addr} generation={generation} boot_time={}",
+        "ready addr={addr} generation={} boot_time={}",
+        export.generation(),
         now_sec()
     ));
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -110,21 +108,13 @@ pub fn start_server(
                         continue;
                     }
                     let export = Arc::clone(&export);
-                    let clients = Arc::clone(&clients);
                     let slots = Arc::clone(&slots);
                     let trace = trace.clone();
                     let conn_trace = trace.clone();
                     trace.line(&format!("connection peer={peer:?}"));
                     let worker = thread::spawn(move || {
                         let _connection_permit = connection_permit;
-                        if let Err(error) = serve_connection(
-                            stream,
-                            generation,
-                            &clients,
-                            &export,
-                            &conn_trace,
-                            &slots,
-                        ) {
+                        if let Err(error) = serve_connection(stream, &export, &conn_trace, &slots) {
                             trace.line(&format!("connection_closed peer={peer:?} err={error}"));
                         }
                     });
@@ -162,8 +152,6 @@ pub fn start_server(
 /// finishes, serializing the wire without serializing the work.
 fn serve_connection(
     mut stream: TcpStream,
-    generation: u64,
-    clients: &Arc<ClientTable>,
     export: &Arc<dyn ReadOnlyExport>,
     trace: &Trace,
     slots: &Arc<RpcSlots>,
@@ -200,20 +188,13 @@ fn serve_connection(
                     inflight: Arc::clone(&inflight),
                 };
                 let responses = responses.clone();
-                let clients = Arc::clone(clients);
                 let export = Arc::clone(export);
                 let handler_trace = trace.clone();
                 let spawned = thread::Builder::new()
                     .name("nfs-rpc".to_string())
                     .spawn(move || {
                         let _guard = guard;
-                        let response = handle_rpc_record(
-                            &record,
-                            generation,
-                            &clients,
-                            &*export,
-                            &handler_trace,
-                        );
+                        let response = handle_rpc_record(&record, &*export, &handler_trace);
                         // The writer may have already exited on a broken socket;
                         // a dropped reply is recovered by client retransmit.
                         let _ = responses.send(response);
@@ -357,6 +338,22 @@ mod tests {
     struct EmptyExport;
 
     impl ReadOnlyExport for EmptyExport {
+        fn generation(&self) -> u64 {
+            1
+        }
+
+        fn set_clientid(&self, _verifier: [u8; 8], _owner: Vec<u8>) -> (u64, [u8; 8]) {
+            (0, [0; 8])
+        }
+
+        fn confirm_client(&self, _clientid: u64, _verifier: &[u8]) -> StatusResult<()> {
+            Err(Status::StaleClientId)
+        }
+
+        fn client_confirmed(&self, _clientid: u64) -> bool {
+            false
+        }
+
         fn root(&self) -> u64 {
             1
         }
@@ -381,13 +378,7 @@ mod tests {
             Err(Status::Invalid)
         }
 
-        fn open_state(
-            &self,
-            _generation: u64,
-            _id: u64,
-            _clientid: u64,
-            _access: u32,
-        ) -> StatusResult<OpenResult> {
+        fn open_state(&self, _id: u64, _clientid: u64, _access: u32) -> StatusResult<OpenResult> {
             Err(Status::Invalid)
         }
 
@@ -416,7 +407,7 @@ mod tests {
     #[test]
     fn start_server_rejects_non_loopback_bind() {
         let bind = "0.0.0.0:0".parse().expect("bind addr");
-        let result = start_server(Arc::new(EmptyExport), bind, 1, None);
+        let result = start_server(Arc::new(EmptyExport), bind, None);
         assert!(matches!(result, Err(NfsFrontendError::Io(_))));
     }
 }

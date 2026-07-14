@@ -26,6 +26,7 @@ use crate::export::{
     ReadOnlyExport, StateId, Status, StatusResult, ensure_read_access,
 };
 use crate::persist::{PersistInit, PersistTables, Persister};
+use crate::protocol::client::ClientTable;
 use crate::protocol::consts::{
     EXPORT_ROOT_ID, MAX_NFS_READ_BYTES, NFS_EXPORT_NAME, ROOT_ID, SPOTLIGHT_MARKER_ID,
     SPOTLIGHT_MARKER_NAME, is_reserved_inode,
@@ -129,6 +130,12 @@ impl Body {
 
 pub struct Export {
     rt: Handle,
+    /// Filehandle and client identity generation. It is pinned by persisted
+    /// state and otherwise minted once for this export instance.
+    generation: u64,
+    /// NFS client identity and confirmation state. Server workers never own or
+    /// pass this table; all protocol state transitions go through `Export`.
+    clients: ClientTable,
     /// The projection surface. Every name resolution, attribute, listing, and
     /// read goes through it; the adapter holds nothing else of the engine.
     namespace: Arc<dyn Namespace>,
@@ -190,6 +197,11 @@ impl Export {
         );
         let events = Mutex::new(namespace.subscribe());
         let delayed_lists = Listings::new(rt.clone());
+        let generation = persist
+            .as_ref()
+            .map_or_else(crate::protocol::filehandle::generation, |init| {
+                init.generation
+            });
         let inodes = Arc::new(DashMap::new());
         let by_node = DashMap::new();
         // The two export roots both project the namespace root, under distinct
@@ -259,6 +271,8 @@ impl Export {
 
         Self {
             rt,
+            generation,
+            clients: ClientTable::new(generation),
             namespace,
             events,
             delayed_lists,
@@ -753,6 +767,22 @@ impl Export {
 }
 
 impl ReadOnlyExport for Export {
+    fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    fn set_clientid(&self, verifier: [u8; 8], owner: Vec<u8>) -> (u64, [u8; 8]) {
+        self.clients.set_clientid(verifier, owner)
+    }
+
+    fn confirm_client(&self, clientid: u64, verifier: &[u8]) -> StatusResult<()> {
+        self.clients.confirm(clientid, verifier)
+    }
+
+    fn client_confirmed(&self, clientid: u64) -> bool {
+        self.clients.is_confirmed(clientid)
+    }
+
     fn root(&self) -> u64 {
         ROOT_ID
     }
@@ -966,13 +996,7 @@ impl ReadOnlyExport for Export {
             .map_err(|_| Status::Io)
     }
 
-    fn open_state(
-        &self,
-        generation: u64,
-        id: u64,
-        clientid: u64,
-        access: u32,
-    ) -> StatusResult<OpenResult> {
+    fn open_state(&self, id: u64, clientid: u64, access: u32) -> StatusResult<OpenResult> {
         // The protocol validated `attr.kind != Directory/Symlink` before OPEN, so
         // this is a file. `attr` both drains pending events and rebinds a
         // subtree, so re-read the body afterwards.
@@ -1003,7 +1027,7 @@ impl ReadOnlyExport for Export {
         // target from the inode, so a reattach that clears `NodeId`s never has to
         // rewrite the open table.
         let stateid = self.opens.open(OpenSeed {
-            generation,
+            generation: self.generation,
             inode: id,
             clientid,
             access,
@@ -1229,10 +1253,7 @@ mod tests {
             NodeKind::File,
         );
 
-        let opened = harness
-            .export
-            .open_state(7, id, 1, 1)
-            .expect("backing open");
+        let opened = harness.export.open_state(id, 1, 1).expect("backing open");
         let chunk = harness
             .export
             .read_state(opened.stateid, OVERSIZED_BACKING_BYTES, 8)
@@ -1500,9 +1521,7 @@ mod tests {
         );
 
         // A held-open read against the same id also re-resolves.
-        let opened = export
-            .open_state(0x1234, 101, 1, 1)
-            .expect("open persisted handle");
+        let opened = export.open_state(101, 1, 1).expect("open persisted handle");
         let chunk = export
             .read_state(opened.stateid, 0, 8)
             .expect("read persisted handle");

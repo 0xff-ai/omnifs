@@ -46,10 +46,10 @@ impl NfsMountOptions {
         }
     }
 
-    /// Resolve the filehandle generation and optional persisted table seed.
-    fn filehandle_generation(&self) -> Result<(u64, Option<PersistInit>), NfsFrontendError> {
+    /// Resolve the optional persisted filehandle table seed.
+    fn persist_init(&self) -> Result<Option<PersistInit>, NfsFrontendError> {
         if !self.persist_filehandles {
-            return Ok((crate::protocol::filehandle::generation(), None));
+            return Ok(None);
         }
         let state_path = self.state_dir.join(FH_STATE_FILE);
         let (generation, next_ino, entries) = match FhState::load(&state_path)
@@ -62,15 +62,12 @@ impl NfsMountOptions {
                 Vec::new(),
             ),
         };
-        Ok((
+        Ok(Some(PersistInit {
             generation,
-            Some(PersistInit {
-                generation,
-                next_ino,
-                entries,
-                state_path,
-            }),
-        ))
+            next_ino,
+            entries,
+            state_path,
+        }))
     }
 
     fn bind_for_mount(&self, mount_point: &Path) -> Result<SocketAddr, NfsFrontendError> {
@@ -109,7 +106,7 @@ pub fn mount_blocking(
     // A pinned filehandle generation persists across a restart so a kernel client
     // never sees `NFS4ERR_FHEXPIRED` for a handle it still holds. Off the runner
     // path, keep the fresh-per-process random generation.
-    let (generation, persist_init) = options.filehandle_generation()?;
+    let persist_init = options.persist_init()?;
 
     let task_runtime = rt.clone();
     let export = Arc::new(match persist_init {
@@ -134,7 +131,6 @@ pub fn mount_blocking(
     let server = start_server(
         Arc::clone(&export) as Arc<dyn crate::export::ReadOnlyExport>,
         bind,
-        generation,
         options.trace_path.clone(),
     )?;
     let state_file =
@@ -801,20 +797,28 @@ mod tests {
 
         let mut options = super::NfsMountOptions::loopback(dir.path().to_path_buf());
         options.persist_filehandles = true;
-        let (generation, init) = options.filehandle_generation().expect("resolve generation");
-        let init = init.expect("persist init on the runner path");
-        assert_eq!(generation, 0xABCD_1234, "a reload must keep the generation");
-        assert_eq!(init.generation, generation);
+        let init = options
+            .persist_init()
+            .expect("resolve generation")
+            .expect("persist init on the runner path");
+        assert_eq!(
+            init.generation, 0xABCD_1234,
+            "a reload must keep the generation"
+        );
         assert_eq!(init.next_ino, 512, "a reload resumes the allocation cursor");
         assert_eq!(init.entries.len(), 1);
     }
 
     #[test]
-    fn no_persist_uses_fresh_generation_and_no_init() {
+    fn no_persist_has_no_persisted_seed() {
         let dir = tempfile::tempdir().expect("state dir");
         let options = super::NfsMountOptions::loopback(dir.path().to_path_buf());
-        let (generation, init) = options.filehandle_generation().expect("resolve generation");
-        assert_ne!(generation, 0, "a fresh generation is non-zero");
-        assert!(init.is_none(), "the daemon path never persists filehandles");
+        assert!(
+            options
+                .persist_init()
+                .expect("resolve persisted seed")
+                .is_none(),
+            "the daemon path never persists filehandles"
+        );
     }
 }
