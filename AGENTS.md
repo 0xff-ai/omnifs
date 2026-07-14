@@ -171,6 +171,8 @@ When a feature touches mount behavior, prove no regression through `crates/omnif
 - Tracked diffs do not include every handoff artifact. Copy required untracked files explicitly, but exclude ignored local state such as `.cache`, `.serena`, `dist`, and `target`.
 - Do not infer task ownership from branch names, worktree names, or public branches. Use an explicit local ledger or handoff note for manual multi-agent work.
 - Prefer local handoff paths such as `git fetch /path` or `format-patch | git am`. Reserve public branches for integration or review boundaries unless the user explicitly asks to publish.
+- `docs/future/codebase-simplification-tracker.md` is the operational source of truth for redesign work. Update it immediately when a redesign is recorded, assigned, starts implementation, produces a stable handoff, starts integration, finishes integration, is blocked, or is superseded. Do not report a redesign lifecycle transition until the tracker records it.
+- Create redesign implementation tasks with the user's **approve for me** permission profile whenever the thread tool exposes that setting. Luna subagents inherit the parent thread's permission profile when no per-agent setting exists; their briefs must require immediate approval requests for necessary escalations rather than treating sandbox or network denial as a product blocker or silently skipping required work.
 
 ## Validation
 
