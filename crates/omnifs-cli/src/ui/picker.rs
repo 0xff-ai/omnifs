@@ -165,16 +165,16 @@ pub(crate) fn default_on(manifest: &ProviderManifest) -> bool {
         return true;
     }
     let default_is_oauth = matches!(
-        manifest.auth.as_ref().and_then(|auth| auth.default_scheme()),
+        manifest
+            .auth
+            .as_ref()
+            .and_then(|auth| auth.default_scheme()),
         Some((_, AuthScheme::Oauth(_)))
     );
     if default_is_oauth {
         return true;
     }
-    let auth_manifest = manifest
-        .auth
-        .as_ref()
-        .map(|auth| auth.wasm_auth_manifest());
+    let auth_manifest = manifest.auth.as_ref().map(|auth| auth.wasm_auth_manifest());
     let ambient = crate::commands::mount::detect::detect(auth_manifest.as_ref());
     !ambient.is_empty()
 }
@@ -192,7 +192,11 @@ fn build_detail(manifest: &ProviderManifest, summary: &str) -> Detail {
         role: PanelRole::Plain,
     });
     // Auth line.
-    let auth_line = match manifest.auth.as_ref().and_then(|auth| auth.default_scheme()) {
+    let auth_line = match manifest
+        .auth
+        .as_ref()
+        .and_then(|auth| auth.default_scheme())
+    {
         Some((_, AuthScheme::Oauth(_))) => "sign-in with your browser".to_string(),
         Some((_, AuthScheme::StaticToken(scheme))) => {
             let mut line = "needs an API key".to_string();
@@ -237,7 +241,11 @@ fn build_detail(manifest: &ProviderManifest, summary: &str) -> Detail {
     }
 
     // notes: provider auth guidance for the default scheme, if any.
-    if let Some((key, _)) = manifest.auth.as_ref().and_then(|auth| auth.default_scheme()) {
+    if let Some((key, _)) = manifest
+        .auth
+        .as_ref()
+        .and_then(|auth| auth.default_scheme())
+    {
         let key = key.to_string();
         if let Some(auth) = &manifest.auth {
             let guidance = auth.guidance_for(&key);

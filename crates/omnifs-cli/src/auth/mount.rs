@@ -167,12 +167,7 @@ impl MountAuth {
         let manifest = omnifs_workspace::mounts::pinned_manifest(catalog, &spec)
             .ok()
             .flatten()
-            .and_then(|manifest| {
-                manifest
-                    .auth
-                    .as_ref()
-                    .map(|auth| auth.wasm_auth_manifest())
-            });
+            .and_then(|manifest| manifest.auth.as_ref().map(|auth| auth.wasm_auth_manifest()));
         Self { spec, manifest }
     }
 

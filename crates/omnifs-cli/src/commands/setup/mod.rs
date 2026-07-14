@@ -427,10 +427,7 @@ impl SetupArgs {
                 continue;
             }
             let requires_prompt = manifest.requires_mount_input();
-            let auth_manifest = manifest
-                .auth
-                .as_ref()
-                .map(|auth| auth.wasm_auth_manifest());
+            let auth_manifest = manifest.auth.as_ref().map(|auth| auth.wasm_auth_manifest());
             let ambient =
                 !crate::commands::mount::detect::detect(auth_manifest.as_ref()).is_empty();
             if requires_prompt {
@@ -439,7 +436,10 @@ impl SetupArgs {
                 selected.push(name);
             } else {
                 let reason = if matches!(
-                    manifest.auth.as_ref().and_then(|auth| auth.default_scheme()),
+                    manifest
+                        .auth
+                        .as_ref()
+                        .and_then(|auth| auth.default_scheme()),
                     Some((_, omnifs_workspace::authn::AuthScheme::Oauth(_)))
                 ) {
                     "needs browser sign-in"
