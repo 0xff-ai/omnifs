@@ -406,11 +406,14 @@ impl Comment {
         let body = self.body.as_deref().unwrap_or("");
         Ok(FileProjection::body(body.to_owned())
             .content_type(ContentType::Markdown)
+            .dynamic()
             .build())
     }
 
     pub(crate) fn author(&self, _key: &crate::item::CommentKey) -> Result<FileProjection> {
-        Ok(FileProjection::text(self.user.login.clone(), TextFormat::Raw).build())
+        Ok(FileProjection::text(self.user.login.clone(), TextFormat::Raw)
+            .dynamic()
+            .build())
     }
 }
 
