@@ -198,11 +198,8 @@ impl Commands {
             Self::Inspect(args) => args.run(output).await.map(|()| ExitCode::Success),
             Self::Mount(args) => args.run(output).await,
             Self::Provider(args) => args.run(output).await,
-            Self::Skill(args) => args.run().map(|()| ExitCode::Success),
-            Self::Completions(args) => {
-                args.run();
-                Ok(ExitCode::Success)
-            },
+            Self::Skill(args) => args.run(output).map(|()| ExitCode::Success),
+            Self::Completions(args) => args.run(output).map(|()| ExitCode::Success),
             Self::Version(args) => args.run(output).await,
             #[cfg(feature = "daemon")]
             Self::Daemon(args) => omnifs_daemon::run(&args).await.map(|()| ExitCode::Success),

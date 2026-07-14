@@ -302,7 +302,7 @@ fn cli_redesign_contract_jsonl_ends_with_one_terminal_result_envelope() {
     let output = fixture.run(&["status", "--output", "jsonl"]);
     let lines = json_lines(&output);
 
-    assert!(!lines.is_empty());
+    assert_eq!(lines.len(), 1);
     assert!(lines.iter().all(|line| line["schema_version"] == 1));
     assert_eq!(lines.last().expect("terminal line")["type"], "result");
     assert_eq!(lines.last().expect("terminal line")["command"], "status");

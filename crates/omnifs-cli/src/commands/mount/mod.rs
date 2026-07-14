@@ -22,7 +22,7 @@ use crate::error::{ExitCode, WithExitCode};
 use crate::stages::PromptMode;
 use crate::token_source::TokenSource;
 use crate::ui::consent::{Decision, Outcome, Plan, Row};
-use crate::ui::output::Output;
+use crate::ui::output::{Output, ResultVerdict};
 use crate::workspace::Workspace;
 use omnifs_workspace::layout::WorkspaceLayout;
 
@@ -89,7 +89,13 @@ impl MountArgs {
             MountCommand::Add(args) => args.run(output).await,
             MountCommand::Ls(args) => ls(&args, output).await,
             MountCommand::Show(args) => show(&args, output).await,
-            MountCommand::Reauth(args) => args.run(output).await.map(|()| ExitCode::Success),
+            MountCommand::Reauth(args) => {
+                let receipt = args.run(output.clone()).await?;
+                if output.is_structured() {
+                    output.emit_result(ResultVerdict::Ok, receipt)?;
+                }
+                Ok(ExitCode::Success)
+            },
             MountCommand::Rm { name, dry_run } => {
                 let workspace = Workspace::resolve()?;
                 let receipt = rm_with_options(&workspace, &name, output.yes(), dry_run, &output)?;
@@ -225,7 +231,10 @@ fn render_mount_show(result: &MountShowResult) -> String {
 }
 
 impl ReauthArgs {
-    async fn run(self, output: Output) -> anyhow::Result<()> {
+    async fn run(
+        self,
+        output: Output,
+    ) -> anyhow::Result<crate::commands::receipt::MountReauthReceipt> {
         let workspace = Workspace::resolve()?;
         output.intro(format!("omnifs mount reauth {}", self.name))?;
         let prompt = PromptMode::from_flags(output.yes(), output.no_input());
@@ -233,7 +242,11 @@ impl ReauthArgs {
         if result.is_ok() {
             output.outro(format!("Re-authenticated `{}`.", self.name));
         }
-        result
+        result?;
+        Ok(crate::commands::receipt::MountReauthReceipt {
+            verdict: crate::commands::receipt::Verdict::Ok,
+            mount: self.name.to_string(),
+        })
     }
 
     pub(crate) async fn run_with_output(

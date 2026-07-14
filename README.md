@@ -70,7 +70,7 @@ omnifs frontend shell fuse --environment docker
 
 Every attached frontend exposes every configured mount. Provider installation and mount creation are separate, and `omnifs up` applies each mount spec's exact provider pin without selecting upgrades.
 
-For automation, select one invocation-owned output contract. JSON prints one envelope and keeps resource collections plural; JSONL adds progress events before one terminal result or error.
+For automation, select one invocation-owned output contract. JSON prints one envelope and keeps resource collections plural; JSONL uses the same terminal result or error envelope with its stream-record discriminator. Live logs and Inspector records remain line streams.
 
 ```bash
 omnifs --output json status | jq '.result.frontends[] | {filesystem, environment, location, scope}'

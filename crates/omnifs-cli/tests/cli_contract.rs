@@ -338,7 +338,7 @@ fn mount_remove_jsonl_dry_run_ends_with_one_typed_result() {
         .lines()
         .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("JSONL line"))
         .collect::<Vec<_>>();
-    assert!(!lines.is_empty());
+    assert_eq!(lines.len(), 1);
     assert_eq!(
         lines.iter().filter(|line| line["type"] == "result").count(),
         1

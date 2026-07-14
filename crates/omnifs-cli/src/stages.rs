@@ -94,7 +94,6 @@ pub(crate) async fn configure_mount(
     prompt: PromptMode,
 ) -> anyhow::Result<MountInitOutcome> {
     let mut plan = spec_creation(&args, workspace, output, prompt)?;
-    output.phase(plan.manifest.id.as_str());
     persist_mount_spec(workspace, &plan, output)?;
     let status = plan.authenticate(&args, workspace, output, prompt).await?;
 

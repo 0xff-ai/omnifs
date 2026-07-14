@@ -130,6 +130,13 @@ pub(crate) struct MountAddReceipt {
     pub(crate) status: MountAddStatus,
 }
 
+/// `omnifs mount reauth`: the mount whose credential was refreshed.
+#[derive(Debug, Serialize)]
+pub(crate) struct MountReauthReceipt {
+    pub(crate) verdict: Verdict,
+    pub(crate) mount: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum MountAddStatus {

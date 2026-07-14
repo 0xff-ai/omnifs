@@ -7,6 +7,7 @@ use clap::Args;
 use clap::CommandFactory;
 
 use crate::cli::Cli;
+use crate::ui::output::Output;
 
 #[derive(Args, Debug, Clone)]
 pub struct CompletionsArgs {
@@ -14,8 +15,12 @@ pub struct CompletionsArgs {
 }
 
 impl CompletionsArgs {
-    pub fn run(self) {
+    pub fn run(self, output: Output) -> anyhow::Result<()> {
+        if output.is_structured() {
+            anyhow::bail!("completions is a passthrough command and only supports human output")
+        }
         let mut cmd = Cli::command();
         clap_complete::generate(self.shell, &mut cmd, "omnifs", &mut std::io::stdout());
+        Ok(())
     }
 }

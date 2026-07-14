@@ -9,9 +9,7 @@ use serde::Serialize;
 use std::fmt::Write as _;
 use std::io::{self, Write};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
 
-use super::event::{JsonlError, JsonlEvent, JsonlResult};
 use super::style::Glyph;
 
 pub(crate) const SCHEMA_VERSION: u8 = 1;
@@ -258,6 +256,50 @@ impl ErrorEnvelope {
     }
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct JsonlResult<T> {
+    schema_version: u8,
+    #[serde(rename = "type")]
+    kind: &'static str,
+    command: String,
+    verdict: ResultVerdict,
+    result: T,
+}
+
+impl<T> JsonlResult<T> {
+    fn new(command: impl Into<String>, verdict: ResultVerdict, result: T) -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION,
+            kind: "result",
+            command: command.into(),
+            verdict,
+            result,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct JsonlError {
+    schema_version: u8,
+    #[serde(rename = "type")]
+    kind: &'static str,
+    command: String,
+    verdict: ErrorVerdict,
+    error: ErrorPayload,
+}
+
+impl JsonlError {
+    fn from_envelope(envelope: ErrorEnvelope) -> Self {
+        Self {
+            schema_version: envelope.schema_version,
+            kind: "error",
+            command: envelope.command,
+            verdict: envelope.verdict,
+            error: envelope.error,
+        }
+    }
+}
+
 impl Output {
     /// Serialize the JSON terminal result envelope without touching stdout or
     /// process-global state. JSONL adds a `"type":"result"` discriminator
@@ -272,17 +314,6 @@ impl Output {
 
     pub(crate) fn error_bytes(error: &ErrorEnvelope) -> serde_json::Result<Vec<u8>> {
         serde_json::to_vec(error)
-    }
-
-    pub(crate) fn event_bytes(
-        mode: OutputMode,
-        event: &JsonlEvent,
-    ) -> serde_json::Result<Option<Vec<u8>>> {
-        if mode == OutputMode::Jsonl {
-            serde_json::to_vec(event).map(Some)
-        } else {
-            Ok(None)
-        }
     }
 
     pub(crate) fn jsonl_result_bytes<T: Serialize>(
@@ -358,18 +389,6 @@ impl Output {
         };
         Self::write_bytes(writer, &bytes)?;
         Ok(())
-    }
-
-    pub(crate) fn write_event<W: Write>(
-        &self,
-        writer: &mut W,
-        event: &JsonlEvent,
-    ) -> anyhow::Result<bool> {
-        let Some(bytes) = Self::event_bytes(self.mode, event)? else {
-            return Ok(false);
-        };
-        Self::write_bytes(writer, &bytes)?;
-        Ok(true)
     }
 
     /// Structured modes and explicit no-input policy reject prompts before a
@@ -482,21 +501,6 @@ impl Output {
         Ok(())
     }
 
-    pub(crate) fn phase(&self, title: impl Into<String>) {
-        let title = title.into();
-        if self.mode == OutputMode::Human {
-            if !self.quiet {
-                let _ = cliclack::log::step(&title);
-            }
-        } else if self.mode == OutputMode::Jsonl {
-            self.emit_event(&JsonlEvent::Phase(super::event::JsonlPhase::new(
-                self.command,
-                title,
-                "started",
-            )));
-        }
-    }
-
     pub(crate) fn row(&self, row: &super::report::Row) {
         if self.mode == OutputMode::Human {
             let _ = cliclack::log::remark(row.render().trim_start());
@@ -546,17 +550,6 @@ impl Output {
         crate::ui::progress::Progress::new(self.clone(), key)
     }
 
-    pub(crate) fn progress_event(&self, resource: String, message: String, elapsed: Duration) {
-        if self.mode == OutputMode::Jsonl {
-            self.emit_event(&JsonlEvent::Progress(super::event::JsonlProgress::new(
-                self.command,
-                resource,
-                message,
-                u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
-            )));
-        }
-    }
-
     pub(crate) const fn with_no_input(mut self, no_input: bool) -> Self {
         self.no_input = no_input;
         self
@@ -565,17 +558,6 @@ impl Output {
     pub(crate) const fn with_yes(mut self, yes: bool) -> Self {
         self.yes = yes;
         self
-    }
-
-    fn emit_event(&self, event: &JsonlEvent) {
-        let mut current = state(self);
-        if current.failure.is_some() || current.terminal {
-            return;
-        }
-        let mut stdout = stdout(self);
-        if let Err(error) = self.write_event(&mut *stdout, event) {
-            current.failure = Some(error.to_string());
-        }
     }
 
     fn settle_result<W: Write, T: Serialize>(
@@ -698,7 +680,6 @@ impl From<crate::inventory::Verdict> for ResultVerdict {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::event::{JsonlEvent, JsonlPhase, JsonlProgress};
 
     #[test]
     fn invocation_policy_is_cloneable_and_explicit() {
@@ -729,34 +710,6 @@ mod tests {
                 "result": {"mounts": 2}
             })
         );
-    }
-
-    #[test]
-    fn json_mode_suppresses_events_but_jsonl_emits_tagged_lines() {
-        let phase = JsonlEvent::Phase(JsonlPhase::new("up", "daemon", "started"));
-        let progress = JsonlEvent::Progress(JsonlProgress::new(
-            "up",
-            "frontend:docker:fuse",
-            "waiting",
-            820,
-        ));
-        assert!(
-            Output::event_bytes(OutputMode::Json, &phase)
-                .unwrap()
-                .is_none()
-        );
-        let bytes = Output::event_bytes(OutputMode::Jsonl, &phase)
-            .unwrap()
-            .unwrap();
-        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(value["type"], "phase");
-        assert_eq!(value["schema_version"], 1);
-        let bytes = Output::event_bytes(OutputMode::Jsonl, &progress)
-            .unwrap()
-            .unwrap();
-        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(value["type"], "progress");
-        assert_eq!(value["elapsed_ms"], 820);
     }
 
     #[test]
@@ -800,18 +753,18 @@ mod tests {
             .unwrap();
         assert_eq!(std::str::from_utf8(&json).unwrap().matches('\n').count(), 1);
 
-        let event = JsonlEvent::Phase(JsonlPhase::new("up", "daemon", "started"));
-        assert!(!output.write_event(&mut json, &event).unwrap());
-        assert_eq!(std::str::from_utf8(&json).unwrap().matches('\n').count(), 1);
-
         let mut jsonl = Vec::new();
         Output::new(OutputMode::Jsonl, false)
-            .write_event(&mut jsonl, &event)
+            .write_result_with_fallback(
+                &mut jsonl,
+                "status",
+                ResultVerdict::Ok,
+                serde_json::json!({}),
+            )
             .unwrap();
-        assert_eq!(
-            std::str::from_utf8(&jsonl).unwrap().matches('\n').count(),
-            1
-        );
+        let value: serde_json::Value =
+            serde_json::from_slice(jsonl.strip_suffix(b"\n").unwrap()).unwrap();
+        assert_eq!(value["type"], "result");
     }
 
     #[test]
@@ -907,7 +860,7 @@ mod tests {
     }
 
     #[test]
-    fn event_and_terminal_share_one_stdout_lock_across_clones() {
+    fn concurrent_terminal_clones_share_one_stdout_lock() {
         use std::sync::{Arc, Barrier, mpsc};
         use std::thread;
 
@@ -934,33 +887,38 @@ mod tests {
         let barrier = Arc::new(Barrier::new(2));
         let (sender, receiver) = mpsc::channel();
         thread::scope(|scope| {
-            let event_output = output.clone();
-            let event_barrier = Arc::clone(&barrier);
+            let error_output = output.clone();
+            let error_barrier = Arc::clone(&barrier);
+            let error_sender = sender.clone();
             scope.spawn(move || {
-                event_barrier.wait();
-                event_output.phase("working");
+                error_barrier.wait();
+                error_sender
+                    .send(error_output.emit_error(ErrorEnvelope::serialization_failure("status")))
+                    .unwrap();
             });
 
             let terminal_output = output.clone();
             let terminal_barrier = Arc::clone(&barrier);
+            let terminal_sender = sender;
             scope.spawn(move || {
                 terminal_barrier.wait();
-                sender
+                terminal_sender
                     .send(terminal_output.emit_result(ResultVerdict::Ok, serde_json::json!({})))
                     .unwrap();
             });
         });
 
-        assert!(receiver.recv().unwrap().is_ok());
+        let outcomes = [receiver.recv().unwrap(), receiver.recv().unwrap()];
+        assert_eq!(outcomes.iter().filter(|result| result.is_ok()).count(), 1);
         let lines = String::from_utf8(bytes.lock().unwrap().clone())
             .unwrap()
             .lines()
             .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
             .collect::<Vec<_>>();
-        assert_eq!(
-            lines.iter().filter(|line| line["type"] == "result").count(),
-            1
-        );
-        assert!(lines.iter().all(|line| line["type"] != "error"));
+        assert_eq!(lines.len(), 1);
+        assert!(matches!(
+            lines[0]["type"].as_str(),
+            Some("result" | "error")
+        ));
     }
 }

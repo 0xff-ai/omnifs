@@ -101,7 +101,7 @@ Exit codes are the API. Every code is modeled in `error::ExitCode`, and clap par
 
 Every top-level error carries a stable slug derived from its exit class, not its wording (`generic-failure`, `usage`, `daemon-unavailable`, `auth-required`, `degraded`, `canceled`). The human error block shows it dim as a trailing `(id: <slug>)`; structured modes emit the same slug in the terminal error envelope.
 
-One global `--output human|json|jsonl` owns the invocation. Human mode renders a compact workspace context strip followed by responsive resource tables on stdout while narration and progress use stderr. Tables use sentence-case headers, soft alignment without borders or rules, explicit state text, and contextual recovery lines; below 72 columns the same typed fields stack beneath each resource identity. JSON emits exactly one result or error envelope on stdout and suppresses progress. JSONL emits zero or more event lines followed by exactly one terminal result or error line. Structured modes never prompt unless required answers were supplied by flags. `--no-input` forbids prompts and browser handoffs, `--yes` approves confirmation-only decisions, and `--quiet` suppresses optional narration without hiding tables, receipts, or errors.
+One global `--output human|json|jsonl` owns the invocation. Human mode renders a compact workspace context strip followed by responsive resource tables on stdout while narration and progress use stderr. Tables use sentence-case headers, soft alignment without borders or rules, explicit state text, and contextual recovery lines; below 72 columns the same typed fields stack beneath each resource identity. JSON emits exactly one result or error envelope on stdout and suppresses progress. Finite JSONL commands emit the same single terminal result or error envelope with a `type` discriminator; streaming passthrough commands such as logs and Inspector records remain line streams. Structured modes never prompt unless required answers were supplied by flags. `--no-input` forbids prompts and browser handoffs, `--yes` approves confirmation-only decisions, and `--quiet` suppresses optional narration without hiding tables, receipts, or errors.
 
 Every JSON result uses one envelope:
 
@@ -133,8 +133,8 @@ files, or `$OMNIFS_HOME`; users and uninstallers remove `$OMNIFS_HOME` through
 ordinary filesystem operations.
 
 `crates/omnifs-cli/src/ui` owns terminal rendering and stream selection. CLI
-modules emit reports, events, JSON values, narration, or already-rendered raw
-records through that surface; clippy rejects direct print macros elsewhere.
+modules emit reports, JSON values, narration, or already-rendered raw records
+through that surface; clippy rejects direct print macros elsewhere.
 The only non-UI passthroughs are daemon logs and generated shell completions,
 whose destination streams are owned by the invoked tools.
 

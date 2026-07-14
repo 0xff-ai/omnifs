@@ -4,6 +4,8 @@ use anyhow::Context;
 use clap::{Args, Subcommand, ValueEnum};
 use std::path::{Path, PathBuf};
 
+use crate::ui::output::Output;
+
 const USAGE_SKILL: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../skills/omnifs-usage/SKILL.md"
@@ -31,7 +33,10 @@ pub enum InstallTarget {
 }
 
 impl SkillArgs {
-    pub fn run(self) -> anyhow::Result<()> {
+    pub fn run(self, output: Output) -> anyhow::Result<()> {
+        if output.is_structured() {
+            anyhow::bail!("skill is a passthrough command and only supports human output")
+        }
         match self.command {
             SkillCommand::Install { target } => target.install(),
         }

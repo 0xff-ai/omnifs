@@ -1,8 +1,7 @@
 //! Short-lived progress handles returned by Output.
 //!
 //! The handle keeps only lifecycle facts needed to render a transient human
-//! spinner and to serialize direct JSONL progress events. It is not a mirror of
-//! a command stage and has no renderer or event-bus abstraction.
+//! spinner. It is not a mirror of a command stage or a renderer.
 
 #![allow(clippy::disallowed_macros, clippy::print_stderr)]
 
@@ -82,8 +81,6 @@ impl Progress {
             return;
         }
         self.next_update = now + UPDATE_INTERVAL;
-        self.output
-            .progress_event(self.key.clone(), text.to_owned(), self.started.elapsed());
         if !self.tty || self.started.elapsed() < APPEARANCE_DELAY {
             return;
         }
