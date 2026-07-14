@@ -49,10 +49,9 @@ impl<'a> AuthManifestView<'a> {
     ) -> anyhow::Result<String> {
         let Some(manifest) = self.manifest else {
             return match auth {
-                omnifs_workspace::mounts::Auth::StaticToken(_) => Ok(auth
-                    .scheme()
-                    .unwrap_or(DEFAULT_STATIC_SCHEME)
-                    .to_owned()),
+                omnifs_workspace::mounts::Auth::StaticToken(_) => {
+                    Ok(auth.scheme().unwrap_or(DEFAULT_STATIC_SCHEME).to_owned())
+                },
                 omnifs_workspace::mounts::Auth::OAuth(_) => auth
                     .scheme()
                     .map(str::to_owned)

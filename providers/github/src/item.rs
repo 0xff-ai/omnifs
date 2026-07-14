@@ -621,12 +621,7 @@ impl PullRequest {
                 )
             })
             .collect::<Vec<_>>();
-        page_or_complete(
-            entries,
-            len,
-            REVIEW_PAGE_SIZE,
-            PageCursor(page + 1),
-        )
+        page_or_complete(entries, len, REVIEW_PAGE_SIZE, PageCursor(page + 1))
     }
 
     pub(crate) async fn checks(
@@ -712,12 +707,7 @@ impl Review {
                 )
             })
             .collect::<Vec<_>>();
-        page_or_complete(
-            entries,
-            len,
-            REVIEW_PAGE_SIZE,
-            PageCursor(page + 1),
-        )
+        page_or_complete(entries, len, REVIEW_PAGE_SIZE, PageCursor(page + 1))
     }
 }
 
@@ -1054,12 +1044,7 @@ async fn comments_collection(
         let files = comment.eager_leaves(&key)?;
         entries.push(CollectionEntry::computed(key, files));
     }
-    page_or_complete(
-        entries,
-        len,
-        COMMENT_PAGE_SIZE,
-        PageCursor(page + 1),
-    )
+    page_or_complete(entries, len, COMMENT_PAGE_SIZE, PageCursor(page + 1))
 }
 
 pub(crate) fn unzip_logs(bytes: &[u8]) -> Vec<u8> {

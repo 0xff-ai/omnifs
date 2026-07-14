@@ -262,7 +262,10 @@ fn github_issue_list_fetches_rest_followup_pages() {
                 .map(|entry| entry.name.as_str())
                 .collect();
             assert_eq!(names.len(), 99);
-            assert!(!names.contains(&"50"), "PR-shaped issue row must be filtered");
+            assert!(
+                !names.contains(&"50"),
+                "PR-shaped issue row must be filtered"
+            );
             assert!(matches!(
                 listing.next_cursor,
                 Some(Cursor::Opaque(ref cursor)) if cursor == "2"
@@ -278,7 +281,10 @@ fn github_issue_list_fetches_rest_followup_pages() {
         )
         .unwrap();
     let [Callout::Fetch(fetch)] = page_two.callouts() else {
-        panic!("expected issues page 2 fetch, got {:?}", page_two.callouts());
+        panic!(
+            "expected issues page 2 fetch, got {:?}",
+            page_two.callouts()
+        );
     };
     assert!(
         fetch.url.ends_with(
@@ -608,9 +614,7 @@ fn github_owner_listing_tracks_browsed_repos() {
     assert!(
         repos_fetch
             .url
-            .ends_with(
-                "/users/octocat/repos?sort=full_name&direction=asc&per_page=100&page=1"
-            ),
+            .ends_with("/users/octocat/repos?sort=full_name&direction=asc&per_page=100&page=1"),
         "expected owner repo listing fetch, got {}",
         repos_fetch.url
     );
@@ -676,9 +680,7 @@ fn github_owner_listing_tracks_browsed_repos() {
     assert!(
         repos_fetch
             .url
-            .ends_with(
-                "/users/octocat/repos?sort=full_name&direction=asc&per_page=100&page=2"
-            ),
+            .ends_with("/users/octocat/repos?sort=full_name&direction=asc&per_page=100&page=2"),
         "expected stable owner repo page 2 URL, got {}",
         repos_fetch.url
     );
@@ -759,9 +761,7 @@ fn github_root_and_owner_listings_ignore_unclassified_repo_paths() {
     assert!(
         repos_fetch
             .url
-            .ends_with(
-                "/users/open/repos?sort=full_name&direction=asc&per_page=100&page=1"
-            ),
+            .ends_with("/users/open/repos?sort=full_name&direction=asc&per_page=100&page=1"),
         "expected owner repo listing fetch, got {}",
         repos_fetch.url
     );
@@ -1426,9 +1426,7 @@ fn github_pr_checks_list_from_head_sha_and_read_check_run_objects() {
     assert!(
         continuation_fetch
             .url
-            .ends_with(
-                "/repos/octocat/Hello-World/commits/abc123/check-runs?per_page=100&page=2"
-            ),
+            .ends_with("/repos/octocat/Hello-World/commits/abc123/check-runs?per_page=100&page=2"),
         "continuation must reuse the captured head without refetching the pull: {}",
         continuation_fetch.url
     );
@@ -2068,9 +2066,7 @@ fn github_provider_lookup_owner_validates_and_owner_listing_classifies_with_org_
     assert!(
         repos_fetch
             .url
-            .ends_with(
-                "/orgs/openai/repos?sort=full_name&direction=asc&per_page=100&page=1"
-            ),
+            .ends_with("/orgs/openai/repos?sort=full_name&direction=asc&per_page=100&page=1"),
         "expected repo listing fetch after owner classification, got {}",
         repos_fetch.url
     );
