@@ -83,27 +83,10 @@ impl OAuthRequest {
         &self,
         config: &DeviceCodeConfig,
     ) -> Result<ConfiguredDeviceClient, AuthError> {
-        let auth_uri = AuthUrl::new(self.scheme.authorization_endpoint.clone())?;
-        let token_uri = TokenUrl::new(self.scheme.token_endpoint.clone())?;
         let device_uri = DeviceAuthorizationUrl::new(config.device_authorization_endpoint.clone())?;
-        let revocation_url = self
-            .scheme
-            .revocation_endpoint
-            .clone()
-            .map(RevocationUrl::new)
-            .transpose()?;
-
-        let mut client = BasicClient::new(ClientId::new(self.effective_client_id()?))
-            .set_auth_uri(auth_uri)
-            .set_token_uri(token_uri)
-            .set_device_authorization_url(device_uri)
-            .set_revocation_url_option(revocation_url);
-
-        if let Some((secret, auth_type)) = self.token_endpoint_secret()? {
-            client = client.set_client_secret(secret);
-            client = client.set_auth_type(auth_type);
-        }
-        Ok(client)
+        Ok(self
+            .token_client()?
+            .set_device_authorization_url(device_uri))
     }
 
     #[must_use]
