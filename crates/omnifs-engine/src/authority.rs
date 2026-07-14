@@ -587,18 +587,16 @@ mod tests {
 
     #[test]
     fn resource_binding_pairing_fails_closed_in_authority_resolution() {
-        let dynamic_preopen = manifest(
-            vec![AccessNeed::PreopenedPath {
-                value: omnifs_caps::PreopenedPath {
-                    host: "/data/file".to_owned(),
-                    guest: "/data".to_owned(),
-                    mode: PreopenMode::Ro,
-                },
-                why: "test".to_owned(),
-                dynamic: true,
-            }],
-            None,
-        );
+        let dynamic_need = AccessNeed::PreopenedPath {
+            value: omnifs_caps::PreopenedPath {
+                host: "/data/file".to_owned(),
+                guest: "/data".to_owned(),
+                mode: PreopenMode::Ro,
+            },
+            why: "test".to_owned(),
+            dynamic: true,
+        };
+        let dynamic_preopen = manifest(vec![dynamic_need.clone()], None);
         assert!(matches!(
             RuntimeAuthority::resolve(&dynamic_preopen, &spec()),
             Err(AuthorityError::Config {
@@ -607,8 +605,7 @@ mod tests {
             })
         ));
 
-        let unpaired_file = manifest(
-            Vec::new(),
+        let host_file = || {
             Some(ConfigMetadata {
                 fields: vec![ConfigField {
                     name: "path".to_owned(),
@@ -620,11 +617,34 @@ mod tests {
                         mode: PreopenMode::Ro,
                     }),
                 }],
-            }),
-        );
+            })
+        };
+        let unpaired_file = manifest(Vec::new(), host_file());
         assert!(matches!(
             RuntimeAuthority::resolve(&unpaired_file, &spec()),
             Err(AuthorityError::Binding { kind: "preopenedPath", field, .. })
+                if field == "path"
+        ));
+
+        let paired_file = manifest(vec![dynamic_need], host_file());
+        let temp = tempfile::tempdir().unwrap();
+        let configured_path = temp.path().join("data.db");
+        std::fs::write(&configured_path, b"authority test").unwrap();
+        let mut configured = spec();
+        configured.config_raw = Some(serde_json::json!({
+            "path": configured_path,
+        }));
+        let authority = RuntimeAuthority::resolve(&paired_file, &configured).unwrap();
+        assert_eq!(authority.preopens().len(), 1);
+        assert_eq!(
+            std::path::Path::new(&authority.preopens()[0].host),
+            temp.path().canonicalize().unwrap()
+        );
+        assert_eq!(authority.preopens()[0].mode, PreopenMode::Ro);
+
+        assert!(matches!(
+            RuntimeAuthority::resolve(&paired_file, &spec()),
+            Err(AuthorityError::Config { kind: "preopenedPath", field, .. })
                 if field == "path"
         ));
 
