@@ -404,9 +404,10 @@ impl Runtime {
         };
         let mount_name = config.mount.as_str();
         let config_bytes = config.config_bytes();
-        // Load the pinned artifact's manifest once: capability/config metadata
-        // validation, preopen resolution, and auth all read it, and enforcement
-        // rests on this pinned manifest, never on a spec-stamped snapshot.
+        // Load the pinned artifact's manifest once: config validation must run
+        // before preopen resolution or instance creation, and capability/auth
+        // enforcement rests on this pinned manifest, never on a spec-stamped
+        // snapshot.
         let manifest = fs::read(wasm_path)
             .map_err(|error| format!("reading {}: {error}", wasm_path.display()))
             .and_then(|bytes| {
@@ -419,11 +420,11 @@ impl Runtime {
             .as_ref()
             .and_then(|manifest| manifest.config.as_ref());
 
+        validate_instance_config(config_metadata, config, mount_name)?;
+
         let preopens = resolve_preopens(config, config_metadata);
         let park_signal = test_callouts.as_ref().map(TestCallouts::park_signal);
         let instance = Instance::new(engine, wasm_path, config_bytes, &preopens, park_signal)?;
-
-        validate_instance_config(config_metadata, config, mount_name)?;
 
         let init_return = instance.initialize().map_err(BuildError::from)?;
         let initialize_result = finish_initialize_return(init_return)?;

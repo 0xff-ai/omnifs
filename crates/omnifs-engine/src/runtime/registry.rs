@@ -1128,12 +1128,23 @@ mod tests {
         );
 
         // Pin the test provider into the provider store, then mount it with an
-        // out-of-schema config field the provider config metadata forbids.
+        // out-of-schema config field and an invalid literal preopen. Config
+        // validation must win over preopen validation during runtime build.
         let spec = pin_spec(
             providers_dir.path(),
             &base_wasm,
             "test-provider",
-            serde_json::json!({ "mount": "test", "config": { "unexpected": true } }),
+            serde_json::json!({
+                "mount": "test",
+                "config": { "unexpected": true },
+                "capabilities": {
+                    "preopened_paths": [{
+                        "host": "relative",
+                        "guest": "/data",
+                        "mode": "ro"
+                    }]
+                }
+            }),
         );
 
         match registry.add_mount(&spec, &tokio::runtime::Handle::current()) {
