@@ -261,7 +261,7 @@ fn json_commands_emit_expected_shapes() {
     assert_eq!(status_json["schema_version"], 1);
     assert_eq!(status_json["command"], "status");
     assert_eq!(status_json["verdict"], "ok");
-    assert_eq!(status_json["result"]["workspace"]["daemon"], "stopped");
+    assert_eq!(status_json["result"]["daemon"]["probe"]["state"], "stopped");
     assert!(status_json["result"]["mounts"].as_array().is_some());
     assert!(status_json["result"]["providers"].as_array().is_some());
 
@@ -297,9 +297,9 @@ fn json_commands_emit_expected_shapes() {
 
     let doctor = fixture.run(&["doctor", "--output", "json"]);
     let doctor_json = stdout_json(&doctor);
-    assert!(doctor_json["result"]["verdict"].as_str().is_some());
-    assert!(doctor_json["result"]["probes"].as_array().is_some());
-    assert!(doctor_json["result"]["live"]["skipped"].as_str().is_some());
+    assert!(doctor_json["verdict"].as_str().is_some());
+    assert!(doctor_json["result"]["inventory"].is_object());
+    assert!(doctor_json["result"]["findings"].as_array().is_some());
 }
 
 #[test]
