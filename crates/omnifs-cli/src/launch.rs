@@ -38,7 +38,7 @@ impl<'a> Launcher<'a> {
         }
     }
 
-    pub(crate) async fn launch(self) -> anyhow::Result<LaunchOutcome> {
+    pub(crate) async fn launch(self) -> anyhow::Result<()> {
         let paths = self.workspace.layout();
         let config = self.workspace.config()?;
         let telemetry_enabled =
@@ -71,7 +71,7 @@ impl<'a> Launcher<'a> {
             revision,
             snapshot.mounts_dir().display()
         ));
-        let outcome = launch_host_native(
+        launch_host_native(
             self.workspace,
             self.verb,
             telemetry_enabled,
@@ -81,7 +81,7 @@ impl<'a> Launcher<'a> {
         )
         .await?;
         self.workspace.repository()?.mark_applied(&revision)?;
-        Ok(outcome)
+        Ok(())
     }
 }
 
@@ -116,19 +116,6 @@ fn preflight_mounts(
     Ok(())
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct LaunchOutcome {
-    pub local_mount_points: Vec<PathBuf>,
-    pub(crate) daemon_restarted: bool,
-}
-
-impl LaunchOutcome {
-    #[must_use]
-    pub(crate) fn daemon_restarted(&self) -> bool {
-        self.daemon_restarted
-    }
-}
-
 /// The loopback address the debug `OMNIFS_DAEMON_ADDR` TCP path serves on,
 /// honoring the env override.
 fn env_control_addr() -> anyhow::Result<Option<SocketAddr>> {
@@ -141,8 +128,7 @@ fn env_control_addr() -> anyhow::Result<Option<SocketAddr>> {
 }
 
 /// Leave a daemon already serving `revision` alone, or replace only the daemon
-/// process and wait for the immutable snapshot to become ready. Frontend
-/// convergence happens after this returns.
+/// process and wait for the immutable snapshot to become ready.
 async fn launch_host_native(
     workspace: &Workspace,
     verb: &str,
@@ -150,7 +136,7 @@ async fn launch_host_native(
     output: Output,
     revision: &Revision,
     snapshot: &Path,
-) -> anyhow::Result<LaunchOutcome> {
+) -> anyhow::Result<()> {
     let paths = workspace.layout();
     let client = DaemonClient::for_layout(paths);
     let current = client.status_optional().await?;
@@ -166,11 +152,11 @@ async fn launch_host_native(
             });
         if serves_revision {
             report_launch_status(status);
-            return Ok(launch_outcome(status.clone(), false));
+            return Ok(());
         }
 
         output.narrate("Restarting omnifs daemon for changed mount revision");
-        DaemonTeardown::new(workspace, output).stop_daemon().await?;
+        DaemonTeardown::new(workspace).stop_daemon().await?;
     } else {
         output.narrate("Starting omnifs daemon (host-native)");
     }
@@ -181,23 +167,7 @@ async fn launch_host_native(
 
     let status = client.status().await?;
     report_launch_status(&status);
-    Ok(launch_outcome(status, true))
-}
-
-fn launch_outcome(status: DaemonStatus, daemon_restarted: bool) -> LaunchOutcome {
-    let mut local_mount_points = status
-        .frontends
-        .into_iter()
-        .filter(|frontend| frontend.delivery == omnifs_api::FrontendDelivery::Local)
-        .map(|frontend| frontend.mount_point)
-        .filter(|mount_point| !mount_point.as_os_str().is_empty())
-        .collect::<Vec<_>>();
-    local_mount_points.sort();
-    local_mount_points.dedup();
-    LaunchOutcome {
-        local_mount_points,
-        daemon_restarted,
-    }
+    Ok(())
 }
 
 #[derive(Debug)]

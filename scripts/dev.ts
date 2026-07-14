@@ -209,7 +209,7 @@ async function main() {
   const fixtures = await startFixtures(render.mounts, fixturePaths);
   try {
     console.log("Starting the host-native daemon");
-    await run($`${omnifsCli} up --no-frontend`.env(cliEnv(devHome)));
+    await run($`${omnifsCli} up`.env(cliEnv(devHome)));
 
     console.log("Starting the Docker-hosted FUSE frontend");
     const hostFilesystem = process.platform === "linux" ? "fuse" : "nfs";
@@ -233,7 +233,7 @@ async function main() {
     if (keepRunning(options)) {
       if (options.detach) {
         console.log(
-          `Detached. Stop with \`${omnifsCli} frontend disable fuse --environment docker && ${omnifsCli} down\`.`,
+          `Detached. Stop with \`${omnifsCli} frontend disable fuse --environment docker && ${omnifsCli} frontend disable ${hostFilesystem} --environment host --location ${hostLocation} && ${omnifsCli} down\`.`,
         );
       }
       return;
@@ -541,21 +541,12 @@ async function writeDevHome(
   mkdirSync(mountsDir, { recursive: true });
   cpSync(providerStore, providersDir, { recursive: true });
 
-  // The daemon always runs host-native. Persist the desired host and Docker
-  // frontends using the public filesystem/environment/location vocabulary.
+  // The daemon always runs host-native. Keep the Docker frontend image in the
+  // workspace config so `frontend enable` resolves the local build without a
+  // registry lookup. Frontend lifecycle itself is imperative and explicit.
   writeFileSync(
     join(devHome, "config.toml"),
-    [
-      `[[frontends]]`,
-      `filesystem = "${process.platform === "linux" ? "fuse" : "nfs"}"`,
-      `environment = "host"`,
-      `location = ${JSON.stringify(join(devHome, "mnt"))}`,
-      ``,
-      `[[frontends]]`,
-      `filesystem = "fuse"`,
-      `environment = "docker"`,
-      ``,
-    ].join("\n"),
+    [`[system]`, `frontend_image = ${JSON.stringify(frontendImage)}`, ``].join("\n"),
   );
 
   for (const mount of render.mounts) {
@@ -675,7 +666,12 @@ async function teardownSession(
     .env(cliEnv(devHome))
     .quiet()
     .nothrow();
-  await $`${omnifsCli} down --force`.env(cliEnv(devHome)).quiet().nothrow();
+  const hostFilesystem = process.platform === "linux" ? "fuse" : "nfs";
+  await $`${omnifsCli} frontend disable ${hostFilesystem} --environment host --location ${join(devHome, "mnt")}`
+    .env(cliEnv(devHome))
+    .quiet()
+    .nothrow();
+  await $`${omnifsCli} down`.env(cliEnv(devHome)).quiet().nothrow();
   if (fixtures.k8s) {
     await run(
       $`docker compose -p ${K8S_COMPOSE_PROJECT} -f ${join(

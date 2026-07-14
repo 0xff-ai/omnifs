@@ -13,7 +13,7 @@ keywords = ["omnifs", "filesystem", "paths"]
 omnifs-caps = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-toml_edit = { workspace = true }
+toml = "0.8"
 thiserror = { workspace = true }
 tracing = { workspace = true }
 secrecy = { version = "0.10", features = ["serde"] }

@@ -3355,7 +3355,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "time",
- "toml_edit 0.22.27",
+ "toml 0.8.23",
  "tracing",
  "utoipa",
  "wasmparser 0.247.0",

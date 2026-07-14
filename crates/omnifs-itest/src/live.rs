@@ -223,8 +223,8 @@ pub fn hermetic_home() -> HermeticHome {
     HermeticHome { home, mount_point }
 }
 
-/// A running `omnifs daemon` and platform-default local frontend runner with
-/// the test provider mounted, torn down on drop.
+/// A running `omnifs daemon` and explicit local frontend runner with the test
+/// provider mounted, torn down on drop.
 pub struct NativeDaemon {
     daemon: Child,
     frontend: Child,
@@ -799,8 +799,8 @@ fn curl_ok(url: &str) -> bool {
         .is_ok_and(|status| status.success())
 }
 
-/// Bring up `omnifs daemon` with the platform-default local frontend runner and
-/// only the test provider mounted. `OMNIFS_HOME` and `OMNIFS_DAEMON_ADDR` are
+/// Bring up `omnifs daemon` with an explicit local frontend runner and only the
+/// test provider mounted. `OMNIFS_HOME` and `OMNIFS_DAEMON_ADDR` are
 /// hermetic per lane, so neither process touches the user's real workspace.
 ///
 /// Returns `None` (skip) only when the platform genuinely cannot mount. Panics

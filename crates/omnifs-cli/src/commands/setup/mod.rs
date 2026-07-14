@@ -1,6 +1,7 @@
 //! `omnifs setup`: the small onboarding composition over the normal commands.
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 
 use anyhow::anyhow;
 use clap::Args;
@@ -32,6 +33,7 @@ pub struct SetupArgs {
 }
 
 impl SetupArgs {
+    #[allow(clippy::too_many_lines)] // setup's onboarding phases stay linear
     pub async fn run(self, output: Output) -> anyhow::Result<()> {
         let mode =
             PromptMode::from_flags(output.yes(), output.no_input() || output.is_structured());
@@ -56,7 +58,8 @@ impl SetupArgs {
         }
 
         let inventory = crate::inventory::Inventory::collect(&workspace).await?;
-        if !inventory.desired_mounts.is_empty() && self.providers.is_empty() && !mode.yes {
+        let mounts = &inventory.desired_mounts;
+        if !mounts.is_empty() && self.providers.is_empty() && !mode.yes {
             render_review(&workspace, output).await?;
             if mode.no_input {
                 anyhow::bail!(
@@ -75,8 +78,7 @@ impl SetupArgs {
         if installed.is_empty() {
             anyhow::bail!("no built-in or plugin providers are available");
         }
-        let configured = inventory
-            .desired_mounts
+        let configured = mounts
             .iter()
             .map(|mount| {
                 (
@@ -129,14 +131,15 @@ impl SetupArgs {
             .await?;
         }
 
-        if !workspace.mounts()?.is_empty() {
+        let has_mounts = !workspace.mounts()?.is_empty();
+        if has_mounts {
             workspace.commit_mounts()?;
         }
         if self.no_up {
             session.outro("You're set. Run `omnifs up` when ready.");
             return emit_inventory_if_structured(&workspace, output).await;
         }
-        if workspace.mounts()?.is_empty() {
+        if !has_mounts {
             session.outro("No mounts yet. Add one with `omnifs mount add <provider>`.");
             return emit_inventory_if_structured(&workspace, output).await;
         }
@@ -163,7 +166,7 @@ impl SetupArgs {
             return validate_preselected(&self.providers, installed, configured, session);
         }
         if mode.yes {
-            return Ok(self.yes_auto_select(installed, configured, session));
+            return Ok(Self::yes_auto_select(installed, configured, session));
         }
         if mode.no_input {
             anyhow::bail!(
@@ -184,7 +187,6 @@ impl SetupArgs {
     }
 
     fn yes_auto_select(
-        &self,
         installed: &[(Provider, ProviderManifest)],
         configured: &BTreeMap<String, String>,
         session: &mut crate::ui::session::Session,
@@ -279,10 +281,10 @@ fn render_frontend_result(session: &mut crate::ui::session::Session, result: Fro
     let action = if result.changed { "started" } else { "ready" };
     let mut detail = format!("{} {state} ({action})", result.id);
     if let Some(message) = result.detail {
-        detail.push_str(&format!(": {message}"));
+        let _ = write!(&mut detail, ": {message}");
     }
     if let Some(fix) = result.fix {
-        detail.push_str(&format!("; fix: {fix}"));
+        let _ = write!(&mut detail, "; fix: {fix}");
     }
     session.row(crate::ui::report::Row::new(glyph, "frontend", detail));
 }

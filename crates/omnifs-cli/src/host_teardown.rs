@@ -1,81 +1,12 @@
 //! Local frontend teardown driven by runner-owned mount state.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 
 use omnifs_mtab::{MountKind, MountState, Platform, UnmountCommand};
 
 const UNMOUNT_POLL_CADENCE: Duration = Duration::from_millis(500);
 const UNMOUNT_POLL_ATTEMPTS: usize = 12;
-
-/// A host frontend teardown failure with the reason that made it unsafe or
-/// impossible to remove the mount.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct TeardownFailure {
-    pub(crate) mount_point: PathBuf,
-    pub(crate) reason: String,
-}
-
-#[derive(Debug, Default, PartialEq, Eq)]
-pub(crate) struct TeardownSummary {
-    pub unmounted: usize,
-    pub swept_orphans: usize,
-    pub failed: Vec<TeardownFailure>,
-    pub skipped: usize,
-    pub errors: Vec<String>,
-}
-
-impl TeardownSummary {
-    fn tear_down_one(&mut self, state_file: &Path, state: MountState, force: bool) {
-        if !omnifs_nfs::mount_is_active(&state.mount_point) {
-            if let Some(error) = remove_state_file(state_file) {
-                self.errors.push(error);
-            }
-            self.swept_orphans += 1;
-            return;
-        }
-        if !local_mount_is_owned(&state) {
-            self.failed.push(TeardownFailure {
-                mount_point: state.mount_point,
-                reason: "mount is not owned by omnifs; refusing to unmount it".to_owned(),
-            });
-            return;
-        }
-
-        let mount_point = state.mount_point.clone();
-        let command = match (&state.kind, force) {
-            (MountKind::Nfs { .. }, false) => {
-                UnmountCommand::nfs_graceful(Platform::current(), &mount_point)
-            },
-            (_, false) => UnmountCommand::graceful(Platform::current(), &mount_point),
-            (_, true) => UnmountCommand::forced(Platform::current(), &mount_point),
-        };
-        if let Err(error) = command.run_quiet() {
-            self.failed.push(TeardownFailure {
-                mount_point,
-                reason: format!("unmount command failed: {error}"),
-            });
-            return;
-        }
-
-        if !poll_until_unmounted(&mount_point, UNMOUNT_POLL_CADENCE, UNMOUNT_POLL_ATTEMPTS) {
-            self.failed.push(TeardownFailure {
-                mount_point,
-                reason: format!(
-                    "mount remained active after waiting {} seconds",
-                    UNMOUNT_POLL_CADENCE
-                        .as_secs()
-                        .saturating_mul(UNMOUNT_POLL_ATTEMPTS as u64)
-                ),
-            });
-            return;
-        }
-        if let Some(error) = remove_state_file(state_file) {
-            self.errors.push(error);
-        }
-        self.unmounted += 1;
-    }
-}
 
 pub(crate) fn local_mount_is_owned(state: &MountState) -> bool {
     match &state.kind {
@@ -93,22 +24,6 @@ fn fuse_mount_is_omnifs(mount_point: &Path) -> bool {
 #[cfg(not(target_os = "linux"))]
 fn fuse_mount_is_omnifs(_mount_point: &Path) -> bool {
     false
-}
-
-pub(crate) fn teardown_local_frontends(
-    state_root: &Path,
-    force: bool,
-) -> anyhow::Result<TeardownSummary> {
-    let mut summary = TeardownSummary::default();
-    for path in MountState::files_under(state_root)? {
-        match MountState::read_file(&path) {
-            Ok(state) => summary.tear_down_one(&path, state, force),
-            Err(_error) => {
-                summary.skipped += 1;
-            },
-        }
-    }
-    Ok(summary)
 }
 
 /// Tear down exactly one host frontend location. The location is the identity
@@ -131,17 +46,39 @@ pub(crate) fn teardown_local_frontend(
         if is_nfs != nfs {
             continue;
         }
-        let mut summary = TeardownSummary::default();
-        summary.tear_down_one(&path, state, false);
-        if let Some(error) = summary.errors.into_iter().next() {
-            anyhow::bail!(error)
+        if !omnifs_nfs::mount_is_active(&state.mount_point) {
+            if let Some(error) = remove_state_file(&path) {
+                anyhow::bail!(error)
+            }
+            return Ok(());
         }
-        if let Some(failure) = summary.failed.into_iter().next() {
+        if !local_mount_is_owned(&state) {
             anyhow::bail!(
-                "could not unmount {}: {}",
-                failure.mount_point.display(),
-                failure.reason
-            )
+                "could not unmount {}: mount is not owned by omnifs; refusing to unmount it",
+                state.mount_point.display()
+            );
+        }
+        let mount_point = state.mount_point.clone();
+        let command = match state.kind {
+            MountKind::Nfs { .. } => {
+                UnmountCommand::nfs_graceful(Platform::current(), &mount_point)
+            },
+            MountKind::Fuse => UnmountCommand::graceful(Platform::current(), &mount_point),
+        };
+        command.run_quiet().map_err(|error| {
+            anyhow::anyhow!("could not unmount {}: {error}", mount_point.display())
+        })?;
+        if !poll_until_unmounted(&mount_point, UNMOUNT_POLL_CADENCE, UNMOUNT_POLL_ATTEMPTS) {
+            anyhow::bail!(
+                "could not unmount {}: mount remained active after waiting {} seconds",
+                mount_point.display(),
+                UNMOUNT_POLL_CADENCE
+                    .as_secs()
+                    .saturating_mul(UNMOUNT_POLL_ATTEMPTS as u64)
+            );
+        }
+        if let Some(error) = remove_state_file(&path) {
+            anyhow::bail!(error)
         }
         return Ok(());
     }
@@ -168,30 +105,5 @@ fn remove_state_file(state_file: &Path) -> Option<String> {
             "failed to remove mount state {}: {error}",
             state_file.display()
         )),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn corrupt_record_does_not_hide_healthy_sibling() {
-        let root = tempfile::tempdir().unwrap();
-        let good_dir = root.path().join("nfs/good");
-        let good = omnifs_mtab::StateFile::write_nfs(
-            &root.path().join("mount"),
-            "127.0.0.1:2049".parse().unwrap(),
-            &good_dir,
-        )
-        .unwrap();
-        let corrupt_dir = root.path().join("fuse/corrupt");
-        std::fs::create_dir_all(&corrupt_dir).unwrap();
-        std::fs::write(corrupt_dir.join("mount-corrupt.json"), b"not json").unwrap();
-
-        let summary = teardown_local_frontends(root.path(), false).unwrap();
-        assert_eq!(summary.swept_orphans, 1);
-        assert_eq!(summary.skipped, 1);
-        assert!(!good.path().exists());
     }
 }

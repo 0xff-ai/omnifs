@@ -50,16 +50,14 @@ pub enum Commands {
 
     /// Start the daemon and serve configured mounts
     ///
-    /// Spawns the host-native daemon over configured mounts, then launches
-    /// every frontend in the effective `[[frontends]]` plan (explicit config,
-    /// else the platform default). `--no-frontend` starts the daemon only,
-    /// on every OS.
+    /// Spawns or replaces the host-native daemon over configured mounts.
+    /// Frontends are managed separately with `omnifs frontend enable`.
     #[command(visible_alias = "apply")]
     Up(commands::up::UpArgs),
     /// Stop the daemon and clean up
     ///
-    /// Tears down every running frontend (local, Docker, or krunkit), then
-    /// the daemon.
+    /// Stops only the daemon; independent frontend runners stay alive and
+    /// reconnect when a daemon is started again.
     Down(commands::down::DownArgs),
     /// Tail the daemon log
     Logs(commands::logs::LogsArgs),
@@ -467,14 +465,12 @@ mod tests {
 
     #[test]
     fn apply_alias_parses_identically_to_up() {
-        let up = Cli::try_parse_from(["omnifs", "up", "--no-frontend", "--wait", "3s"]).unwrap();
-        let apply =
-            Cli::try_parse_from(["omnifs", "apply", "--no-frontend", "--wait", "3s"]).unwrap();
+        let up = Cli::try_parse_from(["omnifs", "up", "--wait", "3s"]).unwrap();
+        let apply = Cli::try_parse_from(["omnifs", "apply", "--wait", "3s"]).unwrap();
         let (Commands::Up(up), Commands::Up(apply)) = (up.command.unwrap(), apply.command.unwrap())
         else {
             panic!("up and apply must parse to Commands::Up");
         };
-        assert_eq!(up.no_frontend, apply.no_frontend);
         assert_eq!(up.wait, apply.wait);
     }
 

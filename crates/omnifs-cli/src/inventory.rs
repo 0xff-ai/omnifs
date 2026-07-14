@@ -7,7 +7,6 @@
 use anyhow::Result;
 use omnifs_api::{CredentialHealth, DaemonStatus, FrontendDelivery, FsType, HealthState};
 use omnifs_mtab::{MountKind, MountState};
-use omnifs_workspace::config::{Environment, Filesystem};
 use omnifs_workspace::creds::FileStore;
 use omnifs_workspace::layout::WorkspaceLayout;
 use omnifs_workspace::mounts::{Name as MountName, Registry, Revision};
@@ -19,9 +18,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use crate::auth::{AuthReadiness, MountAuth};
-use crate::credential_target::CredentialTarget;
+use crate::commands::frontend::{
+    FrontendEnvironment as Environment, FrontendFilesystem as Filesystem,
+};
 use crate::mount_config::MountConfig;
-use crate::workspace::{MountRemovalTarget, Workspace};
+use crate::workspace::Workspace;
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct Inventory {
@@ -36,8 +37,6 @@ pub(crate) struct Inventory {
     pub(crate) mounts: Vec<MountStatus>,
     pub(crate) providers: Vec<ProviderStatus>,
     pub(crate) startup_credentials: Vec<StartupCredentialStatus>,
-    #[serde(skip_serializing)]
-    pub(crate) removal_targets: Vec<MountRemovalTarget>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -97,10 +96,13 @@ impl DaemonObservation {
     pub(crate) fn state(&self) -> DaemonState {
         match (&self.probe, self.status.as_ref()) {
             (DaemonProbe::Stopped, _) => DaemonState::Stopped,
-            (DaemonProbe::Unreachable { .. }, _) if self.runtime.is_some() => {
-                DaemonState::Unreachable
+            (DaemonProbe::Unreachable { .. }, _) => {
+                if self.runtime.is_some() {
+                    DaemonState::Unreachable
+                } else {
+                    DaemonState::Stopped
+                }
             },
-            (DaemonProbe::Unreachable { .. }, _) => DaemonState::Stopped,
             (DaemonProbe::Responding, Some(status)) => match status.health.overall_state() {
                 HealthState::Healthy => DaemonState::Running,
                 HealthState::Starting => DaemonState::Starting,
@@ -156,11 +158,12 @@ impl DaemonObservation {
                 health: omnifs_api::DaemonHealth::new(vec![omnifs_api::SubsystemHealth::new(
                     omnifs_api::DaemonSubsystem::Control,
                     match state {
-                        DaemonState::Running => HealthState::Healthy,
+                        DaemonState::Running | DaemonState::Stopped | DaemonState::Unreachable => {
+                            HealthState::Healthy
+                        },
                         DaemonState::Starting => HealthState::Starting,
                         DaemonState::Degraded => HealthState::Degraded,
                         DaemonState::Failed => HealthState::Unhealthy,
-                        DaemonState::Stopped | DaemonState::Unreachable => HealthState::Healthy,
                     },
                     "test",
                 )]),
@@ -259,8 +262,7 @@ impl FrontendState {
 
     pub(crate) const fn severity(self) -> Severity {
         match self {
-            Self::Attached => Severity::Positive,
-            Self::Running => Severity::Positive,
+            Self::Attached | Self::Running => Severity::Positive,
             Self::Failed => Severity::Error,
         }
     }
@@ -467,7 +469,7 @@ impl Inventory {
         let runtime = RuntimeRecord::read(&layout.runtime_record_file())
             .ok()
             .flatten();
-        let mut mounts = mount_statuses(&registry, catalog, &credentials, daemon_status);
+        let mut mounts = mount_statuses(registry, catalog, &credentials, daemon_status);
         let mount_count = mounts.len();
         let runners = runner_statuses(&layout)?;
         let frontends = frontend_statuses(daemon_status, mount_count, &runners);
@@ -483,7 +485,7 @@ impl Inventory {
         for mount in &mut mounts {
             mount.access_count = access_count;
         }
-        let providers = provider_statuses(&registry, catalog)?;
+        let providers = provider_statuses(registry, catalog)?;
         let desired_mounts = registry
             .iter()
             .map(|(name, spec)| MountConfig {
@@ -492,7 +494,6 @@ impl Inventory {
                 source: registry.spec_path(name),
             })
             .collect();
-        let removal_targets = removal_targets(&registry);
         let mut daemon = DaemonObservation::from(daemon_probe);
         daemon.runtime = runtime;
         let startup_credentials = daemon
@@ -520,7 +521,6 @@ impl Inventory {
             mounts,
             providers,
             startup_credentials,
-            removal_targets,
         })
     }
 
@@ -614,7 +614,6 @@ impl Inventory {
             mounts,
             providers,
             startup_credentials: Vec::new(),
-            removal_targets: Vec::new(),
         }
     }
 }
@@ -624,30 +623,6 @@ impl Inventory {
 pub(crate) enum Verdict {
     Ok,
     Degraded,
-}
-
-fn removal_targets(registry: &Registry) -> Vec<MountRemovalTarget> {
-    let mut targets = registry
-        .iter()
-        .map(|(name, spec)| MountRemovalTarget {
-            name: name.to_string(),
-            path: registry.spec_path(name),
-            config: Some(spec.clone()),
-            credential: CredentialTarget::for_mount(spec),
-        })
-        .collect::<Vec<_>>();
-
-    targets.extend(registry.failures().iter().filter_map(|failure| {
-        let name = failure.path.file_stem()?.to_str()?.to_owned();
-        Some(MountRemovalTarget {
-            name,
-            path: failure.path.clone(),
-            config: None,
-            credential: CredentialTarget::None,
-        })
-    }));
-    targets.sort_by(|left, right| left.name.cmp(&right.name));
-    targets
 }
 
 /// Discover host-owned runner records when the daemon cannot answer. These

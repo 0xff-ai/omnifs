@@ -35,9 +35,11 @@ cleanup() {
     tail -n 200 "$OMNIFS_HOME/cache/daemon.log" >&2 || true
   fi
   local frontend
+  "$OMNIFS_CLI" frontend disable fuse --environment docker >/dev/null 2>&1 || true
   frontend="$(docker ps --filter "label=ai.0xff.omnifs.home=$OMNIFS_HOME" --format '{{.Names}}' 2>/dev/null || true)"
   [[ -n "$frontend" ]] && docker rm -f "$frontend" >/dev/null 2>&1
-  "$OMNIFS_CLI" down --force >/dev/null 2>&1 || true
+  "$OMNIFS_CLI" frontend disable fuse --environment host --location "$OMNIFS_HOME/mnt" >/dev/null 2>&1 || true
+  "$OMNIFS_CLI" down >/dev/null 2>&1 || true
   rm -rf "$OMNIFS_HOME"
 }
 trap cleanup EXIT

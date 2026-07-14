@@ -151,8 +151,8 @@ fn workspace_root() -> PathBuf {
 // ===========================================================================
 
 /// Drives the real `omnifs` binary against a hermetic `OMNIFS_HOME`, exactly
-/// as a contributor would: `up --no-frontend`, `frontend enable fuse
-/// --environment krunkit`, `frontend ls`, `down`. No test touches the user's real
+/// as a contributor would: `up`, explicit host and krunkit frontend enable,
+/// `frontend ls`, explicit frontend disable, `down`. No test touches the user's real
 /// `~/.omnifs` or default ports.
 struct Fixture {
     home: TempDir,
@@ -218,15 +218,15 @@ impl Fixture {
             .unwrap_or_else(|error| panic!("spawn omnifs {}: {error}", args.join(" ")))
     }
 
-    /// Bring up a host-native daemon and wait for its default frontend to
-    /// serve the test-provider tree. Panics on a real failure: every
+    /// Bring up a host-native daemon, explicitly enable its host frontend, and
+    /// wait for it to serve the test-provider tree. Panics on a real failure: every
     /// environment gap (missing wasm, unmountable platform) was already
     /// checked by [`preconditions`] before the fixture was built.
     fn up_native(&mut self) {
-        let out = self.run(&["up", "--no-frontend"]);
+        let out = self.run(&["up"]);
         assert!(
             out.status.success(),
-            "omnifs up --no-frontend failed (exit {})\nstdout: {}\nstderr: {}",
+            "omnifs up failed (exit {})\nstdout: {}\nstderr: {}",
             out.status,
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr),
@@ -340,7 +340,7 @@ impl Drop for Fixture {
 /// `frontend_docker`'s own `force_unmount`: on macOS `sudo -n umount -f`
 /// clears a dead-server NFS mount instantly, where `diskutil unmount force`
 /// blocks in an uninterruptible NFS syscall. A no-op when nothing is mounted
-/// (the common case after a clean `omnifs down`).
+/// (the common case after explicit frontend disable).
 fn force_unmount(mount_point: &Path) {
     let unmount_once = || {
         let Some(canonical) = mount_point
@@ -503,15 +503,37 @@ fn krunkit_lifecycle_and_matrix() {
         mismatches.join("\n  ")
     );
 
-    // `omnifs down` tears the krunkit guest down (`teardown_frontend`, which
-    // is exactly what selected frontend disable runs) before stopping the
-    // daemon, so this one call proves both the frontend-down contract and
-    // the daemon-then-frontend teardown ordering. Bounded retries: the
-    // host-native NFS mount can be transiently busy at shutdown (macOS
-    // spawns indexer handles like mds/mdworker against a fresh mount), and
-    // the CLI's own failure guidance for that exact case is "re-run
-    // `omnifs down`". A handle held by this test would never clear, so a
-    // bounded retry that must eventually succeed keeps the assertion honest.
+    // Frontend runners have independent lifecycles. Disable the krunkit and
+    // host runners explicitly, then stop the daemon with `omnifs down`.
+    // The host-native NFS mount can be transiently busy at shutdown because
+    // macOS spawns indexer handles like mds/mdworker against a fresh mount.
+    let krunkit_disabled =
+        fixture.run(&["frontend", "disable", "fuse", "--environment", "krunkit"]);
+    assert!(
+        krunkit_disabled.status.success(),
+        "disabling krunkit frontend before down failed (exit {})\nstdout: {}\nstderr: {}",
+        krunkit_disabled.status,
+        String::from_utf8_lossy(&krunkit_disabled.stdout),
+        String::from_utf8_lossy(&krunkit_disabled.stderr),
+    );
+    let host_location = fixture.mount_point.to_str().expect("mount point utf8");
+    let host_disabled = fixture.run(&[
+        "frontend",
+        "disable",
+        "nfs",
+        "--environment",
+        "host",
+        "--location",
+        host_location,
+    ]);
+    assert!(
+        host_disabled.status.success(),
+        "disabling host frontend before down failed (exit {})\nstdout: {}\nstderr: {}",
+        host_disabled.status,
+        String::from_utf8_lossy(&host_disabled.stdout),
+        String::from_utf8_lossy(&host_disabled.stderr),
+    );
+
     let mut down_out = fixture.down();
     for _ in 0..3 {
         if down_out.status.success() {
@@ -540,6 +562,6 @@ fn krunkit_lifecycle_and_matrix() {
     let leftover = fixture.krunkit_artifacts();
     assert!(
         leftover.is_empty(),
-        "omnifs down must remove every krunkit artifact, found: {leftover:?}"
+        "frontend disable must remove every krunkit artifact before omnifs down, found: {leftover:?}"
     );
 }

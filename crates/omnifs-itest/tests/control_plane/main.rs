@@ -42,10 +42,10 @@ impl Daemon {
         self.child.id()
     }
 
-    /// Spawn a host-native daemon for a fresh hermetic home. The daemon serves
-    /// the platform-default frontend and binds its Unix socket; it is handed no
-    /// TCP listener and no `OMNIFS_DAEMON_ADDR`, so it is reachable only through
-    /// its own workspace's record.
+    /// Spawn a host-native daemon for a fresh hermetic home. The daemon binds
+    /// its fixed local frontend socket but launches no runner. It is handed no
+    /// TCP listener and no `OMNIFS_DAEMON_ADDR`, so its control API is reachable
+    /// only through its own workspace's record.
     fn spawn() -> Option<Self> {
         let hermetic = hermetic_home();
         let child = Command::new(omnifs_bin())

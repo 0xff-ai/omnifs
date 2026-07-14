@@ -56,12 +56,6 @@ impl CredentialTarget {
         )))
     }
 
-    pub(crate) fn for_mount(config: &Spec) -> Self {
-        config.auth.as_ref().map_or(Self::None, |auth| {
-            Self::for_configured_auth(config, auth, auth.scheme()).unwrap_or(Self::None)
-        })
-    }
-
     pub(crate) fn keys(&self) -> Vec<&CredentialId> {
         match self {
             Self::Internal(key) => vec![key],

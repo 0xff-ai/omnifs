@@ -154,6 +154,32 @@ impl Fixture {
         // Record daemon PID from the runtime record so Drop can kill it.
         self.update_pid_from_record();
 
+        // Frontends are independent of daemon startup. Enable the host
+        // frontend explicitly at this fixture's mount path before probing the
+        // projected tree.
+        let filesystem = if cfg!(target_os = "macos") {
+            "nfs"
+        } else {
+            "fuse"
+        };
+        let location = self.mount_point.to_string_lossy().into_owned();
+        let frontend = self.run(&[
+            "frontend",
+            "enable",
+            filesystem,
+            "--environment",
+            "host",
+            "--location",
+            &location,
+        ]);
+        assert!(
+            frontend.status.success(),
+            "host frontend enable failed (exit {})\nstdout: {}\nstderr: {}",
+            frontend.status,
+            String::from_utf8_lossy(&frontend.stdout),
+            String::from_utf8_lossy(&frontend.stderr),
+        );
+
         // Wait for the mount to serve the projected tree.
         let message = self.mount_point.join("test/hello/message");
         let deadline = Instant::now() + Duration::from_secs(30);
@@ -258,9 +284,9 @@ fn scenario_2_down_nothing_running() {
 
 // Full up, status, repeated up, and down lifecycle.
 
-/// Up serves the mount, status shows it running, up-again is rejected,
-/// down is clean. Scenarios 3-6 share a single daemon lifecycle so we do not
-/// pay 4x mount setup latency.
+/// Up serves the mount through an explicitly enabled host frontend, status
+/// shows it running, and down leaves that frontend alive. Scenarios 3-6 share
+/// a single daemon lifecycle so we do not pay 4x mount setup latency.
 #[test]
 #[allow(clippy::too_many_lines)] // one shared daemon lifecycle across scenarios 3-6
 fn scenarios_3_to_6_lifecycle_cycle() {
@@ -285,7 +311,7 @@ fn scenarios_3_to_6_lifecycle_cycle() {
     let mut fixture = Fixture::new();
     fixture.write_test_spec();
 
-    // Starting the daemon serves the mount.
+    // Start the daemon, then enable the host frontend for the mount.
 
     let Some(()) = fixture.up_and_wait() else {
         return; // skip: platform could not mount
@@ -381,14 +407,9 @@ fn scenarios_3_to_6_lifecycle_cycle() {
         "applying the served revision must retain the daemon pid"
     );
 
-    // Shutdown cleans up the daemon and mount.
-
-    // Use --force so a tardy NFS unmount does not cause `down` to exit
-    // non-zero. On macOS the NFS client takes a variable amount of time to
-    // acknowledge the server's unmount, which can exceed the 3s grace window
-    // in `wait_unmounted`. The invariant under test (mount gone, daemon.json
-    // removed, daemon exited) is preserved regardless of the --force flag.
-    let out = fixture.run(&["down", "--force"]);
+    // Shutdown stops only the daemon; the independent host frontend and its
+    // mount remain available while the daemon is down.
+    let out = fixture.run(&["down"]);
     assert!(
         out.status.success(),
         "omnifs down must exit 0 (exit {})\nstdout: {}\nstderr: {}",
@@ -413,7 +434,51 @@ fn scenarios_3_to_6_lifecycle_cycle() {
         "status immediately after down must report stopped: {immediate_json:#}"
     );
 
-    // Mount is gone from the OS mount table.
+    // The host runner and mount remain observable after daemon shutdown.
+    let frontend = immediate_json["result"]["frontends"]
+        .as_array()
+        .expect("status result.frontends must be an array");
+    let filesystem = if cfg!(target_os = "macos") {
+        "nfs"
+    } else {
+        "fuse"
+    };
+    let mount_location = fixture.mount_point.to_string_lossy().into_owned();
+    assert!(
+        frontend.iter().any(|entry| {
+            entry["filesystem"].as_str() == Some(filesystem)
+                && entry["environment"].as_str() == Some("host")
+                && entry["location"].as_str() == Some(mount_location.as_str())
+                && entry["state"].as_str() == Some("running")
+        }),
+        "status after down must retain the running host frontend: {frontend:?}"
+    );
+    assert!(
+        fixture.mount_is_active(),
+        "mount point {} must remain active while the daemon is down",
+        fixture.mount_point.display()
+    );
+
+    // Disable the exact host frontend while the daemon is stopped, then wait
+    // for its mount and runner observation to disappear.
+    let location = fixture.mount_point.to_string_lossy().into_owned();
+    let disabled = fixture.run(&[
+        "frontend",
+        "disable",
+        filesystem,
+        "--environment",
+        "host",
+        "--location",
+        &location,
+    ]);
+    assert!(
+        disabled.status.success(),
+        "frontend disable while daemon is down must succeed (exit {})\nstdout: {}\nstderr: {}",
+        disabled.status,
+        String::from_utf8_lossy(&disabled.stdout),
+        String::from_utf8_lossy(&disabled.stderr),
+    );
+
     // Poll briefly: the OS may take a moment to acknowledge the unmount.
     let settled = {
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -429,8 +494,29 @@ fn scenarios_3_to_6_lifecycle_cycle() {
     };
     assert!(
         settled,
-        "mount point {} must be gone from the mount table after `omnifs down`",
+        "mount point {} must be gone from the mount table after frontend disable",
         fixture.mount_point.display()
+    );
+
+    let after_disable = fixture.run(&["status", "--output", "json"]);
+    assert!(
+        after_disable.status.success(),
+        "status after frontend disable must succeed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&after_disable.stdout),
+        String::from_utf8_lossy(&after_disable.stderr),
+    );
+    let after_disable_json: serde_json::Value = serde_json::from_slice(&after_disable.stdout)
+        .expect("status after frontend disable must produce valid JSON");
+    let remaining_frontends = after_disable_json["result"]["frontends"]
+        .as_array()
+        .expect("status result.frontends must be an array after disable");
+    assert!(
+        !remaining_frontends.iter().any(|entry| {
+            entry["filesystem"].as_str() == Some(filesystem)
+                && entry["environment"].as_str() == Some("host")
+                && entry["location"].as_str() == Some(location.as_str())
+        }),
+        "frontend disable must remove the exact host frontend observation: {remaining_frontends:?}"
     );
 
     // The runtime record is removed.
@@ -525,7 +611,7 @@ fn scenario_8_revision_restart_and_preflight_failure() {
 
     let mut fixture = Fixture::new();
     fixture.write_test_spec();
-    let out = fixture.run(&["up", "--no-frontend"]);
+    let out = fixture.run(&["up"]);
     assert!(
         out.status.success(),
         "initial up failed (exit {})\nstdout: {}\nstderr: {}",
@@ -540,7 +626,7 @@ fn scenario_8_revision_restart_and_preflight_failure() {
             .expect("initial runtime record");
 
     fixture.write_other_spec();
-    let out = fixture.run(&["apply", "--no-frontend"]);
+    let out = fixture.run(&["apply"]);
     assert!(
         out.status.success(),
         "changed-revision apply failed (exit {})\nstdout: {}\nstderr: {}",
@@ -572,7 +658,7 @@ fn scenario_8_revision_restart_and_preflight_failure() {
 
     std::fs::write(fixture.mounts_dir().join("malformed.json"), b"{")
         .expect("write malformed desired state");
-    let out = fixture.run(&["up", "--no-frontend"]);
+    let out = fixture.run(&["up"]);
     assert!(
         !out.status.success(),
         "malformed desired state must reject up"

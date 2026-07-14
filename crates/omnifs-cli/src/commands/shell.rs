@@ -10,9 +10,9 @@
 //! the user exactly where they were with nothing to undo; their real dotfiles
 //! are never touched.
 //!
-//! Surface-aware: several frontends can be attached at once (`[[frontends]]`
-//! config), so `omnifs shell` probes live state and picks one rather than
-//! trusting a single recorded choice. A guest frontend's mount (Docker
+//! Surface-aware: several independent frontend runners can be attached at
+//! once, so `omnifs shell` uses Inventory's live observations rather than
+//! trusting a recorded choice. A guest frontend's mount (Docker
 //! container or krunkit microVM) is invisible on the host, so a live guest is
 //! preferred over a host subshell and entered by execing into it (`docker
 //! exec` or ssh-over-vsock); Docker is checked before krunkit only because
@@ -392,7 +392,7 @@ fn local_mounts(inventory: Option<&Inventory>, paths: &WorkspaceLayout) -> Resul
                 .frontends
                 .iter()
                 .filter(|frontend| {
-                    frontend.environment == omnifs_workspace::config::Environment::Host
+                    frontend.environment == crate::commands::frontend::FrontendEnvironment::Host
                         && matches!(
                             frontend.state,
                             FrontendState::Attached | FrontendState::Running

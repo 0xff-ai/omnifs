@@ -2,7 +2,6 @@
 
 use clap::Args;
 
-use crate::commands::frontend::FrontendController;
 use crate::commands::receipt::UpReceipt;
 use crate::error::ExitCode;
 use crate::inventory::Inventory;
@@ -12,80 +11,44 @@ use crate::workspace::Workspace;
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct UpArgs {
-    /// Skip launching any configured frontends after the daemon comes up, on
-    /// every OS. The daemon still starts; a frontend already running from a
-    /// previous session is untouched and stays usable. Frontends can always
-    /// be started later with `omnifs frontend enable`.
-    #[arg(long)]
-    pub no_frontend: bool,
     /// Wait until /v1/ready answers, failing with exit code 3 on timeout.
     #[arg(long, value_name = "DURATION")]
     pub wait: Option<String>,
 }
 
 impl UpArgs {
-    pub async fn run(self, output: Output) -> anyhow::Result<ExitCode> {
-        let workspace = Workspace::resolve()?;
+    pub(crate) async fn start_in_workspace(
+        &self,
+        workspace: &Workspace,
+        output: Output,
+    ) -> anyhow::Result<()> {
         let wait = self
             .wait
             .as_deref()
             .map(crate::stages::parse_wait_duration)
             .transpose()?;
-        let outcome = Launcher::new(&workspace, "omnifs up", output)
+        Launcher::new(workspace, "omnifs up", output)
             .launch()
             .await?;
-        if !output.is_structured() {
-            output.narrate("");
-        }
-        if !output.is_structured() {
-            for mount_point in &outcome.local_mount_points {
-                output.narrate(format!(
-                    "Browse it directly: `{}`",
-                    crate::ui::style::bold(format!("ls {}", mount_point.display())),
-                ));
-            }
-        }
-
-        let frontend_degraded = if self.no_frontend {
-            false
-        } else {
-            let report = FrontendController::new(&workspace, output)?
-                .converge(outcome.daemon_restarted())
-                .await?;
-            for failure in &report {
-                if !output.is_structured() {
-                    output.narrate(format!(
-                        "Frontend {} failed: {}\nFix  {}",
-                        failure.id,
-                        failure.detail.as_deref().unwrap_or("unknown error"),
-                        failure.fix.as_deref().unwrap_or("omnifs frontend restart"),
-                    ));
-                }
-            }
-            !report.is_empty()
-        };
 
         if let Some(timeout) = wait {
-            crate::stages::wait_until_ready(&workspace, timeout).await?;
+            crate::stages::wait_until_ready(workspace, timeout).await?;
             if !output.is_structured() {
                 output.narrate("Daemon is ready.");
             }
         }
+        Ok(())
+    }
+
+    pub async fn run(self, output: Output) -> anyhow::Result<ExitCode> {
+        let workspace = Workspace::resolve()?;
+        self.start_in_workspace(&workspace, output).await?;
         crate::telemetry::maybe_print_health_nudge(&workspace, output).await;
 
         if output.is_structured() {
-            let code = emit_receipt(&workspace, output).await?;
-            return Ok(if frontend_degraded {
-                ExitCode::Degraded
-            } else {
-                code
-            });
+            return emit_receipt(&workspace, output).await;
         }
-        Ok(if frontend_degraded {
-            ExitCode::Degraded
-        } else {
-            ExitCode::Success
-        })
+        Ok(ExitCode::Success)
     }
 }
 

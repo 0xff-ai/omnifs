@@ -7,9 +7,8 @@
 //!      says what was started.
 //!   3. If neither applies, nothing is running.
 //!
-//! The backend is never inferred from `[system].runtime`. `down` is
-//! backend-transparent: it dispatches through `LaunchBackend::reclaim` without
-//! naming Docker or native.
+//! The backend is never inferred from `[system].runtime`; the daemon owns its
+//! shutdown protocol, and frontend runners remain independent.
 
 use clap::Args;
 
@@ -21,24 +20,19 @@ use crate::ui::output::{Output, ResultVerdict};
 use crate::workspace::Workspace;
 
 #[derive(Args, Debug, Clone, Default)]
-pub struct DownArgs {
-    /// Force the host-native unmount if a clean shutdown leaves the mount busy.
-    #[arg(long)]
-    pub force: bool,
-}
+pub struct DownArgs {}
 
 impl DownArgs {
     pub async fn run(self, output: Output) -> anyhow::Result<ExitCode> {
-        let DownArgs { force } = self;
         let workspace = Workspace::resolve()?;
         let inventory = Inventory::collect(&workspace).await?;
 
-        let teardown = DaemonTeardown::with_inventory(&workspace, output, inventory);
+        let teardown = DaemonTeardown::with_inventory(&workspace, inventory);
         let exit = if output.is_structured() {
             // The receipt is the whole story: a failed row already conveys the
             // failure, so this returns a non-zero exit code rather than an
             // error that would print a second JSON document.
-            let outcomes = teardown.down_collect(force).await?;
+            let outcomes = teardown.down_collect().await?;
             let rows = outcomes
                 .iter()
                 .map(crate::daemon_teardown::TeardownOutcome::outcome)
@@ -61,7 +55,7 @@ impl DownArgs {
                 ExitCode::Success
             }
         } else {
-            teardown.down(force).await?;
+            teardown.down().await?;
             ExitCode::Success
         };
         crate::telemetry::maybe_print_health_nudge(&workspace, output).await;

@@ -6,8 +6,9 @@
 //! the standard toolbox (the `fuse-docker` conformance column, reusing the
 //! shared matrix machinery from `omnifs_itest::matrix` rather than forking
 //! it), plus the surrounding lifecycle, timing, and security guarantees:
-//! `omnifs frontend {enable,disable,ls}`, `omnifs down` teardown ordering, a
-//! cold-start budget, cross-mount byte identity, kill/reattach behavior, and
+//! `omnifs frontend {enable,disable,ls}`, explicit frontend teardown before
+//! `omnifs down`, a cold-start budget, cross-mount byte identity,
+//! kill/reattach behavior, and
 //! the no-credentials contract.
 //!
 //! Gated on `OMNIFS_ACCEPTANCE_LIVE`, matching every other live-mount lane.
@@ -180,15 +181,15 @@ impl Fixture {
             .unwrap_or_else(|error| panic!("spawn omnifs {}: {error}", args.join(" ")))
     }
 
-    /// Bring up a host-native daemon and wait for its default frontend to
-    /// serve the test-provider tree. Panics on a real failure: every
+    /// Bring up a host-native daemon, explicitly enable its host frontend,
+    /// and wait for it to serve the test-provider tree. Panics on a real failure: every
     /// environment gap (missing wasm, unmountable platform) was already
     /// checked by [`preconditions`] before the fixture was built.
     fn up_native(&mut self) {
-        let out = self.run(&["up", "--no-frontend"]);
+        let out = self.run(&["up"]);
         assert!(
             out.status.success(),
-            "omnifs up --no-frontend failed (exit {})\nstdout: {}\nstderr: {}",
+            "omnifs up failed (exit {})\nstdout: {}\nstderr: {}",
             out.status,
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr),
@@ -303,8 +304,8 @@ impl Drop for Fixture {
 /// a dead-server NFS mount instantly, where `diskutil unmount force` blocks
 /// in an uninterruptible NFS syscall (observed hanging this suite's Drop);
 /// the path is resolved via the parent so the dead mount itself is never
-/// stat-ed. A no-op when nothing is mounted (the common case after a clean
-/// `omnifs down`). Retries briefly: a just-killed server can leave the mount
+/// stat-ed. A no-op when nothing is mounted (the common case after explicit
+/// frontend disable). Retries briefly: a just-killed server can leave the mount
 /// transiently busy before the kernel gives up on it.
 fn force_unmount(mount_point: &Path) {
     #[cfg(target_os = "linux")]
@@ -706,8 +707,37 @@ fn fuse_docker_lifecycle_and_matrix() {
     fixture.assert_frontend_enable_ok(&reenabled, "re-enable after disable");
     assert_serves(&fixture.container_name());
 
-    // `omnifs down` tears the frontend container down before stopping the
-    // daemon (`DaemonTeardown::down`).
+    // Frontend runners have independent lifecycles. Disable Docker and the
+    // host runner explicitly, then stop the daemon with `omnifs down`.
+    let disabled = fixture.run(&["frontend", "disable", "fuse", "--environment", "docker"]);
+    assert!(
+        disabled.status.success(),
+        "disabling Docker frontend before down failed (exit {})\nstdout: {}\nstderr: {}",
+        disabled.status,
+        String::from_utf8_lossy(&disabled.stdout),
+        String::from_utf8_lossy(&disabled.stderr),
+    );
+    let host_location = fixture.mount_point.to_str().expect("mount point utf8");
+    let disabled = fixture.run(&[
+        "frontend",
+        "disable",
+        if cfg!(target_os = "linux") {
+            "fuse"
+        } else {
+            "nfs"
+        },
+        "--environment",
+        "host",
+        "--location",
+        host_location,
+    ]);
+    assert!(
+        disabled.status.success(),
+        "disabling host frontend before down failed (exit {})\nstdout: {}\nstderr: {}",
+        disabled.status,
+        String::from_utf8_lossy(&disabled.stdout),
+        String::from_utf8_lossy(&disabled.stderr),
+    );
     let down_out = fixture.down();
     assert!(
         down_out.status.success(),
@@ -718,7 +748,7 @@ fn fuse_docker_lifecycle_and_matrix() {
     );
     assert!(
         fixture.containers().is_empty(),
-        "omnifs down must remove the frontend container"
+        "frontend disable must remove the frontend container before omnifs down"
     );
 }
 
@@ -733,18 +763,11 @@ fn fuse_docker_lifecycle_and_matrix() {
 ///    up host-side; the only observable effect is the container going away.
 ///    Docker frontend enable again creates a fresh container that serves.
 /// 2. **Kill the daemon, leaving the container alive.** The VFS wire client
-///    reconnects with backoff forever (`omnifs-vfs-wire`), so the
-///    container process itself does not crash. But its `OMNIFS_ATTACH_ADDR`/
-///    `OMNIFS_ATTACH_TOKEN` are baked in at container creation, and a fresh
-///    daemon mints a new ephemeral attach port and a new per-instance token,
-///    so the stale container can never rediscover it: recovery is
-///    Docker frontend enable again (a fresh container), not automatic. This test
-///    proves the container survives and that recovery path, but deliberately
-///    never issues a filesystem read through the stale mount: a live FUSE
-///    read against an attach whose TCP target is unreachable can block in an
-///    uninterruptible kernel wait (observed manually against this exact
-///    scenario), which is real information but unsafe to assert inside a
-///    bounded test.
+///    reconnects with backoff forever (`omnifs-vfs-wire`), and daemon startup
+///    restores the predecessor TCP address and token before publishing
+///    readiness. The same container therefore reattaches without replacement.
+///    This test deliberately avoids a filesystem read while the daemon is
+///    absent because an unreachable FUSE attach can block in the kernel.
 #[test]
 fn kill_and_reattach_fuse_semantics() {
     if !acceptance_gated() {
@@ -811,11 +834,12 @@ fn kill_and_reattach_fuse_semantics() {
     // that blocks a fresh daemon from mounting there again. This is a
     // pre-existing rough edge independent of the Docker frontend (observed
     // manually against a plain `omnifs up` after a bare kill); the product's
-    // supported recovery is `omnifs down`, which sweeps orphaned host-native
-    // mounts, but calling it here would also tear down the very container
-    // this test is keeping alive on purpose. So this test does the same sweep
-    // by hand: force-unmount, then bring up a fresh daemon on the same home,
-    // a new instance with its own ephemeral attach port and token.
+    // supported recovery is to disable the stale frontend before stopping the
+    // daemon, but calling it here would also tear down the very container this
+    // test is keeping alive on purpose. So this test sweeps the host mount by
+    // hand: force-unmount, then brings up a fresh daemon on the same home.
+    // The daemon instance changes while its approved attach authority stays
+    // stable for the surviving container.
     force_unmount(&fixture.mount_point);
     fixture.up_native();
     let new_instance = fixture
@@ -827,12 +851,10 @@ fn kill_and_reattach_fuse_semantics() {
         "a restarted daemon must mint a new instance id"
     );
 
-    let up3 = fixture.frontend_enable();
-    fixture.assert_frontend_enable_ok(&up3, "after a daemon restart");
     let id_3 = container_id(&container);
-    assert_ne!(
+    assert_eq!(
         id_2, id_3,
-        "recovering from a stale attach target must recreate the container"
+        "daemon restart must preserve the existing frontend container"
     );
     assert_serves(&container);
 }

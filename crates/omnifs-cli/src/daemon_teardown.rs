@@ -1,13 +1,12 @@
-//! Daemon and frontend shutdown workflows.
+//! Daemon shutdown workflow.
 //!
 //! Teardown is deliberately a typed collection step. Commands render these
-//! outcomes through the UI event stream, so a receipt cannot claim a frontend
-//! or daemon was stopped when the cleanup only produced a warning.
+//! outcomes through the UI event stream, so a receipt cannot claim the daemon
+//! was stopped when the cleanup only produced a warning.
 
 use crate::inventory::{DaemonProbe, Inventory};
 use crate::ui::consent::Outcome;
 use crate::ui::event::{LedgerRenderer, Render, UiEvent};
-use crate::ui::output::Output;
 use crate::workspace::Workspace;
 use omnifs_workspace::runtime_record::{RecordedBackend, RuntimeRecord};
 use std::time::Duration;
@@ -19,9 +18,6 @@ const SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// command to choose severity and wording without parsing internal prose.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum TeardownOutcome {
-    FrontendsRemoved,
-    FrontendsAbsent,
-    FrontendsFailed { error: String },
     DaemonStopped { pid: u32 },
     DaemonAlreadyStopped,
     DaemonShutdownFailed { error: String },
@@ -34,9 +30,6 @@ pub(crate) enum TeardownOutcome {
 impl TeardownOutcome {
     pub(crate) fn id(&self) -> &'static str {
         match self {
-            Self::FrontendsRemoved | Self::FrontendsAbsent | Self::FrontendsFailed { .. } => {
-                "frontends"
-            },
             Self::DaemonStopped { .. }
             | Self::DaemonAlreadyStopped
             | Self::DaemonShutdownFailed { .. }
@@ -49,9 +42,6 @@ impl TeardownOutcome {
 
     pub(crate) fn outcome(&self) -> Outcome {
         match self {
-            Self::FrontendsRemoved => Outcome::done(self.id(), "torn down"),
-            Self::FrontendsAbsent => Outcome::skip(self.id(), "none found"),
-            Self::FrontendsFailed { error } => Outcome::fail(self.id(), error.clone()),
             Self::DaemonStopped { pid } => Outcome::done(self.id(), format!("stopped (pid {pid})")),
             Self::DaemonAlreadyStopped => Outcome::skip(self.id(), "already stopped"),
             Self::DaemonShutdownFailed { error } => {
@@ -72,8 +62,7 @@ impl TeardownOutcome {
     pub(crate) fn is_failure(&self) -> bool {
         matches!(
             self,
-            Self::FrontendsFailed { .. }
-                | Self::DaemonShutdownFailed { .. }
+            Self::DaemonShutdownFailed { .. }
                 | Self::StaleRecordKept { .. }
                 | Self::OwnershipUnknown { .. }
         )
@@ -82,36 +71,29 @@ impl TeardownOutcome {
 
 pub(crate) struct DaemonTeardown<'a> {
     workspace: &'a Workspace,
-    output: Output,
     initial: Option<Inventory>,
 }
 
 impl<'a> DaemonTeardown<'a> {
-    pub(crate) fn new(workspace: &'a Workspace, output: Output) -> Self {
+    pub(crate) fn new(workspace: &'a Workspace) -> Self {
         Self {
             workspace,
-            output,
             initial: None,
         }
     }
 
-    pub(crate) fn with_inventory(
-        workspace: &'a Workspace,
-        output: Output,
-        inventory: Inventory,
-    ) -> Self {
+    pub(crate) fn with_inventory(workspace: &'a Workspace, inventory: Inventory) -> Self {
         Self {
             workspace,
-            output,
             initial: Some(inventory),
         }
     }
 
-    /// Stop frontends before stopping the namespace daemon they depend on, and
-    /// render the typed outcomes to the flat ledger. Bails on the first failure
-    /// so the exit code reflects an incomplete teardown.
-    pub(crate) async fn down(&self, force: bool) -> anyhow::Result<()> {
-        let outcomes = self.down_collect(force).await?;
+    /// Stop the namespace daemon and render the typed outcomes to the flat
+    /// ledger. Bails on the first failure so the exit code reflects an
+    /// incomplete teardown.
+    pub(crate) async fn down(&self) -> anyhow::Result<()> {
+        let outcomes = self.down_collect().await?;
         render_outcomes(&outcomes);
         if let Some(outcome) = outcomes.iter().find(|outcome| outcome.is_failure()) {
             anyhow::bail!(outcome.outcome().value);
@@ -120,10 +102,8 @@ impl<'a> DaemonTeardown<'a> {
     }
 
     /// Stop only the namespace daemon, leaving every frontend process in
-    /// place. Apply uses this path when switching desired mount revisions:
-    /// host frontends reconnect to the fresh local socket, while guest
-    /// frontends are relaunched separately with the new start-scoped attach
-    /// authority.
+    /// place. Apply uses this path when switching desired mount revisions;
+    /// surviving frontends reconnect when the daemon returns.
     pub(crate) async fn stop_daemon(&self) -> anyhow::Result<()> {
         let record_path = self.workspace.layout().runtime_record_file();
         let outcome = match self.workspace.daemon().status_optional().await {
@@ -146,17 +126,11 @@ impl<'a> DaemonTeardown<'a> {
         }
     }
 
-    /// Run the teardown workflow and return its typed outcomes without
+    /// Run the daemon teardown workflow and return its typed outcomes without
     /// rendering. `down` renders these to the ledger; structured output settles
-    /// them into a receipt. A frontend-teardown failure stops the workflow
-    /// before the daemon is touched (fail-closed: a live frontend depends on
-    /// the daemon namespace).
-    pub(crate) async fn down_collect(&self, force: bool) -> anyhow::Result<Vec<TeardownOutcome>> {
-        let mut outcomes = vec![self.teardown_frontends(force).await];
-        if outcomes[0].is_failure() {
-            return Ok(outcomes);
-        }
-
+    /// them into a receipt.
+    pub(crate) async fn down_collect(&self) -> anyhow::Result<Vec<TeardownOutcome>> {
+        let mut outcomes = Vec::new();
         let record_path = self.workspace.layout().runtime_record_file();
         match self.initial_or_status().await {
             Ok(Some(status)) => {
@@ -233,20 +207,6 @@ impl<'a> DaemonTeardown<'a> {
             _ => self.workspace.daemon().status_optional().await,
         }
     }
-
-    async fn teardown_frontends(&self, force: bool) -> TeardownOutcome {
-        let report =
-            crate::commands::frontend::teardown_all(self.workspace.layout(), force, self.output)
-                .await;
-        if let Some(error) = report.error() {
-            TeardownOutcome::FrontendsFailed { error }
-        } else if report.found {
-            TeardownOutcome::FrontendsRemoved
-        } else {
-            TeardownOutcome::FrontendsAbsent
-        }
-    }
-
     fn remove_stale_record(&self) -> TeardownOutcome {
         let path = self.workspace.layout().runtime_record_file();
         match self.recorded_pid_liveness() {
@@ -279,12 +239,10 @@ impl<'a> DaemonTeardown<'a> {
 
 fn render_outcomes(outcomes: &[TeardownOutcome]) {
     let mut renderer = LedgerRenderer;
-    if outcomes.iter().all(|outcome| {
-        matches!(
-            outcome,
-            TeardownOutcome::FrontendsAbsent | TeardownOutcome::StaleRecordAbsent
-        )
-    }) {
+    if outcomes
+        .iter()
+        .all(|outcome| matches!(outcome, TeardownOutcome::StaleRecordAbsent))
+    {
         renderer.event(&UiEvent::Narration {
             message: "Nothing to tear down.".to_owned(),
         });
@@ -312,13 +270,12 @@ mod tests {
         assert_eq!(stopped.id, "daemon");
         assert_eq!(stopped.glyph(), Glyph::Done);
 
-        let failed = TeardownOutcome::FrontendsFailed {
+        let failed = TeardownOutcome::DaemonShutdownFailed {
             error: "busy".to_owned(),
         }
         .outcome();
-        assert_eq!(failed.id, "frontends");
-        // Frontend teardown failure is fail-closed: it blocks daemon shutdown
-        // (see `down`), so its severity is a hard failure, not a warning.
+        assert_eq!(failed.id, "daemon");
+        // Daemon shutdown failure is a hard failure, not a warning.
         assert_eq!(failed.glyph(), Glyph::Fail);
         assert!(failed.value.contains("busy"));
     }

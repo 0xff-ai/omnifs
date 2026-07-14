@@ -4,7 +4,7 @@
 //! runtime or credentials. Local delivery starts a sibling runner binary;
 //! Docker and krunkit deliver the FUSE runner inside an isolated guest.
 
-mod controller;
+mod lifecycle;
 
 use clap::Subcommand;
 
@@ -19,10 +19,10 @@ pub struct FrontendArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum FrontendCommand {
-    Enable(controller::FrontendEnableArgs),
-    Disable(controller::FrontendDisableArgs),
-    Restart(controller::FrontendRestartArgs),
-    Ls(controller::FrontendLsArgs),
+    Enable(lifecycle::FrontendEnableArgs),
+    Disable(lifecycle::FrontendDisableArgs),
+    Restart(lifecycle::FrontendRestartArgs),
+    Ls(lifecycle::FrontendLsArgs),
 }
 
 impl FrontendArgs {
@@ -36,4 +36,7 @@ impl FrontendArgs {
     }
 }
 
-pub(crate) use controller::{FrontendController, FrontendResult, RuntimeState, teardown_all};
+pub(crate) use lifecycle::{
+    FrontendEnableArgs, FrontendEnvironment, FrontendFilesystem, FrontendId, FrontendResult,
+    RuntimeState,
+};

@@ -123,10 +123,11 @@ bun benchmarks/latency/run.ts \
 `cold_first_ms` is only a true first touch if nothing read the path before the
 timed spawn. Two things guarantee that:
 
-1. **Restart the host-native daemon and reattach the frontend so caches are
-   fresh.** Use the same `OMNIFS_HOME` for `omnifs frontend down`, `omnifs down`,
-   `omnifs up --no-frontend`, and `omnifs frontend up`; then rediscover the
-   replacement frontend container and copy the runner back into it. Wait for
+1. **Restart the host-native daemon and let the existing frontend runner
+   reconnect so caches are fresh.** Use the same `OMNIFS_HOME` for `omnifs
+   down` and `omnifs up`; the runner remains alive across the daemon restart.
+   Use `omnifs frontend restart` only when the benchmark requires a fresh
+   runner as well. Wait for
    readiness with `omnifs status` rather than reading the mount. The on-disk
    cache under `OMNIFS_HOME` persists, so this gives *fresh-daemon cold*
    (in-memory/session state reset, first provider callout), not

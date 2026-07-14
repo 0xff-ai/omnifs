@@ -7,7 +7,6 @@
 
 use std::collections::BTreeMap;
 
-use omnifs_auth::RevokeOutcome;
 use serde::Serialize;
 
 use super::event::UiEvent;
@@ -175,7 +174,6 @@ impl Decision {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum OutcomeState {
     Done,
-    Warn,
     Fail,
     Skip,
 }
@@ -184,7 +182,6 @@ impl OutcomeState {
     pub(crate) const fn glyph(self) -> Glyph {
         match self {
             Self::Done => Glyph::Done,
-            Self::Warn => Glyph::Warn,
             Self::Fail => Glyph::Fail,
             Self::Skip => Glyph::Skip,
         }
@@ -209,10 +206,6 @@ pub(crate) struct Outcome {
 impl Outcome {
     pub(crate) fn done(id: impl Into<String>, value: impl Into<String>) -> Self {
         Self::new(id, OutcomeState::Done, value)
-    }
-
-    pub(crate) fn warn(id: impl Into<String>, value: impl Into<String>) -> Self {
-        Self::new(id, OutcomeState::Warn, value)
     }
 
     pub(crate) fn fail(id: impl Into<String>, value: impl Into<String>) -> Self {
@@ -240,22 +233,6 @@ impl Outcome {
         self
     }
 
-    pub(crate) fn with_detail(mut self, detail: Outcome) -> Self {
-        if self.state == OutcomeState::Done && detail.state == OutcomeState::Warn {
-            self.state = OutcomeState::Warn;
-        }
-        if detail.state == OutcomeState::Fail {
-            self.state = OutcomeState::Fail;
-        }
-        self.details.push(detail);
-        self
-    }
-
-    pub(crate) fn with_id(mut self, id: impl Into<String>) -> Self {
-        self.id = id.into();
-        self
-    }
-
     pub(crate) fn glyph(&self) -> Glyph {
         self.state.glyph()
     }
@@ -273,26 +250,6 @@ impl Outcome {
             format!("{}; {details}", self.value)
         };
         report::Row::new(self.glyph(), self.key.clone(), value)
-    }
-
-    /// Map the auth service's typed result into the consent receipt vocabulary.
-    /// A failed upstream revoke is a warning because the local credential was
-    /// still deleted. A local delete failure is a hard failure so callers keep
-    /// the mount spec intact.
-    pub(crate) fn credential(
-        key: &omnifs_workspace::authn::CredentialId,
-        outcome: &RevokeOutcome,
-    ) -> Self {
-        let id = format!("credential:{key}");
-        match outcome {
-            RevokeOutcome::Revoked | RevokeOutcome::LocalOnly => {
-                Self::done(id, outcome.to_string())
-            },
-            RevokeOutcome::Unsupported | RevokeOutcome::Failed { .. } => {
-                Self::warn(id, outcome.to_string())
-            },
-            RevokeOutcome::DeleteFailed { .. } => Self::fail(id, outcome.to_string()),
-        }
     }
 }
 
@@ -315,7 +272,6 @@ impl Receipt {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use omnifs_workspace::authn::CredentialId;
 
     #[test]
     fn plan_counts_and_receipt_keep_stable_ids() {
@@ -340,35 +296,6 @@ mod tests {
             ["daemon", "mount:a", "provider-store"]
         );
         assert_eq!(receipt.rows[2].state, OutcomeState::Skip);
-    }
-
-    #[test]
-    fn revoke_outcomes_are_typed_for_receipts() {
-        let key = CredentialId::new("github", "oauth", "default").unwrap();
-        assert_eq!(
-            Outcome::credential(&key, &RevokeOutcome::Revoked).state,
-            OutcomeState::Done
-        );
-        assert_eq!(
-            Outcome::credential(
-                &key,
-                &RevokeOutcome::Failed {
-                    error: "403".to_owned()
-                }
-            )
-            .state,
-            OutcomeState::Warn
-        );
-        assert_eq!(
-            Outcome::credential(
-                &key,
-                &RevokeOutcome::DeleteFailed {
-                    error: "read-only".to_owned()
-                }
-            )
-            .state,
-            OutcomeState::Fail
-        );
     }
 
     #[test]

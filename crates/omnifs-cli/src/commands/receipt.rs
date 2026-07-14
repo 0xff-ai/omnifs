@@ -9,10 +9,10 @@
 use serde::Serialize;
 use std::path::PathBuf;
 
-use crate::commands::frontend::FrontendResult;
+use crate::commands::frontend::{FrontendEnvironment as Environment, FrontendId, FrontendResult};
 use crate::inventory::{AccessPath, FrontendStatus, Inventory};
 use crate::stages::MountInitStatus;
-use crate::ui::consent::{Outcome, Plan};
+use crate::ui::consent::Outcome;
 use crate::ui::output::ResultVerdict;
 use omnifs_workspace::mounts::Name as MountName;
 
@@ -71,17 +71,6 @@ pub(crate) struct TeardownReceipt {
     pub(crate) rows: Vec<Outcome>,
 }
 
-/// `omnifs reset`: the approved plan plus its settled rows. The
-/// existing `verdict` and `rows` fields remain unchanged for applied resets;
-/// `dry_run` and `plan` make plan-only invocations self-describing.
-#[derive(Debug, Serialize)]
-pub(crate) struct ResetReceipt {
-    pub(crate) verdict: Verdict,
-    pub(crate) rows: Vec<Outcome>,
-    pub(crate) dry_run: bool,
-    pub(crate) plan: Plan,
-}
-
 /// `omnifs mount rm`: the approved removal plan and the rows settled by the
 /// operation. Dry runs retain the plan while leaving `rows` empty because no
 /// operation was applied.
@@ -119,26 +108,6 @@ impl MountRemoveReceipt {
         match self.verdict {
             Verdict::Ok => ResultVerdict::Ok,
             Verdict::Degraded | Verdict::Failed => ResultVerdict::Degraded,
-        }
-    }
-}
-
-impl ResetReceipt {
-    pub(crate) fn dry_run(plan: Plan) -> Self {
-        Self {
-            verdict: Verdict::Ok,
-            rows: Vec::new(),
-            dry_run: true,
-            plan,
-        }
-    }
-
-    pub(crate) fn applied(plan: Plan, rows: Vec<Outcome>) -> Self {
-        Self {
-            verdict: Verdict::from_rows(&rows),
-            rows,
-            dry_run: false,
-            plan,
         }
     }
 }
@@ -241,14 +210,10 @@ impl FrontendReceipt {
     }
 }
 
-fn frontend_matches_id(
-    frontend: &FrontendStatus,
-    id: &omnifs_workspace::config::FrontendId,
-) -> bool {
+fn frontend_matches_id(frontend: &FrontendStatus, id: &FrontendId) -> bool {
     frontend.filesystem == id.filesystem()
         && frontend.environment == id.environment()
-        && (id.environment() != omnifs_workspace::config::Environment::Host
-            || frontend.location.as_deref() == id.location())
+        && (id.environment() != Environment::Host || frontend.location.as_deref() == id.location())
 }
 
 fn frontend_access_paths(inventory: &Inventory, rows: &[FrontendResult]) -> Vec<AccessPath> {
@@ -262,8 +227,7 @@ fn frontend_access_paths(inventory: &Inventory, rows: &[FrontendResult]) -> Vec<
             .iter()
             .filter_map(|row| {
                 let location = row.id.location().map(PathBuf::from).or_else(|| {
-                    (row.id.environment() != omnifs_workspace::config::Environment::Host)
-                        .then(|| PathBuf::from("/omnifs"))
+                    (row.id.environment() != Environment::Host).then(|| PathBuf::from("/omnifs"))
                 })?;
                 Some((
                     row.id.filesystem(),
@@ -307,8 +271,10 @@ pub(crate) struct SnapshotReceipt {
 mod tests {
     use super::*;
     use crate::commands::frontend::RuntimeState;
+    use crate::commands::frontend::{
+        FrontendEnvironment as Environment, FrontendFilesystem as Filesystem, FrontendId,
+    };
     use crate::inventory::{DaemonState, FrontendState};
-    use omnifs_workspace::config::{EffectiveFrontend, Environment, Filesystem, PlanSource};
 
     fn inventory_with_frontends(frontends: Vec<FrontendStatus>) -> Inventory {
         Inventory::test(DaemonState::Running, frontends, Vec::new(), Vec::new())
@@ -316,32 +282,26 @@ mod tests {
 
     #[test]
     fn frontend_receipt_ignores_unrelated_degraded_frontends() {
-        let selected = EffectiveFrontend {
-            filesystem: Filesystem::Nfs,
-            environment: Environment::Host,
-            location: Some(PathBuf::from("/mnt/omnifs")),
-            source: PlanSource::Configured,
-        };
-        let unrelated = EffectiveFrontend {
-            filesystem: Filesystem::Fuse,
-            environment: Environment::Docker,
-            location: None,
-            source: PlanSource::PlatformDefault,
-        };
+        let selected = FrontendId::new(
+            Filesystem::Nfs,
+            Environment::Host,
+            Some(PathBuf::from("/mnt/omnifs")),
+        );
+        let unrelated = FrontendId::new(Filesystem::Fuse, Environment::Docker, None);
         let inventory = inventory_with_frontends(vec![
             FrontendStatus {
-                filesystem: selected.filesystem,
-                environment: selected.environment,
-                location: selected.location.clone(),
+                filesystem: selected.filesystem(),
+                environment: selected.environment(),
+                location: selected.location().map(PathBuf::from),
                 state: FrontendState::Attached,
                 scope: "all",
                 mount_count: 0,
                 fix: None,
             },
             FrontendStatus {
-                filesystem: unrelated.filesystem,
-                environment: unrelated.environment,
-                location: unrelated.location.clone(),
+                filesystem: unrelated.filesystem(),
+                environment: unrelated.environment(),
+                location: unrelated.location().map(PathBuf::from),
                 state: FrontendState::Failed,
                 scope: "all",
                 mount_count: 0,
@@ -353,7 +313,7 @@ mod tests {
         let receipt = FrontendReceipt::from_inventory(
             &inventory,
             vec![FrontendResult {
-                id: selected.id(),
+                id: selected,
                 state: RuntimeState::Attached,
                 changed: true,
                 fix: None,

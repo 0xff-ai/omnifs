@@ -85,6 +85,22 @@ fn write_frontend_config(fixture: &Fixture, body: &str) {
     std::fs::write(fixture.home().join("config.toml"), body).expect("write config");
 }
 
+fn write_runner_observation(fixture: &Fixture, location: &Path) {
+    let state_dir = fixture.home().join("cache/frontends/fuse/observed");
+    std::fs::create_dir_all(&state_dir).expect("frontend state directory");
+    std::fs::write(
+        state_dir.join("mount-observed.json"),
+        serde_json::json!({
+            "version": 2,
+            "mount_point": location.to_string_lossy().into_owned(),
+            "pid": std::process::id(),
+            "kind": "fuse"
+        })
+        .to_string(),
+    )
+    .expect("write frontend state fixture");
+}
+
 fn write_mount_fixture(fixture: &Fixture, name: &str) {
     std::fs::write(
         fixture.home().join(format!("mounts/{name}.json")),
@@ -117,6 +133,7 @@ fn cli_redesign_contract_human_status_has_context_and_resource_sections() {
 #[test]
 fn cli_redesign_contract_wide_headers_are_sentence_case_and_ordered() {
     let fixture = Fixture::new();
+    write_runner_observation(&fixture, &fixture.mount_point);
     let output = fixture.run_with_env(
         &["status", "--output", "human", "--detail"],
         &[("COLUMNS", "120")],
@@ -138,8 +155,20 @@ fn cli_redesign_contract_wide_headers_are_sentence_case_and_ordered() {
 #[test]
 fn cli_redesign_contract_frontends_report_whole_namespace_coverage() {
     let fixture = Fixture::new();
-    let output = fixture.run(&["status", "--output", "human"]);
-    let text = stdout_text(&output);
+    write_runner_observation(&fixture, &fixture.mount_point);
+    let output = fixture.run(&["status", "--output", "json"]);
+    let json = stdout_json(&output);
+    let frontends = json["result"]["frontends"].as_array().expect("frontends");
+    assert_eq!(
+        frontends.len(),
+        1,
+        "expected one runner observation: {json}"
+    );
+    assert_eq!(frontends[0]["scope"], "all");
+    assert_eq!(frontends[0]["mount_count"], 0);
+
+    let human = fixture.run(&["status", "--output", "human"]);
+    let text = stdout_text(&human);
     let frontend_section = text.split("Mounts  ").next().unwrap_or(&text);
     let rows = frontend_section
         .lines()
@@ -176,6 +205,7 @@ fn cli_redesign_contract_actions_are_contextual_rows_without_fix_column() {
 #[test]
 fn cli_redesign_contract_narrow_status_uses_stacked_schema_fields() {
     let fixture = Fixture::new();
+    write_runner_observation(&fixture, &fixture.mount_point);
     let output = fixture.run_with_env(&["status", "--output", "human"], &[("COLUMNS", "71")]);
     let text = stdout_text(&output);
 
@@ -198,7 +228,8 @@ fn cli_redesign_contract_status_json_exposes_four_authoritative_resource_arrays(
 
     assert_eq!(json["schema_version"], 1);
     assert_eq!(json["command"], "status");
-    assert!(result["workspace"].is_object());
+    assert!(result["home"].is_string());
+    assert!(result["daemon"].is_object());
     for key in ["frontends", "mounts", "providers"] {
         assert!(result[key].is_array(), "missing result.{key}: {json}");
     }
@@ -223,44 +254,33 @@ fn cli_redesign_contract_access_paths_form_mount_frontend_cross_product() {
 }
 
 #[test]
-fn cli_redesign_contract_stopped_workspace_keeps_desired_frontends_visible() {
+fn cli_redesign_contract_stopped_workspace_has_no_frontends() {
     let fixture = Fixture::new();
     let output = fixture.run(&["status", "--output", "json"]);
     let json = stdout_json(&output);
     let frontends = json["result"]["frontends"].as_array().expect("frontends");
-    assert!(!frontends.is_empty(), "{json}");
-    assert!(frontends.iter().all(|frontend| {
-        frontend["source"].is_string()
-            && frontend["scope"] == "all"
-            && frontend["state"].as_str() == Some("stopped")
-    }));
+    assert!(
+        frontends.is_empty(),
+        "stopped workspace must have no frontends: {json}"
+    );
 }
 
 #[test]
-fn cli_redesign_contract_unmanaged_live_frontends_remain_observable() {
+fn cli_redesign_contract_runner_observation_reports_exact_identity() {
     let fixture = Fixture::new();
-    let state_dir = fixture.home().join("cache/frontends/fuse/unmanaged");
-    std::fs::create_dir_all(&state_dir).expect("frontend state directory");
-    let unmanaged_location = fixture.home().join("unmanaged-mount");
-    std::fs::create_dir_all(&unmanaged_location).expect("unmanaged mount directory");
-    std::fs::write(
-        state_dir.join("mount-unmanaged.json"),
-        serde_json::json!({
-            "version": 2,
-            "mount_point": unmanaged_location,
-            "pid": std::process::id(),
-            "kind": "fuse"
-        })
-        .to_string(),
-    )
-    .expect("write unmanaged frontend state");
+    let runner_location = fixture.home().join("runner-mount");
+    std::fs::create_dir_all(&runner_location).expect("runner mount directory");
+    write_runner_observation(&fixture, &runner_location);
     let output = fixture.run(&["frontend", "ls", "--output", "json"]);
     let json = stdout_json(&output);
     let frontends = json["result"]["frontends"].as_array().expect("frontends");
     assert!(frontends.iter().any(|frontend| {
-        frontend["source"].as_str() == Some("unmanaged")
-            && frontend["state"].as_str() == Some("unmanaged")
+        frontend["filesystem"].as_str() == Some("fuse")
+            && frontend["environment"].as_str() == Some("host")
+            && frontend["location"].as_str() == runner_location.to_str()
+            && frontend["state"].as_str() == Some("running")
             && frontend["scope"] == "all"
+            && frontend.get("source").is_none()
     }));
 }
 
@@ -292,8 +312,8 @@ fn cli_redesign_contract_jsonl_ends_with_one_terminal_result_envelope() {
 #[test]
 fn cli_redesign_contract_structured_no_input_fails_before_prompt_bytes() {
     let fixture = Fixture::new();
-    write_frontend_config(&fixture, "[[frontends]]\nkind = \"nfs\"\n");
-    let output = fixture.run(&["status", "--output", "json", "--no-input"]);
+    write_frontend_config(&fixture, "[[frontends]]\nfilesystem = \"nfs\"\n");
+    let output = fixture.run(&["setup", "--no-up", "--output", "json", "--no-input"]);
     assert_eq!(output.status.code(), Some(1));
     assert_eq!(output.stderr, b"", "structured errors must stay on stdout");
     let json = stdout_json(&output);
@@ -305,6 +325,7 @@ fn cli_redesign_contract_structured_no_input_fails_before_prompt_bytes() {
 #[test]
 fn cli_redesign_contract_state_rows_pair_symbols_with_lowercase_labels() {
     let fixture = Fixture::new();
+    write_runner_observation(&fixture, &fixture.mount_point);
     let output = fixture.run(&["status", "--output", "human"]);
     let rendered = stdout_text(&output);
     let state_rows = rendered
@@ -313,56 +334,33 @@ fn cli_redesign_contract_state_rows_pair_symbols_with_lowercase_labels() {
         .collect::<Vec<_>>();
     assert!(!state_rows.is_empty());
     assert!(
-        state_rows
-            .iter()
-            .all(|line| line.contains("○ stopped") || line.contains("● attached")),
+        state_rows.iter().all(|line| {
+            line.contains("○ stopped") || line.contains("● attached") || line.contains("● running")
+        }),
         "state rows must carry a symbol: {state_rows:?}"
     );
 }
 
 #[test]
-fn cli_redesign_contract_new_frontend_config_keys_parse_as_filesystem_environment_location() {
+fn cli_redesign_contract_frontend_config_is_rejected_as_removed_field() {
     let fixture = Fixture::new();
-    write_frontend_config(
-        &fixture,
-        &format!(
-            "[[frontends]]\nfilesystem = \"nfs\"\nenvironment = \"host\"\nlocation = \"{}\"\n",
-            fixture.mount_point.display()
-        ),
+    write_frontend_config(&fixture, "[[frontends]]\nfilesystem = \"nfs\"\n");
+    let output = fixture.run(&["setup", "--no-up", "--output", "json", "--no-input"]);
+    assert!(
+        !output.status.success(),
+        "removed frontend config must fail"
     );
-    let output = fixture.run(&["status", "--output", "json"]);
-    let json = stdout_json(&output);
-    let frontend = &json["result"]["frontends"][0];
-    assert_eq!(frontend["filesystem"], "nfs");
-    assert_eq!(frontend["environment"], "host");
-    assert_eq!(
-        frontend["location"],
-        fixture.mount_point.to_string_lossy().as_ref()
-    );
-}
-
-#[test]
-fn cli_redesign_contract_old_frontend_config_keys_are_rejected_with_replacements() {
-    let fixture = Fixture::new();
-    write_frontend_config(
-        &fixture,
-        &format!(
-            "[[frontends]]\nkind = \"nfs\"\ndriver = \"local\"\nmount_point = \"{}\"\n",
-            fixture.mount_point.display()
-        ),
-    );
-    let output = fixture.run(&["status", "--output", "json"]);
     let json = stdout_json(&output);
     let message = json["error"]["message"].as_str().unwrap_or_default();
-    assert!(message.contains("filesystem"), "{message}");
-    assert!(message.contains("environment"), "{message}");
-    assert!(message.contains("location"), "{message}");
+    assert!(message.contains("frontends"), "{message}");
 }
 
 #[test]
 fn cli_redesign_contract_old_commands_and_flags_are_usage_errors() {
     let fixture = Fixture::new();
     for args in [
+        ["up", "--no-frontend"].as_slice(),
+        ["down", "--force"].as_slice(),
         ["frontend", "up", "fuse", "--driver", "docker"].as_slice(),
         ["frontend", "down"].as_slice(),
         ["shell", "--mount", "/tmp/omnifs"].as_slice(),

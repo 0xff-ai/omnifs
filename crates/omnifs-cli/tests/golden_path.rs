@@ -97,6 +97,7 @@ fn record_wall_clock(home: &Path, elapsed: Duration) {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // one continuous setup and daemon lifecycle
 fn setup_init_up_wait_read_down_golden_path() {
     let started = Instant::now();
     let mut fixture = Fixture::new();
@@ -158,15 +159,55 @@ fn setup_init_up_wait_read_down_golden_path() {
     );
     fixture.update_pid_from_record();
 
+    let filesystem = if cfg!(target_os = "macos") {
+        "nfs"
+    } else {
+        "fuse"
+    };
+    let location = fixture.mount_point.to_string_lossy().into_owned();
+    let frontend = fixture.run(&[
+        "frontend",
+        "enable",
+        filesystem,
+        "--environment",
+        "host",
+        "--location",
+        &location,
+    ]);
+    assert_eq!(
+        exit_code(&frontend),
+        0,
+        "frontend enable must exit 0\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&frontend.stdout),
+        String::from_utf8_lossy(&frontend.stderr)
+    );
+
     assert_eq!(fixture.read_fixture_file(), b"Hello, world!");
 
-    let down = fixture.run(&["down", "--force"]);
+    let down = fixture.run(&["down"]);
     assert_eq!(
         exit_code(&down),
         0,
-        "down --force must exit 0\nstdout: {}\nstderr: {}",
+        "down must exit 0\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&down.stdout),
         String::from_utf8_lossy(&down.stderr)
+    );
+
+    let disabled = fixture.run(&[
+        "frontend",
+        "disable",
+        filesystem,
+        "--environment",
+        "host",
+        "--location",
+        &location,
+    ]);
+    assert_eq!(
+        exit_code(&disabled),
+        0,
+        "frontend disable must exit 0\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&disabled.stdout),
+        String::from_utf8_lossy(&disabled.stderr)
     );
 
     let elapsed = started.elapsed();
