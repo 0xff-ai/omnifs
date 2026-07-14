@@ -108,19 +108,19 @@ impl AddArgs {
 /// then compact needs and limits lines.
 /// All on stderr.
 pub(crate) fn render_consent_block(
-    session: &crate::ui::output::Output,
+    output: &crate::ui::output::Output,
     manifest: &ProviderManifest,
 ) {
     let description = manifest
         .description
         .as_deref()
         .unwrap_or(&manifest.display_name);
-    session.note(description);
+    output.note(description);
     if let Some(needs) = crate::capability::compact_needs(manifest) {
-        session.note(crate::ui::style::dim(needs));
+        output.note(crate::ui::style::dim(needs));
     }
     if let Some(limits) = crate::capability::compact_limits(manifest) {
-        session.note(crate::ui::style::dim(limits));
+        output.note(crate::ui::style::dim(limits));
     }
 }
 
@@ -130,7 +130,7 @@ pub(crate) async fn run_static_token_init(
     token: SecretString,
     credentials_file: &Path,
     validate: bool,
-    session: &crate::ui::output::Output,
+    output: &crate::ui::output::Output,
 ) -> anyhow::Result<CredentialTarget> {
     let static_token_scheme = auth.static_token_scheme(manifest)?;
 
@@ -143,11 +143,11 @@ pub(crate) async fn run_static_token_init(
     let validation = match static_token_scheme.validation.as_ref() {
         Some(v) if validate => Some(
             StaticTokenValidator::new(v, header_name, header_prefix)
-                .validate(token.expose_secret(), session)
+                .validate(token.expose_secret(), output)
                 .await?,
         ),
         Some(_) => {
-            session.note("token stored without validation (--no-validate)");
+            output.note("token stored without validation (--no-validate)");
             None
         },
         None => None,
@@ -155,7 +155,7 @@ pub(crate) async fn run_static_token_init(
     let identity = validation
         .as_ref()
         .and_then(|outcome| outcome.identity.clone());
-    session.row(&crate::ui::report::Row::new(
+    output.row(&crate::ui::report::Row::new(
         crate::ui::style::Glyph::Done,
         "signed in",
         identity
@@ -165,7 +165,7 @@ pub(crate) async fn run_static_token_init(
     if let Some(outcome) = &validation
         && let Some(workspace) = &outcome.workspace
     {
-        session.note(workspace);
+        output.note(workspace);
     }
 
     let store = FileStore::new(credentials_file);
@@ -192,7 +192,7 @@ pub(crate) async fn run_static_token_init(
             .put(key, &entry)
             .with_context(|| "failed to store credential")?;
     }
-    session.row(&crate::ui::report::Row::new(
+    output.row(&crate::ui::report::Row::new(
         crate::ui::style::Glyph::Done,
         "credential",
         "stored",

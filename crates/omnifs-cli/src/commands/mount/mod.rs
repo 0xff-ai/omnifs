@@ -229,17 +229,17 @@ impl ReauthArgs {
         let workspace = Workspace::resolve()?;
         output.intro(format!("omnifs mount reauth {}", self.name))?;
         let prompt = PromptMode::from_flags(output.yes(), output.no_input());
-        let result = self.run_in_session(&workspace, &output, prompt).await;
+        let result = self.run_with_output(&workspace, &output, prompt).await;
         if result.is_ok() {
             output.outro(format!("Re-authenticated `{}`.", self.name));
         }
         result
     }
 
-    pub(crate) async fn run_in_session(
+    pub(crate) async fn run_with_output(
         &self,
         workspace: &Workspace,
-        session: &crate::ui::output::Output,
+        output: &crate::ui::output::Output,
         prompt: PromptMode,
     ) -> anyhow::Result<()> {
         let paths = workspace.layout();
@@ -282,7 +282,7 @@ impl ReauthArgs {
         }
 
         let target = if selection.is_oauth() {
-            session.note(format!("re-authenticating `{mount_name}` over OAuth"));
+            output.note(format!("re-authenticating `{mount_name}` over OAuth"));
             crate::auth::login_with_workspace(
                 workspace,
                 mount_name,
@@ -290,7 +290,7 @@ impl ReauthArgs {
                 self.no_browser,
                 prompt.no_input,
                 &self.scopes,
-                session,
+                output,
             )
             .await?
         } else {
@@ -299,21 +299,21 @@ impl ReauthArgs {
                 self.token_env.as_deref(),
                 interactive,
             )?;
-            let token = source.read(session)?;
+            let token = source.read(output)?;
             run_static_token_init(
                 manifest,
                 &selection,
                 token,
                 &paths.credentials_file,
                 !self.no_validate,
-                session,
+                output,
             )
             .await?
         };
         for key in target.keys() {
             match workspace.daemon().reload_credential_if_ready(key).await {
                 Ok(Some(_)) => {
-                    session.row(&crate::ui::report::Row::new(
+                    output.row(&crate::ui::report::Row::new(
                         crate::ui::style::Glyph::Done,
                         format!("credential `{key}`"),
                         "reloaded in running daemon",
@@ -321,16 +321,16 @@ impl ReauthArgs {
                 },
                 Ok(None) => {},
                 Err(error) => {
-                    session.row(&crate::ui::report::Row::new(
+                    output.row(&crate::ui::report::Row::new(
                         crate::ui::style::Glyph::Warn,
                         format!("credential `{key}`"),
                         format!("stored, but live reload failed: {error:#}"),
                     ));
-                    session.note("run `omnifs up` to restart with the new credential");
+                    output.note("run `omnifs up` to restart with the new credential");
                 },
             }
         }
-        crate::telemetry::maybe_print_health_nudge(workspace, session.clone()).await;
+        crate::telemetry::maybe_print_health_nudge(workspace, output.clone()).await;
         Ok(())
     }
 }
@@ -357,7 +357,7 @@ fn rm_with_options(
 ) -> anyhow::Result<crate::commands::receipt::MountRemoveReceipt> {
     let layout = workspace.layout();
     output.intro(format!("omnifs mount rm {name}"))?;
-    let session = output.clone();
+    let output = output.clone();
     let mounts = workspace.mounts()?;
     let name =
         MountName::new(name.to_owned()).with_context(|| format!("invalid mount name `{name}`"))?;
@@ -376,17 +376,17 @@ fn rm_with_options(
                 WorkspaceLayout::display(&layout.mounts_dir.join(format!("{name}.json")))
             ),
         ));
-        session.plan(&plan);
+        output.plan(&plan);
         if let Some(suggestion) = mounts
             .iter()
             .map(|mount| mount.name.to_string())
             .find(|candidate| candidate.starts_with(name.as_str()))
         {
-            session.note(format!("Did you mean `{suggestion}`?"));
+            output.note(format!("Did you mean `{suggestion}`?"));
         }
         let receipt = plan.receipt([Outcome::skip("spec", "already absent")]);
-        session.receipt(&receipt);
-        session.outro(format!("Mount `{name}` already absent."));
+        output.receipt(&receipt);
+        output.outro(format!("Mount `{name}` already absent."));
         return Ok(crate::commands::receipt::MountRemoveReceipt::applied(
             name.to_string(),
             plan,
@@ -397,15 +397,15 @@ fn rm_with_options(
     // Build the plan without constructing an HTTP client or registering an
     // OAuth revocation. A dry run must stop before any apply-only work.
     let plan = mount_remove_plan(&config_path);
-    session.plan(&plan);
+    output.plan(&plan);
     match Decision::resolve(
         PromptMode::from_flags(yes || output.yes(), output.no_input()),
         dry_run,
         "-y",
-        output,
+        &output,
     )? {
         Decision::DryRun => {
-            session.outro("Dry run; no changes made.");
+            output.outro("Dry run; no changes made.");
             return Ok(crate::commands::receipt::MountRemoveReceipt::dry_run(
                 name.to_string(),
                 plan,
@@ -429,8 +429,8 @@ fn rm_with_options(
         );
     }
     let receipt = plan.receipt(outcomes);
-    session.receipt(&receipt);
-    session.outro(format!("Removed `{name}`."));
+    output.receipt(&receipt);
+    output.outro(format!("Removed `{name}`."));
     if receipt
         .rows
         .iter()

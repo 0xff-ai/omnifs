@@ -33,7 +33,7 @@ impl<'a> StaticTokenValidator<'a> {
     pub(super) async fn validate(
         &self,
         token: &str,
-        session: &crate::ui::output::Output,
+        output: &crate::ui::output::Output,
     ) -> anyhow::Result<ValidationOutcome> {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(15))
@@ -53,7 +53,7 @@ impl<'a> StaticTokenValidator<'a> {
                 .body(body.to_string());
         }
 
-        session.note(format!("validating against {}", self.validation.url));
+        output.note(format!("validating against {}", self.validation.url));
         let response = req.send().await.context("validation request failed")?;
         let status = response.status();
         if u32::from(status.as_u16()) != u32::from(self.validation.expect_status) {

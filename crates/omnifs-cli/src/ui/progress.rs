@@ -74,6 +74,9 @@ impl Progress {
     }
 
     pub(crate) fn update(&mut self, text: &str) {
+        if !self.output.show_progress() {
+            return;
+        }
         let now = Instant::now();
         if now < self.next_update {
             return;
@@ -123,6 +126,9 @@ impl Progress {
     }
 
     fn settle(mut self, glyph: Glyph, value: impl std::fmt::Display) {
+        if !self.output.show_progress() {
+            return;
+        }
         if self.drawn {
             let mut err = std::io::stderr();
             let _ = write!(err, "\r");

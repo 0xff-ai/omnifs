@@ -37,7 +37,7 @@ async fn login(
     store: Box<dyn CredentialStore>,
     account: Option<&str>,
     interactivity: LoginInteractivity<'_>,
-    session: &crate::ui::output::Output,
+    output: &crate::ui::output::Output,
 ) -> anyhow::Result<CredentialTarget> {
     let LoginInteractivity {
         no_browser,
@@ -53,12 +53,12 @@ async fn login(
         .map(|auth| auth.guidance_for(&request.scheme().key))
         .unwrap_or_default();
     let mode = AuthMode::from_oauth_flow(&request.scheme().flow);
-    session.note(format!(
+    output.note(format!(
         "requesting OAuth for `{mount}` using scheme `{}` ({})",
         request.scheme().key,
         mode.label()
     ));
-    print_oauth_consent_summary(session, &request, &guidance);
+    print_oauth_consent_summary(output, &request, &guidance);
     let client = OAuthClient::new()?;
     let printed_urls = Arc::new(Mutex::new(Vec::new()));
     let client = if no_browser {
@@ -83,12 +83,10 @@ async fn login(
             ))
             .with_exit_code(ExitCode::AuthRequired);
         },
-        LoginRequest::ManualCode(request) => {
-            login_manual(&client, request, &mount, session).await?
-        },
+        LoginRequest::ManualCode(request) => login_manual(&client, request, &mount, output).await?,
         LoginRequest::DeviceCode(request) => {
             // The callback runs before the await inside login_device_code, so we cannot
-            // borrow &mut session across the future. Emit directly with cliclack log
+            // borrow &mut output across the future. Emit directly with cliclack log
             // remark on the same output rail used by the command.
             let result = client
                 .login_device_code(request, move |prompt| {
@@ -97,7 +95,7 @@ async fn login(
                 })
                 .await;
             if result.is_ok() {
-                session.row(&crate::ui::report::Row::new(
+                output.row(&crate::ui::report::Row::new(
                     crate::ui::style::Glyph::Done,
                     "oauth",
                     "authorized",
@@ -111,18 +109,18 @@ async fn login(
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .drain(..)
     {
-        session.note(format!("Open {url}"));
+        output.note(format!("Open {url}"));
     }
     // Store each target key through the workspace store.
     for key in target.keys() {
         store.put(key, &entry)?;
     }
-    session.note(format!(
+    output.note(format!(
         "stored OAuth credential for `{mount}` with scopes: {}",
         format_scopes(entry.scopes())
     ));
     if mount == "github" && entry.scopes().is_empty() {
-        session.note(
+        output.note(
             "GitHub granted no scopes. Public resources will work; rerun with `--scope repo` for private repositories.",
         );
     }
@@ -133,13 +131,13 @@ async fn login_manual(
     client: &OAuthClient,
     request: ManualCodeLoginRequest,
     mount: &str,
-    session: &crate::ui::output::Output,
+    output: &crate::ui::output::Output,
 ) -> anyhow::Result<CredentialEntry> {
     let result = client
         .login_manual_code(request, |url| {
-            session.note(format!("Open {url}"));
+            output.note(format!("Open {url}"));
             async move {
-                let prompt_output = session.clone();
+                let prompt_output = output.clone();
                 let pasted = tokio::task::spawn_blocking(move || {
                     crate::ui::prompt::Text::new("Paste redirect URL or `code state`")
                         .ask_with_output(&prompt_output)
@@ -173,7 +171,7 @@ pub(crate) async fn login_with_workspace(
     no_browser: bool,
     no_input: bool,
     scopes: &[String],
-    session: &crate::ui::output::Output,
+    output: &crate::ui::output::Output,
 ) -> anyhow::Result<CredentialTarget> {
     let store = Box::new(FileStore::new(&workspace.layout().credentials_file));
     let mounts = workspace.mounts()?;
@@ -188,7 +186,7 @@ pub(crate) async fn login_with_workspace(
             no_input,
             scopes,
         },
-        session,
+        output,
     )
     .await
 }
@@ -204,7 +202,7 @@ pub(crate) async fn login_with_spec(
     no_browser: bool,
     no_input: bool,
     scopes: &[String],
-    session: &crate::ui::output::Output,
+    output: &crate::ui::output::Output,
 ) -> anyhow::Result<CredentialTarget> {
     let store = Box::new(FileStore::new(&workspace.layout().credentials_file));
     let mount_auth = crate::auth::MountAuth::from_spec(workspace.catalog(), spec.clone());
@@ -218,7 +216,7 @@ pub(crate) async fn login_with_spec(
             no_input,
             scopes,
         },
-        session,
+        output,
     )
     .await
 }
@@ -276,29 +274,29 @@ fn present_device_prompt(prompt: &DeviceCodePrompt, no_browser: bool) {
 }
 
 fn print_oauth_consent_summary(
-    session: &crate::ui::output::Output,
+    output: &crate::ui::output::Output,
     request: &OAuthRequest,
     guidance: &SchemeGuidance,
 ) {
     let scheme = request.scheme();
     let mode = AuthMode::from_oauth_flow(&scheme.flow);
-    session.note(crate::ui::style::dim(mode.experience()));
+    output.note(crate::ui::style::dim(mode.experience()));
     if !guidance.setup_steps.is_empty() {
-        session.note(crate::ui::style::dim("Guidance:"));
+        output.note(crate::ui::style::dim("Guidance:"));
         for (index, step) in guidance.setup_steps.iter().enumerate() {
-            session.note(format!("{}. {step}", index + 1));
+            output.note(format!("{}. {step}", index + 1));
         }
     }
     if let Some(url) = &guidance.docs_url {
-        session.note(format!("{} {}", style::dim("Docs:"), style::accent(url)));
+        output.note(format!("{} {}", style::dim("Docs:"), style::accent(url)));
     }
-    session.note(format!(
+    output.note(format!(
         "{} {}",
         style::dim("Scopes:"),
         format_scopes(&scheme.default_scopes)
     ));
     if !scheme.inject_domains.is_empty() {
-        session.note(format!(
+        output.note(format!(
             "{} {}",
             style::dim("Applies to:"),
             scheme.inject_domains.join(", ")

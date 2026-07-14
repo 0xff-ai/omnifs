@@ -42,9 +42,9 @@ impl<'a> ProviderSelection<'a> {
         explicit_name: Option<&str>,
         interactive: bool,
         yes: bool,
-        session: &crate::ui::output::Output,
+        output: &crate::ui::output::Output,
     ) -> anyhow::Result<(String, MountName)> {
-        let provider = self.resolve_provider(provider_arg, interactive, session)?;
+        let provider = self.resolve_provider(provider_arg, interactive, output)?;
         // An unknown positional provider bails here (before the caller's own
         // catalog lookup), so the available-provider list and install hint must
         // ride on this error or they never reach the user.
@@ -72,7 +72,7 @@ impl<'a> ProviderSelection<'a> {
             return Ok((provider, proposed_name));
         }
 
-        let name = self.ensure_unique_name(proposed_name, interactive, yes, session)?;
+        let name = self.ensure_unique_name(proposed_name, interactive, yes, output)?;
         Ok((provider, name))
     }
 
@@ -102,7 +102,7 @@ impl<'a> ProviderSelection<'a> {
         proposed: MountName,
         interactive: bool,
         yes: bool,
-        session: &crate::ui::output::Output,
+        output: &crate::ui::output::Output,
     ) -> anyhow::Result<MountName> {
         if !mount_exists(self.mounts, &proposed) {
             return Ok(proposed);
@@ -111,7 +111,7 @@ impl<'a> ProviderSelection<'a> {
         // `--yes` accepts the auto-suggested name on collision, even
         // non-interactively (it never overwrites the existing mount).
         if yes {
-            session.row(&crate::ui::report::Row::new(
+            output.row(&crate::ui::report::Row::new(
                 crate::ui::style::Glyph::Warn,
                 "mount name",
                 format!("{proposed} taken, using {suggestion}"),
@@ -125,7 +125,7 @@ impl<'a> ProviderSelection<'a> {
         }
         let name = crate::ui::prompt::Text::new("New mount name")
             .with_default(suggestion.as_str())
-            .ask_with_output(session)?;
+            .ask_with_output(output)?;
         Ok(MountName::new(name)?)
     }
 

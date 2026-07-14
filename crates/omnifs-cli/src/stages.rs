@@ -90,21 +90,21 @@ impl PromptMode {
 pub(crate) async fn configure_mount(
     args: AddArgs,
     workspace: &Workspace,
-    session: &crate::ui::output::Output,
+    output: &crate::ui::output::Output,
     prompt: PromptMode,
 ) -> anyhow::Result<MountInitOutcome> {
-    let mut plan = spec_creation(&args, workspace, session, prompt)?;
-    session.phase(plan.manifest.id.as_str());
-    persist_mount_spec(workspace, &plan, session)?;
-    let status = plan.authenticate(&args, workspace, session, prompt).await?;
+    let mut plan = spec_creation(&args, workspace, output, prompt)?;
+    output.phase(plan.manifest.id.as_str());
+    persist_mount_spec(workspace, &plan, output)?;
+    let status = plan.authenticate(&args, workspace, output, prompt).await?;
 
     match status {
-        MountInitStatus::Ready => session.row(&crate::ui::report::Row::new(
+        MountInitStatus::Ready => output.row(&crate::ui::report::Row::new(
             crate::ui::style::Glyph::Done,
             "mount ready",
             plan.mount_name.as_str(),
         )),
-        MountInitStatus::SignInDeclined => session.row(&crate::ui::report::Row::new(
+        MountInitStatus::SignInDeclined => output.row(&crate::ui::report::Row::new(
             crate::ui::style::Glyph::Skip,
             "sign in",
             format!(
@@ -114,21 +114,21 @@ pub(crate) async fn configure_mount(
         )),
     }
     if !workspace.daemon().ready().await {
-        session.note("run `omnifs up` to start serving it");
+        output.note("run `omnifs up` to start serving it");
     }
 
     let running = workspace.daemon().ready().await;
     if running {
         let path = browse_path(plan.mount_name.as_str());
-        session.note(crate::ui::hint(
+        output.note(crate::ui::hint(
             &format!("ls {}", path.display()),
             "browse it",
         ));
     } else {
-        session.note(crate::ui::hint("omnifs up", "start serving"));
+        output.note(crate::ui::hint("omnifs up", "start serving"));
     }
 
-    crate::telemetry::maybe_print_health_nudge(workspace, session.clone()).await;
+    crate::telemetry::maybe_print_health_nudge(workspace, output.clone()).await;
 
     Ok(MountInitOutcome {
         mount_name: plan.mount_name.to_string(),
@@ -148,7 +148,7 @@ fn init_interactive(prompt: PromptMode) -> bool {
 pub(crate) fn spec_creation(
     args: &AddArgs,
     workspace: &Workspace,
-    session: &crate::ui::output::Output,
+    output: &crate::ui::output::Output,
     prompt: PromptMode,
 ) -> anyhow::Result<MountInitPlan> {
     let paths = workspace.layout();
@@ -161,7 +161,7 @@ pub(crate) fn spec_creation(
         anyhow::bail!("no built-in or disk providers are available");
     }
 
-    // No provider argument in an interactive session: choose one with the
+    // No provider argument in an interactive output: choose one with the
     // generic single-select prompt instead of a bare list.
     let picked = if args.provider.is_none() && interactive {
         let options =
@@ -172,7 +172,7 @@ pub(crate) fn spec_creation(
         Some(
             crate::ui::prompt::Select::new("Which provider?")
                 .options(choices)
-                .ask_with_output(session)?,
+                .ask_with_output(output)?,
         )
     } else {
         None
@@ -183,7 +183,7 @@ pub(crate) fn spec_creation(
         args.as_name.as_deref(),
         interactive,
         prompt.yes,
-        session,
+        output,
     )?;
 
     let (provider, manifest) = crate::catalog::find_installed(&installed, &provider_name)
@@ -227,7 +227,7 @@ pub(crate) fn spec_creation(
         interactive,
         prompt.yes,
     )
-    .resolve(session)?;
+    .resolve(output)?;
     let ImportOutcome { auth, token } = import_outcome;
 
     if !interactive && token.is_none() && auth.as_ref().is_some_and(AuthSelection::is_oauth) {
@@ -249,7 +249,7 @@ pub(crate) fn spec_creation(
     let mut created = if args.config_json.is_some() {
         creator.create_for_config_override()
     } else {
-        creator.create(session, interactive)?
+        creator.create(output, interactive)?
     };
     apply_mount_overrides(args, manifest, &creator, &mut created)?;
 
@@ -278,10 +278,10 @@ impl MountInitPlan {
         &mut self,
         args: &AddArgs,
         workspace: &Workspace,
-        session: &crate::ui::output::Output,
+        output: &crate::ui::output::Output,
         prompt: PromptMode,
     ) -> anyhow::Result<MountInitStatus> {
-        crate::commands::mount::render_consent_block(session, &self.manifest);
+        crate::commands::mount::render_consent_block(output, &self.manifest);
         let plan = self;
         let Some(auth) = plan.effective_auth.as_ref() else {
             return Ok(MountInitStatus::Ready);
@@ -294,7 +294,7 @@ impl MountInitPlan {
                 token,
                 &workspace.layout().credentials_file,
                 !args.no_validate,
-                session,
+                output,
             )
             .await?;
         } else if auth.is_oauth() {
@@ -306,7 +306,7 @@ impl MountInitPlan {
                     plan.mount_name
                 ))
                 .with_default(true)
-                .ask_with_output(session)?;
+                .ask_with_output(output)?;
                 if !proceed {
                     return Ok(MountInitStatus::SignInDeclined);
                 }
@@ -318,16 +318,16 @@ impl MountInitPlan {
                 args.no_browser,
                 prompt.no_input,
                 &args.scopes,
-                session,
+                output,
             )
             .await
             .inspect_err(|_| {
-                session.note(format!(
+                output.note(format!(
                     "login did not complete; run `omnifs mount reauth {}` to finish",
                     plan.mount_name
                 ));
             })?;
-            session.row(&crate::ui::report::Row::new(
+            output.row(&crate::ui::report::Row::new(
                 crate::ui::style::Glyph::Done,
                 "signed in",
                 "done",
@@ -341,13 +341,13 @@ impl MountInitPlan {
                     .map(|auth| auth.guidance_for(&scheme.key))
                     .unwrap_or_default();
                 if let Some(url) = &scheme.creation_url {
-                    session.note(format!("create a token at {url}"));
+                    output.note(format!("create a token at {url}"));
                 }
                 for step in &guidance.setup_steps {
-                    session.note(step);
+                    output.note(step);
                 }
                 if let Some(url) = &guidance.docs_url {
-                    session.note(url);
+                    output.note(url);
                 }
             }
             let source = TokenSource::resolve(
@@ -355,14 +355,14 @@ impl MountInitPlan {
                 args.token_env.as_deref(),
                 interactive,
             )?;
-            let token = source.read(session)?;
+            let token = source.read(output)?;
             crate::commands::mount::run_static_token_init(
                 &plan.manifest,
                 auth,
                 token,
                 &workspace.layout().credentials_file,
                 !args.no_validate,
-                session,
+                output,
             )
             .await?;
         }
@@ -424,17 +424,17 @@ fn selected_auth(
 fn persist_mount_spec(
     workspace: &Workspace,
     plan: &MountInitPlan,
-    session: &crate::ui::output::Output,
+    output: &crate::ui::output::Output,
 ) -> anyhow::Result<()> {
     workspace.put_mount_uncommitted(&plan.spec)?;
     workspace.commit_mounts()?;
-    session.row(&crate::ui::report::Row::new(
+    output.row(&crate::ui::report::Row::new(
         crate::ui::style::Glyph::Done,
         "desired state",
         format!("{} recorded", plan.mount_name),
     ));
     // `Wrote <path>` collapses to a single dim continuation, printed once.
-    session.note(format!(
+    output.note(format!(
         "wrote {}",
         WorkspaceLayout::display(&plan.mount_path)
     ));

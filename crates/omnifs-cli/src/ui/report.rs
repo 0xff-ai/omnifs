@@ -1,4 +1,4 @@
-//! Rows used by the live session and consent rails.
+//! Rows used by the live output and consent rails.
 
 // This module is the sanctioned rail output owner.
 #![allow(clippy::disallowed_macros, clippy::print_stdout)]

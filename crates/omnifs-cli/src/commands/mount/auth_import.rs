@@ -35,7 +35,7 @@ impl<'a> AuthImportDecision<'a> {
 
     pub(crate) fn resolve(
         self,
-        session: &crate::ui::output::Output,
+        output: &crate::ui::output::Output,
     ) -> anyhow::Result<ImportOutcome> {
         if self.default_auth.is_none() {
             return Ok(ImportOutcome {
@@ -49,7 +49,7 @@ impl<'a> AuthImportDecision<'a> {
         // non-interactively, so the documented behavior is reachable in scripts.
         if self.yes {
             if let Some(credential) = detected.first() {
-                session.row(&crate::ui::report::Row::new(
+                output.row(&crate::ui::report::Row::new(
                     crate::ui::style::Glyph::Done,
                     "credential",
                     format!("imported from {}", credential.source()),
@@ -68,7 +68,7 @@ impl<'a> AuthImportDecision<'a> {
                 token: None,
             });
         }
-        let Some(token) = Self::prompt_for_import(&detected, session)? else {
+        let Some(token) = Self::prompt_for_import(&detected, output)? else {
             return Ok(ImportOutcome {
                 auth: self.default_auth,
                 token: None,

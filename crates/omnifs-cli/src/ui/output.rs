@@ -259,8 +259,9 @@ impl ErrorEnvelope {
 }
 
 impl Output {
-    /// Serialize a terminal result without touching stdout or process-global
-    /// state. JSONL uses the same terminal object shape as JSON.
+    /// Serialize the JSON terminal result envelope without touching stdout or
+    /// process-global state. JSONL adds a `"type":"result"` discriminator
+    /// around its terminal representation.
     pub(crate) fn result_bytes<T: Serialize>(
         command: impl Into<String>,
         verdict: ResultVerdict,
@@ -429,6 +430,10 @@ impl Output {
 
     pub(crate) const fn is_structured(&self) -> bool {
         self.mode.is_structured()
+    }
+
+    pub(crate) const fn show_progress(&self) -> bool {
+        self.mode.is_structured() || !self.quiet
     }
 
     pub(crate) const fn no_input(&self) -> bool {
