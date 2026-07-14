@@ -2,7 +2,7 @@
 //! provider.
 
 use rc_zip_sync::ReadZip;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
 use omnifs_core::ContentType;
@@ -136,6 +136,23 @@ pub(crate) struct CheckRunKey {
     #[allow(dead_code)]
     pub(crate) number: u64,
     pub(crate) check_run_id: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct CheckCursor {
+    sha: String,
+    page: u64,
+}
+
+impl Cursor for CheckCursor {
+    fn encode(&self) -> String {
+        serde_json::to_string(self).expect("check cursor serialization is infallible")
+    }
+
+    fn decode(token: &str) -> Result<Self> {
+        serde_json::from_str(token)
+            .map_err(|_| ProviderError::invalid_input("invalid check cursor"))
+    }
 }
 
 #[omnifs_sdk::path_captures]
@@ -419,7 +436,7 @@ impl Owner {
                 })
             })
             .collect();
-        page_or_complete(entries, len, 100, page)
+        page_or_complete(entries, len, 100, PageCursor(page + 1))
     }
 }
 
@@ -449,7 +466,7 @@ impl Repo {
                 )
             })
             .collect::<Vec<_>>();
-        page_or_complete(entries, len, ITEM_PAGE_SIZE, page)
+        page_or_complete(entries, len, ITEM_PAGE_SIZE, PageCursor(page + 1))
     }
 
     pub(crate) async fn pulls(
@@ -476,7 +493,7 @@ impl Repo {
                 )
             })
             .collect::<Vec<_>>();
-        page_or_complete(entries, len, ITEM_PAGE_SIZE, page)
+        page_or_complete(entries, len, ITEM_PAGE_SIZE, PageCursor(page + 1))
     }
 
     pub(crate) async fn workflow_runs(
@@ -514,7 +531,7 @@ impl Repo {
                 )
             })
             .collect();
-        page_or_complete(entries, len, 30, page)
+        page_or_complete(entries, len, 30, PageCursor(page + 1))
     }
 }
 
@@ -578,7 +595,7 @@ impl PullRequest {
                 ))
             })
             .collect::<Vec<_>>();
-        page_or_complete(entries, len, FILE_PAGE_SIZE, page)
+        page_or_complete(entries, len, FILE_PAGE_SIZE, PageCursor(page + 1))
     }
 
     pub(crate) async fn reviews(
@@ -604,25 +621,37 @@ impl PullRequest {
                 )
             })
             .collect::<Vec<_>>();
-        page_or_complete(entries, len, REVIEW_PAGE_SIZE, page)
+        page_or_complete(
+            entries,
+            len,
+            REVIEW_PAGE_SIZE,
+            PageCursor(page + 1),
+        )
     }
 
     pub(crate) async fn checks(
         key: PullKey,
-        cx: ListCx<PageCursor>,
-    ) -> Result<Collection<CheckRun, PageCursor>> {
+        cx: ListCx<CheckCursor>,
+    ) -> Result<Collection<CheckRun, CheckCursor>> {
         let repo = RepoId::new(&key.owner, &key.repo);
-        let pull: PullHeadResponse = cx
-            .endpoint(GitHubApi)
-            .get(format!("/repos/{repo}/pulls/{}", key.number))
-            .json()
-            .await?;
-        let page = cx.cursor().map_or(1, |c| c.0);
+        let cursor = if let Some(cursor) = cx.cursor() {
+            cursor.clone()
+        } else {
+            let pull: PullHeadResponse = cx
+                .endpoint(GitHubApi)
+                .get(format!("/repos/{repo}/pulls/{}", key.number))
+                .json()
+                .await?;
+            CheckCursor {
+                sha: pull.head.sha,
+                page: 1,
+            }
+        };
+        let CheckCursor { sha, page } = cursor;
         let runs: CheckRunsResponse = cx
             .endpoint(GitHubApi)
             .get(format!(
-                "/repos/{repo}/commits/{}/check-runs?per_page={CHECK_RUN_PAGE_SIZE}&page={page}",
-                pull.head.sha
+                "/repos/{repo}/commits/{sha}/check-runs?per_page={CHECK_RUN_PAGE_SIZE}&page={page}"
             ))
             .json()
             .await?;
@@ -644,7 +673,15 @@ impl PullRequest {
                 )
             })
             .collect::<Vec<_>>();
-        page_or_complete(entries, len, CHECK_RUN_PAGE_SIZE, page)
+        page_or_complete(
+            entries,
+            len,
+            CHECK_RUN_PAGE_SIZE,
+            CheckCursor {
+                sha,
+                page: page + 1,
+            },
+        )
     }
 }
 
@@ -675,7 +712,12 @@ impl Review {
                 )
             })
             .collect::<Vec<_>>();
-        page_or_complete(entries, len, REVIEW_PAGE_SIZE, page)
+        page_or_complete(
+            entries,
+            len,
+            REVIEW_PAGE_SIZE,
+            PageCursor(page + 1),
+        )
     }
 }
 
@@ -862,16 +904,16 @@ impl Comment {
     }
 }
 
-fn page_or_complete<T: omnifs_sdk::object::Object>(
+fn page_or_complete<T: omnifs_sdk::object::Object, C: Cursor>(
     entries: Vec<CollectionEntry<T>>,
     len: u64,
     page_size: u64,
-    page: u64,
-) -> Result<Collection<T, PageCursor>> {
+    next: C,
+) -> Result<Collection<T, C>> {
     if len < page_size {
         Ok(Collection::complete(entries))
     } else {
-        Ok(Collection::page(entries).next(PageCursor(page + 1)))
+        Ok(Collection::page(entries).next(next))
     }
 }
 
@@ -1012,7 +1054,12 @@ async fn comments_collection(
         let files = comment.eager_leaves(&key)?;
         entries.push(CollectionEntry::computed(key, files));
     }
-    page_or_complete(entries, len, COMMENT_PAGE_SIZE, page)
+    page_or_complete(
+        entries,
+        len,
+        COMMENT_PAGE_SIZE,
+        PageCursor(page + 1),
+    )
 }
 
 pub(crate) fn unzip_logs(bytes: &[u8]) -> Vec<u8> {

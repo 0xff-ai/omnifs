@@ -1337,6 +1337,7 @@ fn github_pr_reviews_and_review_comments_list_and_read_objects() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn github_pr_checks_list_from_head_sha_and_read_check_run_objects() {
     use omnifs_wit::provider::types::{CalloutResult, HttpResponse};
 
@@ -1367,22 +1368,29 @@ fn github_pr_checks_list_from_head_sha_and_read_check_run_objects() {
         "unexpected check runs URL: {}",
         check_fetch.url
     );
+    let first_page = (700..800)
+        .map(|id| {
+            let output = if id == 700 {
+                r#", "output":{"title":"CI","summary":"All green"}"#
+            } else {
+                ""
+            };
+            format!(
+                r#"{{
+                    "id":{id},
+                    "name":"ci-{id}",
+                    "status":"completed",
+                    "conclusion":"success"{output}
+                }}"#
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
     checks
         .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
             status: 200,
             headers: Vec::new(),
-            body: br#"{
-                "check_runs":[
-                    {
-                        "id":700,
-                        "name":"ci",
-                        "status":"completed",
-                        "conclusion":"success",
-                        "output":{"title":"CI","summary":"All green"}
-                    }
-                ]
-            }"#
-            .to_vec(),
+            body: format!(r#"{{"check_runs":[{first_page}]}}"#).into_bytes(),
         })])
         .unwrap();
     match checks.result().unwrap() {
@@ -1392,13 +1400,52 @@ fn github_pr_checks_list_from_head_sha_and_read_check_run_objects() {
                 .iter()
                 .map(|entry| entry.name.as_str())
                 .collect();
-            assert_eq!(names, vec!["700"]);
+            assert_eq!(names.len(), 100);
+            assert!(names.contains(&"700"));
+            assert!(matches!(
+                listing.next_cursor,
+                Some(Cursor::Opaque(ref cursor))
+                    if cursor == r#"{"sha":"abc123","page":2}"#
+            ));
             assert!(
                 checks.effects().unwrap().canonical.is_empty(),
                 "check run list must not seed canonicals"
             );
         },
         other => panic!("expected check runs listing, got {other:?}"),
+    }
+
+    let cursor = r#"{"sha":"abc123","page":2}"#.to_string();
+    let mut page_two = harness
+        .list_with_cursor(
+            "/octocat/Hello-World/pulls/open/7/checks",
+            Some(Cursor::Opaque(cursor)),
+        )
+        .unwrap();
+    let continuation_fetch = page_two.expect_single_fetch();
+    assert!(
+        continuation_fetch
+            .url
+            .ends_with(
+                "/repos/octocat/Hello-World/commits/abc123/check-runs?per_page=100&page=2"
+            ),
+        "continuation must reuse the captured head without refetching the pull: {}",
+        continuation_fetch.url
+    );
+    page_two
+        .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
+            status: 200,
+            headers: Vec::new(),
+            body: br#"{"check_runs":[]}"#.to_vec(),
+        })])
+        .unwrap();
+    match page_two.result().unwrap() {
+        OpResult::ListChildren(ListChildrenResult::Entries(listing)) => {
+            assert!(listing.entries.is_empty());
+            assert!(listing.exhaustive);
+            assert!(listing.next_cursor.is_none());
+        },
+        other => panic!("expected completed check continuation, got {other:?}"),
     }
 
     let mut check_md = harness
