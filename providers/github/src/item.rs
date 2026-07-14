@@ -144,7 +144,7 @@ pub(crate) struct CheckCursor {
     page: u64,
 }
 
-impl Cursor for CheckCursor {
+impl omnifs_sdk::collection::Cursor for CheckCursor {
     fn encode(&self) -> String {
         serde_json::to_string(self).expect("check cursor serialization is infallible")
     }
@@ -894,7 +894,7 @@ impl Comment {
     }
 }
 
-fn page_or_complete<T: omnifs_sdk::object::Object, C: Cursor>(
+fn page_or_complete<T: omnifs_sdk::object::Object, C: omnifs_sdk::collection::Cursor>(
     entries: Vec<CollectionEntry<T>>,
     len: u64,
     page_size: u64,

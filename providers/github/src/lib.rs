@@ -12,7 +12,6 @@ mod item;
 mod objects;
 
 use api::GitHubApi;
-pub(crate) use objects::ItemData;
 use objects::{
     ChangedFile, CheckRun, Comment, Issue, Notification, Owner, PullRequest, Repo, Review,
     ReviewComment, WorkflowRun,
