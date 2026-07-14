@@ -121,7 +121,7 @@ pub(crate) fn encode_attrs(generation: u64, attr: &Attr, request: &[u32]) -> Vec
     let mut result_bits = Vec::new();
     let mut vals = XdrWriter::new();
     for bit in requested_bits(request) {
-        if !supported_attr(bit) {
+        if !SUPPORTED_ATTR_BITS.contains(&bit) {
             continue;
         }
         result_bits.push(bit);
@@ -212,10 +212,6 @@ fn requested_bits(words: &[u32]) -> impl Iterator<Item = u32> + '_ {
                 )
             })
         })
-}
-
-fn supported_attr(bit: u32) -> bool {
-    SUPPORTED_ATTR_BITS.contains(&bit)
 }
 
 pub(crate) fn encode_bitmap(writer: &mut XdrWriter, bits: &[u32]) {
