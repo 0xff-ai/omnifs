@@ -1,10 +1,11 @@
-//! `omnifs mount` — add, list, re-authenticate, or remove mounts.
+//! `omnifs mount` — add, list, re-authenticate, revoke, or remove mounts.
 
 pub(crate) mod add;
 pub(crate) mod auth_import;
 pub(crate) mod detect;
 pub(crate) mod mount_file;
 pub(crate) mod provider_selection;
+pub(crate) mod revoke;
 pub(crate) mod spec_creation;
 mod token_validation;
 
@@ -12,6 +13,7 @@ pub(crate) use add::AddArgs;
 pub(crate) use add::{render_consent_block, run_static_token_init};
 pub(crate) use auth_import::AuthImportDecision;
 pub(crate) use auth_import::ImportOutcome;
+pub(crate) use revoke::RevokeArgs;
 
 use anyhow::{Context, anyhow};
 use clap::{Args, Subcommand};
@@ -42,6 +44,8 @@ pub enum MountCommand {
     Show(ShowArgs),
     /// Re-authenticate an existing mount.
     Reauth(ReauthArgs),
+    /// Revoke the configured credential for an existing mount.
+    Revoke(RevokeArgs),
     /// Remove a mount config.
     Rm {
         name: String,
@@ -90,6 +94,13 @@ impl MountArgs {
             MountCommand::Ls(args) => ls(&args, output).await,
             MountCommand::Show(args) => show(&args, output).await,
             MountCommand::Reauth(args) => {
+                let receipt = args.run(output.clone()).await?;
+                if output.is_structured() {
+                    output.emit_result(ResultVerdict::Ok, receipt)?;
+                }
+                Ok(ExitCode::Success)
+            },
+            MountCommand::Revoke(args) => {
                 let receipt = args.run(output.clone()).await?;
                 if output.is_structured() {
                     output.emit_result(ResultVerdict::Ok, receipt)?;

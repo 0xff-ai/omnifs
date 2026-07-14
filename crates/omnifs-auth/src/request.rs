@@ -42,7 +42,7 @@ impl OAuthRequest {
     /// Compare the complete OAuth runtime configuration while excluding only
     /// request injection facts, which belong to the consuming mount binding.
     /// Secrets are compared directly in memory and never leave this method.
-    pub(crate) fn has_same_runtime_metadata(&self, other: &Self) -> bool {
+    pub fn has_same_runtime_metadata(&self, other: &Self) -> bool {
         let mut left = self.scheme.clone();
         let mut right = other.scheme.clone();
         left.inject_domains.clear();

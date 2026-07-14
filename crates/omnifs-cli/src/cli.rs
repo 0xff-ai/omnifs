@@ -63,7 +63,7 @@ pub enum Commands {
     Logs(commands::logs::LogsArgs),
     /// Stream FUSE, provider, and callout events
     Inspect(commands::inspect::InspectArgs),
-    /// Add, list, reauthenticate, or remove mounts
+    /// Add, list, reauthenticate, revoke, or remove mounts
     Mount(commands::mount::MountArgs),
 
     /// List or install provider artifacts
@@ -142,6 +142,7 @@ impl Commands {
                     commands::mount::MountCommand::Ls(_) => "mount.ls",
                     commands::mount::MountCommand::Show(_) => "mount.show",
                     commands::mount::MountCommand::Reauth(_) => "mount.reauth",
+                    commands::mount::MountCommand::Revoke(_) => "mount.revoke",
                     commands::mount::MountCommand::Rm { .. } => "mount.rm",
                 },
             ),

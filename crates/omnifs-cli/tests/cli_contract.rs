@@ -8,6 +8,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use common::{install_test_provider, install_test_provider_as, omnifs_bin, release_wasm_dir};
+use omnifs_workspace::authn::CredentialId;
+use omnifs_workspace::creds::{CredentialEntry, CredentialStore, FileStore};
+use secrecy::SecretString;
+use time::OffsetDateTime;
 
 struct Fixture {
     home: tempfile::TempDir,
@@ -321,30 +325,22 @@ fn lifecycle_json_receipts_emit_one_document_with_a_verdict() {
 }
 
 #[test]
-fn mount_remove_jsonl_dry_run_ends_with_one_typed_result() {
+fn destructive_mount_jsonl_commands_end_with_one_typed_result() {
     let fixture = Fixture::new();
+    let terminal_result = |output: &Output| {
+        assert_eq!(exit_code(output), 0, "{output:?}");
+        let mut lines = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("JSONL line"))
+            .collect::<Vec<_>>();
+        assert_eq!(lines.len(), 1);
+        let terminal = lines.pop().unwrap();
+        assert_eq!(terminal["type"], "result");
+        terminal
+    };
     fixture.write_static_token_mount_without_credential();
-    let dry_run = fixture.run(&[
-        "mount",
-        "rm",
-        "test",
-        "--keep-credentials",
-        "--dry-run",
-        "--output",
-        "jsonl",
-    ]);
-    assert_eq!(exit_code(&dry_run), 0);
-    let lines = String::from_utf8_lossy(&dry_run.stdout)
-        .lines()
-        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("JSONL line"))
-        .collect::<Vec<_>>();
-    assert_eq!(lines.len(), 1);
-    assert_eq!(
-        lines.iter().filter(|line| line["type"] == "result").count(),
-        1
-    );
-    let terminal = lines.last().expect("terminal result");
-    assert_eq!(terminal["type"], "result");
+    let dry_run = fixture.run(&["mount", "rm", "test", "--dry-run", "--output", "jsonl"]);
+    let terminal = terminal_result(&dry_run);
     assert_eq!(terminal["command"], "mount.rm");
     assert_eq!(terminal["result"]["mount"], "test");
     assert_eq!(terminal["result"]["dry_run"], true);
@@ -354,6 +350,38 @@ fn mount_remove_jsonl_dry_run_ends_with_one_typed_result() {
             .is_some_and(Vec::is_empty)
     );
     assert!(terminal["result"]["plan"]["rows"].as_array().is_some());
+
+    let test_spec = std::fs::read_to_string(fixture.home_path().join("mounts/test.json"))
+        .expect("read test mount");
+    std::fs::write(
+        fixture.home_path().join("mounts/shared.json"),
+        test_spec.replace("\"mount\":\"test\"", "\"mount\":\"shared\""),
+    )
+    .expect("write shared mount");
+    let credential_id = CredentialId::new("test-provider", "pat", "default").unwrap();
+    let store = FileStore::new(fixture.home_path().join("credentials.json"));
+    store
+        .put(
+            &credential_id,
+            &CredentialEntry::static_token(
+                SecretString::from("secret".to_owned()),
+                OffsetDateTime::UNIX_EPOCH,
+            ),
+        )
+        .unwrap();
+
+    let revoked = fixture.run(&["mount", "revoke", "test", "--yes", "--output", "jsonl"]);
+    let terminal = terminal_result(&revoked);
+    assert_eq!(terminal["command"], "mount.revoke");
+    assert_eq!(terminal["result"]["rows"][0]["state"], "done");
+    let result = terminal["result"]["rows"][0]["value"].as_str().unwrap();
+    assert!(result.contains("test"));
+    assert!(result.contains("shared"));
+    assert!(store.get(&credential_id).unwrap().is_none());
+
+    let already_absent = fixture.run(&["mount", "revoke", "test", "--output", "jsonl"]);
+    let terminal = terminal_result(&already_absent);
+    assert_eq!(terminal["result"]["rows"][0]["state"], "skip");
 }
 
 #[test]

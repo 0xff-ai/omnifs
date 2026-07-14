@@ -199,7 +199,7 @@ impl MountAuth {
     }
 
     pub(crate) fn readiness(&self, store: &dyn CredentialStore) -> AuthReadiness {
-        let target = match self.status_target() {
+        let target = match self.credential_target() {
             Ok(target) => target,
             Err(error) => {
                 return AuthReadiness::Error {
@@ -224,16 +224,19 @@ impl MountAuth {
         self.target_for_scheme(Some(auth), scheme, account)
     }
 
-    fn primary_auth(&self) -> Option<&Auth> {
-        self.spec.auth.as_ref()
-    }
-
-    fn status_target(&self) -> anyhow::Result<CredentialTarget> {
+    /// Resolve the credential identity selected by this mount's persisted auth
+    /// block. The manifest remains best-effort because materialized specs carry
+    /// their selected scheme.
+    pub(crate) fn credential_target(&self) -> anyhow::Result<CredentialTarget> {
         let Some(auth) = self.primary_auth() else {
             return Ok(CredentialTarget::None);
         };
         let scheme = self.manifest_view().configured_scheme_key(auth)?;
         CredentialTarget::for_configured_auth(&self.spec, auth, Some(&scheme))
+    }
+
+    fn primary_auth(&self) -> Option<&Auth> {
+        self.spec.auth.as_ref()
     }
 
     fn target_for_scheme(

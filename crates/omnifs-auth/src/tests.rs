@@ -327,6 +327,16 @@ async fn optional_revocation_endpoint_works_without_builder_type_branching() {
         .await
         .unwrap();
     assert_eq!(skipped, OAuthRevokeOutcome::Unsupported);
+
+    let failing = FakeRevocationServer::start_with_failure(true).await;
+    let error = client
+        .revoke_access_token(
+            OAuthRequest::new(fake.loopback_scheme(Some(failing.endpoint()))),
+            SecretString::from("access-3".to_owned()),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, AuthError::RevocationEndpoint(_)));
 }
 
 #[tokio::test]
