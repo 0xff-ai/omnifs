@@ -230,9 +230,7 @@ async fn namespaces_dir(cx: DirCx<State>) -> Result<DirListing> {
 impl NamespaceKey {
     async fn types(self, cx: DirCx<State>) -> Result<DirListing> {
         let api = KubeApi::new(&cx);
-        Ok(dir_listing(
-            api.list_types_for_listing(Some(self.ns.as_str())).await?,
-        ))
+        api.list_types_for_listing(Some(self.ns.as_str())).await
     }
 }
 
@@ -277,7 +275,7 @@ async fn pod_log_read(cx: Cx<State>, key: PodLogKey) -> Result<FileProjection> {
 
 async fn cluster_types_dir(cx: DirCx<State>) -> Result<DirListing> {
     let api = KubeApi::new(&cx);
-    Ok(dir_listing(api.list_types_for_listing(None).await?))
+    api.list_types_for_listing(None).await
 }
 
 impl ClusterTypeKey {

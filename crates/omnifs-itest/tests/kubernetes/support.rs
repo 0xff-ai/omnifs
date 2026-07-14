@@ -78,11 +78,28 @@ const EXAMPLE_V1: &str = r#"{"groupVersion":"example.io/v1","resources":[
   {"name":"legacies","singularName":"legacy","namespaced":true,"kind":"Legacy","verbs":["get","list"]}
 ]}"#;
 
+const PARTIAL_API_GROUPS: &str = r#"{
+  "kind": "APIGroupList",
+  "groups": [
+    {"name":"example.io",
+     "versions":[{"groupVersion":"example.io/v2","version":"v2"},{"groupVersion":"example.io/v1","version":"v1"}],
+     "preferredVersion":{"groupVersion":"example.io/v2","version":"v2"}}
+  ]
+}"#;
+
 pub fn http_ok(body: &[u8]) -> CalloutResult {
     CalloutResult::HttpResponse(HttpResponse {
         status: 200,
         headers: Vec::<Header>::new(),
         body: body.to_vec(),
+    })
+}
+
+fn http_unavailable() -> CalloutResult {
+    CalloutResult::HttpResponse(HttpResponse {
+        status: 503,
+        headers: Vec::<Header>::new(),
+        body: Vec::new(),
     })
 }
 
@@ -120,6 +137,31 @@ pub fn warm_discovery(harness: &RuntimeHarness) -> Vec<String> {
         op.answer_callouts(responses).unwrap();
     }
     sorted_entry_names(op.into_list_children().unwrap())
+}
+
+/// Answer a discovery attempt where core discovery and the preferred grouped
+/// version are unavailable, but the grouped fallback version is readable.
+pub fn answer_partial_discovery(op: &mut TestOp<'_>) {
+    while op.is_waiting_for_callouts() {
+        let responses = op
+            .expect_fetches()
+            .iter()
+            .map(|fetch| {
+                if fetch.url.ends_with("/api/v1")
+                    || fetch.url.ends_with("/apis/example.io/v2")
+                {
+                    http_unavailable()
+                } else if fetch.url.ends_with("/apis") {
+                    http_ok(PARTIAL_API_GROUPS.as_bytes())
+                } else if fetch.url.ends_with("/apis/example.io/v1") {
+                    http_ok(EXAMPLE_V1.as_bytes())
+                } else {
+                    panic!("unexpected partial discovery URL: {}", fetch.url);
+                }
+            })
+            .collect();
+        op.answer_callouts(responses).unwrap();
+    }
 }
 
 /// List a directory that should resolve from cached discovery alone (no

@@ -63,17 +63,46 @@ impl Resource {
 }
 
 /// Resource discovery indexed by filesystem-facing type name.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct Discovery {
     by_plural: HashMap<String, Resource>,
+    failure: Option<ProviderError>,
 }
 
 impl Discovery {
+    fn is_complete(&self) -> bool {
+        self.failure.is_none()
+    }
+
+    fn record_failure(&mut self, failure: ProviderError) {
+        let replace = self.failure.as_ref().is_none_or(|current| {
+            Self::failure_priority(failure.kind()) > Self::failure_priority(current.kind())
+        });
+        if replace {
+            self.failure = Some(failure);
+        }
+    }
+
+    fn failure_priority(kind: ProviderErrorKind) -> u8 {
+        match kind {
+            ProviderErrorKind::PermissionDenied | ProviderErrorKind::Denied => 4,
+            ProviderErrorKind::RateLimited => 3,
+            ProviderErrorKind::Timeout | ProviderErrorKind::Network => 2,
+            _ => 1,
+        }
+    }
+
     fn insert(&mut self, fs_name: String, resource: Resource) {
         self.by_plural.entry(fs_name).or_insert(resource);
     }
 
-    fn add_resources(&mut self, api_root: &str, group: &str, resources: &[K8sApiResource]) {
+    fn add_resources(
+        &mut self,
+        api_root: &str,
+        group: &str,
+        resources: &[K8sApiResource],
+        qualify_group: bool,
+    ) {
         for entry in resources {
             if !is_browsable(entry) || self.has_group_resource(group, &entry.name) {
                 continue;
@@ -85,7 +114,9 @@ impl Discovery {
                 group: group.to_string(),
                 namespaced: entry.namespaced,
             };
-            let fs_name = if !group.is_empty() && self.get(&entry.name).is_some() {
+            let fs_name = if !group.is_empty()
+                && (qualify_group || self.get(&entry.name).is_some())
+            {
                 format!("{}.{}", entry.name, group)
             } else {
                 entry.name.clone()
@@ -96,6 +127,18 @@ impl Discovery {
 
     fn get(&self, fs_plural: &str) -> Option<&Resource> {
         self.by_plural.get(fs_plural)
+    }
+
+    fn resource(&self, fs_plural: &str) -> Result<Resource> {
+        if let Some(resource) = self.get(fs_plural) {
+            return Ok(resource.clone());
+        }
+        if let Some(failure) = &self.failure {
+            return Err(failure.clone());
+        }
+        Err(ProviderError::not_found(format!(
+            "unknown resource type: {fs_plural}"
+        )))
     }
 
     fn has_group_resource(&self, group: &str, plural: &str) -> bool {
@@ -113,6 +156,15 @@ impl Discovery {
             .collect();
         names.sort();
         names
+    }
+
+    fn type_listing(&self, names: impl IntoIterator<Item = String>) -> DirListing {
+        let entries = names.into_iter().map(Entry::dir);
+        if self.failure.is_none() {
+            DirListing::exhaustive(entries)
+        } else {
+            DirListing::open(entries)
+        }
     }
 }
 
@@ -161,60 +213,67 @@ impl<'a> KubeApi<'a> {
         }
     }
 
-    pub(crate) async fn ensure_discovery(&self) -> Result<()> {
-        if self.cx.state(|state| state.discovery.borrow().is_some()) {
-            return Ok(());
-        }
-        let discovery = self.fetch_discovery().await?;
-        self.cx.state(|state| {
-            *state.discovery.borrow_mut() = Some(discovery);
-        });
-        Ok(())
-    }
-
-    pub(crate) async fn resource(&self, fs_plural: &str) -> Result<Resource> {
-        self.ensure_discovery().await?;
-        self.cx.state(|state| {
+    pub(crate) async fn ensure_discovery(&self) {
+        if self.cx.state(|state| {
             state
                 .discovery
                 .borrow()
                 .as_ref()
-                .and_then(|discovery| discovery.get(fs_plural).cloned())
-                .ok_or_else(|| {
-                    ProviderError::not_found(format!("unknown resource type: {fs_plural}"))
-                })
+                .is_some_and(Discovery::is_complete)
+        }) {
+            return;
+        }
+        let discovery = self.fetch_discovery().await;
+        self.cx.state(|state| {
+            *state.discovery.borrow_mut() = Some(discovery);
+        });
+    }
+
+    pub(crate) async fn resource(&self, fs_plural: &str) -> Result<Resource> {
+        self.ensure_discovery().await;
+        self.cx.state(|state| {
+            state.discovery.borrow().as_ref().map_or_else(
+                || Err(ProviderError::internal("kubernetes discovery is unavailable")),
+                |discovery| discovery.resource(fs_plural),
+            )
         })
     }
 
     pub(crate) async fn list_types_for_listing(
         &self,
         namespace: Option<&str>,
-    ) -> Result<Vec<String>> {
+    ) -> Result<DirListing> {
         let namespaced = namespace.is_some();
-        let types = self.list_types(namespaced).await?;
+        self.ensure_discovery().await;
+        let discovery = self.cx.state(|state| {
+            state
+                .discovery
+                .borrow()
+                .as_ref()
+                .cloned()
+                .ok_or_else(|| ProviderError::internal("kubernetes discovery is unavailable"))
+        })?;
+        let types = discovery.sorted_types(namespaced);
         if !self.cx.state(|state| state.hide_empty_types) {
-            return Ok(types);
+            return Ok(discovery.type_listing(types));
         }
 
         let mut names = Vec::new();
         let mut paths = Vec::new();
-        self.cx.state(|state| {
-            if let Some(discovery) = state.discovery.borrow().as_ref() {
-                for plural in &types {
-                    if let Some(resource) = discovery.get(plural) {
-                        names.push(plural.clone());
-                        paths.push(resource.collection_path(namespace));
-                    }
-                }
+        for plural in &types {
+            if let Some(resource) = discovery.get(plural) {
+                names.push(plural.clone());
+                paths.push(resource.collection_path(namespace));
             }
-        });
+        }
 
         let results = join_all(paths.iter().map(|path| self.collection_non_empty(path))).await;
-        Ok(names
-            .into_iter()
-            .zip(results)
-            .filter_map(|(name, result)| result.unwrap_or(true).then_some(name))
-            .collect())
+        Ok(discovery.type_listing(
+            names
+                .into_iter()
+                .zip(results)
+                .filter_map(|(name, result)| result.unwrap_or(true).then_some(name)),
+        ))
     }
 
     pub(crate) async fn list_names(&self, path: &str) -> Result<Vec<String>> {
@@ -278,43 +337,44 @@ impl<'a> KubeApi<'a> {
         Ok(container_names(&pod))
     }
 
-    async fn fetch_discovery(&self) -> Result<Discovery> {
+    async fn fetch_discovery(&self) -> Discovery {
         let mut discovery = Discovery::default();
 
-        if let Ok(core) = self.get_json::<APIResourceList>("/api/v1", &[]).await {
-            discovery.add_resources("/api/v1", "", &core.resources);
-        }
+        let core_available = match self
+            .get_json::<APIResourceList>("/api/v1", &[])
+            .await
+        {
+            Ok(core) => {
+                discovery.add_resources("/api/v1", "", &core.resources, false);
+                true
+            },
+            Err(failure) => {
+                discovery.record_failure(failure);
+                false
+            },
+        };
 
-        if let Ok(groups) = self.get_json::<APIGroupList>("/apis", &[]).await {
-            for group in &groups.groups {
-                for group_version in group_versions_preferred_first(group) {
-                    let api_root = format!("/apis/{group_version}");
-                    if let Ok(list) = self.get_json::<APIResourceList>(&api_root, &[]).await {
-                        discovery.add_resources(&api_root, &group.name, &list.resources);
+        match self.get_json::<APIGroupList>("/apis", &[]).await {
+            Ok(groups) => {
+                for group in &groups.groups {
+                    for group_version in group_versions_preferred_first(group) {
+                        let api_root = format!("/apis/{group_version}");
+                        match self.get_json::<APIResourceList>(&api_root, &[]).await {
+                            Ok(list) => discovery.add_resources(
+                                &api_root,
+                                &group.name,
+                                &list.resources,
+                                !core_available,
+                            ),
+                            Err(failure) => discovery.record_failure(failure),
+                        }
                     }
                 }
-            }
+            },
+            Err(failure) => discovery.record_failure(failure),
         }
 
-        if discovery.by_plural.is_empty() {
-            return Err(ProviderError::internal(
-                "kubernetes discovery returned no readable resources; is the API endpoint reachable? \
-                 (for `unix://` endpoints, is `kubectl proxy --unix-socket` running?)",
-            ));
-        }
-        Ok(discovery)
-    }
-
-    async fn list_types(&self, namespaced: bool) -> Result<Vec<String>> {
-        self.ensure_discovery().await?;
-        Ok(self.cx.state(|state| {
-            state
-                .discovery
-                .borrow()
-                .as_ref()
-                .map(|discovery| discovery.sorted_types(namespaced))
-                .unwrap_or_default()
-        }))
+        discovery
     }
 
     async fn collection_non_empty(&self, path: &str) -> Result<bool> {

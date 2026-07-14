@@ -2,10 +2,11 @@
 
 mod support;
 
+use omnifs_wit::provider::types::{ErrorKind, ListChildrenResult, OpResult};
 use serde_json::{Value, json};
 use support::{
-    TestOpExt, http_ok, kube_harness, list_type_names, read_bytes, sorted_entry_names,
-    warm_discovery,
+    TestOpExt, answer_partial_discovery, http_ok, kube_harness, list_type_names, read_bytes,
+    sorted_entry_names, warm_discovery,
 };
 
 const CONFIGMAP_JSON: &str = r#"{
@@ -52,6 +53,41 @@ fn cluster_and_namespace_listings_classify_scope_and_filter_unreadable() {
             "pods",
         ]
     );
+}
+
+#[test]
+fn partial_discovery_stays_open_qualifies_groups_and_retries_unknown_types() {
+    let harness = kube_harness();
+
+    let mut types = harness.list("/namespaces/demo").unwrap();
+    answer_partial_discovery(&mut types);
+    match types.into_list_children().unwrap() {
+        ListChildrenResult::Entries(listing) => {
+            assert!(
+                !listing.exhaustive,
+                "a listing from incomplete discovery must remain open"
+            );
+            let mut names: Vec<String> = listing
+                .entries
+                .into_iter()
+                .map(|entry| entry.name)
+                .collect();
+            names.sort();
+            assert_eq!(names, vec!["bars.example.io", "legacies.example.io"]);
+        },
+        other => panic!("expected partial type entries, got {other:?}"),
+    }
+
+    let mut omitted_core_type = harness.list("/namespaces/demo/pods").unwrap();
+    assert!(
+        omitted_core_type.is_waiting_for_callouts(),
+        "a partial discovery snapshot must be retried by the next operation"
+    );
+    answer_partial_discovery(&mut omitted_core_type);
+    match omitted_core_type.result().unwrap() {
+        OpResult::Error(error) => assert_eq!(error.kind, ErrorKind::Network),
+        other => panic!("expected retained discovery Network error, got {other:?}"),
+    }
 }
 
 /// A resource collection is fetched at its discovered group-version root: core
