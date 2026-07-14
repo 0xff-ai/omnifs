@@ -1,8 +1,8 @@
 //! Daemon and frontend shutdown workflows.
 //!
 //! Teardown is deliberately a typed collection step. Commands render these
-//! outcomes through the UI event stream, so a reset receipt cannot claim a
-//! frontend or daemon was stopped when the cleanup only produced a warning.
+//! outcomes through the UI event stream, so a receipt cannot claim a frontend
+//! or daemon was stopped when the cleanup only produced a warning.
 
 use crate::ui::consent::Outcome;
 use crate::ui::event::{LedgerRenderer, Render, UiEvent};
@@ -170,32 +170,6 @@ impl<'a> DaemonTeardown<'a> {
             },
         }
         Ok(outcomes)
-    }
-
-    /// Best-effort daemon teardown for `omnifs reset`. Every branch is returned
-    /// so reset can settle its planned rows truthfully, including warnings.
-    pub(crate) async fn reset_best_effort(&self) -> Vec<TeardownOutcome> {
-        let mut outcomes = vec![self.teardown_frontends(false).await];
-        match self.workspace.daemon().status_optional().await {
-            Ok(Some(status)) => {
-                outcomes.push(self.shutdown_and_wait(status.pid).await);
-                if let Some(TeardownOutcome::DaemonShutdownFailed { .. }) = outcomes.last() {
-                    // Keep the runtime record so a later `down` can still make
-                    // an ownership decision.
-                } else if let Err(error) =
-                    RuntimeRecord::remove(&self.workspace.layout().runtime_record_file())
-                {
-                    outcomes.push(TeardownOutcome::StaleRecordKept {
-                        error: error.to_string(),
-                    });
-                }
-            },
-            Ok(None) => outcomes.push(self.remove_stale_record()),
-            Err(error) => outcomes.push(TeardownOutcome::OwnershipUnknown {
-                error: format!("{error:#}"),
-            }),
-        }
-        outcomes
     }
 
     /// Request shutdown and wait until the control surface is observably gone.

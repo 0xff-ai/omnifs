@@ -101,6 +101,10 @@ fn help_documents_exit_codes() {
     assert!(stdout.contains("3  daemon unreachable"));
     assert!(stdout.contains("4  auth or consent required"));
     assert!(stdout.contains("5  degraded health"));
+    assert!(
+        !stdout.contains("reset"),
+        "retired reset command in help: {stdout}"
+    );
 }
 
 #[test]
@@ -318,38 +322,6 @@ fn lifecycle_json_receipts_emit_one_document_with_a_verdict() {
         Some("ok" | "degraded")
     ));
     assert!(down_json["result"]["rows"].as_array().is_some());
-
-    // `reset --output json --yes` with nothing configured is a typed reset receipt.
-    let reset = fixture.run(&["reset", "--yes", "--output", "json"]);
-    assert_eq!(
-        exit_code(&reset),
-        0,
-        "stderr: {}",
-        String::from_utf8_lossy(&reset.stderr)
-    );
-    let reset_json = stdout_json(&reset);
-    assert!(matches!(
-        reset_json["verdict"].as_str(),
-        Some("ok" | "degraded")
-    ));
-    assert!(reset_json["result"]["rows"].as_array().is_some());
-    assert_eq!(reset_json["result"]["dry_run"], false);
-    assert!(reset_json["result"]["plan"]["title"].as_str().is_some());
-
-    // Dry-run emits the same typed receipt shape, with no applied rows and no
-    // second JSON document from the human session rail.
-    let dry_run = fixture.run(&["reset", "--dry-run", "--output", "json"]);
-    assert_eq!(exit_code(&dry_run), 0);
-    assert_eq!(String::from_utf8_lossy(&dry_run.stdout).lines().count(), 1);
-    let dry_run_json = stdout_json(&dry_run);
-    assert_eq!(dry_run_json["verdict"], "ok");
-    assert_eq!(dry_run_json["result"]["dry_run"], true);
-    assert!(
-        dry_run_json["result"]["rows"]
-            .as_array()
-            .is_some_and(Vec::is_empty)
-    );
-    assert!(dry_run_json["result"]["plan"]["rows"].as_array().is_some());
 }
 
 #[test]
@@ -447,7 +419,6 @@ fn every_json_command_keeps_its_error_contract_before_workspace_resolution() {
         &["doctor", "--output", "json"],
         &["up", "--output", "json"],
         &["down", "--output", "json"],
-        &["reset", "--yes", "--output", "json"],
         &[
             "mount",
             "add",

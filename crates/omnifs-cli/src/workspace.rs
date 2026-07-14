@@ -11,7 +11,6 @@ use std::cell::{OnceCell, Ref, RefCell, RefMut};
 use std::path::PathBuf;
 
 use crate::client::DaemonClient;
-use crate::credential_target::CredentialTarget;
 use crate::mount_config::MountConfig;
 use omnifs_workspace::config::Config;
 use omnifs_workspace::mounts::Spec;
@@ -25,14 +24,6 @@ pub(crate) struct Workspace {
     registry: OnceCell<RefCell<Registry>>,
     /// Desired-state repository retaining its lock for this command lifetime.
     repository: OnceCell<RefCell<Repository>>,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct MountRemovalTarget {
-    pub(crate) name: String,
-    pub(crate) path: PathBuf,
-    pub(crate) config: Option<Spec>,
-    pub(crate) credential: CredentialTarget,
 }
 
 impl Workspace {
@@ -59,7 +50,7 @@ impl Workspace {
 
     /// The mount-spec registry cell for this command, scanned from `mounts/`
     /// on first use and cached for the lifetime of this `Workspace`. Every
-    /// read (`mounts()`, `reset_removal_targets()`) and every write
+    /// read (`mounts()`) and every write
     /// (`put_mount`, `remove_mount`) goes through this one cell, so a write
     /// earlier in a multi-step command is visible to a later read in the
     /// same process instead of a stale pre-write snapshot.
@@ -161,51 +152,6 @@ impl Workspace {
                 source: registry.spec_path(name),
             })
             .collect())
-    }
-
-    /// Build removal targets tolerantly, for use by `omnifs reset`.
-    ///
-    /// Reads through the shared [`Registry`]: resolvable specs yield a target
-    /// plus their stored credential; files that failed to load (broken JSON,
-    /// name/filename mismatch) still produce a target with
-    /// `CredentialTarget::None` so reset can nuke broken state.
-    pub(crate) fn reset_removal_targets(&self) -> anyhow::Result<Vec<MountRemovalTarget>> {
-        let registry = self.registry()?;
-        let mut targets = Vec::new();
-
-        for (name, spec) in registry.iter() {
-            targets.push(MountRemovalTarget {
-                name: name.to_string(),
-                path: registry.spec_path(name),
-                config: Some(spec.clone()),
-                credential: CredentialTarget::for_mount(spec),
-            });
-        }
-
-        for failure in registry.failures() {
-            let Some(name) = failure
-                .path
-                .file_stem()
-                .and_then(|stem| stem.to_str())
-                .map(str::to_owned)
-            else {
-                continue;
-            };
-            tracing::warn!(
-                path = %failure.path.display(),
-                error = %failure.error,
-                "unparsable mount config; will remove the file but cannot drop credentials"
-            );
-            targets.push(MountRemovalTarget {
-                name,
-                path: failure.path.clone(),
-                config: None,
-                credential: CredentialTarget::None,
-            });
-        }
-
-        targets.sort_by(|a, b| a.name.cmp(&b.name));
-        Ok(targets)
     }
 }
 

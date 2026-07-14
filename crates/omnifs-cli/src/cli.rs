@@ -91,12 +91,6 @@ pub enum Commands {
     /// Install omnifs usage skills for agent harnesses
     Skill(commands::skill::SkillArgs),
 
-    /// Remove all mounts and credentials, stop the daemon
-    ///
-    /// Nukes every mount config and (by default) its stored credential, then
-    /// stops the running backend. Asks for confirmation unless `--yes` is set.
-    Reset(commands::reset::ResetArgs),
-
     /// Diagnose environment, auth, and daemon health
     Doctor(commands::doctor::DoctorArgs),
 
@@ -174,7 +168,6 @@ impl Commands {
                 },
             ),
             Self::Skill(_) => (Some("skill"), "skill"),
-            Self::Reset(_) => (Some("reset"), "reset"),
             Self::Doctor(_) => (Some("doctor"), "doctor"),
             Self::Completions(_) => (Some("completions"), "completions"),
             Self::Version(_) => (Some("version"), "version"),
@@ -221,7 +214,6 @@ impl Commands {
             Self::Mount(args) => args.run(output).await,
             Self::Provider(args) => args.run(output).await,
             Self::Skill(args) => args.run().map(|()| ExitCode::Success),
-            Self::Reset(args) => args.run(output).await,
             Self::Completions(args) => {
                 args.run();
                 Ok(ExitCode::Success)

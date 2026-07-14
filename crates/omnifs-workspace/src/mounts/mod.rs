@@ -278,8 +278,8 @@ pub struct Registry {
     failures: Vec<SpecLoadFailure>,
 }
 
-/// A `mounts/*.json` file that failed to load, retained so a tolerant reader
-/// (startup validation, `omnifs reset`) can still account for it.
+/// A `mounts/*.json` file that failed to load, retained so startup validation
+/// can account for every invalid desired-state entry.
 #[derive(Debug)]
 pub struct SpecLoadFailure {
     pub path: PathBuf,
