@@ -268,20 +268,11 @@ impl MountFixture {
             std::fs::create_dir_all(dir).expect("fixture dir");
         }
 
-        let bytes = std::fs::read(wasm).expect("read test provider");
-        let id = omnifs_workspace::ids::ProviderId::from_wasm_bytes(&bytes);
+        let artifact =
+            omnifs_workspace::provider::Artifact::from_file(wasm).expect("parse test provider");
+        let id = artifact.id();
         let store = omnifs_workspace::provider::ProviderStore::new(&providers_dir);
-        store.put_if_absent(&id, &bytes).expect("put test provider");
-        store
-            .install(
-                id,
-                omnifs_workspace::ids::ProviderMeta {
-                    name: omnifs_workspace::ids::ProviderName::new("test-provider").unwrap(),
-                    version: None,
-                },
-                "test_provider.wasm".into(),
-            )
-            .expect("install test provider");
+        store.retain(&artifact).expect("retain test provider");
 
         let mount_config = format!(
             r#"{{

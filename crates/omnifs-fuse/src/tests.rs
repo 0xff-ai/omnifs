@@ -65,21 +65,12 @@ fn build_harness() -> FuseHarness {
         test_src.display()
     );
     let test_bytes = std::fs::read(&test_src).expect("read test provider");
-    let id = omnifs_workspace::ids::ProviderId::from_wasm_bytes(&test_bytes);
+    let artifact =
+        omnifs_workspace::provider::Artifact::from_bytes("test_provider.wasm", test_bytes)
+            .expect("parse test provider artifact");
+    let id = artifact.id();
     let store = omnifs_workspace::provider::ProviderStore::new(providers_dir.path());
-    store
-        .put_if_absent(&id, &test_bytes)
-        .expect("put test provider");
-    store
-        .install(
-            id,
-            omnifs_workspace::ids::ProviderMeta {
-                name: omnifs_workspace::ids::ProviderName::new("test-provider").unwrap(),
-                version: None,
-            },
-            "test_provider.wasm".into(),
-        )
-        .expect("install test provider");
+    store.retain(&artifact).expect("retain test provider");
 
     let mount_config = format!(
         r#"{{

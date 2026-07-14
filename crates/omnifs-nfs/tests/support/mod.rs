@@ -77,31 +77,19 @@ pub fn test_export_with_mount(mount: &str) -> TestExport {
 
 /// The pinned reference for the test provider, derived from its built bytes.
 pub fn test_provider_reference() -> omnifs_workspace::ids::ProviderRef {
-    use omnifs_workspace::ids::{ProviderId, ProviderMeta, ProviderName, ProviderRef};
-    let bytes =
-        std::fs::read(provider_wasm_path("test_provider.wasm")).expect("read test provider");
-    ProviderRef {
-        id: ProviderId::from_wasm_bytes(&bytes),
-        meta: ProviderMeta {
-            name: ProviderName::new("test-provider").unwrap(),
-            version: None,
-        },
-    }
+    use omnifs_workspace::provider::Artifact;
+    Artifact::from_file(provider_wasm_path("test_provider.wasm"))
+        .expect("parse test provider")
+        .reference()
 }
 
 /// Install the test provider into the content-addressed store at `providers_dir`.
 fn install_test_provider(providers_dir: &Path) {
-    use omnifs_workspace::provider::ProviderStore;
-    let reference = test_provider_reference();
-    let bytes =
-        std::fs::read(provider_wasm_path("test_provider.wasm")).expect("read test provider");
+    use omnifs_workspace::provider::{Artifact, ProviderStore};
+    let artifact =
+        Artifact::from_file(provider_wasm_path("test_provider.wasm")).expect("parse test provider");
     let store = ProviderStore::new(providers_dir);
-    store
-        .put_if_absent(&reference.id, &bytes)
-        .expect("put test provider");
-    store
-        .install(reference.id, reference.meta, "test_provider.wasm".into())
-        .expect("install test provider");
+    store.retain(&artifact).expect("retain test provider");
 }
 
 pub fn provider_wasm_path(plugin_name: &str) -> PathBuf {

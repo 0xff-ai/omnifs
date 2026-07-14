@@ -293,9 +293,8 @@ mod tests {
     use super::{MountRuntimes, RegistryError};
     use crate::HostContext;
     use crate::cloner::GitCloner;
-    use omnifs_workspace::ids::{ProviderId, ProviderMeta, ProviderName};
     use omnifs_workspace::mounts::{Registry, Spec};
-    use omnifs_workspace::provider::ProviderStore;
+    use omnifs_workspace::provider::{Artifact, ProviderStore};
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
@@ -313,20 +312,12 @@ mod tests {
         name: &str,
         mut body: serde_json::Value,
     ) -> Spec {
-        let id = ProviderId::from_wasm_bytes(bytes);
+        let artifact = Artifact::from_bytes(format!("{name}.wasm"), bytes.to_vec())
+            .expect("parse provider artifact");
+        let reference = artifact.reference();
         let store = ProviderStore::new(providers_dir);
-        store.put_if_absent(&id, bytes).expect("put provider");
-        store
-            .install(
-                id,
-                ProviderMeta {
-                    name: ProviderName::new(name).unwrap(),
-                    version: None,
-                },
-                format!("{name}.wasm"),
-            )
-            .expect("install provider");
-        body["provider"] = serde_json::json!({ "id": id.to_string(), "meta": { "name": name } });
+        store.retain(&artifact).expect("retain provider");
+        body["provider"] = serde_json::to_value(reference).expect("serialize provider reference");
         serde_json::from_value(body).expect("build pinned spec")
     }
 

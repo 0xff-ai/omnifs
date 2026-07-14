@@ -21,7 +21,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let store = ProviderStore::new(&args.out);
     for wasm in &args.wasms {
         let artifact = Artifact::from_file(wasm)?;
-        store.add_artifact(artifact)?;
+        store.retain(&artifact)?;
     }
 
     let index = store.read_index()?;

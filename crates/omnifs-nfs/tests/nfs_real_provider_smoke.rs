@@ -1,7 +1,7 @@
 use omnifs_engine::{Namespace, TreeNamespace};
 use omnifs_nfs::{Export, ReadOnlyExport};
-use omnifs_workspace::ids::{ProviderId, ProviderMeta, ProviderName, ProviderRef};
-use omnifs_workspace::provider::ProviderStore;
+use omnifs_workspace::ids::ProviderRef;
+use omnifs_workspace::provider::{Artifact, ProviderStore};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -317,33 +317,19 @@ fn read_path(export: &Export, path: &[&str]) -> Vec<u8> {
 }
 
 fn copy_provider(providers_dir: &Path, wasm: &str) {
-    let bytes = std::fs::read(provider_wasm_path(wasm))
-        .unwrap_or_else(|error| panic!("read provider {wasm}: {error}"));
-    let reference = provider_reference(wasm);
+    let artifact = Artifact::from_file(provider_wasm_path(wasm))
+        .unwrap_or_else(|error| panic!("parse provider {wasm}: {error}"));
     let store = ProviderStore::new(providers_dir);
     store
-        .put_if_absent(&reference.id, &bytes)
-        .unwrap_or_else(|error| panic!("store provider {wasm}: {error}"));
-    store
-        .install(reference.id, reference.meta, wasm.to_string())
+        .retain(&artifact)
         .unwrap_or_else(|error| panic!("index provider {wasm}: {error}"));
 }
 
 /// The pinned reference for a built provider wasm, named from its file stem.
 fn provider_reference(wasm: &str) -> ProviderRef {
-    let bytes = std::fs::read(provider_wasm_path(wasm))
-        .unwrap_or_else(|error| panic!("read provider {wasm}: {error}"));
-    let name = wasm
-        .strip_prefix("omnifs_provider_")
-        .and_then(|stem| stem.strip_suffix(".wasm"))
-        .unwrap_or(wasm);
-    ProviderRef {
-        id: ProviderId::from_wasm_bytes(&bytes),
-        meta: ProviderMeta {
-            name: ProviderName::new(name).unwrap(),
-            version: None,
-        },
-    }
+    Artifact::from_file(provider_wasm_path(wasm))
+        .unwrap_or_else(|error| panic!("parse provider {wasm}: {error}"))
+        .reference()
 }
 
 fn provider_wasm_path(plugin_name: &str) -> PathBuf {
