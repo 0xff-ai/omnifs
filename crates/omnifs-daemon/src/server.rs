@@ -578,8 +578,8 @@ impl Daemon {
         let failed = self
             .last_failed
             .lock()
-            .map(|failed| failed.clone())
-            .unwrap_or_default();
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
         self.context.status(
             self.attach_serving
                 .load(std::sync::atomic::Ordering::Acquire),
@@ -672,9 +672,11 @@ impl Daemon {
 
     fn apply_reconcile_outcome(&self, outcome: ReconcileOutcome) -> ReconcileReport {
         let failed: Vec<MountFailure> = outcome.failed.into_iter().map(api_mount_failure).collect();
-        if let Ok(mut last) = self.last_failed.lock() {
-            last.clone_from(&failed);
-        }
+        let mut last = self
+            .last_failed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        last.clone_from(&failed);
         ReconcileReport {
             added: outcome.added,
             updated: outcome.updated,
