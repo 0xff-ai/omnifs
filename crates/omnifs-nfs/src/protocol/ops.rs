@@ -691,10 +691,14 @@ pub(crate) fn handle_readdir(
         },
     };
     let mut res = op_status(OP_READDIR, NFS4_OK);
+    let prefix_len = res.len();
     res.bytes(&cookie_verifier);
     let maxcount = usize::try_from(maxcount).unwrap_or(usize::MAX);
     let trailer_len = 8; // final entry-present bool plus EOF bool.
-    if res.len().saturating_add(trailer_len) > maxcount {
+    if (res.len() - prefix_len)
+        .saturating_add(trailer_len)
+        > maxcount
+    {
         return error_reply(OP_READDIR, Status::TooSmall);
     }
     let mut eof = true;
@@ -705,8 +709,7 @@ pub(crate) fn handle_readdir(
         encoded_entry.string(&entry.name);
         encoded_entry.bytes(&encode_attrs(generation, &entry.attr, attrs));
         let encoded_entry = encoded_entry.into_inner();
-        if res
-            .len()
+        if (res.len() - prefix_len)
             .saturating_add(encoded_entry.len())
             .saturating_add(trailer_len)
             > maxcount

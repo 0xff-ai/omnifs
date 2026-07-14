@@ -546,7 +546,7 @@ fn synthetic_readdir_respects_maxcount() {
         &[FATTR4_TYPE, FATTR4_SIZE, FATTR4_FILEID],
     );
     assert_eq!(status, NFS4_OK);
-    assert!(result.len() <= 96);
+    assert!(result.len() - 8 <= 96);
     let decoded = decode_readdir_result(&result);
     assert_eq!(decoded.entries.len(), 1);
     assert!(!decoded.eof);
@@ -712,7 +712,7 @@ fn synthetic_readdir_maxcount_exact_boundary_includes_trailer() {
         &[FATTR4_TYPE, FATTR4_SIZE, FATTR4_FILEID],
     );
     assert_eq!(status, NFS4_OK);
-    let maxcount = u32::try_from(full.len()).expect("test READDIR result fits u32");
+    let maxcount = u32::try_from(full.len() - 8).expect("test READDIR result body fits u32");
 
     let (status, exact) = handle_readdir(
         &export,
