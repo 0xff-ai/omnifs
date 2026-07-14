@@ -4,21 +4,20 @@
 //!
 //! ```text
 //! <64hex>.wasm   immutable provider artifacts, write-if-absent
-//! index.json     name index + latest pointers
+//! index.json     retained artifact index
 //! ```
 //!
 //! Artifacts are keyed by [`ProviderId`] (BLAKE3 of the exact WASM bytes), so a
-//! present `<id>.wasm` is always the correct content. The CLI is the only writer;
-//! `install` advances `latest[name]` under an advisory lock (same pattern as the
-//! credentials `FileStore`) so two concurrent CLI processes do not lose an update
-//! in the read-modify-write.
+//! present `<id>.wasm` is always the correct content. Retention appends an entry
+//! under an advisory lock (same pattern as the credentials `FileStore`) so two
+//! concurrent writers do not lose an update in the read-modify-write.
 
-use std::collections::BTreeMap;
+use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::ids::{ProviderId, ProviderMeta, ProviderName, ProviderVersion};
+use crate::ids::{IdError, ProviderId, ProviderName, ProviderVersion};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
@@ -26,7 +25,7 @@ use crate::provider::Artifact;
 
 const INDEX_FILE: &str = "index.json";
 const LOCK_FILE: &str = ".index.lock";
-const INDEX_VERSION: u32 = 1;
+const INDEX_VERSION: u32 = 2;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -39,9 +38,15 @@ pub enum StoreError {
     },
     #[error("unsupported provider index version {0}")]
     Version(u32),
+    #[error("provider index contains duplicate provider id {0}")]
+    DuplicateId(ProviderId),
+    #[error("provider index contains invalid provider name `{name}`: {source}")]
+    InvalidProviderName { name: String, source: IdError },
+    #[error("provider index contains invalid artifact file name `{file}`")]
+    InvalidFileName { file: String },
 }
 
-/// One installed artifact in the index. `file` is display-only provenance.
+/// One retained artifact in the index. `file` is display-only provenance.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct IndexEntry {
@@ -52,15 +57,35 @@ pub struct IndexEntry {
     pub file: String,
 }
 
-/// The provider index: every retained artifact plus a name→latest-id pointer.
+impl IndexEntry {
+    fn validate(&self) -> Result<(), StoreError> {
+        ProviderName::new(self.name.as_str()).map_err(|source| {
+            StoreError::InvalidProviderName {
+                name: self.name.to_string(),
+                source,
+            }
+        })?;
+        if self.file.is_empty()
+            || Path::new(&self.file)
+                .file_name()
+                .and_then(|name| name.to_str())
+                != Some(self.file.as_str())
+        {
+            return Err(StoreError::InvalidFileName {
+                file: self.file.clone(),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// The provider index: every retained artifact, with no lifecycle state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Index {
     pub version: u32,
     #[serde(default)]
     pub providers: Vec<IndexEntry>,
-    #[serde(default)]
-    pub latest: BTreeMap<String, ProviderId>,
 }
 
 impl Index {
@@ -69,8 +94,18 @@ impl Index {
         Self {
             version: INDEX_VERSION,
             providers: Vec::new(),
-            latest: BTreeMap::new(),
         }
+    }
+
+    fn validate(&self) -> Result<(), StoreError> {
+        let mut ids = HashSet::with_capacity(self.providers.len());
+        for entry in &self.providers {
+            entry.validate()?;
+            if !ids.insert(entry.id) {
+                return Err(StoreError::DuplicateId(entry.id));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -119,17 +154,18 @@ impl ProviderStore {
         })
     }
 
-    /// Retain one validated provider artifact and advance its provider-name
-    /// latest pointer.
-    pub fn add_artifact(&self, artifact: Artifact) -> Result<IndexEntry, StoreError> {
+    /// Retain one validated provider artifact without replacing any existing
+    /// artifact or selecting another version.
+    pub fn retain(&self, artifact: &Artifact) -> Result<IndexEntry, StoreError> {
         let entry = IndexEntry {
             id: artifact.id,
             name: artifact.meta.name.clone(),
             version: artifact.meta.version.clone(),
             file: artifact.file.clone(),
         };
+        entry.validate()?;
         self.put_if_absent(&artifact.id, &artifact.bytes)?;
-        self.install(artifact.id, artifact.meta, artifact.file)?;
+        self.retain_index_entry(entry.clone())?;
         Ok(entry)
     }
 
@@ -143,6 +179,7 @@ impl ProviderStore {
                 if index.version != INDEX_VERSION {
                     return Err(StoreError::Version(index.version));
                 }
+                index.validate()?;
                 Ok(index)
             },
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Index::empty()),
@@ -150,38 +187,20 @@ impl ProviderStore {
         }
     }
 
-    /// Upsert one provider into the index and advance `latest[name]`, under an
-    /// advisory lock on the store so concurrent CLI installs serialize.
-    pub fn install(
-        &self,
-        id: ProviderId,
-        meta: ProviderMeta,
-        file: String,
-    ) -> Result<(), StoreError> {
+    fn retain_index_entry(&self, entry: IndexEntry) -> Result<(), StoreError> {
         create_dir_all(&self.root)?;
         let lock = self.lock()?;
-        let result = self.install_locked(id, meta, file);
+        let result = self.retain_index_entry_locked(entry);
         // Release the lock regardless; an unlock failure must not mask the result.
         let _ = FileExt::unlock(&lock);
         result
     }
 
-    fn install_locked(
-        &self,
-        id: ProviderId,
-        meta: ProviderMeta,
-        file: String,
-    ) -> Result<(), StoreError> {
+    fn retain_index_entry_locked(&self, entry: IndexEntry) -> Result<(), StoreError> {
         let mut index = self.read_index()?;
-        if !index.providers.iter().any(|entry| entry.id == id) {
-            index.providers.push(IndexEntry {
-                id,
-                name: meta.name.clone(),
-                version: meta.version,
-                file,
-            });
+        if !index.providers.iter().any(|current| current.id == entry.id) {
+            index.providers.push(entry);
         }
-        index.latest.insert(meta.name.to_string(), id);
         self.write_index(&index)
     }
 
@@ -239,13 +258,6 @@ mod tests {
 
     const EMPTY_WASM: &[u8] = b"\0asm\x01\0\0\0";
 
-    fn meta(name: &str, version: Option<&str>) -> ProviderMeta {
-        ProviderMeta {
-            name: ProviderName::new(name).unwrap(),
-            version: version.map(ProviderVersion::new),
-        }
-    }
-
     fn artifact(file: &str, name: &str) -> (ProviderId, Artifact) {
         let metadata = serde_json::json!({
             "id": name,
@@ -262,12 +274,12 @@ mod tests {
     }
 
     #[test]
-    fn add_artifact_writes_root_hash_file_and_indexes_metadata() {
+    fn retain_writes_root_hash_file_and_indexes_metadata() {
         let dir = tempdir().unwrap();
         let store = ProviderStore::new(dir.path());
         let (id, artifact) = artifact("omnifs_provider_demo.wasm", "demo");
 
-        let entry = store.add_artifact(artifact).unwrap();
+        let entry = store.retain(&artifact).unwrap();
 
         assert_eq!(entry.id, id);
         assert_eq!(entry.name.as_str(), "demo");
@@ -276,7 +288,6 @@ mod tests {
         assert!(!dir.path().join("by-hash").exists());
         let index = store.read_index().unwrap();
         assert_eq!(index.providers.len(), 1);
-        assert_eq!(index.latest.get("demo"), Some(&id));
     }
 
     #[test]
@@ -294,41 +305,24 @@ mod tests {
     }
 
     #[test]
-    fn install_records_entry_and_advances_latest() {
+    fn retain_records_same_name_artifacts_without_selection_state() {
         let dir = tempdir().unwrap();
         let store = ProviderStore::new(dir.path());
 
-        let v1 = b"github v1";
-        let id1 = ProviderId::from_wasm_bytes(v1);
-        store.put_if_absent(&id1, v1).unwrap();
-        store
-            .install(
-                id1,
-                meta("github", Some("0.3.0")),
-                "omnifs_provider_github.wasm".into(),
-            )
-            .unwrap();
+        let (id1, artifact1) = artifact("github-v1.wasm", "github");
+        store.retain(&artifact1).unwrap();
 
         let index = store.read_index().unwrap();
-        assert_eq!(index.version, 1);
+        assert_eq!(index.version, 2);
         assert_eq!(index.providers.len(), 1);
-        assert_eq!(index.latest.get("github"), Some(&id1));
 
-        // A newer artifact for the same name advances latest but retains both.
-        let v2 = b"github v2";
-        let id2 = ProviderId::from_wasm_bytes(v2);
-        store.put_if_absent(&id2, v2).unwrap();
-        store
-            .install(
-                id2,
-                meta("github", Some("0.3.1")),
-                "omnifs_provider_github.wasm".into(),
-            )
-            .unwrap();
+        let (id2, artifact2) = artifact("github-v2.wasm", "github");
+        store.retain(&artifact2).unwrap();
 
         let index = store.read_index().unwrap();
         assert_eq!(index.providers.len(), 2);
-        assert_eq!(index.latest.get("github"), Some(&id2));
+        assert!(index.providers.iter().any(|entry| entry.id == id1));
+        assert!(index.providers.iter().any(|entry| entry.id == id2));
     }
 
     #[test]
@@ -344,7 +338,7 @@ mod tests {
         let dir = tempdir().unwrap();
         std::fs::write(
             dir.path().join("index.json"),
-            r#"{"version":1,"providers":[],"latest":{},"providersByName":{}}"#,
+            r#"{"version":2,"providers":[],"providersByName":{}}"#,
         )
         .unwrap();
         let store = ProviderStore::new(dir.path());
@@ -370,7 +364,7 @@ mod tests {
         std::fs::write(
             dir.path().join("index.json"),
             format!(
-                r#"{{"version":1,"providers":[{{"id":"{id}","name":"demo","file":"omnifs_provider_demo.wasm","source":"manual"}}]}}"#
+                r#"{{"version":2,"providers":[{{"id":"{id}","name":"demo","file":"omnifs_provider_demo.wasm","source":"manual"}}]}}"#
             ),
         )
         .unwrap();
@@ -388,5 +382,36 @@ mod tests {
             message.contains("unknown field `source`"),
             "error should name the unknown key, got: {message}"
         );
+    }
+
+    #[test]
+    fn read_index_rejects_duplicate_ids_and_invalid_names() {
+        let dir = tempdir().unwrap();
+        let id = ProviderId::from_wasm_bytes(b"demo").to_string();
+        std::fs::write(
+            dir.path().join("index.json"),
+            format!(
+                r#"{{"version":2,"providers":[{{"id":"{id}","name":"bad name","file":"one.wasm"}},{{"id":"{id}","name":"demo","file":"two.wasm"}}]}}"#
+            ),
+        )
+        .unwrap();
+        let store = ProviderStore::new(dir.path());
+
+        assert!(matches!(
+            store.read_index(),
+            Err(StoreError::InvalidProviderName { name, .. }) if name == "bad name"
+        ));
+
+        std::fs::write(
+            dir.path().join("index.json"),
+            format!(
+                r#"{{"version":2,"providers":[{{"id":"{id}","name":"demo","file":"one.wasm"}},{{"id":"{id}","name":"demo","file":"two.wasm"}}]}}"#
+            ),
+        )
+        .unwrap();
+        assert!(matches!(
+            store.read_index(),
+            Err(StoreError::DuplicateId(duplicate)) if duplicate.to_string() == id
+        ));
     }
 }
