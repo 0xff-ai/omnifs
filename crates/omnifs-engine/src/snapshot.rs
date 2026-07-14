@@ -264,6 +264,9 @@ fn files_from_entries(entries: Vec<object::CanonicalEntry>) -> Result<Vec<Snapsh
             if path.is_root() {
                 bail!("object cache row maps canonical bytes to root path");
             }
+            if path.segments().next() == Some(INDEX_FILE) {
+                bail!("object cache row uses reserved snapshot index path `{path}`");
+            }
             if !paths.insert(path.clone()) {
                 bail!("object cache contains duplicate canonical path `{path}`");
             }
@@ -458,5 +461,20 @@ mod tests {
             + std::fs::read(out.join("documents/two.json")).unwrap().len()
             + std::fs::read(out.join(INDEX_FILE)).unwrap().len();
         assert_eq!(final_update.total_bytes, bytes_on_disk as u64);
+    }
+
+    #[test]
+    fn snapshot_rejects_reserved_index_paths() {
+        for path in ["/index.json", "/index.json/child"] {
+            let temp = tempfile::tempdir().unwrap();
+            let cache_dir = temp.path().join("cache");
+            seed(&cache_dir, path, "reserved", b"canonical");
+
+            let error = MountSnapshot::from_cache_dir(&cache_dir, "fixture").unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                format!("object cache row uses reserved snapshot index path `{path}`")
+            );
+        }
     }
 }

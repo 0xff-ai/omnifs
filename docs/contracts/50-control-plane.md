@@ -49,6 +49,10 @@ daemon answers, the CLI reads `<cache>/object` directly and writes the same
 directory layout. Both paths export canonical bytes and metadata only; no
 credentials are transmitted.
 
+The top-level `index.json` is generated snapshot metadata, so the entire
+canonical path namespace rooted at `/index.json` is reserved and rejected
+before directory or tar export.
+
 The snapshot tree is the audit surface for replicas. Compare rendered canonical
 files with `diff -r --exclude=index.json <before> <after>`; `index.json` records
 logical id, path, blake3, and size for each file and therefore changes whenever
