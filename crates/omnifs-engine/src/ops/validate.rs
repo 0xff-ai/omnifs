@@ -100,8 +100,17 @@ where
 
     pub(crate) fn chunk(
         &mut self,
-        _result: &std::result::Result<wit_types::ReadChunkResult, wit_types::ProviderError>,
+        result: &std::result::Result<wit_types::ReadChunkResult, wit_types::ProviderError>,
+        requested_length: u32,
     ) -> std::result::Result<(), String> {
+        if let Ok(result) = result
+            && result.content.len() > requested_length as usize
+        {
+            return Err(format!(
+                "read-chunk result exceeds requested length {requested_length}: returned {} bytes",
+                result.content.len()
+            ));
+        }
         Ok(())
     }
 
@@ -335,13 +344,14 @@ where
 pub(crate) fn validate_chunk<F>(
     result: &std::result::Result<wit_types::ReadChunkResult, wit_types::ProviderError>,
     effects: &wit_types::Effects,
+    requested_length: u32,
     tree_exists: F,
 ) -> std::result::Result<(), String>
 where
     F: Fn(u64) -> bool,
 {
     let mut v = ReturnValidator::common(result, effects, tree_exists)?;
-    v.chunk(result)
+    v.chunk(result, requested_length)
 }
 pub(crate) fn validate_initialize<F>(
     result: &std::result::Result<wit_types::InitializeResult, wit_types::ProviderError>,
@@ -556,6 +566,16 @@ mod tests {
         let error = validate_lookup(&result, &effects(), |_| false).unwrap_err();
         assert!(error.contains("references unknown tree 7"));
         validate_lookup(&result, &effects(), |_| true).unwrap();
+    }
+
+    #[test]
+    fn rejects_oversized_read_chunk() {
+        let result = Ok(wit_types::ReadChunkResult {
+            content: vec![0; 5],
+            eof: false,
+        });
+        let error = validate_chunk(&result, &effects(), 4, |_| true).unwrap_err();
+        assert!(error.contains("requested length 4"));
     }
 
     #[test]

@@ -61,8 +61,8 @@ impl RangedHandle {
     }
 
     /// Drive provider `read_chunk` for one ranged read; learn the exact size on
-    /// an EOF-short read. Validates the chunk against the requested length and
-    /// the projected attrs, mirroring the FUSE ranged read path.
+    /// an EOF-short read. The typed Runtime boundary validates the requested
+    /// length before this handle-level EOF and projected-attr bookkeeping.
     pub async fn read(&self, offset: u64, length: u32) -> Result<Chunk> {
         let chunk = match self
             .runtime
@@ -76,14 +76,6 @@ impl RangedHandle {
             },
             Err(error) => return Err(error.into()),
         };
-
-        if chunk.content.len() > length as usize {
-            return Err(TreeError::internal(format!(
-                "provider returned oversized ranged chunk for {}: requested {length}, returned {}",
-                self.path.as_str(),
-                chunk.content.len()
-            )));
-        }
 
         let mut learned_attrs = None;
         if chunk.eof {

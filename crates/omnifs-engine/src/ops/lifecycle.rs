@@ -168,7 +168,7 @@ impl Runtime {
         async {
             let op_gen = self.cache.current_generation();
             let (result, effects) = self.instance.read_chunk(id, handle, offset, length).await?;
-            crate::op_validate::validate_chunk(&result, &effects, |tree| {
+            crate::op_validate::validate_chunk(&result, &effects, length, |tree| {
                 self.resolve_tree_ref(tree).is_some()
             })
             .map_err(EngineError::ProviderProtocol)?;
