@@ -99,12 +99,12 @@ pub(crate) async fn configure_mount(
     let status = plan.authenticate(&args, workspace, session, prompt).await?;
 
     match status {
-        MountInitStatus::Ready => session.row(crate::ui::report::Row::new(
+        MountInitStatus::Ready => session.row(&crate::ui::report::Row::new(
             crate::ui::style::Glyph::Done,
             "mount ready",
             plan.mount_name.as_str(),
         )),
-        MountInitStatus::SignInDeclined => session.row(crate::ui::report::Row::new(
+        MountInitStatus::SignInDeclined => session.row(&crate::ui::report::Row::new(
             crate::ui::style::Glyph::Skip,
             "sign in",
             format!(
@@ -172,7 +172,7 @@ pub(crate) fn spec_creation(
         Some(
             crate::ui::prompt::Select::new("Which provider?")
                 .options(choices)
-                .ask_with_output(session.clone())?,
+                .ask_with_output(session)?,
         )
     } else {
         None
@@ -227,7 +227,7 @@ pub(crate) fn spec_creation(
         interactive,
         prompt.yes,
     )
-    .resolve(Some(session))?;
+    .resolve(session)?;
     let ImportOutcome { auth, token } = import_outcome;
 
     if !interactive && token.is_none() && auth.as_ref().is_some_and(AuthSelection::is_oauth) {
@@ -249,7 +249,7 @@ pub(crate) fn spec_creation(
     let mut created = if args.config_json.is_some() {
         creator.create_for_config_override()
     } else {
-        creator.create(interactive)?
+        creator.create(session, interactive)?
     };
     apply_mount_overrides(args, manifest, &creator, &mut created)?;
 
@@ -306,7 +306,7 @@ impl MountInitPlan {
                     plan.mount_name
                 ))
                 .with_default(true)
-                .ask_with_output(session.clone())?;
+                .ask_with_output(session)?;
                 if !proceed {
                     return Ok(MountInitStatus::SignInDeclined);
                 }
@@ -327,7 +327,7 @@ impl MountInitPlan {
                     plan.mount_name
                 ));
             })?;
-            session.row(crate::ui::report::Row::new(
+            session.row(&crate::ui::report::Row::new(
                 crate::ui::style::Glyph::Done,
                 "signed in",
                 "done",
@@ -355,7 +355,7 @@ impl MountInitPlan {
                 args.token_env.as_deref(),
                 interactive,
             )?;
-            let token = source.read()?;
+            let token = source.read(session)?;
             crate::commands::mount::run_static_token_init(
                 &plan.manifest,
                 auth,
@@ -428,7 +428,7 @@ fn persist_mount_spec(
 ) -> anyhow::Result<()> {
     workspace.put_mount_uncommitted(&plan.spec)?;
     workspace.commit_mounts()?;
-    session.row(crate::ui::report::Row::new(
+    session.row(&crate::ui::report::Row::new(
         crate::ui::style::Glyph::Done,
         "desired state",
         format!("{} recorded", plan.mount_name),

@@ -35,7 +35,7 @@ impl<'a> AuthImportDecision<'a> {
 
     pub(crate) fn resolve(
         self,
-        session: Option<&crate::ui::output::Output>,
+        session: &crate::ui::output::Output,
     ) -> anyhow::Result<ImportOutcome> {
         if self.default_auth.is_none() {
             return Ok(ImportOutcome {
@@ -49,13 +49,11 @@ impl<'a> AuthImportDecision<'a> {
         // non-interactively, so the documented behavior is reachable in scripts.
         if self.yes {
             if let Some(credential) = detected.first() {
-                if let Some(session) = session {
-                    session.row(crate::ui::report::Row::new(
-                        crate::ui::style::Glyph::Done,
-                        "credential",
-                        format!("imported from {}", credential.source()),
-                    ));
-                }
+                session.row(&crate::ui::report::Row::new(
+                    crate::ui::style::Glyph::Done,
+                    "credential",
+                    format!("imported from {}", credential.source()),
+                ));
                 return self.promote(credential.value());
             }
             return Ok(ImportOutcome {
@@ -70,10 +68,7 @@ impl<'a> AuthImportDecision<'a> {
                 token: None,
             });
         }
-        let output = session.cloned().unwrap_or_else(|| {
-            crate::ui::output::Output::new(crate::ui::output::OutputMode::Human, false)
-        });
-        let Some(token) = Self::prompt_for_import(&detected, &output)? else {
+        let Some(token) = Self::prompt_for_import(&detected, session)? else {
             return Ok(ImportOutcome {
                 auth: self.default_auth,
                 token: None,
@@ -119,7 +114,7 @@ impl<'a> AuthImportDecision<'a> {
         // explicit "skip auth for now" option, never a silent fallback.
         let chosen = crate::ui::prompt::Select::new("How should this mount authenticate?")
             .items(options.clone())
-            .ask_with_output(output.clone())?;
+            .ask_with_output(output)?;
 
         for (i, cred) in detected.iter().enumerate() {
             if chosen == options[i] {
@@ -144,7 +139,7 @@ fn prompt_single_import(
     // explicit "skip auth for now" option, never a silent fallback.
     let answer = crate::ui::prompt::Select::new("How should this mount authenticate?")
         .items(options)
-        .ask_with_output(output.clone())?;
+        .ask_with_output(output)?;
     if answer == import {
         Ok(Some(cred.value()))
     } else {

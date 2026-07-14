@@ -21,7 +21,6 @@ use crate::launch_backend::{
     BUILD_CHANNEL, BuildChannel, ContainerName, DockerTarget, ImageRef, names_registry,
 };
 use crate::ui::output::{Output, OutputMode};
-use crate::ui::progress::Progress;
 
 #[derive(Debug, Default)]
 struct LayerProgress {
@@ -157,7 +156,7 @@ impl Runtime {
             ..Default::default()
         };
         let source = image.split('/').next().unwrap_or(image);
-        let mut row = Progress::start_with_output("frontend image", "pulling", self.output.clone());
+        let mut row = self.output.progress("frontend image");
         let mut layers: HashMap<String, LayerProgress> = HashMap::new();
         let mut stream = self.docker.create_image(Some(opts), None, None);
         let result: Result<()> = async {

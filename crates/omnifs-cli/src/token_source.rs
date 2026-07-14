@@ -49,7 +49,7 @@ impl TokenSource {
     /// surrounding whitespace and rejects an empty-after-trim value, so a
     /// stray newline or copy-paste padding never becomes part of the secret.
     /// Interactive prompts via the shared hidden password input (TTY only).
-    pub fn read(self) -> anyhow::Result<SecretString> {
+    pub fn read(self, output: &crate::ui::output::Output) -> anyhow::Result<SecretString> {
         match self {
             Self::Stdin => {
                 let mut buf = String::new();
@@ -77,7 +77,7 @@ impl TokenSource {
                         "no token source and stdin is not a terminal; pass --token - or --token-env VAR"
                     );
                 }
-                let token = crate::ui::prompt::Password::new("Token").ask()?;
+                let token = crate::ui::prompt::Password::new("Token").ask_with_output(output)?;
                 let trimmed = token.trim();
                 if trimmed.is_empty() {
                     bail!("token cannot be empty");

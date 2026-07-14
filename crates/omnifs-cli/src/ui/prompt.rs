@@ -63,11 +63,7 @@ impl Text {
         self
     }
 
-    pub(crate) fn ask(self) -> anyhow::Result<String> {
-        self.ask_with_output(Output::new(super::output::OutputMode::Human, false))
-    }
-
-    pub(crate) fn ask_with_output(self, output: Output) -> anyhow::Result<String> {
+    pub(crate) fn ask_with_output(self, output: &Output) -> anyhow::Result<String> {
         output.ensure_prompt_allowed()?;
         let mut prompt = cliclack::input(&self.question);
         if let Some(default) = &self.default {
@@ -97,11 +93,7 @@ impl Confirm {
         self
     }
 
-    pub(crate) fn ask(self) -> anyhow::Result<bool> {
-        self.ask_with_output(Output::new(super::output::OutputMode::Human, false))
-    }
-
-    pub(crate) fn ask_with_output(self, output: Output) -> anyhow::Result<bool> {
+    pub(crate) fn ask_with_output(self, output: &Output) -> anyhow::Result<bool> {
         output.ensure_prompt_allowed()?;
         let answer = cliclack::confirm(&self.question)
             .initial_value(self.default)
@@ -123,11 +115,7 @@ impl Password {
         }
     }
 
-    pub(crate) fn ask(self) -> anyhow::Result<String> {
-        self.ask_with_output(Output::new(super::output::OutputMode::Human, false))
-    }
-
-    pub(crate) fn ask_with_output(self, output: Output) -> anyhow::Result<String> {
+    pub(crate) fn ask_with_output(self, output: &Output) -> anyhow::Result<String> {
         output.ensure_prompt_allowed()?;
         let answer = cliclack::password(&self.question)
             .interact()
@@ -168,11 +156,7 @@ impl<T: Clone + Eq + std::fmt::Display> Select<T> {
         self
     }
 
-    pub(crate) fn ask(self) -> anyhow::Result<T> {
-        self.ask_with_output(Output::new(super::output::OutputMode::Human, false))
-    }
-
-    pub(crate) fn ask_with_output(self, output: Output) -> anyhow::Result<T> {
+    pub(crate) fn ask_with_output(self, output: &Output) -> anyhow::Result<T> {
         output.ensure_prompt_allowed()?;
         let mut prompt = cliclack::select(&self.question);
         for (value, label, hint) in self.items {
@@ -180,62 +164,6 @@ impl<T: Clone + Eq + std::fmt::Display> Select<T> {
         }
         let answer = prompt.interact().map_err(prompt_error)?;
         output.answer(&self.question, answer.to_string());
-        Ok(answer)
-    }
-}
-
-pub(crate) struct MultiSelect<T> {
-    question: String,
-    items: Vec<(T, String, String)>,
-    initial_values: Vec<T>,
-}
-
-impl<T: Clone + Eq + std::fmt::Display> MultiSelect<T> {
-    pub(crate) fn new(question: impl Into<String>) -> Self {
-        Self {
-            question: question.into(),
-            items: Vec::new(),
-            initial_values: Vec::new(),
-        }
-    }
-
-    /// Add explicit `(value, label, hint)` choices.
-    pub(crate) fn options(mut self, items: impl IntoIterator<Item = (T, String, String)>) -> Self {
-        self.items.extend(items);
-        self
-    }
-
-    /// Set the values selected when the prompt first opens.
-    pub(crate) fn initial_values(mut self, values: impl IntoIterator<Item = T>) -> Self {
-        self.initial_values = values.into_iter().collect();
-        self
-    }
-
-    pub(crate) fn ask(self) -> anyhow::Result<Vec<T>> {
-        self.ask_with_output(Output::new(super::output::OutputMode::Human, false))
-    }
-
-    pub(crate) fn ask_with_output(self, output: Output) -> anyhow::Result<Vec<T>> {
-        if self.items.is_empty() {
-            anyhow::bail!("no providers available to choose from");
-        }
-        output.ensure_prompt_allowed()?;
-        let mut prompt = cliclack::multiselect(&self.question).required(false);
-        for (value, label, hint) in self.items {
-            prompt = prompt.item(value, label, hint);
-        }
-        let answer = prompt
-            .initial_values(self.initial_values)
-            .interact()
-            .map_err(prompt_error)?;
-        output.answer(
-            &self.question,
-            answer
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(", "),
-        );
         Ok(answer)
     }
 }
@@ -259,8 +187,9 @@ mod tests {
 
     #[test]
     fn structured_prompt_policy_fails_before_display() {
+        let output = Output::new(super::super::output::OutputMode::Json, false);
         let error = Confirm::new("Proceed?")
-            .ask_with_output(Output::new(super::super::output::OutputMode::Json, false))
+            .ask_with_output(&output)
             .unwrap_err();
         assert!(
             error

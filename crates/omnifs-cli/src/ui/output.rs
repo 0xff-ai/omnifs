@@ -389,16 +389,8 @@ impl Output {
         }
     }
 
-    pub(crate) const fn mode(&self) -> OutputMode {
-        self.mode
-    }
-
     pub(crate) const fn is_structured(&self) -> bool {
         self.mode.is_structured()
-    }
-
-    pub(crate) const fn quiet(&self) -> bool {
-        self.quiet
     }
 
     pub(crate) const fn no_input(&self) -> bool {
@@ -454,7 +446,7 @@ impl Output {
                 let _ = cliclack::log::step(&title);
             }
         } else if self.mode == OutputMode::Jsonl {
-            self.emit_event(JsonlEvent::Phase(super::event::JsonlPhase::new(
+            self.emit_event(&JsonlEvent::Phase(super::event::JsonlPhase::new(
                 self.command,
                 title,
                 "started",
@@ -462,7 +454,7 @@ impl Output {
         }
     }
 
-    pub(crate) fn row(&self, row: super::report::Row) {
+    pub(crate) fn row(&self, row: &super::report::Row) {
         if self.mode == OutputMode::Human {
             let _ = cliclack::log::remark(row.render().trim_start());
         }
@@ -507,17 +499,13 @@ impl Output {
         }
     }
 
-    pub(crate) fn progress(
-        &self,
-        length: u64,
-        message: impl std::fmt::Display,
-    ) -> crate::ui::progress::Progress {
-        crate::ui::progress::Progress::start(self.clone(), length, message)
+    pub(crate) fn progress(&self, key: impl Into<String>) -> crate::ui::progress::Progress {
+        crate::ui::progress::Progress::new(self.clone(), key)
     }
 
     pub(crate) fn progress_event(&self, resource: String, message: String, elapsed: Duration) {
         if self.mode == OutputMode::Jsonl {
-            self.emit_event(JsonlEvent::Progress(super::event::JsonlProgress::new(
+            self.emit_event(&JsonlEvent::Progress(super::event::JsonlProgress::new(
                 self.command,
                 resource,
                 message,
@@ -536,45 +524,15 @@ impl Output {
         self
     }
 
-    fn failure(&self) -> Option<anyhow::Error> {
-        state(self)
-            .failure
-            .as_ref()
-            .map(|message| anyhow::Error::new(OutputFailure(message.clone())))
-    }
-
-    fn fail(&self, error: impl std::fmt::Display) {
+    fn emit_event(&self, event: &JsonlEvent) {
         let mut current = state(self);
-        if current.failure.is_none() {
+        if current.failure.is_some() || current.terminal {
+            return;
+        }
+        let mut stdout = io::stdout().lock();
+        if let Err(error) = self.write_event(&mut stdout, event) {
             current.failure = Some(error.to_string());
         }
-    }
-
-    fn ensure_terminal_open(&self) -> anyhow::Result<()> {
-        if let Some(error) = self.failure() {
-            return Err(error);
-        }
-        if state(self).terminal {
-            anyhow::bail!("terminal output has already been settled")
-        }
-        Ok(())
-    }
-
-    fn mark_terminal(&self) {
-        state(self).terminal = true;
-    }
-
-    fn emit_event(&self, event: JsonlEvent) {
-        if let Err(error) = self.write_event_to_stdout(&event) {
-            self.fail(error);
-        }
-    }
-
-    fn write_event_to_stdout(&self, event: &JsonlEvent) -> anyhow::Result<()> {
-        self.ensure_terminal_open()?;
-        let mut stdout = io::stdout().lock();
-        self.write_event(&mut stdout, event)?;
-        Ok(())
     }
 
     fn settle_result<W: Write, T: Serialize>(
@@ -586,20 +544,30 @@ impl Output {
         if !self.mode.is_structured() {
             anyhow::bail!("structured terminal output is unavailable in human mode");
         }
-        self.ensure_terminal_open()?;
+        let mut current = state(self);
+        if let Some(error) = current
+            .failure
+            .as_ref()
+            .map(|message| anyhow::Error::new(OutputFailure(message.clone())))
+        {
+            return Err(error);
+        }
+        if current.terminal {
+            anyhow::bail!("terminal output has already been settled")
+        }
         let emitted =
             self.write_result_with_fallback(writer, self.command(), verdict.into(), result);
         match emitted {
             Ok(true) => {
-                self.mark_terminal();
+                current.terminal = true;
                 Ok(())
             },
             Ok(false) => {
-                self.mark_terminal();
+                current.terminal = true;
                 anyhow::bail!("failed to serialize structured result")
             },
             Err(error) => {
-                self.fail(&error);
+                current.failure = Some(error.to_string());
                 Err(error)
             },
         }
@@ -609,14 +577,24 @@ impl Output {
         if !self.mode.is_structured() {
             anyhow::bail!("structured terminal output is unavailable in human mode");
         }
-        self.ensure_terminal_open()?;
+        let mut current = state(self);
+        if let Some(error) = current
+            .failure
+            .as_ref()
+            .map(|message| anyhow::Error::new(OutputFailure(message.clone())))
+        {
+            return Err(error);
+        }
+        if current.terminal {
+            anyhow::bail!("terminal output has already been settled")
+        }
         match self.write_error(writer, error) {
             Ok(()) => {
-                self.mark_terminal();
+                current.terminal = true;
                 Ok(())
             },
             Err(error) => {
-                self.fail(&error);
+                current.failure = Some(error.to_string());
                 Err(error)
             },
         }
@@ -631,10 +609,6 @@ pub(crate) enum OutputMode {
 }
 
 impl OutputMode {
-    pub(crate) const fn is_human(self) -> bool {
-        matches!(self, Self::Human)
-    }
-
     pub(crate) const fn is_structured(self) -> bool {
         !matches!(self, Self::Human)
     }
@@ -677,12 +651,9 @@ mod tests {
         let output = Output::new(OutputMode::Jsonl, true)
             .with_no_input(true)
             .with_yes(true);
-        assert_eq!(output.clone().mode(), output.mode());
-        assert_eq!(output.mode(), OutputMode::Jsonl);
-        assert!(output.quiet());
         assert!(output.no_input());
         assert!(output.yes());
-        assert!(output.mode().is_structured());
+        assert!(output.is_structured());
         assert!(!OutputMode::Human.is_structured());
     }
 
@@ -882,17 +853,36 @@ mod tests {
     }
 
     #[test]
-    fn terminal_settlement_rejects_a_second_document() {
+    fn terminal_settlement_is_single_across_concurrent_clones() {
+        use std::sync::{Arc, Barrier, mpsc};
+        use std::thread;
+
         let output = Output::new(OutputMode::Json, false).with_command("status");
-        let mut bytes = Vec::new();
-        output
-            .settle_result(&mut bytes, ResultVerdict::Ok, serde_json::json!({}))
-            .unwrap();
-        assert!(
-            output
-                .settle_error(&mut bytes, ErrorEnvelope::serialization_failure("status"),)
-                .is_err()
+        let barrier = Arc::new(Barrier::new(2));
+        let (sender, receiver) = mpsc::channel();
+        thread::scope(|scope| {
+            for output in [output.clone(), output.clone()] {
+                let barrier = Arc::clone(&barrier);
+                let sender = sender.clone();
+                scope.spawn(move || {
+                    barrier.wait();
+                    let mut bytes = Vec::new();
+                    let result =
+                        output.settle_result(&mut bytes, ResultVerdict::Ok, serde_json::json!({}));
+                    sender.send((result.is_ok(), bytes)).unwrap();
+                });
+            }
+        });
+
+        drop(sender);
+        let outcomes = receiver.iter().collect::<Vec<_>>();
+        assert_eq!(outcomes.iter().filter(|(ok, _)| *ok).count(), 1);
+        assert_eq!(
+            outcomes
+                .iter()
+                .map(|(_, bytes)| usize::from(bytes.last() == Some(&b'\n')))
+                .sum::<usize>(),
+            1
         );
-        assert_eq!(bytes.iter().filter(|byte| **byte == b'\n').count(), 1);
     }
 }

@@ -155,7 +155,7 @@ pub(crate) async fn run_static_token_init(
     let identity = validation
         .as_ref()
         .and_then(|outcome| outcome.identity.clone());
-    session.row(crate::ui::report::Row::new(
+    session.row(&crate::ui::report::Row::new(
         crate::ui::style::Glyph::Done,
         "signed in",
         identity
@@ -192,7 +192,7 @@ pub(crate) async fn run_static_token_init(
             .put(key, &entry)
             .with_context(|| "failed to store credential")?;
     }
-    session.row(crate::ui::report::Row::new(
+    session.row(&crate::ui::report::Row::new(
         crate::ui::style::Glyph::Done,
         "credential",
         "stored",
@@ -241,10 +241,11 @@ mod tests {
 
         let reference = provider_ref("db");
         let mount_name = MountName::try_from("db").unwrap();
+        let output = crate::ui::output::Output::new(crate::ui::output::OutputMode::Human, false);
         let creator = MountSpecCreator::new(&reference, &mount_name, &manifest);
 
         creator
-            .create(false)
+            .create(&output, false)
             .expect_err("default generation must fail without the required field");
 
         let created = creator.create_for_config_override();
@@ -270,8 +271,9 @@ mod tests {
 
         let reference = provider_ref("linear");
         let mount_name = MountName::try_from("linear").unwrap();
+        let output = crate::ui::output::Output::new(crate::ui::output::OutputMode::Human, false);
         let created = MountSpecCreator::new(&reference, &mount_name, &manifest)
-            .create(false)
+            .create(&output, false)
             .unwrap();
 
         assert_eq!(
@@ -460,7 +462,10 @@ mod tests {
             true,
             true,
         )
-        .resolve(None)
+        .resolve(&crate::ui::output::Output::new(
+            crate::ui::output::OutputMode::Human,
+            false,
+        ))
         .unwrap();
 
         let promoted = outcome.auth.expect("auth");
@@ -516,7 +521,10 @@ mod tests {
             false, // non-interactive
             true,  // --yes
         )
-        .resolve(None)
+        .resolve(&crate::ui::output::Output::new(
+            crate::ui::output::OutputMode::Human,
+            false,
+        ))
         .unwrap();
 
         assert!(

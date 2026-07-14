@@ -8,6 +8,8 @@ use omnifs_workspace::provider::{
 use serde_json::Value;
 use std::path::PathBuf;
 
+use crate::ui::output::Output;
+
 #[derive(Debug, Default, Clone)]
 pub(crate) struct CreatedMountSpec {
     pub(crate) config: Option<Value>,
@@ -47,7 +49,11 @@ impl<'a> MountSpecCreator<'a> {
         }
     }
 
-    pub(crate) fn create(&self, interactive: bool) -> anyhow::Result<CreatedMountSpec> {
+    pub(crate) fn create(
+        &self,
+        output: &Output,
+        interactive: bool,
+    ) -> anyhow::Result<CreatedMountSpec> {
         // Seed explicit grants from the manifest's declared needs. The manifest
         // never grants at runtime; the spec owns these grants from here on.
         let capabilities =
@@ -74,10 +80,10 @@ impl<'a> MountSpecCreator<'a> {
 
         if interactive {
             if let Some(config_metadata) = self.manifest.config.as_ref() {
-                prompt_host_files(config_metadata, &mut config)?;
+                prompt_host_files(config_metadata, &mut config, output)?;
             }
             if let Some(field) = self.manifest.dynamic_domain_field() {
-                prompt_domains(field, &mut config)?;
+                prompt_domains(field, &mut config, output)?;
             }
         }
         self.validate(&config)?;
@@ -113,7 +119,11 @@ impl<'a> MountSpecCreator<'a> {
 /// already seeded from the manifest's dynamic need; the host resolves the
 /// preopen from this path at mount-start (guest == host), so init only collects
 /// the value.
-fn prompt_host_files(metadata: &ConfigMetadata, config: &mut Value) -> anyhow::Result<()> {
+fn prompt_host_files(
+    metadata: &ConfigMetadata,
+    config: &mut Value,
+    output: &Output,
+) -> anyhow::Result<()> {
     let Some(config_obj) = config.as_object_mut() else {
         anyhow::bail!("generated config must be an object");
     };
@@ -121,7 +131,7 @@ fn prompt_host_files(metadata: &ConfigMetadata, config: &mut Value) -> anyhow::R
         let Some(HostResourceBinding::File { .. }) = field.binding else {
             continue;
         };
-        let host_path = prompt_host_file(name, field)?
+        let host_path = prompt_host_file(name, field, output)?
             .canonicalize()
             .with_context(|| format!("canonicalize host file for `{name}`"))?;
         config_obj.insert(
@@ -138,7 +148,7 @@ fn prompt_host_files(metadata: &ConfigMetadata, config: &mut Value) -> anyhow::R
 /// list is refused here rather than producing a mount whose grant can never
 /// resolve. A list supplied another way (an inherited default) is left as-is
 /// when already non-empty.
-fn prompt_domains(field: &str, config: &mut Value) -> anyhow::Result<()> {
+fn prompt_domains(field: &str, config: &mut Value, output: &Output) -> anyhow::Result<()> {
     let Some(config_obj) = config.as_object_mut() else {
         anyhow::bail!("generated config must be an object");
     };
@@ -152,7 +162,7 @@ fn prompt_domains(field: &str, config: &mut Value) -> anyhow::Result<()> {
     let raw = crate::ui::prompt::Text::new(
         "Domains this mount may fetch (space- or comma-separated, e.g. example.com docs.rs)",
     )
-    .ask()?;
+    .ask_with_output(output)?;
     let domains = parse_domain_list(&raw)?;
     if domains.is_empty() {
         anyhow::bail!("at least one domain is required to fetch anything");
@@ -205,9 +215,9 @@ fn validate_dynamic_domains(config: &Value, field: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn prompt_host_file(name: &str, field: &ConfigField) -> anyhow::Result<PathBuf> {
+fn prompt_host_file(name: &str, field: &ConfigField, output: &Output) -> anyhow::Result<PathBuf> {
     let description = field.description.as_deref().unwrap_or(name);
-    let raw = crate::ui::prompt::Text::new(description).ask()?;
+    let raw = crate::ui::prompt::Text::new(description).ask_with_output(output)?;
     let path = crate::ui::input_path(raw.trim());
     if !path.is_file() {
         anyhow::bail!("{} is not a readable file", path.display());

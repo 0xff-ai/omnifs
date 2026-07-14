@@ -94,7 +94,7 @@ impl<'a> ProviderSelection<'a> {
         }
         crate::ui::prompt::Select::new("Which provider does this mount use?")
             .items(providers)
-            .ask_with_output(output.clone())
+            .ask_with_output(output)
     }
 
     fn ensure_unique_name(
@@ -111,7 +111,7 @@ impl<'a> ProviderSelection<'a> {
         // `--yes` accepts the auto-suggested name on collision, even
         // non-interactively (it never overwrites the existing mount).
         if yes {
-            session.row(crate::ui::report::Row::new(
+            session.row(&crate::ui::report::Row::new(
                 crate::ui::style::Glyph::Warn,
                 "mount name",
                 format!("{proposed} taken, using {suggestion}"),
@@ -125,7 +125,7 @@ impl<'a> ProviderSelection<'a> {
         }
         let name = crate::ui::prompt::Text::new("New mount name")
             .with_default(suggestion.as_str())
-            .ask_with_output(session.clone())?;
+            .ask_with_output(session)?;
         Ok(MountName::new(name)?)
     }
 

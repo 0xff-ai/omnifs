@@ -246,7 +246,7 @@ fn render_outcomes(output: &Output, outcomes: &[TeardownOutcome]) {
     }
     for outcome in outcomes {
         let row = outcome.outcome().render_receipt();
-        output.row(row);
+        output.row(&row);
     }
 }
 

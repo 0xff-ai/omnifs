@@ -397,7 +397,7 @@ impl FrontendEnableArgs {
         let result = self.enable(&workspace, output.clone()).await?;
         let inventory = Inventory::collect(&workspace).await?;
         finish_receipt(
-            output,
+            &output,
             &FrontendReceipt::from_inventory(&inventory, vec![result]),
         )
     }
@@ -444,7 +444,7 @@ impl FrontendDisableArgs {
         let result = self.disable(&workspace, output.clone()).await?;
         let inventory = Inventory::collect(&workspace).await?;
         finish_receipt(
-            output,
+            &output,
             &FrontendReceipt::from_inventory(&inventory, vec![result]),
         )
     }
@@ -538,7 +538,7 @@ impl FrontendRestartArgs {
         let results = self.restart(&workspace, output.clone()).await?;
         let inventory = Inventory::collect(&workspace).await?;
         finish_receipt(
-            output,
+            &output,
             &FrontendReceipt::from_inventory(&inventory, results),
         )
     }
@@ -910,7 +910,7 @@ impl FrontendLsArgs {
     }
 }
 
-fn finish_receipt(output: Output, receipt: &FrontendReceipt) -> Result<crate::error::ExitCode> {
+fn finish_receipt(output: &Output, receipt: &FrontendReceipt) -> Result<crate::error::ExitCode> {
     if output.is_structured() {
         output.emit_result(receipt.output_verdict(), receipt)?;
     } else {

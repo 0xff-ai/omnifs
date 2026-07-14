@@ -54,45 +54,18 @@ pub(crate) struct Progress {
     frame: usize,
     next_update: Instant,
     drawn: bool,
-    transient: bool,
-    bar: Option<cliclack::ProgressBar>,
 }
 
 impl Progress {
-    pub(crate) fn start(output: Output, length: u64, message: impl std::fmt::Display) -> Self {
-        let bar = (output.mode().is_human() && !output.quiet()).then(|| {
-            let bar = if length == 0 {
-                cliclack::spinner()
-            } else {
-                cliclack::progress_bar(length)
-            };
-            bar.start(message);
-            bar
-        });
+    pub(crate) fn new(output: Output, key: impl Into<String>) -> Self {
         Self {
             output,
-            key: "progress".to_owned(),
+            key: key.into(),
             tty: std::io::stderr().is_terminal(),
             started: Instant::now(),
             frame: 0,
             next_update: Instant::now(),
             drawn: false,
-            transient: false,
-            bar,
-        }
-    }
-
-    pub(crate) fn start_with_output(key: &str, _text: &str, output: Output) -> Self {
-        Self {
-            output,
-            key: key.to_owned(),
-            tty: std::io::stderr().is_terminal(),
-            started: Instant::now(),
-            frame: 0,
-            next_update: Instant::now(),
-            drawn: false,
-            transient: true,
-            bar: None,
         }
     }
 
@@ -101,10 +74,6 @@ impl Progress {
     }
 
     pub(crate) fn update(&mut self, text: &str) {
-        if let Some(bar) = &self.bar {
-            bar.set_message(text);
-            return;
-        }
         let now = Instant::now();
         if now < self.next_update {
             return;
@@ -112,7 +81,7 @@ impl Progress {
         self.next_update = now + UPDATE_INTERVAL;
         self.output
             .progress_event(self.key.clone(), text.to_owned(), self.started.elapsed());
-        if !self.transient || !self.tty || self.started.elapsed() < APPEARANCE_DELAY {
+        if !self.tty || self.started.elapsed() < APPEARANCE_DELAY {
             return;
         }
         self.frame = (self.frame + 1) % SPINNER_FRAMES.len();
@@ -154,55 +123,34 @@ impl Progress {
     }
 
     fn settle(mut self, glyph: Glyph, value: impl std::fmt::Display) {
-        if let Some(bar) = self.bar.take() {
-            bar.stop(value);
-            return;
-        }
         if self.drawn {
             let mut err = std::io::stderr();
             let _ = write!(err, "\r");
             let _ = queue!(err, Clear(ClearType::CurrentLine));
             let _ = err.flush();
         }
-        if !self.output.quiet() {
-            self.output.row(super::report::Row::new(
-                glyph,
-                std::mem::take(&mut self.key),
-                value.to_string(),
-            ));
-        }
-    }
-
-    pub(crate) fn set_message(&self, message: impl std::fmt::Display) {
-        if let Some(bar) = &self.bar {
-            bar.set_message(message);
-        }
-    }
-
-    pub(crate) fn inc(&self, delta: u64) {
-        if let Some(bar) = &self.bar {
-            bar.inc(delta);
-        }
-    }
-
-    pub(crate) fn stop(&mut self, message: impl std::fmt::Display) {
-        if let Some(bar) = self.bar.take() {
-            bar.stop(message);
-        }
-    }
-
-    pub(crate) fn error(&mut self, message: impl std::fmt::Display) {
-        if let Some(bar) = self.bar.take() {
-            bar.error(message);
-        }
+        let value = value.to_string();
+        let value = if self.output.is_structured() {
+            value
+        } else {
+            format!(
+                "{value} {}",
+                style::dim(format!("({})", format_duration(self.started.elapsed())))
+            )
+        };
+        self.output.row(&super::report::Row::new(
+            glyph,
+            std::mem::take(&mut self.key),
+            value,
+        ));
     }
 }
 
-impl Drop for Progress {
-    fn drop(&mut self) {
-        if let Some(bar) = self.bar.take() {
-            bar.clear();
-        }
+fn format_duration(duration: Duration) -> String {
+    if duration.as_secs() > 0 {
+        format!("{}s", duration.as_secs())
+    } else {
+        format!("{}ms", duration.as_millis())
     }
 }
 
@@ -215,6 +163,8 @@ mod tests {
     fn human_bytes_uses_decimal_units() {
         assert_eq!(human_bytes(0), "0 B");
         assert_eq!(human_bytes(148_000_000), "148 MB");
+        assert_eq!(format_duration(Duration::from_millis(12)), "12ms");
+        assert_eq!(format_duration(Duration::from_secs(2)), "2s");
     }
 
     #[test]

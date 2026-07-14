@@ -92,8 +92,7 @@ impl MountArgs {
             MountCommand::Reauth(args) => args.run(output).await.map(|()| ExitCode::Success),
             MountCommand::Rm { name, dry_run } => {
                 let workspace = Workspace::resolve()?;
-                let receipt =
-                    rm_with_options(&workspace, &name, output.yes(), dry_run, output.clone())?;
+                let receipt = rm_with_options(&workspace, &name, output.yes(), dry_run, &output)?;
                 if output.is_structured() {
                     output.emit_result(receipt.output_verdict(), &receipt)?;
                 }
@@ -300,7 +299,7 @@ impl ReauthArgs {
                 self.token_env.as_deref(),
                 interactive,
             )?;
-            let token = source.read()?;
+            let token = source.read(session)?;
             run_static_token_init(
                 manifest,
                 &selection,
@@ -314,7 +313,7 @@ impl ReauthArgs {
         for key in target.keys() {
             match workspace.daemon().reload_credential_if_ready(key).await {
                 Ok(Some(_)) => {
-                    session.row(crate::ui::report::Row::new(
+                    session.row(&crate::ui::report::Row::new(
                         crate::ui::style::Glyph::Done,
                         format!("credential `{key}`"),
                         "reloaded in running daemon",
@@ -322,7 +321,7 @@ impl ReauthArgs {
                 },
                 Ok(None) => {},
                 Err(error) => {
-                    session.row(crate::ui::report::Row::new(
+                    session.row(&crate::ui::report::Row::new(
                         crate::ui::style::Glyph::Warn,
                         format!("credential `{key}`"),
                         format!("stored, but live reload failed: {error:#}"),
@@ -343,7 +342,7 @@ pub fn rm(workspace: &Workspace, name: &str, yes: bool) -> anyhow::Result<()> {
         name,
         yes,
         false,
-        Output::new(crate::ui::output::OutputMode::Human, false),
+        &Output::new(crate::ui::output::OutputMode::Human, false),
     )
     .map(|_| ())
 }
@@ -354,7 +353,7 @@ fn rm_with_options(
     name: &str,
     yes: bool,
     dry_run: bool,
-    output: Output,
+    output: &Output,
 ) -> anyhow::Result<crate::commands::receipt::MountRemoveReceipt> {
     let layout = workspace.layout();
     output.intro(format!("omnifs mount rm {name}"))?;

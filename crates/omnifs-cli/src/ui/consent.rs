@@ -135,7 +135,7 @@ impl Decision {
         mode: PromptMode,
         dry_run: bool,
         flag_hint: &str,
-        output: Output,
+        output: &Output,
     ) -> anyhow::Result<Self> {
         if dry_run {
             return Ok(Self::DryRun);
@@ -297,7 +297,7 @@ mod tests {
                 mode,
                 true,
                 "-y",
-                Output::new(crate::ui::output::OutputMode::Human, false)
+                &Output::new(crate::ui::output::OutputMode::Human, false)
             )
             .unwrap(),
             Decision::DryRun
@@ -306,7 +306,7 @@ mod tests {
             mode,
             false,
             "-y",
-            Output::new(crate::ui::output::OutputMode::Human, false),
+            &Output::new(crate::ui::output::OutputMode::Human, false),
         )
         .unwrap_err();
         assert!(error.to_string().contains("pass -y or --yes"));

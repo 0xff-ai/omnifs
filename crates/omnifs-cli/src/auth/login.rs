@@ -3,8 +3,8 @@
 use crate::error::{ExitCode, WithExitCode, WithHint};
 use anyhow::anyhow;
 use omnifs_auth::{
-    CredentialService, DeviceCodePrompt, LoginRequest, ManualCode, ManualCodeLoginRequest,
-    OAuthClient, OAuthRequest, UrlOpener,
+    DeviceCodePrompt, LoginRequest, ManualCode, ManualCodeLoginRequest, OAuthClient, OAuthRequest,
+    UrlOpener,
 };
 use omnifs_workspace::creds::{CredentialEntry, CredentialStore, FileStore};
 use std::collections::BTreeMap;
@@ -97,7 +97,7 @@ async fn login(
                 })
                 .await;
             if result.is_ok() {
-                session.row(crate::ui::report::Row::new(
+                session.row(&crate::ui::report::Row::new(
                     crate::ui::style::Glyph::Done,
                     "oauth",
                     "authorized",
@@ -113,10 +113,9 @@ async fn login(
     {
         session.note(format!("Open {url}"));
     }
-    // Write through the credential service so the single store owner records it.
-    let service = CredentialService::new(Arc::from(store), OAuthClient::new()?);
+    // Store each target key through the workspace store.
     for key in target.keys() {
-        service.store_entry(key, entry.clone())?;
+        store.put(key, &entry)?;
     }
     session.note(format!(
         "stored OAuth credential for `{mount}` with scopes: {}",
@@ -141,9 +140,9 @@ async fn login_manual(
             session.note(format!("Open {url}"));
             async move {
                 let prompt_output = session.clone();
-                let pasted = tokio::task::spawn_blocking(|| {
+                let pasted = tokio::task::spawn_blocking(move || {
                     crate::ui::prompt::Text::new("Paste redirect URL or `code state`")
-                        .ask_with_output(prompt_output)
+                        .ask_with_output(&prompt_output)
                 })
                 .await
                 .unwrap_or_else(|error| Err(anyhow::anyhow!("prompt task panicked: {error}")))
