@@ -126,18 +126,13 @@ fn cli_redesign_contract_human_status_has_context_and_resource_sections() {
     for heading in ["Frontends  ", "Mounts  "] {
         assert!(text.contains(heading), "missing {heading:?} in {text}");
     }
-    let detail = fixture.run(&["status", "--detail", "--output", "human"]);
-    assert!(stdout_text(&detail).contains("Providers  "));
 }
 
 #[test]
 fn cli_redesign_contract_wide_headers_are_sentence_case_and_ordered() {
     let fixture = Fixture::new();
     write_runner_observation(&fixture, &fixture.mount_point);
-    let output = fixture.run_with_env(
-        &["status", "--output", "human", "--detail"],
-        &[("COLUMNS", "120")],
-    );
+    let output = fixture.run_with_env(&["status", "--output", "human"], &[("COLUMNS", "120")]);
     let text = stdout_text(&output);
 
     let filesystem = text.find("Filesystem").expect("filesystem header");
@@ -230,9 +225,10 @@ fn cli_redesign_contract_status_json_exposes_four_authoritative_resource_arrays(
     assert_eq!(json["command"], "status");
     assert!(result["home"].is_string());
     assert!(result["daemon"].is_object());
-    for key in ["frontends", "mounts", "providers"] {
+    for key in ["frontends", "mounts"] {
         assert!(result[key].is_array(), "missing result.{key}: {json}");
     }
+    assert!(result.get("providers").is_none());
     assert!(
         result.get("access").is_none(),
         "default status must keep access focused"

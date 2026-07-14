@@ -66,9 +66,6 @@ pub enum Commands {
     /// Add, list, reauthenticate, revoke, or remove mounts
     Mount(commands::mount::MountArgs),
 
-    /// List or install provider artifacts
-    Provider(commands::provider::ProviderArgs),
-
     /// Install omnifs usage skills for agent harnesses
     Skill(commands::skill::SkillArgs),
 
@@ -80,7 +77,7 @@ pub enum Commands {
 
     /// Print version information
     ///
-    /// Prints the one-line build identity and provider facts.
+    /// Prints the one-line build identity.
     Version(commands::version::VersionArgs),
 
     /// Run the runtime daemon. Internal: launched by the host-native lifecycle
@@ -146,14 +143,6 @@ impl Commands {
                     commands::mount::MountCommand::Rm { .. } => "mount.rm",
                 },
             ),
-            Self::Provider(args) => (
-                Some("provider"),
-                match &args.command {
-                    commands::provider::ProviderCommand::Add(_) => "provider.add",
-                    commands::provider::ProviderCommand::Ls(_) => "provider.ls",
-                    commands::provider::ProviderCommand::Show(_) => "provider.show",
-                },
-            ),
             Self::Skill(_) => (Some("skill"), "skill"),
             Self::Doctor(_) => (Some("doctor"), "doctor"),
             Self::Completions(_) => (Some("completions"), "completions"),
@@ -198,7 +187,6 @@ impl Commands {
             Self::Logs(args) => args.run(output).map(|()| ExitCode::Success),
             Self::Inspect(args) => args.run(output).await.map(|()| ExitCode::Success),
             Self::Mount(args) => args.run(output).await,
-            Self::Provider(args) => args.run(output).await,
             Self::Skill(args) => args.run(output).map(|()| ExitCode::Success),
             Self::Completions(args) => args.run(output).map(|()| ExitCode::Success),
             Self::Version(args) => args.run(output).await,
@@ -289,7 +277,7 @@ where
         index = index.saturating_add(1);
     }
     match positional.as_slice() {
-        [command, subcommand] if matches!(command.as_str(), "mount" | "provider" | "frontend") => {
+        [command, subcommand] if matches!(command.as_str(), "mount" | "frontend") => {
             format!("{command}.{subcommand}")
         },
         [command, ..] if command == "apply" => "up".to_owned(),
@@ -316,7 +304,7 @@ async fn run_bare(output: Output) -> anyhow::Result<ExitCode> {
         return Ok(exit_code);
     }
     let report = crate::status::InventoryReport { inventory };
-    report.render(false).print();
+    report.render().print();
 
     // The status report is the record (stdout); these next-step hints are
     // conversational, so `-q` drops them.
@@ -404,10 +392,6 @@ mod tests {
         assert_eq!(
             raw_command_path(argv(&["--output", "json", "mount", "show", "x"])),
             "mount.show"
-        );
-        assert_eq!(
-            raw_command_path(argv(&["provider", "--output=jsonl", "ls"])),
-            "provider.ls"
         );
         assert_eq!(
             raw_command_path(argv(&["--yes", "--no-input", "status"])),

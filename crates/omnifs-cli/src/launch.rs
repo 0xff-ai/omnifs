@@ -19,7 +19,7 @@ use crate::workspace::Workspace;
 /// Command-owned daemon launcher.
 ///
 /// `Launcher` is the policy boundary for `omnifs up`: mount discovery,
-/// provider bundle installation, contract preflight, credential preflight,
+/// exact-pinned mount discovery, contract preflight, credential preflight,
 /// daemon launch, and user-facing next steps stay behind this interface
 /// instead of being reassembled by the command.
 pub(crate) struct Launcher<'a> {
@@ -55,8 +55,6 @@ impl<'a> Launcher<'a> {
                 paths.mounts_dir.display()
             );
         }
-
-        crate::provider_bundle::ensure_providers_installed(&paths.providers_dir)?;
 
         // Fail fast, before a healthy daemon is stopped or a new daemon spawns,
         // when a configured mount's
@@ -285,7 +283,7 @@ fn report_launch_status(status: &DaemonStatus) {
         crate::ui::eprint_raw(&format!("✓ {}\n", mounts.message));
     } else {
         crate::ui::eprint_raw(&format!(
-            "✓ Runtime sees {} provider(s)\n",
+            "✓ Runtime serves {} mount(s)\n",
             status.mounts.len()
         ));
     }

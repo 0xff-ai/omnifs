@@ -49,24 +49,15 @@ pub(crate) fn install_fixture_provider(
     providers_dir: &std::path::Path,
     name: &str,
 ) -> omnifs_workspace::ids::ProviderRef {
-    use omnifs_workspace::ids::{ProviderId, ProviderMeta, ProviderName, ProviderRef};
-    use omnifs_workspace::provider::ProviderStore;
+    use omnifs_workspace::provider::{Artifact, ProviderStore};
 
     let file = format!("omnifs_provider_{name}.wasm");
     let bytes = wasm_with_provider_metadata(name, &file);
-    let id = ProviderId::from_wasm_bytes(&bytes);
+    let artifact = Artifact::from_bytes(file, bytes).expect("parse fixture provider");
+    let reference = artifact.reference();
     let store = ProviderStore::new(providers_dir);
-    store
-        .put_if_absent(&id, &bytes)
-        .expect("put fixture provider");
-    let meta = ProviderMeta {
-        name: ProviderName::new(name).unwrap(),
-        version: None,
-    };
-    store
-        .install(id, meta.clone(), file)
-        .expect("install fixture provider");
-    ProviderRef { id, meta }
+    store.retain(&artifact).expect("retain fixture provider");
+    reference
 }
 
 #[cfg(test)]

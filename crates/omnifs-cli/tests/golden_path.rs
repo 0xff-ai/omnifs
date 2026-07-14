@@ -9,7 +9,7 @@ use std::process::{Command, Output};
 use std::time::{Duration, Instant};
 
 use common::{
-    force_unmount, install_test_provider_as, live_acceptance_enabled, nfs_serial_lock, omnifs_bin,
+    force_unmount, install_test_provider, live_acceptance_enabled, nfs_serial_lock, omnifs_bin,
     platform_can_mount, recorded_pid, release_wasm_dir,
 };
 
@@ -17,6 +17,7 @@ struct Fixture {
     home: tempfile::TempDir,
     mount_point: PathBuf,
     daemon_pid: Option<u32>,
+    provider_id: omnifs_workspace::ids::ProviderId,
 }
 
 impl Fixture {
@@ -24,7 +25,7 @@ impl Fixture {
         let home = tempfile::tempdir().expect("home tempdir");
         let providers = home.path().join("providers");
         std::fs::create_dir_all(&providers).expect("providers dir");
-        install_test_provider_as(&providers, "test");
+        let provider_id = install_test_provider(&providers);
 
         let mount_point = home.path().join("mnt");
         std::fs::create_dir_all(&mount_point).expect("mount point dir");
@@ -33,6 +34,7 @@ impl Fixture {
             home,
             mount_point,
             daemon_pid: None,
+            provider_id,
         }
     }
 
@@ -41,6 +43,17 @@ impl Fixture {
     }
 
     fn run(&self, args: &[&str]) -> Output {
+        Command::new(omnifs_bin())
+            .args(args)
+            .env("OMNIFS_HOME", self.home_path())
+            .env("OMNIFS_MOUNT_POINT", &self.mount_point)
+            .env("NO_COLOR", "1")
+            .env("RUST_LOG", "warn")
+            .output()
+            .unwrap_or_else(|error| panic!("spawn omnifs {}: {error}", args.join(" ")))
+    }
+
+    fn run_owned(&self, args: &[String]) -> Output {
         Command::new(omnifs_bin())
             .args(args)
             .env("OMNIFS_HOME", self.home_path())
@@ -95,7 +108,14 @@ fn mount_add_up_wait_read_down_golden_path() {
     let started = Instant::now();
     let mut fixture = Fixture::new();
 
-    let init = fixture.run(&["mount", "add", "test", "--no-input", "--yes"]);
+    let provider_id = fixture.provider_id.to_string();
+    let init = fixture.run_owned(&[
+        "mount".into(),
+        "add".into(),
+        provider_id,
+        "--no-input".into(),
+        "--yes".into(),
+    ]);
     assert_eq!(
         exit_code(&init),
         0,

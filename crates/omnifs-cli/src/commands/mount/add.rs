@@ -217,8 +217,7 @@ mod tests {
     use omnifs_workspace::mounts::Name as MountName;
     use omnifs_workspace::mounts::Registry;
     use omnifs_workspace::provider::{
-        Catalog, ConfigField, ConfigMetadata, ConfigType, HostResourceBinding, ProviderManifest,
-        ProviderStore,
+        ConfigField, ConfigMetadata, ConfigType, HostResourceBinding, ProviderManifest,
     };
     use serde_json::Value;
 
@@ -615,46 +614,6 @@ mod tests {
         }
     }
 
-    /// Templates are drawn from the latest installed artifact in the
-    /// content-addressed store: install one and assert it surfaces with its
-    /// embedded manifest and a pinnable reference.
-    #[test]
-    fn installed_providers_reads_latest_artifact() {
-        let dir = tempfile::tempdir().unwrap();
-        let paths = omnifs_workspace::layout::WorkspaceLayout::under_root(dir.path());
-
-        let mut manifest = provider_manifest();
-        manifest.default_mount = "linear-dev".to_owned();
-        let wasm = wasm_with_custom_section(
-            omnifs_workspace::provider::PROVIDER_METADATA_SECTION_NAME,
-            &serde_json::to_vec(&manifest).unwrap(),
-        );
-        let id = ProviderId::from_wasm_bytes(&wasm);
-        let store = ProviderStore::new(&paths.providers_dir);
-        store.put_if_absent(&id, &wasm).unwrap();
-        store
-            .install(
-                id,
-                ProviderMeta {
-                    name: ProviderName::new("linear").unwrap(),
-                    version: None,
-                },
-                "omnifs_provider_linear.wasm".into(),
-            )
-            .unwrap();
-
-        let installed =
-            crate::catalog::installed_providers(&Catalog::open(&paths.providers_dir)).unwrap();
-
-        let (provider, manifest) = installed
-            .iter()
-            .find(|(provider, _)| provider.meta.name.as_str() == "linear")
-            .expect("linear provider");
-        assert_eq!(manifest.default_mount, "linear-dev");
-        assert_eq!(provider.reference().id, id);
-        assert_eq!(provider.reference().meta.name.as_str(), "linear");
-    }
-
     fn provider_manifest() -> ProviderManifest {
         use omnifs_workspace::authn::{
             AuthScheme, OAuthFlow, OauthScheme, PkceLoopbackConfig, StaticTokenScheme,
@@ -721,32 +680,6 @@ mod tests {
                 ],
             }),
             config: None,
-        }
-    }
-
-    fn wasm_with_custom_section(name: &str, data: &[u8]) -> Vec<u8> {
-        let mut wasm = b"\0asm\x01\0\0\0".to_vec();
-        wasm.push(0);
-        let mut payload = Vec::new();
-        encode_var_u32(name.len(), &mut payload);
-        payload.extend_from_slice(name.as_bytes());
-        payload.extend_from_slice(data);
-        encode_var_u32(payload.len(), &mut wasm);
-        wasm.extend_from_slice(&payload);
-        wasm
-    }
-
-    fn encode_var_u32(mut value: usize, out: &mut Vec<u8>) {
-        loop {
-            let mut byte = u8::try_from(value & 0x7f).unwrap();
-            value >>= 7;
-            if value != 0 {
-                byte |= 0x80;
-            }
-            out.push(byte);
-            if value == 0 {
-                break;
-            }
         }
     }
 }

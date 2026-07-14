@@ -7,7 +7,7 @@ mod common;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use common::{install_test_provider, install_test_provider_as, omnifs_bin, release_wasm_dir};
+use common::{install_test_provider, omnifs_bin, release_wasm_dir};
 use omnifs_workspace::authn::CredentialId;
 use omnifs_workspace::creds::{CredentialEntry, CredentialStore, FileStore};
 use secrecy::SecretString;
@@ -43,6 +43,17 @@ impl Fixture {
             .unwrap_or_else(|error| panic!("spawn omnifs {}: {error}", args.join(" ")))
     }
 
+    fn run_owned(&self, args: &[String]) -> Output {
+        Command::new(omnifs_bin())
+            .args(args)
+            .env("OMNIFS_HOME", self.home_path())
+            .env("OMNIFS_MOUNT_POINT", &self.mount_point)
+            .env("NO_COLOR", "1")
+            .env("RUST_LOG", "warn")
+            .output()
+            .unwrap_or_else(|error| panic!("spawn omnifs {}: {error}", args.join(" ")))
+    }
+
     fn write_static_token_mount_without_credential(&self) {
         let provider_id = install_test_provider(&self.home_path().join("providers"));
         let spec = format!(
@@ -57,19 +68,11 @@ fn install_web_provider(fixture: &Fixture) {
     let providers_dir = fixture.home_path().join("providers");
     let wasm = std::fs::read(release_wasm_dir().join("omnifs_provider_web.wasm"))
         .expect("read web provider wasm");
-    let id = omnifs_workspace::ids::ProviderId::from_wasm_bytes(&wasm);
+    let artifact =
+        omnifs_workspace::provider::Artifact::from_bytes("omnifs_provider_web.wasm", wasm)
+            .expect("validate web provider");
     let store = omnifs_workspace::provider::ProviderStore::new(&providers_dir);
-    store.put_if_absent(&id, &wasm).expect("store web provider");
-    store
-        .install(
-            id,
-            omnifs_workspace::ids::ProviderMeta {
-                name: omnifs_workspace::ids::ProviderName::new("web").unwrap(),
-                version: None,
-            },
-            "omnifs_provider_web.wasm".into(),
-        )
-        .expect("install web provider");
+    store.retain(&artifact).expect("retain web provider");
 }
 
 fn exit_code(output: &Output) -> i32 {
@@ -259,17 +262,12 @@ fn json_commands_emit_expected_shapes() {
     assert_eq!(status_json["verdict"], "ok");
     assert_eq!(status_json["result"]["daemon"]["probe"]["state"], "stopped");
     assert!(status_json["result"]["mounts"].as_array().is_some());
-    assert!(status_json["result"]["providers"].as_array().is_some());
+    assert!(status_json["result"].get("providers").is_none());
 
     let mounts = fixture.run(&["mount", "ls", "--output", "json"]);
     assert_eq!(exit_code(&mounts), 0);
     let mounts_json = stdout_json(&mounts);
     assert!(mounts_json["result"]["mounts"].as_array().is_some());
-
-    let providers = fixture.run(&["provider", "ls", "--output", "json"]);
-    assert_eq!(exit_code(&providers), 0);
-    let providers_json = stdout_json(&providers);
-    assert!(providers_json["result"]["providers"].as_array().is_some());
 
     let version = fixture.run(&["version", "--output", "json"]);
     assert_eq!(exit_code(&version), 0);
@@ -277,18 +275,7 @@ fn json_commands_emit_expected_shapes() {
     assert!(version_json["result"]["cli"].as_str().is_some());
     assert!(version_json["result"]["daemon"].is_null());
     assert!(version_json["result"]["channel"].as_str().is_some());
-    // Providers is now a structured object, not a bare count, and the paths
-    // block moved to `doctor`.
-    assert!(
-        version_json["result"]["providers"]["state"]
-            .as_str()
-            .is_some()
-    );
-    assert!(
-        version_json["result"]["providers"]["count"]
-            .as_u64()
-            .is_some()
-    );
+    assert!(version_json["result"].get("providers").is_none());
     assert!(version_json["paths"].is_null());
 
     let doctor = fixture.run(&["doctor", "--output", "json"]);
@@ -383,16 +370,17 @@ fn destructive_mount_jsonl_commands_end_with_one_typed_result() {
 #[test]
 fn mount_add_json_receipt_names_the_mount() {
     let fixture = Fixture::new();
-    install_test_provider_as(&fixture.home_path().join("providers"), "test");
+    let provider_id = install_test_provider(&fixture.home_path().join("providers"));
+    let provider_id = provider_id.to_string();
 
-    let output = fixture.run(&[
-        "mount",
-        "add",
-        "test",
-        "--no-input",
-        "--yes",
-        "--output",
-        "json",
+    let output = fixture.run_owned(&[
+        "mount".into(),
+        "add".into(),
+        provider_id,
+        "--no-input".into(),
+        "--yes".into(),
+        "--output".into(),
+        "json".into(),
     ]);
     assert_eq!(
         exit_code(&output),
@@ -434,7 +422,6 @@ fn every_json_command_keeps_its_error_contract_before_workspace_resolution() {
     let commands: &[&[&str]] = &[
         &["status", "--output", "json"],
         &["mount", "ls", "--output", "json"],
-        &["provider", "ls", "--output", "json"],
         &["version", "--output", "json"],
         &["doctor", "--output", "json"],
         &["up", "--output", "json"],
@@ -487,9 +474,16 @@ fn bare_invocation_without_mounts_points_to_mount_add() {
 #[test]
 fn mount_add_collision_renames_with_yes() {
     let fixture = Fixture::new();
-    install_test_provider_as(&fixture.home_path().join("providers"), "test");
+    let provider_id = install_test_provider(&fixture.home_path().join("providers"));
+    let provider_id = provider_id.to_string();
 
-    let first = fixture.run(&["mount", "add", "test", "--no-input", "--yes"]);
+    let first = fixture.run_owned(&[
+        "mount".into(),
+        "add".into(),
+        provider_id.clone(),
+        "--no-input".into(),
+        "--yes".into(),
+    ]);
     assert_eq!(
         exit_code(&first),
         0,
@@ -499,7 +493,13 @@ fn mount_add_collision_renames_with_yes() {
     );
     assert!(first.stdout.is_empty(), "session prose belongs on stderr");
 
-    let second = fixture.run(&["mount", "add", "test", "--no-input", "--yes"]);
+    let second = fixture.run_owned(&[
+        "mount".into(),
+        "add".into(),
+        provider_id,
+        "--no-input".into(),
+        "--yes".into(),
+    ]);
     assert_eq!(
         exit_code(&second),
         0,

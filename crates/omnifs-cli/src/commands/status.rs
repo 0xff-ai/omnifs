@@ -7,11 +7,7 @@ use crate::workspace::Workspace;
 use clap::Args;
 
 #[derive(Args, Debug, Clone, Default)]
-pub struct StatusArgs {
-    /// Reveal configured provider detail.
-    #[arg(long = "detail")]
-    pub detail: bool,
-}
+pub struct StatusArgs {}
 
 impl StatusArgs {
     pub async fn run(self, output: Output) -> anyhow::Result<ExitCode> {
@@ -21,7 +17,7 @@ impl StatusArgs {
         if output.is_structured() {
             output.emit_result(report.inventory.verdict(), report.inventory)?;
         } else {
-            crate::ui::print_raw(&format!("{}\n", report.render(self.detail).render()));
+            crate::ui::print_raw(&format!("{}\n", report.render().render()));
         }
         Ok(exit_code)
     }

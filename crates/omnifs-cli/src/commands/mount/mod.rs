@@ -281,12 +281,16 @@ impl ReauthArgs {
             anyhow::bail!("mount `{mount_name}` needs no authentication");
         };
 
-        let installed = crate::catalog::installed_providers(workspace.catalog())?;
-        let provider_name = mount_config.config.provider_name();
-        let (_, manifest) = crate::catalog::find_installed(&installed, provider_name.as_str())
+        let provider = workspace
+            .catalog()
+            .get(&mount_config.config.provider.id)?
             .ok_or_else(|| {
-                anyhow!("provider `{provider_name}` for mount `{mount_name}` is not installed")
+                anyhow!(
+                    "provider artifact `{}` for mount `{mount_name}` is missing",
+                    mount_config.config.provider.id
+                )
             })?;
+        let manifest = provider.manifest()?;
 
         let selection = crate::auth::AuthSelection {
             auth_type: auth.kind(),
@@ -325,7 +329,7 @@ impl ReauthArgs {
             )?;
             let token = source.read(output)?;
             run_static_token_init(
-                manifest,
+                &manifest,
                 &selection,
                 token,
                 &paths.credentials_file,

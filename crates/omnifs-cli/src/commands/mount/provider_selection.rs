@@ -1,67 +1,57 @@
-use crate::catalog::mount_exists;
-use crate::error::WithHint;
 use crate::mount_config::MountConfig;
+use crate::provider_bundle::EmbeddedProviders;
+use crate::provider_resolver::mount_exists;
 use anyhow::anyhow;
 use omnifs_workspace::mounts::Name as MountName;
-use omnifs_workspace::provider::{Provider, ProviderManifest};
 
 pub(crate) struct ProviderSelection<'a> {
     mounts: &'a [MountConfig],
-    installed: &'a [(Provider, ProviderManifest)],
+    embedded: &'a EmbeddedProviders,
 }
 
 impl<'a> ProviderSelection<'a> {
-    pub(crate) fn new(
-        mounts: &'a [MountConfig],
-        installed: &'a [(Provider, ProviderManifest)],
-    ) -> Self {
-        Self { mounts, installed }
+    pub(crate) fn new(mounts: &'a [MountConfig], embedded: &'a EmbeddedProviders) -> Self {
+        Self { mounts, embedded }
     }
 
     pub(crate) fn provider_names(&self) -> Vec<String> {
-        let mut manifests: Vec<&ProviderManifest> = self
-            .installed
-            .iter()
-            .map(|(_, manifest)| manifest)
-            .collect();
-        manifests.sort_by(|a, b| a.id.cmp(&b.id));
-        manifests
-            .into_iter()
-            .map(|manifest| manifest.id.clone())
-            .collect()
+        let mut names = self.embedded.names().map(str::to_owned).collect::<Vec<_>>();
+        names.sort();
+        names
     }
 
-    /// The pinned provider's manifest for a name slug, if installed.
-    fn manifest_for(&self, name: &str) -> Option<&ProviderManifest> {
-        crate::catalog::find_installed(self.installed, name).map(|(_, manifest)| manifest)
-    }
-
-    pub(crate) fn resolve(
+    pub(crate) fn select(
         &self,
         provider_arg: Option<&str>,
+        interactive: bool,
+        output: &crate::ui::output::Output,
+    ) -> anyhow::Result<String> {
+        if let Some(provider) = provider_arg {
+            return Ok(provider.to_owned());
+        }
+        if !interactive {
+            anyhow::bail!(
+                "non-interactive mode requires a provider path, digest, or embedded name"
+            );
+        }
+        let providers = self.provider_names();
+        if providers.is_empty() {
+            anyhow::bail!("the embedded provider bundle contains no providers");
+        }
+        crate::ui::prompt::Select::new("Which provider?")
+            .items(providers)
+            .ask_with_output(output)
+    }
+
+    pub(crate) fn mount_name(
+        &self,
+        default_mount: &str,
         explicit_name: Option<&str>,
         interactive: bool,
         yes: bool,
         output: &crate::ui::output::Output,
-    ) -> anyhow::Result<(String, MountName)> {
-        let provider = self.resolve_provider(provider_arg, interactive, output)?;
-        // An unknown positional provider bails here (before the caller's own
-        // catalog lookup), so the available-provider list and install hint must
-        // ride on this error or they never reach the user.
-        let manifest = self
-            .manifest_for(&provider)
-            .ok_or_else(|| {
-                anyhow!(
-                    "provider `{provider}` not found; available: {}",
-                    self.provider_names().join(", ")
-                )
-            })
-            .with_hint("Run `omnifs provider ls` to list installed providers")
-            .with_hint(
-                "Or run `omnifs provider add <wasm-or-dir>` to install a provider artifact",
-            )?;
-
-        let proposed = explicit_name.map_or_else(|| manifest.default_mount.clone(), str::to_string);
+    ) -> anyhow::Result<MountName> {
+        let proposed = explicit_name.map_or_else(|| default_mount.to_owned(), str::to_owned);
         let proposed_name = MountName::new(proposed.as_str())?;
 
         // Explicit names are always returned as requested; the caller applies
@@ -69,32 +59,11 @@ impl<'a> ProviderSelection<'a> {
         // Accidental default-name collisions still go through the unique-name
         // flow below.
         if explicit_name.is_some() {
-            return Ok((provider, proposed_name));
+            return Ok(proposed_name);
         }
 
         let name = self.ensure_unique_name(proposed_name, interactive, yes, output)?;
-        Ok((provider, name))
-    }
-
-    fn resolve_provider(
-        &self,
-        provider_arg: Option<&str>,
-        interactive: bool,
-        output: &crate::ui::output::Output,
-    ) -> anyhow::Result<String> {
-        if let Some(provider) = provider_arg {
-            return Ok(provider.to_string());
-        }
-        if !interactive {
-            anyhow::bail!("non-interactive mode requires a provider argument");
-        }
-        let providers = self.provider_names();
-        if providers.is_empty() {
-            anyhow::bail!("no providers found");
-        }
-        crate::ui::prompt::Select::new("Which provider does this mount use?")
-            .items(providers)
-            .ask_with_output(output)
+        Ok(name)
     }
 
     fn ensure_unique_name(

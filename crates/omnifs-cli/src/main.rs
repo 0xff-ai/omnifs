@@ -11,7 +11,6 @@
 
 mod auth;
 mod capability;
-mod catalog;
 mod cli;
 mod client;
 mod commands;
@@ -33,6 +32,7 @@ mod local_backend;
 mod mount_config;
 mod process;
 mod provider_bundle;
+mod provider_resolver;
 mod runtime;
 mod stages;
 mod status;

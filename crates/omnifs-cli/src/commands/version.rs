@@ -35,19 +35,12 @@ struct VersionJson {
     cli: String,
     daemon: Option<DaemonVersionJson>,
     channel: &'static str,
-    providers: ProvidersJson,
 }
 
 #[derive(Serialize)]
 struct DaemonVersionJson {
     version: String,
     pid: u32,
-}
-
-#[derive(Serialize)]
-struct ProvidersJson {
-    state: &'static str,
-    count: usize,
 }
 
 impl VersionJson {
@@ -65,14 +58,6 @@ impl VersionJson {
             cli: env!("CARGO_PKG_VERSION").to_string(),
             channel: BUILD_CHANNEL.word(),
             daemon,
-            providers: ProvidersJson {
-                state: if inventory.providers.is_empty() {
-                    "missing"
-                } else {
-                    "present"
-                },
-                count: inventory.providers.len(),
-            },
         })
     }
 }

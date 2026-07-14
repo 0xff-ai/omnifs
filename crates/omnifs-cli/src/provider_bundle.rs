@@ -1,52 +1,85 @@
-//! Provider WASM installation into the content-addressed store.
-//!
-//! Each provider WASM is hashed to its
-//! [`ProviderId`](omnifs_workspace::ids::ProviderId), written under
-//! `providers_dir/<hex>.wasm`, and recorded in `index.json` (advancing
-//! `latest[name]`). Content addressing makes installation idempotent.
+//! The compiled provider bundle, parsed without retaining it wholesale.
 
 use anyhow::Context as _;
 use std::io::{Cursor, Read};
-use std::path::Path;
 
-use omnifs_workspace::provider::{Artifact, ProviderStore};
+use omnifs_workspace::provider::{Artifact, ProviderManifest, ProviderWasm};
 
 static EMBEDDED_PROVIDER_BUNDLE: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/provider-bundle.tar.zst"));
 
-/// Install the launcher's embedded provider bundle into the content-addressed
-/// store at `providers_dir`. Idempotent: content-addressed artifacts already
-/// present are skipped, so a warm launch re-runs cheaply.
-pub(crate) fn ensure_providers_installed(providers_dir: &Path) -> anyhow::Result<()> {
-    std::fs::create_dir_all(providers_dir)
-        .with_context(|| format!("create {}", providers_dir.display()))?;
-    let store = ProviderStore::new(providers_dir);
+#[derive(Debug)]
+pub(crate) struct EmbeddedProviders {
+    entries: Vec<EmbeddedProvider>,
+}
 
-    // The bundle is a compile-time artifact this crate's build script produced
-    // from the provider catalog, so its entries are trusted bare file names.
-    let decoder = zstd::stream::read::Decoder::new(Cursor::new(EMBEDDED_PROVIDER_BUNDLE))
-        .context("decode embedded provider bundle")?;
-    let mut archive = tar::Archive::new(decoder);
-    for entry in archive.entries().context("read embedded provider bundle")? {
-        let mut entry = entry.context("read embedded provider bundle entry")?;
-        let name = entry
-            .path()
-            .context("read embedded provider bundle path")?
-            .file_name()
-            .and_then(|name| name.to_str())
-            .map(str::to_owned)
-            .context("embedded provider bundle entry has no file name")?;
-        let mut bytes = Vec::new();
-        entry
-            .read_to_end(&mut bytes)
-            .with_context(|| format!("read embedded provider bundle file `{name}`"))?;
-        let artifact = Artifact::from_bytes(name.clone(), bytes)
-            .with_context(|| format!("read provider metadata from `{name}`"))?;
-        store
-            .add_artifact(artifact)
-            .with_context(|| format!("install embedded provider `{name}`"))?;
+#[derive(Debug)]
+pub(crate) struct EmbeddedProvider {
+    artifact: Artifact,
+    manifest: ProviderManifest,
+}
+
+impl EmbeddedProviders {
+    pub(crate) fn load() -> anyhow::Result<Self> {
+        let mut entries = Vec::new();
+        // The bundle is a compile-time artifact this crate's build script produced
+        // from the provider catalog, so its entries are trusted bare file names.
+        let decoder = zstd::stream::read::Decoder::new(Cursor::new(EMBEDDED_PROVIDER_BUNDLE))
+            .context("decode embedded provider bundle")?;
+        let mut archive = tar::Archive::new(decoder);
+        for entry in archive.entries().context("read embedded provider bundle")? {
+            let mut entry = entry.context("read embedded provider bundle entry")?;
+            let name = entry
+                .path()
+                .context("read embedded provider bundle path")?
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_owned)
+                .context("embedded provider bundle entry has no file name")?;
+            let mut bytes = Vec::new();
+            entry
+                .read_to_end(&mut bytes)
+                .with_context(|| format!("read embedded provider bundle file `{name}`"))?;
+            let manifest = ProviderWasm::from_bytes(bytes.clone())
+                .metadata()
+                .with_context(|| format!("read provider metadata from `{name}`"))?
+                .with_context(|| format!("provider `{name}` has no metadata"))?;
+            let artifact = Artifact::from_bytes(name.clone(), bytes)
+                .with_context(|| format!("validate provider artifact `{name}`"))?;
+            entries.push(EmbeddedProvider { artifact, manifest });
+        }
+        entries.sort_by(|left, right| left.manifest.id.cmp(&right.manifest.id));
+        Ok(Self { entries })
     }
-    Ok(())
+
+    pub(crate) fn entries(&self) -> &[EmbeddedProvider] {
+        &self.entries
+    }
+
+    pub(crate) fn by_name(&self, name: &str) -> Option<&EmbeddedProvider> {
+        self.entries.iter().find(|entry| entry.manifest.id == name)
+    }
+
+    pub(crate) fn by_id(
+        &self,
+        id: &omnifs_workspace::ids::ProviderId,
+    ) -> Option<&EmbeddedProvider> {
+        self.entries.iter().find(|entry| entry.artifact.id() == *id)
+    }
+
+    pub(crate) fn names(&self) -> impl Iterator<Item = &str> {
+        self.entries.iter().map(|entry| entry.manifest.id.as_str())
+    }
+}
+
+impl EmbeddedProvider {
+    pub(crate) fn artifact(&self) -> &Artifact {
+        &self.artifact
+    }
+
+    pub(crate) fn manifest(&self) -> &ProviderManifest {
+        &self.manifest
+    }
 }
 
 #[cfg(test)]
@@ -54,30 +87,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ensure_providers_installed_populates_store() {
-        let providers_dir = tempfile::tempdir().expect("temp providers dir");
-
-        ensure_providers_installed(providers_dir.path()).expect("install providers");
-        // Second call is a content-addressed no-op success.
-        ensure_providers_installed(providers_dir.path()).expect("reinstall providers");
-
-        let store = ProviderStore::new(providers_dir.path());
-        let index = store.read_index().expect("read index");
-        assert!(
-            !index.providers.is_empty(),
-            "expected at least one installed provider"
-        );
-        for entry in &index.providers {
-            assert!(
-                store.artifact_path(&entry.id).is_file(),
-                "missing retained artifact for `{}`",
-                entry.name
-            );
-            assert_ne!(
-                entry.name.as_str(),
-                "test-provider",
-                "the test fixture provider must not ship in the embedded bundle"
-            );
-        }
+    fn embedded_bundle_parses_validated_entries_without_store_side_effects() {
+        let embedded = EmbeddedProviders::load().expect("parse embedded providers");
+        assert!(!embedded.entries().is_empty());
+        assert!(!embedded.names().any(|name| name == "test-provider"));
     }
 }

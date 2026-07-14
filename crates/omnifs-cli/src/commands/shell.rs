@@ -162,7 +162,6 @@ mod tests {
                 fix: None,
             }],
             mounts: Vec::new(),
-            providers: Vec::new(),
         }
     }
 

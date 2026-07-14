@@ -250,7 +250,7 @@ impl Doctor<'_> {
             let mut report = InventoryReport {
                 inventory: result.inventory,
             }
-            .render(true);
+            .render();
             report.push(TableBlock::Resources(findings_table(&result.findings)));
             report.print();
         }
@@ -462,7 +462,6 @@ mod golden {
                 crate::inventory::DaemonState::Stopped,
                 Vec::new(),
                 Vec::new(),
-                Vec::new(),
             ),
             findings: Vec::new(),
         };
@@ -471,7 +470,6 @@ mod golden {
         let degraded = DoctorResult {
             inventory: Inventory::test(
                 crate::inventory::DaemonState::Failed,
-                Vec::new(),
                 Vec::new(),
                 Vec::new(),
             ),
@@ -501,7 +499,6 @@ mod golden {
                 crate::inventory::DaemonState::Stopped,
                 Vec::new(),
                 Vec::new(),
-                Vec::new(),
             ),
             findings: vec![targeted_finding()],
         };
@@ -521,7 +518,6 @@ mod golden {
             workspace: &workspace,
             inventory: Inventory::test(
                 crate::inventory::DaemonState::Stopped,
-                Vec::new(),
                 Vec::new(),
                 Vec::new(),
             ),

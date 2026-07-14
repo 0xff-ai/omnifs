@@ -144,28 +144,13 @@ pub fn force_unmount(mount_point: &Path) {
 /// Install the test provider into the provider store under `providers_dir` and
 /// return its content id.
 pub fn install_test_provider(providers_dir: &Path) -> omnifs_workspace::ids::ProviderId {
-    install_test_provider_as(providers_dir, "test-provider")
-}
-
-pub fn install_test_provider_as(
-    providers_dir: &Path,
-    provider_name: &str,
-) -> omnifs_workspace::ids::ProviderId {
-    let bytes = std::fs::read(release_wasm_dir().join("test_provider.wasm"))
-        .expect("read test provider wasm");
-    let id = omnifs_workspace::ids::ProviderId::from_wasm_bytes(&bytes);
+    let artifact = omnifs_workspace::provider::Artifact::from_file(
+        release_wasm_dir().join("test_provider.wasm"),
+    )
+    .expect("parse test provider wasm");
+    let id = artifact.id();
     let store = omnifs_workspace::provider::ProviderStore::new(providers_dir);
-    store.put_if_absent(&id, &bytes).expect("put test provider");
-    store
-        .install(
-            id,
-            omnifs_workspace::ids::ProviderMeta {
-                name: omnifs_workspace::ids::ProviderName::new(provider_name).unwrap(),
-                version: None,
-            },
-            "test_provider.wasm".into(),
-        )
-        .expect("install test provider");
+    store.retain(&artifact).expect("retain test provider");
     id
 }
 

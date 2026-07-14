@@ -2,7 +2,6 @@
 
 import {
   chmodSync,
-  cpSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -54,8 +53,8 @@ type DevOptions = {
 };
 
 type ProviderStoreIndex = {
-  latest?: Record<string, string>;
-  providers: Array<{ id: string }>;
+  version: 2;
+  providers: Array<{ id: string; name: string; version?: string }>;
 };
 
 type DevMountTemplate = {
@@ -204,7 +203,7 @@ async function main() {
     }
   }
 
-  await writeDevHome(devHome, providerStore, frontendImage, omnifsCli, render);
+  await writeDevHome(devHome, frontendImage, omnifsCli, render);
 
   const fixtures = await startFixtures(render.mounts, fixturePaths);
   try {
@@ -451,13 +450,12 @@ async function renderDevHomePlan(
 }
 
 function assertProviderInStore(index: ProviderStoreIndex, providerName: string): void {
-  const id = index.latest?.[providerName];
-  if (!id) {
-    throw new Error(`provider store bundle has no latest entry for ${providerName}`);
+  if (index.version !== 2) {
+    throw new Error(`provider store bundle has unsupported index version ${index.version}`);
   }
-  const entry = index.providers.find((candidate) => candidate.id === id);
+  const entry = index.providers.find((candidate) => candidate.name === providerName);
   if (!entry) {
-    throw new Error(`provider store bundle index is missing provider ${id}`);
+    throw new Error(`provider store bundle index has no exact entry for ${providerName}`);
   }
 }
 
@@ -524,7 +522,6 @@ function cliEnv(devHome: string, extra: Record<string, string | undefined> = {})
 
 async function writeDevHome(
   devHome: string,
-  providerStore: string,
   frontendImage: string,
   omnifsCli: string,
   render: DevHomeRender,
@@ -533,13 +530,10 @@ async function writeDevHome(
   chmodPrivateDir(devHome);
 
   const mountsDir = join(devHome, "mounts");
-  const providersDir = join(devHome, "providers");
   const credentialsPath = join(devHome, "credentials.json");
   rmSync(mountsDir, { recursive: true, force: true });
-  rmSync(providersDir, { recursive: true, force: true });
   rmSync(credentialsPath, { force: true });
   mkdirSync(mountsDir, { recursive: true });
-  cpSync(providerStore, providersDir, { recursive: true });
 
   // The daemon always runs host-native. Keep the Docker frontend image in the
   // workspace config so `frontend enable` resolves the local build without a

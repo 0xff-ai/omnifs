@@ -81,7 +81,7 @@ The Omnifs VFS wire protocol also serves over token-authenticated TCP because a 
 
 ### Provider bundles
 
-`just build providers` emits the content-addressed provider-store bundle at `target/omnifs-provider-store`. `scripts/dev.ts` embeds it into the natively-built `omnifs` CLI/daemon binary via `OMNIFS_PROVIDER_BUNDLE_DIR` and copies it into the dev provider store for runtime mount pinning; it must not compile providers again. The frontend image (`Dockerfile`'s `frontend-dev`/`frontend-release` stages, built from or injected into `thin-builder`) needs no provider-store build context at all: it runs `omnifs-thin fuse`, which contains no engine runtime and no provider bundle. Release CLI binaries embed the provider bundle and unpack it into `OMNIFS_HOME/providers`.
+`just build providers` emits the content-addressed provider-store bundle at `target/omnifs-provider-store`. `scripts/dev.ts` embeds it into the natively-built `omnifs` CLI/daemon binary via `OMNIFS_PROVIDER_BUNDLE_DIR`, validates its v2 entries by exact name and id, and invokes `mount add` so each selected embedded artifact is retained lazily; it must not copy the whole store into the dev home or compile providers again. The frontend image (`Dockerfile`'s `frontend-dev`/`frontend-release` stages, built from or injected into `thin-builder`) needs no provider-store build context at all: it runs `omnifs-thin fuse`, which contains no engine runtime and no provider bundle. Release CLI binaries embed the provider bundle and retain selected artifacts through mount creation.
 
 Provider-store indexes strict-parse both the top-level index object and retained provider entries. Unknown keys make the store unreadable instead of being silently accepted.
 
@@ -115,15 +115,14 @@ Every JSON result uses one envelope:
   "result": {
     "workspace": {},
     "frontends": [],
-    "mounts": [],
-    "providers": []
+    "mounts": []
   }
 }
 ```
 
-Inventory and receipt models are typed and sorted before both rendering and serialization. Status owns plural `frontends`, `mounts`, and `providers`; focused mutation receipts add plural `access_paths` where relevant. Frontends always carry `scope: "all"` and a mount count because they expose the complete namespace. Provider state is derived from exact reverse pins as `pinned`, `installed`, or `missing`; `up` applies the committed pin exactly and never chooses a replacement artifact.
+Inventory and receipt models are typed and sorted before both rendering and serialization. Status owns plural `frontends` and `mounts`; each mount reports the health of its exact provider pin, and focused mutation receipts add plural `access_paths` where relevant. Frontends always carry `scope: "all"` and a mount count because they expose the complete namespace. `up` applies the committed pin exactly and never installs or chooses a replacement artifact.
 
-Observation commands exit 0 when collection succeeds and every resource is positive or neutral, including a deliberately stopped daemon, observed runners waiting to reconnect, offline mounts while stopped, unpinned installed artifacts, and unnecessary auth. Inventory never adds a row for an unlaunched default. A complete inventory with an actionable or failed row exits 5. When a runtime record says the daemon should be live but its control probe is unavailable, status emits the trustworthy degraded inventory and exits 3. Human, JSON, and JSONL derive the same resource verdict; the exit mapper applies the unreachable override.
+Observation commands exit 0 when collection succeeds and every resource is positive or neutral, including a deliberately stopped daemon, observed runners waiting to reconnect, offline mounts while stopped, and unnecessary auth. Inventory never adds a row for an unlaunched default. A complete inventory with an actionable or failed row exits 5. When a runtime record says the daemon should be live but its control probe is unavailable, status emits the trustworthy degraded inventory and exits 3. Human, JSON, and JSONL derive the same resource verdict; the exit mapper applies the unreachable override.
 
 `down` stops the daemon only and leaves frontend runners alive. It treats shutdown as complete only
 after the acknowledged shutdown request's control surface becomes unavailable;

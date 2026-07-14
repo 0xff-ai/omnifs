@@ -1,9 +1,7 @@
 //! Status report: data types, collection, and rendering.
 
 use crate::error::ExitCode;
-use crate::inventory::{
-    DaemonState, FrontendStatus, Inventory, MountStatus, ProviderState, ProviderStatus, Severity,
-};
+use crate::inventory::{DaemonState, FrontendStatus, Inventory, MountStatus, Severity};
 use crate::ui::table::{
     Action as TableAction, Block as TableBlock, Cell as TableCell, Column as TableColumn,
     ContextStrip as TableContext, Meta as TableMeta, Priority as TablePriority,
@@ -37,7 +35,7 @@ impl InventoryReport {
         }
     }
 
-    pub(crate) fn render(&self, detail: bool) -> TableReport {
+    pub(crate) fn render(&self) -> TableReport {
         let mut report = TableReport::new();
         let daemon_state = self.inventory.daemon_state();
         let context_state = match daemon_state {
@@ -51,7 +49,7 @@ impl InventoryReport {
             DaemonState::Unreachable => TableState::failure("unreachable"),
             DaemonState::Failed => TableState::failure("failed"),
         };
-        let mut metadata = vec![
+        let metadata = vec![
             TableMeta::new(
                 "Daemon",
                 self.inventory
@@ -84,20 +82,16 @@ impl InventoryReport {
 
         report.push(TableBlock::Resources(mount_table(&self.inventory.mounts)));
 
-        if detail {
-            report.push(TableBlock::Resources(provider_table(
-                &self.inventory.providers,
-            )));
-        }
         report
     }
 }
 
 fn provider_label(mount: &MountStatus) -> String {
-    mount.provider.version.as_ref().map_or_else(
+    let identity = mount.provider.version.as_ref().map_or_else(
         || mount.provider.name.clone(),
         |version| format!("{}@{}", mount.provider.name, version),
-    )
+    );
+    format!("{identity} ({})", mount.provider.state.label())
 }
 
 /// Shared table builders for list/show consumers. The report delegates to
@@ -176,69 +170,20 @@ pub(crate) fn mount_table(mounts: &[MountStatus]) -> TableResources {
     table
 }
 
-pub(crate) fn provider_table(providers: &[ProviderStatus]) -> TableResources {
-    provider_rows_table("Providers", providers)
-}
-
-pub(crate) fn provider_rows_table(title: &str, rows: &[ProviderStatus]) -> TableResources {
-    let missing = rows
-        .iter()
-        .filter(|provider| provider.state == ProviderState::Missing)
-        .count();
-    let count = if missing == 0 {
-        crate::ui::table::CountLabel::named(rows.len(), "artifacts")
-    } else {
-        crate::ui::table::CountLabel::with_secondary(
-            rows.len().saturating_sub(missing),
-            "artifacts",
-            missing,
-            "missing",
-        )
-    };
-    let mut table = TableResources::new(
-        title,
-        count,
-        vec![
-            TableColumn::new("Provider", TablePriority::Identity, TableWidth::Auto),
-            TableColumn::new("Version", TablePriority::Essential, TableWidth::Auto),
-            TableColumn::new("Artifact", TablePriority::Secondary, TableWidth::Digest),
-            TableColumn::new("Mounts", TablePriority::Detail, TableWidth::Auto),
-            TableColumn::new("State", TablePriority::Essential, TableWidth::Auto),
-        ],
-    );
-    for provider in rows {
-        let mut row = TableRow::new(
-            [
-                TableCell::new(provider.name.clone()),
-                TableCell::new(
-                    provider
-                        .version
-                        .clone()
-                        .unwrap_or_else(|| "unversioned".into()),
-                ),
-                TableCell::new(provider.artifact.clone()),
-                TableCell::new(provider.pinned_by.join(", ")),
-                TableCell::state(table_state(
-                    provider.state.severity(),
-                    provider.state.label(),
-                )),
-            ],
-            table_state(provider.state.severity(), provider.state.label()),
-        );
-        if let Some(fix) = &provider.fix {
-            row = row.with_action(TableAction::fix(fix.clone()));
-        }
-        table.push(row);
-    }
-    table
-}
-
 fn mount_row_state(mount: &MountStatus) -> TableState {
-    let severity = [mount.auth.severity(), mount.serving.severity()]
-        .into_iter()
-        .max_by_key(|severity| severity.rank())
-        .unwrap_or(Severity::Neutral);
-    let label = if mount.auth.severity().rank() >= mount.serving.severity().rank() {
+    let severity = [
+        mount.provider.state.severity(),
+        mount.auth.severity(),
+        mount.serving.severity(),
+    ]
+    .into_iter()
+    .max_by_key(|severity| severity.rank())
+    .unwrap_or(Severity::Neutral);
+    let label = if mount.provider.state.severity().rank() >= mount.auth.severity().rank()
+        && mount.provider.state.severity().rank() >= mount.serving.severity().rank()
+    {
+        mount.provider.state.label()
+    } else if mount.auth.severity().rank() >= mount.serving.severity().rank() {
         mount.auth.label()
     } else {
         mount.serving.label()
@@ -258,53 +203,30 @@ fn table_state(severity: Severity, label: impl Into<String>) -> TableState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::inventory::{ProviderState, ProviderStatus};
 
-    fn report(daemon: DaemonState, degraded: bool) -> InventoryReport {
-        let inventory = Inventory::test(
-            daemon,
-            Vec::new(),
-            Vec::new(),
-            if degraded {
-                vec![ProviderStatus {
-                    name: "missing".into(),
-                    version: None,
-                    artifact: "a".repeat(64),
-                    pinned_by: Vec::new(),
-                    state: ProviderState::Missing,
-                    fix: Some("omnifs provider add <path>".into()),
-                }]
-            } else {
-                Vec::new()
-            },
-        );
+    fn report(daemon: DaemonState) -> InventoryReport {
+        let inventory = Inventory::test(daemon, Vec::new(), Vec::new());
         InventoryReport { inventory }
     }
 
     #[test]
     fn status_exit_code_reserves_daemon_unreachable_for_code_three() {
         assert_eq!(
-            report(DaemonState::Unreachable, true).exit_code(),
+            report(DaemonState::Unreachable).exit_code(),
             ExitCode::DaemonUnavailable
         );
-        assert_eq!(
-            report(DaemonState::Running, false).exit_code(),
-            ExitCode::Success
-        );
-        assert_eq!(
-            report(DaemonState::Running, true).exit_code(),
-            ExitCode::Degraded
-        );
+        assert_eq!(report(DaemonState::Running).exit_code(), ExitCode::Success);
     }
 
     #[test]
     fn context_metadata_uses_namespace_identity() {
-        let rendered = report(DaemonState::Stopped, false)
-            .render(false)
-            .render_with(crate::ui::table::RenderOptions {
-                width: 120,
-                color: false,
-            });
+        let rendered =
+            report(DaemonState::Stopped)
+                .render()
+                .render_with(crate::ui::table::RenderOptions {
+                    width: 120,
+                    color: false,
+                });
         assert!(rendered.contains("Daemon stopped · namespace /"));
         assert!(!rendered.contains("Namespace namespace"));
         assert!(rendered.contains("Fix  omnifs up"));
@@ -312,21 +234,21 @@ mod tests {
 
     #[test]
     fn context_actions_follow_observed_daemon_state() {
-        let healthy = report(DaemonState::Running, false);
+        let healthy = report(DaemonState::Running);
         let healthy_text = healthy
-            .render(false)
+            .render()
             .render_with(crate::ui::table::RenderOptions {
                 width: 120,
                 color: false,
             });
         assert!(!healthy_text.contains("Fix  omnifs"));
 
-        let unreachable = report(DaemonState::Unreachable, false)
-            .render(false)
-            .render_with(crate::ui::table::RenderOptions {
+        let unreachable = report(DaemonState::Unreachable).render().render_with(
+            crate::ui::table::RenderOptions {
                 width: 120,
                 color: false,
-            });
+            },
+        );
         assert!(unreachable.contains("× unreachable"));
         assert!(unreachable.contains("Fix  omnifs logs"));
     }

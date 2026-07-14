@@ -264,7 +264,7 @@ mod tests {
     use crate::inventory::{DaemonState, FrontendState};
 
     fn inventory_with_frontends(frontends: Vec<FrontendStatus>) -> Inventory {
-        Inventory::test(DaemonState::Running, frontends, Vec::new(), Vec::new())
+        Inventory::test(DaemonState::Running, frontends, Vec::new())
     }
 
     #[test]

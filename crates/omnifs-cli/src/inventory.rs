@@ -14,7 +14,7 @@ use omnifs_workspace::provider::Catalog;
 use omnifs_workspace::runtime_record::RuntimeRecord;
 use serde::Serialize;
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use crate::auth::{AuthReadiness, MountAuth};
@@ -35,7 +35,6 @@ pub(crate) struct Inventory {
     pub(crate) runners: Vec<RunnerStatus>,
     pub(crate) frontends: Vec<FrontendStatus>,
     pub(crate) mounts: Vec<MountStatus>,
-    pub(crate) providers: Vec<ProviderStatus>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -268,6 +267,33 @@ pub(crate) struct ProviderPin {
     pub(crate) name: String,
     pub(crate) version: Option<String>,
     pub(crate) artifact: String,
+    pub(crate) state: ProviderPinState,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub(crate) enum ProviderPinState {
+    Available,
+    Missing,
+    Corrupt { message: String },
+}
+
+impl ProviderPinState {
+    pub(crate) const fn severity(&self) -> Severity {
+        match self {
+            Self::Available => Severity::Positive,
+            Self::Missing => Severity::Attention,
+            Self::Corrupt { .. } => Severity::Error,
+        }
+    }
+
+    pub(crate) const fn label(&self) -> &'static str {
+        match self {
+            Self::Available => "available",
+            Self::Missing => "missing",
+            Self::Corrupt { .. } => "corrupt",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -386,49 +412,6 @@ impl ServingState {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub(crate) struct ProviderStatus {
-    pub(crate) name: String,
-    pub(crate) version: Option<String>,
-    pub(crate) artifact: String,
-    pub(crate) pinned_by: Vec<String>,
-    pub(crate) state: ProviderState,
-    pub(crate) fix: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum ProviderState {
-    Pinned,
-    Installed,
-    Missing,
-}
-
-impl ProviderState {
-    pub(crate) const fn label(self) -> &'static str {
-        match self {
-            Self::Pinned => "pinned",
-            Self::Installed => "installed",
-            Self::Missing => "missing",
-        }
-    }
-
-    pub(crate) const fn severity(self) -> Severity {
-        match self {
-            Self::Pinned => Severity::Positive,
-            Self::Installed => Severity::Neutral,
-            Self::Missing => Severity::Attention,
-        }
-    }
-
-    pub(crate) const fn fix(self) -> Option<&'static str> {
-        match self {
-            Self::Missing => Some("omnifs provider add <path>"),
-            Self::Pinned | Self::Installed => None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub(crate) struct AccessPath {
     pub(crate) filesystem: Filesystem,
     pub(crate) environment: Environment,
@@ -484,7 +467,6 @@ impl Inventory {
         for mount in &mut mounts {
             mount.access_count = access_count;
         }
-        let providers = provider_statuses(registry, catalog)?;
         let desired_mounts = registry
             .iter()
             .map(|(name, spec)| MountConfig {
@@ -504,7 +486,6 @@ impl Inventory {
             runners,
             frontends,
             mounts,
-            providers,
         })
     }
 
@@ -555,16 +536,13 @@ impl Inventory {
                 )
         }) || self.mounts.iter().any(|entry| {
             entry.fix.is_some()
+                || entry.provider.state.severity() >= Severity::Attention
                 || entry.auth.severity() >= Severity::Attention
                 || entry.serving.severity() >= Severity::Attention
-        }) || self
-            .providers
-            .iter()
-            .any(|entry| entry.state == ProviderState::Missing)
-            || matches!(
-                self.daemon.state(),
-                DaemonState::Failed | DaemonState::Unreachable
-            );
+        }) || matches!(
+            self.daemon.state(),
+            DaemonState::Failed | DaemonState::Unreachable
+        );
         if degraded {
             Verdict::Degraded
         } else {
@@ -581,7 +559,6 @@ impl Inventory {
         state: DaemonState,
         frontends: Vec<FrontendStatus>,
         mounts: Vec<MountStatus>,
-        providers: Vec<ProviderStatus>,
     ) -> Self {
         Self {
             home: PathBuf::from("/tmp/omnifs"),
@@ -592,7 +569,6 @@ impl Inventory {
             runners: Vec::new(),
             frontends,
             mounts,
-            providers,
         }
     }
 }
@@ -755,14 +731,21 @@ fn desired_mount_rows(
             let provider = ProviderPin {
                 name: spec.provider.meta.name.to_string(),
                 version: spec.provider.meta.version.as_ref().map(ToString::to_string),
-                artifact,
+                artifact: artifact.clone(),
+                state: match catalog.get(&spec.provider.id) {
+                    Ok(Some(_)) => ProviderPinState::Available,
+                    Ok(None) => ProviderPinState::Missing,
+                    Err(error) => ProviderPinState::Corrupt {
+                        message: error.to_string(),
+                    },
+                },
             };
             let local_auth = AuthState::from_readiness(
                 &MountAuth::from_spec(catalog, spec.clone()).readiness(credentials),
                 &name_string,
             );
             let auth = mount_auth_state(&name_string, local_auth, daemon);
-            let provider_present = catalog.get(&spec.provider.id).ok().flatten().is_some();
+            let provider_present = matches!(provider.state, ProviderPinState::Available);
             let serving = derive_serving_state(MountObservation {
                 provider: if provider_present {
                     Presence::Present
@@ -788,9 +771,7 @@ fn desired_mount_rows(
             // Fixes follow the same precedence as the observed facts: an
             // unreadable spec is emitted below, then artifact retention, auth,
             // daemon failure, and finally the absence of a loaded mount.
-            let fix = if !provider_present {
-                ProviderState::Missing.fix().map(str::to_owned)
-            } else if let Some(command) = auth.command() {
+            let fix = if let Some(command) = auth.command() {
                 Some(command.to_owned())
             } else {
                 serving.fix().map(str::to_owned)
@@ -834,6 +815,9 @@ fn invalid_mount_rows(registry: &Registry) -> Vec<MountStatus> {
                 name: "<invalid>".into(),
                 version: None,
                 artifact: String::new(),
+                state: ProviderPinState::Corrupt {
+                    message: failure.error.to_string(),
+                },
             },
             auth: AuthState::Error {
                 message: failure.error.to_string(),
@@ -863,6 +847,7 @@ fn observed_mount_rows(status: &DaemonStatus, desired: &BTreeSet<String>) -> Vec
                     name: mount.provider_name.clone(),
                     version: None,
                     artifact: mount.provider_id.clone(),
+                    state: ProviderPinState::Available,
                 },
                 auth,
                 serving: ServingState::Live,
@@ -912,90 +897,6 @@ fn derive_serving_state(observation: MountObservation) -> ServingState {
     } else {
         ServingState::Offline
     }
-}
-
-fn provider_statuses(registry: &Registry, catalog: &Catalog) -> Result<Vec<ProviderStatus>> {
-    let pins = reverse_pins(registry);
-    let installed = catalog
-        .installed()?
-        .into_iter()
-        .filter(|provider| provider.wasm_path().is_file())
-        .map(|provider| InstalledProvider {
-            name: provider.meta.name.to_string(),
-            version: provider.meta.version.as_ref().map(ToString::to_string),
-            artifact: provider.id.to_string(),
-        })
-        .collect();
-    Ok(provider_rows(installed, pins))
-}
-
-struct InstalledProvider {
-    name: String,
-    version: Option<String>,
-    artifact: String,
-}
-
-fn reverse_pins(
-    registry: &Registry,
-) -> BTreeMap<String, (String, Option<String>, BTreeSet<String>)> {
-    let mut pins = BTreeMap::<String, (String, Option<String>, BTreeSet<String>)>::new();
-    for (_, spec) in registry.iter() {
-        let artifact = spec.provider.id.to_string();
-        let entry = pins.entry(artifact).or_insert_with(|| {
-            (
-                spec.provider.meta.name.to_string(),
-                spec.provider.meta.version.as_ref().map(ToString::to_string),
-                BTreeSet::new(),
-            )
-        });
-        entry.2.insert(spec.mount.clone());
-    }
-    pins
-}
-
-fn provider_rows(
-    installed: Vec<InstalledProvider>,
-    mut pins: BTreeMap<String, (String, Option<String>, BTreeSet<String>)>,
-) -> Vec<ProviderStatus> {
-    let mut rows = installed
-        .into_iter()
-        .map(|provider| {
-            let artifact = provider.artifact;
-            let pinned_by = pins
-                .remove(&artifact)
-                .map_or_else(BTreeSet::new, |entry| entry.2);
-            let state = if pinned_by.is_empty() {
-                ProviderState::Installed
-            } else {
-                ProviderState::Pinned
-            };
-            ProviderStatus {
-                name: provider.name,
-                version: provider.version,
-                artifact,
-                pinned_by: pinned_by.into_iter().collect(),
-                state,
-                fix: state.fix().map(str::to_owned),
-            }
-        })
-        .collect::<Vec<_>>();
-    for (artifact, (name, version, mounts)) in pins {
-        rows.push(ProviderStatus {
-            name,
-            version,
-            artifact,
-            pinned_by: mounts.into_iter().collect(),
-            state: ProviderState::Missing,
-            fix: ProviderState::Missing.fix().map(str::to_owned),
-        });
-    }
-    rows.sort_by(|left, right| {
-        left.name
-            .cmp(&right.name)
-            .then_with(|| left.version.cmp(&right.version))
-            .then_with(|| left.artifact.cmp(&right.artifact))
-    });
-    rows
 }
 
 fn filesystem(value: FsType) -> Filesystem {
@@ -1105,13 +1006,14 @@ mod tests {
                 name: "p".into(),
                 version: None,
                 artifact: "a".repeat(64),
+                state: ProviderPinState::Available,
             },
             auth: auth.clone(),
             serving: ServingState::Offline,
             access_count: 0,
             fix: auth.command().map(ToOwned::to_owned),
         };
-        let inventory = Inventory::test(DaemonState::Stopped, vec![], vec![mount], vec![]);
+        let inventory = Inventory::test(DaemonState::Stopped, vec![], vec![mount]);
         assert_eq!(inventory.verdict(), Verdict::Degraded);
         assert_eq!(
             inventory.mounts[0].auth.command(),
@@ -1139,13 +1041,13 @@ mod tests {
                     name: "github".into(),
                     version: Some("1".into()),
                     artifact: "a".repeat(64),
+                    state: ProviderPinState::Available,
                 },
                 auth: AuthState::Ready,
                 serving: ServingState::Live,
                 access_count: 1,
                 fix: None,
             }],
-            vec![],
         );
         let name = MountName::new("github").unwrap();
         assert_eq!(
@@ -1287,13 +1189,13 @@ mod tests {
                     name: "github".into(),
                     version: None,
                     artifact: "a".repeat(64),
+                    state: ProviderPinState::Available,
                 },
                 auth: AuthState::Ready,
                 serving: ServingState::Live,
                 access_count: 1,
                 fix: None,
             }],
-            vec![],
         );
         let paths = inventory.access_paths(&MountName::new("github").unwrap());
         assert_eq!(paths.len(), 2);
@@ -1332,13 +1234,13 @@ mod tests {
                     name: "p".into(),
                     version: None,
                     artifact: "a".repeat(64),
+                    state: ProviderPinState::Available,
                 },
                 auth: AuthState::Ready,
                 serving: ServingState::Offline,
                 access_count: 0,
                 fix: None,
             }],
-            vec![],
         );
         assert_eq!(
             base.verdict(),
@@ -1379,13 +1281,13 @@ mod tests {
                     name: "p".into(),
                     version: Some("1.2.3".into()),
                     artifact: "b".repeat(64),
+                    state: ProviderPinState::Available,
                 },
                 auth: AuthState::NotNeeded,
                 serving: ServingState::Offline,
                 access_count: 0,
                 fix: None,
             }],
-            vec![],
         );
         let json = serde_json::to_value(inventory).unwrap();
         assert_eq!(json["daemon"]["probe"]["state"], "stopped");
@@ -1397,45 +1299,5 @@ mod tests {
                 .len(),
             64
         );
-    }
-
-    #[test]
-    fn provider_rows_reverse_pin_exact_artifacts_and_sort_mounts() {
-        let installed_artifact = "a".repeat(64);
-        let missing_artifact = "b".repeat(64);
-        let mut pins = BTreeMap::new();
-        pins.insert(
-            installed_artifact.clone(),
-            (
-                "github".into(),
-                Some("1.0.0".into()),
-                ["zeta", "alpha"].into_iter().map(str::to_owned).collect(),
-            ),
-        );
-        pins.insert(
-            missing_artifact.clone(),
-            (
-                "github".into(),
-                Some("2.0.0".into()),
-                BTreeSet::from(["work".into()]),
-            ),
-        );
-        let rows = provider_rows(
-            vec![InstalledProvider {
-                name: "github".into(),
-                version: Some("1.0.0".into()),
-                artifact: installed_artifact.clone(),
-            }],
-            pins,
-        );
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].state, ProviderState::Pinned);
-        assert_eq!(rows[0].pinned_by, vec!["alpha", "zeta"]);
-        assert_eq!(rows[0].artifact, installed_artifact);
-        assert_eq!(rows[1].state, ProviderState::Missing);
-        assert_eq!(rows[1].artifact, missing_artifact);
-        assert_eq!(rows[1].fix.as_deref(), Some("omnifs provider add <path>"));
-        assert_eq!(ProviderState::Installed.severity(), Severity::Neutral);
-        assert_eq!(ProviderState::Missing.severity(), Severity::Attention);
     }
 }

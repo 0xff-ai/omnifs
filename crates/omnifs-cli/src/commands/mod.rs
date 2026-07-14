@@ -5,7 +5,6 @@ pub mod frontend;
 pub mod inspect;
 pub mod logs;
 pub mod mount;
-pub mod provider;
 pub mod receipt;
 pub mod shell;
 pub mod skill;

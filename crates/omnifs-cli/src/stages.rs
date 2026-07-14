@@ -19,7 +19,9 @@ use crate::commands::mount::mount_file::MountFile;
 use crate::commands::mount::provider_selection::ProviderSelection;
 use crate::commands::mount::spec_creation::{CreatedMountSpec, MountSpecCreator};
 use crate::commands::mount::{AddArgs, AuthImportDecision, ImportOutcome};
-use crate::error::{ExitCode, WithExitCode, WithHint};
+use crate::error::{ExitCode, WithExitCode};
+use crate::provider_bundle::EmbeddedProviders;
+use crate::provider_resolver::ProviderResolver;
 use crate::token_source::TokenSource;
 use crate::workspace::Workspace;
 
@@ -151,20 +153,18 @@ pub(crate) fn spec_creation(
     prompt: PromptMode,
 ) -> anyhow::Result<MountInitPlan> {
     let paths = workspace.layout();
-    crate::provider_bundle::ensure_providers_installed(&paths.providers_dir)?;
     let interactive = init_interactive(prompt);
-    let catalog = workspace.catalog();
     let mounts = workspace.mounts()?;
-    let installed = crate::catalog::installed_providers(catalog)?;
-    if installed.is_empty() {
-        anyhow::bail!("no built-in or disk providers are available");
-    }
+    let embedded = EmbeddedProviders::load()?;
+    let provider_selection = ProviderSelection::new(&mounts, &embedded);
 
     // No provider argument in an interactive output: choose one with the
     // generic single-select prompt instead of a bare list.
     let picked = if args.provider.is_none() && interactive {
-        let options =
-            crate::catalog::provider_options(&installed, &std::collections::BTreeMap::new());
+        let options = crate::provider_resolver::provider_options(
+            &embedded,
+            &std::collections::BTreeMap::new(),
+        );
         let choices = options
             .into_iter()
             .map(|option| (option.name.clone(), option.name, option.hint));
@@ -176,28 +176,22 @@ pub(crate) fn spec_creation(
     } else {
         None
     };
-    let provider_selection = ProviderSelection::new(&mounts, &installed);
-    let (provider_name, mount_name) = provider_selection.resolve(
+    let selector = provider_selection.select(
         args.provider.as_deref().or(picked.as_deref()),
+        interactive,
+        output,
+    )?;
+    let resolved = ProviderResolver::new(&paths.providers_dir, &embedded).resolve(&selector)?;
+    let provider_name = resolved.reference.meta.name.to_string();
+    let mount_name = provider_selection.mount_name(
+        &resolved.manifest.default_mount,
         args.as_name.as_deref(),
         interactive,
         prompt.yes,
         output,
     )?;
-
-    let (provider, manifest) = crate::catalog::find_installed(&installed, &provider_name)
-        .ok_or_else(|| {
-            anyhow!(
-                "provider `{provider_name}` not found; available: {}",
-                provider_selection.provider_names().join(", ")
-            )
-        })
-        .with_hint("Run `omnifs provider ls` to list available providers (or `omnifs mount add` with no args to pick one interactively)")
-        .with_hint(format!(
-            "Or run `omnifs provider add <wasm-or-dir>` to install provider artifacts into {}",
-            paths.providers_dir.display()
-        ))?;
-    let reference = provider.reference();
+    let reference = resolved.reference;
+    let manifest = resolved.manifest;
     if mounts.iter().any(|mount| mount.name == mount_name) {
         anyhow::bail!(
             "mount `{mount_name}` already exists; remove it first or choose a different name"
@@ -212,7 +206,7 @@ pub(crate) fn spec_creation(
         args,
         &reference,
         &mount_name,
-        manifest,
+        &manifest,
         auth_manifest.as_ref(),
     )?;
     // Resolve auth first: an ambient credential (imported under --yes or on the
@@ -236,7 +230,7 @@ pub(crate) fn spec_creation(
         .with_exit_code(ExitCode::AuthRequired);
     }
 
-    let creator = MountSpecCreator::new(&reference, &mount_name, manifest);
+    let creator = MountSpecCreator::new(&reference, &mount_name, &manifest);
     if !interactive && creator.requires_prompt() && args.config_json.is_none() {
         anyhow::bail!(
             "cannot complete provider config prompts for `{provider_name}` without an interactive terminal; pass --config-json <json>"
@@ -250,7 +244,7 @@ pub(crate) fn spec_creation(
     } else {
         creator.create(output, interactive)?
     };
-    apply_mount_overrides(args, manifest, &creator, &mut created)?;
+    apply_mount_overrides(args, &manifest, &creator, &mut created)?;
 
     let mount_file = MountFile::new(
         &mount_name,

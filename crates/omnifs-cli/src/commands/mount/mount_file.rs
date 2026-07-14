@@ -11,8 +11,7 @@ use omnifs_workspace::mounts::{Auth, OAuth, StaticToken};
 /// type only assembles the in-memory value.
 pub(crate) struct MountFile<'a> {
     mount_name: &'a MountName,
-    /// The pinned provider reference written into the mount spec, taken from the
-    /// latest installed artifact for this provider.
+    /// The exact retained provider reference written into the mount spec.
     reference: &'a ProviderRef,
     auth: Option<&'a AuthSelection>,
     scopes: &'a [String],
