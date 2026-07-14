@@ -356,7 +356,7 @@ impl<'a> KubeApi<'a> {
                         let api_root = format!("/apis/{group_version}");
                         match self.get_json::<APIResourceList>(&api_root, &[]).await {
                             Ok(list) => {
-                                discovery.add_resources(&api_root, &group.name, &list.resources)
+                                discovery.add_resources(&api_root, &group.name, &list.resources);
                             },
                             Err(failure) => discovery.record_failure(failure),
                         }
