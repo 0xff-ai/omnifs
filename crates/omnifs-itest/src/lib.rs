@@ -159,11 +159,10 @@ impl RuntimeHarness {
     pub fn list_with_cursor(
         &self,
         path: &str,
-        cursor: Option<omnifs_wit::provider::types::Cursor>,
+        cursor: Option<&omnifs_wit::provider::types::Cursor>,
     ) -> Result<TestOp<'_, ListChildrenResult>, EngineError> {
         let path = parse_path(path);
-        self.runtime
-            .start_list_children(&path, None, cursor.as_ref())
+        self.runtime.start_list_children(&path, None, cursor)
     }
 
     pub fn read(&self, path: &str) -> Result<TestOp<'_, ReadFileOutcome>, EngineError> {
@@ -238,7 +237,7 @@ impl ReadFileOpExt for TestOp<'_, ReadFileOutcome> {
     fn into_read_file(self) -> Result<ReadFileResult, EngineError> {
         match self.into_result()?.map_err(EngineError::ProviderError)? {
             ReadFileOutcome::Found(result) => Ok(result),
-            other => Err(EngineError::ProviderProtocol(format!(
+            other @ ReadFileOutcome::NotFound(_) => Err(EngineError::ProviderProtocol(format!(
                 "expected found read-file result, got {other:?}"
             ))),
         }

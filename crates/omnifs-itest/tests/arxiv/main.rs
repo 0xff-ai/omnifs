@@ -311,7 +311,7 @@ fn category_listing_paginates() {
     }
 
     let page1 = harness
-        .list_with_cursor("/categories/cs.AI/papers", Some(Cursor::Page(1)))
+        .list_with_cursor("/categories/cs.AI/papers", Some(&Cursor::Page(1)))
         .unwrap();
     let page1_fetch = page1.expect_single_fetch();
     assert!(page1_fetch.url.contains("start=50"));
