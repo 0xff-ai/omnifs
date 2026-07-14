@@ -218,10 +218,7 @@ impl AuthManager {
             return RefreshOutcome::NotApplicable;
         };
         let evidence = RejectionEvidence::new(status.as_u16(), www_authenticate(headers));
-        binding
-            .service
-            .report_rejected(&binding.id, evidence)
-            .await
+        binding.service.report_rejected(&binding.id, evidence).await
     }
 }
 

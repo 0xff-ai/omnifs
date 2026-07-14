@@ -1,7 +1,5 @@
 use omnifs_caps::Allowlist;
-use omnifs_engine::test_support::auth::{
-    AuthManager, RefreshOutcome, manager_with_store_and_http,
-};
+use omnifs_engine::test_support::auth::{AuthManager, RefreshOutcome, manager_with_store_and_http};
 use omnifs_engine::test_support::blob::{BlobCache, BlobExecutor, BlobLimits};
 use omnifs_engine::test_support::capability::CapabilityChecker;
 use omnifs_engine::test_support::http::HttpStack;

@@ -18,9 +18,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use omnifs_engine::test_support::auth::{
-    AuthManager, RefreshOutcome, manager_with_store_and_http,
-};
+use omnifs_engine::test_support::auth::{AuthManager, RefreshOutcome, manager_with_store_and_http};
 use omnifs_workspace::authn::CredentialId;
 use omnifs_workspace::authn::{
     AuthManifest, AuthScheme, OAuthFlow, OauthScheme, PkceManualCodeConfig, TokenEndpointAuthMethod,

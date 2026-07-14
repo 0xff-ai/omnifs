@@ -42,8 +42,8 @@ pub fn wasm_cache_dir() -> PathBuf {
 
 pub mod auth {
     pub use crate::auth::AuthManager;
-    pub use omnifs_auth::{CredentialService, RefreshOutcome};
     use omnifs_auth::OAuthClient;
+    pub use omnifs_auth::{CredentialService, RefreshOutcome};
     use omnifs_workspace::authn::AuthManifest;
     use omnifs_workspace::creds::CredentialStore;
     use omnifs_workspace::mounts::Auth;
