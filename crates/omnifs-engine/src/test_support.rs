@@ -5,9 +5,6 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 
 use crate::Runtime;
-use crate::cache::{
-    CachedCanonical, Caches, Record, RecordKind, SCHEMA_VERSION, Store, object, view as cache_view,
-};
 use crate::callouts::{TestCallout, TestSignal, record_outcome as inner_record};
 use crate::inspector::WitCalloutView;
 use crate::log_redaction::{LogUrl as InternalLogUrl, WitHeaders as InternalWitHeaders};
@@ -487,18 +484,4 @@ impl fmt::Display for WitHeaders<'_> {
 /// callout result, exactly as the production executor methods do.
 pub fn record_outcome(result: &wit_types::CalloutResult) {
     inner_record(result);
-}
-
-#[allow(dead_code)]
-fn _cache_types_are_part_of_test_support() -> Option<(
-    CachedCanonical,
-    Caches,
-    Record,
-    RecordKind,
-    Store,
-    object::Cache,
-    cache_view::Cache,
-)> {
-    let _ = SCHEMA_VERSION;
-    None
 }

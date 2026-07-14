@@ -10,8 +10,6 @@ pub(crate) const RPC_PROG_UNAVAIL: u32 = 1;
 pub(crate) const RPC_PROG_MISMATCH: u32 = 2;
 pub(crate) const RPC_PROC_UNAVAIL: u32 = 3;
 pub(crate) const RPC_GARBAGE_ARGS: u32 = 4;
-#[allow(dead_code)]
-pub(crate) const RPC_SYSTEM_ERR: u32 = 5;
 
 // reject_stat values for MSG_DENIED
 pub(crate) const RPC_MISMATCH: u32 = 0;
@@ -19,8 +17,6 @@ pub(crate) const AUTH_ERROR: u32 = 1;
 
 // auth_stat values for AUTH_ERROR denied body
 pub(crate) const AUTH_BADCRED: u32 = 1;
-#[allow(dead_code)]
-pub(crate) const AUTH_REJECTEDCRED: u32 = 2;
 
 // RPC auth flavors
 pub(crate) const AUTH_NONE: u32 = 0;

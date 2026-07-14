@@ -152,27 +152,9 @@ impl Glyph {
     }
 }
 
-/// Render a digest short and dim for human output: the first eight hex
-/// characters. The full digest is retained for structured output.
-// Kept for compact provider artifact labels.
-#[allow(dead_code)]
-pub(crate) fn short_digest(digest: &str) -> String {
-    let short: String = digest.chars().take(8).collect();
-    dim(short)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn short_digest_takes_eight_chars() {
-        let full = "2867dacb1f9e0a5c";
-        // Strip color to assert on the visible text.
-        let rendered = short_digest(full);
-        assert!(rendered.contains("2867dacb"));
-        assert!(!rendered.contains("1f9e"));
-    }
 
     #[test]
     fn every_glyph_is_one_visible_column() {

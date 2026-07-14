@@ -163,12 +163,6 @@ impl<R: Render> LiveRow<R> {
         self.update(&format!("{verb}… {secs}s"));
     }
 
-    /// Determinate byte meter: `148 MB / 262 MB`.
-    #[allow(dead_code)] // Guest image pull (T3).
-    pub(crate) fn update_bytes(&mut self, done: u64, total: u64) {
-        self.update(&format!("{} / {}", human_bytes(done), human_bytes(total)));
-    }
-
     /// Determinate byte meter with a short source or operation suffix:
     /// `148 MB / 262 MB from ghcr.io`.
     pub(crate) fn update_bytes_with(
@@ -182,12 +176,6 @@ impl<R: Render> LiveRow<R> {
             human_bytes(done),
             human_bytes(total)
         ));
-    }
-
-    /// Determinate count meter: `3 / 10 files`.
-    #[allow(dead_code)] // snapshot export (T3).
-    pub(crate) fn update_count(&mut self, done: u64, total: u64, unit: &str) {
-        self.update(&format!("{done} / {total} {unit}"));
     }
 
     /// Combined file and byte meter for exports whose total shape is known.
@@ -288,7 +276,7 @@ mod tests {
         let mut recorder = EventRecorder::default();
         {
             let mut row = LiveRow::with_renderer("image", &mut recorder);
-            row.update_bytes(148_000_000, 262_000_000);
+            row.update_bytes_with(148_000_000, 262_000_000, "from ghcr.io");
             row.settle_ok("downloaded");
         }
         assert!(matches!(recorder.0[0], UiEvent::Progress { .. }));

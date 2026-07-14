@@ -86,15 +86,6 @@ impl Plan {
         self.rows.len().saturating_sub(self.remove_count())
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn summary(&self) -> String {
-        format!(
-            "{} to remove, {} kept",
-            self.remove_count(),
-            self.keep_count()
-        )
-    }
-
     /// Convert the plan into an event. Keeping this on the plan means every
     /// renderer sees the same rows and counts.
     pub(crate) fn event(&self) -> UiEvent {
@@ -335,7 +326,6 @@ mod tests {
 
         assert_eq!(plan.remove_count(), 2);
         assert_eq!(plan.keep_count(), 1);
-        assert_eq!(plan.summary(), "2 to remove, 1 kept");
 
         let receipt = plan.receipt([
             Outcome::done("mount:a", "deleted"),
