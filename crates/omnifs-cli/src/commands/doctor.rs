@@ -418,7 +418,7 @@ mod golden {
             Finding::from_probe(
                 "config identity",
                 None,
-                ProbeResult::Ok("9 providers (27 artifacts)".to_string()),
+                ProbeResult::Ok("workspace paths agree".to_string()),
             ),
             Finding::from_probe(
                 "credential store",

@@ -1,7 +1,7 @@
 //! omnifs-cli: Command-line interface for omnifs.
 //!
 //! Provides commands to mount and unmount the virtual filesystem,
-//! as well as provider introspection utilities.
+//! as well as workspace inspection utilities.
 
 // The output drift gate. Direct std printing is denied crate-wide so a new
 // command cannot bypass the `ui` toolkit; the anstream print macros are denied

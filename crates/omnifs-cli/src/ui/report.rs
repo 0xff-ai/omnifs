@@ -76,9 +76,9 @@ mod tests {
 
     #[test]
     fn rows_keep_a_separator_before_the_value() {
-        let row = Row::new(Glyph::Done, "providers discovered", "9 providers");
+        let row = Row::new(Glyph::Done, "frontends observed", "2 attached");
         let plain = strip_ansi(&row.render());
-        assert!(plain.contains("providers dis… 9 providers"), "{plain:?}");
+        assert!(plain.contains("frontends ob… 2 attached"), "{plain:?}");
     }
 
     #[test]

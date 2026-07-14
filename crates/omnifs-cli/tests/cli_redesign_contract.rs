@@ -215,7 +215,7 @@ fn cli_redesign_contract_narrow_status_uses_stacked_schema_fields() {
 }
 
 #[test]
-fn cli_redesign_contract_status_json_exposes_four_authoritative_resource_arrays() {
+fn cli_redesign_contract_status_json_exposes_observed_frontends_and_mounts() {
     let fixture = Fixture::new();
     let output = fixture.run(&["status", "--output", "json"]);
     let json = stdout_json(&output);
