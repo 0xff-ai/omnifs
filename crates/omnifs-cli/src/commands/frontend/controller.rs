@@ -164,9 +164,8 @@ impl<'a> FrontendController<'a> {
             environment: args.environment.into(),
             location: args.location,
         };
-        let id = id_from_spec(&spec, self.host_os, &self.default_location)?;
         let mut candidate = self.plan.clone();
-        let changed = candidate.enable(spec, self.host_os, &self.default_location)?;
+        let (changed, id) = candidate.enable(spec, self.host_os, &self.default_location)?;
         if changed {
             self.plan = candidate;
             self.document.replace_frontends(&self.plan)?;
@@ -250,7 +249,7 @@ impl<'a> FrontendController<'a> {
                     environment,
                     location,
                 };
-                id_from_spec(&spec, self.host_os, &self.default_location)?
+                spec.resolve(self.host_os, &self.default_location)?.id()
             },
             None => bail!("no frontend matches the selector"),
         };
@@ -642,27 +641,9 @@ fn observed_id(frontend: &FrontendInfo) -> FrontendId {
         location: (frontend.delivery == FrontendDelivery::Local)
             .then(|| frontend.mount_point.clone()),
     };
-    id_from_spec(&spec, current_host_os(), &frontend.mount_point)
+    spec.resolve(current_host_os(), &frontend.mount_point)
         .expect("observed frontend identity is valid")
-}
-
-fn id_from_spec(
-    spec: &FrontendSpec,
-    host_os: HostOs,
-    default_location: &Path,
-) -> Result<FrontendId> {
-    let mut plan = FrontendPlan::default();
-    plan.enable(spec.clone(), host_os, default_location)?;
-    plan.effective(host_os, default_location)?
-        .into_iter()
-        .find(|entry| {
-            entry.filesystem == spec.filesystem
-                && entry.environment == spec.environment
-                && (spec.environment != Environment::Host
-                    || spec.location.as_deref() == entry.location.as_deref())
-        })
-        .map(|entry| entry.id())
-        .context("frontend identity did not resolve")
+        .id()
 }
 
 async fn wait_for_mount(

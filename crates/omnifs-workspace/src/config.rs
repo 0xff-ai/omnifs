@@ -233,6 +233,37 @@ impl FrontendSpec {
         }
         Ok(())
     }
+
+    pub fn resolve(
+        &self,
+        host_os: HostOs,
+        default_location: impl AsRef<Path>,
+    ) -> Result<EffectiveFrontend, ConfigError> {
+        let default_location = default_location.as_ref();
+        self.validate(host_os)?;
+        let location = match self.environment {
+            Environment::Host => {
+                let location = self
+                    .location
+                    .clone()
+                    .unwrap_or_else(|| default_location.to_path_buf());
+                if !location.is_absolute() {
+                    return Err(ConfigError::Validation(format!(
+                        "host frontend location must be absolute: {}",
+                        location.display()
+                    )));
+                }
+                Some(location)
+            },
+            Environment::Docker | Environment::Krunkit => None,
+        };
+        Ok(EffectiveFrontend {
+            filesystem: self.filesystem,
+            environment: self.environment,
+            location,
+            source: PlanSource::Configured,
+        })
+    }
 }
 
 impl FrontendPlan {
@@ -261,15 +292,9 @@ impl FrontendPlan {
         let mut docker_seen = false;
         let mut krunkit_seen = false;
         for spec in specs {
-            spec.validate(host_os)?;
-            let location = match spec.environment {
-                Environment::Host => Some(
-                    spec.location
-                        .unwrap_or_else(|| default_location.to_path_buf()),
-                ),
-                Environment::Docker | Environment::Krunkit => None,
-            };
-            match spec.environment {
+            let mut resolved = spec.resolve(host_os, default_location)?;
+            resolved.source = source;
+            match resolved.environment {
                 Environment::Docker if docker_seen => {
                     return Err(ConfigError::Validation(
                         "at most one docker frontend entry is allowed".into(),
@@ -283,24 +308,19 @@ impl FrontendPlan {
                 },
                 Environment::Krunkit => krunkit_seen = true,
                 Environment::Host => {
-                    let resolved = location.as_ref().ok_or_else(|| {
+                    let location = resolved.location.as_ref().ok_or_else(|| {
                         ConfigError::Validation("host frontend location did not resolve".into())
                     })?;
-                    if host_locations.iter().any(|existing| existing == resolved) {
+                    if host_locations.iter().any(|existing| existing == location) {
                         return Err(ConfigError::Validation(format!(
                             "two host frontend entries resolve to the same location {}",
-                            resolved.display()
+                            location.display()
                         )));
                     }
-                    host_locations.push(resolved.clone());
+                    host_locations.push(location.clone());
                 },
             }
-            effective.push(EffectiveFrontend {
-                filesystem: spec.filesystem,
-                environment: spec.environment,
-                location,
-                source,
-            });
+            effective.push(resolved);
         }
         Ok(effective)
     }
@@ -310,30 +330,22 @@ impl FrontendPlan {
         spec: FrontendSpec,
         host_os: HostOs,
         default_location: impl AsRef<Path>,
-    ) -> Result<bool, ConfigError> {
+    ) -> Result<(bool, FrontendId), ConfigError> {
         let mut candidate = self.clone();
         candidate.materialize(host_os, default_location.as_ref());
-        let wanted = FrontendPlan {
-            entries: vec![spec.clone()],
-            configured: true,
-        }
-        .effective(host_os, default_location.as_ref())?
-        .into_iter()
-        .next()
-        .ok_or_else(|| ConfigError::Validation("frontend plan entry disappeared".into()))?
-        .id();
+        let wanted = spec.resolve(host_os, default_location.as_ref())?.id();
         if candidate
             .effective(host_os, default_location.as_ref())?
             .iter()
             .any(|existing| existing.id() == wanted)
         {
             *self = candidate;
-            return Ok(false);
+            return Ok((false, wanted));
         }
         candidate.entries.push(spec);
         candidate.effective(host_os, default_location)?;
         *self = candidate;
-        Ok(true)
+        Ok((true, wanted))
     }
 
     pub fn disable(
@@ -663,7 +675,9 @@ mod tests {
         let location = "/home/user/omnifs";
         let mut linux = FrontendPlan::default();
         let fuse = spec(Filesystem::Fuse, Environment::Host, None);
-        assert!(!linux.enable(fuse, HostOs::Linux, location).unwrap());
+        let (changed, canonical_id) = linux.enable(fuse, HostOs::Linux, location).unwrap();
+        assert!(!changed);
+        assert_eq!(canonical_id.location(), Some(Path::new(location)));
         assert_eq!(linux.entries.len(), 1);
         let id = linux.effective(HostOs::Linux, location).unwrap()[0].id();
         assert!(linux.disable(&id, HostOs::Linux, location).unwrap());
@@ -671,7 +685,7 @@ mod tests {
 
         let mut mac = FrontendPlan::default();
         let nfs = spec(Filesystem::Nfs, Environment::Host, None);
-        assert!(!mac.enable(nfs, HostOs::MacOs, location).unwrap());
+        assert!(!mac.enable(nfs, HostOs::MacOs, location).unwrap().0);
         assert_eq!(mac.entries.len(), 2);
         let docker_id = mac.effective(HostOs::MacOs, location).unwrap()[1].id();
         assert!(mac.disable(&docker_id, HostOs::MacOs, location).unwrap());
