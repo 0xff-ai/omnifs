@@ -89,7 +89,6 @@ where
     }
 
     pub(crate) fn open(
-        &mut self,
         result: &std::result::Result<wit_types::OpenFileResult, wit_types::ProviderError>,
     ) -> std::result::Result<(), String> {
         if let Ok(result) = result {
@@ -99,7 +98,6 @@ where
     }
 
     pub(crate) fn chunk(
-        &mut self,
         result: &std::result::Result<wit_types::ReadChunkResult, wit_types::ProviderError>,
         requested_length: u32,
     ) -> std::result::Result<(), String> {
@@ -111,20 +109,6 @@ where
                 result.content.len()
             ));
         }
-        Ok(())
-    }
-
-    pub(crate) fn initialize(
-        &mut self,
-        _result: &std::result::Result<wit_types::InitializeResult, wit_types::ProviderError>,
-    ) -> std::result::Result<(), String> {
-        Ok(())
-    }
-
-    pub(crate) fn event(
-        &mut self,
-        _result: &std::result::Result<(), wit_types::ProviderError>,
-    ) -> std::result::Result<(), String> {
         Ok(())
     }
 
@@ -338,8 +322,8 @@ pub(crate) fn validate_open<F>(
 where
     F: Fn(u64) -> bool,
 {
-    let mut v = ReturnValidator::common(result, effects, tree_exists)?;
-    v.open(result)
+    let _ = ReturnValidator::common(result, effects, tree_exists)?;
+    ReturnValidator::<F>::open(result)
 }
 pub(crate) fn validate_chunk<F>(
     result: &std::result::Result<wit_types::ReadChunkResult, wit_types::ProviderError>,
@@ -350,8 +334,8 @@ pub(crate) fn validate_chunk<F>(
 where
     F: Fn(u64) -> bool,
 {
-    let mut v = ReturnValidator::common(result, effects, tree_exists)?;
-    v.chunk(result, requested_length)
+    let _ = ReturnValidator::common(result, effects, tree_exists)?;
+    ReturnValidator::<F>::chunk(result, requested_length)
 }
 pub(crate) fn validate_initialize<F>(
     result: &std::result::Result<wit_types::InitializeResult, wit_types::ProviderError>,
@@ -361,8 +345,8 @@ pub(crate) fn validate_initialize<F>(
 where
     F: Fn(u64) -> bool,
 {
-    let mut v = ReturnValidator::common(result, effects, tree_exists)?;
-    v.initialize(result)
+    let _ = ReturnValidator::common(result, effects, tree_exists)?;
+    Ok(())
 }
 pub(crate) fn validate_event<F>(
     result: &std::result::Result<(), wit_types::ProviderError>,
@@ -372,8 +356,8 @@ pub(crate) fn validate_event<F>(
 where
     F: Fn(u64) -> bool,
 {
-    let mut v = ReturnValidator::common(result, effects, tree_exists)?;
-    v.event(result)
+    let _ = ReturnValidator::common(result, effects, tree_exists)?;
+    Ok(())
 }
 
 fn effects_empty(effects: &wit_types::Effects) -> bool {

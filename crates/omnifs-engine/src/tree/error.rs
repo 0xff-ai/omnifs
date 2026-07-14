@@ -97,6 +97,7 @@ pub type Result<T> = std::result::Result<T, TreeError>;
 impl From<crate::EngineError> for TreeError {
     fn from(err: crate::EngineError) -> Self {
         match err {
+            crate::EngineError::Wasmtime(error) => TreeError::internal(error.to_string()),
             crate::EngineError::ProviderProtocol(msg) => TreeError::internal(msg),
             crate::EngineError::ProviderError(e) => TreeError {
                 kind: TreeErrorKind::from(
@@ -110,7 +111,6 @@ impl From<crate::EngineError> for TreeError {
                     .retry_after
                     .map(|secs| Duration::from_secs(u64::from(secs))),
             },
-            other => TreeError::internal(other.to_string()),
         }
     }
 }

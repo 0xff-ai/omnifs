@@ -137,20 +137,21 @@ pub struct TestOp<'a, T> {
     state: TestOpState<T>,
 }
 
+type TestResult<T> = std::result::Result<
+    (
+        std::result::Result<T, wit_types::ProviderError>,
+        wit_types::Effects,
+    ),
+    EngineError,
+>;
+type TestReceiver<T> = mpsc::Receiver<TestResult<T>>;
+
 enum TestOpState<T> {
     InProgress,
     WaitingForCallouts {
         callouts: Vec<wit_types::Callout>,
         replies: Vec<tokio::sync::oneshot::Sender<wit_types::CalloutResult>>,
-        result_rx: mpsc::Receiver<
-            std::result::Result<
-                (
-                    std::result::Result<T, wit_types::ProviderError>,
-                    wit_types::Effects,
-                ),
-                EngineError,
-            >,
-        >,
+        result_rx: TestReceiver<T>,
     },
     Returned {
         result: std::result::Result<T, wit_types::ProviderError>,
@@ -218,65 +219,68 @@ impl Runtime {
     #[doc(hidden)]
     pub fn start_lookup_child(
         &self,
-        parent: omnifs_core::path::Path,
-        name: omnifs_core::path::Segment,
+        parent: &omnifs_core::path::Path,
+        name: &omnifs_core::path::Segment,
     ) -> crate::runtime::Result<TestOp<'_, wit_types::LookupChildResult>> {
         let id = self.next_operation_id();
+        let parent_text = parent.as_str().to_owned();
+        let name_text = name.as_str().to_owned();
         if self.test_callouts.is_some() {
-            let parent = parent.as_str().to_string();
-            let name = name.as_str().to_string();
             return TestOp::start_callout(self, id, move |instance| async move {
-                instance.lookup_child(id, parent, name).await
+                instance.lookup_child(id, parent_text, name_text).await
             });
         }
-        let transport = futures::executor::block_on(self.instance.lookup_child(
-            id,
-            parent.as_str().to_string(),
-            name.as_str().to_string(),
-        ))?;
+        let transport =
+            futures::executor::block_on(self.instance.lookup_child(id, parent_text, name_text))?;
         TestOp::from_transport(self, id, Ok(transport))
     }
 
     #[doc(hidden)]
     pub fn start_list_children(
         &self,
-        path: omnifs_core::path::Path,
+        path: &omnifs_core::path::Path,
         validator: Option<String>,
-        cursor: Option<wit_types::Cursor>,
+        cursor: Option<&wit_types::Cursor>,
     ) -> crate::runtime::Result<TestOp<'_, wit_types::ListChildrenResult>> {
         let id = self.next_operation_id();
+        let path_text = path.as_str().to_owned();
+        let cursor = cursor.cloned();
         if self.test_callouts.is_some() {
-            let path = path.as_str().to_string();
+            let callout_path = path_text.clone();
             return TestOp::start_callout(self, id, move |instance| async move {
-                instance.list_children(id, path, validator, cursor).await
+                instance
+                    .list_children(id, callout_path, validator, cursor)
+                    .await
             });
         }
-        let transport = futures::executor::block_on(self.instance.list_children(
-            id,
-            path.as_str().to_string(),
-            validator,
-            cursor,
-        ))?;
+        let transport = futures::executor::block_on(
+            self.instance
+                .list_children(id, path_text, validator, cursor),
+        )?;
         TestOp::from_transport(self, id, Ok(transport))
     }
 
     #[doc(hidden)]
     pub fn start_read_file(
         &self,
-        path: omnifs_core::path::Path,
-        content_type: String,
+        path: &omnifs_core::path::Path,
+        content_type: &str,
         cached: Option<wit_types::CanonicalInput>,
     ) -> crate::runtime::Result<TestOp<'_, wit_types::ReadFileOutcome>> {
         let id = self.next_operation_id();
+        let path_text = path.as_str().to_owned();
+        let content_type = content_type.to_owned();
         if self.test_callouts.is_some() {
-            let path = path.as_str().to_string();
+            let callout_path = path_text.clone();
             return TestOp::start_callout(self, id, move |instance| async move {
-                instance.read_file(id, path, content_type, cached).await
+                instance
+                    .read_file(id, callout_path, content_type, cached)
+                    .await
             });
         }
         let transport = futures::executor::block_on(self.instance.read_file(
             id,
-            path.as_str().to_string(),
+            path_text,
             content_type,
             cached,
         ))?;
@@ -330,15 +334,7 @@ impl<'a, T> TestOp<'a, T> {
     fn wait_for_progress(
         runtime: &'a Runtime,
         id: u64,
-        result_rx: mpsc::Receiver<
-            std::result::Result<
-                (
-                    std::result::Result<T, wit_types::ProviderError>,
-                    wit_types::Effects,
-                ),
-                EngineError,
-            >,
-        >,
+        result_rx: TestReceiver<T>,
     ) -> crate::runtime::Result<TestOpState<T>> {
         let inbox = runtime.test_callouts.as_ref().ok_or_else(|| {
             EngineError::ProviderProtocol("test callout inbox is not configured".to_string())
@@ -420,13 +416,7 @@ impl<'a, T> TestOp<'a, T> {
     fn from_transport(
         runtime: &'a Runtime,
         id: u64,
-        transport: std::result::Result<
-            (
-                std::result::Result<T, wit_types::ProviderError>,
-                wit_types::Effects,
-            ),
-            EngineError,
-        >,
+        transport: TestResult<T>,
     ) -> crate::runtime::Result<Self> {
         let (result, effects) = transport?;
         Ok(Self {

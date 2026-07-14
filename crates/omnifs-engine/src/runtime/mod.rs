@@ -366,6 +366,9 @@ impl Runtime {
     }
 
     #[allow(clippy::too_many_arguments)]
+    // Keep mount construction ordered in one boundary: manifest validation,
+    // provider initialization, auth, caches, and runtime wiring are coupled.
+    #[allow(clippy::too_many_lines)]
     fn build(
         engine: &wasmtime::Engine,
         wasm_path: &StdPath,

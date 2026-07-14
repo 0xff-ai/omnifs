@@ -398,6 +398,9 @@ async fn build_driver_state(
     Ok((store, bindings))
 }
 
+// Keep the Wasmtime command driver cohesive: its ordered command dispatch and
+// in-flight future polling are one runtime boundary.
+#[allow(clippy::too_many_lines)]
 async fn drive_instance(
     mut store: wasmtime::Store<HostState>,
     bindings: Provider,

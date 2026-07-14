@@ -16,12 +16,13 @@ impl Runtime {
         name: &Segment,
     ) -> Result<wit_types::LookupChildResult> {
         let id = self.next_operation_id();
+        let joined_path = parent_path.join_segment(name);
         let span = inspector::provider_span(
             id,
             &self.mount_name,
             &self.provider_name,
             "lookup_child",
-            &parent_path.join_segment(name).to_string(),
+            joined_path.as_str(),
         );
         async {
             let op_gen = self.cache.current_generation();

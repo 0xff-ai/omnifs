@@ -147,8 +147,8 @@ impl RuntimeHarness {
         name: &str,
     ) -> Result<TestOp<'_, LookupChildResult>, EngineError> {
         self.runtime.start_lookup_child(
-            parse_path(parent_path),
-            Segment::try_from(name).expect("test lookup name must be a protocol segment"),
+            &parse_path(parent_path),
+            &Segment::try_from(name).expect("test lookup name must be a protocol segment"),
         )
     }
 
@@ -161,14 +161,15 @@ impl RuntimeHarness {
         path: &str,
         cursor: Option<omnifs_wit::provider::types::Cursor>,
     ) -> Result<TestOp<'_, ListChildrenResult>, EngineError> {
+        let path = parse_path(path);
         self.runtime
-            .start_list_children(parse_path(path), None, cursor)
+            .start_list_children(&path, None, cursor.as_ref())
     }
 
     pub fn read(&self, path: &str) -> Result<TestOp<'_, ReadFileOutcome>, EngineError> {
         let path = parse_path(path);
-        self.runtime
-            .start_read_file(path.clone(), path.content_type_mime(None).to_string(), None)
+        let content_type = path.content_type_mime(None).to_string();
+        self.runtime.start_read_file(&path, &content_type, None)
     }
 
     pub fn timer_tick(&self) -> Result<TestOp<'_, ()>, EngineError> {
