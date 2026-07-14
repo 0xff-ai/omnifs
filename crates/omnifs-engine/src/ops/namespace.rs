@@ -1,6 +1,6 @@
 use crate::cache::RecordKind;
 use crate::clock::now_millis;
-use crate::coalesce::ns::{Key as NsKey, OrderKey};
+use crate::coalesce::ns::{Key as NsKey, OrderKey, SharedError};
 use crate::effect_apply::{EffectApplier, LookupOutcome};
 use crate::object_id::ObjectId;
 use crate::runtime::Namespace;
@@ -79,12 +79,12 @@ impl Namespace<'_> {
                         self.runtime
                             .run_lookup_child(parent_path, &name)
                             .await
-                            .map_err(|error| error.to_string())
+                            .map_err(SharedError::from)
                     })
                     .await
             })
             .await
-            .map_err(EngineError::ProviderProtocol)?;
+            .map_err(SharedError::into_engine)?;
         Ok(EffectApplier::new(&self.runtime.cache).lookup(
             parent_path,
             &child_path,
@@ -131,12 +131,12 @@ impl Namespace<'_> {
                                     cursor.map(crate::wit_protocol::cached_cursor_to_wit),
                                 )
                                 .await
-                                .map_err(|error| error.to_string())
+                                .map_err(SharedError::from)
                         })
                         .await
                 })
                 .await
-                .map_err(EngineError::ProviderProtocol)?
+                .map_err(SharedError::into_engine)?
         };
 
         if let wit_types::ListChildrenResult::Entries(ref listing) = result {
@@ -240,12 +240,12 @@ impl Namespace<'_> {
                             self.runtime
                                 .run_read_file(path, content_type, cached_canonical)
                                 .await
-                                .map_err(|error| error.to_string())
+                                .map_err(SharedError::from)
                         })
                         .await
                 })
                 .await
-                .map_err(EngineError::ProviderProtocol)?
+                .map_err(SharedError::into_engine)?
         };
 
         match result {

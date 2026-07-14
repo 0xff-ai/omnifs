@@ -451,7 +451,31 @@ pub mod ns {
 
     impl CoverKey for Key {}
 
-    pub type Shared<T> = std::result::Result<T, String>;
+    #[derive(Clone, Debug)]
+    pub(crate) enum SharedError {
+        Provider(wit_types::ProviderError),
+        Other(String),
+    }
+
+    impl From<crate::EngineError> for SharedError {
+        fn from(error: crate::EngineError) -> Self {
+            match error {
+                crate::EngineError::ProviderError(error) => Self::Provider(error),
+                error => Self::Other(error.to_string()),
+            }
+        }
+    }
+
+    impl SharedError {
+        pub fn into_engine(self) -> crate::EngineError {
+            match self {
+                Self::Provider(error) => crate::EngineError::ProviderError(error),
+                Self::Other(message) => crate::EngineError::ProviderProtocol(message),
+            }
+        }
+    }
+
+    pub(crate) type Shared<T> = std::result::Result<T, SharedError>;
 
     /// Namespace-owned typed coalescers. Exact operation values are isolated
     /// by operation kind; the ordering gate is value-free and remains around
@@ -827,5 +851,21 @@ mod tests {
         .await
         .expect("slot should be free after runner abort");
         assert_eq!(*recovered, 2);
+    }
+
+    #[test]
+    fn shared_provider_error_round_trips_without_losing_kind() {
+        let error = crate::EngineError::ProviderError(omnifs_wit::provider::types::ProviderError {
+            kind: omnifs_wit::provider::types::ErrorKind::RateLimited,
+            message: "throttled".to_string(),
+            retryable: true,
+            retry_after: Some(3),
+        });
+        let shared = ns::SharedError::from(error);
+        let round_tripped = shared.into_engine();
+        assert!(round_tripped.is_provider_rate_limited());
+        assert!(
+            matches!(round_tripped, crate::EngineError::ProviderError(error) if error.retry_after == Some(3))
+        );
     }
 }
