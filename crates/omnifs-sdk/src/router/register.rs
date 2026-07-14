@@ -5,6 +5,7 @@
 //! produces the immutable route table used for host browse calls.
 
 use crate::captures::CaptureDescriptor;
+use crate::cx::Cx;
 use crate::error::{ProviderError, Result};
 use crate::object::{FacetAxis, FacetMetadata, Key, Object, ObjectKind};
 use crate::projection::FileProjection;
@@ -14,8 +15,8 @@ use std::sync::Arc;
 
 use super::compiled::CompiledRouter;
 use super::descriptor::{RouteDescriptor, RouteKind};
-use super::handlers::{IntoDirHandler, IntoFileHandler, IntoTreeRefHandler};
-use super::object::{CollectionHandler, ObjectBlock, ObjectHandle, mount_object, object};
+use super::handlers::{Handler, IntoHandler};
+use super::object::{ObjectBlock, ObjectHandle, mount_object, object};
 use super::pattern::Pattern;
 use super::readme::{ObjectLeaves, Readme, Scope};
 
@@ -68,8 +69,11 @@ struct CollectionMount<S> {
     parent_template: String,
     child_kind: ObjectKind,
     requires_canonical: bool,
-    handler: CollectionHandler<S>,
-    validator: super::handlers::RouteValidator,
+    handler: Handler<
+        crate::handler::DirCx<S>,
+        std::rc::Rc<super::object::ResolvedChildView>,
+        crate::projection::DirProjection,
+    >,
 }
 
 // ===========================================================================
@@ -236,7 +240,6 @@ impl<S> Router<S> {
                 child_kind: declaration.child_kind,
                 requires_canonical: declaration.requires_canonical,
                 handler: declaration.handler.clone(),
-                validator: declaration.validator.clone(),
             });
         }
         // Register each tree face as a treeref route at `template/name`,
@@ -249,7 +252,6 @@ impl<S> Router<S> {
             self.treerefs.push(super::handlers::TreeRefEntry {
                 pattern: pattern.clone(),
                 handler: face.handler.clone(),
-                validator: face.validator.clone(),
             });
         }
 
@@ -260,18 +262,22 @@ impl<S> Router<S> {
             let choices_path = format!("{mount}/{}", face.name);
             let pattern = Pattern::parse(&choices_path)?;
             let names = face.names;
-            let handler: super::handlers::BoxedDirHandler<S> =
-                std::sync::Arc::new(move |_dir_cx, _caps| {
-                    let entries = names
-                        .iter()
-                        .map(|name| crate::projection::Entry::dir(*name))
-                        .collect::<Vec<_>>();
-                    Box::pin(async move { Ok(crate::projection::DirListing::exhaustive(entries)) })
-                });
+            let handler: Handler<crate::handler::DirCx<S>, (), crate::projection::DirListing> =
+                Handler::new(
+                    Arc::new(move |_dir_cx, (), _caps| {
+                        let entries = names
+                            .iter()
+                            .map(|name| crate::projection::Entry::dir(*name))
+                            .collect::<Vec<_>>();
+                        Box::pin(
+                            async move { Ok(crate::projection::DirListing::exhaustive(entries)) },
+                        )
+                    }),
+                    super::handlers::accept_validator(),
+                );
             self.dirs.push(super::handlers::DirEntry {
                 pattern: pattern.clone(),
                 handler,
-                validator: super::handlers::accept_validator(),
             });
         }
 
@@ -289,45 +295,49 @@ impl<S> Router<S> {
         Ok(())
     }
 
-    fn dir_at<Marker, H: IntoDirHandler<S, Marker>>(&mut self, template: &str, h: H) -> Result<()> {
+    fn dir_at<Args, H>(&mut self, template: &str, h: H) -> Result<()>
+    where
+        H: IntoHandler<
+                S,
+                Args,
+                crate::projection::DirListing,
+                Context = crate::handler::DirCx<S>,
+                Input = (),
+            >,
+    {
         let pattern = Pattern::parse(template)?;
-        let (handler, validator) = h.into_dir_handler();
+        let handler: Handler<crate::handler::DirCx<S>, (), crate::projection::DirListing> =
+            h.into_handler();
         self.dirs.push(super::handlers::DirEntry {
             pattern: pattern.clone(),
             handler,
-            validator,
         });
         Ok(())
     }
 
-    fn file_at<Marker, H: IntoFileHandler<S, Marker>>(
-        &mut self,
-        template: &str,
-        ranged: bool,
-        h: H,
-    ) -> Result<()> {
+    fn file_at<Args, H>(&mut self, template: &str, ranged: bool, h: H) -> Result<()>
+    where
+        H: IntoHandler<S, Args, FileProjection, Context = Cx<S>, Input = ()>,
+    {
         let pattern = Pattern::parse(template)?;
-        let (handler, validator) = h.into_file_handler();
+        let handler: Handler<Cx<S>, (), FileProjection> = h.into_handler();
         self.files.push(super::handlers::FileEntry {
             pattern: pattern.clone(),
             handler,
-            validator,
             ranged,
         });
         Ok(())
     }
 
-    fn treeref_at<Marker, H: IntoTreeRefHandler<S, Marker>>(
-        &mut self,
-        template: &str,
-        h: H,
-    ) -> Result<()> {
+    fn treeref_at<Args, H>(&mut self, template: &str, h: H) -> Result<()>
+    where
+        H: IntoHandler<S, Args, crate::handler::TreeRef, Context = Cx<S>, Input = ()>,
+    {
         let pattern = Pattern::parse(template)?;
-        let (handler, validator) = h.into_treeref_handler();
+        let handler: Handler<Cx<S>, (), crate::handler::TreeRef> = h.into_handler();
         self.treerefs.push(super::handlers::TreeRefEntry {
             pattern: pattern.clone(),
             handler,
-            validator,
         });
         Ok(())
     }
@@ -391,16 +401,16 @@ impl<S> Router<S> {
 
     fn validate_capture_compatibility(&self) -> Result<()> {
         for entry in &self.dirs {
-            validate_route_captures(&entry.pattern, &entry.validator)?;
+            validate_route_captures(&entry.pattern, entry.handler.validator())?;
         }
         for entry in &self.files {
-            validate_route_captures(&entry.pattern, &entry.validator)?;
+            validate_route_captures(&entry.pattern, entry.handler.validator())?;
         }
         for entry in &self.treerefs {
-            validate_route_captures(&entry.pattern, &entry.validator)?;
+            validate_route_captures(&entry.pattern, entry.handler.validator())?;
         }
         for entry in &self.objects {
-            validate_route_captures(&entry.pattern, &entry.validator)?;
+            validate_route_captures(&entry.pattern, entry.read.validator())?;
         }
         Ok(())
     }
@@ -423,7 +433,7 @@ impl<S> Router<S> {
                         &entry.pattern,
                         RouteKind::Dir,
                         None,
-                        entry.validator.capture_descriptors(),
+                        entry.handler.validator().capture_descriptors(),
                     )
                 }),
         );
@@ -432,7 +442,7 @@ impl<S> Router<S> {
                 &entry.pattern,
                 RouteKind::File,
                 None,
-                entry.validator.capture_descriptors(),
+                entry.handler.validator().capture_descriptors(),
             )
         }));
         routes.extend(self.treerefs.iter().map(|entry| {
@@ -440,7 +450,7 @@ impl<S> Router<S> {
                 &entry.pattern,
                 RouteKind::Treeref,
                 None,
-                entry.validator.capture_descriptors(),
+                entry.handler.validator().capture_descriptors(),
             )
         }));
         routes.extend(self.object_metadata.iter().map(|object| {
@@ -484,16 +494,18 @@ impl<S> Router<S> {
     fn synthesize_readme_route(&mut self, path: &str, body: String) -> Result<()> {
         let pattern = Pattern::parse(path)?;
         let bytes = body.into_bytes();
-        let handler: super::handlers::BoxedFileHandler<S> = Arc::new(move |_cx, _caps| {
-            let bytes = bytes.clone();
-            Box::pin(
-                async move { Ok(FileProjection::body_with_type(bytes, ContentType::Markdown)) },
-            )
-        });
+        let handler: Handler<Cx<S>, (), FileProjection> = Handler::new(
+            Arc::new(move |_cx, (), _caps| {
+                let bytes = bytes.clone();
+                Box::pin(
+                    async move { Ok(FileProjection::body_with_type(bytes, ContentType::Markdown)) },
+                )
+            }),
+            super::handlers::accept_validator(),
+        );
         self.files.push(super::handlers::FileEntry {
             pattern: pattern.clone(),
             handler,
-            validator: super::handlers::accept_validator(),
             ranged: false,
         });
         Ok(())
@@ -509,6 +521,31 @@ impl<S> Router<S> {
             .into_iter()
             .map(|collection| self.resolve_collection(collection))
             .collect()
+    }
+
+    fn attach_anchor_collection(
+        &mut self,
+        parent_template: &str,
+        dir_path: &str,
+        handler: Handler<crate::handler::DirCx<S>, (), crate::projection::DirProjection>,
+    ) -> Result<()> {
+        let parent_pattern = Pattern::parse(parent_template)?;
+        let Some(parent) = self
+            .objects
+            .iter_mut()
+            .find(|entry| entry.pattern == parent_pattern)
+        else {
+            return Err(ProviderError::internal(format!(
+                "anchor collection at {dir_path} has no registered parent object at {parent_template}"
+            )));
+        };
+        if parent.anchor_collection.is_some() {
+            return Err(ProviderError::invalid_input(format!(
+                "anchor collection at {dir_path}: parent object anchor {parent_template} already has a collection owner"
+            )));
+        }
+        parent.anchor_collection = Some(super::object::AnchorCollection { handler });
+        Ok(())
     }
 
     fn resolve_collection(&mut self, collection: CollectionMount<S>) -> Result<RouteDescriptor>
@@ -548,13 +585,13 @@ impl<S> Router<S> {
             super::object::FacetExpansion::for_axes(&child_pattern, child.facet_axes)?;
 
         let dir_pattern = Pattern::parse(&collection.dir_path)?;
-        validate_route_captures(&dir_pattern, &collection.validator)?;
+        validate_route_captures(&dir_pattern, collection.handler.validator())?;
         let dir_depth = dir_pattern.pattern_len();
         let descriptor = RouteDescriptor::new(
             &dir_pattern,
             RouteKind::Collection,
             Some(collection.child_kind.as_str().to_string()),
-            collection.validator.capture_descriptors(),
+            collection.handler.validator().capture_descriptors(),
         );
         let topology = if collection.dir_path == child_template {
             super::object::CollectionTopology::Anchor
@@ -574,46 +611,34 @@ impl<S> Router<S> {
             facet_expansion,
             dir_depth,
         ));
+        let bound_handler = collection.handler.bind_input(child_view);
+        let validator = bound_handler.validator().clone();
         match topology {
             super::object::CollectionTopology::Nested => {
-                let handler = collection.handler.clone();
-                let view = child_view.clone();
-                let boxed: super::handlers::BoxedDirHandler<S> =
-                    std::sync::Arc::new(move |dir_cx, caps| {
-                        let fut = handler(dir_cx, caps, view.clone());
-                        Box::pin(async move {
-                            fut.await
-                                .map(crate::projection::DirListing::from_projection)
-                        })
-                    });
+                let handler: Handler<crate::handler::DirCx<S>, (), crate::projection::DirListing> =
+                    Handler::new(
+                        Arc::new(move |dir_cx, (), caps| {
+                            let handler = bound_handler.clone();
+                            Box::pin(async move {
+                                handler
+                                    .call(dir_cx, (), caps)
+                                    .await
+                                    .map(crate::projection::DirListing::from_projection)
+                            })
+                        }),
+                        validator,
+                    );
                 self.dirs.push(super::handlers::DirEntry {
                     pattern: dir_pattern,
-                    handler: boxed,
-                    validator: collection.validator,
+                    handler,
                 });
             },
             super::object::CollectionTopology::Anchor => {
-                let parent_pattern = Pattern::parse(&collection.parent_template)?;
-                let Some(parent) = self
-                    .objects
-                    .iter_mut()
-                    .find(|entry| entry.pattern == parent_pattern)
-                else {
-                    return Err(ProviderError::internal(format!(
-                        "anchor collection at {} has no registered parent object at {}",
-                        collection.dir_path, collection.parent_template
-                    )));
-                };
-                if parent.anchor_collection.is_some() {
-                    return Err(ProviderError::invalid_input(format!(
-                        "anchor collection at {}: parent object anchor {} already has a collection owner",
-                        collection.dir_path, collection.parent_template
-                    )));
-                }
-                parent.anchor_collection = Some(super::object::AnchorCollection {
-                    handler: collection.handler,
-                    child_view,
-                });
+                self.attach_anchor_collection(
+                    &collection.parent_template,
+                    &collection.dir_path,
+                    bound_handler,
+                )?;
             },
         }
         Ok(descriptor)
@@ -641,7 +666,16 @@ pub struct TreeRefRoute<'r, S> {
 
 impl<'r, S> DirRoute<'r, S> {
     /// Register the directory handler and claim the template as a leaf.
-    pub fn handler<Marker, H: IntoDirHandler<S, Marker>>(self, h: H) -> Result<&'r mut Router<S>> {
+    pub fn handler<Args, H>(self, h: H) -> Result<&'r mut Router<S>>
+    where
+        H: IntoHandler<
+                S,
+                Args,
+                crate::projection::DirListing,
+                Context = crate::handler::DirCx<S>,
+                Input = (),
+            >,
+    {
         self.router.dir_at(&self.template, h)?;
         Ok(self.router)
     }
@@ -657,7 +691,10 @@ impl<'r, S> FileRoute<'r, S> {
     }
 
     /// Register the file handler and claim the template as a leaf.
-    pub fn handler<Marker, H: IntoFileHandler<S, Marker>>(self, h: H) -> Result<&'r mut Router<S>> {
+    pub fn handler<Args, H>(self, h: H) -> Result<&'r mut Router<S>>
+    where
+        H: IntoHandler<S, Args, FileProjection, Context = Cx<S>, Input = ()>,
+    {
         self.router.file_at(&self.template, self.ranged, h)?;
         Ok(self.router)
     }
@@ -665,10 +702,10 @@ impl<'r, S> FileRoute<'r, S> {
 
 impl<'r, S> TreeRefRoute<'r, S> {
     /// Register the subtree-handoff handler and claim the template as a leaf.
-    pub fn handler<Marker, H: IntoTreeRefHandler<S, Marker>>(
-        self,
-        h: H,
-    ) -> Result<&'r mut Router<S>> {
+    pub fn handler<Args, H>(self, h: H) -> Result<&'r mut Router<S>>
+    where
+        H: IntoHandler<S, Args, crate::handler::TreeRef, Context = Cx<S>, Input = ()>,
+    {
         self.router.treeref_at(&self.template, h)?;
         Ok(self.router)
     }

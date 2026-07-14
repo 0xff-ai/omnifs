@@ -27,8 +27,8 @@ mod spec;
 pub use spec::{DirFace, FileFace, ObjectBlock, ObjectHandle, object};
 
 pub(super) use dispatch::{
-    AnchorCollection, CollectionTopology, FacetExpansion, ObjectReadTarget, ObjectRouteEntry,
-    SourceLeafAttrs, mount_object,
+    AnchorCollection, CollectionTopology, FacetExpansion, ObjectListInput, ObjectReadInput,
+    ObjectReadTarget, ObjectRouteEntry, SourceLeafAttrs, mount_object,
 };
 pub(crate) use dispatch::{EntryView, ResolvedChildView};
-pub(super) use spec::{CollectionHandler, file_object};
+pub(super) use spec::{AnchorShape, file_object};
