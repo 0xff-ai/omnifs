@@ -164,7 +164,7 @@ impl BlobExecutor {
                 Err(early) => early,
                 Ok(request) => {
                     let request_id = request
-                        .blob_request_id(self.http.auth_binding_for_url(&request.original_url));
+                        .blob_request_id(self.http.auth_binding_for_url(request.original_url()));
                     let lock = self.cache.request_lock(request_id);
                     let _guard = lock.lock().await;
                     if let Some(record) = self.cache.lookup_by_request(request_id) {
@@ -599,7 +599,7 @@ mod tests {
     fn rehydrate_skips_a_ref_with_wrong_size_or_digest() {
         let tmp = tempfile::tempdir().unwrap();
         let cache_root = tmp.path().join("blob-cache");
-        let cache = BlobCache::new(cache_root.clone()).unwrap();
+        let _cache = BlobCache::new(cache_root.clone()).unwrap();
         let request = BlobRequestId::new(None, "GET", "https://example.test/bad", &[], None);
         let generation = BlobGeneration::from_bytes(b"actual");
         let body = cache_root
@@ -612,17 +612,15 @@ mod tests {
             .join(format!("{}.json", request.filesystem_name()));
         std::fs::write(
             reference,
-            serde_json::to_vec(&BlobRef {
-                request_id: request.filesystem_name(),
-                generation: generation.filesystem_name(),
-                metadata: BlobMetadata {
-                    status: 200,
-                    content_type: None,
-                    etag: None,
-                    response_headers: Vec::new(),
-                    size: 99,
-                },
-            })
+            serde_json::to_vec(&serde_json::json!({
+                "request_id": request.filesystem_name(),
+                "generation": generation.filesystem_name(),
+                "status": 200,
+                "content_type": null,
+                "etag": null,
+                "response_headers": [],
+                "size": 99,
+            }))
             .unwrap(),
         )
         .unwrap();

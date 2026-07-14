@@ -34,7 +34,7 @@ use std::path::{Path as StdPath, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
-use tracing::{debug, warn};
+use tracing::debug;
 
 pub(crate) mod instance;
 pub(crate) mod registry;

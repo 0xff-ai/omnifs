@@ -57,6 +57,10 @@ impl ValidatedRequest {
             self.body.as_deref(),
         )
     }
+
+    pub(crate) fn original_url(&self) -> &str {
+        &self.original_url
+    }
 }
 
 impl HttpStack {
@@ -146,11 +150,12 @@ impl HttpStack {
             normalized.push((name.as_str().to_string(), header.value.clone()));
         }
         normalized.sort_by(|left, right| left.0.cmp(&right.0));
+        let canonical_url = parsed.to_string();
         Ok(ValidatedRequest {
             method,
             url: parsed,
             original_url: url.to_string(),
-            canonical_url: parsed.to_string(),
+            canonical_url,
             headers: normalized,
             body: body.map(ToOwned::to_owned),
         })

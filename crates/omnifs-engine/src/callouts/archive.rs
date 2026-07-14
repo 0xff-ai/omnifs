@@ -11,7 +11,9 @@
 #[cfg(test)]
 use crate::blob_cache::{BLOB_TMP_DIR, BlobMetadata};
 use crate::blob_cache::{BlobCache, BlobRecord};
-use crate::cache::identity::{BlobGeneration, BlobRequestId};
+use crate::cache::identity::BlobGeneration;
+#[cfg(test)]
+use crate::cache::identity::BlobRequestId;
 use crate::callouts::{callout_error, callout_internal, callout_not_found, record_outcome};
 use crate::sandbox::publish;
 use crate::tools::archive::{self, ArchiveFormat, ExtractError, ExtractStats};

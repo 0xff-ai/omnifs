@@ -60,12 +60,7 @@ impl RuntimeHarness {
         engine: &wasmtime::Engine,
         capture_test_callouts: bool,
     ) -> Result<Self, BuildError> {
-        let tempdir = || {
-            tempfile::tempdir().map_err(|source| BuildError::CacheDir {
-                path: std::env::temp_dir(),
-                source,
-            })
-        };
+        let tempdir = || tempfile::tempdir().map_err(|error| BuildError::Cache(error.to_string()));
         let clone_dir = tempdir()?;
         let cache_dir = tempdir()?;
         let config_dir = tempdir()?;
@@ -97,10 +92,8 @@ impl RuntimeHarness {
         }
         let wasm_path = catalog.provider_path_by_id(&spec.provider.id);
         let cloner = Arc::new(GitCloner::new(clone_dir.path().to_path_buf()).unwrap());
-        let caches = Caches::open(cache_dir.path()).map_err(|error| BuildError::CacheDir {
-            path: cache_dir.path().to_path_buf(),
-            source: std::io::Error::other(error.to_string()),
-        })?;
+        let caches =
+            Caches::open(cache_dir.path()).map_err(|error| BuildError::Cache(error.to_string()))?;
         let credential_service =
             omnifs_engine::test_support::auth::credential_service_for_file(&paths.credentials_file);
         let context = HostContext::new(
