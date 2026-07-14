@@ -16,7 +16,7 @@ use crate::objects::{
 use crate::{
     CHECK_RUN_PAGE_SIZE, COMMENT_PAGE_SIZE, CheckRunsResponse, FILE_PAGE_SIZE, FilePath,
     NOTIFICATION_PAGE_SIZE, OwnerName, REVIEW_PAGE_SIZE, RepoId, RepoName, StateFilter, ThreadId,
-    WorkflowRunsResponse, list_items, resolve_owner_kind,
+    WorkflowRunsResponse, resolve_owner_kind,
 };
 
 /// Identity discriminator for the comment anchor's `{item_kind}` segment. A
@@ -32,20 +32,34 @@ pub(crate) enum ItemKind {
 }
 
 impl ItemKind {
-    pub(crate) const fn search_qualifier(self) -> &'static str {
-        match self {
-            Self::Issues => "+is:issue",
-            Self::Pulls => "+is:pr",
-        }
-    }
-
-    pub(crate) const fn rest_resource(self) -> &'static str {
+    const fn rest_resource(self) -> &'static str {
         match self {
             Self::Issues => "issues",
             Self::Pulls => "pulls",
         }
     }
+
+    async fn list_page(
+        self,
+        cx: &Cx,
+        owner: &OwnerName,
+        repo: &RepoName,
+        filter: StateFilter,
+        page: u64,
+    ) -> Result<Vec<ItemData>> {
+        let resource = self.rest_resource();
+        let state = filter.rest_state();
+        cx.endpoint(GitHubApi)
+            .get(format!(
+                "/repos/{owner}/{repo}/{resource}?state={state}\
+                 &sort=created&direction=desc&per_page={ITEM_PAGE_SIZE}&page={page}"
+            ))
+            .json()
+            .await
+    }
 }
+
+const ITEM_PAGE_SIZE: u64 = 100;
 
 // ===========================================================================
 // Keys
@@ -412,12 +426,15 @@ impl Owner {
 impl Repo {
     pub(crate) async fn issues(
         key: ItemListKey,
-        cx: ListCx<NoCursor>,
-    ) -> Result<Collection<Issue, NoCursor>> {
+        cx: ListCx<PageCursor>,
+    ) -> Result<Collection<Issue, PageCursor>> {
         let filter = key.filter;
-        let page = list_items(&cx, &key.owner, &key.repo, ItemKind::Issues, filter).await?;
-        let entries = page
-            .items
+        let page = cx.cursor().map_or(1, |cursor| cursor.0);
+        let items = ItemKind::Issues
+            .list_page(&cx, &key.owner, &key.repo, filter, page)
+            .await?;
+        let len = items.len() as u64;
+        let entries = items
             .iter()
             .filter(|item| !item.is_pull_request())
             .map(|item| {
@@ -432,17 +449,20 @@ impl Repo {
                 )
             })
             .collect::<Vec<_>>();
-        Ok(complete_or_partial(entries, page.exhaustive))
+        page_or_complete(entries, len, ITEM_PAGE_SIZE, page)
     }
 
     pub(crate) async fn pulls(
         key: ItemListKey,
-        cx: ListCx<NoCursor>,
-    ) -> Result<Collection<PullRequest, NoCursor>> {
+        cx: ListCx<PageCursor>,
+    ) -> Result<Collection<PullRequest, PageCursor>> {
         let filter = key.filter;
-        let page = list_items(&cx, &key.owner, &key.repo, ItemKind::Pulls, filter).await?;
-        let entries = page
-            .items
+        let page = cx.cursor().map_or(1, |cursor| cursor.0);
+        let items = ItemKind::Pulls
+            .list_page(&cx, &key.owner, &key.repo, filter, page)
+            .await?;
+        let len = items.len() as u64;
+        let entries = items
             .iter()
             .map(|item| {
                 CollectionEntry::computed(
@@ -456,7 +476,7 @@ impl Repo {
                 )
             })
             .collect::<Vec<_>>();
-        Ok(complete_or_partial(entries, page.exhaustive))
+        page_or_complete(entries, len, ITEM_PAGE_SIZE, page)
     }
 
     pub(crate) async fn workflow_runs(
@@ -839,17 +859,6 @@ impl Comment {
             ("author".to_string(), self.author(key)?),
             ("body.md".to_string(), self.body_md(key)?),
         ])
-    }
-}
-
-fn complete_or_partial<T: omnifs_sdk::object::Object, C: ListCursor>(
-    entries: Vec<CollectionEntry<T>>,
-    exhaustive: bool,
-) -> Collection<T, C> {
-    if exhaustive {
-        Collection::complete(entries)
-    } else {
-        Collection::partial(entries)
     }
 }
 

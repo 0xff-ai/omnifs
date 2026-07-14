@@ -2,7 +2,6 @@
 
 //! github-provider: GitHub virtual filesystem provider for omnifs.
 
-use omnifs_sdk::hashbrown::HashSet;
 use omnifs_sdk::prelude::*;
 use serde::Deserialize;
 
@@ -13,7 +12,6 @@ mod item;
 mod objects;
 
 use api::GitHubApi;
-use item::ItemKind;
 pub(crate) use objects::ItemData;
 use objects::{
     ChangedFile, CheckRun, Comment, Issue, Notification, Owner, PullRequest, Repo, Review,
@@ -457,22 +455,6 @@ pub(crate) const CHECK_RUN_PAGE_SIZE: u64 = 100;
 pub(crate) const COMMENT_PAGE_SIZE: u64 = 100;
 pub(crate) const NOTIFICATION_PAGE_SIZE: u64 = 50;
 
-const PAGE_SIZE: u64 = 100;
-const SEARCH_RESULT_CAP: u64 = 1000;
-
-#[derive(Debug, Deserialize)]
-struct SearchResults {
-    #[serde(default)]
-    total_count: u64,
-    #[serde(default)]
-    items: Vec<ItemData>,
-}
-
-pub(crate) struct ListPage {
-    pub(crate) items: Vec<ItemData>,
-    pub(crate) exhaustive: bool,
-}
-
 #[derive(Debug, Deserialize)]
 pub(crate) struct CheckRunsResponse {
     #[serde(default)]
@@ -483,86 +465,4 @@ pub(crate) struct CheckRunsResponse {
 pub(crate) struct WorkflowRunsResponse {
     #[serde(default)]
     pub(crate) workflow_runs: Vec<WorkflowRun>,
-}
-
-/// Search supplies `total_count` so we can size the rest of the work
-/// without parsing Link headers. Pages 2..N use the typed REST endpoint
-/// because Search caps result windows and mixes issue/PR data unless qualified.
-pub(crate) async fn list_items(
-    cx: &Cx,
-    owner: &OwnerName,
-    repo: &RepoName,
-    kind: ItemKind,
-    filter: StateFilter,
-) -> Result<ListPage> {
-    let search_state_clause = match filter {
-        StateFilter::Open => "+state:open",
-        StateFilter::All => "",
-    };
-    let qualifier = kind.search_qualifier();
-    let search_path = format!(
-        "/search/issues?q=repo:{owner}/{repo}{qualifier}{search_state_clause}\
-         &sort=created&order=desc&per_page={PAGE_SIZE}"
-    );
-    let rest_resource = kind.rest_resource();
-    let rest_state = filter.rest_state();
-    let rest_path = format!(
-        "/repos/{owner}/{repo}/{rest_resource}?state={rest_state}\
-         &sort=created&direction=desc&per_page={PAGE_SIZE}"
-    );
-
-    let first: SearchResults = match cx.endpoint(GitHubApi).get(search_path).json().await {
-        Ok(results) => results,
-        Err(err) if is_search_repo_missing(&err) => {
-            if repo_exists(cx, owner, repo).await? {
-                return Err(err);
-            }
-            return Err(ProviderError::not_found(format!(
-                "{owner}/{repo}: repository not found on GitHub"
-            )));
-        },
-        Err(err) => return Err(err),
-    };
-    let capped_total = first.total_count.min(SEARCH_RESULT_CAP);
-    let page_count = capped_total.div_ceil(PAGE_SIZE);
-    let mut items = first.items;
-    items.reserve((capped_total as usize).saturating_sub(items.len()));
-
-    if page_count > 1 {
-        let page_requests = (2..=page_count).map(|page| {
-            cx.endpoint(GitHubApi)
-                .get(format!("{rest_path}&page={page}"))
-                .json::<Vec<ItemData>>()
-        });
-        for page in join_all(page_requests).await {
-            items.extend(page?);
-        }
-        let mut seen = HashSet::with_capacity(items.len());
-        items.retain(|item| seen.insert(item.number));
-    }
-
-    Ok(ListPage {
-        items,
-        exhaustive: first.total_count <= SEARCH_RESULT_CAP,
-    })
-}
-
-fn is_search_repo_missing(err: &ProviderError) -> bool {
-    use omnifs_sdk::error::ProviderErrorKind;
-    err.kind() == ProviderErrorKind::InvalidInput && err.message().contains("HTTP 422")
-}
-
-async fn repo_exists(cx: &Cx, owner: &OwnerName, repo: &RepoName) -> Result<bool> {
-    use omnifs_sdk::error::ProviderErrorKind;
-
-    match cx
-        .endpoint(GitHubApi)
-        .get(format!("/repos/{owner}/{repo}"))
-        .json::<serde::de::IgnoredAny>()
-        .await
-    {
-        Ok(_) => Ok(true),
-        Err(err) if err.kind() == ProviderErrorKind::NotFound => Ok(false),
-        Err(err) => Err(err),
-    }
 }

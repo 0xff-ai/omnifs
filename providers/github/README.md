@@ -34,7 +34,7 @@
 /github/notifications/thread-{id}/
 ```
 
-Hybrid search + REST pagination; `ItemKind` (`issues` vs `pulls`) selects the list source and whether `diff.patch` exists. Issues lists exclude PR-shaped rows (no mirror into `pulls/`).
+Issues and pulls use ordered REST page cursors. Issues filter PR-shaped rows after each fetch, while the raw page length decides whether another page exists.
 
 ## Capabilities
 
