@@ -4,7 +4,7 @@
 //! A provider is a `wasm32-wasip2` component implementing the
 //! `omnifs:provider` WIT contract. The host mounts it, sends it browse
 //! operations (lookup a child, list a directory, read a file), and runs
-//! every side effect (HTTP, git, blobs, archives) on the provider's behalf
+//! every side effect (HTTP, git, and blobs) on the provider's behalf
 //! through a strict request/response callout protocol. Providers never open
 //! sockets, never touch credentials, and never cache: the host owns trust,
 //! caching, and I/O; the provider owns meaning (what paths exist and what
@@ -60,7 +60,7 @@
 //!   honest [`file_attrs::Stability`] is the correct behavior.
 //!
 //! `r.treeref(..)` is the third, narrower verb: hand a whole subtree to the
-//! host (a git clone, an extracted archive) by returning a
+//! host (such as a git clone) by returning a
 //! [`handler::TreeRef`]; the host bind-mounts the resolved tree and provider
 //! dispatch stops there.
 //!
@@ -89,8 +89,8 @@
 //!
 //! # The async model
 //!
-//! Handlers are plain `async fn`s. Awaiting an HTTP call (or git, blob,
-//! archive callout) awaits a WIT async host import. The component runtime
+//! Handlers are plain `async fn`s. Awaiting an HTTP, git, or blob callout
+//! awaits a WIT async host import. The component runtime
 //! suspends the operation while the host runs the effect, then resumes your
 //! future with the result. Your code reads as straight-line async; there is no
 //! executor, no `Send` bounds, and state is single-threaded by construction.
@@ -130,7 +130,7 @@
 //! | [`endpoint`] | Declared HTTP endpoints: typed request builder, conditional loads, rate-limit breaker |
 //! | [`browse`] | Wire-facing results and [`browse::Effects`] |
 //! | [`handler`] | Dir intent/cursor types, ranged-read sessions, [`handler::TreeRef`] |
-//! | [`blob`] / [`archives`] / [`git`] | Host-side large bytes, archive trees, git clones |
+//! | [`blob`] / [`git`] | Host-side large bytes and git clones |
 //! | [`error`] | [`error::ProviderError`]: kinds, retryability, HTTP status mapping |
 //!
 //! Providers depend only on this crate; `hashbrown`, `serde`, and
@@ -179,7 +179,6 @@ pub const SDK_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// WIT package declaration the SDK-generated exports target.
 pub const PROVIDER_WIT_PACKAGE: &str = omnifs_wit::PROVIDER_WIT_PACKAGE;
 
-pub mod archives;
 pub mod blob;
 pub mod browse;
 pub mod captures;

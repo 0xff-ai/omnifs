@@ -7,7 +7,7 @@ use omnifs_core::path::Path;
 
 /// Where a node's bytes/children live. `Provider` is the normal projected
 /// case; `Subtree` is a treeref already resolved (via `Runtime::resolve_tree_ref`)
-/// to a bind-mounted clone/archive dir, captured at resolve time so read/list
+/// to a bind-mounted clone dir, captured at resolve time so read/list
 /// branch to passthrough without a second provider round trip; `Synthetic` is
 /// host-produced content that no provider projected.
 #[derive(Debug, Clone, PartialEq, Eq)]

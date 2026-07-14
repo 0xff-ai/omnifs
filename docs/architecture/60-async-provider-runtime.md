@@ -5,7 +5,7 @@ Scope: provider component execution, async host imports, same-instance concurren
 
 ## Intended model
 
-Provider code is ordinary async Rust. A handler awaits HTTP, blob, git, archive, or blob-read work through the SDK. That await reaches a WIT async host import. Wasmtime suspends the component future, the host executes the effect, and the guest future resumes with a typed `callout-result`.
+Provider code is ordinary async Rust. A handler awaits HTTP, blob, git, or blob-read work through the SDK. That await reaches a WIT async host import. Wasmtime suspends the component future, the host executes the effect, and the guest future resumes with a typed `callout-result`.
 
 The host owns trust and I/O. Providers do not open sockets, read credentials, or bypass capability checks. Suspension lives in Wasmtime's component async runtime rather than an omnifs-specific continuation export.
 
@@ -82,7 +82,6 @@ The SDK owns no custom executor. The provider macro emits async namespace and no
 - HTTP fetches go through `HttpStack`.
 - Blob fetches and reads go through `BlobExecutor`.
 - Git opens go through `GitExecutor`.
-- Archive opens go through `ArchiveExecutor`.
 
 Tracing is preserved at the callout boundary. Namespace requests, provider
 operations, callouts, subtree handoffs, clone operations, cache activity, and
@@ -115,7 +114,7 @@ unless the operation recorded a more specific result first.
 
 The driver runs one provider instance on a single event-loop thread, so same-instance concurrency depends on every suspension point yielding that thread rather than blocking it.
 
-- **Async callouts yield.** HTTP and archive callouts are `async` and return control to the event loop while the host does the work, so other in-flight ops keep progressing.
+- **Async callouts yield.** HTTP callouts are `async` and return control to the event loop while the host does the work, so other in-flight ops keep progressing.
 - **Synchronous executors are offloaded.** `GitExecutor::open_repo` (which shells out to `git`) and `BlobExecutor::read` (a bounded disk read) are synchronous. `CalloutHost::run` runs them on the Tokio blocking pool via `spawn_blocking`, so a slow clone or read suspends only its own op, not the whole instance. Without this, the blocking call would run inside the host-task future's poll on the event-loop thread and stall every concurrent op.
 - **WASI Preview 2 imports still block the instance.** `wasmtime_wasi::p2::add_to_linker_async` binds WASI functions on the legacy `func_wrap_async` path, which holds the store exclusively across the await (Wasmtime `StoreFiberYield::KeepStore`). A provider that blocks on WASI I/O (a preopened-file read, `wasi:io/poll`) therefore serializes the instance for the duration of that wait, unlike an omnifs callout. This is inherent to WASI p2; only a move to WASI p3 (concurrent host bindings) would change it. Providers do upstream work through omnifs callouts, not WASI, so this is rarely on the hot path.
 
@@ -125,7 +124,7 @@ Provider integration tests need deterministic canned HTTP and blob responses. Th
 
 This is test-only host plumbing, not a provider continuation export. The component suspends on async host imports. The test controller intercepts HTTP and blob fetch imports, records the callout, and waits for the test to provide the corresponding `callout-result`.
 
-Git, archive, and blob-read imports fall through to the real host executors so tests that rely on a real cached git checkout or host blob cache continue to exercise production behavior.
+Git and blob-read imports fall through to the real host executors so tests that rely on a real cached git checkout or host blob cache continue to exercise production behavior.
 
 ## Direct `wasi:http` option
 

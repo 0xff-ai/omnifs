@@ -2,8 +2,7 @@
 //!
 //! Provider HTTP fetches whose payload should never cross the WIT
 //! boundary are streamed into [`crate::blob_cache::BlobCache`].
-//! Other host-side machinery (FUSE blob-backed reads, archive
-//! extraction) consumes the file in place, so the bytes never
+//! Other host-side machinery consumes the file in place, so the bytes never
 //! round-trip back through the provider.
 
 pub use crate::blob_cache::BlobCache;

@@ -414,7 +414,7 @@ impl Lookup {
     }
 
     /// Hand the child off as a host-resolved subtree (a git clone, an
-    /// extracted archive). `tree` is the handle a tree-opening callout
+    /// `tree` is the handle a tree-opening callout
     /// returned; dispatch below this point belongs to the host.
     pub fn subtree(tree: u64) -> Self {
         Self::Subtree { tree }

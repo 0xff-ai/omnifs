@@ -76,7 +76,7 @@ Allowed, but never as a side effect. Surface the tradeoff and get sign-off in th
 - `crates/omnifs-sdk`: provider authoring API, object model, route registration, and dispatch.
 - `crates/omnifs-wit/wit/provider.wit`: provider component contract.
 - `crates/omnifs-workspace`: every byte under `OMNIFS_HOME`: the directory layout, provider/credential identity types, the auth-scheme wire model, provider manifests and the content-addressed provider index, the mount-spec registry (sole owner of on-disk specs) with creation-time inheritance and materialization, and credential stores.
-- `crates/omnifs-engine`: trusted runtime, callouts, auth, namespace, cache access, pagination, archive execution, shared projection semantics, and opaque cache storage.
+- `crates/omnifs-engine`: trusted runtime, callouts, auth, namespace, cache access, pagination, shared projection semantics, and opaque cache storage.
 - `crates/omnifs-vfs-wire`: the Omnifs VFS wire protocol, including serialization, framing, handshake, attach transport and reconnect, readiness signaling, and the client wire cache for the engine-owned `Namespace` surface.
 - `crates/omnifs-fuse` and `crates/omnifs-nfs`: protocol adapters.
 - `crates/omnifs-mtab`: `/proc/mounts` parsing, NFS mount state files, and shared platform unmount command construction.

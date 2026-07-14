@@ -56,7 +56,6 @@ pub enum CalloutKind {
     Fetch,
     FetchBlob,
     GitOpenRepo,
-    OpenArchive,
     ReadBlob,
 }
 
@@ -66,7 +65,6 @@ impl CalloutKind {
             Self::Fetch => "fetch",
             Self::FetchBlob => "fetch_blob",
             Self::GitOpenRepo => "git_open_repo",
-            Self::OpenArchive => "open_archive",
             Self::ReadBlob => "read_blob",
         }
     }
@@ -76,7 +74,6 @@ impl CalloutKind {
             "fetch" => Self::Fetch,
             "fetch_blob" => Self::FetchBlob,
             "git_open_repo" => Self::GitOpenRepo,
-            "open_archive" => Self::OpenArchive,
             "read_blob" => Self::ReadBlob,
             _ => return None,
         })

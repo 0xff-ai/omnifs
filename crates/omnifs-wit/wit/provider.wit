@@ -21,13 +21,8 @@ interface types {
         /// HTTP fetch whose response body lands in the host's disk-backed
         /// blob cache instead of crossing the WIT boundary. Returns a
         /// `blob-id` plus response metadata; the bytes can later be served
-        /// verbatim as read bytes (`byte-source.blob`) or mounted as a
-        /// directory tree (`open-archive`).
+        /// verbatim as read bytes (`byte-source.blob`).
         fetch-blob(blob-fetch-request),
-        /// Mount a stored blob as a directory tree, with the host
-        /// performing decompression and walk based on the requested
-        /// archive format.
-        open-archive(archive-open-request),
         /// Bring a (range of a) stored blob across the WIT boundary so
         /// the provider can parse it. Use sparingly; the point of blobs
         /// is to keep large bytes host-side.
@@ -40,7 +35,6 @@ interface types {
         http-response(http-response),
         git-repo-opened(git-repo-info),
         blob-fetched(blob-fetched),
-        archive-opened(archive-opened),
         blob-read(list<u8>),
         callout-error(callout-error),
     }
@@ -311,14 +305,6 @@ interface types {
         reference: option<string>,
     }
 
-    /// Archive formats the host knows how to extract for `open-archive`.
-    /// Closed enum on purpose; add arms when a provider needs them.
-    enum archive-format {
-        tar-gz,
-        tar,
-        zip,
-    }
-
     /// HTTP fetch that lands its response body in the host's disk-backed
     /// blob cache. The host derives identity from the validated request.
     record blob-fetch-request {
@@ -337,19 +323,6 @@ interface types {
         etag: option<string>,
         status: u16,
         response-headers: list<header>,
-    }
-
-    /// Mount a stored blob as a directory tree. `format` tells the host
-    /// how to decompress and walk the bytes. `strip-prefix`, when set,
-    /// is removed from every entry's path at mount time.
-    record archive-open-request {
-        blob: blob-id,
-        format: archive-format,
-        strip-prefix: option<string>,
-    }
-
-    record archive-opened {
-        tree: tree-ref,
     }
 
     /// Bring (a range of) a stored blob across the WIT. The host caps
@@ -511,12 +484,11 @@ interface log {
 }
 
 interface callouts {
-    use types.{archive-open-request, blob-fetch-request, callout-result, correlation-id, git-open-request, http-request, read-blob-request};
+    use types.{blob-fetch-request, callout-result, correlation-id, git-open-request, http-request, read-blob-request};
 
     fetch: async func(id: correlation-id, req: http-request) -> callout-result;
     git-open-repo: async func(id: correlation-id, req: git-open-request) -> callout-result;
     fetch-blob: async func(id: correlation-id, req: blob-fetch-request) -> callout-result;
-    open-archive: async func(id: correlation-id, req: archive-open-request) -> callout-result;
     read-blob: async func(id: correlation-id, req: read-blob-request) -> callout-result;
 }
 

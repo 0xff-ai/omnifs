@@ -38,7 +38,7 @@ There is one route API. `file` and `dir` are the nouns; the *face* you put under
 | Are the bytes large or host-cacheable, and should never cross the WIT boundary (a PR diff, a PDF)? | yes | **Blob face** `o.file(..).blob(method)` returning `BlobFile<F>` |
 | Is the leaf ranged or `Live` (pod logs, `tail -f`)? | yes | **Stream face** `o.file(..).stream(method)`; the only face that may be `Live` |
 | Does a directory list child objects (repos under an owner, issues, comments)? | yes | **Collection face** `o.dir(name).collection::<C>(method)` returning `Collection<C, Cur>`; `C` must be its own `r.object::<C>` |
-| Is the subtree a real tree the host can materialize wholesale (git repo, release archive)? | yes | **Tree face** `o.dir(name).tree(method)` returning `TreeRef`, or raw `r.treeref(t).handler(..)` |
+| Is the subtree a real tree the host can materialize wholesale (such as a git repo)? | yes | **Tree face** `o.dir(name).tree(method)` returning `TreeRef`, or raw `r.treeref(t).handler(..)` |
 | Is the same object reachable at a second path (by-name and by-id)? | yes | `let h = r.object::<O>(..)?; r.alias(other_template, &h)?;` |
 | Tempted to add an object so something gets cached? | stop | An object earns canonical storage only with a `canonical` face. No canonical payload means a direct face or raw handler, not a fake object |
 
@@ -177,7 +177,7 @@ A file-shaped object projects as a single file, not a directory: `r.file_object:
 - Batch parallel fetches with `join_all([f1, f2, ..])`: one suspension round, host runs them concurrently, results return in order. Every child must come from the same `Cx` and yield exactly one callout per suspension or results silently misalign.
 - Pagination: for a raw dir listing return `DirListing::paged(entries, Cursor::Page(n + 1))`; for an object collection return `Collection::page(entries).next(cursor)`; the host echoes the cursor back on continuation.
 - Rate limits: a 429 arms a per-authority breaker (cooldown from `Retry-After` or the endpoint's `rate_limit` policy); further calls fast-fail without a callout until cooldown passes.
-- Large bytes stay host-side: `fetch-blob` lands a body in the host blob cache (serve via blob byte-source or `open-archive` into a `TreeRef`); `read-blob` brings ranges across the boundary, sparingly.
+- Large bytes stay host-side: `fetch-blob` lands a body in the host blob cache for a blob byte-source; `read-blob` brings ranges across the boundary, sparingly.
 
 ## Events and freshness
 

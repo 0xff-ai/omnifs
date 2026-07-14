@@ -11,10 +11,10 @@
 //! # Layering: only the public boundary builds `CalloutResult`
 //!
 //! Each executor module (this one's dispatch, `http.rs`,
-//! `blob.rs`, `git.rs`, `archive.rs`) exposes a public callout entry
+//! `blob.rs`, and `git.rs`) exposes a public callout entry
 //! method that returns `wit_types::CalloutResult`. Everything below
 //! that method uses typed `Result<T, ExecutorError>` (`BlobError`,
-//! `ArchiveError`, `GitError`, …) and propagates with `?`. The
+//! `GitError`, …) and propagates with `?`. The
 //! conversion happens at exactly one place per executor: the public
 //! method's outermost `match` or `From<ExecutorError> for CalloutResult`.
 //!
@@ -55,14 +55,12 @@
 //!    return.
 //! 4. Add a `CalloutHost::run` arm dispatching to it.
 
-pub(crate) mod archive;
 pub(crate) mod blob;
 pub mod cloner;
 pub(crate) mod git;
 pub(crate) mod http;
 pub(crate) mod wit_convert;
 
-use crate::archive::ArchiveExecutor;
 use crate::blob::BlobExecutor;
 use crate::git::GitExecutor;
 use crate::http::HttpStack;
@@ -210,9 +208,6 @@ pub(crate) fn record_outcome(result: &wit_types::CalloutResult) {
         wit_types::CalloutResult::GitRepoOpened(r) => {
             span.record("tree_ref", r.tree);
         },
-        wit_types::CalloutResult::ArchiveOpened(r) => {
-            span.record("tree_ref", r.tree);
-        },
         wit_types::CalloutResult::CalloutError(e) => {
             span.record("error.kind", tracing::field::debug(&e.kind));
             span.record("error.message", e.message.as_str());
@@ -226,23 +221,16 @@ pub(crate) struct CalloutHost {
     http: Arc<HttpStack>,
     git: GitExecutor,
     blob: BlobExecutor,
-    archive: Arc<ArchiveExecutor>,
     next_callout_index: Arc<AtomicUsize>,
     test_callouts: Option<TestCallouts>,
 }
 
 impl CalloutHost {
-    pub(crate) fn new(
-        http: Arc<HttpStack>,
-        git: GitExecutor,
-        blob: BlobExecutor,
-        archive: Arc<ArchiveExecutor>,
-    ) -> Self {
+    pub(crate) fn new(http: Arc<HttpStack>, git: GitExecutor, blob: BlobExecutor) -> Self {
         Self {
             http,
             git,
             blob,
-            archive,
             next_callout_index: Arc::new(AtomicUsize::new(0)),
             test_callouts: None,
         }
@@ -290,7 +278,6 @@ impl CalloutHost {
                 let req = req.clone();
                 spawn_blocking_callout("git.open_repo", move || git.open_repo(&req, op_id)).await
             },
-            wit_types::Callout::OpenArchive(req) => self.archive.open(req).await,
             // Synchronous bounded disk read; offloaded for the same reason as
             // `git.open_repo` so a slow read never stalls the event loop.
             wit_types::Callout::ReadBlob(req) => {

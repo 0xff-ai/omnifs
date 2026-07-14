@@ -8,7 +8,6 @@
 //! [`join_all`] polls sibling callout futures in one operation so the async
 //! component runtime can keep several host imports in flight at once.
 
-use crate::archives;
 use crate::git;
 use crate::http;
 use core::cell::RefCell;
@@ -132,17 +131,12 @@ impl<S> Cx<S> {
     pub fn git(&self) -> git::Builder<'_, S> {
         git::Builder::new(self)
     }
-
-    /// Archive-mount callout builder; see [`crate::archives`].
-    pub fn archives(&self) -> archives::Builder<'_, S> {
-        archives::Builder::new(self)
-    }
 }
 
 /// Run a collection of callout futures concurrently and collect their
 /// outputs in input order. Polling every child before returning `Pending`
 /// starts every generated async host import the child reaches, so the host can
-/// run the corresponding HTTP, git, blob, or archive work concurrently.
+/// run the corresponding HTTP, git, or blob work concurrently.
 ///
 /// ```ignore
 /// let pages = join_all(

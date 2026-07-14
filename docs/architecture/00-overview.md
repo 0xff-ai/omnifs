@@ -27,7 +27,7 @@ Identity is layered. The provider computes a logical id from object kind and nor
 
 ## Callouts and effects
 
-Provider namespace and notify calls are async component exports that return terminal results. When provider code awaits host work, it calls an async WIT import. The host executes callouts such as HTTP fetches, blob fetches, git clone/open operations, archive opens, and blob reads, then the component future resumes with the typed result.
+Provider namespace and notify calls are async component exports that return terminal results. When provider code awaits host work, it calls an async WIT import. The host executes callouts such as HTTP fetches, blob fetches, git clone/open operations, and blob reads, then the component future resumes with the typed result.
 
 One provider instance can serve multiple concurrent filesystem operations. Wasmtime's component async runtime owns suspension while the host owns the callout executors, auth injection, capability checks, tracing, and cache-visible effects.
 

@@ -1,10 +1,9 @@
 //! Engine/instance/mount lifecycle for one WASM provider.
 //!
 //! `Runtime` manages the Wasmtime store lifetime, provider initialization,
-//! executor handles (HTTP, Git, Blob, Archive), and cache/mount lifecycle.
+//! executor handles (HTTP, Git, and Blob), and cache/mount lifecycle.
 //! Typed operation execution is in `ops::lifecycle`; WASI store plumbing is in `wasi`.
 
-use crate::archive::ArchiveExecutor;
 use crate::auth::binding_from_config;
 use crate::blob::{BlobExecutor, BlobLimits};
 use crate::blob_cache::BlobCache;
@@ -53,7 +52,6 @@ const RATE_LIMIT_DEFAULT_COOLDOWN: std::time::Duration = std::time::Duration::fr
 const RATE_LIMIT_MAX_COOLDOWN: std::time::Duration = std::time::Duration::from_hours(1);
 const PROVIDER_CACHE_SUBDIR: &str = "providers";
 const BLOB_CACHE_SUBDIR: &str = "blobs";
-const ARCHIVE_CACHE_SUBDIR: &str = "archives";
 const RECENT_REVALIDATE_OBJECTS: usize = 32;
 
 /// Host-owned filesystem context for provider runtime.
@@ -394,29 +392,12 @@ impl Runtime {
         let blob_cache = Arc::new(BlobCache::new(blob_path.clone()).map_err(|source| {
             BuildError::Cache(format!("blob cache at {}: {source}", blob_path.display()))
         })?);
-        let archive_path = cache_root.join(ARCHIVE_CACHE_SUBDIR);
-        let archive = Arc::new(
-            ArchiveExecutor::new(blob_cache.clone(), trees.clone(), archive_path.clone()).map_err(
-                |source| {
-                    BuildError::Cache(format!(
-                        "archive cache at {}: {source}",
-                        archive_path.display()
-                    ))
-                },
-            )?,
-        );
-
         // Per-mount facade: structurally isolates object and view cache state.
         let cache = caches.mount(mount_name);
         let blob_limits = BlobLimits::from_config(config);
         let http = Arc::new(HttpStack::new(auth.clone(), capability.clone())?);
         let blob = BlobExecutor::new(Arc::clone(&http), blob_cache.clone(), blob_limits);
-        let mut callout_host = CalloutHost::new(
-            Arc::clone(&http),
-            git.clone(),
-            blob.clone(),
-            Arc::clone(&archive),
-        );
+        let mut callout_host = CalloutHost::new(Arc::clone(&http), git.clone(), blob.clone());
         if let Some(test_callouts) = test_callouts {
             callout_host = callout_host.with_test_callouts(test_callouts);
         }
@@ -554,8 +535,7 @@ impl Runtime {
     }
 
     /// Resolve a tree-ref handle to a real filesystem path.
-    /// Works for both git clones and extracted archives — they share a
-    /// single tree registry, so a `tree-ref` is unambiguous.
+    /// Resolves a host-issued git tree handle through the shared registry.
     pub fn resolve_tree_ref(&self, tree_ref: u64) -> Option<PathBuf> {
         self.trees.resolve(tree_ref)
     }

@@ -74,7 +74,7 @@ pub(crate) use cache::blob as blob_cache;
 #[cfg(feature = "runtime")]
 pub(crate) use callouts::wit_convert as wit_protocol;
 #[cfg(feature = "runtime")]
-pub(crate) use callouts::{archive, blob, cloner, git, http};
+pub(crate) use callouts::{blob, cloner, git, http};
 #[cfg(feature = "runtime")]
 pub(crate) use effects::apply as effect_apply;
 #[cfg(feature = "runtime")]

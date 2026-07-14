@@ -30,9 +30,7 @@ url = { version = "2", optional = true }
 wasmtime-wasi = { version = "46.0.1", default-features = false, features = ["p2"], optional = true }
 sha2 = { workspace = true, optional = true }
 tempfile = { workspace = true, optional = true }
-flate2 = { workspace = true, optional = true }
 tar = { workspace = true, optional = true }
-zip = { workspace = true, optional = true }
 omnifs-core = { workspace = true, optional = true }
 omnifs-caps = { workspace = true, optional = true }
 omnifs-workspace = { workspace = true, optional = true }
@@ -51,7 +49,6 @@ runtime = [
     "dep:blake3",
     "dep:dashmap",
     "dep:fjall",
-    "dep:flate2",
     "dep:hex",
     "dep:moka",
     "dep:omnifs-api",
@@ -72,7 +69,6 @@ runtime = [
     "dep:url",
     "dep:wasmtime",
     "dep:wasmtime-wasi",
-    "dep:zip",
 ]
 
 [dev-dependencies]

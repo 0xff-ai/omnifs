@@ -21,7 +21,7 @@
 //! - wire->cache translation stays in `EffectApplier` (host-internal, inside
 //!   `Namespace` methods); `Tree` never imports `wit_types` in its public
 //!   surface.
-//! - The tree-ref/clone/archive registry stays in `Runtime::resolve_tree_ref`.
+//! - The tree-ref/clone registry stays in `Runtime::resolve_tree_ref`.
 
 // The module docs reference many bare host identifiers, protocol acronyms
 // (NFSv4, FUSE), and renderer-side type names (DirSnapshot, FileAttr) as prose,

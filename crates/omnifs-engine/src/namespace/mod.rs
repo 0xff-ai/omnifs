@@ -72,7 +72,7 @@ pub struct Epoch(pub u64);
 ///
 /// `Symlink` is reserved: the projection does not produce symlinks, but the
 /// variant keeps the wire shape complete.
-/// `Subtree` is a local-directory handoff (a resolved treeref clone/archive).
+/// `Subtree` is a local-directory handoff (a resolved treeref clone).
 /// The consumer can serve `root` only when that path is accessible in its
 /// filesystem namespace; containerized or guest frontends (docker, krunkit)
 /// cannot dereference a host-local path.

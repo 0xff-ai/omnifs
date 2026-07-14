@@ -207,8 +207,7 @@ impl<'cx, S> Request<'cx, S> {
     /// Convert this request into a blob fetch. The response body lands in
     /// the host's blob cache rather than crossing the WIT, and the returned
     /// [`crate::blob::BlobRef`] can be handed to
-    /// [`crate::projection::FileProjection::blob`], `cx.archives().open(..)`,
-    /// or `cx.blob(id).read()`.
+    /// [`crate::projection::FileProjection::blob`] or `cx.blob(id).read()`.
     pub fn into_blob(self) -> BlobRequest<'cx, S> {
         BlobRequest { inner: self }
     }
@@ -370,7 +369,7 @@ pub(crate) fn expect_callout<T>(
 }
 
 /// The future shape of every callout (fetch, fetch-blob, read-blob,
-/// git-open-repo, open-archive).
+/// git-open-repo).
 ///
 /// `Pending` wraps the generated async WIT import future. `Ready` short-circuits
 /// builder and breaker errors without entering the host.
@@ -422,7 +421,6 @@ async fn run_callout<T>(
         Callout::Fetch(req) => callouts::fetch(id, req).await,
         Callout::GitOpenRepo(req) => callouts::git_open_repo(id, req).await,
         Callout::FetchBlob(req) => callouts::fetch_blob(id, req).await,
-        Callout::OpenArchive(req) => callouts::open_archive(id, req).await,
         Callout::ReadBlob(req) => callouts::read_blob(id, req).await,
     };
     extract(result)

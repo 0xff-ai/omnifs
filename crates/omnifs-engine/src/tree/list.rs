@@ -57,7 +57,7 @@ pub struct Listing {
 }
 
 /// `list()` either lists a provider directory or hands off a resolved backing
-/// subtree dir (a bind-mounted clone/archive). A distinct variant so a treeref
+/// subtree dir (a bind-mounted clone). A distinct variant so a treeref
 /// dir can never be mistaken for a provider listing.
 #[derive(Debug, Clone)]
 pub enum ListOutcome {

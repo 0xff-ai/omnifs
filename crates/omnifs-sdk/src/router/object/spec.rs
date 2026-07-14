@@ -70,7 +70,7 @@ pub(in crate::router) struct ObjectDefinition<O: Object> {
 /// One tree face: the relative dir name and the boxed treeref handler. The
 /// handler parses `O::Key` from the dir-path captures and runs the typed tree
 /// method, lowering to a [`crate::handler::TreeRef`] (the host resolves the
-/// git-open / archive callout the method issues).
+/// git-open callout the method issues).
 pub(in crate::router) struct TreeFaceEntry<S> {
     pub name: &'static str,
     pub handler: super::super::handlers::BoxedTreeRefHandler<S>,
@@ -686,7 +686,7 @@ impl<'a, O: Object> DirFace<'a, O> {
     /// A subtree handoff registered as an object dir face so it reads in
     /// `start()`. Lowers to the `treeref` machinery: the face becomes a treeref
     /// route at `template/name`, so a lookup or list there returns the subtree
-    /// handoff after the host runs the git-open / archive callout the method
+    /// handoff after the host runs the git-open callout the method
     /// issues.
     pub fn tree<Fut>(
         self,

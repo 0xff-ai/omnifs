@@ -3,7 +3,7 @@
 //! Drives canned futures/results through executor-shaped spans, then asserts
 //! the captured `fmt` layer output contains request-side fields on the `new`
 //! line and late-recorded response-side fields on the `close` line. Coverage
-//! spans all five callout kinds.
+//! spans the host callout kinds.
 
 use omnifs_engine::test_support::{LogUrl, WitHeaders, record_outcome};
 use omnifs_wit::provider::types as wit_types;
@@ -45,7 +45,7 @@ impl<'a> MakeWriter<'a> for CapturedWriter {
 //
 // Each helper mirrors the production `#[instrument]` annotations on
 // `HttpStack::fetch`, `BlobExecutor::fetch`, `BlobExecutor::read`,
-// `GitExecutor::open_repo`, and `ArchiveExecutor::open`. The function
+// and `GitExecutor::open_repo`. The function
 // bodies do not perform real I/O; they synthesize a `CalloutResult` and
 // call `record_outcome` so the late-bound span fields land before the
 // span closes.
@@ -141,22 +141,6 @@ fn fake_git_open(req: &wit_types::GitOpenRequest) -> wit_types::CalloutResult {
     result
 }
 
-#[tracing::instrument(target = "omnifs_callout", skip_all, fields(
-    blob = req.blob,
-    format = ?req.format,
-    strip_prefix = req.strip_prefix.as_deref().unwrap_or(""),
-    tree_ref = tracing::field::Empty,
-    error.kind = tracing::field::Empty,
-    error.message = tracing::field::Empty,
-    error.retryable = tracing::field::Empty,
-))]
-async fn fake_archive_open(req: &wit_types::ArchiveOpenRequest) -> wit_types::CalloutResult {
-    let _ = req;
-    let result = wit_types::CalloutResult::ArchiveOpened(wit_types::ArchiveOpened { tree: 99 });
-    record_outcome(&result);
-    result
-}
-
 fn http_request() -> wit_types::HttpRequest {
     wit_types::HttpRequest {
         method: "GET".to_string(),
@@ -199,14 +183,6 @@ fn git_open_request() -> wit_types::GitOpenRequest {
     wit_types::GitOpenRequest {
         clone_url: "https://user:pass@github.com/example/repo.git".to_string(),
         reference: Some("main".to_string()),
-    }
-}
-
-fn archive_open_request() -> wit_types::ArchiveOpenRequest {
-    wit_types::ArchiveOpenRequest {
-        blob: 4242,
-        format: wit_types::ArchiveFormat::TarGz,
-        strip_prefix: Some("/pkg-1.0/".to_string()),
     }
 }
 
@@ -288,21 +264,6 @@ async fn git_open_span_records_tree_ref_at_close() {
         !output.contains("user:pass"),
         "git URL must strip userinfo: {output}"
     );
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn archive_open_span_records_tree_ref_at_close() {
-    let req = archive_open_request();
-    let output = run_with_capture_async(|| async move {
-        let _ = fake_archive_open(&req).await;
-    })
-    .await;
-
-    assert_contains_new_line(
-        &output,
-        &["blob=4242", "format=", "strip_prefix=\"/pkg-1.0/\""],
-    );
-    assert_contains_close_line(&output, &["tree_ref=99"]);
 }
 
 // --- helpers --------------------------------------------------------------

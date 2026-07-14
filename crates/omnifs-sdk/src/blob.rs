@@ -10,8 +10,6 @@
 //! A stored blob is consumed by:
 //! - [`crate::projection::FileProjection::blob`]: serve the bytes verbatim
 //!   from a file route; the host reads them without guest involvement.
-//! - `cx.archives().open(blob).format(..).send()`: mount as a directory tree
-//!   (see [`crate::archives`]).
 
 use crate::error::{ProviderError, Result};
 use omnifs_wit::provider::types::{BlobFetchRequest, BlobFetched, Callout, CalloutResult, Header};
@@ -32,8 +30,8 @@ impl BlobId {
 /// Metadata returned by a blob fetch.
 ///
 /// The response body stays in the host cache. Use [`Self::id`] when passing
-/// the blob to [`crate::projection::FileProjection::blob`], archive opening,
-/// or [`BlobReader`]. The fetch resolves for any upstream status; check
+/// the blob to [`crate::projection::FileProjection::blob`] or [`BlobReader`].
+/// The fetch resolves for any upstream status; check
 /// [`Self::error_for_status`] before treating the blob as valid content.
 #[derive(Clone, Debug)]
 pub struct BlobRef {

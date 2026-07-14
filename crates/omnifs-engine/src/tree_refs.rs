@@ -1,9 +1,8 @@
 //! Shared `tree-ref -> filesystem path` registry.
 //!
-//! Both git clones and extracted archive trees materialize as plain
-//! directories on disk that the host serves through bind mounts. They
-//! share a single u64 ID space so a `tree-ref` returned to the provider
-//! is unambiguous: there is only one source of truth for resolution.
+//! Git clones materialize as plain directories on disk that the host serves
+//! through bind mounts. A shared u64 ID space keeps a `tree-ref` returned to
+//! the provider unambiguous: there is only one source of truth for resolution.
 
 use dashmap::DashMap;
 use std::path::PathBuf;

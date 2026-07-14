@@ -88,9 +88,8 @@ changes:
   should not cross the provider/WIT boundary. A blob can still carry exact size,
   content type, stability, and ETag/version evidence;
 - preserve the blob toolchain as separate capabilities: `fetch-blob` stores a
-  body host-side and returns a runtime-local handle, `read-blob` copies a capped
-  range back into the provider, and `open-archive` extracts a blob to a host
-  tree and returns a `TreeRef`;
+  body host-side and returns a runtime-local handle, while `read-blob` copies a
+  capped range back into the provider;
 - `BlobId` is runtime-local. The host derives durable blob request and body
   identities from validated request facts; providers never name cache entries;
 - stream and tree stay behaviors under file and directory faces;
@@ -756,9 +755,8 @@ async fn diff(cx: Cx<GitHub>, key: PullRequestKey) -> Result<BlobFile<Diff>> {
 
 GitHub action logs are different in the current provider: the endpoint returns a
 zip and the provider flattens it into text in guest memory. That can remain a
-direct transformed file until a host-side archive/log view exists. If the log
-surface becomes a raw downloadable archive or an extracted tree, model it as a
-blob or tree face instead of a direct file.
+direct transformed file. If the log surface becomes a raw downloadable archive
+or an extracted tree, model it as a blob or tree face instead of a direct file.
 
 ### arXiv
 
@@ -768,9 +766,8 @@ version. Category browsing is a typed cursor collection of paper-version
 objects.
 
 PDFs and source tarballs are blob-backed file faces, not inline canonical object
-bytes. A source archive may also grow a directory/tree face by fetching the
-tarball into the blob store and using `open-archive` to produce a `TreeRef`; that
-must remain a host-side extraction path, not provider-side archive parsing.
+bytes. A source archive remains an ordinary blob-backed file; if a directory/tree
+face is needed later, it requires an explicitly designed provider-side path.
 
 ```text
 /papers/{paper}/@latest/{paper.atom,paper.json,paper.pdf,source.tar.gz}

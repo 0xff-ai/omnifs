@@ -84,14 +84,6 @@ impl<T: Send + 'static> CalloutsHostWithStore<T> for HostState {
         Self::dispatch_callout(accessor, id, wit_types::Callout::FetchBlob(req)).await
     }
 
-    async fn open_archive(
-        accessor: &Accessor<T, Self>,
-        id: u64,
-        req: wit_types::ArchiveOpenRequest,
-    ) -> wit_types::CalloutResult {
-        Self::dispatch_callout(accessor, id, wit_types::Callout::OpenArchive(req)).await
-    }
-
     async fn read_blob(
         accessor: &Accessor<T, Self>,
         id: u64,
