@@ -292,58 +292,42 @@ impl<S> Shape<'_, S> {
     }
 }
 
-/// Merge the entries and effects of ANCHOR-topology collection projections
-/// into the parent anchor's listing. Each collection enumerates child object
+/// Merge the entries and effects of an ANCHOR-topology collection projection
+/// into the parent anchor's listing. The collection enumerates child object
 /// names (and emits each fresh child's canonical store through its projection
 /// effects); those names become directory siblings of the parent's own leaves,
 /// the parent's own leaves winning name collisions.
-pub(in crate::router) fn merge_anchor_collections(
+pub(in crate::router) fn merge_anchor_collection(
     listing: &Listing,
-    projections: &[DirProjection],
+    projection: &DirProjection,
 ) -> Result<Listing> {
     let mut entries: Vec<BrowseEntry> = listing.entries().to_vec();
     let mut effects = listing.effects().clone();
     let parent_names: std::collections::BTreeSet<String> =
         entries.iter().map(|e| e.name().to_string()).collect();
 
-    // The merged listing is exhaustive only if the parent's own listing AND
-    // every merged collection are exhaustive; a paged/partial child makes the
-    // whole listing partial. Carry through a single resume cursor and validator
-    // (a parent paginates through at most one anchor collection in practice; if
-    // more than one paginates, the first cursor wins and the rest are merged as
-    // partial — the host re-runs every collection on resume).
     let mut all_exhaustive = listing.exhaustive();
     let mut next_cursor: Option<crate::handler::Cursor> = None;
-    let mut validator: Option<String> = None;
-
-    for projection in projections {
-        match projection.outcome() {
-            DirOutcome::Entries {
-                entries: child_entries,
-                exhaustive,
-                cursor,
-            } => {
-                for entry in child_entries {
-                    if !parent_names.contains(entry.name()) {
-                        entries.push(entry.to_browse_entry());
-                    }
+    match projection.outcome() {
+        DirOutcome::Entries {
+            entries: child_entries,
+            exhaustive,
+            cursor,
+        } => {
+            for entry in child_entries {
+                if !parent_names.contains(entry.name()) {
+                    entries.push(entry.to_browse_entry());
                 }
-                if !exhaustive {
-                    all_exhaustive = false;
-                }
-                if next_cursor.is_none() {
-                    next_cursor.clone_from(cursor);
-                }
-            },
-            // A child listing whose validator matched: it contributes no fresh
-            // entries here, but it is not a completeness claim either.
-            DirOutcome::Unchanged => all_exhaustive = false,
-        }
-        if validator.is_none() {
-            validator = projection.validator().map(|v| v.0.clone());
-        }
-        effects.extend(projection.project_effects()?);
+            }
+            all_exhaustive &= *exhaustive;
+            next_cursor.clone_from(cursor);
+        },
+        // A child listing whose validator matched: it contributes no fresh
+        // entries here, but it is not a completeness claim either.
+        DirOutcome::Unchanged => all_exhaustive = false,
     }
+    let validator = projection.validator().map(|v| v.0.clone());
+    effects.extend(projection.project_effects()?);
 
     let mut merged = if all_exhaustive {
         Listing::complete(entries)

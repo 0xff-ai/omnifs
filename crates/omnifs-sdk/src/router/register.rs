@@ -588,12 +588,16 @@ impl<S> Router<S> {
                             collection.dir_path, collection.parent_template
                         )));
                     };
-                    parent
-                        .anchor_collections
-                        .push(super::object::AnchorCollection {
-                            handler: collection.handler,
-                            child_view,
-                        });
+                    if parent.anchor_collection.is_some() {
+                        return Err(ProviderError::invalid_input(format!(
+                            "anchor collection at {}: parent object anchor {} already has a collection owner",
+                            collection.dir_path, collection.parent_template
+                        )));
+                    }
+                    parent.anchor_collection = Some(super::object::AnchorCollection {
+                        handler: collection.handler,
+                        child_view,
+                    });
                 },
             }
         }

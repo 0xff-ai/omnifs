@@ -836,15 +836,30 @@ fn anchor_collection_page_is_partial_and_carries_cursor() {
         !listing.exhaustive,
         "a paged anchor collection makes the parent listing non-exhaustive, not falsely complete"
     );
-    let Some(wit_types::Cursor::Opaque(token)) = &listing.next_cursor else {
+    let Some(cursor) = listing.next_cursor.clone() else {
         panic!(
             "the anchor collection's resume cursor must be carried through, got {:?}",
             listing.next_cursor
         );
     };
+    let wit_types::Cursor::Opaque(token) = &cursor else {
+        panic!("the anchor collection must emit an opaque cursor");
+    };
     assert_eq!(
         token, "1",
         "the typed page cursor round-trips through the wire"
+    );
+
+    let list = drive(&cx, r.list_children(&cx, "/o", None, Some(cursor.into())));
+    let (out, _effects) = list_wit(list);
+    let wit_types::ListChildrenResult::Entries(listing) = out else {
+        panic!("owner anchor continuation lists entries");
+    };
+    let names: Vec<&str> = listing.entries.iter().map(|e| e.name.as_str()).collect();
+    assert!(names.contains(&"repo1"), "the continuation emits repo1");
+    assert!(
+        !names.contains(&"repo0"),
+        "the continuation does not restart the collection at repo0"
     );
 }
 

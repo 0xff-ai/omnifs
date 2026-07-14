@@ -131,47 +131,40 @@ pub(in crate::router) struct ObjectRouteEntry<S> {
     /// Per-leaf live-face handlers (direct/blob/stream/object), keyed by leaf
     /// name. Shared with the spec so an alias mount replays the same closures.
     pub face_handlers: std::rc::Rc<std::collections::BTreeMap<String, FaceHandler<S>>>,
-    /// ANCHOR-topology collections attached at seal: their child template
-    /// equals this anchor, so they merge into this anchor's listing/lookup
+    /// The ANCHOR-topology collection attached at seal: its child template
+    /// equals this anchor, so it merges into this anchor's listing/lookup
     /// instead of getting a separate dir route.
-    pub anchor_collections: Vec<AnchorCollection<S>>,
+    pub anchor_collection: Option<AnchorCollection<S>>,
     pub validator: RouteValidator,
 }
 
 /// An ANCHOR-topology collection attached to a parent object's anchor: the
 /// boxed list handler plus the child view resolved at seal time. The parent's
-/// anchor listing runs each of these, merges the child-name entries, and emits
-/// each fresh child's canonical store.
+/// anchor listing runs it, merges the child-name entries, and emits each fresh
+/// child's canonical store.
 pub(in crate::router) struct AnchorCollection<S> {
     pub handler: CollectionHandler<S>,
     pub child_view: std::rc::Rc<ResolvedChildView>,
 }
 
 impl<S> ObjectRouteEntry<S> {
-    /// Run the attached ANCHOR collections and lower each to a
+    /// Run the attached ANCHOR collection and lower it to a
     /// [`crate::projection::DirProjection`], using the captures decoded from
-    /// the anchor path.
-    pub(in crate::router) async fn run_anchor_collections(
+    /// the anchor path and the host's continuation cursor.
+    pub(in crate::router) async fn run_anchor_collection(
         &self,
         cx: &Cx<S>,
         caps: &Captures,
-    ) -> Result<Vec<crate::projection::DirProjection>> {
-        let mut projections = Vec::with_capacity(self.anchor_collections.len());
-        for collection in &self.anchor_collections {
-            let dir_cx = crate::handler::DirCx::new(
-                cx.clone(),
-                crate::handler::DirIntent::List { cursor: None },
-            );
-            let projection =
-                (collection.handler)(dir_cx, caps.clone(), collection.child_view.clone()).await?;
-            projections.push(projection);
-        }
-        Ok(projections)
-    }
-
-    /// Whether this anchor has ANCHOR-topology collections attached.
-    pub(in crate::router) fn has_anchor_collections(&self) -> bool {
-        !self.anchor_collections.is_empty()
+        cursor: Option<crate::handler::Cursor>,
+    ) -> Result<Option<crate::projection::DirProjection>> {
+        let Some(collection) = &self.anchor_collection else {
+            return Ok(None);
+        };
+        let dir_cx =
+            crate::handler::DirCx::new(cx.clone(), crate::handler::DirIntent::List { cursor });
+        let projection =
+            (collection.handler)(dir_cx, caps.clone(), collection.child_view.clone()).await?;
+        Ok(Some(projection))
     }
 }
 
@@ -331,7 +324,7 @@ where
         read: route.clone().read_handler(),
         list: route.list_handler(),
         face_handlers: spec.face_handlers.clone(),
-        anchor_collections: Vec::new(),
+        anchor_collection: None,
         validator: captures_validator::<O::Key>(),
     };
 

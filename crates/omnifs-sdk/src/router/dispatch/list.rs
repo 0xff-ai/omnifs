@@ -13,18 +13,19 @@ impl<S> Router<S> {
     ///
     /// Resolution order: treeref handoff; a dir route run with
     /// [`DirIntent::List`] and the resume cursor; an object anchor
-    /// (precomputed leaf names, with the load's canonical-store and
-    /// eager-preload effects attached); an auto-navigable literal prefix
-    /// listed from the route table alone. File routes report not-a-directory.
+    /// (precomputed leaf names plus its optional cursor-bearing collection,
+    /// with canonical-store and eager-preload effects attached); an
+    /// auto-navigable literal prefix listed from the route table alone. File
+    /// routes report not-a-directory.
     ///
     /// Handler and anchor listings are merged with the literal sibling
     /// routes registered at that depth, ordered by name, the handler winning
     /// name collisions. Exhaustiveness: a handler listing reports the
-    /// handler's own flag; an object anchor listing is complete (its leaves
-    /// are statically known); an implicit prefix listing is partial whenever
-    /// a capture sibling at the next depth can bind names that cannot be
-    /// enumerated. Lookup remains the authority for names a listing
-    /// omitted.
+    /// handler's own flag; a bare object anchor listing is complete because
+    /// its leaves are statically known, while an attached collection carries
+    /// its own completeness; an implicit prefix listing is partial whenever a
+    /// capture sibling at the next depth can bind names that cannot be
+    /// enumerated. Lookup remains the authority for names a listing omitted.
     ///
     /// `cached_validator` is accepted for the WIT contract but unused here:
     /// the host delivers the listing validator through the context (see
@@ -76,14 +77,18 @@ impl<S> Router<S> {
             let mut listing = shape
                 .object_dir_listing(route.entry, &abs, out.source.as_ref())
                 .with_effects(out.effects);
-            if route.entry.has_anchor_collections() {
-                let projections = super::route_future(
-                    route.entry.pattern.template(),
-                    Box::pin(route.entry.run_anchor_collections(cx, &route.captures)),
-                )
-                .await
-                .map_err(|error| error.with_context("list-children", &abs))?;
-                listing = super::route_shape::merge_anchor_collections(&listing, &projections)?;
+            if let Some(projection) = super::route_future(
+                route.entry.pattern.template(),
+                Box::pin(
+                    route
+                        .entry
+                        .run_anchor_collection(cx, &route.captures, cursor),
+                ),
+            )
+            .await
+            .map_err(|error| error.with_context("list-children", &abs))?
+            {
+                listing = super::route_shape::merge_anchor_collection(&listing, &projection)?;
             }
             return Ok(List::entries(listing));
         }
