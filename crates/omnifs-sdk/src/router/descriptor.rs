@@ -1,4 +1,4 @@
-//! Sealed route table introspection.
+//! Compiled route table introspection.
 
 use crate::captures::CaptureDescriptor;
 use serde::Serialize;

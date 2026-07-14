@@ -32,7 +32,7 @@
 //!
 //! [`Pattern::is_ambiguous_with`] detects two leaf claims that can bind the
 //! same concrete path with equal precedence, where neither could reliably win.
-//! [`Router::seal`](super::Router::seal) runs this pairwise over all leaf
+//! [`Router::compile`](super::Router::compile) runs this pairwise over all leaf
 //! claims and fails initialization on the first overlap, so shadowed routes
 //! are a startup error rather than silent runtime behavior.
 
@@ -361,7 +361,7 @@ impl Pattern {
 
     /// A shape signature of all segments but the last (`l:<lit>`, `p:<prefix>`,
     /// `c`, `r` joined by `/`). Used only for human-readable overlap
-    /// diagnostics in [`Router::seal`](super::Router::seal) errors; capture
+    /// diagnostics in [`Router::compile`](super::Router::compile) errors; capture
     /// names are deliberately erased because they do not affect matching.
     #[must_use]
     pub fn parent_signature(&self) -> String {

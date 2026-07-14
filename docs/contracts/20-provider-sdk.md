@@ -25,6 +25,8 @@ Use `r.object::<O>` or `r.file_object::<O>` for object-backed paths. Keep canoni
 
 Route dispatch has one owner for precedence. Lookup, listing, read, and open must share route-target resolution rules.
 
+`Router` is the mutable registration builder used only during provider startup. `Router::compile` consumes it, resolves collections, validates the complete route surface, synthesizes README routes, and returns `CompiledRouter`, the only type that supports runtime dispatch. Provider initialization publishes state and the compiled router only after both startup and compilation succeed.
+
 Keep `r.dir`, `r.file`, and `r.treeref` as the path-oriented face for non-object routes. Use typed `omnifs_core::path::Path` or parsed segments after parse boundaries. Split and join provider paths as strings only at WIT or display boundaries.
 
 ### Provider metadata
@@ -103,6 +105,6 @@ Changing the `Object` trait, route faces, dispatch, provider macro surface, or W
 - `just check providers`
 - `just build providers`
 - `just validate providers`
-- Provider initialization/seal tests after route-surface changes.
+- Provider initialization/compilation tests after route-surface changes.
 - WIT-boundary tests for object, collection, file-object, preload, effects, `ByteSource`, `DirListing`, and canonical `view_leaves` changes.
 - Manifest schema generation/checks when provider config metadata changes.

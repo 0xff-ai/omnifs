@@ -1,8 +1,8 @@
 //! Route registration and object mounting.
 //!
 //! Everything here runs once, inside a provider's `start`. The route table is
-//! append-only and immutable after [`Router::seal`]; dispatch (the
-//! `dispatch` submodule) reads it on every host browse call.
+//! append-only. [`Router::compile`] consumes that registration state and
+//! produces the immutable route table used for host browse calls.
 
 use crate::error::{ProviderError, Result};
 use crate::object::{FacetMetadata, Key, Object, ObjectKind};
@@ -11,6 +11,7 @@ use omnifs_core::ContentType;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use super::compiled::CompiledRouter;
 use super::descriptor::{RouteDescriptor, RouteKind};
 use super::handlers::{IntoDirHandler, IntoFileHandler, IntoTreeRefHandler};
 use super::object::{ObjectBlock, ObjectHandle, mount_object, object};
@@ -21,14 +22,14 @@ use super::readme::{ObjectLeaves, Readme, Scope};
 // Router
 // ===========================================================================
 
-/// The registration and dispatch surface; `S` is the provider state type
-/// handlers receive through their `Cx<S>` / `DirCx<S>`.
+/// The mutable registration builder; `S` is the provider state type handlers
+/// receive through their `Cx<S>` / `DirCx<S>`.
 ///
 /// Routes live in per-kind tables (dirs, files, treerefs, objects).
 /// Separately, `leaf_claims` accumulates one pattern per leaf so
-/// [`Self::seal`] can enforce one-path-one-route across all kinds at once,
+/// [`Self::compile`] can enforce one-path-one-route across all kinds at once,
 /// and `object_registry` records each mounted object kind so a collection
-/// face can resolve its child object's anchor at seal time.
+/// face can resolve its child object's anchor at compile time.
 ///
 /// ```ignore
 /// fn start(config: Config, r: &mut Router<State>) -> Result<State> {
@@ -50,16 +51,15 @@ pub struct Router<S = ()> {
     pub(super) objects: Vec<super::object::ObjectRouteEntry<S>>,
     pub(super) leaf_claims: Vec<Pattern>,
     pub(super) object_registry: Vec<RegisteredObject>,
-    pub(super) route_descriptors: Vec<RouteDescriptor>,
     /// Collection faces declared on object dir faces, resolved against the
-    /// registry at seal time (which registers the dir route for NESTED
+    /// registry at compile time (which registers the dir route for NESTED
     /// collections and attaches ANCHOR collections to the parent object).
     pub(super) collections: Vec<CollectionRef<S>>,
 }
 
 /// Registry record for one mounted object kind, used by collection faces to
 /// resolve the child object's anchor template, view leaves, and facet axes at
-/// seal time.
+/// compile time.
 pub(super) struct RegisteredObject {
     pub kind: ObjectKind,
     pub template: String,
@@ -70,10 +70,10 @@ pub(super) struct RegisteredObject {
     pub facet_axes: &'static [crate::object::FacetAxis],
 }
 
-/// A collection face awaiting registry resolution at seal time. Carries the
+/// A collection face awaiting registry resolution at compile time. Carries the
 /// late-bound child-view cell its handler reads, plus, for the NESTED
 /// topology, the boxed list handler and validator deferred for dir-route
-/// registration (see [`Router::seal`]).
+/// registration (see [`Router::compile`]).
 pub(super) struct CollectionRef<S> {
     /// The collection dir path (`parent_anchor/name`).
     pub dir_path: String,
@@ -100,7 +100,6 @@ impl<S> Default for Router<S> {
             objects: Vec::new(),
             leaf_claims: Vec::new(),
             object_registry: Vec::new(),
-            route_descriptors: Vec::new(),
             collections: Vec::new(),
         }
     }
@@ -181,7 +180,7 @@ impl<S> Router<S> {
     }
 
     /// Mount the same object spec at another `template` (an alias). Captures
-    /// must satisfy the key (checked at seal time).
+    /// must satisfy the key (checked at compile time).
     pub fn alias<O>(
         &mut self,
         template: &'static str,
@@ -223,7 +222,7 @@ impl<S> Router<S> {
             canonical_view_leaf_names: handle.canonical_view_leaf_names(),
             facet_axes: <O::Key as FacetMetadata>::facet_axes(),
         });
-        // Defer collection dir-route registration to seal: the child object's
+        // Defer collection dir-route registration to compile: the child object's
         // template, leaves, and facet axes may not be registered yet, and the
         // ANCHOR topology (child template == collection dir) must NOT get a
         // separate dir route. Pair each declared collection with its boxed
@@ -339,7 +338,7 @@ impl<S> Router<S> {
         Ok(())
     }
 
-    /// Seal-time validation and collection resolution, called by the
+    /// Compile-time validation and collection resolution, called by the
     /// `#[omnifs_sdk::provider]` glue after `start` returns; providers do not
     /// call it themselves.
     ///
@@ -353,7 +352,7 @@ impl<S> Router<S> {
     /// The face-level checks (canonical CT, single canonical, representation
     /// without canonical, Live only on stream, reserved `@`) run at build time
     /// inside the block builder and need no re-check here.
-    pub fn seal(&mut self) -> Result<()>
+    pub fn compile(mut self) -> Result<CompiledRouter<S>>
     where
         S: 'static,
     {
@@ -373,14 +372,22 @@ impl<S> Router<S> {
 
         let route_descriptors = self.describe_routes(collection_descriptors);
         self.synthesize_readme_routes(&route_descriptors)?;
-        self.route_descriptors = route_descriptors;
-        Ok(())
-    }
-
-    /// Return the route descriptors captured when this router was sealed.
-    #[must_use]
-    pub fn routes(&self) -> Vec<RouteDescriptor> {
-        self.route_descriptors.clone()
+        let Self {
+            dirs,
+            files,
+            treerefs,
+            objects,
+            leaf_claims: _,
+            object_registry: _,
+            collections: _,
+        } = self;
+        Ok(CompiledRouter::new(
+            dirs,
+            files,
+            treerefs,
+            objects,
+            route_descriptors,
+        ))
     }
 
     fn describe_routes(

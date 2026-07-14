@@ -83,7 +83,7 @@ This lane can **never** run in GitHub-hosted CI: krunkit boots a libkrun microVM
 - Hand-edit generated OpenAPI or schema files as the primary fix.
 - Change API/model code without regenerating the corresponding checked-in artifact and running its focused parity test.
 - Validate only the intended leaf path when parent traversal changed.
-- Treat compile-time route validity as enough for seal-time behavior.
+- Treat Rust type-checking as enough for `Router::compile` behavior.
 - Ignore runtime logs when the mount returns `Input/output error`.
 - Treat a local aggregate command as the source of truth when CI runs the lanes directly.
 - Run host tests that rebuild providers in parallel without prebuilding providers when contention matters.

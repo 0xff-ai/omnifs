@@ -6,9 +6,9 @@ use crate::error::{ProviderError, Result};
 use crate::handler::{Cursor, DirCx, DirIntent};
 use omnifs_core::path::Path;
 
-use super::super::register::Router;
+use super::super::compiled::CompiledRouter;
 
-impl<S> Router<S> {
+impl<S> CompiledRouter<S> {
     /// List an absolute directory path.
     ///
     /// Resolution order: treeref handoff; a dir route run with

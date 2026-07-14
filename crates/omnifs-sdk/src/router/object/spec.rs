@@ -57,11 +57,11 @@ pub(in crate::router) struct ObjectSpec<O: Object> {
     pub(super) face_handlers:
         std::rc::Rc<std::collections::BTreeMap<String, FaceHandler<O::State>>>,
     /// Collection faces declared on dir faces; resolved against the object
-    /// registry at seal time.
+    /// registry at compile time.
     pub(super) collections: std::rc::Rc<Vec<CollectionDecl>>,
     /// SDK-generated collection list handlers, keyed by collection dir path,
-    /// each with the late-bound child view that seal resolves and the dispatch
-    /// path passes in.
+    /// each with the late-bound child view resolved during compilation and
+    /// passed in by the dispatch path.
     pub(super) collection_handlers: std::rc::Rc<Vec<CollectionHandlerEntry<O::State>>>,
     /// Tree faces declared on dir faces (`o.dir(name).tree(method)`): each is
     /// registered as a treeref route at `template/name` so a lookup/list there
@@ -91,7 +91,7 @@ pub(in crate::router) struct ChoicesFace {
 }
 
 /// One SDK-generated collection list handler: the collection dir path, the
-/// boxed list handler, and the late-bound child view seal resolves.
+/// boxed list handler, and the late-bound child view resolved during compilation.
 pub(in crate::router) struct CollectionHandlerEntry<S> {
     pub dir_path: String,
     pub handler: CollectionHandler<S>,
@@ -108,7 +108,7 @@ pub(super) type DirProjectionFuture =
 
 /// The `dyn Fn` a [`CollectionHandler`] boxes: parse the parent key + cursor,
 /// run the typed list method, lower the [`crate::collection::Collection`] to a
-/// [`crate::projection::DirProjection`] against the seal-resolved child view.
+/// [`crate::projection::DirProjection`] against the compiled child view.
 type CollectionListFn<S> = dyn Fn(
     crate::handler::DirCx<S>,
     Captures,
@@ -121,7 +121,7 @@ pub(in crate::router) type CollectionHandler<S> = std::rc::Rc<CollectionListFn<S
 
 /// A late-bound child-view cell: the typed `collection` face stores the handler
 /// at mount time, but the child object's template, leaves, and facet axes are
-/// only known once every route is registered, so [`super::Router::seal`]
+/// only known once every route is registered, so [`super::Router::compile`]
 /// resolves them and fills this cell before dispatch can run.
 pub(in crate::router) type LateChildView =
     std::rc::Rc<std::cell::RefCell<Option<std::rc::Rc<ResolvedChildView>>>>;
@@ -212,7 +212,7 @@ pub struct ObjectBlock<O: Object> {
     /// name; moved into the mounted entry.
     face_handlers: std::collections::BTreeMap<String, FaceHandler<O::State>>,
     /// Collections declared on dir faces, resolved against the object registry
-    /// at seal time.
+    /// at compile time.
     collections: Vec<CollectionDecl>,
     /// SDK-generated collection list handlers (dir path + boxed handler +
     /// late-bound child view).
@@ -230,7 +230,7 @@ pub struct ObjectBlock<O: Object> {
 
 /// A collection face declaration captured at registration time. The child
 /// template + anchor computation are resolved against the object registry at
-/// seal time, where every object route is known.
+/// compile time, where every object route is known.
 pub(in crate::router) struct CollectionDecl {
     /// The full dir path of the collection (`template/name`).
     pub dir_path: String,
@@ -673,7 +673,7 @@ pub struct DirFace<'a, O: Object> {
 impl<'a, O: Object> DirFace<'a, O> {
     /// Register a child-object collection: the dir lists `C` entries, each
     /// resolving to a child `r.object::<C>` anchor. `C` must be registered as
-    /// its own object route (checked at seal time).
+    /// its own object route (checked at compile time).
     ///
     /// The list `method`'s key `K` is parsed from the COLLECTION DIR PATH
     /// captures (`template/name`), not the parent anchor's `O::Key`. A
@@ -716,7 +716,7 @@ impl<'a, O: Object> DirFace<'a, O> {
 
         // The SDK-generated collection list handler: parse the parent key + the
         // host-echoed cursor, run the typed list method, and lower the
-        // Collection to a DirProjection against the seal-resolved child view.
+        // Collection to a DirProjection against the compiled child view.
         let handler: CollectionHandler<O::State> = std::rc::Rc::new(
             move |dir_cx: crate::handler::DirCx<O::State>,
                   caps: Captures,
@@ -764,7 +764,7 @@ impl<'a, O: Object> DirFace<'a, O> {
             )));
         }
         // The treeref route (registered at mount time) claims the path, so the
-        // tree face must NOT also claim_leaf or the seal overlap check fires.
+        // tree face must NOT also claim_leaf or the compile overlap check fires.
         let handler: super::super::handlers::BoxedTreeRefHandler<O::State> =
             std::sync::Arc::new(move |cx: Cx<O::State>, caps: Captures| {
                 Box::pin(async move {

@@ -1,6 +1,6 @@
 # Omnifs route schema
 
-This README is generated from the sealed provider route table for `/`.
+This README is generated from the compiled provider route table for `/`.
 
 ## Keying schema
 

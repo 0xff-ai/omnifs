@@ -189,7 +189,7 @@ Use the right wider gate for the change:
 - **Host gate.** Use `just check host` and `just test host`; both exclude provider/test-provider WASM crates from host-target builds.
 - **Provider or broad-surface change.** Run the affected provider, host, generated-artifact, and docs gates explicitly.
 - **Mount, provider, clone, traversal, or runtime behavior.** Rust checks are not enough. Validate through the live runtime with `just dev -y`, `omnifs status`, and the smoke path in `CONTRIBUTING.md`.
-- **Route-surface change.** Run the host integration path that initializes and seals providers, especially `all_providers_initialize_and_seal`.
+- **Route-surface change.** Run the host integration path that initializes and compiles provider routers, especially `all_providers_initialize_and_seal` (the test retains its historical name).
 - **Control API change.** Run `just openapi` to regenerate the checked-in spec, then run the daemon OpenAPI parity test.
 - **Provider manifest schema change.** Run `just schema` and keep the checked-in schema synchronized.
 - **Documentation-heavy change.** Run `just docs-check` locally. It is not a CI gate and does not block a merge, so run it yourself when you touch `docs/`.
@@ -208,7 +208,7 @@ Do not use `cargo check --workspace --all-targets` as the host gate. If validati
 - **Provider metadata is injected at build time, not compiled into the Wasm.** The `#[provider]` macro emits the typed `Provider::METADATA` const plus a native `provider_metadata()` accessor (non-wasm only); `omnifs-embed-metadata` (run by `just build providers`) links the provider crates, converts each const into the host `ProviderManifest`, and injects the JSON as the `omnifs.provider-metadata.v1` custom section. Missing metadata means the harvester did not run, build providers with `just build providers`. The host reads the section pre-instantiation; it never instantiates a component to read it.
 - **Host resource bindings must stay per-field.** `HostFile` and `HostSocket` are string config fields with host-resource bindings. Keep the binding on the field metadata; hiding it in the type shape makes host resource lookup miss it.
 - **Object anchors mount at their `r.object` template.** Mount directory-shaped objects at the real anchor path, or use a detached object handle plus `r.object`/`r.alias`.
-- **Seal-time route errors are component-init errors.** `cargo check --target wasm32-wasip2` can compile incoherent route trees. Provider route validity is proved when the host initializes and seals the provider.
+- **Router compile errors are component-init errors.** `cargo check --target wasm32-wasip2` can type-check incoherent route trees. Provider route validity is proved when initialization consumes the registration builder through `Router::compile`.
 - **Live NFS mount tests are serialized for a reason.** macOS live NFS tests use a cross-process TCP lock. Do not parallelize or remove that guard casually.
 
 ## Documentation

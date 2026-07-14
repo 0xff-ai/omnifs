@@ -132,7 +132,7 @@ fn poll_ready<F: Future>(future: F) -> F::Output {
     }
 }
 
-fn read_text(router: &Router<()>, path: &str) -> String {
+fn read_text(router: &CompiledRouter<()>, path: &str) -> String {
     let cx = Cx::new(1, Rc::new(RefCell::new(())));
     let outcome = poll_ready(router.read_file(&cx, path, "text/markdown", None)).unwrap();
     let crate::browse::ReadOutcome::Found(content) = outcome else {
@@ -141,7 +141,11 @@ fn read_text(router: &Router<()>, path: &str) -> String {
     String::from_utf8(content.content().expect("inline text").to_vec()).unwrap()
 }
 
-fn lookup_child_entry(router: &Router<()>, parent: &str, name: &str) -> wit_types::LookupEntry {
+fn lookup_child_entry(
+    router: &CompiledRouter<()>,
+    parent: &str,
+    name: &str,
+) -> wit_types::LookupEntry {
     let cx = Cx::new(1, Rc::new(RefCell::new(())));
     let lookup = poll_ready(router.lookup_child(&cx, parent, name)).unwrap();
     let (wire, _effects) = lookup.into_result_and_effects();
@@ -151,7 +155,7 @@ fn lookup_child_entry(router: &Router<()>, parent: &str, name: &str) -> wit_type
     entry
 }
 
-fn list_entries(router: &Router<()>, path: &str) -> Vec<wit_types::DirEntry> {
+fn list_entries(router: &CompiledRouter<()>, path: &str) -> Vec<wit_types::DirEntry> {
     let cx = Cx::new(1, Rc::new(RefCell::new(())));
     let list = poll_ready(router.list_children(&cx, path, None, None)).unwrap();
     let (wire, _effects) = list.into_result_and_effects();
@@ -246,7 +250,7 @@ fn alias_symmetry_one_identity() {
     let mut router = Router::<()>::new();
     router.alias("/open/{id}", &handle).unwrap();
     router.alias("/all/{id}", &handle).unwrap();
-    router.seal().unwrap();
+    let _compiled = router.compile().unwrap();
 
     let caps = Captures::new(vec![Capture {
         name: "id".into(),
@@ -269,7 +273,7 @@ fn alias_symmetry_one_identity() {
 }
 
 #[test]
-fn seal_rejects_overlapping_routes() {
+fn compile_rejects_overlapping_routes() {
     let mut router = Router::<()>::new();
     router
         .file("/items/{id}")
@@ -283,7 +287,10 @@ fn seal_rejects_overlapping_routes() {
         })
         .unwrap();
 
-    let err = router.seal().unwrap_err();
+    let err = router
+        .compile()
+        .err()
+        .expect("overlapping routes must fail compilation");
     assert_eq!(err.kind(), ProviderErrorKind::InvalidInput);
 }
 
@@ -299,7 +306,7 @@ fn owned_path_route_templates_register_and_dispatch_like_literals() {
         .file("/static/item")
         .handler(|_cx: Cx<()>| async { Ok(FileProjection::inline(b"static").build()) })
         .unwrap();
-    router.seal().unwrap();
+    let router = router.compile().unwrap();
 
     let entries = list_entries(&router, "/https/example.test");
     assert_eq!(
@@ -417,6 +424,7 @@ fn route_shape_tracks_explicit_child_routes_under_object_anchor() {
         .handler(|_cx: Cx<()>| async { Ok(FileProjection::inline(b"comment").build()) })
         .unwrap();
 
+    let router = router.compile().unwrap();
     let shape = router.shape();
     let item = omnifs_core::path::Path::parse("/items/42").unwrap();
     let mut entries = shape.static_entries_for_parent(&item);
@@ -559,7 +567,7 @@ fn object_dir_child_lookup_carries_all_sibling_leaves() {
         .dir("/items/{id}/comments")
         .handler(|_cx: DirCx<()>| async { Ok(DirListing::exhaustive([Entry::file("1")])) })
         .unwrap();
-    router.seal().unwrap();
+    let router = router.compile().unwrap();
 
     let cx = Cx::new(1, Rc::new(RefCell::new(())));
     let lookup = poll_ready(router.lookup_child(&cx, "/items/42", "body")).unwrap();
@@ -594,7 +602,7 @@ fn dynamic_capture_prefix_lists_route_table_children_without_stub_dir() {
         .file("/items/{id}/body")
         .handler(|_cx: Cx<()>| async { Ok(FileProjection::body(b"body".to_vec()).build()) })
         .unwrap();
-    router.seal().unwrap();
+    let router = router.compile().unwrap();
 
     let cx = Cx::new(1, Rc::new(RefCell::new(())));
 
@@ -620,7 +628,7 @@ fn dynamic_capture_prefix_lists_route_table_children_without_stub_dir() {
 }
 
 #[test]
-fn seal_synthesizes_root_and_branch_readmes() {
+fn compile_synthesizes_root_and_branch_readmes() {
     let mut router = Router::<()>::new();
     router
         .object::<DemoObj>("/items/{id}", |o| {
@@ -630,7 +638,7 @@ fn seal_synthesizes_root_and_branch_readmes() {
             Ok(())
         })
         .unwrap();
-    router.seal().unwrap();
+    let router = router.compile().unwrap();
 
     let root = read_text(&router, "/README.md");
     assert!(root.contains("The keying schema is the path grammar below."));
@@ -642,7 +650,7 @@ fn seal_synthesizes_root_and_branch_readmes() {
             .routes()
             .iter()
             .all(|route| route.template != "/README.md"),
-        "generated README leaves stay out of Router::routes()"
+        "generated README leaves stay out of CompiledRouter::routes()"
     );
 
     let branch = read_text(&router, "/items/README.md");
@@ -653,8 +661,8 @@ fn seal_synthesizes_root_and_branch_readmes() {
 
 #[test]
 fn empty_router_synthesizes_root_readme() {
-    let mut router = Router::<()>::new();
-    router.seal().unwrap();
+    let router = Router::<()>::new();
+    let router = router.compile().unwrap();
 
     let root = read_text(&router, "/README.md");
     assert!(root.contains("No provider routes are declared under this scope."));
@@ -676,7 +684,7 @@ fn explicit_readme_registration_wins() {
         .file("/items/README.md")
         .handler(|_cx: Cx<()>| async { Ok(FileProjection::body(b"custom branch").build()) })
         .unwrap();
-    router.seal().unwrap();
+    let router = router.compile().unwrap();
 
     assert_eq!(read_text(&router, "/README.md"), "custom root");
     assert_eq!(read_text(&router, "/items/README.md"), "custom branch");
@@ -692,7 +700,7 @@ fn literal_root_readme_beats_root_object_capture() {
             Ok(())
         })
         .unwrap();
-    router.seal().unwrap();
+    let router = router.compile().unwrap();
 
     let entry = lookup_child_entry(&router, "/", "README.md");
     assert_eq!(entry.target.name.as_str(), "README.md");
@@ -726,7 +734,7 @@ fn root_object_capture_still_resolves_non_literal_names() {
             Ok(())
         })
         .unwrap();
-    router.seal().unwrap();
+    let router = router.compile().unwrap();
 
     let entry = lookup_child_entry(&router, "/", "torvalds");
     assert_eq!(entry.target.name.as_str(), "torvalds");
@@ -750,7 +758,7 @@ fn explicit_literal_file_beats_root_object_capture() {
         .file("/rate_limit")
         .handler(|_cx: Cx<()>| async { Ok(FileProjection::inline(b"ok").build()) })
         .unwrap();
-    router.seal().unwrap();
+    let router = router.compile().unwrap();
 
     let entry = lookup_child_entry(&router, "/", "rate_limit");
     assert_eq!(entry.target.name.as_str(), "rate_limit");
@@ -779,7 +787,7 @@ fn direct_face_resolves_and_reads() {
             Ok(())
         })
         .unwrap();
-    router.seal().unwrap();
+    let router = router.compile().unwrap();
 
     let cx = Cx::new(1, Rc::new(RefCell::new(())));
     let outcome = poll_ready(router.read_file(&cx, "/items/42/live", "", None)).unwrap();
@@ -801,7 +809,7 @@ fn file_object_anchor_reads_canonical() {
             Ok(())
         })
         .unwrap();
-    router.seal().unwrap();
+    let router = router.compile().unwrap();
 
     let cx = Cx::new(1, Rc::new(RefCell::new(())));
     let outcome = poll_ready(router.read_file(&cx, "/items/42", "", None)).unwrap();

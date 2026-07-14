@@ -6,9 +6,9 @@ use crate::error::{ProviderError, Result};
 use crate::handler::{DirCx, DirIntent};
 use omnifs_core::path::{Path, Segment};
 
-use super::super::register::Router;
+use super::super::compiled::CompiledRouter;
 
-impl<S> Router<S> {
+impl<S> CompiledRouter<S> {
     /// Resolve one child name under an absolute parent path.
     ///
     /// Lookup is the authoritative name oracle: a found result here is

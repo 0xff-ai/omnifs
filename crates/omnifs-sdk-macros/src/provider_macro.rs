@@ -669,9 +669,10 @@ fn generate_lifecycle(
                     Ok(state) => state,
                     Err(error) => return omnifs_sdk::prelude::ProviderReturn::from(error),
                 };
-                if let Err(error) = router.seal() {
-                    return omnifs_sdk::prelude::ProviderReturn::from(error);
-                }
+                let router = match router.compile() {
+                    Ok(router) => router,
+                    Err(error) => return omnifs_sdk::prelude::ProviderReturn::from(error),
+                };
                 STATE.with(|slot| {
                     *slot.borrow_mut() = Some(std::rc::Rc::new(core::cell::RefCell::new(state)));
                 });
@@ -703,7 +704,7 @@ fn generate_state_management(state_type: &Type) -> TokenStream2 {
             static STATE: core::cell::RefCell<Option<std::rc::Rc<core::cell::RefCell<#state_type>>>>
                 = const { core::cell::RefCell::new(None) };
             static ROUTER: core::cell::RefCell<
-                Option<std::rc::Rc<omnifs_sdk::prelude::Router<#state_type>>>
+                Option<std::rc::Rc<omnifs_sdk::prelude::CompiledRouter<#state_type>>>
             > = const { core::cell::RefCell::new(None) };
             static RANGE_HANDLES: omnifs_sdk::__internal::RangeReaders =
                 const { omnifs_sdk::__internal::RangeReaders::new() };
@@ -719,7 +720,7 @@ fn generate_state_management(state_type: &Type) -> TokenStream2 {
         }
 
         fn router_handle() -> core::result::Result<
-            std::rc::Rc<omnifs_sdk::prelude::Router<#state_type>>,
+            std::rc::Rc<omnifs_sdk::prelude::CompiledRouter<#state_type>>,
             String,
         > {
             ROUTER.with(|slot| {

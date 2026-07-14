@@ -7,11 +7,11 @@ use crate::handler::OpenedFile;
 use crate::projection::FileSource;
 use omnifs_core::path::Path;
 
+use super::super::compiled::CompiledRouter;
 use super::super::object::ObjectReadTarget;
-use super::super::register::Router;
 use super::route_shape::ReadRoute;
 
-impl<S> Router<S> {
+impl<S> CompiledRouter<S> {
     /// Read the bytes at an absolute file path.
     ///
     /// A plain file route wins first: its handler runs and the projection

@@ -86,7 +86,7 @@ impl<'a> Readme<'a> {
         out.push_str("# Omnifs route schema\n\n");
         let _ = writeln!(
             out,
-            "This README is generated from the sealed provider route table for `{}`.\n",
+            "This README is generated from the compiled provider route table for `{}`.\n",
             self.scope.label()
         );
         out.push_str("## Keying schema\n\n");

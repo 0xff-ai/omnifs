@@ -37,8 +37,9 @@
 //! the provider state. The `#[provider]` macro infers the config and state
 //! types from that signature. There are no per-route attribute macros; the
 //! route topology lives in `start`, readable top to bottom. After `start`
-//! returns, the generated glue seals the router (overlapping routes fail
-//! initialization loudly) and wires the WIT exports.
+//! returns, the generated glue compiles the router (overlapping routes fail
+//! initialization loudly) and wires the WIT exports to the resulting
+//! [`router::CompiledRouter`].
 //!
 //! # The two provider flavours
 //!

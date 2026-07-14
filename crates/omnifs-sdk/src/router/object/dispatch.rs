@@ -131,15 +131,15 @@ pub(in crate::router) struct ObjectRouteEntry<S> {
     /// Per-leaf live-face handlers (direct/blob/stream/object), keyed by leaf
     /// name. Shared with the spec so an alias mount replays the same closures.
     pub face_handlers: std::rc::Rc<std::collections::BTreeMap<String, FaceHandler<S>>>,
-    /// The ANCHOR-topology collection attached at seal: its child template
-    /// equals this anchor, so it merges into this anchor's listing/lookup
+    /// The ANCHOR-topology collection attached at compile time: its child
+    /// template equals this anchor, so it merges into this anchor's listing/lookup
     /// instead of getting a separate dir route.
     pub anchor_collection: Option<AnchorCollection<S>>,
     pub validator: RouteValidator,
 }
 
 /// An ANCHOR-topology collection attached to a parent object's anchor: the
-/// boxed list handler plus the child view resolved at seal time. The parent's
+/// boxed list handler plus the child view resolved at compile time. The parent's
 /// anchor listing runs it, merges the child-name entries, and emits each fresh
 /// child's canonical store.
 pub(in crate::router) struct AnchorCollection<S> {
@@ -223,7 +223,7 @@ impl ListingLeaf {
 }
 
 /// What mounting an object spec yields: the dispatchable entry and the leaf
-/// claims to feed [`Router::seal`](super::Router::seal).
+/// claims to feed [`Router::compile`](super::Router::compile).
 pub(in crate::router) struct MountedObject<S> {
     pub entry: ObjectRouteEntry<S>,
     pub claims: Vec<Pattern>,
@@ -348,7 +348,7 @@ impl FacetExpansion {
     }
 
     /// Build from an explicit facet-axis slice (the child key's axes resolved
-    /// at seal, where the key type is not statically in scope).
+    /// during compilation, where the key type is not statically in scope).
     pub(in crate::router) fn for_axes(pattern: &Pattern, axes: &[FacetAxis]) -> Result<Self> {
         let axes = axes
             .iter()
@@ -414,10 +414,10 @@ impl FacetExpansionAxis {
 }
 
 // ===========================================================================
-// Collection child-view resolution (seal time)
+// Collection child-view resolution (compile time)
 // ===========================================================================
 
-/// The two collection topologies, discriminated at seal by comparing the
+/// The two collection topologies, discriminated at compile time by comparing the
 /// collection dir pattern to the child object's registered template.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::router) enum CollectionTopology {
@@ -430,7 +430,7 @@ pub(in crate::router) enum CollectionTopology {
     Anchor,
 }
 
-/// A collection's child object resolved against the object registry at seal
+/// A collection's child object resolved against the object registry at compile
 /// time: enough to compute, for each listed entry, the child anchor path, the
 /// dir-entry name, and the child canonical-view leaf paths (facet-expanded).
 #[derive(Clone)]

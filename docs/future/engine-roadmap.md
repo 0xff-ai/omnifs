@@ -6,7 +6,7 @@ Related: `docs/architecture/00-overview.md` (the invariants these must respect),
 
 ## Typestate object blocks
 
-The face-validity checks (a representation/derive face with no canonical, two canonical faces, `Live` on a non-stream face) run at seal time and panic with a named error. The refinement is a builder typestate that makes the invalid combinations compile errors instead, removing the runtime checks. Add that complexity only when compile-time enforcement is worth the builder API cost.
+The face-validity checks (a representation/derive face with no canonical, two canonical faces, `Live` on a non-stream face) run while finishing the object block and return a named error. The refinement is a builder typestate that makes the invalid combinations compile errors instead, removing the runtime checks. Add that complexity only when compile-time enforcement is worth the builder API cost.
 
 ## Cross-type preload_object
 

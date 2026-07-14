@@ -707,10 +707,10 @@ Reject:
 
 Error messages should name both contributors and the exact path.
 
-The seal runs at component initialization: a route tree that fails any check
+Router compilation runs at component initialization: a route tree that fails any check
 above aborts the provider's `initialize` with an error naming the offending
 path. The gate is the host integration test `all_providers_initialize_and_seal`
-(`crates/omnifs-engine/tests/runtime_test.rs`); per repo convention providers
+(`crates/omnifs-engine/tests/runtime_test.rs`, retaining its historical name); per repo convention providers
 carry no in-crate route tests.
 
 ## Provider target shapes

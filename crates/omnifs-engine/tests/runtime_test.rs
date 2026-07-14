@@ -33,8 +33,8 @@ fn test_context(
     HostContext::new(cache_dir, config_dir, providers_dir, credentials_file)
 }
 
-/// Every shipped provider must initialize (run `start()` + `seal()`) cleanly.
-/// The seal runs inside `initialize` and needs no credentials, so this is a
+/// Every shipped provider must initialize (run `start()` + `compile()`) cleanly.
+/// Router compilation runs inside `initialize` and needs no credentials, so this is a
 /// deterministic gate for route-overlap and registration errors that a
 /// `cargo check` for `wasm32-wasip2` cannot catch (it compiles but never seals).
 /// This guards against the class of bug where a migrated provider mounts an
@@ -44,8 +44,8 @@ fn test_context(
 async fn all_providers_initialize_and_seal() {
     // Providers whose `start()` registers routes without touching a backing
     // resource. `db` is excluded: it opens its SQLite file at init, so a bare
-    // harness (no fixture) fails with an environmental I/O error, not a seal
-    // error; db's seal is exercised through its live mount instead.
+    // harness (no fixture) fails with an environmental I/O error, not a router
+    // compilation error; db's router is compiled through its live mount instead.
     let providers = [
         ("omnifs_provider_github.wasm", "github"),
         ("omnifs_provider_arxiv.wasm", "arxiv"),
@@ -72,7 +72,7 @@ async fn all_providers_initialize_and_seal() {
         let result = omnifs_itest::try_make_runtime_from_config(&config);
         assert!(
             result.is_ok(),
-            "provider {wasm} failed to initialize/seal: {:?}",
+            "provider {wasm} failed to initialize/compile: {:?}",
             result.err()
         );
     }

@@ -90,7 +90,7 @@ impl ExampleProvider {
 }
 ```
 
-`#[provider]` infers config and state from `start`; stateless providers use `fn start(r: &mut Router) -> Result<()>`. The macro seals the router after `start`: overlapping route claims fail initialization with a named-routes error.
+`#[provider]` infers config and state from `start`; stateless providers use `fn start(r: &mut Router) -> Result<()>`. After `start`, the macro consumes the registration builder through `Router::compile`: overlapping route claims fail initialization with a named-routes error, and only the resulting `CompiledRouter` is published for dispatch.
 
 ## Route template grammar
 
@@ -147,7 +147,7 @@ r.object::<Issue>("/{owner}/{repo}/issues/{filter}/{number}", |o| {
 })?;
 ```
 
-What the faces are: `canonical::<F>()` is the verbatim stored bytes (exactly one per object; `F` must equal `Object::Canonical`); `representation::<F>()` renders the whole object via `Representable<F>`; `computed(method)` is a field leaf (eager by default, `.lazy()` to skip listing-time preload); `direct`/`blob`/`stream` declare their own read contract; `o.dir(name).collection::<C>(method)` lists child `C` objects, `.choices(names)` a fixed finite name set, `.tree(method)` a subtree handoff. An object with no canonical face (Docker `Container`: only `direct` faces) emits no object-cache entry; a representation/derive face requires a canonical to render from (seal-time error otherwise).
+What the faces are: `canonical::<F>()` is the verbatim stored bytes (exactly one per object; `F` must equal `Object::Canonical`); `representation::<F>()` renders the whole object via `Representable<F>`; `computed(method)` is a field leaf (eager by default, `.lazy()` to skip listing-time preload); `direct`/`blob`/`stream` declare their own read contract; `o.dir(name).collection::<C>(method)` lists child `C` objects, `.choices(names)` a fixed finite name set, `.tree(method)` a subtree handoff. An object with no canonical face (Docker `Container`: only `direct` faces) emits no object-cache entry; a representation/derive face requires a canonical to render from (registration error otherwise).
 
 The contract that makes caching work: `Load::Fresh` must carry the **verbatim** upstream bytes plus the validator (ETag). The SDK emits the canonical-store effect; the host stores bytes keyed by the logical id and pushes them back into later `read-file` calls so re-rendering costs no upstream fetch. Because `filter` is a `Facet`, `/issues/open/7` and `/issues/all/7` resolve to one cached object, and finite facet choices expand view leaves across all aliases.
 
@@ -211,7 +211,7 @@ For any path-surface change, test whole-shell traversal in the live container, n
 ## Top pitfalls
 
 1. Forgetting `Facet` on a filter/alias capture: the same object caches once per alias and invalidation misses siblings.
-2. `canonical::<F>()` whose `F` is not `Object::Canonical`, two canonical faces, or a representation/derive face with no canonical: all are seal-time errors. `Load::fresh(value, canonical)` always carries the verbatim body and validator.
+2. `canonical::<F>()` whose `F` is not `Object::Canonical`, two canonical faces, or a representation/derive face with no canonical: all are registration errors. `Load::fresh(value, canonical)` always carries the verbatim body and validator.
 3. Inventing objects for query-shaped data (DNS answers, process listings): corrupts cache semantics; stay path-oriented.
 4. Inline bytes over 64 KiB or with non-exact size: projection validation rejects it; use deferred reads or blobs.
 5. `MemoryRangeReader` for genuinely large content: it buffers everything; implement a real `RangeReader` over blob ranges.
@@ -220,7 +220,7 @@ For any path-surface change, test whole-shell traversal in the live container, n
 8. Expecting webhook/file-changed events to fire handlers: only `timer` is dispatched.
 9. A finite `choices()` list for a dynamic universe: it silently hides new upstream values; reserve choices for truly static sets.
 10. Provider-local caching "to be safe": it fights the host's invalidation and fence machinery; delete it.
-11. Face modifiers go before the terminal face call: `o.file("body").lazy().computed(f)` marks `body` lazy; `.computed()`/`.canonical()`/`.direct()`/etc. is the terminal registration call. A collection child object (`o.dir(..).collection::<C>(..)`) must have its own `r.object::<C>` route or seal fails to resolve it.
+11. Face modifiers go before the terminal face call: `o.file("body").lazy().computed(f)` marks `body` lazy; `.computed()`/`.canonical()`/`.direct()`/etc. is the terminal registration call. A collection child object (`o.dir(..).collection::<C>(..)`) must have its own `r.object::<C>` route or router compilation fails to resolve it.
 
 ## Where to look
 

@@ -1,6 +1,6 @@
 //! `lookup_child`, `list_children`, `read_file`, and `open_file` dispatch.
 //!
-//! Each entry point resolves an absolute path against the sealed route
+//! Each entry point resolves an absolute path against the compiled route
 //! tables through a shared `Shape` view (`route_shape`), with the
 //! literal-prefix auto-navigation machinery in `static_shape`. Common rules
 //! across all entry points:

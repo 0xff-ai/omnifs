@@ -1,7 +1,7 @@
 //! WIT-boundary tests for the provider object SDK.
 //!
-//! Each test builds a fixture provider's `Router<()>`, drives a browse method
-//! (`lookup_child` / `list_children` / `read_file` / `open_file`), lowers the
+//! Each test builds a fixture provider's `Router<()>`, compiles it, drives a
+//! browse method (`lookup_child` / `list_children` / `read_file` / `open_file`), lowers the
 //! SDK result via its public
 //! `into_*_and_effects()` / `into_wit()`, and asserts on the exact WIT records.
 //! These assertions encode the CORRECT behavior the SDK must exhibit at the
@@ -26,7 +26,7 @@ use omnifs_sdk::object::{
 };
 use omnifs_sdk::projection::{FileProjection, StreamFile};
 use omnifs_sdk::repr::{Json, Markdown, Representable};
-use omnifs_sdk::router::Router;
+use omnifs_sdk::router::{CompiledRouter, Router};
 use std::cell::RefCell;
 use std::future::Future;
 use std::rc::Rc;
@@ -167,7 +167,7 @@ impl Item {
     }
 }
 
-fn item_router() -> Router<()> {
+fn item_router() -> CompiledRouter<()> {
     let mut r = Router::<()>::new();
     r.object::<Item>("/items/{id}", |o| {
         o.dynamic();
@@ -179,8 +179,7 @@ fn item_router() -> Router<()> {
         Ok(())
     })
     .unwrap();
-    r.seal().unwrap();
-    r
+    r.compile().unwrap()
 }
 
 #[test]
@@ -338,7 +337,7 @@ impl Object for Day {
     }
 }
 
-fn day_router() -> Router<()> {
+fn day_router() -> CompiledRouter<()> {
     let mut r = Router::<()>::new();
     r.file_object::<Day>("/{day}/{collection}", |o| {
         o.dynamic();
@@ -348,8 +347,7 @@ fn day_router() -> Router<()> {
         Ok(())
     })
     .unwrap();
-    r.seal().unwrap();
-    r
+    r.compile().unwrap()
 }
 
 #[test]
@@ -597,7 +595,7 @@ async fn list_issues(
     )]))
 }
 
-fn nested_collection_router() -> Router<()> {
+fn nested_collection_router() -> CompiledRouter<()> {
     let mut r = Router::<()>::new();
     r.object::<Repo>("/{owner}/{repo}", |o| {
         o.dynamic();
@@ -614,8 +612,7 @@ fn nested_collection_router() -> Router<()> {
         Ok(())
     })
     .unwrap();
-    r.seal().unwrap();
-    r
+    r.compile().unwrap()
 }
 
 #[test]
@@ -739,7 +736,7 @@ async fn list_repos(
     )]))
 }
 
-fn anchor_collection_router() -> Router<()> {
+fn anchor_collection_router() -> CompiledRouter<()> {
     let mut r = Router::<()>::new();
     r.object::<Owner>("/{owner}", |o| {
         o.dynamic();
@@ -754,12 +751,11 @@ fn anchor_collection_router() -> Router<()> {
         Ok(())
     })
     .unwrap();
-    r.seal().unwrap();
-    r
+    r.compile().unwrap()
 }
 
 #[test]
-fn anchor_collection_seals_and_merges_repo_names_with_owner_faces() {
+fn anchor_collection_compiles_and_merges_repo_names_with_owner_faces() {
     let r = anchor_collection_router();
     let cx = cx();
     let list = drive(&cx, r.list_children(&cx, "/o", None, None));
@@ -824,7 +820,7 @@ fn anchor_collection_page_is_partial_and_carries_cursor() {
         Ok(())
     })
     .unwrap();
-    r.seal().unwrap();
+    let r = r.compile().unwrap();
 
     let cx = cx();
     let list = drive(&cx, r.list_children(&cx, "/o", None, None));
@@ -881,7 +877,7 @@ fn direct_face_runs_handler_and_returns_inline_no_canonical() {
         Ok(())
     })
     .unwrap();
-    r.seal().unwrap();
+    let r = r.compile().unwrap();
 
     let cx = cx();
     let outcome = drive(&cx, r.read_file(&cx, "/items/42/live", "", None));
@@ -898,11 +894,11 @@ fn direct_face_runs_handler_and_returns_inline_no_canonical() {
 }
 
 // ===========================================================================
-// Registration / seal errors
+// Registration / compile errors
 // ===========================================================================
 
 #[test]
-fn collection_of_unregistered_child_kind_fails_seal() {
+fn collection_of_unregistered_child_kind_fails_compile() {
     let mut r = Router::<()>::new();
     r.object::<Repo>("/{owner}/{repo}", |o| {
         o.dynamic();
@@ -912,16 +908,19 @@ fn collection_of_unregistered_child_kind_fails_seal() {
     })
     .unwrap();
     // Issue is never registered as its own object route.
-    let err = r.seal().unwrap_err();
+    let err = r
+        .compile()
+        .err()
+        .expect("unregistered child kind must fail compilation");
     assert_eq!(
         err.kind(),
         omnifs_sdk::error::ProviderErrorKind::InvalidInput,
-        "a collection whose child object kind is unregistered fails seal"
+        "a collection whose child object kind is unregistered fails compile"
     );
 }
 
 // A child object kind with no canonical face, used to drive the
-// no-canonical-when-fresh seal failure.
+// no-canonical-when-fresh compile failure.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Bare {
     id: String,
@@ -950,7 +949,7 @@ async fn list_bare(_key: RepoKey, _cx: ListCx<NoCursor, ()>) -> Result<Collectio
 }
 
 #[test]
-fn collection_of_child_without_canonical_face_fails_seal() {
+fn collection_of_child_without_canonical_face_fails_compile() {
     let mut r = Router::<()>::new();
     r.object::<Repo>("/{owner}/{repo}", |o| {
         o.dynamic();
@@ -967,11 +966,14 @@ fn collection_of_child_without_canonical_face_fails_seal() {
         Ok(())
     })
     .unwrap();
-    let err = r.seal().unwrap_err();
+    let err = r
+        .compile()
+        .err()
+        .expect("child without a canonical face must fail compilation");
     assert_eq!(
         err.kind(),
         omnifs_sdk::error::ProviderErrorKind::InvalidInput,
-        "a collection of a child with no canonical face fails seal"
+        "a collection of a child with no canonical face fails compile"
     );
 }
 
@@ -988,7 +990,7 @@ async fn repo_tree(_cx: Cx<()>, _key: RepoKey) -> Result<omnifs_sdk::handler::Tr
     Ok(omnifs_sdk::handler::TreeRef::new(7))
 }
 
-fn tree_face_router() -> Router<()> {
+fn tree_face_router() -> CompiledRouter<()> {
     let mut r = Router::<()>::new();
     r.object::<Repo>("/{owner}/{repo}", |o| {
         o.dynamic();
@@ -997,8 +999,7 @@ fn tree_face_router() -> Router<()> {
         Ok(())
     })
     .unwrap();
-    r.seal().unwrap();
-    r
+    r.compile().unwrap()
 }
 
 #[test]
@@ -1077,7 +1078,7 @@ fn nested_collection_list_varies_by_subcapture() {
 // Choices face (FIX C): the choices dir lists its fixed names
 // ===========================================================================
 
-fn choices_router() -> Router<()> {
+fn choices_router() -> CompiledRouter<()> {
     let mut r = Router::<()>::new();
     r.object::<Repo>("/{owner}/{repo}", |o| {
         o.dynamic();
@@ -1086,8 +1087,7 @@ fn choices_router() -> Router<()> {
         Ok(())
     })
     .unwrap();
-    r.seal().unwrap();
-    r
+    r.compile().unwrap()
 }
 
 #[test]
@@ -1192,7 +1192,7 @@ impl Pod {
     }
 }
 
-fn pod_router() -> Router<()> {
+fn pod_router() -> CompiledRouter<()> {
     let mut r = Router::<()>::new();
     r.object::<Pod>("/pods/{name}", |o| {
         o.dynamic();
@@ -1201,8 +1201,7 @@ fn pod_router() -> Router<()> {
         Ok(())
     })
     .unwrap();
-    r.seal().unwrap();
-    r
+    r.compile().unwrap()
 }
 
 #[test]

@@ -14,7 +14,7 @@ Route matching follows a most-specific-wins model:
 3. prefix captures beat bare captures
 4. longer patterns break ties
 
-Ambiguous routes that could match the same concrete path with the same precedence must fail at seal time. A sealed router is the contract. A route tree that compiles but cannot seal is an invalid provider component.
+Ambiguous routes that could match the same concrete path with the same precedence must fail when the registration builder is compiled. `Router::compile` consumes the mutable builder and returns the only runtime-dispatchable form, `CompiledRouter`. A route tree that cannot compile is an invalid provider component and is never published by provider initialization.
 
 ## Capture validation
 

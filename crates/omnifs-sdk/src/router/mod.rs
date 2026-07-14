@@ -2,9 +2,10 @@
 //!
 //! A provider's `start` registers its whole path surface imperatively on a
 //! [`Router`]; afterwards the `#[omnifs_sdk::provider]` macro glue calls
-//! [`Router::seal`] (overlapping leaf claims fail initialization) and drives
+//! [`Router::compile`] (overlapping leaf claims fail initialization) and drives
 //! every host browse call (`lookup_child`, `list_children`, `read_file`,
-//! `open_file`) through the table. There are no per-route attribute macros.
+//! `open_file`) through the resulting [`CompiledRouter`]. There are no
+//! per-route attribute macros.
 //!
 //! Registration verbs:
 //!
@@ -38,6 +39,7 @@
 //!   routes registered at that depth, and report `exhaustive = false`
 //!   whenever a capture sibling exists at the next depth.
 
+mod compiled;
 mod descriptor;
 mod dispatch;
 mod handlers;
@@ -49,6 +51,7 @@ mod register;
 #[cfg(test)]
 mod tests;
 
+pub use compiled::CompiledRouter;
 pub use descriptor::{RouteDescriptor, RouteKind};
 pub use handlers::{
     IntoDirHandler, IntoFileHandler, IntoTreeRefHandler, NoCaptures, WithCaptures, WithKeyMethod,

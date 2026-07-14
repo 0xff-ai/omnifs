@@ -1,6 +1,6 @@
 //! Route-table shape used by lookup, listing, and read dispatch.
 //!
-//! [`Shape`] is a borrowed view over the sealed router that centralizes
+//! [`Shape`] is a borrowed view over the compiled router that centralizes
 //! route selection (per-kind `best_match` queries) and result assembly
 //! (static lookups, projection-to-listing lowering, entry merging), so the
 //! three entry points share one set of rules.
@@ -12,14 +12,14 @@ use crate::file_attrs::{FileProj, ReadMode, Size};
 use crate::projection::{DirOutcome, DirProjection};
 use omnifs_core::path::Path;
 
+use super::super::compiled::CompiledRouter;
 use super::super::handlers::{DirEntry, FileEntry, TreeRefEntry};
 use super::super::object::{ObjectReadTarget, ObjectRouteEntry, SourceLeafAttrs};
 use super::super::pattern::best_match;
-use super::super::register::Router;
 
-/// A borrowed dispatch view over the sealed route tables.
+/// A borrowed dispatch view over the compiled route tables.
 pub(in crate::router) struct Shape<'a, S> {
-    pub(super) router: &'a Router<S>,
+    pub(super) router: &'a CompiledRouter<S>,
 }
 
 /// A selected route plus the captures its pattern decoded from the path;
@@ -45,7 +45,7 @@ pub(super) enum ReadRoute<'a, S> {
     },
 }
 
-impl<S> Router<S> {
+impl<S> CompiledRouter<S> {
     pub(in crate::router) fn shape(&self) -> Shape<'_, S> {
         Shape { router: self }
     }

@@ -29,7 +29,8 @@ pub use crate::repr::{
     Atom, Format, Json, Markdown, RenderTable, Representable, Yaml, pretty_json,
 };
 pub use crate::router::{
-    DirFace, DirRoute, FileFace, FileRoute, ObjectBlock, ObjectHandle, Router, TreeRefRoute, object,
+    CompiledRouter, DirFace, DirRoute, FileFace, FileRoute, ObjectBlock, ObjectHandle, Router,
+    TreeRefRoute, object,
 };
 pub use omnifs_core::ContentType;
 pub use omnifs_core::path::{ParseError, Path, Segment};
