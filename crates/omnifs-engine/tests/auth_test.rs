@@ -1,5 +1,7 @@
 use omnifs_caps::Allowlist;
-use omnifs_engine::test_support::auth::{AuthManager, RefreshOutcome};
+use omnifs_engine::test_support::auth::{
+    AuthManager, RefreshOutcome, manager_with_store_and_http,
+};
 use omnifs_engine::test_support::blob::{BlobCache, BlobExecutor, BlobLimits};
 use omnifs_engine::test_support::capability::CapabilityChecker;
 use omnifs_engine::test_support::http::HttpStack;
@@ -44,37 +46,43 @@ fn github_pat_auth() -> AuthConfig {
 }
 
 fn github_pat_manager(auth: AuthConfig) -> AuthManager {
-    auth_manager(&[auth], Some(&github_pat_manifest()))
+    auth_manager(Some(&auth), Some(&github_pat_manifest()))
 }
 
-fn auth_manager(configs: &[AuthConfig], manifest: Option<&AuthManifest>) -> AuthManager {
-    AuthManager::from_configs_manifest_store_with_http(
-        configs,
+fn auth_manager(config: Option<&AuthConfig>, manifest: Option<&AuthManifest>) -> AuthManager {
+    manager_with_store_and_http(
+        config,
         manifest,
         "github",
         Arc::new(MemoryStore::default()),
         reqwest_oauth2::Client::new(),
     )
-    .unwrap()
 }
 
-#[test]
-fn test_no_injection_without_config() {
+#[tokio::test]
+async fn test_no_injection_without_config() {
     let manager = AuthManager::none();
-    let headers = manager.headers_for_url("https://api.github.com/repos");
-    assert!(headers.is_empty());
+    assert_eq!(
+        manager
+            .authorization_for("https://api.github.com/repos")
+            .await
+            .unwrap(),
+        None
+    );
 }
 
-#[test]
-fn test_missing_credential_returns_no_headers_but_requires_auth() {
+#[tokio::test]
+async fn test_missing_credential_fails_closed() {
     let manager = github_pat_manager(github_pat_auth());
-    let headers = manager.headers_for_url("https://api.github.com/repos");
-    assert!(headers.is_empty());
-    assert!(manager.requires_auth_for_url("https://api.github.com/repos"));
+    let error = manager
+        .authorization_for("https://api.github.com/repos")
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("no credential is stored"));
 }
 
-#[test]
-fn test_static_token_injection_from_store() {
+#[tokio::test]
+async fn test_static_token_injection_from_store() {
     let auth = github_pat_auth();
     let store: Arc<dyn CredentialStore> = Arc::new(MemoryStore::default());
     let key = CredentialId::new("github", "pat", "default").unwrap();
@@ -87,23 +95,28 @@ fn test_static_token_injection_from_store() {
             ),
         )
         .unwrap();
-    let manager = AuthManager::from_configs_manifest_store_with_http(
-        &[auth],
+    let manager = manager_with_store_and_http(
+        Some(&auth),
         Some(&github_pat_manifest()),
         "github",
         store,
         reqwest_oauth2::Client::new(),
-    )
-    .unwrap();
+    );
 
-    let headers = manager.headers_for_url("https://api.github.com/repos");
-    assert_eq!(headers.len(), 1);
-    assert_eq!(headers[0].0, "Authorization");
-    assert_eq!(headers[0].1, "Bearer ghp_store_token");
+    assert_eq!(
+        manager
+            .authorization_for("https://api.github.com/repos")
+            .await
+            .unwrap(),
+        Some((
+            "Authorization".to_string(),
+            "Bearer ghp_store_token".to_string()
+        ))
+    );
 }
 
-#[test]
-fn test_auth_manifest_backed_static_token_injection() {
+#[tokio::test]
+async fn test_auth_manifest_backed_static_token_injection() {
     let auth = AuthConfig::StaticToken(StaticTokenConfig {
         scheme: Some("pat".to_string()),
         account: None,
@@ -130,30 +143,32 @@ fn test_auth_manifest_backed_static_token_injection() {
             ),
         )
         .unwrap();
-    let manager = AuthManager::from_configs_manifest_store_with_http(
-        &[auth],
+    let manager = manager_with_store_and_http(
+        Some(&auth),
         Some(&manifest),
         "github",
         store,
         reqwest_oauth2::Client::new(),
-    )
-    .unwrap();
+    );
 
     assert_eq!(
-        manager.headers_for_url("https://api.example.com/repos"),
-        vec![("X-Test-Token".to_string(), "token secret".to_string())]
-    );
-    assert!(manager.requires_auth_for_url("https://api.example.com/repos"));
-    assert!(
         manager
-            .headers_for_url("https://other.example.com/repos")
-            .is_empty()
+            .authorization_for("https://api.example.com/repos")
+            .await
+            .unwrap(),
+        Some(("X-Test-Token".to_string(), "token secret".to_string()))
     );
-    assert!(!manager.requires_auth_for_url("https://other.example.com/repos"));
+    assert_eq!(
+        manager
+            .authorization_for("https://other.example.com/repos")
+            .await
+            .unwrap(),
+        None
+    );
 }
 
-#[test]
-fn test_auth_manifest_backed_static_token_missing_credential_still_requires_auth() {
+#[tokio::test]
+async fn test_auth_manifest_backed_static_token_missing_credential_fails_closed() {
     let auth = AuthConfig::StaticToken(StaticTokenConfig {
         scheme: Some("pat".to_string()),
         account: None,
@@ -171,26 +186,26 @@ fn test_auth_manifest_backed_static_token_missing_credential_still_requires_auth
         })],
     };
 
-    let manager = auth_manager(&[auth], Some(&manifest));
+    let manager = auth_manager(Some(&auth), Some(&manifest));
 
-    assert!(
-        manager
-            .headers_for_url("https://api.example.com/repos")
-            .is_empty()
-    );
-    assert!(manager.requires_auth_for_url("https://api.example.com/repos"));
+    let error = manager
+        .authorization_for("https://api.example.com/repos")
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("no credential is stored"));
 }
 
-#[test]
-fn test_provider_without_auth_manifest_behaves_as_no_auth() {
-    let manager = auth_manager(&[], None);
+#[tokio::test]
+async fn test_provider_without_auth_manifest_behaves_as_no_auth() {
+    let manager = auth_manager(None, None);
 
-    assert!(
+    assert_eq!(
         manager
-            .headers_for_url("https://api.example.com/repos")
-            .is_empty()
+            .authorization_for("https://api.example.com/repos")
+            .await
+            .unwrap(),
+        None
     );
-    assert!(!manager.requires_auth_for_url("https://api.example.com/repos"));
 }
 
 #[tokio::test]
@@ -229,16 +244,14 @@ async fn refresh_without_stored_oauth_credential_reports_no_credential() {
 #[tokio::test]
 async fn test_execute_fetch_returns_denied_when_auth_is_required_but_missing() {
     // Create an AuthManager with a config that requires auth for api.github.com
-    // but has no valid credential (env var doesn't exist). The injector should
-    // exist (so requires_auth_for_url returns true) but have no header_value
-    // (so headers_for_url returns empty).
+    // but has no stored credential. Authorization must fail closed before the
+    // request is dispatched.
     let auth = Arc::new(github_pat_manager(github_pat_auth()));
 
-    // Verify the setup: auth is required for this domain but no headers available
-    assert!(auth.requires_auth_for_url("https://api.github.com/repos"));
     assert!(
-        auth.headers_for_url("https://api.github.com/repos")
-            .is_empty()
+        auth.authorization_for("https://api.github.com/repos")
+            .await
+            .is_err()
     );
 
     let capability = Arc::new(CapabilityChecker::new(Allowlist {
@@ -271,7 +284,10 @@ async fn oauth_401_refreshes_and_retries_once() {
     let api = FakeHttpsApiServer::start("Bearer access-refresh-1", "ok").await;
     let (auth, store, key) = oauth_manager(tokens.endpoint(), FakeHttpsApiServer::domain());
     seed_oauth(store.as_ref(), &key, "old-access", "refresh-1", 3600);
-    auth.prepare_for_url(&api.url()).await.unwrap();
+    auth.authorization_for(&api.url())
+        .await
+        .unwrap()
+        .expect("oauth authorization header");
 
     let stack = HttpStack::with_https_client(
         Arc::clone(&auth),
@@ -317,9 +333,10 @@ async fn concurrent_oauth_refreshes_coalesce_inside_one_process() {
     let tokens = FakeTokenServer::start(false).await;
     let (auth, store, key) = oauth_manager(tokens.endpoint(), "localhost".to_string());
     seed_oauth(store.as_ref(), &key, "old-access", "refresh-1", 3600);
-    auth.prepare_for_url("https://localhost/resource")
+    auth.authorization_for("https://localhost/resource")
         .await
-        .unwrap();
+        .unwrap()
+        .expect("oauth authorization header");
 
     let results = futures::future::join_all((0..8).map(|_| {
         let auth = Arc::clone(&auth);
@@ -348,7 +365,10 @@ async fn fetch_blob_uses_same_oauth_retry_path() {
     let api = FakeHttpsApiServer::start("Bearer access-refresh-1", "blob-body").await;
     let (auth, store, key) = oauth_manager(tokens.endpoint(), FakeHttpsApiServer::domain());
     seed_oauth(store.as_ref(), &key, "old-access", "refresh-1", 3600);
-    auth.prepare_for_url(&api.url()).await.unwrap();
+    auth.authorization_for(&api.url())
+        .await
+        .unwrap()
+        .expect("oauth authorization header");
 
     let stack = Arc::new(HttpStack::with_https_client(
         auth,
@@ -394,7 +414,10 @@ async fn oauth_refresh_failure_surfaces_denied_and_preserves_store() {
     let api = FakeHttpsApiServer::start("Bearer never-used", "ok").await;
     let (auth, store, key) = oauth_manager(tokens.endpoint(), FakeHttpsApiServer::domain());
     seed_oauth(store.as_ref(), &key, "old-access", "refresh-1", 3600);
-    auth.prepare_for_url(&api.url()).await.unwrap();
+    auth.authorization_for(&api.url())
+        .await
+        .unwrap()
+        .expect("oauth authorization header");
 
     let stack = HttpStack::with_https_client(
         Arc::clone(&auth),
@@ -426,7 +449,7 @@ async fn oauth_refresh_failure_surfaces_denied_and_preserves_store() {
     assert_eq!(api.calls(), 1);
     assert_eq!(tokens.refreshes(), 0);
     assert!(store.get(&key).unwrap().is_some());
-    let err = auth.prepare_for_url(&api.url()).await.unwrap_err();
+    let err = auth.authorization_for(&api.url()).await.unwrap_err();
     assert!(err.to_string().contains("needs re-authentication"));
 }
 
@@ -457,14 +480,13 @@ async fn oauth_config_client_id_overrides_missing_manifest_default_for_refresh()
     };
     scheme.default_client_id = None;
 
-    let auth = AuthManager::from_configs_manifest_store_with_http(
-        &[config],
+    let auth = manager_with_store_and_http(
+        Some(&config),
         Some(&manifest),
         "test-provider",
         Arc::clone(&store),
         reqwest_oauth2::Client::new(),
-    )
-    .unwrap();
+    );
 
     assert_eq!(
         auth.report_rejected_for_response(
@@ -522,14 +544,14 @@ fn oauth_manager(
 ) -> (Arc<AuthManager>, Arc<dyn CredentialStore>, CredentialId) {
     let store: Arc<dyn CredentialStore> = Arc::new(MemoryStore::default());
     let key = CredentialId::new("test-provider", "oauth", "default").unwrap();
-    let auth = AuthManager::from_configs_manifest_store_with_http(
-        &[oauth_config()],
+    let config = oauth_config();
+    let auth = manager_with_store_and_http(
+        Some(&config),
         Some(&oauth_manifest(token_endpoint, inject_domain)),
         "test-provider",
         Arc::clone(&store),
         reqwest_oauth2::Client::new(),
-    )
-    .unwrap();
+    );
     (Arc::new(auth), store, key)
 }
 

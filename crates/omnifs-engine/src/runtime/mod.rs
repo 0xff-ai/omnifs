@@ -437,27 +437,22 @@ impl Runtime {
         let auth_manifest = manifest
             .as_ref()
             .and_then(omnifs_workspace::provider::ProviderManifest::wasm_auth_manifest);
-        let auth = if config.auth.is_none() {
-            Arc::new(AuthManager::none())
-        } else {
-            Arc::new(
-                AuthManager::from_configs_manifest_service(
-                    config.auth.as_slice(),
-                    auth_manifest.as_ref(),
-                    config.provider_name().as_str(),
-                    Arc::clone(credential_service),
-                )
-                .map_err(|e| BuildError::ProviderProtocol(format!("auth config error: {e}")))?,
+        let auth = Arc::new(
+            AuthManager::from_config_manifest_service(
+                config.auth.as_ref(),
+                auth_manifest.as_ref(),
+                config.provider_name().as_str(),
+                Arc::clone(credential_service),
             )
-        };
+            .map_err(|e| BuildError::ProviderProtocol(format!("auth config error: {e}")))?,
+        );
 
         // Mount-start validation: a registered credential that is not usable
         // yet does not block the mount from loading (reads that need it fail
         // closed per the credential service), but it is worth a warn and a
         // daemon-visible degraded signal rather than a silent wait for the
         // first failing read.
-        let credential_warning =
-            crate::auth::build_time_credential_warning(credential_service, &auth);
+        let credential_warning = crate::auth::build_time_credential_warning(&auth);
         if let Some(warning) = credential_warning.as_deref() {
             warn!(
                 mount = mount_name,

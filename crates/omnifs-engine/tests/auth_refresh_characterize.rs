@@ -3,7 +3,7 @@
 //! `auth_test.rs` exercises these behaviors end to end through `HttpStack` and a
 //! live HTTPS API; this file exercises the same contract directly on the manager:
 //!
-//!   (a) preparing a request whose credential expires inside the 60s refresh
+//!   (a) authorizing a request whose credential expires inside the 60s refresh
 //!       window triggers a synchronous refresh (and a fresh credential does not);
 //!   (b) a 401 (and a 403 carrying `WWW-Authenticate: ... invalid_token`) is
 //!       reported to the auth service, which refreshes and rotates the token
@@ -18,7 +18,9 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use omnifs_engine::test_support::auth::{AuthManager, RefreshOutcome};
+use omnifs_engine::test_support::auth::{
+    AuthManager, RefreshOutcome, manager_with_store_and_http,
+};
 use omnifs_workspace::authn::CredentialId;
 use omnifs_workspace::authn::{
     AuthManifest, AuthScheme, OAuthFlow, OauthScheme, PkceManualCodeConfig, TokenEndpointAuthMethod,
@@ -32,21 +34,24 @@ use tokio::net::TcpListener;
 
 const RESOURCE_URL: &str = "https://localhost/resource";
 
-/// Preparing a request whose OAuth credential expires within the 60s refresh
+/// Authorizing a request whose OAuth credential expires within the 60s refresh
 /// window triggers a synchronous refresh against the token endpoint.
 #[tokio::test]
-async fn prepare_inside_refresh_window_refreshes_synchronously() {
+async fn authorization_inside_refresh_window_refreshes_synchronously() {
     let tokens = FakeTokenServer::start(false).await;
     let (auth, store, key) = oauth_manager(tokens.endpoint());
     // 30s to expiry: inside the 60s window, so not "fresh".
     seed_oauth(store.as_ref(), &key, "old-access", "refresh-1", 30);
 
-    auth.prepare_for_url(RESOURCE_URL).await.unwrap();
+    auth.authorization_for(RESOURCE_URL)
+        .await
+        .unwrap()
+        .expect("oauth authorization header");
 
     assert_eq!(
         tokens.refreshes(),
         1,
-        "a near-expiry credential refreshes on prepare"
+        "a near-expiry credential refreshes on authorization"
     );
     assert_eq!(
         store
@@ -60,16 +65,19 @@ async fn prepare_inside_refresh_window_refreshes_synchronously() {
     );
 }
 
-/// Preparing a request whose OAuth credential is comfortably valid does NOT
+/// Authorizing a request whose OAuth credential is comfortably valid does NOT
 /// refresh: the 60s window gates the proactive refresh.
 #[tokio::test]
-async fn prepare_outside_refresh_window_does_not_refresh() {
+async fn authorization_outside_refresh_window_does_not_refresh() {
     let tokens = FakeTokenServer::start(false).await;
     let (auth, store, key) = oauth_manager(tokens.endpoint());
     // 1h to expiry: comfortably fresh.
     seed_oauth(store.as_ref(), &key, "old-access", "refresh-1", 3600);
 
-    auth.prepare_for_url(RESOURCE_URL).await.unwrap();
+    auth.authorization_for(RESOURCE_URL)
+        .await
+        .unwrap()
+        .expect("oauth authorization header");
 
     assert_eq!(tokens.refreshes(), 0, "a fresh credential is not refreshed");
     assert_eq!(
@@ -96,11 +104,14 @@ async fn response_401_is_refreshable_and_forced_refresh_rotates_once() {
     seed_oauth(store.as_ref(), &key, "old-access", "refresh-1", 3600);
     // Load `current` from the store so a forced refresh actually hits the token
     // endpoint (rather than adopting the store entry it already matches).
-    auth.prepare_for_url(RESOURCE_URL).await.unwrap();
+    auth.authorization_for(RESOURCE_URL)
+        .await
+        .unwrap()
+        .expect("oauth authorization header");
     assert_eq!(
         tokens.refreshes(),
         0,
-        "prepare with a fresh token does not refresh"
+        "authorization with a fresh token does not refresh"
     );
 
     let empty = reqwest::header::HeaderMap::new();
@@ -128,7 +139,10 @@ async fn response_401_is_refreshable_and_forced_refresh_rotates_once() {
     let tokens = FakeTokenServer::start(false).await;
     let (auth, store, key) = oauth_manager(tokens.endpoint());
     seed_oauth(store.as_ref(), &key, "old-access", "refresh-1", 3600);
-    auth.prepare_for_url(RESOURCE_URL).await.unwrap();
+    auth.authorization_for(RESOURCE_URL)
+        .await
+        .unwrap()
+        .expect("oauth authorization header");
     let mut invalid_token = reqwest::header::HeaderMap::new();
     invalid_token.insert(
         reqwest::header::WWW_AUTHENTICATE,
@@ -145,7 +159,10 @@ async fn response_401_is_refreshable_and_forced_refresh_rotates_once() {
     let tokens = FakeTokenServer::start(false).await;
     let (auth, store, key) = oauth_manager(tokens.endpoint());
     seed_oauth(store.as_ref(), &key, "old-access", "refresh-1", 3600);
-    auth.prepare_for_url(RESOURCE_URL).await.unwrap();
+    auth.authorization_for(RESOURCE_URL)
+        .await
+        .unwrap()
+        .expect("oauth authorization header");
     assert_eq!(
         auth.report_rejected_for_response(RESOURCE_URL, StatusCode::FORBIDDEN, &empty)
             .await,
@@ -169,7 +186,10 @@ async fn invalid_grant_refresh_needs_consent_and_keeps_stored_credential() {
     let (auth, store, key) = oauth_manager(tokens.endpoint());
     seed_oauth(store.as_ref(), &key, "old-access", "refresh-1", 3600);
     // Load `current` so the forced refresh reaches the token endpoint.
-    auth.prepare_for_url(RESOURCE_URL).await.unwrap();
+    auth.authorization_for(RESOURCE_URL)
+        .await
+        .unwrap()
+        .expect("oauth authorization header");
 
     let result = auth
         .report_rejected_for_response(
@@ -187,7 +207,7 @@ async fn invalid_grant_refresh_needs_consent_and_keeps_stored_credential() {
         store.get(&key).unwrap().is_some(),
         "invalid_grant preserves the stored credential for diagnostics"
     );
-    let err = auth.prepare_for_url(RESOURCE_URL).await.unwrap_err();
+    let err = auth.authorization_for(RESOURCE_URL).await.unwrap_err();
     assert!(
         err.to_string().contains("needs re-authentication"),
         "NeedsConsent credentials fail closed"
@@ -239,14 +259,14 @@ fn oauth_manifest(token_endpoint: String) -> AuthManifest {
 fn oauth_manager(token_endpoint: String) -> (AuthManager, Arc<dyn CredentialStore>, CredentialId) {
     let store: Arc<dyn CredentialStore> = Arc::new(MemoryStore::default());
     let key = CredentialId::new("test-provider", "oauth", "default").unwrap();
-    let auth = AuthManager::from_configs_manifest_store_with_http(
-        &[oauth_config()],
+    let config = oauth_config();
+    let auth = manager_with_store_and_http(
+        Some(&config),
         Some(&oauth_manifest(token_endpoint)),
         "test-provider",
         Arc::clone(&store),
         reqwest_oauth2::Client::new(),
-    )
-    .unwrap();
+    );
     (auth, store, key)
 }
 

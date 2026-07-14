@@ -1,15 +1,15 @@
 //! Authentication header injection for HTTP requests.
 //!
-//! `AuthManager` maps a mount's auth config onto per-credential strategies and
+//! `AuthManager` maps a mount's auth config onto one credential binding and
 //! delegates every credential concern (store access, expiry, OAuth refresh) to
 //! the shared `omnifs_auth::CredentialService`. `AuthManager` keeps only two
-//! jobs: matching a request URL to the credentials that apply to it, and
-//! composing the resolved material into wire headers. The service is the single
+//! jobs: matching a request URL to the credential that applies to it, and
+//! composing the resolved material into a wire header. The service is the single
 //! fail-closed owner of the bytes.
 
 use omnifs_auth::{
-    AuthError as OAuthError, AuthUnavailable, CredentialHealth, CredentialService, OAuthClient,
-    OAuthRequest, RefreshOutcome, RejectionEvidence,
+    AuthError as OAuthError, CredentialHealth, CredentialService, OAuthClient, OAuthRequest,
+    RefreshOutcome, RejectionEvidence,
 };
 use omnifs_workspace::authn::{AuthKind, AuthManifest, CredentialId, SchemeResolveError};
 use omnifs_workspace::creds::{CredentialStore, FileStore};
@@ -50,129 +50,158 @@ pub enum InjectError {
 
 /// One mount credential resolved to the domains it authorizes. Domain matching
 /// lives here; the credential bytes live in the `CredentialService` under `id`.
-struct Strategy {
-    kind: AuthKind,
+struct AuthBinding {
+    service: Arc<CredentialService>,
     id: CredentialId,
     domains: Vec<String>,
 }
 
-impl Strategy {
+impl AuthBinding {
     fn applies_to_url(&self, url: &str) -> bool {
         let host = url::Url::parse(url)
             .ok()
             .and_then(|u| u.host_str().map(String::from));
         host.is_some_and(|host| self.domains.iter().any(|domain| domain == &host))
     }
-}
 
-/// Maps a mount's auth config onto per-credential strategies over a shared
-/// [`CredentialService`]. A no-auth mount has no strategies and no service.
-pub struct AuthManager {
-    service: Option<Arc<CredentialService>>,
-    strategies: Vec<Strategy>,
-}
-
-impl AuthManager {
-    pub fn none() -> Self {
-        Self {
-            service: None,
-            strategies: vec![],
-        }
-    }
-
-    /// Build over a shared service (the daemon-wide credential owner). Each
-    /// strategy registers its credential with the service.
-    pub fn from_configs_manifest_service(
-        configs: &[Auth],
+    fn register(
+        auth: &Auth,
         manifest: Option<&AuthManifest>,
         provider_name: &str,
         service: Arc<CredentialService>,
     ) -> Result<Self, InjectError> {
-        let mut strategies = Vec::new();
-        for config in configs {
-            strategies.extend(build_strategies(config, manifest, provider_name, &service)?);
+        match auth {
+            Auth::StaticToken(config) => {
+                Self::register_static(auth, config, manifest, provider_name, service)
+            },
+            Auth::OAuth(config) => {
+                Self::register_oauth(auth, config, manifest, provider_name, service)
+            },
         }
+    }
+
+    fn register_static(
+        auth: &Auth,
+        config: &StaticToken,
+        manifest: Option<&AuthManifest>,
+        provider_name: &str,
+        service: Arc<CredentialService>,
+    ) -> Result<Self, InjectError> {
+        let manifest = manifest.ok_or(InjectError::ManifestRequired(AuthKind::StaticToken))?;
+        let scheme = manifest
+            .resolve_static_scheme(config.scheme.as_deref())
+            .map_err(InjectError::from)?;
+        let id = credential_id(provider_name, auth, &scheme.key)?;
+        let header_name = scheme
+            .header_name
+            .clone()
+            .unwrap_or_else(|| "Authorization".to_string());
+        let value_prefix = scheme.value_prefix.clone();
+        let domains = scheme.inject_domains.clone();
+        service.register_static(id.clone(), header_name, value_prefix);
         Ok(Self {
-            service: Some(service),
-            strategies,
+            service,
+            id,
+            domains,
         })
     }
 
-    /// Test/standalone constructor: build a dedicated service around `store` and
-    /// `oauth_http`, then register strategies against it.
-    #[doc(hidden)]
-    pub fn from_configs_manifest_store_with_http(
-        configs: &[Auth],
+    fn register_oauth(
+        auth: &Auth,
+        config: &OAuth,
         manifest: Option<&AuthManifest>,
-        provider_name: impl Into<String>,
-        store: Arc<dyn CredentialStore>,
-        oauth_http: reqwest_oauth2::Client,
+        provider_name: &str,
+        service: Arc<CredentialService>,
     ) -> Result<Self, InjectError> {
-        let provider_name = provider_name.into();
-        let service = Arc::new(CredentialService::new(
-            store,
-            OAuthClient::from_http_client(oauth_http),
-        ));
-        Self::from_configs_manifest_service(configs, manifest, &provider_name, service)
+        let manifest = manifest.ok_or(InjectError::ManifestRequired(AuthKind::OAuth))?;
+        let scheme = manifest
+            .resolve_oauth_scheme(config.scheme.as_deref())
+            .map_err(InjectError::from)?
+            .clone();
+        let id = credential_id(provider_name, auth, &scheme.key)?;
+        let request = OAuthRequest::from_mount_config(Some(config), scheme)?;
+        let domains = request.scheme().inject_domains.clone();
+        service.register_oauth(id.clone(), request);
+        Ok(Self {
+            service,
+            id,
+            domains,
+        })
     }
 
-    pub async fn prepare_for_url(&self, url: &str) -> Result<(), InjectError> {
-        let Some(service) = &self.service else {
-            return Ok(());
+    async fn authorization(&self) -> Result<(String, String), InjectError> {
+        let material = self
+            .service
+            .authorization(&self.id)
+            .await
+            .map_err(|error| InjectError::Unavailable(error.to_string()))?;
+        Ok((
+            material.name().to_string(),
+            material.expose_value().to_string(),
+        ))
+    }
+
+    fn health(&self) -> Option<CredentialHealth> {
+        self.service.status(&self.id).map(|status| status.health)
+    }
+
+    fn credential_warning(&self) -> Option<String> {
+        let status = self.service.status(&self.id)?;
+        matches!(
+            status.health,
+            CredentialHealth::Missing | CredentialHealth::Expired | CredentialHealth::NeedsConsent
+        )
+        .then(|| format!("credential {} is {:?}", status.id, status.health))
+    }
+}
+
+/// Maps a mount's optional auth config onto one binding over a shared
+/// [`CredentialService`]. A no-auth mount has no binding.
+pub struct AuthManager {
+    binding: Option<AuthBinding>,
+}
+
+impl AuthManager {
+    pub fn none() -> Self {
+        Self { binding: None }
+    }
+
+    /// Build over the daemon-wide credential owner, registering the mount's
+    /// single credential when auth is configured.
+    pub(crate) fn from_config_manifest_service(
+        config: Option<&Auth>,
+        manifest: Option<&AuthManifest>,
+        provider_name: &str,
+        service: Arc<CredentialService>,
+    ) -> Result<Self, InjectError> {
+        Ok(Self {
+            binding: config
+                .map(|auth| AuthBinding::register(auth, manifest, provider_name, service))
+                .transpose()?,
+        })
+    }
+
+    /// Resolve the one host-owned authorization header for `url`. `None` means
+    /// the mount's binding does not apply; a missing or unusable credential is
+    /// a fail-closed error.
+    pub async fn authorization_for(
+        &self,
+        url: &str,
+    ) -> Result<Option<(String, String)>, InjectError> {
+        let Some(binding) = self
+            .binding
+            .as_ref()
+            .filter(|binding| binding.applies_to_url(url))
+        else {
+            return Ok(None);
         };
-        for strategy in self
-            .strategies
-            .iter()
-            .filter(|strategy| strategy.kind == AuthKind::OAuth && strategy.applies_to_url(url))
-        {
-            match service.authorization(&strategy.id).await {
-                // A never-authorized credential falls through to the empty-headers
-                // "no credentials" denial in the caller; a refresh failure fails
-                // the prepare outright. Both deny.
-                Ok(_) | Err(AuthUnavailable::Missing) => {},
-                Err(error) => return Err(InjectError::Unavailable(error.to_string())),
-            }
-        }
-        Ok(())
+        binding.authorization().await.map(Some)
     }
 
-    pub fn headers_for_url(&self, url: &str) -> Vec<(String, String)> {
-        let Some(service) = &self.service else {
-            return Vec::new();
-        };
-        self.strategies
-            .iter()
-            .filter(|strategy| strategy.applies_to_url(url))
-            .filter_map(|strategy| service.cached_authorization(&strategy.id))
-            .map(|material| {
-                (
-                    material.name().to_string(),
-                    material.expose_value().to_string(),
-                )
-            })
-            .collect()
-    }
-
-    pub fn requires_auth_for_url(&self, url: &str) -> bool {
-        self.strategies
-            .iter()
-            .any(|strategy| strategy.applies_to_url(url))
-    }
-
-    /// Credential ids this manager registered with the service, for the
-    /// mount-start credential health check. Empty for a no-auth mount.
-    pub(crate) fn credential_ids(&self) -> impl Iterator<Item = &CredentialId> {
-        self.strategies.iter().map(|strategy| &strategy.id)
-    }
-
-    /// Coarsest live health for this mount's registered credentials. `None`
-    /// means the mount has no auth strategies.
+    /// Live health for this mount's credential. `None` means the mount has no
+    /// auth binding.
     pub(crate) fn health(&self) -> Option<CredentialHealth> {
-        let service = self.service.as_ref()?;
-        self.strategies
-            .iter()
-            .filter_map(|strategy| service.status(&strategy.id).map(|status| status.health))
-            .max_by_key(CredentialHealth::severity)
+        self.binding.as_ref()?.health()
     }
 
     pub async fn report_rejected_for_response(
@@ -181,98 +210,19 @@ impl AuthManager {
         status: reqwest::StatusCode,
         headers: &reqwest::header::HeaderMap,
     ) -> RefreshOutcome {
-        let Some(service) = &self.service else {
+        let Some(binding) = self
+            .binding
+            .as_ref()
+            .filter(|binding| binding.applies_to_url(url))
+        else {
             return RefreshOutcome::NotApplicable;
         };
         let evidence = RejectionEvidence::new(status.as_u16(), www_authenticate(headers));
-        let mut saw_no_credential = false;
-        for strategy in self
-            .strategies
-            .iter()
-            .filter(|strategy| strategy.applies_to_url(url))
-        {
-            if strategy.kind != AuthKind::OAuth {
-                continue;
-            }
-            match service
-                .report_rejected(&strategy.id, evidence.clone())
-                .await
-            {
-                RefreshOutcome::Refreshed => return RefreshOutcome::Refreshed,
-                RefreshOutcome::NoCredential => saw_no_credential = true,
-                RefreshOutcome::RefreshFailed(error) => {
-                    return RefreshOutcome::RefreshFailed(error);
-                },
-                RefreshOutcome::NotApplicable => {},
-            }
-        }
-        if saw_no_credential {
-            RefreshOutcome::NoCredential
-        } else {
-            RefreshOutcome::NotApplicable
-        }
+        binding
+            .service
+            .report_rejected(&binding.id, evidence)
+            .await
     }
-}
-
-fn build_strategies(
-    config: &Auth,
-    manifest: Option<&AuthManifest>,
-    provider_name: &str,
-    service: &CredentialService,
-) -> Result<Vec<Strategy>, InjectError> {
-    match config {
-        Auth::StaticToken(inner) => build_static(config, inner, manifest, provider_name, service),
-        Auth::OAuth(inner) => build_oauth(config, inner, manifest, provider_name, service),
-    }
-}
-
-fn build_static(
-    auth: &Auth,
-    config: &StaticToken,
-    manifest: Option<&AuthManifest>,
-    provider_name: &str,
-    service: &CredentialService,
-) -> Result<Vec<Strategy>, InjectError> {
-    let manifest = manifest.ok_or(InjectError::ManifestRequired(AuthKind::StaticToken))?;
-    let scheme = manifest
-        .resolve_static_scheme(config.scheme.as_deref())
-        .map_err(InjectError::from)?;
-    let id = credential_id(provider_name, auth, &scheme.key)?;
-    let header_name = scheme
-        .header_name
-        .clone()
-        .unwrap_or_else(|| "Authorization".to_string());
-    let value_prefix = scheme.value_prefix.clone();
-    let domains = scheme.inject_domains.clone();
-    service.register_static(id.clone(), header_name, value_prefix);
-    Ok(vec![Strategy {
-        kind: AuthKind::StaticToken,
-        id,
-        domains,
-    }])
-}
-
-fn build_oauth(
-    auth: &Auth,
-    config: &OAuth,
-    manifest: Option<&AuthManifest>,
-    provider_name: &str,
-    service: &CredentialService,
-) -> Result<Vec<Strategy>, InjectError> {
-    let manifest = manifest.ok_or(InjectError::ManifestRequired(AuthKind::OAuth))?;
-    let scheme = manifest
-        .resolve_oauth_scheme(config.scheme.as_deref())
-        .map_err(InjectError::from)?
-        .clone();
-    let id = credential_id(provider_name, auth, &scheme.key)?;
-    let request = OAuthRequest::from_mount_config(Some(config), scheme)?;
-    let domains = request.scheme().inject_domains.clone();
-    service.register_oauth(id.clone(), request);
-    Ok(vec![Strategy {
-        kind: AuthKind::OAuth,
-        id,
-        domains,
-    }])
 }
 
 fn credential_id(
@@ -288,28 +238,12 @@ fn credential_id(
 
 /// Non-secret credential health for one mount, checked once at mount-start:
 /// `Some` when a registered credential is `Missing`, `Expired`, or
-/// `NeedsConsent`. `None` for a no-auth mount or once every registered
-/// credential is at least usable. The mount still loads either way; the
+/// `NeedsConsent`. `None` for a no-auth mount or once the registered credential
+/// is at least usable. The mount still loads either way; the
 /// daemon surfaces the warning in the Mounts subsystem health without
 /// blocking the mount on it.
-pub(crate) fn build_time_credential_warning(
-    service: &CredentialService,
-    manager: &AuthManager,
-) -> Option<String> {
-    let ids: std::collections::HashSet<&CredentialId> = manager.credential_ids().collect();
-    if ids.is_empty() {
-        return None;
-    }
-    service.health().into_iter().find_map(|status| {
-        if !ids.contains(&status.id) {
-            return None;
-        }
-        matches!(
-            status.health,
-            CredentialHealth::Missing | CredentialHealth::Expired | CredentialHealth::NeedsConsent
-        )
-        .then(|| format!("credential {} is {:?}", status.id, status.health))
-    })
+pub(crate) fn build_time_credential_warning(manager: &AuthManager) -> Option<String> {
+    manager.binding.as_ref()?.credential_warning()
 }
 
 fn www_authenticate(headers: &reqwest::header::HeaderMap) -> Option<String> {

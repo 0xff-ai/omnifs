@@ -43,6 +43,27 @@ pub fn wasm_cache_dir() -> PathBuf {
 pub mod auth {
     pub use crate::auth::AuthManager;
     pub use omnifs_auth::{CredentialService, RefreshOutcome};
+    use omnifs_auth::OAuthClient;
+    use omnifs_workspace::authn::AuthManifest;
+    use omnifs_workspace::creds::CredentialStore;
+    use omnifs_workspace::mounts::Auth;
+    use std::sync::Arc;
+
+    /// Build a dedicated auth manager around a test store and OAuth client.
+    pub fn manager_with_store_and_http(
+        config: Option<&Auth>,
+        manifest: Option<&AuthManifest>,
+        provider_name: &str,
+        store: Arc<dyn CredentialStore>,
+        oauth_http: reqwest_oauth2::Client,
+    ) -> AuthManager {
+        let service = Arc::new(CredentialService::new(
+            store,
+            OAuthClient::from_http_client(oauth_http),
+        ));
+        AuthManager::from_config_manifest_service(config, manifest, provider_name, service)
+            .expect("build test auth manager")
+    }
 
     /// A credential service over an on-disk store, matching the production
     /// wiring in `MountRuntimes::new`. For harnesses that build a `Runtime`

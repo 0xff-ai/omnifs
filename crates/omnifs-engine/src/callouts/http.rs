@@ -117,17 +117,16 @@ impl HttpStack {
         body: Option<&[u8]>,
         timeout: Duration,
     ) -> Result<reqwest::Response, wit_types::CalloutResult> {
-        if let Err(error) = self.auth.prepare_for_url(url).await {
-            return Err(callout_denied(format!("auth prepare failed: {error}")));
-        }
-
-        let auth_headers = self.auth.headers_for_url(url);
-        if auth_headers.is_empty() && self.auth.requires_auth_for_url(url) {
-            return Err(callout_denied(format!("no credentials for {url}")));
-        }
+        let auth_header = self
+            .auth
+            .authorization_for(url)
+            .await
+            .map_err(|error| callout_denied(format!("auth authorization failed: {error}")))?;
 
         let header_map = match build_header_map(
-            auth_headers.iter().map(|(n, v)| (n.as_str(), v.as_str())),
+            auth_header
+                .iter()
+                .map(|(name, value)| (name.as_str(), value.as_str())),
             headers.iter().map(|h| (h.name.as_str(), h.value.as_str())),
         ) {
             Ok(header_map) => header_map,
