@@ -390,7 +390,7 @@ impl CredentialService {
             })
             .await
         {
-            Ok(result) => result,
+            Ok(result) => Ok(result),
             Err(Some(error)) => Err(error),
             Err(None) => Err(RefreshFailure {
                 needs_consent: false,

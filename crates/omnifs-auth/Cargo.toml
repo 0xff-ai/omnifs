@@ -26,6 +26,7 @@ webbrowser = { workspace = true }
 
 [dev-dependencies]
 rcgen = "0.13"
+tempfile = { workspace = true }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 
 [lints]

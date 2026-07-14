@@ -6,8 +6,8 @@ use omnifs_workspace::authn::{
     PkceLoopbackConfig, PkceManualCodeConfig, TokenEndpointAuthMethod,
 };
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
@@ -418,7 +418,6 @@ impl FakeAuthServer {
 pub(super) struct FakeRevocationServer {
     base: Url,
     revocations: Arc<AtomicUsize>,
-    tokens: Arc<StdMutex<Vec<String>>>,
     fail: bool,
 }
 
@@ -446,7 +445,6 @@ impl FakeRevocationServer {
         let server = Self {
             base: Url::parse(&format!("https://{addr}")).unwrap(),
             revocations: Arc::new(AtomicUsize::new(0)),
-            tokens: Arc::new(StdMutex::new(Vec::new())),
             fail,
         };
         let task_server = server.clone();
@@ -469,14 +467,6 @@ impl FakeRevocationServer {
                     if !request.starts_with("POST /revoke ") {
                         return;
                     }
-                    let body = request.split("\r\n\r\n").nth(1).unwrap_or_default();
-                    let params: HashMap<String, String> =
-                        url::form_urlencoded::parse(body.as_bytes())
-                            .into_owned()
-                            .collect();
-                    if let Some(token) = params.get("token") {
-                        task_server.tokens.lock().unwrap().push(token.clone());
-                    }
                     task_server.revocations.fetch_add(1, Ordering::SeqCst);
                     if task_server.fail {
                         let response = "HTTP/1.1 500 Internal Server Error\r\ncontent-type: application/json\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}";
@@ -497,10 +487,6 @@ impl FakeRevocationServer {
 
     pub(super) fn revocations(&self) -> usize {
         self.revocations.load(Ordering::SeqCst)
-    }
-
-    pub(super) fn revoked_tokens(&self) -> Vec<String> {
-        self.tokens.lock().unwrap().clone()
     }
 }
 
