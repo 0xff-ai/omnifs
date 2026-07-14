@@ -15,13 +15,13 @@ A single `omnifs` binary is both CLI and daemon. The runtime loop lives behind h
 
 The daemon exposes REST API 7.0, whose schema lives in `omnifs-api` and whose checked-in OpenAPI document is generated from the daemon implementation. API 7 removes mount mutation, explicit reconcile, hot-reconcile reporting, and failed-mount projections because desired state now crosses the daemon boundary only as an immutable startup revision. `FrontendInfo.mount_point` remains authoritative for that frontend, and credential material is never transmitted on the wire.
 
-A host-native daemon serves the control API over a Unix domain socket at `$OMNIFS_HOME/control.sock`. Auth on that socket is filesystem permissions: the config directory is forced to `0700` and the socket to `0600`, so only the owning user can connect, and there is no bearer token on that path. The bearer-token middleware survives but is enforced only on a TCP listener, which the daemon binds only for the `OMNIFS_DAEMON_ADDR` debug/test path (there is no other TCP control listener). There, the token lives in daemon memory only (no token file); its value comes from `OMNIFS_CONTROL_TOKEN` when the caller injects one, else is generated per start.
+A host-native daemon serves the temporary REST control API locally over `$OMNIFS_HOME/control.sock`. The workspace directory is forced to `0700` and the socket to `0600`, so filesystem permissions authenticate every control request. The control API has no remote TCP listener, bearer-token mode, or environment-selected endpoint.
 
 `$OMNIFS_HOME/daemon.json` is the single daemon-owned runtime record, replacing both `launch.json` and the `control-token` file. It records the endpoint to dial (`{ "kind": "unix", "path": ... }`), the backend identity (the native process id), a per-start `instance_id`, the exact mount revision loaded by that daemon, the serving frontends, `started_at`, and any token-authenticated attach listeners. It is written mode `0600` because attach records carry tokens. The daemon publishes it only after the immutable namespace and every fixed, requested, or restored listener are ready, and removes it on graceful exit. A crash may leave it stale; a replacement validates and restores current persisted attach authority from that stale record, including its token, before publishing a new instance record. When the record says a daemon should exist but the control probe fails, inventory reports the daemon as unreachable and status exits 3; a cleanly absent daemon is stopped. Teardown (`omnifs down`) removes the record after liveness-checking its pid before trusting it for a stale sweep.
 
-The CLI resolves which endpoint to dial in one order: `OMNIFS_DAEMON_ADDR` when set (TCP, bearer token from `OMNIFS_CONTROL_TOKEN`), else the workspace's `daemon.json` (unix socket), else the fixed `$OMNIFS_HOME/control.sock` when present, else the daemon is stopped. It never dials a default control port blind. An unreadable runtime record is stale metadata and permits only the fixed-socket fallback. The CLI asserts the `instance_id` echoed by `/v1/status` against the record's, so a record overwritten by a restart mid-command is caught. Because it only dials an endpoint from its own workspace's record, fixed socket, or explicit debug override, a daemon owned by a different `OMNIFS_HOME` is structurally unaddressable.
+The CLI resolves the local control socket from its own workspace's `daemon.json` when present, else from the fixed `$OMNIFS_HOME/control.sock`, else the daemon is stopped. It never selects a remote endpoint or accepts a control endpoint override. An unreadable runtime record is stale metadata and permits only the fixed-socket fallback. The CLI asserts the `instance_id` echoed by `/v1/status` against the record's, so a record overwritten by a restart mid-command is caught.
 
-`GET /v1/ready` is the only unauthenticated control route on the TCP listener. Every other TCP route, including `/v1/events`, snapshot export routes, and future routes, is authenticated by default through the daemon router middleware. Missing or wrong bearer tokens fail closed with HTTP 401 and an `ApiError` whose code is `Unauthorized`. The Unix-socket listener omits the middleware entirely.
+The control API is local-only over `$OMNIFS_HOME/control.sock`; its workspace directory and socket permissions authenticate requests. VFS TCP and vsock attachment listeners and their tokens are separate frontend transport and are not control API transport.
 
 The control API may expose operational state that contains no secrets. `GET /v1/credentials` reports registered credential ids, coarse health, expiry, and scopes only; it never reports access tokens, refresh tokens, client secrets, or header material. `POST /v1/credentials/{id}/reload` reloads a registered credential from the host store and returns the same non-secret status shape. `GET /v1/providers` reports installed artifacts grouped by provider name. Provider state is derived from exact mount pins, never install recency.
 
@@ -37,29 +37,9 @@ Specs are one file per mount, and a spec file's stem is its mount name. `mounts:
 
 The CLI materializes `HEAD` under cache storage and starts the daemon with that immutable snapshot plus its exact revision. The daemon never invokes Git or chooses desired state. If a healthy daemon already records `HEAD`, `up` leaves it running. Otherwise it stops only the daemon, starts the new revision, waits for readiness, and then advances `refs/omnifs/applied`; a failed start never advances the ref. `up` and its exact `apply` alias never launch, stop, or reconcile a frontend. Existing frontend runners survive daemon replacement and reconnect through the fixed local socket or the restored TCP/vsock listener authority and token. `down` also stops only the daemon; runner teardown belongs to `omnifs frontend disable`.
 
-Mount specs strict-parse their top-level JSON fields. Unknown top-level keys are invalid, while the provider-owned `config` object remains opaque to the host. The control API has no mount mutation or reconcile routes; it retains read-only inspection/export plus credential, frontend, status, event, and shutdown surfaces.
+Mount specs strict-parse their top-level JSON fields. Unknown top-level keys are invalid, while the provider-owned `config` object remains opaque to the host. The control API has no mount mutation or reconcile routes; it retains read-only inspection plus credential, frontend, status, event, and shutdown surfaces.
 
 Prefer REST API extensions for new non-secret interactions. Keep credential material off the REST API.
-
-### Replica snapshots
-
-`omnifs mount snapshot <mount> --out <dir>` exports a configured mount's canonical
-object store as a plain directory tree plus `index.json`. When a compatible
-daemon is running, the CLI reads the snapshot from `GET
-/v1/mounts/{name}/export` as an `application/x-tar` stream. When no compatible
-daemon answers, the CLI reads `<cache>/object` directly and writes the same
-directory layout. Both paths export canonical bytes and metadata only; no
-credentials are transmitted.
-
-The top-level `index.json` is generated snapshot metadata, so the entire
-canonical path namespace rooted at `/index.json` is reserved and rejected
-before directory or tar export.
-
-The snapshot tree is the audit surface for replicas. Compare rendered canonical
-files with `diff -r --exclude=index.json <before> <after>`; `index.json` records
-logical id, path, blake3, and size for each file and therefore changes whenever
-file bytes change. Use `scripts/demo/snapshot-diff.sh` for the supported demo
-flow.
 
 ### Runtime modes
 
@@ -163,10 +143,8 @@ whose destination streams are owned by the invoked tools.
 - Make any directory above `$OMNIFS_HOME/mounts` a Git repository, or place credentials, provider artifacts, cache data, sockets, logs, or daemon records under mount-version control.
 - Add a second spec read or write path that bypasses `mounts::Registry`, or write a spec to a file whose stem is not its mount name.
 - Add a second apply command path, args type, receipt, lifecycle branch, or telemetry label for the `apply` spelling.
-- Put credential material or provider secrets in snapshot export routes or snapshot
-  indexes.
 - Reintroduce a persisted daemon runtime-backend choice (a `[system].runtime`-shaped config field or a `--runtime` flag); the daemon has exactly one runtime.
-- Dial a default control port blind. The CLI only ever dials an endpoint read from its own workspace's `daemon.json` or from `OMNIFS_DAEMON_ADDR`.
+- Select a remote control endpoint or bypass the workspace's local control socket; the CLI only dials the Unix socket recorded in its own `daemon.json` or the fixed `$OMNIFS_HOME/control.sock`.
 - Hand-edit `crates/omnifs-api/openapi/daemon.json`.
 - Add API routes without keeping client/status behavior and schema generation in step.
 - Reintroduce a separate public `omnifsd` binary name in docs or UX.

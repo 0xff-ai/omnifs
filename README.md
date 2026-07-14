@@ -289,7 +289,7 @@ tail -n 80 ~/.omnifs-dev/cache/daemon.log
 - A real provider ecosystem: standalone packaging, a community catalog, authoring docs, and sidecars for providers that need native dependencies.
 - Additional mount surfaces beyond Linux FUSE and macOS NFSv4, plus passthrough for host-backed subtrees.
 - Easier install and slimmer packaging: Homebrew or shell installers and smaller frontend images for docker and krunkit delivery.
-- Going further than warm cache reads: offline snapshots, background indexing, semantic search, and DNS prefetch.
+- Going further than warm cache reads: background indexing, semantic search, and DNS prefetch.
 - Trust and safety: signed provider manifests, tighter sandboxing for host-run tools, and metered filesystem access.
 
 ## License

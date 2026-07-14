@@ -602,9 +602,7 @@ async function runInitMount(
 
   await run(
     $`${omnifsCli} ${args}`.env(
-      // `init` never needs a live daemon; point at the discard port so an
-      // accidental daemon touch fails fast instead of hanging.
-      cliEnv(devHome, { ...credentialEnv, OMNIFS_DAEMON_ADDR: "127.0.0.1:9" }),
+      cliEnv(devHome, credentialEnv),
     ),
   );
 }
