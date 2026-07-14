@@ -6,8 +6,8 @@ use omnifs_workspace::authn::{
     PkceLoopbackConfig, PkceManualCodeConfig, TokenEndpointAuthMethod,
 };
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
@@ -411,6 +411,96 @@ impl FakeAuthServer {
             },
             other => panic!("unexpected grant_type: {other:?}"),
         }
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct FakeRevocationServer {
+    base: Url,
+    revocations: Arc<AtomicUsize>,
+    tokens: Arc<StdMutex<Vec<String>>>,
+    fail: bool,
+}
+
+impl FakeRevocationServer {
+    pub(super) async fn start() -> Self {
+        Self::start_with_failure(false).await
+    }
+
+    pub(super) async fn start_with_failure(fail: bool) -> Self {
+        let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
+        let cert_der = cert.cert.der().clone();
+        let key_der = tokio_rustls::rustls::pki_types::PrivateKeyDer::Pkcs8(
+            tokio_rustls::rustls::pki_types::PrivatePkcs8KeyDer::from(
+                cert.key_pair.serialize_der(),
+            ),
+        );
+        let config = tokio_rustls::rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert_der], key_der)
+            .unwrap();
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+        let server = Self {
+            base: Url::parse(&format!("https://{addr}")).unwrap(),
+            revocations: Arc::new(AtomicUsize::new(0)),
+            tokens: Arc::new(StdMutex::new(Vec::new())),
+            fail,
+        };
+        let task_server = server.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let acceptor = acceptor.clone();
+                let task_server = task_server.clone();
+                tokio::spawn(async move {
+                    let Ok(mut stream) = acceptor.accept(stream).await else {
+                        return;
+                    };
+                    let mut buf = vec![0; 4096];
+                    let Ok(read) = stream.read(&mut buf).await else {
+                        return;
+                    };
+                    let request = String::from_utf8_lossy(&buf[..read]);
+                    if !request.starts_with("POST /revoke ") {
+                        return;
+                    }
+                    let body = request.split("\r\n\r\n").nth(1).unwrap_or_default();
+                    let params: HashMap<String, String> =
+                        url::form_urlencoded::parse(body.as_bytes())
+                            .into_owned()
+                            .collect();
+                    if let Some(token) = params.get("token") {
+                        task_server.tokens.lock().unwrap().push(token.clone());
+                    }
+                    task_server.revocations.fetch_add(1, Ordering::SeqCst);
+                    if task_server.fail {
+                        let response = "HTTP/1.1 500 Internal Server Error\r\ncontent-type: application/json\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}";
+                        stream.write_all(response.as_bytes()).await.unwrap();
+                        return;
+                    }
+                    let response = "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}";
+                    stream.write_all(response.as_bytes()).await.unwrap();
+                });
+            }
+        });
+        server
+    }
+
+    pub(super) fn endpoint(&self) -> String {
+        self.base.join("/revoke").unwrap().to_string()
+    }
+
+    pub(super) fn revocations(&self) -> usize {
+        self.revocations.load(Ordering::SeqCst)
+    }
+
+    pub(super) fn revoked_tokens(&self) -> Vec<String> {
+        self.tokens.lock().unwrap().clone()
     }
 }
 

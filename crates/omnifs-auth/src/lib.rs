@@ -5,7 +5,7 @@ mod flows;
 mod request;
 mod service;
 
-pub use client::{OAuthClient, UrlOpener};
+pub use client::{OAuthClient, OAuthRevokeOutcome, UrlOpener};
 pub use error::AuthError;
 pub use flows::{DeviceCodePrompt, ManualCode};
 pub use request::{

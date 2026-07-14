@@ -1,9 +1,9 @@
 use crate::callback::{LoopbackCallback, LoopbackEndpoint, accept_callback_request};
 use crate::request::ClientSideTokenLoginRequest;
-use crate::test_support::{FakeAuthServer, FakeBehavior, FakeOpener};
+use crate::test_support::{FakeAuthServer, FakeBehavior, FakeOpener, FakeRevocationServer};
 use crate::{
     AuthBinding, AuthError, CredentialService, LoginRequest, OAuthClient, OAuthRequest,
-    RefreshOutcome, UrlOpener,
+    OAuthRevokeOutcome, RefreshOutcome, UrlOpener,
 };
 use omnifs_workspace::authn::{
     CredentialId, DevicePollCompat, OAuthFlow, OauthScheme, PkceManualCodeConfig,
@@ -293,6 +293,40 @@ async fn token_endpoint_errors_surface_typed_errors() {
             description
         } if error == "invalid_grant" && description.as_deref() == Some("bad code")
     ));
+}
+
+#[tokio::test]
+async fn optional_revocation_endpoint_works_without_builder_type_branching() {
+    let fake = FakeAuthServer::start(FakeBehavior::default()).await;
+    let revoke_fake = FakeRevocationServer::start().await;
+    let scheme = fake.loopback_scheme(Some(revoke_fake.endpoint()));
+    let http = reqwest::ClientBuilder::new()
+        .danger_accept_invalid_certs(true)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let client = OAuthClient::from_http_client(http);
+
+    let revoked = client
+        .revoke_access_token(
+            OAuthRequest::new(scheme),
+            SecretString::from("access-1".to_owned()),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(revoked, OAuthRevokeOutcome::Revoked);
+    assert_eq!(revoke_fake.revocations(), 1);
+
+    let no_revoke_scheme = fake.loopback_scheme(None);
+    let skipped = client
+        .revoke_access_token(
+            OAuthRequest::new(no_revoke_scheme),
+            SecretString::from("access-2".to_owned()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(skipped, OAuthRevokeOutcome::Unsupported);
 }
 
 #[tokio::test]

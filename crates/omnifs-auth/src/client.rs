@@ -1,7 +1,7 @@
 use crate::error::AuthError;
 use crate::flows::credential_entry_from_token;
 use crate::request::OAuthRequest;
-use oauth2::RefreshToken;
+use oauth2::{AccessToken, RefreshToken, StandardRevocableToken};
 use omnifs_workspace::creds::CredentialEntry;
 use secrecy::{ExposeSecret, SecretString};
 use std::future::Future;
@@ -61,6 +61,28 @@ impl OAuthClient {
         let token = exchange.request_async(&self.http).await?;
         Ok(credential_entry_from_token(&token))
     }
+
+    pub async fn revoke_access_token(
+        &self,
+        request: OAuthRequest,
+        access_token: SecretString,
+    ) -> Result<OAuthRevokeOutcome, AuthError> {
+        if request.scheme.revocation_endpoint.is_none() {
+            return Ok(OAuthRevokeOutcome::Unsupported);
+        }
+        let client = request.token_client()?;
+        let revoke = client.revoke_token(StandardRevocableToken::from(AccessToken::new(
+            access_token.expose_secret().to_owned(),
+        )))?;
+        revoke.request_async(&self.http).await?;
+        Ok(OAuthRevokeOutcome::Revoked)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OAuthRevokeOutcome {
+    Revoked,
+    Unsupported,
 }
 
 struct SystemBrowser;
