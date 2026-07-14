@@ -82,7 +82,7 @@ pub(crate) struct Inode {
 /// A persisted or reattach-cleared inode whose [`NodeId`] is not yet known. It
 /// carries the same identity chain an [`Inode`] does, minus the resolved body:
 /// the first op that touches its id re-resolves it lazily (see
-/// [`Export::ensure_live`]).
+/// [`Export::live_inode`]).
 #[derive(Clone)]
 pub(crate) struct ColdEntry {
     pub(crate) scope: u64,
@@ -145,7 +145,7 @@ pub struct Export {
     /// (scope, backing path) -> inode, for subtree-local children.
     by_backing: DashMap<(u64, PathBuf), u64>,
     /// Persisted or reattach-cleared inode ids whose `NodeId` is not yet resolved,
-    /// keyed by id. `ensure_live` walks these back to a live [`Inode`]. `Arc` so
+    /// keyed by id. `live_inode` walks these back to a live [`Inode`]. `Arc` so
     /// the persister snapshots it alongside `inodes`.
     cold: Arc<DashMap<u64, ColdEntry>>,
     /// Allocation cursor for fresh inode ids. `Arc` so a restart resumes it and
@@ -342,14 +342,17 @@ impl Export {
     /// (or joining a backing path) and caching the fresh `NodeId` down the chain.
     /// A name that no longer resolves returns [`Status::Stale`] for that handle
     /// only; a genuinely-gone path is allowed to be stale.
-    fn ensure_live(&self, id: u64) -> StatusResult<()> {
-        if self.inodes.contains_key(&id) {
-            return Ok(());
+    fn live_inode(
+        &self,
+        id: u64,
+    ) -> StatusResult<dashmap::mapref::one::Ref<'_, u64, Inode>> {
+        if let Some(inode) = self.inodes.get(&id) {
+            return Ok(inode);
         }
         // The roots are always seeded; a missing root means a cleared table mid
         // re-anchor, which the caller retries.
         if id == ROOT_ID || id == EXPORT_ROOT_ID {
-            return Ok(());
+            return self.inodes.get(&id).ok_or(Status::Stale);
         }
         let cold = self
             .cold
@@ -357,8 +360,7 @@ impl Export {
             .map(|entry| entry.clone())
             .ok_or(Status::Stale)?;
         // Resolve the parent first, then this name under it.
-        self.ensure_live(cold.parent)?;
-        let parent = self.inodes.get(&cold.parent).ok_or(Status::Stale)?;
+        let parent = self.live_inode(cold.parent)?;
         let parent_scope = cold.scope;
         let parent_body = parent.body.clone();
         drop(parent);
@@ -392,7 +394,7 @@ impl Export {
             }
         }
         self.cold.remove(&id);
-        Ok(())
+        self.inodes.get(&id).ok_or(Status::Stale)
     }
 
     // --- events --------------------------------------------------------------
@@ -759,8 +761,7 @@ impl ReadOnlyExport for Export {
     }
 
     fn attr(&self, id: u64) -> StatusResult<Attr> {
-        self.ensure_live(id)?;
-        let inode = self.inodes.get(&id).ok_or(Status::Stale)?;
+        let inode = self.live_inode(id)?;
         let parent = inode.parent;
         let body = inode.body.clone();
         drop(inode);
@@ -820,9 +821,7 @@ impl ReadOnlyExport for Export {
     fn lookup(&self, parent: u64, name: &str) -> StatusResult<u64> {
         let name = Segment::try_from(name).map_err(|_| Status::Invalid)?;
         self.apply_pending_events();
-        self.ensure_live(parent)?;
-
-        let inode = self.inodes.get(&parent).ok_or(Status::Stale)?;
+        let inode = self.live_inode(parent)?;
         if inode.kind != NodeKind::Directory {
             return Err(Status::NotDir);
         }
@@ -887,8 +886,7 @@ impl ReadOnlyExport for Export {
 
     fn readdir(&self, id: u64) -> StatusResult<DirListing> {
         self.apply_pending_events();
-        self.ensure_live(id)?;
-        let inode = self.inodes.get(&id).ok_or(Status::Stale)?;
+        let inode = self.live_inode(id)?;
         if inode.kind != NodeKind::Directory {
             return Err(Status::NotDir);
         }
@@ -922,8 +920,7 @@ impl ReadOnlyExport for Export {
 
     fn read(&self, id: u64) -> StatusResult<Vec<u8>> {
         self.apply_pending_events();
-        self.ensure_live(id)?;
-        let inode = self.inodes.get(&id).ok_or(Status::Stale)?;
+        let inode = self.live_inode(id)?;
         if inode.kind == NodeKind::Directory {
             return Err(Status::IsDir);
         }
@@ -955,8 +952,7 @@ impl ReadOnlyExport for Export {
     }
 
     fn readlink(&self, id: u64) -> StatusResult<Vec<u8>> {
-        self.ensure_live(id)?;
-        let inode = self.inodes.get(&id).ok_or(Status::Stale)?;
+        let inode = self.live_inode(id)?;
         if inode.kind != NodeKind::Symlink {
             return Err(Status::Invalid);
         }
@@ -1047,13 +1043,7 @@ impl ReadOnlyExport for Export {
         };
         // Re-resolve the read target from the inode: a reattach may have cleared
         // its `NodeId`, and a subtree may have rebound to a backing path.
-        self.ensure_live(inode_id)?;
-        let body = self
-            .inodes
-            .get(&inode_id)
-            .ok_or(Status::Stale)?
-            .body
-            .clone();
+        let body = self.live_inode(inode_id)?.body.clone();
         match body {
             Body::Node(node) => self.read_node_chunk(inode_id, node, offset, count),
             Body::Backing(path) => Self::read_backing_state(inode_id, &path, offset, count),
