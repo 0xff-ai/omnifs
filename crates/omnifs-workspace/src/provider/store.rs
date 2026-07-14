@@ -14,8 +14,9 @@
 
 use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::ids::{IdError, ProviderId, ProviderName, ProviderVersion};
 use fs2::FileExt;
@@ -42,11 +43,22 @@ pub enum StoreError {
     DuplicateId(ProviderId),
     #[error("provider index contains invalid provider name `{name}`: {source}")]
     InvalidProviderName { name: String, source: IdError },
-    #[error("provider index contains invalid artifact file name `{file}`")]
-    InvalidFileName { file: String },
+    #[error("provider artifact at {} is not a regular file", path.display())]
+    ArtifactNotRegular { path: PathBuf },
+    #[error(
+        "provider artifact at {} does not match requested digest {expected}; found {actual}",
+        path.display()
+    )]
+    ArtifactMismatch {
+        path: PathBuf,
+        expected: ProviderId,
+        actual: ProviderId,
+    },
+    #[error("failed to read provider artifact at {}: {source}", path.display())]
+    ArtifactRead { path: PathBuf, source: io::Error },
 }
 
-/// One retained artifact in the index. `file` is display-only provenance.
+/// One retained artifact in the index.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct IndexEntry {
@@ -54,7 +66,6 @@ pub struct IndexEntry {
     pub name: ProviderName,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<ProviderVersion>,
-    pub file: String,
 }
 
 impl IndexEntry {
@@ -65,16 +76,6 @@ impl IndexEntry {
                 source,
             }
         })?;
-        if self.file.is_empty()
-            || Path::new(&self.file)
-                .file_name()
-                .and_then(|name| name.to_str())
-                != Some(self.file.as_str())
-        {
-            return Err(StoreError::InvalidFileName {
-                file: self.file.clone(),
-            });
-        }
         Ok(())
     }
 }
@@ -84,7 +85,6 @@ impl IndexEntry {
 #[serde(deny_unknown_fields)]
 pub struct Index {
     pub version: u32,
-    #[serde(default)]
     pub providers: Vec<IndexEntry>,
 }
 
@@ -136,24 +136,6 @@ impl ProviderStore {
         self.root.join(INDEX_FILE)
     }
 
-    /// Write `bytes` under `<id>.wasm`, atomically, only if absent.
-    /// Content addressing makes a present file always correct, so a hit is a skip.
-    pub fn put_if_absent(&self, id: &ProviderId, bytes: &[u8]) -> Result<(), StoreError> {
-        create_dir_all(&self.root)?;
-        let final_path = self.artifact_path(id);
-        if final_path.exists() {
-            return Ok(());
-        }
-        let tmp = self
-            .root
-            .join(format!(".{id}.wasm.tmp-{}", std::process::id()));
-        write_file(&tmp, bytes)?;
-        fs::rename(&tmp, &final_path).map_err(|source| StoreError::Io {
-            path: final_path,
-            source,
-        })
-    }
-
     /// Retain one validated provider artifact without replacing any existing
     /// artifact or selecting another version.
     pub fn retain(&self, artifact: &Artifact) -> Result<IndexEntry, StoreError> {
@@ -161,12 +143,13 @@ impl ProviderStore {
             id: artifact.id,
             name: artifact.meta.name.clone(),
             version: artifact.meta.version.clone(),
-            file: artifact.file.clone(),
         };
         entry.validate()?;
-        self.put_if_absent(&artifact.id, &artifact.bytes)?;
-        self.retain_index_entry(entry.clone())?;
-        Ok(entry)
+        create_dir_all(&self.root)?;
+        let lock = self.lock()?;
+        let result = self.retain_locked(artifact, entry.clone());
+        let _ = FileExt::unlock(&lock);
+        result.map(|()| entry)
     }
 
     /// Read the index, or an empty (version-stamped) one if it does not exist yet.
@@ -187,21 +170,100 @@ impl ProviderStore {
         }
     }
 
-    fn retain_index_entry(&self, entry: IndexEntry) -> Result<(), StoreError> {
-        create_dir_all(&self.root)?;
-        let lock = self.lock()?;
-        let result = self.retain_index_entry_locked(entry);
-        // Release the lock regardless; an unlock failure must not mask the result.
-        let _ = FileExt::unlock(&lock);
-        result
-    }
-
-    fn retain_index_entry_locked(&self, entry: IndexEntry) -> Result<(), StoreError> {
+    fn retain_locked(&self, artifact: &Artifact, entry: IndexEntry) -> Result<(), StoreError> {
+        self.publish_artifact(artifact)?;
         let mut index = self.read_index()?;
         if !index.providers.iter().any(|current| current.id == entry.id) {
             index.providers.push(entry);
         }
         self.write_index(&index)
+    }
+
+    fn publish_artifact(&self, artifact: &Artifact) -> Result<(), StoreError> {
+        let final_path = self.artifact_path(&artifact.id);
+        match fs::symlink_metadata(&final_path) {
+            Ok(metadata) => self.validate_existing_artifact(&final_path, metadata, artifact),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                let tmp = self.write_artifact_temp(&artifact.id, &artifact.bytes)?;
+                match fs::hard_link(&tmp, &final_path) {
+                    Ok(()) => remove_temp(&tmp, &final_path),
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                        remove_temp(&tmp, &final_path)?;
+                        match fs::symlink_metadata(&final_path) {
+                            Ok(metadata) => {
+                                self.validate_existing_artifact(&final_path, metadata, artifact)
+                            },
+                            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                                self.publish_artifact(artifact)
+                            },
+                            Err(source) => Err(StoreError::ArtifactRead {
+                                path: final_path,
+                                source,
+                            }),
+                        }
+                    },
+                    Err(source) => {
+                        let _ = fs::remove_file(&tmp);
+                        Err(StoreError::Io {
+                            path: final_path,
+                            source,
+                        })
+                    },
+                }
+            },
+            Err(source) => Err(StoreError::ArtifactRead {
+                path: final_path,
+                source,
+            }),
+        }
+    }
+
+    fn validate_existing_artifact(
+        &self,
+        path: &Path,
+        metadata: fs::Metadata,
+        artifact: &Artifact,
+    ) -> Result<(), StoreError> {
+        if !metadata.file_type().is_file() {
+            return Err(StoreError::ArtifactNotRegular {
+                path: path.to_path_buf(),
+            });
+        }
+        let bytes = fs::read(path).map_err(|source| StoreError::ArtifactRead {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        let actual = ProviderId::from_wasm_bytes(&bytes);
+        if actual != artifact.id || bytes != artifact.bytes {
+            return Err(StoreError::ArtifactMismatch {
+                path: path.to_path_buf(),
+                expected: artifact.id,
+                actual,
+            });
+        }
+        Ok(())
+    }
+
+    fn write_artifact_temp(&self, id: &ProviderId, bytes: &[u8]) -> Result<PathBuf, StoreError> {
+        loop {
+            let path = self.root.join(format!(
+                ".{id}.wasm.tmp-{}-{}",
+                std::process::id(),
+                TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+            ));
+            let mut file = match OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(file) => file,
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(source) => {
+                    return Err(StoreError::Io { path, source });
+                },
+            };
+            if let Err(source) = file.write_all(bytes) {
+                let _ = fs::remove_file(&path);
+                return Err(StoreError::Io { path, source });
+            }
+            return Ok(path);
+        }
     }
 
     fn write_index(&self, index: &Index) -> Result<(), StoreError> {
@@ -210,9 +272,11 @@ impl ProviderStore {
             path: path.clone(),
             source,
         })?;
-        let tmp = self
-            .root
-            .join(format!("{INDEX_FILE}.tmp-{}", std::process::id()));
+        let tmp = self.root.join(format!(
+            "{INDEX_FILE}.tmp-{}-{}",
+            std::process::id(),
+            TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
         write_file(&tmp, &bytes)?;
         fs::rename(&tmp, &path).map_err(|source| StoreError::Io { path, source })
     }
@@ -249,6 +313,15 @@ fn write_file(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
     })
 }
 
+fn remove_temp(path: &Path, final_path: &Path) -> Result<(), StoreError> {
+    fs::remove_file(path).map_err(|source| StoreError::Io {
+        path: final_path.to_path_buf(),
+        source,
+    })
+}
+
+static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -258,11 +331,12 @@ mod tests {
 
     const EMPTY_WASM: &[u8] = b"\0asm\x01\0\0\0";
 
-    fn artifact(file: &str, name: &str) -> (ProviderId, Artifact) {
+    fn artifact(name: &str) -> (ProviderId, Artifact) {
+        let file = format!("{name}.wasm");
         let metadata = serde_json::json!({
             "id": name,
             "displayName": name,
-            "provider": file,
+            "provider": &file,
             "defaultMount": name
         });
         let bytes = wasm_with_provider_metadata(
@@ -277,13 +351,12 @@ mod tests {
     fn retain_writes_root_hash_file_and_indexes_metadata() {
         let dir = tempdir().unwrap();
         let store = ProviderStore::new(dir.path());
-        let (id, artifact) = artifact("omnifs_provider_demo.wasm", "demo");
+        let (id, artifact) = artifact("demo");
 
         let entry = store.retain(&artifact).unwrap();
 
         assert_eq!(entry.id, id);
         assert_eq!(entry.name.as_str(), "demo");
-        assert_eq!(entry.file, "omnifs_provider_demo.wasm");
         assert!(store.artifact_path(&id).is_file());
         assert!(!dir.path().join("by-hash").exists());
         let index = store.read_index().unwrap();
@@ -291,17 +364,18 @@ mod tests {
     }
 
     #[test]
-    fn put_if_absent_is_content_addressed_and_idempotent() {
+    fn retain_is_content_addressed_and_idempotent() {
         let dir = tempdir().unwrap();
         let store = ProviderStore::new(dir.path());
-        let bytes = b"provider wasm bytes";
-        let id = ProviderId::from_wasm_bytes(bytes);
+        let (id, artifact) = artifact("demo");
 
-        store.put_if_absent(&id, bytes).unwrap();
-        assert!(store.artifact_path(&id).exists());
-        assert_eq!(std::fs::read(store.artifact_path(&id)).unwrap(), bytes);
-        // Second call is a no-op skip (already present).
-        store.put_if_absent(&id, bytes).unwrap();
+        store.retain(&artifact).unwrap();
+        store.retain(&artifact).unwrap();
+        assert_eq!(
+            std::fs::read(store.artifact_path(&id)).unwrap(),
+            artifact.bytes
+        );
+        assert_eq!(store.read_index().unwrap().providers.len(), 1);
     }
 
     #[test]
@@ -309,14 +383,27 @@ mod tests {
         let dir = tempdir().unwrap();
         let store = ProviderStore::new(dir.path());
 
-        let (id1, artifact1) = artifact("github-v1.wasm", "github");
+        let (id1, artifact1) = artifact("github");
         store.retain(&artifact1).unwrap();
 
         let index = store.read_index().unwrap();
         assert_eq!(index.version, 2);
         assert_eq!(index.providers.len(), 1);
 
-        let (id2, artifact2) = artifact("github-v2.wasm", "github");
+        let (id2, artifact2) = {
+            let metadata = serde_json::json!({
+                "id": "github",
+                "displayName": "github",
+                "provider": "github-v2.wasm",
+                "defaultMount": "github"
+            });
+            let bytes = wasm_with_provider_metadata(
+                EMPTY_WASM,
+                serde_json::to_vec(&metadata).unwrap().as_slice(),
+            );
+            let id = ProviderId::from_wasm_bytes(&bytes);
+            (id, Artifact::from_bytes("github-v2.wasm", bytes).unwrap())
+        };
         store.retain(&artifact2).unwrap();
 
         let index = store.read_index().unwrap();
@@ -328,9 +415,21 @@ mod tests {
     #[test]
     fn read_index_rejects_unknown_version() {
         let dir = tempdir().unwrap();
-        std::fs::write(dir.path().join("index.json"), r#"{"version":99}"#).unwrap();
+        std::fs::write(
+            dir.path().join("index.json"),
+            r#"{"version":1,"providers":[]}"#,
+        )
+        .unwrap();
         let store = ProviderStore::new(dir.path());
-        assert!(matches!(store.read_index(), Err(StoreError::Version(99))));
+        assert!(matches!(store.read_index(), Err(StoreError::Version(1))));
+    }
+
+    #[test]
+    fn read_index_rejects_present_v2_without_providers() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("index.json"), r#"{"version":2}"#).unwrap();
+        let store = ProviderStore::new(dir.path());
+        assert!(matches!(store.read_index(), Err(StoreError::Index { .. })));
     }
 
     #[test]
@@ -364,7 +463,7 @@ mod tests {
         std::fs::write(
             dir.path().join("index.json"),
             format!(
-                r#"{{"version":2,"providers":[{{"id":"{id}","name":"demo","file":"omnifs_provider_demo.wasm","source":"manual"}}]}}"#
+                r#"{{"version":2,"providers":[{{"id":"{id}","name":"demo","source":"manual"}}]}}"#
             ),
         )
         .unwrap();
@@ -391,7 +490,7 @@ mod tests {
         std::fs::write(
             dir.path().join("index.json"),
             format!(
-                r#"{{"version":2,"providers":[{{"id":"{id}","name":"bad name","file":"one.wasm"}},{{"id":"{id}","name":"demo","file":"two.wasm"}}]}}"#
+                r#"{{"version":2,"providers":[{{"id":"{id}","name":"bad name"}},{{"id":"{id}","name":"demo"}}]}}"#
             ),
         )
         .unwrap();
@@ -405,7 +504,7 @@ mod tests {
         std::fs::write(
             dir.path().join("index.json"),
             format!(
-                r#"{{"version":2,"providers":[{{"id":"{id}","name":"demo","file":"one.wasm"}},{{"id":"{id}","name":"demo","file":"two.wasm"}}]}}"#
+                r#"{{"version":2,"providers":[{{"id":"{id}","name":"demo"}},{{"id":"{id}","name":"demo"}}]}}"#
             ),
         )
         .unwrap();
@@ -413,17 +512,79 @@ mod tests {
             store.read_index(),
             Err(StoreError::DuplicateId(duplicate)) if duplicate.to_string() == id
         ));
+    }
 
-        std::fs::write(
-            dir.path().join("index.json"),
-            format!(
-                r#"{{"version":2,"providers":[{{"id":"{id}","name":"demo","file":"../demo.wasm"}}]}}"#
-            ),
-        )
-        .unwrap();
+    #[test]
+    fn retain_rejects_corrupt_collision_without_indexing_it() {
+        let dir = tempdir().unwrap();
+        let store = ProviderStore::new(dir.path());
+        let (id, artifact) = artifact("demo");
+        std::fs::write(store.artifact_path(&id), b"corrupt").unwrap();
+
         assert!(matches!(
-            store.read_index(),
-            Err(StoreError::InvalidFileName { file }) if file == "../demo.wasm"
+            store.retain(&artifact),
+            Err(StoreError::ArtifactMismatch { expected, .. }) if expected == id
         ));
+        assert!(store.read_index().unwrap().providers.is_empty());
+    }
+
+    #[test]
+    fn retain_rejects_non_file_collision_without_indexing_it() {
+        let dir = tempdir().unwrap();
+        let store = ProviderStore::new(dir.path());
+        let (id, artifact) = artifact("demo");
+        std::fs::create_dir(store.artifact_path(&id)).unwrap();
+
+        assert!(matches!(
+            store.retain(&artifact),
+            Err(StoreError::ArtifactNotRegular { .. })
+        ));
+        assert!(store.read_index().unwrap().providers.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retain_rejects_symlink_collision_without_indexing_it() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        let store = ProviderStore::new(dir.path());
+        let (id, artifact) = artifact("demo");
+        let target = dir.path().join("target.wasm");
+        std::fs::write(&target, &artifact.bytes).unwrap();
+        symlink(&target, store.artifact_path(&id)).unwrap();
+
+        assert!(matches!(
+            store.retain(&artifact),
+            Err(StoreError::ArtifactNotRegular { .. })
+        ));
+        assert!(store.read_index().unwrap().providers.is_empty());
+    }
+
+    #[test]
+    fn concurrent_retain_of_same_artifact_is_idempotent() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let (_, source) = artifact("demo");
+        let bytes = source.bytes.clone();
+
+        std::thread::scope(|scope| {
+            let handles = (0..8)
+                .map(|_| {
+                    let root = root.clone();
+                    let bytes = bytes.clone();
+                    scope.spawn(move || {
+                        let artifact = Artifact::from_bytes("demo.wasm", bytes).unwrap();
+                        ProviderStore::new(root).retain(&artifact)
+                    })
+                })
+                .collect::<Vec<_>>();
+            for handle in handles {
+                handle.join().unwrap().unwrap();
+            }
+        });
+
+        let store = ProviderStore::new(root);
+        assert_eq!(store.read_index().unwrap().providers.len(), 1);
     }
 }
