@@ -53,16 +53,15 @@
 //!   re-render from cache without refetching. Identity comes from the key's
 //!   captures; route-context captures that must not affect identity (a list
 //!   filter, a version selector) are wrapped in [`identity::Facet`].
-//! - **Path-oriented** (`r.dir`/`r.file`/`r.treeref` with plain handlers):
+//! - **Path-oriented** (`r.dir`/`r.file` with plain handlers):
 //!   use when the path is a direct operation with no stable canonical object
 //!   behind it: a DNS query, a Docker daemon listing, a database row read.
 //!   Do not invent fake objects for query results; serving fresh bytes with
 //!   honest [`file_attrs::Stability`] is the correct behavior.
 //!
-//! `r.treeref(..)` is the third, narrower verb: hand a whole subtree to the
-//! host (such as a git clone) by returning a
-//! [`handler::TreeRef`]; the host bind-mounts the resolved tree and provider
-//! dispatch stops there.
+//! A tree handoff is an object directory face declared with
+//! `o.dir("name").tree(method)`. The host bind-mounts the resolved tree and
+//! provider dispatch stops there.
 //!
 //! # Routes, captures, and dispatch
 //!

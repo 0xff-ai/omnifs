@@ -30,7 +30,7 @@ pub use crate::repr::{
 };
 pub use crate::router::{
     CompiledRouter, DirFace, DirRoute, FileFace, FileRoute, ObjectBlock, ObjectHandle, Router,
-    TreeRefRoute, object,
+    object,
 };
 pub use omnifs_core::ContentType;
 pub use omnifs_core::path::{ParseError, Path, Segment};

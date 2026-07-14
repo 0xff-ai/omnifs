@@ -5,11 +5,11 @@
 //! typed page cursor; scoped intent-tagged invalidation from `on_tick`;
 //! object-load prefetch via `preload_object`; an object alias; deferred, ranged,
 //! and live files; paged and partial listings with validators; rate limits; and
-//! a subtree handoff.
+//! object aliases.
 //!
 //! It is the conformance fixture every host integration test drives, so every
 //! pinned behavior is preserved on the new surface: the root, hello, and items
-//! listings; the ranged contracts; negative lookup; tree-777 rejection; and feed
+//! listings; the ranged contracts; negative lookup; and feed
 //! pagination.
 
 #![allow(clippy::needless_pass_by_value)]
@@ -428,8 +428,6 @@ impl TestProvider {
 
         r.dir("/dynamic/{name}").handler(dynamic)?;
 
-        r.treeref("/checkout").handler(checkout)?;
-
         Ok(State::default())
     }
 
@@ -700,14 +698,6 @@ async fn dynamic(_cx: DirCx<State>, captures: DynamicCaptures) -> Result<DirList
     content.push(b'\n');
     Ok(DirListing::exhaustive([Entry::file("value")])
         .preload_file(value_path, FileProjection::inline(content).build()))
-}
-
-// ===========================================================================
-// /checkout subtree handoff
-// ===========================================================================
-
-async fn checkout(_cx: Cx<State>) -> Result<TreeRef> {
-    Ok(TreeRef::new(777))
 }
 
 // ===========================================================================

@@ -14,7 +14,8 @@ use std::sync::Arc;
 
 use super::compiled::CompiledRouter;
 use super::descriptor::{RouteDescriptor, RouteKind};
-use super::handlers::{IntoDirHandler, IntoFileHandler, IntoTreeRefHandler};
+use super::handlers::{DirHandler, IntoDirHandler, IntoFileHandler};
+use super::object::AnchorShape;
 use super::object::{CollectionHandler, ObjectBlock, ObjectHandle, mount_object, object};
 use super::pattern::Pattern;
 use super::readme::{ObjectLeaves, Readme, Scope};
@@ -79,7 +80,7 @@ struct CollectionMount<S> {
 /// The mutable registration builder; `S` is the provider state type handlers
 /// receive through their `Cx<S>` / `DirCx<S>`.
 ///
-/// Routes live in per-kind tables (dirs, files, treerefs, objects). Compilation
+/// Routes live in per-kind tables (dirs, files, objects). Compilation
 /// derives cross-kind claims and resolves collection faces against the mounted
 /// object entries.
 ///
@@ -99,7 +100,6 @@ struct CollectionMount<S> {
 pub struct Router<S = ()> {
     pub(super) dirs: Vec<super::handlers::DirEntry<S>>,
     pub(super) files: Vec<super::handlers::FileEntry<S>>,
-    pub(super) treerefs: Vec<super::handlers::TreeRefEntry<S>>,
     pub(super) objects: Vec<super::object::ObjectRouteEntry<S>>,
     collections: Vec<CollectionMount<S>>,
     object_metadata: Vec<ObjectMountMetadata>,
@@ -110,7 +110,6 @@ impl<S> Default for Router<S> {
         Self {
             dirs: Vec::new(),
             files: Vec::new(),
-            treerefs: Vec::new(),
             objects: Vec::new(),
             collections: Vec::new(),
             object_metadata: Vec::new(),
@@ -140,16 +139,6 @@ impl<S> Router<S> {
             router: self,
             template: template.into(),
             ranged: false,
-        }
-    }
-
-    /// Begin a subtree-handoff route at `template`; finish with
-    /// [`TreeRefRoute::handler`]. The template may be a borrowed literal or an
-    /// owned `String`.
-    pub fn treeref(&mut self, template: impl Into<String>) -> TreeRefRoute<'_, S> {
-        TreeRefRoute {
-            router: self,
-            template: template.into(),
         }
     }
 
@@ -239,16 +228,15 @@ impl<S> Router<S> {
                 validator: declaration.validator.clone(),
             });
         }
-        // Register each tree face as a treeref route at `template/name`,
-        // claiming that path exactly once (the treeref registration claims it;
-        // the tree face itself does not). A lookup/list there returns the
-        // subtree handoff.
+        // Register each tree face as a tree-capable directory route at
+        // `template/name`. The mounted pattern and its capture validator are
+        // rebuilt for every alias, while the object face reuses its handler.
         for face in handle.tree_faces() {
             let tree_path = format!("{mount}/{}", face.name);
             let pattern = Pattern::parse(&tree_path)?;
-            self.treerefs.push(super::handlers::TreeRefEntry {
+            self.dirs.push(super::handlers::DirEntry {
                 pattern: pattern.clone(),
-                handler: face.handler.clone(),
+                handler: DirHandler::Tree(face.handler.clone()),
                 validator: face.validator.clone(),
             });
         }
@@ -270,7 +258,7 @@ impl<S> Router<S> {
                 });
             self.dirs.push(super::handlers::DirEntry {
                 pattern: pattern.clone(),
-                handler,
+                handler: DirHandler::Listing(handler),
                 validator: super::handlers::accept_validator(),
             });
         }
@@ -294,7 +282,7 @@ impl<S> Router<S> {
         let (handler, validator) = h.into_dir_handler();
         self.dirs.push(super::handlers::DirEntry {
             pattern: pattern.clone(),
-            handler,
+            handler: DirHandler::Listing(handler),
             validator,
         });
         Ok(())
@@ -313,21 +301,6 @@ impl<S> Router<S> {
             handler,
             validator,
             ranged,
-        });
-        Ok(())
-    }
-
-    fn treeref_at<Marker, H: IntoTreeRefHandler<S, Marker>>(
-        &mut self,
-        template: &str,
-        h: H,
-    ) -> Result<()> {
-        let pattern = Pattern::parse(template)?;
-        let (handler, validator) = h.into_treeref_handler();
-        self.treerefs.push(super::handlers::TreeRefEntry {
-            pattern: pattern.clone(),
-            handler,
-            validator,
         });
         Ok(())
     }
@@ -363,7 +336,6 @@ impl<S> Router<S> {
         Ok(CompiledRouter::new(
             self.dirs,
             self.files,
-            self.treerefs,
             self.objects,
             route_descriptors,
         ))
@@ -373,10 +345,9 @@ impl<S> Router<S> {
         let mut claims = Vec::new();
         claims.extend(self.dirs.iter().map(|entry| entry.pattern.clone()));
         claims.extend(self.files.iter().map(|entry| entry.pattern.clone()));
-        claims.extend(self.treerefs.iter().map(|entry| entry.pattern.clone()));
         for entry in &self.objects {
             claims.push(entry.pattern.clone());
-            if entry.shape == super::object::AnchorShape::Dir {
+            if entry.shape == AnchorShape::Dir {
                 for leaf in &entry.leaves {
                     claims.push(Pattern::parse(&format!(
                         "{}/{}",
@@ -394,9 +365,6 @@ impl<S> Router<S> {
             validate_route_captures(&entry.pattern, &entry.validator)?;
         }
         for entry in &self.files {
-            validate_route_captures(&entry.pattern, &entry.validator)?;
-        }
-        for entry in &self.treerefs {
             validate_route_captures(&entry.pattern, &entry.validator)?;
         }
         for entry in &self.objects {
@@ -431,14 +399,6 @@ impl<S> Router<S> {
             RouteDescriptor::new(
                 &entry.pattern,
                 RouteKind::File,
-                None,
-                entry.validator.capture_descriptors(),
-            )
-        }));
-        routes.extend(self.treerefs.iter().map(|entry| {
-            RouteDescriptor::new(
-                &entry.pattern,
-                RouteKind::Treeref,
                 None,
                 entry.validator.capture_descriptors(),
             )
@@ -588,7 +548,7 @@ impl<S> Router<S> {
                     });
                 self.dirs.push(super::handlers::DirEntry {
                     pattern: dir_pattern,
-                    handler: boxed,
+                    handler: DirHandler::Listing(boxed),
                     validator: collection.validator,
                 });
             },
@@ -633,12 +593,6 @@ pub struct FileRoute<'r, S> {
     pub(super) ranged: bool,
 }
 
-/// A pending [`Router::treeref`] registration.
-pub struct TreeRefRoute<'r, S> {
-    pub(super) router: &'r mut Router<S>,
-    pub(super) template: String,
-}
-
 impl<'r, S> DirRoute<'r, S> {
     /// Register the directory handler and claim the template as a leaf.
     pub fn handler<Marker, H: IntoDirHandler<S, Marker>>(self, h: H) -> Result<&'r mut Router<S>> {
@@ -659,17 +613,6 @@ impl<'r, S> FileRoute<'r, S> {
     /// Register the file handler and claim the template as a leaf.
     pub fn handler<Marker, H: IntoFileHandler<S, Marker>>(self, h: H) -> Result<&'r mut Router<S>> {
         self.router.file_at(&self.template, self.ranged, h)?;
-        Ok(self.router)
-    }
-}
-
-impl<'r, S> TreeRefRoute<'r, S> {
-    /// Register the subtree-handoff handler and claim the template as a leaf.
-    pub fn handler<Marker, H: IntoTreeRefHandler<S, Marker>>(
-        self,
-        h: H,
-    ) -> Result<&'r mut Router<S>> {
-        self.router.treeref_at(&self.template, h)?;
         Ok(self.router)
     }
 }

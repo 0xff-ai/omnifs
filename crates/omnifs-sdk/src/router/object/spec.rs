@@ -60,20 +60,21 @@ pub(in crate::router) struct ObjectDefinition<O: Object> {
     /// object and specializes the relative face at every mount.
     pub(super) collections: std::rc::Rc<Vec<CollectionDeclaration<O::State>>>,
     /// Tree faces declared on dir faces (`o.dir(name).tree(method)`): each is
-    /// registered as a treeref route at `template/name` so a lookup/list there
-    /// returns the subtree handoff. Shared so an alias replays the same closures.
+    /// registered as a tree-capable directory route at `template/name` so a
+    /// lookup/list there returns the subtree handoff. Shared so an alias
+    /// replays the same closures.
     pub(super) tree_faces: std::rc::Rc<Vec<TreeFaceEntry<O::State>>>,
     /// Choices faces declared on dir faces (`o.dir(name).choices(names)`).
     pub(super) choices_faces: std::rc::Rc<Vec<ChoicesFace>>,
 }
 
-/// One tree face: the relative dir name and the boxed treeref handler. The
+/// One tree face: the relative dir name and the boxed tree handler. The
 /// handler parses `O::Key` from the dir-path captures and runs the typed tree
 /// method, lowering to a [`crate::handler::TreeRef`] (the host resolves the
 /// git-open callout the method issues).
 pub(in crate::router) struct TreeFaceEntry<S> {
     pub name: &'static str,
-    pub handler: super::super::handlers::BoxedTreeRefHandler<S>,
+    pub handler: super::super::handlers::BoxedTreeHandler<S>,
     pub validator: RouteValidator,
 }
 
@@ -136,8 +137,8 @@ impl<O: Object> ObjectHandle<O> {
         &self.definition.collections
     }
 
-    /// The tree faces declared on this object, registered as treeref routes at
-    /// mount time.
+    /// The tree faces declared on this object, registered as tree-capable
+    /// directory routes at mount time.
     pub(in crate::router) fn tree_faces(&self) -> &[TreeFaceEntry<O::State>] {
         &self.definition.tree_faces
     }
@@ -189,8 +190,8 @@ pub struct ObjectBlock<O: Object> {
     face_handlers: std::collections::BTreeMap<String, FaceHandler<O::State>>,
     /// Collections declared on dir faces, consumed by compilation.
     collections: Vec<CollectionDeclaration<O::State>>,
-    /// Tree faces (`o.dir(name).tree(method)`), registered as treeref routes at
-    /// mount time.
+    /// Tree faces (`o.dir(name).tree(method)`), registered as directory routes
+    /// at mount time.
     tree_faces: Vec<TreeFaceEntry<O::State>>,
     /// Choices faces (`o.dir(name).choices(names)`): the dir face name plus the
     /// fixed finite child names, registered as an exhaustive dir route at mount
@@ -684,10 +685,9 @@ impl<'a, O: Object> DirFace<'a, O> {
     }
 
     /// A subtree handoff registered as an object dir face so it reads in
-    /// `start()`. Lowers to the `treeref` machinery: the face becomes a treeref
-    /// route at `template/name`, so a lookup or list there returns the subtree
-    /// handoff after the host runs the git-open callout the method
-    /// issues.
+    /// `start()`. The face becomes a tree-capable directory route at
+    /// `template/name`, so a lookup or list there returns the subtree handoff
+    /// after the host runs the git-open callout the method issues.
     pub fn tree<Fut>(
         self,
         method: fn(Cx<O::State>, O::Key) -> Fut,
@@ -703,8 +703,7 @@ impl<'a, O: Object> DirFace<'a, O> {
                 self.block.template, self.name
             )));
         }
-        // The treeref route owns this path and claims it during compilation.
-        let handler: super::super::handlers::BoxedTreeRefHandler<O::State> =
+        let handler: super::super::handlers::BoxedTreeHandler<O::State> =
             std::sync::Arc::new(move |cx: Cx<O::State>, caps: Captures| {
                 Box::pin(async move {
                     let key = O::Key::from_captures(&caps)?;

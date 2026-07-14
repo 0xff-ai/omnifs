@@ -2,7 +2,7 @@
 //! [`Router::compile`](super::Router::compile).
 
 use super::descriptor::RouteDescriptor;
-use super::handlers::{DirEntry, FileEntry, TreeRefEntry};
+use super::handlers::{DirEntry, FileEntry};
 use super::object::ObjectRouteEntry;
 
 /// An immutable, executable provider route table produced by
@@ -14,7 +14,6 @@ use super::object::ObjectRouteEntry;
 pub struct CompiledRouter<S = ()> {
     pub(super) dirs: Vec<DirEntry<S>>,
     pub(super) files: Vec<FileEntry<S>>,
-    pub(super) treerefs: Vec<TreeRefEntry<S>>,
     pub(super) objects: Vec<ObjectRouteEntry<S>>,
     route_descriptors: Vec<RouteDescriptor>,
 }
@@ -23,14 +22,12 @@ impl<S> CompiledRouter<S> {
     pub(super) fn new(
         dirs: Vec<DirEntry<S>>,
         files: Vec<FileEntry<S>>,
-        treerefs: Vec<TreeRefEntry<S>>,
         objects: Vec<ObjectRouteEntry<S>>,
         route_descriptors: Vec<RouteDescriptor>,
     ) -> Self {
         Self {
             dirs,
             files,
-            treerefs,
             objects,
             route_descriptors,
         }

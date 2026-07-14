@@ -3,7 +3,7 @@
 use crate::browse::Lookup;
 use crate::cx::Cx;
 use crate::error::{ProviderError, Result};
-use crate::handler::{DirCx, DirIntent};
+use crate::handler::DirIntent;
 use omnifs_core::path::{Path, Segment};
 
 use super::super::compiled::CompiledRouter;
@@ -16,8 +16,8 @@ impl<S> CompiledRouter<S> {
     /// lets capture routes resolve arbitrary names (`cd /github/torvalds`)
     /// without enumeration. Resolution order:
     ///
-    /// 1. A treeref route at the child path: run the handler and hand the
-    ///    subtree to the host.
+    /// 1. A tree-capable directory route at the child path: run the handler
+    ///    and hand the subtree to the host.
     /// 2. A dir route at the child path: answer statically, without running
     ///    the child's handler, unless a file route also matches with
     ///    strictly higher precedence (then the file claims the name).
@@ -48,22 +48,37 @@ impl<S> CompiledRouter<S> {
         let child_abs = parent_abs.join_segment(&child);
         let shape = self.shape();
 
-        if let Some(route) = shape.treeref_route(&child_abs) {
-            let tree_ref = super::route_future(
-                route.entry.pattern.template(),
-                (route.entry.handler)(cx.clone(), route.captures),
-            )
-            .await
-            .map_err(|error| error.with_context("lookup-child", &child_abs))?;
-            return Ok(Lookup::subtree(tree_ref.tree_ref));
-        }
-
         let file_match = shape.file_route(&child_abs);
         if let Some(dir_route) = shape.dir_route(&child_abs) {
             let file_wins = file_match.as_ref().is_some_and(|file_route| {
                 file_route.entry.pattern.precedence_key() > dir_route.entry.pattern.precedence_key()
             });
             if !file_wins {
+                if dir_route.entry.is_tree() {
+                    let answer = super::route_future(
+                        dir_route.entry.pattern.template(),
+                        Box::pin(dir_route.entry.invoke(
+                            cx.clone(),
+                            DirIntent::Lookup {
+                                child: name.to_string(),
+                            },
+                            dir_route.captures,
+                        )),
+                    )
+                    .await
+                    .map_err(|error| error.with_context("lookup-child", &child_abs))?;
+                    return match answer {
+                        super::super::handlers::DirAnswer::Tree(tree_ref) => {
+                            Ok(Lookup::subtree(tree_ref.tree_ref))
+                        },
+                        super::super::handlers::DirAnswer::Listing(listing) => Ok(shape
+                            .projection_lookup(
+                                &parent_abs,
+                                name,
+                                &listing.into_dir_projection(),
+                            )?),
+                    };
+                }
                 return Ok(shape.static_dir_lookup(&parent_abs, name));
             }
         }
@@ -92,19 +107,26 @@ impl<S> CompiledRouter<S> {
         }
 
         if let Some(route) = shape.dir_route(&parent_abs) {
-            let dir_cx = DirCx::new(
-                cx.clone(),
-                DirIntent::Lookup {
-                    child: name.to_string(),
-                },
-            );
-            let listing = super::route_future(
+            let answer = super::route_future(
                 route.entry.pattern.template(),
-                (route.entry.handler)(dir_cx, route.captures),
+                Box::pin(route.entry.invoke(
+                    cx.clone(),
+                    DirIntent::Lookup {
+                        child: name.to_string(),
+                    },
+                    route.captures,
+                )),
             )
             .await
             .map_err(|error| error.with_context("lookup-child", &child_abs))?;
-            return shape.projection_lookup(&parent_abs, name, &listing.into_dir_projection());
+            return match answer {
+                super::super::handlers::DirAnswer::Tree(tree_ref) => {
+                    Ok(Lookup::subtree(tree_ref.tree_ref))
+                },
+                super::super::handlers::DirAnswer::Listing(listing) => {
+                    shape.projection_lookup(&parent_abs, name, &listing.into_dir_projection())
+                },
+            };
         }
 
         Ok(Lookup::not_found())

@@ -3,7 +3,7 @@
 use crate::browse::List;
 use crate::cx::Cx;
 use crate::error::{ProviderError, Result};
-use crate::handler::{Cursor, DirCx, DirIntent};
+use crate::handler::{Cursor, DirIntent};
 use omnifs_core::path::Path;
 
 use super::super::compiled::CompiledRouter;
@@ -11,7 +11,7 @@ use super::super::compiled::CompiledRouter;
 impl<S> CompiledRouter<S> {
     /// List an absolute directory path.
     ///
-    /// Resolution order: treeref handoff; a dir route run with
+    /// Resolution order: a tree-capable directory handoff or a dir route run
     /// [`DirIntent::List`] and the resume cursor; an object anchor
     /// (precomputed leaf names plus its optional cursor-bearing collection,
     /// with canonical-store and eager-preload effects attached); an
@@ -46,25 +46,25 @@ impl<S> CompiledRouter<S> {
             Path::parse(path).map_err(|error| ProviderError::invalid_input(error.to_string()))?;
         let shape = self.shape();
 
-        if let Some(route) = shape.treeref_route(&abs) {
-            let tree_ref = super::route_future(
-                route.entry.pattern.template(),
-                (route.entry.handler)(cx.clone(), route.captures),
-            )
-            .await
-            .map_err(|error| error.with_context("list-children", &abs))?;
-            return Ok(List::subtree(tree_ref.tree_ref));
-        }
-
         if let Some(route) = shape.dir_route(&abs) {
-            let dir_cx = DirCx::new(cx.clone(), DirIntent::List { cursor });
-            let listing = super::route_future(
+            let answer = super::route_future(
                 route.entry.pattern.template(),
-                (route.entry.handler)(dir_cx, route.captures),
+                Box::pin(route.entry.invoke(
+                    cx.clone(),
+                    DirIntent::List { cursor },
+                    route.captures,
+                )),
             )
             .await
             .map_err(|error| error.with_context("list-children", &abs))?;
-            return shape.dir_projection_into_list(&abs, &listing.into_dir_projection());
+            return match answer {
+                super::super::handlers::DirAnswer::Tree(tree_ref) => {
+                    Ok(List::subtree(tree_ref.tree_ref))
+                },
+                super::super::handlers::DirAnswer::Listing(listing) => {
+                    shape.dir_projection_into_list(&abs, &listing.into_dir_projection())
+                },
+            };
         }
 
         if let Some(route) = shape.object_route(&abs) {

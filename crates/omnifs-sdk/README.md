@@ -32,9 +32,9 @@ Build with `cargo build --target wasm32-wasip2 --release`. The `.wasm` component
 
 ## Concepts
 
-- **Router registration**: `Router::dir`, `Router::file`, `Router::treeref`, `Router::object::<Object>()`, and reusable object handles register path families at `start`. Literal path prefixes are auto-navigable directories; you do not write stub `dir` handlers for intermediate segments.
+- **Router registration**: `Router::dir`, `Router::file`, `Router::object::<Object>()`, and reusable object handles register path families at `start`. Literal path prefixes are auto-navigable directories; you do not write stub `dir` handlers for intermediate segments.
 - **Provider lifecycle**: the `#[provider]` macro infers config and state from `start`. Use `fn start(r: &mut Router) -> Result<()>` for stateless providers, or `fn start(config: Config, r: &mut Router<State>) -> Result<State>` when config or state exists.
-- **Handlers**: async functions taking `Cx`, `DirCx`, state-bearing `Cx<State>` / `DirCx<State>`, or typed `#[path_captures]` keys. Return `FileProjection`, `DirListing` (raw directory listings; objects list through `Collection`), `TreeRef`, or `Effects` (for timer/event handlers).
+- **Handlers**: async functions taking `Cx`, `DirCx`, state-bearing `Cx<State>` / `DirCx<State>`, or typed `#[path_captures]` keys. Return `FileProjection`, `DirListing` (raw directory listings; objects list through `Collection`), or `Effects` (for timer/event handlers). Object directory faces can hand off a host-resolved tree through `.tree(...)`.
 - **Objects**: `#[object]` types implement `Object::load` / `Object::render`; `bind` mounts them at a path template. The host caches canonical bytes and pushes them on later reads.
 - **Endpoints**: `#[derive(Endpoint)]` plus `cx.endpoint::<E>()` for typed HTTP (and rate-limit policy) against declared bases.
 - **Callouts**: handlers `.await` on `cx.http()`, `cx.git()`, etc. The host executes each async import and returns the typed result to the awaiting future; there are no fire-and-forget callouts.

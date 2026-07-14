@@ -8,8 +8,9 @@
 //! - Candidate selection is per route kind, highest precedence first, with
 //!   capture validators filtering candidacy (a typed-key parse rejection
 //!   falls through to the next-most-specific route, not to not-found).
-//! - Treeref routes win before anything else; below a handed-off subtree the
-//!   host never calls the provider again.
+//! - Tree-capable directory routes hand off before ordinary directory
+//!   answers; below a handed-off subtree the host never calls the provider
+//!   again.
 //! - Literal prefixes of registered routes resolve and list as directories
 //!   with no handler involved; listings merge handler enumerations with
 //!   those static siblings and are non-exhaustive whenever a capture

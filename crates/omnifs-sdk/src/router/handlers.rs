@@ -9,7 +9,7 @@ use super::pattern::Pattern;
 use crate::captures::{CaptureDescriptor, Captures, FromCaptures};
 use crate::cx::Cx;
 use crate::error::Result;
-use crate::handler::{DirCx, TreeRef};
+use crate::handler::{DirCx, DirIntent, TreeRef};
 use crate::projection::{DirListing, FileProjection};
 use std::future::Future;
 use std::pin::Pin;
@@ -24,7 +24,7 @@ type HandlerFuture<T> = Pin<Box<dyn Future<Output = Result<T>>>>;
 /// typed key at call time.
 pub(super) type BoxedDirHandler<S> = Arc<dyn Fn(DirCx<S>, Captures) -> HandlerFuture<DirListing>>;
 pub(super) type BoxedFileHandler<S> = Arc<dyn Fn(Cx<S>, Captures) -> HandlerFuture<FileProjection>>;
-pub(super) type BoxedTreeRefHandler<S> = Arc<dyn Fn(Cx<S>, Captures) -> HandlerFuture<TreeRef>>;
+pub(super) type BoxedTreeHandler<S> = Arc<dyn Fn(Cx<S>, Captures) -> HandlerFuture<TreeRef>>;
 
 /// A per-route capture validator derived from the handler's key type.
 ///
@@ -70,13 +70,6 @@ pub trait IntoDirHandler<S, Marker> {
 /// where `C: FromCaptures`. See [`IntoDirHandler`] for the role of `Marker`.
 pub trait IntoFileHandler<S, Marker> {
     fn into_file_handler(self) -> (BoxedFileHandler<S>, RouteValidator);
-}
-
-/// Accepted treeref handler shapes: `async fn(Cx<S>)` or
-/// `async fn(Cx<S>, C)`, returning [`TreeRef`]. See [`IntoDirHandler`] for the
-/// role of `Marker`.
-pub trait IntoTreeRefHandler<S, Marker> {
-    fn into_treeref_handler(self) -> (BoxedTreeRefHandler<S>, RouteValidator);
 }
 
 /// Marker: context-only handlers, `async fn(Cx)` / `async fn(DirCx)`.
@@ -190,42 +183,41 @@ where
     }
 }
 
-impl<S, F, Fut> IntoTreeRefHandler<S, NoCaptures> for F
-where
-    F: Fn(Cx<S>) -> Fut + 'static,
-    Fut: Future<Output = Result<TreeRef>> + 'static,
-{
-    fn into_treeref_handler(self) -> (BoxedTreeRefHandler<S>, RouteValidator) {
-        (
-            Arc::new(move |cx: Cx<S>, _caps: Captures| Box::pin(self(cx))),
-            accept_validator(),
-        )
-    }
-}
-
-impl<S, C, F, Fut> IntoTreeRefHandler<S, WithCaptures<C>> for F
-where
-    C: FromCaptures + 'static,
-    F: Fn(Cx<S>, C) -> Fut + 'static,
-    Fut: Future<Output = Result<TreeRef>> + 'static,
-{
-    fn into_treeref_handler(self) -> (BoxedTreeRefHandler<S>, RouteValidator) {
-        let handler: BoxedTreeRefHandler<S> =
-            Arc::new(
-                move |cx: Cx<S>, caps: Captures| match C::from_captures(&caps) {
-                    Ok(parsed) => Box::pin(self(cx, parsed)) as HandlerFuture<TreeRef>,
-                    Err(error) => Box::pin(async move { Err(error) }),
-                },
-            );
-        (handler, captures_validator::<C>())
-    }
-}
-
 /// One row of the dir route table: pattern, erased handler, validator.
 pub(super) struct DirEntry<S> {
     pub(super) pattern: Pattern,
-    pub(super) handler: BoxedDirHandler<S>,
+    pub(super) handler: DirHandler<S>,
     pub(super) validator: RouteValidator,
+}
+
+pub(super) enum DirHandler<S> {
+    Listing(BoxedDirHandler<S>),
+    Tree(BoxedTreeHandler<S>),
+}
+
+pub(super) enum DirAnswer {
+    Listing(DirListing),
+    Tree(TreeRef),
+}
+
+impl<S> DirEntry<S> {
+    pub(super) fn is_tree(&self) -> bool {
+        matches!(&self.handler, DirHandler::Tree(_))
+    }
+
+    pub(super) async fn invoke(
+        &self,
+        cx: Cx<S>,
+        intent: DirIntent,
+        captures: Captures,
+    ) -> Result<DirAnswer> {
+        match &self.handler {
+            DirHandler::Listing(handler) => (handler)(DirCx::new(cx, intent), captures)
+                .await
+                .map(DirAnswer::Listing),
+            DirHandler::Tree(handler) => (handler)(cx, captures).await.map(DirAnswer::Tree),
+        }
+    }
 }
 
 pub(super) struct FileEntry<S> {
@@ -237,10 +229,4 @@ pub(super) struct FileEntry<S> {
     /// `open-file` without probing. The handler still supplies the real reader,
     /// size, and stability at `open-file`.
     pub(super) ranged: bool,
-}
-
-pub(super) struct TreeRefEntry<S> {
-    pub(super) pattern: Pattern,
-    pub(super) handler: BoxedTreeRefHandler<S>,
-    pub(super) validator: RouteValidator,
 }

@@ -13,7 +13,7 @@ use crate::projection::{DirOutcome, DirProjection};
 use omnifs_core::path::Path;
 
 use super::super::compiled::CompiledRouter;
-use super::super::handlers::{DirEntry, FileEntry, TreeRefEntry};
+use super::super::handlers::{DirEntry, FileEntry};
 use super::super::object::{ObjectReadTarget, ObjectRouteEntry, SourceLeafAttrs};
 use super::super::pattern::best_match;
 
@@ -52,10 +52,6 @@ impl<S> CompiledRouter<S> {
 }
 
 impl<S> Shape<'_, S> {
-    pub(super) fn treeref_route(&self, abs: &Path) -> Option<RouteMatch<'_, TreeRefEntry<S>>> {
-        route_match(self.router.treerefs.iter(), abs)
-    }
-
     /// Dir routes registered via `r.dir(..)`.
     pub(in crate::router) fn dir_route(&self, abs: &Path) -> Option<RouteMatch<'_, DirEntry<S>>> {
         route_match(self.router.dirs.iter(), abs)

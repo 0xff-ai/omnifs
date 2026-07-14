@@ -208,11 +208,7 @@ fn top_level_readme_branch(route: &RouteDescriptor) -> Option<String> {
 fn is_browsable(kind: RouteKind) -> bool {
     matches!(
         kind,
-        RouteKind::Dir
-            | RouteKind::Treeref
-            | RouteKind::Object
-            | RouteKind::Alias
-            | RouteKind::Collection
+        RouteKind::Dir | RouteKind::Object | RouteKind::Alias | RouteKind::Collection
     )
 }
 
@@ -220,7 +216,6 @@ fn route_kind_description(route: &RouteDescriptor) -> String {
     match (route.kind, route.object_kind.as_deref()) {
         (RouteKind::Dir, _) => "directory".to_string(),
         (RouteKind::File, _) => "file".to_string(),
-        (RouteKind::Treeref, _) => "subtree".to_string(),
         (RouteKind::Object, Some(kind)) => format!("object `{kind}`"),
         (RouteKind::FileObject, Some(kind)) => format!("file object `{kind}`"),
         (RouteKind::Alias, Some(kind)) => format!("alias for `{kind}`"),

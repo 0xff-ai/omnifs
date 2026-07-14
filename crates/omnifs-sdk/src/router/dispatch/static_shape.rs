@@ -22,8 +22,8 @@ impl<S> Shape<'_, S> {
     ///
     /// A child is a directory when the contributing route continues below it
     /// or is itself dir-kinded; on duplicate names the first contributing
-    /// route wins (iteration order: dir routes, file routes, treerefs,
-    /// objects). Routes whose already-present captures fail the prefix
+    /// route wins (iteration order: dir routes, file routes, objects). Routes
+    /// whose already-present captures fail the prefix
     /// validator are skipped. Capture children are invisible here by
     /// construction; that gap is what the exhaustiveness rules account for.
     pub(in crate::router) fn static_entries_for_parent(
@@ -60,14 +60,13 @@ impl<S> Shape<'_, S> {
     }
 
     /// Whether a path is an auto-navigable intermediate directory: not
-    /// itself a dir/file/treeref/object route (those answer through their
+    /// itself a dir/file/object route (those answer through their
     /// own dispatch arms), but either a concrete path with literal children
     /// beneath it or a literal directory child its parent's static entries
     /// advertise. The root qualifies whenever any route at all is registered.
     pub(super) fn is_implicit_prefix_dir(&self, absolute_path: &Path) -> bool {
         if best_match(self.router.dirs.iter(), absolute_path).is_some()
             || best_match(self.router.files.iter(), absolute_path).is_some()
-            || best_match(self.router.treerefs.iter(), absolute_path).is_some()
             || best_match(self.router.objects.iter(), absolute_path).is_some()
         {
             return false;
@@ -75,7 +74,6 @@ impl<S> Shape<'_, S> {
         if absolute_path.is_root() {
             return !self.router.dirs.is_empty()
                 || !self.router.files.is_empty()
-                || !self.router.treerefs.is_empty()
                 || !self.router.objects.is_empty();
         }
         if !self.static_entries_for_parent(absolute_path).is_empty() {
@@ -115,18 +113,12 @@ impl<S> Shape<'_, S> {
             .files
             .iter()
             .map(|r| (&r.pattern, &r.validator, BrowseEntryKind::File, r.ranged));
-        let treerefs = self
-            .router
-            .treerefs
-            .iter()
-            .map(|r| (&r.pattern, &r.validator, BrowseEntryKind::Directory, false));
         let objects = self
             .router
             .objects
             .iter()
             .map(|r| (&r.pattern, &r.validator, BrowseEntryKind::Directory, false));
         dirs.chain(files)
-            .chain(treerefs)
             .chain(objects)
             .filter(move |(pattern, _, _, _)| pattern.accepts_as_strict_ancestor(parent_segments))
     }

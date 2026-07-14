@@ -17,7 +17,6 @@ pub struct RouteDescriptor {
 pub enum RouteKind {
     Dir,
     File,
-    Treeref,
     Object,
     FileObject,
     Alias,

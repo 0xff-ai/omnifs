@@ -36,7 +36,7 @@
 //! claims and fails initialization on the first overlap, so shadowed routes
 //! are a startup error rather than silent runtime behavior.
 
-use super::handlers::{DirEntry, FileEntry, RouteValidator, TreeRefEntry};
+use super::handlers::{DirEntry, FileEntry, RouteValidator};
 use crate::captures::{Capture, CaptureDescriptor, Captures};
 use crate::error::ProviderError;
 use omnifs_core::path::Path;
@@ -654,15 +654,6 @@ impl<S> RoutedEntry for DirEntry<S> {
 }
 
 impl<S> RoutedEntry for FileEntry<S> {
-    fn route_pattern(&self) -> &Pattern {
-        &self.pattern
-    }
-    fn route_validator(&self) -> &RouteValidator {
-        &self.validator
-    }
-}
-
-impl<S> RoutedEntry for TreeRefEntry<S> {
     fn route_pattern(&self) -> &Pattern {
         &self.pattern
     }

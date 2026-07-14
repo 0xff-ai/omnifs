@@ -13,8 +13,6 @@
 //!   [`crate::projection::DirListing`].
 //! - [`Router::file`]: a file route; the handler returns a
 //!   [`crate::projection::FileProjection`].
-//! - [`Router::treeref`]: a subtree handoff; the handler returns a
-//!   [`crate::handler::TreeRef`] the host resolves to a bind-mounted tree.
 //! - [`Router::object`] / [`Router::attach`]: bind a typed
 //!   [`crate::object::Object`] whose [`crate::object::Key`] both loads and
 //!   identifies the canonical resource; representations and field leaves are
@@ -53,9 +51,7 @@ mod tests;
 
 pub use compiled::CompiledRouter;
 pub use descriptor::{RouteDescriptor, RouteKind};
-pub use handlers::{
-    IntoDirHandler, IntoFileHandler, IntoTreeRefHandler, NoCaptures, WithCaptures, WithKeyMethod,
-};
+pub use handlers::{IntoDirHandler, IntoFileHandler, NoCaptures, WithCaptures, WithKeyMethod};
 pub use object::{DirFace, FileFace, ObjectBlock, ObjectHandle, object};
 pub(crate) use object::{EntryView, ResolvedChildView};
-pub use register::{DirRoute, FileRoute, Router, TreeRefRoute};
+pub use register::{DirRoute, FileRoute, Router};

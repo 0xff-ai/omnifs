@@ -1040,13 +1040,15 @@ async fn repo_tree(_cx: Cx<()>, _key: RepoKey) -> Result<omnifs_sdk::handler::Tr
 
 fn tree_face_router() -> CompiledRouter<()> {
     let mut r = Router::<()>::new();
-    r.object::<Repo>("/{owner}/{repo}", |o| {
-        o.dynamic();
-        o.file("repo.json").canonical::<Json>()?;
-        o.dir("repo").tree(repo_tree)?;
-        Ok(())
-    })
-    .unwrap();
+    let repo = r
+        .object::<Repo>("/{owner}/{repo}", |o| {
+            o.dynamic();
+            o.file("repo.json").canonical::<Json>()?;
+            o.dir("repo").tree(repo_tree)?;
+            Ok(())
+        })
+        .unwrap();
+    r.alias("/{owner}/mirror{repo}", &repo).unwrap();
     r.compile().unwrap()
 }
 
@@ -1054,7 +1056,7 @@ fn tree_face_router() -> CompiledRouter<()> {
 fn object_tree_face_lookup_returns_subtree_handoff() {
     let r = tree_face_router();
     let cx = cx();
-    // A lookup at the tree path runs the treeref handler and returns the
+    // A lookup at the tree path runs the tree-capable directory handler and returns the
     // host-resolved subtree handle, not a static dir.
     let lookup = drive(&cx, r.lookup_child(&cx, "/torvalds/linux", "repo"));
     let (out, _effects) = lookup.into_result_and_effects();
@@ -1077,6 +1079,22 @@ fn object_tree_face_list_returns_subtree_handoff() {
         matches!(out, wit_types::ListChildrenResult::Subtree(7)),
         "listing the tree path returns the subtree handoff, got {out:?} (FIX A)"
     );
+}
+
+#[test]
+fn aliased_object_tree_face_replays_lookup_and_list_handoff() {
+    let r = tree_face_router();
+    let cx = cx();
+    let lookup = drive(&cx, r.lookup_child(&cx, "/torvalds/mirrorlinux", "repo"));
+    let (lookup, _) = lookup.into_result_and_effects();
+    assert!(matches!(lookup, wit_types::LookupChildResult::Subtree(7)));
+
+    let list = drive(
+        &cx,
+        r.list_children(&cx, "/torvalds/mirrorlinux/repo", None, None),
+    );
+    let (list, _) = list.into_result_and_effects();
+    assert!(matches!(list, wit_types::ListChildrenResult::Subtree(7)));
 }
 
 // ===========================================================================

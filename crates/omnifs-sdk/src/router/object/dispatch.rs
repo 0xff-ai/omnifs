@@ -10,7 +10,7 @@ use crate::cx::Cx;
 use crate::error::{ProviderError, Result};
 use crate::file_attrs::{Stability, VersionToken};
 use crate::handler::OpenedFile;
-use crate::object::{FacetAxis, FacetMetadata, Key, Object};
+use crate::object::{FacetAxis, FacetMetadata, Key, Object, ObjectKind};
 use crate::projection::FileProjection;
 use omnifs_core::ContentType;
 use std::future::Future;

@@ -24,6 +24,7 @@ mod dispatch;
 mod serve;
 mod spec;
 
+pub(super) use spec::AnchorShape;
 pub use spec::{DirFace, FileFace, ObjectBlock, ObjectHandle, object};
 
 pub(super) use dispatch::{
