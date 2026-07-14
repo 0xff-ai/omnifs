@@ -480,7 +480,7 @@ pub mod ns {
     /// Namespace-owned typed coalescers. Exact operation values are isolated
     /// by operation kind; the ordering gate is value-free and remains around
     /// provider execution, validation, and effect publication.
-    pub struct InFlight {
+    pub(crate) struct InFlight {
         lookup: super::Coalesce<Key, Shared<wit_types::LookupChildResult>>,
         list: super::Coalesce<Key, Shared<wit_types::ListChildrenResult>>,
         read: super::Coalesce<Key, Shared<wit_types::ReadFileOutcome>>,
@@ -494,7 +494,7 @@ pub mod ns {
     }
 
     impl InFlight {
-        pub fn new() -> Self {
+        pub(crate) fn new() -> Self {
             Self {
                 lookup: super::Coalesce::new(),
                 list: super::Coalesce::new(),
@@ -503,7 +503,7 @@ pub mod ns {
             }
         }
 
-        pub async fn lookup<F, Fut>(
+        pub(crate) async fn lookup<F, Fut>(
             &self,
             key: Key,
             work: F,
@@ -519,7 +519,11 @@ pub mod ns {
                 .clone()
         }
 
-        pub async fn list<F, Fut>(&self, key: Key, work: F) -> Shared<wit_types::ListChildrenResult>
+        pub(crate) async fn list<F, Fut>(
+            &self,
+            key: Key,
+            work: F,
+        ) -> Shared<wit_types::ListChildrenResult>
         where
             F: FnOnce() -> Fut,
             Fut: std::future::Future<Output = Shared<wit_types::ListChildrenResult>>,
@@ -531,7 +535,11 @@ pub mod ns {
                 .clone()
         }
 
-        pub async fn read<F, Fut>(&self, key: Key, work: F) -> Shared<wit_types::ReadFileOutcome>
+        pub(crate) async fn read<F, Fut>(
+            &self,
+            key: Key,
+            work: F,
+        ) -> Shared<wit_types::ReadFileOutcome>
         where
             F: FnOnce() -> Fut,
             Fut: std::future::Future<Output = Shared<wit_types::ReadFileOutcome>>,
@@ -543,7 +551,7 @@ pub mod ns {
                 .clone()
         }
 
-        pub async fn ordered<T, F, Fut>(&self, key: &OrderKey, work: F) -> T
+        pub(crate) async fn ordered<T, F, Fut>(&self, key: &OrderKey, work: F) -> T
         where
             T: Send + 'static,
             F: FnOnce() -> Fut,
