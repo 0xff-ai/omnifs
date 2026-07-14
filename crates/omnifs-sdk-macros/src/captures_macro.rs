@@ -47,15 +47,13 @@ struct FieldSpec {
     ident: syn::Ident,
     name_lit: LitStr,
     ty: Type,
-    descriptor_ty: Type,
-    is_option: bool,
     facet_inner_ty: Option<Type>,
 }
 
 impl FieldSpec {
     fn capture_value(&self) -> TokenStream2 {
         let name = &self.name_lit;
-        if self.is_option {
+        if option_inner_type(&self.ty).is_some() {
             quote! { caps.parse_optional(#name)? }
         } else if self.facet_inner_ty.is_some() {
             // The inner type is inferred from the field. Emitting `Facet<T>(..)`
@@ -82,17 +80,10 @@ pub(crate) fn path_captures_impl(item: &ItemStruct) -> syn::Result<TokenStream2>
             let ident = field.ident.as_ref().expect("named field has ident").clone();
             let name_lit = LitStr::new(&ident.to_string(), ident.span());
             let facet_inner_ty = facet_inner_type(&field.ty).cloned();
-            let option_inner_ty = option_inner_type(&field.ty).cloned();
-            let descriptor_ty = facet_inner_ty
-                .clone()
-                .or_else(|| option_inner_ty.clone())
-                .unwrap_or_else(|| field.ty.clone());
             Ok(FieldSpec {
                 ident,
                 name_lit,
                 ty: field.ty.clone(),
-                descriptor_ty,
-                is_option: option_inner_ty.is_some(),
                 facet_inner_ty,
             })
         })
@@ -118,7 +109,11 @@ pub(crate) fn path_captures_impl(item: &ItemStruct) -> syn::Result<TokenStream2>
     });
     let capture_descriptors = fields.iter().map(|field| {
         let name_lit = &field.name_lit;
-        let descriptor_ty = &field.descriptor_ty;
+        let descriptor_ty = field
+            .facet_inner_ty
+            .as_ref()
+            .or_else(|| option_inner_type(&field.ty))
+            .unwrap_or(&field.ty);
         let choices = field.facet_inner_ty.as_ref().map_or_else(
             || quote! { None },
             |inner_ty| {
