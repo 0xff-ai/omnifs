@@ -468,6 +468,64 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn load_rejects_conflicting_shared_oauth_bindings_before_publication() {
+        let root = tempfile::tempdir().expect("temp root");
+        let mounts = root.path().join("snapshot");
+        let providers = root.path().join("providers");
+        std::fs::create_dir_all(&mounts).expect("mounts");
+        std::fs::create_dir_all(&providers).expect("providers");
+        let wasm = wasm_artifact_path("omnifs_provider_github.wasm");
+        assert!(
+            wasm.exists(),
+            "GitHub provider missing at {}. Run `just build providers` first.",
+            wasm.display()
+        );
+
+        for (mount, client_id) in [("left", "client-a"), ("right", "client-b")] {
+            let spec = pin_spec(
+                &providers,
+                &wasm,
+                "github",
+                serde_json::json!({
+                    "mount": mount,
+                    "config": {},
+                    "auth": {
+                        "type": "oauth",
+                        "scheme": "device",
+                        "account": "shared",
+                        "clientId": client_id
+                    }
+                }),
+            );
+            std::fs::write(
+                mounts.join(format!("{mount}.json")),
+                serde_json::to_vec_pretty(&spec).expect("serialize spec"),
+            )
+            .expect("write spec");
+        }
+
+        let context = HostContext::new(
+            root.path().join("cache"),
+            root.path().join("config"),
+            &providers,
+            root.path().join("credentials"),
+        )
+        .with_wasm_cache_dir(crate::test_support::wasm_cache_dir());
+        let result = MountRuntimes::load(
+            context,
+            Arc::new(GitCloner::new(root.path().join("clones"))),
+            &Registry::load(&mounts).expect("load selected snapshot"),
+            &tokio::runtime::Handle::current(),
+        );
+
+        assert!(matches!(
+            result,
+            Err(RegistryError::ConfigError(message))
+                if message.contains("conflicting OAuth runtime metadata")
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn load_publishes_all_snapshot_mounts() {
         let root = tempfile::tempdir().expect("temp root");
         let mounts = root.path().join("snapshot");
