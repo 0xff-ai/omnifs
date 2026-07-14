@@ -695,10 +695,7 @@ pub(crate) fn handle_readdir(
     res.bytes(&cookie_verifier);
     let maxcount = usize::try_from(maxcount).unwrap_or(usize::MAX);
     let trailer_len = 8; // final entry-present bool plus EOF bool.
-    if (res.len() - prefix_len)
-        .saturating_add(trailer_len)
-        > maxcount
-    {
+    if (res.len() - prefix_len).saturating_add(trailer_len) > maxcount {
         return error_reply(OP_READDIR, Status::TooSmall);
     }
     let mut eof = true;
