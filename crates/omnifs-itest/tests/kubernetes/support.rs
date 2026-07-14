@@ -27,7 +27,7 @@ pub fn kube_harness() -> RuntimeHarness {
 }
 
 // Canned API discovery, shaped to exercise scope, subresource/verb filtering,
-// plural collisions, and version preference in one catalog. Mirrors the
+// stable core/group naming and version preference in one catalog. Mirrors the
 // fixtures the provider's former in-crate discovery unit tests used.
 
 const CORE_V1: &str = r#"{
@@ -95,9 +95,9 @@ pub fn http_ok(body: &[u8]) -> CalloutResult {
     })
 }
 
-fn http_unavailable() -> CalloutResult {
+fn http_error(status: u16) -> CalloutResult {
     CalloutResult::HttpResponse(HttpResponse {
-        status: 503,
+        status,
         headers: Vec::<Header>::new(),
         body: Vec::new(),
     })
@@ -139,18 +139,24 @@ pub fn warm_discovery(harness: &RuntimeHarness) -> Vec<String> {
     sorted_entry_names(op.into_list_children().unwrap())
 }
 
-/// Answer a discovery attempt where core discovery and the preferred grouped
-/// version are unavailable, but the grouped fallback version is readable.
-pub fn answer_partial_discovery(op: &mut TestOp<'_>) {
+/// Answer a partial discovery attempt with an optional core failure and a
+/// configurable preferred-group-version failure. The fallback stays readable.
+pub fn answer_partial_discovery(
+    op: &mut TestOp<'_>,
+    core_error: Option<u16>,
+    preferred_error: u16,
+) {
     while op.is_waiting_for_callouts() {
         let responses = op
             .expect_fetches()
             .iter()
             .map(|fetch| {
-                if fetch.url.ends_with("/api/v1") || fetch.url.ends_with("/apis/example.io/v2") {
-                    http_unavailable()
+                if fetch.url.ends_with("/api/v1") {
+                    core_error.map_or_else(|| http_ok(CORE_V1.as_bytes()), http_error)
                 } else if fetch.url.ends_with("/apis") {
                     http_ok(PARTIAL_API_GROUPS.as_bytes())
+                } else if fetch.url.ends_with("/apis/example.io/v2") {
+                    http_error(preferred_error)
                 } else if fetch.url.ends_with("/apis/example.io/v1") {
                     http_ok(EXAMPLE_V1.as_bytes())
                 } else {

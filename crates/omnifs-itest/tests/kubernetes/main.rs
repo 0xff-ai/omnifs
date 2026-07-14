@@ -28,11 +28,10 @@ const CONFIGMAP_JSON: &str = r#"{
 
 /// Discovery classifies resources by scope and drops what is not browsable:
 /// subresources (`pods/log`, `pods/status`, `deployments/scale`) and resources
-/// lacking `get`+`list` (`bindings`). Plural collisions are qualified by group
-/// (core `events` keeps the bare name; `events.k8s.io` becomes
-/// `events.events.k8s.io`), and only the preferred group version surfaces
-/// (`bars` from `example.io/v2`, while `legacies`, present only in `v1`, is
-/// still kept).
+/// lacking `get`+`list` (`bindings`). Core resources keep bare names while
+/// every grouped resource uses `<plural>.<group>`, and only the preferred
+/// group version surfaces (`bars` from `example.io/v2`, while `legacies`,
+/// present only in `v1`, is still kept).
 #[test]
 fn cluster_and_namespace_listings_classify_scope_and_filter_unreadable() {
     let harness = kube_harness();
@@ -44,12 +43,12 @@ fn cluster_and_namespace_listings_classify_scope_and_filter_unreadable() {
     assert_eq!(
         namespaced_types,
         vec![
-            "bars",
+            "bars.example.io",
             "configmaps",
-            "deployments",
+            "deployments.apps",
             "events",
             "events.events.k8s.io",
-            "legacies",
+            "legacies.example.io",
             "pods",
         ]
     );
@@ -60,7 +59,7 @@ fn partial_discovery_stays_open_qualifies_groups_and_retries_unknown_types() {
     let harness = kube_harness();
 
     let mut types = harness.list("/namespaces/demo").unwrap();
-    answer_partial_discovery(&mut types);
+    answer_partial_discovery(&mut types, Some(503), 503);
     match types.into_list_children().unwrap() {
         ListChildrenResult::Entries(listing) => {
             assert!(
@@ -83,17 +82,44 @@ fn partial_discovery_stays_open_qualifies_groups_and_retries_unknown_types() {
         omitted_core_type.is_waiting_for_callouts(),
         "a partial discovery snapshot must be retried by the next operation"
     );
-    answer_partial_discovery(&mut omitted_core_type);
+    answer_partial_discovery(&mut omitted_core_type, Some(503), 503);
     match omitted_core_type.result().unwrap() {
         OpResult::Error(error) => assert_eq!(error.kind, ErrorKind::Network),
         other => panic!("expected retained discovery Network error, got {other:?}"),
     }
+
+    warm_discovery(&harness);
+    let mut recovered = harness.list("/namespaces/demo/bars.example.io").unwrap();
+    assert!(
+        recovered
+            .expect_single_fetch()
+            .url
+            .ends_with("/apis/example.io/v2/namespaces/demo/bars"),
+        "the grouped path must remain stable and routable after complete recovery"
+    );
+    recovered
+        .answer_callouts(vec![http_ok(br#"{"items":[]}"#)])
+        .unwrap();
+
+    let not_found_harness = kube_harness();
+    let mut unknown = not_found_harness.list("/namespaces/demo/unknowns").unwrap();
+    answer_partial_discovery(&mut unknown, None, 404);
+    match unknown.result().unwrap() {
+        OpResult::Error(error) => {
+            assert_eq!(error.kind, ErrorKind::Network);
+            assert!(
+                error.retryable,
+                "a missing discovery source is not authoritative type absence"
+            );
+        },
+        other => panic!("expected normalized discovery-source error, got {other:?}"),
+    }
 }
 
 /// A resource collection is fetched at its discovered group-version root: core
-/// types under `/api/v1`, grouped types under `/apis/<group>/<version>`. A
-/// plural collision's qualified name routes to its own group while the bare
-/// name stays on core.
+/// types under `/api/v1`, grouped types under `/apis/<group>/<version>`. Every
+/// grouped type keeps its qualified filesystem name while core types keep bare
+/// names.
 #[test]
 fn resource_collections_use_discovered_group_version_paths() {
     let harness = kube_harness();
@@ -110,7 +136,7 @@ fn resource_collections_use_discovered_group_version_paths() {
         .answer_callouts(vec![http_ok(br#"{"items":[]}"#)])
         .unwrap();
 
-    let mut deployments = harness.list("/namespaces/demo/deployments").unwrap();
+    let mut deployments = harness.list("/namespaces/demo/deployments.apps").unwrap();
     assert!(
         deployments
             .expect_single_fetch()

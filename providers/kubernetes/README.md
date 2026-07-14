@@ -73,8 +73,8 @@ navigable (only `ls`/`readdir` is filtered, not `lookup`).
 
 - `/namespaces/<ns>` lists the namespaced resource types; `/cluster` lists the
   cluster-scoped types. Both are populated from API discovery, so CRDs appear
-  automatically. A plural that collides across API groups is disambiguated to
-  `<plural>.<group>`; built-ins keep the bare name.
+  automatically. Core-group resources keep bare plurals, while every grouped
+  resource uses the stable `<plural>.<group>` form.
 - `Namespace` objects are cluster-scoped, so they live at
   `/cluster/namespaces/<ns>/...`. The top-level `/namespaces/` tree is the
   grouping for namespaced resources.
@@ -83,7 +83,7 @@ Examples:
 
 ```bash
 cat /omnifs/k8s/namespaces/default/pods/web-7d9f/manifest.yaml
-cat /omnifs/k8s/namespaces/default/deployments/web/status.yaml
+cat /omnifs/k8s/namespaces/default/deployments.apps/web/status.yaml
 cat /omnifs/k8s/namespaces/default/pods/web-7d9f/logs/web.log
 cat /omnifs/k8s/cluster/nodes/node-1/manifest.yaml
 grep -r --include=manifest.yaml image: /omnifs/k8s/namespaces/default
@@ -106,12 +106,14 @@ grep -r --include=manifest.yaml image: /omnifs/k8s/namespaces/default
 - **Listings** issue a single unpaginated `LIST` (the API returns the full
   collection — no silent truncation), which can be expensive for very large
   namespaces.
-- **Discovery** walks `/api/v1` plus every API group once per instance and
-  caches it. Each group's versions are queried preferred-first, so a
-  multi-version resource resolves to its preferred version while a resource
-  present only in a non-preferred version still surfaces — matching client-go's
-  `ServerPreferredResources`. A group version whose discovery call fails (e.g. a
-  flaky aggregated API) is skipped rather than failing the whole tree.
+- **Discovery** walks `/api/v1` plus every API group. A complete snapshot is
+  cached for the provider instance; a partial snapshot exposes known types as
+  an open listing and is retried by the next operation. Each group's versions
+  are queried preferred-first, so a multi-version resource resolves to its
+  preferred version while a resource present only in a non-preferred version
+  still surfaces — matching client-go's `ServerPreferredResources`. A failed
+  discovery source is retained as a non-authoritative upstream failure, so it
+  cannot turn an omitted type into a filesystem `NotFound`.
 - **`events.txt`** filters by `involvedObject.{name,namespace,kind,uid}` — the
   same field selector `kubectl describe`/`kubectl get events` build — so events
   of a same-named object of another kind (or a prior incarnation) don't leak in.

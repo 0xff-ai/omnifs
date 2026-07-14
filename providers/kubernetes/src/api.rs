@@ -75,6 +75,14 @@ impl Discovery {
     }
 
     fn record_failure(&mut self, failure: ProviderError) {
+        let failure = if failure.kind() == ProviderErrorKind::NotFound {
+            ProviderError::network(format!(
+                "kubernetes discovery source was not found: {}",
+                failure.message()
+            ))
+        } else {
+            failure
+        };
         let replace = self.failure.as_ref().is_none_or(|current| {
             Self::failure_priority(failure.kind()) > Self::failure_priority(current.kind())
         });
@@ -96,13 +104,7 @@ impl Discovery {
         self.by_plural.entry(fs_name).or_insert(resource);
     }
 
-    fn add_resources(
-        &mut self,
-        api_root: &str,
-        group: &str,
-        resources: &[K8sApiResource],
-        qualify_group: bool,
-    ) {
+    fn add_resources(&mut self, api_root: &str, group: &str, resources: &[K8sApiResource]) {
         for entry in resources {
             if !is_browsable(entry) || self.has_group_resource(group, &entry.name) {
                 continue;
@@ -114,11 +116,10 @@ impl Discovery {
                 group: group.to_string(),
                 namespaced: entry.namespaced,
             };
-            let fs_name = if !group.is_empty() && (qualify_group || self.get(&entry.name).is_some())
-            {
-                format!("{}.{}", entry.name, group)
-            } else {
+            let fs_name = if group.is_empty() {
                 entry.name.clone()
+            } else {
+                format!("{}.{}", entry.name, group)
             };
             self.insert(fs_name, resource);
         }
@@ -159,7 +160,7 @@ impl Discovery {
 
     fn type_listing(&self, names: impl IntoIterator<Item = String>) -> DirListing {
         let entries = names.into_iter().map(Entry::dir);
-        if self.failure.is_none() {
+        if self.is_complete() {
             DirListing::exhaustive(entries)
         } else {
             DirListing::open(entries)
@@ -343,16 +344,10 @@ impl<'a> KubeApi<'a> {
     async fn fetch_discovery(&self) -> Discovery {
         let mut discovery = Discovery::default();
 
-        let core_available = match self.get_json::<APIResourceList>("/api/v1", &[]).await {
-            Ok(core) => {
-                discovery.add_resources("/api/v1", "", &core.resources, false);
-                true
-            },
-            Err(failure) => {
-                discovery.record_failure(failure);
-                false
-            },
-        };
+        match self.get_json::<APIResourceList>("/api/v1", &[]).await {
+            Ok(core) => discovery.add_resources("/api/v1", "", &core.resources),
+            Err(failure) => discovery.record_failure(failure),
+        }
 
         match self.get_json::<APIGroupList>("/apis", &[]).await {
             Ok(groups) => {
@@ -360,12 +355,9 @@ impl<'a> KubeApi<'a> {
                     for group_version in group_versions_preferred_first(group) {
                         let api_root = format!("/apis/{group_version}");
                         match self.get_json::<APIResourceList>(&api_root, &[]).await {
-                            Ok(list) => discovery.add_resources(
-                                &api_root,
-                                &group.name,
-                                &list.resources,
-                                !core_available,
-                            ),
+                            Ok(list) => {
+                                discovery.add_resources(&api_root, &group.name, &list.resources)
+                            },
                             Err(failure) => discovery.record_failure(failure),
                         }
                     }

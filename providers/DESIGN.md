@@ -838,10 +838,13 @@ local proxy/socket endpoint and cluster credentials are manifest/config
 authority, not route behavior.
 
 Discovery owns resource admissibility and filesystem naming. It filters
-subresources, requires both `get` and `list`, qualifies plural-name collisions
-by API group, prefers preferred group versions, and can hide empty resource
-types. Do not flatten this into a generic collection rule; it is provider-local
-routing state backed by Kubernetes discovery.
+subresources, requires both `get` and `list`, keeps core plurals bare, always
+names grouped resources as `<plural>.<group>`, prefers preferred group versions,
+and can hide empty resource types. Partial discovery produces open listings,
+retains non-authoritative source failures, and retries on the next operation;
+complete discovery is exhaustive and cached. Do not flatten this into a generic
+collection rule; it is provider-local routing state backed by Kubernetes
+discovery.
 
 ### Linear
 
