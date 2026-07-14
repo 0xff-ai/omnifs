@@ -6,7 +6,6 @@
 use crate::auth::credential_service_for_file;
 use crate::cache::Caches;
 use crate::cloner::GitCloner;
-use crate::snapshot::MountSnapshot;
 use crate::{BuildError, HostContext, Runtime, component_engine};
 use omnifs_auth::CredentialService;
 use omnifs_workspace::mounts::materialize::materialize;
@@ -187,14 +186,6 @@ impl MountRuntimes {
             .collect()
     }
 
-    /// Build a read-only canonical-store snapshot for a loaded mount.
-    pub fn snapshot_mount(&self, mount: &str) -> anyhow::Result<Option<MountSnapshot>> {
-        if !self.is_running(mount) {
-            return Ok(None);
-        }
-        MountSnapshot::from_caches(&self.caches, mount).map(Some)
-    }
-
     pub fn shutdown_all(&self) {
         let _ = self.timer_shutdown.send(true);
         for (_, task) in self.timer_tasks.lock().drain() {
@@ -205,10 +196,6 @@ impl MountRuntimes {
                 warn!(mount, error = %e, "shutdown failed");
             }
         }
-    }
-
-    fn is_running(&self, mount: &str) -> bool {
-        self.instances.contains_key(mount)
     }
 
     fn start_timer(

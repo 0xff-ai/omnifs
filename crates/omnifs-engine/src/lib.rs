@@ -34,8 +34,6 @@ pub(crate) mod sandbox;
 pub(crate) mod serving;
 pub mod singleflight;
 #[cfg(feature = "runtime")]
-pub mod snapshot;
-#[cfg(feature = "runtime")]
 pub mod test_support;
 #[cfg(feature = "runtime")]
 pub(crate) mod tools;
