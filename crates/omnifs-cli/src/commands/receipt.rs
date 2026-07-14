@@ -82,6 +82,47 @@ pub(crate) struct ResetReceipt {
     pub(crate) plan: Plan,
 }
 
+/// `omnifs mount rm`: the approved removal plan and the rows settled by the
+/// operation. Dry runs retain the plan while leaving `rows` empty because no
+/// operation was applied.
+#[derive(Debug, Serialize)]
+pub(crate) struct MountRemoveReceipt {
+    pub(crate) verdict: Verdict,
+    pub(crate) mount: String,
+    pub(crate) rows: Vec<Outcome>,
+    pub(crate) dry_run: bool,
+    pub(crate) plan: Plan,
+}
+
+impl MountRemoveReceipt {
+    pub(crate) fn dry_run(mount: String, plan: Plan) -> Self {
+        Self {
+            verdict: Verdict::Ok,
+            mount,
+            rows: Vec::new(),
+            dry_run: true,
+            plan,
+        }
+    }
+
+    pub(crate) fn applied(mount: String, plan: Plan, rows: Vec<Outcome>) -> Self {
+        Self {
+            verdict: Verdict::from_rows(&rows),
+            mount,
+            rows,
+            dry_run: false,
+            plan,
+        }
+    }
+
+    pub(crate) fn output_verdict(&self) -> ResultVerdict {
+        match self.verdict {
+            Verdict::Ok => ResultVerdict::Ok,
+            Verdict::Degraded | Verdict::Failed => ResultVerdict::Degraded,
+        }
+    }
+}
+
 impl ResetReceipt {
     pub(crate) fn dry_run(plan: Plan) -> Self {
         Self {

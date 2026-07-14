@@ -111,7 +111,7 @@ impl MountArgs {
                 dry_run,
             } => {
                 let workspace = Workspace::resolve()?;
-                rm_with_options(
+                let receipt = rm_with_options(
                     &workspace,
                     &name,
                     output.yes(),
@@ -119,8 +119,11 @@ impl MountArgs {
                     dry_run,
                     output,
                 )
-                .await
-                .map(|()| ExitCode::Success)
+                .await?;
+                if output.is_structured() {
+                    output.emit_result(receipt.output_verdict(), &receipt)?;
+                }
+                Ok(ExitCode::Success)
             },
         }
     }
@@ -379,6 +382,7 @@ pub async fn rm(
         Output::new(crate::ui::output::OutputMode::Human, false),
     )
     .await
+    .map(|_| ())
 }
 
 #[allow(clippy::too_many_lines)] // plan, decision, and receipt stay linear
@@ -389,7 +393,7 @@ async fn rm_with_options(
     keep_credentials: bool,
     dry_run: bool,
     output: Output,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<crate::commands::receipt::MountRemoveReceipt> {
     let layout = workspace.layout();
     let mut session =
         crate::ui::session::Session::intro_with_output(format!("omnifs mount rm {name}"), output)?;
@@ -422,7 +426,11 @@ async fn rm_with_options(
         let receipt = plan.receipt([Outcome::skip("spec", "already absent")]);
         session.receipt(&receipt);
         session.outro(format!("Mount `{name}` already absent."));
-        return Ok(());
+        return Ok(crate::commands::receipt::MountRemoveReceipt::applied(
+            name.to_string(),
+            plan,
+            receipt.rows,
+        ));
     };
     let config_path = mount.source.clone();
     // Build the plan without constructing an HTTP client or registering an
@@ -444,7 +452,10 @@ async fn rm_with_options(
     )? {
         Decision::DryRun => {
             session.outro("Dry run; no changes made.");
-            return Ok(());
+            return Ok(crate::commands::receipt::MountRemoveReceipt::dry_run(
+                name.to_string(),
+                plan,
+            ));
         },
         Decision::Apply => {},
     }
@@ -552,7 +563,11 @@ async fn rm_with_options(
                 )
         );
     }
-    Ok(())
+    Ok(crate::commands::receipt::MountRemoveReceipt::applied(
+        name.to_string(),
+        plan,
+        receipt.rows,
+    ))
 }
 
 pub(crate) async fn delete_credentials(
