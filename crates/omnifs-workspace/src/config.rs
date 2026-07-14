@@ -212,6 +212,11 @@ impl FrontendSpec {
                 }
             },
             Environment::Docker | Environment::Krunkit => {
+                if self.environment == Environment::Krunkit && host_os != HostOs::MacOs {
+                    return Err(ConfigError::Validation(
+                        "a krunkit frontend requires a macOS host".into(),
+                    ));
+                }
                 if self.filesystem != Filesystem::Fuse {
                     return Err(ConfigError::Validation(format!(
                         "the {} environment only delivers a fuse frontend",
@@ -619,7 +624,7 @@ mod tests {
                     spec(filesystem, Environment::Krunkit, None)
                         .validate(host)
                         .is_ok()
-                        == (filesystem == Filesystem::Fuse)
+                        == (filesystem == Filesystem::Fuse && host == HostOs::MacOs)
                 );
             }
         }
