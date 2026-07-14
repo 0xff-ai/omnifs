@@ -149,17 +149,6 @@ impl ProviderManifest {
         Ok(manifest)
     }
 
-    #[must_use]
-    pub fn default_scheme(&self) -> Option<(&str, &AuthScheme)> {
-        self.auth.as_ref()?.default_scheme()
-    }
-
-    /// Auth manifest derived from provider metadata for host HTTP injection.
-    #[must_use]
-    pub fn wasm_auth_manifest(&self) -> Option<AuthManifest> {
-        Some(self.auth.as_ref()?.wasm_auth_manifest())
-    }
-
     fn validate(&self) -> Result<(), ProviderMetadataError> {
         // `id` is the provider name slug; reject anything the name newtype would
         // reject so `ProviderMeta` conversion never fails past this parse boundary.

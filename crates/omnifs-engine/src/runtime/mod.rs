@@ -436,7 +436,8 @@ impl Runtime {
 
         let auth_manifest = manifest
             .as_ref()
-            .and_then(omnifs_workspace::provider::ProviderManifest::wasm_auth_manifest);
+            .and_then(|manifest| manifest.auth.as_ref())
+            .map(|auth| auth.wasm_auth_manifest());
         let auth = Arc::new(
             AuthManager::from_config_manifest_service(
                 config.auth.as_ref(),

@@ -13,7 +13,7 @@ pub mod materialize;
 pub mod name;
 pub mod upgrade;
 
-pub use auth::{Auth, AuthKind, OAuth, StaticToken};
+pub use auth::{Auth, OAuth, StaticToken};
 pub use name::{Name, NameError};
 pub use upgrade::{
     AddedField, AuthDelta, CapabilityChange, CapabilityDirection, FieldChange, LimitChange,
@@ -270,8 +270,9 @@ pub enum SpecError {
 /// The pinned provider's manifest, or `None` when the artifact is not retained
 /// (the missing-artifact error then surfaces at build time). Loads the artifact
 /// once and never mutates the spec: defaults are baked in at creation time, not
-/// here. Callers pluck what they need (`capabilities`, `config`,
-/// `wasm_auth_manifest()`, the full `auth` block) from the returned manifest.
+/// here. Callers pluck what they need (`capabilities`, `config`, or the full
+/// `auth` block) from the returned manifest; the auth block owns conversion to
+/// the host injection manifest.
 pub fn pinned_manifest(
     catalog: &Catalog,
     spec: &Spec,
@@ -410,11 +411,6 @@ impl Registry {
     #[must_use]
     pub fn failures(&self) -> &[SpecLoadFailure] {
         &self.failures
-    }
-
-    #[must_use]
-    pub fn mounts_dir(&self) -> &Path {
-        &self.mounts_dir
     }
 
     /// The on-disk path a mount's spec occupies: `mounts_dir/<name>.json`.

@@ -283,7 +283,10 @@ pub(crate) fn spec_creation(
         None => None,
     };
 
-    let auth_manifest = manifest.wasm_auth_manifest();
+    let auth_manifest = manifest
+        .auth
+        .as_ref()
+        .map(|auth| auth.wasm_auth_manifest());
     let default_auth = selected_auth(
         args,
         &reference,

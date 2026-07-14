@@ -8,10 +8,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::BTreeMap;
 use time::OffsetDateTime;
 
-use crate::authn::{CredentialId, CredentialIdError};
-
-/// Re-export so callers don't need a direct omnifs-core dep for this type.
-pub use crate::authn::AuthKind;
+use crate::authn::{AuthKind, CredentialId, CredentialIdError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]

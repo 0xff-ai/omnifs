@@ -176,15 +176,6 @@ impl WorkspaceLayout {
         self.frontends_dir().join(VSOCK_ATTACH_SOCKET_NAME)
     }
 
-    pub fn provider_path(&self, provider: &str) -> PathBuf {
-        let provider = PathBuf::from(provider);
-        if provider.is_absolute() {
-            provider
-        } else {
-            self.providers_dir.join(provider)
-        }
-    }
-
     /// Home-relativize a path for display (e.g. `~/.omnifs/config.toml`).
     /// Falls back to the full path if HOME is unset or stripping fails.
     pub fn display(path: &Path) -> String {
@@ -244,24 +235,12 @@ impl<Role> Workspace<Role> {
         self.layout
     }
 
-    pub fn config_dir(&self) -> &Path {
-        &self.layout.config_dir
-    }
-
-    pub fn cache_dir(&self) -> &Path {
-        &self.layout.cache_dir
-    }
-
     pub fn mounts_dir(&self) -> &Path {
         &self.layout.mounts_dir
     }
 
     pub fn providers_dir(&self) -> &Path {
         &self.layout.providers_dir
-    }
-
-    pub fn credentials_file(&self) -> &Path {
-        &self.layout.credentials_file
     }
 
     pub fn config_file(&self) -> &Path {

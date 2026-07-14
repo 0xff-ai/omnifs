@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-pub use crate::authn::AuthKind;
+use crate::authn::AuthKind;
 
 /// Authentication configuration for HTTP requests.
 #[derive(Debug, Clone, Deserialize, Serialize)]

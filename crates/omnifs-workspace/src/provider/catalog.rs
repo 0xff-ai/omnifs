@@ -1,16 +1,17 @@
 //! The provider catalog: a read-only index over the content-addressed
 //! [`ProviderStore`].
 //!
-//! `Catalog` answers "which retained artifact is this pinned id / the latest for
-//! this name / every installed provider?" Each [`Provider`] it yields lazily
-//! reads its embedded manifest from the retained WASM. Nothing here touches mount
-//! specs; resolution (joining a spec against this index) lives in `omnifs-mount`.
+//! `Catalog` answers "which retained artifact is this pinned id / the latest
+//! installable artifacts / every installed provider?" Each [`Provider`] it
+//! yields lazily reads its embedded manifest from the retained WASM. Nothing
+//! here touches mount specs; resolution (joining a spec against this index)
+//! lives in `omnifs-mount`.
 
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::ids::{ProviderId, ProviderMeta, ProviderName, ProviderRef};
+use crate::ids::{ProviderId, ProviderMeta, ProviderRef};
 
 use crate::provider::store::{IndexEntry, ProviderStore, StoreError};
 use crate::provider::{ProviderManifest, ProviderMetadataError, read_provider_metadata_section};
@@ -67,20 +68,6 @@ impl Catalog {
         };
         let provider = self.provider_from_entry(entry);
         Ok(provider.wasm_path().exists().then_some(provider))
-    }
-
-    /// The most recently installed artifact for a name. Init and upgrade only,
-    /// never serving.
-    pub fn latest_by_name(&self, name: &ProviderName) -> Result<Option<Provider>, CatalogError> {
-        let index = self.store.read_index()?;
-        let Some(id) = index.latest.get(name.as_str()) else {
-            return Ok(None);
-        };
-        Ok(index
-            .providers
-            .iter()
-            .find(|entry| &entry.id == id)
-            .map(|entry| self.provider_from_entry(entry)))
     }
 
     /// The latest installed artifact per provider name, in name order: the

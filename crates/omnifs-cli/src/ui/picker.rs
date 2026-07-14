@@ -142,7 +142,7 @@ pub(crate) fn cap_tags(manifest: &ProviderManifest) -> Vec<CapTag> {
 
 /// Derive the auth tag from the manifest's default scheme.
 pub(crate) fn auth_tag(manifest: &ProviderManifest) -> Option<AuthTag> {
-    let (_, scheme) = manifest.default_scheme()?;
+    let (_, scheme) = manifest.auth.as_ref()?.default_scheme()?;
     match scheme {
         AuthScheme::Oauth(_) => Some(AuthTag::SignIn),
         AuthScheme::StaticToken(_) => Some(AuthTag::ApiKey),
@@ -164,11 +164,18 @@ pub(crate) fn default_on(manifest: &ProviderManifest) -> bool {
     if manifest.auth.is_none() {
         return true;
     }
-    let default_is_oauth = matches!(manifest.default_scheme(), Some((_, AuthScheme::Oauth(_))));
+    let default_is_oauth = matches!(
+        manifest.auth.as_ref().and_then(|auth| auth.default_scheme()),
+        Some((_, AuthScheme::Oauth(_)))
+    );
     if default_is_oauth {
         return true;
     }
-    let ambient = crate::commands::mount::detect::detect(manifest.wasm_auth_manifest().as_ref());
+    let auth_manifest = manifest
+        .auth
+        .as_ref()
+        .map(|auth| auth.wasm_auth_manifest());
+    let ambient = crate::commands::mount::detect::detect(auth_manifest.as_ref());
     !ambient.is_empty()
 }
 
@@ -185,7 +192,7 @@ fn build_detail(manifest: &ProviderManifest, summary: &str) -> Detail {
         role: PanelRole::Plain,
     });
     // Auth line.
-    let auth_line = match manifest.default_scheme() {
+    let auth_line = match manifest.auth.as_ref().and_then(|auth| auth.default_scheme()) {
         Some((_, AuthScheme::Oauth(_))) => "sign-in with your browser".to_string(),
         Some((_, AuthScheme::StaticToken(scheme))) => {
             let mut line = "needs an API key".to_string();
@@ -230,7 +237,7 @@ fn build_detail(manifest: &ProviderManifest, summary: &str) -> Detail {
     }
 
     // notes: provider auth guidance for the default scheme, if any.
-    if let Some((key, _)) = manifest.default_scheme() {
+    if let Some((key, _)) = manifest.auth.as_ref().and_then(|auth| auth.default_scheme()) {
         let key = key.to_string();
         if let Some(auth) = &manifest.auth {
             let guidance = auth.guidance_for(&key);
