@@ -671,9 +671,9 @@ pub(crate) fn outcome_for_callout(result: &wit_types::CalloutResult) -> Inspecto
             429 => InspectorOutcome::Timeout,
             _ => InspectorOutcome::Network,
         },
-        wit_types::CalloutResult::BlobFetched(_)
-        | wit_types::CalloutResult::GitRepoOpened(_)
-        | wit_types::CalloutResult::BlobRead(_) => InspectorOutcome::Ok,
+        wit_types::CalloutResult::BlobFetched(_) | wit_types::CalloutResult::GitRepoOpened(_) => {
+            InspectorOutcome::Ok
+        },
         wit_types::CalloutResult::CalloutError(error) => error_kind_outcome(error.kind),
     }
 }
@@ -690,7 +690,6 @@ impl WitCalloutView<'_> {
             wit_types::Callout::Fetch(_) => CalloutKind::Fetch,
             wit_types::Callout::FetchBlob(_) => CalloutKind::FetchBlob,
             wit_types::Callout::GitOpenRepo(_) => CalloutKind::GitOpenRepo,
-            wit_types::Callout::ReadBlob(_) => CalloutKind::ReadBlob,
         }
     }
     fn summary(&self) -> String {
@@ -705,9 +704,6 @@ impl WitCalloutView<'_> {
                 "git.open_repo {}",
                 omnifs_api::events::redact_git_remote(&req.clone_url)
             ),
-            wit_types::Callout::ReadBlob(req) => {
-                format!("blob.read {}B @ {}", req.len.unwrap_or(0), req.offset)
-            },
         }
     }
 }

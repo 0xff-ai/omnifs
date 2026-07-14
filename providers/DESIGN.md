@@ -87,9 +87,8 @@ changes:
 - blob means host-resident bytes, normally from a blob fetch, where the body
   should not cross the provider/WIT boundary. A blob can still carry exact size,
   content type, stability, and ETag/version evidence;
-- preserve the blob toolchain as separate capabilities: `fetch-blob` stores a
-  body host-side and returns a runtime-local handle, while `read-blob` copies a
-  capped range back into the provider;
+- preserve the blob toolchain as a host-owned capability: `fetch-blob` stores a
+  body host-side and returns a runtime-local handle for file projection;
 - `BlobId` is runtime-local. The host derives durable blob request and body
   identities from validated request facts; providers never name cache entries;
 - stream and tree stay behaviors under file and directory faces;
@@ -461,8 +460,7 @@ filesystem behavior:
 - direct provider reads for bytes with no replayable object contract;
 - ranged reads for large or streaming content;
 - blobs for host-resident bytes that should not cross back through the provider,
-  including bytes later served as a file, read back through capped `read-blob`,
-  or extracted into a `TreeRef`;
+  including bytes later served as a file or extracted into a `TreeRef`;
 - canonical bytes for replayable object storage.
 
 `Live` requires a ranged stream face:

@@ -44,8 +44,7 @@ impl<'a> MakeWriter<'a> for CapturedWriter {
 // --- Canned instrumented executor methods --------------------------------
 //
 // Each helper mirrors the production `#[instrument]` annotations on
-// `HttpStack::fetch`, `BlobExecutor::fetch`, `BlobExecutor::read`,
-// and `GitExecutor::open_repo`. The function
+// `HttpStack::fetch`, `BlobExecutor::fetch`, and `GitExecutor::open_repo`. The function
 // bodies do not perform real I/O; they synthesize a `CalloutResult` and
 // call `record_outcome` so the late-bound span fields land before the
 // span closes.
@@ -111,22 +110,6 @@ async fn fake_blob_fetch(req: &wit_types::BlobFetchRequest) -> wit_types::Callou
 }
 
 #[tracing::instrument(target = "omnifs_callout", skip_all, fields(
-    blob = req.blob,
-    offset = req.offset,
-    len = ?req.len,
-    response_body_bytes = tracing::field::Empty,
-    error.kind = tracing::field::Empty,
-    error.message = tracing::field::Empty,
-    error.retryable = tracing::field::Empty,
-))]
-fn fake_blob_read(req: &wit_types::ReadBlobRequest) -> wit_types::CalloutResult {
-    let _ = req;
-    let result = wit_types::CalloutResult::BlobRead(b"hello world".to_vec());
-    record_outcome(&result);
-    result
-}
-
-#[tracing::instrument(target = "omnifs_callout", skip_all, fields(
     url = %LogUrl(&req.clone_url),
     tree_ref = tracing::field::Empty,
     error.kind = tracing::field::Empty,
@@ -168,14 +151,6 @@ fn blob_fetch_request() -> wit_types::BlobFetchRequest {
             value: "Bearer should-not-leak".into(),
         }],
         body: None,
-    }
-}
-
-fn read_blob_request() -> wit_types::ReadBlobRequest {
-    wit_types::ReadBlobRequest {
-        blob: 4242,
-        offset: 0,
-        len: Some(64),
     }
 }
 
@@ -235,18 +210,6 @@ async fn blob_fetch_span_records_request_and_late_bound_blob() {
     );
     assert!(output.contains("Authorization=<redacted>"));
     assert!(!output.contains("should-not-leak"));
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn blob_read_span_records_response_body_bytes_at_close() {
-    let req = read_blob_request();
-    let output = run_with_capture_async(|| async move {
-        fake_blob_read(&req);
-    })
-    .await;
-
-    assert_contains_new_line(&output, &["blob=4242", "offset=0", "len="]);
-    assert_contains_close_line(&output, &["response_body_bytes=11"]);
 }
 
 #[tokio::test(flavor = "current_thread")]

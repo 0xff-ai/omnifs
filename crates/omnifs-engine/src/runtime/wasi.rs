@@ -83,14 +83,6 @@ impl<T: Send + 'static> CalloutsHostWithStore<T> for HostState {
     ) -> wit_types::CalloutResult {
         Self::dispatch_callout(accessor, id, wit_types::Callout::FetchBlob(req)).await
     }
-
-    async fn read_blob(
-        accessor: &Accessor<T, Self>,
-        id: u64,
-        req: wit_types::ReadBlobRequest,
-    ) -> wit_types::CalloutResult {
-        Self::dispatch_callout(accessor, id, wit_types::Callout::ReadBlob(req)).await
-    }
 }
 
 impl CalloutsHost for HostState {}

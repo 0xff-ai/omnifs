@@ -281,10 +281,6 @@ mod tests {
                 value: 1024,
                 why: "fetch".into(),
             }),
-            max_read_blob_bytes: Some(ResourceLimit {
-                value: 64,
-                why: "read".into(),
-            }),
         };
 
         assert_eq!(
@@ -292,7 +288,6 @@ mod tests {
             Limits {
                 max_memory_mb: Some(128),
                 max_fetch_blob_bytes: Some(1024),
-                max_read_blob_bytes: Some(64),
             }
         );
     }

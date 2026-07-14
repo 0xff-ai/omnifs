@@ -23,10 +23,6 @@ interface types {
         /// `blob-id` plus response metadata; the bytes can later be served
         /// verbatim as read bytes (`byte-source.blob`).
         fetch-blob(blob-fetch-request),
-        /// Bring a (range of a) stored blob across the WIT boundary so
-        /// the provider can parse it. Use sparingly; the point of blobs
-        /// is to keep large bytes host-side.
-        read-blob(read-blob-request),
     }
 
     // --- Callout results (host -> provider, non-recursive) ---
@@ -35,7 +31,6 @@ interface types {
         http-response(http-response),
         git-repo-opened(git-repo-info),
         blob-fetched(blob-fetched),
-        blob-read(list<u8>),
         callout-error(callout-error),
     }
 
@@ -325,15 +320,6 @@ interface types {
         response-headers: list<header>,
     }
 
-    /// Bring (a range of) a stored blob across the WIT. The host caps
-    /// this path to a small policy window because bytes cross into the
-    /// guest.
-    record read-blob-request {
-        blob: blob-id,
-        offset: u64,
-        len: option<u32>,
-    }
-
     variant cursor {
         opaque(string),
         page(u32),
@@ -389,7 +375,6 @@ interface types {
     record provider-limits {
         max-memory-mb: option<scalar-limit>,
         max-fetch-blob-bytes: option<scalar-limit>,
-        max-read-blob-bytes: option<scalar-limit>,
     }
 
     /// The provider manifest: the versioned provider/host contract describing
@@ -484,12 +469,11 @@ interface log {
 }
 
 interface callouts {
-    use types.{blob-fetch-request, callout-result, correlation-id, git-open-request, http-request, read-blob-request};
+    use types.{blob-fetch-request, callout-result, correlation-id, git-open-request, http-request};
 
     fetch: async func(id: correlation-id, req: http-request) -> callout-result;
     git-open-repo: async func(id: correlation-id, req: git-open-request) -> callout-result;
     fetch-blob: async func(id: correlation-id, req: blob-fetch-request) -> callout-result;
-    read-blob: async func(id: correlation-id, req: read-blob-request) -> callout-result;
 }
 
 // === Worlds ===

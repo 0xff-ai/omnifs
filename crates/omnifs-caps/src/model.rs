@@ -112,16 +112,12 @@ pub struct LimitDeclarations {
     pub max_memory_mb: Option<ResourceLimit<u32>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_fetch_blob_bytes: Option<ResourceLimit<u64>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_read_blob_bytes: Option<ResourceLimit<u64>>,
 }
 
 impl LimitDeclarations {
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.max_memory_mb.is_none()
-            && self.max_fetch_blob_bytes.is_none()
-            && self.max_read_blob_bytes.is_none()
+        self.max_memory_mb.is_none() && self.max_fetch_blob_bytes.is_none()
     }
 }
 
@@ -132,16 +128,12 @@ pub struct Limits {
     pub max_memory_mb: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_fetch_blob_bytes: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_read_blob_bytes: Option<u64>,
 }
 
 impl Limits {
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.max_memory_mb.is_none()
-            && self.max_fetch_blob_bytes.is_none()
-            && self.max_read_blob_bytes.is_none()
+        self.max_memory_mb.is_none() && self.max_fetch_blob_bytes.is_none()
     }
 
     #[must_use]
@@ -150,10 +142,6 @@ impl Limits {
             max_memory_mb: declarations.max_memory_mb.as_ref().map(|limit| limit.value),
             max_fetch_blob_bytes: declarations
                 .max_fetch_blob_bytes
-                .as_ref()
-                .map(|limit| limit.value),
-            max_read_blob_bytes: declarations
-                .max_read_blob_bytes
                 .as_ref()
                 .map(|limit| limit.value),
         }

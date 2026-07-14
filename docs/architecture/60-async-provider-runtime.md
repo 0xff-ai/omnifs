@@ -5,7 +5,7 @@ Scope: provider component execution, async host imports, same-instance concurren
 
 ## Intended model
 
-Provider code is ordinary async Rust. A handler awaits HTTP, blob, git, or blob-read work through the SDK. That await reaches a WIT async host import. Wasmtime suspends the component future, the host executes the effect, and the guest future resumes with a typed `callout-result`.
+Provider code is ordinary async Rust. A handler awaits HTTP, blob, or git work through the SDK. That await reaches a WIT async host import. Wasmtime suspends the component future, the host executes the effect, and the guest future resumes with a typed `callout-result`.
 
 The host owns trust and I/O. Providers do not open sockets, read credentials, or bypass capability checks. Suspension lives in Wasmtime's component async runtime rather than an omnifs-specific continuation export.
 
@@ -124,7 +124,7 @@ Provider integration tests need deterministic canned HTTP and blob responses. Th
 
 This is test-only host plumbing, not a provider continuation export. The component suspends on async host imports. The test controller intercepts HTTP and blob fetch imports, records the callout, and waits for the test to provide the corresponding `callout-result`.
 
-Git and blob-read imports fall through to the real host executors so tests that rely on a real cached git checkout or host blob cache continue to exercise production behavior.
+Git imports fall through to the real host executor so tests that rely on a real cached git checkout continue to exercise production behavior.
 
 ## Direct `wasi:http` option
 

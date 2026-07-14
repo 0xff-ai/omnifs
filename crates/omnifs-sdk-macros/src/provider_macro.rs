@@ -167,7 +167,7 @@ fn parse_capabilities(content: ParseStream<'_>) -> syn::Result<Vec<omnifs_caps::
                 why: parse_dynamic_why(&inner, &kind)?,
                 dynamic: true,
             },
-            "memory_mb" | "fetch_blob_bytes" | "read_blob_bytes" => {
+            "memory_mb" | "fetch_blob_bytes" => {
                 return Err(syn::Error::new(
                     kind.span(),
                     format!(
@@ -221,21 +221,11 @@ fn parse_limits(content: ParseStream<'_>) -> syn::Result<omnifs_caps::LimitDecla
                     why: why.value(),
                 });
             },
-            "read_blob_bytes" => {
-                reject_duplicate_limit(limits.max_read_blob_bytes.as_ref(), &kind)?;
-                let amount: LitInt = inner.parse()?;
-                let _: Token![,] = inner.parse()?;
-                let why: LitStr = inner.parse()?;
-                limits.max_read_blob_bytes = Some(omnifs_caps::ResourceLimit {
-                    value: amount.base10_parse::<u64>()?,
-                    why: why.value(),
-                });
-            },
             other => {
                 return Err(syn::Error::new(
                     kind.span(),
                     format!(
-                        "unsupported limit `{other}`; expected `memory_mb`, `fetch_blob_bytes`, or `read_blob_bytes`"
+                        "unsupported limit `{other}`; expected `memory_mb` or `fetch_blob_bytes`"
                     ),
                 ));
             },
@@ -589,12 +579,10 @@ fn capability_tokens(need: &omnifs_caps::AccessNeed) -> TokenStream2 {
 fn limit_declarations_tokens(limits: &omnifs_caps::LimitDeclarations) -> TokenStream2 {
     let max_memory_mb = optional_limit_tokens(limits.max_memory_mb.as_ref());
     let max_fetch_blob_bytes = optional_limit_tokens(limits.max_fetch_blob_bytes.as_ref());
-    let max_read_blob_bytes = optional_limit_tokens(limits.max_read_blob_bytes.as_ref());
     quote! {
         omnifs_sdk::LimitDeclarations {
             max_memory_mb: #max_memory_mb,
             max_fetch_blob_bytes: #max_fetch_blob_bytes,
-            max_read_blob_bytes: #max_read_blob_bytes,
         }
     }
 }

@@ -553,16 +553,6 @@
               "type": "null"
             }
           ]
-        },
-        "maxReadBlobBytes": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ResourceLimit2"
-            },
-            {
-              "type": "null"
-            }
-          ]
         }
       },
       "additionalProperties": false

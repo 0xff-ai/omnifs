@@ -89,9 +89,6 @@ pub(crate) fn callout_internal(message: impl Into<String>) -> wit_types::Callout
 pub(crate) fn callout_denied(message: impl Into<String>) -> wit_types::CalloutResult {
     callout_error(wit_types::ErrorKind::Denied, message, false)
 }
-pub(crate) fn callout_not_found(message: impl Into<String>) -> wit_types::CalloutResult {
-    callout_error(wit_types::ErrorKind::NotFound, message, false)
-}
 pub(crate) fn callout_too_large(message: impl Into<String>) -> wit_types::CalloutResult {
     callout_error(wit_types::ErrorKind::TooLarge, message, false)
 }
@@ -202,9 +199,6 @@ pub(crate) fn record_outcome(result: &wit_types::CalloutResult) {
             );
             span.record("response_body_bytes", r.size);
         },
-        wit_types::CalloutResult::BlobRead(bytes) => {
-            span.record("response_body_bytes", bytes.len());
-        },
         wit_types::CalloutResult::GitRepoOpened(r) => {
             span.record("tree_ref", r.tree);
         },
@@ -277,13 +271,6 @@ impl CalloutHost {
                 let git = self.git.clone();
                 let req = req.clone();
                 spawn_blocking_callout("git.open_repo", move || git.open_repo(&req, op_id)).await
-            },
-            // Synchronous bounded disk read; offloaded for the same reason as
-            // `git.open_repo` so a slow read never stalls the event loop.
-            wit_types::Callout::ReadBlob(req) => {
-                let blob = self.blob.clone();
-                let req = *req;
-                spawn_blocking_callout("blob.read", move || blob.read(&req)).await
             },
         }
     }

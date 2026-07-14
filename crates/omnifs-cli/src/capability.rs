@@ -137,12 +137,6 @@ pub(crate) fn limit_lines(limits: &LimitDeclarations) -> Vec<LimitLine> {
             value: limit.value.to_string(),
         });
     }
-    if let Some(limit) = &limits.max_read_blob_bytes {
-        lines.push(LimitLine {
-            label: "Blob read limit",
-            value: limit.value.to_string(),
-        });
-    }
     lines
 }
 

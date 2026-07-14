@@ -30,7 +30,7 @@ impl BlobId {
 /// Metadata returned by a blob fetch.
 ///
 /// The response body stays in the host cache. Use [`Self::id`] when passing
-/// the blob to [`crate::projection::FileProjection::blob`] or [`BlobReader`].
+/// the blob to [`crate::projection::FileProjection::blob`].
 /// The fetch resolves for any upstream status; check
 /// [`Self::error_for_status`] before treating the blob as valid content.
 #[derive(Clone, Debug)]

@@ -192,10 +192,6 @@ impl ProviderManifest {
             "limits.maxFetchBlobBytes.why",
             self.limits.max_fetch_blob_bytes.as_ref(),
         )?;
-        validate_limit_why(
-            "limits.maxReadBlobBytes.why",
-            self.limits.max_read_blob_bytes.as_ref(),
-        )?;
         if let Some(auth) = &self.auth {
             auth.validate()?;
             self.validate_auth_inject_domain_coverage(auth)?;

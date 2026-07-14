@@ -1,4 +1,4 @@
-//! Provider-facing `fetch-blob` and `read-blob` executors.
+//! Provider-facing `fetch-blob` executor.
 //!
 //! Provider HTTP fetches whose payload should never cross the WIT
 //! boundary are streamed into [`crate::blob_cache::BlobCache`].
@@ -8,15 +8,13 @@
 pub use crate::blob_cache::BlobCache;
 use crate::blob_cache::{BLOB_TMP_DIR, BlobCacheError, BlobMetadata, BlobRecord};
 use crate::cache::identity::{BlobGeneration, BlobRequestId};
-use crate::callouts::{
-    callout_internal, callout_network, callout_not_found, callout_too_large, record_outcome,
-};
+use crate::callouts::{callout_internal, callout_network, callout_too_large, record_outcome};
 use crate::http::{HttpStack, decode_response_headers};
 use crate::log_redaction::{LogUrl, WitHeaders};
 use futures::StreamExt;
 use omnifs_wit::provider::types as wit_types;
 use omnifs_workspace::mounts::Spec;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,26 +22,19 @@ use std::time::Duration;
 const BLOB_FETCH_TIMEOUT: Duration = Duration::from_mins(2);
 
 const DEFAULT_MAX_FETCH_BLOB_BYTES: u64 = 1024 * 1024 * 1024;
-const DEFAULT_MAX_READ_BLOB_BYTES: u64 = 16 * 1024 * 1024;
-
-/// Host-side size limits for blob fetches and guest-visible reads.
+/// Host-side size limits for blob fetches.
 ///
-/// Fetch limits bound how much data the host stores on disk. Read
-/// limits bound how many bytes a single `read-blob` callout may copy
-/// back into provider memory.
+/// Fetch limits bound how much data the host stores on disk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BlobLimits {
     /// Maximum response-body bytes accepted by `fetch-blob`.
     pub max_fetch_blob_bytes: u64,
-    /// Maximum bytes returned by one `read-blob` response.
-    pub max_read_blob_bytes: u64,
 }
 
 impl Default for BlobLimits {
     fn default() -> Self {
         Self {
             max_fetch_blob_bytes: DEFAULT_MAX_FETCH_BLOB_BYTES,
-            max_read_blob_bytes: DEFAULT_MAX_READ_BLOB_BYTES,
         }
     }
 }
@@ -56,14 +47,11 @@ impl BlobLimits {
             max_fetch_blob_bytes: limits
                 .and_then(|limits| limits.max_fetch_blob_bytes)
                 .unwrap_or(defaults.max_fetch_blob_bytes),
-            max_read_blob_bytes: limits
-                .and_then(|limits| limits.max_read_blob_bytes)
-                .unwrap_or(defaults.max_read_blob_bytes),
         }
     }
 }
 
-/// Errors raised while fetching, storing, or reading host-resident blobs.
+/// Errors raised while fetching or storing host-resident blobs.
 #[derive(Debug, thiserror::Error)]
 enum BlobError {
     #[error("{operation} exceeds host blob cap ({actual} > {max} bytes)")]
@@ -76,8 +64,6 @@ enum BlobError {
     Network(String),
     #[error("I/O error")]
     Io(#[source] std::io::Error),
-    #[error("{0}")]
-    NotFound(String),
     #[error("{0}")]
     Internal(String),
 }
@@ -113,7 +99,6 @@ impl From<BlobError> for wit_types::CalloutResult {
             BlobError::TooLarge { .. } => callout_too_large(error.to_string()),
             BlobError::Network(_) => callout_network(error.to_string()),
             BlobError::Io(_) => callout_internal(error.to_string()),
-            BlobError::NotFound(msg) => callout_not_found(msg),
             BlobError::Internal(msg) => callout_internal(msg),
         }
     }
@@ -221,44 +206,6 @@ impl BlobExecutor {
             .publish(request_id, generation, staged.path(), metadata)
             .map_err(|error| BlobError::from(error).with_io_context("publish blob"))?;
         Ok((*record).clone())
-    }
-
-    /// Read a range from a cached blob back into provider memory.
-    ///
-    /// `offset` may point past EOF, which returns an empty byte vector.
-    /// The configured read cap applies to the number of bytes returned
-    /// by this call, not to the absolute offset.
-    #[tracing::instrument(target = "omnifs_callout", skip_all, fields(
-        blob = req.blob,
-        offset = req.offset,
-        len = ?req.len,
-        response_body_bytes = tracing::field::Empty,
-        error.kind = tracing::field::Empty,
-        error.message = tracing::field::Empty,
-        error.retryable = tracing::field::Empty,
-    ))]
-    pub fn read(&self, req: &wit_types::ReadBlobRequest) -> wit_types::CalloutResult {
-        let result = match self.read_inner(req.blob, req.offset, req.len) {
-            Ok(bytes) => wit_types::CalloutResult::BlobRead(bytes),
-            Err(e) => e.into(),
-        };
-        record_outcome(&result);
-        result
-    }
-
-    fn read_inner(
-        &self,
-        blob_id: u64,
-        offset: u64,
-        len: Option<u32>,
-    ) -> Result<Vec<u8>, BlobError> {
-        let record = self
-            .cache
-            .lookup_by_id(blob_id)
-            .ok_or_else(|| BlobError::NotFound(format!("blob {blob_id} not found")))?;
-        let path = self.cache.body_path(&record);
-        read_range(&path, offset, len, self.limits.max_read_blob_bytes)
-            .map_err(|error| error.with_io_context("read blob"))
     }
 }
 
@@ -369,34 +316,6 @@ async fn stream_response_body(
     })
 }
 
-fn read_range(
-    path: &Path,
-    offset: u64,
-    len: Option<u32>,
-    max_bytes: u64,
-) -> Result<Vec<u8>, BlobError> {
-    let file_len = std::fs::metadata(path)?.len();
-    let available = file_len.saturating_sub(offset);
-    let bytes_to_read = match len {
-        Some(n) => available.min(u64::from(n)),
-        None => available,
-    };
-    if bytes_to_read > max_bytes {
-        return Err(BlobError::TooLarge {
-            operation: "read blob",
-            max: max_bytes,
-            actual: bytes_to_read,
-        });
-    }
-
-    let mut file = std::fs::File::open(path)?;
-    file.seek(SeekFrom::Start(offset))?;
-    let mut buf = Vec::new();
-    let mut limited = (&mut file).take(bytes_to_read);
-    limited.read_to_end(&mut buf)?;
-    Ok(buf)
-}
-
 fn lookup_header(headers: &[(String, String)], name: &str) -> Option<String> {
     headers
         .iter()
@@ -407,90 +326,6 @@ fn lookup_header(headers: &[(String, String)], name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::capability::CapabilityChecker;
-    use omnifs_caps::Allowlist;
-
-    #[test]
-    fn read_range_enforces_explicit_len_cap() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("blob");
-        std::fs::write(&path, b"abcdef").unwrap();
-
-        assert_eq!(read_range(&path, 0, Some(4), 4).unwrap(), b"abcd".to_vec());
-        assert!(matches!(
-            read_range(&path, 0, Some(5), 4),
-            Err(BlobError::TooLarge { .. })
-        ));
-        assert_eq!(read_range(&path, 3, Some(2), 4).unwrap(), b"de".to_vec());
-        assert!(read_range(&path, 99, Some(4), 4).unwrap().is_empty());
-    }
-
-    #[test]
-    fn read_range_enforces_read_to_end_cap() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("blob");
-        std::fs::write(&path, b"abcdef").unwrap();
-
-        assert!(matches!(
-            read_range(&path, 0, None, 4),
-            Err(BlobError::TooLarge { .. })
-        ));
-        assert_eq!(read_range(&path, 2, None, 6).unwrap(), b"cdef".to_vec());
-    }
-
-    #[test]
-    fn read_blob_maps_cap_to_too_large() {
-        let tmp = tempfile::tempdir().unwrap();
-        let cache = Arc::new(BlobCache::new(tmp.path().to_path_buf()).unwrap());
-        let request = BlobRequestId::new(None, "GET", "https://example.test/blob", &[], None);
-        let body = b"abcdef";
-        let generation = BlobGeneration::from_bytes(body);
-        let staged = tmp.path().join(BLOB_TMP_DIR).join("staged");
-        std::fs::write(&staged, body).unwrap();
-        let record = cache
-            .publish(
-                request,
-                generation,
-                &staged,
-                BlobMetadata {
-                    status: 200,
-                    content_type: None,
-                    etag: None,
-                    response_headers: Vec::new(),
-                    size: body.len() as u64,
-                },
-            )
-            .unwrap();
-        let capability = CapabilityChecker::new(Allowlist {
-            domains: Vec::new(),
-            git_repos: Vec::new(),
-            needs_git: false,
-            unix_sockets: Vec::new(),
-        });
-        let http = Arc::new(HttpStack::new(None, Arc::new(capability)).unwrap());
-        let executor = BlobExecutor::new(
-            http,
-            cache,
-            BlobLimits {
-                max_fetch_blob_bytes: DEFAULT_MAX_FETCH_BLOB_BYTES,
-                max_read_blob_bytes: 4,
-            },
-        );
-
-        match executor.read(&wit_types::ReadBlobRequest {
-            blob: record.id,
-            offset: 0,
-            len: None,
-        }) {
-            wit_types::CalloutResult::CalloutError(wit_types::CalloutError {
-                kind: wit_types::ErrorKind::TooLarge,
-                retryable: false,
-                ..
-            }) => {},
-            other => panic!("expected TooLarge read-blob error, got {other:?}"),
-        }
-    }
-
     #[tokio::test]
     async fn stream_response_body_rejects_large_content_length_before_writing() {
         let tmp = tempfile::tempdir().unwrap();

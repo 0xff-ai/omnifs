@@ -508,8 +508,8 @@ impl<'a, E: EndpointHooks, S> BlobRequestBuilder<'a, E, S> {
 }
 
 /// A handle to a host-resident blob fetched through an [`Endpoint`]. Hand
-/// `id` to `FileProjection::blob` (with `size` as the exact size), or to
-/// `cx.blob(id)`; the bytes themselves stay host-side.
+/// `id` to `FileProjection::blob` (with `size` as the exact size); the bytes
+/// themselves stay host-side.
 pub struct BlobHandle {
     pub id: crate::blob::BlobId,
     pub size: u64,
