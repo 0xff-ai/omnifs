@@ -413,5 +413,17 @@ mod tests {
             store.read_index(),
             Err(StoreError::DuplicateId(duplicate)) if duplicate.to_string() == id
         ));
+
+        std::fs::write(
+            dir.path().join("index.json"),
+            format!(
+                r#"{{"version":2,"providers":[{{"id":"{id}","name":"demo","file":"../demo.wasm"}}]}}"#
+            ),
+        )
+        .unwrap();
+        assert!(matches!(
+            store.read_index(),
+            Err(StoreError::InvalidFileName { file }) if file == "../demo.wasm"
+        ));
     }
 }

@@ -107,18 +107,14 @@ impl Catalog {
                 actual: actual_name,
             });
         }
-        let expected_version = entry
-            .version
-            .as_ref()
-            .map(ToString::to_string)
-            .unwrap_or_default();
-        let actual_version = manifest.version.clone().unwrap_or_default();
+        let expected_version = entry.version.as_ref().map(|version| version.as_str());
+        let actual_version = manifest.version.as_deref();
         if actual_version != expected_version {
             return Err(CatalogError::ManifestMismatch {
                 path,
                 field: "version",
-                expected: expected_version,
-                actual: actual_version,
+                expected: expected_version.unwrap_or("<none>").to_owned(),
+                actual: actual_version.unwrap_or("<none>").to_owned(),
             });
         }
         let provider = self.provider_from_entry(entry);
