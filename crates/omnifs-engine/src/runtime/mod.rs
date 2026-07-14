@@ -5,7 +5,7 @@
 //! Typed operation execution is in `ops::lifecycle`; WASI store plumbing is in `wasi`.
 
 use crate::archive::ArchiveExecutor;
-use crate::auth::AuthManager;
+use crate::auth::binding_from_config;
 use crate::blob::{BlobExecutor, BlobLimits};
 use crate::blob_cache::BlobCache;
 use crate::cache::{Caches, Store};
@@ -19,7 +19,7 @@ use crate::instance::Instance;
 use crate::invalidation::InvalidationState;
 use crate::tree_refs::TreeRefs;
 use dashmap::DashMap;
-use omnifs_auth::{CredentialHealth, CredentialService};
+use omnifs_auth::{AuthBinding, CredentialHealth, CredentialService};
 use omnifs_caps::{Grant, PreopenedPath};
 use omnifs_core::path::Path;
 use omnifs_wit::provider::types as wit_types;
@@ -131,12 +131,7 @@ pub struct Runtime {
     pub(crate) mount_name: String,
     pub(crate) provider_name: String,
     provider_id: ProviderId,
-    auth: Arc<AuthManager>,
-    /// Non-secret warning captured once at mount-start when a registered
-    /// credential is `Missing`/`Expired`/`NeedsConsent`. `None` once healthy
-    /// or when the mount has no auth. A build-time snapshot, not a live
-    /// poll: the daemon surfaces it in the Mounts subsystem health.
-    credential_warning: Option<String>,
+    auth: Option<Arc<AuthBinding>>,
     next_operation_id: AtomicU64,
     blob_cache: Arc<BlobCache>,
     trees: Arc<TreeRefs>,
@@ -308,14 +303,11 @@ impl Runtime {
     }
 
     pub fn auth_health(&self) -> Option<CredentialHealth> {
-        self.auth.health()
+        self.auth.as_ref().map(|binding| binding.health())
     }
 
-    /// Non-secret credential warning captured at mount-start, if the mount's
-    /// auth was not ready when the mount was built.
-    #[must_use]
-    pub fn credential_warning(&self) -> Option<&str> {
-        self.credential_warning.as_deref()
+    pub(crate) fn auth_binding(&self) -> Option<&Arc<AuthBinding>> {
+        self.auth.as_ref()
     }
 
     pub fn namespace(&self) -> Namespace<'_> {
@@ -421,28 +413,13 @@ impl Runtime {
             .as_ref()
             .and_then(|manifest| manifest.auth.as_ref())
             .map(ProviderAuthManifest::wasm_auth_manifest);
-        let auth = Arc::new(
-            AuthManager::from_config_manifest_service(
-                config.auth.as_ref(),
-                auth_manifest.as_ref(),
-                config.provider_name().as_str(),
-                Arc::clone(credential_service),
-            )
-            .map_err(|e| BuildError::ProviderProtocol(format!("auth config error: {e}")))?,
-        );
-
-        // Mount-start validation: a registered credential that is not usable
-        // yet does not block the mount from loading (reads that need it fail
-        // closed per the credential service), but it is worth a warn and a
-        // daemon-visible degraded signal rather than a silent wait for the
-        // first failing read.
-        let credential_warning = crate::auth::build_time_credential_warning(&auth);
-        if let Some(warning) = credential_warning.as_deref() {
-            warn!(
-                mount = mount_name,
-                warning, "mount credential is not ready at start"
-            );
-        }
+        let auth = binding_from_config(
+            config.auth.as_ref(),
+            auth_manifest.as_ref(),
+            config.provider_name().as_str(),
+            credential_service,
+        )
+        .map_err(|e| BuildError::ProviderProtocol(format!("auth config error: {e}")))?;
 
         let trees = Arc::new(TreeRefs::new());
         let git = git::GitExecutor::new(cloner, capability.clone(), trees.clone());
@@ -479,7 +456,6 @@ impl Runtime {
             provider_name: config.provider_name().to_string(),
             provider_id: config.provider.id,
             auth,
-            credential_warning,
             next_operation_id: AtomicU64::new(1),
             blob_cache,
             trees,

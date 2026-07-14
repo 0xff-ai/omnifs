@@ -163,7 +163,6 @@ mod tests {
             }],
             mounts: Vec::new(),
             providers: Vec::new(),
-            startup_credentials: Vec::new(),
         }
     }
 

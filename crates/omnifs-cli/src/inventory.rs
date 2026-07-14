@@ -5,7 +5,7 @@
 //! verdict decisions below are pure.
 
 use anyhow::Result;
-use omnifs_api::{CredentialHealth, DaemonStatus, FrontendDelivery, FsType, HealthState};
+use omnifs_api::{DaemonStatus, FrontendDelivery, FsType, HealthState};
 use omnifs_mtab::{MountKind, MountState};
 use omnifs_workspace::creds::FileStore;
 use omnifs_workspace::layout::WorkspaceLayout;
@@ -36,7 +36,6 @@ pub(crate) struct Inventory {
     pub(crate) frontends: Vec<FrontendStatus>,
     pub(crate) mounts: Vec<MountStatus>,
     pub(crate) providers: Vec<ProviderStatus>,
-    pub(crate) startup_credentials: Vec<StartupCredentialStatus>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -68,12 +67,6 @@ pub(crate) struct RunnerStatus {
 pub(crate) enum RunnerState {
     Attached,
     Failed,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub(crate) struct StartupCredentialStatus {
-    pub(crate) mount: String,
-    pub(crate) health: Option<CredentialHealth>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -496,20 +489,6 @@ impl Inventory {
             .collect();
         let mut daemon = DaemonObservation::from(daemon_probe);
         daemon.runtime = runtime;
-        let startup_credentials = daemon
-            .status
-            .as_ref()
-            .map(|status| {
-                status
-                    .mounts
-                    .iter()
-                    .map(|mount| StartupCredentialStatus {
-                        mount: mount.mount.clone(),
-                        health: mount.auth_health,
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
         Ok(Self {
             home: layout.config_dir,
             mount_revision,
@@ -520,7 +499,6 @@ impl Inventory {
             frontends,
             mounts,
             providers,
-            startup_credentials,
         })
     }
 
@@ -577,10 +555,6 @@ impl Inventory {
             .providers
             .iter()
             .any(|entry| entry.state == ProviderState::Missing)
-            || self
-                .startup_credentials
-                .iter()
-                .any(|entry| entry.health.is_some_and(CredentialHealth::needs_attention))
             || matches!(
                 self.daemon.state(),
                 DaemonState::Failed | DaemonState::Unreachable
@@ -613,7 +587,6 @@ impl Inventory {
             frontends,
             mounts,
             providers,
-            startup_credentials: Vec::new(),
         }
     }
 }

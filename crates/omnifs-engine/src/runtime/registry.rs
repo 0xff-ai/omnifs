@@ -22,15 +22,14 @@ pub(crate) const DEFAULT_REVALIDATE_SECS: u64 = 15 * 60;
 /// Registry of loaded WASM providers.
 ///
 /// Instantiates providers on demand and manages their lifecycle including
-/// per-mount timer-driven refresh tasks.
+/// per-mount timer-driven revalidation tasks.
 pub struct MountRuntimes {
     engine: wasmtime::Engine,
     caches: Arc<Caches>,
     cloner: Arc<GitCloner>,
     context: HostContext,
-    /// The single host-wide credential owner: store access, expiry, and OAuth
-    /// refresh for every mount. Shared so mounts resolving to the same
-    /// credential share one refresh state.
+    /// Shared store and OAuth transport retained for the lifetime of all
+    /// mount-owned bindings.
     credential_service: Arc<CredentialService>,
     instances: HashMap<String, Arc<Runtime>>,
     timer_shutdown: watch::Sender<bool>,
@@ -105,6 +104,23 @@ impl MountRuntimes {
                 registry.build_mount(&spec, capture_test_callouts)
             })
             .collect::<Result<Vec<_>, _>>()?;
+        for (index, left) in built.iter().enumerate() {
+            for right in built.iter().skip(index + 1) {
+                if let (Some(left), Some(right)) =
+                    (left.runtime.auth_binding(), right.runtime.auth_binding())
+                {
+                    if left.credential_id() == right.credential_id() && !left.same_runtime_as(right)
+                    {
+                        return Err(RegistryError::ConfigError(
+                            omnifs_auth::AuthError::CredentialBindingConflict {
+                                id: left.credential_id().clone(),
+                            }
+                            .to_string(),
+                        ));
+                    }
+                }
+            }
+        }
         registry.instances = built
             .iter()
             .map(|built| (built.mount.clone(), Arc::clone(&built.runtime)))
@@ -165,12 +181,7 @@ impl MountRuntimes {
         &self.context
     }
 
-    /// The host-wide credential owner, shared across every mount. The daemon
-    /// spawns the proactive OAuth refresh loop on this shared handle.
-    pub fn credential_service(&self) -> &Arc<CredentialService> {
-        &self.credential_service
-    }
-
+    /// The immutable runtime for one loaded mount.
     pub fn get(&self, mount: &str) -> Option<Arc<Runtime>> {
         self.instances.get(mount).cloned()
     }

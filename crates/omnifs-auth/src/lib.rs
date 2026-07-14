@@ -13,8 +13,8 @@ pub use request::{
     OAuthRequest,
 };
 pub use service::{
-    AuthUnavailable, CredentialHealth, CredentialService, CredentialStatus, REFRESH_WINDOW,
-    RefreshOutcome, RejectionEvidence, RevokeOutcome,
+    AuthBinding, AuthUnavailable, CredentialHealth, CredentialService, REFRESH_WINDOW,
+    RefreshOutcome, RejectionEvidence,
 };
 
 #[cfg(test)]

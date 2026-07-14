@@ -78,12 +78,6 @@ pub async fn run(args: &DaemonArgs) -> anyhow::Result<()> {
         )?)
     };
 
-    // Proactively refreshes every registered OAuth credential before it enters
-    // its refresh window, so a request-path authorization call almost never
-    // has to await a live refresh. Spawned on the shared credential service
-    // (not per-mount) so all startup credentials share one refresh owner.
-    let refresh_loop = registry.credential_service().spawn_refresh_loop();
-
     let rt = Handle::current();
     let inspector = init_global_from_env();
     if let Some(inspector) = &inspector {
@@ -114,7 +108,7 @@ pub async fn run(args: &DaemonArgs) -> anyhow::Result<()> {
     // Give the daemon a handle to the namespace so `POST /v1/frontend/attach-target`
     // can bind a TCP attach listener on a running daemon without a restart.
     daemon.set_namespace(Arc::clone(&namespace));
-    let result = daemon.run(previous, refresh_loop).await;
+    let result = daemon.run(previous).await;
     let served_mounts = registry.runtime_entries().len();
     telemetry.daemon_event(
         DaemonEvent::FrontendStopped,

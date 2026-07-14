@@ -2,8 +2,8 @@ use crate::callback::{LoopbackCallback, LoopbackEndpoint, accept_callback_reques
 use crate::request::ClientSideTokenLoginRequest;
 use crate::test_support::{FakeAuthServer, FakeBehavior, FakeOpener, FakeRevocationServer};
 use crate::{
-    AuthError, CredentialHealth, CredentialService, LoginRequest, OAuthClient, OAuthRequest,
-    OAuthRevokeOutcome, RefreshOutcome, RejectionEvidence, RevokeOutcome, UrlOpener,
+    AuthBinding, AuthError, CredentialService, LoginRequest, OAuthClient, OAuthRequest,
+    OAuthRevokeOutcome, RefreshOutcome, UrlOpener,
 };
 use omnifs_workspace::authn::{
     CredentialId, DevicePollCompat, OAuthFlow, OauthScheme, PkceManualCodeConfig,
@@ -12,6 +12,7 @@ use omnifs_workspace::authn::{
 use omnifs_workspace::creds::{
     CredentialEntry, CredentialStore, FileStore, MemoryStore, Refreshability,
 };
+use omnifs_workspace::mounts::OAuth as OAuthMount;
 use secrecy::{ExposeSecret, SecretString};
 use std::sync::Arc;
 use time::OffsetDateTime;
@@ -367,25 +368,27 @@ async fn device_code_refresh_does_not_require_redirect_uri() {
 }
 
 #[tokio::test]
-async fn report_rejected_401_single_flights_refresh_and_updates_health() {
+async fn binding_rejection_single_flights_refresh() {
     let fake = FakeAuthServer::start(FakeBehavior {
         refresh_delay_ms: 50,
         ..FakeBehavior::default()
     })
     .await;
-    let (service, store, id) = service_with_oauth(fake.loopback_scheme(None));
+    let (binding, store, id) = binding_with_oauth(fake.loopback_scheme(None));
     seed_oauth(store.as_ref(), &id, "old-access", "refresh-1", 3600);
-    service.authorization(&id).await.unwrap();
+    binding
+        .authorization_for("https://api.example.test/resource")
+        .await
+        .unwrap();
 
     // Collected eagerly so all tasks are spawned (and observe the pre-rotation
     // token) before any is awaited; a lazy iterator would serialize them.
     let handles: Vec<_> = (0..8)
         .map(|_| {
-            let service = Arc::clone(&service);
-            let id = id.clone();
+            let binding = Arc::clone(&binding);
             tokio::spawn(async move {
-                service
-                    .report_rejected(&id, RejectionEvidence::new(401, None))
+                binding
+                    .report_rejected_for_response("https://api.example.test/resource", 401, None)
                     .await
             })
         })
@@ -410,28 +413,24 @@ async fn report_rejected_401_single_flights_refresh_and_updates_health() {
             .expose_secret(),
         "access-refresh-1"
     );
-    assert!(
-        service
-            .health()
-            .into_iter()
-            .any(|status| { status.id == id && matches!(status.health, CredentialHealth::Ready) })
-    );
+    assert!(matches!(binding.health(), crate::CredentialHealth::Ready));
 }
 
 #[tokio::test]
 async fn report_rejected_403_bearer_invalid_token_refreshes() {
     let fake = FakeAuthServer::start(FakeBehavior::default()).await;
-    let (service, store, id) = service_with_oauth(fake.loopback_scheme(None));
+    let (binding, store, id) = binding_with_oauth(fake.loopback_scheme(None));
     seed_oauth(store.as_ref(), &id, "old-access", "refresh-1", 3600);
-    service.authorization(&id).await.unwrap();
+    binding
+        .authorization_for("https://api.example.test/resource")
+        .await
+        .unwrap();
 
-    let outcome = service
-        .report_rejected(
-            &id,
-            RejectionEvidence::new(
-                403,
-                Some(r#"Bearer realm="api", error="invalid_token""#.to_owned()),
-            ),
+    let outcome = binding
+        .report_rejected_for_response(
+            "https://api.example.test/resource",
+            403,
+            Some(r#"Bearer realm="api", error="invalid_token""#.to_owned()),
         )
         .await;
 
@@ -442,14 +441,18 @@ async fn report_rejected_403_bearer_invalid_token_refreshes() {
 #[tokio::test]
 async fn report_rejected_403_unrelated_challenge_does_not_refresh() {
     let fake = FakeAuthServer::start(FakeBehavior::default()).await;
-    let (service, store, id) = service_with_oauth(fake.loopback_scheme(None));
+    let (binding, store, id) = binding_with_oauth(fake.loopback_scheme(None));
     seed_oauth(store.as_ref(), &id, "old-access", "refresh-1", 3600);
-    service.authorization(&id).await.unwrap();
+    binding
+        .authorization_for("https://api.example.test/resource")
+        .await
+        .unwrap();
 
-    let outcome = service
-        .report_rejected(
-            &id,
-            RejectionEvidence::new(403, Some(r#"Bearer error="not_invalid_token""#.to_owned())),
+    let outcome = binding
+        .report_rejected_for_response(
+            "https://api.example.test/resource",
+            403,
+            Some(r#"Bearer error="not_invalid_token""#.to_owned()),
         )
         .await;
 
@@ -457,78 +460,129 @@ async fn report_rejected_403_unrelated_challenge_does_not_refresh() {
     assert_eq!(fake.refreshes(), 0);
 }
 
-#[tokio::test]
-async fn reload_reloads_store_value_for_next_authorization() {
-    let store: Arc<dyn CredentialStore> = Arc::new(MemoryStore::default());
-    let service = CredentialService::new(Arc::clone(&store), OAuthClient::new().unwrap());
-    let id = CredentialId::new("test-provider", "pat", "default").unwrap();
-    service.bind_static(id.clone()).unwrap();
-    store
-        .put(
-            &id,
-            &CredentialEntry::static_token(
-                SecretString::from("old-token".to_string()),
-                OffsetDateTime::now_utc(),
-            ),
-        )
-        .unwrap();
-
-    let old = service.authorization(&id).await.unwrap();
-    assert_eq!(old.expose_secret(), "old-token");
-    store
-        .put(
-            &id,
-            &CredentialEntry::static_token(
-                SecretString::from("new-token".to_string()),
-                OffsetDateTime::now_utc(),
-            ),
-        )
-        .unwrap();
-
-    let status = service.reload(&id).await.expect("bound credential");
-    assert_eq!(status.id, id);
-    assert!(matches!(status.health, CredentialHealth::StaticUnvalidated));
-    let new = service.authorization(&id).await.unwrap();
-
-    assert_eq!(new.expose_secret(), "new-token");
-}
-
 #[test]
 fn bind_reuses_identical_oauth_runtime_metadata_but_rejects_conflicts() {
-    let service = CredentialService::new(
+    let service = Arc::new(CredentialService::new(
         Arc::new(MemoryStore::default()),
         OAuthClient::new().unwrap(),
-    );
+    ));
     let id = CredentialId::new("test-provider", "oauth", "default").unwrap();
 
     let mut first = binding_scheme();
     first.inject_domains = vec!["first.example.test".to_owned()];
     first.inject_header_name = Some("X-First".to_owned());
     first.inject_value_prefix = "Token ".to_owned();
-    service
-        .bind_oauth(id.clone(), OAuthRequest::new(first))
+    let first = service
+        .bind_oauth(
+            id.clone(),
+            OAuthRequest::new(first),
+            vec!["first.example.test".to_owned()],
+            "X-First".to_owned(),
+            "Token ".to_owned(),
+        )
         .unwrap();
 
     let mut same_runtime = binding_scheme();
     same_runtime.inject_domains = vec!["second.example.test".to_owned()];
     same_runtime.inject_header_name = Some("X-Second".to_owned());
     same_runtime.inject_value_prefix = "Bearer ".to_owned();
-    service
-        .bind_oauth(id.clone(), OAuthRequest::new(same_runtime))
+    let second = service
+        .bind_oauth(
+            id.clone(),
+            OAuthRequest::new(same_runtime),
+            vec!["second.example.test".to_owned()],
+            "X-Second".to_owned(),
+            "Bearer ".to_owned(),
+        )
         .unwrap();
 
-    let mut conflicting = binding_scheme();
-    conflicting.default_scopes = vec!["write".to_owned()];
-    let error = service
-        .bind_oauth(id.clone(), OAuthRequest::new(conflicting))
-        .unwrap_err();
-    assert!(matches!(
-        &error,
-        AuthError::CredentialBindingConflict { id: error_id } if error_id == &id
+    let conflicting = binding_scheme();
+    let conflicting_request = OAuthRequest::from_mount_config(
+        Some(&OAuthMount {
+            client_id: Some("different-client".to_owned()),
+            ..OAuthMount::default()
+        }),
+        conflicting,
+    )
+    .unwrap();
+    let third = service
+        .bind_oauth(
+            id.clone(),
+            conflicting_request,
+            vec![],
+            "Authorization".to_owned(),
+            "Bearer ".to_owned(),
+        )
+        .unwrap();
+    assert!(first.same_runtime_as(&second));
+    assert!(!first.same_runtime_as(&third));
+}
+
+#[tokio::test]
+async fn shared_binding_adopts_fresh_stored_token_without_second_refresh() {
+    let fake = FakeAuthServer::start(FakeBehavior::default()).await;
+    let store: Arc<dyn CredentialStore> = Arc::new(MemoryStore::default());
+    let id = CredentialId::new("test-provider", "oauth", "default").unwrap();
+    seed_oauth(store.as_ref(), &id, "old-access", "refresh-1", 3600);
+    let http = reqwest::ClientBuilder::new()
+        .danger_accept_invalid_certs(true)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let service = Arc::new(CredentialService::new(
+        Arc::clone(&store),
+        OAuthClient::from_http_client(http),
     ));
+    let request = OAuthRequest::new(fake.loopback_scheme(None));
+    let first = Arc::new(
+        service
+            .bind_oauth(
+                id.clone(),
+                request.clone(),
+                vec!["api.example.test".to_owned()],
+                "Authorization".to_owned(),
+                "Bearer ".to_owned(),
+            )
+            .unwrap(),
+    );
+    let follower = Arc::new(
+        service
+            .bind_oauth(
+                id.clone(),
+                request,
+                vec!["api.example.test".to_owned()],
+                "Authorization".to_owned(),
+                "Bearer ".to_owned(),
+            )
+            .unwrap(),
+    );
+
+    first
+        .authorization_for("https://api.example.test/resource")
+        .await
+        .unwrap();
     assert_eq!(
-        error.to_string(),
-        format!("credential {id} has conflicting OAuth runtime metadata")
+        first
+            .report_rejected_for_response("https://api.example.test/resource", 401, None)
+            .await,
+        RefreshOutcome::Refreshed
+    );
+    assert_eq!(fake.refreshes(), 1);
+    assert_eq!(
+        follower
+            .report_rejected_for_response("https://api.example.test/resource", 401, None)
+            .await,
+        RefreshOutcome::Refreshed
+    );
+    assert_eq!(fake.refreshes(), 1);
+    assert_eq!(
+        follower
+            .authorization_for("https://api.example.test/resource")
+            .await
+            .unwrap()
+            .unwrap()
+            .1,
+        "Bearer access-refresh-1"
     );
 }
 
@@ -549,10 +603,10 @@ fn bind_rejects_stored_kind_mismatch() {
             ),
         )
         .unwrap();
-    let service = CredentialService::new(store, OAuthClient::new().unwrap());
+    let service = Arc::new(CredentialService::new(store, OAuthClient::new().unwrap()));
 
     assert!(matches!(
-        service.bind_static(id.clone()),
+        service.bind_static(id.clone(), vec![], "Authorization".to_owned(), "Bearer ".to_owned()),
         Err(AuthError::CredentialKindMismatch { id: error_id, .. }) if error_id == id
     ));
 }
@@ -562,12 +616,14 @@ fn bind_propagates_malformed_store_reads() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("credentials.json");
     std::fs::write(&path, b"not json").unwrap();
-    let service =
-        CredentialService::new(Arc::new(FileStore::new(path)), OAuthClient::new().unwrap());
+    let service = Arc::new(CredentialService::new(
+        Arc::new(FileStore::new(path)),
+        OAuthClient::new().unwrap(),
+    ));
     let id = CredentialId::new("test-provider", "pat", "default").unwrap();
 
     assert!(matches!(
-        service.bind_static(id),
+        service.bind_static(id, vec![], "Authorization".to_owned(), "Bearer ".to_owned()),
         Err(AuthError::CredentialStore(_))
     ));
 }
@@ -579,12 +635,15 @@ async fn invalid_grant_refresh_needs_consent_and_keeps_stored_entry() {
         ..FakeBehavior::default()
     })
     .await;
-    let (service, store, id) = service_with_oauth(fake.loopback_scheme(None));
+    let (binding, store, id) = binding_with_oauth(fake.loopback_scheme(None));
     seed_oauth(store.as_ref(), &id, "old-access", "refresh-1", 3600);
-    service.authorization(&id).await.unwrap();
+    binding
+        .authorization_for("https://api.example.test/resource")
+        .await
+        .unwrap();
 
-    let outcome = service
-        .report_rejected(&id, RejectionEvidence::new(401, None))
+    let outcome = binding
+        .report_rejected_for_response("https://api.example.test/resource", 401, None)
         .await;
 
     assert!(matches!(outcome, RefreshOutcome::RefreshFailed(_)));
@@ -597,64 +656,16 @@ async fn invalid_grant_refresh_needs_consent_and_keeps_stored_entry() {
             .expose_secret(),
         "old-access"
     );
-    assert!(service.health().into_iter().any(|status| {
-        status.id == id && matches!(status.health, CredentialHealth::NeedsConsent)
-    }));
     assert!(matches!(
-        service.authorization(&id).await,
+        binding.health(),
+        crate::CredentialHealth::NeedsConsent
+    ));
+    assert!(matches!(
+        binding
+            .authorization_for("https://api.example.test/resource")
+            .await,
         Err(crate::AuthUnavailable::NeedsConsent)
     ));
-}
-
-#[tokio::test]
-async fn needs_consent_credential_leaves_the_refresh_schedule() {
-    let fake = FakeAuthServer::start(FakeBehavior {
-        token_error: Some(("invalid_grant".to_owned(), "revoked".to_owned())),
-        ..FakeBehavior::default()
-    })
-    .await;
-    let (service, store, id) = service_with_oauth(fake.loopback_scheme(None));
-    seed_oauth(store.as_ref(), &id, "old-access", "refresh-1", 3600);
-    service.authorization(&id).await.unwrap();
-    assert!(service.earliest_oauth_deadline().is_some());
-
-    service
-        .report_rejected(&id, RejectionEvidence::new(401, None))
-        .await;
-
-    // A NeedsConsent credential's past-due deadline must not pin the loop's
-    // minimum, or it starves every other credential of proactive refresh.
-    assert!(service.earliest_oauth_deadline().is_none());
-}
-
-#[tokio::test]
-async fn revoke_and_delete_revokes_access_token_then_deletes_local_entry() {
-    let fake = FakeAuthServer::start(FakeBehavior::default()).await;
-    let revoke_fake = FakeRevocationServer::start().await;
-    let (service, store, id) =
-        service_with_oauth(fake.loopback_scheme(Some(revoke_fake.endpoint())));
-    seed_oauth(store.as_ref(), &id, "access-1", "refresh-1", 3600);
-
-    let outcome = service.revoke_and_delete(&id).await;
-
-    assert_eq!(outcome, RevokeOutcome::Revoked);
-    assert_eq!(revoke_fake.revoked_tokens(), ["access-1"]);
-    assert!(store.get(&id).unwrap().is_none());
-}
-
-#[tokio::test]
-async fn revoke_and_delete_deletes_local_entry_when_upstream_revoke_fails() {
-    let fake = FakeAuthServer::start(FakeBehavior::default()).await;
-    let revoke_fake = FakeRevocationServer::start_with_failure(true).await;
-    let (service, store, id) =
-        service_with_oauth(fake.loopback_scheme(Some(revoke_fake.endpoint())));
-    seed_oauth(store.as_ref(), &id, "access-1", "refresh-1", 3600);
-
-    let outcome = service.revoke_and_delete(&id).await;
-
-    assert!(matches!(outcome, RevokeOutcome::Failed { .. }));
-    assert_eq!(revoke_fake.revoked_tokens(), ["access-1"]);
-    assert!(store.get(&id).unwrap().is_none());
 }
 
 fn loopback_login_request(scheme: OauthScheme) -> crate::request::LoopbackLoginRequest {
@@ -686,13 +697,9 @@ fn device_code_login_request(scheme: OauthScheme) -> crate::request::DeviceCodeL
     request
 }
 
-fn service_with_oauth(
+fn binding_with_oauth(
     scheme: OauthScheme,
-) -> (
-    Arc<CredentialService>,
-    Arc<dyn CredentialStore>,
-    CredentialId,
-) {
+) -> (Arc<AuthBinding>, Arc<dyn CredentialStore>, CredentialId) {
     let store: Arc<dyn CredentialStore> = Arc::new(MemoryStore::default());
     let http = reqwest::ClientBuilder::new()
         .danger_accept_invalid_certs(true)
@@ -704,10 +711,17 @@ fn service_with_oauth(
         OAuthClient::from_http_client(http),
     ));
     let id = CredentialId::new("test-provider", "oauth", "default").unwrap();
-    service
-        .bind_oauth(id.clone(), OAuthRequest::new(scheme))
+    seed_oauth(store.as_ref(), &id, "old-access", "refresh-1", 3600);
+    let binding = service
+        .bind_oauth(
+            id.clone(),
+            OAuthRequest::new(scheme),
+            vec!["api.example.test".to_owned()],
+            "Authorization".to_owned(),
+            "Bearer ".to_owned(),
+        )
         .unwrap();
-    (service, store, id)
+    (Arc::new(binding), store, id)
 }
 
 fn binding_scheme() -> OauthScheme {

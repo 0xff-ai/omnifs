@@ -327,7 +327,7 @@ mod tests {
                 width: 120,
                 color: false,
             });
-        assert!(healthy_text.contains("API 7.0"));
+        assert!(healthy_text.contains("API 8.0"));
         assert!(!healthy_text.contains("Fix  omnifs"));
 
         let unreachable = report(DaemonState::Unreachable, false)

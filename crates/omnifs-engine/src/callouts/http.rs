@@ -13,12 +13,12 @@
 //! without re-buffering. That is the only reqwest type any caller ever
 //! sees.
 
-use crate::auth::AuthManager;
+use crate::auth::www_authenticate;
 use crate::callouts::{callout_denied, callout_internal, callout_network, record_outcome};
 use crate::capability::CapabilityChecker;
 use crate::log_redaction::{LogUrl, WitHeaders};
 use dashmap::DashMap;
-use omnifs_auth::RefreshOutcome;
+use omnifs_auth::{AuthBinding, RefreshOutcome};
 use omnifs_wit::provider::types as wit_types;
 use reqwest::Url;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
@@ -31,13 +31,13 @@ use tracing::warn;
 pub struct HttpStack {
     https_client: reqwest::Client,
     unix_clients: DashMap<PathBuf, reqwest::Client>,
-    auth: Arc<AuthManager>,
+    auth: Option<Arc<AuthBinding>>,
     capability: Arc<CapabilityChecker>,
 }
 
 impl HttpStack {
     pub fn new(
-        auth: Arc<AuthManager>,
+        auth: Option<Arc<AuthBinding>>,
         capability: Arc<CapabilityChecker>,
     ) -> Result<Self, reqwest::Error> {
         let https_client = Self::client_builder().build()?;
@@ -53,7 +53,7 @@ impl HttpStack {
 
     #[doc(hidden)]
     pub fn with_https_client(
-        auth: Arc<AuthManager>,
+        auth: Option<Arc<AuthBinding>>,
         capability: Arc<CapabilityChecker>,
         https_client: reqwest::Client,
     ) -> Self {
@@ -92,11 +92,18 @@ impl HttpStack {
         let response = self
             .send_once(reqwest_method.clone(), &parsed, url, headers, body, timeout)
             .await?;
-        match self
-            .auth
-            .report_rejected_for_response(url, response.status(), response.headers())
-            .await
-        {
+        let rejection = match &self.auth {
+            Some(auth) => {
+                auth.report_rejected_for_response(
+                    url,
+                    response.status().as_u16(),
+                    www_authenticate(response.headers()),
+                )
+                .await
+            },
+            None => RefreshOutcome::NotApplicable,
+        };
+        match rejection {
             RefreshOutcome::Refreshed => {
                 self.send_once(reqwest_method, &parsed, url, headers, body, timeout)
                     .await
@@ -117,11 +124,13 @@ impl HttpStack {
         body: Option<&[u8]>,
         timeout: Duration,
     ) -> Result<reqwest::Response, wit_types::CalloutResult> {
-        let auth_header = self
-            .auth
-            .authorization_for(url)
-            .await
-            .map_err(|error| callout_denied(format!("auth authorization failed: {error}")))?;
+        let auth_header = match &self.auth {
+            Some(auth) => auth
+                .authorization_for(url)
+                .await
+                .map_err(|error| callout_denied(format!("auth authorization failed: {error}")))?,
+            None => None,
+        };
 
         let header_map = match build_header_map(
             auth_header

@@ -29,11 +29,9 @@ use hyper_util::client::legacy::Client as HyperClient;
 use hyper_util::rt::TokioExecutor;
 use hyperlocal::{UnixConnector, Uri as UnixUri};
 use omnifs_api::{
-    API_MAJOR, API_MINOR, ApiError, CredentialStatus, DaemonStatus, ErrorCode,
-    FrontendAttachTargetReport, FrontendAttachTargetRequest, FrontendAttachTargetVsockReport,
-    FrontendDelivery, StopReport,
+    API_MAJOR, API_MINOR, ApiError, DaemonStatus, ErrorCode, FrontendAttachTargetReport,
+    FrontendAttachTargetRequest, FrontendAttachTargetVsockReport, FrontendDelivery, StopReport,
 };
-use omnifs_workspace::authn::CredentialId;
 use omnifs_workspace::layout::WorkspaceLayout;
 use omnifs_workspace::runtime_record::{Endpoint, RuntimeRecord};
 use serde::de::DeserializeOwned;
@@ -446,22 +444,6 @@ impl DaemonClient {
         Self::parse_ok_json(&raw, "daemon attach-target vsock request failed")
     }
 
-    pub(crate) async fn reload_credential_if_ready(
-        &self,
-        id: &CredentialId,
-    ) -> Result<Option<CredentialStatus>> {
-        if !self.ready().await {
-            return Ok(None);
-        }
-        self.require_compatible().await?;
-        let path = format!("/v1/credentials/{id}/reload");
-        let raw = self
-            .request(Method::POST, &path, None, REQUEST_TIMEOUT)
-            .await?
-            .ok_or_else(|| self.unavailable_error())?;
-        Self::parse_ok_json(&raw, "daemon credential reload request failed").map(Some)
-    }
-
     /// Ask the daemon to unmount its frontend and exit. `None` when no daemon
     /// answered, so the caller can fall back to a stale-mount sweep.
     pub(crate) async fn shutdown(&self) -> Result<Option<StopReport>> {
@@ -536,7 +518,6 @@ impl DaemonControlState {
 fn hint_for(code: ErrorCode) -> &'static str {
     match code {
         ErrorCode::AuthRequired => "Try: omnifs mount reauth <name>",
-        ErrorCode::CredentialNotFound => "Try: omnifs mount reauth <mount>",
         ErrorCode::DaemonShuttingDown => "Try: omnifs up",
         ErrorCode::MountNotFound => "Try: omnifs status",
         ErrorCode::SpecInvalid => "Try: inspect the mount spec and rerun omnifs up",
@@ -546,7 +527,7 @@ fn hint_for(code: ErrorCode) -> &'static str {
 
 fn exit_code_for(code: ErrorCode) -> ExitCode {
     match code {
-        ErrorCode::AuthRequired | ErrorCode::CredentialNotFound => ExitCode::AuthRequired,
+        ErrorCode::AuthRequired => ExitCode::AuthRequired,
         ErrorCode::DaemonShuttingDown => ExitCode::DaemonUnavailable,
         ErrorCode::MountNotFound | ErrorCode::SpecInvalid | ErrorCode::Internal => {
             ExitCode::GenericFailure
@@ -580,10 +561,6 @@ mod tests {
         assert_eq!(
             hint_for(ErrorCode::AuthRequired),
             "Try: omnifs mount reauth <name>"
-        );
-        assert_eq!(
-            hint_for(ErrorCode::CredentialNotFound),
-            "Try: omnifs mount reauth <mount>"
         );
         assert_eq!(hint_for(ErrorCode::DaemonShuttingDown), "Try: omnifs up");
         assert_eq!(hint_for(ErrorCode::Internal), "Try: omnifs doctor");

@@ -11,7 +11,6 @@
 //! skips the record.
 
 use crate::workspace::Workspace;
-use omnifs_api::CredentialHealth;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Record a completed CLI invocation. `cmd` is the top-level subcommand and
@@ -70,18 +69,6 @@ fn nudge_due(path: &std::path::Path) -> bool {
 
 async fn health_nudge(workspace: &Workspace) -> Option<String> {
     let inventory = crate::inventory::Inventory::collect(workspace).await.ok()?;
-    for mount in &inventory.startup_credentials {
-        if let Some(health) = mount.health
-            && health.needs_attention()
-        {
-            return Some(format!(
-                "mount `{}` has {}; run `omnifs mount reauth {}`",
-                mount.mount,
-                credential_health_noun(health),
-                mount.mount
-            ));
-        }
-    }
     for mount in inventory.mounts {
         match mount.auth {
             crate::inventory::AuthState::Missing { .. } => {
@@ -106,16 +93,4 @@ async fn health_nudge(workspace: &Workspace) -> Option<String> {
         }
     }
     None
-}
-
-fn credential_health_noun(health: CredentialHealth) -> &'static str {
-    match health {
-        CredentialHealth::Ready => "a ready credential",
-        CredentialHealth::ExpiringSoon => "an expiring credential",
-        CredentialHealth::Expired => "an expired credential",
-        CredentialHealth::RefreshFailed => "a credential refresh failure",
-        CredentialHealth::NeedsConsent => "a credential needing consent",
-        CredentialHealth::Missing => "a missing credential",
-        CredentialHealth::StaticUnvalidated => "an unvalidated static credential",
-    }
 }

@@ -392,7 +392,6 @@ fn lookup_header(headers: &[(String, String)], name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::AuthManager;
     use crate::capability::CapabilityChecker;
     use omnifs_caps::Allowlist;
 
@@ -465,8 +464,7 @@ mod tests {
             needs_git: false,
             unix_sockets: Vec::new(),
         });
-        let http =
-            Arc::new(HttpStack::new(Arc::new(AuthManager::none()), Arc::new(capability)).unwrap());
+        let http = Arc::new(HttpStack::new(None, Arc::new(capability)).unwrap());
         let executor = BlobExecutor::new(
             http,
             cache,

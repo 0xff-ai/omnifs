@@ -1,4 +1,4 @@
-//! Characterization: `AuthManager` OAuth refresh behavior.
+//! Characterization: mount-owned OAuth binding refresh behavior.
 //!
 //! `auth_test.rs` exercises these behaviors end to end through `HttpStack` and a
 //! live HTTPS API; this file exercises the same contract directly on the manager:
@@ -18,7 +18,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use omnifs_engine::test_support::auth::{AuthManager, RefreshOutcome, manager_with_store_and_http};
+use omnifs_engine::test_support::auth::{RefreshOutcome, binding_with_store_and_http};
 use omnifs_workspace::authn::CredentialId;
 use omnifs_workspace::authn::{
     AuthManifest, AuthScheme, OAuthFlow, OauthScheme, PkceManualCodeConfig, TokenEndpointAuthMethod,
@@ -37,7 +37,7 @@ const RESOURCE_URL: &str = "https://localhost/resource";
 #[tokio::test]
 async fn authorization_inside_refresh_window_refreshes_synchronously() {
     let tokens = FakeTokenServer::start(false).await;
-    let (auth, store, key) = oauth_manager(tokens.endpoint());
+    let (auth, store, key) = oauth_manager_expiring(tokens.endpoint());
     // 30s to expiry: inside the 60s window, so not "fresh".
     seed_oauth(store.as_ref(), &key, "old-access", "refresh-1", 30);
 
@@ -95,8 +95,6 @@ async fn authorization_outside_refresh_window_does_not_refresh() {
 /// refreshable rejection rotates the token exactly once.
 #[tokio::test]
 async fn response_401_is_refreshable_and_forced_refresh_rotates_once() {
-    use reqwest::StatusCode;
-
     let tokens = FakeTokenServer::start(false).await;
     let (auth, store, key) = oauth_manager(tokens.endpoint());
     seed_oauth(store.as_ref(), &key, "old-access", "refresh-1", 3600);
@@ -112,9 +110,8 @@ async fn response_401_is_refreshable_and_forced_refresh_rotates_once() {
         "authorization with a fresh token does not refresh"
     );
 
-    let empty = reqwest::header::HeaderMap::new();
     assert_eq!(
-        auth.report_rejected_for_response(RESOURCE_URL, StatusCode::UNAUTHORIZED, &empty)
+        auth.report_rejected_for_response(RESOURCE_URL, 401, None)
             .await,
         RefreshOutcome::Refreshed,
         "401 is refreshable"
@@ -141,14 +138,13 @@ async fn response_401_is_refreshable_and_forced_refresh_rotates_once() {
         .await
         .unwrap()
         .expect("oauth authorization header");
-    let mut invalid_token = reqwest::header::HeaderMap::new();
-    invalid_token.insert(
-        reqwest::header::WWW_AUTHENTICATE,
-        reqwest::header::HeaderValue::from_static("Bearer error=\"invalid_token\""),
-    );
     assert_eq!(
-        auth.report_rejected_for_response(RESOURCE_URL, StatusCode::FORBIDDEN, &invalid_token)
-            .await,
+        auth.report_rejected_for_response(
+            RESOURCE_URL,
+            403,
+            Some("Bearer error=\"invalid_token\"".to_owned())
+        )
+        .await,
         RefreshOutcome::Refreshed,
         "403 + invalid_token bearer challenge is refreshable"
     );
@@ -162,13 +158,13 @@ async fn response_401_is_refreshable_and_forced_refresh_rotates_once() {
         .unwrap()
         .expect("oauth authorization header");
     assert_eq!(
-        auth.report_rejected_for_response(RESOURCE_URL, StatusCode::FORBIDDEN, &empty)
+        auth.report_rejected_for_response(RESOURCE_URL, 403, None)
             .await,
         RefreshOutcome::NotApplicable,
         "a plain 403 is not refreshable"
     );
     assert_eq!(
-        auth.report_rejected_for_response(RESOURCE_URL, StatusCode::INTERNAL_SERVER_ERROR, &empty)
+        auth.report_rejected_for_response(RESOURCE_URL, 500, None)
             .await,
         RefreshOutcome::NotApplicable,
         "a 500 is not refreshable"
@@ -190,11 +186,7 @@ async fn invalid_grant_refresh_needs_consent_and_keeps_stored_credential() {
         .expect("oauth authorization header");
 
     let result = auth
-        .report_rejected_for_response(
-            RESOURCE_URL,
-            reqwest::StatusCode::UNAUTHORIZED,
-            &reqwest::header::HeaderMap::new(),
-        )
+        .report_rejected_for_response(RESOURCE_URL, 401, None)
         .await;
     assert!(
         matches!(result, RefreshOutcome::RefreshFailed(_)),
@@ -254,18 +246,46 @@ fn oauth_manifest(token_endpoint: String) -> AuthManifest {
     }
 }
 
-fn oauth_manager(token_endpoint: String) -> (AuthManager, Arc<dyn CredentialStore>, CredentialId) {
+fn oauth_manager(
+    token_endpoint: String,
+) -> (
+    Arc<omnifs_auth::AuthBinding>,
+    Arc<dyn CredentialStore>,
+    CredentialId,
+) {
     let store: Arc<dyn CredentialStore> = Arc::new(MemoryStore::default());
     let key = CredentialId::new("test-provider", "oauth", "default").unwrap();
+    seed_oauth(&*store, &key, "old-access", "refresh-1", 3600);
     let config = oauth_config();
-    let auth = manager_with_store_and_http(
+    let auth = binding_with_store_and_http(
         Some(&config),
         Some(&oauth_manifest(token_endpoint)),
         "test-provider",
         Arc::clone(&store),
         reqwest_oauth2::Client::new(),
     );
-    (auth, store, key)
+    (auth.expect("configured auth"), store, key)
+}
+
+fn oauth_manager_expiring(
+    token_endpoint: String,
+) -> (
+    Arc<omnifs_auth::AuthBinding>,
+    Arc<dyn CredentialStore>,
+    CredentialId,
+) {
+    let store: Arc<dyn CredentialStore> = Arc::new(MemoryStore::default());
+    let key = CredentialId::new("test-provider", "oauth", "default").unwrap();
+    seed_oauth(&*store, &key, "old-access", "refresh-1", 30);
+    let config = oauth_config();
+    let auth = binding_with_store_and_http(
+        Some(&config),
+        Some(&oauth_manifest(token_endpoint)),
+        "test-provider",
+        Arc::clone(&store),
+        reqwest_oauth2::Client::new(),
+    );
+    (auth.expect("configured auth"), store, key)
 }
 
 fn seed_oauth(

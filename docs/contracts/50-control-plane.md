@@ -13,7 +13,7 @@ Read this before touching `omnifs-cli`, `omnifs-daemon`, `omnifs-api`, lifecycle
 
 A single `omnifs` binary is both CLI and daemon. The runtime loop lives behind hidden `omnifs daemon`; there is no separate public `omnifsd` binary.
 
-The daemon exposes REST API 7.0, whose schema lives in `omnifs-api` and whose checked-in OpenAPI document is generated from the daemon implementation. API 7 removes mount mutation, explicit reconcile, hot-reconcile reporting, and failed-mount projections because desired state now crosses the daemon boundary only as an immutable startup revision. `FrontendInfo.mount_point` remains authoritative for that frontend, and credential material is never transmitted on the wire.
+The daemon exposes REST API 8.0, whose schema lives in `omnifs-api` and whose checked-in OpenAPI document is generated from the daemon implementation. API 8 removes mount mutation, explicit reconcile, hot-reconcile reporting, failed-mount projections, and daemon credential registry/reload routes because desired state and auth bindings cross the daemon boundary only as an immutable startup revision. `FrontendInfo.mount_point` remains authoritative for that frontend, and credential material is never transmitted on the wire.
 
 A host-native daemon serves the temporary REST control API locally over `$OMNIFS_HOME/control.sock`. The workspace directory is forced to `0700` and the socket to `0600`, so filesystem permissions authenticate every control request. The control API has no remote TCP listener, bearer-token mode, or environment-selected endpoint.
 
@@ -23,7 +23,7 @@ The CLI resolves the local control socket from its own workspace's `daemon.json`
 
 The control API is local-only over `$OMNIFS_HOME/control.sock`; its workspace directory and socket permissions authenticate requests. VFS TCP and vsock attachment listeners and their tokens are separate frontend transport and are not control API transport.
 
-The control API may expose operational state that contains no secrets. `GET /v1/credentials` reports registered credential ids, coarse health, expiry, and scopes only; it never reports access tokens, refresh tokens, client secrets, or header material. `POST /v1/credentials/{id}/reload` reloads a registered credential from the host store and returns the same non-secret status shape. `GET /v1/providers` reports installed artifacts grouped by provider name. Provider state is derived from exact mount pins, never install recency.
+The control API may expose operational state that contains no secrets. Mount health is reported with each `MountInfo`; the daemon has no credential enumeration or reload surface. Credential import and `mount reauth` write the host store and take effect on the next `omnifs up` or `omnifs apply`, while OAuth refresh remains live only for an already-bound mount. `GET /v1/providers` reports installed artifacts grouped by provider name. Provider state is derived from exact mount pins, never install recency.
 
 Mount wire payloads distinguish provider identity from provider naming. `provider_name` is the human/catalog slug used by credentials and UX. `provider_id` is the pinned provider content hash for the exact artifact the mount runs.
 

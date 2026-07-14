@@ -7,77 +7,9 @@
       "name": "MIT OR Apache-2.0",
       "identifier": "MIT OR Apache-2.0"
     },
-    "version": "7.0"
+    "version": "8.0"
   },
   "paths": {
-    "/v1/credentials": {
-      "get": {
-        "operationId": "credentials_list",
-        "responses": {
-          "200": {
-            "description": "registered credential health",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/CredentialStatus"
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/v1/credentials/{id}/reload": {
-      "post": {
-        "operationId": "credential_reload",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "description": "credential storage key",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "refreshed credential health",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/CredentialStatus"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "invalid credential id",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "credential not registered with the daemon",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/v1/events": {
       "get": {
         "summary": "Stream the inspector history snapshot followed by live records as\nnewline-framed JSON using the same wire format the raw TCP listener used to\nspeak, now chunk-encoded by HTTP. A lagged subscriber gets a\n`# dropped N events` comment line and resumes from the newest record.",
@@ -266,6 +198,54 @@
         }
       }
     },
+    "/v1/mounts/{name}/export": {
+      "get": {
+        "operationId": "mount_export",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "mount name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "canonical-store snapshot tar",
+            "content": {
+              "application/x-tar": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "mount not found",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "snapshot export failed",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/providers": {
       "get": {
         "operationId": "providers_list",
@@ -388,44 +368,6 @@
           "missing",
           "static_unvalidated"
         ]
-      },
-      "CredentialStatus": {
-        "type": "object",
-        "required": [
-          "id",
-          "health",
-          "scopes"
-        ],
-        "properties": {
-          "expires_at": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "RFC3339 expiry timestamp, when the credential carries one."
-          },
-          "health": {
-            "$ref": "#/components/schemas/CredentialHealth"
-          },
-          "id": {
-            "type": "string",
-            "description": "Credential storage key, e.g. `github:oauth:default`."
-          },
-          "refresh_failed_attempts": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int32",
-            "minimum": 0
-          },
-          "scopes": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          }
-        }
       },
       "DaemonBackend": {
         "oneOf": [
@@ -550,8 +492,8 @@
       "ErrorCode": {
         "type": "string",
         "enum": [
+          "unauthorized",
           "auth_required",
-          "credential_not_found",
           "mount_not_found",
           "spec_invalid",
           "daemon_shutting_down",

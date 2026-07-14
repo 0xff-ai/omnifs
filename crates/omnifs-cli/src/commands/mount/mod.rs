@@ -311,24 +311,11 @@ impl ReauthArgs {
             .await?
         };
         for key in target.keys() {
-            match workspace.daemon().reload_credential_if_ready(key).await {
-                Ok(Some(_)) => {
-                    output.row(&crate::ui::report::Row::new(
-                        crate::ui::style::Glyph::Done,
-                        format!("credential `{key}`"),
-                        "reloaded in running daemon",
-                    ));
-                },
-                Ok(None) => {},
-                Err(error) => {
-                    output.row(&crate::ui::report::Row::new(
-                        crate::ui::style::Glyph::Warn,
-                        format!("credential `{key}`"),
-                        format!("stored, but live reload failed: {error:#}"),
-                    ));
-                    output.note("run `omnifs up` to restart with the new credential");
-                },
-            }
+            output.row(&crate::ui::report::Row::new(
+                crate::ui::style::Glyph::Done,
+                format!("credential `{key}`"),
+                "stored; takes effect on the next `omnifs up` or `omnifs apply`",
+            ));
         }
         crate::telemetry::maybe_print_health_nudge(workspace, output.clone()).await;
         Ok(())

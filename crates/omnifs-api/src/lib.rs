@@ -16,7 +16,7 @@ pub mod events;
 
 /// Control API major version. The CLI refuses to talk to a daemon with a
 /// different major. Bump when routes or payloads change incompatibly.
-pub const API_MAJOR: u16 = 7;
+pub const API_MAJOR: u16 = 8;
 
 /// Control API minor version. The CLI warns but proceeds when the daemon's
 /// minor differs. Bump for additive, backward-compatible additions.
@@ -56,7 +56,6 @@ pub struct ApiError {
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
     AuthRequired,
-    CredentialNotFound,
     MountNotFound,
     SpecInvalid,
     DaemonShuttingDown,
@@ -329,19 +328,6 @@ impl CredentialHealth {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-pub struct CredentialStatus {
-    /// Credential storage key, e.g. `github:oauth:default`.
-    pub id: String,
-    pub health: CredentialHealth,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub refresh_failed_attempts: Option<u32>,
-    /// RFC3339 expiry timestamp, when the credential carries one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expires_at: Option<String>,
-    pub scopes: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct ProviderArtifact {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
@@ -421,10 +407,7 @@ pub struct FrontendAttachTargetVsockReport {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        CredentialHealth, CredentialStatus, FrontendAttachTargetRequest, FrontendDelivery,
-        FrontendInfo,
-    };
+    use super::{CredentialHealth, FrontendAttachTargetRequest, FrontendDelivery, FrontendInfo};
 
     #[test]
     fn frontend_attach_request_defaults_to_docker() {
@@ -454,22 +437,6 @@ mod tests {
         assert!(CredentialHealth::RefreshFailed.needs_attention());
         assert!(CredentialHealth::NeedsConsent.needs_attention());
         assert!(CredentialHealth::Missing.needs_attention());
-    }
-
-    #[test]
-    fn credential_wire_status_is_public_data_only() {
-        let status = CredentialStatus {
-            id: "github:oauth:default".to_string(),
-            health: CredentialHealth::Ready,
-            refresh_failed_attempts: None,
-            expires_at: Some("2026-07-05T12:00:00Z".to_string()),
-            scopes: vec!["repo".to_string()],
-        };
-        let json = serde_json::to_value(status).expect("credential status serializes");
-
-        assert_eq!(json["id"], "github:oauth:default");
-        assert_eq!(json["health"], "ready");
-        assert_eq!(json["expires_at"], "2026-07-05T12:00:00Z");
     }
 
     #[test]

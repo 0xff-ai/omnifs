@@ -1,5 +1,5 @@
 //! Control API server:
-//! `/v1/{ready,status,credentials,providers,mounts,shutdown,events}`.
+//! `/v1/{ready,status,providers,mounts,shutdown,events}`.
 //!
 //! Serves daemon runtime facts and shutdown, and the
 //! inspector event stream over HTTP on the local control socket. See
@@ -12,16 +12,12 @@ use axum::extract::{Path as UrlPath, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Json, Response};
 use omnifs_api::{
-    ApiError, CredentialHealth, CredentialStatus, DaemonBackend, DaemonHealth, DaemonStatus,
-    DaemonSubsystem, ErrorCode, FrontendAttachTargetReport, FrontendAttachTargetRequest,
+    ApiError, CredentialHealth, DaemonBackend, DaemonHealth, DaemonStatus, DaemonSubsystem,
+    ErrorCode, FrontendAttachTargetReport, FrontendAttachTargetRequest,
     FrontendAttachTargetVsockReport, FrontendDelivery, FrontendInfo, FsType, HealthState,
     MountInfo, ProviderArtifact, ProviderSummary, ReadyInfo, StopReport, SubsystemHealth,
 };
-use omnifs_auth::{
-    CredentialHealth as AuthCredentialHealth, CredentialStatus as AuthCredentialStatus,
-};
 use omnifs_engine::{Inspector, MountRuntimes};
-use omnifs_workspace::authn::CredentialId;
 use omnifs_workspace::provider::{Catalog, CatalogError, Provider};
 use omnifs_workspace::runtime_record::{
     AttachRecord, AttachTransport, FrontendKind as RecordFrontendKind, FrontendRecord,
@@ -33,7 +29,6 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use time::format_description::well_known::Rfc3339;
 use tokio_stream::StreamExt as _;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
@@ -73,7 +68,7 @@ fn validate_attach_token(token: &str) -> anyhow::Result<()> {
 
 #[derive(OpenApi)]
 #[openapi(
-    info(title = "omnifs daemon control API", version = "7.0"),
+    info(title = "omnifs daemon control API", version = "8.0"),
     components(schemas(
         ReadyInfo,
         ApiError,
@@ -89,7 +84,6 @@ fn validate_attach_token(token: &str) -> anyhow::Result<()> {
         DaemonBackend,
         MountInfo,
         CredentialHealth,
-        CredentialStatus,
         ProviderArtifact,
         ProviderSummary,
         StopReport,
@@ -629,15 +623,10 @@ impl Daemon {
     /// listener, restores persisted dynamic authority, and publishes the new
     /// record only after all required listeners are alive. The same method owns
     /// task joins, provider shutdown, record removal, and socket cleanup.
-    pub async fn run(
-        self: Arc<Self>,
-        previous: Option<RuntimeRecord>,
-        refresh_loop: tokio::task::JoinHandle<()>,
-    ) -> anyhow::Result<()> {
+    pub async fn run(self: Arc<Self>, previous: Option<RuntimeRecord>) -> anyhow::Result<()> {
         let result = self.run_inner(previous).await;
         let _ = self.shutdown_tx.send(true);
         self.stop_tasks().await;
-        refresh_loop.abort();
         self.registry.shutdown_all();
         self.runtime_record.remove();
         self.cleanup_sockets();
@@ -846,11 +835,7 @@ impl Daemon {
     fn control_status(&self) -> DaemonStatus {
         let entries = self.registry.runtime_entries();
         let mut mounts = Vec::with_capacity(entries.len());
-        let mut credential_degraded = Vec::new();
         for (mount, runtime) in entries {
-            if let Some(warning) = runtime.credential_warning() {
-                credential_degraded.push((mount.clone(), warning.to_string()));
-            }
             mounts.push(MountInfo {
                 provider_name: runtime.provider_name().to_string(),
                 provider_id: runtime.provider_id().to_string(),
@@ -861,13 +846,10 @@ impl Daemon {
             });
         }
         mounts.sort_by(|a, b| a.mount.cmp(&b.mount));
-        credential_degraded.sort_by(|a, b| a.0.cmp(&b.0));
-
         self.context.status(
             self.attach_serving.load(Ordering::Acquire),
             self.frontends.attached(),
             mounts,
-            &credential_degraded,
         )
     }
 
@@ -910,8 +892,6 @@ impl Daemon {
         OpenApiRouter::new()
             .routes(routes!(ready))
             .routes(routes!(status))
-            .routes(routes!(credentials_list))
-            .routes(routes!(credential_reload))
             .routes(routes!(providers_list))
             .routes(routes!(mounts_list))
             .routes(routes!(mount_inspect))
@@ -972,59 +952,6 @@ async fn ready(State(daemon): State<Arc<Daemon>>) -> Response {
 )]
 async fn status(State(daemon): State<Arc<Daemon>>) -> Json<DaemonStatus> {
     Json(daemon.control_status())
-}
-
-#[utoipa::path(
-    get,
-    path = "/v1/credentials",
-    operation_id = "credentials_list",
-    responses((status = 200, description = "registered credential health", body = [CredentialStatus])),
-)]
-async fn credentials_list(State(daemon): State<Arc<Daemon>>) -> Json<Vec<CredentialStatus>> {
-    let mut statuses = daemon
-        .registry
-        .credential_service()
-        .health()
-        .into_iter()
-        .map(api_credential_status)
-        .collect::<Vec<_>>();
-    statuses.sort_by(|a, b| a.id.cmp(&b.id));
-    Json(statuses)
-}
-
-#[utoipa::path(
-    post,
-    path = "/v1/credentials/{id}/reload",
-    operation_id = "credential_reload",
-    params(("id" = String, Path, description = "credential storage key")),
-    responses(
-        (status = 200, description = "refreshed credential health", body = CredentialStatus),
-        (status = 400, description = "invalid credential id", body = ApiError),
-        (status = 404, description = "credential not registered with the daemon", body = ApiError),
-    ),
-)]
-async fn credential_reload(
-    State(daemon): State<Arc<Daemon>>,
-    UrlPath(id): UrlPath<String>,
-) -> Response {
-    let id = match id.parse::<CredentialId>() {
-        Ok(id) => id,
-        Err(error) => {
-            return error_response(
-                StatusCode::BAD_REQUEST,
-                ErrorCode::SpecInvalid,
-                format!("invalid credential id `{id}`: {error}"),
-            );
-        },
-    };
-    match daemon.registry.credential_service().reload(&id).await {
-        Some(status) => Json(api_credential_status(status)).into_response(),
-        None => error_response(
-            StatusCode::NOT_FOUND,
-            ErrorCode::CredentialNotFound,
-            format!("credential `{id}` is not registered with the daemon"),
-        ),
-    }
 }
 
 #[utoipa::path(
@@ -1255,33 +1182,15 @@ fn error_response(status: StatusCode, code: ErrorCode, message: impl Into<String
         .into_response()
 }
 
-fn api_credential_status(status: AuthCredentialStatus) -> CredentialStatus {
-    let refresh_failed_attempts = match &status.health {
-        AuthCredentialHealth::RefreshFailed { attempts } => Some(*attempts),
-        _ => None,
-    };
-    CredentialStatus {
-        id: status.id.to_string(),
-        health: api_credential_health_kind(&status.health),
-        refresh_failed_attempts,
-        expires_at: status.expires_at.map(|expires_at| {
-            expires_at
-                .format(&Rfc3339)
-                .expect("OffsetDateTime formats as RFC3339")
-        }),
-        scopes: status.scopes,
-    }
-}
-
-fn api_credential_health_kind(health: &AuthCredentialHealth) -> CredentialHealth {
+fn api_credential_health_kind(health: &omnifs_auth::CredentialHealth) -> CredentialHealth {
     match health {
-        AuthCredentialHealth::Ready => CredentialHealth::Ready,
-        AuthCredentialHealth::ExpiringSoon => CredentialHealth::ExpiringSoon,
-        AuthCredentialHealth::Expired => CredentialHealth::Expired,
-        AuthCredentialHealth::RefreshFailed { .. } => CredentialHealth::RefreshFailed,
-        AuthCredentialHealth::NeedsConsent => CredentialHealth::NeedsConsent,
-        AuthCredentialHealth::Missing => CredentialHealth::Missing,
-        AuthCredentialHealth::StaticUnvalidated => CredentialHealth::StaticUnvalidated,
+        omnifs_auth::CredentialHealth::Ready => CredentialHealth::Ready,
+        omnifs_auth::CredentialHealth::ExpiringSoon => CredentialHealth::ExpiringSoon,
+        omnifs_auth::CredentialHealth::Expired => CredentialHealth::Expired,
+        omnifs_auth::CredentialHealth::RefreshFailed { .. } => CredentialHealth::RefreshFailed,
+        omnifs_auth::CredentialHealth::NeedsConsent => CredentialHealth::NeedsConsent,
+        omnifs_auth::CredentialHealth::Missing => CredentialHealth::Missing,
+        omnifs_auth::CredentialHealth::StaticUnvalidated => CredentialHealth::StaticUnvalidated,
     }
 }
 

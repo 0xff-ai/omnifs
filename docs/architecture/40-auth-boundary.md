@@ -25,7 +25,7 @@ Credential file protection is a local desktop trust boundary. It protects agains
 
 Provider metadata declares auth schemes, injection domains, header shape, flow type, scopes, and setup guidance. Metadata is generated from `#[omnifs_sdk::provider]` annotations and emitted by the provider macro as `omnifs.provider-metadata.v1` in the compiled Wasm.
 
-The host extracts that metadata and binds each mount's credential during startup, while generic auth behavior remains provider-agnostic. It does not branch on provider names.
+The host extracts that metadata and binds each mount's credential while building the immutable startup namespace, before publishing any runtime. Each mount owns its injection facts and loaded entry, while a shared credential service owns only durable storage, OAuth transport, and refresh single-flight. Generic auth behavior remains provider-agnostic, and it does not branch on provider names.
 
 Provider-specific OAuth details belong next to the provider, usually in `providers/<name>/README.md`, when they help a user understand setup or scope consequences.
 
