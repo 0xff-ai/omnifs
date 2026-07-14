@@ -989,7 +989,7 @@ impl ReadOnlyExport for Export {
         drop(inode);
 
         match body {
-            Body::Backing(_) => {},
+            Body::Backing(_) | Body::Synthetic(_) => {},
             Body::Node(node) => {
                 // Learn the exact size before the OPEN reply. The lookup that
                 // precedes OPEN already runs this probe, so this is the backstop
@@ -1005,7 +1005,6 @@ impl ReadOnlyExport for Export {
                 }
             },
             Body::Subtree { .. } => return Err(Status::IsDir),
-            Body::Synthetic(_) => {},
         }
         // The open records only the inode id; each read re-resolves the read
         // target from the inode, so a reattach that clears `NodeId`s never has to
