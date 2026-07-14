@@ -7,6 +7,7 @@ use omnifs_workspace::authn::AuthKind;
 use omnifs_workspace::creds::{CredentialStore, FileStore};
 
 use crate::auth::MountAuth;
+use crate::credential_target::CredentialTarget;
 use crate::stages::PromptMode;
 use crate::ui::consent::{Decision, Outcome, Plan, Receipt, Row};
 use crate::ui::output::Output;
@@ -24,13 +25,22 @@ impl RevokeArgs {
         let workspace = Workspace::resolve()?;
         output.intro(format!("omnifs mount revoke {}", self.name))?;
         let mounts = workspace.mounts()?;
-        let auth = MountAuth::load(workspace.catalog(), &mounts, &self.name)?;
-        let auth_config = auth
-            .spec()
+        let requested = mounts
+            .iter()
+            .find(|mount| mount.name.as_str() == self.name)
+            .ok_or_else(|| anyhow!("no mount config named `{}`", self.name))?;
+        let auth_config = requested
+            .config
             .auth
             .as_ref()
             .ok_or_else(|| anyhow!("mount `{}` has no configured credential", self.name))?;
-        let target = auth.credential_target()?;
+        let target = match auth_config.scheme() {
+            Some(scheme) => {
+                CredentialTarget::for_configured_auth(&requested.config, auth_config, Some(scheme))?
+            },
+            None => MountAuth::from_spec(workspace.catalog(), requested.config.clone())
+                .credential_target()?,
+        };
         let credential_id = target
             .primary_key()
             .cloned()
@@ -50,19 +60,30 @@ impl RevokeArgs {
             );
         }
         let oauth_request = if entry.is_some() && auth_config.kind() == AuthKind::OAuth {
-            Some(auth.oauth_request(auth_config.account(), &[])?.0)
+            Some(
+                MountAuth::from_spec(workspace.catalog(), requested.config.clone())
+                    .oauth_request(auth_config.account(), &[])?
+                    .0,
+            )
         } else {
             None
         };
 
         let mut affected_mounts = Vec::new();
-        for mount in mounts {
-            let candidate_auth = MountAuth::from_spec(workspace.catalog(), mount.config);
-            let Some(candidate_config) = candidate_auth.spec().auth.as_ref() else {
+        for mount in &mounts {
+            let Some(candidate_config) = mount.config.auth.as_ref() else {
                 continue;
             };
             let mount_name = mount.name.to_string();
-            let candidate = candidate_auth.credential_target()?;
+            let candidate = match candidate_config.scheme() {
+                Some(scheme) => CredentialTarget::for_configured_auth(
+                    &mount.config,
+                    candidate_config,
+                    Some(scheme),
+                )?,
+                None => MountAuth::from_spec(workspace.catalog(), mount.config.clone())
+                    .credential_target()?,
+            };
             if candidate.primary_key() == Some(&credential_id) {
                 if candidate_config.kind() != auth_config.kind() {
                     anyhow::bail!(
@@ -71,9 +92,10 @@ impl RevokeArgs {
                     );
                 }
                 if let Some(request) = oauth_request.as_ref() {
-                    let candidate_request = candidate_auth
-                        .oauth_request(candidate_config.account(), &[])?
-                        .0;
+                    let candidate_request =
+                        MountAuth::from_spec(workspace.catalog(), mount.config.clone())
+                            .oauth_request(candidate_config.account(), &[])?
+                            .0;
                     if !request.has_same_runtime_metadata(&candidate_request) {
                         return Err(omnifs_auth::AuthError::CredentialBindingConflict {
                             id: credential_id.clone(),
