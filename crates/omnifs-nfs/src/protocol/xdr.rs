@@ -231,5 +231,4 @@ mod tests {
         let mut reader = XdrReader::new(&bytes);
         assert!(matches!(reader.string(), Err(XdrError::InvalidUtf8)));
     }
-
 }

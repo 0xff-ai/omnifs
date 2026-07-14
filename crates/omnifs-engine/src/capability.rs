@@ -169,7 +169,9 @@ mod tests {
             config_raw: None,
         };
         let mut provider_caps = wit_types::RequestedCapabilities::empty();
-        provider_caps.unix_sockets.push("/tmp/provider.sock".to_owned());
+        provider_caps
+            .unix_sockets
+            .push("/tmp/provider.sock".to_owned());
 
         let checker = CapabilityChecker::from_config(&spec, &provider_caps, None);
 
