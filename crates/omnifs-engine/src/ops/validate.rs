@@ -46,10 +46,10 @@ where
         let Ok(result) = result else { return Ok(()) };
         match result {
             wit_types::LookupChildResult::Entry(entry) => {
-                self.segment_name(&entry.target.name)?;
+                Self::segment_name(&entry.target.name)?;
                 self.entry(&entry.target.kind)?;
                 for sibling in &entry.siblings {
-                    self.segment_name(&sibling.name)?;
+                    Self::segment_name(&sibling.name)?;
                     self.entry(&sibling.kind)?;
                 }
             },
@@ -67,7 +67,7 @@ where
         match result {
             wit_types::ListChildrenResult::Entries(listing) => {
                 for entry in &listing.entries {
-                    self.segment_name(&entry.name)?;
+                    Self::segment_name(&entry.name)?;
                     self.entry(&entry.kind)?;
                 }
             },
@@ -218,7 +218,7 @@ where
         }
     }
 
-    fn segment_name(&self, name: &str) -> std::result::Result<(), String> {
+    fn segment_name(name: &str) -> std::result::Result<(), String> {
         Segment::try_from(name)
             .map_err(|error| format!("dir-entry name {name:?} is not a valid segment: {error}"))
             .map(|_| ())
