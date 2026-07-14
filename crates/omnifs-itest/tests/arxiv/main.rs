@@ -284,10 +284,12 @@ fn category_listing_paginates() {
         &mut page0,
         (0..50)
             .map(|i| {
-                format!(
-                    r"<entry><id>http://arxiv.org/abs/2604.{i:05}v1</id></entry>",
-                    i = i + 1
-                )
+                let entry_id = if i == 24 {
+                    "malformed-entry-id".to_string()
+                } else {
+                    format!("http://arxiv.org/abs/2604.{:05}v1", i + 1)
+                };
+                format!(r"<entry><id>{entry_id}</id></entry>")
             })
             .fold(
                 br#"<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom">"#.to_vec(),
@@ -302,7 +304,7 @@ fn category_listing_paginates() {
     );
     match page0.result().unwrap() {
         OpResult::ListChildren(ListChildrenResult::Entries(listing)) => {
-            assert_eq!(listing.entries.len(), 50);
+            assert_eq!(listing.entries.len(), 49);
             assert!(matches!(listing.next_cursor, Some(Cursor::Page(1))));
         },
         other => panic!("expected paged listing, got {other:?}"),

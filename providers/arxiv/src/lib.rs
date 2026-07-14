@@ -236,8 +236,8 @@ impl CategoryKey {
 
     async fn recent(cx: DirCx, key: CategoryKey) -> Result<DirListing> {
         let page = cx.page_cursor(0);
-        let ids = fetch_category_page(&cx, key.category.as_ref(), page).await?;
-        let exhaustive = ids.len() < CATEGORY_PAGE_SIZE as usize;
+        let (raw_count, ids) = fetch_category_page(&cx, key.category.as_ref(), page).await?;
+        let exhaustive = raw_count < CATEGORY_PAGE_SIZE as usize;
         let entries = ids.into_iter().filter_map(|raw| {
             PaperId::from_decoded(&raw)
                 .ok()

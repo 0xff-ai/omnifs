@@ -62,13 +62,14 @@ pub(crate) async fn load_paper<S>(
 /// listing needs no provider state (the host echoes the cursor back).
 pub(crate) const CATEGORY_PAGE_SIZE: u32 = 50;
 
-/// Fetch one page of a category's most-recent papers and return their bare
-/// arXiv ids. Stateless: pagination is driven by `page` (the listing cursor).
+/// Fetch one page of a category's most-recent papers and return the raw entry
+/// count alongside their parseable bare arXiv ids. Stateless: pagination is
+/// driven by `page` (the listing cursor).
 pub(crate) async fn fetch_category_page<S>(
     cx: &Cx<S>,
     category: &str,
     page: u32,
-) -> Result<Vec<String>> {
+) -> Result<(usize, Vec<String>)> {
     let resp = cx
         .endpoint(ArxivApi)
         .get("/api/query")
@@ -79,10 +80,13 @@ pub(crate) async fn fetch_category_page<S>(
         .query("sortOrder", "descending")
         .send_checked()
         .await?;
-    Ok(category_entry_ids(resp.body())?
+    let entry_ids = category_entry_ids(resp.body())?;
+    let raw_count = entry_ids.len();
+    let ids = entry_ids
         .into_iter()
         .filter_map(|entry_id| arxiv_id_from_entry_id(&entry_id))
-        .collect())
+        .collect();
+    Ok((raw_count, ids))
 }
 
 fn category_entry_ids(feed_xml: &[u8]) -> Result<Vec<String>> {
