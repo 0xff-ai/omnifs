@@ -26,6 +26,8 @@ use crate::{
     WireError, WireNamespace, WireRequest, WireResponse, serve_connection,
 };
 
+const VALID_TOKEN: &str = "0123456789abcdef0123456789abcdef";
+
 /// A canned identity for tests that don't care about the specific value, only
 /// that a `Hello` carries one.
 fn test_identity() -> FrontendIdentity {
@@ -576,13 +578,50 @@ async fn unix_listener_end_to_end() {
     server.shutdown().await;
 }
 
+#[tokio::test]
+async fn startup_gate_holds_listener_until_ready_publication() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("ns.sock");
+    let server = VfsServer::new(StubNamespace::new(), "inst-startup-gate".to_string());
+    let _control_gate = server.begin_startup();
+    server.serve_local(socket.clone()).unwrap();
+
+    let mut stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
+    let hello = postcard::to_allocvec(&Handshake::Hello {
+        protocol: PROTOCOL,
+        token: None,
+        frontend: test_identity(),
+    })
+    .unwrap();
+    write_frame(&mut stream, &Frame::new(0, KIND_REQUEST, hello))
+        .await
+        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(25), read_frame(&mut stream))
+            .await
+            .is_err(),
+        "the listener must not serve before startup publication"
+    );
+
+    server.mark_ready();
+    let welcome = read_frame(&mut stream)
+        .await
+        .unwrap()
+        .expect("welcome after startup publication");
+    assert!(matches!(
+        postcard::from_bytes::<Handshake>(&welcome.body).unwrap(),
+        Handshake::Welcome { instance_id, .. } if instance_id == "inst-startup-gate"
+    ));
+    server.shutdown().await;
+}
+
 /// The Docker Desktop path end to end: a real TCP loopback listener, a real
 /// [`WireNamespace`] dialing it with the matching attach token.
 #[tokio::test]
 async fn tcp_listener_end_to_end() {
     let stub = StubNamespace::new();
     let (server, ListenerTarget::Tcp { addr, token }) =
-        start_tcp_server(stub, "inst-tcp-e2e", "secret-token")
+        start_tcp_server(stub, "inst-tcp-e2e", VALID_TOKEN)
     else {
         panic!("TCP server returned a non-TCP target")
     };
@@ -608,7 +647,7 @@ async fn tcp_listener_end_to_end() {
 async fn tcp_listener_rejects_wrong_token() {
     let stub = StubNamespace::new();
     let (server, ListenerTarget::Tcp { addr, .. }) =
-        start_tcp_server(stub, "inst-tcp-reject", "secret-token")
+        start_tcp_server(stub, "inst-tcp-reject", VALID_TOKEN)
     else {
         panic!("TCP server returned a non-TCP target")
     };
@@ -645,13 +684,13 @@ async fn unix_listener_with_token_end_to_end() {
         Arc::clone(&stub),
         socket.clone(),
         "inst-uds-token",
-        "secret-token",
+        VALID_TOKEN,
     );
 
     let mut stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
     let hello = postcard::to_allocvec(&Handshake::Hello {
         protocol: PROTOCOL,
-        token: Some("secret-token".to_string()),
+        token: Some(VALID_TOKEN.to_string()),
         frontend: test_identity(),
     })
     .unwrap();
@@ -670,7 +709,7 @@ async fn unix_listener_with_token_end_to_end() {
     server.shutdown().await;
     assert!(!socket.exists(), "dynamic UDS must be removed on shutdown");
 
-    let rebound = start_vsock_server(stub, socket.clone(), "inst-uds-rebound", "secret-token");
+    let rebound = start_vsock_server(stub, socket.clone(), "inst-uds-rebound", VALID_TOKEN);
     assert!(socket.exists(), "dynamic UDS must be bindable again");
     rebound.shutdown().await;
     assert!(!socket.exists(), "rebound UDS must be cleaned too");
@@ -681,7 +720,7 @@ async fn unix_listener_with_token_rejects_wrong_token() {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("ns.sock");
     let stub = StubNamespace::new();
-    let server = start_vsock_server(stub, socket.clone(), "inst-uds-reject", "secret-token");
+    let server = start_vsock_server(stub, socket.clone(), "inst-uds-reject", VALID_TOKEN);
 
     let mut stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
     let hello = postcard::to_allocvec(&Handshake::Hello {
@@ -704,6 +743,67 @@ async fn unix_listener_with_token_rejects_wrong_token() {
     server.shutdown().await;
 }
 
+#[tokio::test]
+async fn invalid_vsock_token_is_rejected_before_binding() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("invalid.sock");
+    let server = VfsServer::new(StubNamespace::new(), "inst-invalid-token".to_string());
+
+    let error = server
+        .ensure_vsock(socket.clone(), Some("not-a-valid-token".to_string()))
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(!socket.exists());
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn removing_dynamic_listener_recovers_readiness() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = VfsServer::new(StubNamespace::new(), "inst-readiness".to_string());
+    server.serve_local(dir.path().join("local.sock")).unwrap();
+    let (target, newly_bound) = server
+        .ensure_tcp_with_status(Ipv4Addr::LOCALHOST, 0, Some(VALID_TOKEN.to_string()))
+        .unwrap();
+    assert!(newly_bound);
+
+    server.mark_ready();
+    assert!(server.ready());
+    assert!(server.remove_listener(&target));
+    assert!(server.ready());
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn unix_listener_never_follows_an_existing_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("target.sock");
+    let socket = dir.path().join("listener.sock");
+    let target_listener = std::os::unix::net::UnixListener::bind(&target).unwrap();
+    symlink(&target, &socket).unwrap();
+    let server = VfsServer::new(StubNamespace::new(), "inst-symlink".to_string());
+
+    server.serve_local(socket.clone()).unwrap();
+
+    assert!(
+        !std::fs::symlink_metadata(&socket)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert!(target.exists(), "the symlink target must remain untouched");
+    server.shutdown().await;
+    assert!(
+        target.exists(),
+        "shutdown must remove only the owned listener"
+    );
+    drop(target_listener);
+}
+
 /// The manager's reconnect-forever loop, exercised over a real TCP socket:
 /// answer the handshake once as `inst-a`, sever the connection (a stand-in for
 /// the daemon dying), then answer a second dial to the same address as
@@ -721,7 +821,7 @@ async fn tcp_reconnect_fires_reattached_on_new_instance() {
     std_listener.set_nonblocking(true).unwrap();
     let listener = tokio::net::TcpListener::from_std(std_listener).unwrap();
     let rt = tokio::runtime::Handle::current();
-    let token = "secret-token".to_string();
+    let token = VALID_TOKEN.to_string();
 
     let attach_target = AttachTarget::Tcp {
         addr: addr.to_string(),
@@ -1272,10 +1372,14 @@ mod trace_propagation {
             TreeNamespace::single("test".to_string(), Arc::clone(&runtime), Handle::current());
 
         let server = VfsServer::new(tree_ns, "inst-trace".to_string());
-        let ListenerTarget::Tcp { addr, token } = server
-            .ensure_tcp("127.0.0.1".parse().unwrap(), 0, Some("secret".to_string()))
-            .unwrap()
-        else {
+        let target = server
+            .ensure_tcp(
+                "127.0.0.1".parse().unwrap(),
+                0,
+                Some(super::VALID_TOKEN.to_string()),
+            )
+            .unwrap();
+        let ListenerTarget::Tcp { addr, token } = target else {
             panic!("trace server returned a non-TCP target")
         };
 

@@ -25,7 +25,7 @@ use omnifs_engine::Namespace;
 use serde::Deserialize;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, UnixListener};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::JoinSet;
 
 use crate::frame::{Frame, KIND_EVENT, KIND_REQUEST, KIND_RESPONSE, read_frame, write_frame};
@@ -97,6 +97,7 @@ struct VfsState {
     ready: bool,
     readiness_enabled: bool,
     shutting_down: bool,
+    startup_gate: Option<watch::Sender<bool>>,
 }
 
 #[derive(Debug, Clone)]
@@ -249,6 +250,7 @@ impl VfsServer {
                 ready: false,
                 readiness_enabled: false,
                 shutting_down: false,
+                startup_gate: None,
             }),
             connection_tx,
             connection_task: Mutex::new(None),
@@ -292,7 +294,11 @@ impl VfsServer {
                         record.target == target && Arc::ptr_eq(&record.identity, &identity)
                     }) {
                         let record = state.listeners.remove(&target.kind());
-                        state.ready = false;
+                        state.ready = if state.readiness_enabled {
+                            listener_set_ready(&state)
+                        } else {
+                            false
+                        };
                         if let Some(path) = record.as_ref().and_then(|record| record.target.path())
                         {
                             unlink_socket(path);
@@ -337,12 +343,33 @@ impl VfsServer {
 
     /// Mark the currently bound listeners ready after startup restoration.
     pub fn mark_ready(&self) {
+        let startup_gate = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.readiness_enabled = true;
+            state.ready = listener_set_ready(&state);
+            state.startup_gate.clone()
+        };
+        if let Some(startup_gate) = startup_gate {
+            let _ = startup_gate.send(true);
+        }
+    }
+
+    /// Hold listener tasks behind one startup gate until the daemon has
+    /// published its durable runtime record.
+    pub fn begin_startup(&self) -> watch::Receiver<bool> {
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.readiness_enabled = true;
-        state.ready = listener_set_ready(&state);
+        if let Some(startup_gate) = &state.startup_gate {
+            return startup_gate.subscribe();
+        }
+        let (startup_gate, receiver) = watch::channel(false);
+        state.startup_gate = Some(startup_gate);
+        receiver
     }
 
     /// Bind the fixed local UDS before starting its accept task.
@@ -352,6 +379,7 @@ impl VfsServer {
         }
         let listener = bind_unix(&path, "local attach socket")?;
         self.install(ListenerTarget::Local { path }, Listener::Unix(listener))
+            .map(|(target, _)| target)
     }
 
     /// Bind or return the token-authenticated TCP listener for Docker delivery.
@@ -361,13 +389,26 @@ impl VfsServer {
         port: u16,
         requested_token: Option<String>,
     ) -> io::Result<ListenerTarget> {
+        self.ensure_tcp_with_status(bind_addr, port, requested_token)
+            .map(|(target, _)| target)
+    }
+
+    /// Bind or return the TCP listener and report whether this call created it.
+    /// Daemon persistence uses the ownership bit to roll back only a listener
+    /// created by the failing control operation.
+    pub fn ensure_tcp_with_status(
+        self: &Arc<Self>,
+        bind_addr: Ipv4Addr,
+        port: u16,
+        requested_token: Option<String>,
+    ) -> io::Result<(ListenerTarget, bool)> {
         if let Some(target) = self.existing(ListenerKind::Tcp) {
-            return Ok(target);
+            return Ok((target, false));
         }
+        let token = requested_token.map_or_else(generate_attach_token, validate_attach_token)?;
         let std_listener = std::net::TcpListener::bind((bind_addr, port))?;
         std_listener.set_nonblocking(true)?;
         let addr = std_listener.local_addr()?;
-        let token = requested_token.map_or_else(generate_attach_token, validate_attach_token)?;
         let listener = TcpListener::from_std(std_listener)?;
         self.install(ListenerTarget::Tcp { addr, token }, Listener::Tcp(listener))
     }
@@ -378,18 +419,70 @@ impl VfsServer {
         path: PathBuf,
         requested_token: Option<String>,
     ) -> io::Result<ListenerTarget> {
+        self.ensure_vsock_with_status(path, requested_token)
+            .map(|(target, _)| target)
+    }
+
+    /// Bind or return the vsock listener and report whether this call created it.
+    /// Daemon persistence uses the ownership bit to roll back only a listener
+    /// created by the failing control operation.
+    pub fn ensure_vsock_with_status(
+        self: &Arc<Self>,
+        path: PathBuf,
+        requested_token: Option<String>,
+    ) -> io::Result<(ListenerTarget, bool)> {
         if let Some(target) = self.existing(ListenerKind::Vsock) {
-            return Ok(target);
+            return Ok((target, false));
         }
-        let listener = bind_unix(&path, "vsock attach socket")?;
         let token = requested_token.map_or_else(generate_attach_token, validate_attach_token)?;
-        self.install(
-            ListenerTarget::Vsock {
-                socket_path: path,
-                token,
+        let target = ListenerTarget::Vsock {
+            socket_path: path.clone(),
+            token,
+        };
+        let listener = bind_unix(&path, "vsock attach socket")?;
+        match self.install(target, Listener::Unix(listener)) {
+            Ok(binding) => {
+                if !binding.1 && binding.0.path() != Some(path.as_path()) {
+                    unlink_socket(&path);
+                }
+                Ok(binding)
             },
-            Listener::Unix(listener),
-        )
+            Err(error) => {
+                unlink_socket(&path);
+                Err(error)
+            },
+        }
+    }
+
+    /// Remove one exact listener owned by this server.
+    pub fn remove_listener(&self, target: &ListenerTarget) -> bool {
+        let (task, path) = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let Some(record) = state.listeners.get(&target.kind()) else {
+                return false;
+            };
+            if &record.target != target {
+                return false;
+            }
+            let record = state
+                .listeners
+                .remove(&target.kind())
+                .expect("listener existed immediately before removal");
+            state.ready = if state.readiness_enabled {
+                listener_set_ready(&state)
+            } else {
+                false
+            };
+            (record.task, record.target.path().map(PathBuf::from))
+        };
+        task.abort();
+        if let Some(path) = path {
+            unlink_socket(&path);
+        }
+        true
     }
 
     /// Stop listeners and connection tasks, then remove owned UDS paths.
@@ -461,7 +554,11 @@ impl VfsServer {
                 .map(|record| record.target.clone());
         }
         if let Some(record) = state.listeners.remove(&kind) {
-            state.ready = false;
+            state.ready = if state.readiness_enabled {
+                listener_set_ready(&state)
+            } else {
+                false
+            };
             if let Some(path) = record.target.path() {
                 unlink_socket(path);
             }
@@ -473,11 +570,18 @@ impl VfsServer {
         self: &Arc<Self>,
         target: ListenerTarget,
         listener: Listener,
-    ) -> io::Result<ListenerTarget> {
+    ) -> io::Result<(ListenerTarget, bool)> {
         let kind = target.kind();
         if let Some(existing) = self.existing(kind) {
-            return Ok(existing);
+            return Ok((existing, false));
         }
+        let startup_gate = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .startup_gate
+            .as_ref()
+            .map(watch::Sender::subscribe);
         let target_for_task = target.clone();
         let identity = Arc::new(());
         let task_identity = Arc::clone(&identity);
@@ -495,6 +599,16 @@ impl VfsServer {
         let task = tokio::spawn(async move {
             if start_rx.await.is_err() {
                 return;
+            }
+            if let Some(mut startup_gate) = startup_gate {
+                let cancelled = if *startup_gate.borrow() {
+                    false
+                } else {
+                    startup_gate.changed().await.is_err() || !*startup_gate.borrow()
+                };
+                if cancelled {
+                    return;
+                }
             }
             accept_loop(
                 listener,
@@ -532,7 +646,7 @@ impl VfsServer {
         }
         drop(state);
         let _ = start_tx.send(());
-        Ok(target)
+        Ok((target, true))
     }
 }
 
@@ -674,8 +788,9 @@ fn bind_unix(path: &Path, description: &str) -> io::Result<UnixListener> {
         std::fs::create_dir_all(parent)?;
         std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
     }
-    if path.exists() {
-        match UnixStream::connect(path) {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => std::fs::remove_file(path)?,
+        Ok(_) => match UnixStream::connect(path) {
             Ok(_) => {
                 return Err(io::Error::new(
                     io::ErrorKind::AddrInUse,
@@ -691,10 +806,19 @@ fn bind_unix(path: &Path, description: &str) -> io::Result<UnixListener> {
                 std::fs::remove_file(path)?
             },
             Err(error) => return Err(error),
-        }
+        },
+        Err(error) => {
+            if error.kind() != io::ErrorKind::NotFound {
+                return Err(error);
+            }
+        },
     }
     let listener = UnixListener::bind(path)?;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    if let Err(error) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+        drop(listener);
+        std::fs::remove_file(path)?;
+        return Err(error);
+    }
     Ok(listener)
 }
 

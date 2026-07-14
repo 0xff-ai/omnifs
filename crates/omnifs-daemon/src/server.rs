@@ -154,34 +154,55 @@ impl RuntimeRecordStore {
         Ok(())
     }
 
-    fn set_attach(&self, target: AttachRecord) {
+    fn set_attach(&self, target: AttachRecord) -> anyhow::Result<()> {
         let mut guard = self
             .record
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(record) = guard.as_mut() {
-            record.set_attach(target);
-            if self.published.load(Ordering::Acquire)
-                && let Err(error) = record.write(&self.path)
-            {
-                warn!(%error, path = %self.path.display(), "failed to persist attach listener");
-            }
+        let Some(record) = guard.as_mut() else {
+            anyhow::bail!("runtime record has already been removed")
+        };
+        let previous = record.clone();
+        record.set_attach(target);
+        if self.published.load(Ordering::Acquire)
+            && let Err(error) = record.write(&self.path)
+        {
+            *record = previous;
+            return Err(error).with_context(|| {
+                format!(
+                    "persist attach listener in runtime record {}",
+                    self.path.display()
+                )
+            });
         }
+        Ok(())
     }
 
-    fn remove_attach(&self, target: &AttachRecord) {
+    fn remove_attach(&self, target: &AttachRecord) -> anyhow::Result<()> {
         let mut guard = self
             .record
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(record) = guard.as_mut() {
-            record.remove_attach(target);
-            if self.published.load(Ordering::Acquire)
-                && let Err(error) = record.write(&self.path)
-            {
-                warn!(%error, path = %self.path.display(), "failed to persist removed attach listener");
-            }
+        let Some(record) = guard.as_mut() else {
+            anyhow::bail!("runtime record has already been removed")
+        };
+        let previous = record.clone();
+        record.remove_attach(target);
+        if record.attach == previous.attach {
+            return Ok(());
         }
+        if self.published.load(Ordering::Acquire)
+            && let Err(error) = record.write(&self.path)
+        {
+            *record = previous;
+            return Err(error).with_context(|| {
+                format!(
+                    "persist removed attach listener in runtime record {}",
+                    self.path.display()
+                )
+            });
+        }
+        Ok(())
     }
 
     pub(crate) fn remove(&self) {
@@ -311,6 +332,9 @@ impl Daemon {
         bind_addr: AttachBindAddr,
         port: u16,
     ) -> anyhow::Result<AttachOutcome> {
+        if self.vfs.get().is_none_or(|vfs| !vfs.ready()) {
+            return Ok(AttachOutcome::NamespaceNotReady);
+        }
         self.ensure_attach_tcp_with_token(bind_addr, port, None)
     }
 
@@ -323,14 +347,31 @@ impl Daemon {
         let Some(vfs) = self.vfs.get() else {
             return Ok(AttachOutcome::NamespaceNotReady);
         };
-        let target = vfs
-            .ensure_tcp(bind_addr.0, port, requested_token)
+        let (target, newly_bound) = vfs
+            .ensure_tcp_with_status(bind_addr.0, port, requested_token)
             .context("bind namespace TCP listener")?;
-        self.runtime_record.set_attach(attach_record(&target)?);
+        let record = match attach_record(&target) {
+            Ok(record) => record,
+            Err(error) => {
+                if newly_bound {
+                    vfs.remove_listener(&target);
+                }
+                return Err(error);
+            },
+        };
+        if let Err(error) = self.runtime_record.set_attach(record) {
+            if newly_bound {
+                vfs.remove_listener(&target);
+            }
+            return Err(error);
+        }
         Ok(AttachOutcome::Bound(target))
     }
 
     pub fn ensure_attach_uds(&self) -> anyhow::Result<AttachOutcome> {
+        if self.vfs.get().is_none_or(|vfs| !vfs.ready()) {
+            return Ok(AttachOutcome::NamespaceNotReady);
+        }
         self.ensure_attach_uds_with_token(None)
     }
 
@@ -342,10 +383,24 @@ impl Daemon {
             return Ok(AttachOutcome::NamespaceNotReady);
         };
         let path = self.context.vsock_attach_socket();
-        let target = vfs
-            .ensure_vsock(path, requested_token)
+        let (target, newly_bound) = vfs
+            .ensure_vsock_with_status(path, requested_token)
             .context("bind namespace vsock listener")?;
-        self.runtime_record.set_attach(attach_record(&target)?);
+        let record = match attach_record(&target) {
+            Ok(record) => record,
+            Err(error) => {
+                if newly_bound {
+                    vfs.remove_listener(&target);
+                }
+                return Err(error);
+            },
+        };
+        if let Err(error) = self.runtime_record.set_attach(record) {
+            if newly_bound {
+                vfs.remove_listener(&target);
+            }
+            return Err(error);
+        }
         Ok(AttachOutcome::Bound(target))
     }
 
@@ -371,27 +426,33 @@ impl Daemon {
         let _ = self.events_tx.set(events_tx);
         let vfs = self.vfs.get().context("VFS server was not initialized")?;
         let listener_events = vfs.listener_events();
-        self.start_fixed_listeners()?;
+        let startup_gate = vfs.begin_startup();
+        self.start_fixed_listeners(startup_gate)?;
         self.restore_attach_listeners(previous.as_ref())?;
 
         check_startup_events(&mut events_rx)?;
+        // The VFS-owned startup gate keeps the bound control and namespace
+        // tasks from serving or exiting until this durable publication succeeds.
+        self.runtime_record.publish()?;
         vfs.mark_ready();
         anyhow::ensure!(
             vfs.ready(),
             "required namespace attach listener exited before readiness"
         );
-        self.runtime_record.publish()?;
         info!("namespace listeners ready");
         self.spawn_signal_task();
         self.supervise(&mut events_rx, listener_events).await
     }
 
-    fn start_fixed_listeners(self: &Arc<Self>) -> anyhow::Result<()> {
+    fn start_fixed_listeners(
+        self: &Arc<Self>,
+        startup_gate: tokio::sync::watch::Receiver<bool>,
+    ) -> anyhow::Result<()> {
         let control_socket = self.context.control_socket();
         let control_listener = self.context.bind_control_socket()?;
         self.track_socket(control_socket);
         let rt = tokio::runtime::Handle::current();
-        self.spawn_control_unix(control_listener, &rt)?;
+        self.spawn_control_unix(control_listener, &rt, startup_gate)?;
         let vfs = self.vfs.get().context("VFS server was not initialized")?;
         vfs.serve_local(self.context.local_attach_socket())
             .context("bind local namespace listener")?;
@@ -435,7 +496,7 @@ impl Daemon {
         if let Some(port) = self.context.attach_tcp_port()
             && self.vfs.get().is_some_and(|vfs| !vfs.ready())
         {
-            self.ensure_attach_tcp(AttachBindAddr::loopback(), port)?;
+            self.ensure_attach_tcp_with_token(AttachBindAddr::loopback(), port, None)?;
         }
         Ok(())
     }
@@ -462,8 +523,18 @@ impl Daemon {
                         if matches!(target, omnifs_vfs_wire::ListenerTarget::Local { .. }) {
                             anyhow::bail!("local namespace listener exited");
                         }
-                        self.runtime_record.remove_attach(&attach_record(&target)?);
-                        warn!(?target, "dynamic namespace listener exited; target is unavailable");
+                        self.runtime_record.remove_attach(&attach_record(&target)?)?;
+                        match &target {
+                            ListenerTarget::Local { path } => {
+                                warn!(transport = "local", path = %path.display(), "namespace listener exited; target is unavailable");
+                            },
+                            ListenerTarget::Tcp { addr, .. } => {
+                                warn!(transport = "tcp", address = %addr, "namespace listener exited; target is unavailable");
+                            },
+                            ListenerTarget::Vsock { socket_path, .. } => {
+                                warn!(transport = "vsock", path = %socket_path.display(), "namespace listener exited; target is unavailable");
+                            },
+                        }
                     },
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {},
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
@@ -502,6 +573,7 @@ impl Daemon {
         self: &Arc<Self>,
         listener: std::os::unix::net::UnixListener,
         rt: &tokio::runtime::Handle,
+        mut startup_gate: tokio::sync::watch::Receiver<bool>,
     ) -> std::io::Result<()> {
         listener.set_nonblocking(true)?;
         let listener = tokio::net::UnixListener::from_std(listener)?;
@@ -509,6 +581,15 @@ impl Daemon {
         let app = Self::router(Arc::clone(self));
         let daemon = Arc::clone(self);
         let task = rt.spawn(async move {
+            let cancelled = if *startup_gate.borrow() {
+                false
+            } else {
+                startup_gate.changed().await.is_err() || !*startup_gate.borrow()
+            };
+            if cancelled {
+                daemon.send_event(TaskEvent::Control);
+                return;
+            }
             if let Err(error) = axum::serve(listener, app).await {
                 warn!(%error, "control API server exited");
             }
@@ -973,23 +1054,60 @@ mod tests {
             ),
         );
 
-        store.set_attach(AttachRecord::Tcp {
-            addr: "127.0.0.1:1".to_string(),
-            token: "a".repeat(32),
-        });
+        store
+            .set_attach(AttachRecord::Tcp {
+                addr: "127.0.0.1:1".to_string(),
+                token: "a".repeat(32),
+            })
+            .unwrap();
         assert!(!path.exists());
         store.publish().unwrap();
-        store.set_attach(AttachRecord::Vsock {
-            socket_path: dir.path().join("vsock.sock"),
-            token: "b".repeat(32),
-        });
+        store
+            .set_attach(AttachRecord::Vsock {
+                socket_path: dir.path().join("vsock.sock"),
+                token: "b".repeat(32),
+            })
+            .unwrap();
         assert_eq!(RuntimeRecord::read(&path).unwrap().unwrap().attach.len(), 2);
 
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(
+            store
+                .set_attach(AttachRecord::Tcp {
+                    addr: "127.0.0.1:3".to_string(),
+                    token: "d".repeat(32),
+                })
+                .is_err()
+        );
+        assert!(
+            store
+                .remove_attach(&AttachRecord::Tcp {
+                    addr: "127.0.0.1:1".to_string(),
+                    token: "a".repeat(32),
+                })
+                .is_err()
+        );
+
+        std::fs::remove_dir(&path).unwrap();
+        store.publish().unwrap();
+        let recovered = RuntimeRecord::read(&path).unwrap().unwrap();
+        assert!(
+            recovered.attach.iter().any(
+                |target| matches!(target, AttachRecord::Tcp { addr, .. } if addr == "127.0.0.1:1")
+            ),
+            "failed persistence must roll back the in-memory replacement"
+        );
+        assert_eq!(recovered.attach.len(), 2);
         store.remove();
-        store.set_attach(AttachRecord::Tcp {
-            addr: "127.0.0.1:2".to_string(),
-            token: "c".repeat(32),
-        });
+        assert!(
+            store
+                .set_attach(AttachRecord::Tcp {
+                    addr: "127.0.0.1:2".to_string(),
+                    token: "c".repeat(32),
+                })
+                .is_err()
+        );
         assert!(!path.exists());
     }
 
@@ -1152,12 +1270,60 @@ mod tests {
             context,
             Arc::clone(&registry),
             None,
-            runtime_record,
+            Arc::clone(&runtime_record),
         ));
 
         let rt = tokio::runtime::Handle::current();
         let namespace = omnifs_engine::TreeNamespace::new(Arc::clone(&registry), rt.clone());
         daemon.set_namespace(Arc::clone(&namespace));
+
+        let router = super::Daemon::router(Arc::clone(&daemon));
+        let response = router
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/frontend/attach-target")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let vfs = daemon.vfs.get().unwrap();
+        vfs.serve_local(dir.path().join("local.sock")).unwrap();
+        vfs.mark_ready();
+
+        runtime_record.publish().unwrap();
+        std::fs::remove_file(&runtime_record.path).unwrap();
+        std::fs::create_dir(&runtime_record.path).unwrap();
+        let response = router
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/frontend/attach-target")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            vfs.ready(),
+            "rolling back a newly bound listener must preserve readiness"
+        );
+        std::fs::remove_dir(&runtime_record.path).unwrap();
+        runtime_record.publish().unwrap();
+        assert!(
+            omnifs_workspace::runtime_record::RuntimeRecord::read(&runtime_record.path)
+                .unwrap()
+                .unwrap()
+                .attach
+                .is_empty(),
+            "failed persistence must not retain the rolled-back listener"
+        );
 
         let target = match daemon
             .ensure_attach_tcp(super::AttachBindAddr::loopback(), 0)
@@ -1168,8 +1334,6 @@ mod tests {
                 panic!("the namespace was set before binding the attach listener")
             },
         };
-
-        let router = super::Daemon::router(Arc::clone(&daemon));
 
         assert_non_docker_attach_is_rejected(&router).await;
 
