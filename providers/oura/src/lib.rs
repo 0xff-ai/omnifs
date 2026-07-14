@@ -284,7 +284,7 @@ struct DailyCollectionKey {
     kind = "daily_collection",
     key = DailyCollectionKey
 )]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(serde::Deserialize)]
 #[serde(transparent)]
 struct DailyCollection(Value);
 

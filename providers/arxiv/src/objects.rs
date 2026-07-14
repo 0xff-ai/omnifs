@@ -1,7 +1,7 @@
 //! arXiv paper object, representations, and warm projections.
 
 use omnifs_sdk::prelude::*;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::json;
 
 use crate::PaperKey;
@@ -17,7 +17,7 @@ use crate::api::{
     canonical = Atom,
     decode = parse_paper_atom
 )]
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct Paper {
     pub raw_id: String,
     pub latest_version: u32,

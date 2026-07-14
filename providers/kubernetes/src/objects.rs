@@ -2,13 +2,13 @@
 
 use omnifs_sdk::prelude::*;
 use omnifs_sdk::repr::{Representable, Yaml};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::Value;
 
 use crate::State;
 use crate::api::KubeApi;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(transparent)]
 pub(crate) struct KubeManifest(Value);
 
@@ -49,7 +49,7 @@ impl KubeManifest {
 ///
 /// Canonical = JSON (cleaned manifest); decode round-trips via `serde_json`.
 #[omnifs_sdk::object(kind = "kubernetes.namespaced-resource", key = crate::NamespacedResourceKey)]
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(transparent)]
 pub(crate) struct NamespacedResource(KubeManifest);
 
@@ -138,7 +138,7 @@ impl Representable<Yaml> for NamespacedResource {
 ///
 /// Canonical = JSON (cleaned manifest); decode round-trips via `serde_json`.
 #[omnifs_sdk::object(kind = "kubernetes.cluster-resource", key = crate::ClusterResourceKey)]
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(transparent)]
 pub(crate) struct ClusterResource(KubeManifest);
 

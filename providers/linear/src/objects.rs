@@ -3,16 +3,15 @@
 use omnifs_core::ContentType;
 use omnifs_sdk::prelude::*;
 use omnifs_sdk::repr::{Markdown, Representable};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use crate::{IssueKey, TeamPath};
 
 #[omnifs_sdk::object(kind = "linear.issue", key = crate::IssueKey)]
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Issue {
     pub(crate) identifier: String,
-    pub(crate) number: u64,
     pub(crate) priority: Option<f64>,
     pub(crate) title: String,
     pub(crate) updated_at: Option<String>,
@@ -21,12 +20,12 @@ pub(crate) struct Issue {
     pub(crate) description: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub(crate) struct IssueState {
     pub(crate) name: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct IssueAssignee {
     pub(crate) display_name: Option<String>,
@@ -108,7 +107,7 @@ impl Representable<Markdown> for Issue {
 /// A Linear team, projected at `/teams/{team}`. The canonical `item.json` is the
 /// raw team node; the anchor also hosts the nested issue collection.
 #[omnifs_sdk::object(kind = "linear.team", key = crate::TeamPath)]
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Team {
     pub(crate) key: String,
