@@ -25,12 +25,13 @@ impl CapabilityChecker {
         Self { grants }
     }
 
-    /// Build the enforcement allowlist from a mount spec's grants plus the
-    /// provider's runtime-requested capabilities. A dynamic domain grant is
-    /// resolved from a `domains` string-array config field. A dynamic
-    /// unix-socket grant is resolved from the config field the provider marks as
-    /// a host socket. A malformed or missing value resolves to no grant, so the
-    /// provider is simply denied at callout time.
+    /// Build the enforcement allowlist from a mount spec's grants. Provider
+    /// runtime output may narrow use through `needs_git`, but it cannot add
+    /// grant values. A dynamic domain grant is resolved from a `domains`
+    /// string-array config field. A dynamic unix-socket grant is resolved from
+    /// the config field the provider marks as a host socket. A malformed or
+    /// missing value resolves to no grant, so the provider is simply denied at
+    /// callout time.
     #[must_use]
     pub fn from_config(
         config: &Spec,
@@ -67,14 +68,13 @@ fn allowlist_from_config(
 ) -> Allowlist {
     let grants = config.capabilities.as_ref();
 
-    let mut unix_sockets: Vec<PathBuf> = match grants.and_then(|g| g.unix_sockets.as_ref()) {
+    // Initialize output is untrusted and cannot widen the spec-owned socket
+    // grant, so `provider_caps.unix_sockets` is deliberately ignored.
+    let unix_sockets: Vec<PathBuf> = match grants.and_then(|g| g.unix_sockets.as_ref()) {
         Some(Grant::Literal(paths)) => paths.iter().map(PathBuf::from).collect(),
         Some(Grant::Dynamic(_)) => dynamic_socket(config, metadata).into_iter().collect(),
         None => Vec::new(),
     };
-    unix_sockets.extend(provider_caps.unix_sockets.iter().map(PathBuf::from));
-    unix_sockets.sort();
-    unix_sockets.dedup();
 
     Allowlist {
         domains: domains(config, grants.and_then(|g| g.domains.as_ref()), metadata),
@@ -142,4 +142,37 @@ pub(crate) fn config_str<'a>(config: &'a Spec, field: &str) -> Option<&'a str> {
         .as_ref()
         .and_then(|config| config.get(field))
         .and_then(serde_json::Value::as_str)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CapabilityChecker;
+    use omnifs_wit::provider::types as wit_types;
+    use omnifs_workspace::ids::{ProviderId, ProviderMeta, ProviderName, ProviderRef};
+    use omnifs_workspace::mounts::Spec;
+
+    #[test]
+    fn provider_requested_unix_socket_is_not_granted() {
+        let spec = Spec {
+            provider: ProviderRef {
+                id: ProviderId::from_wasm_bytes(b"test-provider"),
+                meta: ProviderMeta {
+                    name: ProviderName::new("test-provider").unwrap(),
+                    version: None,
+                },
+            },
+            mount: "test".to_owned(),
+            revalidate: true,
+            auth: None,
+            capabilities: None,
+            limits: None,
+            config_raw: None,
+        };
+        let mut provider_caps = wit_types::RequestedCapabilities::empty();
+        provider_caps.unix_sockets.push("/tmp/provider.sock".to_owned());
+
+        let checker = CapabilityChecker::from_config(&spec, &provider_caps, None);
+
+        assert!(checker.grants().unix_sockets.is_empty());
+    }
 }

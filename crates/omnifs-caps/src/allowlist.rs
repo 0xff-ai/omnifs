@@ -1,7 +1,8 @@
 //! The resolved runtime allowlist and the *decision* of whether a callout is
 //! permitted. The host resolves a mount's [`Grants`](crate::Grants) into an
-//! [`Allowlist`] (dynamic grants resolved to concrete values, runtime-requested
-//! additions merged) and calls these checks before every provider callout.
+//! [`Allowlist`] with dynamic grants resolved to concrete values, then calls
+//! these checks before every provider callout. Runtime provider output can
+//! narrow use but cannot add grant values.
 //! This crate owns the decision; the host owns enforcement (acting on it).
 
 use std::net::IpAddr;
