@@ -233,7 +233,7 @@ fn read_provider_metadata_bytes(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ids::ProviderName;
+    use crate::ids::{ProviderName, ProviderVersion};
     use crate::provider::Artifact;
     use crate::provider::sections::wasm_with_provider_metadata;
     use tempfile::tempdir;
@@ -264,6 +264,28 @@ mod tests {
         let catalog = Catalog::open(dir.path());
 
         assert_eq!(catalog.get(&id).unwrap().unwrap().id, id);
+
+        let mut index = store.read_index().unwrap();
+        index.providers[0].version = Some(ProviderVersion::new(""));
+        std::fs::write(
+            dir.path().join("index.json"),
+            serde_json::to_vec_pretty(&index).unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(
+            catalog.get(&id),
+            Err(CatalogError::ManifestMismatch {
+                field: "version",
+                ..
+            })
+        ));
+
+        index.providers[0].version = None;
+        std::fs::write(
+            dir.path().join("index.json"),
+            serde_json::to_vec_pretty(&index).unwrap(),
+        )
+        .unwrap();
 
         let path = store.artifact_path(&id);
         std::fs::write(&path, b"corrupt").unwrap();

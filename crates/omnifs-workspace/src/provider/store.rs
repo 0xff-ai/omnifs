@@ -37,6 +37,8 @@ pub enum StoreError {
         path: PathBuf,
         source: serde_json::Error,
     },
+    #[error("provider index at {} is not a regular file", path.display())]
+    IndexNotRegular { path: PathBuf },
     #[error("unsupported provider index version {0}")]
     Version(u32),
     #[error("provider index contains duplicate provider id {0}")]
@@ -56,6 +58,8 @@ pub enum StoreError {
     },
     #[error("failed to read provider artifact at {}: {source}", path.display())]
     ArtifactRead { path: PathBuf, source: io::Error },
+    #[error("provider index lock at {} is not a regular file", path.display())]
+    LockNotRegular { path: PathBuf },
 }
 
 /// One retained artifact in the index.
@@ -155,19 +159,25 @@ impl ProviderStore {
     /// Read the index, or an empty (version-stamped) one if it does not exist yet.
     pub fn read_index(&self) -> Result<Index, StoreError> {
         let path = self.index_path();
-        match fs::read(&path) {
-            Ok(bytes) => {
-                let index: Index = serde_json::from_slice(&bytes)
-                    .map_err(|source| StoreError::Index { path, source })?;
-                if index.version != INDEX_VERSION {
-                    return Err(StoreError::Version(index.version));
-                }
-                index.validate()?;
-                Ok(index)
-            },
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Index::empty()),
-            Err(source) => Err(StoreError::Io { path, source }),
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Index::empty()),
+            Err(source) => return Err(StoreError::Io { path, source }),
+        };
+        if !metadata.file_type().is_file() {
+            return Err(StoreError::IndexNotRegular { path });
         }
+        let bytes = fs::read(&path).map_err(|source| StoreError::Io {
+            path: path.clone(),
+            source,
+        })?;
+        let index: Index =
+            serde_json::from_slice(&bytes).map_err(|source| StoreError::Index { path, source })?;
+        if index.version != INDEX_VERSION {
+            return Err(StoreError::Version(index.version));
+        }
+        index.validate()?;
+        Ok(index)
     }
 
     fn retain_locked(&self, artifact: &Artifact, entry: IndexEntry) -> Result<(), StoreError> {
@@ -245,9 +255,13 @@ impl ProviderStore {
     }
 
     fn write_artifact_temp(&self, id: &ProviderId, bytes: &[u8]) -> Result<PathBuf, StoreError> {
+        self.write_temp(&format!(".{id}.wasm.tmp"), bytes)
+    }
+
+    fn write_temp(&self, prefix: &str, bytes: &[u8]) -> Result<PathBuf, StoreError> {
         loop {
             let path = self.root.join(format!(
-                ".{id}.wasm.tmp-{}-{}",
+                "{prefix}-{}-{}",
                 std::process::id(),
                 TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
             ));
@@ -262,6 +276,10 @@ impl ProviderStore {
                 let _ = fs::remove_file(&path);
                 return Err(StoreError::Io { path, source });
             }
+            if let Err(source) = file.sync_all() {
+                let _ = fs::remove_file(&path);
+                return Err(StoreError::Io { path, source });
+            }
             return Ok(path);
         }
     }
@@ -272,27 +290,51 @@ impl ProviderStore {
             path: path.clone(),
             source,
         })?;
-        let tmp = self.root.join(format!(
-            "{INDEX_FILE}.tmp-{}-{}",
-            std::process::id(),
-            TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
-        ));
-        write_file(&tmp, &bytes)?;
+        let tmp = self.write_temp(&format!("{INDEX_FILE}.tmp"), &bytes)?;
         fs::rename(&tmp, &path).map_err(|source| StoreError::Io { path, source })
     }
 
     fn lock(&self) -> Result<File, StoreError> {
         let path = self.root.join(LOCK_FILE);
-        let lock = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&path)
-            .map_err(|source| StoreError::Io {
-                path: path.clone(),
-                source,
-            })?;
+        let lock = loop {
+            match OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(lock) => break lock,
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    let metadata = match fs::symlink_metadata(&path) {
+                        Ok(metadata) => metadata,
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                        Err(source) => {
+                            return Err(StoreError::Io {
+                                path: path.clone(),
+                                source,
+                            });
+                        },
+                    };
+                    if !metadata.file_type().is_file() {
+                        return Err(StoreError::LockNotRegular { path });
+                    }
+                    break OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .open(&path)
+                        .map_err(|source| StoreError::Io {
+                            path: path.clone(),
+                            source,
+                        })?;
+                },
+                Err(source) => {
+                    return Err(StoreError::Io {
+                        path: path.clone(),
+                        source,
+                    });
+                },
+            }
+        };
         lock.lock_exclusive()
             .map_err(|source| StoreError::Io { path, source })?;
         Ok(lock)
@@ -301,13 +343,6 @@ impl ProviderStore {
 
 fn create_dir_all(path: &Path) -> Result<(), StoreError> {
     fs::create_dir_all(path).map_err(|source| StoreError::Io {
-        path: path.to_path_buf(),
-        source,
-    })
-}
-
-fn write_file(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
-    fs::write(path, bytes).map_err(|source| StoreError::Io {
         path: path.to_path_buf(),
         source,
     })
@@ -422,6 +457,33 @@ mod tests {
         .unwrap();
         let store = ProviderStore::new(dir.path());
         assert!(matches!(store.read_index(), Err(StoreError::Version(1))));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn store_rejects_preexisting_index_and_lock_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        let store = ProviderStore::new(dir.path());
+        let index_target = dir.path().join("index-target.json");
+        std::fs::write(&index_target, br#"{"version":2,"providers":[]}"#).unwrap();
+        symlink(&index_target, dir.path().join(INDEX_FILE)).unwrap();
+        assert!(matches!(
+            store.read_index(),
+            Err(StoreError::IndexNotRegular { .. })
+        ));
+
+        std::fs::remove_file(dir.path().join(INDEX_FILE)).unwrap();
+        let lock_target = dir.path().join("lock-target");
+        std::fs::write(&lock_target, b"").unwrap();
+        symlink(&lock_target, dir.path().join(LOCK_FILE)).unwrap();
+        let (_, artifact) = artifact("demo");
+        assert!(matches!(
+            store.retain(&artifact),
+            Err(StoreError::LockNotRegular { .. })
+        ));
+        assert!(!store.artifact_path(&artifact.id).exists());
     }
 
     #[test]
