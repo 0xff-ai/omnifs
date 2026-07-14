@@ -555,19 +555,15 @@ impl<S> Router<S> {
 
             match topology {
                 super::object::CollectionTopology::Nested => {
-                    let handler = collection.handler.clone();
-                    let view = child_view.clone();
-                    let boxed: super::handlers::BoxedDirHandler<S> =
-                        std::sync::Arc::new(move |dir_cx, caps| {
-                            let fut = handler(dir_cx, caps, view.clone());
+                    self.dirs.push(super::handlers::DirEntry {
+                        pattern: dir_pattern,
+                        handler: std::sync::Arc::new(move |dir_cx, caps| {
+                            let fut = (collection.handler)(dir_cx, caps, child_view.clone());
                             Box::pin(async move {
                                 fut.await
                                     .map(crate::projection::DirListing::from_projection)
                             })
-                        });
-                    self.dirs.push(super::handlers::DirEntry {
-                        pattern: dir_pattern,
-                        handler: boxed,
+                        }),
                         validator: collection.validator,
                     });
                 },
