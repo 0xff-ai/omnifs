@@ -546,6 +546,9 @@ fn scripted_setup_and_mount_add_do_not_prompt() {
 fn mount_add_same_artifact_collision_preserves_existing_spec() {
     let fixture = Fixture::new();
     install_web_provider(&fixture);
+    std::fs::remove_dir(fixture.home_path().join("mounts"))
+        .expect("remove fixture mounts dir to exercise fresh-home bootstrap");
+    assert!(!fixture.home_path().join("mounts").exists());
 
     let first = fixture.run(&[
         "mount",
@@ -561,7 +564,7 @@ fn mount_add_same_artifact_collision_preserves_existing_spec() {
     assert_eq!(
         exit_code(&first),
         0,
-        "first mount add failed\nstdout: {}\nstderr: {}",
+        "first mount add on a fresh home failed\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&first.stdout),
         String::from_utf8_lossy(&first.stderr)
     );
@@ -579,12 +582,9 @@ fn mount_add_same_artifact_collision_preserves_existing_spec() {
         "--config-json",
         r#"{"domains":["example.org"]}"#,
     ]);
-    assert_ne!(exit_code(&second), 0, "same-artifact collision must fail");
+    assert_ne!(exit_code(&second), 0, "mount-name collision must fail");
     let stderr = String::from_utf8_lossy(&second.stderr);
-    assert!(
-        stderr.contains("already exists for this provider artifact"),
-        "{stderr}"
-    );
+    assert!(stderr.contains("mount web already exists"), "{stderr}");
     assert!(
         stderr.contains("remove it first") && stderr.contains("different name"),
         "{stderr}"
