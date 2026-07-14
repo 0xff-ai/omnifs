@@ -245,7 +245,8 @@ mod tests {
             "id": name,
             "displayName": name,
             "provider": format!("{name}.wasm"),
-            "defaultMount": name
+            "defaultMount": name,
+            "refreshIntervalSecs": 0
         });
         let bytes = wasm_with_provider_metadata(
             EMPTY_WASM,

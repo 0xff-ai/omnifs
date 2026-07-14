@@ -338,7 +338,7 @@ where
     ReturnValidator::<F>::chunk(result, requested_length)
 }
 pub(crate) fn validate_initialize<F>(
-    result: &std::result::Result<wit_types::InitializeResult, wit_types::ProviderError>,
+    result: &std::result::Result<(), wit_types::ProviderError>,
     effects: &wit_types::Effects,
     tree_exists: F,
 ) -> std::result::Result<(), String>

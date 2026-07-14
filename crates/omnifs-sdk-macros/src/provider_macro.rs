@@ -32,28 +32,6 @@ pub struct ProviderArgs {
     timer: Option<TimerSpec>,
 }
 
-impl ProviderArgs {
-    fn requested_capabilities_tokens(&self) -> TokenStream2 {
-        let git = self
-            .capabilities
-            .iter()
-            .any(|need| matches!(need, omnifs_caps::AccessNeed::GitRepo { .. }));
-        let refresh = if let Some(timer) = &self.timer {
-            let interval = &timer.interval;
-            quote! { (#interval).as_secs() as u32 }
-        } else {
-            quote! { 0u32 }
-        };
-        quote! {
-            omnifs_sdk::prelude::RequestedCapabilities {
-                needs_git: #git,
-                refresh_interval_secs: #refresh,
-                ..omnifs_sdk::prelude::RequestedCapabilities::empty()
-            }
-        }
-    }
-}
-
 impl Parse for ProviderArgs {
     fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
         let mut args = Self {
@@ -476,24 +454,13 @@ impl ManifestFacts {
         })
     }
 
-    fn provider_info_tokens(&self) -> TokenStream2 {
-        let name = &self.name;
-        let display_name = &self.display_name;
-        quote! {
-            omnifs_sdk::prelude::ProviderInfo {
-                name: #name.to_string(),
-                version: env!("CARGO_PKG_VERSION").to_string(),
-                description: #display_name.to_string(),
-            }
-        }
-    }
-
     fn metadata_tokens(
         &self,
         config_type: &Type,
         capabilities: &[omnifs_caps::AccessNeed],
         limits: &omnifs_caps::LimitDeclarations,
         auth: Option<&syn::Expr>,
+        refresh_interval: &TokenStream2,
     ) -> TokenStream2 {
         let id = LitStr::new(&self.name, Span::call_site());
         let display_name = LitStr::new(&self.display_name, Span::call_site());
@@ -526,6 +493,7 @@ impl ManifestFacts {
                 version: #version,
                 wit_package: Some(omnifs_sdk::PROVIDER_WIT_PACKAGE.to_string()),
                 sdk_version: Some(omnifs_sdk::SDK_VERSION.to_string()),
+                refresh_interval_secs: #refresh_interval,
                 capabilities: ::std::vec![#(#capability_entries),*],
                 limits: #limits,
                 auth: #auth,
@@ -629,8 +597,6 @@ fn generate_lifecycle(
     config_type: &Type,
     state_type: &Type,
     start_kind: StartKind,
-    info_tokens: &TokenStream2,
-    caps_tokens: &TokenStream2,
 ) -> TokenStream2 {
     let start_call = match start_kind {
         StartKind::ConfigAndRouter => quote! { #type_name::start(config, &mut builder) },
@@ -647,7 +613,7 @@ fn generate_lifecycle(
                 config_bytes: Vec<u8>,
             ) -> (
                 core::result::Result<
-                    omnifs_sdk::omnifs::provider::types::InitializeResult,
+                    (),
                     omnifs_sdk::omnifs::provider::types::ProviderError,
                 >,
                 omnifs_sdk::omnifs::provider::types::Effects,
@@ -688,10 +654,8 @@ fn generate_lifecycle(
                 ROUTER.with(|slot| {
                     *slot.borrow_mut() = Some(std::rc::Rc::new(router));
                 });
-                let info = #info_tokens;
-                let capabilities = #caps_tokens;
                 (
-                    Ok(omnifs_sdk::omnifs::provider::types::InitializeResult { info, capabilities }),
+                    Ok(()),
                     omnifs_sdk::prelude::Effects::new().into_wit(),
                 )
             }
@@ -1047,25 +1011,24 @@ pub(crate) fn provider_impl(args: &ProviderArgs, input: ItemImpl) -> syn::Result
         ));
     }
     let manifest = ManifestFacts::from_args(args)?;
-    let info_tokens = manifest.provider_info_tokens();
-    let caps_tokens = args.requested_capabilities_tokens();
+    let refresh_interval = args.timer.as_ref().map_or_else(
+        || quote! { 0u32 },
+        |timer| {
+            let interval = &timer.interval;
+            quote! { (#interval).as_secs() as u32 }
+        },
+    );
     let metadata = manifest.metadata_tokens(
         config_type,
         &args.capabilities,
         &args.limits,
         args.auth.as_ref(),
+        &refresh_interval,
     );
     let provider_metadata = provider_metadata_impl_tokens(&metadata);
 
     let state_management = generate_state_management(state_type);
-    let lifecycle = generate_lifecycle(
-        &type_name,
-        config_type,
-        state_type,
-        start_kind,
-        &info_tokens,
-        &caps_tokens,
-    );
+    let lifecycle = generate_lifecycle(&type_name, config_type, state_type, start_kind);
     let namespace = generate_namespace(&type_name, state_type);
     let notify = generate_notify(&type_name, state_type, args.timer.as_ref());
 

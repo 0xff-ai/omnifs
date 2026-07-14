@@ -261,6 +261,7 @@ mod tests {
             "displayName": "Web",
             "provider": "web.wasm",
             "defaultMount": "web",
+            "refreshIntervalSecs": 0,
             "capabilities": [{
                 "kind": "domain",
                 "value": "resolved from config",

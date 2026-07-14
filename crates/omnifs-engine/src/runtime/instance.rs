@@ -93,7 +93,7 @@ enum Command {
 
 type InitializeTransport = std::result::Result<
     (
-        std::result::Result<wit_types::InitializeResult, wit_types::ProviderError>,
+        std::result::Result<(), wit_types::ProviderError>,
         wit_types::Effects,
     ),
     EngineError,
@@ -428,7 +428,7 @@ async fn drive_instance(
                                         .func()
                                         .typed::<
                                             (Vec<u8>,),
-                                            ((std::result::Result<wit_types::InitializeResult, wit_types::ProviderError>, wit_types::Effects),),
+                                            ((std::result::Result<(), wit_types::ProviderError>, wit_types::Effects),),
                                         >(&access)
                                 }) {
                                     Ok(initialize) => initialize

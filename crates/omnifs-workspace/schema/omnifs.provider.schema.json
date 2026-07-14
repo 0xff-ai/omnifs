@@ -52,6 +52,12 @@
       "description": "Filename of the provider WASM component.",
       "type": "string"
     },
+    "refreshIntervalSecs": {
+      "description": "Provider timer interval declared by `events(timer(...))`. Zero means\nthat the provider declares no timer event.",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
     "sdkVersion": {
       "description": "`omnifs-sdk` crate version used to generate the provider component.",
       "type": [
@@ -79,7 +85,8 @@
     "id",
     "displayName",
     "provider",
-    "defaultMount"
+    "defaultMount",
+    "refreshIntervalSecs"
   ],
   "$defs": {
     "AccessNeed": {

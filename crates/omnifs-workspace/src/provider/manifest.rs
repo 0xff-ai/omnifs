@@ -32,6 +32,9 @@ pub struct ProviderManifest {
     /// `omnifs-sdk` crate version used to generate the provider component.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sdk_version: Option<String>,
+    /// Provider timer interval declared by `events(timer(...))`. Zero means
+    /// that the provider declares no timer event.
+    pub refresh_interval_secs: u32,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capabilities: Vec<AccessNeed>,
     #[serde(default, skip_serializing_if = "LimitDeclarations::is_empty")]
@@ -443,7 +446,8 @@ mod tests {
         "id": "demo",
         "displayName": "Demo",
         "provider": "demo.wasm",
-        "defaultMount": "demo"
+        "defaultMount": "demo",
+        "refreshIntervalSecs": 0
     }"#;
 
     const DEMO_MANIFEST_VERSIONED: &[u8] = br#"{
@@ -451,7 +455,8 @@ mod tests {
         "displayName": "Demo",
         "provider": "demo.wasm",
         "defaultMount": "demo",
-        "version": "0.3.1"
+        "version": "0.3.1",
+        "refreshIntervalSecs": 60
     }"#;
 
     const DEMO_MANIFEST_CONTRACT_EVIDENCE: &[u8] = br#"{
@@ -460,15 +465,17 @@ mod tests {
         "provider": "demo.wasm",
         "defaultMount": "demo",
         "version": "0.3.1",
-        "witPackage": "package omnifs:provider@0.5.0;",
-        "sdkVersion": "0.2.1"
+        "witPackage": "package omnifs:provider@0.6.0;",
+        "sdkVersion": "0.2.1",
+        "refreshIntervalSecs": 0
     }"#;
 
     const INVALID_MANIFEST_BAD_ID: &[u8] = br#"{
         "id": "bad id!",
         "displayName": "Bad",
         "provider": "bad.wasm",
-        "defaultMount": "bad"
+        "defaultMount": "bad",
+        "refreshIntervalSecs": 0
     }"#;
 
     const INVALID_MANIFEST_MEMORY_CAPABILITY: &[u8] = br#"{
@@ -476,6 +483,7 @@ mod tests {
         "displayName": "Bad",
         "provider": "bad.wasm",
         "defaultMount": "bad",
+        "refreshIntervalSecs": 0,
         "capabilities": [
             { "kind": "memoryMb", "value": 1, "why": "bad" }
         ]
@@ -486,6 +494,7 @@ mod tests {
         "displayName": "Bad",
         "provider": "bad.wasm",
         "defaultMount": "bad",
+        "refreshIntervalSecs": 0,
         "limits": {
             "maxMemoryMb": { "value": 1.5, "why": "bad" }
         }
@@ -496,6 +505,7 @@ mod tests {
         "displayName": "Bad",
         "provider": "bad.wasm",
         "defaultMount": "bad",
+        "refreshIntervalSecs": 0,
         "limits": {
             "maxMemoryMb": { "value": 4294967296, "why": "bad" }
         }
@@ -506,6 +516,7 @@ mod tests {
         "displayName": "Bad",
         "provider": "bad.wasm",
         "defaultMount": "bad",
+        "refreshIntervalSecs": 0,
         "config": {
             "fields": [
                 {
@@ -522,6 +533,7 @@ mod tests {
         "displayName": "Demo",
         "provider": "demo.wasm",
         "defaultMount": "demo",
+        "refreshIntervalSecs": 0,
         "capabilities": [
             { "kind": "domain", "value": "api.demo.test", "why": "Fetch Demo API resources." }
         ],
@@ -553,6 +565,7 @@ mod tests {
         "displayName": "Confidential",
         "provider": "conf.wasm",
         "defaultMount": "conf",
+        "refreshIntervalSecs": 0,
         "capabilities": [
             { "kind": "domain", "value": "api.conf.test", "why": "Fetch confidential API resources." }
         ],
@@ -619,17 +632,20 @@ mod tests {
 
         let stamped = ProviderManifest::from_bytes(DEMO_MANIFEST_VERSIONED).unwrap();
         assert_eq!(stamped.version.as_deref(), Some("0.3.1"));
+        assert_eq!(stamped.refresh_interval_secs, 60);
         let reencoded = serde_json::to_value(&stamped).unwrap();
         assert_eq!(reencoded["version"], "0.3.1");
+        assert_eq!(reencoded["refreshIntervalSecs"], 60);
 
         let contract = ProviderManifest::from_bytes(DEMO_MANIFEST_CONTRACT_EVIDENCE).unwrap();
         assert_eq!(
             contract.wit_package.as_deref(),
-            Some("package omnifs:provider@0.5.0;")
+            Some("package omnifs:provider@0.6.0;")
         );
         assert_eq!(contract.sdk_version.as_deref(), Some("0.2.1"));
         let reencoded = serde_json::to_value(&contract).unwrap();
-        assert_eq!(reencoded["witPackage"], "package omnifs:provider@0.5.0;");
+        assert_eq!(reencoded["witPackage"], "package omnifs:provider@0.6.0;");
+        assert_eq!(reencoded["refreshIntervalSecs"], 0);
         assert_eq!(reencoded["sdkVersion"], "0.2.1");
     }
 
@@ -696,6 +712,7 @@ mod tests {
             "displayName": "Web",
             "provider": "omnifs_provider_web.wasm",
             "defaultMount": "web",
+            "refreshIntervalSecs": 0,
             "capabilities": [
                 {
                     "kind": "domain",
@@ -720,6 +737,7 @@ mod tests {
             "displayName": "Bad",
             "provider": "bad.wasm",
             "defaultMount": "bad",
+            "refreshIntervalSecs": 0,
             "capabilities": [
                 {
                     "kind": "gitRepo",
@@ -848,6 +866,7 @@ mod tests {
             "displayName": "BYO",
             "provider": "byo.wasm",
             "defaultMount": "byo",
+            "refreshIntervalSecs": 0,
             "capabilities": [
                 { "kind": "domain", "value": "api.byo.test", "why": "Fetch BYO API resources." }
             ],
@@ -894,6 +913,7 @@ mod tests {
             "displayName": "Linear",
             "provider": "omnifs_provider_linear.wasm",
             "defaultMount": "linear",
+            "refreshIntervalSecs": 0,
             "capabilities": [
                 {
                     "kind": "domain",

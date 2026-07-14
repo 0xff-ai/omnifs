@@ -1,4 +1,4 @@
-package omnifs:provider@0.5.0;
+package omnifs:provider@0.6.0;
 
 // === Shared types ===
 
@@ -270,11 +270,6 @@ interface types {
         eof: bool,
     }
 
-    record initialize-result {
-        info: provider-info,
-        capabilities: requested-capabilities,
-    }
-
     // --- Data types ---
 
     record http-request {
@@ -343,77 +338,6 @@ interface types {
         error,
     }
 
-    record provider-info {
-        name: string,
-        version: string,
-        description: string,
-    }
-
-    /// An authority-bearing capability the provider declares it needs (the
-    /// manifest "needs" side; the mount spec grants the matching capability
-    /// and the host enforces the grant). Mirrors `omnifs-caps` `AccessNeed`.
-    variant access-need {
-        domain(string-need),
-        git-repo(string-need),
-        unix-socket(string-need),
-        preopened-path(string-need),
-    }
-
-    record string-need {
-        value: string,
-        why: string,
-        /// The literal value is resolved at init (e.g. a docker socket from the
-        /// configured endpoint) rather than declared statically.
-        dynamic: bool,
-    }
-
-    record scalar-limit {
-        amount: u64,
-        why: string,
-    }
-
-    record provider-limits {
-        max-memory-mb: option<scalar-limit>,
-        max-fetch-blob-bytes: option<scalar-limit>,
-    }
-
-    /// The provider manifest: the versioned provider/host contract describing
-    /// identity, declared capability needs, and config metadata. The build step
-    /// embeds this as a static global the host reads BEFORE instantiation (to
-    /// build the capability sandbox), so it is never a runtime call. Being a
-    /// WIT type, its shape is versioned with the `omnifs:provider` package, so
-    /// a manifest-shape change is caught by the same contract-evidence check as
-    /// any other contract change. Auth is added to this record in a later
-    /// iteration; until then auth stays out of the typed manifest.
-    record provider-manifest {
-        id: string,
-        display-name: string,
-        default-mount: string,
-        /// Provider crate version (`CARGO_PKG_VERSION`); catalog/UI context,
-        /// never identity.
-        version: string,
-        capabilities: list<access-need>,
-        limits: provider-limits,
-        /// Serialized JSON Schema of the provider config, derived at build time
-        /// via schemars. `none` for a provider with no config.
-        config-schema: option<string>,
-    }
-
-    record requested-capabilities {
-        domains: list<string>,
-        /// Absolute unix socket paths the provider may open via the
-        /// `unix:` URL scheme. The host grants the union of these
-        /// provider-declared sockets and any instance-configured
-        /// sockets.
-        unix-sockets: list<string>,
-        auth-types: list<string>,
-        max-memory-mb: u32,
-        needs-git: bool,
-        needs-websocket: bool,
-        needs-streaming: bool,
-        refresh-interval-secs: u32,
-    }
-
     variant provider-event {
         file-changed(string),
         webhook-received(list<u8>),
@@ -425,13 +349,13 @@ interface types {
 // === Provider exports ===
 
 interface lifecycle {
-    use types.{effects, initialize-result, provider-error};
+    use types.{effects, provider-error};
 
     /// Terminal-only in this iteration. It has no correlation id, so it
     /// cannot suspend on callouts unless the interface is explicitly
     /// changed later.
     initialize: func(config: list<u8>)
-        -> tuple<result<initialize-result, provider-error>, effects>;
+        -> tuple<result<_, provider-error>, effects>;
     shutdown: func();
 }
 

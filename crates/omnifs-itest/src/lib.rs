@@ -84,20 +84,19 @@ impl RuntimeHarness {
         // manifest defaults into the spec before serving, so the harness exercises
         // the same already-hydrated spec the daemon sees in production.
         let catalog = Catalog::open(providers_dir.path());
-        if let Some(provider) = catalog
+        let provider = catalog
             .get(&spec.provider.id)
             .map_err(|error| BuildError::InvalidConfig(error.to_string()))?
-        {
-            let manifest = provider
-                .manifest()
-                .map_err(|error| BuildError::InvalidConfig(error.to_string()))?;
-            spec.apply_provider_metadata(
-                &manifest,
-                omnifs_workspace::mounts::ProviderMetadataInheritance::all(),
-            )
+            .ok_or_else(|| BuildError::InvalidConfig("pinned provider missing".to_string()))?;
+        let manifest = provider
+            .manifest()
             .map_err(|error| BuildError::InvalidConfig(error.to_string()))?;
-        }
-        let wasm_path = catalog.provider_path_by_id(&spec.provider.id);
+        spec.apply_provider_metadata(
+            &manifest,
+            omnifs_workspace::mounts::ProviderMetadataInheritance::all(),
+        )
+        .map_err(|error| BuildError::InvalidConfig(error.to_string()))?;
+        let wasm_path = provider.wasm_path().to_path_buf();
         let cloner = Arc::new(GitCloner::new(clone_dir.path().to_path_buf()).map_err(
             |source| {
                 BuildError::Cache(format!(
@@ -125,6 +124,7 @@ impl RuntimeHarness {
                 engine,
                 &wasm_path,
                 &spec,
+                &manifest,
                 cloner,
                 &context,
                 &caches,
@@ -135,6 +135,7 @@ impl RuntimeHarness {
                 engine,
                 &wasm_path,
                 &spec,
+                &manifest,
                 cloner,
                 &context,
                 &caches,

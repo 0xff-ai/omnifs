@@ -23,9 +23,10 @@ use omnifs_core::path::Path;
 use omnifs_wit::provider::types as wit_types;
 use omnifs_workspace::ids::ProviderId;
 use omnifs_workspace::mounts::Spec;
-use omnifs_workspace::provider::{ConfigMetadata, ProviderAuthManifest, ProviderStore};
+use omnifs_workspace::provider::{
+    ConfigMetadata, ProviderAuthManifest, ProviderManifest, ProviderStore,
+};
 
-use std::fs;
 use std::path::{Path as StdPath, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -122,7 +123,6 @@ impl HostContext {
 /// and operation id allocation.
 pub struct Runtime {
     pub(crate) instance: Instance,
-    initialize_result: wit_types::InitializeResult,
     pub(crate) mount_name: String,
     pub(crate) provider_name: String,
     provider_id: ProviderId,
@@ -277,6 +277,7 @@ impl Runtime {
         engine: &wasmtime::Engine,
         wasm_path: &StdPath,
         config: &Spec,
+        manifest: &ProviderManifest,
         cloner: Arc<GitCloner>,
         context: &HostContext,
         caches: &Arc<Caches>,
@@ -286,6 +287,7 @@ impl Runtime {
             engine,
             wasm_path,
             config,
+            manifest,
             cloner,
             context,
             caches,
@@ -299,6 +301,7 @@ impl Runtime {
         engine: &wasmtime::Engine,
         wasm_path: &StdPath,
         config: &Spec,
+        manifest: &ProviderManifest,
         cloner: Arc<GitCloner>,
         context: &HostContext,
         caches: &Arc<Caches>,
@@ -308,6 +311,7 @@ impl Runtime {
             engine,
             wasm_path,
             config,
+            manifest,
             cloner,
             context,
             caches,
@@ -324,6 +328,7 @@ impl Runtime {
         engine: &wasmtime::Engine,
         wasm_path: &StdPath,
         config: &Spec,
+        manifest: &ProviderManifest,
         cloner: Arc<GitCloner>,
         context: &HostContext,
         caches: &Arc<Caches>,
@@ -338,21 +343,6 @@ impl Runtime {
         };
         let mount_name = config.mount.as_str();
         let config_bytes = config.config_bytes();
-        // Load the pinned artifact's manifest once: config validation must run
-        // before preopen resolution or instance creation, and capability/auth
-        // enforcement rests on this pinned manifest, never on a spec-stamped
-        // snapshot.
-        let manifest = fs::read(wasm_path)
-            .map_err(|error| format!("reading {}: {error}", wasm_path.display()))
-            .and_then(|bytes| {
-                omnifs_workspace::provider::ProviderWasm::from_bytes(bytes)
-                    .metadata()
-                    .map_err(|error| error.to_string())
-            })
-            .map_err(BuildError::InvalidConfig)?;
-        let manifest = manifest.ok_or_else(|| {
-            BuildError::InvalidConfig("provider artifact has no embedded manifest".to_owned())
-        })?;
         let config_metadata = manifest.config.as_ref();
 
         validate_instance_config(config_metadata, config, mount_name)?;
@@ -367,8 +357,18 @@ impl Runtime {
             park_signal,
         )?;
 
-        let init_return = instance.initialize().map_err(BuildError::from)?;
-        let (initialize_result, initialize_effects) = finish_initialize_return(init_return)?;
+        let (init_result, initialize_effects) = instance.initialize().map_err(BuildError::from)?;
+        op_validate::validate_initialize(&init_result, &initialize_effects, |_| false).map_err(
+            |message| {
+                BuildError::ProviderProtocol(format!(
+                    "initialize returned invalid result: {message}"
+                ))
+            },
+        )?;
+        let initialize_effects = init_result
+            .map(|_| initialize_effects)
+            .map_err(EngineError::ProviderError)
+            .map_err(BuildError::from)?;
         let auth_manifest = manifest
             .auth
             .as_ref()
@@ -406,7 +406,6 @@ impl Runtime {
             .map_err(BuildError::from)?;
         let runtime = Self {
             instance,
-            initialize_result,
             mount_name: mount_name.to_string(),
             provider_name: config.provider_name().to_string(),
             provider_id: config.provider.id,
@@ -428,16 +427,6 @@ impl Runtime {
 
     pub fn shutdown(&self) -> Result<()> {
         self.instance.shutdown()
-    }
-
-    #[must_use]
-    pub fn requested_capabilities(&self) -> &wit_types::RequestedCapabilities {
-        &self.initialize_result.capabilities
-    }
-
-    #[must_use]
-    pub fn provider_info(&self) -> &wit_types::ProviderInfo {
-        &self.initialize_result.info
     }
 
     pub fn call_close_file(&self, handle: u64) -> Result<()> {
@@ -593,22 +582,6 @@ impl RecentObjects {
     fn snapshot(&self) -> Vec<ObjectId> {
         self.ids.clone()
     }
-}
-
-fn finish_initialize_return(
-    ret: (
-        std::result::Result<wit_types::InitializeResult, wit_types::ProviderError>,
-        wit_types::Effects,
-    ),
-) -> std::result::Result<(wit_types::InitializeResult, wit_types::Effects), BuildError> {
-    let (result, effects) = ret;
-    op_validate::validate_initialize(&result, &effects, |_| false).map_err(|message| {
-        BuildError::ProviderProtocol(format!("initialize returned invalid result: {message}"))
-    })?;
-    result
-        .map(|result| (result, effects))
-        .map_err(EngineError::ProviderError)
-        .map_err(BuildError::from)
 }
 
 fn validate_instance_config(

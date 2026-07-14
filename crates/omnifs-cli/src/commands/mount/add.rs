@@ -595,6 +595,7 @@ mod tests {
             version: None,
             wit_package: None,
             sdk_version: None,
+            refresh_interval_secs: 0,
             capabilities: vec![omnifs_caps::AccessNeed::Domain {
                 value: "api.linear.app".to_string(),
                 why: "api calls".to_string(),

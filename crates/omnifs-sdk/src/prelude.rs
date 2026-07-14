@@ -37,4 +37,4 @@ pub use omnifs_core::path::{ParseError, Path, Segment};
 
 pub use omnifs_sdk_macros::{Endpoint, config, object, path_captures, path_segment, provider};
 
-pub use omnifs_wit::provider::types::{ProviderEvent, ProviderInfo, RequestedCapabilities};
+pub use omnifs_wit::provider::types::ProviderEvent;

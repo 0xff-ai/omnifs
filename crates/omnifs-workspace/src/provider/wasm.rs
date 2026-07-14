@@ -127,7 +127,8 @@ mod tests {
         "id": "demo",
         "displayName": "Demo",
         "provider": "demo.wasm",
-        "defaultMount": "demo"
+        "defaultMount": "demo",
+        "refreshIntervalSecs": 0
     }"#;
 
     #[test]

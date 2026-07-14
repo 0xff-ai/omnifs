@@ -372,7 +372,8 @@ mod tests {
             "id": name,
             "displayName": name,
             "provider": &file,
-            "defaultMount": name
+            "defaultMount": name,
+            "refreshIntervalSecs": 0
         });
         let bytes = wasm_with_provider_metadata(
             EMPTY_WASM,
@@ -430,7 +431,8 @@ mod tests {
                 "id": "github",
                 "displayName": "github",
                 "provider": "github-v2.wasm",
-                "defaultMount": "github"
+                "defaultMount": "github",
+                "refreshIntervalSecs": 0
             });
             let bytes = wasm_with_provider_metadata(
                 EMPTY_WASM,

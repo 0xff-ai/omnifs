@@ -1,3 +1,4 @@
+use std::fs;
 use std::sync::Arc;
 
 use omnifs_core::path::Path;
@@ -11,6 +12,7 @@ use omnifs_itest::{
     make_engine, make_initialized_runtime, make_runtime, provider_wasm_path,
     spec_with_test_provider,
 };
+use omnifs_workspace::provider::ProviderWasm;
 
 fn p(value: &str) -> Path {
     Path::parse(value).unwrap()
@@ -938,6 +940,10 @@ async fn test_cache_isolated_by_mount_name() {
     let config_dir = tempfile::tempdir().unwrap();
     let cloner = Arc::new(GitCloner::new(clone_dir.path().to_path_buf()).unwrap());
     let wasm_path = provider_wasm_path("test_provider.wasm");
+    let manifest = ProviderWasm::from_bytes(fs::read(&wasm_path).unwrap())
+        .metadata()
+        .unwrap()
+        .unwrap();
     let mut config_a = config.clone();
     config_a.mount = "mount-a".to_string();
     let mut config_b = config;
@@ -963,6 +969,7 @@ async fn test_cache_isolated_by_mount_name() {
         &engine,
         &wasm_path,
         &config_a,
+        &manifest,
         cloner.clone(),
         &context_a,
         &caches,
@@ -973,6 +980,7 @@ async fn test_cache_isolated_by_mount_name() {
         &engine,
         &wasm_path,
         &config_b,
+        &manifest,
         cloner,
         &context_b,
         &caches,

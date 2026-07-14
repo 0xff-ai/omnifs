@@ -9,7 +9,9 @@ use crate::cloner::GitCloner;
 use crate::{BuildError, HostContext, Runtime, component_engine};
 use omnifs_auth::CredentialService;
 use omnifs_workspace::mounts::{Registry, Spec};
+use omnifs_workspace::provider::ProviderWasm;
 use std::collections::HashMap;
+use std::fs;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
@@ -119,7 +121,13 @@ impl MountRuntimes {
             .map(|built| (built.mount.clone(), Arc::clone(&built.runtime)))
             .collect();
         for built in built {
-            registry.start_timer(&built.mount, &built.runtime, built.revalidate, handle);
+            registry.start_timer(
+                &built.mount,
+                &built.runtime,
+                built.provider_interval_secs,
+                built.revalidate,
+                handle,
+            );
             info!(mount = built.mount.as_str(), "loaded provider");
         }
         Ok(registry)
@@ -140,11 +148,37 @@ impl MountRuntimes {
             ));
         }
 
+        let manifest = fs::read(&wasm_path)
+            .map_err(|error| {
+                RegistryError::RuntimeError(format!(
+                    "reading provider manifest {}: {error}",
+                    wasm_path.display()
+                ))
+            })
+            .and_then(|bytes| {
+                ProviderWasm::from_bytes(bytes).metadata().map_err(|error| {
+                    RegistryError::RuntimeError(format!(
+                        "reading provider manifest {}: {error}",
+                        wasm_path.display()
+                    ))
+                })
+            })
+            .and_then(|manifest| {
+                manifest.ok_or_else(|| {
+                    RegistryError::RuntimeError(format!(
+                        "provider artifact {} has no embedded manifest",
+                        wasm_path.display()
+                    ))
+                })
+            })?;
+        let provider_interval_secs = manifest.refresh_interval_secs;
+
         let runtime = if capture_test_callouts {
             Runtime::new_for_callout_tests(
                 &self.engine,
                 &wasm_path,
                 spec,
+                &manifest,
                 self.cloner.clone(),
                 &self.context,
                 &self.caches,
@@ -155,6 +189,7 @@ impl MountRuntimes {
                 &self.engine,
                 &wasm_path,
                 spec,
+                &manifest,
                 self.cloner.clone(),
                 &self.context,
                 &self.caches,
@@ -164,6 +199,7 @@ impl MountRuntimes {
         .map_err(|error| RegistryError::from_build(&mount, error))?;
         Ok(BuiltMount {
             mount,
+            provider_interval_secs,
             revalidate: spec.revalidate,
             runtime: Arc::new(runtime),
         })
@@ -206,10 +242,10 @@ impl MountRuntimes {
         &self,
         mount: &str,
         runtime: &Arc<Runtime>,
+        provider_interval_secs: u32,
         revalidate: bool,
         handle: &tokio::runtime::Handle,
     ) {
-        let provider_interval_secs = runtime.requested_capabilities().refresh_interval_secs;
         if provider_interval_secs == 0 && !revalidate {
             return;
         }
@@ -256,6 +292,7 @@ impl MountRuntimes {
 
 struct BuiltMount {
     mount: String,
+    provider_interval_secs: u32,
     revalidate: bool,
     runtime: Arc<Runtime>,
 }
@@ -544,6 +581,7 @@ mod tests {
         )
         .expect("startup load");
         assert_eq!(registry.mounts(), ["test"]);
+        assert_eq!(registry.timer_tasks.lock().len(), 1);
         registry.shutdown_all();
     }
 }
