@@ -31,4 +31,4 @@ pub(super) use dispatch::{
     SourceLeafAttrs, mount_object,
 };
 pub(crate) use dispatch::{EntryView, ResolvedChildView};
-pub(super) use spec::{CollectionHandler, LateChildView, file_object};
+pub(super) use spec::{CollectionHandler, file_object};

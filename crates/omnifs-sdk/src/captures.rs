@@ -70,6 +70,11 @@ pub struct CaptureDescriptor {
     pub name: String,
     pub type_name: String,
     pub choices: Option<Vec<String>>,
+    /// Whether this descriptor must be present in every route using the key.
+    /// This is compile-time validation metadata and is intentionally absent
+    /// from serialized route descriptions.
+    #[serde(skip)]
+    pub required: bool,
 }
 
 impl CaptureDescriptor {
@@ -79,6 +84,7 @@ impl CaptureDescriptor {
             name: name.into(),
             type_name: "String".to_string(),
             choices: None,
+            required: true,
         }
     }
 }

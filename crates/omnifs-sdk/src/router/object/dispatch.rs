@@ -1,17 +1,16 @@
 //! Mounted object dispatch, collection resolution, and read targets.
 
-use super::super::descriptor::RouteKind;
 use super::super::handlers::{RouteValidator, captures_validator};
 use super::super::pattern::{CaptureLocation, Pattern};
 use super::serve::ObjectRoute;
-use super::spec::{AnchorShape, CollectionHandler, ComputedFn, ObjectSpec};
+use super::spec::{AnchorShape, CollectionHandler, ComputedFn, ObjectDefinition};
 use crate::browse::{CachedCanonical, Effects, ReadOutcome};
 use crate::captures::Captures;
 use crate::cx::Cx;
 use crate::error::{ProviderError, Result};
 use crate::file_attrs::{Stability, VersionToken};
 use crate::handler::OpenedFile;
-use crate::object::{FacetAxis, FacetMetadata, Key, Object, ObjectKind};
+use crate::object::{FacetAxis, FacetMetadata, Key, Object};
 use crate::projection::FileProjection;
 use omnifs_core::ContentType;
 use std::future::Future;
@@ -122,8 +121,6 @@ impl<O: Object> ObjectLeaf<O> {
 /// The mounted, type-erased object route the dispatch tables hold.
 pub(in crate::router) struct ObjectRouteEntry<S> {
     pub pattern: Pattern,
-    pub kind: ObjectKind,
-    pub route_kind: RouteKind,
     pub shape: AnchorShape,
     pub leaves: Vec<ListingLeaf>,
     pub read: BoxedObjectRead<S>,
@@ -222,13 +219,6 @@ impl ListingLeaf {
     }
 }
 
-/// What mounting an object spec yields: the dispatchable entry and the leaf
-/// claims to feed [`Router::compile`](super::Router::compile).
-pub(in crate::router) struct MountedObject<S> {
-    pub entry: ObjectRouteEntry<S>,
-    pub claims: Vec<Pattern>,
-}
-
 pub(in crate::router) type BoxedObjectRead<S> = Box<
     dyn for<'a> Fn(
         &'a Cx<S>,
@@ -273,35 +263,17 @@ pub(in crate::router) enum ObjectReadTarget {
     Stream(String),
 }
 
-fn mounted_leaf_claims<O: Object>(
-    spec: &ObjectSpec<O>,
-    mount_template: &str,
-) -> Result<Vec<Pattern>> {
-    let mount = mount_template.trim_end_matches('/');
-    let mut claims = Vec::new();
-    if spec.shape == AnchorShape::File {
-        // The file-object anchor IS the leaf; no separate child claims.
-        return Ok(claims);
-    }
-    for leaf in &spec.leaves {
-        claims.push(Pattern::parse(&format!("{mount}/{}", leaf.leaf_name()))?);
-    }
-    Ok(claims)
-}
-
-/// Specialize an [`ObjectSpec`] at a concrete mount pattern.
+/// Specialize an [`ObjectDefinition`] at a concrete mounted face.
 pub(in crate::router) fn mount_object<O>(
     pattern: &Pattern,
-    spec: &ObjectSpec<O>,
-    combined_template: &str,
-    route_kind: RouteKind,
-) -> Result<MountedObject<O::State>>
+    definition: &ObjectDefinition<O>,
+) -> Result<ObjectRouteEntry<O::State>>
 where
     O: Object + 'static,
     O::Key: Key + FacetMetadata + 'static,
     O::State: 'static,
 {
-    let listing_leaves: Vec<ListingLeaf> = spec
+    let listing_leaves: Vec<ListingLeaf> = definition
         .leaves
         .iter()
         .map(|leaf| ListingLeaf {
@@ -310,28 +282,19 @@ where
         })
         .collect();
 
-    let mut leaf_claims = mounted_leaf_claims(spec, combined_template)?;
-    leaf_claims.push(pattern.clone());
-
-    let route = ObjectRoute::for_mount(spec, pattern)?;
+    let route = ObjectRoute::for_mount(definition, pattern)?;
 
     let entry = ObjectRouteEntry {
         pattern: pattern.clone(),
-        kind: O::kind(),
-        route_kind,
-        shape: spec.shape,
+        shape: definition.shape,
         leaves: listing_leaves,
         read: route.clone().read_handler(),
         list: route.list_handler(),
-        face_handlers: spec.face_handlers.clone(),
+        face_handlers: definition.face_handlers.clone(),
         anchor_collection: None,
         validator: captures_validator::<O::Key>(),
     };
-
-    Ok(MountedObject {
-        entry,
-        claims: leaf_claims,
-    })
+    Ok(entry)
 }
 // ===========================================================================
 // Facet expansion (unchanged)
@@ -430,8 +393,8 @@ pub(in crate::router) enum CollectionTopology {
     Anchor,
 }
 
-/// A collection's child object resolved against the object registry at compile
-/// time: enough to compute, for each listed entry, the child anchor path, the
+/// A collection's child object resolved against the mounted object entries at
+/// compile time: enough to compute, for each listed entry, the child anchor path, the
 /// dir-entry name, and the child canonical-view leaf paths (facet-expanded).
 #[derive(Clone)]
 pub(crate) struct ResolvedChildView {

@@ -90,7 +90,7 @@ impl ExampleProvider {
 }
 ```
 
-`#[provider]` infers config and state from `start`; stateless providers use `fn start(r: &mut Router) -> Result<()>`. After `start`, the macro consumes the registration builder through `Router::compile`: overlapping route claims fail initialization with a named-routes error, and only the resulting `CompiledRouter` is published for dispatch.
+`#[provider]` infers config and state from `start`; stateless providers use `fn start(r: &mut Router) -> Result<()>`. After `start`, the macro consumes the registration builder exactly once through `Router::compile`: capture-incompatible handlers and overlapping route claims fail initialization, aliases mounted through `r.alias` are frozen as additional faces, and only the resulting `CompiledRouter` is published for dispatch. `Option<T>` fields in `#[path_captures]` keys may be absent on a route reused by a related template; other fields must be present.
 
 ## Route template grammar
 

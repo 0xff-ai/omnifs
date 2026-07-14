@@ -400,6 +400,14 @@ struct RepoKey {
     owner: String,
     repo: String,
 }
+
+#[allow(dead_code)]
+#[omnifs_sdk::path_captures]
+struct OptionalPaperKey {
+    paper: String,
+    version: Option<String>,
+}
+
 impl FromCaptures for RepoKey {
     fn from_captures(c: &Captures) -> Result<Self> {
         Ok(Self {
@@ -896,6 +904,46 @@ fn direct_face_runs_handler_and_returns_inline_no_canonical() {
 // ===========================================================================
 // Registration / compile errors
 // ===========================================================================
+
+#[test]
+fn compile_rejects_handler_captures_missing_from_route_template() {
+    let mut optional = Router::<()>::new();
+    optional
+        .file("/papers/{paper}/paper.pdf")
+        .handler(|_cx: Cx<()>, _key: OptionalPaperKey| async {
+            Ok(FileProjection::body(b"optional").build())
+        })
+        .unwrap();
+    let optional = optional
+        .compile()
+        .expect("optional captures may be absent from a shared route template");
+    let cx = cx();
+    let (out, _) = read_wit(drive(
+        &cx,
+        optional.read_file(&cx, "/papers/demo/paper.pdf", "", None),
+    ));
+    let result = found(&out);
+    let wit_types::ByteSource::Inline(bytes) = &result.bytes else {
+        panic!("optional capture route should return inline bytes");
+    };
+    assert_eq!(bytes, b"optional");
+
+    let mut r = Router::<()>::new();
+    r.file("/items/{id}")
+        .handler(|_cx: Cx<()>, _key: OptionalPaperKey| async {
+            Ok(FileProjection::body(b"unreachable").build())
+        })
+        .unwrap();
+
+    let err = r
+        .compile()
+        .err()
+        .expect("capture-incompatible handler must fail compilation");
+    assert_eq!(
+        err.kind(),
+        omnifs_sdk::error::ProviderErrorKind::InvalidInput
+    );
+}
 
 #[test]
 fn collection_of_unregistered_child_kind_fails_compile() {

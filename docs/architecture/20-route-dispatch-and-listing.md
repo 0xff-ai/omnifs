@@ -14,11 +14,13 @@ Route matching follows a most-specific-wins model:
 3. prefix captures beat bare captures
 4. longer patterns break ties
 
-Ambiguous routes that could match the same concrete path with the same precedence must fail when the registration builder is compiled. `Router::compile` consumes the mutable builder and returns the only runtime-dispatchable form, `CompiledRouter`. A route tree that cannot compile is an invalid provider component and is never published by provider initialization.
+Ambiguous routes that could match the same concrete path with the same precedence must fail when the registration builder is compiled. `Router::compile` consumes the mutable builder exactly once, freezes aliases that were mounted as additional builder faces, resolves collections into the immutable route graph, and returns the only runtime-dispatchable form, `CompiledRouter`. A route tree that cannot compile is an invalid provider component and is never published by provider initialization.
 
 ## Capture validation
 
 Capture parsers participate in match candidacy. A candidate route whose captures fail to parse does not own the path, and dispatch falls through to the next candidate.
+
+`#[path_captures]` fields are required by default. `Option<T>` fields are optional descriptors: their segment may be absent when the same key type is reused by a related route, while a present segment still goes through `T`'s parser.
 
 This is what lets providers model adjacent typed paths without read-time hacks. For example, one route can accept an IP-shaped segment while a sibling route rejects it and accepts a domain-shaped segment.
 

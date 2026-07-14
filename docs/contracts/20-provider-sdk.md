@@ -25,7 +25,7 @@ Use `r.object::<O>` or `r.file_object::<O>` for object-backed paths. Keep canoni
 
 Route dispatch has one owner for precedence. Lookup, listing, read, and open must share route-target resolution rules.
 
-`Router` is the mutable registration builder used only during provider startup. `Router::compile` consumes it, resolves collections, validates the complete route surface, synthesizes README routes, and returns `CompiledRouter`, the only type that supports runtime dispatch. Provider initialization publishes state and the compiled router only after both startup and compilation succeed.
+`Router` is the mutable registration builder used only during provider startup. `Router::compile` consumes it exactly once, freezes each alias as an additional mounted face, resolves collections, validates capture compatibility and the complete route surface, synthesizes README routes, and returns `CompiledRouter`, the only type that supports runtime dispatch. Provider initialization publishes state and the compiled router only after both startup and compilation succeed. An optional `#[path_captures]` field may be omitted by a route template so one key type can be reused across related route shapes; non-optional fields remain required at compile time.
 
 Keep `r.dir`, `r.file`, and `r.treeref` as the path-oriented face for non-object routes. Use typed `omnifs_core::path::Path` or parsed segments after parse boundaries. Split and join provider paths as strings only at WIT or display boundaries.
 

@@ -68,7 +68,7 @@ mod util;
 /// What the expansion does, so debugging is not archaeology: it defines the
 /// provider type, thread-local `STATE`/`ROUTER`/range-handle
 /// slots, an `initialize` that deserializes config, runs `start`, and
-/// **seals the router** (overlapping route claims fail initialization), the
+/// **compiles the router** (overlapping route claims fail initialization), the
 /// async namespace methods that await your handlers, and the component
 /// `export!`.
 #[proc_macro_attribute]

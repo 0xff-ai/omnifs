@@ -5,7 +5,7 @@ use super::dispatch::{
     BoxedObjectList, BoxedObjectRead, FacetExpansion, ObjectLeaf, ObjectListing, ObjectReadTarget,
     SourceLeafAttrs,
 };
-use super::spec::{AnchorShape, ObjectSpec};
+use super::spec::{AnchorShape, ObjectDefinition};
 use crate::browse::{CachedCanonical, Effects, FileContent, ReadOutcome};
 use crate::captures::{Captures, FromCaptures};
 use crate::cx::Cx;
@@ -45,16 +45,16 @@ impl<O: Object + 'static> ObjectRoute<O>
 where
     O::Key: Key + FacetMetadata + 'static,
 {
-    pub(super) fn for_mount(spec: &ObjectSpec<O>, pattern: &Pattern) -> Result<Self> {
+    pub(super) fn for_mount(definition: &ObjectDefinition<O>, pattern: &Pattern) -> Result<Self> {
         Ok(Self {
             pattern: pattern.clone(),
-            shape: spec.shape,
-            leaves: spec.leaves.clone(),
-            stability: spec.stability,
-            render_table: spec.render_table.clone(),
-            has_canonical: spec.has_canonical,
+            shape: definition.shape,
+            leaves: definition.leaves.clone(),
+            stability: definition.stability,
+            render_table: definition.render_table.clone(),
+            has_canonical: definition.has_canonical,
             facet_expansion: FacetExpansion::for_pattern::<O::Key>(pattern)?,
-            when: spec.when,
+            when: definition.when,
         })
     }
 

@@ -109,6 +109,7 @@ pub(crate) fn path_captures_impl(item: &ItemStruct) -> syn::Result<TokenStream2>
     });
     let capture_descriptors = fields.iter().map(|field| {
         let name_lit = &field.name_lit;
+        let required = option_inner_type(&field.ty).is_none();
         let descriptor_ty = field
             .facet_inner_ty
             .as_ref()
@@ -132,6 +133,7 @@ pub(crate) fn path_captures_impl(item: &ItemStruct) -> syn::Result<TokenStream2>
                 name: #name_lit.to_string(),
                 type_name: stringify!(#descriptor_ty).to_string(),
                 choices: #choices,
+                required: #required,
             }
         }
     });
@@ -143,8 +145,16 @@ pub(crate) fn path_captures_impl(item: &ItemStruct) -> syn::Result<TokenStream2>
     let identity_captures_body = identity_fields.iter().map(|field| {
         let name_lit = &field.name_lit;
         let ident = &field.ident;
-        quote! {
-            captures.push((#name_lit, self.#ident.to_string()));
+        if option_inner_type(&field.ty).is_some() {
+            quote! {
+                if let Some(value) = &self.#ident {
+                    captures.push((#name_lit, value.to_string()));
+                }
+            }
+        } else {
+            quote! {
+                captures.push((#name_lit, self.#ident.to_string()));
+            }
         }
     });
 

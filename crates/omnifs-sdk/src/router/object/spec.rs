@@ -29,7 +29,7 @@ use std::pin::Pin;
 /// aliasing the same handle twice replays one definition at two templates,
 /// each with its own leaf claims.
 pub struct ObjectHandle<O: Object> {
-    pub(in crate::router) spec: std::rc::Rc<ObjectSpec<O>>,
+    pub(in crate::router) definition: std::rc::Rc<ObjectDefinition<O>>,
 }
 
 /// Whether the anchor projects as a directory (children are the declared
@@ -43,7 +43,7 @@ pub(in crate::router) enum AnchorShape {
 
 /// Internal registration state built by an object block, independent of any
 /// alias template; [`mount_object`] specializes it per mount.
-pub(in crate::router) struct ObjectSpec<O: Object> {
+pub(in crate::router) struct ObjectDefinition<O: Object> {
     pub(super) shape: AnchorShape,
     pub(super) when: Option<fn(&O::Key) -> bool>,
     pub(super) stability: fn(&O::Key) -> Stability,
@@ -56,13 +56,9 @@ pub(in crate::router) struct ObjectSpec<O: Object> {
     /// Boxed live-face handlers, shared so an alias replays the same closures.
     pub(super) face_handlers:
         std::rc::Rc<std::collections::BTreeMap<String, FaceHandler<O::State>>>,
-    /// Collection faces declared on dir faces; resolved against the object
-    /// registry at compile time.
-    pub(super) collections: std::rc::Rc<Vec<CollectionDecl>>,
-    /// SDK-generated collection list handlers, keyed by collection dir path,
-    /// each with the late-bound child view resolved during compilation and
-    /// passed in by the dispatch path.
-    pub(super) collection_handlers: std::rc::Rc<Vec<CollectionHandlerEntry<O::State>>>,
+    /// Collection faces declared on dir faces. Compilation resolves each child
+    /// object and specializes the relative face at every mount.
+    pub(super) collections: std::rc::Rc<Vec<CollectionDeclaration<O::State>>>,
     /// Tree faces declared on dir faces (`o.dir(name).tree(method)`): each is
     /// registered as a treeref route at `template/name` so a lookup/list there
     /// returns the subtree handoff. Shared so an alias replays the same closures.
@@ -90,15 +86,13 @@ pub(in crate::router) struct ChoicesFace {
     pub names: &'static [&'static str],
 }
 
-/// One SDK-generated collection list handler: the collection dir path, the
-/// boxed list handler, and the late-bound child view resolved during compilation.
-pub(in crate::router) struct CollectionHandlerEntry<S> {
-    pub dir_path: String,
+/// One collection face declaration: its relative name, typed list handler, and
+/// child object identity. Compilation supplies the resolved child view.
+pub(in crate::router) struct CollectionDeclaration<S> {
+    pub name: String,
     pub handler: CollectionHandler<S>,
-    pub late_view: LateChildView,
-    /// Capture validator for the deferred NESTED dir route, computed from the
-    /// list method's key type `K` (the collection dir path captures), not the
-    /// parent anchor's `O::Key`.
+    pub child_kind: ObjectKind,
+    pub requires_canonical: bool,
     pub validator: RouteValidator,
 }
 
@@ -119,14 +113,7 @@ type CollectionListFn<S> = dyn Fn(
 /// closure.
 pub(in crate::router) type CollectionHandler<S> = std::rc::Rc<CollectionListFn<S>>;
 
-/// A late-bound child-view cell: the typed `collection` face stores the handler
-/// at mount time, but the child object's template, leaves, and facet axes are
-/// only known once every route is registered, so [`super::Router::compile`]
-/// resolves them and fills this cell before dispatch can run.
-pub(in crate::router) type LateChildView =
-    std::rc::Rc<std::cell::RefCell<Option<std::rc::Rc<ResolvedChildView>>>>;
-
-impl<O: Object> Clone for ObjectSpec<O> {
+impl<O: Object> Clone for ObjectDefinition<O> {
     fn clone(&self) -> Self {
         Self {
             shape: self.shape,
@@ -137,7 +124,6 @@ impl<O: Object> Clone for ObjectSpec<O> {
             leaves: self.leaves.clone(),
             face_handlers: self.face_handlers.clone(),
             collections: self.collections.clone(),
-            collection_handlers: self.collection_handlers.clone(),
             tree_faces: self.tree_faces.clone(),
             choices_faces: self.choices_faces.clone(),
         }
@@ -145,39 +131,29 @@ impl<O: Object> Clone for ObjectSpec<O> {
 }
 
 impl<O: Object> ObjectHandle<O> {
-    /// Whether the object spec declares a canonical face (used by collection
-    /// registry resolution).
-    pub(in crate::router) fn has_canonical(&self) -> bool {
-        self.spec.has_canonical
-    }
-
-    /// The collection faces this object declared, for registry resolution.
-    pub(in crate::router) fn collection_decls(&self) -> &[CollectionDecl] {
-        &self.spec.collections
-    }
-
-    /// The SDK-generated collection list handlers (dir path + boxed handler +
-    /// late-bound child view).
-    pub(in crate::router) fn collection_handlers(&self) -> &[CollectionHandlerEntry<O::State>] {
-        &self.spec.collection_handlers
+    /// The collection faces this object declared for compilation.
+    pub(in crate::router) fn collections(&self) -> &[CollectionDeclaration<O::State>] {
+        &self.definition.collections
     }
 
     /// The tree faces declared on this object, registered as treeref routes at
     /// mount time.
     pub(in crate::router) fn tree_faces(&self) -> &[TreeFaceEntry<O::State>] {
-        &self.spec.tree_faces
+        &self.definition.tree_faces
     }
 
     /// The choices faces declared on this object, registered as exhaustive dir
     /// routes at mount time.
     pub(in crate::router) fn choices_faces(&self) -> &[ChoicesFace] {
-        &self.spec.choices_faces
+        &self.definition.choices_faces
     }
 
-    /// The object spec's declared canonical-view leaf names (canonical,
-    /// representation, computed), for collection child-view resolution.
+    /// The canonical and representation leaves that a mounted face exposes
+    /// to the host's canonical store. Compilation copies this into its local
+    /// collection-resolution metadata; the executable entry only needs the
+    /// already-expanded listing leaves.
     pub(in crate::router) fn canonical_view_leaf_names(&self) -> Vec<String> {
-        self.spec
+        self.definition
             .leaves
             .iter()
             .filter(|leaf| leaf.is_canonical_view())
@@ -211,12 +187,8 @@ pub struct ObjectBlock<O: Object> {
     /// Boxed live-face handlers (direct/blob/stream/object), keyed by leaf
     /// name; moved into the mounted entry.
     face_handlers: std::collections::BTreeMap<String, FaceHandler<O::State>>,
-    /// Collections declared on dir faces, resolved against the object registry
-    /// at compile time.
-    collections: Vec<CollectionDecl>,
-    /// SDK-generated collection list handlers (dir path + boxed handler +
-    /// late-bound child view).
-    collection_handlers: Vec<CollectionHandlerEntry<O::State>>,
+    /// Collections declared on dir faces, consumed by compilation.
+    collections: Vec<CollectionDeclaration<O::State>>,
     /// Tree faces (`o.dir(name).tree(method)`), registered as treeref routes at
     /// mount time.
     tree_faces: Vec<TreeFaceEntry<O::State>>,
@@ -226,20 +198,6 @@ pub struct ObjectBlock<O: Object> {
     choices_faces: Vec<ChoicesFace>,
     /// The single allowed file-object face name (file shape only).
     file_face_seen: bool,
-}
-
-/// A collection face declaration captured at registration time. The child
-/// template + anchor computation are resolved against the object registry at
-/// compile time, where every object route is known.
-pub(in crate::router) struct CollectionDecl {
-    /// The full dir path of the collection (`template/name`).
-    pub dir_path: String,
-    /// The parent object's template (`dir_path` minus the face name).
-    pub parent_template: String,
-    pub child_kind: ObjectKind,
-    /// Whether any entry can be `fresh` (requires the child to have a canonical
-    /// face). Always true for the typed `collection::<C>` form.
-    pub requires_canonical: bool,
 }
 
 impl<O: Object> ObjectBlock<O> {
@@ -255,7 +213,6 @@ impl<O: Object> ObjectBlock<O> {
             leaves: Vec::new(),
             face_handlers: std::collections::BTreeMap::new(),
             collections: Vec::new(),
-            collection_handlers: Vec::new(),
             tree_faces: Vec::new(),
             choices_faces: Vec::new(),
             file_face_seen: false,
@@ -365,7 +322,7 @@ impl<O: Object> ObjectBlock<O> {
         self.stability(|_| Stability::Live)
     }
 
-    fn claim_leaf(&mut self, name: &str) -> Result<()> {
+    fn validate_leaf_path(&self, name: &str) -> Result<()> {
         // A file-shaped anchor IS its single face: the path itself is the leaf,
         // so there is no `template/name` child to claim (and `name` is empty).
         // The anchor pattern is claimed once at mount; claiming a synthetic
@@ -377,7 +334,7 @@ impl<O: Object> ObjectBlock<O> {
         Ok(())
     }
 
-    fn finish(self) -> Result<ObjectSpec<O>> {
+    fn finish(self) -> Result<ObjectDefinition<O>> {
         let stability = self.stability.ok_or_else(|| {
             ProviderError::invalid_input(
                 "object block requires a stability declaration: stability(|key| ..) or stable()/dynamic()/live()",
@@ -402,7 +359,7 @@ impl<O: Object> ObjectBlock<O> {
             )));
         }
 
-        Ok(ObjectSpec {
+        Ok(ObjectDefinition {
             shape: self.shape,
             when: self.when,
             stability,
@@ -411,7 +368,6 @@ impl<O: Object> ObjectBlock<O> {
             leaves: self.leaves,
             face_handlers: std::rc::Rc::new(self.face_handlers),
             collections: std::rc::Rc::new(self.collections),
-            collection_handlers: std::rc::Rc::new(self.collection_handlers),
             tree_faces: std::rc::Rc::new(self.tree_faces),
             choices_faces: std::rc::Rc::new(self.choices_faces),
         })
@@ -468,7 +424,7 @@ impl<'a, O: Object> FileFace<'a, O> {
             )));
         }
         self.block.canonical_ct = Some(F::CT);
-        self.block.claim_leaf(self.name)?;
+        self.block.validate_leaf_path(self.name)?;
         // For the file shape the path itself is the leaf; record the literal.
         let leaf_name = self.leaf_name();
         self.block.leaves.push(ObjectLeaf::Canonical {
@@ -485,7 +441,7 @@ impl<'a, O: Object> FileFace<'a, O> {
     {
         self.file_shape_guard()?;
         self.block.renders.push((F::CT, render_fn::<O, F>()));
-        self.block.claim_leaf(self.name)?;
+        self.block.validate_leaf_path(self.name)?;
         let leaf_name = self.leaf_name();
         self.block.leaves.push(ObjectLeaf::Representation {
             leaf_name,
@@ -499,7 +455,7 @@ impl<'a, O: Object> FileFace<'a, O> {
     /// be inline bytes); [`Self::lazy`] excludes it from preload.
     pub fn computed(mut self, method: ComputedFn<O>) -> Result<&'a mut ObjectBlock<O>> {
         self.file_shape_guard()?;
-        self.block.claim_leaf(self.name)?;
+        self.block.validate_leaf_path(self.name)?;
         let leaf_name = self.leaf_name();
         let lazy = self.lazy;
         self.block.leaves.push(ObjectLeaf::Computed {
@@ -523,7 +479,7 @@ impl<'a, O: Object> FileFace<'a, O> {
         O::State: 'static,
     {
         self.file_shape_guard()?;
-        self.block.claim_leaf(self.name)?;
+        self.block.validate_leaf_path(self.name)?;
         let leaf_name = self.leaf_name();
         let handler: BoxedFaceRead<O::State> = Box::new(move |cx, caps| {
             let cx = cx.clone();
@@ -555,7 +511,7 @@ impl<'a, O: Object> FileFace<'a, O> {
         O::State: 'static,
     {
         self.file_shape_guard()?;
-        self.block.claim_leaf(self.name)?;
+        self.block.validate_leaf_path(self.name)?;
         let leaf_name = self.leaf_name();
         let handler: BoxedFaceRead<O::State> = Box::new(move |cx, caps| {
             let cx = cx.clone();
@@ -587,7 +543,7 @@ impl<'a, O: Object> FileFace<'a, O> {
         O::State: 'static,
     {
         self.file_shape_guard()?;
-        self.block.claim_leaf(self.name)?;
+        self.block.validate_leaf_path(self.name)?;
         let leaf_name = self.leaf_name();
         let handler: BoxedFaceOpen<O::State> = Box::new(move |cx, caps| {
             let cx = cx.clone();
@@ -618,7 +574,7 @@ impl<'a, O: Object> FileFace<'a, O> {
         O::State: 'static,
     {
         self.file_shape_guard()?;
-        self.block.claim_leaf(self.name)?;
+        self.block.validate_leaf_path(self.name)?;
         let leaf_name = self.leaf_name();
         // The child object serves its own canonical bytes through a direct
         // read of its load result. The child key is parsed from the parent
@@ -701,43 +657,27 @@ impl<'a, O: Object> DirFace<'a, O> {
                 self.block.template, self.name
             )));
         }
-        let dir_path = format!(
-            "{}/{}",
-            self.block.template.trim_end_matches('/'),
-            self.name
-        );
-        let late_view: LateChildView = std::rc::Rc::new(std::cell::RefCell::new(None));
-        self.block.collections.push(CollectionDecl {
-            dir_path: dir_path.clone(),
-            parent_template: self.block.template.to_string(),
+        self.block.collections.push(CollectionDeclaration {
+            name: self.name.to_string(),
+            handler: std::rc::Rc::new(
+                move |dir_cx: crate::handler::DirCx<O::State>,
+                      caps: Captures,
+                      child_view: std::rc::Rc<ResolvedChildView>| {
+                    Box::pin(async move {
+                        let key = K::from_captures(&caps)?;
+                        let cursor = match dir_cx.cursor() {
+                            Some(wire) => crate::collection::decode_cursor::<Cur>(wire)?,
+                            None => None,
+                        };
+                        let cx = (*dir_cx).clone();
+                        let list_cx = crate::collection::ListCx::new(cx, cursor);
+                        let collection = method(key, list_cx).await?;
+                        collection.into_dir_projection(&child_view)
+                    }) as DirProjectionFuture
+                },
+            ),
             child_kind: C::kind(),
             requires_canonical: true,
-        });
-
-        // The SDK-generated collection list handler: parse the parent key + the
-        // host-echoed cursor, run the typed list method, and lower the
-        // Collection to a DirProjection against the compiled child view.
-        let handler: CollectionHandler<O::State> = std::rc::Rc::new(
-            move |dir_cx: crate::handler::DirCx<O::State>,
-                  caps: Captures,
-                  child_view: std::rc::Rc<ResolvedChildView>| {
-                Box::pin(async move {
-                    let key = K::from_captures(&caps)?;
-                    let cursor = match dir_cx.cursor() {
-                        Some(wire) => crate::collection::decode_cursor::<Cur>(wire)?,
-                        None => None,
-                    };
-                    let cx = (*dir_cx).clone();
-                    let list_cx = crate::collection::ListCx::new(cx, cursor);
-                    let collection = method(key, list_cx).await?;
-                    collection.into_dir_projection(&child_view)
-                }) as DirProjectionFuture
-            },
-        );
-        self.block.collection_handlers.push(CollectionHandlerEntry {
-            dir_path,
-            handler,
-            late_view,
             validator: captures_validator::<K>(),
         });
         Ok(self.block)
@@ -763,8 +703,7 @@ impl<'a, O: Object> DirFace<'a, O> {
                 self.block.template, self.name
             )));
         }
-        // The treeref route (registered at mount time) claims the path, so the
-        // tree face must NOT also claim_leaf or the compile overlap check fires.
+        // The treeref route owns this path and claims it during compilation.
         let handler: super::super::handlers::BoxedTreeRefHandler<O::State> =
             std::sync::Arc::new(move |cx: Cx<O::State>, caps: Captures| {
                 Box::pin(async move {
@@ -793,8 +732,7 @@ impl<'a, O: Object> DirFace<'a, O> {
                 )));
             }
         }
-        // The dir route (registered at mount time) claims the path, so the
-        // choices face must NOT also claim_leaf.
+        // The generated dir route owns this path and claims it during compilation.
         self.block.choices_faces.push(ChoicesFace {
             name: self.name,
             names,
@@ -818,7 +756,7 @@ pub fn object<O: Object>(
     block(&mut builder)?;
     let spec = builder.finish()?;
     Ok(ObjectHandle {
-        spec: std::rc::Rc::new(spec),
+        definition: std::rc::Rc::new(spec),
     })
 }
 
@@ -837,7 +775,7 @@ pub(in crate::router) fn file_object<O: Object>(
     }
     let spec = builder.finish()?;
     Ok(ObjectHandle {
-        spec: std::rc::Rc::new(spec),
+        definition: std::rc::Rc::new(spec),
     })
 }
 

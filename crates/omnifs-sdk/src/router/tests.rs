@@ -180,7 +180,7 @@ fn object_without_stability_fails_to_finish() {
 #[test]
 fn representation_dispatch() {
     let handle = demo_handle().unwrap();
-    let table = &handle.spec.render_table;
+    let table = &handle.definition.render_table;
     let canonical = br#"{"title":"hello"}"#;
 
     assert_eq!(
@@ -338,15 +338,8 @@ fn object_mount_lists_canonical_render_and_computed_leaves() {
     .unwrap();
     let pattern = super::pattern::Pattern::parse("/items/{id}").unwrap();
 
-    let mounted = super::object::mount_object::<DemoObj>(
-        &pattern,
-        &handle.spec,
-        "/items/{id}",
-        RouteKind::Object,
-    )
-    .unwrap();
+    let mounted = super::object::mount_object::<DemoObj>(&pattern, &handle.definition).unwrap();
     let leaf_names: Vec<&str> = mounted
-        .entry
         .leaves
         .iter()
         .map(|leaf| leaf.name.as_str())
@@ -367,19 +360,13 @@ fn lazy_excluded_eager_leaves_inherit_object_stability() {
     })
     .unwrap();
     let pattern = super::pattern::Pattern::parse("/items/{id}").unwrap();
-    let mounted = super::object::mount_object::<DemoObj>(
-        &pattern,
-        &handle.spec,
-        "/items/{id}",
-        RouteKind::Object,
-    )
-    .unwrap();
+    let mounted = super::object::mount_object::<DemoObj>(&pattern, &handle.definition).unwrap();
     let cx = Cx::new(1, Rc::new(RefCell::new(())));
     let caps = Captures::new(vec![Capture {
         name: "id".into(),
         value: "42".into(),
     }]);
-    let listing = poll_ready((mounted.entry.list)(&cx, caps, "/items/42".to_string())).unwrap();
+    let listing = poll_ready((mounted.list)(&cx, caps, "/items/42".to_string())).unwrap();
     let mut fs: Vec<_> = listing.effects.into_wit().fs;
     fs.sort_by(|a, b| a.path.cmp(&b.path));
 
