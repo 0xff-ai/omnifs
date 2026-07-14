@@ -308,6 +308,7 @@ impl From<&ExtractError> for wit_types::ErrorKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::archive::tests::append_targz_file;
     use flate2::Compression;
     use flate2::write::GzEncoder;
 
@@ -339,19 +340,6 @@ mod tests {
             tar.finish().unwrap();
         }
         gz.finish().unwrap()
-    }
-
-    fn append_targz_file(
-        tar: &mut tar::Builder<&mut GzEncoder<Vec<u8>>>,
-        path: &str,
-        bytes: &[u8],
-    ) {
-        let mut header = tar::Header::new_gnu();
-        header.set_path(path).unwrap();
-        header.set_size(bytes.len() as u64);
-        header.set_mode(0o644);
-        header.set_cksum();
-        tar.append(&header, bytes).unwrap();
     }
 
     #[test]

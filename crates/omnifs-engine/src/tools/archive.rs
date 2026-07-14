@@ -412,7 +412,7 @@ fn ensure_dir(path: &Path) -> Result<(), ExtractError> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use flate2::Compression;
     use flate2::write::GzEncoder;
@@ -431,7 +431,7 @@ mod tests {
         gz.finish().unwrap()
     }
 
-    fn append_targz_file(
+    pub(crate) fn append_targz_file(
         tar: &mut tar::Builder<&mut GzEncoder<Vec<u8>>>,
         path: &str,
         bytes: &[u8],
