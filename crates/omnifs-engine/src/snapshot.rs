@@ -291,6 +291,17 @@ fn files_from_entries(entries: Vec<object::CanonicalEntry>) -> Result<Vec<Snapsh
         }
     }
 
+    for path in &paths {
+        if let Some(ancestor) = std::iter::successors(path.parent(), Path::parent)
+            .take_while(|ancestor| !ancestor.is_root())
+            .find(|ancestor| paths.contains(ancestor))
+        {
+            bail!(
+                "object cache contains canonical file/ancestor collision: file `{ancestor}` is an ancestor of `{path}`"
+            );
+        }
+    }
+
     files.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(files)
 }
@@ -476,7 +487,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_rejects_reserved_index_paths() {
+    fn snapshot_rejects_reserved_and_ancestor_conflicting_paths() {
         for path in ["/index.json", "/index.json/child"] {
             let temp = tempfile::tempdir().unwrap();
             let cache_dir = temp.path().join("cache");
@@ -488,5 +499,16 @@ mod tests {
                 format!("object cache row uses reserved snapshot index path `{path}`")
             );
         }
+
+        let temp = tempfile::tempdir().unwrap();
+        let cache_dir = temp.path().join("cache");
+        seed(&cache_dir, "/foo", "parent", b"parent");
+        seed(&cache_dir, "/foo/child", "child", b"child");
+
+        let error = MountSnapshot::from_cache_dir(&cache_dir, "fixture").unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "object cache contains canonical file/ancestor collision: file `/foo` is an ancestor of `/foo/child`"
+        );
     }
 }
