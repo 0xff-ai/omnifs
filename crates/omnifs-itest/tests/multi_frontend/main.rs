@@ -1,9 +1,9 @@
 //! Multi-frontend acceptance: one daemon, several renderers, one shared
 //! namespace.
 //!
-//! The daemon is a frontend registry. These lanes prove that a single daemon can
-//! serve more than one renderer over one namespace, and that an invalidation
-//! reaches every renderer.
+//! The VFS server is the frontend registry. These lanes prove that a single
+//! daemon can serve more than one renderer over one namespace, and that an
+//! invalidation reaches every renderer.
 //!
 //! - `dual_frontend_serves_one_namespace` (Linux only): one daemon serving FUSE
 //!   and NFS concurrently. The full conformance row table runs against BOTH
@@ -25,8 +25,6 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use omnifs_itest::live;
-#[cfg(target_os = "linux")]
-use omnifs_workspace::runtime_record::RuntimeRecord;
 
 /// The live-growth file the test provider serves: `hello/live-log` grows one
 /// 12-byte line per 500ms from its first read, capped well above what these
@@ -54,15 +52,13 @@ fn dual_frontend_serves_one_namespace() {
         return;
     };
 
-    // The runtime record names both served frontends.
-    let record = RuntimeRecord::read(&daemon.record_path())
-        .expect("read runtime record")
-        .expect("runtime record present while serving");
+    // Live status, not durable daemon metadata, owns attachment observations.
+    let status = daemon.status();
     assert_eq!(
-        record.frontends.len(),
+        status.frontends.len(),
         2,
-        "the daemon must record both served frontends, got {:?}",
-        record.frontends
+        "the VFS server must observe both served frontends, got {:?}",
+        status.frontends
     );
 
     let fuse_root = daemon.tree_root(0);

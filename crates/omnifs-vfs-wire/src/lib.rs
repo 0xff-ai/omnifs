@@ -6,7 +6,7 @@
 //! and reconnect, readiness signaling, and the client wire cache.
 //!
 //! The daemon serves a [`TreeNamespace`](omnifs_engine::TreeNamespace) over a
-//! byte stream with [`serve_listener`]; an out-of-process renderer attaches a
+//! [`VfsServer`]; an out-of-process renderer attaches a
 //! [`WireNamespace`] and holds a `dyn Namespace` that speaks frames instead of
 //! calling the engine directly.
 //!
@@ -18,7 +18,7 @@
 //!
 //! On connect the client sends one `Hello { protocol, token, frontend }`
 //! request frame (`request_id = 0`), naming itself with a [`FrontendIdentity`]
-//! so the daemon's frontend registry can track it live. The server replies
+//! so the server can track it live. The server replies
 //! with either `Welcome { protocol, instance_id }` or `Rejected { reason }`
 //! (both response frames, `request_id = 0`), then closes the connection in the
 //! rejected case. A plain UDS listener ignores `token` (filesystem permissions
@@ -33,11 +33,9 @@
 //! `frontend` is display-only for the host: the guest names its own kind and
 //! mount point so the daemon's status surface can report it, but the host
 //! decides how the connection was *delivered* (native/docker/krunkit/external)
-//! from which listener it arrived on, never from anything the guest claims. A
-//! server that tracks attach lifecycle passes an [`AttachObserver`] into
-//! [`serve_connection`]/[`serve_listener`]/[`serve_listener_tcp`]; its
-//! `attached` fires once per successful handshake and `detached` fires when
-//! that connection ends, for any reason.
+//! from which listener it arrived on, never from anything the guest claims.
+//! [`VfsServer`] owns that listener authority and removes an observed identity
+//! when its last connection ends.
 //!
 //! # Identity
 //!
@@ -63,7 +61,7 @@ use serde::{Deserialize, Serialize};
 pub use beacon::spawn_ready_signal;
 pub use beacon::{ReadyPortError, resolve_ready_vsock_port};
 pub use client::{AttachTarget, AttachTargetError, WireNamespace};
-pub use server::{serve_connection, serve_listener, serve_listener_tcp};
+pub use server::{ListenerEvent, ListenerTarget, VfsServer, serve_connection};
 
 /// The Omnifs VFS wire protocol version. A client and server that disagree refuse
 /// to serve: there is no version negotiation, so v3 rejects a v2 (or lower)
@@ -71,8 +69,8 @@ pub use server::{serve_connection, serve_listener, serve_listener_tcp};
 pub const PROTOCOL: u32 = 3;
 
 /// Identity a connecting frontend presents in its handshake `Hello`, naming
-/// its own kind and guest-side mount point (display-only). The daemon's
-/// frontend registry reports it. The host derives delivery (local/docker/krunkit)
+/// its own kind and guest-side mount point (display-only). The server reports
+/// it. The host derives delivery (local/docker/krunkit)
 /// from the listener that accepted the connection, never from the guest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FrontendIdentity {
@@ -89,20 +87,6 @@ pub struct FrontendIdentity {
 pub enum FrontendKind {
     Fuse,
     Nfs,
-}
-
-/// Observes the attach lifecycle of connections on a wire listener. A server
-/// that wants to track which frontends are currently attached (the daemon's
-/// frontend registry) passes one in; a bare test server passes `None`.
-pub trait AttachObserver: Send + Sync {
-    /// Called once, right after a connection completes its handshake.
-    /// Returns an opaque id that [`Self::detached`] receives back when that
-    /// same connection ends.
-    fn attached(&self, identity: &FrontendIdentity) -> u64;
-    /// Called when the connection that produced `id` ends, for any reason: an
-    /// orderly disconnect, a protocol fault, or a panic in the serve loop.
-    /// Fired from a drop guard so it cannot be skipped.
-    fn detached(&self, id: u64);
 }
 
 /// One namespace call, mirroring the [`Namespace`](omnifs_engine::Namespace)
@@ -156,9 +140,8 @@ pub(crate) enum WireResponse {
 /// `token` is `None` over a Unix socket (the client has nothing to prove
 /// beyond the filesystem permissions that let it open the socket); a TCP
 /// attach listener requires it and rejects a mismatch via `Rejected`.
-/// `frontend` names the connecting frontend so the server-side
-/// [`AttachObserver`] (when present) can report it; display-only, never used
-/// for a trust decision.
+/// `frontend` names the connecting frontend so [`VfsServer`] can report it in
+/// its live snapshot; display-only, never used for a trust decision.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) enum Handshake {
     Hello {

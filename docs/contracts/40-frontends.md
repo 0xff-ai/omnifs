@@ -17,7 +17,7 @@ A frontend consumes the narrow `omnifs_engine::namespace` surface (`Namespace`, 
 
 ### Frontend registry
 
-The daemon constructs one `TreeNamespace` over the shared mount registry and serves it to separate frontend processes over the Omnifs VFS wire protocol. Every frontend exposes that complete namespace, so adding or removing a mount changes every frontend together. Frontends never store mount membership, selection, or filtering. The daemon tracks live attachments but never builds, mounts, supervises, or unmounts a renderer. Each frontend process owns one protocol surface and its own lifetime; the CLI owns launch and teardown through the frontend backend seam.
+The daemon constructs one `TreeNamespace` over the shared mount registry and gives it to `omnifs_vfs_wire::VfsServer`. `VfsServer` owns the fixed local and requested TCP/vsock listeners, attach tokens, listener and connection tasks, readiness, and the deduplicated live attachment snapshot; the daemon owns namespace construction, control serving, durable attach-target records, and process lifetime. Every frontend exposes the complete namespace, so adding or removing a mount changes every frontend together. Frontends never store mount membership, selection, or filtering. Each frontend process owns one protocol surface and its own lifetime; the CLI owns launch and teardown through the frontend backend seam.
 
 ### FUSE
 
@@ -101,7 +101,7 @@ The NFS mode of `omnifs-thin` uses `NFS4ERR_DELAY` in two distinct ways. Do not 
 - `crates/omnifs-mtab/src`
 - `crates/omnifs-engine/src/namespace` (the surface frontends consume)
 - `crates/omnifs-engine/src/tree`
-- `crates/omnifs-daemon/src/frontends.rs`
+- `crates/omnifs-vfs-wire/src/server.rs` (`VfsServer`)
 - `crates/omnifs-cli/src/frontend_backend.rs`
 - `crates/omnifs-cli/src/runtime.rs`
 - `crates/omnifs-cli/src/host_teardown.rs`

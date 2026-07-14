@@ -170,7 +170,6 @@ impl DaemonObservation {
                 },
                 omnifs_workspace::runtime_record::RecordedBackend::Native { pid: 1 },
                 "test-instance".to_owned(),
-                Vec::new(),
             )
         });
         Self {
@@ -1233,7 +1232,6 @@ mod tests {
             },
             omnifs_workspace::runtime_record::RecordedBackend::Native { pid: 42 },
             "instance".into(),
-            Vec::new(),
         );
         let mut unreachable = DaemonObservation::from(probe);
         unreachable.runtime = Some(expected);

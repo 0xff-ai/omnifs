@@ -3289,6 +3289,8 @@ version = "0.2.1"
 dependencies = [
  "constant_time_eq",
  "futures",
+ "getrandom 0.3.4",
+ "hex",
  "omnifs-api",
  "omnifs-engine",
  "omnifs-itest",

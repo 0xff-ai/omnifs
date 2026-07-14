@@ -309,6 +309,23 @@ impl MultiFrontendDaemon {
         self.home.path().join("daemon.json")
     }
 
+    /// Live daemon observations for this hermetic home.
+    #[must_use]
+    pub fn status(&self) -> omnifs_api::DaemonStatus {
+        let output = Command::new("curl")
+            .args(["-fsS", "--unix-socket"])
+            .arg(self.home.path().join("control.sock"))
+            .arg("http://localhost/v1/status")
+            .output()
+            .expect("query daemon status");
+        assert!(
+            output.status.success(),
+            "query daemon status: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).expect("daemon status is JSON")
+    }
+
     /// The projected test-provider root under the frontend at `index`.
     #[must_use]
     pub fn tree_root(&self, index: usize) -> PathBuf {

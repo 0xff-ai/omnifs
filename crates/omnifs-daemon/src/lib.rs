@@ -7,7 +7,6 @@
 
 mod app;
 mod context;
-mod frontends;
 mod server;
 
 pub use app::{DaemonArgs, run};

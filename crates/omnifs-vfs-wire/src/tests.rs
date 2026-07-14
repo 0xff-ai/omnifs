@@ -4,9 +4,10 @@
 //! pipe with a frame-level client, so no socket is involved. One end-to-end test
 //! runs a real [`WireNamespace`] over a `UnixListener` in a tempdir.
 
+use std::net::Ipv4Addr;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use futures::future::{BoxFuture, FutureExt};
@@ -21,8 +22,8 @@ use crate::frame::{
     Frame, KIND_EVENT, KIND_REQUEST, KIND_RESPONSE, MAX_FRAME, read_frame, write_frame,
 };
 use crate::{
-    AttachObserver, AttachTarget, FrontendIdentity, FrontendKind, Handshake, PROTOCOL, WireError,
-    WireNamespace, WireRequest, WireResponse, serve_connection, serve_listener, serve_listener_tcp,
+    AttachTarget, FrontendIdentity, FrontendKind, Handshake, ListenerTarget, PROTOCOL, VfsServer,
+    WireError, WireNamespace, WireRequest, WireResponse, serve_connection,
 };
 
 /// A canned identity for tests that don't care about the specific value, only
@@ -197,6 +198,39 @@ async fn recv_response(io: &mut DuplexStream) -> (u64, WireResponse) {
     (frame.request_id, postcard::from_bytes(&frame.body).unwrap())
 }
 
+fn start_local_server(
+    namespace: Arc<dyn Namespace>,
+    path: PathBuf,
+    instance_id: &str,
+) -> Arc<VfsServer> {
+    let server = VfsServer::new(namespace, instance_id.to_string());
+    server.serve_local(path).unwrap();
+    server
+}
+
+fn start_tcp_server(
+    namespace: Arc<dyn Namespace>,
+    instance_id: &str,
+    token: &str,
+) -> (Arc<VfsServer>, ListenerTarget) {
+    let server = VfsServer::new(namespace, instance_id.to_string());
+    let target = server
+        .ensure_tcp(Ipv4Addr::LOCALHOST, 0, Some(token.to_string()))
+        .unwrap();
+    (server, target)
+}
+
+fn start_vsock_server(
+    namespace: Arc<dyn Namespace>,
+    path: PathBuf,
+    instance_id: &str,
+    token: &str,
+) -> Arc<VfsServer> {
+    let server = VfsServer::new(namespace, instance_id.to_string());
+    server.ensure_vsock(path, Some(token.to_string())).unwrap();
+    server
+}
+
 /// Spawn a server over the server half of a fresh duplex, with no expected
 /// token (mirroring a Unix-socket listener); return the client half and the
 /// server's join handle.
@@ -213,15 +247,12 @@ fn serve_over_duplex_with_token(
     namespace: Arc<dyn Namespace>,
     expected_token: Option<&'static str>,
 ) -> (DuplexStream, tokio::task::JoinHandle<Result<(), WireError>>) {
-    serve_over_duplex_with(namespace, expected_token, None)
+    serve_over_duplex_with(namespace, expected_token)
 }
 
-/// Like [`serve_over_duplex_with_token`], additionally taking the
-/// [`AttachObserver`] the connection reports through.
 fn serve_over_duplex_with(
     namespace: Arc<dyn Namespace>,
     expected_token: Option<&'static str>,
-    observer: Option<Arc<dyn AttachObserver>>,
 ) -> (DuplexStream, tokio::task::JoinHandle<Result<(), WireError>>) {
     let (client_io, server_io) = tokio::io::duplex(1024 * 1024);
     let handle = tokio::spawn(serve_connection(
@@ -229,7 +260,6 @@ fn serve_over_duplex_with(
         server_io,
         "inst-server".to_string(),
         expected_token,
-        observer,
     ));
     (client_io, handle)
 }
@@ -520,15 +550,8 @@ async fn server_side_nserror_propagates() {
 async fn unix_listener_end_to_end() {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("ns.sock");
-    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
     let stub = StubNamespace::new();
-    tokio::spawn(serve_listener(
-        stub,
-        listener,
-        "inst-e2e".to_string(),
-        None,
-        None,
-    ));
+    let server = start_local_server(stub, socket.clone(), "inst-e2e");
 
     let namespace = WireNamespace::attach(
         AttachTarget::Unix(socket),
@@ -550,27 +573,24 @@ async fn unix_listener_end_to_end() {
 
     let err = namespace.readlink(NodeId(1)).await.unwrap_err();
     assert_eq!(err, NsError::Invalid);
+    server.shutdown().await;
 }
 
 /// The Docker Desktop path end to end: a real TCP loopback listener, a real
 /// [`WireNamespace`] dialing it with the matching attach token.
 #[tokio::test]
 async fn tcp_listener_end_to_end() {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
     let stub = StubNamespace::new();
-    tokio::spawn(serve_listener_tcp(
-        stub,
-        listener,
-        "inst-tcp-e2e".to_string(),
-        "secret-token".to_string(),
-        None,
-    ));
+    let (server, ListenerTarget::Tcp { addr, token }) =
+        start_tcp_server(stub, "inst-tcp-e2e", "secret-token")
+    else {
+        panic!("TCP server returned a non-TCP target")
+    };
 
     let namespace = WireNamespace::attach(
         AttachTarget::Tcp {
             addr: addr.to_string(),
-            token: "secret-token".to_string(),
+            token,
         },
         test_identity(),
         tokio::runtime::Handle::current(),
@@ -581,20 +601,17 @@ async fn tcp_listener_end_to_end() {
 
     let answer = namespace.lookup(NodeId::ROOT, "message").await.unwrap();
     assert_eq!(answer.node, NodeId(42));
+    server.shutdown().await;
 }
 
 #[tokio::test]
 async fn tcp_listener_rejects_wrong_token() {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
     let stub = StubNamespace::new();
-    tokio::spawn(serve_listener_tcp(
-        stub,
-        listener,
-        "inst-tcp-reject".to_string(),
-        "secret-token".to_string(),
-        None,
-    ));
+    let (server, ListenerTarget::Tcp { addr, .. }) =
+        start_tcp_server(stub, "inst-tcp-reject", "secret-token")
+    else {
+        panic!("TCP server returned a non-TCP target")
+    };
 
     let result = WireNamespace::attach(
         AttachTarget::Tcp {
@@ -610,11 +627,12 @@ async fn tcp_listener_rejects_wrong_token() {
         Ok(_) => panic!("a wrong token must be rejected, not accepted"),
         Err(other) => panic!("expected Rejected, got {other:?}"),
     }
+    server.shutdown().await;
 }
 
-/// The krunkit vsock-proxy path's host-side shape: a real `UnixListener` served
-/// by [`serve_listener`] with `Some(token)`, so a connecting peer must present
-/// it exactly like [`serve_listener_tcp`]'s TCP listener does. Driven with the
+/// The krunkit vsock-proxy path's host-side shape: a real token-authenticated
+/// UDS listener, so a connecting peer must present it exactly like the TCP
+/// listener does. Driven with the
 /// raw frame helpers (not `WireNamespace::attach`/`AttachTarget::Unix`, which
 /// by design never sends a token) since production reaches this socket through
 /// krunkit's vsock proxy, not a bare Unix dial.
@@ -622,15 +640,13 @@ async fn tcp_listener_rejects_wrong_token() {
 async fn unix_listener_with_token_end_to_end() {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("ns.sock");
-    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
     let stub = StubNamespace::new();
-    tokio::spawn(serve_listener(
-        stub,
-        listener,
-        "inst-uds-token".to_string(),
-        Some("secret-token".to_string()),
-        None,
-    ));
+    let server = start_vsock_server(
+        Arc::clone(&stub),
+        socket.clone(),
+        "inst-uds-token",
+        "secret-token",
+    );
 
     let mut stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
     let hello = postcard::to_allocvec(&Handshake::Hello {
@@ -650,21 +666,22 @@ async fn unix_listener_with_token_end_to_end() {
         Handshake::Welcome { instance_id, .. } => assert_eq!(instance_id, "inst-uds-token"),
         other => panic!("expected Welcome, got {other:?}"),
     }
+    drop(stream);
+    server.shutdown().await;
+    assert!(!socket.exists(), "dynamic UDS must be removed on shutdown");
+
+    let rebound = start_vsock_server(stub, socket.clone(), "inst-uds-rebound", "secret-token");
+    assert!(socket.exists(), "dynamic UDS must be bindable again");
+    rebound.shutdown().await;
+    assert!(!socket.exists(), "rebound UDS must be cleaned too");
 }
 
 #[tokio::test]
 async fn unix_listener_with_token_rejects_wrong_token() {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("ns.sock");
-    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
     let stub = StubNamespace::new();
-    tokio::spawn(serve_listener(
-        stub,
-        listener,
-        "inst-uds-reject".to_string(),
-        Some("secret-token".to_string()),
-        None,
-    ));
+    let server = start_vsock_server(stub, socket.clone(), "inst-uds-reject", "secret-token");
 
     let mut stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
     let hello = postcard::to_allocvec(&Handshake::Hello {
@@ -684,165 +701,7 @@ async fn unix_listener_with_token_rejects_wrong_token() {
         Handshake::Rejected { .. } => {},
         other => panic!("expected Rejected, got {other:?}"),
     }
-}
-
-// ---------------------------------------------------------------------------
-// Attach lifecycle observer
-// ---------------------------------------------------------------------------
-
-/// A counting [`AttachObserver`]: records every identity `attached` reported
-/// and every id `detached` reported, so a test can assert on both halves of
-/// the lifecycle independently.
-#[derive(Default)]
-struct RecordingObserver {
-    next_id: AtomicU64,
-    attached: Mutex<Vec<(u64, FrontendIdentity)>>,
-    detached: Mutex<Vec<u64>>,
-}
-
-impl RecordingObserver {
-    fn attached_count(&self) -> usize {
-        self.attached.lock().unwrap().len()
-    }
-
-    fn detached_count(&self) -> usize {
-        self.detached.lock().unwrap().len()
-    }
-}
-
-impl AttachObserver for RecordingObserver {
-    fn attached(&self, identity: &FrontendIdentity) -> u64 {
-        // Ids start at 1 so a test can distinguish "never attached" (0) from a
-        // real assigned id.
-        let id = self.next_id.fetch_add(1, Ordering::SeqCst) + 1;
-        self.attached.lock().unwrap().push((id, identity.clone()));
-        id
-    }
-
-    fn detached(&self, id: u64) {
-        self.detached.lock().unwrap().push(id);
-    }
-}
-
-/// A successful v3 handshake reports the connecting frontend's identity to the
-/// server's [`AttachObserver`] verbatim, and an orderly disconnect reports the
-/// matching `detached(id)`.
-#[tokio::test]
-async fn handshake_identity_reaches_the_attach_observer() {
-    let stub = StubNamespace::new();
-    let observer = Arc::new(RecordingObserver::default());
-    let (mut io, server) = serve_over_duplex_with(
-        stub,
-        None,
-        Some(Arc::clone(&observer) as Arc<dyn AttachObserver>),
-    );
-
-    let identity = FrontendIdentity {
-        kind: FrontendKind::Nfs,
-        mount_point: PathBuf::from("/guest/omnifs"),
-    };
-    let hello = postcard::to_allocvec(&Handshake::Hello {
-        protocol: PROTOCOL,
-        token: None,
-        frontend: identity.clone(),
-    })
-    .unwrap();
-    write_frame(&mut io, &Frame::new(0, KIND_REQUEST, hello))
-        .await
-        .unwrap();
-    let welcome = read_frame(&mut io).await.unwrap().expect("welcome frame");
-    match postcard::from_bytes::<Handshake>(&welcome.body).unwrap() {
-        Handshake::Welcome { .. } => {},
-        other => panic!("expected Welcome, got {other:?}"),
-    }
-
-    assert_eq!(observer.attached_count(), 1);
-    let (id, reported) = observer.attached.lock().unwrap()[0].clone();
-    assert_eq!(reported, identity);
-    assert_eq!(
-        observer.detached_count(),
-        0,
-        "not detached before disconnect"
-    );
-
-    // An orderly disconnect: drop the client half, closing the pipe.
-    drop(io);
-    server.await.unwrap().unwrap();
-
-    assert_eq!(observer.detached_count(), 1);
-    assert_eq!(observer.detached.lock().unwrap()[0], id);
-}
-
-/// The [`AttachObserver::detached`] drop guard fires even when the serve task
-/// is torn down abnormally (aborted mid-flight, standing in for a panic
-/// unwinding through [`serve_connection`]) rather than returning normally, so
-/// the registry can never leak an entry for a connection that is actually
-/// gone.
-#[tokio::test]
-async fn detach_fires_via_drop_guard_on_abnormal_termination() {
-    let stub = StubNamespace::new();
-    let observer = Arc::new(RecordingObserver::default());
-    let (mut io, server) = serve_over_duplex_with(
-        stub,
-        None,
-        Some(Arc::clone(&observer) as Arc<dyn AttachObserver>),
-    );
-
-    client_handshake(&mut io, PROTOCOL).await.unwrap();
-    // Wait for the observer to see the attach before aborting; `client_handshake`
-    // only proves the client saw `Welcome`, which the server sends before
-    // calling `attached`.
-    for _ in 0..100 {
-        if observer.attached_count() == 1 {
-            break;
-        }
-        tokio::task::yield_now().await;
-    }
-    assert_eq!(observer.attached_count(), 1);
-    assert_eq!(observer.detached_count(), 0);
-
-    // Abort the serve task outright instead of closing the connection in the
-    // ordinary way: tokio drops the in-flight future in place, running every
-    // local's `Drop` impl (including `AttachGuard`'s) without the function
-    // ever reaching its own return statement.
-    server.abort();
-    let outcome = server.await;
-    assert!(outcome.is_err() && outcome.unwrap_err().is_cancelled());
-
-    assert_eq!(observer.detached_count(), 1);
-}
-
-/// Disconnecting aborts in-flight namespace calls before waiting for the
-/// writer, so a blocked provider operation cannot keep a dead frontend in the
-/// attach registry.
-#[tokio::test]
-async fn disconnect_drops_attach_with_an_in_flight_request() {
-    let observer = Arc::new(RecordingObserver::default());
-    let (mut io, server) = serve_over_duplex_with(
-        StubNamespace::new(),
-        None,
-        Some(Arc::clone(&observer) as Arc<dyn AttachObserver>),
-    );
-
-    client_handshake(&mut io, PROTOCOL).await.unwrap();
-    send_request(
-        &mut io,
-        1,
-        &WireRequest::Read {
-            node: NodeId(1),
-            offset: 60_000,
-            len: 1,
-        },
-    )
-    .await;
-    drop(io);
-
-    tokio::time::timeout(Duration::from_secs(1), server)
-        .await
-        .expect("server must not wait for the blocked request")
-        .unwrap()
-        .unwrap();
-    assert_eq!(observer.detached_count(), 1);
+    server.shutdown().await;
 }
 
 /// The manager's reconnect-forever loop, exercised over a real TCP socket:
@@ -851,8 +710,8 @@ async fn disconnect_drops_attach_with_an_in_flight_request() {
 /// `inst-b`. The client must reconnect on its own and fire `Reattached`.
 ///
 /// The server side is hand-rolled with the frame primitives instead of
-/// [`serve_listener_tcp`] so the test can close the connection deterministically
-/// right after the handshake; `serve_connection`'s own background tasks
+/// so the test can close the connection deterministically right after the
+/// handshake; the production listener's background tasks
 /// (writer, event forwarder) would otherwise keep the socket's write half open
 /// past an abort of the top-level task.
 #[tokio::test]
@@ -1120,14 +979,7 @@ impl Namespace for MemoStub {
 async fn attach_stub(stub: Arc<dyn Namespace>) -> (Arc<WireNamespace>, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("ns.sock");
-    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
-    tokio::spawn(serve_listener(
-        stub,
-        listener,
-        "memo-inst".to_string(),
-        None,
-        None,
-    ));
+    start_local_server(stub, socket.clone(), "memo-inst");
     let ns = WireNamespace::attach(
         AttachTarget::Unix(socket),
         test_identity(),
@@ -1374,7 +1226,9 @@ mod trace_propagation {
     use omnifs_engine::{Namespace, NodeId, TreeNamespace};
     use tokio::runtime::Handle;
 
-    use crate::{AttachTarget, FrontendIdentity, FrontendKind, WireNamespace, serve_listener_tcp};
+    use crate::{
+        AttachTarget, FrontendIdentity, FrontendKind, ListenerTarget, VfsServer, WireNamespace,
+    };
 
     /// Drain up to `max` records from `live` within a generous per-record
     /// timeout, returning what arrived. Bounded so a missing event fails the
@@ -1417,20 +1271,18 @@ mod trace_propagation {
         let tree_ns =
             TreeNamespace::single("test".to_string(), Arc::clone(&runtime), Handle::current());
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(serve_listener_tcp(
-            tree_ns,
-            listener,
-            "inst-trace".to_string(),
-            "secret".to_string(),
-            None,
-        ));
+        let server = VfsServer::new(tree_ns, "inst-trace".to_string());
+        let ListenerTarget::Tcp { addr, token } = server
+            .ensure_tcp("127.0.0.1".parse().unwrap(), 0, Some("secret".to_string()))
+            .unwrap()
+        else {
+            panic!("trace server returned a non-TCP target")
+        };
 
         let client = WireNamespace::attach(
             AttachTarget::Tcp {
                 addr: addr.to_string(),
-                token: "secret".to_string(),
+                token,
             },
             FrontendIdentity {
                 kind: FrontendKind::Fuse,
@@ -1448,6 +1300,8 @@ mod trace_propagation {
         let message = client.lookup(hello.node, "message").await.unwrap();
         let read = client.read(message.node, 0, 4096).await.unwrap();
         assert_eq!(read.bytes, b"Hello, world!");
+
+        server.shutdown().await;
 
         let records = drain(&mut live, 64).await;
         let read_end = records

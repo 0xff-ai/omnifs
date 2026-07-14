@@ -105,8 +105,8 @@ pub async fn run(args: &DaemonArgs) -> anyhow::Result<()> {
     // Build the one shared namespace after atomic startup loading, so its root
     // record reflects the complete mount set.
     let namespace = omnifs_engine::TreeNamespace::new(Arc::clone(&registry), rt.clone());
-    // Give the daemon a handle to the namespace so `POST /v1/frontend/attach-target`
-    // can bind a TCP attach listener on a running daemon without a restart.
+    // Give the daemon's VfsServer a handle to the namespace so REST attach
+    // requests can bind a TCP listener on a running daemon without a restart.
     daemon.set_namespace(Arc::clone(&namespace));
     let result = daemon.run(previous).await;
     let served_mounts = registry.runtime_entries().len();
