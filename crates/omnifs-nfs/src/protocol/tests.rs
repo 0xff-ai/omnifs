@@ -15,7 +15,7 @@ use crate::protocol::consts::{
 };
 use crate::protocol::filehandle::{client_id, decode_file_handle, file_handle, now_sec};
 use crate::protocol::ops::handle_readdir;
-use crate::protocol::xdr::{XdrReader, XdrWriter};
+use crate::protocol::xdr::{XdrError, XdrReader, XdrWriter};
 use crate::trace::Trace;
 use std::collections::BTreeMap;
 
@@ -239,6 +239,19 @@ fn op_getattr(bits: &[u32]) -> Vec<u8> {
     writer.into_inner()
 }
 
+fn malformed_bitmap() -> Vec<u8> {
+    let mut writer = XdrWriter::new();
+    writer.u32(u32::MAX);
+    writer.into_inner()
+}
+
+fn op_getattr_with_malformed_bitmap() -> Vec<u8> {
+    let mut writer = XdrWriter::new();
+    writer.u32(OP_GETATTR);
+    writer.bytes(&malformed_bitmap());
+    writer.into_inner()
+}
+
 fn request_words(bits: &[u32]) -> Vec<u32> {
     let mut writer = XdrWriter::new();
     encode_bitmap(&mut writer, bits);
@@ -300,6 +313,31 @@ fn op_readdir_with_maxcount(maxcount: u32) -> Vec<u8> {
     writer.u32(4096);
     writer.u32(maxcount);
     encode_bitmap(&mut writer, &[FATTR4_TYPE, FATTR4_SIZE, FATTR4_FILEID]);
+    writer.into_inner()
+}
+
+fn op_readdir_with_malformed_bitmap() -> Vec<u8> {
+    let mut writer = XdrWriter::new();
+    writer.u32(OP_READDIR);
+    writer.u64(0);
+    writer.bytes(&[0; 8]);
+    writer.u32(4096);
+    writer.u32(4096);
+    writer.bytes(&malformed_bitmap());
+    writer.into_inner()
+}
+
+fn op_open_with_malformed_create_fattr() -> Vec<u8> {
+    let mut writer = XdrWriter::new();
+    writer.u32(OP_OPEN);
+    writer.u32(1);
+    writer.u32(1);
+    writer.u32(0);
+    writer.u64(client_id(TEST_GENERATION));
+    writer.opaque(b"owner");
+    writer.u32(1);
+    writer.u32(0);
+    writer.bytes(&malformed_bitmap());
     writer.into_inner()
 }
 
@@ -387,6 +425,37 @@ fn compound_result_with_minor(export: &dyn ReadOnlyExport, minor: u32, ops: &[Ve
         &Trace::new(None).unwrap(),
     )
     .unwrap()
+}
+
+fn compound_decode_error(export: &dyn ReadOnlyExport, ops: &[Vec<u8>]) -> XdrError {
+    let payload = compound_payload(ops);
+    let mut reader = XdrReader::new(&payload);
+    let clients = ClientTable::with_confirmed_default(TEST_GENERATION);
+    handle_compound(
+        &mut reader,
+        TEST_GENERATION,
+        &clients,
+        export,
+        1,
+        &Trace::new(None).unwrap(),
+    )
+    .expect_err("malformed compound should preserve its XDR decode error")
+}
+
+#[test]
+fn malformed_compound_bitmaps_return_decode_error() {
+    let export = StaticExport::fixture();
+
+    for (name, op) in [
+        ("GETATTR", op_getattr_with_malformed_bitmap()),
+        ("READDIR", op_readdir_with_malformed_bitmap()),
+        ("OPEN create fattr", op_open_with_malformed_create_fattr()),
+    ] {
+        assert!(
+            matches!(compound_decode_error(&export, &[op]), XdrError::Underflow),
+            "{name} should return XDR underflow"
+        );
+    }
 }
 
 fn open_stateid(result: &[u8]) -> [u8; 16] {

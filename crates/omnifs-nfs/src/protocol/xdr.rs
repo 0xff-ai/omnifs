@@ -72,9 +72,15 @@ impl<'a> XdrReader<'a> {
 
     pub(crate) fn bitmap(&mut self) -> Result<Vec<u32>, XdrError> {
         let len = self.u32()? as usize;
+        let byte_len = len.checked_mul(4).ok_or(XdrError::Underflow)?;
+        let bytes = self.take(byte_len)?;
         let mut words = Vec::with_capacity(len);
-        for _ in 0..len {
-            words.push(self.u32()?);
+        for chunk in bytes.chunks_exact(4) {
+            words.push(u32::from_be_bytes(
+                chunk
+                    .try_into()
+                    .expect("bitmap chunks are exactly one u32 long"),
+            ));
         }
         Ok(words)
     }
@@ -99,12 +105,13 @@ impl<'a> XdrReader<'a> {
     }
 
     pub(crate) fn take(&mut self, len: usize) -> Result<&'a [u8], XdrError> {
-        if self.pos + len > self.data.len() {
+        let end = self.pos.checked_add(len).ok_or(XdrError::Underflow)?;
+        if end > self.data.len() {
             return Err(XdrError::Underflow);
         }
         let start = self.pos;
-        self.pos += len;
-        Ok(&self.data[start..start + len])
+        self.pos = end;
+        Ok(&self.data[start..end])
     }
 }
 
@@ -223,5 +230,13 @@ mod tests {
         let bytes = writer.into_inner();
         let mut reader = XdrReader::new(&bytes);
         assert!(matches!(reader.string(), Err(XdrError::InvalidUtf8)));
+    }
+
+    #[test]
+    fn reader_rejects_bitmap_with_huge_count_before_allocating() {
+        let bytes = u32::MAX.to_be_bytes();
+        let mut reader = XdrReader::new(&bytes);
+
+        assert!(matches!(reader.bitmap(), Err(XdrError::Underflow)));
     }
 }
