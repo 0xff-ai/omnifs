@@ -90,7 +90,7 @@ async fn test_list_root() {
         .unwrap();
     match result {
         NamespaceListOutcome::Entries(listing) => {
-            assert_eq!(listing.entries.len(), 7);
+            assert_eq!(listing.entries.len(), 6);
             let names: Vec<&str> = listing
                 .entries
                 .iter()
@@ -101,7 +101,6 @@ async fn test_list_root() {
             assert!(names.contains(&"hello"));
             assert!(names.contains(&"scoped"));
             assert!(names.contains(&"dynamic"));
-            assert!(names.contains(&"checkout"));
             assert!(names.contains(&"slow"));
             assert!(
                 listing
@@ -472,9 +471,11 @@ async fn test_object_dir_child_lookup_preserves_full_listing() {
     let object_dir = p("/items/open/7");
     // The conformance Item anchor exposes its file leaves (item.json/item.md +
     // title/state/body derives), a `log` object stream face, the `comments`
-    // child-object collection dir, and `replies` (a Comment alias subtree).
+    // child-object collection dir, the tree-capable `checkout` dir, and
+    // `replies` (a Comment alias subtree).
     let expected = vec![
         "body",
+        "checkout",
         "comments",
         "item.json",
         "item.md",
@@ -716,7 +717,7 @@ async fn test_subtree_handoff_rejects_unknown_tree_ref() {
     let lookup_error = harness
         .runtime
         .namespace()
-        .lookup_child(&p("/"), "checkout")
+        .lookup_child(&p("/items/open/7"), "checkout")
         .await
         .unwrap_err();
     assert!(
@@ -729,7 +730,7 @@ async fn test_subtree_handoff_rejects_unknown_tree_ref() {
     let listing_error = harness
         .runtime
         .namespace()
-        .list_children(&p("/checkout"), None, None)
+        .list_children(&p("/items/open/7/checkout"), None, None)
         .await
         .unwrap_err();
     assert!(

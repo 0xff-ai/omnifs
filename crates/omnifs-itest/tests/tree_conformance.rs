@@ -198,14 +198,7 @@ async fn lists_root_and_nested_directories() {
     let t = tree_harness();
 
     let root = t.list_names("/").await;
-    for expected in [
-        "README.md",
-        "items",
-        "hello",
-        "scoped",
-        "checkout",
-        "dynamic",
-    ] {
+    for expected in ["README.md", "items", "hello", "scoped", "dynamic"] {
         assert!(
             root.contains(&expected.to_string()),
             "root missing {expected}: {root:?}"

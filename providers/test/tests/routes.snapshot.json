@@ -21,6 +21,26 @@
     ]
   },
   {
+    "template": "/items/{filter}/{number}/checkout",
+    "kind": "Dir",
+    "object_kind": null,
+    "captures": [
+      {
+        "name": "filter",
+        "type_name": "StateFilter",
+        "choices": [
+          "open",
+          "all"
+        ]
+      },
+      {
+        "name": "number",
+        "type_name": "u64",
+        "choices": null
+      }
+    ]
+  },
+  {
     "template": "/hello",
     "kind": "Dir",
     "object_kind": null,
@@ -167,12 +187,6 @@
   {
     "template": "/scoped/item",
     "kind": "File",
-    "object_kind": null,
-    "captures": []
-  },
-  {
-    "template": "/checkout",
-    "kind": "Treeref",
     "object_kind": null,
     "captures": []
   },

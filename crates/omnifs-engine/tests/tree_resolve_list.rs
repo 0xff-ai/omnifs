@@ -165,14 +165,13 @@ async fn list_root_yields_known_children() {
         .collect();
     // Verified against providers/test/src/lib.rs route registrations on this
     // branch: the root projects the generated README plus items, hello,
-    // scoped, the /dynamic capture prefix, the checkout treeref, and the slow
-    // delay route the concurrency net added.
-    assert_eq!(names.len(), 7, "got {names:?}");
+    // scoped, the /dynamic capture prefix, and the slow delay route the
+    // concurrency net added.
+    assert_eq!(names.len(), 6, "got {names:?}");
     assert!(names.contains(&"README.md"));
     assert!(names.contains(&"items"));
     assert!(names.contains(&"hello"));
     assert!(names.contains(&"scoped"));
-    assert!(names.contains(&"checkout"));
     assert!(names.contains(&"dynamic"));
     assert!(names.contains(&"slow"));
     assert_eq!(

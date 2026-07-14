@@ -197,8 +197,8 @@ impl OpenedFile {
     }
 }
 
-/// The subtree handoff token a `treeref` handler returns: a host-issued
-/// tree handle from a git-open callout that the host
+/// The subtree handoff token a tree-capable directory handler returns: a
+/// host-issued tree handle from a git-open callout that the host
 /// resolves to a bind-mounted directory. Provider dispatch stops at the
 /// handoff point; paths below it never reach the provider.
 ///

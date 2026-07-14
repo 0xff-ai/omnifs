@@ -4,8 +4,8 @@
 //! representation, and computed faces; a child-object `comments` collection with a
 //! typed page cursor; scoped intent-tagged invalidation from `on_tick`;
 //! object-load prefetch via `preload_object`; an object alias; deferred, ranged,
-//! and live files; paged and partial listings with validators; rate limits; and
-//! object aliases.
+//! and live files; an object tree handoff; paged and partial listings with
+//! validators; rate limits; and object aliases.
 //!
 //! It is the conformance fixture every host integration test drives, so every
 //! pinned behavior is preserved on the new surface: the root, hello, and items
@@ -93,6 +93,13 @@ impl Item {
     #[allow(clippy::unused_async)]
     async fn log(_cx: Cx<State>, _key: ItemKey) -> Result<StreamFile> {
         Ok(StreamFile::new(ItemLogReader).live())
+    }
+
+    /// Returns an intentionally unknown handle so host validation can exercise
+    /// the retained object-directory tree-handoff boundary.
+    #[allow(clippy::unused_async)]
+    async fn unknown_tree(_cx: Cx<State>, _key: ItemKey) -> Result<TreeRef> {
+        Ok(TreeRef::new(777))
     }
 
     /// The hand-written load `#[object]` forwards `Object::load` to. Item 404 is
@@ -374,6 +381,7 @@ impl TestProvider {
             // The live ranged leaf opens through object stream dispatch.
             o.file("log").stream(Item::log)?;
             o.dir("comments").collection(item_comments)?;
+            o.dir("checkout").tree(Item::unknown_tree)?;
             Ok(())
         })?;
 

@@ -4,7 +4,7 @@
 //! callout: the host checks `clone_url` against the provider's capability
 //! grants, clones the remote into a host-side cache directory if it is not
 //! already there, and returns a `GitRepoInfo` whose `tree` field is the
-//! handle a treeref route returns (wrap it in
+//! handle a tree-capable directory face returns (wrap it in
 //! [`crate::handler::TreeRef::new`]). The repository bytes never enter guest
 //! memory: traversal and file reads are served through FUSE bind mounts of
 //! the clone directory, not through the WIT.
