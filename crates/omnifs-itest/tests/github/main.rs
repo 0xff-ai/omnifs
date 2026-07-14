@@ -1067,6 +1067,8 @@ fn github_pr_lookup_validates_and_exposes_diff() {
 fn github_pr_files_list_and_read_changed_file_objects() {
     use omnifs_wit::provider::types::{CalloutResult, HttpResponse};
 
+    const CHANGED_FILE_ROW: &[u8] = br#"{"changes":7,"unknown_marker":"preserved","filename":"src/lib.rs","deletions":2,"status":"modified","patch":"@@ -1 +1 @@\n-old\n+new","additions":5}"#;
+    let files_response = [b"[".as_slice(), CHANGED_FILE_ROW, b"]".as_slice()].concat();
     let harness = github_harness();
     let mut listed = harness
         .list("/octocat/Hello-World/pulls/open/7/files")
@@ -1084,17 +1086,7 @@ fn github_pr_files_list_and_read_changed_file_objects() {
         .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
             status: 200,
             headers: Vec::new(),
-            body: br#"[
-                {
-                    "filename":"src/lib.rs",
-                    "status":"modified",
-                    "additions":5,
-                    "deletions":2,
-                    "changes":7,
-                    "patch":"@@ -1 +1 @@\n-old\n+new"
-                }
-            ]"#
-            .to_vec(),
+            body: files_response.clone(),
         })])
         .unwrap();
     match listed.result().unwrap() {
@@ -1138,26 +1130,17 @@ fn github_pr_files_list_and_read_changed_file_objects() {
     read.answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
         status: 200,
         headers: Vec::new(),
-        body: br#"[
-                {
-                    "filename":"src/lib.rs",
-                    "status":"modified",
-                    "additions":5,
-                    "deletions":2,
-                    "changes":7,
-                    "patch":"@@ -1 +1 @@\n-old\n+new"
-                }
-            ]"#
-        .to_vec(),
+        body: files_response,
     })])
     .unwrap();
     match read.result().unwrap() {
         OpResult::ReadFile(ReadFileOutcome::Found(file)) => {
             let body = std::str::from_utf8(omnifs_itest::expect_inline(file)).unwrap();
             assert!(body.contains("# src/lib.rs"), "unexpected file.md: {body}");
-            assert!(
-                !read.effects().unwrap().canonical.is_empty(),
-                "changed-file read should store canonical bytes from its own load"
+            assert_eq!(
+                read.effects().unwrap().canonical[0].bytes.as_slice(),
+                CHANGED_FILE_ROW,
+                "changed-file canonical must preserve the matched list row verbatim"
             );
         },
         other => panic!("expected changed-file markdown read, got {other:?}"),

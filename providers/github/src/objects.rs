@@ -4,14 +4,14 @@ use omnifs_core::ContentType;
 use omnifs_sdk::prelude::*;
 use omnifs_sdk::repr::{Markdown, Representable};
 use serde::de::IgnoredAny;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use crate::User;
 
 /// The single-item wire body shared by github.issue and github.pull
 /// (identical GitHub JSON shape). Not an Object itself; Issue/PullRequest
 /// are thin #[serde(transparent)] wrappers.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub(crate) struct ItemData {
     pub(crate) number: u64,
     pub(crate) title: String,
@@ -20,11 +20,9 @@ pub(crate) struct ItemData {
     pub(crate) state: String,
     #[serde(default)]
     pub(crate) user: Option<User>,
-    #[serde(default)]
-    pub(crate) updated_at: Option<String>,
     /// Set on issue-list rows that are actually PRs; used by `Issue::load`
     /// to enforce disjointness and by `Repo::issues` to filter rows.
-    #[serde(default, skip_serializing)]
+    #[serde(default)]
     pub(crate) pull_request: Option<IgnoredAny>,
 }
 
@@ -65,7 +63,7 @@ impl ItemData {
 }
 
 #[omnifs_sdk::object(kind = "github.issue", key = crate::item::IssueKey)]
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(transparent)]
 pub(crate) struct Issue(pub(crate) ItemData);
 
@@ -94,7 +92,7 @@ impl Representable<Markdown> for Issue {
 }
 
 #[omnifs_sdk::object(kind = "github.pull", key = crate::item::PullKey)]
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(transparent)]
 pub(crate) struct PullRequest(pub(crate) ItemData);
 
@@ -123,7 +121,7 @@ impl Representable<Markdown> for PullRequest {
 }
 
 #[omnifs_sdk::object(kind = "github.pull_file", key = crate::item::ChangedFileKey)]
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub(crate) struct ChangedFile {
     pub(crate) filename: String,
     pub(crate) status: String,
@@ -137,12 +135,6 @@ pub(crate) struct ChangedFile {
     pub(crate) patch: Option<String>,
     #[serde(default)]
     pub(crate) previous_filename: Option<String>,
-    #[serde(default)]
-    pub(crate) blob_url: Option<String>,
-    #[serde(default)]
-    pub(crate) raw_url: Option<String>,
-    #[serde(default)]
-    pub(crate) contents_url: Option<String>,
 }
 
 impl ChangedFile {
@@ -179,7 +171,7 @@ impl Representable<Markdown> for ChangedFile {
 }
 
 #[omnifs_sdk::object(kind = "github.review", key = crate::item::ReviewKey)]
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub(crate) struct Review {
     pub(crate) id: u64,
     #[serde(default)]
@@ -190,8 +182,6 @@ pub(crate) struct Review {
     pub(crate) state: Option<String>,
     #[serde(default)]
     pub(crate) submitted_at: Option<String>,
-    #[serde(default)]
-    pub(crate) commit_id: Option<String>,
 }
 
 impl Review {
@@ -227,7 +217,7 @@ impl Representable<Markdown> for Review {
 }
 
 #[omnifs_sdk::object(kind = "github.review_comment", key = crate::item::ReviewCommentKey)]
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub(crate) struct ReviewComment {
     pub(crate) id: u64,
     #[serde(default)]
@@ -269,7 +259,7 @@ impl Representable<Markdown> for ReviewComment {
 }
 
 #[omnifs_sdk::object(kind = "github.check", key = crate::item::CheckRunKey)]
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub(crate) struct CheckRun {
     pub(crate) id: u64,
     pub(crate) name: String,
@@ -282,7 +272,7 @@ pub(crate) struct CheckRun {
     pub(crate) output: Option<CheckOutput>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize)]
 pub(crate) struct CheckOutput {
     #[serde(default)]
     pub(crate) title: Option<String>,
@@ -356,7 +346,7 @@ impl Representable<Markdown> for CheckRun {
 /// A GitHub owner (user or organization) profile. The upstream profile JSON is
 /// the canonical payload; `profile.md` renders it.
 #[omnifs_sdk::object(kind = "github.owner", key = crate::item::OwnerKey)]
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub(crate) struct Owner {
     #[serde(default)]
     pub(crate) login: Option<String>,
@@ -379,26 +369,18 @@ impl Representable<Markdown> for Owner {
 }
 
 #[omnifs_sdk::object(kind = "github.repo", key = crate::item::RepoKey)]
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub(crate) struct Repo {
-    #[serde(default)]
-    pub(crate) full_name: Option<String>,
-}
+#[derive(Clone, Debug, Deserialize)]
+pub(crate) struct Repo {}
 
 /// One issue/PR comment. The list payload carries `id`, so a comment can be
 /// stored fresh at listing time and keyed by its own `comment_id`.
 #[omnifs_sdk::object(kind = "github.comment", key = crate::item::CommentKey)]
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub(crate) struct Comment {
     pub(crate) id: u64,
-    pub(crate) user: CommentUser,
+    pub(crate) user: User,
     #[serde(default)]
     pub(crate) body: Option<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub(crate) struct CommentUser {
-    pub(crate) login: String,
 }
 
 impl Comment {
@@ -427,7 +409,7 @@ impl Representable<Markdown> for Comment {
 }
 
 #[omnifs_sdk::object(kind = "github.notification", key = crate::item::NotificationKey)]
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub(crate) struct Notification {
     pub(crate) id: String,
     #[serde(default)]
@@ -441,18 +423,14 @@ pub(crate) struct Notification {
     pub(crate) repository: Option<NotificationRepo>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub(crate) struct NotificationSubject {
     pub(crate) title: String,
     #[serde(rename = "type")]
     pub(crate) kind: String,
-    #[serde(default)]
-    pub(crate) url: Option<String>,
-    #[serde(default)]
-    pub(crate) latest_comment_url: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub(crate) struct NotificationRepo {
     #[serde(default)]
     pub(crate) full_name: Option<String>,
@@ -490,7 +468,7 @@ impl Representable<Markdown> for Notification {
 }
 
 #[omnifs_sdk::object(kind = "github.run", key = crate::item::RunKey)]
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub(crate) struct WorkflowRun {
     pub(crate) id: u64,
     pub(crate) status: String,

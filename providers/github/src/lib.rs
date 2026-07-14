@@ -4,7 +4,7 @@
 
 use omnifs_sdk::hashbrown::HashSet;
 use omnifs_sdk::prelude::*;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 pub(crate) use omnifs_sdk::prelude::Result;
 
@@ -387,7 +387,7 @@ impl std::fmt::Display for RepoId {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub(crate) struct User {
     pub(crate) login: String,
 }

@@ -3,6 +3,7 @@
 
 use rc_zip_sync::ReadZip;
 use serde::Deserialize;
+use serde_json::value::RawValue;
 
 use omnifs_core::ContentType;
 use omnifs_sdk::prelude::*;
@@ -255,12 +256,13 @@ impl ChangedFile {
         _since: Option<Validator>,
     ) -> Result<Load<Self>> {
         let filename = key.path.decoded()?;
-        let Some(file) = find_pull_file(cx, key, &filename).await? else {
+        let Some((file, raw)) = find_pull_file(cx, key, &filename).await? else {
             return Ok(Load::NotFound);
         };
-        let canonical = serde_json::to_vec(&file)
-            .map_err(|err| ProviderError::invalid_input(format!("canonical encode: {err}")))?;
-        Ok(Load::fresh(file, Canonical::new(canonical, None)))
+        Ok(Load::fresh(
+            file,
+            Canonical::new(raw.get().as_bytes(), None),
+        ))
     }
 }
 
@@ -514,7 +516,7 @@ impl PullRequest {
         let len = files.len() as u64;
         let entries = files
             .into_iter()
-            .filter_map(|file| {
+            .filter_map(|(file, _raw)| {
                 let path = FilePath::from_github_path(&file.filename)?;
                 Some(CollectionEntry::computed(
                     ChangedFileKey {
@@ -842,27 +844,39 @@ async fn pull_files_page(
     repo: &RepoName,
     number: u64,
     page: u64,
-) -> Result<Vec<ChangedFile>> {
+) -> Result<Vec<(ChangedFile, Box<RawValue>)>> {
     let repo = RepoId::new(owner, repo);
-    cx.endpoint(GitHubApi)
+    let raw_files: Vec<Box<RawValue>> = cx
+        .endpoint(GitHubApi)
         .get(format!(
             "/repos/{repo}/pulls/{number}/files?per_page={FILE_PAGE_SIZE}&page={page}"
         ))
         .json()
-        .await
+        .await?;
+    raw_files
+        .into_iter()
+        .map(|raw| {
+            let file = serde_json::from_str::<ChangedFile>(raw.get())
+                .map_err(|err| ProviderError::invalid_input(format!("json decode: {err}")))?;
+            Ok((file, raw))
+        })
+        .collect()
 }
 
 async fn find_pull_file(
     cx: &Cx,
     key: &ChangedFileKey,
     filename: &str,
-) -> Result<Option<ChangedFile>> {
+) -> Result<Option<(ChangedFile, Box<RawValue>)>> {
     const MAX_FILE_PAGES: u64 = 30;
 
     for page in 1..=MAX_FILE_PAGES {
         let files = pull_files_page(cx, &key.owner, &key.repo, key.number, page).await?;
         let len = files.len() as u64;
-        if let Some(file) = files.into_iter().find(|file| file.filename == filename) {
+        if let Some(file) = files
+            .into_iter()
+            .find(|(file, _raw)| file.filename == filename)
+        {
             return Ok(Some(file));
         }
         if len < FILE_PAGE_SIZE {
