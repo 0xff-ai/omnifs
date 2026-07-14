@@ -52,7 +52,6 @@ mod tests;
 pub use descriptor::{RouteDescriptor, RouteKind};
 pub use handlers::{
     IntoDirHandler, IntoFileHandler, IntoTreeRefHandler, NoCaptures, WithCaptures, WithKeyMethod,
-    WithSyncKeyMethod,
 };
 pub use object::{DirFace, FileFace, ObjectBlock, ObjectHandle, object};
 pub(crate) use object::{EntryView, ResolvedChildView};
