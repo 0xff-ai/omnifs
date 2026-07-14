@@ -41,7 +41,7 @@ impl ConfigMetadata {
     }
 
     /// The config fields bound to host resources, in declaration order. The
-    /// host resolves each field's grant from its value at mount-start.
+    /// host resolves each field's authority from its value at mount-start.
     pub fn host_resource_fields(&self) -> impl Iterator<Item = (&str, &ConfigField)> {
         self.fields
             .iter()
@@ -57,7 +57,7 @@ impl ConfigMetadata {
             .map(|(name, _)| name)
     }
 
-    /// The config field that supplies a dynamic domain grant, if present.
+    /// The config field that supplies a dynamic domain authority, if present.
     #[must_use]
     pub fn domain_list_field(&self) -> Option<&str> {
         self.fields
@@ -232,9 +232,9 @@ impl ConfigType {
 }
 
 /// Binds a config field's string value to a host resource the sandbox must be
-/// granted. The provider also declares the matching capability as a `dynamic`
-/// need; the host resolves the concrete grant from this field's value at
-/// mount-start.
+/// bound. The provider also declares the matching capability as a `dynamic`
+/// need; the host resolves the concrete authority from this field's value
+/// at mount-start.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
 pub enum HostResourceBinding {
@@ -246,7 +246,7 @@ pub enum HostResourceBinding {
         mode: PreopenMode,
     },
     /// A host unix socket the host issues provider callouts over. The value is a
-    /// `unix://` endpoint resolved into the socket allowlist.
+    /// `unix://` endpoint resolved into the host's socket authority.
     Socket,
 }
 

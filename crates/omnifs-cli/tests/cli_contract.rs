@@ -57,7 +57,7 @@ impl Fixture {
     fn write_static_token_mount_without_credential(&self) {
         let provider_id = install_test_provider(&self.home_path().join("providers"));
         let spec = format!(
-            r#"{{"provider":{{"id":"{provider_id}","meta":{{"name":"test-provider"}}}},"mount":"test","auth":{{"type":"static-token","scheme":"pat"}},"capabilities":{{"domains":["httpbin.org"]}}}}"#
+            r#"{{"provider":{{"id":"{provider_id}","meta":{{"name":"test-provider"}}}},"mount":"test","auth":{{"type":"static-token","scheme":"pat"}}}}"#
         );
         std::fs::write(self.home_path().join("mounts/test.json"), spec)
             .expect("write auth mount spec");

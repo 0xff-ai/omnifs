@@ -1,10 +1,10 @@
 //! Shared HTTP transport for provider callouts.
 //!
-//! `HttpStack` owns the reqwest client, auth resolver, and capability
+//! `HttpStack` owns the reqwest client, auth resolver, and resolved authority
 //! checker. It is the single place where method parsing, header
 //! construction, body handing, and network error mapping happen for
 //! provider HTTP traffic. The HTTP and blob callout paths both build on
-//! this so their auth and capability semantics cannot drift.
+//! this so their auth and authority semantics cannot drift.
 //!
 //! Encapsulation contract: `reqwest::Client`, `reqwest::Method`,
 //! `reqwest::header::HeaderMap`, and `reqwest::RequestBuilder` stay
@@ -14,9 +14,9 @@
 //! sees.
 
 use crate::auth::www_authenticate;
+use crate::authority::{ApprovedHttpTransport, RuntimeAuthority};
 use crate::cache::identity::BlobRequestId;
 use crate::callouts::{callout_denied, callout_internal, callout_network, record_outcome};
-use crate::capability::CapabilityChecker;
 use crate::log_redaction::{LogUrl, WitHeaders};
 use dashmap::DashMap;
 use omnifs_auth::{AuthBinding, RefreshOutcome};
@@ -33,14 +33,14 @@ pub struct HttpStack {
     https_client: reqwest::Client,
     unix_clients: DashMap<PathBuf, reqwest::Client>,
     auth: Option<Arc<AuthBinding>>,
-    capability: Arc<CapabilityChecker>,
+    authority: Arc<RuntimeAuthority>,
 }
 
-/// Request after URL, method, capability, and provider-header validation.
+/// Request after URL, method, authority, and provider-header validation.
 /// Host-injected auth is added only when dispatching and is not identity data.
 pub(crate) struct ValidatedRequest {
     method: reqwest::Method,
-    url: Url,
+    transport: ApprovedHttpTransport,
     original_url: String,
     canonical_url: String,
     headers: Vec<(String, String)>,
@@ -72,10 +72,10 @@ impl HttpStack {
 
     pub fn new(
         auth: Option<Arc<AuthBinding>>,
-        capability: Arc<CapabilityChecker>,
+        authority: Arc<RuntimeAuthority>,
     ) -> Result<Self, reqwest::Error> {
         let https_client = Self::client_builder().build()?;
-        Ok(Self::with_https_client(auth, capability, https_client))
+        Ok(Self::with_https_client(auth, authority, https_client))
     }
 
     fn client_builder() -> reqwest::ClientBuilder {
@@ -88,14 +88,14 @@ impl HttpStack {
     #[doc(hidden)]
     pub fn with_https_client(
         auth: Option<Arc<AuthBinding>>,
-        capability: Arc<CapabilityChecker>,
+        authority: Arc<RuntimeAuthority>,
         https_client: reqwest::Client,
     ) -> Self {
         Self {
             https_client,
             unix_clients: DashMap::new(),
             auth,
-            capability,
+            authority,
         }
     }
 
@@ -123,14 +123,10 @@ impl HttpStack {
         headers: &[wit_types::Header],
         body: Option<&[u8]>,
     ) -> Result<ValidatedRequest, wit_types::CalloutResult> {
-        let parsed = Url::parse(url).map_err(|_| callout_denied("invalid URL"))?;
-        if !parsed.username().is_empty() || parsed.password().is_some() {
-            return Err(callout_denied("URL credentials are not allowed"));
-        }
-        if let Err(e) = self.capability.check_url(url) {
-            let _ = e;
-            return Err(callout_denied("URL is not allowed"));
-        }
+        let transport = self
+            .authority
+            .approve_http(url)
+            .map_err(|error| callout_denied(error.to_string()))?;
         let method = reqwest::Method::from_str(method)
             .map_err(|_| callout_denied(format!("unsupported HTTP method: {method}")))?;
         let mut normalized = Vec::with_capacity(headers.len());
@@ -150,10 +146,10 @@ impl HttpStack {
             normalized.push((name.as_str().to_string(), header.value.clone()));
         }
         normalized.sort_by(|left, right| left.0.cmp(&right.0));
-        let canonical_url = parsed.to_string();
+        let canonical_url = transport.canonical_url().to_string();
         Ok(ValidatedRequest {
             method,
-            url: parsed,
+            transport,
             original_url: url.to_string(),
             canonical_url,
             headers: normalized,
@@ -169,7 +165,7 @@ impl HttpStack {
         let response = self
             .send_once(
                 request.method.clone(),
-                &request.url,
+                &request.transport,
                 &request.original_url,
                 &request.headers,
                 request.body.as_deref(),
@@ -191,7 +187,7 @@ impl HttpStack {
             RefreshOutcome::Refreshed => {
                 self.send_once(
                     request.method.clone(),
-                    &request.url,
+                    &request.transport,
                     &request.original_url,
                     &request.headers,
                     request.body.as_deref(),
@@ -209,7 +205,7 @@ impl HttpStack {
     async fn send_once(
         &self,
         reqwest_method: reqwest::Method,
-        parsed: &Url,
+        transport: &ApprovedHttpTransport,
         url: &str,
         headers: &[(String, String)],
         body: Option<&[u8]>,
@@ -235,7 +231,7 @@ impl HttpStack {
             Err(message) => return Err(callout_internal(message)),
         };
 
-        let (client, request_url) = self.client_and_url_for(parsed)?;
+        let (client, request_url) = self.client_and_url_for(transport)?;
         let mut request = client
             .request(reqwest_method, request_url)
             .headers(header_map)
@@ -252,22 +248,23 @@ impl HttpStack {
 
     fn client_and_url_for(
         &self,
-        parsed: &Url,
+        transport: &ApprovedHttpTransport,
     ) -> Result<(reqwest::Client, Url), wit_types::CalloutResult> {
-        match parsed.scheme() {
-            "https" => Ok((self.https_client.clone(), parsed.clone())),
-            "unix" => {
-                let socket = CapabilityChecker::decode_unix_socket(parsed.as_str())
-                    .map_err(|e| callout_denied(e.to_string()))?;
-                let client = self.unix_client_for(&socket).map_err(|e| {
+        match transport {
+            ApprovedHttpTransport::Https(url) => Ok((self.https_client.clone(), url.clone())),
+            ApprovedHttpTransport::Unix {
+                socket,
+                request_url,
+                ..
+            } => {
+                let client = self.unix_client_for(socket).map_err(|e| {
                     callout_internal(format!(
                         "failed to build unix client for {}: {e}",
                         socket.display()
                     ))
                 })?;
-                Ok((client, unix_request_url(parsed)?))
+                Ok((client, request_url.clone()))
             },
-            other => Err(callout_denied(format!("unsupported URL scheme `{other}`"))),
         }
     }
 
@@ -334,20 +331,6 @@ impl HttpStack {
         record_outcome(&result);
         result
     }
-}
-
-fn unix_request_url(parsed: &Url) -> Result<Url, wit_types::CalloutResult> {
-    let mut rewritten = String::from("http://localhost");
-    rewritten.push_str(parsed.path());
-    if let Some(query) = parsed.query() {
-        rewritten.push('?');
-        rewritten.push_str(query);
-    }
-    Url::parse(&rewritten).map_err(|e| {
-        callout_internal(format!(
-            "could not rewrite unix URL {parsed} to http form: {e}"
-        ))
-    })
 }
 
 /// Combine auth and request headers into a single `HeaderMap`. Invalid

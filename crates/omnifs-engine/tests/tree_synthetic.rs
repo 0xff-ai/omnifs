@@ -412,7 +412,7 @@ async fn root_ignore_not_synthesized_below_root() {
 #[tokio::test(flavor = "multi_thread")]
 async fn root_ignore_provider_collision_is_host_owned() {
     let t = test_tree_with_config(
-        r#"{"provider":"test_provider.wasm","mount":"test","config":{"root_ignore":true},"capabilities":{"domains":["httpbin.org"]}}"#,
+        r#"{"provider":"test_provider.wasm","mount":"test","config":{"root_ignore":true}}"#,
     );
     let ctx = RequestCtx::default();
     let root = t.tree.resolve(&path("/"), &ctx).await.unwrap();

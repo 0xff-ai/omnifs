@@ -10,9 +10,6 @@ pub fn docker_harness() -> RuntimeHarness {
         {
             "provider": "omnifs_provider_docker.wasm",
             "mount": "docker",
-            "capabilities": {
-                "domains": ["localhost"]
-            }
         }
     "#,
     )

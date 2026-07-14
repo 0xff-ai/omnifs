@@ -11,9 +11,6 @@ pub fn dns_harness() -> RuntimeHarness {
         {
             "provider": "omnifs_provider_dns.wasm",
             "mount": "dns",
-            "capabilities": {
-                "domains": ["cloudflare-dns.com", "dns.google"]
-            }
         }
     "#,
     )

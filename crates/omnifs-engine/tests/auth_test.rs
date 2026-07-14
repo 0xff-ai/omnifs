@@ -1,7 +1,6 @@
-use omnifs_caps::Allowlist;
 use omnifs_engine::test_support::auth::{AuthBinding, RefreshOutcome, binding_with_store_and_http};
+use omnifs_engine::test_support::authority::RuntimeAuthority;
 use omnifs_engine::test_support::blob::{BlobCache, BlobExecutor, BlobLimits};
-use omnifs_engine::test_support::capability::CapabilityChecker;
 use omnifs_engine::test_support::http::HttpStack;
 use omnifs_wit::provider::types as wit_types;
 use omnifs_workspace::authn::CredentialId;
@@ -231,13 +230,8 @@ async fn test_execute_fetch_returns_denied_when_auth_is_required_but_missing() {
             .is_err()
     );
 
-    let capability = Arc::new(CapabilityChecker::new(Allowlist {
-        domains: vec!["api.github.com".to_string()],
-        git_repos: Vec::new(),
-        needs_git: false,
-        unix_sockets: Vec::new(),
-    }));
-    let stack = HttpStack::new(Some(auth), capability).unwrap();
+    let authority = RuntimeAuthority::for_test(&["api.github.com"], &[], &[]);
+    let stack = HttpStack::new(Some(auth), authority).unwrap();
 
     let req = wit_types::HttpRequest {
         method: "GET".to_string(),
@@ -268,12 +262,7 @@ async fn oauth_401_refreshes_and_retries_once() {
 
     let stack = HttpStack::with_https_client(
         Some(Arc::clone(&auth)),
-        Arc::new(CapabilityChecker::new(Allowlist {
-            domains: vec![FakeHttpsApiServer::domain()],
-            git_repos: Vec::new(),
-            needs_git: false,
-            unix_sockets: Vec::new(),
-        })),
+        RuntimeAuthority::for_test(&[FakeHttpsApiServer::domain().as_str()], &[], &[]),
         test_https_client(),
     );
 
@@ -347,12 +336,7 @@ async fn fetch_blob_uses_same_oauth_retry_path() {
 
     let stack = Arc::new(HttpStack::with_https_client(
         Some(auth),
-        Arc::new(CapabilityChecker::new(Allowlist {
-            domains: vec![FakeHttpsApiServer::domain()],
-            git_repos: Vec::new(),
-            needs_git: false,
-            unix_sockets: Vec::new(),
-        })),
+        RuntimeAuthority::for_test(&[FakeHttpsApiServer::domain().as_str()], &[], &[]),
         test_https_client(),
     ));
     let temp = tempfile::tempdir().unwrap();
@@ -395,12 +379,7 @@ async fn oauth_refresh_failure_surfaces_denied_and_preserves_store() {
 
     let stack = HttpStack::with_https_client(
         Some(Arc::clone(&auth)),
-        Arc::new(CapabilityChecker::new(Allowlist {
-            domains: vec![FakeHttpsApiServer::domain()],
-            git_repos: Vec::new(),
-            needs_git: false,
-            unix_sockets: Vec::new(),
-        })),
+        RuntimeAuthority::for_test(&[FakeHttpsApiServer::domain().as_str()], &[], &[]),
         test_https_client(),
     );
 

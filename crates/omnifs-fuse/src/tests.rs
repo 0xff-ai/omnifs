@@ -76,7 +76,6 @@ fn build_harness() -> FuseHarness {
         r#"{{
                 "provider": {{ "id": "{id}", "meta": {{ "name": "test-provider" }} }},
                 "mount": "test",
-                "capabilities": {{ "domains": ["httpbin.org"] }},
                 "config": {{}}
             }}"#
     );

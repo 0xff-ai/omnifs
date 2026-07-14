@@ -1,5 +1,5 @@
 use anyhow::{Context, anyhow};
-use omnifs_caps::{Grants, Limits};
+use omnifs_caps::Limits;
 use omnifs_workspace::ids::ProviderRef;
 use omnifs_workspace::mounts::{Name as MountName, ProviderMetadataInheritance, Spec};
 use omnifs_workspace::provider::{
@@ -13,7 +13,6 @@ use crate::ui::output::Output;
 #[derive(Debug, Default, Clone)]
 pub(crate) struct CreatedMountSpec {
     pub(crate) config: Option<Value>,
-    pub(crate) capabilities: Option<Grants>,
     pub(crate) limits: Option<Limits>,
 }
 
@@ -37,14 +36,12 @@ impl<'a> MountSpecCreator<'a> {
     }
 
     /// Spec skeleton for a caller that supplies the whole config through an
-    /// override flag: manifest-seeded grants and limits, no generated config,
+    /// override flag: pinned manifest needs and limits, no generated config,
     /// no prompts, no default-config validation (the override is validated
     /// where it is applied).
     pub(crate) fn create_for_config_override(&self) -> CreatedMountSpec {
         CreatedMountSpec {
             config: None,
-            capabilities: (!self.manifest.capabilities.is_empty())
-                .then(|| self.manifest.provider_capabilities()),
             limits: (!self.manifest.limits.is_empty()).then(|| self.manifest.provider_limits()),
         }
     }
@@ -54,17 +51,12 @@ impl<'a> MountSpecCreator<'a> {
         output: &Output,
         interactive: bool,
     ) -> anyhow::Result<CreatedMountSpec> {
-        // Seed explicit grants from the manifest's declared needs. The manifest
-        // never grants at runtime; the spec owns these grants from here on.
-        let capabilities =
-            (!self.manifest.capabilities.is_empty()).then(|| self.manifest.provider_capabilities());
         let limits = (!self.manifest.limits.is_empty()).then(|| self.manifest.provider_limits());
         let mut spec = Spec {
             provider: self.reference.clone(),
             mount: self.mount_name.to_string(),
             revalidate: true,
             auth: None,
-            capabilities: None,
             limits: None,
             config_raw: None,
         };
@@ -73,7 +65,6 @@ impl<'a> MountSpecCreator<'a> {
         let Some(mut config) = spec.config_raw else {
             return Ok(CreatedMountSpec {
                 config: None,
-                capabilities,
                 limits,
             });
         };
@@ -89,7 +80,6 @@ impl<'a> MountSpecCreator<'a> {
         self.validate(&config)?;
         Ok(CreatedMountSpec {
             config: Some(config),
-            capabilities,
             limits,
         })
     }
@@ -115,10 +105,9 @@ impl<'a> MountSpecCreator<'a> {
 }
 
 /// Prompt for the host path of each field the provider marks as a host file and
-/// write the chosen absolute path into the config. The matching preopen grant is
-/// already seeded from the manifest's dynamic need; the host resolves the
-/// preopen from this path at mount-start (guest == host), so init only collects
-/// the value.
+/// write the chosen absolute path into the config. Startup pairs the bound field
+/// with the manifest's dynamic need and resolves the exact preopen from this
+/// path (guest == host), so init only collects the value.
 fn prompt_host_files(
     metadata: &ConfigMetadata,
     config: &mut Value,
@@ -143,9 +132,9 @@ fn prompt_host_files(
 }
 
 /// Collect the dynamic-domain allowlist interactively and write it into the
-/// `domains` config field the provider reads. The seeded dynamic domain grant
-/// resolves its runtime allowlist from exactly these hostnames, so an empty
-/// list is refused here rather than producing a mount whose grant can never
+/// `domains` config field the provider reads. Startup resolves the dynamic
+/// domain authority from exactly these hostnames, so an empty list is refused
+/// here rather than producing a mount whose authority can never
 /// resolve. A list supplied another way (an inherited default) is left as-is
 /// when already non-empty.
 fn prompt_domains(field: &str, config: &mut Value, output: &Output) -> anyhow::Result<()> {
@@ -175,9 +164,9 @@ fn prompt_domains(field: &str, config: &mut Value, output: &Output) -> anyhow::R
 }
 
 /// Split a user-entered domain list on whitespace and commas and validate each
-/// entry as a bare hostname. Matches the dynamic-domain grant's runtime
+/// entry as a bare hostname. Matches the dynamic-domain authority's runtime
 /// allowlist rules (no scheme, port, path, or wildcard), so the collected value
-/// cannot widen the grant beyond what the provider legitimately fetches.
+/// cannot widen the authority beyond what the provider legitimately fetches.
 fn parse_domain_list(raw: &str) -> anyhow::Result<Vec<String>> {
     let mut domains = Vec::new();
     for token in raw.split(|c: char| c.is_whitespace() || c == ',') {
@@ -245,7 +234,7 @@ mod tests {
 
     #[test]
     fn rejects_non_bare_hostnames() {
-        // A dynamic domain grant must not be widened by scheme, path, port, or
+        // A dynamic domain authority must not be widened by scheme, path, port, or
         // wildcard entries; each of these is refused.
         for bad in [
             "https://example.com",

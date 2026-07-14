@@ -5,11 +5,11 @@
 //! Typed operation execution is in `ops::lifecycle`; WASI store plumbing is in `wasi`.
 
 use crate::auth::binding_from_config;
+use crate::authority::RuntimeAuthority;
 use crate::blob::{BlobExecutor, BlobLimits};
 use crate::blob_cache::BlobCache;
 use crate::cache::{Caches, Store};
 use crate::callouts::{CalloutHost, TestCallouts, TestSignal};
-use crate::capability::{CapabilityChecker, config_str};
 use crate::cloner::GitCloner;
 use crate::coalesce::ns::InFlight;
 use crate::git;
@@ -19,14 +19,11 @@ use crate::invalidation::InvalidationState;
 use crate::tree_refs::TreeRefs;
 use dashmap::DashMap;
 use omnifs_auth::{AuthBinding, CredentialHealth, CredentialService};
-use omnifs_caps::{Grant, PreopenedPath};
 use omnifs_core::path::Path;
 use omnifs_wit::provider::types as wit_types;
 use omnifs_workspace::ids::ProviderId;
 use omnifs_workspace::mounts::Spec;
-use omnifs_workspace::provider::{
-    ConfigMetadata, HostResourceBinding, ProviderAuthManifest, ProviderStore,
-};
+use omnifs_workspace::provider::{ConfigMetadata, ProviderAuthManifest, ProviderStore};
 
 use std::fs;
 use std::path::{Path as StdPath, PathBuf};
@@ -163,6 +160,8 @@ pub enum BuildError {
     HttpClient(#[from] reqwest::Error),
     #[error("invalid config: {0}")]
     InvalidConfig(String),
+    #[error("authority: {0}")]
+    Authority(#[from] crate::authority::AuthorityError),
     #[error("cache: {0}")]
     Cache(String),
     #[error("provider protocol: {0}")]
@@ -351,27 +350,28 @@ impl Runtime {
                     .map_err(|error| error.to_string())
             })
             .map_err(BuildError::InvalidConfig)?;
-        let config_metadata = manifest
-            .as_ref()
-            .and_then(|manifest| manifest.config.as_ref());
+        let manifest = manifest.ok_or_else(|| {
+            BuildError::InvalidConfig("provider artifact has no embedded manifest".to_owned())
+        })?;
+        let config_metadata = manifest.config.as_ref();
 
         validate_instance_config(config_metadata, config, mount_name)?;
 
-        let preopens = resolve_preopens(config, config_metadata);
+        let authority = RuntimeAuthority::resolve(&manifest, config)?;
         let park_signal = test_callouts.as_ref().map(TestCallouts::park_signal);
-        let instance = Instance::new(engine, wasm_path, config_bytes, &preopens, park_signal)?;
+        let instance = Instance::new(
+            engine,
+            wasm_path,
+            config_bytes,
+            Arc::clone(&authority),
+            park_signal,
+        )?;
 
         let init_return = instance.initialize().map_err(BuildError::from)?;
         let (initialize_result, initialize_effects) = finish_initialize_return(init_return)?;
-        let capability = Arc::new(CapabilityChecker::from_config(
-            config,
-            &initialize_result.capabilities,
-            config_metadata,
-        ));
-
         let auth_manifest = manifest
+            .auth
             .as_ref()
-            .and_then(|manifest| manifest.auth.as_ref())
             .map(ProviderAuthManifest::wasm_auth_manifest);
         let auth = binding_from_config(
             config.auth.as_ref(),
@@ -382,7 +382,7 @@ impl Runtime {
         .map_err(|e| BuildError::ProviderProtocol(format!("auth config error: {e}")))?;
 
         let trees = Arc::new(TreeRefs::new());
-        let git = git::GitExecutor::new(cloner, capability.clone(), trees.clone(), mount_name);
+        let git = git::GitExecutor::new(cloner, Arc::clone(&authority), trees.clone(), mount_name);
 
         let cache_root = context
             .cache_dir()
@@ -395,7 +395,7 @@ impl Runtime {
         // Per-mount facade: structurally isolates object and view cache state.
         let cache = caches.mount(mount_name);
         let blob_limits = BlobLimits::from_config(config);
-        let http = Arc::new(HttpStack::new(auth.clone(), capability.clone())?);
+        let http = Arc::new(HttpStack::new(auth.clone(), authority)?);
         let blob = BlobExecutor::new(Arc::clone(&http), blob_cache.clone(), blob_limits);
         let mut callout_host = CalloutHost::new(Arc::clone(&http), git.clone(), blob.clone());
         if let Some(test_callouts) = test_callouts {
@@ -609,38 +609,6 @@ fn finish_initialize_return(
         .map(|result| (result, effects))
         .map_err(EngineError::ProviderError)
         .map_err(BuildError::from)
-}
-
-/// The WASI preopens to hand the instance. A literal preopen grant is used
-/// verbatim; a dynamic one is resolved at mount-start from the config fields the
-/// provider marks as host files: the file's parent directory is preopened at the
-/// same path (guest == host), so the provider opens the configured path
-/// unchanged. The mode comes from the field's host-resource binding.
-fn resolve_preopens(config: &Spec, metadata: Option<&ConfigMetadata>) -> Vec<PreopenedPath> {
-    match config
-        .capabilities
-        .as_ref()
-        .and_then(|capabilities| capabilities.preopened_paths.as_ref())
-    {
-        Some(Grant::Literal(paths)) => paths.clone(),
-        Some(Grant::Dynamic(_)) => metadata
-            .into_iter()
-            .flat_map(ConfigMetadata::host_resource_fields)
-            .filter_map(|(field, metadata)| {
-                let Some(HostResourceBinding::File { mode }) = metadata.binding else {
-                    return None;
-                };
-                let value = config_str(config, field)?;
-                let dir = StdPath::new(value).parent()?.to_str()?.to_string();
-                Some(PreopenedPath {
-                    host: dir.clone(),
-                    guest: dir,
-                    mode,
-                })
-            })
-            .collect(),
-        None => Vec::new(),
-    }
 }
 
 fn validate_instance_config(

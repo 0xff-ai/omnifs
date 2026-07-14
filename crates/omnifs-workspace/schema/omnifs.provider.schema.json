@@ -83,7 +83,7 @@
   ],
   "$defs": {
     "AccessNeed": {
-      "description": "One access capability a provider *needs*, declared via `capabilities(..)` in\n`#[omnifs_sdk::provider]` and embedded in the `omnifs.provider-metadata.v1`\nsection. A need is never a grant: the host checks a mount's [`Grants`]\nagainst these, it never grants from them at runtime.",
+      "description": "One provider access declaration embedded in its manifest.",
       "oneOf": [
         {
           "type": "object",
@@ -478,7 +478,7 @@
       ]
     },
     "HostResourceBinding": {
-      "description": "Binds a config field's string value to a host resource the sandbox must be\ngranted. The provider also declares the matching capability as a `dynamic`\nneed; the host resolves the concrete grant from this field's value at\nmount-start.",
+      "description": "Binds a config field's string value to a host resource the sandbox must be\nbound. The provider also declares the matching capability as a `dynamic`\nneed; the host resolves the concrete authority from this field's value\nat mount-start.",
       "oneOf": [
         {
           "description": "A host file the provider opens through a preopened WASI directory. The\nhost preopens the file's parent directory at the same path (guest ==\nhost) with `mode`, so the provider opens the configured path unchanged.",
@@ -499,7 +499,7 @@
           ]
         },
         {
-          "description": "A host unix socket the host issues provider callouts over. The value is a\n`unix://` endpoint resolved into the socket allowlist.",
+          "description": "A host unix socket the host issues provider callouts over. The value is a\n`unix://` endpoint resolved into the host's socket authority.",
           "type": "object",
           "properties": {
             "kind": {
@@ -716,7 +716,7 @@
       ]
     },
     "PreopenMode": {
-      "description": "Access mode for a preopened directory grant.",
+      "description": "Access mode for a preopened directory declared by a provider.",
       "type": "string",
       "enum": [
         "ro",

@@ -228,7 +228,6 @@ impl MountFixture {
             r#"{{
                 "provider": {{ "id": "{id}", "meta": {{ "name": "test-provider" }} }},
                 "mount": "test",
-                "capabilities": {{ "domains": ["httpbin.org"] }}
             }}"#
         );
         let mounts_dir = home.join("mounts");

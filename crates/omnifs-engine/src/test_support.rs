@@ -90,8 +90,8 @@ pub mod blob {
     pub use crate::blob::{BlobCache, BlobExecutor, BlobLimits};
 }
 
-pub mod capability {
-    pub use crate::capability::CapabilityChecker;
+pub mod authority {
+    pub use crate::authority::RuntimeAuthority;
 }
 
 pub mod clock {

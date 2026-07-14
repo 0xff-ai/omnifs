@@ -278,7 +278,6 @@ impl MountFixture {
             r#"{{
                 "provider": {{ "id": "{id}", "meta": {{ "name": "test-provider" }} }},
                 "mount": "test",
-                "capabilities": {{ "domains": ["httpbin.org"] }}
             }}"#
         );
         let spec = omnifs_workspace::mounts::Spec::parse(&mount_config).expect("parse mount spec");

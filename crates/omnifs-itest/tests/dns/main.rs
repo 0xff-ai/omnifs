@@ -38,9 +38,6 @@ fn dns_provider_rejects_invalid_default_resolver_config_during_initialize() {
         {
             "provider": "omnifs_provider_dns.wasm",
             "mount": "dns",
-            "capabilities": {
-                "domains": ["cloudflare-dns.com", "dns.google"]
-            },
             "config": {
                 "default_resolver": "missing",
                 "resolvers": {
@@ -72,9 +69,6 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
         {
             "provider": "omnifs_provider_dns.wasm",
             "mount": "dns",
-            "capabilities": {
-                "domains": ["cloudflare-dns.com", "dns.google"]
-            }
         }
     "#,
     );
@@ -267,9 +261,6 @@ async fn dns_provider_unknown_resolver_read_is_invalid_input() {
         {
             "provider": "omnifs_provider_dns.wasm",
             "mount": "dns",
-            "capabilities": {
-                "domains": ["cloudflare-dns.com", "dns.google"]
-            }
         }
     "#,
     );
@@ -300,9 +291,6 @@ async fn dns_provider_unknown_record_reads_are_not_found() {
         {
             "provider": "omnifs_provider_dns.wasm",
             "mount": "dns",
-            "capabilities": {
-                "domains": ["cloudflare-dns.com", "dns.google"]
-            }
         }
     "#,
     );

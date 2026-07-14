@@ -33,9 +33,6 @@ fn oura_harness() -> RuntimeHarness {
         {
             "provider": "omnifs_provider_oura.wasm",
             "mount": "oura",
-            "capabilities": {
-                "domains": ["api.ouraring.com"]
-            }
         }
     "#,
     )

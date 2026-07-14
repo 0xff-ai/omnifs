@@ -5,7 +5,7 @@ use crate::provider::config::ConfigMetadata;
 use crate::provider::sections::{
     ProviderMetadataError, is_hostname_only, validate_provider_manifest,
 };
-use omnifs_caps::{AccessNeed, Grants, LimitDeclarations, Limits, domain_matches};
+use omnifs_caps::{AccessNeed, LimitDeclarations, Limits};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
@@ -165,11 +165,11 @@ impl ProviderManifest {
         }
         for entry in &self.capabilities {
             validate_non_empty("capabilities.why", entry.why())?;
-            // A dynamic grant is resolved at mount-start from config: domains
+            // A dynamic authority is resolved at mount-start from config: domains
             // from the provider's `domains` field, a unix socket from a
             // host-socket field, and a preopened path from a host-file field.
             // Any other dynamic kind has no resolver and would resolve to an
-            // empty allowlist, denying the provider at its first callout.
+            // empty authority, denying the provider at its first callout.
             // Reject those at the manifest boundary.
             if entry.is_dynamic()
                 && !matches!(
@@ -231,14 +231,6 @@ impl ProviderManifest {
         Ok(())
     }
 
-    /// The capabilities this provider declares it needs, lowered into a grant
-    /// set. Used by `omnifs init` to seed a mount's explicit grants; never used
-    /// to grant at runtime (the spec is the grant authority).
-    #[must_use]
-    pub fn provider_capabilities(&self) -> Grants {
-        Grants::from_needs(&self.capabilities)
-    }
-
     /// The scalar limits this provider declares, lowered into mount-owned
     /// runtime values. Used by `omnifs init` to seed a mount's explicit limits;
     /// never read at serve time as provider defaults.
@@ -247,13 +239,8 @@ impl ProviderManifest {
         Limits::from_declarations(&self.limits)
     }
 
-    /// The `domains` config field that supplies a dynamic domain grant's
-    /// allowlist, when this provider both declares a dynamic domain need and
-    /// exposes a matching string-array config field. `mount add` seeds the
-    /// dynamic grant from the need, but the grant stays inert until the mount
-    /// lists concrete domains, so this value must be collected per mount. The
-    /// grant remains dynamic (resolved against exactly this list at
-    /// mount-start), never widened to a literal wildcard.
+    /// The `domains` config field that supplies a dynamic domain authority when
+    /// this provider declares a dynamic domain need.
     #[must_use]
     pub fn dynamic_domain_field(&self) -> Option<&str> {
         let declares_dynamic_domain = self
@@ -270,11 +257,11 @@ impl ProviderManifest {
 
     /// Whether creating a mount for this provider needs per-mount input that a
     /// non-interactive run cannot synthesize: a host-file path, or the domain
-    /// allowlist a dynamic domain grant resolves from. `setup --yes` skips such
+    /// authority a dynamic domain need resolves from. `setup --yes` skips such
     /// a provider (it cannot answer for the operator), and `mount add` prompts
     /// interactively or requires `--config-json`. Without this, the flow would
-    /// seed a dynamic domain grant and write a mount whose empty allowlist the
-    /// materialize-time check then refuses, an unfixable state from the flow.
+    /// write a mount whose dynamic domain authority cannot be resolved at
+    /// startup, an unfixable state from the flow.
     #[must_use]
     pub fn requires_mount_input(&self) -> bool {
         self.dynamic_domain_field().is_some()
@@ -293,6 +280,10 @@ fn validate_limit_why<T>(
         validate_non_empty(field, &limit.why)?;
     }
     Ok(())
+}
+
+fn domain_matches(allowed: &str, host: &str) -> bool {
+    allowed == "*" || allowed == host
 }
 
 fn validate_scheme(key: &str, scheme: &AuthScheme) -> Result<(), ProviderMetadataError> {

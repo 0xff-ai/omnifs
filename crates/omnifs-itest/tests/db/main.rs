@@ -20,9 +20,6 @@ fn db_config(host_file: &str) -> String {
         r#"{{
             "provider": "omnifs_provider_db.wasm",
             "mount": "db",
-            "capabilities": {{
-                "preopened_paths": {{ "dynamic": true }}
-            }},
             "config": {{
                 "path": "{host_file}",
                 "read_only": true,

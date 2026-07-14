@@ -32,7 +32,6 @@ impl AuthSelection {
             mount: mount_name.to_string(),
             revalidate: true,
             auth: None,
-            capabilities: None,
             limits: None,
             config_raw: None,
         };
@@ -225,7 +224,7 @@ impl MountAuth {
     }
 
     /// Resolve the credential identity selected by this mount's persisted auth
-    /// block. The manifest remains best-effort because materialized specs carry
+    /// block. The manifest remains best-effort because specs carry
     /// their selected scheme.
     pub(crate) fn credential_target(&self) -> anyhow::Result<CredentialTarget> {
         let Some(auth) = self.primary_auth() else {

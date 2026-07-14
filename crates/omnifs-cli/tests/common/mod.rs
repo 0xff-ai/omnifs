@@ -157,7 +157,5 @@ pub fn install_test_provider(providers_dir: &Path) -> omnifs_workspace::ids::Pro
 /// No-auth mount spec for the test provider, pinning `id`. Serves
 /// `test/hello/message`.
 pub fn test_mount_spec(id: &omnifs_workspace::ids::ProviderId) -> String {
-    format!(
-        r#"{{"provider":{{"id":"{id}","meta":{{"name":"test-provider"}}}},"mount":"test","capabilities":{{"domains":["httpbin.org"]}}}}"#
-    )
+    format!(r#"{{"provider":{{"id":"{id}","meta":{{"name":"test-provider"}}}},"mount":"test"}}"#)
 }

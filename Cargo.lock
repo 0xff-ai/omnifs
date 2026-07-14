@@ -2827,12 +2827,9 @@ dependencies = [
 name = "omnifs-caps"
 version = "0.2.1"
 dependencies = [
- "hex",
  "schemars",
  "serde",
  "serde_json",
- "thiserror 2.0.18",
- "url",
  "utoipa",
 ]
 

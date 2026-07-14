@@ -51,9 +51,6 @@ pub struct AddArgs {
     /// Full provider config JSON object to write into the mount spec.
     #[arg(long = "config-json", value_name = "JSON")]
     pub config_json: Option<String>,
-    /// Full capability grants JSON object to write into the mount spec.
-    #[arg(long = "capabilities-json", value_name = "JSON")]
-    pub capabilities_json: Option<String>,
     /// Full resource limits JSON object to write into the mount spec.
     #[arg(long = "limits-json", value_name = "JSON")]
     pub limits_json: Option<String>,
@@ -208,10 +205,7 @@ mod tests {
     use crate::commands::mount::mount_file::MountFile;
     use crate::commands::mount::spec_creation::{CreatedMountSpec, MountSpecCreator};
     use crate::workspace::Workspace;
-    use omnifs_caps::{
-        Grant, Grants as ProviderCapabilities, LimitDeclarations, Limits as ProviderLimits,
-        PreopenMode, PreopenedPath, ResourceLimit,
-    };
+    use omnifs_caps::{LimitDeclarations, Limits as ProviderLimits, PreopenMode, ResourceLimit};
     use omnifs_workspace::authn::{AuthManifest, AuthScheme};
     use omnifs_workspace::ids::{ProviderId, ProviderMeta, ProviderName, ProviderRef};
     use omnifs_workspace::mounts::Name as MountName;
@@ -279,13 +273,6 @@ mod tests {
             created.config,
             Some(serde_json::json!({"endpoint": "unix:///var/run/docker.sock"})),
         );
-        // `mount add` seeds the spec's grants from the manifest's needs, so a
-        // mount carries explicit grants the materialize-time check can satisfy.
-        let capabilities = created.capabilities.expect("grants seeded from needs");
-        assert_eq!(
-            capabilities.domains,
-            Some(Grant::Literal(vec!["api.linear.app".to_string()])),
-        );
         assert_eq!(
             created.limits.expect("limits seeded from manifest"),
             ProviderLimits {
@@ -317,7 +304,7 @@ mod tests {
     }
 
     #[test]
-    fn mount_file_includes_generated_config_and_capabilities() {
+    fn mount_file_includes_generated_config_without_capabilities() {
         let dir = tempfile::tempdir().unwrap();
         let mounts = dir.path();
 
@@ -328,14 +315,6 @@ mod tests {
             &[],
             CreatedMountSpec {
                 config: Some(serde_json::json!({"path": "/data/chinook.db"})),
-                capabilities: Some(ProviderCapabilities {
-                    preopened_paths: Some(Grant::Literal(vec![PreopenedPath {
-                        host: "/host/db".to_string(),
-                        guest: "/data".to_string(),
-                        mode: PreopenMode::Ro,
-                    }])),
-                    ..ProviderCapabilities::default()
-                }),
                 limits: Some(ProviderLimits {
                     max_memory_mb: Some(128),
                     ..ProviderLimits::default()
@@ -350,10 +329,7 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(mounts.join("db.json")).unwrap())
                 .unwrap();
         assert_eq!(written["config"]["path"], "/data/chinook.db");
-        assert_eq!(
-            written["capabilities"]["preopened_paths"][0]["host"],
-            "/host/db"
-        );
+        assert!(!written.as_object().unwrap().contains_key("capabilities"));
         assert_eq!(written["limits"]["max_memory_mb"], 128);
     }
 
@@ -374,7 +350,6 @@ mod tests {
             scheme: None,
             no_auth: false,
             config_json: None,
-            capabilities_json: None,
             limits_json: None,
         };
 
@@ -546,8 +521,7 @@ mod tests {
 
     /// A web-like provider: a *dynamic* domain need plus a `domains` string
     /// array config field with no default and no auth. This is the shape that
-    /// seeds a dynamic domain grant but leaves the allowlist for the mount to
-    /// supply.
+    /// leaves the authority for the mount to supply.
     fn web_manifest() -> ProviderManifest {
         let mut manifest = provider_manifest();
         manifest.id = "web".to_string();
@@ -577,13 +551,10 @@ mod tests {
     #[test]
     fn dynamic_domain_provider_requires_domains_input() {
         // The web provider declares a dynamic domain need and reads its
-        // allowlist from a `domains` config field with no default. `mount add`
-        // seeds the dynamic grant automatically, but that grant is inert until
-        // the mount supplies concrete domains, and the materialize-time check
-        // refuses an empty allowlist. So the flow must treat a dynamic-domain
-        // provider as needing input: a non-interactive run without
-        // --config-json bails asking for it rather than writing a spec that can
-        // never be served.
+        // authority from a `domains` config field with no default. The flow
+        // must treat a dynamic-domain provider as needing input: a
+        // non-interactive run without --config-json bails asking for it rather
+        // than writing a spec that can never be served.
         let manifest = web_manifest();
         let reference = provider_ref("web");
         let mount_name = MountName::try_from("web").unwrap();
@@ -593,15 +564,7 @@ mod tests {
             "a dynamic-domain provider must require domain input"
         );
 
-        // The seeded grant stays a dynamic grant, constrained to the config
-        // allowlist at mount-start, never a wildcard literal that would let the
-        // provider fetch any domain.
-        let created = creator.create_for_config_override();
-        let caps = created.capabilities.expect("dynamic domain grant seeded");
-        assert!(
-            caps.domains.expect("domains grant").is_dynamic(),
-            "domain grant must stay dynamic, not widen to a literal wildcard"
-        );
+        assert!(creator.create_for_config_override().config.is_none());
     }
 
     fn provider_ref(name: &str) -> ProviderRef {

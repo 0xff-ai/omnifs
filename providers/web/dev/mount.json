@@ -1,9 +1,6 @@
 {
   "provider": "web",
   "mount": "web",
-  "capabilities": {
-    "domains": { "dynamic": true }
-  },
   "config": {
     "domains": ["example.com"]
   },

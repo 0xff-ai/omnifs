@@ -11,9 +11,6 @@ pub fn arxiv_harness() -> RuntimeHarness {
         {
             "provider": "omnifs_provider_arxiv.wasm",
             "mount": "arxiv",
-            "capabilities": {
-                "domains": ["export.arxiv.org", "arxiv.org"]
-            }
         }
     "#,
     )

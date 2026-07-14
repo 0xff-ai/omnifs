@@ -5,13 +5,12 @@
 //! traversal and blob reads run through bind-mount reads of the clone
 //! directory, not through the WIT.
 
+use crate::authority::RuntimeAuthority;
 use crate::cache::identity::GitId;
 use crate::callouts::{callout_denied, callout_invalid, callout_network, record_outcome};
-use crate::capability::CapabilityChecker;
 use crate::cloner::{CloneError, GitCloner};
 use crate::log_redaction::LogUrl;
 use crate::tree_refs::TreeRefs;
-use omnifs_caps::Error as CapabilityError;
 use omnifs_wit::provider::types as wit_types;
 use std::sync::Arc;
 use tracing::warn;
@@ -20,7 +19,7 @@ use url::Url;
 #[derive(Clone)]
 pub struct GitExecutor {
     cloner: Arc<GitCloner>,
-    capability: Arc<CapabilityChecker>,
+    authority: Arc<RuntimeAuthority>,
     trees: Arc<TreeRefs>,
     mount_scope: String,
 }
@@ -28,13 +27,13 @@ pub struct GitExecutor {
 impl GitExecutor {
     pub fn new(
         cloner: Arc<GitCloner>,
-        capability: Arc<CapabilityChecker>,
+        authority: Arc<RuntimeAuthority>,
         trees: Arc<TreeRefs>,
         mount_scope: impl Into<String>,
     ) -> Self {
         Self {
             cloner,
-            capability,
+            authority,
             trees,
             mount_scope: mount_scope.into(),
         }
@@ -68,7 +67,7 @@ impl GitExecutor {
         req: &wit_types::GitOpenRequest,
         operation_id: u64,
     ) -> Result<u64, GitError> {
-        self.capability.check_git_url(&req.clone_url)?;
+        self.authority.check_git_url(&req.clone_url)?;
         let remote = canonical_remote(&req.clone_url)?;
         if let Some(reference) = req.reference.as_deref() {
             GitCloner::validate_reference(reference)
@@ -144,8 +143,8 @@ enum GitError {
     Clone(String),
 }
 
-impl From<CapabilityError> for GitError {
-    fn from(_error: CapabilityError) -> Self {
+impl From<crate::authority::AuthorityError> for GitError {
+    fn from(_error: crate::authority::AuthorityError) -> Self {
         Self::Denied("Git remote is not allowed".to_string())
     }
 }
@@ -172,9 +171,8 @@ impl From<GitError> for wit_types::CalloutResult {
 #[cfg(test)]
 mod tests {
     use super::{GitCloner, GitExecutor, GitId, canonical_remote};
-    use crate::capability::CapabilityChecker;
+    use crate::authority::RuntimeAuthority;
     use crate::tree_refs::TreeRefs;
-    use omnifs_caps::Allowlist;
     use omnifs_wit::provider::types as wit_types;
     use std::sync::Arc;
 
@@ -218,12 +216,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let executor = GitExecutor::new(
             Arc::new(GitCloner::new(temp.path().to_path_buf()).unwrap()),
-            Arc::new(CapabilityChecker::new(Allowlist {
-                domains: Vec::new(),
-                git_repos: vec!["*".to_string()],
-                needs_git: true,
-                unix_sockets: Vec::new(),
-            })),
+            RuntimeAuthority::for_test(&[], &["*"], &[]),
             Arc::new(TreeRefs::new()),
             "mount",
         );

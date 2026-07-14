@@ -172,9 +172,7 @@ pub fn test_mount_spec(id: &ProviderId) -> String {
 /// every frontend must expose the same known bytes from both roots.
 #[must_use]
 pub fn test_mount_spec_at(id: &ProviderId, mount: &str) -> String {
-    format!(
-        r#"{{"provider":{{"id":"{id}","meta":{{"name":"test-provider"}}}},"mount":"{mount}","capabilities":{{"domains":["httpbin.org"]}}}}"#
-    )
+    format!(r#"{{"provider":{{"id":"{id}","meta":{{"name":"test-provider"}}}},"mount":"{mount}"}}"#)
 }
 
 /// A hermetic `OMNIFS_HOME` with the test provider installed and its mount spec

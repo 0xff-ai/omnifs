@@ -6,11 +6,6 @@
     "read_only": true,
     "sample_limit": 20
   },
-  "capabilities": {
-    "preopened_paths": {
-      "dynamic": true
-    }
-  },
   "limits": {
     "max_memory_mb": 128
   }

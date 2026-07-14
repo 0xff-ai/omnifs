@@ -65,7 +65,6 @@ type DevMountTemplate = {
     scheme?: string;
   };
   config?: Record<string, unknown>;
-  capabilities?: unknown;
   limits?: unknown;
 };
 
@@ -584,9 +583,6 @@ async function runInitMount(
   }
   if (mount.template.config) {
     args.push("--config-json", JSON.stringify(mount.template.config));
-  }
-  if (mount.template.capabilities) {
-    args.push("--capabilities-json", JSON.stringify(mount.template.capabilities));
   }
   if (mount.template.limits) {
     args.push("--limits-json", JSON.stringify(mount.template.limits));

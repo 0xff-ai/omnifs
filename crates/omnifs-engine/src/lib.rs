@@ -3,11 +3,11 @@
 #[cfg(feature = "runtime")]
 pub(crate) mod auth_inject;
 #[cfg(feature = "runtime")]
+pub(crate) mod authority;
+#[cfg(feature = "runtime")]
 pub(crate) mod cache;
 #[cfg(feature = "runtime")]
 pub(crate) mod callouts;
-#[cfg(feature = "runtime")]
-pub(crate) mod capability;
 #[cfg(feature = "runtime")]
 pub(crate) mod clock;
 pub mod coalesce;

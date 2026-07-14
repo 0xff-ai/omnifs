@@ -275,7 +275,6 @@ const GITHUB_MOUNT_JSON: &str = r#"{
 const DOCKER_MOUNT_JSON: &str = r#"{
     "provider":"omnifs_provider_docker.wasm",
     "mount":"docker",
-    "capabilities":{"unix_sockets":["/var/run/docker.sock"]},
     "limits":{"max_memory_mb":64},
     "config":{"endpoint":"unix:///var/run/docker.sock"}
 }"#;
@@ -285,11 +284,6 @@ fn db_mount_json(db_dir: &Path) -> String {
         r#"{{
             "provider":"omnifs_provider_db.wasm",
             "mount":"db",
-            "capabilities":{{
-                "preopened_paths":[
-                    {{"host":{host:?},"guest":"/data","mode":"ro"}}
-                ]
-            }},
             "limits":{{"max_memory_mb":128}},
             "config":{{
                 "path":"/data/test.db",

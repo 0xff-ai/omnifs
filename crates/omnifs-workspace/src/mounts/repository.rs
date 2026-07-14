@@ -207,9 +207,9 @@ impl Repository {
         self.require_head()
     }
 
-    /// Materialize an immutable registry snapshot for `revision` under the
+    /// Create an immutable registry snapshot for `revision` under the
     /// workspace cache. Existing snapshots are validated and reused.
-    pub fn materialize(
+    pub fn snapshot(
         &self,
         revision: &Revision,
         cache_dir: impl AsRef<Path>,
@@ -747,14 +747,14 @@ mod tests {
     }
 
     #[test]
-    fn materialize_loads_exact_revision() {
+    fn snapshot_loads_exact_revision() {
         let dir = tempfile::tempdir().unwrap();
         let mounts = dir.path().join("mounts");
         let mut repository = Repository::open(&mounts).unwrap();
         repository.put(&spec("demo")).unwrap();
         let revision = repository.commit().unwrap();
         let cache = dir.path().join("cache");
-        let (_, snapshot) = repository.materialize(&revision, &cache).unwrap();
+        let (_, snapshot) = repository.snapshot(&revision, &cache).unwrap();
         let name = Name::new("demo").unwrap();
         assert_eq!(snapshot.get(&name).unwrap().mount, "demo");
         assert!(
@@ -782,7 +782,7 @@ mod tests {
         assert!(invalid.status.success());
         let invalid_revision = repository.head_revision().unwrap().unwrap();
         assert!(matches!(
-            repository.materialize(&invalid_revision, &cache),
+            repository.snapshot(&invalid_revision, &cache),
             Err(RepositoryError::UnexpectedTracked { .. })
         ));
     }

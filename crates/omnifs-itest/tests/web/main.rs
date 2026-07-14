@@ -18,9 +18,6 @@ fn web_harness() -> RuntimeHarness {
         {
             "provider": "omnifs_provider_web.wasm",
             "mount": "web",
-            "capabilities": {
-                "domains": { "dynamic": true }
-            },
             "config": {
                 "domains": ["example.test"]
             }
@@ -195,9 +192,6 @@ fn web_provider_only_exposes_configured_hosts() {
         {
             "provider": "omnifs_provider_web.wasm",
             "mount": "web",
-            "capabilities": {
-                "domains": { "dynamic": true }
-            },
             "config": {
                 "domains": ["EXAMPLE.test", "example.test", "second.test"]
             }
@@ -259,9 +253,6 @@ async fn web_provider_denies_domains_outside_mount_config() {
         {
             "provider": "omnifs_provider_web.wasm",
             "mount": "web",
-            "capabilities": {
-                "domains": { "dynamic": true }
-            },
             "config": {
                 "domains": ["allowed.test"]
             }

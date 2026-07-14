@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context, anyhow};
-use omnifs_caps::{Grants, Limits};
+use omnifs_caps::Limits;
 use omnifs_workspace::layout::WorkspaceLayout;
 use omnifs_workspace::mounts::{Name as MountName, Spec};
 use omnifs_workspace::provider::{ProviderAuthManifest, ProviderManifest};
@@ -450,9 +450,6 @@ fn apply_mount_overrides(
         }
         creator.validate(&config)?;
         created.config = Some(config);
-    }
-    if let Some(raw) = args.capabilities_json.as_deref() {
-        created.capabilities = Some(parse_json_flag::<Grants>("--capabilities-json", raw)?);
     }
     if let Some(raw) = args.limits_json.as_deref() {
         created.limits = Some(parse_json_flag::<Limits>("--limits-json", raw)?);

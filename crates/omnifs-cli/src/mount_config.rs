@@ -76,7 +76,6 @@ mod tests {
     use time::OffsetDateTime;
 
     use crate::test_support::{install_fixture_provider, spec_with_reference};
-    use omnifs_workspace::mounts::materialize;
     use omnifs_workspace::provider::Catalog;
 
     fn sample_entry(value: &str) -> CredentialEntry {
@@ -102,21 +101,19 @@ mod tests {
         Catalog::open(paths.providers_dir)
     }
 
-    /// Materialize `config`'s spec, then validate its host-managed credential.
-    /// Mirrors the preflight `Launcher::launch` runs before spawning the
-    /// daemon.
-    fn materialize_and_validate(
+    /// Validate `config`'s host-managed credential. Authority belongs to daemon
+    /// startup and is deliberately absent from this pre-stop preflight.
+    fn preflight_and_validate(
         config: &MountConfig,
         catalog: &Catalog,
         store: &dyn CredentialStore,
     ) -> anyhow::Result<()> {
-        let materialized = materialize::materialize(config.config.clone(), catalog)?;
-        let mount_auth = MountAuth::from_spec(catalog, materialized);
+        let mount_auth = MountAuth::from_spec(catalog, config.config.clone());
         config.validate_host_managed_credentials(&mount_auth, store)
     }
 
     #[test]
-    fn materialize_validates_host_managed_static_token() {
+    fn preflight_validates_host_managed_static_token() {
         let tmp = tempfile::tempdir().unwrap();
         let paths = omnifs_workspace::layout::WorkspaceLayout::under_root(tmp.path());
         std::fs::create_dir_all(&paths.providers_dir).unwrap();
@@ -130,17 +127,17 @@ mod tests {
             name: MountName::try_from("github").unwrap(),
             config: spec_with_reference(
                 &reference,
-                r#"{ "mount": "github", "capabilities": { "domains": ["api.example.com"] }, "auth": {"type":"static-token","scheme":"pat"} }"#,
+                r#"{ "mount": "github", "auth": {"type":"static-token","scheme":"pat"} }"#,
             ),
             source: PathBuf::from("/dev/null"),
         };
 
         let catalog = test_catalog(tmp.path());
-        materialize_and_validate(&config, &catalog, &store).unwrap();
+        preflight_and_validate(&config, &catalog, &store).unwrap();
     }
 
     #[test]
-    fn materialize_oauth_mount_configs() {
+    fn preflight_validates_oauth_mount_configs() {
         let tmp = tempfile::tempdir().unwrap();
         let paths = omnifs_workspace::layout::WorkspaceLayout::under_root(tmp.path());
         std::fs::create_dir_all(&paths.providers_dir).unwrap();
@@ -156,25 +153,22 @@ mod tests {
             name: MountName::try_from("github").unwrap(),
             config: spec_with_reference(
                 &reference,
-                r#"{ "mount": "github", "capabilities": { "domains": ["api.example.com"] }, "auth": {"type":"oauth","scheme":"device","clientId":"client-id"} }"#,
+                r#"{ "mount": "github", "auth": {"type":"oauth","scheme":"device","clientId":"client-id"} }"#,
             ),
             source: PathBuf::from("/dev/null"),
         };
-        materialize_and_validate(&with_scheme, &catalog, &store).unwrap();
+        preflight_and_validate(&with_scheme, &catalog, &store).unwrap();
 
         let metadata_only = MountConfig {
             name: MountName::try_from("github").unwrap(),
-            config: spec_with_reference(
-                &reference,
-                r#"{ "mount": "github", "capabilities": { "domains": ["api.example.com"] } }"#,
-            ),
+            config: spec_with_reference(&reference, r#"{ "mount": "github" }"#),
             source: PathBuf::from("/dev/null"),
         };
-        materialize_and_validate(&metadata_only, &catalog, &store).unwrap();
+        preflight_and_validate(&metadata_only, &catalog, &store).unwrap();
     }
 
     #[test]
-    fn materialize_errors_when_credential_missing() {
+    fn preflight_errors_when_credential_missing() {
         let tmp = tempfile::tempdir().unwrap();
         let paths = omnifs_workspace::layout::WorkspaceLayout::under_root(tmp.path());
         std::fs::create_dir_all(&paths.providers_dir).unwrap();
@@ -185,12 +179,12 @@ mod tests {
             name: MountName::try_from("ghost").unwrap(),
             config: spec_with_reference(
                 &reference,
-                r#"{ "mount": "ghost", "capabilities": { "domains": ["api.example.com"] }, "auth": {"type":"static-token","scheme":"pat"} }"#,
+                r#"{ "mount": "ghost", "auth": {"type":"static-token","scheme":"pat"} }"#,
             ),
             source: PathBuf::from("/dev/null"),
         };
         let catalog = test_catalog(tmp.path());
-        let err = materialize_and_validate(&config, &catalog, &store).unwrap_err();
+        let err = preflight_and_validate(&config, &catalog, &store).unwrap_err();
         let chain = format!("{err:#}");
         assert!(
             chain.contains("no stored credential"),

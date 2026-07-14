@@ -53,7 +53,6 @@ impl<'a> MountFile<'a> {
                     }),
                 }
             }),
-            capabilities: self.created.capabilities,
             limits: self.created.limits,
             config_raw: self.created.config,
         }

@@ -15,10 +15,6 @@ pub fn github_harness() -> RuntimeHarness {
                 "type": "static-token",
                 "scheme": "pat"
             },
-            "capabilities": {
-                "domains": ["api.github.com"],
-                "git_repos": ["git@github.com:octocat/Hello-World.git"]
-            }
         }
     "#,
     )

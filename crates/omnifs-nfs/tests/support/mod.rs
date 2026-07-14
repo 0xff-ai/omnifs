@@ -40,9 +40,6 @@ pub fn test_export_with_mount(mount: &str) -> TestExport {
         r#"{{
             "provider": {reference},
             "mount": {mount:?},
-            "capabilities": {{
-                "domains": ["httpbin.org"]
-            }}
         }}"#,
     );
     std::fs::write(mounts_dir.join(format!("{mount}.json")), provider_config)

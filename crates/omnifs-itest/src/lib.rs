@@ -347,7 +347,7 @@ pub fn make_engine() -> wasmtime::Engine {
 }
 
 /// The canonical test-provider mount config the bare `make_runtime` uses.
-pub const TEST_PROVIDER_CONFIG: &str = r#"{"provider":"test_provider.wasm","mount":"test","capabilities":{"domains":["httpbin.org"]}}"#;
+pub const TEST_PROVIDER_CONFIG: &str = r#"{"provider":"test_provider.wasm","mount":"test"}"#;
 
 pub fn make_runtime(engine: &wasmtime::Engine) -> RuntimeHarness {
     RuntimeHarness::with_engine(TEST_PROVIDER_CONFIG, engine).unwrap()

@@ -410,11 +410,6 @@ mod tests {
             ("mount add static token", "mount add", "token-env"),
             ("mount add auth suppression", "mount add", "no-auth"),
             ("mount add provider config", "mount add", "config-json"),
-            (
-                "mount add capability grants",
-                "mount add",
-                "capabilities-json",
-            ),
             ("mount add resource limits", "mount add", "limits-json"),
             ("up readiness wait", "up", "wait"),
         ];

@@ -5,15 +5,12 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "The omnifs capability subsystem: data model, invariants, and matching semantics for provider sandboxing. Enforcement lives in the host."
+description = "The omnifs capability declaration model used by provider manifests and WIT. Enforcement lives in the host."
 
 [dependencies]
 serde = { workspace = true }
 schemars = { workspace = true }
 utoipa = { workspace = true }
-thiserror = { workspace = true }
-url = { workspace = true }
-hex = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

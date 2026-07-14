@@ -1,16 +1,14 @@
 //! Provider registry: startup loading and lifecycle management for WASM providers.
 //!
 //! Startup is atomic: the complete immutable mount snapshot is scanned,
-//! materialized, and instantiated before any runtime is published.
+//! snapshotted, and instantiated before any runtime is published.
 
 use crate::auth::credential_service_for_file;
 use crate::cache::Caches;
 use crate::cloner::GitCloner;
 use crate::{BuildError, HostContext, Runtime, component_engine};
 use omnifs_auth::CredentialService;
-use omnifs_workspace::mounts::materialize::materialize;
 use omnifs_workspace::mounts::{Registry, Spec};
-use omnifs_workspace::provider::Catalog;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -69,7 +67,7 @@ impl MountRuntimes {
     }
 
     /// Load and publish every mount from the supplied immutable snapshot. Any
-    /// snapshot, materialization, artifact, duplicate, or runtime error aborts
+    /// snapshot assembly, artifact, duplicate, or runtime error aborts
     /// startup before the first runtime is visible.
     pub fn load(
         context: HostContext,
@@ -95,14 +93,9 @@ impl MountRuntimes {
                 failure.error
             )));
         }
-        let catalog = Catalog::open(registry.context.providers_dir());
         let built = desired
             .iter()
-            .map(|(_, spec)| {
-                let spec = materialize(spec.clone(), &catalog)
-                    .map_err(|error| RegistryError::ConfigError(error.to_string()))?;
-                registry.build_mount(&spec, capture_test_callouts)
-            })
+            .map(|(_, spec)| registry.build_mount(spec, capture_test_callouts))
             .collect::<Result<Vec<_>, _>>()?;
         for (index, left) in built.iter().enumerate() {
             for right in built.iter().skip(index + 1) {
@@ -357,22 +350,15 @@ mod tests {
         );
 
         // Pin the test provider into the provider store, then mount it with an
-        // out-of-schema config field and an invalid literal preopen. Config
-        // validation must win over preopen validation during runtime build.
+        // out-of-schema config field. Config validation must fail before
+        // provider instance construction.
         let spec = pin_spec(
             providers_dir.path(),
             &base_wasm,
             "test-provider",
             serde_json::json!({
                 "mount": "test",
-                "config": { "unexpected": true },
-                "capabilities": {
-                    "preopened_paths": [{
-                        "host": "relative",
-                        "guest": "/data",
-                        "mode": "ro"
-                    }]
-                }
+                "config": { "unexpected": true }
             }),
         );
         std::fs::write(
@@ -536,7 +522,6 @@ mod tests {
             serde_json::json!({
                 "mount": "test",
                 "config": {},
-                "capabilities": { "domains": ["httpbin.org"] }
             }),
         );
         std::fs::write(

@@ -6,7 +6,7 @@ use anyhow::Context as _;
 use omnifs_api::{DaemonStatus, DaemonSubsystem};
 use omnifs_workspace::creds::{CredentialStore, FileStore};
 use omnifs_workspace::layout::WorkspaceLayout;
-use omnifs_workspace::mounts::{Registry, Revision, materialize};
+use omnifs_workspace::mounts::{Registry, Revision};
 use omnifs_workspace::provider::Catalog;
 use omnifs_workspace::runtime_record::RuntimeRecord;
 
@@ -47,7 +47,7 @@ impl<'a> Launcher<'a> {
         let (snapshot_dir, snapshot) = self
             .workspace
             .repository()?
-            .materialize(&revision, &paths.cache_dir)?;
+            .snapshot(&revision, &paths.cache_dir)?;
         let configs = mount_configs(&snapshot);
         if configs.is_empty() {
             anyhow::bail!(
@@ -57,9 +57,9 @@ impl<'a> Launcher<'a> {
         }
 
         // Fail fast, before a healthy daemon is stopped or a new daemon spawns,
-        // when a configured mount's
-        // host-managed credential is missing or its spec under-grants the
-        // pinned provider's declared needs.
+        // when a configured mount's host-managed credential is missing. The
+        // daemon resolves the pinned manifest and bound config into authority
+        // before constructing any provider instance.
         let store = FileStore::new(&paths.credentials_file);
         preflight_mounts(&configs, self.workspace.catalog(), &store)?;
 
@@ -93,21 +93,17 @@ fn mount_configs(registry: &Registry) -> Vec<MountConfig> {
         .collect()
 }
 
-/// Validate every configured mount before the running daemon is touched:
-/// materialize its spec (capability satisfaction, dynamic-grant resolution)
-/// and confirm its
-/// host-managed credential, if any, is present. The daemon repeats the mount
-/// construction from this same immutable snapshot, but a failure here leaves
-/// a healthy prior revision serving.
+/// Validate every configured mount before the running daemon is touched and
+/// confirm its host-managed credential, if any, is present. Authority belongs
+/// to the new daemon startup, so this preflight stays credential-only and a
+/// failed authority resolution leaves a healthy prior revision serving.
 fn preflight_mounts(
     configs: &[MountConfig],
     catalog: &Catalog,
     store: &dyn CredentialStore,
 ) -> anyhow::Result<()> {
     for config in configs {
-        let materialized = materialize::materialize(config.config.clone(), catalog)
-            .with_context(|| format!("materialize mount {}", config.source.display()))?;
-        let mount_auth = crate::auth::MountAuth::from_spec(catalog, materialized);
+        let mount_auth = crate::auth::MountAuth::from_spec(catalog, config.config.clone());
         config.validate_host_managed_credentials(&mount_auth, store)?;
     }
     Ok(())

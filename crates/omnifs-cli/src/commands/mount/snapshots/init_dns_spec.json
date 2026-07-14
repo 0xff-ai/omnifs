@@ -7,15 +7,6 @@
     }
   },
   "mount": "dns",
-  "capabilities": {
-    "domains": [
-      "cloudflare-dns.com",
-      "dns.google"
-    ],
-    "git_repos": null,
-    "unix_sockets": null,
-    "preopened_paths": null
-  },
   "limits": {
     "max_memory_mb": 32
   },

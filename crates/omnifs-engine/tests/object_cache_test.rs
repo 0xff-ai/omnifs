@@ -17,7 +17,6 @@ const CONFIG: &str = r#"
 {
     "provider": "test_provider.wasm",
     "mount": "test",
-    "capabilities": { "domains": ["httpbin.org"] }
 }
 "#;
 

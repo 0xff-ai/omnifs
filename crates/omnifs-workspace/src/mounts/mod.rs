@@ -1,16 +1,13 @@
-//! The omnifs mount: the user-authored mount `Spec` (which bakes in its
-//! provider-manifest defaults at creation), the `Registry` that owns specs on
-//! disk, the Git-backed `Repository` that versions desired state, and
-//! materialization against the provider manifest in [`crate::provider`]. Plus
+//! The omnifs mount: the user-authored mount `Spec` (which carries the pinned
+//! provider reference and config), the `Registry` that owns specs on
+//! disk, and the Git-backed `Repository` that versions desired state. Plus
 //! the sparse user `Auth` config.
 //!
-//! `Spec` represents the mount JSON. Provider-manifest defaults (the auth scheme
-//! and config defaults) are baked into the spec at creation time by the CLI's
-//! spec creator, so loading a spec is a plain parse: there is no read-time
-//! resolution step and no separate runtime-ready type.
+//! `Spec` represents the mount JSON. Startup resolves the pinned provider
+//! manifest and bound config into runtime authority before instance creation;
+//! the spec itself remains a plain parsed desired-state document.
 
 pub mod auth;
-pub mod materialize;
 pub mod name;
 pub mod repository;
 
@@ -28,7 +25,7 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
 use crate::provider::{Catalog, CatalogError, ProviderManifest};
-use omnifs_caps::{Grants, Limits};
+use omnifs_caps::Limits;
 
 /// Raw user-authored mount JSON.
 ///
@@ -45,8 +42,6 @@ pub struct Spec {
     pub revalidate: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth: Option<Auth>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub capabilities: Option<Grants>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limits: Option<Limits>,
     /// Opaque provider config. The provider owns its meaning, so the host keeps
@@ -140,10 +135,9 @@ impl Spec {
     }
 
     /// Fill manifest-declared auth-scheme and config defaults into any field the
-    /// user left unset. Capabilities and limits are never filled here: the
-    /// manifest declares needs and scalar defaults; `omnifs init` writes
-    /// explicit grants and limits, and the spec owns them. Identity is never
-    /// touched: the provider name lives in `self.provider.meta.name`, not here.
+    /// user left unset. Runtime authority is resolved later from the pinned
+    /// manifest and the resulting bound config. Identity is never touched: the
+    /// provider name lives in `self.provider.meta.name`, not here.
     pub fn apply_provider_metadata(
         &mut self,
         manifest: &crate::provider::ProviderManifest,
@@ -521,7 +515,7 @@ impl Registry {
 
     /// Restore one validated revision file through the same parser, naming
     /// checks, and atomic writer used for live specs. Repository uses this when
-    /// materializing Git snapshots; callers cannot bypass Spec validation.
+    /// snapshotting Git revisions; callers cannot bypass Spec validation.
     pub(crate) fn write_snapshot_file(
         root: &Path,
         relative: &Path,

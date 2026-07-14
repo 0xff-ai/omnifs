@@ -62,7 +62,6 @@ async fn all_providers_initialize_and_compile() {
                 r#"{{
                     "provider":"{wasm}",
                     "mount":"{mount}",
-                    "capabilities": {{ "domains": {{ "dynamic": true }} }},
                     "config": {{ "domains": ["example.com"] }}
                 }}"#
             )
@@ -159,9 +158,6 @@ async fn test_list_projects_nested_files_into_cache() {
         {
             "provider": "test_provider.wasm",
             "mount": "test",
-            "capabilities": {
-                "domains": ["httpbin.org"]
-            }
         }
     "#,
     );
@@ -219,9 +215,6 @@ async fn test_list_projects_direct_file_content_into_cache() {
         {
             "provider": "test_provider.wasm",
             "mount": "test",
-            "capabilities": {
-                "domains": ["httpbin.org"]
-            }
         }
     "#,
     );
@@ -267,9 +260,6 @@ async fn test_mutable_unversioned_full_reads_are_observation_only() {
         {
             "provider": "test_provider.wasm",
             "mount": "test",
-            "capabilities": {
-                "domains": ["httpbin.org"]
-            }
         }
     "#,
     );
@@ -321,9 +311,6 @@ async fn test_read_file() {
         {
             "provider": "test_provider.wasm",
             "mount": "test",
-            "capabilities": {
-                "domains": ["httpbin.org"]
-            }
         }
     "#,
     );
@@ -363,9 +350,6 @@ async fn test_read_file_sibling_projections_do_not_erase_parent_dirents() {
         {
             "provider": "test_provider.wasm",
             "mount": "test",
-            "capabilities": {
-                "domains": ["httpbin.org"]
-            }
         }
     "#,
     );
@@ -463,7 +447,6 @@ async fn test_object_dir_child_lookup_preserves_full_listing() {
         {
             "provider": "test_provider.wasm",
             "mount": "test",
-            "capabilities": { "domains": ["httpbin.org"] }
         }
     "#,
     );
@@ -538,9 +521,6 @@ async fn test_ranged_open_read_chunk_contract() {
         {
             "provider": "test_provider.wasm",
             "mount": "test",
-            "capabilities": {
-                "domains": ["httpbin.org"]
-            }
         }
     "#,
     );
@@ -583,9 +563,6 @@ async fn test_unknown_and_volatile_ranged_eof_contracts() {
         {
             "provider": "test_provider.wasm",
             "mount": "test",
-            "capabilities": {
-                "domains": ["httpbin.org"]
-            }
         }
     "#,
     );
@@ -707,9 +684,6 @@ async fn test_subtree_handoff_rejects_unknown_tree_ref() {
         {
             "provider": "test_provider.wasm",
             "mount": "test",
-            "capabilities": {
-                "domains": ["httpbin.org"]
-            }
         }
     "#,
     );
@@ -749,9 +723,6 @@ async fn test_list_projects_adjacent_files_into_cache() {
         {
             "provider": "test_provider.wasm",
             "mount": "test",
-            "capabilities": {
-                "domains": ["httpbin.org"]
-            }
         }
     "#,
     );
@@ -808,9 +779,6 @@ async fn test_lookup_returns_siblings_and_list_warms_child_shape() {
         {
             "provider": "test_provider.wasm",
             "mount": "test",
-            "capabilities": {
-                "domains": ["httpbin.org"]
-            }
         }
     "#,
     );
@@ -963,9 +931,7 @@ fn cache_delete_prefix_respects_segment_boundaries() {
 #[allow(clippy::too_many_lines)]
 async fn test_cache_isolated_by_mount_name() {
     let engine = make_engine();
-    let config = spec_with_test_provider(
-        r#"{ "mount": "test", "capabilities": { "domains": ["httpbin.org"] } }"#,
-    );
+    let config = spec_with_test_provider(r#"{ "mount": "test" }"#);
 
     let clone_dir = tempfile::tempdir().unwrap();
     let cache_dir = tempfile::tempdir().unwrap();

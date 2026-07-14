@@ -45,9 +45,9 @@ Use `just build providers` when artifacts need embedded metadata and validation-
 
 ### Host resource config fields
 
-Config fields that name host resources use typed `HostFile` or `HostSocket` fields. The manifest records them as string fields with a host-resource binding, and the host resolves those grants at mount-start.
+Config fields that name host resources use typed `HostFile` or `HostSocket` fields. The manifest records them as string fields with a host-resource binding, and startup requires the matching dynamic manifest need before resolving exact authority.
 
-Keep host-resource bindings directly on the config field metadata. Resolve dynamic grants during mount materialization, not lazily during provider execution.
+Keep host-resource bindings directly on the config field metadata. A matching dynamic `PreopenedPath` or `UnixSocket` need and bound config field resolve exact startup authority once, before provider instance construction; a missing or unpaired declaration fails closed rather than being resolved lazily during provider execution.
 
 ### Endpoint values
 
@@ -101,7 +101,7 @@ Each lifecycle, namespace, and notify export returns only its operation-specific
 - `crates/omnifs-sdk/src/metadata.rs`
 - `crates/omnifs-embed-metadata/src/main.rs`
 - `crates/omnifs-workspace/src/provider/sections.rs`
-- `crates/omnifs-workspace/src/mounts/materialize.rs`
+- `crates/omnifs-engine/src/authority.rs`
 - `providers/*/src/lib.rs`
 - `providers/DESIGN.md`
 - `skills/omnifs-provider-sdk/SKILL.md`

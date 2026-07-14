@@ -12,6 +12,7 @@ use std::path::{Component as PathComponent, Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 
+use crate::authority::RuntimeAuthority;
 use crate::callouts::{CalloutHost, ParkSignal};
 use futures::StreamExt;
 use tracing::Instrument;
@@ -21,7 +22,6 @@ use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
 use crate::Provider;
 use crate::wasi::HostState;
 use crate::{BuildError, EngineError};
-use omnifs_caps::{PreopenMode, PreopenedPath};
 use omnifs_wit::provider::types as wit_types;
 
 #[derive(Clone)]
@@ -146,14 +146,13 @@ impl Instance {
         engine: &wasmtime::Engine,
         wasm_path: &Path,
         config_bytes: Vec<u8>,
-        preopens: &[PreopenedPath],
+        authority: Arc<RuntimeAuthority>,
         park_signal: Option<ParkSignal>,
     ) -> std::result::Result<Self, BuildError> {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let engine = engine.clone();
         let wasm_path = wasm_path.to_path_buf();
-        let preopens = preopens.to_vec();
 
         std::thread::Builder::new()
             .name("omnifs-provider-instance".to_string())
@@ -178,7 +177,7 @@ impl Instance {
                     },
                 };
                 runtime.block_on(async move {
-                    match build_driver_state(&engine, &wasm_path, &preopens).await {
+                    match build_driver_state(&engine, &wasm_path, &authority).await {
                         Ok((store, bindings)) => {
                             let _ = ready_tx.send(Ok(()));
                             if let Err(error) = drive_instance(store, bindings, rx).await {
@@ -377,14 +376,14 @@ impl Instance {
 async fn build_driver_state(
     engine: &wasmtime::Engine,
     wasm_path: &Path,
-    preopens: &[PreopenedPath],
+    authority: &RuntimeAuthority,
 ) -> std::result::Result<(wasmtime::Store<HostState>, Provider), BuildError> {
     let mut linker = Linker::<HostState>::new(engine);
     wasmtime_wasi::p2::add_to_linker_async::<HostState>(&mut linker)?;
     Provider::add_to_linker::<HostState, HostState>(&mut linker, |state| state)?;
 
     let component = Component::from_file(engine, wasm_path)?;
-    let wasi = build_wasi_ctx(preopens)?;
+    let wasi = build_wasi_ctx(authority)?;
     let mut store = wasmtime::Store::new(
         engine,
         HostState {
@@ -537,50 +536,44 @@ async fn drive_instance(
 }
 
 fn build_wasi_ctx(
-    preopens: &[PreopenedPath],
+    authority: &RuntimeAuthority,
 ) -> std::result::Result<wasmtime_wasi::WasiCtx, BuildError> {
     let mut builder = WasiCtxBuilder::new();
-    for entry in preopens {
-        let host = validate_preopen_path(&entry.host, "host")?;
+    for entry in authority.preopens() {
+        let host = validate_preopen_path(&entry.host)?;
         // Guest paths must also be absolute. They share the same
         // no-parent-escape rule because Wasmtime's preopen API treats
         // them as opaque mount tokens; relative or `..`-laden values
         // would silently confuse later guest-side path resolution.
-        let _ = validate_preopen_path(&entry.guest, "guest")?;
+        let _ = validate_preopen_path(&entry.guest)?;
         let (dir_perms, file_perms) = match entry.mode {
-            PreopenMode::Ro => (DirPerms::READ, FilePerms::READ),
-            PreopenMode::Rw => (
+            omnifs_caps::PreopenMode::Ro => (DirPerms::READ, FilePerms::READ),
+            omnifs_caps::PreopenMode::Rw => (
                 DirPerms::READ | DirPerms::MUTATE,
                 FilePerms::READ | FilePerms::WRITE,
             ),
         };
         builder
             .preopened_dir(&host, &entry.guest, dir_perms, file_perms)
-            .map_err(|e| {
-                BuildError::InvalidConfig(format!(
-                    "preopen failed for host={} guest={}: {e}",
-                    host.display(),
-                    entry.guest,
-                ))
-            })?;
+            .map_err(|_| BuildError::InvalidConfig("preopen setup failed".to_owned()))?;
     }
     Ok(builder.build())
 }
 
-fn validate_preopen_path(raw: &str, label: &str) -> std::result::Result<PathBuf, BuildError> {
+fn validate_preopen_path(raw: &str) -> std::result::Result<PathBuf, BuildError> {
     let path = PathBuf::from(raw);
     if !path.is_absolute() {
-        return Err(BuildError::InvalidConfig(format!(
-            "preopen {label} path must be absolute: {raw}"
-        )));
+        return Err(BuildError::InvalidConfig(
+            "preopen path validation failed: path must be absolute".to_owned(),
+        ));
     }
     if path
         .components()
         .any(|c| matches!(c, PathComponent::ParentDir))
     {
-        return Err(BuildError::InvalidConfig(format!(
-            "preopen {label} path must not contain '..' segments: {raw}"
-        )));
+        return Err(BuildError::InvalidConfig(
+            "preopen path validation failed: parent segments are not allowed".to_owned(),
+        ));
     }
     Ok(path)
 }
@@ -590,17 +583,20 @@ mod tests {
     use super::*;
     #[test]
     fn validate_preopen_path_rejects_relative() {
-        let err = validate_preopen_path("data/db", "host").unwrap_err();
+        let err = validate_preopen_path("data/db").unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("must be absolute"), "unexpected error: {msg}");
+        assert!(
+            msg.contains("path must be absolute"),
+            "unexpected error: {msg}"
+        );
     }
 
     #[test]
     fn validate_preopen_path_rejects_parent_dir() {
-        let err = validate_preopen_path("/data/../etc/passwd", "host").unwrap_err();
+        let err = validate_preopen_path("/data/../etc/passwd").unwrap_err();
         let msg = err.to_string();
         assert!(
-            msg.contains("must not contain '..'"),
+            msg.contains("parent segments are not allowed"),
             "unexpected error: {msg}"
         );
     }
