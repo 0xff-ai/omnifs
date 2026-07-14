@@ -39,18 +39,30 @@ impl std::fmt::Display for Refreshability {
 }
 
 /// One durable host-managed HTTP credential entry.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct CredentialEntry {
     kind: AuthKind,
+    #[serde(rename = "access_token")]
     value: SecretString,
+    #[serde(with = "time::serde::rfc3339")]
     stored_at: OffsetDateTime,
+    #[serde(default, with = "time::serde::rfc3339::option")]
     last_validated: Option<OffsetDateTime>,
+    #[serde(default)]
     scopes: Vec<String>,
     /// Human-readable identity reported by the upstream API at validation time.
+    #[serde(default)]
     upstream_identity: Option<String>,
+    #[serde(default)]
     refresh_token: Option<SecretString>,
+    #[serde(default, with = "time::serde::rfc3339::option")]
     expires_at: Option<OffsetDateTime>,
+    #[serde(
+        default = "CredentialEntry::default_token_type",
+        deserialize_with = "CredentialEntry::deserialize_token_type"
+    )]
     token_type: String,
+    #[serde(default)]
     extras: BTreeMap<String, String>,
 }
 
@@ -144,6 +156,16 @@ impl CredentialEntry {
         self.extras = extras;
     }
 
+    fn default_token_type() -> String {
+        Self::normalize_token_type(String::new())
+    }
+
+    fn deserialize_token_type<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<String, D::Error> {
+        String::deserialize(deserializer).map(Self::normalize_token_type)
+    }
+
     fn normalize_token_type(token_type: String) -> String {
         if token_type.is_empty() {
             "Bearer".to_owned()
@@ -151,31 +173,6 @@ impl CredentialEntry {
             token_type
         }
     }
-}
-
-#[derive(Deserialize)]
-struct CredentialEntryWire {
-    kind: AuthKind,
-    #[serde(rename = "access_token", with = "secret_string_serde")]
-    access_token: SecretString,
-    #[serde(default, with = "secret_string_serde::option")]
-    refresh_token: Option<SecretString>,
-    #[serde(default, rename = "refreshability")]
-    _refreshability: Option<Refreshability>,
-    #[serde(default, with = "time::serde::rfc3339::option")]
-    expires_at: Option<OffsetDateTime>,
-    #[serde(default)]
-    token_type: String,
-    #[serde(with = "time::serde::rfc3339")]
-    stored_at: OffsetDateTime,
-    #[serde(default, with = "time::serde::rfc3339::option")]
-    last_validated: Option<OffsetDateTime>,
-    #[serde(default)]
-    scopes: Vec<String>,
-    #[serde(default)]
-    upstream_identity: Option<String>,
-    #[serde(default)]
-    extras: BTreeMap<String, String>,
 }
 
 impl Serialize for CredentialEntry {
@@ -218,25 +215,6 @@ impl Serialize for CredentialEntry {
     }
 }
 
-impl<'de> Deserialize<'de> for CredentialEntry {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let wire = CredentialEntryWire::deserialize(deserializer)?;
-        let entry = Self {
-            kind: wire.kind,
-            value: wire.access_token,
-            stored_at: wire.stored_at,
-            last_validated: wire.last_validated,
-            scopes: wire.scopes,
-            upstream_identity: wire.upstream_identity,
-            refresh_token: wire.refresh_token,
-            expires_at: wire.expires_at,
-            token_type: Self::normalize_token_type(wire.token_type),
-            extras: wire.extras,
-        };
-        Ok(entry)
-    }
-}
-
 /// Trait every credential store implements. Errors are typed so callers can
 /// decide how to handle each variant.
 pub trait CredentialStore: Send + Sync {
@@ -260,26 +238,6 @@ pub enum CredStoreError {
     Backend(String),
     #[error(transparent)]
     CredentialId(#[from] CredentialIdError),
-}
-
-mod secret_string_serde {
-    use secrecy::SecretString;
-    use serde::{Deserialize, Deserializer};
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<SecretString, D::Error> {
-        Ok(SecretString::from(String::deserialize(de)?))
-    }
-
-    pub mod option {
-        use secrecy::SecretString;
-        use serde::{Deserialize, Deserializer};
-
-        pub fn deserialize<'de, D: Deserializer<'de>>(
-            de: D,
-        ) -> Result<Option<SecretString>, D::Error> {
-            Ok(Option::<String>::deserialize(de)?.map(SecretString::from))
-        }
-    }
 }
 
 #[cfg(test)]
