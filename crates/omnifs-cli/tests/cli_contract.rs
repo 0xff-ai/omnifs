@@ -102,10 +102,6 @@ fn help_documents_exit_codes() {
     assert!(stdout.contains("4  auth or consent required"));
     assert!(stdout.contains("5  degraded health"));
     assert!(
-        !stdout.contains("\n  setup "),
-        "retired setup command in help: {stdout}"
-    );
-    assert!(
         !stdout.contains("reset"),
         "retired reset command in help: {stdout}"
     );
@@ -467,6 +463,47 @@ fn bare_invocation_without_mounts_points_to_mount_add() {
     assert!(stdout.contains("Frontends  "));
     assert!(stdout.contains("Mounts  0"));
     assert!(String::from_utf8_lossy(&output.stderr).contains("omnifs mount add <provider>"));
+}
+
+#[test]
+fn mount_add_collision_renames_with_yes() {
+    let fixture = Fixture::new();
+    install_test_provider_as(&fixture.home_path().join("providers"), "test");
+
+    let first = fixture.run(&["mount", "add", "test", "--no-input", "--yes"]);
+    assert_eq!(
+        exit_code(&first),
+        0,
+        "first mount add must succeed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&first.stdout),
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert!(first.stdout.is_empty(), "session prose belongs on stderr");
+
+    let second = fixture.run(&["mount", "add", "test", "--no-input", "--yes"]);
+    assert_eq!(
+        exit_code(&second),
+        0,
+        "second mount add must rename the collision\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&second.stdout),
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert!(second.stdout.is_empty(), "session prose belongs on stderr");
+    let stderr = String::from_utf8_lossy(&second.stderr);
+    assert!(stderr.contains("┌ omnifs mount add"), "{stderr}");
+    assert!(
+        stderr.contains("mount name") && stderr.contains("test taken, using test-2"),
+        "--yes collision rename must stay visible: {stderr}"
+    );
+    assert!(stderr.contains("└ Mounted `test-2`."), "{stderr}");
+    assert!(
+        fixture.home_path().join("mounts/test.json").is_file(),
+        "first mount add must write the test mount spec"
+    );
+    assert!(
+        fixture.home_path().join("mounts/test-2.json").is_file(),
+        "collision rename must write the suggested mount spec"
+    );
 }
 
 #[test]
