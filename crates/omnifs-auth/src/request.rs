@@ -39,6 +39,28 @@ impl OAuthRequest {
         &self.scheme
     }
 
+    /// Compare the complete OAuth runtime configuration while excluding only
+    /// request injection facts, which belong to the consuming mount binding.
+    /// Secrets are compared directly in memory and never leave this method.
+    pub(crate) fn has_same_runtime_metadata(&self, other: &Self) -> bool {
+        let mut left = self.scheme.clone();
+        let mut right = other.scheme.clone();
+        left.inject_domains.clear();
+        left.inject_header_name = None;
+        left.inject_value_prefix.clear();
+        right.inject_domains.clear();
+        right.inject_header_name = None;
+        right.inject_value_prefix.clear();
+
+        left == right
+            && self.client_id == other.client_id
+            && self.client_secret.as_ref().map(ExposeSecret::expose_secret)
+                == other
+                    .client_secret
+                    .as_ref()
+                    .map(ExposeSecret::expose_secret)
+    }
+
     pub fn override_default_scopes(&mut self, scopes: Vec<String>) {
         self.scheme.default_scopes = scopes;
     }

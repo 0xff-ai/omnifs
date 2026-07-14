@@ -43,7 +43,9 @@ async fn refresh_loop_refreshes_before_the_request_path_ever_asks() {
         store.clone(),
         OAuthClient::new().expect("build oauth client"),
     ));
-    service.register_oauth(key.clone(), oauth_request(tokens.endpoint()));
+    service
+        .bind_oauth(key.clone(), oauth_request(tokens.endpoint()))
+        .unwrap();
 
     let handle = service.spawn_refresh_loop();
 
@@ -88,7 +90,7 @@ async fn refresh_loop_refreshes_before_the_request_path_ever_asks() {
     let status = health
         .iter()
         .find(|status| status.id == key)
-        .expect("registered credential reports health");
+        .expect("bound credential reports health");
     assert_eq!(status.health, CredentialHealth::Ready);
 
     handle.abort();

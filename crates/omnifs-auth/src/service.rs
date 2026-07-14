@@ -2,13 +2,13 @@
 //!
 //! [`CredentialService`] is the single host-side owner of credential store
 //! access, the one expiry predicate, and OAuth refresh. A mount's
-//! injector ([`crate`] consumers in `omnifs-engine`) registers each credential
+//! injector ([`crate`] consumers in `omnifs-engine`) binds each credential
 //! it needs, then asks for [`CredentialService::authorization`] per request. The
 //! service reads the store, refreshes synchronously inside the refresh window,
 //! coalesces concurrent refreshes per credential, and NEVER returns a stale or
-//! absent credential as success. Token material never leaves the service except
-//! as the composed [`HeaderMaterial`] the injector places on the wire; it is
-//! never logged and never placed on a status or wire type.
+//! absent credential as success. Token material remains a [`SecretString`] until
+//! the consuming engine binding composes the final wire header; it is never
+//! logged and never placed on a status or wire type.
 
 use crate::client::{OAuthClient, OAuthRevokeOutcome};
 use crate::error::AuthError;
@@ -54,29 +54,6 @@ const REFRESH_LOOP_MIN_INTERVAL: Duration = Duration::from_secs(1);
 /// reproducible sequence of wake-ups.
 const REFRESH_LOOP_SEED: u64 = 0x5EED_1E55_0A57_0000;
 
-/// The resolved auth header the injector places on a request. Holds the secret
-/// value (already prefixed, e.g. `Bearer <token>`) as a [`SecretString`] so it
-/// is redacted in logs; the injector exposes it only at the wire boundary.
-#[derive(Debug, Clone)]
-pub struct HeaderMaterial {
-    name: String,
-    value: SecretString,
-}
-
-impl HeaderMaterial {
-    #[must_use]
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
-    /// Expose the composed header value for placement on the wire. This is the
-    /// single controlled disclosure of token material.
-    #[must_use]
-    pub fn expose_value(&self) -> &str {
-        self.value.expose_secret()
-    }
-}
-
 /// Why a credential could not be authorized. Every variant is a fail-closed
 /// denial; none carries token material.
 #[derive(Debug, Clone, thiserror::Error)]
@@ -91,7 +68,7 @@ pub enum AuthUnavailable {
     RefreshFailed(String),
 }
 
-/// Non-secret health of one registered credential. NEVER holds token material.
+/// Non-secret health of one bound credential. NEVER holds token material.
 #[derive(Debug, Clone)]
 pub struct CredentialStatus {
     pub id: CredentialId,
@@ -224,14 +201,12 @@ impl std::fmt::Display for RevokeOutcome {
     }
 }
 
-/// Per-credential state: how to compose its header, how to refresh it (OAuth),
-/// and the last-known entry cached in memory. `current` is the token the
+/// Per-credential state: how to refresh it (OAuth), and the last-known entry
+/// cached in memory. `current` is the token the
 /// injector last resolved; `do_refresh` compares against it to decide whether a
 /// forced refresh must hit the endpoint or can adopt a newer stored entry.
 struct CredentialState {
     kind: AuthKind,
-    header_name: String,
-    value_prefix: String,
     /// `Some` for OAuth (carries endpoints, client credentials, refresh
     /// params); `None` for static tokens, which never refresh.
     request: Option<OAuthRequest>,
@@ -241,16 +216,8 @@ struct CredentialState {
 }
 
 impl CredentialState {
-    fn authorization(&self, entry: &CredentialEntry) -> HeaderMaterial {
-        let value = format!(
-            "{}{}",
-            self.value_prefix,
-            entry.access_token().expose_secret()
-        );
-        HeaderMaterial {
-            name: self.header_name.clone(),
-            value: SecretString::from(value),
-        }
+    fn authorization(&self, entry: &CredentialEntry) -> SecretString {
+        entry.access_token().clone()
     }
 
     fn health(
@@ -287,7 +254,8 @@ impl CredentialState {
 ///
 /// One instance is shared across every mount in a host: mounts that resolve to
 /// the same [`CredentialId`] share one refresh state, so a single refresh serves
-/// them all. Registration is idempotent (first registration wins).
+/// them all. Bindings are established during startup and conflicting OAuth
+/// runtime metadata fails.
 pub struct CredentialService {
     store: Arc<dyn CredentialStore>,
     oauth: OAuthClient,
@@ -296,7 +264,7 @@ pub struct CredentialService {
     /// onto one endpoint call.
     refreshes: Group<String, Option<CredentialEntry>, String>,
     /// Wakes [`spawn_refresh_loop`](Self::spawn_refresh_loop)'s sleep
-    /// immediately when credential state changes under it (`register_oauth`,
+    /// immediately when credential state changes under it (`bind_oauth`,
     /// `store_entry`, `reload`), instead of waiting out whatever deadline it
     /// last computed.
     refresh_notify: Notify,
@@ -325,73 +293,75 @@ impl CredentialService {
             .is_none_or(|expires_at| expires_at - now > window)
     }
 
-    /// Register a static-token credential and its header shape. Reads the store
-    /// once to warm the in-memory entry.
-    pub fn register_static(&self, id: CredentialId, header_name: String, value_prefix: String) {
-        self.register(id, AuthKind::StaticToken, header_name, value_prefix, None);
+    /// Bind a static-token credential. Store errors and stored kind mismatches
+    /// fail before the binding is published.
+    pub fn bind_static(&self, id: CredentialId) -> Result<(), AuthError> {
+        self.bind(id, AuthKind::StaticToken, None)
     }
 
-    /// Register an OAuth credential. The header shape and refresh parameters both
-    /// come from the request's scheme.
-    pub fn register_oauth(&self, id: CredentialId, request: OAuthRequest) {
-        let scheme = request.scheme();
-        let header_name = scheme
-            .inject_header_name
-            .clone()
-            .unwrap_or_else(|| "Authorization".to_string());
-        let value_prefix = scheme.inject_value_prefix.clone();
-        self.register(
-            id,
-            AuthKind::OAuth,
-            header_name,
-            value_prefix,
-            Some(request),
-        );
-        // A newly-registered OAuth credential can change the refresh loop's
+    /// Bind an OAuth credential. Injection facts remain in the engine binding;
+    /// this request supplies only the runtime refresh metadata owned here.
+    pub fn bind_oauth(&self, id: CredentialId, request: OAuthRequest) -> Result<(), AuthError> {
+        self.bind(id, AuthKind::OAuth, Some(request))?;
+        // A newly-bound OAuth credential can change the refresh loop's
         // nearest deadline (or give it its first one); wake it so a mount
         // added long after the loop started sleeping is not stranded until
         // some other credential's deadline happens to fire first.
         self.refresh_notify.notify_one();
+        Ok(())
     }
 
-    fn register(
+    fn bind(
         &self,
         id: CredentialId,
         kind: AuthKind,
-        header_name: String,
-        value_prefix: String,
         request: Option<OAuthRequest>,
-    ) {
+    ) -> Result<(), AuthError> {
         use dashmap::mapref::entry::Entry;
-        let Entry::Vacant(slot) = self.states.entry(id) else {
-            // First registration wins: a live refresh state is never clobbered.
-            return;
-        };
-        let current = self
-            .store
-            .get(slot.key())
-            .ok()
-            .flatten()
-            .filter(|entry| entry.kind() == kind)
-            .map(Arc::new);
-        slot.insert(Arc::new(CredentialState {
-            kind,
-            header_name,
-            value_prefix,
-            request,
-            current: ArcSwapOption::new(current),
-            refresh_failures: AtomicU32::new(0),
-            needs_consent: AtomicBool::new(false),
-        }));
+        match self.states.entry(id.clone()) {
+            Entry::Occupied(existing) => {
+                let state = existing.get();
+                let same = state.kind == kind
+                    && match (&state.request, &request) {
+                        (Some(existing), Some(candidate)) => {
+                            existing.has_same_runtime_metadata(candidate)
+                        },
+                        (None, None) => true,
+                        _ => false,
+                    };
+                if same {
+                    Ok(())
+                } else {
+                    Err(AuthError::CredentialBindingConflict { id })
+                }
+            },
+            Entry::Vacant(slot) => {
+                let stored = self.store.get(slot.key())?;
+                if let Some(entry) = &stored
+                    && entry.kind() != kind
+                {
+                    return Err(AuthError::CredentialKindMismatch {
+                        id,
+                        expected: kind,
+                        found: entry.kind(),
+                    });
+                }
+                slot.insert(Arc::new(CredentialState {
+                    kind,
+                    request,
+                    current: ArcSwapOption::new(stored.map(Arc::new)),
+                    refresh_failures: AtomicU32::new(0),
+                    needs_consent: AtomicBool::new(false),
+                }));
+                Ok(())
+            },
+        }
     }
 
     /// Resolve a usable auth header for `id`, refreshing synchronously when the
     /// credential is inside the refresh window. Fails closed: a missing, expired,
     /// or unrefreshable credential returns an error, never a stale header.
-    pub async fn authorization(
-        &self,
-        id: &CredentialId,
-    ) -> Result<HeaderMaterial, AuthUnavailable> {
+    pub async fn authorization(&self, id: &CredentialId) -> Result<SecretString, AuthUnavailable> {
         let Some(state) = self.state(id) else {
             return Err(AuthUnavailable::Missing);
         };
@@ -429,7 +399,7 @@ impl CredentialService {
     ///
     /// [`authorization`]: CredentialService::authorization
     #[must_use]
-    pub fn cached_authorization(&self, id: &CredentialId) -> Option<HeaderMaterial> {
+    pub fn cached_authorization(&self, id: &CredentialId) -> Option<SecretString> {
         let state = self.state(id)?;
         if state.needs_consent.load(Ordering::Relaxed) {
             return None;
@@ -444,7 +414,7 @@ impl CredentialService {
     pub async fn refresh(
         &self,
         id: &CredentialId,
-    ) -> Result<Option<HeaderMaterial>, AuthUnavailable> {
+    ) -> Result<Option<SecretString>, AuthUnavailable> {
         let Some(state) = self.state(id) else {
             return Ok(None);
         };
@@ -544,7 +514,7 @@ impl CredentialService {
         upstream
     }
 
-    /// Non-secret health for every registered credential.
+    /// Non-secret health for every bound credential.
     #[must_use]
     pub fn health(&self) -> Vec<CredentialStatus> {
         let now = OffsetDateTime::now_utc();
@@ -557,7 +527,7 @@ impl CredentialService {
             .collect()
     }
 
-    /// Non-secret health for one registered credential.
+    /// Non-secret health for one bound credential.
     #[must_use]
     pub fn status(&self, id: &CredentialId) -> Option<CredentialStatus> {
         let state = self.state(id)?;
@@ -588,7 +558,7 @@ impl CredentialService {
 
     /// Drop the cached entry for `id`, re-read/refresh it from the store, and
     /// return the refreshed non-secret status. `None` means no mounted provider
-    /// has registered this credential with the service.
+    /// has bound this credential with the service.
     pub async fn reload(&self, id: &CredentialId) -> Option<CredentialStatus> {
         let state = self.state(id)?;
         state.current.store(None);
@@ -712,9 +682,7 @@ impl CredentialService {
             ));
         };
         let Some(request) = state.request.clone() else {
-            return Err(format!(
-                "OAuth credential {id} is not registered for refresh"
-            ));
+            return Err(format!("OAuth credential {id} is not bound for refresh"));
         };
 
         match self.oauth.refresh(request, refresh_token).await {
@@ -736,7 +704,7 @@ impl CredentialService {
         }
     }
 
-    /// Spawn the proactive OAuth refresh loop: it refreshes every registered
+    /// Spawn the proactive OAuth refresh loop: it refreshes every bound
     /// OAuth credential before it enters [`REFRESH_WINDOW`], so a request-path
     /// [`authorization`](Self::authorization) call almost never has to await a
     /// live refresh. Never returns on its own; abort the returned handle to
@@ -752,7 +720,7 @@ impl CredentialService {
         loop {
             let Some((id, deadline)) = self.earliest_oauth_deadline() else {
                 // Nothing to schedule around yet (no OAuth credential is
-                // registered, or none carries an expiry). `register_oauth`
+                // bound, or none carries an expiry). `bind_oauth`
                 // wakes this the moment that changes.
                 self.refresh_notify.notified().await;
                 continue;
@@ -782,7 +750,7 @@ impl CredentialService {
         }
     }
 
-    /// The nearest `expires_at - REFRESH_WINDOW` across every registered
+    /// The nearest `expires_at - REFRESH_WINDOW` across every bound
     /// OAuth credential the loop can still rotate, and which credential it
     /// belongs to. Credentials in `NeedsConsent` or without a refresh token
     /// are excluded: their deadline is already past and can never advance, so

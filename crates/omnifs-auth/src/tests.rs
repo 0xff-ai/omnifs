@@ -5,8 +5,13 @@ use crate::{
     AuthError, CredentialHealth, CredentialService, LoginRequest, OAuthClient, OAuthRequest,
     OAuthRevokeOutcome, RefreshOutcome, RejectionEvidence, RevokeOutcome, UrlOpener,
 };
-use omnifs_workspace::authn::{CredentialId, DevicePollCompat, OauthScheme};
-use omnifs_workspace::creds::{CredentialEntry, CredentialStore, MemoryStore, Refreshability};
+use omnifs_workspace::authn::{
+    CredentialId, DevicePollCompat, OAuthFlow, OauthScheme, PkceManualCodeConfig,
+    TokenEndpointAuthMethod,
+};
+use omnifs_workspace::creds::{
+    CredentialEntry, CredentialStore, FileStore, MemoryStore, Refreshability,
+};
 use secrecy::{ExposeSecret, SecretString};
 use std::sync::Arc;
 use time::OffsetDateTime;
@@ -457,11 +462,7 @@ async fn reload_reloads_store_value_for_next_authorization() {
     let store: Arc<dyn CredentialStore> = Arc::new(MemoryStore::default());
     let service = CredentialService::new(Arc::clone(&store), OAuthClient::new().unwrap());
     let id = CredentialId::new("test-provider", "pat", "default").unwrap();
-    service.register_static(
-        id.clone(),
-        "Authorization".to_string(),
-        "Bearer ".to_string(),
-    );
+    service.bind_static(id.clone()).unwrap();
     store
         .put(
             &id,
@@ -473,7 +474,7 @@ async fn reload_reloads_store_value_for_next_authorization() {
         .unwrap();
 
     let old = service.authorization(&id).await.unwrap();
-    assert_eq!(old.expose_value(), "Bearer old-token");
+    assert_eq!(old.expose_secret(), "old-token");
     store
         .put(
             &id,
@@ -484,12 +485,91 @@ async fn reload_reloads_store_value_for_next_authorization() {
         )
         .unwrap();
 
-    let status = service.reload(&id).await.expect("registered credential");
+    let status = service.reload(&id).await.expect("bound credential");
     assert_eq!(status.id, id);
     assert!(matches!(status.health, CredentialHealth::StaticUnvalidated));
     let new = service.authorization(&id).await.unwrap();
 
-    assert_eq!(new.expose_value(), "Bearer new-token");
+    assert_eq!(new.expose_secret(), "new-token");
+}
+
+#[test]
+fn bind_reuses_identical_oauth_runtime_metadata_but_rejects_conflicts() {
+    let service = CredentialService::new(
+        Arc::new(MemoryStore::default()),
+        OAuthClient::new().unwrap(),
+    );
+    let id = CredentialId::new("test-provider", "oauth", "default").unwrap();
+
+    let mut first = binding_scheme();
+    first.inject_domains = vec!["first.example.test".to_owned()];
+    first.inject_header_name = Some("X-First".to_owned());
+    first.inject_value_prefix = "Token ".to_owned();
+    service
+        .bind_oauth(id.clone(), OAuthRequest::new(first))
+        .unwrap();
+
+    let mut same_runtime = binding_scheme();
+    same_runtime.inject_domains = vec!["second.example.test".to_owned()];
+    same_runtime.inject_header_name = Some("X-Second".to_owned());
+    same_runtime.inject_value_prefix = "Bearer ".to_owned();
+    service
+        .bind_oauth(id.clone(), OAuthRequest::new(same_runtime))
+        .unwrap();
+
+    let mut conflicting = binding_scheme();
+    conflicting.default_scopes = vec!["write".to_owned()];
+    let error = service
+        .bind_oauth(id.clone(), OAuthRequest::new(conflicting))
+        .unwrap_err();
+    assert!(matches!(
+        &error,
+        AuthError::CredentialBindingConflict { id: error_id } if error_id == &id
+    ));
+    assert_eq!(
+        error.to_string(),
+        format!("credential {id} has conflicting OAuth runtime metadata")
+    );
+}
+
+#[test]
+fn bind_rejects_stored_kind_mismatch() {
+    let store: Arc<dyn CredentialStore> = Arc::new(MemoryStore::default());
+    let id = CredentialId::new("test-provider", "pat", "default").unwrap();
+    store
+        .put(
+            &id,
+            &CredentialEntry::oauth(
+                SecretString::from("access"),
+                None,
+                None,
+                "Bearer",
+                vec![],
+                OffsetDateTime::UNIX_EPOCH,
+            ),
+        )
+        .unwrap();
+    let service = CredentialService::new(store, OAuthClient::new().unwrap());
+
+    assert!(matches!(
+        service.bind_static(id.clone()),
+        Err(AuthError::CredentialKindMismatch { id: error_id, .. }) if error_id == id
+    ));
+}
+
+#[test]
+fn bind_propagates_malformed_store_reads() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("credentials.json");
+    std::fs::write(&path, b"not json").unwrap();
+    let service =
+        CredentialService::new(Arc::new(FileStore::new(path)), OAuthClient::new().unwrap());
+    let id = CredentialId::new("test-provider", "pat", "default").unwrap();
+
+    assert!(matches!(
+        service.bind_static(id),
+        Err(AuthError::CredentialStore(_))
+    ));
 }
 
 #[tokio::test]
@@ -624,8 +704,32 @@ fn service_with_oauth(
         OAuthClient::from_http_client(http),
     ));
     let id = CredentialId::new("test-provider", "oauth", "default").unwrap();
-    service.register_oauth(id.clone(), OAuthRequest::new(scheme));
+    service
+        .bind_oauth(id.clone(), OAuthRequest::new(scheme))
+        .unwrap();
     (service, store, id)
+}
+
+fn binding_scheme() -> OauthScheme {
+    OauthScheme {
+        key: "oauth".to_owned(),
+        display_name: "test oauth".to_owned(),
+        authorization_endpoint: "https://auth.example.test/authorize".to_owned(),
+        token_endpoint: "https://auth.example.test/token".to_owned(),
+        revocation_endpoint: None,
+        default_client_id: Some("client-id".to_owned()),
+        default_scopes: vec!["read".to_owned()],
+        flow: OAuthFlow::PkceManualCode(PkceManualCodeConfig {
+            redirect_uri: "https://localhost/callback".to_owned(),
+        }),
+        token_endpoint_auth: TokenEndpointAuthMethod::None,
+        refresh_token_rotates: true,
+        extra_authorize_params: vec![],
+        extra_token_params: vec![],
+        inject_domains: vec!["api.example.test".to_owned()],
+        inject_header_name: None,
+        inject_value_prefix: "Bearer ".to_owned(),
+    }
 }
 
 fn seed_oauth(

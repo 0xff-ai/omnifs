@@ -1,4 +1,6 @@
 use oauth2::ErrorResponse;
+use omnifs_workspace::authn::{AuthKind, CredentialId};
+use omnifs_workspace::creds::CredStoreError;
 use std::fmt::Display;
 
 type HttpRequestTokenError<E> =
@@ -12,6 +14,16 @@ pub enum AuthError {
     MissingClientId,
     #[error("oauth client_secret is required for this token endpoint auth method")]
     MissingClientSecret,
+    #[error("credential store error: {0}")]
+    CredentialStore(#[from] CredStoreError),
+    #[error("credential {id} has kind {found}, expected {expected}")]
+    CredentialKindMismatch {
+        id: CredentialId,
+        expected: AuthKind,
+        found: AuthKind,
+    },
+    #[error("credential {id} has conflicting OAuth runtime metadata")]
+    CredentialBindingConflict { id: CredentialId },
     #[error("oauth loopback flow requires an opener")]
     MissingOpener,
     #[error("oauth state did not match pending login")]

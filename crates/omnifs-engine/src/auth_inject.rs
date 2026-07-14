@@ -14,7 +14,8 @@ use omnifs_auth::{
 use omnifs_workspace::authn::{AuthKind, AuthManifest, CredentialId, SchemeResolveError};
 use omnifs_workspace::creds::{CredentialStore, FileStore};
 use omnifs_workspace::ids::ProviderName;
-use omnifs_workspace::mounts::{Auth, OAuth, StaticToken};
+use omnifs_workspace::mounts::Auth;
+use secrecy::ExposeSecret;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -42,8 +43,8 @@ pub enum InjectError {
     AmbiguousOAuthScheme,
     #[error("credential id error: {0}")]
     CredentialId(String),
-    #[error("oauth error: {0}")]
-    OAuth(String),
+    #[error("auth error: {0}")]
+    Auth(#[from] OAuthError),
     #[error("credential unavailable: {0}")]
     Unavailable(String),
 }
@@ -54,6 +55,8 @@ struct AuthBinding {
     service: Arc<CredentialService>,
     id: CredentialId,
     domains: Vec<String>,
+    header_name: String,
+    value_prefix: String,
 }
 
 impl AuthBinding {
@@ -64,7 +67,7 @@ impl AuthBinding {
         host.is_some_and(|host| self.domains.iter().any(|domain| domain == &host))
     }
 
-    fn register(
+    fn from_config(
         auth: &Auth,
         manifest: Option<&AuthManifest>,
         provider_name: &str,
@@ -72,61 +75,50 @@ impl AuthBinding {
     ) -> Result<Self, InjectError> {
         match auth {
             Auth::StaticToken(config) => {
-                Self::register_static(auth, config, manifest, provider_name, service)
+                let manifest =
+                    manifest.ok_or(InjectError::ManifestRequired(AuthKind::StaticToken))?;
+                let scheme = manifest
+                    .resolve_static_scheme(config.scheme.as_deref())
+                    .map_err(InjectError::from)?;
+                let id = credential_id(provider_name, auth, &scheme.key)?;
+                let header_name = scheme
+                    .header_name
+                    .clone()
+                    .unwrap_or_else(|| "Authorization".to_string());
+                service.bind_static(id.clone())?;
+                Ok(Self {
+                    service,
+                    id,
+                    domains: scheme.inject_domains.clone(),
+                    header_name,
+                    value_prefix: scheme.value_prefix.clone(),
+                })
             },
             Auth::OAuth(config) => {
-                Self::register_oauth(auth, config, manifest, provider_name, service)
+                let manifest = manifest.ok_or(InjectError::ManifestRequired(AuthKind::OAuth))?;
+                let scheme = manifest
+                    .resolve_oauth_scheme(config.scheme.as_deref())
+                    .map_err(InjectError::from)?
+                    .clone();
+                let id = credential_id(provider_name, auth, &scheme.key)?;
+                let request = OAuthRequest::from_mount_config(Some(config), scheme)?;
+                let header_name = request
+                    .scheme()
+                    .inject_header_name
+                    .clone()
+                    .unwrap_or_else(|| "Authorization".to_string());
+                let value_prefix = request.scheme().inject_value_prefix.clone();
+                let domains = request.scheme().inject_domains.clone();
+                service.bind_oauth(id.clone(), request)?;
+                Ok(Self {
+                    service,
+                    id,
+                    domains,
+                    header_name,
+                    value_prefix,
+                })
             },
         }
-    }
-
-    fn register_static(
-        auth: &Auth,
-        config: &StaticToken,
-        manifest: Option<&AuthManifest>,
-        provider_name: &str,
-        service: Arc<CredentialService>,
-    ) -> Result<Self, InjectError> {
-        let manifest = manifest.ok_or(InjectError::ManifestRequired(AuthKind::StaticToken))?;
-        let scheme = manifest
-            .resolve_static_scheme(config.scheme.as_deref())
-            .map_err(InjectError::from)?;
-        let id = credential_id(provider_name, auth, &scheme.key)?;
-        let header_name = scheme
-            .header_name
-            .clone()
-            .unwrap_or_else(|| "Authorization".to_string());
-        let value_prefix = scheme.value_prefix.clone();
-        let domains = scheme.inject_domains.clone();
-        service.register_static(id.clone(), header_name, value_prefix);
-        Ok(Self {
-            service,
-            id,
-            domains,
-        })
-    }
-
-    fn register_oauth(
-        auth: &Auth,
-        config: &OAuth,
-        manifest: Option<&AuthManifest>,
-        provider_name: &str,
-        service: Arc<CredentialService>,
-    ) -> Result<Self, InjectError> {
-        let manifest = manifest.ok_or(InjectError::ManifestRequired(AuthKind::OAuth))?;
-        let scheme = manifest
-            .resolve_oauth_scheme(config.scheme.as_deref())
-            .map_err(InjectError::from)?
-            .clone();
-        let id = credential_id(provider_name, auth, &scheme.key)?;
-        let request = OAuthRequest::from_mount_config(Some(config), scheme)?;
-        let domains = request.scheme().inject_domains.clone();
-        service.register_oauth(id.clone(), request);
-        Ok(Self {
-            service,
-            id,
-            domains,
-        })
     }
 
     async fn authorization(&self) -> Result<(String, String), InjectError> {
@@ -136,8 +128,8 @@ impl AuthBinding {
             .await
             .map_err(|error| InjectError::Unavailable(error.to_string()))?;
         Ok((
-            material.name().to_string(),
-            material.expose_value().to_string(),
+            self.header_name.clone(),
+            format!("{}{}", self.value_prefix, material.expose_secret()),
         ))
     }
 
@@ -166,8 +158,8 @@ impl AuthManager {
         Self { binding: None }
     }
 
-    /// Build over the daemon-wide credential owner, registering the mount's
-    /// single credential when auth is configured.
+    /// Build over the daemon-wide credential owner, binding the mount's single
+    /// credential when auth is configured.
     pub(crate) fn from_config_manifest_service(
         config: Option<&Auth>,
         manifest: Option<&AuthManifest>,
@@ -176,7 +168,7 @@ impl AuthManager {
     ) -> Result<Self, InjectError> {
         Ok(Self {
             binding: config
-                .map(|auth| AuthBinding::register(auth, manifest, provider_name, service))
+                .map(|auth| AuthBinding::from_config(auth, manifest, provider_name, service))
                 .transpose()?,
         })
     }
@@ -234,8 +226,8 @@ fn credential_id(
 }
 
 /// Non-secret credential health for one mount, checked once at mount-start:
-/// `Some` when a registered credential is `Missing`, `Expired`, or
-/// `NeedsConsent`. `None` for a no-auth mount or once the registered credential
+/// `Some` when a bound credential is `Missing`, `Expired`, or
+/// `NeedsConsent`. `None` for a no-auth mount or once the bound credential
 /// is at least usable. The mount still loads either way; the
 /// daemon surfaces the warning in the Mounts subsystem health without
 /// blocking the mount on it.
@@ -250,12 +242,6 @@ fn www_authenticate(headers: &reqwest::header::HeaderMap) -> Option<String> {
         .filter_map(|value| value.to_str().ok())
         .collect::<Vec<_>>();
     (!values.is_empty()).then(|| values.join(", "))
-}
-
-impl From<OAuthError> for InjectError {
-    fn from(value: OAuthError) -> Self {
-        Self::OAuth(value.to_string())
-    }
 }
 
 impl From<SchemeResolveError> for InjectError {
