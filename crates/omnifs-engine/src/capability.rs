@@ -162,7 +162,6 @@ mod tests {
                 },
             },
             mount: "test".to_owned(),
-            root_mount: false,
             revalidate: true,
             auth: None,
             capabilities: None,

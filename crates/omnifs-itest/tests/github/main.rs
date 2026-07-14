@@ -2270,10 +2270,7 @@ async fn open_then_all_one_load() {
         })])
         .unwrap();
     assert!(
-        matches!(
-            first.result().unwrap(),
-            Ok(ReadFileOutcome::Found(_))
-        ),
+        matches!(first.result().unwrap(), Ok(ReadFileOutcome::Found(_))),
         "expected read terminal, got {first:?}"
     );
     let effects = first.effects().unwrap();

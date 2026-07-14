@@ -312,7 +312,7 @@ async fn plain_path_ignores_unrelated_indexed_validator() {
     let read = harness
         .runtime
         .namespace()
-        .read_file(&p(path), "application/octet-stream".to_string(), None)
+        .read_file(&p(path), "application/octet-stream".to_string())
         .await
         .expect("indexed read still dispatches to plain provider handler");
     let ReadBytes::Inline(bytes) = read.bytes else {

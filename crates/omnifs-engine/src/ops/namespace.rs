@@ -1,3 +1,4 @@
+use crate::EngineError;
 use crate::cache::RecordKind;
 use crate::clock::now_millis;
 use crate::coalesce::ns::{Key as NsKey, OrderKey, SharedError};
@@ -6,7 +7,6 @@ use crate::object_id::ObjectId;
 use crate::runtime::Namespace;
 use crate::runtime::Result;
 use crate::view::{AttrPayload, CachedCursor, EntryMeta, FileAttrsCache, Stability};
-use crate::EngineError;
 use omnifs_core::path::{Path, Segment};
 use omnifs_wit::provider::types as wit_types;
 

@@ -294,8 +294,7 @@ impl TreeNamespace {
     fn record_outcome<T>(span: &tracing::Span, result: &Result<T, NsError>) {
         let outcome = result
             .as_ref()
-            .map(|_| InspectorOutcome::Ok)
-            .unwrap_or_else(|error| Self::outcome_for(error));
+            .map_or_else(Self::outcome_for, |_| InspectorOutcome::Ok);
         inspect::record_outcome(span, outcome);
     }
 

@@ -15,7 +15,7 @@ pub use crate::ops::namespace::{
     ChunkOutcome, DirEntry, DirListing, ListOutcome as NamespaceListOutcome, OpenOutcome,
     ReadBytes, ReadOutcome,
 };
-pub use crate::runtime::wasm::{component_engine, provider_compiler_strategy};
+pub use crate::runtime::wasm::component_engine;
 pub use crate::tree::{PaginationControl, Synthetic, SyntheticContent, probe_live_growth};
 pub use crate::{Cursor, Engine, EngineError, GitCloner, HostContext};
 
