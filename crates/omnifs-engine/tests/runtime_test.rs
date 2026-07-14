@@ -9,7 +9,7 @@ use omnifs_engine::test_support::{LookupOutcome, NamespaceListOutcome, ReadBytes
 use omnifs_engine::view::{DirentsPayload, FilePayload, FileSize, LookupPayload, Stability};
 use omnifs_engine::{Engine, HostContext};
 use omnifs_itest::{
-    make_engine, make_initialized_runtime, make_runtime, provider_wasm_path,
+    TEST_PROVIDER_CONFIG, make_engine, make_initialized_runtime, make_runtime, provider_wasm_path,
     spec_with_test_provider,
 };
 use omnifs_workspace::provider::ProviderWasm;
@@ -155,14 +155,7 @@ async fn test_list_hello_dir() {
 
 #[tokio::test]
 async fn test_list_projects_nested_files_into_cache() {
-    let harness = make_initialized_runtime(
-        r#"
-        {
-            "provider": "test_provider.wasm",
-            "mount": "test",
-        }
-    "#,
-    );
+    let harness = make_initialized_runtime(TEST_PROVIDER_CONFIG);
 
     let result = harness
         .runtime
@@ -212,14 +205,7 @@ async fn test_list_projects_nested_files_into_cache() {
 
 #[tokio::test]
 async fn test_list_projects_direct_file_content_into_cache() {
-    let harness = make_initialized_runtime(
-        r#"
-        {
-            "provider": "test_provider.wasm",
-            "mount": "test",
-        }
-    "#,
-    );
+    let harness = make_initialized_runtime(TEST_PROVIDER_CONFIG);
 
     let result = harness
         .runtime
@@ -257,14 +243,7 @@ async fn test_list_projects_direct_file_content_into_cache() {
 
 #[tokio::test]
 async fn test_mutable_unversioned_full_reads_are_observation_only() {
-    let harness = make_initialized_runtime(
-        r#"
-        {
-            "provider": "test_provider.wasm",
-            "mount": "test",
-        }
-    "#,
-    );
+    let harness = make_initialized_runtime(TEST_PROVIDER_CONFIG);
 
     let path = "/hello/fresh-full";
     let content_type = Path::parse(path)
@@ -308,14 +287,7 @@ async fn test_mutable_unversioned_full_reads_are_observation_only() {
 
 #[tokio::test]
 async fn test_read_file() {
-    let harness = make_initialized_runtime(
-        r#"
-        {
-            "provider": "test_provider.wasm",
-            "mount": "test",
-        }
-    "#,
-    );
+    let harness = make_initialized_runtime(TEST_PROVIDER_CONFIG);
     let result = harness
         .runtime
         .namespace()
@@ -347,14 +319,7 @@ async fn test_read_file() {
 
 #[tokio::test]
 async fn test_read_file_sibling_projections_do_not_erase_parent_dirents() {
-    let harness = make_initialized_runtime(
-        r#"
-        {
-            "provider": "test_provider.wasm",
-            "mount": "test",
-        }
-    "#,
-    );
+    let harness = make_initialized_runtime(TEST_PROVIDER_CONFIG);
 
     let listing = harness
         .runtime
@@ -444,14 +409,7 @@ async fn test_read_file_sibling_projections_do_not_erase_parent_dirents() {
 /// looked-up child and a subsequent readdir enumerates only `body`.
 #[tokio::test]
 async fn test_object_dir_child_lookup_preserves_full_listing() {
-    let harness = make_initialized_runtime(
-        r#"
-        {
-            "provider": "test_provider.wasm",
-            "mount": "test",
-        }
-    "#,
-    );
+    let harness = make_initialized_runtime(TEST_PROVIDER_CONFIG);
 
     let object_dir = p("/items/open/7");
     // The conformance Item anchor exposes its file leaves (item.json/item.md +
@@ -518,14 +476,7 @@ async fn test_object_dir_child_lookup_preserves_full_listing() {
 
 #[tokio::test]
 async fn test_ranged_open_read_chunk_contract() {
-    let harness = make_initialized_runtime(
-        r#"
-        {
-            "provider": "test_provider.wasm",
-            "mount": "test",
-        }
-    "#,
-    );
+    let harness = make_initialized_runtime(TEST_PROVIDER_CONFIG);
 
     let opened = harness
         .runtime
@@ -560,14 +511,7 @@ async fn test_ranged_open_read_chunk_contract() {
 
 #[tokio::test]
 async fn test_unknown_and_volatile_ranged_eof_contracts() {
-    let harness = make_initialized_runtime(
-        r#"
-        {
-            "provider": "test_provider.wasm",
-            "mount": "test",
-        }
-    "#,
-    );
+    let harness = make_initialized_runtime(TEST_PROVIDER_CONFIG);
 
     let opened = harness
         .runtime
@@ -681,14 +625,7 @@ async fn test_lookup_child() {
 
 #[tokio::test]
 async fn test_subtree_handoff_rejects_unknown_tree_ref() {
-    let harness = make_initialized_runtime(
-        r#"
-        {
-            "provider": "test_provider.wasm",
-            "mount": "test",
-        }
-    "#,
-    );
+    let harness = make_initialized_runtime(TEST_PROVIDER_CONFIG);
 
     let lookup_error = harness
         .runtime
@@ -720,14 +657,7 @@ async fn test_subtree_handoff_rejects_unknown_tree_ref() {
 /// Test that lookup-adjacent file projections are cached.
 #[tokio::test]
 async fn test_list_projects_adjacent_files_into_cache() {
-    let harness = make_initialized_runtime(
-        r#"
-        {
-            "provider": "test_provider.wasm",
-            "mount": "test",
-        }
-    "#,
-    );
+    let harness = make_initialized_runtime(TEST_PROVIDER_CONFIG);
     // Projection-tree contract: a bare `lookup` is light and does not warm
     // a child's adjacent shape; the preload a dir handler attaches with
     // `preload_*` lands when the directory is actually *listed*. Listing
@@ -776,14 +706,7 @@ async fn test_list_projects_adjacent_files_into_cache() {
 
 #[tokio::test]
 async fn test_lookup_returns_siblings_and_list_warms_child_shape() {
-    let harness = make_initialized_runtime(
-        r#"
-        {
-            "provider": "test_provider.wasm",
-            "mount": "test",
-        }
-    "#,
-    );
+    let harness = make_initialized_runtime(TEST_PROVIDER_CONFIG);
     // a lookup materializes the target plus the parent's static sibling set,
     // but does NOT warm the child's shape (lookup is light).
     let result = harness
