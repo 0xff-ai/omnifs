@@ -505,7 +505,7 @@ impl Runtime {
             cache,
             invalidation: InvalidationState::default(),
             coalesce: Coalesce::new(),
-            recent_objects: parking_lot::Mutex::new(RecentObjects::new(RECENT_REVALIDATE_OBJECTS)),
+            recent_objects: parking_lot::Mutex::new(RecentObjects::new()),
             pagination_locks: DashMap::new(),
             rate_limit_until: std::sync::Mutex::new(None),
             test_callouts: test_rx.map(std::sync::Mutex::new),
@@ -658,15 +658,13 @@ impl Runtime {
 }
 
 struct RecentObjects {
-    limit: usize,
     ids: Vec<ObjectId>,
 }
 
 impl RecentObjects {
-    fn new(limit: usize) -> Self {
+    fn new() -> Self {
         Self {
-            limit,
-            ids: Vec::with_capacity(limit),
+            ids: Vec::with_capacity(RECENT_REVALIDATE_OBJECTS),
         }
     }
 
@@ -675,7 +673,7 @@ impl RecentObjects {
             self.ids.remove(index);
         }
         self.ids.insert(0, id);
-        self.ids.truncate(self.limit);
+        self.ids.truncate(RECENT_REVALIDATE_OBJECTS);
     }
 
     fn snapshot(&self) -> Vec<ObjectId> {
