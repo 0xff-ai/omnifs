@@ -42,7 +42,6 @@ use crate::cache::{Record as CacheRecord, RecordKind};
 use crate::ops::namespace::{DirEntry, ListOutcome};
 use crate::tree::synthetic::{control_entries, is_reserved_provider_leaf};
 use crate::view::{DirentRecord, DirentsPayload};
-use omnifs_api::events::TraceId;
 use omnifs_core::path::Path;
 use tracing::warn;
 
@@ -77,7 +76,7 @@ impl Runtime {
     /// `path` so the kernel re-lists.
     ///
     /// On a provider error the stored dirents are left untouched.
-    pub async fn paginate_next(&self, path: &Path, trace: Option<TraceId>) -> NextPageOutcome {
+    pub async fn paginate_next(&self, path: &Path) -> NextPageOutcome {
         // Serialize the read-modify-write of this directory's accumulated
         // dirents. Without this, two concurrent `@next` reads could both
         // snapshot the same base record below and each append only their own
@@ -105,7 +104,7 @@ impl Runtime {
         // Echo the cursor; no validator on a continuation page.
         let listing = match self
             .namespace()
-            .list_children(path, None, Some(cursor), trace)
+            .list_children(path, None, Some(cursor))
             .await
         {
             Ok(ListOutcome::Entries(listing)) => listing,
@@ -172,7 +171,7 @@ impl Runtime {
     /// Loop [`paginate_next`](Self::paginate_next) until the feed is exhausted
     /// or [`MAX_PAGINATION_PAGES`] pages have been loaded. Returns a one-line
     /// summary suitable for use as the `@all` file content.
-    pub async fn paginate_all(&self, path: &Path, trace: Option<TraceId>) -> String {
+    pub async fn paginate_all(&self, path: &Path) -> String {
         let mut pages: u32 = 0;
         let mut added_total: usize = 0;
         loop {
@@ -181,7 +180,7 @@ impl Runtime {
                     "loaded {pages} pages (+{added_total}); capped at {MAX_PAGINATION_PAGES} pages\n"
                 );
             }
-            match self.paginate_next(path, trace).await {
+            match self.paginate_next(path).await {
                 NextPageOutcome::Loaded { added, more } => {
                     pages += 1;
                     added_total += added;

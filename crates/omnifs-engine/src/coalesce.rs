@@ -75,6 +75,11 @@ impl RunConfig {
         cover: Policy::Wait,
     };
 
+    pub const ORDERING: Self = Self {
+        exact: Policy::Wait,
+        cover: Policy::Wait,
+    };
+
     pub fn budgeted(budget: Duration) -> Self {
         Self {
             exact: Policy::Block(Some(budget)),
@@ -393,26 +398,31 @@ pub mod ns {
     use omnifs_core::path::Path;
     use omnifs_wit::provider::types as wit_types;
 
-    /// Shared outcome sent from the running caller to exact-key waiters.
-    pub type SharedOutcome = std::result::Result<wit_types::OpResult, String>;
-
     /// Key a namespace provider op coalesces under.
     #[derive(Clone, PartialEq, Eq, Hash)]
     pub enum Key {
+        Lookup(Path),
+        List(Path),
+        ReadPath(Path),
+        ReadObject(ObjectId),
+        Revalidate(ObjectId),
+    }
+
+    #[derive(Clone, PartialEq, Eq, Hash)]
+    pub enum OrderKey {
         Path(Path),
         Object(ObjectId),
         Revalidate(ObjectId),
     }
 
-    impl CoalesceKey for Key {
-        type Id = Key;
-
-        fn exact_id(&self) -> Key {
+    impl CoalesceKey for OrderKey {
+        type Id = Self;
+        fn exact_id(&self) -> Self {
             self.clone()
         }
     }
 
-    impl CoverKey for Key {
+    impl CoverKey for OrderKey {
         fn covers(holder: &Self, waiter: &Self) -> bool {
             match (holder, waiter) {
                 (Self::Path(holder), Self::Path(waiter)) => {
@@ -421,7 +431,6 @@ pub mod ns {
                 _ => false,
             }
         }
-
         fn prefer_cover(_waiter: &Self, current: &Self, candidate: &Self) -> bool {
             match (current, candidate) {
                 (Self::Path(current), Self::Path(candidate)) => {
@@ -432,19 +441,98 @@ pub mod ns {
         }
     }
 
-    pub fn share_outcome<E: std::fmt::Display>(
-        result: std::result::Result<wit_types::OpResult, E>,
-    ) -> SharedOutcome {
-        result.map_err(|error| error.to_string())
+    impl CoalesceKey for Key {
+        type Id = Key;
+
+        fn exact_id(&self) -> Key {
+            self.clone()
+        }
     }
 
-    pub fn unshare_outcome<E>(
-        outcome: SharedOutcome,
-        make_err: impl FnOnce(String) -> E,
-    ) -> std::result::Result<wit_types::OpResult, E> {
-        match outcome {
-            Ok(v) => Ok(v),
-            Err(msg) => Err(make_err(msg)),
+    impl CoverKey for Key {}
+
+    pub type Shared<T> = std::result::Result<T, String>;
+
+    /// Namespace-owned typed coalescers. Exact operation values are isolated
+    /// by operation kind; the ordering gate is value-free and remains around
+    /// provider execution, validation, and effect publication.
+    pub struct InFlight {
+        lookup: super::Coalesce<Key, Shared<wit_types::LookupChildResult>>,
+        list: super::Coalesce<Key, Shared<wit_types::ListChildrenResult>>,
+        read: super::Coalesce<Key, Shared<wit_types::ReadFileOutcome>>,
+        ordering: super::Coalesce<OrderKey, ()>,
+    }
+
+    impl Default for InFlight {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    impl InFlight {
+        pub fn new() -> Self {
+            Self {
+                lookup: super::Coalesce::new(),
+                list: super::Coalesce::new(),
+                read: super::Coalesce::new(),
+                ordering: super::Coalesce::new(),
+            }
+        }
+
+        pub async fn lookup<F, Fut>(
+            &self,
+            key: Key,
+            work: F,
+        ) -> Shared<wit_types::LookupChildResult>
+        where
+            F: FnOnce() -> Fut,
+            Fut: std::future::Future<Output = Shared<wit_types::LookupChildResult>>,
+        {
+            self.lookup
+                .run(&key, super::RunConfig::EXACT, work)
+                .await
+                .as_ref()
+                .clone()
+        }
+
+        pub async fn list<F, Fut>(&self, key: Key, work: F) -> Shared<wit_types::ListChildrenResult>
+        where
+            F: FnOnce() -> Fut,
+            Fut: std::future::Future<Output = Shared<wit_types::ListChildrenResult>>,
+        {
+            self.list
+                .run(&key, super::RunConfig::EXACT, work)
+                .await
+                .as_ref()
+                .clone()
+        }
+
+        pub async fn read<F, Fut>(&self, key: Key, work: F) -> Shared<wit_types::ReadFileOutcome>
+        where
+            F: FnOnce() -> Fut,
+            Fut: std::future::Future<Output = Shared<wit_types::ReadFileOutcome>>,
+        {
+            self.read
+                .run(&key, super::RunConfig::EXACT, work)
+                .await
+                .as_ref()
+                .clone()
+        }
+
+        pub async fn ordered<T, F, Fut>(&self, key: &OrderKey, work: F) -> T
+        where
+            T: Send + 'static,
+            F: FnOnce() -> Fut,
+            Fut: std::future::Future<Output = T>,
+        {
+            let slot = std::sync::Arc::new(parking_lot::Mutex::new(None));
+            let output = std::sync::Arc::clone(&slot);
+            self.ordering
+                .run(key, super::RunConfig::ORDERING, || async move {
+                    *output.lock() = Some(work().await);
+                })
+                .await;
+            slot.lock().take().expect("ordering gate published a value")
         }
     }
 }
@@ -688,8 +776,8 @@ mod tests {
         use crate::object_id::ObjectId;
 
         let coalesce = Arc::new(Coalesce::<ns::Key, u32>::new());
-        let a = ns::Key::Object(ObjectId::from_bytes(b"issue:42".to_vec()));
-        let b = ns::Key::Object(ObjectId::from_bytes(b"issue:4".to_vec()));
+        let a = ns::Key::ReadObject(ObjectId::from_bytes(b"issue:42".to_vec()));
+        let b = ns::Key::ReadObject(ObjectId::from_bytes(b"issue:4".to_vec()));
         let hold = {
             let coalesce = Arc::clone(&coalesce);
             let a = a.clone();

@@ -228,11 +228,7 @@ impl Tree {
         // Capture the generation BEFORE awaiting the render so the result can be
         // fenced against an invalidation that lands mid-read.
         let op_gen = runtime.cache().current_generation();
-        let result = match runtime
-            .namespace()
-            .read_file(path, content_type, ctx.trace)
-            .await
-        {
+        let result = match runtime.namespace().read_file(path, content_type).await {
             Ok(result) => result,
             Err(EngineError::ProviderError(error)) => {
                 warn!(
@@ -263,7 +259,7 @@ impl Tree {
         &self,
         node: &Node,
         content: &SyntheticContent,
-        ctx: &RequestCtx,
+        _ctx: &RequestCtx,
     ) -> Result<ReadResult> {
         match content {
             SyntheticContent::Fixed(bytes) => Ok(ReadResult::Bytes {
@@ -280,16 +276,14 @@ impl Tree {
                     )));
                 };
                 let status = match action {
-                    PaginationControl::All => runtime.paginate_all(&parent, ctx.trace).await,
-                    PaginationControl::Next => {
-                        match runtime.paginate_next(&parent, ctx.trace).await {
-                            NextPageOutcome::Loaded { added, more } => format!(
-                                "loaded +{added} entries; {}\n",
-                                if more { "more available" } else { "complete" }
-                            ),
-                            NextPageOutcome::NoMore => "no more pages\n".to_string(),
-                            NextPageOutcome::Error(message) => message,
-                        }
+                    PaginationControl::All => runtime.paginate_all(&parent).await,
+                    PaginationControl::Next => match runtime.paginate_next(&parent).await {
+                        NextPageOutcome::Loaded { added, more } => format!(
+                            "loaded +{added} entries; {}\n",
+                            if more { "more available" } else { "complete" }
+                        ),
+                        NextPageOutcome::NoMore => "no more pages\n".to_string(),
+                        NextPageOutcome::Error(message) => message,
                     },
                 };
                 // The action grew (or exhausted) the parent's accumulated

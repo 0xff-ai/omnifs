@@ -2,7 +2,7 @@
 
 mod support;
 
-use omnifs_wit::provider::types::{ErrorKind, ListChildrenResult, OpResult};
+use omnifs_wit::provider::types::{ErrorKind, ListChildrenResult};
 use serde_json::{Value, json};
 use support::{
     TestOpExt, answer_partial_discovery, http_ok, kube_harness, list_type_names, read_bytes,
@@ -84,7 +84,7 @@ fn partial_discovery_stays_open_qualifies_groups_and_retries_unknown_types() {
     );
     answer_partial_discovery(&mut omitted_core_type, Some(503), 503);
     match omitted_core_type.result().unwrap() {
-        OpResult::Error(error) => assert_eq!(error.kind, ErrorKind::Network),
+        Err(error) => assert_eq!(error.kind, ErrorKind::Network),
         other => panic!("expected retained discovery Network error, got {other:?}"),
     }
 
@@ -105,7 +105,7 @@ fn partial_discovery_stays_open_qualifies_groups_and_retries_unknown_types() {
     let mut unknown = not_found_harness.list("/namespaces/demo/unknowns").unwrap();
     answer_partial_discovery(&mut unknown, None, 404);
     match unknown.result().unwrap() {
-        OpResult::Error(error) => {
+        Err(error) => {
             assert_eq!(error.kind, ErrorKind::Network);
             assert!(
                 error.retryable,
@@ -149,7 +149,7 @@ fn resource_collections_use_discovered_group_version_paths() {
         )])
         .unwrap();
     assert_eq!(
-        sorted_entry_names(deployments.into_list_children().unwrap()),
+        sorted_entry_names(deployments.into_ok().unwrap()),
         vec!["ticker"]
     );
 

@@ -24,11 +24,11 @@ Current responsibilities:
 - `CalloutFuture` awaits generated WIT async imports directly.
 - `CalloutHost` is the host implementation of those imports.
 - `Instance` keeps one provider store alive inside Wasmtime `run_concurrent`.
-- `Runtime` validates and materializes terminal provider returns.
+- `Runtime` validates and materializes typed operation payloads together with terminal effects.
 
 ## WIT boundary
 
-The provider world imports `omnifs:provider/callouts` and exports async namespace and notify methods. Namespace operations return terminal `provider-return` values directly.
+The provider world imports `omnifs:provider/callouts` and exports async namespace and notify methods. Namespace and notify operations return operation-specific typed result/effects tuples directly.
 
 Not part of the provider protocol:
 

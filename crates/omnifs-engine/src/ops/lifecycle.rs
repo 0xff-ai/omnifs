@@ -1,101 +1,246 @@
-//! Op execution loop: start async provider call → apply effects → return.
-//!
-//! Everything from the first `instance.start_op` call to the final
-//! `EffectApplier::apply` lives here so a read-file round trip is traceable
-//! through one seam. `Runtime` retains engine/instance/mount lifecycle and
-//! delegates here for all op execution.
+//! Typed provider operation execution and terminal effect publication.
 
 use crate::Runtime;
 use crate::clock;
-use crate::inspector::{self, InspectorProviderOp, WitProviderErrorView};
-use crate::op::Op;
+use crate::inspector;
 use crate::runtime::{EngineError, Result};
-use omnifs_api::events::{InspectorOutcome, OutcomeFields, TraceId};
+use omnifs_api::events::InspectorOutcome;
+use omnifs_core::path::{Path, Segment};
 use omnifs_wit::provider::types as wit_types;
+use tracing::Instrument;
 
 impl Runtime {
-    pub(crate) async fn run_op(
+    pub(crate) async fn run_lookup_child(
         &self,
-        op: Op,
-        request_trace: Option<TraceId>,
-    ) -> Result<wit_types::OpResult> {
-        // The generation captured here fences any `canonical-write` this op
-        // emits: a write is rejected if the anchor was invalidated after the
-        // operation began.
-        let op_gen = self.cache.current_generation();
+        parent_path: &Path,
+        name: &Segment,
+    ) -> Result<wit_types::LookupChildResult> {
         let id = self.next_operation_id();
-        let trace_id = request_trace.or_else(inspector::current_trace_id);
-        let live_op = trace_id.and_then(|t| {
-            InspectorProviderOp::begin(&op, id, &self.mount_name, &self.provider_name, t)
-        });
-        let ret = self.instance.start_op(op.clone(), id).await?;
-        let handoff_start = std::time::Instant::now();
-        let result = self.finish_provider_return(&op, ret, op_gen);
-        // Emit subtree.start/end when the provider handed off a tree-ref.
-        // Done here, after finish handles validation and effect application,
-        // so the elapsed reflects the resolution work.
-        if let (Some(trace), Ok(op_result)) = (trace_id, result.as_ref())
-            && let Some(tree_ref) = inspector::subtree_tree_ref(op_result)
-            && let Some(sink) = inspector::global()
-        {
-            sink.emit_subtree_handoff(trace, id, tree_ref, handoff_start.elapsed());
+        let span = inspector::provider_span(
+            id,
+            &self.mount_name,
+            &self.provider_name,
+            "lookup_child",
+            &parent_path.join_segment(name).to_string(),
+        );
+        async {
+            let op_gen = self.cache.current_generation();
+            let (result, effects) = self
+                .instance
+                .lookup_child(
+                    id,
+                    parent_path.as_str().to_string(),
+                    name.as_str().to_string(),
+                )
+                .await?;
+            crate::op_validate::validate_lookup(&result, &effects, |tree| {
+                self.resolve_tree_ref(tree).is_some()
+            })
+            .map_err(EngineError::ProviderProtocol)?;
+            inspect_result(&span, &result);
+            let result = self.provider_result(result)?;
+            self.publish_effects(&effects, op_gen);
+            inspector::record_outcome(&span, InspectorOutcome::Ok);
+            if let wit_types::LookupChildResult::Subtree(tree) = &result {
+                inspector::record_subtree_handoff(id, *tree);
+            }
+            Ok(result)
         }
-        if let Some(live) = live_op {
-            let outcome = match &result {
-                Ok(_) => OutcomeFields::ok(),
-                Err(EngineError::ProviderError(error)) => {
-                    OutcomeFields::with_outcome(WitProviderErrorView(error).outcome())
-                },
-                Err(_) => OutcomeFields::with_outcome(InspectorOutcome::Internal),
-            };
-            live.finish(outcome);
-        }
-        if let Ok(result) = &result {
-            self.note_returned_result(result);
-        }
-        result
+        .instrument(span.clone())
+        .await
     }
 
-    pub(crate) fn finish_provider_return(
+    pub(crate) async fn run_list_children(
         &self,
-        op: &Op,
-        ret: wit_types::ProviderReturn,
-        op_gen: u64,
-    ) -> Result<wit_types::OpResult> {
-        crate::op_validate::validate_return(op, &ret, |tree| self.resolve_tree_ref(tree).is_some())
+        path: &Path,
+        cached_validator: Option<String>,
+        cursor: Option<wit_types::Cursor>,
+    ) -> Result<wit_types::ListChildrenResult> {
+        let id = self.next_operation_id();
+        let span = inspector::provider_span(
+            id,
+            &self.mount_name,
+            &self.provider_name,
+            "list_children",
+            path.as_str(),
+        );
+        async {
+            let op_gen = self.cache.current_generation();
+            let (result, effects) = self
+                .instance
+                .list_children(id, path.as_str().to_string(), cached_validator, cursor)
+                .await?;
+            crate::op_validate::validate_list(&result, &effects, |tree| {
+                self.resolve_tree_ref(tree).is_some()
+            })
             .map_err(EngineError::ProviderProtocol)?;
-        let now = clock::now_millis();
-        let (prefixes, paths) =
-            crate::effect_apply::EffectApplier::new(&self.cache).apply(&ret.effects, op_gen, now);
-        self.record_view_invalidations(prefixes, paths);
-        self.store_read_not_found_negative(op, &ret.result, op_gen, now);
-        Ok(ret.result)
+            inspect_result(&span, &result);
+            let result = self.provider_result(result)?;
+            self.publish_effects(&effects, op_gen);
+            inspector::record_outcome(&span, InspectorOutcome::Ok);
+            if let wit_types::ListChildrenResult::Subtree(tree) = &result {
+                inspector::record_subtree_handoff(id, *tree);
+            }
+            Ok(result)
+        }
+        .instrument(span.clone())
+        .await
+    }
+
+    pub(crate) async fn run_read_file(
+        &self,
+        path: &Path,
+        content_type: String,
+        cached_canonical: Option<wit_types::CanonicalInput>,
+    ) -> Result<wit_types::ReadFileOutcome> {
+        let id = self.next_operation_id();
+        let span = inspector::provider_span(
+            id,
+            &self.mount_name,
+            &self.provider_name,
+            "read_file",
+            path.as_str(),
+        );
+        async {
+            let op_gen = self.cache.current_generation();
+            let (result, effects) = self
+                .instance
+                .read_file(
+                    id,
+                    path.as_str().to_string(),
+                    content_type,
+                    cached_canonical,
+                )
+                .await?;
+            crate::op_validate::validate_read(&result, &effects, |tree| {
+                self.resolve_tree_ref(tree).is_some()
+            })
+            .map_err(EngineError::ProviderProtocol)?;
+            inspect_result(&span, &result);
+            let result = self.provider_result(result)?;
+            self.publish_effects(&effects, op_gen);
+            self.store_read_not_found_negative(path, &result, op_gen);
+            inspector::record_outcome(&span, InspectorOutcome::Ok);
+            Ok(result)
+        }
+        .instrument(span.clone())
+        .await
+    }
+
+    pub(crate) async fn run_open_file(&self, path: &Path) -> Result<wit_types::OpenFileResult> {
+        let id = self.next_operation_id();
+        let span = inspector::provider_span(
+            id,
+            &self.mount_name,
+            &self.provider_name,
+            "open_file",
+            path.as_str(),
+        );
+        async {
+            let op_gen = self.cache.current_generation();
+            let (result, effects) = self
+                .instance
+                .open_file(id, path.as_str().to_string())
+                .await?;
+            crate::op_validate::validate_open(&result, &effects, |tree| {
+                self.resolve_tree_ref(tree).is_some()
+            })
+            .map_err(EngineError::ProviderProtocol)?;
+            inspect_result(&span, &result);
+            let result = self.provider_result(result)?;
+            self.publish_effects(&effects, op_gen);
+            inspector::record_outcome(&span, InspectorOutcome::Ok);
+            Ok(result)
+        }
+        .instrument(span.clone())
+        .await
+    }
+
+    pub(crate) async fn run_read_chunk(
+        &self,
+        handle: u64,
+        offset: u64,
+        length: u32,
+    ) -> Result<wit_types::ReadChunkResult> {
+        let id = self.next_operation_id();
+        let span =
+            inspector::provider_span(id, &self.mount_name, &self.provider_name, "read_chunk", "");
+        async {
+            let op_gen = self.cache.current_generation();
+            let (result, effects) = self.instance.read_chunk(id, handle, offset, length).await?;
+            crate::op_validate::validate_chunk(&result, &effects, |tree| {
+                self.resolve_tree_ref(tree).is_some()
+            })
+            .map_err(EngineError::ProviderProtocol)?;
+            inspect_result(&span, &result);
+            let result = self.provider_result(result)?;
+            self.publish_effects(&effects, op_gen);
+            inspector::record_outcome(&span, InspectorOutcome::Ok);
+            Ok(result)
+        }
+        .instrument(span.clone())
+        .await
+    }
+
+    pub(crate) async fn run_event(&self, event: wit_types::ProviderEvent) -> Result<()> {
+        let id = self.next_operation_id();
+        let span =
+            inspector::provider_span(id, &self.mount_name, &self.provider_name, "on_event", "");
+        async {
+            let op_gen = self.cache.current_generation();
+            let (result, effects) = self.instance.on_event(id, event).await?;
+            crate::op_validate::validate_event(&result, &effects, |tree| {
+                self.resolve_tree_ref(tree).is_some()
+            })
+            .map_err(EngineError::ProviderProtocol)?;
+            inspect_result(&span, &result);
+            self.provider_result(result)?;
+            self.publish_effects(&effects, op_gen);
+            inspector::record_outcome(&span, InspectorOutcome::Ok);
+            Ok(())
+        }
+        .instrument(span.clone())
+        .await
+    }
+
+    fn provider_result<T>(
+        &self,
+        result: std::result::Result<T, wit_types::ProviderError>,
+    ) -> Result<T> {
+        match result {
+            Ok(value) => Ok(value),
+            Err(error) => {
+                if error.kind == wit_types::ErrorKind::RateLimited {
+                    self.note_rate_limited(
+                        error
+                            .retry_after
+                            .map(u64::from)
+                            .map(std::time::Duration::from_secs),
+                    );
+                }
+                Err(EngineError::ProviderError(error))
+            },
+        }
     }
 
     fn store_read_not_found_negative(
         &self,
-        op: &Op,
-        result: &wit_types::OpResult,
+        path: &Path,
+        result: &wit_types::ReadFileOutcome,
         op_gen: u64,
-        now_millis: u64,
     ) {
-        if let (
-            Op::ReadFile { path, .. },
-            wit_types::OpResult::ReadFile(wit_types::ReadFileOutcome::NotFound(maybe_id)),
-        ) = (op, result)
-        {
-            self.apply_not_found_negative(path, maybe_id.as_ref(), op_gen, now_millis);
+        if let wit_types::ReadFileOutcome::NotFound(maybe_id) = result {
+            self.apply_not_found_negative(path, maybe_id.as_ref(), op_gen, clock::now_millis());
         }
     }
+}
 
-    pub(crate) fn note_returned_result(&self, result: &wit_types::OpResult) {
-        if let wit_types::OpResult::Error(e) = result
-            && e.kind == wit_types::ErrorKind::RateLimited
-        {
-            self.note_rate_limited(
-                e.retry_after
-                    .map(|s| std::time::Duration::from_secs(u64::from(s))),
-            );
-        }
+fn inspect_result<T>(
+    span: &tracing::Span,
+    result: &std::result::Result<T, wit_types::ProviderError>,
+) {
+    match result {
+        Ok(_) => {},
+        Err(error) => inspector::record_outcome(span, inspector::outcome_for_provider_error(error)),
     }
 }

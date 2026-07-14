@@ -3,10 +3,10 @@
 mod support;
 
 use omnifs_engine::test_support::{LookupOutcome, NamespaceListOutcome, ReadBytes};
-use omnifs_itest::parse_path;
+use omnifs_itest::{ReadFileOpExt, parse_path};
 use omnifs_wit::provider::types::{
     CalloutResult, Cursor, EntryKind, Header, HttpResponse, ListChildrenResult, LookupChildResult,
-    OpResult, ReadFileOutcome, Stability,
+    ReadFileOutcome, Stability,
 };
 use support::{
     TestOpExt, github_harness, project_file_inline_bytes, project_file_stability, project_paths,
@@ -50,7 +50,7 @@ fn github_provider_routes_namespace_and_numeric_paths() {
         })])
         .unwrap();
     match repo_listing.result().unwrap() {
-        OpResult::ListChildren(ListChildrenResult::Entries(listing)) => {
+        Ok(ListChildrenResult::Entries(listing)) => {
             let mut names: Vec<&str> = listing
                 .entries
                 .iter()
@@ -70,7 +70,7 @@ fn github_provider_routes_namespace_and_numeric_paths() {
         .lookup("/octocat/Hello-World/actions", "runs")
         .unwrap();
     match runs_lookup.result().unwrap() {
-        OpResult::LookupChild(LookupChildResult::Entry(result)) => {
+        Ok(LookupChildResult::Entry(result)) => {
             assert_eq!(result.target.name, "runs");
             assert!(
                 matches!(result.target.kind, EntryKind::Directory),
@@ -104,7 +104,7 @@ fn github_provider_routes_namespace_and_numeric_paths() {
         })])
         .unwrap();
     match runs_listed.result().unwrap() {
-        OpResult::ListChildren(ListChildrenResult::Entries(listing)) => {
+        Ok(ListChildrenResult::Entries(listing)) => {
             let names: Vec<&str> = listing
                 .entries
                 .iter()
@@ -167,7 +167,7 @@ fn github_issue_list_projects_files() {
         response.callouts()
     );
     match response.result().unwrap() {
-        OpResult::ListChildren(ListChildrenResult::Entries(listing)) => {
+        Ok(ListChildrenResult::Entries(listing)) => {
             let effects = response.effects().unwrap();
             let mut preloaded = project_paths(effects);
             preloaded.sort_unstable();
@@ -255,7 +255,7 @@ fn github_issue_list_fetches_rest_followup_pages() {
         })])
         .unwrap();
     match response.result().unwrap() {
-        OpResult::ListChildren(ListChildrenResult::Entries(listing)) => {
+        Ok(ListChildrenResult::Entries(listing)) => {
             let names: Vec<&str> = listing
                 .entries
                 .iter()
@@ -310,7 +310,7 @@ fn github_issue_list_fetches_rest_followup_pages() {
         })])
         .unwrap();
     match page_two.result().unwrap() {
-        OpResult::ListChildren(ListChildrenResult::Entries(listing)) => {
+        Ok(ListChildrenResult::Entries(listing)) => {
             let names: Vec<&str> = listing
                 .entries
                 .iter()
@@ -377,7 +377,7 @@ fn github_pr_list_projects_files() {
     // diff blob are object faces that load on first read; the list does not
     // seed them.
     match response.result().unwrap() {
-        OpResult::ListChildren(ListChildrenResult::Entries(listing)) => {
+        Ok(ListChildrenResult::Entries(listing)) => {
             let effects = response.effects().unwrap();
             let mut preloaded = project_paths(effects);
             preloaded.sort_unstable();
@@ -462,7 +462,7 @@ fn github_action_run_list_projects_files() {
         response.callouts()
     );
     match response.result().unwrap() {
-        OpResult::ListChildren(ListChildrenResult::Entries(listing)) => {
+        Ok(ListChildrenResult::Entries(listing)) => {
             let project_paths = project_paths(response.effects().unwrap());
             assert_eq!(
                 project_paths,
@@ -494,7 +494,7 @@ fn github_provider_action_run_lookup_validates_and_listing_validates() {
         .lookup("/octocat/Hello-World/actions/runs", "123")
         .unwrap();
     match lookup.result().unwrap() {
-        OpResult::LookupChild(LookupChildResult::Entry(result)) => {
+        Ok(LookupChildResult::Entry(result)) => {
             let entry = &result.target;
             assert_eq!(entry.name, "123");
             assert!(matches!(entry.kind, EntryKind::Directory));
@@ -520,7 +520,7 @@ fn github_provider_action_run_lookup_validates_and_listing_validates() {
         .unwrap();
 
     match issued.result().unwrap() {
-        OpResult::ListChildren(ListChildrenResult::Entries(result)) => {
+        Ok(ListChildrenResult::Entries(result)) => {
             let names: Vec<&str> = result
                 .entries
                 .iter()
@@ -576,7 +576,7 @@ fn github_owner_listing_tracks_browsed_repos() {
         })])
         .unwrap();
     assert!(
-        matches!(repo_listing.result().unwrap(), OpResult::ListChildren(_)),
+        matches!(repo_listing.result().unwrap(), Ok(_)),
         "expected repo listing after gate, got {repo_listing:?}"
     );
 
@@ -637,7 +637,7 @@ fn github_owner_listing_tracks_browsed_repos() {
         })])
         .unwrap();
     match owner_listing.result().unwrap() {
-        OpResult::ListChildren(ListChildrenResult::Entries(listing)) => {
+        Ok(ListChildrenResult::Entries(listing)) => {
             let names: Vec<&str> = listing
                 .entries
                 .iter()
@@ -721,14 +721,14 @@ fn github_root_and_owner_listings_ignore_unclassified_repo_paths() {
         })])
         .unwrap();
         assert!(
-            matches!(step.result().unwrap(), OpResult::ListChildren(_)),
+            matches!(step.result().unwrap(), Ok(_)),
             "expected repo listing for {path}, got {step:?}"
         );
     }
 
     let root_listing = harness.list("/").unwrap();
     match root_listing.result().unwrap() {
-        OpResult::ListChildren(ListChildrenResult::Entries(listing)) => {
+        Ok(ListChildrenResult::Entries(listing)) => {
             let names: Vec<&str> = listing
                 .entries
                 .iter()
@@ -783,7 +783,7 @@ fn github_root_and_owner_listings_ignore_unclassified_repo_paths() {
         })])
         .unwrap();
     match owner_listing.result().unwrap() {
-        OpResult::ListChildren(ListChildrenResult::Entries(listing)) => {
+        Ok(ListChildrenResult::Entries(listing)) => {
             let names: Vec<&str> = listing
                 .entries
                 .iter()
@@ -868,7 +868,7 @@ fn github_provider_missing_item_resources_validate_on_lookup() {
         .lookup("/octocat/Hello-World/issues/open", "999999999")
         .unwrap();
     match lookup.result().unwrap() {
-        OpResult::LookupChild(LookupChildResult::Entry(result)) => {
+        Ok(LookupChildResult::Entry(result)) => {
             assert_eq!(result.target.name, "999999999");
             assert!(
                 matches!(result.target.kind, EntryKind::Directory),
@@ -883,7 +883,7 @@ fn github_provider_missing_item_resources_validate_on_lookup() {
         .lookup("/octocat/Hello-World/issues/open/999999999", "diff.patch")
         .unwrap();
     match diff_lookup.result().unwrap() {
-        OpResult::LookupChild(LookupChildResult::NotFound(_)) => {},
+        Ok(LookupChildResult::NotFound(_)) => {},
         other => panic!("expected issue diff.patch lookup to be NotFound, got {other:?}"),
     }
 
@@ -914,7 +914,7 @@ fn github_provider_missing_item_resources_validate_on_lookup() {
     // A 404 on the comment object load resolves the object as not-found, keyed
     // to the comment anchor.
     match issued.result().unwrap() {
-        OpResult::ReadFile(ReadFileOutcome::NotFound(_)) => {},
+        Ok(ReadFileOutcome::NotFound(_)) => {},
         other => panic!("expected ReadFile NotFound on 404 read, got {other:?}"),
     }
 }
@@ -932,7 +932,7 @@ fn github_pr_lookup_validates_and_exposes_diff() {
         .lookup("/octocat/Hello-World/pulls/open", "7")
         .unwrap();
     match lookup.result().unwrap() {
-        OpResult::LookupChild(LookupChildResult::Entry(result)) => {
+        Ok(LookupChildResult::Entry(result)) => {
             assert_eq!(result.target.name, "7");
             assert!(matches!(result.target.kind, EntryKind::Directory));
         },
@@ -964,7 +964,7 @@ fn github_pr_lookup_validates_and_exposes_diff() {
         })])
         .unwrap();
     match listing.result().unwrap() {
-        OpResult::ListChildren(ListChildrenResult::Entries(result)) => {
+        Ok(ListChildrenResult::Entries(result)) => {
             let mut names: Vec<&str> = result
                 .entries
                 .iter()
@@ -1017,7 +1017,7 @@ fn github_pr_lookup_validates_and_exposes_diff() {
     })])
     .unwrap();
     match body.result().unwrap() {
-        OpResult::ReadFile(ReadFileOutcome::Found(file)) => {
+        Ok(ReadFileOutcome::Found(file)) => {
             match &file.bytes {
                 ByteSource::Inline(bytes) => assert_eq!(bytes.as_slice(), b"PR body"),
                 other => panic!("expected inline body field, got {other:?}"),
@@ -1065,7 +1065,7 @@ fn github_pr_lookup_validates_and_exposes_diff() {
     .unwrap();
 
     match diff.result().unwrap() {
-        OpResult::ReadFile(ReadFileOutcome::Found(file)) => match &file.bytes {
+        Ok(ReadFileOutcome::Found(file)) => match &file.bytes {
             ByteSource::Blob(blob) => assert_eq!(*blob, 1),
             other => panic!("expected blob-backed diff, got {other:?}"),
         },
@@ -1087,7 +1087,7 @@ fn github_pr_lookup_validates_and_exposes_diff() {
         })])
         .unwrap();
     match retry.result().unwrap() {
-        OpResult::Error(error) => {
+        Err(error) => {
             assert_eq!(error.kind, ErrorKind::Network);
         },
         other => panic!("expected Network error on refetch, got {other:?}"),
@@ -1121,7 +1121,7 @@ fn github_pr_files_list_and_read_changed_file_objects() {
         })])
         .unwrap();
     match listed.result().unwrap() {
-        OpResult::ListChildren(ListChildrenResult::Entries(listing)) => {
+        Ok(ListChildrenResult::Entries(listing)) => {
             let names: Vec<&str> = listing
                 .entries
                 .iter()
@@ -1165,7 +1165,7 @@ fn github_pr_files_list_and_read_changed_file_objects() {
     })])
     .unwrap();
     match read.result().unwrap() {
-        OpResult::ReadFile(ReadFileOutcome::Found(file)) => {
+        Ok(ReadFileOutcome::Found(file)) => {
             let body = std::str::from_utf8(omnifs_itest::expect_inline(file)).unwrap();
             assert!(body.contains("# src/lib.rs"), "unexpected file.md: {body}");
             assert_eq!(
@@ -1211,7 +1211,7 @@ fn github_pr_reviews_and_review_comments_list_and_read_objects() {
         })])
         .unwrap();
     match reviews.result().unwrap() {
-        OpResult::ListChildren(ListChildrenResult::Entries(listing)) => {
+        Ok(ListChildrenResult::Entries(listing)) => {
             let names: Vec<&str> = listing
                 .entries
                 .iter()
@@ -1258,7 +1258,7 @@ fn github_pr_reviews_and_review_comments_list_and_read_objects() {
         })])
         .unwrap();
     match review_md.result().unwrap() {
-        OpResult::ReadFile(ReadFileOutcome::Found(file)) => {
+        Ok(ReadFileOutcome::Found(file)) => {
             let body = std::str::from_utf8(omnifs_itest::expect_inline(file)).unwrap();
             assert!(body.contains("APPROVED"), "unexpected review.md: {body}");
         },
@@ -1293,7 +1293,7 @@ fn github_pr_reviews_and_review_comments_list_and_read_objects() {
         })])
         .unwrap();
     match comments.result().unwrap() {
-        OpResult::ListChildren(ListChildrenResult::Entries(listing)) => {
+        Ok(ListChildrenResult::Entries(listing)) => {
             let names: Vec<&str> = listing
                 .entries
                 .iter()
@@ -1334,7 +1334,7 @@ fn github_pr_reviews_and_review_comments_list_and_read_objects() {
         })])
         .unwrap();
     match comment_md.result().unwrap() {
-        OpResult::ReadFile(ReadFileOutcome::Found(file)) => {
+        Ok(ReadFileOutcome::Found(file)) => {
             let body = std::str::from_utf8(omnifs_itest::expect_inline(file)).unwrap();
             assert!(
                 body.contains("reviewer on `src/lib.rs`"),
@@ -1403,7 +1403,7 @@ fn github_pr_checks_list_from_head_sha_and_read_check_run_objects() {
         })])
         .unwrap();
     match checks.result().unwrap() {
-        OpResult::ListChildren(ListChildrenResult::Entries(listing)) => {
+        Ok(ListChildrenResult::Entries(listing)) => {
             let names: Vec<&str> = listing
                 .entries
                 .iter()
@@ -1447,7 +1447,7 @@ fn github_pr_checks_list_from_head_sha_and_read_check_run_objects() {
         })])
         .unwrap();
     match page_two.result().unwrap() {
-        OpResult::ListChildren(ListChildrenResult::Entries(listing)) => {
+        Ok(ListChildrenResult::Entries(listing)) => {
             assert!(listing.entries.is_empty());
             assert!(listing.exhaustive);
             assert!(listing.next_cursor.is_none());
@@ -1482,7 +1482,7 @@ fn github_pr_checks_list_from_head_sha_and_read_check_run_objects() {
         })])
         .unwrap();
     match check_md.result().unwrap() {
-        OpResult::ReadFile(ReadFileOutcome::Found(file)) => {
+        Ok(ReadFileOutcome::Found(file)) => {
             let body = std::str::from_utf8(omnifs_itest::expect_inline(file)).unwrap();
             assert!(body.contains("# ci"), "unexpected check.md: {body}");
             assert!(body.contains("All green"), "unexpected check.md: {body}");
@@ -1521,7 +1521,7 @@ fn github_notifications_list_and_read_thread_objects() {
         })])
         .unwrap();
     match listed.result().unwrap() {
-        OpResult::ListChildren(ListChildrenResult::Entries(listing)) => {
+        Ok(ListChildrenResult::Entries(listing)) => {
             let names: Vec<&str> = listing
                 .entries
                 .iter()
@@ -1562,7 +1562,7 @@ fn github_notifications_list_and_read_thread_objects() {
     })])
     .unwrap();
     match item.result().unwrap() {
-        OpResult::ReadFile(ReadFileOutcome::Found(file)) => {
+        Ok(ReadFileOutcome::Found(file)) => {
             let body = std::str::from_utf8(omnifs_itest::expect_inline(file)).unwrap();
             assert!(
                 body.contains("# Review requested"),
@@ -1606,7 +1606,7 @@ fn github_projected_resource_reads_return_all_fetched_siblings() {
         })])
         .unwrap();
     match run_listed.result().unwrap() {
-        OpResult::ListChildren(ListChildrenResult::Entries(_)) => {
+        Ok(ListChildrenResult::Entries(_)) => {
             let effects = run_listed.effects().unwrap();
             let preloaded = project_paths(effects);
             assert!(
@@ -1646,7 +1646,7 @@ fn github_projected_resource_reads_return_all_fetched_siblings() {
         })])
         .unwrap();
     match index_listed.result().unwrap() {
-        OpResult::ListChildren(ListChildrenResult::Entries(_)) => {
+        Ok(ListChildrenResult::Entries(_)) => {
             let preloaded = project_paths(index_listed.effects().unwrap());
             assert!(
                 preloaded.contains(&"/octocat/Hello-World/actions/runs/42/status"),
@@ -1737,7 +1737,7 @@ fn github_provider_resource_reads_do_not_fall_back_to_provider_cache() {
             })])
             .unwrap();
         match first.result().unwrap() {
-            OpResult::ReadFile(ReadFileOutcome::Found(file)) => {
+            Ok(ReadFileOutcome::Found(file)) => {
                 if !case.expected_content.is_empty() {
                     assert_eq!(
                         omnifs_itest::expect_inline(file),
@@ -1764,7 +1764,7 @@ fn github_provider_resource_reads_do_not_fall_back_to_provider_cache() {
             })])
             .unwrap();
         match second.result().unwrap() {
-            OpResult::Error(err) => {
+            Err(err) => {
                 assert_eq!(
                     err.kind,
                     ErrorKind::Network,
@@ -1823,7 +1823,7 @@ fn github_provider_comment_routes_id_dirs_and_refetch() {
         ))
         .unwrap();
     match issue_list.result().unwrap() {
-        OpResult::ListChildren(ListChildrenResult::Entries(listing)) => {
+        Ok(ListChildrenResult::Entries(listing)) => {
             let names: Vec<&str> = listing
                 .entries
                 .iter()
@@ -1851,7 +1851,7 @@ fn github_provider_comment_routes_id_dirs_and_refetch() {
     ))
     .unwrap();
     match dir.result().unwrap() {
-        OpResult::ListChildren(ListChildrenResult::Entries(listing)) => {
+        Ok(ListChildrenResult::Entries(listing)) => {
             let mut names: Vec<&str> = listing
                 .entries
                 .iter()
@@ -1883,7 +1883,7 @@ fn github_provider_comment_routes_id_dirs_and_refetch() {
         ))
         .unwrap();
     match first.result().unwrap() {
-        OpResult::ReadFile(ReadFileOutcome::Found(file)) => {
+        Ok(ReadFileOutcome::Found(file)) => {
             assert_eq!(file.attrs.stability, Stability::Dynamic);
             assert_eq!(omnifs_itest::expect_inline(file), b"octocat:\nA comment\n");
         },
@@ -1905,7 +1905,7 @@ fn github_provider_comment_routes_id_dirs_and_refetch() {
         })])
         .unwrap();
     match reread.result().unwrap() {
-        OpResult::Error(error) => {
+        Err(error) => {
             assert_eq!(error.kind, omnifs_wit::provider::types::ErrorKind::Network);
         },
         other => panic!("expected Network error on comment refetch, got {other:?}"),
@@ -1922,7 +1922,7 @@ fn github_provider_comment_routes_id_dirs_and_refetch() {
         ))
         .unwrap();
     match json_read.result().unwrap() {
-        OpResult::ReadFile(ReadFileOutcome::Found(_)) => {},
+        Ok(ReadFileOutcome::Found(_)) => {},
         other => panic!("expected comment.json read, got {other:?}"),
     }
 
@@ -1944,7 +1944,7 @@ fn github_provider_comment_routes_id_dirs_and_refetch() {
         ))
         .unwrap();
     match pr_read.result().unwrap() {
-        OpResult::ReadFile(ReadFileOutcome::Found(file)) => {
+        Ok(ReadFileOutcome::Found(file)) => {
             assert_eq!(file.attrs.stability, Stability::Dynamic);
             assert_eq!(omnifs_itest::expect_inline(file), b"hubot:\na pr comment\n");
         },
@@ -1972,7 +1972,7 @@ fn github_provider_comment_routes_id_dirs_and_refetch() {
         })])
         .unwrap();
     match missing.result().unwrap() {
-        OpResult::ReadFile(ReadFileOutcome::NotFound(_)) => {},
+        Ok(ReadFileOutcome::NotFound(_)) => {},
         other => panic!("expected NotFound on missing comment, got {other:?}"),
     }
 }
@@ -1987,7 +1987,7 @@ fn github_provider_lookup_owner_validates_and_owner_listing_classifies_with_org_
     // The owner is an implicit prefix dir (/{owner}/{repo} routes exist under it).
     let lookup = harness.lookup("/", "openai").unwrap();
     match lookup.result().unwrap() {
-        OpResult::LookupChild(LookupChildResult::Entry(result)) => {
+        Ok(LookupChildResult::Entry(result)) => {
             assert_eq!(result.target.name, "openai");
             assert!(
                 matches!(result.target.kind, EntryKind::Directory),
@@ -2088,7 +2088,7 @@ fn github_provider_lookup_owner_validates_and_owner_listing_classifies_with_org_
         })])
         .unwrap();
     match listing.result().unwrap() {
-        OpResult::ListChildren(ListChildrenResult::Entries(result)) => {
+        Ok(ListChildrenResult::Entries(result)) => {
             let names: Vec<&str> = result
                 .entries
                 .iter()
@@ -2106,7 +2106,7 @@ fn github_provider_lookup_owner_validates_and_owner_listing_classifies_with_org_
     // and the notifications literal. Browsed owners do not leak into it.
     let root_listing = harness.list("/").unwrap();
     match root_listing.result().unwrap() {
-        OpResult::ListChildren(ListChildrenResult::Entries(listing)) => {
+        Ok(ListChildrenResult::Entries(listing)) => {
             let names: Vec<&str> = listing
                 .entries
                 .iter()
@@ -2147,7 +2147,7 @@ fn github_provider_polls_events_and_invalidates_caches() {
         })])
         .unwrap();
     match issue_cached.result().unwrap() {
-        OpResult::ReadFile(_) => {},
+        Ok(_) => {},
         other => panic!("expected comment ReadFile result, got {other:?}"),
     }
     // TimerTick returns immediately with no callouts or cache invalidations.
@@ -2158,7 +2158,7 @@ fn github_provider_polls_events_and_invalidates_caches() {
         first_tick.callouts()
     );
     match first_tick.result().unwrap() {
-        OpResult::OnEvent => {
+        Ok(()) => {
             assert!(
                 first_tick.effects().unwrap().invalidations.is_empty(),
                 "timer tick should not invalidate anything, got {:?}",
@@ -2171,7 +2171,7 @@ fn github_provider_polls_events_and_invalidates_caches() {
     // A second tick is equally a no-op.
     let second_tick = harness.timer_tick().unwrap();
     assert!(
-        matches!(second_tick.result().unwrap(), OpResult::OnEvent),
+        matches!(second_tick.result().unwrap(), Ok(())),
         "expected second timer tick OnEvent terminal, got {second_tick:?}"
     );
     assert!(
@@ -2198,7 +2198,7 @@ fn github_provider_list_routes_preserve_typed_http_errors() {
 
     fn expect_denied(response: &omnifs_engine::test_support::TestOp<'_>) {
         match response.result().unwrap() {
-            OpResult::Error(error) => assert_eq!(error.kind, ErrorKind::Denied),
+            Err(error) => assert_eq!(error.kind, ErrorKind::Denied),
             other => panic!("expected provider error result, got {other:?}"),
         }
     }
@@ -2272,7 +2272,7 @@ async fn open_then_all_one_load() {
     assert!(
         matches!(
             first.result().unwrap(),
-            OpResult::ReadFile(ReadFileOutcome::Found(_))
+            Ok(ReadFileOutcome::Found(_))
         ),
         "expected read terminal, got {first:?}"
     );
@@ -2309,7 +2309,6 @@ async fn open_then_all_one_load() {
         .read_file(
             &all_title_path,
             all_title_path.content_type_mime(None).to_string(),
-            None,
         )
         .await
         .unwrap();
@@ -2353,7 +2352,7 @@ fn item_json_byte_equals_single_get() {
         body: issue_json.to_vec(),
     })])
     .unwrap();
-    let OpResult::ReadFile(ReadFileOutcome::Found(file)) = step.result().unwrap() else {
+    let Ok(ReadFileOutcome::Found(file)) = step.result().unwrap() else {
         panic!("expected read terminal, got {step:?}");
     };
     assert_eq!(step.effects().unwrap().canonical[0].bytes, issue_json);

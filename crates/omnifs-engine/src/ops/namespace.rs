@@ -1,16 +1,12 @@
-use std::sync::Arc;
-
 use crate::cache::RecordKind;
 use crate::clock::now_millis;
-use crate::coalesce::RunConfig;
-use crate::coalesce::ns::{Key as NsKey, SharedOutcome, share_outcome, unshare_outcome};
+use crate::coalesce::ns::{Key as NsKey, OrderKey};
 use crate::effect_apply::{EffectApplier, LookupOutcome};
 use crate::object_id::ObjectId;
 use crate::runtime::Namespace;
 use crate::runtime::Result;
 use crate::view::{AttrPayload, CachedCursor, EntryMeta, FileAttrsCache, Stability};
-use crate::{EngineError, Op};
-use omnifs_api::events::TraceId;
+use crate::EngineError;
 use omnifs_core::path::{Path, Segment};
 use omnifs_wit::provider::types as wit_types;
 
@@ -62,12 +58,7 @@ pub struct ChunkOutcome {
 }
 
 impl Namespace<'_> {
-    pub async fn lookup_child(
-        &self,
-        parent_path: &Path,
-        name: &str,
-        request_trace: Option<TraceId>,
-    ) -> Result<LookupOutcome> {
+    pub async fn lookup_child(&self, parent_path: &Path, name: &str) -> Result<LookupOutcome> {
         let name = Segment::try_from(name)
             .map_err(|error| EngineError::ProviderProtocol(error.to_string()))?;
         let child_path = parent_path.join_segment(&name);
@@ -76,17 +67,24 @@ impl Namespace<'_> {
             return Ok(LookupOutcome::NotFound);
         }
         let op_gen = self.runtime.cache().current_generation();
-        let op = Op::LookupChild {
-            parent_path: parent_path.clone(),
-            name,
-        };
+        let key = NsKey::Lookup(child_path.clone());
+        let order_key = OrderKey::Path(child_path.clone());
         let result = self
-            .coalesced(NsKey::Path(child_path.clone()), || {
-                self.runtime.run_op(op.clone(), request_trace)
+            .runtime
+            .coalesce
+            .lookup(key.clone(), || async {
+                self.runtime
+                    .coalesce
+                    .ordered(&order_key, || async {
+                        self.runtime
+                            .run_lookup_child(parent_path, &name)
+                            .await
+                            .map_err(|error| error.to_string())
+                    })
+                    .await
             })
-            .await?;
-
-        let result = Self::run_op_expect(op, result, expect_lookup_child)?;
+            .await
+            .map_err(EngineError::ProviderProtocol)?;
         Ok(EffectApplier::new(&self.runtime.cache).lookup(
             parent_path,
             &child_path,
@@ -101,25 +99,45 @@ impl Namespace<'_> {
         path: &Path,
         cached_validator: Option<String>,
         cursor: Option<CachedCursor>,
-        request_trace: Option<TraceId>,
     ) -> Result<ListOutcome> {
         let is_continuation = cursor.is_some();
         let op_gen = self.runtime.cache().current_generation();
-        let op = Op::ListChildren {
-            path: path.clone(),
-            cached_validator,
-            cursor: cursor.map(crate::wit_protocol::cached_cursor_to_wit),
-        };
+        let key = NsKey::List(path.clone());
+        let order_key = OrderKey::Path(path.clone());
         let result = if is_continuation {
-            self.runtime.run_op(op.clone(), request_trace).await?
+            self.runtime
+                .coalesce
+                .ordered(&order_key, || async {
+                    self.runtime
+                        .run_list_children(
+                            path,
+                            cached_validator,
+                            cursor.map(crate::wit_protocol::cached_cursor_to_wit),
+                        )
+                        .await
+                })
+                .await?
         } else {
-            self.coalesced(NsKey::Path(path.clone()), || {
-                self.runtime.run_op(op.clone(), request_trace)
-            })
-            .await?
+            self.runtime
+                .coalesce
+                .list(key.clone(), || async {
+                    self.runtime
+                        .coalesce
+                        .ordered(&order_key, || async {
+                            self.runtime
+                                .run_list_children(
+                                    path,
+                                    cached_validator,
+                                    cursor.map(crate::wit_protocol::cached_cursor_to_wit),
+                                )
+                                .await
+                                .map_err(|error| error.to_string())
+                        })
+                        .await
+                })
+                .await
+                .map_err(EngineError::ProviderProtocol)?
         };
-
-        let result = Self::run_op_expect(op, result, expect_list_children)?;
 
         if let wit_types::ListChildrenResult::Entries(ref listing) = result {
             let m = EffectApplier::new(&self.runtime.cache);
@@ -133,13 +151,8 @@ impl Namespace<'_> {
         Ok(ListOutcome::from_wit(result))
     }
 
-    pub async fn read_file(
-        &self,
-        path: &Path,
-        content_type: String,
-        request_trace: Option<TraceId>,
-    ) -> Result<ReadOutcome> {
-        self.read_file_with_mode(path, content_type, request_trace, ReadMode::Serve)
+    pub async fn read_file(&self, path: &Path, content_type: String) -> Result<ReadOutcome> {
+        self.read_file_with_mode(path, content_type, ReadMode::Serve)
             .await
     }
 
@@ -148,7 +161,7 @@ impl Namespace<'_> {
         path: &Path,
         content_type: String,
     ) -> Result<ReadOutcome> {
-        self.read_file_with_mode(path, content_type, None, ReadMode::Revalidate)
+        self.read_file_with_mode(path, content_type, ReadMode::Revalidate)
             .await
     }
 
@@ -156,7 +169,6 @@ impl Namespace<'_> {
         &self,
         path: &Path,
         content_type: String,
-        request_trace: Option<TraceId>,
         mode: ReadMode,
     ) -> Result<ReadOutcome> {
         let now = now_millis();
@@ -190,34 +202,53 @@ impl Namespace<'_> {
             .is_some_and(|s| s == Stability::Live);
 
         // Cheap op for the error arm: no byte buffer, same path/content_type shape.
-        let op_for_error = Op::ReadFile {
-            path: path.clone(),
-            content_type: content_type.clone(),
-            cached_canonical: None,
-        };
-        let op = Op::ReadFile {
-            path: path.clone(),
-            content_type,
-            cached_canonical,
-        };
-
         // Warm-but-not-live reads coalesce by object identity, so concurrent
         // user reads of distinct paths that alias the same object share one
         // provider operation. Timer revalidation uses a distinct object key
         // because a normal warm read may serve pushed bytes without reloading.
         // Cold reads have no known id yet, so they key on the path.
         let coalesce_key = match &warm_id {
-            Some(host_id) => mode.coalesce_key(host_id.clone()),
-            None => NsKey::Path(path.clone()),
+            Some(host_id) => match mode {
+                ReadMode::Serve => NsKey::ReadObject(host_id.clone()),
+                ReadMode::Revalidate => NsKey::Revalidate(host_id.clone()),
+            },
+            None => NsKey::ReadPath(path.clone()),
+        };
+        let order_key = match &warm_id {
+            Some(host_id) => match mode {
+                ReadMode::Serve => OrderKey::Object(host_id.clone()),
+                ReadMode::Revalidate => OrderKey::Revalidate(host_id.clone()),
+            },
+            None => OrderKey::Path(path.clone()),
         };
         let result = if live {
-            self.runtime.run_op(op, request_trace).await?
-        } else {
-            self.coalesced(coalesce_key, || self.runtime.run_op(op, request_trace))
+            self.runtime
+                .coalesce
+                .ordered(&order_key, || async {
+                    self.runtime
+                        .run_read_file(path, content_type, cached_canonical)
+                        .await
+                })
                 .await?
+        } else {
+            self.runtime
+                .coalesce
+                .read(coalesce_key, || async {
+                    self.runtime
+                        .coalesce
+                        .ordered(&order_key, || async {
+                            self.runtime
+                                .run_read_file(path, content_type, cached_canonical)
+                                .await
+                                .map_err(|error| error.to_string())
+                        })
+                        .await
+                })
+                .await
+                .map_err(EngineError::ProviderProtocol)?
         };
 
-        match Self::run_op_expect(op_for_error, result, expect_read_file)? {
+        match result {
             wit_types::ReadFileOutcome::Found(result) => {
                 match warm_id {
                     Some(host_id) => self.runtime.note_read_object(host_id),
@@ -235,46 +266,17 @@ impl Namespace<'_> {
     }
 
     pub async fn open_file(&self, path: &Path) -> Result<OpenOutcome> {
-        let op = Op::OpenFile { path: path.clone() };
-        let result = self.runtime.run_op(op.clone(), None).await?;
-        Self::run_op_expect(op, result, expect_open_file).map(OpenOutcome::from_wit)
+        self.runtime
+            .run_open_file(path)
+            .await
+            .map(OpenOutcome::from_wit)
     }
 
     pub async fn read_chunk(&self, handle: u64, offset: u64, length: u32) -> Result<ChunkOutcome> {
-        let op = Op::ReadChunk {
-            handle,
-            offset,
-            length,
-        };
-        let result = self.runtime.run_op(op.clone(), None).await?;
-        Self::run_op_expect(op, result, expect_read_chunk).map(ChunkOutcome::from_wit)
-    }
-
-    fn run_op_expect<T>(
-        op: Op,
-        result: wit_types::OpResult,
-        expect: fn(wit_types::OpResult) -> Expected<T>,
-    ) -> Result<T> {
-        match expect(result) {
-            Expected::Match(result) => Ok(result),
-            Expected::ProviderError(error) => Err(EngineError::ProviderError(error)),
-            Expected::Unexpected(result) => Err(EngineError::unexpected_op_result(op, *result)),
-        }
-    }
-
-    async fn coalesced<F, Fu>(&self, key: NsKey, op: F) -> Result<wit_types::OpResult>
-    where
-        F: FnOnce() -> Fu,
-        Fu: std::future::Future<Output = Result<wit_types::OpResult>>,
-    {
-        let shared: Arc<SharedOutcome> = self
-            .runtime
-            .coalesce
-            .run(&key, RunConfig::NAMESPACE, || async {
-                share_outcome(op().await)
-            })
-            .await;
-        unshare_outcome((*shared).clone(), EngineError::ProviderProtocol)
+        self.runtime
+            .run_read_chunk(handle, offset, length)
+            .await
+            .map(ChunkOutcome::from_wit)
     }
 }
 
@@ -287,28 +289,6 @@ enum ReadMode {
 impl ReadMode {
     fn revalidates(self) -> bool {
         self == Self::Revalidate
-    }
-
-    fn coalesce_key(self, id: ObjectId) -> NsKey {
-        match self {
-            Self::Serve => NsKey::Object(id),
-            Self::Revalidate => NsKey::Revalidate(id),
-        }
-    }
-}
-
-enum Expected<T> {
-    Match(T),
-    ProviderError(wit_types::ProviderError),
-    Unexpected(Box<wit_types::OpResult>),
-}
-
-impl<T> Expected<T> {
-    fn unexpected(result: wit_types::OpResult) -> Self {
-        match result {
-            wit_types::OpResult::Error(error) => Self::ProviderError(error),
-            result => Self::Unexpected(Box::new(result)),
-        }
     }
 }
 
@@ -387,41 +367,6 @@ impl ChunkOutcome {
             content: result.content,
             eof: result.eof,
         }
-    }
-}
-
-fn expect_lookup_child(result: wit_types::OpResult) -> Expected<wit_types::LookupChildResult> {
-    match result {
-        wit_types::OpResult::LookupChild(result) => Expected::Match(result),
-        result => Expected::unexpected(result),
-    }
-}
-
-fn expect_list_children(result: wit_types::OpResult) -> Expected<wit_types::ListChildrenResult> {
-    match result {
-        wit_types::OpResult::ListChildren(result) => Expected::Match(result),
-        result => Expected::unexpected(result),
-    }
-}
-
-fn expect_read_file(result: wit_types::OpResult) -> Expected<wit_types::ReadFileOutcome> {
-    match result {
-        wit_types::OpResult::ReadFile(result) => Expected::Match(result),
-        result => Expected::unexpected(result),
-    }
-}
-
-fn expect_open_file(result: wit_types::OpResult) -> Expected<wit_types::OpenFileResult> {
-    match result {
-        wit_types::OpResult::OpenFile(result) => Expected::Match(result),
-        result => Expected::unexpected(result),
-    }
-}
-
-fn expect_read_chunk(result: wit_types::OpResult) -> Expected<wit_types::ReadChunkResult> {
-    match result {
-        wit_types::OpResult::ReadChunk(result) => Expected::Match(result),
-        result => Expected::unexpected(result),
     }
 }
 

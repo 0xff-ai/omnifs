@@ -1,7 +1,7 @@
 //! Generated bindings and package identity for the omnifs WIT contract.
 
 /// Package declaration from `wit/provider.wit`.
-pub const PROVIDER_WIT_PACKAGE: &str = "package omnifs:provider@0.4.0;";
+pub const PROVIDER_WIT_PACKAGE: &str = "package omnifs:provider@0.5.0;";
 
 #[cfg(test)]
 mod tests {
@@ -38,33 +38,6 @@ pub mod provider {
 
     #[cfg(feature = "host-bindings")]
     pub use omnifs::provider::log;
-
-    impl types::ProviderReturn {
-        /// Terminal return with no host-side effects.
-        #[must_use]
-        pub fn terminal(result: types::OpResult) -> Self {
-            Self {
-                result,
-                effects: types::Effects {
-                    canonical: Vec::new(),
-                    fs: Vec::new(),
-                    invalidations: Vec::new(),
-                },
-            }
-        }
-
-        /// Terminal return with effects committed if the return is accepted.
-        #[must_use]
-        pub fn with_effects(result: types::OpResult, effects: types::Effects) -> Self {
-            Self { result, effects }
-        }
-
-        /// Unwrap the operation result. Intended for test assertions.
-        #[must_use]
-        pub fn expect_result(self) -> types::OpResult {
-            self.result
-        }
-    }
 
     impl types::RequestedCapabilities {
         /// Runtime-only capability request with no install-time metadata duplication.

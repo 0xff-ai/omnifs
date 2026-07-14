@@ -37,8 +37,8 @@ async fn two_ops_suspend_concurrently_on_one_instance() {
     let namespace = runtime.namespace();
     let path_a = p("/hello/remote-a");
     let path_b = p("/hello/remote-b");
-    let read_a = namespace.read_file(&path_a, String::new(), None);
-    let read_b = namespace.read_file(&path_b, String::new(), None);
+    let read_a = namespace.read_file(&path_a, String::new());
+    let read_b = namespace.read_file(&path_b, String::new());
 
     let answer_both = async {
         let mut pending: Vec<PendingTestCallout> = Vec::new();

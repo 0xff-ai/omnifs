@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 
 use crate::Runtime;
-use crate::callouts::{TestCallout, TestSignal, record_outcome as inner_record};
+use crate::callouts::{TestSignal, record_outcome as inner_record};
 use crate::inspector::WitCalloutView;
 use crate::log_redaction::{LogUrl as InternalLogUrl, WitHeaders as InternalWitHeaders};
 use omnifs_wit::provider::types as wit_types;
@@ -16,8 +16,7 @@ pub use crate::ops::namespace::{
     ChunkOutcome, DirEntry, DirListing, ListOutcome as NamespaceListOutcome, OpenOutcome,
     ReadBytes, ReadOutcome,
 };
-pub use crate::ops::op::Op;
-pub use crate::runtime::wasm::component_engine;
+pub use crate::runtime::wasm::{component_engine, provider_compiler_strategy};
 pub use crate::tree::{PaginationControl, Synthetic, SyntheticContent, probe_live_growth};
 pub use crate::{Cursor, Engine, EngineError, GitCloner, HostContext};
 
@@ -132,23 +131,29 @@ pub mod cache {
 /// inspect and answer captured host imports. This is not the provider runtime
 /// protocol: production operations await WIT async host imports directly.
 #[doc(hidden)]
-pub struct TestOp<'a> {
+pub struct TestOp<'a, T> {
     runtime: &'a Runtime,
-    op: Op,
     id: u64,
-    op_gen: u64,
-    state: TestOpState,
+    state: TestOpState<T>,
 }
 
-enum TestOpState {
+enum TestOpState<T> {
     InProgress,
     WaitingForCallouts {
         callouts: Vec<wit_types::Callout>,
         replies: Vec<tokio::sync::oneshot::Sender<wit_types::CalloutResult>>,
-        result_rx: mpsc::Receiver<std::result::Result<wit_types::ProviderReturn, EngineError>>,
+        result_rx: mpsc::Receiver<
+            std::result::Result<
+                (
+                    std::result::Result<T, wit_types::ProviderError>,
+                    wit_types::Effects,
+                ),
+                EngineError,
+            >,
+        >,
     },
     Returned {
-        result: Box<wit_types::OpResult>,
+        result: std::result::Result<T, wit_types::ProviderError>,
         effects: Box<wit_types::Effects>,
     },
 }
@@ -207,92 +212,146 @@ impl Runtime {
             }
         }
     }
+}
 
-    /// Synchronous test entry: blocks the caller until the operation returns or
-    /// suspends on captured callouts. Production code drives ops through the
-    /// async [`Engine::run_op`] path instead; this exists for the provider
-    /// integration harness (`omnifs-itest`).
+impl Runtime {
     #[doc(hidden)]
-    pub fn start_op(&self, op: Op) -> crate::runtime::Result<TestOp<'_>> {
-        let op_gen = self.cache.current_generation();
+    pub fn start_lookup_child(
+        &self,
+        parent: omnifs_core::path::Path,
+        name: omnifs_core::path::Segment,
+    ) -> crate::runtime::Result<TestOp<'_, wit_types::LookupChildResult>> {
         let id = self.next_operation_id();
         if self.test_callouts.is_some() {
-            return TestOp::start_callout_test(self, op, id, op_gen);
+            let parent = parent.as_str().to_string();
+            let name = name.as_str().to_string();
+            return TestOp::start_callout(self, id, move |instance| async move {
+                instance.lookup_child(id, parent, name).await
+            });
         }
-        let ret = futures::executor::block_on(self.instance.start_op(op.clone(), id))?;
-        TestOp::from_return(self, op, id, op_gen, ret)
+        let transport = futures::executor::block_on(self.instance.lookup_child(
+            id,
+            parent.as_str().to_string(),
+            name.as_str().to_string(),
+        ))?;
+        TestOp::from_transport(self, id, Ok(transport))
+    }
+
+    #[doc(hidden)]
+    pub fn start_list_children(
+        &self,
+        path: omnifs_core::path::Path,
+        validator: Option<String>,
+        cursor: Option<wit_types::Cursor>,
+    ) -> crate::runtime::Result<TestOp<'_, wit_types::ListChildrenResult>> {
+        let id = self.next_operation_id();
+        if self.test_callouts.is_some() {
+            let path = path.as_str().to_string();
+            return TestOp::start_callout(self, id, move |instance| async move {
+                instance.list_children(id, path, validator, cursor).await
+            });
+        }
+        let transport = futures::executor::block_on(self.instance.list_children(
+            id,
+            path.as_str().to_string(),
+            validator,
+            cursor,
+        ))?;
+        TestOp::from_transport(self, id, Ok(transport))
+    }
+
+    #[doc(hidden)]
+    pub fn start_read_file(
+        &self,
+        path: omnifs_core::path::Path,
+        content_type: String,
+        cached: Option<wit_types::CanonicalInput>,
+    ) -> crate::runtime::Result<TestOp<'_, wit_types::ReadFileOutcome>> {
+        let id = self.next_operation_id();
+        if self.test_callouts.is_some() {
+            let path = path.as_str().to_string();
+            return TestOp::start_callout(self, id, move |instance| async move {
+                instance.read_file(id, path, content_type, cached).await
+            });
+        }
+        let transport = futures::executor::block_on(self.instance.read_file(
+            id,
+            path.as_str().to_string(),
+            content_type,
+            cached,
+        ))?;
+        TestOp::from_transport(self, id, Ok(transport))
+    }
+
+    #[doc(hidden)]
+    pub fn start_event(
+        &self,
+        event: wit_types::ProviderEvent,
+    ) -> crate::runtime::Result<TestOp<'_, ()>> {
+        let id = self.next_operation_id();
+        if self.test_callouts.is_some() {
+            return TestOp::start_callout(self, id, move |instance| async move {
+                instance.on_event(id, event).await
+            });
+        }
+        let transport = futures::executor::block_on(self.instance.on_event(id, event))?;
+        TestOp::from_transport(self, id, Ok(transport))
     }
 }
 
-impl<'a> TestOp<'a> {
-    fn start_callout_test(
-        runtime: &'a Runtime,
-        op: Op,
-        id: u64,
-        op_gen: u64,
-    ) -> crate::runtime::Result<Self> {
+impl<'a, T> TestOp<'a, T> {
+    fn start_callout<F, Fut>(runtime: &'a Runtime, id: u64, make: F) -> crate::runtime::Result<Self>
+    where
+        F: FnOnce(crate::runtime::instance::Instance) -> Fut + Send + 'static,
+        Fut: std::future::Future<
+                Output = std::result::Result<
+                    (
+                        std::result::Result<T, wit_types::ProviderError>,
+                        wit_types::Effects,
+                    ),
+                    EngineError,
+                >,
+            > + Send
+            + 'static,
+        T: Send + 'static,
+    {
         let instance = runtime.instance.clone();
-        let op_for_task = op.clone();
-        let (result_tx, result_rx) = mpsc::channel();
+        let (tx, rx) = mpsc::channel();
         std::thread::Builder::new()
             .name(format!("omnifs-test-op-{id}"))
             .spawn(move || {
-                let result = futures::executor::block_on(instance.start_op(op_for_task, id));
-                let _ = result_tx.send(result);
+                let _ = tx.send(futures::executor::block_on(make(instance)));
             })
-            .map_err(|error| EngineError::ProviderProtocol(format!("spawn test op: {error}")))?;
-
-        let state = Self::wait_for_progress(runtime, &op, id, op_gen, result_rx)?;
-        Ok(Self {
-            runtime,
-            op,
-            id,
-            op_gen,
-            state,
-        })
+            .map_err(|e| EngineError::ProviderProtocol(format!("spawn test op: {e}")))?;
+        let state = Self::wait_for_progress(runtime, id, rx)?;
+        Ok(Self { runtime, id, state })
     }
-
-    fn from_return(
-        runtime: &'a Runtime,
-        op: Op,
-        id: u64,
-        op_gen: u64,
-        ret: wit_types::ProviderReturn,
-    ) -> crate::runtime::Result<Self> {
-        let state = Self::returned_state(runtime, &op, op_gen, ret)?;
-        Ok(Self {
-            runtime,
-            op,
-            id,
-            op_gen,
-            state,
-        })
-    }
-
-    /// Safety net for a `Parked` marker that never arrives while a callout
-    /// burst is draining. The marker, not this timeout, closes a burst; the
-    /// window is wide enough that only a genuine lost signal trips it.
-    const BURST_WATCHDOG: std::time::Duration = std::time::Duration::from_secs(5);
 
     fn wait_for_progress(
-        runtime: &Runtime,
-        op: &Op,
+        runtime: &'a Runtime,
         id: u64,
-        op_gen: u64,
-        result_rx: mpsc::Receiver<std::result::Result<wit_types::ProviderReturn, EngineError>>,
-    ) -> crate::runtime::Result<TestOpState> {
+        result_rx: mpsc::Receiver<
+            std::result::Result<
+                (
+                    std::result::Result<T, wit_types::ProviderError>,
+                    wit_types::Effects,
+                ),
+                EngineError,
+            >,
+        >,
+    ) -> crate::runtime::Result<TestOpState<T>> {
         let inbox = runtime.test_callouts.as_ref().ok_or_else(|| {
             EngineError::ProviderProtocol("test callout inbox is not configured".to_string())
         })?;
-        let recv_signal = |timeout| {
-            inbox
-                .lock()
-                .expect("test callout receiver poisoned")
-                .recv_timeout(timeout)
-        };
         loop {
             match result_rx.try_recv() {
-                Ok(ret) => return Self::returned_state(runtime, op, op_gen, ret?),
+                Ok(transport) => {
+                    let (result, effects) = transport?;
+                    return Ok(TestOpState::Returned {
+                        result,
+                        effects: Box::new(effects),
+                    });
+                },
                 Err(mpsc::TryRecvError::Disconnected) => {
                     return Err(EngineError::ProviderProtocol(
                         "provider operation result channel closed".to_string(),
@@ -300,19 +359,39 @@ impl<'a> TestOp<'a> {
                 },
                 Err(mpsc::TryRecvError::Empty) => {},
             }
-
-            match recv_signal(std::time::Duration::from_millis(10)) {
+            let signal = inbox
+                .lock()
+                .map_err(|_| {
+                    EngineError::ProviderProtocol("test callout receiver poisoned".to_string())
+                })?
+                .recv_timeout(std::time::Duration::from_millis(10));
+            match signal {
                 Ok(TestSignal::Callout(first)) => {
-                    let mut callouts = Vec::new();
-                    let mut replies = Vec::new();
-                    Self::push_test_callout(id, first, &mut callouts, &mut replies)?;
-                    // The instance's single-threaded executor enqueues every
-                    // callout of this round before it can park, so a `Parked`
-                    // marker arrives in FIFO order right after the last one.
+                    if first.op_id != id {
+                        return Err(EngineError::ProviderProtocol(
+                            "test callout operation id mismatch".to_string(),
+                        ));
+                    }
+                    let mut callouts = vec![first.callout];
+                    let mut replies = vec![first.reply];
                     loop {
-                        match recv_signal(Self::BURST_WATCHDOG) {
+                        let signal = inbox
+                            .lock()
+                            .map_err(|_| {
+                                EngineError::ProviderProtocol(
+                                    "test callout receiver poisoned".to_string(),
+                                )
+                            })?
+                            .recv_timeout(std::time::Duration::from_secs(5));
+                        match signal {
                             Ok(TestSignal::Callout(next)) => {
-                                Self::push_test_callout(id, next, &mut callouts, &mut replies)?;
+                                if next.op_id != id {
+                                    return Err(EngineError::ProviderProtocol(
+                                        "test callout operation id mismatch".to_string(),
+                                    ));
+                                }
+                                callouts.push(next.callout);
+                                replies.push(next.reply);
                             },
                             Ok(TestSignal::Parked) | Err(mpsc::RecvTimeoutError::Timeout) => break,
                             Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -328,8 +407,6 @@ impl<'a> TestOp<'a> {
                         result_rx,
                     });
                 },
-                // A park with no callout in flight, or a poll timeout: loop to
-                // re-check the result channel.
                 Ok(TestSignal::Parked) | Err(mpsc::RecvTimeoutError::Timeout) => {},
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
                     return Err(EngineError::ProviderProtocol(
@@ -340,54 +417,76 @@ impl<'a> TestOp<'a> {
         }
     }
 
-    fn push_test_callout(
+    fn from_transport(
+        runtime: &'a Runtime,
         id: u64,
-        test_callout: TestCallout,
-        callouts: &mut Vec<wit_types::Callout>,
-        replies: &mut Vec<tokio::sync::oneshot::Sender<wit_types::CalloutResult>>,
-    ) -> crate::runtime::Result<()> {
-        if test_callout.op_id != id {
-            return Err(EngineError::ProviderProtocol(format!(
-                "test callout for operation {} received while driving operation {id}",
-                test_callout.op_id
-            )));
-        }
-        callouts.push(test_callout.callout);
-        replies.push(test_callout.reply);
-        Ok(())
-    }
-
-    fn returned_state(
-        runtime: &Runtime,
-        op: &Op,
-        op_gen: u64,
-        ret: wit_types::ProviderReturn,
-    ) -> crate::runtime::Result<TestOpState> {
-        let effects = ret.effects.clone();
-        let result = runtime.finish_provider_return(op, ret, op_gen)?;
-        runtime.note_returned_result(&result);
-        Ok(TestOpState::Returned {
-            result: Box::new(result),
-            effects: Box::new(effects),
+        transport: std::result::Result<
+            (
+                std::result::Result<T, wit_types::ProviderError>,
+                wit_types::Effects,
+            ),
+            EngineError,
+        >,
+    ) -> crate::runtime::Result<Self> {
+        let (result, effects) = transport?;
+        Ok(Self {
+            runtime,
+            id,
+            state: TestOpState::Returned {
+                result,
+                effects: Box::new(effects),
+            },
         })
-    }
-
-    pub fn callouts(&self) -> &[wit_types::Callout] {
-        match &self.state {
-            TestOpState::WaitingForCallouts { callouts, .. } => callouts,
-            TestOpState::InProgress | TestOpState::Returned { .. } => &[],
-        }
-    }
-
-    pub fn is_waiting_for_callouts(&self) -> bool {
-        matches!(self.state, TestOpState::WaitingForCallouts { .. })
     }
 
     pub fn is_returned(&self) -> bool {
         matches!(self.state, TestOpState::Returned { .. })
     }
+    pub fn result(&self) -> Option<&std::result::Result<T, wit_types::ProviderError>> {
+        match &self.state {
+            TestOpState::Returned { result, .. } => Some(result),
+            _ => None,
+        }
+    }
+    pub fn effects(&self) -> Option<&wit_types::Effects> {
+        match &self.state {
+            TestOpState::Returned { effects, .. } => Some(effects),
+            _ => None,
+        }
+    }
+    pub fn into_result(
+        self,
+    ) -> crate::runtime::Result<std::result::Result<T, wit_types::ProviderError>> {
+        match self.state {
+            TestOpState::Returned { result, .. } => Ok(result),
+            _ => Err(EngineError::ProviderProtocol(
+                "provider operation has not returned".to_string(),
+            )),
+        }
+    }
+    pub fn into_result_and_effects(
+        self,
+    ) -> crate::runtime::Result<(
+        std::result::Result<T, wit_types::ProviderError>,
+        wit_types::Effects,
+    )> {
+        match self.state {
+            TestOpState::Returned { result, effects } => Ok((result, *effects)),
+            _ => Err(EngineError::ProviderProtocol(
+                "provider operation has not returned".to_string(),
+            )),
+        }
+    }
+    pub fn callouts(&self) -> &[wit_types::Callout] {
+        match &self.state {
+            TestOpState::WaitingForCallouts { callouts, .. } => callouts,
+            _ => &[],
+        }
+    }
+    pub fn is_waiting_for_callouts(&self) -> bool {
+        matches!(self.state, TestOpState::WaitingForCallouts { .. })
+    }
 
-    #[allow(clippy::needless_pass_by_value)]
     pub fn answer_callouts(
         &mut self,
         results: Vec<wit_types::CalloutResult>,
@@ -401,7 +500,7 @@ impl<'a> TestOp<'a> {
                 "provider operation is not waiting on test callouts".to_string(),
             ));
         };
-        if results.len() != replies.len() {
+        if replies.len() != results.len() {
             return Err(EngineError::ProviderProtocol(format!(
                 "expected {} test callout results, got {}",
                 replies.len(),
@@ -411,65 +510,17 @@ impl<'a> TestOp<'a> {
         for (reply, result) in replies.into_iter().zip(results) {
             let _ = reply.send(result);
         }
-        self.state =
-            Self::wait_for_progress(self.runtime, &self.op, self.id, self.op_gen, result_rx)?;
+        self.state = Self::wait_for_progress(self.runtime, self.id, result_rx)?;
         Ok(())
-    }
-
-    pub fn into_result(self) -> crate::runtime::Result<wit_types::OpResult> {
-        match self.state {
-            TestOpState::Returned { result, .. } => Ok(*result),
-            TestOpState::WaitingForCallouts { .. } | TestOpState::InProgress => Err(
-                EngineError::ProviderProtocol("provider operation has not returned".to_string()),
-            ),
-        }
-    }
-
-    pub fn result(&self) -> Option<&wit_types::OpResult> {
-        match &self.state {
-            TestOpState::Returned { result, .. } => Some(result.as_ref()),
-            TestOpState::WaitingForCallouts { .. } | TestOpState::InProgress => None,
-        }
-    }
-
-    pub fn effects(&self) -> Option<&wit_types::Effects> {
-        match &self.state {
-            TestOpState::Returned { effects, .. } => Some(effects.as_ref()),
-            TestOpState::WaitingForCallouts { .. } | TestOpState::InProgress => None,
-        }
-    }
-
-    pub fn into_result_and_effects(
-        self,
-    ) -> crate::runtime::Result<(wit_types::OpResult, wit_types::Effects)> {
-        match self.state {
-            TestOpState::Returned { result, effects } => Ok((*result, *effects)),
-            TestOpState::WaitingForCallouts { .. } | TestOpState::InProgress => Err(
-                EngineError::ProviderProtocol("provider operation has not returned".to_string()),
-            ),
-        }
     }
 }
 
-impl fmt::Debug for TestOp<'_> {
+impl<T: fmt::Debug> fmt::Debug for TestOp<'_, T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut debug = f.debug_struct("TestOp");
-        debug.field("id", &self.id).field("op", &self.op);
-        match &self.state {
-            TestOpState::InProgress => {
-                debug.field("state", &"in_progress");
-            },
-            TestOpState::WaitingForCallouts { callouts, .. } => {
-                debug.field("state", &"waiting-for-callouts");
-                debug.field("callouts", callouts);
-            },
-            TestOpState::Returned { result, effects } => {
-                debug.field("state", &"returned");
-                debug.field("result", result);
-                debug.field("effects", effects);
-            },
-        }
-        debug.finish()
+        f.debug_struct("TestOp")
+            .field("id", &self.id)
+            .field("state", &self.is_returned())
+            .finish()
     }
 }
 

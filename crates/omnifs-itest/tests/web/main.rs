@@ -1,10 +1,16 @@
 #![cfg(not(target_os = "wasi"))]
 
+use omnifs_core::path::Path;
+use omnifs_engine::EngineError;
 use omnifs_itest::{RuntimeHarness, TestOpExt, into_inline, make_initialized_runtime};
 use omnifs_wit::provider::types::{
     CalloutResult, EntryKind, ErrorKind, Header, HttpResponse, ListChildrenResult,
-    LookupChildResult, OpResult, ReadFileOutcome,
+    LookupChildResult, ReadFileOutcome,
 };
+
+fn p(path: &str) -> Path {
+    Path::parse(path).unwrap()
+}
 
 fn web_harness() -> RuntimeHarness {
     make_initialized_runtime(
@@ -174,9 +180,9 @@ fn web_provider_rejects_fragments_and_traversal() {
         "/raw/https/example.test/foo%2F%2e%2E",
     ] {
         let op = harness.read(path).unwrap();
-        match op.into_result().unwrap() {
-            OpResult::ReadFile(ReadFileOutcome::NotFound(_)) => {},
-            OpResult::Error(error) if error.kind == ErrorKind::NotFound => {},
+        match op.result().unwrap() {
+            Ok(ReadFileOutcome::NotFound(_)) => {},
+            Err(error) if error.kind == ErrorKind::NotFound => {},
             other => panic!("expected rejected web path for {path}, got {other:?}"),
         }
     }
@@ -225,7 +231,11 @@ fn web_provider_only_exposes_configured_hosts() {
 
     for prefix in ["/https", "/raw/https"] {
         let lookup = harness.lookup(prefix, "denied.test").unwrap();
-        assert_not_found(lookup.into_result().unwrap());
+        match lookup.result().unwrap() {
+            Ok(LookupChildResult::NotFound(_)) => {},
+            Err(error) => assert_eq!(error.kind, ErrorKind::NotFound),
+            other => panic!("expected not-found lookup, got {other:?}"),
+        }
 
         let read = harness
             .read(&format!("{prefix}/denied.test/@root"))
@@ -234,16 +244,49 @@ fn web_provider_only_exposes_configured_hosts() {
             read.callouts().is_empty(),
             "denied host must not fetch upstream"
         );
-        assert_not_found(read.into_result().unwrap());
+        match read.result().unwrap() {
+            Ok(ReadFileOutcome::NotFound(_)) => {},
+            Err(error) => assert_eq!(error.kind, ErrorKind::NotFound),
+            other => panic!("expected not-found read, got {other:?}"),
+        }
     }
 }
 
-fn assert_not_found(result: OpResult) {
-    match result {
-        OpResult::Error(error) => assert_eq!(error.kind, ErrorKind::NotFound),
-        OpResult::LookupChild(LookupChildResult::NotFound(_))
-        | OpResult::ReadFile(ReadFileOutcome::NotFound(_)) => {},
-        other => panic!("expected not-found result, got {other:?}"),
+#[tokio::test]
+async fn web_provider_denies_domains_outside_mount_config() {
+    let harness = RuntimeHarness::new_real_callouts(
+        r#"
+        {
+            "provider": "omnifs_provider_web.wasm",
+            "mount": "web",
+            "capabilities": {
+                "domains": { "dynamic": true }
+            },
+            "config": {
+                "domains": ["allowed.test"]
+            }
+        }
+    "#,
+    )
+    .unwrap();
+
+    let path = p("/https/denied.test/articles/readable");
+    let error = harness
+        .runtime
+        .namespace()
+        .read_file(&path, path.content_type_mime(None).to_string())
+        .await
+        .unwrap_err();
+
+    match error {
+        EngineError::ProviderError(error) => {
+            assert_eq!(error.kind, ErrorKind::Denied);
+            assert!(
+                error.message.contains("domain not in allowlist"),
+                "unexpected denied error: {error:?}"
+            );
+        },
+        other => panic!("expected denied provider error, got {other:?}"),
     }
 }
 

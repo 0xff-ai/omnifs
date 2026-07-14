@@ -5,7 +5,7 @@ mod support;
 use omnifs_engine::test_support::TestOp;
 use omnifs_wit::provider::types::{
     ByteSource, Callout, CalloutResult, Cursor, ErrorKind, HttpResponse, ListChildrenResult,
-    LookupChildResult, OpResult, ReadFileOutcome, Stability,
+    LookupChildResult, ReadFileOutcome, Stability,
 };
 use support::{
     TestOpExt, arxiv_harness, canonical_id_string, count_fetch_callouts, first_canonical_id,
@@ -60,7 +60,7 @@ fn resume_blob(op: &mut TestOp<'_>, blob: u64) {
 
 fn read_file_bytes(op: &TestOp<'_>) -> Vec<u8> {
     match op.result().unwrap() {
-        OpResult::ReadFile(ReadFileOutcome::Found(file)) => match &file.bytes {
+        Ok(ReadFileOutcome::Found(file)) => match &file.bytes {
             ByteSource::Inline(bytes) => bytes.clone(),
             ByteSource::Canonical => op.effects().unwrap().canonical.first().map_or_else(
                 || panic!("expected canonical bytes in effects"),
@@ -116,7 +116,7 @@ fn paper_root_lists_latest_and_numbered_versions() {
     assert_eq!(count_fetch_callouts(&[&listed]), 1);
     resume_paper_atom(&mut listed);
     match listed.result().unwrap() {
-        OpResult::ListChildren(ListChildrenResult::Entries(listing)) => {
+        Ok(ListChildrenResult::Entries(listing)) => {
             let names: Vec<&str> = listing
                 .entries
                 .iter()
@@ -132,7 +132,7 @@ fn paper_root_lists_latest_and_numbered_versions() {
         .unwrap();
     resume_paper_atom(&mut version_body);
     match version_body.result().unwrap() {
-        OpResult::ReadFile(ReadFileOutcome::Found(file)) => match &file.bytes {
+        Ok(ReadFileOutcome::Found(file)) => match &file.bytes {
             ByteSource::Inline(bytes) => assert!(bytes.starts_with(b"{")),
             other => panic!("expected inline bytes, got {other:?}"),
         },
@@ -156,7 +156,7 @@ fn version_blob_immutable_latest_mutable() {
     assert!(version_pdf.url.contains("2604.00002v1"));
     resume_blob(&mut version_pdf_step, 1);
     match version_pdf_step.result().unwrap() {
-        OpResult::ReadFile(ReadFileOutcome::Found(file)) => {
+        Ok(ReadFileOutcome::Found(file)) => {
             assert_eq!(file.attrs.stability, Stability::Stable);
         },
         other => panic!("expected version pdf, got {other:?}"),
@@ -184,7 +184,7 @@ fn version_blob_immutable_latest_mutable() {
     );
     resume_blob(&mut latest_pdf_step, 2);
     match latest_pdf_step.result().unwrap() {
-        OpResult::ReadFile(ReadFileOutcome::Found(file)) => {
+        Ok(ReadFileOutcome::Found(file)) => {
             assert_ne!(file.attrs.stability, Stability::Stable);
         },
         other => panic!("expected latest pdf, got {other:?}"),
@@ -206,7 +206,7 @@ fn category_listing_emits_no_member_canonicals() {
     );
     assert!(op.effects().unwrap().canonical.is_empty());
     match op.result().unwrap() {
-        OpResult::ListChildren(ListChildrenResult::Entries(listing)) => {
+        Ok(ListChildrenResult::Entries(listing)) => {
             assert_eq!(listing.entries.len(), 1);
             assert_eq!(listing.entries[0].name, PAPER_ID);
         },
@@ -244,12 +244,12 @@ fn versioned_paper_segment_rejected() {
         .read("/papers/2401.12345v2/@latest/paper.json")
         .unwrap();
     match read.result().unwrap() {
-        OpResult::Error(error) => assert_eq!(error.kind, ErrorKind::NotFound),
+        Err(error) => assert_eq!(error.kind, ErrorKind::NotFound),
         other => panic!("expected versioned id read to fail, got {other:?}"),
     }
     let lookup = harness.lookup("/papers", "2401.12345v2").unwrap();
     match lookup.result().unwrap() {
-        OpResult::LookupChild(LookupChildResult::NotFound(_)) => {},
+        Ok(LookupChildResult::NotFound(_)) => {},
         other => panic!("expected lookup miss, got {other:?}"),
     }
 }
@@ -267,7 +267,7 @@ fn missing_paper_emits_not_found_with_id() {
         br#"<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom"></feed>"#.to_vec(),
     );
     match op.result().unwrap() {
-        OpResult::ReadFile(ReadFileOutcome::NotFound(Some(id))) => {
+        Ok(ReadFileOutcome::NotFound(Some(id))) => {
             assert_eq!(canonical_id_string(id), "arxiv.paper|paper=99999999.99999");
         },
         other => panic!("expected not-found with id, got {other:?}"),
@@ -303,7 +303,7 @@ fn category_listing_paginates() {
             .collect(),
     );
     match page0.result().unwrap() {
-        OpResult::ListChildren(ListChildrenResult::Entries(listing)) => {
+        Ok(ListChildrenResult::Entries(listing)) => {
             assert_eq!(listing.entries.len(), 49);
             assert!(matches!(listing.next_cursor, Some(Cursor::Page(1))));
         },
@@ -326,7 +326,7 @@ fn representation_dispatch_respects_declared_leaves() {
     resume_paper_atom(&mut json);
     assert!(matches!(
         json.result().unwrap(),
-        OpResult::ReadFile(ReadFileOutcome::Found(_))
+        Ok(ReadFileOutcome::Found(_))
     ));
     let mut raw = harness
         .read(&format!("/papers/{PAPER_ID}/@latest/paper.atom"))
@@ -339,7 +339,7 @@ fn representation_dispatch_respects_declared_leaves() {
         .read(&format!("/papers/{PAPER_ID}/@latest/paper.md"))
         .unwrap();
     match md.result().unwrap() {
-        OpResult::Error(error) => assert_eq!(error.kind, ErrorKind::NotFound),
+        Err(error) => assert_eq!(error.kind, ErrorKind::NotFound),
         other => panic!("expected undeclared paper.md to be missing, got {other:?}"),
     }
 
@@ -347,7 +347,7 @@ fn representation_dispatch_respects_declared_leaves() {
         .read(&format!("/papers/{PAPER_ID}/paper.json"))
         .unwrap();
     match direct_latest.result().unwrap() {
-        OpResult::Error(error) => assert_eq!(error.kind, ErrorKind::NotFound),
+        Err(error) => assert_eq!(error.kind, ErrorKind::NotFound),
         other => panic!("expected old direct paper.json to be missing, got {other:?}"),
     }
 
@@ -355,7 +355,7 @@ fn representation_dispatch_respects_declared_leaves() {
         .read(&format!("/papers/{PAPER_ID}/versions/v1/paper.pdf"))
         .unwrap();
     match old_versions.result().unwrap() {
-        OpResult::Error(error) => assert_eq!(error.kind, ErrorKind::NotFound),
+        Err(error) => assert_eq!(error.kind, ErrorKind::NotFound),
         other => panic!("expected old versions path to be missing, got {other:?}"),
     }
 }

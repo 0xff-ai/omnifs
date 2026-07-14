@@ -5,8 +5,7 @@ mod support;
 use omnifs_engine::test_support::TestOp;
 use omnifs_wit::provider::types::Effects;
 use omnifs_wit::provider::types::{
-    ByteSource, CalloutResult, FsKind, HttpResponse, ListChildrenResult, OpResult, ReadFileOutcome,
-    Stability,
+    ByteSource, CalloutResult, FsKind, HttpResponse, ListChildrenResult, ReadFileOutcome, Stability,
 };
 use support::{TestOpExt, docker_harness, project_paths};
 
@@ -81,7 +80,7 @@ fn assert_no_project_effects(effects: &Effects) {
 
 fn assert_inline_file(op: &TestOp<'_>, expected: &[u8]) {
     match op.result().unwrap() {
-        OpResult::ReadFile(ReadFileOutcome::Found(file)) => {
+        Ok(ReadFileOutcome::Found(file)) => {
             assert_eq!(file.attrs.stability, Stability::Dynamic);
             match &file.bytes {
                 ByteSource::Inline(bytes) => assert_eq!(bytes.as_slice(), expected),
@@ -170,7 +169,7 @@ fn docker_summary_txt_renders_from_fresh_inspect() {
     assert_project_paths(effects, &["/state"]);
     assert_projected_inline_file(effects, "/state", b"running\n");
     match op.result().unwrap() {
-        OpResult::ReadFile(ReadFileOutcome::Found(file)) => match &file.bytes {
+        Ok(ReadFileOutcome::Found(file)) => match &file.bytes {
             ByteSource::Inline(body) => {
                 let text = std::str::from_utf8(body.as_slice()).unwrap();
                 assert!(text.contains("id     0123456789ab"));
@@ -190,7 +189,7 @@ fn docker_container_dir_lists_route_shaped_leaves() {
     let op = harness.list("/containers/by-name/web").unwrap();
 
     match op.result().unwrap() {
-        OpResult::ListChildren(ListChildrenResult::Entries(listing)) => {
+        Ok(ListChildrenResult::Entries(listing)) => {
             let mut names: Vec<&str> = listing.entries.iter().map(|e| e.name.as_str()).collect();
             names.sort_unstable();
             assert_eq!(names, vec!["inspect.json", "state", "summary.txt"]);
@@ -216,7 +215,7 @@ fn docker_by_name_listing_enumerates_names() {
     );
 
     match op.result().unwrap() {
-        OpResult::ListChildren(ListChildrenResult::Entries(listing)) => {
+        Ok(ListChildrenResult::Entries(listing)) => {
             let mut names: Vec<&str> = listing.entries.iter().map(|e| e.name.as_str()).collect();
             names.sort_unstable();
             assert_eq!(names, vec!["api", "web"]);
@@ -245,7 +244,7 @@ fn docker_compose_routes_enumerate_services_and_containers() {
         br#"[{"Id":"0123456789ab","Names":["/web"],"Labels":{"com.docker.compose.project":"demo","com.docker.compose.service":"api"}}]"#.to_vec(),
     );
     match services_op.result().unwrap() {
-        OpResult::ListChildren(ListChildrenResult::Entries(listing)) => {
+        Ok(ListChildrenResult::Entries(listing)) => {
             let names: Vec<&str> = listing.entries.iter().map(|e| e.name.as_str()).collect();
             assert_eq!(names, vec!["api"]);
         },
@@ -268,7 +267,7 @@ fn docker_compose_routes_enumerate_services_and_containers() {
         br#"[{"Id":"0123456789ab","Names":["/web"],"Labels":{"com.docker.compose.project":"demo","com.docker.compose.service":"api"}}]"#.to_vec(),
     );
     match containers_op.result().unwrap() {
-        OpResult::ListChildren(ListChildrenResult::Entries(listing)) => {
+        Ok(ListChildrenResult::Entries(listing)) => {
             let names: Vec<&str> = listing.entries.iter().map(|e| e.name.as_str()).collect();
             assert_eq!(names, vec!["web"]);
         },

@@ -129,11 +129,11 @@ impl Tree {
         runtime: &Runtime,
         path: &omnifs_core::path::Path,
         cursor: Cursor,
-        ctx: &RequestCtx,
+        _ctx: &RequestCtx,
     ) -> Result<Listing> {
         let result = runtime
             .namespace()
-            .list_children(path, None, Some(cursor.0), ctx.trace)
+            .list_children(path, None, Some(cursor.0))
             .await?;
         match result {
             crate::ops::namespace::ListOutcome::Entries(listing) => Ok(Listing {
@@ -162,7 +162,7 @@ impl Tree {
         &self,
         runtime: &Runtime,
         node: &Node,
-        ctx: &RequestCtx,
+        _ctx: &RequestCtx,
     ) -> Result<ListOutcome> {
         let path = node.path();
         // A non-exhaustive cached dirents record may carry a listing validator
@@ -173,7 +173,7 @@ impl Tree {
 
         let result = runtime
             .namespace()
-            .list_children(path, cached_validator, None, ctx.trace)
+            .list_children(path, cached_validator, None)
             .await;
 
         match result {

@@ -10,15 +10,13 @@
 
 use core::time::Duration;
 use omnifs_core::path::Path;
-use omnifs_wit::provider::types::{
-    CalloutError, ErrorKind, OpResult, ProviderError as WitProviderError, ProviderReturn,
-};
+use omnifs_wit::provider::types::{CalloutError, ErrorKind, ProviderError as WitProviderError};
 use std::fmt;
 
 /// Provider result type alias used throughout the SDK and generated code.
 pub type Result<T> = core::result::Result<T, ProviderError>;
 
-/// Provider-side error that lowers to WIT `OpResult::Error`.
+/// Provider-side error that lowers directly to the WIT `provider-error` record.
 ///
 /// Construct through the per-kind constructors ([`Self::not_found`],
 /// [`Self::network`], ...) or [`Self::from_http_status`]; there is no public
@@ -239,22 +237,16 @@ impl fmt::Display for ProviderError {
     }
 }
 
-impl From<ProviderError> for OpResult {
+impl From<ProviderError> for WitProviderError {
     fn from(error: ProviderError) -> Self {
-        OpResult::Error(WitProviderError {
+        Self {
             kind: error.kind.wit_kind(),
             message: error.message,
             retryable: error.retryable,
             retry_after: error
                 .retry_after
                 .map(|d| u32::try_from(d.as_secs()).unwrap_or(u32::MAX)),
-        })
-    }
-}
-
-impl From<ProviderError> for ProviderReturn {
-    fn from(error: ProviderError) -> Self {
-        ProviderReturn::terminal(OpResult::from(error))
+        }
     }
 }
 

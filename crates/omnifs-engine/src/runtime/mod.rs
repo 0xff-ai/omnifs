@@ -2,7 +2,7 @@
 //!
 //! `Runtime` manages the Wasmtime store lifetime, provider initialization,
 //! executor handles (HTTP, Git, Blob, Archive), and cache/mount lifecycle.
-//! Op execution is in `op_lifecycle`; WASI store plumbing is in `wasi`.
+//! Typed operation execution is in `ops::lifecycle`; WASI store plumbing is in `wasi`.
 
 use crate::archive::ArchiveExecutor;
 use crate::auth::AuthManager;
@@ -12,8 +12,7 @@ use crate::cache::{Caches, Store};
 use crate::callouts::{CalloutHost, TestCallouts, TestSignal};
 use crate::capability::{CapabilityChecker, config_str};
 use crate::cloner::GitCloner;
-use crate::coalesce::Coalesce;
-use crate::coalesce::ns::{Key as NsCoalesceKey, SharedOutcome};
+use crate::coalesce::ns::InFlight;
 use crate::git;
 use crate::http::HttpStack;
 use crate::instance::Instance;
@@ -44,7 +43,6 @@ pub(crate) mod wasm;
 
 use crate::clock::{self, DYNAMIC_TTL_MILLIS};
 use crate::object_id::ObjectId;
-use crate::op::Op;
 use crate::op_validate;
 
 pub(crate) const HTTP_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -144,7 +142,7 @@ pub struct Runtime {
     trees: Arc<TreeRefs>,
     pub(crate) cache: Store,
     pub(crate) invalidation: InvalidationState,
-    pub(crate) coalesce: Coalesce<NsCoalesceKey, SharedOutcome>,
+    pub(crate) coalesce: InFlight,
     recent_objects: parking_lot::Mutex<RecentObjects>,
     /// Per-path locks serializing the read-modify-write of a paged
     /// directory's accumulated dirents. Two concurrent `@next` (or `@all`)
@@ -224,11 +222,6 @@ pub enum EngineError {
     ProviderProtocol(String),
     #[error("provider returned error: {0:?}")]
     ProviderError(wit_types::ProviderError),
-    #[error("{op:?} returned unexpected result: {result:?}")]
-    UnexpectedOpResult {
-        op: Box<Op>,
-        result: Box<wit_types::OpResult>,
-    },
 }
 
 pub(crate) type Result<T> = std::result::Result<T, EngineError>;
@@ -248,13 +241,6 @@ pub(crate) enum ProviderErrorClass {
 }
 
 impl EngineError {
-    pub(crate) fn unexpected_op_result(op: Op, result: wit_types::OpResult) -> Self {
-        Self::UnexpectedOpResult {
-            op: Box::new(op),
-            result: Box::new(result),
-        }
-    }
-
     pub(crate) fn provider_class(&self) -> Option<ProviderErrorClass> {
         let Self::ProviderError(error) = self else {
             return None;
@@ -303,9 +289,6 @@ impl From<EngineError> for BuildError {
             EngineError::ProviderError(e) => {
                 Self::ProviderProtocol(format!("provider error during build: {e:?}"))
             },
-            EngineError::UnexpectedOpResult { op, result } => Self::ProviderProtocol(format!(
-                "{op:?} returned unexpected result during build: {result:?}"
-            )),
         }
     }
 }
@@ -424,7 +407,7 @@ impl Runtime {
         let instance = Instance::new(engine, wasm_path, config_bytes, &preopens, park_signal)?;
 
         let init_return = instance.initialize().map_err(BuildError::from)?;
-        let initialize_result = finish_initialize_return(init_return)?;
+        let (initialize_result, initialize_effects) = finish_initialize_return(init_return)?;
         let capability = Arc::new(CapabilityChecker::from_config(
             config,
             &initialize_result.capabilities,
@@ -486,7 +469,7 @@ impl Runtime {
         instance
             .set_callouts(callout_host)
             .map_err(BuildError::from)?;
-        Ok(Self {
+        let runtime = Self {
             instance,
             initialize_result,
             mount_name: mount_name.to_string(),
@@ -499,12 +482,14 @@ impl Runtime {
             trees,
             cache,
             invalidation: InvalidationState::default(),
-            coalesce: Coalesce::new(),
+            coalesce: InFlight::new(),
             recent_objects: parking_lot::Mutex::new(RecentObjects::new()),
             pagination_locks: DashMap::new(),
             rate_limit_until: std::sync::Mutex::new(None),
             test_callouts: test_rx.map(std::sync::Mutex::new),
-        })
+        };
+        runtime.publish_effects(&initialize_effects, runtime.cache.current_generation());
+        Ok(runtime)
     }
 
     pub fn shutdown(&self) -> Result<()> {
@@ -611,14 +596,8 @@ impl Runtime {
         self.cache.paths_for_id(id.as_bytes()).into_iter().next()
     }
 
-    pub async fn call_timer_tick(&self) -> Result<wit_types::OpResult> {
-        self.run_op(
-            Op::OnEvent {
-                event: wit_types::ProviderEvent::TimerTick,
-            },
-            None,
-        )
-        .await
+    pub async fn call_timer_tick(&self) -> Result<()> {
+        self.run_event(wit_types::ProviderEvent::TimerTick).await
     }
 
     /// Resolve a tree-ref handle to a real filesystem path.
@@ -650,6 +629,13 @@ impl Runtime {
         std::fs::read(path)
             .map_err(|e| EngineError::ProviderProtocol(format!("read blob {blob_id}: {e}")))
     }
+
+    pub(crate) fn publish_effects(&self, effects: &wit_types::Effects, op_gen: u64) {
+        let now = clock::now_millis();
+        let (prefixes, paths) =
+            crate::effect_apply::EffectApplier::new(&self.cache).apply(effects, op_gen, now);
+        self.record_view_invalidations(prefixes, paths);
+    }
 }
 
 struct RecentObjects {
@@ -677,17 +663,19 @@ impl RecentObjects {
 }
 
 fn finish_initialize_return(
-    ret: wit_types::ProviderReturn,
-) -> std::result::Result<wit_types::InitializeResult, BuildError> {
-    op_validate::validate_return(&Op::Initialize, &ret, |_| false).map_err(|message| {
+    ret: (
+        std::result::Result<wit_types::InitializeResult, wit_types::ProviderError>,
+        wit_types::Effects,
+    ),
+) -> std::result::Result<(wit_types::InitializeResult, wit_types::Effects), BuildError> {
+    let (result, effects) = ret;
+    op_validate::validate_initialize(&result, &effects, |_| false).map_err(|message| {
         BuildError::ProviderProtocol(format!("initialize returned invalid result: {message}"))
     })?;
-    match ret.result {
-        wit_types::OpResult::Initialize(result) => Ok(result),
-        other => Err(BuildError::ProviderProtocol(format!(
-            "initialize returned unexpected result: {other:?}"
-        ))),
-    }
+    result
+        .map(|result| (result, effects))
+        .map_err(EngineError::ProviderError)
+        .map_err(BuildError::from)
 }
 
 /// The WASI preopens to hand the instance. A literal preopen grant is used

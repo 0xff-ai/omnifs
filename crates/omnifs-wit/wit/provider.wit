@@ -1,4 +1,4 @@
-package omnifs:provider@0.4.0;
+package omnifs:provider@0.5.0;
 
 // === Shared types ===
 
@@ -8,28 +8,6 @@ interface types {
     type tree-ref = u64;
     type file-handle = u64;
     type blob-id = u64;
-
-    // --- Terminal return ---
-
-    /// Completed operation answer. This shape cannot carry callouts.
-    /// `effects` is the only terminal host-mutation channel.
-    record provider-return {
-        %result: op-result,
-        effects: effects,
-    }
-
-    /// Completed operation answer. Arm names mirror provider operations;
-    /// `error` is the cross-operation failure arm.
-    variant op-result {
-        lookup-child(lookup-child-result),
-        list-children(list-children-result),
-        read-file(read-file-outcome),
-        open-file(open-file-result),
-        read-chunk(read-chunk-result),
-        initialize(initialize-result),
-        on-event,
-        error(provider-error),
-    }
 
     // --- Callouts (provider -> host, request/response) ---
 
@@ -492,35 +470,39 @@ interface types {
 // === Provider exports ===
 
 interface lifecycle {
-    use types.{provider-return, requested-capabilities};
+    use types.{effects, initialize-result, provider-error};
 
     /// Terminal-only in this iteration. It has no correlation id, so it
     /// cannot suspend on callouts unless the interface is explicitly
     /// changed later.
-    initialize: func(config: list<u8>) -> provider-return;
+    initialize: func(config: list<u8>)
+        -> tuple<result<initialize-result, provider-error>, effects>;
     shutdown: func();
 }
 
 interface namespace {
-    use types.{correlation-id, file-handle, provider-return, canonical-input, cursor};
+    use types.{canonical-input, correlation-id, cursor, effects, file-handle,
+        list-children-result, lookup-child-result, open-file-result, provider-error,
+        read-chunk-result, read-file-outcome};
 
     lookup-child: async func(id: correlation-id, parent-path: string, name: string)
-        -> provider-return;
+        -> tuple<result<lookup-child-result, provider-error>, effects>;
     list-children: async func(id: correlation-id, path: string, cached-validator: option<string>, cursor: option<cursor>)
-        -> provider-return;
+        -> tuple<result<list-children-result, provider-error>, effects>;
     read-file: async func(id: correlation-id, path: string, content-type: string, cached-canonical: option<canonical-input>)
-        -> provider-return;
+        -> tuple<result<read-file-outcome, provider-error>, effects>;
     open-file: async func(id: correlation-id, path: string)
-        -> provider-return;
+        -> tuple<result<open-file-result, provider-error>, effects>;
     read-chunk: async func(id: correlation-id, handle: file-handle, offset: u64, len: u32)
-        -> provider-return;
+        -> tuple<result<read-chunk-result, provider-error>, effects>;
     close-file: func(handle: file-handle);
 }
 
 interface notify {
-    use types.{correlation-id, provider-event, provider-return};
+    use types.{correlation-id, effects, provider-error, provider-event};
 
-    on-event: async func(id: correlation-id, event: provider-event) -> provider-return;
+    on-event: async func(id: correlation-id, event: provider-event)
+        -> tuple<result<_, provider-error>, effects>;
 }
 
 // === Host import ===
@@ -542,13 +524,6 @@ interface callouts {
 }
 
 // === Worlds ===
-
-world provider-core {
-    import log;
-    import callouts;
-    export lifecycle;
-    export namespace;
-}
 
 world provider {
     import log;

@@ -90,7 +90,7 @@ impl TreeError {
 pub type Result<T> = std::result::Result<T, TreeError>;
 
 // Host `EngineError` variants: Wasmtime, ProviderProtocol(String),
-// ProviderError(wit_types::ProviderError), UnexpectedOpResult { op, result }.
+// ProviderError(wit_types::ProviderError).
 // A typed `ProviderError` carries its `kind`/`retryable`/`retry-after` through
 // to the neutral `TreeErrorKind` so a renderer reproduces the right kernel
 // status (a `RateLimited` provider error must surface as EAGAIN, not EIO).

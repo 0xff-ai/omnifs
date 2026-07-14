@@ -81,7 +81,7 @@ impl Tree {
         runtime: &Arc<Runtime>,
         parent: &Path,
         name: &str,
-        ctx: &RequestCtx,
+        _ctx: &RequestCtx,
     ) -> Result<Node> {
         let rel = parent.join(name).map_err(|e| {
             TreeError::invalid_input(format!("resolve_child: invalid name {name:?}: {e}"))
@@ -127,11 +127,7 @@ impl Tree {
             return Ok(Node::new(mount, rel, meta, NodeBody::Provider));
         }
 
-        match runtime
-            .namespace()
-            .lookup_child(parent, name, ctx.trace)
-            .await?
-        {
+        match runtime.namespace().lookup_child(parent, name).await? {
             LookupOutcome::Entry(entry) => Ok(Node::new(
                 mount,
                 entry.path().clone(),

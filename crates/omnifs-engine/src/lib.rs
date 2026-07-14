@@ -85,11 +85,6 @@ pub(crate) use effects::invalidation;
 pub(crate) use inspect as inspector;
 #[cfg(feature = "runtime")]
 pub(crate) use omnifs_wit::provider::Provider;
-#[cfg(feature = "runtime")]
-pub(crate) use ops::op;
-#[cfg(feature = "runtime")]
-pub(crate) use ops::op::Op;
-#[cfg(feature = "runtime")]
 pub(crate) use ops::validate as op_validate;
 #[cfg(feature = "runtime")]
 pub(crate) use runtime::wasm::component_engine;

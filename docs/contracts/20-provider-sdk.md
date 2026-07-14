@@ -57,11 +57,13 @@ Provider handlers are async, and SDK callout futures await WIT async host import
 
 Use `cx::join_all` for independent concurrent callouts. It starts sibling async imports by polling them in one provider operation; it must not depend on positional host resume batches.
 
-The provider macro owns WIT export glue. Namespace and notify exports are async and return terminal `provider-return` values. Lifecycle exports remain terminal.
+The provider macro owns WIT export glue. Namespace and notify exports are async and return operation-specific typed result/effects tuples. Lifecycle exports return their operation-specific typed result/effects tuples as well.
 
 ### WIT coordination
 
 Changing the `Object` trait, route faces, dispatch, provider macro surface, or WIT contract is usually an all-provider migration. Keep providers, SDK tests, WIT boundary tests, and docs in step in the same change.
+
+Each lifecycle, namespace, and notify export returns only its operation-specific typed result together with terminal effects; impossible cross-operation results are unrepresentable at the component interface. Effects remain the only terminal host-mutation channel: provider errors carry empty effects, and the host validates typed success payloads plus effects before committing once.
 
 ## Must not
 

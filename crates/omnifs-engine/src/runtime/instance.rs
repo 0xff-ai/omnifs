@@ -7,17 +7,20 @@
 //! `Runtime` composes this with orchestration concerns
 //! (executors, caches, activity, invalidation, coalesce).
 
+use std::future::Future;
 use std::path::{Component as PathComponent, Path, PathBuf};
+use std::pin::Pin;
 use std::sync::Arc;
 
 use crate::callouts::{CalloutHost, ParkSignal};
 use futures::StreamExt;
+use tracing::Instrument;
 use wasmtime::component::{Component, Linker, ResourceTable};
 use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
 
 use crate::Provider;
 use crate::wasi::HostState;
-use crate::{BuildError, EngineError, Op};
+use crate::{BuildError, EngineError};
 use omnifs_caps::{PreopenMode, PreopenedPath};
 use omnifs_wit::provider::types as wit_types;
 
@@ -34,14 +37,50 @@ enum Command {
     },
     Initialize {
         config_bytes: Vec<u8>,
-        reply: std::sync::mpsc::Sender<std::result::Result<wit_types::ProviderReturn, EngineError>>,
+        reply: std::sync::mpsc::Sender<InitializeTransport>,
     },
-    StartOp {
-        op: Op,
+    LookupChild {
         id: u64,
-        reply: tokio::sync::oneshot::Sender<
-            std::result::Result<wit_types::ProviderReturn, EngineError>,
-        >,
+        parent_path: String,
+        name: String,
+        span: tracing::Span,
+        reply: tokio::sync::oneshot::Sender<LookupTransport>,
+    },
+    ListChildren {
+        id: u64,
+        path: String,
+        cached_validator: Option<String>,
+        cursor: Option<wit_types::Cursor>,
+        span: tracing::Span,
+        reply: tokio::sync::oneshot::Sender<ListTransport>,
+    },
+    ReadFile {
+        id: u64,
+        path: String,
+        content_type: String,
+        cached_canonical: Option<wit_types::CanonicalInput>,
+        span: tracing::Span,
+        reply: tokio::sync::oneshot::Sender<ReadTransport>,
+    },
+    OpenFile {
+        id: u64,
+        path: String,
+        span: tracing::Span,
+        reply: tokio::sync::oneshot::Sender<OpenTransport>,
+    },
+    ReadChunk {
+        id: u64,
+        handle: u64,
+        offset: u64,
+        length: u32,
+        span: tracing::Span,
+        reply: tokio::sync::oneshot::Sender<ChunkTransport>,
+    },
+    OnEvent {
+        id: u64,
+        event: wit_types::ProviderEvent,
+        span: tracing::Span,
+        reply: tokio::sync::oneshot::Sender<EventTransport>,
     },
     Shutdown {
         reply: std::sync::mpsc::Sender<std::result::Result<(), EngineError>>,
@@ -51,6 +90,56 @@ enum Command {
         reply: std::sync::mpsc::Sender<std::result::Result<(), EngineError>>,
     },
 }
+
+type InitializeTransport = std::result::Result<
+    (
+        std::result::Result<wit_types::InitializeResult, wit_types::ProviderError>,
+        wit_types::Effects,
+    ),
+    EngineError,
+>;
+type LookupTransport = std::result::Result<
+    (
+        std::result::Result<wit_types::LookupChildResult, wit_types::ProviderError>,
+        wit_types::Effects,
+    ),
+    EngineError,
+>;
+type ListTransport = std::result::Result<
+    (
+        std::result::Result<wit_types::ListChildrenResult, wit_types::ProviderError>,
+        wit_types::Effects,
+    ),
+    EngineError,
+>;
+type ReadTransport = std::result::Result<
+    (
+        std::result::Result<wit_types::ReadFileOutcome, wit_types::ProviderError>,
+        wit_types::Effects,
+    ),
+    EngineError,
+>;
+type OpenTransport = std::result::Result<
+    (
+        std::result::Result<wit_types::OpenFileResult, wit_types::ProviderError>,
+        wit_types::Effects,
+    ),
+    EngineError,
+>;
+type ChunkTransport = std::result::Result<
+    (
+        std::result::Result<wit_types::ReadChunkResult, wit_types::ProviderError>,
+        wit_types::Effects,
+    ),
+    EngineError,
+>;
+type EventTransport = std::result::Result<
+    (
+        std::result::Result<(), wit_types::ProviderError>,
+        wit_types::Effects,
+    ),
+    EngineError,
+>;
 
 impl Instance {
     pub(crate) fn new(
@@ -113,14 +202,21 @@ impl Instance {
         Ok(Self { tx, config_bytes })
     }
 
-    pub(crate) async fn start_op(
+    pub(crate) async fn lookup_child(
         &self,
-        op: Op,
         id: u64,
-    ) -> std::result::Result<wit_types::ProviderReturn, EngineError> {
+        parent_path: String,
+        name: String,
+    ) -> LookupTransport {
         let (reply, recv) = tokio::sync::oneshot::channel();
         self.tx
-            .send(Command::StartOp { op, id, reply })
+            .send(Command::LookupChild {
+                id,
+                parent_path,
+                name,
+                span: tracing::Span::current(),
+                reply,
+            })
             .map_err(|_| {
                 EngineError::ProviderProtocol("provider instance driver stopped".to_string())
             })?;
@@ -129,7 +225,120 @@ impl Instance {
         })?
     }
 
-    pub fn initialize(&self) -> std::result::Result<wit_types::ProviderReturn, EngineError> {
+    pub(crate) async fn list_children(
+        &self,
+        id: u64,
+        path: String,
+        cached_validator: Option<String>,
+        cursor: Option<wit_types::Cursor>,
+    ) -> ListTransport {
+        let (reply, recv) = tokio::sync::oneshot::channel();
+        self.tx
+            .send(Command::ListChildren {
+                id,
+                path,
+                cached_validator,
+                cursor,
+                span: tracing::Span::current(),
+                reply,
+            })
+            .map_err(|_| {
+                EngineError::ProviderProtocol("provider instance driver stopped".to_string())
+            })?;
+        recv.await.map_err(|_| {
+            EngineError::ProviderProtocol("provider operation reply dropped".to_string())
+        })?
+    }
+
+    pub(crate) async fn read_file(
+        &self,
+        id: u64,
+        path: String,
+        content_type: String,
+        cached_canonical: Option<wit_types::CanonicalInput>,
+    ) -> ReadTransport {
+        let (reply, recv) = tokio::sync::oneshot::channel();
+        self.tx
+            .send(Command::ReadFile {
+                id,
+                path,
+                content_type,
+                cached_canonical,
+                span: tracing::Span::current(),
+                reply,
+            })
+            .map_err(|_| {
+                EngineError::ProviderProtocol("provider instance driver stopped".to_string())
+            })?;
+        recv.await.map_err(|_| {
+            EngineError::ProviderProtocol("provider operation reply dropped".to_string())
+        })?
+    }
+
+    pub(crate) async fn open_file(&self, id: u64, path: String) -> OpenTransport {
+        let (reply, recv) = tokio::sync::oneshot::channel();
+        self.tx
+            .send(Command::OpenFile {
+                id,
+                path,
+                span: tracing::Span::current(),
+                reply,
+            })
+            .map_err(|_| {
+                EngineError::ProviderProtocol("provider instance driver stopped".to_string())
+            })?;
+        recv.await.map_err(|_| {
+            EngineError::ProviderProtocol("provider operation reply dropped".to_string())
+        })?
+    }
+
+    pub(crate) async fn read_chunk(
+        &self,
+        id: u64,
+        handle: u64,
+        offset: u64,
+        length: u32,
+    ) -> ChunkTransport {
+        let (reply, recv) = tokio::sync::oneshot::channel();
+        self.tx
+            .send(Command::ReadChunk {
+                id,
+                handle,
+                offset,
+                length,
+                span: tracing::Span::current(),
+                reply,
+            })
+            .map_err(|_| {
+                EngineError::ProviderProtocol("provider instance driver stopped".to_string())
+            })?;
+        recv.await.map_err(|_| {
+            EngineError::ProviderProtocol("provider operation reply dropped".to_string())
+        })?
+    }
+
+    pub(crate) async fn on_event(
+        &self,
+        id: u64,
+        event: wit_types::ProviderEvent,
+    ) -> EventTransport {
+        let (reply, recv) = tokio::sync::oneshot::channel();
+        self.tx
+            .send(Command::OnEvent {
+                id,
+                event,
+                span: tracing::Span::current(),
+                reply,
+            })
+            .map_err(|_| {
+                EngineError::ProviderProtocol("provider instance driver stopped".to_string())
+            })?;
+        recv.await.map_err(|_| {
+            EngineError::ProviderProtocol("provider operation reply dropped".to_string())
+        })?
+    }
+
+    pub fn initialize(&self) -> InitializeTransport {
         self.call_sync(|reply| Command::Initialize {
             config_bytes: self.config_bytes.clone(),
             reply,
@@ -197,7 +406,8 @@ async fn drive_instance(
     let bindings = Arc::new(bindings);
     store
         .run_concurrent(async |accessor| -> wasmtime::Result<()> {
-            let mut calls = futures::stream::FuturesUnordered::new();
+            let mut calls: futures::stream::FuturesUnordered<Pin<Box<dyn Future<Output = ()>>>> =
+                futures::stream::FuturesUnordered::new();
             loop {
                 tokio::select! {
                     Some(command) = rx.recv() => {
@@ -214,7 +424,10 @@ async fn drive_instance(
                                     lifecycle
                                         .func_initialize()
                                         .func()
-                                        .typed::<(Vec<u8>,), (wit_types::ProviderReturn,)>(&access)
+                                        .typed::<
+                                            (Vec<u8>,),
+                                            ((std::result::Result<wit_types::InitializeResult, wit_types::ProviderError>, wit_types::Effects),),
+                                        >(&access)
                                 }) {
                                     Ok(initialize) => initialize
                                         .call_concurrent(accessor, (config_bytes,))
@@ -225,12 +438,71 @@ async fn drive_instance(
                                 .map_err(Into::into);
                                 let _ = reply.send(result);
                             },
-                            Command::StartOp { op, id, reply } => {
-                                let bindings = Arc::clone(&bindings);
+                            Command::LookupChild { id, parent_path, name, span, reply } => {
+                                let namespace = Arc::clone(&bindings);
                                 calls.push(Box::pin(async move {
-                                    let result = call_op(&bindings, accessor, op, id).await;
+                                    let result = namespace
+                                        .omnifs_provider_namespace()
+                                        .call_lookup_child(accessor, id, parent_path, name)
+                                        .await
+                                        .map_err(Into::into);
                                     let _ = reply.send(result);
-                                }));
+                                }.instrument(span)));
+                            },
+                            Command::ListChildren { id, path, cached_validator, cursor, span, reply } => {
+                                let namespace = Arc::clone(&bindings);
+                                calls.push(Box::pin(async move {
+                                    let result = namespace
+                                        .omnifs_provider_namespace()
+                                        .call_list_children(accessor, id, path, cached_validator, cursor)
+                                        .await
+                                        .map_err(Into::into);
+                                    let _ = reply.send(result);
+                                }.instrument(span)));
+                            },
+                            Command::ReadFile { id, path, content_type, cached_canonical, span, reply } => {
+                                let namespace = Arc::clone(&bindings);
+                                calls.push(Box::pin(async move {
+                                    let result = namespace
+                                        .omnifs_provider_namespace()
+                                        .call_read_file(accessor, id, path, content_type, cached_canonical)
+                                        .await
+                                        .map_err(Into::into);
+                                    let _ = reply.send(result);
+                                }.instrument(span)));
+                            },
+                            Command::OpenFile { id, path, span, reply } => {
+                                let namespace = Arc::clone(&bindings);
+                                calls.push(Box::pin(async move {
+                                    let result = namespace
+                                        .omnifs_provider_namespace()
+                                        .call_open_file(accessor, id, path)
+                                        .await
+                                        .map_err(Into::into);
+                                    let _ = reply.send(result);
+                                }.instrument(span)));
+                            },
+                            Command::ReadChunk { id, handle, offset, length, span, reply } => {
+                                let namespace = Arc::clone(&bindings);
+                                calls.push(Box::pin(async move {
+                                    let result = namespace
+                                        .omnifs_provider_namespace()
+                                        .call_read_chunk(accessor, id, handle, offset, length)
+                                        .await
+                                        .map_err(Into::into);
+                                    let _ = reply.send(result);
+                                }.instrument(span)));
+                            },
+                            Command::OnEvent { id, event, span, reply } => {
+                                let notify = Arc::clone(&bindings);
+                                calls.push(Box::pin(async move {
+                                    let result = notify
+                                        .omnifs_provider_notify()
+                                        .call_on_event(accessor, id, event)
+                                        .await
+                                        .map_err(Into::into);
+                                    let _ = reply.send(result);
+                                }.instrument(span)));
                             },
                             Command::Shutdown { reply } => {
                                 let shutdown = bindings.omnifs_provider_lifecycle().func_shutdown();
@@ -259,68 +531,6 @@ async fn drive_instance(
             Ok(())
         })
         .await?
-}
-
-async fn call_op(
-    bindings: &Provider,
-    accessor: &wasmtime::component::Accessor<HostState>,
-    op: Op,
-    id: u64,
-) -> std::result::Result<wit_types::ProviderReturn, EngineError> {
-    let namespace = bindings.omnifs_provider_namespace();
-    match op {
-        Op::LookupChild { parent_path, name } => Ok(namespace
-            .call_lookup_child(
-                accessor,
-                id,
-                parent_path.as_str().to_string(),
-                name.as_str().to_string(),
-            )
-            .await?),
-        Op::ListChildren {
-            path,
-            cached_validator,
-            cursor,
-        } => Ok(namespace
-            .call_list_children(
-                accessor,
-                id,
-                path.as_str().to_string(),
-                cached_validator,
-                cursor,
-            )
-            .await?),
-        Op::ReadFile {
-            path,
-            content_type,
-            cached_canonical,
-        } => Ok(namespace
-            .call_read_file(
-                accessor,
-                id,
-                path.as_str().to_string(),
-                content_type,
-                cached_canonical,
-            )
-            .await?),
-        Op::OpenFile { path } => Ok(namespace
-            .call_open_file(accessor, id, path.as_str().to_string())
-            .await?),
-        Op::ReadChunk {
-            handle,
-            offset,
-            length,
-        } => Ok(namespace
-            .call_read_chunk(accessor, id, handle, offset, length)
-            .await?),
-        Op::OnEvent { event } => Ok(bindings
-            .omnifs_provider_notify()
-            .call_on_event(accessor, id, event)
-            .await?),
-        Op::Initialize => {
-            unreachable!("Op::Initialize never reaches start_op; see Instance::initialize")
-        },
-    }
 }
 
 fn build_wasi_ctx(

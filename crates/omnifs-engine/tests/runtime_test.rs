@@ -11,7 +11,6 @@ use omnifs_itest::{
     make_engine, make_initialized_runtime, make_runtime, provider_wasm_path,
     spec_with_test_provider,
 };
-use omnifs_wit::provider::types::OpResult;
 
 fn p(value: &str) -> Path {
     Path::parse(value).unwrap()
@@ -33,19 +32,20 @@ fn test_context(
     HostContext::new(cache_dir, config_dir, providers_dir, credentials_file)
 }
 
-/// Every shipped provider must initialize (run `start()` + `compile()`) cleanly.
+/// Every shipped provider must initialize (run `start()` + `Router::compile()`) cleanly.
 /// Router compilation runs inside `initialize` and needs no credentials, so this is a
 /// deterministic gate for route-overlap and registration errors that a
-/// `cargo check` for `wasm32-wasip2` cannot catch (it compiles but never seals).
+/// `cargo check` for `wasm32-wasip2` cannot catch (it type-checks but never compiles the route tree).
 /// This guards against the class of bug where a migrated provider mounts an
 /// object at the wrong template (e.g. an object at `/{a}/{b}` colliding with a
 /// literal route), which otherwise only surfaces at live mount time.
 #[tokio::test]
-async fn all_providers_initialize_and_seal() {
+async fn all_providers_initialize_and_compile() {
     // Providers whose `start()` registers routes without touching a backing
     // resource. `db` is excluded: it opens its SQLite file at init, so a bare
-    // harness (no fixture) fails with an environmental I/O error, not a router
-    // compilation error; db's router is compiled through its live mount instead.
+    // harness (no fixture) fails with an environmental I/O error, not a route
+    // compilation error; db's route compilation is exercised through its live
+    // mount instead.
     let providers = [
         ("omnifs_provider_github.wasm", "github"),
         ("omnifs_provider_arxiv.wasm", "arxiv"),
@@ -85,7 +85,7 @@ async fn test_list_root() {
     let result = harness
         .runtime
         .namespace()
-        .list_children(&p("/"), None, None, None)
+        .list_children(&p("/"), None, None)
         .await
         .unwrap();
     match result {
@@ -122,7 +122,7 @@ async fn test_list_hello_dir() {
     let result = harness
         .runtime
         .namespace()
-        .list_children(&p("/hello"), None, None, None)
+        .list_children(&p("/hello"), None, None)
         .await
         .unwrap();
     match result {
@@ -170,7 +170,7 @@ async fn test_list_projects_nested_files_into_cache() {
     let result = harness
         .runtime
         .namespace()
-        .list_children(&p("/hello"), None, None, None)
+        .list_children(&p("/hello"), None, None)
         .await
         .unwrap();
     assert!(
@@ -230,7 +230,7 @@ async fn test_list_projects_direct_file_content_into_cache() {
     let result = harness
         .runtime
         .namespace()
-        .list_children(&p("/hello/bundle"), None, None, None)
+        .list_children(&p("/hello/bundle"), None, None)
         .await
         .unwrap();
     assert!(
@@ -283,7 +283,7 @@ async fn test_mutable_unversioned_full_reads_are_observation_only() {
     let first = harness
         .runtime
         .namespace()
-        .read_file(&p(path), content_type.clone(), None)
+        .read_file(&p(path), content_type.clone())
         .await
         .unwrap();
     assert_eq!(inline_content(&first), b"fresh-full-1\n");
@@ -301,7 +301,7 @@ async fn test_mutable_unversioned_full_reads_are_observation_only() {
     let second = harness
         .runtime
         .namespace()
-        .read_file(&p(path), content_type, None)
+        .read_file(&p(path), content_type)
         .await
         .unwrap();
     assert_eq!(inline_content(&second), b"fresh-full-2\n");
@@ -337,7 +337,6 @@ async fn test_read_file() {
                 .unwrap()
                 .content_type_mime(None)
                 .to_string(),
-            None,
         )
         .await
         .unwrap();
@@ -352,7 +351,6 @@ async fn test_read_file() {
                 .unwrap()
                 .content_type_mime(None)
                 .to_string(),
-            None,
         )
         .await
         .unwrap();
@@ -376,7 +374,7 @@ async fn test_read_file_sibling_projections_do_not_erase_parent_dirents() {
     let listing = harness
         .runtime
         .namespace()
-        .list_children(&p("/hello"), None, None, None)
+        .list_children(&p("/hello"), None, None)
         .await
         .unwrap();
     match listing {
@@ -393,7 +391,6 @@ async fn test_read_file_sibling_projections_do_not_erase_parent_dirents() {
                 .unwrap()
                 .content_type_mime(None)
                 .to_string(),
-            None,
         )
         .await
         .unwrap();
@@ -491,7 +488,7 @@ async fn test_object_dir_child_lookup_preserves_full_listing() {
     let listing = harness
         .runtime
         .namespace()
-        .list_children(&object_dir, None, None, None)
+        .list_children(&object_dir, None, None)
         .await
         .unwrap();
     let NamespaceListOutcome::Entries(listing) = listing else {
@@ -509,7 +506,7 @@ async fn test_object_dir_child_lookup_preserves_full_listing() {
     let lookup = harness
         .runtime
         .namespace()
-        .lookup_child(&object_dir, "body", None)
+        .lookup_child(&object_dir, "body")
         .await
         .unwrap();
     match &lookup {
@@ -635,7 +632,7 @@ async fn test_lookup_child() {
     let result = harness
         .runtime
         .namespace()
-        .lookup_child(&p("/"), "hello", None)
+        .lookup_child(&p("/"), "hello")
         .await
         .unwrap();
     match result {
@@ -649,7 +646,7 @@ async fn test_lookup_child() {
     let exact_file = harness
         .runtime
         .namespace()
-        .lookup_child(&p("/hello"), "lazy", None)
+        .lookup_child(&p("/hello"), "lazy")
         .await
         .unwrap();
     match exact_file {
@@ -676,7 +673,7 @@ async fn test_lookup_child() {
     let missing = harness
         .runtime
         .namespace()
-        .lookup_child(&p("/hello"), "missing", None)
+        .lookup_child(&p("/hello"), "missing")
         .await
         .unwrap();
     assert!(
@@ -719,7 +716,7 @@ async fn test_subtree_handoff_rejects_unknown_tree_ref() {
     let lookup_error = harness
         .runtime
         .namespace()
-        .lookup_child(&p("/"), "checkout", None)
+        .lookup_child(&p("/"), "checkout")
         .await
         .unwrap_err();
     assert!(
@@ -732,7 +729,7 @@ async fn test_subtree_handoff_rejects_unknown_tree_ref() {
     let listing_error = harness
         .runtime
         .namespace()
-        .list_children(&p("/checkout"), None, None, None)
+        .list_children(&p("/checkout"), None, None)
         .await
         .unwrap_err();
     assert!(
@@ -765,7 +762,7 @@ async fn test_list_projects_adjacent_files_into_cache() {
     let listing = harness
         .runtime
         .namespace()
-        .list_children(&p("/hello/bundle"), None, None, None)
+        .list_children(&p("/hello/bundle"), None, None)
         .await
         .unwrap();
     match &listing {
@@ -821,7 +818,7 @@ async fn test_lookup_returns_siblings_and_list_warms_child_shape() {
     let result = harness
         .runtime
         .namespace()
-        .lookup_child(&p("/hello"), "snapshot", None)
+        .lookup_child(&p("/hello"), "snapshot")
         .await
         .unwrap();
 
@@ -874,7 +871,7 @@ async fn test_lookup_returns_siblings_and_list_warms_child_shape() {
     let listing = harness
         .runtime
         .namespace()
-        .list_children(&p("/hello/snapshot"), None, None, None)
+        .list_children(&p("/hello/snapshot"), None, None)
         .await
         .unwrap();
     match &listing {
@@ -1018,7 +1015,7 @@ async fn test_cache_isolated_by_mount_name() {
 
     let result = runtime_a
         .namespace()
-        .list_children(&p("/hello"), None, None, None)
+        .list_children(&p("/hello"), None, None)
         .await
         .unwrap();
     assert!(matches!(result, NamespaceListOutcome::Entries(_)));
@@ -1037,12 +1034,12 @@ async fn test_cache_isolated_by_mount_name() {
 
     let scoped_a = runtime_a
         .namespace()
-        .list_children(&p("/scoped"), None, None, None)
+        .list_children(&p("/scoped"), None, None)
         .await
         .unwrap();
     let scoped_b = runtime_b
         .namespace()
-        .list_children(&p("/scoped"), None, None, None)
+        .list_children(&p("/scoped"), None, None)
         .await
         .unwrap();
     assert!(matches!(scoped_a, NamespaceListOutcome::Entries(_)));
@@ -1060,8 +1057,7 @@ async fn test_cache_isolated_by_mount_name() {
             .is_some()
     );
 
-    let tick = runtime_a.call_timer_tick().await.unwrap();
-    assert!(matches!(tick, OpResult::OnEvent));
+    runtime_a.call_timer_tick().await.unwrap();
     assert!(
         runtime_a
             .cache()

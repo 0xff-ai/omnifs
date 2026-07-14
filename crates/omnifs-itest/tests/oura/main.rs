@@ -3,7 +3,7 @@
 use omnifs_itest::{RuntimeHarness, TestOpExt, make_initialized_runtime};
 use omnifs_wit::provider::types::{
     ByteSource, CalloutResult, EntryKind, ErrorKind, FileSize, FsKind, Header, HttpResponse,
-    ListChildrenResult, LookupChildResult, OpResult, ReadFileOutcome, ReadMode, Stability,
+    ListChildrenResult, LookupChildResult, ReadFileOutcome, ReadMode, Stability,
 };
 use serde_json::{Value, json};
 
@@ -55,7 +55,7 @@ fn resume_json(op: &mut omnifs_engine::test_support::TestOp<'_>, body: &'static 
 
 fn read_query_body(op: &omnifs_engine::test_support::TestOp<'_>) -> Vec<u8> {
     match op.result().unwrap() {
-        OpResult::ReadFile(ReadFileOutcome::Found(file)) => {
+        Ok(ReadFileOutcome::Found(file)) => {
             assert_eq!(file.attrs.stability, Stability::Dynamic);
             assert!(file.attrs.version_token.is_none());
             match &file.bytes {
@@ -137,7 +137,7 @@ fn root_is_open_and_date_directories_list_day_files() {
 
     let root = harness.list("/").unwrap();
     match root.result().unwrap() {
-        OpResult::ListChildren(ListChildrenResult::Entries(listing)) => {
+        Ok(ListChildrenResult::Entries(listing)) => {
             assert!(!listing.exhaustive);
             let names: Vec<&str> = listing
                 .entries
@@ -151,7 +151,7 @@ fn root_is_open_and_date_directories_list_day_files() {
 
     let day_lookup = harness.lookup("/", "2026-01-15").unwrap();
     match day_lookup.result().unwrap() {
-        OpResult::LookupChild(LookupChildResult::Entry(result)) => {
+        Ok(LookupChildResult::Entry(result)) => {
             assert_eq!(result.target.name, "2026-01-15");
             assert!(matches!(result.target.kind, EntryKind::Directory));
         },
@@ -160,7 +160,7 @@ fn root_is_open_and_date_directories_list_day_files() {
 
     let day = harness.list("/2026-01-15").unwrap();
     match day.result().unwrap() {
-        OpResult::ListChildren(ListChildrenResult::Entries(listing)) => {
+        Ok(ListChildrenResult::Entries(listing)) => {
             assert!(listing.exhaustive);
             let mut names: Vec<&str> = listing
                 .entries
@@ -182,7 +182,7 @@ fn non_day_indexed_collections_do_not_resolve_as_day_files() {
         .lookup("/2026-01-15", "ring_configuration.json")
         .unwrap();
     match lookup.result().unwrap() {
-        OpResult::LookupChild(LookupChildResult::NotFound(_)) => {},
+        Ok(LookupChildResult::NotFound(_)) => {},
         other => panic!("expected ring_configuration to be absent, got {other:?}"),
     }
 }
@@ -271,7 +271,7 @@ fn day_file_reads_one_month_date_range_and_stores_neighbor_days() {
     invalid.expect_single_fetch();
     resume_json(&mut invalid, br#"{"next_token":"ignored"}"#);
     match invalid.result().unwrap() {
-        OpResult::Error(error) => {
+        Err(error) => {
             assert_eq!(error.kind, ErrorKind::Internal);
             assert!(error.message.contains("data"));
         },

@@ -1,64 +1,125 @@
-//! Validates provider returns against the invoked [`Op`](super::op::Op).
+//! Typed validation for provider operation payloads and terminal effects.
 
 use std::collections::HashMap;
 
-use super::op::Op;
 use crate::object_id::ObjectId;
 use crate::view::{MAX_EAGER_RESPONSE_BYTES, MAX_VERSION_TOKEN_BYTES};
 use crate::wit_protocol::{try_file_attrs_from_attrs, try_file_attrs_from_file_out};
 use omnifs_core::path::Path;
 use omnifs_wit::provider::types as wit_types;
 
-pub(crate) fn validate_return<F>(
-    op: &Op,
-    ret: &wit_types::ProviderReturn,
-    tree_exists: F,
-) -> std::result::Result<(), String>
-where
-    F: Fn(u64) -> bool,
-{
-    ReturnValidator {
-        op,
-        ret,
-        eager_bytes: 0,
-        tree_exists,
-    }
-    .validate()
-}
-
-struct ReturnValidator<'a, F> {
-    op: &'a Op,
-    ret: &'a wit_types::ProviderReturn,
+pub(crate) struct ReturnValidator<'a, F> {
+    effects: &'a wit_types::Effects,
     eager_bytes: usize,
     tree_exists: F,
 }
 
-impl<F> ReturnValidator<'_, F>
+impl<'a, F> ReturnValidator<'a, F>
 where
     F: Fn(u64) -> bool,
 {
-    fn validate(&mut self) -> std::result::Result<(), String> {
-        self.error_returns_do_not_mutate()?;
-        self.op_result()?;
-        self.effects()?;
-        self.subtree_tree()?;
-        Ok(())
+    pub(crate) fn new(effects: &'a wit_types::Effects, tree_exists: F) -> Self {
+        Self {
+            effects,
+            eager_bytes: 0,
+            tree_exists,
+        }
     }
 
-    fn error_returns_do_not_mutate(&self) -> std::result::Result<(), String> {
-        if matches!(self.ret.result, wit_types::OpResult::Error(_))
-            && !effects_empty(&self.ret.effects)
-        {
+    pub(crate) fn common<T>(
+        result: &std::result::Result<T, wit_types::ProviderError>,
+        effects: &'a wit_types::Effects,
+        tree_exists: F,
+    ) -> std::result::Result<Self, String> {
+        if result.is_err() && !effects_empty(effects) {
             return Err("provider error returns must not carry effects".to_string());
+        }
+        let mut validator = Self::new(effects, tree_exists);
+        validator.effects()?;
+        Ok(validator)
+    }
+
+    pub(crate) fn lookup(
+        &mut self,
+        result: &std::result::Result<wit_types::LookupChildResult, wit_types::ProviderError>,
+    ) -> std::result::Result<(), String> {
+        let Ok(result) = result else { return Ok(()) };
+        match result {
+            wit_types::LookupChildResult::Entry(entry) => {
+                self.entry(&entry.target.kind)?;
+                for sibling in &entry.siblings {
+                    self.entry(&sibling.kind)?;
+                }
+            },
+            wit_types::LookupChildResult::Subtree(tree) => self.subtree_tree(*tree)?,
+            wit_types::LookupChildResult::NotFound(_) => {},
         }
         Ok(())
     }
 
+    pub(crate) fn list(
+        &mut self,
+        result: &std::result::Result<wit_types::ListChildrenResult, wit_types::ProviderError>,
+    ) -> std::result::Result<(), String> {
+        let Ok(result) = result else { return Ok(()) };
+        match result {
+            wit_types::ListChildrenResult::Entries(listing) => {
+                for entry in &listing.entries {
+                    self.entry(&entry.kind)?;
+                }
+            },
+            wit_types::ListChildrenResult::Subtree(tree) => self.subtree_tree(*tree)?,
+            wit_types::ListChildrenResult::Unchanged => {},
+        }
+        Ok(())
+    }
+
+    pub(crate) fn read(
+        &mut self,
+        result: &std::result::Result<wit_types::ReadFileOutcome, wit_types::ProviderError>,
+    ) -> std::result::Result<(), String> {
+        let Ok(result) = result else { return Ok(()) };
+        match result {
+            wit_types::ReadFileOutcome::Found(result) => self.read_file_result(result),
+            wit_types::ReadFileOutcome::NotFound(_) => Ok(()),
+        }
+    }
+
+    pub(crate) fn open(
+        &mut self,
+        result: &std::result::Result<wit_types::OpenFileResult, wit_types::ProviderError>,
+    ) -> std::result::Result<(), String> {
+        if let Ok(result) = result {
+            Self::file_attrs_metadata(&result.attrs)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn chunk(
+        &mut self,
+        _result: &std::result::Result<wit_types::ReadChunkResult, wit_types::ProviderError>,
+    ) -> std::result::Result<(), String> {
+        Ok(())
+    }
+
+    pub(crate) fn initialize(
+        &mut self,
+        _result: &std::result::Result<wit_types::InitializeResult, wit_types::ProviderError>,
+    ) -> std::result::Result<(), String> {
+        Ok(())
+    }
+
+    pub(crate) fn event(
+        &mut self,
+        _result: &std::result::Result<(), wit_types::ProviderError>,
+    ) -> std::result::Result<(), String> {
+        Ok(())
+    }
+
     fn effects(&mut self) -> std::result::Result<(), String> {
-        let effects = &self.ret.effects;
+        let effects = self.effects;
         let mut canonical_path_to_id: HashMap<String, Vec<u8>> = HashMap::new();
         let mut fs_path_to_id: HashMap<String, Vec<u8>> = HashMap::new();
-
         for store in &effects.canonical {
             if store.id.kind.is_empty() {
                 return Err("canonical-store id.kind must not be empty".to_string());
@@ -71,7 +132,7 @@ where
                 if leaf.is_empty() {
                     return Err("canonical-store has an empty view-leaf".to_string());
                 }
-                if omnifs_core::path::Path::parse(leaf).is_err() {
+                if Path::parse(leaf).is_err() {
                     return Err(format!(
                         "canonical-store view-leaf {leaf:?} is not a valid protocol path"
                     ));
@@ -86,7 +147,6 @@ where
                 ));
             }
         }
-
         for write in &effects.fs {
             if Path::parse(&write.path).is_err() {
                 return Err(format!(
@@ -101,127 +161,58 @@ where
             }
             if let wit_types::FsKind::File(file) = &write.kind {
                 self.file_out(file)
-                    .map_err(|error| format!("fs-write {:?}: {error}", write.path))?;
+                    .map_err(|e| format!("fs-write {:?}: {e}", write.path))?;
             }
         }
-
         for invalidation in &effects.invalidations {
-            match invalidation {
-                wit_types::Invalidation::Object(_) => {},
-                wit_types::Invalidation::Listing(
-                    wit_types::PathOrPrefix::Path(p) | wit_types::PathOrPrefix::Prefix(p),
-                ) => {
-                    if omnifs_core::path::Path::parse(p).is_err() {
-                        return Err(format!(
-                            "invalidation path {p:?} is not a valid protocol path"
-                        ));
-                    }
-                },
+            if let wit_types::Invalidation::Listing(
+                wit_types::PathOrPrefix::Path(p) | wit_types::PathOrPrefix::Prefix(p),
+            ) = invalidation
+                && Path::parse(p).is_err()
+            {
+                return Err(format!(
+                    "invalidation path {p:?} is not a valid protocol path"
+                ));
             }
         }
+        Ok(())
+    }
 
+    fn subtree_tree(&self, tree: u64) -> std::result::Result<(), String> {
+        if !(self.tree_exists)(tree) {
+            return Err(format!("subtree result references unknown tree {tree}"));
+        }
         Ok(())
     }
 
     fn track_unique_path_id(
-        path_to_id: &mut HashMap<String, Vec<u8>>,
+        map: &mut HashMap<String, Vec<u8>>,
         path: &str,
-        id_bytes: &[u8],
+        id: &[u8],
     ) -> std::result::Result<(), String> {
-        match path_to_id.get(path) {
-            Some(other) if other.as_slice() != id_bytes => Err(format!(
+        match map.get(path) {
+            Some(other) if other.as_slice() != id => Err(format!(
                 "path {path:?} maps to two different object ids in one return"
             )),
             Some(_) => Err(format!("duplicate path {path:?} in one return")),
             None => {
-                path_to_id.insert(path.to_string(), id_bytes.to_vec());
+                map.insert(path.to_string(), id.to_vec());
                 Ok(())
             },
         }
     }
 
     fn check_path_id_conflict(
-        path_to_id: &HashMap<String, Vec<u8>>,
+        map: &HashMap<String, Vec<u8>>,
         path: &str,
-        id_bytes: &[u8],
+        id: &[u8],
     ) -> std::result::Result<(), String> {
-        match path_to_id.get(path) {
-            Some(other) if other.as_slice() != id_bytes => Err(format!(
+        match map.get(path) {
+            Some(other) if other.as_slice() != id => Err(format!(
                 "path {path:?} maps to two different object ids in one return"
             )),
             _ => Ok(()),
         }
-    }
-
-    fn op_result(&mut self) -> std::result::Result<(), String> {
-        match (self.op, &self.ret.result) {
-            (
-                Op::LookupChild { .. },
-                wit_types::OpResult::LookupChild(wit_types::LookupChildResult::Entry(entry)),
-            ) => {
-                self.entry(&entry.target.kind)?;
-                for sibling in &entry.siblings {
-                    self.entry(&sibling.kind)?;
-                }
-            },
-            (
-                Op::LookupChild { .. },
-                wit_types::OpResult::LookupChild(
-                    wit_types::LookupChildResult::Subtree(_)
-                    | wit_types::LookupChildResult::NotFound(_),
-                ),
-            )
-            | (
-                Op::ListChildren { .. },
-                wit_types::OpResult::ListChildren(wit_types::ListChildrenResult::Subtree(_)),
-            )
-            | (Op::ReadChunk { .. }, wit_types::OpResult::ReadChunk(_))
-            | (Op::Initialize, wit_types::OpResult::Initialize(_))
-            | (Op::OnEvent { .. }, wit_types::OpResult::OnEvent)
-            | (_, wit_types::OpResult::Error(_))
-            | (
-                Op::ReadFile { .. },
-                wit_types::OpResult::ReadFile(wit_types::ReadFileOutcome::NotFound(_)),
-            ) => {},
-            (
-                Op::ListChildren { .. },
-                wit_types::OpResult::ListChildren(wit_types::ListChildrenResult::Entries(listing)),
-            ) => {
-                for entry in &listing.entries {
-                    self.entry(&entry.kind)?;
-                }
-            },
-            (
-                Op::ReadFile { .. },
-                wit_types::OpResult::ReadFile(wit_types::ReadFileOutcome::Found(result)),
-            ) => {
-                self.read_file_result(result)?;
-            },
-            (Op::OpenFile { .. }, wit_types::OpResult::OpenFile(result)) => {
-                Self::file_attrs_metadata(&result.attrs)?;
-            },
-            _ => {
-                return Err(format!(
-                    "{:?} returned unexpected result: {:?}",
-                    self.op, self.ret.result
-                ));
-            },
-        }
-        Ok(())
-    }
-
-    fn subtree_tree(&self) -> std::result::Result<(), String> {
-        let tree = match &self.ret.result {
-            wit_types::OpResult::LookupChild(wit_types::LookupChildResult::Subtree(tree))
-            | wit_types::OpResult::ListChildren(wit_types::ListChildrenResult::Subtree(tree)) => {
-                *tree
-            },
-            _ => return Ok(()),
-        };
-        if !(self.tree_exists)(tree) {
-            return Err(format!("subtree result references unknown tree {tree}"));
-        }
-        Ok(())
     }
 
     fn entry(&mut self, kind: &wit_types::EntryKind) -> std::result::Result<(), String> {
@@ -247,7 +238,7 @@ where
                 let attrs = try_file_attrs_from_attrs(&result.attrs)?;
                 attrs
                     .validate_complete_content(bytes.len())
-                    .map_err(|error| format!("read-file result: {error}"))?;
+                    .map_err(|e| format!("read-file result: {e}"))?;
                 self.add_eager_bytes(bytes.len())?;
             },
             wit_types::ByteSource::Canonical | wit_types::ByteSource::Blob(_) => {},
@@ -286,6 +277,84 @@ where
         }
         Ok(())
     }
+}
+
+pub(crate) fn validate_lookup<F>(
+    result: &std::result::Result<wit_types::LookupChildResult, wit_types::ProviderError>,
+    effects: &wit_types::Effects,
+    tree_exists: F,
+) -> std::result::Result<(), String>
+where
+    F: Fn(u64) -> bool,
+{
+    let mut v = ReturnValidator::common(result, effects, tree_exists)?;
+    v.lookup(result)
+}
+pub(crate) fn validate_list<F>(
+    result: &std::result::Result<wit_types::ListChildrenResult, wit_types::ProviderError>,
+    effects: &wit_types::Effects,
+    tree_exists: F,
+) -> std::result::Result<(), String>
+where
+    F: Fn(u64) -> bool,
+{
+    let mut v = ReturnValidator::common(result, effects, tree_exists)?;
+    v.list(result)
+}
+pub(crate) fn validate_read<F>(
+    result: &std::result::Result<wit_types::ReadFileOutcome, wit_types::ProviderError>,
+    effects: &wit_types::Effects,
+    tree_exists: F,
+) -> std::result::Result<(), String>
+where
+    F: Fn(u64) -> bool,
+{
+    let mut v = ReturnValidator::common(result, effects, tree_exists)?;
+    v.read(result)
+}
+pub(crate) fn validate_open<F>(
+    result: &std::result::Result<wit_types::OpenFileResult, wit_types::ProviderError>,
+    effects: &wit_types::Effects,
+    tree_exists: F,
+) -> std::result::Result<(), String>
+where
+    F: Fn(u64) -> bool,
+{
+    let mut v = ReturnValidator::common(result, effects, tree_exists)?;
+    v.open(result)
+}
+pub(crate) fn validate_chunk<F>(
+    result: &std::result::Result<wit_types::ReadChunkResult, wit_types::ProviderError>,
+    effects: &wit_types::Effects,
+    tree_exists: F,
+) -> std::result::Result<(), String>
+where
+    F: Fn(u64) -> bool,
+{
+    let mut v = ReturnValidator::common(result, effects, tree_exists)?;
+    v.chunk(result)
+}
+pub(crate) fn validate_initialize<F>(
+    result: &std::result::Result<wit_types::InitializeResult, wit_types::ProviderError>,
+    effects: &wit_types::Effects,
+    tree_exists: F,
+) -> std::result::Result<(), String>
+where
+    F: Fn(u64) -> bool,
+{
+    let mut v = ReturnValidator::common(result, effects, tree_exists)?;
+    v.initialize(result)
+}
+pub(crate) fn validate_event<F>(
+    result: &std::result::Result<(), wit_types::ProviderError>,
+    effects: &wit_types::Effects,
+    tree_exists: F,
+) -> std::result::Result<(), String>
+where
+    F: Fn(u64) -> bool,
+{
+    let mut v = ReturnValidator::common(result, effects, tree_exists)?;
+    v.event(result)
 }
 
 fn effects_empty(effects: &wit_types::Effects) -> bool {

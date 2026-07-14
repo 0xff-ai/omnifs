@@ -288,7 +288,7 @@ async fn plain_path_ignores_unrelated_indexed_validator() {
     let _ = harness
         .runtime
         .namespace()
-        .read_file(&p(path), "application/octet-stream".to_string(), None)
+        .read_file(&p(path), "application/octet-stream".to_string())
         .await
         .expect("cold read dispatches to provider");
 
@@ -486,7 +486,7 @@ async fn negative_short_circuits_read_without_provider_dispatch() {
     let error = harness
         .runtime
         .namespace()
-        .read_file(&p(path), "application/octet-stream".to_string(), None)
+        .read_file(&p(path), "application/octet-stream".to_string())
         .await
         .expect_err("negative must surface as ENOENT");
 

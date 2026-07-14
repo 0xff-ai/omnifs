@@ -75,7 +75,7 @@ async fn first_page_carries_cursor_and_caches_it() {
     let result = harness
         .runtime
         .namespace()
-        .list_children(&p("/hello/feed"), None, None, None)
+        .list_children(&p("/hello/feed"), None, None)
         .await
         .unwrap();
 
@@ -105,7 +105,7 @@ async fn lookup_sibling_hints_preserve_paged_parent_state() {
     harness
         .runtime
         .namespace()
-        .list_children(&p("/hello/feed"), None, None, None)
+        .list_children(&p("/hello/feed"), None, None)
         .await
         .unwrap();
     let before = cached_dirents(&harness, "/hello/feed");
@@ -116,7 +116,7 @@ async fn lookup_sibling_hints_preserve_paged_parent_state() {
     let lookup = harness
         .runtime
         .namespace()
-        .lookup_child(&p("/hello/feed"), "item-0", None)
+        .lookup_child(&p("/hello/feed"), "item-0")
         .await
         .unwrap();
     let LookupOutcome::Entry(entry) = lookup else {
@@ -156,7 +156,7 @@ async fn paginate_next_accumulates_and_advances() {
     harness
         .runtime
         .namespace()
-        .list_children(&p("/hello/feed"), None, None, None)
+        .list_children(&p("/hello/feed"), None, None)
         .await
         .unwrap();
     assert_eq!(
@@ -231,7 +231,7 @@ async fn paginate_all_expands_to_completion() {
     harness
         .runtime
         .namespace()
-        .list_children(&p("/hello/feed"), None, None, None)
+        .list_children(&p("/hello/feed"), None, None)
         .await
         .unwrap();
 
@@ -263,7 +263,7 @@ async fn paginate_next_on_non_paged_directory_is_no_more() {
     harness
         .runtime
         .namespace()
-        .list_children(&p("/hello/bundle"), None, None, None)
+        .list_children(&p("/hello/bundle"), None, None)
         .await
         .unwrap();
 

@@ -44,7 +44,7 @@ async fn read_bytes(harness: &RuntimeHarness, path: &str) -> Vec<u8> {
     let result = harness
         .runtime
         .namespace()
-        .read_file(&path, path.content_type_mime(None).to_string(), None)
+        .read_file(&path, path.content_type_mime(None).to_string())
         .await
         .unwrap();
     match &result.bytes {
@@ -86,7 +86,7 @@ async fn db_tables_listing_exhaustive_names() {
     let root = harness
         .runtime
         .namespace()
-        .list_children(&parse_path("/"), None, None, None)
+        .list_children(&parse_path("/"), None, None)
         .await
         .unwrap();
     match root {
@@ -103,7 +103,7 @@ async fn db_tables_listing_exhaustive_names() {
     let tables = harness
         .runtime
         .namespace()
-        .list_children(&parse_path("/tables"), None, None, None)
+        .list_children(&parse_path("/tables"), None, None)
         .await
         .unwrap();
     match tables {
@@ -128,7 +128,7 @@ async fn db_tables_listing_exhaustive_names() {
     let missing = harness
         .runtime
         .namespace()
-        .lookup_child(&parse_path("/tables"), "NoSuchTable", None)
+        .lookup_child(&parse_path("/tables"), "NoSuchTable")
         .await
         .unwrap();
     assert_lookup_not_found(&missing);
@@ -141,7 +141,7 @@ async fn db_meta_listing_is_direct_path_surface() {
     let meta = harness
         .runtime
         .namespace()
-        .list_children(&parse_path("/meta"), None, None, None)
+        .list_children(&parse_path("/meta"), None, None)
         .await
         .unwrap();
 
@@ -245,7 +245,7 @@ async fn db_missing_table_negative_record() {
     let lookup = harness
         .runtime
         .namespace()
-        .lookup_child(&parse_path("/tables"), "NoSuchTable", None)
+        .lookup_child(&parse_path("/tables"), "NoSuchTable")
         .await
         .unwrap();
     assert_lookup_not_found(&lookup);
@@ -254,7 +254,7 @@ async fn db_missing_table_negative_record() {
     let read_err = harness
         .runtime
         .namespace()
-        .read_file(&path, path.content_type_mime(None).to_string(), None)
+        .read_file(&path, path.content_type_mime(None).to_string())
         .await
         .unwrap_err();
     match read_err {
@@ -265,7 +265,7 @@ async fn db_missing_table_negative_record() {
     let lookup_again = harness
         .runtime
         .namespace()
-        .lookup_child(&parse_path("/tables"), "NoSuchTable", None)
+        .lookup_child(&parse_path("/tables"), "NoSuchTable")
         .await
         .unwrap();
     assert_lookup_not_found(&lookup_again);

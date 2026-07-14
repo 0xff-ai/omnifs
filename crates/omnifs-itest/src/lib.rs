@@ -3,11 +3,11 @@ pub mod matrix;
 
 use omnifs_core::path::{Path, Segment};
 use omnifs_engine::GitCloner;
+use omnifs_engine::test_support::TestOp;
 use omnifs_engine::test_support::cache::{Caches, Record as CacheRecord, RecordKind};
-use omnifs_engine::test_support::{Op, TestOp};
 use omnifs_engine::{BuildError, Engine, EngineError, HostContext};
 use omnifs_wit::provider::types::{
-    ByteSource, Callout, Effects, HttpRequest, ListChildrenResult, LookupChildResult, OpResult,
+    ByteSource, Callout, Effects, HttpRequest, ListChildrenResult, LookupChildResult,
     ReadFileOutcome, ReadFileResult,
 };
 use omnifs_workspace::ids::{ProviderId, ProviderMeta, ProviderName, ProviderRef};
@@ -141,18 +141,18 @@ impl RuntimeHarness {
         })
     }
 
-    pub fn start_op(&self, op: Op) -> Result<TestOp<'_>, EngineError> {
-        self.runtime.start_op(op)
+    pub fn lookup(
+        &self,
+        parent_path: &str,
+        name: &str,
+    ) -> Result<TestOp<'_, LookupChildResult>, EngineError> {
+        self.runtime.start_lookup_child(
+            parse_path(parent_path),
+            Segment::try_from(name).expect("test lookup name must be a protocol segment"),
+        )
     }
 
-    pub fn lookup(&self, parent_path: &str, name: &str) -> Result<TestOp<'_>, EngineError> {
-        self.start_op(Op::LookupChild {
-            parent_path: parse_path(parent_path),
-            name: Segment::try_from(name).expect("test lookup name must be a protocol segment"),
-        })
-    }
-
-    pub fn list(&self, path: &str) -> Result<TestOp<'_>, EngineError> {
+    pub fn list(&self, path: &str) -> Result<TestOp<'_, ListChildrenResult>, EngineError> {
         self.list_with_cursor(path, None)
     }
 
@@ -160,27 +160,20 @@ impl RuntimeHarness {
         &self,
         path: &str,
         cursor: Option<omnifs_wit::provider::types::Cursor>,
-    ) -> Result<TestOp<'_>, EngineError> {
-        self.start_op(Op::ListChildren {
-            path: parse_path(path),
-            cached_validator: None,
-            cursor,
-        })
+    ) -> Result<TestOp<'_, ListChildrenResult>, EngineError> {
+        self.runtime
+            .start_list_children(parse_path(path), None, cursor)
     }
 
-    pub fn read(&self, path: &str) -> Result<TestOp<'_>, EngineError> {
+    pub fn read(&self, path: &str) -> Result<TestOp<'_, ReadFileOutcome>, EngineError> {
         let path = parse_path(path);
-        self.start_op(Op::ReadFile {
-            content_type: path.content_type_mime(None).to_string(),
-            path,
-            cached_canonical: None,
-        })
+        self.runtime
+            .start_read_file(path.clone(), path.content_type_mime(None).to_string(), None)
     }
 
-    pub fn timer_tick(&self) -> Result<TestOp<'_>, EngineError> {
-        self.start_op(Op::OnEvent {
-            event: omnifs_wit::provider::types::ProviderEvent::TimerTick,
-        })
+    pub fn timer_tick(&self) -> Result<TestOp<'_, ()>, EngineError> {
+        self.runtime
+            .start_event(omnifs_wit::provider::types::ProviderEvent::TimerTick)
     }
 
     pub fn cache_get(
@@ -204,15 +197,13 @@ impl RuntimeHarness {
     }
 }
 
-pub trait TestOpExt {
+pub trait TestOpExt<T> {
     fn expect_single_fetch(&self) -> &HttpRequest;
     fn expect_fetches(&self) -> Vec<&HttpRequest>;
-    fn into_list_children(self) -> Result<ListChildrenResult, EngineError>;
-    fn into_lookup_child(self) -> Result<LookupChildResult, EngineError>;
-    fn into_read_file(self) -> Result<ReadFileResult, EngineError>;
+    fn into_ok(self) -> Result<T, EngineError>;
 }
 
-impl TestOpExt for TestOp<'_> {
+impl<T> TestOpExt<T> for TestOp<'_, T> {
     fn expect_single_fetch(&self) -> &HttpRequest {
         let [Callout::Fetch(request)] = self.callouts() else {
             panic!(
@@ -233,27 +224,19 @@ impl TestOpExt for TestOp<'_> {
             .collect()
     }
 
-    fn into_list_children(self) -> Result<ListChildrenResult, EngineError> {
-        match self.into_result()? {
-            OpResult::ListChildren(result) => Ok(result),
-            other => Err(EngineError::ProviderProtocol(format!(
-                "expected list-children result, got {other:?}"
-            ))),
-        }
+    fn into_ok(self) -> Result<T, EngineError> {
+        self.into_result()?.map_err(EngineError::ProviderError)
     }
+}
 
-    fn into_lookup_child(self) -> Result<LookupChildResult, EngineError> {
-        match self.into_result()? {
-            OpResult::LookupChild(result) => Ok(result),
-            other => Err(EngineError::ProviderProtocol(format!(
-                "expected lookup-child result, got {other:?}"
-            ))),
-        }
-    }
+pub trait ReadFileOpExt {
+    fn into_read_file(self) -> Result<ReadFileResult, EngineError>;
+}
 
+impl ReadFileOpExt for TestOp<'_, ReadFileOutcome> {
     fn into_read_file(self) -> Result<ReadFileResult, EngineError> {
-        match self.into_result()? {
-            OpResult::ReadFile(ReadFileOutcome::Found(result)) => Ok(result),
+        match self.into_result()?.map_err(EngineError::ProviderError)? {
+            ReadFileOutcome::Found(result) => Ok(result),
             other => Err(EngineError::ProviderProtocol(format!(
                 "expected found read-file result, got {other:?}"
             ))),

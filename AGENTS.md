@@ -189,7 +189,7 @@ Use the right wider gate for the change:
 - **Host gate.** Use `just check host` and `just test host`; both exclude provider/test-provider WASM crates from host-target builds.
 - **Provider or broad-surface change.** Run the affected provider, host, generated-artifact, and docs gates explicitly.
 - **Mount, provider, clone, traversal, or runtime behavior.** Rust checks are not enough. Validate through the live runtime with `just dev -y`, `omnifs status`, and the smoke path in `CONTRIBUTING.md`.
-- **Route-surface change.** Run the host integration path that initializes and compiles provider routers, especially `all_providers_initialize_and_seal` (the test retains its historical name).
+- **Route-surface change.** Run the host integration path that initializes and compiles provider routers, especially `all_providers_initialize_and_compile`.
 - **Control API change.** Run `just openapi` to regenerate the checked-in spec, then run the daemon OpenAPI parity test.
 - **Provider manifest schema change.** Run `just schema` and keep the checked-in schema synchronized.
 - **Documentation-heavy change.** Run `just docs-check` locally. It is not a CI gate and does not block a merge, so run it yourself when you touch `docs/`.

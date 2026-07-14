@@ -7,7 +7,7 @@
 use omnifs_engine::test_support::TestOp;
 use omnifs_itest::{RuntimeHarness, make_initialized_runtime};
 use omnifs_wit::provider::types::{
-    ByteSource, CalloutResult, Header, HttpResponse, ListChildrenResult, OpResult, ReadFileOutcome,
+    ByteSource, CalloutResult, Header, HttpResponse, ListChildrenResult, ReadFileOutcome,
 };
 
 pub use omnifs_itest::TestOpExt;
@@ -136,7 +136,7 @@ pub fn warm_discovery(harness: &RuntimeHarness) -> Vec<String> {
             .collect();
         op.answer_callouts(responses).unwrap();
     }
-    sorted_entry_names(op.into_list_children().unwrap())
+    sorted_entry_names(op.into_ok().unwrap())
 }
 
 /// Answer a partial discovery attempt with an optional core failure and a
@@ -176,7 +176,7 @@ pub fn list_type_names(harness: &RuntimeHarness, path: &str) -> Vec<String> {
         !op.is_waiting_for_callouts(),
         "type listing for {path} should reuse cached discovery with no callout"
     );
-    sorted_entry_names(op.into_list_children().unwrap())
+    sorted_entry_names(op.into_ok().unwrap())
 }
 
 pub fn sorted_entry_names(result: ListChildrenResult) -> Vec<String> {
@@ -198,7 +198,7 @@ pub fn sorted_entry_names(result: ListChildrenResult) -> Vec<String> {
 /// canonical store (identity representations) or inline bytes (projections).
 pub fn read_bytes(op: &TestOp<'_>) -> Vec<u8> {
     match op.result().unwrap() {
-        OpResult::ReadFile(ReadFileOutcome::Found(file)) => match &file.bytes {
+        Ok(ReadFileOutcome::Found(file)) => match &file.bytes {
             ByteSource::Canonical => op.effects().unwrap().canonical[0].bytes.clone(),
             ByteSource::Inline(bytes) => bytes.clone(),
             other => panic!("expected canonical or inline read bytes, got {other:?}"),
