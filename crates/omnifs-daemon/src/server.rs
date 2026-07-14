@@ -840,17 +840,24 @@ async fn read_control_line<R: AsyncRead + Unpin>(reader: &mut R) -> std::io::Res
                 "control line is missing its newline terminator",
             ));
         }
-        line.extend_from_slice(&chunk[..read]);
-        if line.len() > CONTROL_MAX_LINE_BYTES {
+        if let Some(end) = chunk[..read].iter().position(|byte| *byte == b'\n') {
+            let line_bytes = end + 1;
+            if line.len() + line_bytes > CONTROL_MAX_LINE_BYTES {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "control line exceeds the maximum size",
+                ));
+            }
+            line.extend_from_slice(&chunk[..line_bytes]);
+            return Ok(line);
+        }
+        if line.len() + read > CONTROL_MAX_LINE_BYTES {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "control line exceeds the maximum size",
             ));
         }
-        if let Some(end) = line.iter().position(|byte| *byte == b'\n') {
-            line.truncate(end + 1);
-            return Ok(line);
-        }
+        line.extend_from_slice(&chunk[..read]);
     }
 }
 

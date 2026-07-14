@@ -394,7 +394,7 @@ fn pin_provider(providers_dir: &StdPath, provider_file: &str) -> Result<Provider
     let reference = artifact.reference();
     let store = ProviderStore::new(providers_dir);
     store
-        .add_artifact(artifact)
+        .retain(&artifact)
         .map_err(|error| BuildError::InvalidConfig(error.to_string()))?;
     Ok(reference)
 }

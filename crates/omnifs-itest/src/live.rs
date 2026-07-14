@@ -17,8 +17,8 @@ use omnifs_api::{
     CONTROL_MAX_LINE_BYTES, CONTROL_PROTOCOL_VERSION, ControlOperation, ControlOutcome,
     ControlReply, ControlRequest,
 };
-use omnifs_workspace::ids::{ProviderId, ProviderMeta, ProviderName};
-use omnifs_workspace::provider::ProviderStore;
+use omnifs_workspace::ids::ProviderId;
+use omnifs_workspace::provider::{Artifact, ProviderStore};
 use tempfile::TempDir;
 
 /// Fixed, non-ephemeral port used purely as a cross-process lock for live NFS
@@ -152,19 +152,11 @@ fn ensure_thin_runner_built() {
 pub fn install_test_provider(providers_dir: &Path) -> ProviderId {
     let bytes = std::fs::read(crate::provider_wasm_path("test_provider.wasm"))
         .expect("read test provider wasm");
-    let id = ProviderId::from_wasm_bytes(&bytes);
+    let artifact =
+        Artifact::from_bytes("test_provider.wasm", bytes).expect("parse test provider artifact");
+    let id = artifact.id();
     let store = ProviderStore::new(providers_dir);
-    store.put_if_absent(&id, &bytes).expect("put test provider");
-    store
-        .install(
-            id,
-            ProviderMeta {
-                name: ProviderName::new("test-provider").unwrap(),
-                version: None,
-            },
-            "test_provider.wasm".into(),
-        )
-        .expect("install test provider");
+    store.retain(&artifact).expect("retain test provider");
     id
 }
 
