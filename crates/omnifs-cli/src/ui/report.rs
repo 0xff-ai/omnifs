@@ -78,7 +78,7 @@ mod tests {
     fn rows_keep_a_separator_before_the_value() {
         let row = Row::new(Glyph::Done, "frontends observed", "2 attached");
         let plain = strip_ansi(&row.render());
-        assert!(plain.contains("frontends ob… 2 attached"), "{plain:?}");
+        assert!(plain.contains("frontends obs… 2 attached"), "{plain:?}");
     }
 
     #[test]
