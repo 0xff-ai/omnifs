@@ -452,7 +452,7 @@ impl Output {
     }
 
     pub(crate) const fn show_progress(&self) -> bool {
-        self.mode.is_structured() || !self.quiet
+        self.mode == OutputMode::Human && !self.quiet
     }
 
     pub(crate) const fn no_input(&self) -> bool {
@@ -689,6 +689,10 @@ mod tests {
         assert!(output.no_input());
         assert!(output.yes());
         assert!(output.is_structured());
+        assert!(!output.show_progress());
+        assert!(!Output::new(OutputMode::Json, false).show_progress());
+        assert!(Output::new(OutputMode::Human, false).show_progress());
+        assert!(!Output::new(OutputMode::Human, true).show_progress());
         assert!(!OutputMode::Human.is_structured());
     }
 

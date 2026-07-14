@@ -47,7 +47,7 @@ Docker and krunkit deliver FUSE only. Every frontend attaches to the host-native
 
 ## Output
 
-Global `--output human|json|jsonl` selects the output contract. JSON emits one envelope with plural resource arrays such as `result.frontends`, `result.mounts`, and `result.providers`; JSONL emits progress events followed by one terminal result or error. `--quiet`, `--no-input`, and `--yes` are also invocation-wide.
+Global `--output human|json|jsonl` selects the output contract. JSON emits one envelope with plural resource arrays such as `result.frontends`, `result.mounts`, and `result.providers`; JSONL emits the same single terminal result or error with a stream-record discriminator. Finite structured commands never emit progress records. `--quiet`, `--no-input`, and `--yes` are also invocation-wide.
 
 ## Status
 
