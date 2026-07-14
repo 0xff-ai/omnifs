@@ -315,6 +315,28 @@ impl AuthState {
         }
     }
 
+    fn from_observed(observed: &omnifs_api::MountInfo) -> Self {
+        let command = format!("omnifs mount reauth {}", observed.mount);
+        match observed.auth_health {
+            None => Self::NotNeeded,
+            Some(
+                omnifs_api::CredentialHealth::Ready
+                | omnifs_api::CredentialHealth::ExpiringSoon
+                | omnifs_api::CredentialHealth::StaticUnvalidated,
+            ) => Self::Ready,
+            Some(omnifs_api::CredentialHealth::Missing) => Self::Missing { command },
+            Some(omnifs_api::CredentialHealth::Expired) => Self::Expired { command },
+            Some(omnifs_api::CredentialHealth::RefreshFailed) => Self::Error {
+                message: "credential refresh failed".into(),
+                command,
+            },
+            Some(omnifs_api::CredentialHealth::NeedsConsent) => Self::Error {
+                message: "credential needs consent".into(),
+                command,
+            },
+        }
+    }
+
     pub(crate) const fn severity(&self) -> Severity {
         match self {
             Self::NotNeeded => Severity::Neutral,
@@ -809,23 +831,7 @@ fn mount_auth_state(mount: &str, local: AuthState, daemon: Option<&DaemonStatus>
         return local;
     };
 
-    let command = format!("omnifs mount reauth {mount}");
-    match observed.auth_health {
-        None => AuthState::NotNeeded,
-        Some(omnifs_api::CredentialHealth::Ready)
-        | Some(omnifs_api::CredentialHealth::ExpiringSoon)
-        | Some(omnifs_api::CredentialHealth::StaticUnvalidated) => AuthState::Ready,
-        Some(omnifs_api::CredentialHealth::Missing) => AuthState::Missing { command },
-        Some(omnifs_api::CredentialHealth::Expired) => AuthState::Expired { command },
-        Some(omnifs_api::CredentialHealth::RefreshFailed) => AuthState::Error {
-            message: "credential refresh failed".into(),
-            command,
-        },
-        Some(omnifs_api::CredentialHealth::NeedsConsent) => AuthState::Error {
-            message: "credential needs consent".into(),
-            command,
-        },
-    }
+    AuthState::from_observed(observed)
 }
 
 fn invalid_mount_rows(registry: &Registry) -> Vec<MountStatus> {
@@ -863,18 +869,22 @@ fn observed_mount_rows(status: &DaemonStatus, desired: &BTreeSet<String>) -> Vec
         .mounts
         .iter()
         .filter(|mount| !desired.contains(&mount.mount))
-        .map(|mount| MountStatus {
-            name: mount.mount.clone(),
-            root: PathBuf::from(format!("/{}", mount.mount.trim_start_matches('/'))),
-            provider: ProviderPin {
-                name: mount.provider_name.clone(),
-                version: None,
-                artifact: mount.provider_id.clone(),
-            },
-            auth: AuthState::NotNeeded,
-            serving: ServingState::Live,
-            access_count: 0,
-            fix: None,
+        .map(|mount| {
+            let auth = AuthState::from_observed(mount);
+            let fix = auth.command().map(str::to_owned);
+            MountStatus {
+                name: mount.mount.clone(),
+                root: PathBuf::from(format!("/{}", mount.mount.trim_start_matches('/'))),
+                provider: ProviderPin {
+                    name: mount.provider_name.clone(),
+                    version: None,
+                    artifact: mount.provider_id.clone(),
+                },
+                auth,
+                serving: ServingState::Live,
+                access_count: 0,
+                fix,
+            }
         })
         .collect()
 }
@@ -1085,6 +1095,18 @@ mod tests {
             AuthState::Ready,
             "local readiness is only a fallback when the daemon has no row"
         );
+
+        let rows = observed_mount_rows(daemon.unwrap(), &BTreeSet::new());
+        assert_eq!(rows.len(), 2);
+        assert!(
+            rows.iter()
+                .all(|row| matches!(row.auth, AuthState::Error { .. }))
+        );
+        assert!(rows.iter().all(|row| {
+            row.fix
+                .as_deref()
+                .is_some_and(|fix| fix.starts_with("omnifs mount reauth "))
+        }));
     }
 
     #[test]

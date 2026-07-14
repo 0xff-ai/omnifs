@@ -6,7 +6,7 @@ use crate::request::OAuthRequest;
 use arc_swap::ArcSwapOption;
 use async_singleflight::Group;
 use omnifs_workspace::authn::{AuthKind, CredentialId};
-use omnifs_workspace::creds::{CredStoreError, CredentialEntry, CredentialStore};
+use omnifs_workspace::creds::{CredentialEntry, CredentialStore};
 use secrecy::ExposeSecret;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -370,16 +370,6 @@ impl CredentialService {
             Some(request),
             current,
         ))
-    }
-
-    /// Store an imported credential. Existing bindings intentionally do not
-    /// observe this write because auth changes take effect at next startup.
-    pub fn store_entry(
-        &self,
-        id: &CredentialId,
-        entry: CredentialEntry,
-    ) -> Result<(), CredStoreError> {
-        self.store.put(id, &entry)
     }
 
     async fn refresh(
