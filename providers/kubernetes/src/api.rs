@@ -114,8 +114,7 @@ impl Discovery {
                 group: group.to_string(),
                 namespaced: entry.namespaced,
             };
-            let fs_name = if !group.is_empty()
-                && (qualify_group || self.get(&entry.name).is_some())
+            let fs_name = if !group.is_empty() && (qualify_group || self.get(&entry.name).is_some())
             {
                 format!("{}.{}", entry.name, group)
             } else {
@@ -233,7 +232,11 @@ impl<'a> KubeApi<'a> {
         self.ensure_discovery().await;
         self.cx.state(|state| {
             state.discovery.borrow().as_ref().map_or_else(
-                || Err(ProviderError::internal("kubernetes discovery is unavailable")),
+                || {
+                    Err(ProviderError::internal(
+                        "kubernetes discovery is unavailable",
+                    ))
+                },
                 |discovery| discovery.resource(fs_plural),
             )
         })
@@ -340,10 +343,7 @@ impl<'a> KubeApi<'a> {
     async fn fetch_discovery(&self) -> Discovery {
         let mut discovery = Discovery::default();
 
-        let core_available = match self
-            .get_json::<APIResourceList>("/api/v1", &[])
-            .await
-        {
+        let core_available = match self.get_json::<APIResourceList>("/api/v1", &[]).await {
             Ok(core) => {
                 discovery.add_resources("/api/v1", "", &core.resources, false);
                 true

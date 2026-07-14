@@ -147,9 +147,7 @@ pub fn answer_partial_discovery(op: &mut TestOp<'_>) {
             .expect_fetches()
             .iter()
             .map(|fetch| {
-                if fetch.url.ends_with("/api/v1")
-                    || fetch.url.ends_with("/apis/example.io/v2")
-                {
+                if fetch.url.ends_with("/api/v1") || fetch.url.ends_with("/apis/example.io/v2") {
                     http_unavailable()
                 } else if fetch.url.ends_with("/apis") {
                     http_ok(PARTIAL_API_GROUPS.as_bytes())
