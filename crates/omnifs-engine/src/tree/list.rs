@@ -30,6 +30,7 @@ use super::error::{Result, TreeError};
 use super::node::{Entry, Node, PaginationControl, Synthetic};
 use super::synthetic;
 use crate::{RequestCtx, Tree};
+use omnifs_api::events::CacheKind;
 
 /// Opaque pagination cursor. Newtype over the substrate's `CachedCursor` so no
 /// second cursor model is invented. Converted to/from provider cursors inside
@@ -74,7 +75,7 @@ impl Tree {
         &self,
         node: &Node,
         cursor: Option<Cursor>,
-        ctx: &RequestCtx,
+        _ctx: &RequestCtx,
     ) -> Result<ListOutcome> {
         if let Some(dir) = node.subtree_path() {
             return Ok(ListOutcome::Subtree(dir.clone()));
@@ -105,7 +106,7 @@ impl Tree {
         // no synthetic entries, the direct provider paginated read.
         if let Some(cursor) = cursor {
             return self
-                .list_continuation(&runtime, path, cursor, ctx)
+                .list_continuation(&runtime, path, cursor)
                 .await
                 .map(ListOutcome::Listing);
         }
@@ -115,10 +116,11 @@ impl Tree {
         // cached listing if one exists.
         self.drain_invalidations(node.mount());
         if let Some(dirents) = consult_authoritative_listing(&runtime, path) {
+            crate::inspector::cache_event(CacheKind::BrowseHit);
             return Ok(ListOutcome::Listing(listing_from_dirents(node, &dirents)));
         }
 
-        self.list_via_provider(&runtime, node, ctx).await
+        self.list_via_provider(&runtime, node).await
     }
 
     /// Continuation page: echo the cursor to the provider, return raw entries.
@@ -129,8 +131,8 @@ impl Tree {
         runtime: &Runtime,
         path: &omnifs_core::path::Path,
         cursor: Cursor,
-        _ctx: &RequestCtx,
     ) -> Result<Listing> {
+        crate::inspector::cache_event(CacheKind::BrowseMiss);
         let result = runtime
             .namespace()
             .list_children(path, None, Some(cursor.0))
@@ -158,12 +160,7 @@ impl Tree {
     /// half: revalidation validator echo + `Unchanged`-serve-cached, rate-limit
     /// serve-stale, the reserved-`@` drop, the dirents write, and the synthetic
     /// control / ignore append.
-    async fn list_via_provider(
-        &self,
-        runtime: &Runtime,
-        node: &Node,
-        _ctx: &RequestCtx,
-    ) -> Result<ListOutcome> {
+    async fn list_via_provider(&self, runtime: &Runtime, node: &Node) -> Result<ListOutcome> {
         let path = node.path();
         // A non-exhaustive cached dirents record may carry a listing validator
         // the provider can revalidate against; echo it so the provider can
@@ -171,6 +168,7 @@ impl Tree {
         let cached_dirents = cached_dirents_for_revalidation(runtime, path);
         let cached_validator = cached_dirents.as_ref().and_then(|d| d.validator.clone());
 
+        crate::inspector::cache_event(CacheKind::BrowseMiss);
         let result = runtime
             .namespace()
             .list_children(path, cached_validator, None)

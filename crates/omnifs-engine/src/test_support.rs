@@ -6,7 +6,6 @@ use std::sync::mpsc;
 
 use crate::Runtime;
 use crate::callouts::{TestSignal, record_outcome as inner_record};
-use crate::inspector::WitCalloutView;
 use crate::log_redaction::{LogUrl as InternalLogUrl, WitHeaders as InternalWitHeaders};
 use omnifs_wit::provider::types as wit_types;
 
@@ -512,11 +511,6 @@ impl<T: fmt::Debug> fmt::Debug for TestOp<'_, T> {
             .field("state", &self.is_returned())
             .finish()
     }
-}
-
-/// Stable kind labels used by the outer dispatch span.
-pub fn kind_label(callout: &wit_types::Callout) -> &'static str {
-    WitCalloutView(callout).span_kind()
 }
 
 /// Public re-display wrapper for redacting URLs in log output.

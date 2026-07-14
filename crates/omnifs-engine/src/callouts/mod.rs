@@ -24,14 +24,15 @@
 //!
 //! # Tracing surface
 //!
-//! All callout spans use `target = "omnifs_callout"` so
-//! `RUST_LOG=omnifs_callout=info` filters everything in this layer
-//! without bringing in unrelated host tracing.
+//! Executor spans use `target = "omnifs_callout"` so
+//! `RUST_LOG=omnifs_callout=info` filters request and outcome diagnostics
+//! without bringing in unrelated host tracing. Dispatch lifecycle spans use
+//! the structured inspector target.
 //!
-//! Each callout produces an outer `callout` span from `CalloutHost::dispatch`
-//! with operation id, callout index, and kind, plus an executor span on the
-//! public method that owns request and outcome fields for that callout. URL and
-//! header fields render through redacting display wrappers.
+//! Each callout produces a structured inspector span from
+//! `CalloutHost::dispatch`, plus an executor span on the public method that
+//! owns request and outcome fields for that callout. URL and header fields
+//! render through redacting display wrappers.
 //!
 //! Every field a span ever records via `Span::record` must appear in
 //! its `#[instrument(fields(...))]` declaration. `tracing` silently
@@ -46,8 +47,7 @@
 //! # Adding a callout
 //!
 //! 1. Add the WIT `callout` variant and `callout-result` arm.
-//! 2. Extend `WitCalloutView` in `inspect.rs` with the callout's inspector kind,
-//!    tracing label, and redacted summary.
+//! 2. Extend the structured classification in `inspect.rs`.
 //! 3. Add the executor public method with
 //!    `#[tracing::instrument(target = "omnifs_callout", skip_all,
 //!    fields(...))]` listing all fields (use `field::Empty` for
@@ -66,7 +66,6 @@ use crate::archive::ArchiveExecutor;
 use crate::blob::BlobExecutor;
 use crate::git::GitExecutor;
 use crate::http::HttpStack;
-use crate::inspector::{InspectorCallout, WitCalloutView};
 use crate::log_redaction::WitHeaders;
 use omnifs_wit::provider::types as wit_types;
 use std::sync::Arc;
@@ -260,21 +259,9 @@ impl CalloutHost {
         callout: wit_types::Callout,
     ) -> wit_types::CalloutResult {
         let index = self.next_callout_index.fetch_add(1, Ordering::Relaxed);
-        let live = InspectorCallout::begin(&callout, op_id, index);
-        let kind = WitCalloutView(&callout).span_kind();
-        let result = self
-            .run(&callout, op_id)
-            .instrument(tracing::info_span!(
-                target: "omnifs_callout",
-                "callout",
-                operation_id = op_id,
-                callout_index = index,
-                kind = kind,
-            ))
-            .await;
-        if let Some(live) = live {
-            live.finish(&result);
-        }
+        let span = crate::inspector::callout_span(&callout, op_id, index);
+        let result = self.run(&callout, op_id).instrument(span.clone()).await;
+        crate::inspector::record_outcome(&span, crate::inspector::outcome_for_callout(&result));
         result
     }
 

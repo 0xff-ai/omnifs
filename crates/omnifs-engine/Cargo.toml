@@ -42,7 +42,6 @@ omnifs-wit = { workspace = true, features = ["host-bindings"], optional = true }
 anyhow = { workspace = true, optional = true }
 fjall = { workspace = true, optional = true }
 moka = { workspace = true, optional = true }
-crossbeam-queue = { version = "0.3", optional = true }
 time = { workspace = true, features = ["formatting"], optional = true }
 
 [features]
@@ -50,7 +49,6 @@ default = ["runtime"]
 runtime = [
     "dep:anyhow",
     "dep:blake3",
-    "dep:crossbeam-queue",
     "dep:dashmap",
     "dep:fjall",
     "dep:flate2",

@@ -90,9 +90,9 @@ pub async fn run(args: &DaemonArgs) -> anyhow::Result<()> {
     let refresh_loop = registry.credential_service().spawn_refresh_loop();
 
     let rt = Handle::current();
-    let sink = init_global_from_env();
-    if let Some(sink) = &sink {
-        if let Some(path) = sink.tee_path() {
+    let inspector = init_global_from_env();
+    if let Some(inspector) = &inspector {
+        if let Some(path) = inspector.tee_path() {
             info!(path = %path.display(), "inspector stream enabled (in-memory ring + file tee)");
         } else {
             info!("inspector stream enabled (in-memory ring only)");
@@ -111,7 +111,7 @@ pub async fn run(args: &DaemonArgs) -> anyhow::Result<()> {
     let daemon = Arc::new(server::Daemon::new(
         context,
         Arc::clone(&registry),
-        sink,
+        inspector,
         Arc::clone(&runtime_record),
         control_token,
     ));

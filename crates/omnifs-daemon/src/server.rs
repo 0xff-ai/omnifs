@@ -21,7 +21,7 @@ use omnifs_api::{
 use omnifs_auth::{
     CredentialHealth as AuthCredentialHealth, CredentialStatus as AuthCredentialStatus,
 };
-use omnifs_engine::{InspectorSink, MountRuntimes};
+use omnifs_engine::{Inspector, MountRuntimes};
 use omnifs_workspace::authn::CredentialId;
 use omnifs_workspace::provider::{Catalog, CatalogError, Provider};
 use omnifs_workspace::runtime_record::{
@@ -338,7 +338,7 @@ enum TaskEvent {
 pub struct Daemon {
     context: DaemonContext,
     registry: Arc<MountRuntimes>,
-    sink: Option<Arc<InspectorSink>>,
+    inspector: Option<Arc<Inspector>>,
     frontends: Frontends,
     runtime_record: Arc<RuntimeRecordStore>,
     control_token: ControlToken,
@@ -371,7 +371,7 @@ impl Daemon {
     pub(crate) fn new(
         context: DaemonContext,
         registry: Arc<MountRuntimes>,
-        sink: Option<Arc<InspectorSink>>,
+        inspector: Option<Arc<Inspector>>,
         runtime_record: Arc<RuntimeRecordStore>,
         control_token: ControlToken,
     ) -> Self {
@@ -383,7 +383,7 @@ impl Daemon {
         Self {
             context,
             registry,
-            sink,
+            inspector,
             frontends,
             runtime_record,
             control_token,
@@ -963,7 +963,7 @@ impl Daemon {
     }
 
     fn event_stream(&self) -> Response {
-        let Some(sink) = self.sink.clone() else {
+        let Some(inspector) = self.inspector.clone() else {
             return error_response(
                 StatusCode::NOT_FOUND,
                 ErrorCode::Internal,
@@ -971,7 +971,7 @@ impl Daemon {
             );
         };
 
-        let subscription = sink.subscribe();
+        let subscription = inspector.subscribe();
         let stream = tokio_stream::iter(subscription.history)
             .map(Ok)
             .chain(BroadcastStream::new(subscription.live))

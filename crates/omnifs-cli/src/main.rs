@@ -97,7 +97,11 @@ async fn main() {
             std::process::exit(code.code());
         },
     };
-    init_tracing(cli.verbose);
+    let inspector = cli
+        .runs_daemon()
+        .then(omnifs_engine::init_global_from_env)
+        .flatten();
+    init_tracing(cli.verbose, inspector.as_ref());
     ui::session::install_theme();
     let command_path = cli.command_path();
     let output = Output::new(cli.output, cli.quiet)
@@ -156,8 +160,12 @@ async fn main() {
     }
 }
 
-fn init_tracing(verbose: u8) {
-    use tracing_subscriber::{EnvFilter, fmt::format::FmtSpan};
+fn init_tracing(verbose: u8, inspector: Option<&std::sync::Arc<omnifs_engine::Inspector>>) {
+    use tracing_subscriber::EnvFilter;
+    use tracing_subscriber::filter::filter_fn;
+    use tracing_subscriber::fmt::format::FmtSpan;
+    use tracing_subscriber::layer::{Layer as _, SubscriberExt as _};
+    use tracing_subscriber::util::SubscriberInitExt as _;
 
     use launch_backend::RunMode;
     // `-v` raises the foreground filter to the same baseline the spawned
@@ -167,15 +175,28 @@ fn init_tracing(verbose: u8) {
         1 => RunMode::Spawned.default_log_level(),
         _ => "debug",
     };
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(verbosity));
-    let mut builder = tracing_subscriber::fmt()
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new(verbosity))
+        .add_directive("omnifs_inspector=off".parse().expect("static directive"));
+    let span_events = if verbose >= 2 {
+        FmtSpan::NEW | FmtSpan::CLOSE
+    } else {
+        FmtSpan::NONE
+    };
+    let fmt_layer = tracing_subscriber::fmt::layer()
         .with_writer(std::io::stderr)
         .with_target(false)
-        .with_env_filter(filter);
-    if verbose >= 2 {
-        builder = builder.with_span_events(FmtSpan::NEW | FmtSpan::CLOSE);
-    }
-    builder.init();
+        .with_span_events(span_events)
+        .with_filter(filter);
+    let inspector_layer = inspector.map(|inspector| {
+        inspector.layer().with_filter(filter_fn(|metadata| {
+            metadata.target() == "omnifs_inspector"
+        }))
+    });
+    tracing_subscriber::registry()
+        .with(fmt_layer)
+        .with(inspector_layer)
+        .init();
 }
 
 async fn run(cli: Cli, output: Output) -> anyhow::Result<error::ExitCode> {

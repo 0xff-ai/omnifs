@@ -1,5 +1,6 @@
 //! Invalidation report types and the sync `Tree::drain_invalidations` body.
 
+use omnifs_api::events::CacheKind;
 use omnifs_core::path::Path;
 
 use crate::Tree;
@@ -40,6 +41,7 @@ impl Tree {
         let changed_dirs = runtime.drain_changed_dirs();
 
         if !(prefixes.is_empty() && paths.is_empty() && changed_dirs.is_empty()) {
+            crate::inspector::cache_event(CacheKind::Invalidated);
             // Tree-owned mem eviction; the kernel-notify half stays
             // renderer-side and consumes the returned report.
             runtime.cache().mem_invalidate_entries_if({

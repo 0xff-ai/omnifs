@@ -7,7 +7,6 @@
 //! in `ops.rs`.
 
 use super::Frontend;
-use super::trace::FuseTrace;
 use fuser::{
     Errno, FileHandle as FuseFileHandle, Filesystem, FopenFlags, Generation, INodeNo, LockOwner,
     OpenFlags, ReplyAttr, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, Request,
@@ -27,8 +26,6 @@ impl Filesystem for Frontend {
                         reply.error(Errno::EINVAL);
                         return;
                     };
-                    let _trace =
-                        FuseTrace::new("lookup", format!("parent={} name={}", parent.0, name_str));
                     match fs.do_lookup(parent.0, name_str).await {
                         Ok((_ino, attr, ttl)) => reply.entry(&ttl, &attr, Generation(0)),
                         Err(errno) => reply.error(errno),
@@ -42,7 +39,6 @@ impl Filesystem for Frontend {
     fn getattr(&self, _req: &Request, ino: INodeNo, _fh: Option<FuseFileHandle>, reply: ReplyAttr) {
         let fs = self.clone();
         drop(self.rt.spawn(async move {
-            let _trace = FuseTrace::new("getattr", format!("ino={}", ino.0));
             match fs.do_getattr(ino.0).await {
                 Ok((attr, ttl)) => reply.attr(&ttl, &attr),
                 Err(errno) => reply.error(errno),
@@ -56,7 +52,6 @@ impl Filesystem for Frontend {
         drop(
             self.rt.spawn(
                 async move {
-                    let _trace = FuseTrace::new("opendir", format!("ino={}", ino.0));
                     let fh = fs.alloc_fh();
                     match fs.do_opendir(ino.0).await {
                         Ok(snapshot) => {
@@ -81,7 +76,6 @@ impl Filesystem for Frontend {
     ) {
         let fs = self.clone();
         drop(self.rt.spawn(async move {
-            let _trace = FuseTrace::new("readdir", format!("fh={} offset={}", fh.0, offset));
             let Some(snapshot) = fs.dir_snapshots.get(&fh.0) else {
                 reply.error(Errno::EBADF);
                 return;
@@ -113,7 +107,6 @@ impl Filesystem for Frontend {
     ) {
         let fs = self.clone();
         drop(self.rt.spawn(async move {
-            let _trace = FuseTrace::new("releasedir", format!("fh={}", fh.0));
             fs.do_releasedir(fh.0);
             reply.ok();
         }));
@@ -135,10 +128,6 @@ impl Filesystem for Frontend {
         drop(
             self.rt.spawn(
                 async move {
-                    let _trace = FuseTrace::new(
-                        "read",
-                        format!("ino={} fh={} offset={} size={}", ino.0, fh.0, offset, size),
-                    );
                     match fs.do_read(ino.0, fh.0, offset, size).await {
                         Ok(bytes) => reply.data(&bytes),
                         Err(errno) => reply.error(errno),
@@ -152,7 +141,6 @@ impl Filesystem for Frontend {
     fn open(&self, _req: &Request, ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
         let fs = self.clone();
         drop(self.rt.spawn(async move {
-            let _trace = FuseTrace::new("open", format!("ino={}", ino.0));
             let fh = fs.alloc_fh();
             match fs.do_open(ino.0, fh).await {
                 Ok(flags) => reply.opened(FuseFileHandle(fh), flags),
@@ -173,7 +161,6 @@ impl Filesystem for Frontend {
     ) {
         let fs = self.clone();
         drop(self.rt.spawn(async move {
-            let _trace = FuseTrace::new("release", format!("fh={}", fh.0));
             fs.do_release(fh.0);
             reply.ok();
         }));
@@ -182,7 +169,6 @@ impl Filesystem for Frontend {
     fn readlink(&self, _req: &Request, ino: INodeNo, reply: ReplyData) {
         let fs = self.clone();
         drop(self.rt.spawn(async move {
-            let _trace = FuseTrace::new("readlink", format!("ino={}", ino.0));
             match fs.do_readlink(ino.0) {
                 Ok(bytes) => reply.data(&bytes),
                 Err(errno) => reply.error(errno),

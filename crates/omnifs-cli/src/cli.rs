@@ -109,6 +109,14 @@ pub enum Commands {
 }
 
 impl Cli {
+    pub(crate) fn runs_daemon(&self) -> bool {
+        #[cfg(feature = "daemon")]
+        if matches!(&self.command, Some(Commands::Daemon(_))) {
+            return true;
+        }
+        false
+    }
+
     pub(crate) fn telemetry_label(&self) -> Option<&'static str> {
         self.command
             .as_ref()

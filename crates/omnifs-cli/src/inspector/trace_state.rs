@@ -672,7 +672,7 @@ mod tests {
                     operation_id: 42,
                     callout_index: 0,
                     kind: CalloutKind::Fetch,
-                    summary: "GET https://api.github.com/repos/raulk/omnifs".into(),
+                    summary: "GET api.github.com/repos/raulk/omnifs".into(),
                 },
             ),
             record(
@@ -695,7 +695,7 @@ mod tests {
                     mount: "github".into(),
                     path: "/raulk/omnifs".into(),
                     kind: CacheKind::BrowseHit,
-                    elapsed_us: Some(80),
+                    elapsed_us: None,
                 },
             ),
             record(

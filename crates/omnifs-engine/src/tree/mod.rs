@@ -37,9 +37,6 @@ mod read;
 mod resolve;
 pub(crate) mod synthetic;
 
-use crate::ServingContext;
-use omnifs_api::events::TraceId;
-
 pub use self::error::{RetryClass, TreeError, TreeErrorKind};
 pub use self::handle::{RangedHandle, probe_live_growth, spawn_live_follow_pump};
 pub use self::invalidate::InvalidationReport;
@@ -48,18 +45,17 @@ pub use self::node::{
     Entry, EntryOrigin, Node, NodeBody, PaginationControl, Synthetic, SyntheticContent,
 };
 pub use self::read::{Chunk, ReadResult};
+use crate::ServingContext;
 
 /// The renderer-neutral, async-first projection core.
 pub struct Tree {
     ctx: ServingContext,
 }
 
-/// Per-call observability context. The trace is optional because the inspector
-/// is not always attached.
+/// Per-call request policy context. Observability follows the active tracing
+/// span rather than being threaded through tree operations.
 #[derive(Debug, Clone, Default)]
-pub struct RequestCtx {
-    pub trace: Option<TraceId>,
-}
+pub struct RequestCtx;
 
 impl Tree {
     /// Wrap a [`ServingContext`] (the mount-resolution backing) into the

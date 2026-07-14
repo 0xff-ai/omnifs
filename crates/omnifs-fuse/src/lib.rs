@@ -26,7 +26,6 @@ mod filesystem;
 pub mod mount;
 mod ops;
 mod read_helpers;
-mod trace;
 
 #[cfg(test)]
 mod tests;

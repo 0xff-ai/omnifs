@@ -8,7 +8,6 @@
 use crate::callouts::{callout_denied, callout_network, record_outcome};
 use crate::capability::CapabilityChecker;
 use crate::cloner::{CloneError, GitCloner};
-use crate::inspector;
 use crate::log_redaction::LogUrl;
 use crate::tree_refs::TreeRefs;
 use omnifs_caps::Error as CapabilityError;
@@ -67,16 +66,7 @@ impl GitExecutor {
         self.capability.check_git_url(&req.clone_url)?;
         let cache_path = self
             .cloner
-            .clone_if_needed(
-                &req.cache_key,
-                &req.clone_url,
-                |cache_key, clone_url| {
-                    inspector::record_clone_start(operation_id, cache_key, clone_url);
-                },
-                |cache_key, elapsed, ok| {
-                    inspector::record_clone_end(operation_id, cache_key, elapsed, ok);
-                },
-            )
+            .clone_if_needed(&req.cache_key, &req.clone_url, operation_id)
             .map_err(|error| {
                 warn!(
                     cache_key = %req.cache_key,

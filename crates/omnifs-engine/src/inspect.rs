@@ -1,11 +1,11 @@
 //! Structured inspector records produced by a tracing subscriber layer.
 
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use crossbeam_queue::ArrayQueue;
 use omnifs_api::events::{
     CacheKind, CalloutKind, InspectorEvent, InspectorLineWriter, InspectorOutcome, InspectorRecord,
     OpEnd, OutcomeFields, TraceId,
@@ -59,13 +59,14 @@ impl InspectorConfig {
     }
 }
 
-type HistoryRing = ArrayQueue<Arc<InspectorRecord>>;
+type HistoryRing = Mutex<VecDeque<Arc<InspectorRecord>>>;
 type FileTee = Mutex<InspectorLineWriter>;
 
 /// In-memory inspector history and live stream. Records are created only by
 /// [`InspectorLayer`], while this type owns their retention and delivery.
 pub struct Inspector {
     history: HistoryRing,
+    history_cap: usize,
     tee: Option<FileTee>,
     live: broadcast::Sender<Arc<InspectorRecord>>,
     process_start: Instant,
@@ -77,6 +78,90 @@ pub struct Inspector {
 /// events into the existing [`InspectorRecord`] wire shape.
 pub struct InspectorLayer {
     inspector: Arc<Inspector>,
+}
+
+impl InspectorLayer {
+    fn span_state(&self, name: &str, visitor: &Fields, inherited: Inherited) -> Option<SpanState> {
+        let (kind, trace_id) = match name {
+            "namespace.request" => (
+                SpanKind::Namespace {
+                    operation: visitor.string("operation"),
+                    mount: visitor.string("mount"),
+                    path: visitor.string("path"),
+                },
+                Some(self.inspector.next_trace_id()),
+            ),
+            "provider.operation" => {
+                let mount = visitor.string("mount");
+                let path = visitor.string("path");
+                (
+                    SpanKind::Provider {
+                        operation_id: visitor.u64("operation_id"),
+                        mount: if mount.is_empty() {
+                            inherited.mount.clone()
+                        } else {
+                            mount
+                        },
+                        provider: visitor.string("provider"),
+                        method: visitor.string("method"),
+                        path: if path.is_empty() {
+                            inherited.path.clone()
+                        } else {
+                            path
+                        },
+                    },
+                    inherited.trace_id,
+                )
+            },
+            "provider.callout" => (
+                SpanKind::Callout {
+                    operation_id: visitor.u64("operation_id"),
+                    index: u32::try_from(visitor.u64("callout_index")).unwrap_or(u32::MAX),
+                    kind: CalloutKind::from_field(&visitor.string("callout_kind"))?,
+                    summary: visitor.string("summary"),
+                },
+                inherited.trace_id,
+            ),
+            "provider.subtree" => (
+                SpanKind::Subtree {
+                    operation_id: visitor.u64("operation_id"),
+                    tree_ref: visitor.u64("tree_ref"),
+                },
+                inherited.trace_id,
+            ),
+            "provider.clone" => (
+                SpanKind::Clone {
+                    operation_id: visitor.u64("operation_id"),
+                    cache_key: visitor.string("cache_key"),
+                },
+                inherited.trace_id,
+            ),
+            _ => return None,
+        };
+        Some(SpanState {
+            kind: kind.clone(),
+            trace_id,
+            started: Instant::now(),
+            outcome: visitor.outcome,
+            mount: match &kind {
+                SpanKind::Namespace { mount, .. } | SpanKind::Provider { mount, .. } => {
+                    mount.clone()
+                },
+                _ => inherited.mount,
+            },
+            path: match &kind {
+                SpanKind::Namespace { path, .. } | SpanKind::Provider { path, .. } => path.clone(),
+                _ => inherited.path,
+            },
+            operation_id: match &kind {
+                SpanKind::Provider { operation_id, .. }
+                | SpanKind::Callout { operation_id, .. }
+                | SpanKind::Subtree { operation_id, .. }
+                | SpanKind::Clone { operation_id, .. } => Some(*operation_id),
+                SpanKind::Namespace { .. } => inherited.operation_id,
+            },
+        })
+    }
 }
 
 pub struct Subscription {
@@ -100,7 +185,8 @@ impl Inspector {
             });
         let (live, _) = broadcast::channel(config.broadcast_cap);
         Some(Self {
-            history: ArrayQueue::new(config.history_cap),
+            history: Mutex::new(VecDeque::with_capacity(config.history_cap)),
+            history_cap: config.history_cap,
             tee,
             live,
             process_start: Instant::now(),
@@ -117,9 +203,10 @@ impl Inspector {
     }
 
     pub fn subscribe(&self) -> Subscription {
+        let history = self.history.lock().expect("inspector history lock");
         let live = self.live.subscribe();
         Subscription {
-            history: self.history_snapshot(),
+            history: history.iter().cloned().collect(),
             live,
         }
     }
@@ -131,19 +218,12 @@ impl Inspector {
     }
 
     pub fn history_snapshot(&self) -> Vec<Arc<InspectorRecord>> {
-        let mut out = Vec::with_capacity(self.history.len());
-        while let Some(record) = self.history.pop() {
-            out.push(record);
-        }
-        for record in &out {
-            if let Err(extra) = self.history.push(Arc::clone(record))
-                && let Some(oldest) = self.history.pop()
-            {
-                let _ = self.history.push(extra);
-                drop(oldest);
-            }
-        }
-        out
+        self.history
+            .lock()
+            .expect("inspector history lock")
+            .iter()
+            .cloned()
+            .collect()
     }
 
     fn next_trace_id(&self) -> TraceId {
@@ -161,12 +241,17 @@ impl Inspector {
             )
             .with_seq(seq),
         );
-        if let Err(rejected) = self.history.push(Arc::clone(&record)) {
-            if self.history.pop().is_some() {
-                let _ = self.history.push(rejected);
+        {
+            let mut history = self.history.lock().expect("inspector history lock");
+            if history.len() == self.history_cap {
+                history.pop_front();
             }
+            history.push_back(Arc::clone(&record));
+            // Keep history publication and live delivery atomic with respect
+            // to `subscribe`, so a record is observed exactly once across the
+            // snapshot/live boundary.
+            let _ = self.live.send(Arc::clone(&record));
         }
-        let _ = self.live.send(Arc::clone(&record));
         if let Some(tee) = &self.tee
             && let Ok(mut writer) = tee.lock()
             && let Err(error) = writer.write_record(&record)
@@ -233,87 +318,21 @@ where
         }
         let mut visitor = Fields::default();
         attrs.record(&mut visitor);
-        let callout_kind = CalloutKind::from_field(&visitor.string("callout_kind"));
-        if metadata.name() == "provider.callout" && callout_kind.is_none() {
-            return;
-        }
         let parent = if attrs.is_root() {
             None
         } else {
             ctx.span(id).and_then(|span| span.parent())
         };
         let inherited = nearest_parent_state(parent);
-        let (kind, trace_id) = match metadata.name() {
-            "namespace.request" => (
-                SpanKind::Namespace {
-                    operation: visitor.string("operation"),
-                    mount: visitor.string("mount"),
-                    path: visitor.string("path"),
-                },
-                Some(self.inspector.next_trace_id()),
-            ),
-            "provider.operation" => (
-                SpanKind::Provider {
-                    operation_id: visitor.u64("operation_id"),
-                    mount: visitor.string("mount"),
-                    provider: visitor.string("provider"),
-                    method: visitor.string("method"),
-                    path: visitor.string("path"),
-                },
-                inherited.trace_id,
-            ),
-            "provider.callout" => (
-                SpanKind::Callout {
-                    operation_id: visitor.u64("operation_id"),
-                    index: clamp_u32(visitor.u64("callout_index") as usize),
-                    kind: callout_kind.expect("callout kind checked above"),
-                    summary: visitor.string("summary"),
-                },
-                inherited.trace_id,
-            ),
-            "provider.subtree" => (
-                SpanKind::Subtree {
-                    operation_id: visitor.u64("operation_id"),
-                    tree_ref: visitor.u64("tree_ref"),
-                },
-                inherited.trace_id,
-            ),
-            "provider.clone" => (
-                SpanKind::Clone {
-                    operation_id: visitor.u64("operation_id"),
-                    cache_key: visitor.string("cache_key"),
-                },
-                inherited.trace_id,
-            ),
-            _ => return,
-        };
-        let state = SpanState {
-            kind: kind.clone(),
-            trace_id,
-            started: Instant::now(),
-            outcome: visitor.outcome,
-            mount: match &kind {
-                SpanKind::Namespace { mount, .. } | SpanKind::Provider { mount, .. } => {
-                    mount.clone()
-                },
-                _ => inherited.mount,
-            },
-            path: match &kind {
-                SpanKind::Namespace { path, .. } | SpanKind::Provider { path, .. } => path.clone(),
-                _ => inherited.path,
-            },
-            operation_id: match &kind {
-                SpanKind::Provider { operation_id, .. }
-                | SpanKind::Callout { operation_id, .. }
-                | SpanKind::Subtree { operation_id, .. }
-                | SpanKind::Clone { operation_id, .. } => Some(*operation_id),
-                SpanKind::Namespace { .. } => inherited.operation_id,
-            },
+        let Some(state) = self.span_state(metadata.name(), &visitor, inherited) else {
+            return;
         };
         if let Some(span) = ctx.span(id) {
             span.extensions_mut().insert(state.clone());
         }
-        let Some(trace_id) = trace_id else { return };
+        let Some(trace_id) = state.trace_id else {
+            return;
+        };
         let event = match &state.kind {
             SpanKind::Namespace {
                 operation,
@@ -404,16 +423,15 @@ where
         let Some(current) = ctx.lookup_current() else {
             return;
         };
-        let inherited = current
-            .extensions()
-            .get::<SpanState>()
-            .map(|state| Inherited {
+        let inherited = current.extensions().get::<SpanState>().map_or_else(
+            || nearest_parent_state(current.parent()),
+            |state| Inherited {
                 trace_id: state.trace_id,
                 mount: state.mount.clone(),
                 path: state.path.clone(),
                 operation_id: state.operation_id,
-            })
-            .unwrap_or_else(|| nearest_parent_state(current.parent()));
+            },
+        );
         let Some(trace_id) = inherited.trace_id else {
             return;
         };
@@ -572,7 +590,7 @@ impl Visit for Fields {
     }
     fn record_i64(&mut self, field: &Field, value: i64) {
         if value >= 0 {
-            self.record_u64(field, value as u64);
+            self.record_u64(field, value.cast_unsigned());
         }
     }
     fn record_u64(&mut self, field: &Field, value: u64) {
@@ -588,7 +606,8 @@ impl Visit for Fields {
     }
 }
 
-pub(crate) fn request_span(operation: &'static str, mount: &str, path: &str) -> Span {
+/// Create the structured root span for one frontend filesystem request.
+pub fn request_span(operation: &'static str, mount: &str, path: &str) -> Span {
     if !tracing::enabled!(target: TARGET, Level::INFO) {
         return Span::none();
     }
@@ -613,7 +632,7 @@ pub(crate) fn callout_span(callout: &wit_types::Callout, operation_id: u64, inde
         return Span::none();
     }
     let view = WitCalloutView(callout);
-    tracing::info_span!(target: TARGET, "provider.callout", operation_id, callout_index = clamp_u32(index), callout_kind = view.kind().as_str(), summary = view.summary(), outcome = tracing::field::Empty)
+    tracing::info_span!(target: TARGET, "provider.callout", operation_id, callout_index = u32::try_from(index).unwrap_or(u32::MAX), callout_kind = view.kind().as_str(), summary = view.summary(), outcome = tracing::field::Empty)
 }
 
 pub(crate) fn record_subtree_handoff(operation_id: u64, tree_ref: u64) {
@@ -638,11 +657,13 @@ pub(crate) fn clone_span(operation_id: u64, cache_key: &str, clone_url: &str) ->
     tracing::info_span!(target: TARGET, "provider.clone", operation_id, cache_key, remote, outcome = tracing::field::Empty)
 }
 
-pub(crate) fn record_outcome(span: &Span, outcome: InspectorOutcome) {
+/// Record the terminal typed outcome which the layer emits when `span` closes.
+pub fn record_outcome(span: &Span, outcome: InspectorOutcome) {
     span.record("outcome", outcome.as_str());
 }
 
-pub(crate) fn cache_event(kind: CacheKind) {
+/// Emit cache activity against the nearest active Inspector request span.
+pub fn cache_event(kind: CacheKind) {
     tracing::event!(name: "cache.activity", target: TARGET, Level::INFO, cache_kind = kind.as_str());
 }
 
@@ -667,7 +688,7 @@ pub(crate) fn outcome_for_provider_error(error: &wit_types::ProviderError) -> In
     error_kind_outcome(error.kind)
 }
 
-pub(crate) struct WitCalloutView<'a>(pub(crate) &'a wit_types::Callout);
+struct WitCalloutView<'a>(&'a wit_types::Callout);
 
 impl WitCalloutView<'_> {
     fn kind(&self) -> CalloutKind {
@@ -706,16 +727,6 @@ impl WitCalloutView<'_> {
             },
         }
     }
-
-    pub(crate) fn span_kind(&self) -> &'static str {
-        match self.kind() {
-            CalloutKind::Fetch => "http.fetch",
-            CalloutKind::FetchBlob => "blob.fetch",
-            CalloutKind::GitOpenRepo => "git.open_repo",
-            CalloutKind::OpenArchive => "archive.open",
-            CalloutKind::ReadBlob => "blob.read",
-        }
-    }
 }
 
 fn error_kind_outcome(kind: wit_types::ErrorKind) -> InspectorOutcome {
@@ -746,9 +757,6 @@ fn wall_ts() -> String {
 
 fn to_us(duration: Duration) -> u64 {
     u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
-}
-fn clamp_u32(value: usize) -> u32 {
-    u32::try_from(value).unwrap_or(u32::MAX)
 }
 fn disabled_from_env() -> bool {
     matches!(
@@ -795,7 +803,9 @@ mod tests {
             let request = request_span("lookup", "m", "/x");
             let _enter = request.enter();
             {
-                let provider = provider_span(7, "m", "p", "lookup_child", "/x");
+                let bridge = tracing::info_span!("runtime.driver");
+                let _bridge_enter = bridge.enter();
+                let provider = provider_span(7, "", "p", "read_chunk", "");
                 let _provider_enter = provider.enter();
                 record_outcome(&provider, InspectorOutcome::Ok);
             }
@@ -806,8 +816,9 @@ mod tests {
         assert!(events.iter().all(|record| record.trace_id == 1));
         assert!(matches!(events[0].event, InspectorEvent::FuseStart { .. }));
         assert!(matches!(
-            events[1].event,
-            InspectorEvent::ProviderStart { .. }
+            &events[1].event,
+            InspectorEvent::ProviderStart { mount, path, .. }
+                if mount == "m" && path == "/x"
         ));
     }
 
@@ -863,7 +874,7 @@ mod tests {
         let inspector = Arc::new(Inspector::new_for_test(64));
         let threads = 8;
         let per_thread = 100;
-        let barrier = Arc::new(Barrier::new(threads));
+        let barrier = Arc::new(Barrier::new(threads + 1));
         let mut handles = Vec::new();
         for thread_id in 0..threads {
             let inspector = Arc::clone(&inspector);
@@ -881,6 +892,10 @@ mod tests {
                     );
                 }
             }));
+        }
+        barrier.wait();
+        for _ in 0..100 {
+            assert!(inspector.history_snapshot().len() <= 64);
         }
         for handle in handles {
             handle.join().expect("emitter thread");

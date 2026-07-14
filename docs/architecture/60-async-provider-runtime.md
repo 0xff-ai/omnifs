@@ -41,7 +41,8 @@ Not part of the provider protocol:
 The protocol retains:
 
 - typed callout request and result records
-- correlation ids passed into each async host import for tracing and attribution
+- operation ids on callouts for host attribution; Inspector correlation follows
+  tracing parents rather than explicit trace-id parameters
 - terminal effects for canonical stores, filesystem writes, and invalidations
 
 Lifecycle exports remain terminal and synchronous at the WIT level. Because the store is configured for component async, the host still invokes those exports through Wasmtime's concurrent call path.
@@ -83,15 +84,31 @@ The SDK owns no custom executor. The provider macro emits async namespace and no
 - Git opens go through `GitExecutor`.
 - Archive opens go through `ArchiveExecutor`.
 
-Tracing is preserved at the callout boundary. Every host import creates the same `omnifs_callout` span shape with:
+Tracing is preserved at the callout boundary. Namespace requests, provider
+operations, callouts, subtree handoffs, clone operations, cache activity, and
+terminal outcomes use stable structured fields. The provider-instance driver
+captures the current parent span in each async command and instruments the
+component-call future with it, so moving work to the driver thread does not
+require a parallel trace-id channel.
+
+Every host import creates one Inspector callout span with:
 
 - operation id
 - callout index
 - callout kind
-- executor-specific request fields
-- executor-specific outcome fields
+- a redacted summary
+- a terminal outcome
 
-The inspector also remains callout-oriented. It begins when the async host import arrives and finishes when the executor returns the `callout-result`.
+Executor-specific child spans on the `omnifs_callout` target retain detailed,
+redacted request and response diagnostics for daemon logging. They do not emit
+a second Inspector lifecycle.
+
+`InspectorLayer` is the sole producer of the existing Inspector record stream.
+It translates span open, record, event, and close callbacks into typed records,
+retains bounded history, and broadcasts live records to the control API. JSON
+serialization happens only at the file tee or `/v1/events` consumer boundary.
+Dropping a future closes its span and produces one terminal internal outcome
+unless the operation recorded a more specific result first.
 
 ## Concurrency and blocking
 

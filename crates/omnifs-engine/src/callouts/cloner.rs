@@ -51,14 +51,11 @@ impl GitCloner {
     /// `cache_key` is a provider-supplied stable identifier (e.g. "github.com/owner/repo").
     /// `clone_url` is the full URL to pass to git clone verbatim.
     ///
-    /// Clone callbacks are called only for a fresh clone. Cache hits never
-    /// call them.
     pub fn clone_if_needed(
         &self,
         cache_key: &str,
         clone_url: &str,
-        mut record_clone_start: impl FnMut(&str, &str),
-        mut record_clone_end: impl FnMut(&str, Duration, bool),
+        operation_id: u64,
     ) -> Result<PathBuf, CloneError> {
         if !crate::sandbox::relative_key::is_safe_relative_key(cache_key, |_| false) {
             return Err(CloneError::UnsafeCacheKey(cache_key.to_string()));
@@ -92,10 +89,16 @@ impl GitCloner {
             return Ok(cache_path);
         }
 
-        record_clone_start(cache_key, clone_url);
-        let started = Instant::now();
-        let outcome = Self::run_clone(clone_url, &cache_path);
-        record_clone_end(cache_key, started.elapsed(), outcome.is_ok());
+        let span = crate::inspector::clone_span(operation_id, cache_key, clone_url);
+        let outcome = span.in_scope(|| Self::run_clone(clone_url, &cache_path));
+        crate::inspector::record_outcome(
+            &span,
+            if outcome.is_ok() {
+                omnifs_api::events::InspectorOutcome::Ok
+            } else {
+                omnifs_api::events::InspectorOutcome::Network
+            },
+        );
         outcome?;
         Self::write_sidecar(&sidecar, clone_url);
         Ok(cache_path)

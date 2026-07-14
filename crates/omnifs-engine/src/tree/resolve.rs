@@ -6,6 +6,7 @@ use crate::Runtime;
 use crate::cache::RecordKind;
 use crate::effect_apply::LookupOutcome;
 use crate::view::{DirentsPayload, EntryMeta};
+use omnifs_api::events::CacheKind;
 use omnifs_core::path::Path;
 
 use super::error::{Result, TreeError};
@@ -21,7 +22,7 @@ impl Tree {
     /// Doubles as filehandle/inode rehydration: a renderer persisted (mount,
     /// path) in its handle and calls resolve again to rebuild a `Node` after
     /// eviction, without re-walking from root.
-    pub async fn resolve(&self, path: &Path, ctx: &RequestCtx) -> Result<Node> {
+    pub async fn resolve(&self, path: &Path, _ctx: &RequestCtx) -> Result<Node> {
         let (mount, rel) = self.ctx.split_mount_path(path)?;
 
         // The mount root is always a directory; no provider round trip needed.
@@ -42,8 +43,7 @@ impl Tree {
             )));
         };
 
-        self.resolve_child_in(mount, &runtime, &parent, name, ctx)
-            .await
+        self.resolve_child_in(mount, &runtime, &parent, name).await
     }
 
     /// Resolve a child of an already-resolved parent directory `Node` to a
@@ -60,16 +60,15 @@ impl Tree {
     /// mount-root ignore file is always synthesized at the root before cached
     /// dirents or provider lookup (the host-owned file wins). Subtree outcomes
     /// resolve through `Runtime::resolve_tree_ref` into `NodeBody::Subtree`.
-    pub async fn resolve_child(&self, parent: &Node, name: &str, ctx: &RequestCtx) -> Result<Node> {
+    pub async fn resolve_child(
+        &self,
+        parent: &Node,
+        name: &str,
+        _ctx: &RequestCtx,
+    ) -> Result<Node> {
         let runtime = self.ctx.runtime_for(parent.mount())?;
-        self.resolve_child_in(
-            parent.mount().to_string(),
-            &runtime,
-            parent.path(),
-            name,
-            ctx,
-        )
-        .await
+        self.resolve_child_in(parent.mount().to_string(), &runtime, parent.path(), name)
+            .await
     }
 
     /// Shared body for [`resolve`](Self::resolve) and
@@ -81,7 +80,6 @@ impl Tree {
         runtime: &Arc<Runtime>,
         parent: &Path,
         name: &str,
-        _ctx: &RequestCtx,
     ) -> Result<Node> {
         let rel = parent.join(name).map_err(|e| {
             TreeError::invalid_input(format!("resolve_child: invalid name {name:?}: {e}"))
@@ -127,6 +125,7 @@ impl Tree {
             return Ok(Node::new(mount, rel, meta, NodeBody::Provider));
         }
 
+        crate::inspector::cache_event(CacheKind::BrowseMiss);
         match runtime.namespace().lookup_child(parent, name).await? {
             LookupOutcome::Entry(entry) => Ok(Node::new(
                 mount,
@@ -162,9 +161,13 @@ fn cached_dirent_child(runtime: &Runtime, parent: &Path, name: &str) -> Option<E
         .cache()
         .cache_get(parent, RecordKind::Dirents, None)?;
     let dirents = DirentsPayload::deserialize(&record.payload)?;
-    dirents
+    let entry = dirents
         .entries
         .iter()
         .find(|entry| entry.name == name)
-        .map(|entry| entry.meta.clone())
+        .map(|entry| entry.meta.clone());
+    if entry.is_some() {
+        crate::inspector::cache_event(CacheKind::BrowseHit);
+    }
+    entry
 }

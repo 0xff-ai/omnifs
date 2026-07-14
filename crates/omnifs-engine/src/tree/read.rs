@@ -20,6 +20,7 @@ use tracing::warn;
 use super::error::{Result, TreeError};
 use super::node::{Node, PaginationControl, SyntheticContent};
 use crate::{RequestCtx, Tree};
+use omnifs_api::events::CacheKind;
 
 /// Result of `Tree::read`. A two-arm shape so a treeref-backed node (read via
 /// renderer std::fs passthrough over a real dir) can never be confused with
@@ -140,13 +141,13 @@ impl Tree {
     /// The renderer still owns its kernel-side handle caches (the per-`fh` whole
     /// buffer FUSE keeps, the inode size promotion) and kernel offset/size
     /// slicing; `Tree::read` returns the whole rendered file.
-    pub async fn read(&self, node: &Node, ctx: &RequestCtx) -> Result<ReadResult> {
+    pub async fn read(&self, node: &Node, _ctx: &RequestCtx) -> Result<ReadResult> {
         // A host-synthesized node (a mount-root ignore file or a `@next`/`@all`
         // pagination control) is served by `Tree`, never the provider. The
         // renderer materializes the result into a per-handle buffer so a partial
         // or repeated read never re-runs the (mutating) control action.
         if let Some(synthetic) = node.synthetic_kind() {
-            return self.read_synthetic(node, &synthetic.content, ctx).await;
+            return self.read_synthetic(node, &synthetic.content).await;
         }
 
         // A subtree node is served by the renderer from the real backing
@@ -209,6 +210,7 @@ impl Tree {
                 .mem_get(path, RecordKind::File, aux.as_deref())
                 && let Some(payload) = file_payload_for_attrs(&record, attrs)
             {
+                crate::inspector::cache_event(CacheKind::FileHit);
                 return read_result_from_cache(path, payload, attrs);
             }
             if let Some(record) = runtime
@@ -216,6 +218,7 @@ impl Tree {
                 .cache_get(path, RecordKind::File, aux.as_deref())
                 && let Some(payload) = file_payload_for_attrs(&record, attrs)
             {
+                crate::inspector::cache_event(CacheKind::FileHit);
                 return read_result_from_cache(path, payload, attrs);
             }
         }
@@ -228,6 +231,7 @@ impl Tree {
         // Capture the generation BEFORE awaiting the render so the result can be
         // fenced against an invalidation that lands mid-read.
         let op_gen = runtime.cache().current_generation();
+        crate::inspector::cache_event(CacheKind::FileMiss);
         let result = match runtime.namespace().read_file(path, content_type).await {
             Ok(result) => result,
             Err(EngineError::ProviderError(error)) => {
@@ -255,12 +259,7 @@ impl Tree {
     /// parent directory, invalidates the parent's cached dirents so a later
     /// listing reflects the grown feed, and returns a one-line status with a
     /// learned exact size so `cat` reads the whole message.
-    async fn read_synthetic(
-        &self,
-        node: &Node,
-        content: &SyntheticContent,
-        _ctx: &RequestCtx,
-    ) -> Result<ReadResult> {
+    async fn read_synthetic(&self, node: &Node, content: &SyntheticContent) -> Result<ReadResult> {
         match content {
             SyntheticContent::Fixed(bytes) => Ok(ReadResult::Bytes {
                 data: materialized_bytes(node.path(), bytes.clone())?,

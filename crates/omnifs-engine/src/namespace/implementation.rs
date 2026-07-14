@@ -7,16 +7,17 @@ use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use futures::future::{BoxFuture, FutureExt};
-use omnifs_api::events::{InspectorOutcome, TraceId};
+use omnifs_api::events::InspectorOutcome;
 use omnifs_core::path::Path;
 use tokio::runtime::Handle;
 use tokio::sync::broadcast;
+use tracing::Instrument;
 
 use super::{
     Attrs, DirCursor, DirEntry, DirPage, EntryKind, Epoch, EventStream, Namespace, NodeAnswer,
     NodeId, NsError, NsEvent, ReadAnswer, ReadStyle, StabilityClass, view_types,
 };
-use crate::inspect::{self, InspectorRequestScope};
+use crate::inspect;
 use crate::registry::MountRuntimes;
 use crate::tree::{ListOutcome, RangedHandle, ReadResult, RequestCtx};
 use crate::view::{EntryMeta, FileAttrsCache, FileSize};
@@ -271,19 +272,12 @@ impl TreeNamespace {
 
     // --- inspector tracing ---------------------------------------------------
     //
-    // `TreeNamespace` is the sole trace-id minting authority for `RequestCtx`.
-    // The `Namespace` trait deliberately keeps a `NodeId` opaque to callers (an
-    // engine-owned handle, not a (mount, path) pair), so FUSE, NFS, and the wire
-    // server dispatching on a remote frontend's behalf cannot derive the mount
-    // and path an inspector span needs to display; only this id table (via
-    // `record`) can. Minting here once per `Namespace` call gives downstream
-    // engine and provider spans (`Runtime::run_op`, callouts) the trace id
-    // without coupling a frontend to tree internals.
-
-    /// Begin an inspector span for one `Namespace` call, when the process-wide
-    /// sink is attached. `None` when the inspector is disabled (the default).
-    fn begin_span(op: &'static str, mount: &str, path: &str) -> Option<InspectorRequestScope> {
-        inspect::global().map(|sink| InspectorRequestScope::begin(sink, op, mount, path))
+    // `TreeNamespace` owns request spans because `NodeId` is opaque to
+    // frontends. Only this id table can map a node to the mount and path that
+    // the inspector records; child provider and callout spans inherit the
+    // request span through tracing.
+    fn begin_span(op: &'static str, mount: &str, path: &str) -> tracing::Span {
+        inspect::request_span(op, mount, path)
     }
 
     /// Inspector paths are mount-relative, while namespace records keep the
@@ -294,26 +288,15 @@ impl TreeNamespace {
         inspector_identity(self.tree.root_node_mount().is_empty(), mount, full_path)
     }
 
-    /// The trace id a span minted, for threading into `RequestCtx`.
-    fn span_trace(span: Option<&InspectorRequestScope>) -> Option<TraceId> {
-        span.map(InspectorRequestScope::trace_id)
-    }
-
-    /// Record `result`'s outcome on `span`, if there is a live one and the call
-    /// failed. A live span always reports `Ok` on `Drop` unless this overrides
-    /// it, so the `Ok` path needs no explicit call.
-    ///
-    /// Takes `span` only after the traced future has already been awaited (see
-    /// call sites), never while it is in flight: `InspectorRequestScope` holds
-    /// a `Cell`, so a live `&InspectorRequestScope` is `!Sync` and cannot be
-    /// held across an `.await` inside a `BoxFuture: Send` (the `Namespace`
-    /// trait's bound).
-    fn record_outcome<T>(span: Option<&InspectorRequestScope>, result: &Result<T, NsError>) {
-        if let Err(error) = result
-            && let Some(span) = span
-        {
-            span.set_outcome(Self::outcome_for(error));
-        }
+    /// Record every completed request, including successful and failed
+    /// operations. The tracing inspector otherwise treats an unset outcome as
+    /// an internal failure when the root span closes.
+    fn record_outcome<T>(span: &tracing::Span, result: &Result<T, NsError>) {
+        let outcome = result
+            .as_ref()
+            .map(|_| InspectorOutcome::Ok)
+            .unwrap_or_else(|error| Self::outcome_for(error));
+        inspect::record_outcome(span, outcome);
     }
 
     fn outcome_for(error: &NsError) -> InspectorOutcome {
@@ -383,13 +366,11 @@ impl TreeNamespace {
 
     /// Re-resolve a node to a fresh [`crate::Node`]. `Tree::resolve` round-trips
     /// the full protocol path across every backing (single, rooted, enumeration).
-    async fn resolve_node(
-        &self,
-        full_path: &Path,
-        trace: Option<TraceId>,
-    ) -> Result<crate::Node, NsError> {
-        let ctx = RequestCtx { trace };
-        self.tree.resolve(full_path, &ctx).await.map_err(Into::into)
+    async fn resolve_node(&self, full_path: &Path) -> Result<crate::Node, NsError> {
+        self.tree
+            .resolve(full_path, &RequestCtx)
+            .await
+            .map_err(Into::into)
     }
 
     // --- invalidation -------------------------------------------------------
@@ -505,21 +486,19 @@ impl TreeNamespace {
     // --- read ---------------------------------------------------------------
 
     async fn read_inner(&self, id: NodeId, offset: u64, len: u32) -> Result<ReadAnswer, NsError> {
-        // A live ranged handle already open on this node serves the read without
-        // re-resolving, so a follow read reuses the single open. It bypasses
-        // tracing because the raw provider handle is not driven through
-        // `Tree`/`Runtime::run_op`, leaving no span for a trace id to attach to.
-        if let Some(handle) = self.take_cached_handle(id.0) {
-            return self.read_ranged(id.0, &handle, offset, len).await;
-        }
-
         let (full_path, mount) = self.record(id)?;
         self.process_invalidations(&mount);
         let (display_mount, display_path) = self.inspector_identity(&mount, &full_path);
         let span = Self::begin_span("read", &display_mount, &display_path);
-        let trace = Self::span_trace(span.as_ref());
         let result = async {
-            let node = self.resolve_node(&full_path, trace).await?;
+            // A live ranged handle already open on this node serves the read
+            // without re-resolving, so follow reads still remain inside the
+            // namespace request span even though they bypass `Tree`.
+            if let Some(handle) = self.take_cached_handle(id.0) {
+                return self.read_ranged(id.0, &handle, offset, len).await;
+            }
+
+            let node = self.resolve_node(&full_path).await?;
 
             if node.is_dir() {
                 return Err(NsError::IsDirectory);
@@ -538,10 +517,11 @@ impl TreeNamespace {
                 return self.read_ranged(id.0, &handle, offset, len).await;
             }
 
-            self.read_full(id.0, &node, offset, len, trace).await
+            self.read_full(id.0, &node, offset, len).await
         }
+        .instrument(span.clone())
         .await;
-        Self::record_outcome(span.as_ref(), &result);
+        Self::record_outcome(&span, &result);
         result
     }
 
@@ -573,10 +553,8 @@ impl TreeNamespace {
         node: &crate::Node,
         offset: u64,
         len: u32,
-        trace: Option<TraceId>,
     ) -> Result<ReadAnswer, NsError> {
-        let ctx = RequestCtx { trace };
-        match self.tree.read(node, &ctx).await? {
+        match self.tree.read(node, &RequestCtx).await? {
             ReadResult::Bytes { data, attrs, .. } => {
                 if let Some(attrs) = &attrs {
                     self.store_learned(id, attrs.clone());
@@ -682,19 +660,18 @@ impl TreeNamespace {
         cursor: DirCursor,
         budget: usize,
     ) -> Result<DirPage, NsError> {
-        // A buffered cursor is pure overflow the previous page held back; serve
-        // it without touching the tree.
-        if let DirCursor::Buffered { entries, then } = cursor {
-            return Ok(DirPage::with_budget(entries, then, budget));
-        }
-
         let (full_path, mount) = self.record(id)?;
         self.process_invalidations(&mount);
         let (display_mount, display_path) = self.inspector_identity(&mount, &full_path);
         let span = Self::begin_span("readdir", &display_mount, &display_path);
-        let trace = Self::span_trace(span.as_ref());
         let result = async {
-            let node = self.resolve_node(&full_path, trace).await?;
+            // A buffered cursor is pure overflow the previous page held back;
+            // serve it inside the request span without touching the tree.
+            if let DirCursor::Buffered { entries, then } = cursor {
+                return Ok(DirPage::with_budget(entries, then, budget));
+            }
+
+            let node = self.resolve_node(&full_path).await?;
             if !node.is_dir() {
                 return Err(NsError::NotDirectory);
             }
@@ -704,8 +681,7 @@ impl TreeNamespace {
                 DirCursor::Tree(c) => Some(crate::Cursor(c)),
                 DirCursor::Buffered { .. } => unreachable!("buffered handled above"),
             };
-            let ctx = RequestCtx { trace };
-            let listing = match self.tree.list(&node, tree_cursor, &ctx).await? {
+            let listing = match self.tree.list(&node, tree_cursor, &RequestCtx).await? {
                 ListOutcome::Listing(listing) => listing,
                 // A subtree node's children are served directly by the projection
                 // tree from the backing directory; this listing path does not
@@ -725,8 +701,9 @@ impl TreeNamespace {
             let tree_next = listing.next_cursor.map(|c| c.0);
             Ok(DirPage::with_budget(entries, tree_next, budget))
         }
+        .instrument(span.clone())
         .await;
-        Self::record_outcome(span.as_ref(), &result);
+        Self::record_outcome(&span, &result);
         result
     }
 
@@ -798,9 +775,8 @@ impl TreeNamespace {
         let op = if exact { "getattr_exact" } else { "getattr" };
         let (display_mount, display_path) = self.inspector_identity(&mount, &full_path);
         let span = Self::begin_span(op, &display_mount, &display_path);
-        let trace = Self::span_trace(span.as_ref());
         let result = async {
-            let node = self.resolve_node(&full_path, trace).await?;
+            let node = self.resolve_node(&full_path).await?;
             let refreshed = self.refresh_record(id.0, &node);
 
             // The exact-size flavor probes provider I/O for a deferred ranged
@@ -824,8 +800,9 @@ impl TreeNamespace {
 
             Ok(self.attrs_from_parts(id.0, &node, refreshed.as_ref()))
         }
+        .instrument(span.clone())
         .await;
-        Self::record_outcome(span.as_ref(), &result);
+        Self::record_outcome(&span, &result);
         result
     }
 
@@ -855,9 +832,8 @@ impl Namespace for TreeNamespace {
             let child_full = parent_full.join(name).map_err(|_| NsError::Invalid)?;
             let (display_mount, display_path) = self.inspector_identity(&mount, &child_full);
             let span = Self::begin_span("lookup", &display_mount, &display_path);
-            let trace = Self::span_trace(span.as_ref());
             let result = async {
-                let node = self.resolve_node(&child_full, trace).await?;
+                let node = self.resolve_node(&child_full).await?;
                 let id = self.intern(&node);
                 let attrs = self.attrs_for(id.0, &node);
                 Ok(NodeAnswer {
@@ -866,8 +842,9 @@ impl Namespace for TreeNamespace {
                     attrs,
                 })
             }
+            .instrument(span.clone())
             .await;
-            Self::record_outcome(span.as_ref(), &result);
+            Self::record_outcome(&span, &result);
             result
         }
         .boxed()

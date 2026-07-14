@@ -1,16 +1,14 @@
 //! Snapshot test for callout span instrumentation.
 //!
-//! Drives canned futures/results through the same outer/inner span
-//! structure that `dispatch_one` uses in production, then asserts the
-//! captured `fmt` layer output contains the request-side fields on the
-//! `new` line and the late-recorded response-side fields on the
-//! `close` line. Coverage spans all five callout kinds.
+//! Drives canned futures/results through executor-shaped spans, then asserts
+//! the captured `fmt` layer output contains request-side fields on the `new`
+//! line and late-recorded response-side fields on the `close` line. Coverage
+//! spans all five callout kinds.
 
-use omnifs_engine::test_support::{LogUrl, WitHeaders, kind_label, record_outcome};
+use omnifs_engine::test_support::{LogUrl, WitHeaders, record_outcome};
 use omnifs_wit::provider::types as wit_types;
 use std::io;
 use std::sync::{Arc, Mutex};
-use tracing::Instrument;
 use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::fmt::format::FmtSpan;
 
@@ -160,46 +158,6 @@ async fn fake_archive_open(req: &wit_types::ArchiveOpenRequest) -> wit_types::Ca
     result
 }
 
-/// Dispatch wrapper that mirrors `Callouts::dispatch_one` for an
-/// individual canned future. Wraps `fut` in the outer `callout` span
-/// carrying `operation_id`, `callout_index`, and `kind`.
-async fn dispatch_one<F>(
-    op_id: u64,
-    index: usize,
-    callout: &wit_types::Callout,
-    fut: F,
-) -> F::Output
-where
-    F: std::future::Future,
-{
-    fut.instrument(tracing::info_span!(
-        target: "omnifs_callout",
-        "callout",
-        operation_id = op_id,
-        callout_index = index,
-        kind = kind_label(callout),
-    ))
-    .await
-}
-
-/// Synchronous variant for callout methods that aren't `async`.
-fn dispatch_one_sync<R>(
-    op_id: u64,
-    index: usize,
-    callout: &wit_types::Callout,
-    body: impl FnOnce() -> R,
-) -> R {
-    let span = tracing::info_span!(
-        target: "omnifs_callout",
-        "callout",
-        operation_id = op_id,
-        callout_index = index,
-        kind = kind_label(callout),
-    );
-    let _entered = span.enter();
-    body()
-}
-
 fn http_request() -> wit_types::HttpRequest {
     wit_types::HttpRequest {
         method: "GET".to_string(),
@@ -257,27 +215,16 @@ fn archive_open_request() -> wit_types::ArchiveOpenRequest {
 #[tokio::test(flavor = "current_thread")]
 async fn http_fetch_span_records_request_and_response_fields() {
     let req = http_request();
-    let callout = wit_types::Callout::Fetch(req.clone());
     let output = run_with_capture_async(|| async move {
-        let _ = dispatch_one(11, 0, &callout, fake_http_fetch(&req)).await;
+        let _ = fake_http_fetch(&req).await;
     })
     .await;
 
-    assert_contains_new_line(
-        &output,
-        &[
-            "kind=\"http.fetch\"",
-            "method=\"GET\"",
-            "url=",
-            "request_headers=",
-        ],
-    );
+    assert_contains_new_line(&output, &["method=\"GET\"", "url=", "request_headers="]);
     assert_contains_close_line(
         &output,
         &["status=200", "response_headers=", "response_body_bytes=2"],
     );
-    assert_present_on_new_and_close(&output, "operation_id=11");
-    assert_present_on_new_and_close(&output, "callout_index=0");
     assert!(
         output.contains("access_token=redacted"),
         "url should redact access_token: {output}"
@@ -297,20 +244,14 @@ async fn http_fetch_span_records_request_and_response_fields() {
 #[tokio::test(flavor = "current_thread")]
 async fn blob_fetch_span_records_cache_key_and_late_bound_blob() {
     let req = blob_fetch_request();
-    let callout = wit_types::Callout::FetchBlob(req.clone());
     let output = run_with_capture_async(|| async move {
-        let _ = dispatch_one(12, 1, &callout, fake_blob_fetch(&req)).await;
+        let _ = fake_blob_fetch(&req).await;
     })
     .await;
 
     assert_contains_new_line(
         &output,
-        &[
-            "kind=\"blob.fetch\"",
-            "cache_key=/pkg/pkg-1.0.crate",
-            "method=\"GET\"",
-            "url=",
-        ],
+        &["cache_key=/pkg/pkg-1.0.crate", "method=\"GET\"", "url="],
     );
     assert_contains_close_line(
         &output,
@@ -321,8 +262,6 @@ async fn blob_fetch_span_records_cache_key_and_late_bound_blob() {
             "response_body_bytes=1024",
         ],
     );
-    assert_present_on_new_and_close(&output, "operation_id=12");
-    assert_present_on_new_and_close(&output, "callout_index=1");
     assert!(output.contains("Authorization=<redacted>"));
     assert!(!output.contains("should-not-leak"));
 }
@@ -330,34 +269,25 @@ async fn blob_fetch_span_records_cache_key_and_late_bound_blob() {
 #[tokio::test(flavor = "current_thread")]
 async fn blob_read_span_records_response_body_bytes_at_close() {
     let req = read_blob_request();
-    let callout = wit_types::Callout::ReadBlob(req);
     let output = run_with_capture_async(|| async move {
-        dispatch_one_sync(13, 2, &callout, || fake_blob_read(&req));
+        fake_blob_read(&req);
     })
     .await;
 
-    assert_contains_new_line(
-        &output,
-        &["kind=\"blob.read\"", "blob=4242", "offset=0", "len="],
-    );
+    assert_contains_new_line(&output, &["blob=4242", "offset=0", "len="]);
     assert_contains_close_line(&output, &["response_body_bytes=11"]);
-    assert_present_on_new_and_close(&output, "operation_id=13");
-    assert_present_on_new_and_close(&output, "callout_index=2");
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn git_open_span_records_tree_ref_at_close() {
     let req = git_open_request();
-    let callout = wit_types::Callout::GitOpenRepo(req.clone());
     let output = run_with_capture_async(|| async move {
-        dispatch_one_sync(14, 3, &callout, || fake_git_open(&req));
+        fake_git_open(&req);
     })
     .await;
 
-    assert_contains_new_line(&output, &["kind=\"git.open_repo\"", "url="]);
+    assert_contains_new_line(&output, &["url="]);
     assert_contains_close_line(&output, &["tree_ref=7"]);
-    assert_present_on_new_and_close(&output, "operation_id=14");
-    assert_present_on_new_and_close(&output, "callout_index=3");
     // The URL must redact userinfo.
     assert!(
         !output.contains("user:pass"),
@@ -368,24 +298,16 @@ async fn git_open_span_records_tree_ref_at_close() {
 #[tokio::test(flavor = "current_thread")]
 async fn archive_open_span_records_tree_ref_at_close() {
     let req = archive_open_request();
-    let callout = wit_types::Callout::OpenArchive(req.clone());
     let output = run_with_capture_async(|| async move {
-        let _ = dispatch_one(15, 4, &callout, fake_archive_open(&req)).await;
+        let _ = fake_archive_open(&req).await;
     })
     .await;
 
     assert_contains_new_line(
         &output,
-        &[
-            "kind=\"archive.open\"",
-            "blob=4242",
-            "format=",
-            "strip_prefix=\"/pkg-1.0/\"",
-        ],
+        &["blob=4242", "format=", "strip_prefix=\"/pkg-1.0/\""],
     );
     assert_contains_close_line(&output, &["tree_ref=99"]);
-    assert_present_on_new_and_close(&output, "operation_id=15");
-    assert_present_on_new_and_close(&output, "callout_index=4");
 }
 
 // --- helpers --------------------------------------------------------------
@@ -432,27 +354,9 @@ fn assert_contains_close_line(output: &str, needles: &[&str]) {
     }
 }
 
-fn assert_present_on_new_and_close(output: &str, needle: &str) {
-    let new_line = find_line_with_marker(output, "new")
-        .unwrap_or_else(|| panic!("no 'new' event in output:\n{output}"));
-    let close_line = find_line_with_marker(output, "close")
-        .unwrap_or_else(|| panic!("no 'close' event in output:\n{output}"));
-    assert!(
-        new_line.contains(needle),
-        "new line missing {needle:?}: {new_line}"
-    );
-    assert!(
-        close_line.contains(needle),
-        "close line missing {needle:?}: {close_line}"
-    );
-}
-
-/// `tracing-subscriber`'s formatter prints span lifecycle markers at
-/// the end of the prefix as `…<fields>}: new` or `…<fields>}: close
-/// time.busy=…`. Find the innermost (deepest, longest prefix) line in
-/// `output` whose marker matches — the inner executor span's fields
-/// trail the outer `callout` span's fields, so the longest line carries
-/// the union of both.
+/// `tracing-subscriber`'s formatter prints span lifecycle markers at the end
+/// of the prefix as `…<fields>}: new` or `…<fields>}: close time.busy=…`.
+/// Find the executor span line in `output` whose marker matches.
 fn find_line_with_marker<'a>(output: &'a str, marker: &str) -> Option<&'a str> {
     let suffix = format!(": {marker}");
     output

@@ -14,7 +14,7 @@ pub mod coalesce;
 #[cfg(feature = "runtime")]
 pub(crate) mod effects;
 #[cfg(feature = "runtime")]
-pub(crate) mod inspect;
+pub mod inspect;
 #[cfg(feature = "runtime")]
 pub(crate) mod log_redaction;
 pub mod namespace;
