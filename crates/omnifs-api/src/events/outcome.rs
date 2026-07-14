@@ -18,6 +18,37 @@ pub enum InspectorOutcome {
     Internal,
 }
 
+impl InspectorOutcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::NotFound => "not_found",
+            Self::Denied => "denied",
+            Self::InvalidInput => "invalid_input",
+            Self::Timeout => "timeout",
+            Self::Network => "network",
+            Self::TooLarge => "too_large",
+            Self::ProviderTrap => "provider_trap",
+            Self::Internal => "internal",
+        }
+    }
+
+    pub fn from_field(value: &str) -> Option<Self> {
+        Some(match value {
+            "ok" => Self::Ok,
+            "not_found" => Self::NotFound,
+            "denied" => Self::Denied,
+            "invalid_input" => Self::InvalidInput,
+            "timeout" => Self::Timeout,
+            "network" => Self::Network,
+            "too_large" => Self::TooLarge,
+            "provider_trap" => Self::ProviderTrap,
+            "internal" => Self::Internal,
+            _ => return None,
+        })
+    }
+}
+
 /// Optional redacted detail attached to end events.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OutcomeFields {

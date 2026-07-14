@@ -48,7 +48,7 @@ pub mod view;
 #[cfg(feature = "runtime")]
 pub use callouts::cloner::{CloneError, GitCloner};
 #[cfg(feature = "runtime")]
-pub use inspect::{InspectorSink, Subscription, init_global_from_env};
+pub use inspect::{Inspector, InspectorLayer, Subscription, init_global_from_env};
 #[cfg(feature = "runtime")]
 pub use namespace::TreeNamespace;
 pub use namespace::{
