@@ -302,7 +302,7 @@ impl Store {
     }
 
     /// Current per-mount generation. Capture this before starting a browse op
-    /// and pass it back as `op_gen` to `put_canonical`.
+    /// and pass it back as `op_gen` to `put_canonical_batch`.
     pub fn current_generation(&self) -> u64 {
         self.generation.load(Ordering::Acquire)
     }
@@ -395,30 +395,9 @@ impl Store {
         let obj = self.object.get(&id)?;
         let canonical = obj.canonical?;
         Some(CachedCanonical {
-            id: obj.id,
+            id,
             bytes: canonical.bytes,
             validator: canonical.validator,
-        })
-    }
-
-    /// Store a canonical object entry, gated on the per-mount id fence.
-    pub fn put_canonical(
-        &self,
-        id: &[u8],
-        bytes: Vec<u8>,
-        validator: Option<String>,
-        view_leaves: &[Path],
-        op_gen: u64,
-    ) -> bool {
-        if self.id_tombstoned_after(id, op_gen) {
-            return false;
-        }
-
-        let leaves: Vec<String> = view_leaves.iter().map(|p| p.as_str().to_string()).collect();
-        let canonical = object::StoredObject { bytes, validator };
-        let view = &self.caches.view;
-        self.object.store(id, canonical, &leaves, |leaf| {
-            view.delete_exact(&self.scope_unscoped(leaf));
         })
     }
 
@@ -689,11 +668,13 @@ mod tests {
             p("/issues/open/42/item.json"),
             p("/issues/all/42/item.json"),
         ];
-        assert!(store.put_canonical(
-            OBJ_ID,
-            b"payload".to_vec(),
-            None,
-            &leaves,
+        assert!(store.put_canonical_batch(
+            vec![CanonicalBatchEntry {
+                id: OBJ_ID.to_vec(),
+                bytes: b"payload".to_vec(),
+                validator: None,
+                view_leaves: leaves.to_vec(),
+            }],
             store.current_generation(),
         ));
 
@@ -706,11 +687,10 @@ mod tests {
             Some(OBJ_ID)
         );
         assert!(store.object.get(OBJ_ID).unwrap().canonical.is_some());
-        assert!(
-            store
-                .cached_canonical_for(&p("/issues/open/42/item.json"))
-                .is_some()
-        );
+        let cached = store
+            .cached_canonical_for(&p("/issues/open/42/item.json"))
+            .unwrap();
+        assert_eq!(cached.id, OBJ_ID);
     }
 
     #[test]
@@ -720,8 +700,24 @@ mod tests {
         let path = "/issues/42/item.json";
         let op_gen = store_a.current_generation();
 
-        assert!(store_a.put_canonical(OBJ_ID, b"from-a".to_vec(), None, &[p(path)], op_gen,));
-        assert!(store_b.put_canonical(OBJ_ID, b"from-b".to_vec(), None, &[p(path)], op_gen,));
+        assert!(store_a.put_canonical_batch(
+            vec![CanonicalBatchEntry {
+                id: OBJ_ID.to_vec(),
+                bytes: b"from-a".to_vec(),
+                validator: None,
+                view_leaves: vec![p(path)],
+            }],
+            op_gen,
+        ));
+        assert!(store_b.put_canonical_batch(
+            vec![CanonicalBatchEntry {
+                id: OBJ_ID.to_vec(),
+                bytes: b"from-b".to_vec(),
+                validator: None,
+                view_leaves: vec![p(path)],
+            }],
+            op_gen,
+        ));
 
         let a = store_a.cached_canonical_for(&p(path)).unwrap();
         let b = store_b.cached_canonical_for(&p(path)).unwrap();
@@ -736,12 +732,28 @@ mod tests {
         let l1 = p("/p/L1");
         let l2 = p("/p/L2");
 
-        store.put_canonical(OBJ_ID, b"v1".to_vec(), None, std::slice::from_ref(&l1), 0);
+        store.put_canonical_batch(
+            vec![CanonicalBatchEntry {
+                id: OBJ_ID.to_vec(),
+                bytes: b"v1".to_vec(),
+                validator: None,
+                view_leaves: vec![l1.clone()],
+            }],
+            0,
+        );
 
         let record = Record::new(RecordKind::File, vec![9, 9, 9]);
         store.cache_put(&p(&l1), RecordKind::File, None, &record);
 
-        assert!(store.put_canonical(OBJ_ID, b"v2".to_vec(), None, std::slice::from_ref(&l2), 0));
+        assert!(store.put_canonical_batch(
+            vec![CanonicalBatchEntry {
+                id: OBJ_ID.to_vec(),
+                bytes: b"v2".to_vec(),
+                validator: None,
+                view_leaves: vec![l2.clone()],
+            }],
+            0,
+        ));
 
         let obj = store.object.get(OBJ_ID).unwrap();
         assert!(obj.leaves.iter().any(|p| p.ends_with("/p/L1")));
@@ -760,11 +772,13 @@ mod tests {
     fn delete_object_removes_index() {
         let (_dir, _caches, store) = open_store("m");
         let leaf = p("/issues/42/item.json");
-        store.put_canonical(
-            OBJ_ID,
-            b"data".to_vec(),
-            None,
-            std::slice::from_ref(&leaf),
+        store.put_canonical_batch(
+            vec![CanonicalBatchEntry {
+                id: OBJ_ID.to_vec(),
+                bytes: b"data".to_vec(),
+                validator: None,
+                view_leaves: vec![leaf.clone()],
+            }],
             0,
         );
         assert!(store.put_negative(&p(&leaf), Some(OBJ_ID), 0, 10_000, 1_000));
@@ -780,11 +794,13 @@ mod tests {
     fn delete_listing_keeps_canonicals() {
         let (_dir, _caches, store) = open_store("m");
         let leaf = p("/dir/child.json");
-        store.put_canonical(
-            OBJ_ID,
-            b"data".to_vec(),
-            None,
-            std::slice::from_ref(&leaf),
+        store.put_canonical_batch(
+            vec![CanonicalBatchEntry {
+                id: OBJ_ID.to_vec(),
+                bytes: b"data".to_vec(),
+                validator: None,
+                view_leaves: vec![leaf.clone()],
+            }],
             0,
         );
 
@@ -814,7 +830,15 @@ mod tests {
         let (_dir, _caches, store) = open_store("m");
         let op_gen = store.current_generation();
         store.delete_object(OBJ_ID);
-        assert!(!store.put_canonical(OBJ_ID, b"late".to_vec(), None, &[p("/x")], op_gen,));
+        assert!(store.put_canonical_batch(
+            vec![CanonicalBatchEntry {
+                id: OBJ_ID.to_vec(),
+                bytes: b"late".to_vec(),
+                validator: None,
+                view_leaves: vec![p("/x")],
+            }],
+            op_gen,
+        ));
         assert!(store.cached_canonical_for(&p("/x")).is_none());
     }
 

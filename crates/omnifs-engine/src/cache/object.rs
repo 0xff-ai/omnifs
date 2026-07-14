@@ -19,7 +19,7 @@ use fjall::{Config, Database, Keyspace, KeyspaceCreateOptions};
 use std::path::Path as StdPath;
 
 /// On-disk schema version for `ObjectRecord`. Bump on layout change.
-pub const SCHEMA: u8 = 1;
+pub const SCHEMA: u8 = 2;
 
 /// Stored canonical bytes for one object.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -33,16 +33,14 @@ pub struct StoredObject {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ObjectRecord {
     pub schema: u8,
-    pub id: Vec<u8>,
     pub canonical: Option<StoredObject>,
     pub leaves: Vec<String>,
 }
 
 impl ObjectRecord {
-    fn new(id: &[u8], canonical: Option<StoredObject>, leaves: Vec<String>) -> Self {
+    fn new(canonical: Option<StoredObject>, leaves: Vec<String>) -> Self {
         Self {
             schema: SCHEMA,
-            id: id.to_vec(),
             canonical,
             leaves,
         }
@@ -120,26 +118,6 @@ pub struct MountObjects {
 }
 
 impl MountObjects {
-    /// UPSERT: union `new_leaves`, set canonical, keep existing VIEW rows, add
-    /// rows for new leaves, evict rendered view bytes for current leaves first.
-    pub fn store(
-        &self,
-        id: &[u8],
-        canonical: StoredObject,
-        new_leaves: &[String],
-        mut view_evict: impl FnMut(&str),
-    ) -> bool {
-        let prior_leaves = self.leaves_of(id);
-        for leaf in &prior_leaves {
-            view_evict(leaf);
-        }
-
-        let merged_leaves = merge_leaves(&prior_leaves, new_leaves);
-        let stored = ObjectRecord::new(id, Some(canonical), merged_leaves);
-
-        self.commit_object(id, &stored, new_leaves)
-    }
-
     /// Index-only upsert for preload fs-writes. Stored bytes beat preload: an
     /// existing `Some` canonical is never clobbered to `None`.
     pub fn store_index_only(&self, id: &[u8], new_leaves: &[String]) -> bool {
@@ -149,7 +127,7 @@ impl MountObjects {
             None => (None, Vec::new()),
         };
         let merged_leaves = merge_leaves(&base_leaves, new_leaves);
-        let stored = ObjectRecord::new(id, canonical, merged_leaves);
+        let stored = ObjectRecord::new(canonical, merged_leaves);
         self.commit_object(id, &stored, new_leaves)
     }
 
@@ -170,7 +148,7 @@ impl MountObjects {
             .filter_map(|e| {
                 let prior_leaves = self.leaves_of(&e.id);
                 let merged_leaves = merge_leaves(&prior_leaves, &e.new_leaves);
-                let stored = ObjectRecord::new(&e.id, Some(e.canonical.clone()), merged_leaves);
+                let stored = ObjectRecord::new(Some(e.canonical.clone()), merged_leaves);
                 match postcard::to_allocvec(&stored) {
                     Ok(payload) => Some((e, payload)),
                     Err(err) => {
@@ -230,29 +208,6 @@ impl MountObjects {
         }
         if let Err(e) = batch.commit() {
             tracing::warn!(error = %e, "object cache: evict_object failed");
-        }
-    }
-
-    /// Capacity eviction: drop canonical bytes + validator and evict rendered view
-    /// leaves, but keep the OBJECTS row (canonical=None) and all VIEW rows.
-    pub fn capacity_evict(&self, id: &[u8], mut view_evict: impl FnMut(&str)) {
-        let Some(mut obj) = self.get(id) else {
-            return;
-        };
-        for leaf in &obj.leaves {
-            view_evict(leaf);
-        }
-        obj.canonical = None;
-
-        let payload = match postcard::to_allocvec(&obj) {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::warn!(error = %e, "object cache: capacity_evict serialize failed");
-                return;
-            },
-        };
-        if let Err(e) = self.objects.insert(id, payload.as_slice()) {
-            tracing::warn!(error = %e, "object cache: capacity_evict failed");
         }
     }
 
@@ -332,7 +287,11 @@ mod tests {
             bytes: b"data".to_vec(),
             validator: Some("v1".to_string()),
         };
-        assert!(cache.store(OBJ, c, std::slice::from_ref(&l1), |_| {}));
+        cache.store_batch(&[StoreBatchEntry {
+            id: OBJ.to_vec(),
+            canonical: c,
+            new_leaves: vec![l1.clone()],
+        }]);
 
         let l3 = "/issues/open/42/title".to_string();
         assert!(cache.store_index_only(OBJ, &[l3]));
@@ -345,77 +304,48 @@ mod tests {
     }
 
     #[test]
-    fn overwrite_unions_aliases_and_evicts_prior_views() {
+    fn overwrite_unions_aliases_keeps_index() {
         let (_dir, cache) = open_cache();
         let l1 = "/p/L1".to_string();
         let l2 = "/p/L2".to_string();
 
-        cache.store(
-            OBJ,
-            StoredObject {
+        cache.store_batch(&[StoreBatchEntry {
+            id: OBJ.to_vec(),
+            canonical: StoredObject {
                 bytes: b"v1".to_vec(),
                 validator: None,
             },
-            std::slice::from_ref(&l1),
-            |_| {},
-        );
+            new_leaves: vec![l1.clone()],
+        }]);
 
-        let mut evicted = Vec::new();
-        cache.store(
-            OBJ,
-            StoredObject {
+        cache.store_batch(&[StoreBatchEntry {
+            id: OBJ.to_vec(),
+            canonical: StoredObject {
                 bytes: b"v2".to_vec(),
                 validator: None,
             },
-            std::slice::from_ref(&l2),
-            |leaf| evicted.push(leaf.to_string()),
-        );
+            new_leaves: vec![l2.clone()],
+        }]);
 
         let got = cache.get(OBJ).unwrap();
         assert!(got.leaves.contains(&l1));
         assert!(got.leaves.contains(&l2));
         assert_eq!(cache.id_of(l1.as_bytes()).as_deref(), Some(OBJ));
         assert_eq!(got.canonical.unwrap().bytes, b"v2");
-
-        let mut evicted_sorted = evicted;
-        evicted_sorted.sort();
-        assert_eq!(evicted_sorted, vec![l1]);
-    }
-
-    #[test]
-    fn capacity_evict_keeps_index_drops_validator() {
-        let (_dir, cache) = open_cache();
-        let leaf = "/a/leaf".to_string();
-        cache.store(
-            OBJ,
-            StoredObject {
-                bytes: b"data".to_vec(),
-                validator: Some("etag".to_string()),
-            },
-            std::slice::from_ref(&leaf),
-            |_| {},
-        );
-
-        cache.capacity_evict(OBJ, |_| {});
-
-        let got = cache.get(OBJ).unwrap();
-        assert!(got.canonical.is_none());
-        assert_eq!(cache.id_of(leaf.as_bytes()).as_deref(), Some(OBJ));
     }
 
     #[test]
     fn evict_object_removes_object_and_paths() {
         let (_dir, cache) = open_cache();
         let leaf = "/a/leaf".to_string();
-        cache.store(
-            OBJ,
-            StoredObject {
+        cache.store_batch(&[StoreBatchEntry {
+            id: OBJ.to_vec(),
+            canonical: StoredObject {
                 bytes: b"data".to_vec(),
                 validator: None,
             },
-            std::slice::from_ref(&leaf),
-            |_| {},
-        );
+            new_leaves: vec![leaf.clone()],
+        }]);
 
         cache.evict_object(OBJ, |_| {});
 
@@ -428,15 +358,14 @@ mod tests {
         let (_dir, cache) = open_cache();
         let p1 = "/issues/42/item.md";
         let p2 = "/issues/42/title";
-        cache.store(
-            OBJ,
-            StoredObject {
+        cache.store_batch(&[StoreBatchEntry {
+            id: OBJ.to_vec(),
+            canonical: StoredObject {
                 bytes: b"data".to_vec(),
                 validator: None,
             },
-            &[p1.to_string(), p2.to_string()],
-            |_| {},
-        );
+            new_leaves: vec![p1.to_string(), p2.to_string()],
+        }]);
 
         assert_eq!(cache.id_of(p1.as_bytes()).as_deref(), Some(OBJ));
         assert_eq!(cache.id_of(p2.as_bytes()).as_deref(), Some(OBJ));
@@ -444,9 +373,9 @@ mod tests {
     }
 
     /// Batch-put of N objects yields identical observable state (`get`/`id_of`/`leaves_of`)
-    /// to N individual single puts, including a mixed case with one fence-rejected entry.
+    /// to N one-entry batches, including a mixed case with one fence-rejected entry.
     #[test]
-    fn store_batch_equivalent_to_single_puts() {
+    fn store_batch_equivalent_to_one_entry_batches() {
         let (_dir_a, cache_a) = open_cache();
         let (_dir_b, cache_b) = open_cache();
 
@@ -458,25 +387,23 @@ mod tests {
         let l1b = "/issues/all/1/item.json".to_string();
         let l2 = "/issues/2/item.json".to_string();
 
-        // Single-put baseline: obj:3 is intentionally omitted (simulates rejection).
-        cache_a.store(
-            id1,
-            StoredObject {
+        // One-entry batch baseline: obj:3 is intentionally omitted (simulates rejection).
+        cache_a.store_batch(&[StoreBatchEntry {
+            id: id1.to_vec(),
+            canonical: StoredObject {
                 bytes: b"payload1".to_vec(),
                 validator: Some("v1".to_string()),
             },
-            &[l1a.clone(), l1b.clone()],
-            |_| {},
-        );
-        cache_a.store(
-            id2,
-            StoredObject {
+            new_leaves: vec![l1a.clone(), l1b.clone()],
+        }]);
+        cache_a.store_batch(&[StoreBatchEntry {
+            id: id2.to_vec(),
+            canonical: StoredObject {
                 bytes: b"payload2".to_vec(),
                 validator: None,
             },
-            std::slice::from_ref(&l2),
-            |_| {},
-        );
+            new_leaves: vec![l2.clone()],
+        }]);
 
         // Batch-put equivalent (obj:3 excluded, same as single-put baseline).
         cache_b.store_batch(&[
