@@ -485,14 +485,14 @@ mod tests {
     fn rejects_bad_fs_write_size_and_aggregate_eager_cap() {
         let mut bad_size_file = deferred_exact(4);
         bad_size_file.bytes = wit_types::ByteSource::Inline(b"toolong".to_vec());
-        let effects = wit_types::Effects {
+        let bad_size_effects = wit_types::Effects {
             fs: vec![fs_file_write("/bad".to_string(), bad_size_file)],
             ..effects()
         };
-        let error = validate_event(&Ok(()), &effects, |_| true).unwrap_err();
+        let error = validate_event(&Ok(()), &bad_size_effects, |_| true).unwrap_err();
         assert!(error.contains("declares size 4"));
 
-        let effects = wit_types::Effects {
+        let aggregate_effects = wit_types::Effects {
             fs: (0..9)
                 .map(|index| {
                     let bytes = vec![0; MAX_INLINE_PROJECTABLE_BYTES];
@@ -508,7 +508,7 @@ mod tests {
                 .collect(),
             ..effects()
         };
-        let error = validate_event(&Ok(()), &effects, |_| true).unwrap_err();
+        let error = validate_event(&Ok(()), &aggregate_effects, |_| true).unwrap_err();
         assert!(error.contains("aggregate eager byte limit"));
     }
 
