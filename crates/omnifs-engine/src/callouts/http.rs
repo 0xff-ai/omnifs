@@ -48,6 +48,7 @@ impl HttpStack {
         reqwest::Client::builder()
             .user_agent("omnifs")
             .connect_timeout(Duration::from_secs(10))
+            .redirect(reqwest::redirect::Policy::none())
     }
 
     #[doc(hidden)]
@@ -299,4 +300,38 @@ pub(crate) fn decode_response_headers(headers: &HeaderMap) -> Vec<(String, Strin
             },
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::HttpStack;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn client_builder_returns_redirect_response_without_following_it() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0; 1024];
+            stream.read(&mut request).await.unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 302 Found\r\nLocation: /followed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+        });
+
+        let client = HttpStack::client_builder().build().unwrap();
+        let response = client
+            .get(format!("http://{address}/start"))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), reqwest::StatusCode::FOUND);
+        server.await.unwrap();
+    }
 }
