@@ -3,8 +3,7 @@
 //! Commands own narration. This module owns the stage behavior so the guided
 //! setup wizard and express `mount add` lane cannot drift from each other.
 
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context, anyhow};
@@ -21,15 +20,9 @@ use crate::commands::mount::mount_file::MountFile;
 use crate::commands::mount::provider_selection::ProviderSelection;
 use crate::commands::mount::spec_creation::{CreatedMountSpec, MountSpecCreator};
 use crate::commands::mount::{AddArgs, AuthImportDecision, ImportOutcome};
-use crate::commands::setup::host_os::HostOs;
 use crate::error::{ExitCode, WithExitCode, WithHint};
-use crate::launch::LaunchOutcome;
 use crate::token_source::TokenSource;
 use crate::workspace::Workspace;
-
-pub(crate) struct EnvironmentReport {
-    pub(crate) configured: bool,
-}
 
 pub(crate) struct MountInitOutcome {
     pub(crate) mount_name: String,
@@ -40,11 +33,6 @@ pub(crate) struct MountInitOutcome {
 pub(crate) enum MountInitStatus {
     Ready,
     SignInDeclined,
-}
-
-pub(crate) struct FirstRead {
-    pub(crate) command: String,
-    pub(crate) output: String,
 }
 
 pub(crate) struct MountInitPlan {
@@ -99,22 +87,9 @@ impl PromptMode {
     }
 }
 
-pub(crate) fn environment_check(
-    os: HostOs,
-    workspace: &Workspace,
-) -> anyhow::Result<EnvironmentReport> {
-    if os == HostOs::Unsupported {
-        anyhow::bail!("omnifs does not yet run on this platform");
-    }
-    // Review mode is for a workspace that already has something to review: a
-    // mount.
-    let configured = workspace.mounts().is_ok_and(|mounts| !mounts.is_empty());
-    Ok(EnvironmentReport { configured })
-}
-
 /// Informational Docker reachability, for setup's environment stage (the
-/// daemon always runs host-native; the caller shows this row only when the
-/// effective `[[frontends]]` plan actually launches a Docker frontend).
+/// daemon always runs host-native; setup shows this row only when its selected
+/// platform defaults include a Docker frontend.
 /// Never fails setup: an unreachable daemon (or an unresolvable target) is
 /// reported, not raised.
 pub(crate) enum DockerReachability {
@@ -431,19 +406,6 @@ impl MountInitPlan {
     }
 }
 
-pub(crate) fn verify_first_read(
-    outcome: &LaunchOutcome,
-    mount_name: &str,
-) -> anyhow::Result<FirstRead> {
-    let mount_point = outcome
-        .local_mount_points
-        .first()
-        .cloned()
-        .or_else(omnifs_workspace::layout::resolve_mount_point)
-        .ok_or_else(|| anyhow!("cannot resolve mount point for first read"))?;
-    run_host_ls(&mount_point.join(mount_name))
-}
-
 pub(crate) async fn wait_until_ready(
     workspace: &Workspace,
     timeout: Duration,
@@ -546,25 +508,6 @@ fn apply_mount_overrides(
 
 fn parse_json_flag<T: DeserializeOwned>(flag: &'static str, raw: &str) -> anyhow::Result<T> {
     serde_json::from_str(raw).with_context(|| format!("parse {flag}"))
-}
-
-fn run_host_ls(path: &Path) -> anyhow::Result<FirstRead> {
-    let output = Command::new("ls")
-        .arg(path)
-        .output()
-        .with_context(|| format!("run ls {}", path.display()))?;
-    let command = format!("ls {}", path.display());
-    if !output.status.success() {
-        anyhow::bail!(
-            "first read failed: `{command}` exited with {}\n{}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-    Ok(FirstRead {
-        command,
-        output: String::from_utf8_lossy(&output.stdout).to_string(),
-    })
 }
 
 fn browse_path(mount_name: &str) -> PathBuf {
