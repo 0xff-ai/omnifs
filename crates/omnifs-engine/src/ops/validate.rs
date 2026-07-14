@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use crate::object_id::ObjectId;
 use crate::view::{MAX_EAGER_RESPONSE_BYTES, MAX_VERSION_TOKEN_BYTES};
 use crate::wit_protocol::{try_file_attrs_from_attrs, try_file_attrs_from_file_out};
-use omnifs_core::path::Path;
+use omnifs_core::path::{Path, Segment};
 use omnifs_wit::provider::types as wit_types;
 
 pub(crate) struct ReturnValidator<'a, F> {
@@ -46,8 +46,10 @@ where
         let Ok(result) = result else { return Ok(()) };
         match result {
             wit_types::LookupChildResult::Entry(entry) => {
+                self.segment_name(&entry.target.name)?;
                 self.entry(&entry.target.kind)?;
                 for sibling in &entry.siblings {
+                    self.segment_name(&sibling.name)?;
                     self.entry(&sibling.kind)?;
                 }
             },
@@ -65,6 +67,7 @@ where
         match result {
             wit_types::ListChildrenResult::Entries(listing) => {
                 for entry in &listing.entries {
+                    self.segment_name(&entry.name)?;
                     self.entry(&entry.kind)?;
                 }
             },
@@ -222,6 +225,12 @@ where
         }
     }
 
+    fn segment_name(&self, name: &str) -> std::result::Result<(), String> {
+        Segment::try_from(name)
+            .map_err(|error| format!("dir-entry name {name:?} is not a valid segment: {error}"))
+            .map(|_| ())
+    }
+
     fn file_out(&mut self, file: &wit_types::FileOut) -> std::result::Result<(), String> {
         let attrs = try_file_attrs_from_file_out(file)?;
         attrs.validate()?;
@@ -359,4 +368,248 @@ where
 
 fn effects_empty(effects: &wit_types::Effects) -> bool {
     effects.canonical.is_empty() && effects.fs.is_empty() && effects.invalidations.is_empty()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::view::MAX_INLINE_PROJECTABLE_BYTES;
+
+    fn effects() -> wit_types::Effects {
+        wit_types::Effects {
+            canonical: Vec::new(),
+            fs: Vec::new(),
+            invalidations: Vec::new(),
+        }
+    }
+
+    fn entry(name: &str) -> wit_types::DirEntry {
+        wit_types::DirEntry {
+            name: name.to_string(),
+            kind: wit_types::EntryKind::Directory,
+            id: None,
+        }
+    }
+
+    fn attrs(size: wit_types::FileSize, stability: wit_types::Stability) -> wit_types::FileAttrs {
+        wit_types::FileAttrs {
+            size,
+            stability,
+            version_token: None,
+        }
+    }
+
+    fn file_out(
+        size: wit_types::FileSize,
+        bytes: wit_types::ByteSource,
+        stability: wit_types::Stability,
+    ) -> wit_types::FileOut {
+        wit_types::FileOut {
+            attrs: attrs(size, stability),
+            bytes,
+            content_type: None,
+        }
+    }
+
+    fn deferred_exact(size: u64) -> wit_types::FileOut {
+        file_out(
+            wit_types::FileSize::Exact(size),
+            wit_types::ByteSource::Deferred(wit_types::ReadMode::Full),
+            wit_types::Stability::Stable,
+        )
+    }
+
+    fn fs_file_write(path: String, file: wit_types::FileOut) -> wit_types::FsWrite {
+        wit_types::FsWrite {
+            id: None,
+            path,
+            kind: wit_types::FsKind::File(file),
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_inline_projection_in_entries() {
+        let result = Ok(wit_types::ListChildrenResult::Entries(
+            wit_types::DirListing {
+                entries: vec![entry_with_kind(
+                    "bad",
+                    wit_types::EntryKind::File(file_out(
+                        wit_types::FileSize::Unknown,
+                        wit_types::ByteSource::Inline(b"bad".to_vec()),
+                        wit_types::Stability::Stable,
+                    )),
+                )],
+                exhaustive: true,
+                validator: None,
+                next_cursor: None,
+            },
+        ));
+        let error = validate_list(&result, &effects(), |_| true).unwrap_err();
+        assert!(error.contains("inline bytes require FileSize::Exact"));
+    }
+
+    #[test]
+    fn rejects_volatile_non_ranged_attrs() {
+        let result = Ok(wit_types::ListChildrenResult::Entries(
+            wit_types::DirListing {
+                entries: vec![entry_with_kind(
+                    "tail",
+                    wit_types::EntryKind::File(file_out(
+                        wit_types::FileSize::Unknown,
+                        wit_types::ByteSource::Deferred(wit_types::ReadMode::Full),
+                        wit_types::Stability::Live,
+                    )),
+                )],
+                exhaustive: true,
+                validator: None,
+                next_cursor: None,
+            },
+        ));
+        let error = validate_list(&result, &effects(), |_| true).unwrap_err();
+        assert!(error.contains("Stability::Live requires"));
+    }
+
+    fn entry_with_kind(name: &str, kind: wit_types::EntryKind) -> wit_types::DirEntry {
+        wit_types::DirEntry {
+            name: name.to_string(),
+            kind,
+            id: None,
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_fs_write_path_without_id() {
+        let effects = wit_types::Effects {
+            fs: vec![fs_file_write("bad".to_string(), deferred_exact(1))],
+            ..effects()
+        };
+        let error = validate_event(&Ok(()), &effects, |_| true).unwrap_err();
+        assert!(error.contains("fs-write path") && error.contains("valid protocol path"));
+    }
+
+    #[test]
+    fn rejects_bad_fs_write_size_and_aggregate_eager_cap() {
+        let mut bad_size_file = deferred_exact(4);
+        bad_size_file.bytes = wit_types::ByteSource::Inline(b"toolong".to_vec());
+        let effects = wit_types::Effects {
+            fs: vec![fs_file_write("/bad".to_string(), bad_size_file)],
+            ..effects()
+        };
+        let error = validate_event(&Ok(()), &effects, |_| true).unwrap_err();
+        assert!(error.contains("declares size 4"));
+
+        let effects = wit_types::Effects {
+            fs: (0..9)
+                .map(|index| {
+                    let bytes = vec![0; MAX_INLINE_PROJECTABLE_BYTES];
+                    fs_file_write(
+                        format!("/large-{index}"),
+                        file_out(
+                            wit_types::FileSize::Exact(bytes.len() as u64),
+                            wit_types::ByteSource::Inline(bytes),
+                            wit_types::Stability::Stable,
+                        ),
+                    )
+                })
+                .collect(),
+            ..effects()
+        };
+        let error = validate_event(&Ok(()), &effects, |_| true).unwrap_err();
+        assert!(error.contains("aggregate eager byte limit"));
+    }
+
+    #[test]
+    fn rejects_read_content_that_violates_declared_size() {
+        let result = Ok(wit_types::ReadFileOutcome::Found(
+            wit_types::ReadFileResult {
+                content_type: None,
+                attrs: attrs(wit_types::FileSize::NonZero, wit_types::Stability::Stable),
+                bytes: wit_types::ByteSource::Inline(Vec::new()),
+            },
+        ));
+        let error = validate_read(&result, &effects(), |_| true).unwrap_err();
+        assert!(error.contains("read-file result") && error.contains("Size::NonZero"));
+    }
+
+    #[test]
+    fn rejects_empty_version_tokens() {
+        let mut file = deferred_exact(1);
+        file.attrs.version_token = Some(String::new());
+        let result = Ok(wit_types::ListChildrenResult::Entries(
+            wit_types::DirListing {
+                entries: vec![entry_with_kind(
+                    "versioned",
+                    wit_types::EntryKind::File(file),
+                )],
+                exhaustive: true,
+                validator: None,
+                next_cursor: None,
+            },
+        ));
+        let error = validate_list(&result, &effects(), |_| true).unwrap_err();
+        assert!(error.contains("version token must not be empty"));
+    }
+
+    #[test]
+    fn subtree_result_requires_known_tree() {
+        let result = Ok(wit_types::LookupChildResult::Subtree(7));
+        let error = validate_lookup(&result, &effects(), |_| false).unwrap_err();
+        assert!(error.contains("references unknown tree 7"));
+        validate_lookup(&result, &effects(), |_| true).unwrap();
+    }
+
+    #[test]
+    fn error_returns_reject_effects() {
+        let result = Err(wit_types::ProviderError {
+            kind: wit_types::ErrorKind::Internal,
+            message: "failed".to_string(),
+            retryable: false,
+            retry_after: None,
+        });
+        let effects = wit_types::Effects {
+            invalidations: vec![wit_types::Invalidation::Listing(
+                wit_types::PathOrPrefix::Path("x".to_string()),
+            )],
+            ..effects()
+        };
+        let error = validate_event(&result, &effects, |_| true).unwrap_err();
+        assert!(error.contains("error returns must not carry effects"));
+    }
+
+    #[test]
+    fn lookup_rejects_invalid_target_and_sibling_names() {
+        let result = Ok(wit_types::LookupChildResult::Entry(
+            wit_types::LookupEntry {
+                target: entry("target/child"),
+                siblings: vec![entry("sibling")],
+                exhaustive: true,
+            },
+        ));
+        let error = validate_lookup(&result, &effects(), |_| true).unwrap_err();
+        assert!(error.contains("target/child"));
+
+        let result = Ok(wit_types::LookupChildResult::Entry(
+            wit_types::LookupEntry {
+                target: entry("target"),
+                siblings: vec![entry("")],
+                exhaustive: true,
+            },
+        ));
+        let error = validate_lookup(&result, &effects(), |_| true).unwrap_err();
+        assert!(error.contains("empty"));
+    }
+
+    #[test]
+    fn list_rejects_multi_segment_entry_names() {
+        let result = Ok(wit_types::ListChildrenResult::Entries(
+            wit_types::DirListing {
+                entries: vec![entry("nested/name")],
+                exhaustive: true,
+                validator: None,
+                next_cursor: None,
+            },
+        ));
+        let error = validate_list(&result, &effects(), |_| true).unwrap_err();
+        assert!(error.contains("nested/name"));
+    }
 }
