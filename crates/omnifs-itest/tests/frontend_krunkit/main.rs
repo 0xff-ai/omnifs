@@ -56,12 +56,6 @@ const GUEST_SCRATCH: &str = "/tmp/omnifs-matrix";
 
 const ENV_GUEST_IMAGE: &str = "OMNIFS_GUEST_IMAGE";
 
-/// Pinned control token shared by every CLI invocation in a fixture, so the
-/// daemon `omnifs up` spawns and the later CLI calls agree on control-API
-/// auth (mirrors `frontend_docker`'s fixture; without it the post-start
-/// status probe reads as "another workspace's daemon" and `up` fails).
-const CONTROL_TOKEN: &str = "frontend-krunkit-acceptance-token";
-
 fn acceptance_gated() -> bool {
     if std::env::var_os("OMNIFS_ACCEPTANCE_LIVE").is_none() {
         eprintln!("skip: set OMNIFS_ACCEPTANCE_LIVE=1 to run the krunkit acceptance gate");
@@ -157,7 +151,6 @@ fn workspace_root() -> PathBuf {
 struct Fixture {
     home: TempDir,
     mount_point: PathBuf,
-    daemon_addr: String,
     guest_image: PathBuf,
     daemon_pid: Option<u32>,
 }
@@ -165,11 +158,9 @@ struct Fixture {
 impl Fixture {
     fn new(guest_image: PathBuf) -> Self {
         let live::HermeticHome { home, mount_point } = live::hermetic_home();
-        let port = live::free_port();
         Self {
             home,
             mount_point,
-            daemon_addr: format!("127.0.0.1:{port}"),
             guest_image,
             daemon_pid: None,
         }
@@ -210,8 +201,6 @@ impl Fixture {
         Command::new(live::omnifs_bin())
             .args(args)
             .env("OMNIFS_HOME", self.home_path())
-            .env("OMNIFS_DAEMON_ADDR", &self.daemon_addr)
-            .env("OMNIFS_CONTROL_TOKEN", CONTROL_TOKEN)
             .env(ENV_GUEST_IMAGE, &self.guest_image)
             .env("RUST_LOG", "warn")
             .output()

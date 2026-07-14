@@ -1,11 +1,10 @@
-//! `omnifs mount` — add, list, re-authenticate, remove, or snapshot mounts.
+//! `omnifs mount` — add, list, re-authenticate, or remove mounts.
 
 pub(crate) mod add;
 pub(crate) mod auth_import;
 pub(crate) mod detect;
 pub(crate) mod mount_file;
 pub(crate) mod provider_selection;
-pub(crate) mod snapshot;
 pub(crate) mod spec_creation;
 mod token_validation;
 
@@ -50,8 +49,6 @@ pub enum MountCommand {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Export a mount's canonical cache to a directory.
-    Snapshot(snapshot::SnapshotArgs),
 }
 
 #[derive(Args, Debug, Clone, Default)]
@@ -93,7 +90,6 @@ impl MountArgs {
             MountCommand::Ls(args) => ls(&args, output).await,
             MountCommand::Show(args) => show(&args, output).await,
             MountCommand::Reauth(args) => args.run(output).await.map(|()| ExitCode::Success),
-            MountCommand::Snapshot(args) => args.run(output).await,
             MountCommand::Rm { name, dry_run } => {
                 let workspace = Workspace::resolve()?;
                 let receipt = rm_with_options(&workspace, &name, output.yes(), dry_run, output)?;

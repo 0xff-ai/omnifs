@@ -12,7 +12,6 @@ use omnifs_workspace::layout::{Daemon, Workspace, WorkspaceLayout};
 use omnifs_workspace::mounts::Revision;
 use omnifs_workspace::runtime_record::{Endpoint, RecordedBackend, RuntimeRecord};
 use std::fmt::Write as _;
-use std::net::{SocketAddr, TcpListener};
 use std::os::unix::fs::{FileTypeExt as _, PermissionsExt as _};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -43,8 +42,6 @@ fn check_uds_path_length(path: &Path) -> anyhow::Result<()> {
 pub(crate) struct DaemonContext {
     layout: WorkspaceLayout,
     mount_revision: Revision,
-    /// Optional debug/test TCP control listener beside the always-on Unix socket.
-    listen: Option<SocketAddr>,
     /// Random per-start id reported in status and written to the runtime record.
     instance_id: String,
     /// `--attach-tcp <port>`: bind a TCP namespace attach listener eagerly at
@@ -69,7 +66,6 @@ struct ProcessInfo {
 
 impl DaemonContext {
     pub(crate) fn resolve(args: &DaemonArgs) -> anyhow::Result<Self> {
-        let listen = args.listen;
         let attach_tcp = args.attach_tcp;
         let workspace: Workspace<Daemon> = Workspace::resolve()?;
         let layout = workspace.into_layout();
@@ -83,7 +79,6 @@ impl DaemonContext {
         Ok(Self {
             layout,
             mount_revision: args.mount_revision.clone(),
-            listen,
             instance_id: generate_instance_id(),
             attach_tcp,
             process,
@@ -106,21 +101,6 @@ impl DaemonContext {
 
     pub(crate) fn vsock_attach_socket(&self) -> PathBuf {
         self.layout.vsock_attach_socket()
-    }
-
-    pub(crate) fn bind_control_listener(&self) -> anyhow::Result<Option<TcpListener>> {
-        self.listen
-            .map(|addr| {
-                TcpListener::bind(addr).map_err(|error| {
-                    anyhow::anyhow!(
-                        "cannot bind control API listener on {addr}: {error}\n\
-                         \n\
-                         Likely cause: another omnifs daemon is already running on that port.\n\
-                         Run `omnifs down` to stop it, then try again."
-                    )
-                })
-            })
-            .transpose()
     }
 
     /// Bind the host-native control socket at `<config_dir>/control.sock`.
@@ -356,13 +336,10 @@ impl DaemonContext {
             SubsystemHealth::new(
                 DaemonSubsystem::Control,
                 HealthState::Healthy,
-                match self.listen {
-                    Some(addr) => format!("control API serving on {addr}"),
-                    None => format!(
-                        "control API serving on {}",
-                        self.layout.control_socket().display()
-                    ),
-                },
+                format!(
+                    "control API serving on {}",
+                    self.layout.control_socket().display()
+                ),
             ),
             SubsystemHealth::new(
                 DaemonSubsystem::Backend,
@@ -427,9 +404,9 @@ fn mount_health(mounts: &[MountInfo], credential_degraded: &[(String, String)]) 
     SubsystemHealth::new(DaemonSubsystem::Mounts, state, message)
 }
 
-/// A random 16-lowercase-hex-character id, generated from the same CSPRNG the
-/// control token uses. Identifies one daemon start so the CLI can tell a record
-/// overwritten by a restart from the daemon it is talking to.
+/// A random 16-lowercase-hex-character id identifying one daemon start, so the
+/// CLI can tell a record overwritten by a restart from the daemon it is talking
+/// to.
 fn generate_instance_id() -> String {
     let mut bytes = [0_u8; 8];
     // A failure here would only weaken an id used for equality checks, never for
@@ -461,7 +438,6 @@ mod tests {
         DaemonContext {
             layout: WorkspaceLayout::under_root(root),
             mount_revision: Revision::new("a".repeat(40)).unwrap(),
-            listen: None,
             instance_id: "test-instance".to_owned(),
             attach_tcp: None,
             process: ProcessInfo {

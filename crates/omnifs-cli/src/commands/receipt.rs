@@ -247,26 +247,6 @@ fn frontend_access_paths(inventory: &Inventory, rows: &[FrontendResult]) -> Vec<
     paths
 }
 
-/// Snapshot export source is part of the receipt because daemon and cache
-/// exports have the same canonical bytes but different operational provenance.
-#[derive(Debug, Clone, Copy, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum SnapshotSource {
-    Daemon,
-    Cache,
-}
-
-#[derive(Debug, Serialize)]
-pub(crate) struct SnapshotReceipt {
-    pub(crate) verdict: Verdict,
-    pub(crate) mount: String,
-    pub(crate) output: PathBuf,
-    pub(crate) source: SnapshotSource,
-    pub(crate) files: u64,
-    pub(crate) bytes: u64,
-    pub(crate) changed: bool,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -2,12 +2,8 @@
 //!
 //! One artifact, one lifecycle: the host-native daemon writes this the moment
 //! it has bound its control socket and installed its routes, and removes it on
-//! a graceful exit. The endpoint the CLI dials, the backend identity teardown
-//! needs, and (on the debug TCP path) the bearer token all live here.
-//!
-//! The CLI only ever dials an endpoint it read from this record (or from
-//! `OMNIFS_DAEMON_ADDR`), so a foreign daemon in another workspace is
-//! structurally unaddressable.
+//! a graceful exit. The endpoint the CLI dials, backend identity teardown
+//! needs, and guest attachment targets all live here.
 //!
 //! An unknown `version` field is reported and treated as an error rather than
 //! silently ignored, matching the NFS mount-state version discipline.
@@ -178,8 +174,9 @@ impl RuntimeRecord {
         }
     }
 
-    /// Atomically write to `path` mode `0600` (the token in the tcp variant must
-    /// not be world-readable). Creates the parent directory if needed.
+    /// Atomically write to `path` mode `0600` so attachment tokens cannot be
+    /// exposed through the runtime record. Creates the parent directory if
+    /// needed.
     pub fn write(&self, path: &Path) -> io::Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;

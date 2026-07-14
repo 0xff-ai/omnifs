@@ -94,9 +94,11 @@ fn detach_mount(mount_point: &Path) {
     }
 }
 
-fn curl_ready(base: &str) -> bool {
+fn curl_ready(socket: &Path) -> bool {
     Command::new("curl")
-        .args(["-fs", "-o", "/dev/null", &format!("{base}/v1/ready")])
+        .args(["-fs", "-o", "/dev/null", "--unix-socket"])
+        .arg(socket)
+        .arg("http://localhost/v1/ready")
         .status()
         .is_ok_and(|status| status.success())
 }
@@ -166,9 +168,7 @@ fn wire_reattach_survives_frontend_and_daemon_restart() {
     let hermetic = live::hermetic_home();
     let home = hermetic.home.path().to_path_buf();
 
-    let ctrl_port = live::free_port();
-    let ctrl_addr = format!("127.0.0.1:{ctrl_port}");
-    let base = format!("http://{ctrl_addr}");
+    let control_socket = home.join("control.sock");
     let socket = home.join("frontends/local.sock");
     let mount_point = home.join("mnt-reattach");
     std::fs::create_dir_all(&mount_point).expect("mount point");
@@ -176,11 +176,9 @@ fn wire_reattach_survives_frontend_and_daemon_restart() {
 
     let spawn_daemon = || {
         Command::new(live::omnifs_bin())
-            .args(["daemon", "--listen", &ctrl_addr])
+            .args(["daemon"])
             .env("OMNIFS_HOME", &home)
-            .env("OMNIFS_DAEMON_ADDR", &ctrl_addr)
             .env_remove("OMNIFS_MOUNT_POINT")
-            .env_remove("OMNIFS_CONTROL_TOKEN")
             .env("RUST_LOG", "warn")
             .spawn()
             .expect("spawn omnifs daemon")
@@ -218,7 +216,7 @@ fn wire_reattach_survives_frontend_and_daemon_restart() {
 
     // The daemon reports ready once its fixed local attach socket serves.
     let deadline = Instant::now() + Duration::from_secs(30);
-    while !curl_ready(&base) {
+    while !curl_ready(&control_socket) {
         if Instant::now() >= deadline {
             eprintln!("skip: daemon never became ready");
             return;
@@ -324,7 +322,7 @@ fn wire_reattach_survives_frontend_and_daemon_restart() {
     std::thread::sleep(Duration::from_secs(2));
     guard.daemon = Some(spawn_daemon());
     let deadline = Instant::now() + Duration::from_secs(30);
-    while !curl_ready(&base) {
+    while !curl_ready(&control_socket) {
         assert!(
             Instant::now() < deadline,
             "the relaunched daemon never became ready"

@@ -195,7 +195,6 @@ impl DockerTarget {
 #[cfg(feature = "daemon")]
 pub(crate) async fn launch_native(
     paths: &omnifs_workspace::layout::WorkspaceLayout,
-    tcp_addr: Option<std::net::SocketAddr>,
     telemetry_enabled: bool,
     mount_revision: &omnifs_workspace::mounts::Revision,
     mount_snapshot: &std::path::Path,
@@ -229,9 +228,6 @@ pub(crate) async fn launch_native(
         .arg(mount_revision.to_string())
         .arg("--mount-snapshot")
         .arg(mount_snapshot);
-    if let Some(tcp_addr) = tcp_addr {
-        command.arg("--listen").arg(tcp_addr.to_string());
-    }
     command
         .stdin(Stdio::null())
         .stdout(Stdio::from(log))
@@ -285,23 +281,9 @@ pub(crate) async fn launch_native(
                         let _ = child.kill().await;
                         anyhow::bail!(
                             "daemon readiness came from pid {}, not spawned pid {pid}; \
-                             another omnifs daemon is already serving on the control port",
+                             another omnifs daemon is already serving",
                             status.pid
                         );
-                    },
-                    // Ready, but our token is rejected: a daemon owned by a
-                    // different workspace holds the port. Fail fast with the
-                    // foreign-daemon diagnosis instead of polling until timeout.
-                    Err(error)
-                        if crate::error::exit_code(&error)
-                            == crate::error::ExitCode::AuthRequired =>
-                    {
-                        let _ = child.kill().await;
-                        let label = tcp_addr.map_or_else(
-                            || "the control socket".to_string(),
-                            |addr| format!("http://{addr}"),
-                        );
-                        return Err(crate::client::foreign_daemon_error(&label));
                     },
                     // A transient status error during our own startup: keep
                     // polling until ready or the timeout.
@@ -324,7 +306,6 @@ pub(crate) async fn launch_native(
 #[cfg(not(feature = "daemon"))]
 pub(crate) async fn launch_native(
     _paths: &omnifs_workspace::layout::WorkspaceLayout,
-    _tcp_addr: Option<std::net::SocketAddr>,
     _telemetry_enabled: bool,
     _mount_revision: &omnifs_workspace::mounts::Revision,
     _mount_snapshot: &std::path::Path,

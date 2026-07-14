@@ -12,7 +12,6 @@ use common::{install_test_provider, install_test_provider_as, omnifs_bin, releas
 struct Fixture {
     home: tempfile::TempDir,
     mount_point: PathBuf,
-    daemon_addr: &'static str,
 }
 
 impl Fixture {
@@ -22,11 +21,7 @@ impl Fixture {
         std::fs::create_dir_all(&mount_point).expect("mount point dir");
         std::fs::create_dir_all(home.path().join("mounts")).expect("mounts dir");
         std::fs::create_dir_all(home.path().join("providers")).expect("providers dir");
-        Self {
-            home,
-            mount_point,
-            daemon_addr: "127.0.0.1:9",
-        }
+        Self { home, mount_point }
     }
 
     fn home_path(&self) -> &Path {
@@ -38,7 +33,6 @@ impl Fixture {
             .args(args)
             .env("OMNIFS_HOME", self.home_path())
             .env("OMNIFS_MOUNT_POINT", &self.mount_point)
-            .env("OMNIFS_DAEMON_ADDR", self.daemon_addr)
             .env("NO_COLOR", "1")
             .env("RUST_LOG", "warn")
             .output()
@@ -177,9 +171,8 @@ fn frontend_enable_help_requires_filesystem_and_lists_live_attachments_command()
 #[test]
 fn removed_top_level_commands_are_usage_errors() {
     let fixture = Fixture::new();
-    // `init` folded into `mount add`, top-level `snapshot` into `mount
-    // snapshot`, and `frontend status` was deleted; each must now be a clap
-    // usage error, not a silent no-op.
+    // `init`, both snapshot command forms, and `frontend status` were deleted;
+    // each must now be a clap usage error, not a silent no-op.
     for (args, needle) in [
         (
             ["init", "github"].as_slice(),
@@ -187,6 +180,10 @@ fn removed_top_level_commands_are_usage_errors() {
         ),
         (
             ["snapshot", "test"].as_slice(),
+            "unrecognized subcommand 'snapshot'",
+        ),
+        (
+            ["mount", "snapshot", "test"].as_slice(),
             "unrecognized subcommand 'snapshot'",
         ),
         (
@@ -211,7 +208,7 @@ fn removed_top_level_commands_are_usage_errors() {
 }
 
 #[test]
-fn daemon_required_command_exits_3_when_control_port_is_unreachable() {
+fn daemon_required_command_exits_3_when_control_socket_is_unreachable() {
     let fixture = Fixture::new();
     let output = fixture.run(&["inspect", "--plain"]);
 
@@ -223,9 +220,7 @@ fn daemon_required_command_exits_3_when_control_port_is_unreachable() {
 /// `omnifs up` validates every configured mount's host-managed credential
 /// before spawning the daemon (see `Launcher::launch`'s `preflight_mounts`),
 /// so a missing credential fails fast with exit code 4 and never reaches
-/// `launch_native` — this fixture's `OMNIFS_DAEMON_ADDR=127.0.0.1:9` would
-/// make a real spawn attempt hang/fail loudly, which is exactly what this
-/// test must not trigger.
+/// `launch_native`, which is exactly what this test must not trigger.
 #[test]
 fn missing_mount_credential_exits_4() {
     let fixture = Fixture::new();

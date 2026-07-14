@@ -22,7 +22,6 @@ omnifs-vfs-wire = { workspace = true }
 anyhow = { workspace = true }
 axum = "0.8"
 clap = { workspace = true }
-constant_time_eq = "0.4"
 getrandom = "0.3"
 hex = { workspace = true }
 tokio = { workspace = true }

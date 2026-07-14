@@ -1,8 +1,7 @@
 //! Control API types shared by the `omnifs` CLI and daemon runtime.
 //!
 //! The daemon serves these under `/v1/` on its control listener: a Unix
-//! domain socket for the host-native daemon, and TCP loopback for the Docker
-//! bridge and the `OMNIFS_DAEMON_ADDR` debug path. See
+//! domain socket for the host-native daemon. See
 //! `docs/contracts/50-control-plane.md`.
 
 use serde::{Deserialize, Serialize};
@@ -56,7 +55,6 @@ pub struct ApiError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
-    Unauthorized,
     AuthRequired,
     CredentialNotFound,
     MountNotFound,

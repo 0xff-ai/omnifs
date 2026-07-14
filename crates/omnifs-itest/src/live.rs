@@ -16,9 +16,8 @@ use omnifs_workspace::provider::ProviderStore;
 use tempfile::TempDir;
 
 /// Fixed, non-ephemeral port used purely as a cross-process lock for live NFS
-/// mounts. Below the OS ephemeral range, so it never collides with a daemon's
-/// [`free_port`]. This is the single owner of the constant; the CLI lifecycle
-/// suite delegates here so both binaries serialize against the same port.
+/// mounts. Below the OS ephemeral range, so it does not collide with any
+/// frontend or attach listener.
 pub const NFS_LOCK_PORT: u16 = 48761;
 
 /// Acquire the cross-process NFS serialization lock, returning the bound socket
@@ -32,16 +31,6 @@ pub fn nfs_serial_lock() -> TcpListener {
             Err(_) => std::thread::sleep(Duration::from_millis(50)),
         }
     }
-}
-
-/// Bind an ephemeral loopback port and return it, for the daemon's control API.
-#[must_use]
-pub fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("bind ephemeral port")
-        .local_addr()
-        .expect("local addr")
-        .port()
 }
 
 /// Whether the platform can serve a mount. On Linux, FUSE requires `/dev/fuse`.
@@ -374,9 +363,7 @@ pub fn start_multi_frontend_daemon(kinds: &[&str]) -> Option<MultiFrontendDaemon
     let nfs_lock = nfs_serial_lock();
     let HermeticHome { home, .. } = hermetic_home();
 
-    let port = free_port();
-    let listen_addr = format!("127.0.0.1:{port}");
-    let base = format!("http://{listen_addr}");
+    let control_socket = home.path().join("control.sock");
     let mut mount_points = Vec::with_capacity(kinds.len());
     for (index, kind) in kinds.iter().enumerate() {
         let mount_point = home.path().join(format!("mnt-{index}-{kind}"));
@@ -385,11 +372,9 @@ pub fn start_multi_frontend_daemon(kinds: &[&str]) -> Option<MultiFrontendDaemon
     }
 
     let daemon = Command::new(omnifs_bin())
-        .args(["daemon", "--listen", &listen_addr])
+        .args(["daemon"])
         .env("OMNIFS_HOME", home.path())
         .env_remove("OMNIFS_MOUNT_POINT")
-        .env("OMNIFS_DAEMON_ADDR", &listen_addr)
-        .env_remove("OMNIFS_CONTROL_TOKEN")
         .env("RUST_LOG", "warn")
         .spawn();
     let mut daemon = match daemon {
@@ -401,7 +386,7 @@ pub fn start_multi_frontend_daemon(kinds: &[&str]) -> Option<MultiFrontendDaemon
     };
 
     let deadline = Instant::now() + Duration::from_secs(30);
-    while !curl_ok(&format!("{base}/v1/ready")) {
+    while !curl_socket_ok(&control_socket) {
         match daemon.try_wait() {
             Ok(Some(status)) => panic!("omnifs daemon exited with {status} before ready"),
             Ok(None) => {},
@@ -410,7 +395,10 @@ pub fn start_multi_frontend_daemon(kinds: &[&str]) -> Option<MultiFrontendDaemon
         if Instant::now() >= deadline {
             let _ = daemon.kill();
             let _ = daemon.wait();
-            panic!("omnifs daemon never reported ready on {listen_addr}");
+            panic!(
+                "omnifs daemon never reported ready on {}",
+                control_socket.display()
+            );
         }
         std::thread::sleep(Duration::from_millis(200));
     }
@@ -636,17 +624,12 @@ fn wire_frontend(
     let hermetic = hermetic_home();
     let home_path = hermetic.home.path().to_path_buf();
 
-    let port = free_port();
-    let listen_addr = format!("127.0.0.1:{port}");
-    let base = format!("http://{listen_addr}");
+    let control_socket = home_path.join("control.sock");
 
-    // The daemon always serves its fixed local socket. The TCP lane additionally
-    // requests the token-guarded listener it intentionally exercises.
-    let mut daemon_args = vec![
-        "daemon".to_string(),
-        "--listen".to_string(),
-        listen_addr.clone(),
-    ];
+    // The daemon always serves its fixed local control socket. The TCP lane
+    // additionally requests the token-guarded VFS listener it intentionally
+    // exercises.
+    let mut daemon_args = vec!["daemon".to_string()];
     if matches!(transport, AttachTransport::Tcp) {
         daemon_args.push("--attach-tcp".to_string());
         daemon_args.push("0".to_string());
@@ -654,9 +637,7 @@ fn wire_frontend(
     let daemon = Command::new(omnifs_bin())
         .args(&daemon_args)
         .env("OMNIFS_HOME", &home_path)
-        .env("OMNIFS_DAEMON_ADDR", &listen_addr)
         .env_remove("OMNIFS_MOUNT_POINT")
-        .env_remove("OMNIFS_CONTROL_TOKEN")
         .env("RUST_LOG", "warn")
         .spawn();
     let mut daemon = match daemon {
@@ -674,14 +655,15 @@ fn wire_frontend(
             Ok(Some(status)) => {
                 let _ = daemon.wait();
                 panic!(
-                    "daemon exited with {status} before /v1/ready on {listen_addr}; \
-                     this is a startup regression, not a skip"
+                    "daemon exited with {status} before /v1/ready on {}; \
+                     this is a startup regression, not a skip",
+                    control_socket.display()
                 );
             },
             Ok(None) => {},
             Err(error) => panic!("poll daemon child status: {error}"),
         }
-        if curl_ok(&format!("{base}/v1/ready")) {
+        if curl_socket_ok(&control_socket) {
             break true;
         }
         if Instant::now() >= deadline {
@@ -693,8 +675,9 @@ fn wire_frontend(
         let _ = daemon.kill();
         let _ = daemon.wait();
         panic!(
-            "daemon never reported /v1/ready on {listen_addr} after 30s; \
-             the attach-listener ready path regressed. Check the daemon log."
+            "daemon never reported /v1/ready on {} after 30s; \
+             the attach-listener ready path regressed. Check the daemon log.",
+            control_socket.display()
         );
     }
 
@@ -702,8 +685,7 @@ fn wire_frontend(
     std::fs::create_dir_all(&mount_point).expect("frontend mount point");
 
     // The out-of-process renderer attaches over the requested transport and
-    // mounts the tree: `--attach <socket>` for Unix, or the TCP env pair the
-    // Docker-hosted frontend also uses.
+    // mounts the tree: `--attach <socket>` for Unix, or the VFS TCP env pair.
     let mut frontend_cmd = Command::new(thin_runner_bin());
     frontend_cmd
         .arg("nfs")
@@ -792,16 +774,18 @@ fn wire_frontend(
     }
 }
 
-fn curl_ok(url: &str) -> bool {
+fn curl_socket_ok(socket: &Path) -> bool {
     Command::new("curl")
-        .args(["-fs", "-o", "/dev/null", url])
+        .args(["-fs", "-o", "/dev/null", "--unix-socket"])
+        .arg(socket)
+        .arg("http://localhost/v1/ready")
         .status()
         .is_ok_and(|status| status.success())
 }
 
 /// Bring up `omnifs daemon` with an explicit local frontend runner and only the
-/// test provider mounted. `OMNIFS_HOME` and `OMNIFS_DAEMON_ADDR` are
-/// hermetic per lane, so neither process touches the user's real workspace.
+/// test provider mounted. `OMNIFS_HOME` is hermetic per lane, so neither
+/// process touches the user's real workspace.
 ///
 /// Returns `None` (skip) only when the platform genuinely cannot mount. Panics
 /// if the daemon exits due to a CLI parse error or bind collision, since that is
@@ -836,16 +820,12 @@ fn native_daemon(nfs_lock: Option<TcpListener>) -> Option<NativeDaemon> {
     let hermetic = hermetic_home();
     let mount_point = hermetic.mount_point.clone();
 
-    let port = free_port();
-    let listen_addr = format!("127.0.0.1:{port}");
-    let base = format!("http://{listen_addr}");
+    let control_socket = hermetic.home.path().join("control.sock");
 
     let daemon = Command::new(omnifs_bin())
-        .args(["daemon", "--listen", &listen_addr])
+        .args(["daemon"])
         .env("OMNIFS_HOME", hermetic.home.path())
         .env_remove("OMNIFS_MOUNT_POINT")
-        .env("OMNIFS_DAEMON_ADDR", &listen_addr)
-        .env_remove("OMNIFS_CONTROL_TOKEN")
         .env("RUST_LOG", "warn")
         .spawn();
     let mut daemon = match daemon {
@@ -867,15 +847,14 @@ fn native_daemon(nfs_lock: Option<TcpListener>) -> Option<NativeDaemon> {
                 }
                 panic!(
                     "omnifs daemon exited with {status} before the control API became ready on \
-                     {listen_addr}; this is a CLI or startup error, not a skip. \
-                     Check that the daemon accepts the args passed in this lane \
-                     and that `{listen_addr}` was not already in use."
+                     {}; this is a CLI or startup error, not a skip.",
+                    control_socket.display()
                 );
             },
             Ok(None) => {},
             Err(error) => panic!("poll daemon child status: {error}"),
         }
-        if curl_ok(&format!("{base}/v1/ready")) {
+        if curl_socket_ok(&control_socket) {
             break true;
         }
         if Instant::now() >= deadline {
@@ -887,8 +866,9 @@ fn native_daemon(nfs_lock: Option<TcpListener>) -> Option<NativeDaemon> {
         let _ = daemon.kill();
         let _ = daemon.wait();
         panic!(
-            "omnifs daemon control API never became ready on {listen_addr} after 30s; \
-             the daemon is alive but not serving. Check the daemon log."
+            "omnifs daemon control API never became ready on {} after 30s; \
+             the daemon is alive but not serving. Check the daemon log.",
+            control_socket.display()
         );
     }
 

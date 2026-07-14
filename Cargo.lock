@@ -2996,7 +2996,6 @@ dependencies = [
  "anyhow",
  "axum",
  "clap",
- "constant_time_eq",
  "getrandom 0.3.4",
  "hex",
  "nix 0.30.1",

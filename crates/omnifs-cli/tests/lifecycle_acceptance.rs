@@ -1,7 +1,7 @@
 //! Lifecycle acceptance tests for the CLI ↔ daemon lifecycle.
 //!
 //! Each test drives the real `omnifs` binary against a hermetic `OMNIFS_HOME`
-//! with its own temp dir, mount point, and control port. No test touches the
+//! with its own temp dir and mount point. No test touches the
 //! user's real `~/.omnifs`, `~/omnifs`, or port 7878.
 //!
 //! The fixture writes `test_provider.wasm` into `<OMNIFS_HOME>/providers/` and
@@ -27,24 +27,19 @@ use std::process::{Command, Output};
 use std::time::{Duration, Instant};
 
 use common::{
-    force_unmount, free_port, install_test_provider, live_acceptance_enabled, nfs_serial_lock,
-    omnifs_bin, platform_can_mount, recorded_pid, release_wasm_dir, test_mount_spec,
+    force_unmount, install_test_provider, live_acceptance_enabled, nfs_serial_lock, omnifs_bin,
+    platform_can_mount, recorded_pid, release_wasm_dir, test_mount_spec,
 };
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-/// Shared bearer token for the debug TCP path. `omnifs up` spawns the daemon
-/// with this in its environment, and every CLI invocation dials with it.
-const CONTROL_TOKEN: &str = "lifecycle-acceptance-token";
-
 // ── Fixture ───────────────────────────────────────────────────────────────────
 
-/// Hermetic per-test fixture: a fresh temp dir, providers, mount point, and
-/// control address. Drops cleanly even when a test panics.
+/// Hermetic per-test fixture: a fresh temp dir, providers, and mount point.
+/// Drops cleanly even when a test panics.
 struct Fixture {
     home: tempfile::TempDir,
     mount_point: PathBuf,
-    daemon_addr: String,
     /// Content id of the test provider installed into the provider store.
     test_provider_id: omnifs_workspace::ids::ProviderId,
     /// PID to kill on drop, when a daemon was spawned via `omnifs up` rather
@@ -68,13 +63,9 @@ impl Fixture {
         let mount_point = home.path().join("mnt");
         std::fs::create_dir_all(&mount_point).expect("mount point dir");
 
-        let port = free_port();
-        let daemon_addr = format!("127.0.0.1:{port}");
-
         Self {
             home,
             mount_point,
-            daemon_addr,
             test_provider_id,
             daemon_pid: None,
         }
@@ -114,11 +105,6 @@ impl Fixture {
             .args(args)
             .env("OMNIFS_HOME", self.home_path())
             .env("OMNIFS_MOUNT_POINT", &self.mount_point)
-            .env("OMNIFS_DAEMON_ADDR", &self.daemon_addr)
-            // The debug TCP path needs a shared token: the spawned daemon reads
-            // this as its bearer token and every CLI invocation dials with the
-            // same value, so no on-disk token file is involved.
-            .env("OMNIFS_CONTROL_TOKEN", CONTROL_TOKEN)
             .env("RUST_LOG", "warn")
             .output()
             .unwrap_or_else(|e| panic!("spawn omnifs {}: {e}", args.join(" ")))
@@ -367,13 +353,13 @@ fn scenarios_3_to_6_lifecycle_cycle() {
         "result.mounts must include 'test'; got: {mounts:?}"
     );
 
-    // Verify backend is native via the daemon status API directly. The debug
-    // TCP listener is authenticated with the shared token the fixture injects.
-    let base = format!("http://{}", fixture.daemon_addr);
-    let auth_header = format!("Authorization: Bearer {CONTROL_TOKEN}");
-    let status_url = format!("{base}/v1/status");
+    // Verify backend is native through the daemon's local control socket.
+    let status_url = "http://localhost/v1/status";
+    let control_socket = fixture.home_path().join("control.sock");
     let status_resp = Command::new("curl")
-        .args(["-fs", "-H", &auth_header, &status_url])
+        .args(["-fs", "--unix-socket"])
+        .arg(&control_socket)
+        .arg(status_url)
         .output()
         .expect("curl /v1/status");
     let status_json: serde_json::Value = serde_json::from_slice(&status_resp.stdout)

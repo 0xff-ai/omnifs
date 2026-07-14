@@ -1,6 +1,5 @@
 //! Shared launch choreography for `omnifs up`.
 
-use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
@@ -11,7 +10,7 @@ use omnifs_workspace::mounts::{Registry, Revision, materialize};
 use omnifs_workspace::provider::Catalog;
 use omnifs_workspace::runtime_record::RuntimeRecord;
 
-use crate::client::{DaemonClient, env_daemon_addr};
+use crate::client::DaemonClient;
 use crate::daemon_teardown::DaemonTeardown;
 use crate::mount_config::MountConfig;
 use crate::ui::output::Output;
@@ -116,17 +115,6 @@ fn preflight_mounts(
     Ok(())
 }
 
-/// The loopback address the debug `OMNIFS_DAEMON_ADDR` TCP path serves on,
-/// honoring the env override.
-fn env_control_addr() -> anyhow::Result<Option<SocketAddr>> {
-    match env_daemon_addr() {
-        None => Ok(None),
-        Some(addr) => addr.parse().map(Some).with_context(|| {
-            format!("OMNIFS_DAEMON_ADDR is not a valid host:port address: {addr:?}")
-        }),
-    }
-}
-
 /// Leave a daemon already serving `revision` alone, or replace only the daemon
 /// process and wait for the immutable snapshot to become ready.
 async fn launch_host_native(
@@ -161,9 +149,7 @@ async fn launch_host_native(
         output.narrate("Starting omnifs daemon (host-native)");
     }
 
-    let tcp_addr = env_control_addr()?;
-    crate::launch_backend::launch_native(paths, tcp_addr, telemetry_enabled, revision, snapshot)
-        .await?;
+    crate::launch_backend::launch_native(paths, telemetry_enabled, revision, snapshot).await?;
 
     let status = client.status().await?;
     report_launch_status(&status);

@@ -178,21 +178,6 @@ impl<R: Render> LiveRow<R> {
         ));
     }
 
-    /// Combined file and byte meter for exports whose total shape is known.
-    pub(crate) fn update_files_bytes(
-        &mut self,
-        files_done: u64,
-        files_total: u64,
-        bytes_done: u64,
-        bytes_total: u64,
-    ) {
-        self.update(&format!(
-            "{files_done} / {files_total} files, {} / {}",
-            human_bytes(bytes_done),
-            human_bytes(bytes_total)
-        ));
-    }
-
     pub(crate) fn settle_ok(self, value: impl std::fmt::Display) {
         self.settle(Glyph::Done, value);
     }
@@ -293,9 +278,9 @@ mod tests {
     fn custom_renderer_receives_failure_settlement() {
         let mut recorder = EventRecorder::default();
         {
-            let mut row = LiveRow::with_renderer("snapshot", &mut recorder);
+            let mut row = LiveRow::with_renderer("worker", &mut recorder);
             row.update("writing");
-            row.settle_fail("snapshot failed");
+            row.settle_fail("worker failed");
         }
         assert!(matches!(
             recorder.0.as_slice(),
@@ -307,7 +292,7 @@ mod tests {
                     value,
                     ..
                 }
-            ] if key == "snapshot" && value == "snapshot failed"
+            ] if key == "worker" && value == "worker failed"
         ));
     }
 

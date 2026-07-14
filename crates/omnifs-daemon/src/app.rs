@@ -2,7 +2,7 @@
 //!
 //! These are invoked by the `omnifs daemon` subcommand (the single-binary
 //! entrypoint); there is no standalone `omnifsd` binary. The daemon still
-//! runs as its own host-native process and speaks the HTTP control API.
+//! runs as its own host-native process and speaks the local HTTP control API.
 
 use anyhow::Context as _;
 use clap::Args;
@@ -11,7 +11,6 @@ use omnifs_engine::MountRuntimes;
 use omnifs_engine::init_global_from_env;
 use omnifs_workspace::mounts::Registry;
 use omnifs_workspace::mounts::Revision;
-use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::runtime::Handle;
@@ -28,10 +27,6 @@ pub struct DaemonArgs {
     /// Immutable mount snapshot directory to load before readiness.
     #[arg(long, value_name = "PATH")]
     pub(crate) mount_snapshot: PathBuf,
-    /// Optional TCP control API listen address. The daemon always serves its
-    /// Unix socket and adds TCP only for this debug/test path.
-    #[arg(long)]
-    pub(crate) listen: Option<SocketAddr>,
     /// Additionally serve the shared namespace over a TCP loopback listener at
     /// `127.0.0.1:<port>` (`0` asks the OS for an ephemeral port), guarded by a
     /// per-instance attach token instead of filesystem permissions. This is the
@@ -107,13 +102,11 @@ pub async fn run(args: &DaemonArgs) -> anyhow::Result<()> {
         .with_context(|| format!("read predecessor runtime record {}", record_path.display()))?;
     let runtime_record = context.runtime_record();
     let runtime_record = server::RuntimeRecordStore::new(record_path, runtime_record);
-    let control_token = server::ControlToken::resolve()?;
     let daemon = Arc::new(server::Daemon::new(
         context,
         Arc::clone(&registry),
         inspector,
         Arc::clone(&runtime_record),
-        control_token,
     ));
     // Build the one shared namespace after atomic startup loading, so its root
     // record reflects the complete mount set.

@@ -2,15 +2,14 @@
 //! `/v1/{ready,status,credentials,providers,mounts,shutdown,events}`.
 //!
 //! Serves daemon runtime facts and shutdown, and the
-//! inspector event stream over HTTP on the control listener. See
+//! inspector event stream over HTTP on the local control socket. See
 //! `docs/contracts/50-control-plane.md`.
 
 use anyhow::Context as _;
 use axum::Router;
 use axum::body::Body;
-use axum::extract::{Path as UrlPath, Request, State};
-use axum::http::{Method, StatusCode, header};
-use axum::middleware::{self, Next};
+use axum::extract::{Path as UrlPath, State};
+use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Json, Response};
 use omnifs_api::{
     ApiError, CredentialHealth, CredentialStatus, DaemonBackend, DaemonHealth, DaemonStatus,
@@ -46,15 +45,6 @@ use utoipa_axum::routes;
 use crate::context::DaemonContext;
 use crate::frontends::Frontends;
 
-const CONTROL_TOKEN_BYTES: usize = 32;
-const BEARER_PREFIX: &str = "Bearer ";
-
-/// Environment variable that hands a TCP-serving daemon a token the caller
-/// already knows, instead of generating one in memory. Set only on the debug
-/// `OMNIFS_DAEMON_ADDR` path; the ordinary host-native daemon serves the
-/// token-free Unix socket and never sees this variable.
-const CONTROL_TOKEN_ENV: &str = "OMNIFS_CONTROL_TOKEN";
-
 /// Attach-token byte length: 16 raw bytes, hex-encoded to the 32 hex characters
 /// the spec calls for.
 const ATTACH_TOKEN_BYTES: usize = 16;
@@ -79,53 +69,6 @@ fn validate_attach_token(token: &str) -> anyhow::Result<()> {
         "persisted attach token must be 32 lowercase hexadecimal characters"
     );
     Ok(())
-}
-
-/// The bearer token guarding the TCP control listener. It lives in memory only;
-/// the daemon no longer writes a token file. Its value comes from
-/// `OMNIFS_CONTROL_TOKEN` when the launcher injects one, else is generated per
-/// start. The Unix socket does not check it (filesystem permissions gate that
-/// listener).
-#[derive(Clone)]
-pub(crate) struct ControlToken {
-    value: Arc<str>,
-}
-
-impl ControlToken {
-    pub(crate) fn resolve() -> anyhow::Result<Self> {
-        if let Ok(value) = std::env::var(CONTROL_TOKEN_ENV) {
-            let trimmed = value.trim();
-            if !trimmed.is_empty() {
-                return Ok(Self {
-                    value: Arc::from(trimmed),
-                });
-            }
-        }
-        let mut random = [0_u8; CONTROL_TOKEN_BYTES];
-        getrandom::fill(&mut random).context("generate daemon control token")?;
-        Ok(Self {
-            value: Arc::from(hex::encode(random)),
-        })
-    }
-
-    fn authorizes(&self, headers: &axum::http::HeaderMap) -> bool {
-        let Some(presented) = headers
-            .get(header::AUTHORIZATION)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.strip_prefix(BEARER_PREFIX))
-        else {
-            return false;
-        };
-
-        constant_time_eq::constant_time_eq(presented.as_bytes(), self.value.as_bytes())
-    }
-
-    #[cfg(test)]
-    fn from_test_value(value: impl Into<Arc<str>>) -> Self {
-        Self {
-            value: value.into(),
-        }
-    }
 }
 
 #[derive(OpenApi)]
@@ -341,7 +284,6 @@ pub struct Daemon {
     inspector: Option<Arc<Inspector>>,
     frontends: Frontends,
     runtime_record: Arc<RuntimeRecordStore>,
-    control_token: ControlToken,
     /// Set once all startup namespace listeners are serving.
     attach_serving: AtomicBool,
     local_alive: Arc<AtomicBool>,
@@ -373,7 +315,6 @@ impl Daemon {
         registry: Arc<MountRuntimes>,
         inspector: Option<Arc<Inspector>>,
         runtime_record: Arc<RuntimeRecordStore>,
-        control_token: ControlToken,
     ) -> Self {
         let record = Arc::clone(&runtime_record);
         let frontends = Frontends::new(Arc::new(move |frontends| {
@@ -386,7 +327,6 @@ impl Daemon {
             inspector,
             frontends,
             runtime_record,
-            control_token,
             attach_serving: AtomicBool::new(false),
             local_alive: Arc::new(AtomicBool::new(false)),
             shutdown_tx,
@@ -728,12 +668,8 @@ impl Daemon {
         self.track_socket(control_socket);
         let local = self.context.bind_local_attach_socket()?;
         self.track_socket(local.path.clone());
-        let control_tcp = self.context.bind_control_listener()?;
         let rt = tokio::runtime::Handle::current();
         self.spawn_control_unix(control_listener, &rt)?;
-        if let Some(listener) = control_tcp {
-            self.spawn_control_tcp(listener, &rt)?;
-        }
 
         let namespace = self
             .namespace
@@ -885,31 +821,8 @@ impl Daemon {
         self.track_task(task);
     }
 
-    /// Serve the control API over TCP with the bearer-token middleware. Used by
-    /// the container and the `--listen` debug path.
-    pub fn spawn_control_tcp(
-        self: &Arc<Self>,
-        listener: std::net::TcpListener,
-        rt: &tokio::runtime::Handle,
-    ) -> std::io::Result<()> {
-        listener.set_nonblocking(true)?;
-        let listener = tokio::net::TcpListener::from_std(listener)?;
-        let addr = listener.local_addr()?;
-        info!(%addr, "control API listening (tcp, token-authenticated)");
-        let app = Self::router(Arc::clone(self), Auth::BearerToken);
-        let daemon = Arc::clone(self);
-        let task = rt.spawn(async move {
-            if let Err(error) = axum::serve(listener, app).await {
-                warn!(%error, "control API server exited");
-            }
-            daemon.send_event(TaskEvent::Control);
-        });
-        self.track_task(task);
-        Ok(())
-    }
-
     /// Serve the control API over the Unix socket, where auth is filesystem
-    /// permissions and the bearer middleware is omitted.
+    /// permissions on the workspace-owned socket.
     pub fn spawn_control_unix(
         self: &Arc<Self>,
         listener: std::os::unix::net::UnixListener,
@@ -918,7 +831,7 @@ impl Daemon {
         listener.set_nonblocking(true)?;
         let listener = tokio::net::UnixListener::from_std(listener)?;
         info!("control API listening (unix socket, filesystem-permission auth)");
-        let app = Self::router(Arc::clone(self), Auth::FilesystemPermissions);
+        let app = Self::router(Arc::clone(self));
         let daemon = Arc::clone(self);
         let task = rt.spawn(async move {
             if let Err(error) = axum::serve(listener, app).await {
@@ -1002,36 +915,18 @@ impl Daemon {
             .routes(routes!(providers_list))
             .routes(routes!(mounts_list))
             .routes(routes!(mount_inspect))
-            .routes(routes!(mount_export))
             .routes(routes!(shutdown))
             .routes(routes!(events))
             .routes(routes!(frontend_attach_target))
             .routes(routes!(frontend_attach_target_vsock))
     }
 
-    fn router(state: Arc<Self>, auth: Auth) -> Router {
-        let control_token = state.control_token.clone();
+    fn router(state: Arc<Self>) -> Router {
         let (router, _) = Self::api_router().with_state(state).split_for_parts();
-        let router = router
+        router
             .fallback(route_not_found)
-            .method_not_allowed_fallback(method_not_allowed);
-        match auth {
-            Auth::BearerToken => router.layer(middleware::from_fn_with_state(
-                control_token,
-                authenticate_control_request,
-            )),
-            Auth::FilesystemPermissions => router,
-        }
+            .method_not_allowed_fallback(method_not_allowed)
     }
-}
-
-/// Which auth policy a control listener enforces. The TCP listener checks the
-/// bearer token; the Unix socket relies on filesystem permissions and omits the
-/// middleware entirely.
-#[derive(Clone, Copy)]
-enum Auth {
-    BearerToken,
-    FilesystemPermissions,
 }
 
 pub fn openapi() -> utoipa::openapi::OpenApi {
@@ -1192,55 +1087,6 @@ async fn mount_inspect(
     }
 }
 
-#[utoipa::path(
-    get,
-    path = "/v1/mounts/{name}/export",
-    operation_id = "mount_export",
-    params(("name" = String, Path, description = "mount name")),
-    responses(
-        (status = 200, description = "canonical-store snapshot tar", content_type = "application/x-tar", body = String),
-        (status = 404, description = "mount not found", content_type = "text/plain", body = String),
-        (status = 500, description = "snapshot export failed", content_type = "text/plain", body = String),
-    ),
-)]
-async fn mount_export(
-    State(daemon): State<Arc<Daemon>>,
-    UrlPath(name): UrlPath<String>,
-) -> Response {
-    let registry = Arc::clone(&daemon.registry);
-    let task_name = name.clone();
-    match tokio::task::spawn_blocking(move || {
-        registry
-            .snapshot_mount(&task_name)
-            .and_then(|snapshot| snapshot.map(|snapshot| snapshot.to_tar_vec()).transpose())
-    })
-    .await
-    {
-        Ok(Ok(Some(bytes))) => Response::builder()
-            .status(StatusCode::OK)
-            .header(header::CONTENT_TYPE, "application/x-tar")
-            .header(
-                header::CONTENT_DISPOSITION,
-                format!("attachment; filename=\"{name}-snapshot.tar\""),
-            )
-            .body(Body::from(bytes))
-            .expect("static response parts are valid"),
-        Ok(Ok(None)) => {
-            (StatusCode::NOT_FOUND, format!("mount `{name}` not found\n")).into_response()
-        },
-        Ok(Err(error)) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("snapshot export failed for mount `{name}`: {error:#}\n"),
-        )
-            .into_response(),
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("snapshot export task failed for mount `{name}`: {error}\n"),
-        )
-            .into_response(),
-    }
-}
-
 /// `POST /v1/shutdown`: release the daemon's serving latch and exit. Frontend
 /// processes have independent lifetimes and are torn down by the CLI.
 #[utoipa::path(
@@ -1381,26 +1227,6 @@ async fn events(State(daemon): State<Arc<Daemon>>) -> Response {
     daemon.event_stream()
 }
 
-async fn authenticate_control_request(
-    State(control_token): State<ControlToken>,
-    request: Request,
-    next: Next,
-) -> Response {
-    if request.method() == Method::GET && request.uri().path() == "/v1/ready" {
-        return next.run(request).await;
-    }
-
-    if control_token.authorizes(request.headers()) {
-        next.run(request).await
-    } else {
-        error_response(
-            StatusCode::UNAUTHORIZED,
-            ErrorCode::Unauthorized,
-            "control API authorization required",
-        )
-    }
-}
-
 async fn route_not_found() -> Response {
     error_response(
         StatusCode::NOT_FOUND,
@@ -1508,9 +1334,6 @@ mod tests {
     use axum::Router;
     use axum::body::{Body, to_bytes};
     use axum::http::{StatusCode, header};
-    use axum::middleware;
-    use axum::routing::get;
-    use omnifs_api::{ApiError, ErrorCode};
     use tower::ServiceExt as _;
 
     #[test]
@@ -1565,87 +1388,6 @@ mod tests {
             delivery: omnifs_api::FrontendDelivery::Local,
         }]);
         assert!(!path.exists());
-    }
-
-    #[tokio::test]
-    async fn control_auth_protects_everything_except_ready() {
-        let token = super::ControlToken::from_test_value("right-token");
-        let app = Router::new()
-            .route("/v1/ready", get(|| async { StatusCode::OK }))
-            .route("/v1/status", get(|| async { StatusCode::NO_CONTENT }))
-            .layer(middleware::from_fn_with_state(
-                token,
-                super::authenticate_control_request,
-            ));
-
-        let response = app
-            .clone()
-            .oneshot(
-                axum::http::Request::builder()
-                    .uri("/v1/ready")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-
-        let response = app
-            .clone()
-            .oneshot(
-                axum::http::Request::builder()
-                    .uri("/v1/status")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-        let body = to_bytes(response.into_body(), 1024).await.unwrap();
-        let error: ApiError = serde_json::from_slice(&body).unwrap();
-        assert_eq!(error.code, ErrorCode::Unauthorized);
-
-        let response = app
-            .clone()
-            .oneshot(
-                axum::http::Request::builder()
-                    .uri("/v1/status")
-                    .header(header::AUTHORIZATION, "Bearer wrong-token")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-
-        let response = app
-            .oneshot(
-                axum::http::Request::builder()
-                    .uri("/v1/status")
-                    .header(header::AUTHORIZATION, "Bearer right-token")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::NO_CONTENT);
-    }
-
-    /// With no `OMNIFS_CONTROL_TOKEN` in the environment the token is generated
-    /// in memory and never touches disk. The env-injection path is covered by
-    /// the launcher/daemon integration, not here, to avoid mutating process env
-    /// under a parallel test runner.
-    #[test]
-    fn control_token_generates_in_memory_when_env_unset() {
-        // Only assert the no-env behavior; reading a process-global env var here
-        // would race other tests. When unset, `resolve` must synthesize a
-        // non-empty hex token without writing any file.
-        if std::env::var_os(super::CONTROL_TOKEN_ENV).is_some() {
-            return;
-        }
-        let token = super::ControlToken::resolve().unwrap();
-        assert_eq!(token.value.len(), super::CONTROL_TOKEN_BYTES * 2);
-        assert!(token.value.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     #[test]
@@ -1771,7 +1513,6 @@ mod tests {
         let args = crate::app::DaemonArgs {
             mount_revision: omnifs_workspace::mounts::Revision::new("a".repeat(40)).unwrap(),
             mount_snapshot: dir.path().join("mounts"),
-            listen: None,
             attach_tcp: None,
         };
         std::fs::create_dir_all(&args.mount_snapshot).unwrap();
@@ -1793,13 +1534,11 @@ mod tests {
         );
         let runtime_record =
             super::RuntimeRecordStore::new(context.runtime_record_file(), context.runtime_record());
-        let control_token = super::ControlToken::from_test_value("test-token");
         let daemon = Arc::new(super::Daemon::new(
             context,
             Arc::clone(&registry),
             None,
             runtime_record,
-            control_token,
         ));
 
         let rt = tokio::runtime::Handle::current();
@@ -1816,7 +1555,7 @@ mod tests {
             },
         };
 
-        let router = super::Daemon::router(Arc::clone(&daemon), super::Auth::FilesystemPermissions);
+        let router = super::Daemon::router(Arc::clone(&daemon));
 
         assert_non_docker_attach_is_rejected(&router).await;
 

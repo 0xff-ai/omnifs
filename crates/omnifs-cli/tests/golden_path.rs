@@ -9,14 +9,13 @@ use std::process::{Command, Output};
 use std::time::{Duration, Instant};
 
 use common::{
-    force_unmount, free_port, install_test_provider_as, live_acceptance_enabled, nfs_serial_lock,
-    omnifs_bin, platform_can_mount, recorded_pid, release_wasm_dir,
+    force_unmount, install_test_provider_as, live_acceptance_enabled, nfs_serial_lock, omnifs_bin,
+    platform_can_mount, recorded_pid, release_wasm_dir,
 };
 
 struct Fixture {
     home: tempfile::TempDir,
     mount_point: PathBuf,
-    daemon_addr: String,
     daemon_pid: Option<u32>,
 }
 
@@ -33,13 +32,8 @@ impl Fixture {
         Self {
             home,
             mount_point,
-            daemon_addr: "127.0.0.1:9".to_string(),
             daemon_pid: None,
         }
-    }
-
-    fn enable_live_addr(&mut self) {
-        self.daemon_addr = format!("127.0.0.1:{}", free_port());
     }
 
     fn home_path(&self) -> &Path {
@@ -51,7 +45,6 @@ impl Fixture {
             .args(args)
             .env("OMNIFS_HOME", self.home_path())
             .env("OMNIFS_MOUNT_POINT", &self.mount_point)
-            .env("OMNIFS_DAEMON_ADDR", &self.daemon_addr)
             .env("NO_COLOR", "1")
             .env("RUST_LOG", "warn")
             .output()
@@ -138,7 +131,6 @@ fn mount_add_up_wait_read_down_golden_path() {
     }
 
     let _guard = nfs_serial_lock();
-    fixture.enable_live_addr();
 
     let up = fixture.run(&["up", "--wait", "30s"]);
     assert_eq!(

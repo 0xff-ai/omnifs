@@ -2,20 +2,16 @@
 //!
 //! The client only ever dials an endpoint within its own workspace: an endpoint
 //! read from the runtime record (`$OMNIFS_HOME/daemon.json`), the fixed control
-//! socket (`$OMNIFS_HOME/control.sock`), or an explicit `OMNIFS_DAEMON_ADDR`. It
-//! never dials a default port blind, so a daemon owned by a different
-//! `OMNIFS_HOME` is structurally unaddressable.
+//! socket (`$OMNIFS_HOME/control.sock`). It never dials a default port blind,
+//! so a daemon owned by a different `OMNIFS_HOME` is structurally
+//! unaddressable.
 //!
 //! Resolution (per request, so the launcher can poll for the record to appear):
-//! - `OMNIFS_DAEMON_ADDR` set: dial TCP, bearer token from `OMNIFS_CONTROL_TOKEN`
-//!   when set (the debug/test path; the ordinary host-native daemon never sets
-//!   this).
-//! - else read the record:
-//!   - a unix endpoint -> connect the socket; a refused/missing socket is a stale
-//!     record, which is removed and reported.
-//!   - no record -> fall back to the fixed control socket if it exists on disk,
-//!     so a daemon that outlived its record stays reachable; otherwise the daemon
-//!     is not running (exit 3).
+//! - read the record: a unix endpoint connects the socket; a refused/missing
+//!   socket is a stale record, which is removed and reported.
+//! - no record -> fall back to the fixed control socket if it exists on disk, so
+//!   a daemon that outlived its record stays reachable; otherwise the daemon is
+//!   not running (exit 3).
 //! - the instance id echoed by `/v1/status` is asserted equal to the record's
 //!   (the control-socket fallback carries no instance id, so this check is
 //!   skipped for it), so a record overwritten by a restart mid-command is caught.
@@ -44,17 +40,12 @@ use serde::de::DeserializeOwned;
 
 use crate::error::{ExitCode, WithExitCode, WithHint};
 
-const EXPORT_API_MINOR: u16 = 2;
-const CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Where and how to reach the daemon, resolved fresh for each request.
 enum Target {
-    /// No runtime record and no `OMNIFS_DAEMON_ADDR`: the daemon is not running.
+    /// No runtime record: the daemon is not running.
     Absent,
-    /// `OMNIFS_DAEMON_ADDR` override (debug/test path). Foreign-daemon copy
-    /// applies only on this path.
-    Env { base: String, token: Option<String> },
     /// Unix-socket endpoint read from the record (the daemon's only production
     /// transport).
     Unix {
@@ -68,7 +59,6 @@ impl Target {
     fn label(&self) -> String {
         match self {
             Self::Absent => "the daemon".to_string(),
-            Self::Env { base, .. } => base.clone(),
             Self::Unix { socket, .. } => format!("unix:{}", socket.display()),
         }
     }
@@ -77,14 +67,12 @@ impl Target {
     fn instance(&self) -> Option<&str> {
         match self {
             Self::Unix { instance, .. } => instance.as_deref(),
-            Self::Absent | Self::Env { .. } => None,
+            Self::Absent => None,
         }
     }
 }
 
-/// A buffered control-API response: status plus the whole body. Every daemon
-/// method reads a bounded JSON or tar payload, so buffering keeps one primitive
-/// over both transports.
+/// A buffered control-API response: status plus the whole body.
 struct RawResponse {
     status: StatusCode,
     body: Bytes,
@@ -123,59 +111,16 @@ impl DaemonClient {
         }
     }
 
-    /// Build the TCP control-client, on demand, only for the
-    /// `OMNIFS_DAEMON_ADDR` override path. The host-native daemon's only
-    /// production transport is the unix socket (`unix_client`, no TLS
-    /// backend involved), so this is never constructed for `status`,
-    /// `down`, `shell`, or any other command that resolves the daemon
-    /// through the runtime record.
-    ///
-    /// Building a `reqwest::Client` initializes its TLS backend, which
-    /// probes the system certificate store; on a CA-less minimal Linux that
-    /// probe can fail. Building it here, lazily, turns that failure into an
-    /// actionable error at the one call site that actually needs TLS,
-    /// instead of a startup panic for every command.
-    fn http_client() -> Result<reqwest::Client> {
-        Self::build_http_client(
-            reqwest::Client::builder()
-                .connect_timeout(CONNECT_TIMEOUT)
-                .timeout(REQUEST_TIMEOUT),
-        )
-    }
-
-    /// The `.build()` call this wraps is where a CA-less system fails: it
-    /// constructs the TLS backend (rustls-platform-verifier loads the
-    /// system root store), and `build()` returns `Err` rather than
-    /// panicking when that store is empty. Split out from `http_client` so
-    /// the failure path is exercisable with an arbitrary builder in tests,
-    /// without depending on an actually CA-less host.
-    fn build_http_client(builder: reqwest::ClientBuilder) -> Result<reqwest::Client> {
-        builder.build().context(
-            "build TLS-capable HTTP client for OMNIFS_DAEMON_ADDR; \
-             no system certificate authorities found, install ca-certificates \
-             (the host-native daemon's unix-socket transport does not need this)",
-        )
-    }
-
     fn unix_client(&self) -> &HyperClient<UnixConnector, Full<Bytes>> {
         self.unix
             .get_or_init(|| HyperClient::builder(TokioExecutor::new()).build(UnixConnector))
     }
 
-    /// Resolve the endpoint to dial for this request. `OMNIFS_DAEMON_ADDR` wins
-    /// over the record. A corrupt record cannot strand a daemon that is still
+    /// Resolve the endpoint to dial for this request. A corrupt record cannot
+    /// strand a daemon that is still
     /// serving on the workspace's fixed control socket, so resolution falls
     /// back to that socket without trusting any fields from the record.
     fn resolve(&self) -> Result<Target> {
-        if let Some(addr) = env_daemon_addr() {
-            let token = std::env::var("OMNIFS_CONTROL_TOKEN")
-                .ok()
-                .filter(|token| !token.trim().is_empty());
-            return Ok(Target::Env {
-                base: format!("http://{addr}"),
-                token,
-            });
-        }
         let record = match &self.record_path {
             Some(record_path) => match RuntimeRecord::read(record_path) {
                 Ok(record) => record,
@@ -225,7 +170,6 @@ impl DaemonClient {
     pub(crate) fn event_endpoint(&self) -> Result<Option<EventEndpoint>> {
         Ok(match self.resolve()? {
             Target::Absent => None,
-            Target::Env { base, token } => Some(EventEndpoint::Tcp { base, token }),
             Target::Unix { socket, .. } => Some(EventEndpoint::Unix { socket }),
         })
     }
@@ -243,46 +187,9 @@ impl DaemonClient {
         let target = self.resolve()?;
         match &target {
             Target::Absent => Ok(None),
-            Target::Env { base, token } => {
-                self.request_tcp(base, token.as_deref(), method, path, body, timeout)
-                    .await
-            },
             Target::Unix { socket, .. } => {
                 self.request_unix(socket, method, path, body, timeout).await
             },
-        }
-    }
-
-    async fn request_tcp(
-        &self,
-        base: &str,
-        token: Option<&str>,
-        method: Method,
-        path: &str,
-        body: Option<&serde_json::Value>,
-        timeout: Duration,
-    ) -> Result<Option<RawResponse>> {
-        let http = Self::http_client()?;
-        let mut builder = http
-            .request(method.clone(), format!("{base}{path}"))
-            .timeout(timeout);
-        if let Some(token) = token {
-            builder = builder.bearer_auth(token);
-        }
-        if let Some(body) = body {
-            builder = builder.json(body);
-        }
-        match builder.send().await {
-            Ok(response) => {
-                let status = response.status();
-                let body = response
-                    .bytes()
-                    .await
-                    .with_context(|| format!("read response body from {base}{path}"))?;
-                Ok(Some(RawResponse { status, body }))
-            },
-            Err(error) if error.is_connect() || error.is_timeout() => Ok(None),
-            Err(error) => Err(error).with_context(|| format!("request {method} {base}{path}")),
         }
     }
 
@@ -316,7 +223,7 @@ impl DaemonClient {
 
         let send = self.unix_client().request(request);
         let response = match tokio::time::timeout(timeout, send).await {
-            // Timed out: treat as unreachable, same as the TCP path.
+            // Timed out: treat the local control socket as unreachable.
             Err(_) => return Ok(None),
             Ok(Ok(response)) => response,
             // A connect error means the socket is gone or refused: the record is
@@ -555,30 +462,6 @@ impl DaemonClient {
         Self::parse_ok_json(&raw, "daemon credential reload request failed").map(Some)
     }
 
-    /// Export a mount snapshot tar only when a compatible daemon is running.
-    pub(crate) async fn export_mount_if_running(&self, mount: &str) -> Result<Option<Vec<u8>>> {
-        let Some(status) = self.compatible_status_optional().await? else {
-            return Ok(None);
-        };
-        if status.api_minor < EXPORT_API_MINOR {
-            return Ok(None);
-        }
-        let path = format!("/v1/mounts/{mount}/export");
-        let Some(raw) = self
-            .request(Method::GET, &path, None, Duration::from_mins(1))
-            .await?
-        else {
-            return Ok(None);
-        };
-        if !raw.status.is_success() {
-            return Err(Self::error_from_body(
-                &raw,
-                "daemon snapshot export request failed",
-            ));
-        }
-        Ok(Some(raw.body.to_vec()))
-    }
-
     /// Ask the daemon to unmount its frontend and exit. `None` when no daemon
     /// answered, so the caller can fall back to a stale-mount sweep.
     pub(crate) async fn shutdown(&self) -> Result<Option<StopReport>> {
@@ -600,21 +483,10 @@ impl DaemonClient {
     }
 }
 
-/// Read `OMNIFS_DAEMON_ADDR` from the environment. There is no default port:
-/// an unset value means "use the runtime record".
-pub(crate) fn env_daemon_addr() -> Option<String> {
-    std::env::var("OMNIFS_DAEMON_ADDR")
-        .ok()
-        .map(|addr| addr.trim().to_string())
-        .filter(|addr| !addr.is_empty())
-}
-
-/// The endpoint the inspector's `GET /v1/events` stream should attach to, in the
-/// same resolution order as the control client. `None` means no daemon is
-/// running (no record, no override).
+/// The endpoint the inspector's `GET /v1/events` stream should attach to.
+/// `None` means no daemon is running.
 #[derive(Clone)]
 pub(crate) enum EventEndpoint {
-    Tcp { base: String, token: Option<String> },
     Unix { socket: PathBuf },
 }
 
@@ -622,7 +494,6 @@ impl EventEndpoint {
     /// A short human label for status lines in the inspector.
     pub(crate) fn label(&self) -> String {
         match self {
-            Self::Tcp { base, .. } => base.clone(),
             Self::Unix { socket } => format!("unix:{}", socket.display()),
         }
     }
@@ -662,33 +533,10 @@ impl DaemonControlState {
     }
 }
 
-/// A daemon is answering `OMNIFS_DAEMON_ADDR` but will not accept this
-/// workspace's credentials. This survives only on the explicit override path:
-/// it is almost always a daemon owned by a different `OMNIFS_HOME`.
-pub(crate) fn foreign_daemon_error(base: &str) -> anyhow::Error {
-    match Err::<(), _>(anyhow::anyhow!(
-        "a daemon is serving at {base}, but it does not accept this workspace's credentials"
-    ))
-    .with_exit_code(ExitCode::AuthRequired)
-    .with_hint(
-        "It likely belongs to a different OMNIFS_HOME (for example the `just dev` sandbox at ~/.omnifs-dev, or another worktree)",
-    )
-    .with_hint(
-        "Stop it with `omnifs down` from the workspace that owns it, or point this CLI elsewhere by setting OMNIFS_DAEMON_ADDR",
-    ) {
-        Ok(()) => unreachable!("foreign daemon error construction always starts from Err"),
-        Err(error) => error,
-    }
-}
-
 fn hint_for(code: ErrorCode) -> &'static str {
     match code {
         ErrorCode::AuthRequired => "Try: omnifs mount reauth <name>",
         ErrorCode::CredentialNotFound => "Try: omnifs mount reauth <mount>",
-        ErrorCode::Unauthorized => {
-            "Try: a daemon on this control address rejected this workspace's credentials; \
-             run `omnifs down` from the workspace that owns it, or set OMNIFS_DAEMON_ADDR to point elsewhere"
-        },
         ErrorCode::DaemonShuttingDown => "Try: omnifs up",
         ErrorCode::MountNotFound => "Try: omnifs status",
         ErrorCode::SpecInvalid => "Try: inspect the mount spec and rerun omnifs up",
@@ -698,9 +546,7 @@ fn hint_for(code: ErrorCode) -> &'static str {
 
 fn exit_code_for(code: ErrorCode) -> ExitCode {
     match code {
-        ErrorCode::Unauthorized | ErrorCode::AuthRequired | ErrorCode::CredentialNotFound => {
-            ExitCode::AuthRequired
-        },
+        ErrorCode::AuthRequired | ErrorCode::CredentialNotFound => ExitCode::AuthRequired,
         ErrorCode::DaemonShuttingDown => ExitCode::DaemonUnavailable,
         ErrorCode::MountNotFound | ErrorCode::SpecInvalid | ErrorCode::Internal => {
             ExitCode::GenericFailure
@@ -728,147 +574,9 @@ fn incompatible_daemon_error(status: &DaemonStatus) -> anyhow::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-    use tokio::net::TcpListener;
-
-    /// Serializes tests that set `OMNIFS_DAEMON_ADDR`/`OMNIFS_CONTROL_TOKEN`
-    /// (process-global state) and restores their prior values on drop. This is
-    /// the only transport a test can force onto without a real runtime record:
-    /// the daemon's production transport is a Unix socket a live daemon binds,
-    /// which these unit tests don't spin up.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    struct EnvGuard {
-        _lock: std::sync::MutexGuard<'static, ()>,
-        saved: Vec<(&'static str, Option<String>)>,
-    }
-
-    impl EnvGuard {
-        #[allow(unsafe_code)] // env::set_var requires unsafe; guarded by ENV_LOCK.
-        fn set(vars: &[(&'static str, &str)]) -> Self {
-            let vars: Vec<(&'static str, Option<&str>)> = vars
-                .iter()
-                .map(|(key, value)| (*key, Some(*value)))
-                .collect();
-            Self::apply(&vars)
-        }
-
-        /// Force `OMNIFS_DAEMON_ADDR`/`OMNIFS_CONTROL_TOKEN` unset for the
-        /// guard's lifetime, so a test asserting on the record-only path is not
-        /// racing another test's env-forced target.
-        #[allow(unsafe_code)] // env::remove_var requires unsafe; guarded by ENV_LOCK.
-        fn unset_daemon_addr() -> Self {
-            Self::apply(&[("OMNIFS_DAEMON_ADDR", None), ("OMNIFS_CONTROL_TOKEN", None)])
-        }
-
-        #[allow(unsafe_code)] // env::set_var/remove_var require unsafe; guarded by ENV_LOCK.
-        fn apply(vars: &[(&'static str, Option<&str>)]) -> Self {
-            let lock = ENV_LOCK
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let saved = vars
-                .iter()
-                .map(|(key, _)| (*key, std::env::var(*key).ok()))
-                .collect();
-            // SAFETY: ENV_LOCK is held for the guard's whole lifetime.
-            for (key, value) in vars {
-                match value {
-                    Some(value) => unsafe { std::env::set_var(key, value) },
-                    None => unsafe { std::env::remove_var(key) },
-                }
-            }
-            Self { _lock: lock, saved }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        #[allow(unsafe_code)] // env::set_var/remove_var require unsafe; guarded by ENV_LOCK.
-        fn drop(&mut self) {
-            // SAFETY: ENV_LOCK is still held (it is a field on `self`).
-            for (key, original) in &self.saved {
-                match original {
-                    Some(value) => unsafe { std::env::set_var(key, value) },
-                    None => unsafe { std::env::remove_var(key) },
-                }
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn status_optional_attaches_control_token_header() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let request = read_request(&mut stream).await;
-            let lower = request.to_ascii_lowercase();
-            assert!(
-                lower.contains("\r\nauthorization: bearer test-token\r\n"),
-                "status request must carry bearer token, got:\n{request}"
-            );
-            let response = json_response(&status_body("test-daemon", API_MAJOR, API_MINOR));
-            stream.write_all(response.as_bytes()).await.unwrap();
-        });
-
-        let _env = EnvGuard::set(&[
-            ("OMNIFS_DAEMON_ADDR", &addr.to_string()),
-            ("OMNIFS_CONTROL_TOKEN", "test-token"),
-        ]);
-        let client = DaemonClient::with_record_path(None);
-        let status = client.status_optional().await.unwrap().unwrap();
-        assert_eq!(status.version, "test-daemon");
-        server.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn status_optional_maps_api_errors_to_hints() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let mut request = [0; 1024];
-            let read = stream.read(&mut request).await.unwrap();
-            let request = String::from_utf8_lossy(&request[..read]);
-            let response = if request.starts_with("GET /v1/status ") {
-                api_error_response(
-                    "401 Unauthorized",
-                    &ApiError {
-                        code: ErrorCode::AuthRequired,
-                        message: "credential required".to_string(),
-                        detail: None,
-                    },
-                )
-            } else {
-                api_error_response(
-                    "404 Not Found",
-                    &ApiError {
-                        code: ErrorCode::Internal,
-                        message: "not found".to_string(),
-                        detail: None,
-                    },
-                )
-            };
-            stream.write_all(response.as_bytes()).await.unwrap();
-        });
-
-        let _env = EnvGuard::set(&[
-            ("OMNIFS_DAEMON_ADDR", &addr.to_string()),
-            ("OMNIFS_CONTROL_TOKEN", "test-token"),
-        ]);
-        let client = DaemonClient::with_record_path(None);
-
-        let error = client.status_optional().await.unwrap_err();
-        let rendered = crate::error::render(&error);
-        assert!(rendered.contains("daemon status request failed: credential required"));
-        assert!(rendered.contains("Try: omnifs mount reauth <name>"));
-        server.await.unwrap();
-    }
 
     #[test]
     fn hint_table_covers_every_error_code() {
-        assert!(hint_for(ErrorCode::Unauthorized).contains("omnifs down"));
-        assert!(hint_for(ErrorCode::Unauthorized).contains("OMNIFS_DAEMON_ADDR"));
         assert_eq!(
             hint_for(ErrorCode::AuthRequired),
             "Try: omnifs mount reauth <name>"
@@ -881,131 +589,15 @@ mod tests {
         assert_eq!(hint_for(ErrorCode::Internal), "Try: omnifs doctor");
     }
 
-    /// A daemon reporting a different major must be refused.
-    #[tokio::test]
-    async fn probe_refuses_on_major_mismatch() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let mut request = [0; 1024];
-            let read = stream.read(&mut request).await.unwrap();
-            let _ = String::from_utf8_lossy(&request[..read]);
-            let response = json_response(&status_body("old-daemon", API_MAJOR + 1, 0));
-            stream.write_all(response.as_bytes()).await.unwrap();
-        });
-
-        let _env = EnvGuard::set(&[
-            ("OMNIFS_DAEMON_ADDR", &addr.to_string()),
-            ("OMNIFS_CONTROL_TOKEN", "test-token"),
-        ]);
-        let client = DaemonClient::with_record_path(None);
-        let err = client.require_compatible().await.unwrap_err();
-        let msg = format!("{err}");
-        assert!(
-            msg.contains("control API"),
-            "error should mention control API mismatch: {msg}"
-        );
-    }
-
-    /// A daemon reporting the same major but a different minor must proceed.
-    #[tokio::test]
-    async fn probe_proceeds_on_minor_skew() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let mut request = [0; 1024];
-            let read = stream.read(&mut request).await.unwrap();
-            let _ = String::from_utf8_lossy(&request[..read]);
-            let response = json_response(&status_body("newer-daemon", API_MAJOR, API_MINOR + 1));
-            stream.write_all(response.as_bytes()).await.unwrap();
-        });
-
-        let _env = EnvGuard::set(&[
-            ("OMNIFS_DAEMON_ADDR", &addr.to_string()),
-            ("OMNIFS_CONTROL_TOKEN", "test-token"),
-        ]);
-        let client = DaemonClient::with_record_path(None);
-        assert!(matches!(
-            client.probe().await,
-            DaemonControlState::Compatible(_)
-        ));
-    }
-
-    /// A CA-less Linux fails inside `ClientBuilder::build()` before any
-    /// network I/O (rustls-platform-verifier's `Verifier::new` returns
-    /// `rustls::Error::General("No CA certificates were loaded from the
-    /// system")` when the native root store comes back empty). An empty
-    /// root store isn't reproducible on this platform, so this forces the
-    /// sibling rejection `build()` makes at the same step (hostname
-    /// verification requires `tls_certs_only()`) to prove `build_http_client`
-    /// turns a `build()` failure into a `Result`, never a panic, and that the
-    /// error is actionable.
-    #[test]
-    fn build_http_client_surfaces_tls_backend_failure_as_error_not_panic() {
-        let builder = reqwest::Client::builder().danger_accept_invalid_hostnames(true);
-        let error = DaemonClient::build_http_client(builder).unwrap_err();
-        let rendered = format!("{error:#}");
-        assert!(
-            rendered.contains("build TLS-capable HTTP client"),
-            "got: {rendered}"
-        );
-        assert!(
-            rendered.contains("ca-certificates"),
-            "error should hint at installing ca-certificates: {rendered}"
-        );
-    }
-
-    /// With no record and no override, the client is absent and require exits 3.
+    /// With no record and no control socket, the client is absent and require exits 3.
     #[tokio::test]
     async fn absent_record_is_daemon_unavailable() {
-        let _env = EnvGuard::unset_daemon_addr();
         let home = tempfile::tempdir().unwrap();
         let record = home.path().join("daemon.json");
         let client = DaemonClient::with_record_path(Some(record));
         assert!(client.status_optional().await.unwrap().is_none());
         let error = client.require_compatible().await.unwrap_err();
         assert_eq!(crate::error::exit_code(&error), ExitCode::DaemonUnavailable);
-    }
-
-    fn json_response(body: &str) -> String {
-        format!(
-            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
-            body.len(),
-            body
-        )
-    }
-
-    async fn read_request(stream: &mut tokio::net::TcpStream) -> String {
-        let mut request = [0; 2048];
-        let read = stream.read(&mut request).await.unwrap();
-        String::from_utf8_lossy(&request[..read]).to_string()
-    }
-
-    fn api_error_response(status: &str, error: &ApiError) -> String {
-        let body = serde_json::to_string(error).unwrap();
-        format!(
-            "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
-            body.len(),
-            body
-        )
-    }
-
-    fn status_body(version: &str, api_major: u16, api_minor: u16) -> String {
-        format!(
-            r#"{{
-                "version":"{version}",
-                "api_major":{api_major},
-                "api_minor":{api_minor},
-                "instance_id":"testinstance0000",
-                "config_dir":"/tmp/omnifs-home",
-                "cache_dir":"/tmp/omnifs-home/cache",
-                "providers_dir":"/tmp/omnifs-home/providers",
-                "frontends":[],
-                "mounts":[]
-            }}"#
-        )
     }
 
     fn client_without_record(record: PathBuf, control_socket: PathBuf) -> DaemonClient {
@@ -1023,7 +615,6 @@ mod tests {
     /// second daemon spawn onto the same locked cache).
     #[test]
     fn resolve_falls_back_to_control_socket_when_record_is_absent() {
-        let _env = EnvGuard::unset_daemon_addr();
         let home = tempfile::tempdir().unwrap();
         let socket = home.path().join("control.sock");
         std::fs::write(&socket, b"").unwrap();
@@ -1044,7 +635,6 @@ mod tests {
     /// fallback must not dial a path that was never created.
     #[test]
     fn resolve_is_absent_without_record_or_control_socket() {
-        let _env = EnvGuard::unset_daemon_addr();
         let home = tempfile::tempdir().unwrap();
         let client = client_without_record(
             home.path().join("daemon.json"),
@@ -1055,7 +645,6 @@ mod tests {
 
     #[test]
     fn corrupt_runtime_record_falls_back_to_fixed_control_socket() {
-        let _env = EnvGuard::unset_daemon_addr();
         let home = tempfile::tempdir().unwrap();
         let record = home.path().join("daemon.json");
         let socket = home.path().join("control.sock");
@@ -1073,7 +662,6 @@ mod tests {
 
     #[test]
     fn corrupt_runtime_record_without_socket_is_cleaned_and_absent() {
-        let _env = EnvGuard::unset_daemon_addr();
         let home = tempfile::tempdir().unwrap();
         let record = home.path().join("daemon.json");
         std::fs::write(&record, b"not json").unwrap();
@@ -1084,7 +672,6 @@ mod tests {
 
     #[test]
     fn unreadable_runtime_record_io_error_is_not_treated_as_stale() {
-        let _env = EnvGuard::unset_daemon_addr();
         let home = tempfile::tempdir().unwrap();
         let record = home.path().join("daemon.json");
         std::fs::create_dir(&record).unwrap();

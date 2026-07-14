@@ -19,8 +19,8 @@ use std::time::{Duration, Instant};
 use omnifs_itest::live::{self, hermetic_home, omnifs_bin, platform_can_mount};
 use tempfile::TempDir;
 
-/// A host-native daemon serving only its Unix socket (no `--listen`, no
-/// `OMNIFS_DAEMON_ADDR`), torn down on drop.
+/// A host-native daemon serving only its workspace-local control socket, torn
+/// down on drop.
 struct Daemon {
     child: Child,
     home: TempDir,
@@ -43,16 +43,13 @@ impl Daemon {
     }
 
     /// Spawn a host-native daemon for a fresh hermetic home. The daemon binds
-    /// its fixed local frontend socket but launches no runner. It is handed no
-    /// TCP listener and no `OMNIFS_DAEMON_ADDR`, so its control API is reachable
-    /// only through its own workspace's record.
+    /// its fixed local frontend socket but launches no runner, so its control
+    /// API is reachable only through its own workspace's record.
     fn spawn() -> Option<Self> {
         let hermetic = hermetic_home();
         let child = Command::new(omnifs_bin())
             .arg("daemon")
             .env("OMNIFS_HOME", hermetic.home.path())
-            .env_remove("OMNIFS_DAEMON_ADDR")
-            .env_remove("OMNIFS_CONTROL_TOKEN")
             .env("RUST_LOG", "warn")
             .spawn();
         let child = match child {
@@ -94,14 +91,12 @@ impl Daemon {
     }
 }
 
-/// Run `omnifs status --output json` against `home`, with the daemon-address override
-/// and token stripped so resolution goes through the workspace's record.
+/// Run `omnifs status --output json` against `home`, resolving through the
+/// workspace's local control socket.
 fn run_status(home: &std::path::Path) -> Output {
     Command::new(omnifs_bin())
         .args(["status", "--output", "json"])
         .env("OMNIFS_HOME", home)
-        .env_remove("OMNIFS_DAEMON_ADDR")
-        .env_remove("OMNIFS_CONTROL_TOKEN")
         .env("RUST_LOG", "warn")
         .output()
         .expect("spawn omnifs status")

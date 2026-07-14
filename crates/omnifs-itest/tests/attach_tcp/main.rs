@@ -54,8 +54,6 @@ fn spawn_namespace_only(extra_args: &[&str]) -> NamespaceOnlyDaemon {
     let child = Command::new(omnifs_bin())
         .args(&args)
         .env("OMNIFS_HOME", home.path())
-        .env_remove("OMNIFS_DAEMON_ADDR")
-        .env_remove("OMNIFS_CONTROL_TOKEN")
         .env("RUST_LOG", "warn")
         .spawn()
         .expect("spawn omnifs daemon");

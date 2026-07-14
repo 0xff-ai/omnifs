@@ -40,8 +40,6 @@ const DOCKER_SCRATCH: &str = "/tmp/omnifs-matrix";
 /// naming rule owned in one place.
 const HOME_LABEL: &str = "ai.0xff.omnifs.home";
 
-const CONTROL_TOKEN: &str = "frontend-docker-acceptance-token";
-
 fn acceptance_gated() -> bool {
     if std::env::var_os("OMNIFS_ACCEPTANCE_LIVE").is_none() {
         eprintln!("skip: set OMNIFS_ACCEPTANCE_LIVE=1 to run the fuse-docker acceptance gate");
@@ -131,7 +129,6 @@ fn docker_output(args: &[&str]) -> Option<String> {
 struct Fixture {
     home: TempDir,
     mount_point: PathBuf,
-    daemon_addr: String,
     frontend_image: String,
     daemon_pid: Option<u32>,
 }
@@ -139,11 +136,9 @@ struct Fixture {
 impl Fixture {
     fn new(frontend_image: String) -> Self {
         let live::HermeticHome { home, mount_point } = live::hermetic_home();
-        let port = live::free_port();
         Self {
             home,
             mount_point,
-            daemon_addr: format!("127.0.0.1:{port}"),
             frontend_image,
             daemon_pid: None,
         }
@@ -173,8 +168,6 @@ impl Fixture {
             .args(args)
             .env("OMNIFS_HOME", self.home_path())
             .env("OMNIFS_MOUNT_POINT", &self.mount_point)
-            .env("OMNIFS_DAEMON_ADDR", &self.daemon_addr)
-            .env("OMNIFS_CONTROL_TOKEN", CONTROL_TOKEN)
             .env("OMNIFS_FRONTEND_IMAGE", &self.frontend_image)
             .env("RUST_LOG", "warn")
             .output()
