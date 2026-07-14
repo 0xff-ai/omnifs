@@ -411,9 +411,11 @@ impl Comment {
     }
 
     pub(crate) fn author(&self, _key: &crate::item::CommentKey) -> Result<FileProjection> {
-        Ok(FileProjection::text(self.user.login.clone(), TextFormat::Raw)
-            .dynamic()
-            .build())
+        Ok(
+            FileProjection::text(self.user.login.clone(), TextFormat::Raw)
+                .dynamic()
+                .build(),
+        )
     }
 }
 
