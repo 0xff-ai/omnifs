@@ -334,7 +334,6 @@ impl RangeRequest {
         Ok(RangeResponse {
             collection: self.collection,
             range: self.range,
-            validator: response.header("etag").map(Validator::from),
             body,
         })
     }
@@ -344,7 +343,6 @@ impl RangeRequest {
 struct RangeResponse {
     collection: Collection,
     range: RangeInclusive<Day>,
-    validator: Option<Validator>,
     body: Value,
 }
 
@@ -358,17 +356,16 @@ impl RangeResponse {
         let Self {
             collection,
             range,
-            validator,
             body,
         } = self;
-        let mut grouping = DayGrouping::from_body(body);
-        let (value, canonical) = grouping.take_canonical(requested, validator.as_ref())?;
+        let mut grouping = DayGrouping::from_body(body)?;
+        let (value, canonical) = grouping.take_canonical(requested)?;
         let mut load = Load::fresh(value, canonical);
         for day in range.start().through(*range.end()) {
             if day == requested {
                 continue;
             }
-            let (_, canonical) = grouping.take_canonical(day, validator.as_ref())?;
+            let (_, canonical) = grouping.take_canonical(day)?;
             load = load.preload_object(ObjectEntry::fresh(
                 DailyCollectionKey { day, collection },
                 canonical,
@@ -380,51 +377,38 @@ impl RangeResponse {
 
 /// Source of each day's projected value, materialized once per day from the
 /// range response.
-enum DayGrouping {
-    Partitioned(HashMap<Day, Vec<Value>>),
-    Whole(Value),
+struct DayGrouping {
+    rows: HashMap<Day, Vec<Value>>,
 }
 
 impl DayGrouping {
     /// Partition owned response rows without cloning the full range payload.
-    /// Responses without a `data` array re-serve the whole body for every day.
-    fn from_body(mut body: Value) -> Self {
-        let items = match body.get_mut("data").and_then(Value::as_array_mut) {
-            Some(items) => std::mem::take(items),
-            None => return Self::Whole(body),
-        };
+    fn from_body(mut body: Value) -> Result<Self> {
+        let items = body
+            .get_mut("data")
+            .and_then(Value::as_array_mut)
+            .ok_or_else(|| ProviderError::internal("Oura response data must be an array"))?;
+        let items = std::mem::take(items);
         let mut rows: HashMap<Day, Vec<Value>> = HashMap::new();
         for item in items {
-            if let Some(day) = Day::from_item(&item) {
-                rows.entry(day).or_default().push(item);
-            }
+            let day = Day::from_item(&item).ok_or_else(|| {
+                ProviderError::internal("Oura response data row has no recognized day")
+            })?;
+            rows.entry(day).or_default().push(item);
         }
-        Self::Partitioned(rows)
+        Ok(Self { rows })
     }
 
-    fn take_canonical(
-        &mut self,
-        day: Day,
-        validator: Option<&Validator>,
-    ) -> Result<(DailyCollection, Canonical)> {
-        let value = self.take(day);
+    fn take_canonical(&mut self, day: Day) -> Result<(DailyCollection, Canonical)> {
+        let value = serde_json::json!({ "data": self.rows.remove(&day).unwrap_or_default() });
         let bytes = serde_json::to_vec(&value)
             .map_err(|error| ProviderError::internal(format!("Oura JSON encode error: {error}")))?;
         Ok((
             DailyCollection(value),
             Canonical {
                 bytes,
-                validator: validator.cloned(),
+                validator: None,
             },
         ))
-    }
-
-    fn take(&mut self, day: Day) -> Value {
-        match self {
-            Self::Partitioned(rows) => {
-                serde_json::json!({ "data": rows.remove(&day).unwrap_or_default() })
-            },
-            Self::Whole(body) => body.clone(),
-        }
     }
 }

@@ -2,7 +2,7 @@
 
 use omnifs_itest::{RuntimeHarness, TestOpExt, make_initialized_runtime};
 use omnifs_wit::provider::types::{
-    ByteSource, CalloutResult, EntryKind, FileSize, FsKind, Header, HttpResponse,
+    ByteSource, CalloutResult, EntryKind, ErrorKind, FileSize, FsKind, Header, HttpResponse,
     ListChildrenResult, LookupChildResult, OpResult, ReadFileOutcome, ReadMode, Stability,
 };
 use serde_json::{Value, json};
@@ -57,7 +57,7 @@ fn read_query_body(op: &omnifs_engine::test_support::TestOp<'_>) -> Vec<u8> {
     match op.result().unwrap() {
         OpResult::ReadFile(ReadFileOutcome::Found(file)) => {
             assert_eq!(file.attrs.stability, Stability::Dynamic);
-            assert_eq!(file.attrs.version_token.as_deref(), Some("\"v1\""));
+            assert!(file.attrs.version_token.is_none());
             match &file.bytes {
                 ByteSource::Canonical => op.effects().unwrap().canonical[0].bytes.clone(),
                 ByteSource::Inline(bytes) => bytes.clone(),
@@ -126,7 +126,7 @@ fn assert_projected_deferred_file_with_exact_size(
         panic!("expected file projection for {path}, got {:?}", write.kind);
     };
     assert_eq!(file.attrs.stability, Stability::Dynamic);
-    assert_eq!(file.attrs.version_token.as_deref(), Some("\"v1\""));
+    assert!(file.attrs.version_token.is_none());
     assert!(matches!(file.attrs.size, FileSize::Exact(_)));
     assert!(matches!(file.bytes, ByteSource::Deferred(ReadMode::Full)));
 }
@@ -228,6 +228,19 @@ fn day_file_reads_one_month_date_range_and_stores_neighbor_days() {
         canonical_json(&op, "/2026-01-14/daily_sleep.json"),
         json!({"data":[{"day":"2026-01-14","id":"sleep-before"}]})
     );
+    assert!(
+        op.effects()
+            .unwrap()
+            .canonical
+            .iter()
+            .all(|store| store.validator.is_none())
+    );
+    assert!(op.effects().unwrap().fs.iter().all(|write| {
+        let FsKind::File(file) = &write.kind else {
+            return true;
+        };
+        file.attrs.version_token.is_none()
+    }));
 
     assert_projected_dir(&op, "/2026-01-14");
     assert_projected_deferred_file_with_exact_size(&op, "/2026-01-14/daily_sleep.json");
@@ -253,6 +266,17 @@ fn day_file_reads_one_month_date_range_and_stores_neighbor_days() {
             .count(),
         31
     );
+
+    let mut invalid = harness.read("/2026-01-15/daily_readiness.json").unwrap();
+    invalid.expect_single_fetch();
+    resume_json(&mut invalid, br#"{"next_token":"ignored"}"#);
+    match invalid.result().unwrap() {
+        OpResult::Error(error) => {
+            assert_eq!(error.kind, ErrorKind::Internal);
+            assert!(error.message.contains("data"));
+        },
+        other => panic!("expected invalid Oura metadata response, got {other:?}"),
+    }
 }
 
 #[test]
