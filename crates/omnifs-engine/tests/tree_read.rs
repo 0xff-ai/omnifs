@@ -83,7 +83,7 @@ fn path(s: &str) -> Path {
 #[tokio::test(flavor = "multi_thread")]
 async fn read_whole_file_returns_provider_bytes() {
     let t = test_tree();
-    let ctx = RequestCtx::default();
+    let ctx = RequestCtx;
 
     let node = t
         .tree
@@ -121,7 +121,7 @@ async fn read_whole_file_returns_provider_bytes() {
 #[tokio::test(flavor = "multi_thread")]
 async fn read_whole_file_second_read_hits_cache() {
     let t = test_tree();
-    let ctx = RequestCtx::default();
+    let ctx = RequestCtx;
 
     let node = t.tree.resolve(&path("/hello/lazy"), &ctx).await.unwrap();
     let first = t.tree.read(&node, &ctx).await.expect("cold read");
@@ -159,7 +159,7 @@ async fn read_whole_file_second_read_hits_cache() {
 #[tokio::test(flavor = "multi_thread")]
 async fn read_exact_zero_short_circuits() {
     let t = test_tree();
-    let ctx = RequestCtx::default();
+    let ctx = RequestCtx;
 
     let meta = EntryMeta::file(
         FileAttrsCache::inline(Vec::new(), Stability::Stable, None).expect("valid empty attrs"),
@@ -185,7 +185,7 @@ async fn read_exact_zero_short_circuits() {
 #[tokio::test(flavor = "multi_thread")]
 async fn materialize_cap_rejects_full_read_but_allows_ranged_open() {
     let t = test_tree();
-    let ctx = RequestCtx::default();
+    let ctx = RequestCtx;
     let oversized = FileSize::Exact(MATERIALIZE_MAX_BYTES + 1);
 
     let full = Node::new(
@@ -322,7 +322,7 @@ async fn open_unknown_ranged_learns_size_on_eof() {
 #[tokio::test(flavor = "multi_thread")]
 async fn open_probe_returns_none_for_non_ranged_node() {
     let t = test_tree();
-    let ctx = RequestCtx::default();
+    let ctx = RequestCtx;
 
     let node = t.tree.resolve(&path("/hello/message"), &ctx).await.unwrap();
     let opened = t
@@ -398,7 +398,7 @@ async fn prime_cold_item_md(t: &TestTree, ctx: &RequestCtx) {
 #[tokio::test(flavor = "multi_thread")]
 async fn read_item_md_is_durably_cached() {
     let t = test_tree();
-    let ctx = RequestCtx::default();
+    let ctx = RequestCtx;
     prime_cold_item_md(&t, &ctx).await;
 
     let node = t
@@ -438,7 +438,7 @@ async fn read_item_md_is_durably_cached() {
 async fn canonical_identity_read_is_not_copied_into_view_cache() {
     let json = "/items/open/7/item.json";
     let t = test_tree();
-    let ctx = RequestCtx::default();
+    let ctx = RequestCtx;
 
     // Prime the object index, then evict the preloaded view leaf so the read is
     // a cold render that answers from the canonical store.

@@ -141,7 +141,7 @@ fn cached_dirents(runtime: &Engine, path_str: &str) -> Option<DirentsPayload> {
 #[tokio::test(flavor = "multi_thread")]
 async fn list_emits_pagination_controls() {
     let t = test_tree();
-    let ctx = RequestCtx::default();
+    let ctx = RequestCtx;
     let feed = t.tree.resolve(&path("/hello/feed"), &ctx).await.unwrap();
 
     let page0 = listing(&t, &feed, None, &ctx).await;
@@ -182,7 +182,7 @@ async fn list_emits_pagination_controls() {
 #[tokio::test(flavor = "multi_thread")]
 async fn list_non_paged_dir_has_no_controls() {
     let t = test_tree();
-    let ctx = RequestCtx::default();
+    let ctx = RequestCtx;
     let hello = t.tree.resolve(&path("/hello"), &ctx).await.unwrap();
 
     let page = listing(&t, &hello, None, &ctx).await;
@@ -200,7 +200,7 @@ async fn list_non_paged_dir_has_no_controls() {
 #[tokio::test(flavor = "multi_thread")]
 async fn list_paginates_with_cursor() {
     let t = test_tree();
-    let ctx = RequestCtx::default();
+    let ctx = RequestCtx;
     let feed = t.tree.resolve(&path("/hello/feed"), &ctx).await.unwrap();
 
     let page0 = listing(&t, &feed, None, &ctx).await;
@@ -234,7 +234,7 @@ async fn list_paginates_with_cursor() {
 #[tokio::test(flavor = "multi_thread")]
 async fn read_next_control_advances_one_page() {
     let t = test_tree();
-    let ctx = RequestCtx::default();
+    let ctx = RequestCtx;
     let feed = t.tree.resolve(&path("/hello/feed"), &ctx).await.unwrap();
 
     // Prime the paged listing so the parent's dirents carry the controls.
@@ -287,7 +287,7 @@ async fn read_next_control_advances_one_page() {
 #[tokio::test(flavor = "multi_thread")]
 async fn read_all_control_exhausts_then_control_still_resolves() {
     let t = test_tree();
-    let ctx = RequestCtx::default();
+    let ctx = RequestCtx;
     let feed = t.tree.resolve(&path("/hello/feed"), &ctx).await.unwrap();
     let _ = listing(&t, &feed, None, &ctx).await;
 
@@ -347,7 +347,7 @@ async fn read_all_control_exhausts_then_control_still_resolves() {
 #[tokio::test(flavor = "multi_thread")]
 async fn root_ignore_synthesized() {
     let t = test_tree();
-    let ctx = RequestCtx::default();
+    let ctx = RequestCtx;
     let root = t.tree.resolve(&path("/"), &ctx).await.unwrap();
 
     let listing = listing(&t, &root, None, &ctx).await;
@@ -388,7 +388,7 @@ async fn root_ignore_synthesized() {
 #[tokio::test(flavor = "multi_thread")]
 async fn root_ignore_not_synthesized_below_root() {
     let t = test_tree();
-    let ctx = RequestCtx::default();
+    let ctx = RequestCtx;
     let hello = t.tree.resolve(&path("/hello"), &ctx).await.unwrap();
 
     let listing = listing(&t, &hello, None, &ctx).await;
@@ -522,7 +522,7 @@ async fn root_ignore_names_below_root_remain_provider_owned() {
 #[tokio::test(flavor = "multi_thread")]
 async fn list_unchanged_serves_cached() {
     let t = test_tree();
-    let ctx = RequestCtx::default();
+    let ctx = RequestCtx;
     let feed = t.tree.resolve(&path("/hello/feed"), &ctx).await.unwrap();
 
     // Cold: caches the paginated (authoritative) dirents.
@@ -555,7 +555,7 @@ async fn list_unchanged_serves_cached() {
 #[tokio::test(flavor = "multi_thread")]
 async fn lookup_negative_cached() {
     let t = test_tree();
-    let ctx = RequestCtx::default();
+    let ctx = RequestCtx;
     let missing = "/hello/definitely-not-here";
 
     let err = t

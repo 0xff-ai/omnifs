@@ -63,7 +63,7 @@ fn test_tree() -> TestTree {
 async fn resolve_root_and_known_dirs() {
     let t = test_tree();
     let tree = &t.tree;
-    let ctx = RequestCtx::default();
+    let ctx = RequestCtx;
 
     // Root resolves to a directory.
     let root = tree
@@ -93,7 +93,7 @@ async fn resolve_root_and_known_dirs() {
 async fn resolve_missing_is_not_found() {
     let t = test_tree();
     let tree = &t.tree;
-    let ctx = RequestCtx::default();
+    let ctx = RequestCtx;
 
     let err = tree
         .resolve(&Path::parse("/hello/nonexistent").unwrap(), &ctx)
@@ -106,7 +106,7 @@ async fn resolve_missing_is_not_found() {
 async fn resolve_child_uses_cached_dirent_positive() {
     let t = test_tree();
     let tree = &t.tree;
-    let ctx = RequestCtx::default();
+    let ctx = RequestCtx;
 
     let parent = tree
         .resolve(&Path::parse("/hello").unwrap(), &ctx)
@@ -141,7 +141,7 @@ async fn resolve_child_uses_cached_dirent_positive() {
 async fn list_root_yields_known_children() {
     let t = test_tree();
     let tree = &t.tree;
-    let ctx = RequestCtx::default();
+    let ctx = RequestCtx;
 
     let root = tree
         .resolve(&Path::parse("/").unwrap(), &ctx)
@@ -186,7 +186,7 @@ async fn list_root_yields_known_children() {
 async fn list_hello_yields_eighteen_children_with_message() {
     let t = test_tree();
     let tree = &t.tree;
-    let ctx = RequestCtx::default();
+    let ctx = RequestCtx;
 
     let hello = tree
         .resolve(&Path::parse("/hello").unwrap(), &ctx)
@@ -218,7 +218,7 @@ async fn list_hello_yields_eighteen_children_with_message() {
 async fn resolve_rehydrates_by_path_without_re_walk() {
     let t = test_tree();
     let tree = &t.tree;
-    let ctx = RequestCtx::default();
+    let ctx = RequestCtx;
 
     let first = tree
         .resolve(&Path::parse("/hello/message").unwrap(), &ctx)
