@@ -133,14 +133,14 @@ impl SetupArgs {
         }
 
         UpArgs::default()
-        .start_in_workspace(&workspace, output)
-        .await?;
+            .start_in_workspace(&workspace, output)
+            .await?;
         for frontend in frontend_defaults {
             let result = frontend.enable(&workspace, output).await?;
             render_frontend_result(&mut session, result);
         }
         session.outro("You're set. Try `omnifs shell`.");
-        Ok(())
+        emit_inventory_if_structured(&workspace, output).await
     }
 
     fn resolve_selection(
