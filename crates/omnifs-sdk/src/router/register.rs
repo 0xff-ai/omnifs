@@ -555,9 +555,6 @@ impl<S> Router<S> {
 
             match topology {
                 super::object::CollectionTopology::Nested => {
-                    // Register the SDK-generated collection dir handler as a dir
-                    // route so a readdir of the collection path runs the typed
-                    // list method against the resolved child view.
                     let handler = collection.handler.clone();
                     let view = child_view.clone();
                     let boxed: super::handlers::BoxedDirHandler<S> =
@@ -575,8 +572,6 @@ impl<S> Router<S> {
                     });
                 },
                 super::object::CollectionTopology::Anchor => {
-                    // Attach to the parent object's anchor: its listing/lookup
-                    // runs this collection and merges the child-name entries.
                     let parent_pattern = Pattern::parse(&collection.parent_template)?;
                     let Some(parent) = self
                         .objects
