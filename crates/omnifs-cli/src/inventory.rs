@@ -751,10 +751,11 @@ fn desired_mount_rows(
                 version: spec.provider.meta.version.as_ref().map(ToString::to_string),
                 artifact,
             };
-            let auth = AuthState::from_readiness(
+            let local_auth = AuthState::from_readiness(
                 &MountAuth::from_spec(catalog, spec.clone()).readiness(credentials),
                 &name_string,
             );
+            let auth = mount_auth_state(&name_string, local_auth, daemon);
             let provider_present = catalog.get(&spec.provider.id).ok().flatten().is_some();
             let serving = derive_serving_state(MountObservation {
                 provider: if provider_present {
@@ -799,6 +800,32 @@ fn desired_mount_rows(
             }
         })
         .collect::<Vec<_>>()
+}
+
+fn mount_auth_state(mount: &str, local: AuthState, daemon: Option<&DaemonStatus>) -> AuthState {
+    let Some(observed) =
+        daemon.and_then(|status| status.mounts.iter().find(|entry| entry.mount == mount))
+    else {
+        return local;
+    };
+
+    let command = format!("omnifs mount reauth {mount}");
+    match observed.auth_health {
+        None => AuthState::NotNeeded,
+        Some(omnifs_api::CredentialHealth::Ready)
+        | Some(omnifs_api::CredentialHealth::ExpiringSoon)
+        | Some(omnifs_api::CredentialHealth::StaticUnvalidated) => AuthState::Ready,
+        Some(omnifs_api::CredentialHealth::Missing) => AuthState::Missing { command },
+        Some(omnifs_api::CredentialHealth::Expired) => AuthState::Expired { command },
+        Some(omnifs_api::CredentialHealth::RefreshFailed) => AuthState::Error {
+            message: "credential refresh failed".into(),
+            command,
+        },
+        Some(omnifs_api::CredentialHealth::NeedsConsent) => AuthState::Error {
+            message: "credential needs consent".into(),
+            command,
+        },
+    }
 }
 
 fn invalid_mount_rows(registry: &Registry) -> Vec<MountStatus> {
@@ -1023,6 +1050,40 @@ mod tests {
         assert_eq!(
             serde_json::to_value(ServingState::NotLoaded).unwrap()["state"],
             "not_loaded"
+        );
+    }
+
+    #[test]
+    fn live_daemon_auth_health_overrides_fresh_local_store_readiness() {
+        let mut observation = DaemonObservation::test(DaemonState::Running);
+        observation.status.as_mut().unwrap().mounts = vec![
+            omnifs_api::MountInfo {
+                mount: "consent".into(),
+                provider_name: "test".into(),
+                provider_id: "a".repeat(64),
+                auth_health: Some(omnifs_api::CredentialHealth::NeedsConsent),
+            },
+            omnifs_api::MountInfo {
+                mount: "refresh".into(),
+                provider_name: "test".into(),
+                provider_id: "b".repeat(64),
+                auth_health: Some(omnifs_api::CredentialHealth::RefreshFailed),
+            },
+        ];
+        let daemon = observation.status.as_ref();
+
+        let consent = mount_auth_state("consent", AuthState::Ready, daemon);
+        assert!(matches!(consent, AuthState::Error { .. }));
+        assert_eq!(consent.command(), Some("omnifs mount reauth consent"));
+
+        let refresh = mount_auth_state("refresh", AuthState::Ready, daemon);
+        assert!(matches!(refresh, AuthState::Error { .. }));
+        assert_eq!(refresh.command(), Some("omnifs mount reauth refresh"));
+
+        assert_eq!(
+            mount_auth_state("unobserved", AuthState::Ready, daemon),
+            AuthState::Ready,
+            "local readiness is only a fallback when the daemon has no row"
         );
     }
 

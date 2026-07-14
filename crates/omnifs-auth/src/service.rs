@@ -43,26 +43,6 @@ pub enum CredentialHealth {
     StaticUnvalidated,
 }
 
-impl CredentialHealth {
-    #[must_use]
-    pub fn severity(&self) -> u8 {
-        match self {
-            Self::Ready => 0,
-            Self::StaticUnvalidated => 1,
-            Self::ExpiringSoon => 2,
-            Self::RefreshFailed { .. } => 3,
-            Self::Expired => 4,
-            Self::NeedsConsent => 5,
-            Self::Missing => 6,
-        }
-    }
-
-    #[must_use]
-    pub fn needs_attention(&self) -> bool {
-        !matches!(self, Self::Ready | Self::StaticUnvalidated)
-    }
-}
-
 /// HTTP rejection evidence reported by the host callout path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RejectionEvidence {
@@ -219,14 +199,6 @@ impl AuthBinding {
         } else {
             CredentialHealth::ExpiringSoon
         }
-    }
-
-    #[must_use]
-    pub fn warning(&self) -> Option<String> {
-        let health = self.health();
-        health
-            .needs_attention()
-            .then(|| format!("credential {} is {health:?}", self.id))
     }
 
     /// Resolve the final header tuple for a URL. The secret is exposed only

@@ -1,7 +1,7 @@
 //! Characterization: mount-owned OAuth binding refresh behavior.
 //!
 //! `auth_test.rs` exercises these behaviors end to end through `HttpStack` and a
-//! live HTTPS API; this file exercises the same contract directly on the manager:
+//! live HTTPS API; this file exercises the same contract directly on the binding:
 //!
 //!   (a) authorizing a request whose credential expires inside the 60s refresh
 //!       window triggers a synchronous refresh (and a fresh credential does not);
@@ -37,7 +37,7 @@ const RESOURCE_URL: &str = "https://localhost/resource";
 #[tokio::test]
 async fn authorization_inside_refresh_window_refreshes_synchronously() {
     let tokens = FakeTokenServer::start(false).await;
-    let (auth, store, key) = oauth_manager_expiring(tokens.endpoint());
+    let (auth, store, key) = oauth_binding_expiring(tokens.endpoint());
     // 30s to expiry: inside the 60s window, so not "fresh".
     seed_oauth(store.as_ref(), &key, "old-access", "refresh-1", 30);
 
@@ -64,11 +64,11 @@ async fn authorization_inside_refresh_window_refreshes_synchronously() {
 }
 
 /// Authorizing a request whose OAuth credential is comfortably valid does NOT
-/// refresh: the 60s window gates the proactive refresh.
+/// refresh: the 60s window gates the on-demand refresh.
 #[tokio::test]
 async fn authorization_outside_refresh_window_does_not_refresh() {
     let tokens = FakeTokenServer::start(false).await;
-    let (auth, store, key) = oauth_manager(tokens.endpoint());
+    let (auth, store, key) = oauth_binding(tokens.endpoint());
     // 1h to expiry: comfortably fresh.
     seed_oauth(store.as_ref(), &key, "old-access", "refresh-1", 3600);
 
@@ -96,7 +96,7 @@ async fn authorization_outside_refresh_window_does_not_refresh() {
 #[tokio::test]
 async fn response_401_is_refreshable_and_forced_refresh_rotates_once() {
     let tokens = FakeTokenServer::start(false).await;
-    let (auth, store, key) = oauth_manager(tokens.endpoint());
+    let (auth, store, key) = oauth_binding(tokens.endpoint());
     seed_oauth(store.as_ref(), &key, "old-access", "refresh-1", 3600);
     // Load `current` from the store so a forced refresh actually hits the token
     // endpoint (rather than adopting the store entry it already matches).
@@ -132,7 +132,7 @@ async fn response_401_is_refreshable_and_forced_refresh_rotates_once() {
     );
 
     let tokens = FakeTokenServer::start(false).await;
-    let (auth, store, key) = oauth_manager(tokens.endpoint());
+    let (auth, store, key) = oauth_binding(tokens.endpoint());
     seed_oauth(store.as_ref(), &key, "old-access", "refresh-1", 3600);
     auth.authorization_for(RESOURCE_URL)
         .await
@@ -151,7 +151,7 @@ async fn response_401_is_refreshable_and_forced_refresh_rotates_once() {
     assert_eq!(tokens.refreshes(), 1);
 
     let tokens = FakeTokenServer::start(false).await;
-    let (auth, store, key) = oauth_manager(tokens.endpoint());
+    let (auth, store, key) = oauth_binding(tokens.endpoint());
     seed_oauth(store.as_ref(), &key, "old-access", "refresh-1", 3600);
     auth.authorization_for(RESOURCE_URL)
         .await
@@ -177,7 +177,7 @@ async fn response_401_is_refreshable_and_forced_refresh_rotates_once() {
 #[tokio::test]
 async fn invalid_grant_refresh_needs_consent_and_keeps_stored_credential() {
     let tokens = FakeTokenServer::start(true).await;
-    let (auth, store, key) = oauth_manager(tokens.endpoint());
+    let (auth, store, key) = oauth_binding(tokens.endpoint());
     seed_oauth(store.as_ref(), &key, "old-access", "refresh-1", 3600);
     // Load `current` so the forced refresh reaches the token endpoint.
     auth.authorization_for(RESOURCE_URL)
@@ -246,7 +246,7 @@ fn oauth_manifest(token_endpoint: String) -> AuthManifest {
     }
 }
 
-fn oauth_manager(
+fn oauth_binding(
     token_endpoint: String,
 ) -> (
     Arc<omnifs_auth::AuthBinding>,
@@ -267,7 +267,7 @@ fn oauth_manager(
     (auth.expect("configured auth"), store, key)
 }
 
-fn oauth_manager_expiring(
+fn oauth_binding_expiring(
     token_endpoint: String,
 ) -> (
     Arc<omnifs_auth::AuthBinding>,

@@ -365,7 +365,7 @@ fn cli_redesign_contract_old_commands_and_flags_are_usage_errors() {
 }
 
 #[test]
-fn cli_redesign_contract_api_7_json_and_openapi_remove_hot_mount_fields() {
+fn cli_redesign_contract_api_8_json_and_openapi_remove_hot_mount_fields() {
     let fixture = Fixture::new();
     let output = fixture.run(&["status", "--output", "json"]);
     let status = stdout_json(&output);
