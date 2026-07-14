@@ -451,7 +451,7 @@ impl Output {
         self.mode.is_structured()
     }
 
-    pub(crate) const fn show_progress(&self) -> bool {
+    pub(crate) fn show_progress(&self) -> bool {
         self.mode == OutputMode::Human && !self.quiet
     }
 
