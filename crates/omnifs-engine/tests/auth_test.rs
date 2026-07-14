@@ -356,7 +356,7 @@ async fn fetch_blob_uses_same_oauth_retry_path() {
     let temp = tempfile::tempdir().unwrap();
     let executor = BlobExecutor::new(
         stack,
-        Arc::new(BlobCache::new(temp.path().to_path_buf())),
+        Arc::new(BlobCache::new(temp.path().to_path_buf()).unwrap()),
         BlobLimits::default(),
     );
 
@@ -366,7 +366,6 @@ async fn fetch_blob_uses_same_oauth_retry_path() {
             url: api.url(),
             headers: Vec::new(),
             body: None,
-            cache_key: "oauth-blob".to_string(),
         })
         .await;
 

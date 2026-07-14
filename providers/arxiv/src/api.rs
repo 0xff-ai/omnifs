@@ -109,13 +109,7 @@ pub(crate) async fn download_pdf<S>(
     raw_id: &str,
     version: Option<u32>,
 ) -> Result<BlobHandle> {
-    let version_tag = version.map_or_else(|| "latest".to_string(), |v| format!("v{v}"));
-    fetch_blob(
-        cx,
-        &paper_pdf_path(raw_id, version),
-        format!("arxiv/papers/{raw_id}/{version_tag}/paper.pdf"),
-    )
-    .await
+    fetch_blob(cx, &paper_pdf_path(raw_id, version)).await
 }
 
 pub(crate) async fn download_source<S>(
@@ -123,22 +117,11 @@ pub(crate) async fn download_source<S>(
     raw_id: &str,
     version: Option<u32>,
 ) -> Result<BlobHandle> {
-    let version_tag = version.map_or_else(|| "latest".to_string(), |v| format!("v{v}"));
-    fetch_blob(
-        cx,
-        &paper_source_path(raw_id, version),
-        format!("arxiv/papers/{raw_id}/{version_tag}/source.tar.gz"),
-    )
-    .await
+    fetch_blob(cx, &paper_source_path(raw_id, version)).await
 }
 
-async fn fetch_blob<S>(cx: &Cx<S>, path: &str, cache_key: String) -> Result<BlobHandle> {
-    cx.endpoint(ArxivWeb)
-        .get(path)
-        .into_blob()
-        .cache_key(cache_key)
-        .fetch()
-        .await
+async fn fetch_blob<S>(cx: &Cx<S>, path: &str) -> Result<BlobHandle> {
+    cx.endpoint(ArxivWeb).get(path).into_blob().fetch().await
 }
 
 pub(crate) fn paper_abs_url(raw_id: &str, version: Option<u32>) -> String {

@@ -82,7 +82,6 @@ async fn fake_http_fetch(req: &wit_types::HttpRequest) -> wit_types::CalloutResu
 }
 
 #[tracing::instrument(target = "omnifs_callout", skip_all, fields(
-    cache_key = %req.cache_key,
     method = req.method.as_str(),
     url = %LogUrl(&req.url),
     request_headers = %WitHeaders(&req.headers),
@@ -185,7 +184,6 @@ fn blob_fetch_request() -> wit_types::BlobFetchRequest {
             value: "Bearer should-not-leak".into(),
         }],
         body: None,
-        cache_key: "/pkg/pkg-1.0.crate".to_string(),
     }
 }
 
@@ -200,7 +198,7 @@ fn read_blob_request() -> wit_types::ReadBlobRequest {
 fn git_open_request() -> wit_types::GitOpenRequest {
     wit_types::GitOpenRequest {
         clone_url: "https://user:pass@github.com/example/repo.git".to_string(),
-        cache_key: "/github.com/example/repo".to_string(),
+        reference: Some("main".to_string()),
     }
 }
 
@@ -242,17 +240,14 @@ async fn http_fetch_span_records_request_and_response_fields() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn blob_fetch_span_records_cache_key_and_late_bound_blob() {
+async fn blob_fetch_span_records_request_and_late_bound_blob() {
     let req = blob_fetch_request();
     let output = run_with_capture_async(|| async move {
         let _ = fake_blob_fetch(&req).await;
     })
     .await;
 
-    assert_contains_new_line(
-        &output,
-        &["cache_key=/pkg/pkg-1.0.crate", "method=\"GET\"", "url="],
-    );
+    assert_contains_new_line(&output, &["method=\"GET\"", "url="]);
     assert_contains_close_line(
         &output,
         &[

@@ -13,6 +13,10 @@ Read this before touching `crates/omnifs-sdk`, SDK macros, providers, `provider.
 
 A provider is one `#[omnifs_sdk::provider]` implementation with synchronous `fn start` registering routes on a `Router`. Keep the provider path surface visible from `start()`. Use SDK constructs for HTTP, status mapping, caching, retry, and projection plumbing.
 
+Git and blob callouts carry request facts only. The host validates those facts
+and owns opaque cache identities, body publication, and rehydration; provider
+APIs must not expose cache-key or filesystem-entry parameters.
+
 Repeated provider boilerplate is evidence of a missing SDK construct. Fix the shared construct rather than normalizing local scaffolding across providers.
 
 ### Object model

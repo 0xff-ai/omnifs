@@ -5,7 +5,8 @@
 //! traversal and blob reads run through bind-mount reads of the clone
 //! directory, not through the WIT.
 
-use crate::callouts::{callout_denied, callout_network, record_outcome};
+use crate::cache::identity::GitId;
+use crate::callouts::{callout_denied, callout_invalid, callout_network, record_outcome};
 use crate::capability::CapabilityChecker;
 use crate::cloner::{CloneError, GitCloner};
 use crate::log_redaction::LogUrl;
@@ -14,12 +15,14 @@ use omnifs_caps::Error as CapabilityError;
 use omnifs_wit::provider::types as wit_types;
 use std::sync::Arc;
 use tracing::warn;
+use url::Url;
 
 #[derive(Clone)]
 pub struct GitExecutor {
     cloner: Arc<GitCloner>,
     capability: Arc<CapabilityChecker>,
     trees: Arc<TreeRefs>,
+    mount_scope: String,
 }
 
 impl GitExecutor {
@@ -27,11 +30,13 @@ impl GitExecutor {
         cloner: Arc<GitCloner>,
         capability: Arc<CapabilityChecker>,
         trees: Arc<TreeRefs>,
+        mount_scope: impl Into<String>,
     ) -> Self {
         Self {
             cloner,
             capability,
             trees,
+            mount_scope: mount_scope.into(),
         }
     }
 
@@ -64,13 +69,25 @@ impl GitExecutor {
         operation_id: u64,
     ) -> Result<u64, GitError> {
         self.capability.check_git_url(&req.clone_url)?;
+        let remote = canonical_remote(&req.clone_url)?;
+        if let Some(reference) = req.reference.as_deref() {
+            GitCloner::validate_reference(reference)
+                .map_err(|error| GitError::Invalid(error.to_string()))?;
+        }
+        let id = GitId::new(&self.mount_scope, &remote, req.reference.as_deref());
         let cache_path = self
             .cloner
-            .clone_if_needed(&req.cache_key, &req.clone_url, operation_id)
+            .clone_if_needed(
+                &id,
+                &req.clone_url,
+                &remote,
+                req.reference.as_deref(),
+                operation_id,
+            )
             .map_err(|error| {
                 warn!(
-                    cache_key = %req.cache_key,
-                    clone_url = %req.clone_url,
+                    cache_id = %id,
+                    clone_url = %LogUrl(&req.clone_url),
                     error = %error,
                     "clone failed"
                 );
@@ -80,10 +97,48 @@ impl GitExecutor {
     }
 }
 
+fn canonical_remote(raw: &str) -> Result<String, GitError> {
+    let remote = raw.trim();
+    if remote.is_empty()
+        || remote
+            .bytes()
+            .any(|byte| byte.is_ascii_whitespace() || byte == 0)
+    {
+        return Err(GitError::Invalid(
+            "Git remote is empty or contains whitespace".to_string(),
+        ));
+    }
+    if let Ok(mut url) = Url::parse(remote) {
+        if !matches!(url.scheme(), "https" | "ssh" | "git") || url.host_str().is_none() {
+            return Err(GitError::Invalid(format!(
+                "unsupported Git remote `{remote}`"
+            )));
+        }
+        url.set_username("")
+            .map_err(|_| GitError::Invalid("invalid Git remote username".to_string()))?;
+        url.set_password(None)
+            .map_err(|_| GitError::Invalid("invalid Git remote password".to_string()))?;
+        return Ok(url.to_string());
+    }
+
+    let (user_host, path) = remote
+        .split_once(':')
+        .ok_or_else(|| GitError::Invalid(format!("invalid Git remote `{remote}`")))?;
+    let host = user_host
+        .rsplit_once('@')
+        .map_or(user_host, |(_, host)| host);
+    if host.is_empty() || path.is_empty() || path.starts_with('/') {
+        return Err(GitError::Invalid(format!("invalid Git remote `{remote}`")));
+    }
+    Ok(format!("{host}:{path}"))
+}
+
 #[derive(Debug, thiserror::Error)]
 enum GitError {
     #[error("{0}")]
     Denied(String),
+    #[error("{0}")]
+    Invalid(String),
     #[error("{0}")]
     Clone(String),
 }
@@ -104,10 +159,32 @@ impl From<GitError> for wit_types::CalloutResult {
     fn from(error: GitError) -> Self {
         match error {
             GitError::Denied(msg) => callout_denied(msg),
+            GitError::Invalid(msg) => callout_invalid(msg),
             // Clone failures map to Network +
             // retryable=true. Transient network blips during git clone
             // are common and the runtime trusts the WIT-level retry hint.
             GitError::Clone(msg) => callout_network(msg),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{GitId, canonical_remote};
+
+    #[test]
+    fn git_identity_excludes_remote_credentials_but_keeps_reference_and_mount() {
+        let first = canonical_remote("https://alice:token@example.test/repo.git").unwrap();
+        let second = canonical_remote("https://bob:rotated@example.test/repo.git").unwrap();
+        assert_eq!(first, "https://example.test/repo.git");
+        assert_eq!(first, second);
+        assert_eq!(
+            GitId::new("mount", &first, Some("main")),
+            GitId::new("mount", &second, Some("main"))
+        );
+        assert_ne!(
+            GitId::new("mount", &first, Some("main")),
+            GitId::new("mount", &first, Some("release"))
+        );
     }
 }

@@ -422,17 +422,20 @@ impl Runtime {
         .map_err(|e| BuildError::ProviderProtocol(format!("auth config error: {e}")))?;
 
         let trees = Arc::new(TreeRefs::new());
-        let git = git::GitExecutor::new(cloner, capability.clone(), trees.clone());
+        let git = git::GitExecutor::new(cloner, capability.clone(), trees.clone(), mount_name);
 
         let cache_dirs = CacheDirs::prepare(context.cache_dir(), mount_name)?;
-        let blob_cache = Arc::new(BlobCache::new(cache_dirs.blob));
+        let blob_cache = Arc::new(
+            BlobCache::new(cache_dirs.blob)
+                .map_err(|error| BuildError::ProviderProtocol(format!("blob cache: {error}")))?,
+        );
         let archive = Arc::new(ArchiveExecutor::new(
             blob_cache.clone(),
             trees.clone(),
             cache_dirs.archive_root,
         ));
 
-        // Per-mount facade: scopes all cache keys with "{mount}\x1f".
+        // Per-mount facade: structurally isolates object and view cache state.
         let cache = caches.mount(mount_name);
         let blob_limits = BlobLimits::from_config(config);
         let http = Arc::new(HttpStack::new(auth.clone(), capability.clone())?);
@@ -604,7 +607,7 @@ impl Runtime {
             .blob_cache
             .lookup_by_id(blob_id)
             .ok_or_else(|| EngineError::ProviderProtocol(format!("blob {blob_id} not found")))?;
-        let path = self.blob_cache.blob_path(&record.cache_key);
+        let path = self.blob_cache.generation_path(record.generation);
         std::fs::read(path)
             .map_err(|e| EngineError::ProviderProtocol(format!("read blob {blob_id}: {e}")))
     }

@@ -308,7 +308,7 @@ interface types {
 
     record git-open-request {
         clone-url: string,
-        cache-key: string,
+        reference: option<string>,
     }
 
     /// Archive formats the host knows how to extract for `open-archive`.
@@ -320,15 +320,12 @@ interface types {
     }
 
     /// HTTP fetch that lands its response body in the host's disk-backed
-    /// blob cache. `cache-key` is provider-scoped: two providers may
-    /// reuse the same key safely. Reusing the same `cache-key` from the
-    /// same provider deduplicates the fetch.
+    /// blob cache. The host derives identity from the validated request.
     record blob-fetch-request {
         method: string,
         url: string,
         headers: list<header>,
         body: option<list<u8>>,
-        cache-key: string,
     }
 
     /// Result of a successful `fetch-blob`. The body is on disk; only the

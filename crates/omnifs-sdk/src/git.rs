@@ -1,6 +1,6 @@
 //! Typed async Git callout builders.
 //!
-//! `cx.git().open_repo(cache_key, clone_url).await` issues a `git-open-repo`
+//! `cx.git().open_repo(clone_url).send().await` issues a `git-open-repo`
 //! callout: the host checks `clone_url` against the provider's capability
 //! grants, clones the remote into a host-side cache directory if it is not
 //! already there, and returns a `GitRepoInfo` whose `tree` field is the
@@ -9,20 +9,14 @@
 //! memory: traversal and file reads are served through FUSE bind mounts of
 //! the clone directory, not through the WIT.
 //!
-//! `cache_key` names the clone directory and must be a safe relative path:
-//! slash-separated, no leading `/`, no `.` or `..` components, no NUL.
-//! Repeating a key reuses the existing clone without refetching; a key
-//! already bound to a different `clone_url` is an error rather than a silent
-//! overwrite. Pick a key that is stable per repository, such as
-//! `github.com/<owner>/<repo>`.
+//! The host validates and derives the clone identity from the remote and
+//! optional reference, so providers never name cache entries.
 //!
 //! ```ignore
 //! let opened = cx
 //!     .git()
-//!     .open_repo(
-//!         format!("github.com/{owner}/{repo}"),
-//!         format!("git@github.com:{owner}/{repo}.git"),
-//!     )
+//!     .open_repo(format!("git@github.com:{owner}/{repo}.git"))
+//!     .send()
 //!     .await?;
 //! Ok(TreeRef::new(opened.tree))
 //! ```
@@ -43,17 +37,35 @@ impl<'cx, S> Builder<'cx, S> {
 
     /// Open (cloning if needed) a repository host-side. Awaiting suspends
     /// the operation while the host clones; a cache hit resumes without
-    /// network work. See the module docs for the `cache_key` contract.
-    pub fn open_repo(
-        self,
-        cache_key: impl Into<String>,
-        clone_url: impl Into<String>,
-    ) -> CalloutFuture<'cx, GitRepoInfo> {
+    /// network work. The host owns cache identity and layout.
+    pub fn open_repo(self, clone_url: impl Into<String>) -> OpenRequest<'cx, S> {
+        OpenRequest {
+            cx: self.cx,
+            clone_url: clone_url.into(),
+            reference: None,
+        }
+    }
+}
+
+#[must_use]
+pub struct OpenRequest<'cx, S> {
+    cx: &'cx Cx<S>,
+    clone_url: String,
+    reference: Option<String>,
+}
+
+impl<'cx, S> OpenRequest<'cx, S> {
+    pub fn reference(mut self, reference: impl Into<String>) -> Self {
+        self.reference = Some(reference.into());
+        self
+    }
+
+    pub fn send(self) -> CalloutFuture<'cx, GitRepoInfo> {
         CalloutFuture::new(
             self.cx,
             Callout::GitOpenRepo(GitOpenRequest {
-                cache_key: cache_key.into(),
-                clone_url: clone_url.into(),
+                clone_url: self.clone_url,
+                reference: self.reference,
             }),
             |r| {
                 crate::http::expect_callout(

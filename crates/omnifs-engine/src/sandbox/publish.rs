@@ -41,9 +41,24 @@ pub(crate) fn temp_sibling_path(dest: &Path) -> PathBuf {
 /// all matching names as stale without checking whether the recorded pid is
 /// still alive.
 pub(crate) fn sweep_temp_publish_dirs(root: &Path) -> std::io::Result<()> {
-    if !root.exists() {
-        std::fs::create_dir_all(root)?;
-        return Ok(());
+    match std::fs::symlink_metadata(root) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "cache root is a symlink",
+            ));
+        },
+        Ok(metadata) if !metadata.is_dir() => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotADirectory,
+                "cache root is not a directory",
+            ));
+        },
+        Ok(_) => {},
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir_all(root)?;
+        },
+        Err(error) => return Err(error),
     }
     for entry in std::fs::read_dir(root)? {
         let entry = entry?;
@@ -54,6 +69,27 @@ pub(crate) fn sweep_temp_publish_dirs(root: &Path) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Publish a completed directory into an absent destination by rename.
+pub(crate) fn publish_dir_by_rename(source: &Path, destination: &Path) -> std::io::Result<()> {
+    let source_meta = std::fs::symlink_metadata(source)?;
+    if !source_meta.is_dir() || source_meta.file_type().is_symlink() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "publish source is not a regular directory",
+        ));
+    }
+    if let Some(parent) = destination.parent() {
+        let metadata = std::fs::symlink_metadata(parent)?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "publish destination parent is not a regular directory",
+            ));
+        }
+    }
+    std::fs::rename(source, destination)
 }
 
 /// True when `name` matches temp paths produced by [`temp_sibling_path`].

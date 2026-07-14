@@ -1,13 +1,11 @@
-//! Git repository cloning with coalescing and timeout.
-//!
-//! `GitCloner` manages shallow clones of git repositories with
-//! locking to prevent concurrent clones of the same repo.
-//! Uses --depth=1 --single-branch --no-tags for fast first access;
-//! the projected tree only reads the HEAD working tree.
+//! Git repository cloning with host-owned opaque identities.
 
+use crate::cache::identity::GitId;
+use crate::log_redaction::LogUrl;
 use crate::sandbox::publish;
 use dashmap::DashMap;
 use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
@@ -16,24 +14,28 @@ use std::time::{Duration, Instant};
 use tracing::warn;
 
 const CLONE_TIMEOUT: Duration = Duration::from_mins(2);
-const STDERR_MAX_BYTES: usize = 4096;
+const CLONE_REPO_DIR: &str = "repo";
+const CLONE_BINDING_FILE: &str = "binding.json";
 
 #[derive(Debug, thiserror::Error)]
 pub enum CloneError {
-    #[error("clone failed (exit {status}): {stderr}")]
-    Failed { status: ExitStatus, stderr: String },
+    #[error("clone failed (exit {status})")]
+    Failed { status: ExitStatus },
     #[error("clone timed out after {timeout_secs}s")]
     Timeout { timeout_secs: u64 },
     #[error("failed to spawn git")]
     Spawn(#[from] std::io::Error),
-    #[error("cache key conflict: expected {expected}, found {found}")]
-    CacheKeyConflict { expected: String, found: String },
-    #[error("unsafe cache key: {0}")]
-    UnsafeCacheKey(String),
+    #[error("invalid git reference: {0}")]
+    InvalidReference(String),
+    #[error("existing clone identity is unavailable")]
+    ExistingEntry,
+    #[error("clone metadata does not match the requested identity")]
+    MetadataConflict,
+    #[error("failed to publish clone")]
+    Publish,
 }
 
-/// Shared clone infrastructure. Owns the cache directory and a lock map
-/// to coalesce concurrent clones of the same repository.
+/// Shared clone infrastructure rooted at a dedicated host-owned directory.
 pub struct GitCloner {
     cache_dir: PathBuf,
     locks: DashMap<String, Arc<Mutex<()>>>,
@@ -47,50 +49,69 @@ impl GitCloner {
         }
     }
 
-    /// Return the local cache path for a repository, cloning if needed.
-    /// `cache_key` is a provider-supplied stable identifier (e.g. "github.com/owner/repo").
-    /// `clone_url` is the full URL to pass to git clone verbatim.
-    ///
-    pub fn clone_if_needed(
+    pub(crate) fn validate_reference(reference: &str) -> Result<(), CloneError> {
+        if reference.is_empty()
+            || reference.starts_with('-')
+            || reference.starts_with('/')
+            || reference.ends_with('/')
+            || reference.ends_with('.')
+            || reference == "@"
+            || reference.contains("..")
+            || reference.contains("@{")
+            || reference
+                .bytes()
+                .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
+            || reference
+                .chars()
+                .any(|ch| matches!(ch, '~' | '^' | ':' | '?' | '*' | '[' | '\\'))
+            || reference
+                .split('/')
+                .any(|part| part.is_empty() || part.starts_with('.') || part.ends_with(".lock"))
+        {
+            return Err(CloneError::InvalidReference(reference.to_string()));
+        }
+        Ok(())
+    }
+
+    /// Return the local cache path for a host-derived identity, cloning if needed.
+    pub(crate) fn clone_if_needed(
         &self,
-        cache_key: &str,
+        id: &GitId,
         clone_url: &str,
+        canonical_remote: &str,
+        reference: Option<&str>,
         operation_id: u64,
     ) -> Result<PathBuf, CloneError> {
-        if !crate::sandbox::relative_key::is_safe_relative_key(cache_key, |_| false) {
-            return Err(CloneError::UnsafeCacheKey(cache_key.to_string()));
-        }
-
-        let cache_path = self.cache_dir.join(cache_key);
-
+        ensure_directory(&self.cache_dir).map_err(|_| CloneError::ExistingEntry)?;
+        let cache_id = id.to_string();
+        let cache_path = self.cache_dir.join(id.filesystem_name());
         let lock = self
             .locks
-            .entry(cache_key.to_string())
+            .entry(cache_id.clone())
             .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone();
         let _guard = lock.lock();
 
-        // Check sidecar binding: if a .omnifs-clone-url file exists,
-        // verify it matches the requested clone_url.
-        let sidecar = cache_path.join(".omnifs-clone-url");
-        if cache_path.join(".git").is_dir() {
-            if let Ok(recorded) = std::fs::read_to_string(&sidecar) {
-                let recorded = recorded.trim();
-                if recorded != clone_url {
-                    return Err(CloneError::CacheKeyConflict {
-                        expected: clone_url.to_string(),
-                        found: recorded.to_string(),
-                    });
-                }
-            } else {
-                // Adopt existing cache entry: write sidecar for first time.
-                Self::write_sidecar(&sidecar, clone_url);
-            }
-            return Ok(cache_path);
+        match std::fs::symlink_metadata(&cache_path) {
+            Ok(_) if Self::is_valid_clone(&cache_path, canonical_remote, reference) => {
+                return Ok(cache_path.join(CLONE_REPO_DIR));
+            },
+            Ok(_) => return Err(CloneError::ExistingEntry),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+            Err(_) => return Err(CloneError::ExistingEntry),
         }
 
-        let span = crate::inspector::clone_span(operation_id, cache_key, clone_url);
-        let outcome = span.in_scope(|| Self::run_clone(clone_url, &cache_path));
+        let span = crate::inspector::clone_span(operation_id, &cache_id, clone_url);
+        let temporary = publish::temp_sibling_path(&cache_path);
+        let temporary_repo = temporary.join(CLONE_REPO_DIR);
+        std::fs::create_dir(&temporary).map_err(|_| CloneError::Publish)?;
+        let outcome = span.in_scope(|| {
+            Self::run_clone(clone_url, reference, &temporary_repo).and_then(|()| {
+                Self::write_binding(&Self::binding_path(&temporary), canonical_remote, reference)?;
+                publish::publish_dir_by_rename(&temporary, &cache_path)
+                    .map_err(|_| CloneError::Publish)
+            })
+        });
         crate::inspector::record_outcome(
             &span,
             if outcome.is_ok() {
@@ -99,88 +120,134 @@ impl GitCloner {
                 omnifs_api::events::InspectorOutcome::Network
             },
         );
-        outcome?;
-        Self::write_sidecar(&sidecar, clone_url);
-        Ok(cache_path)
+        if let Err(error) = outcome {
+            publish::remove_path_best_effort(&temporary);
+            return Err(error);
+        }
+
+        Ok(cache_path.join(CLONE_REPO_DIR))
     }
 
-    /// Return the cache directory root.
     pub fn cache_dir(&self) -> &Path {
         &self.cache_dir
     }
 
-    fn run_clone(url: &str, dest: &Path) -> Result<(), CloneError> {
-        if let Some(parent) = dest.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
+    fn binding_path(path: &Path) -> PathBuf {
+        path.join(CLONE_BINDING_FILE)
+    }
 
-        let mut child = Command::new("git")
-            .args(["clone", "--depth=1", "--single-branch", "--no-tags", url])
+    fn write_binding(path: &Path, remote: &str, reference: Option<&str>) -> std::io::Result<()> {
+        let parent = path
+            .parent()
+            .ok_or_else(|| std::io::Error::other("clone metadata has no parent"))?;
+        ensure_directory(parent)
+            .map_err(|_| std::io::Error::other("clone metadata root unavailable"))?;
+        let binding = CloneBinding {
+            remote: remote.to_string(),
+            reference: reference.map(ToOwned::to_owned),
+        };
+        let bytes = serde_json::to_vec(&binding)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        publish::replace_file_via_temp_rename(path, &bytes)
+    }
+
+    fn is_valid_clone(path: &Path, remote: &str, reference: Option<&str>) -> bool {
+        let wrapper = std::fs::symlink_metadata(path)
+            .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+            && std::fs::symlink_metadata(path.join(CLONE_REPO_DIR).join(".git"))
+                .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+            && std::fs::symlink_metadata(Self::binding_path(path))
+                .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink());
+        if !wrapper {
+            return false;
+        }
+        let Ok(raw) = std::fs::read_to_string(Self::binding_path(path)) else {
+            return false;
+        };
+        let Ok(binding) = serde_json::from_str::<CloneBinding>(&raw) else {
+            return false;
+        };
+        binding.remote == remote && binding.reference.as_deref() == reference
+    }
+
+    fn run_clone(url: &str, reference: Option<&str>, dest: &Path) -> Result<(), CloneError> {
+        let mut command = Command::new("git");
+        command.args(["clone", "--depth=1", "--single-branch", "--no-tags"]);
+        if let Some(reference) = reference {
+            command.args(["--branch", reference]);
+        }
+        let mut child = command
+            .arg("--")
+            .arg(url)
             .arg(dest)
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .spawn()?;
-
-        // Drain stderr on a separate thread to avoid pipe-full deadlock.
-        // Keep reading past the cap (to prevent pipe backup) but only
-        // retain the first STDERR_MAX_BYTES.
         let stderr_handle = child.stderr.take();
         let stderr_thread = std::thread::spawn(move || {
-            let mut retained = Vec::with_capacity(STDERR_MAX_BYTES);
-            let mut discard = [0u8; 1024];
             if let Some(mut pipe) = stderr_handle {
+                let mut discard = [0u8; 1024];
                 loop {
                     match pipe.read(&mut discard) {
                         Ok(0) | Err(_) => break,
-                        Ok(n) => {
-                            let remaining = STDERR_MAX_BYTES.saturating_sub(retained.len());
-                            if remaining > 0 {
-                                retained.extend_from_slice(&discard[..n.min(remaining)]);
-                            }
-                            // Keep reading to drain the pipe even after cap.
-                        },
+                        Ok(_) => {},
                     }
                 }
             }
-            String::from_utf8_lossy(&retained).to_string()
         });
-
         let start = Instant::now();
         loop {
             match child.try_wait() {
                 Ok(Some(status)) => {
-                    let stderr = stderr_thread.join().unwrap_or_default();
+                    let _ = stderr_thread.join();
                     if status.success() {
                         return Ok(());
                     }
-                    let _ = std::fs::remove_dir_all(dest);
-                    warn!(url, %status, stderr = %stderr, "git clone failed");
-                    return Err(CloneError::Failed { status, stderr });
+                    publish::remove_path_best_effort(dest);
+                    warn!(url = %LogUrl(url), %status, "git clone failed");
+                    return Err(CloneError::Failed { status });
                 },
-                Ok(None) => {
-                    if start.elapsed() > CLONE_TIMEOUT {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        let _ = std::fs::remove_dir_all(dest);
-                        warn!(url, "git clone timed out");
-                        return Err(CloneError::Timeout {
-                            timeout_secs: CLONE_TIMEOUT.as_secs(),
-                        });
-                    }
-                    std::thread::sleep(Duration::from_millis(500));
+                Ok(None) if start.elapsed() > CLONE_TIMEOUT => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = stderr_thread.join();
+                    publish::remove_path_best_effort(dest);
+                    warn!(url = %LogUrl(url), "git clone timed out");
+                    return Err(CloneError::Timeout {
+                        timeout_secs: CLONE_TIMEOUT.as_secs(),
+                    });
                 },
-                Err(e) => {
-                    let _ = std::fs::remove_dir_all(dest);
-                    return Err(CloneError::Spawn(e));
+                Ok(None) => std::thread::sleep(Duration::from_millis(500)),
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = stderr_thread.join();
+                    publish::remove_path_best_effort(dest);
+                    return Err(CloneError::Spawn(error));
                 },
             }
         }
     }
+}
 
-    /// Write the clone URL to a sidecar file. Best-effort; the cache
-    /// entry is still usable without the sidecar (we just lose the
-    /// clone-url conflict check on the next open).
-    fn write_sidecar(path: &Path, clone_url: &str) {
-        let _ = publish::replace_file_via_temp_rename(path, clone_url.as_bytes());
+#[derive(Debug, Serialize, Deserialize)]
+struct CloneBinding {
+    remote: String,
+    reference: Option<String>,
+}
+
+fn ensure_directory(path: &Path) -> std::io::Result<()> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component);
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {},
+            Ok(_) => return Err(std::io::Error::other("path is not an owned directory")),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::create_dir(&current)?;
+            },
+            Err(error) => return Err(error),
+        }
     }
+    Ok(())
 }

@@ -644,17 +644,12 @@ pub(crate) fn record_subtree_handoff(operation_id: u64, tree_ref: u64) {
     record_outcome(&span, InspectorOutcome::Ok);
 }
 
-pub(crate) fn clone_span(operation_id: u64, cache_key: &str, clone_url: &str) -> Span {
+pub(crate) fn clone_span(operation_id: u64, cache_id: &str, clone_url: &str) -> Span {
     if !tracing::enabled!(target: TARGET, Level::INFO) {
         return Span::none();
     }
-    let cache_key = if omnifs_api::events::summary_is_cache_key_shaped(cache_key) {
-        cache_key
-    } else {
-        "redacted"
-    };
     let remote = omnifs_api::events::redact_git_remote(clone_url);
-    tracing::info_span!(target: TARGET, "provider.clone", operation_id, cache_key, remote, outcome = tracing::field::Empty)
+    tracing::info_span!(target: TARGET, "provider.clone", operation_id, cache_id, remote, outcome = tracing::field::Empty)
 }
 
 /// Record the terminal typed outcome which the layer emits when `span` closes.
@@ -706,12 +701,7 @@ impl WitCalloutView<'_> {
                 omnifs_api::events::redact_http_url_for_summary(req.method.as_str(), &req.url)
             },
             wit_types::Callout::FetchBlob(req) => {
-                let key = if omnifs_api::events::summary_is_cache_key_shaped(&req.cache_key) {
-                    req.cache_key.as_str()
-                } else {
-                    "redacted"
-                };
-                format!("blob.fetch {key}")
+                omnifs_api::events::redact_http_url_for_summary(req.method.as_str(), &req.url)
             },
             wit_types::Callout::GitOpenRepo(req) => format!(
                 "git.open_repo {}",

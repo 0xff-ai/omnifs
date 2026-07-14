@@ -11,6 +11,7 @@
 #[cfg(test)]
 use crate::blob_cache::BlobMetadata;
 use crate::blob_cache::{BlobCache, BlobRecord};
+use crate::cache::identity::BlobGeneration;
 use crate::callouts::{callout_error, callout_internal, callout_not_found, record_outcome};
 use crate::sandbox::publish;
 use crate::tools::archive::{self, ArchiveFormat, ExtractError, ExtractStats};
@@ -28,7 +29,7 @@ use tracing::{debug, warn};
 /// `tree-ref` resolves identically regardless of source. Extraction
 /// itself is performed on the host by [`crate::tools::archive::extract`].
 ///
-/// Cached extraction directories are keyed by the full `(cache-key,
+/// Cached extraction directories are keyed by the full `(blob generation,
 /// format, strip-prefix)` view and published with a temporary directory
 /// rename, so a registered `tree-ref` never points at a partial tree.
 pub(crate) struct ArchiveExecutor {
@@ -41,7 +42,7 @@ pub(crate) struct ArchiveExecutor {
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 struct ExtractKey {
-    cache_key: String,
+    generation: BlobGeneration,
     format: ArchiveFormat,
     strip_prefix: Option<String>,
 }
@@ -49,7 +50,7 @@ struct ExtractKey {
 impl ExtractKey {
     fn dir_name(&self) -> String {
         let mut hasher = Sha256::new();
-        hasher.update(self.cache_key.as_bytes());
+        hasher.update(self.generation.filesystem_name().as_bytes());
         match &self.strip_prefix {
             Some(strip_prefix) => {
                 hasher.update([1]);
@@ -154,7 +155,7 @@ impl ArchiveExecutor {
             .lookup_by_id(blob_id)
             .ok_or_else(|| ArchiveError::NotFound(format!("blob {blob_id} not found")))?;
         let key = ExtractKey {
-            cache_key: record.cache_key.clone(),
+            generation: record.generation,
             format,
             strip_prefix,
         };
@@ -163,7 +164,7 @@ impl ArchiveExecutor {
             ArchiveMaterialized::Cached { tree } => tree,
             ArchiveMaterialized::Fresh { tree, stats } => {
                 debug!(
-                    cache_key = key.cache_key,
+                    generation = %key.generation,
                     entries = stats.entries,
                     bytes = stats.bytes_written,
                     "archive extracted"
@@ -263,7 +264,7 @@ impl ArchiveExecutor {
         key: &ExtractKey,
         record: &BlobRecord,
     ) -> Result<ExtractStats, ArchiveError> {
-        let blob_path = self.cache.blob_path(&record.cache_key);
+        let blob_path = self.cache.generation_path(record.generation);
         let stats = match archive::extract(
             key.format,
             &blob_path,
@@ -273,7 +274,7 @@ impl ArchiveExecutor {
         ) {
             Ok(stats) => stats,
             Err(e) => {
-                warn!(cache_key = %key.cache_key, error = %e, "archive extraction failed");
+                warn!(generation = %key.generation, error = %e, "archive extraction failed");
                 return Err(e.into());
             },
         };

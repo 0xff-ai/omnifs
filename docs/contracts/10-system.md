@@ -15,6 +15,11 @@ The host owns trust. Providers are untrusted WASM components. Frontends expose o
 
 Keep credential storage, credential injection, callout execution, cache storage, namespace state, and I/O in the host. Keep provider meaning in the provider: path meaning, object identity, canonical assembly, render, versioning, preload, and revalidation.
 
+Host-owned Git and blob storage identities come only from validated mount-scoped
+request facts. Providers may request a remote, reference, or HTTP payload, but
+they never choose a filesystem/cache entry name, and injected credentials are
+excluded from those identities.
+
 ### Byte boundary
 
 The host operates on paths, bytes, content types, file attributes, cache metadata, capability outcomes, and effects. Object meaning stays provider-side.

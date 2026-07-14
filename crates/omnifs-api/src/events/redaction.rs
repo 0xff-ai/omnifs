@@ -59,11 +59,6 @@ pub fn redact_git_remote(raw: &str) -> String {
     trimmed.to_string()
 }
 
-/// Reject summaries that still look like raw upstream URLs for blob/cache-key rules.
-pub fn summary_is_cache_key_shaped(summary: &str) -> bool {
-    !summary.contains("://") && !summary.contains('?') && summary.len() <= 512
-}
-
 pub fn write_truncated(f: &mut fmt::Formatter<'_>, value: &str, max: usize) -> fmt::Result {
     for (index, ch) in value.chars().enumerate() {
         if index == max {
@@ -164,29 +159,6 @@ mod tests {
             "github.com:org/repo"
         );
         assert_eq!(redact_git_remote("  somepath  "), "somepath");
-    }
-
-    // ── summary_is_cache_key_shaped ───────────────────────────────────────
-
-    #[test]
-    fn cache_key_summary_validation() {
-        for summary in [
-            "arxiv/pdf/2401.12345",
-            "owner/repo/commit/abc123",
-            "", // empty is technically fine
-            &"x".repeat(512),
-        ] {
-            assert!(summary_is_cache_key_shaped(summary), "accept: {summary:?}");
-        }
-
-        for summary in [
-            "https://example.com/x",
-            "http://example.com/y",
-            "owner/repo?ref=main",
-            &"x".repeat(513),
-        ] {
-            assert!(!summary_is_cache_key_shaped(summary), "reject: {summary:?}");
-        }
     }
 
     // ── write_truncated ───────────────────────────────────────────────────

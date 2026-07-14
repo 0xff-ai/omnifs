@@ -1,11 +1,11 @@
 //! Typed async blob callout builders.
 //!
 //! Blobs keep large bodies host-side by design.
-//! `cx.http().get(url).into_blob().with_cache_key(key).send()` (or the typed
+//! `cx.http().get(url).into_blob().send()` (or the typed
 //! [`crate::endpoint::RequestBuilder::into_blob`]) lands the response body in
 //! the host's blob cache and returns a [`BlobRef`] carrying metadata only.
-//! The cache key is provider-scoped: reusing a key from the same provider
-//! deduplicates the fetch, and two providers never collide on a key.
+//! The host derives the request identity and body generation from validated
+//! request facts, so providers never name cache entries.
 //!
 //! A stored blob is consumed by:
 //! - [`crate::projection::FileProjection::blob`]: serve the bytes verbatim
@@ -18,7 +18,7 @@ use omnifs_wit::provider::types::{BlobFetchRequest, BlobFetched, Callout, Callou
 
 /// Runtime-local handle for a blob stored in the host cache. Valid only for
 /// the current provider instance; do not persist it or derive paths from it.
-/// The cache key, not this id, is the stable name for re-resolving a blob.
+/// The host-owned cache reference, not this id, selects a rehydrated blob.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct BlobId(pub(crate) u64);
 
@@ -85,14 +85,12 @@ pub(crate) fn blob_fetch_callout(
     url: String,
     headers: Vec<Header>,
     body: Option<Vec<u8>>,
-    cache_key: String,
 ) -> Callout {
     Callout::FetchBlob(BlobFetchRequest {
         method,
         url,
         headers,
         body,
-        cache_key,
     })
 }
 

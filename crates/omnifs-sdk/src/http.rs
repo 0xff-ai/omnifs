@@ -208,13 +208,9 @@ impl<'cx, S> Request<'cx, S> {
     /// the host's blob cache rather than crossing the WIT, and the returned
     /// [`crate::blob::BlobRef`] can be handed to
     /// [`crate::projection::FileProjection::blob`], `cx.archives().open(..)`,
-    /// or `cx.blob(id).read()`. A cache key is mandatory; chain
-    /// [`BlobRequest::with_cache_key`] before `send`.
+    /// or `cx.blob(id).read()`.
     pub fn into_blob(self) -> BlobRequest<'cx, S> {
-        BlobRequest {
-            inner: self,
-            cache_key: None,
-        }
+        BlobRequest { inner: self }
     }
 }
 
@@ -223,7 +219,6 @@ impl<'cx, S> Request<'cx, S> {
 #[must_use]
 pub struct BlobRequest<'cx, S> {
     inner: Request<'cx, S>,
-    cache_key: Option<String>,
 }
 
 impl<'cx, S> BlobRequest<'cx, S> {
@@ -237,34 +232,16 @@ impl<'cx, S> BlobRequest<'cx, S> {
         self
     }
 
-    /// Provider-scoped deduplication key, required before `send`. Two
-    /// requests from the same provider using the same key share one blob and
-    /// one upstream fetch; different providers never collide on a key. Embed
-    /// everything that distinguishes the content (id, version, variant) in
-    /// the key, or stale bytes will be served for the colliding request.
-    pub fn with_cache_key(mut self, key: impl Into<String>) -> Self {
-        self.cache_key = Some(key.into());
-        self
-    }
-
     /// Lower into a `fetch-blob` callout. Resolves to a
     /// [`crate::blob::BlobRef`] carrying metadata only; the body is on the
-    /// host's disk. Fails immediately when no cache key was set, on a sticky
-    /// builder error, or when the authority's rate-limit window is open.
+    /// host's disk. Fails immediately on a sticky builder error or when the
+    /// authority's rate-limit window is open.
     /// Note the `BlobRef` carries the upstream status: chain
     /// [`crate::blob::BlobRef::error_for_status`] for the default mapping.
     pub fn send(self) -> CalloutFuture<'cx, crate::blob::BlobRef> {
         if let Some(error) = self.inner.error {
             return CalloutFuture::ready_error(self.inner.cx, error);
         }
-        let Some(cache_key) = self.cache_key else {
-            return CalloutFuture::ready_error(
-                self.inner.cx,
-                ProviderError::invalid_input(
-                    "blob fetch requires a cache key (call .with_cache_key)",
-                ),
-            );
-        };
         // Blob fetches are HTTP callouts too, so the endpoint breaker must
         // short-circuit before the host starts fetching bytes into the cache.
         if let Some(error) = self.inner.open_breaker_error() {
@@ -275,7 +252,6 @@ impl<'cx, S> BlobRequest<'cx, S> {
             self.inner.url,
             WitHeaders(&self.inner.headers).into(),
             self.inner.body,
-            cache_key,
         );
         CalloutFuture::new(self.inner.cx, callout, crate::blob::extract_blob)
     }

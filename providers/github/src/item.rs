@@ -770,7 +770,6 @@ impl PullRequest {
             .get(format!("/repos/{repo_id}/pulls/{}", key.number))
             .header("Accept", "application/vnd.github.diff")
             .into_blob()
-            .cache_key(format!("github/pulls/{repo_id}/{}/diff.patch", key.number))
             .fetch()
             .await?;
         Ok(BlobFile::new(blob.id)
@@ -784,10 +783,8 @@ impl Repo {
         let repo_id = RepoId::new(&key.owner, &key.repo);
         let opened = cx
             .git()
-            .open_repo(
-                format!("github.com/{repo_id}"),
-                format!("git@github.com:{repo_id}.git"),
-            )
+            .open_repo(format!("git@github.com:{repo_id}.git"))
+            .send()
             .await?;
         Ok(TreeRef::new(opened.tree))
     }

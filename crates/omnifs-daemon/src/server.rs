@@ -1135,7 +1135,7 @@ mod tests {
         context.prepare_startup_dirs().unwrap();
 
         let cloner = Arc::new(omnifs_engine::GitCloner::new(
-            context.cache_dir().to_path_buf(),
+            context.cache_dir().join("clones"),
         ));
         let desired = omnifs_workspace::mounts::Registry::load(&args.mount_snapshot).unwrap();
         let registry = Arc::new(

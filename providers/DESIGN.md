@@ -91,8 +91,8 @@ changes:
   body host-side and returns a runtime-local handle, `read-blob` copies a capped
   range back into the provider, and `open-archive` extracts a blob to a host
   tree and returns a `TreeRef`;
-- `BlobId` is runtime-local. The stable name is the provider cache key used to
-  fetch or rehydrate the blob;
+- `BlobId` is runtime-local. The host derives durable blob request and body
+  identities from validated request facts; providers never name cache entries;
 - stream and tree stay behaviors under file and directory faces;
 - stability, mutability, and authority are separate axes. The current object SDK
   stays read-only until write semantics exist.
@@ -745,7 +745,6 @@ async fn diff(cx: Cx<GitHub>, key: PullRequestKey) -> Result<BlobFile<Diff>> {
         .get(format!("/repos/{}/pulls/{}", key.repo(), key.number()))
         .header("Accept", "application/vnd.github.diff")
         .into_blob()
-        .cache_key(format!("github/pulls/{}/diff", key.id()))
         .fetch()
         .await?;
 

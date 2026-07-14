@@ -360,14 +360,10 @@ impl<'a, E: EndpointHooks, S> RequestBuilder<'a, E, S> {
     }
 
     /// Convert into a blob fetch: the response body lands in the host's
-    /// blob cache and only a [`BlobHandle`] crosses back. A cache key is
-    /// mandatory; chain [`BlobRequestBuilder::cache_key`] before
-    /// [`BlobRequestBuilder::fetch`].
+    /// blob cache and only a [`BlobHandle`] crosses back. The host derives
+    /// identity from the validated request.
     pub fn into_blob(self) -> BlobRequestBuilder<'a, E, S> {
-        BlobRequestBuilder {
-            inner: self,
-            cache_key: None,
-        }
+        BlobRequestBuilder { inner: self }
     }
 }
 
@@ -494,30 +490,15 @@ impl HttpResponse {
 /// [`crate::http::BlobRequest`].
 pub struct BlobRequestBuilder<'a, E, S = ()> {
     inner: RequestBuilder<'a, E, S>,
-    cache_key: Option<String>,
 }
 
 impl<'a, E: EndpointHooks, S> BlobRequestBuilder<'a, E, S> {
-    /// Set the provider-scoped deduplication key. Required: [`Self::fetch`]
-    /// errors without one. Repeating the key from the same provider returns
-    /// the cached blob instead of refetching, so embed everything that
-    /// distinguishes the content (id, version, variant) in the key.
-    #[must_use]
-    pub fn cache_key(mut self, key: impl Into<String>) -> Self {
-        self.cache_key = Some(key.into());
-        self
-    }
-
     /// Fetch the URL into the blob store and return its handle. Applies the
     /// same 4xx/5xx mapping as the structural terminals, so a `BlobHandle`
     /// always refers to a successful response body.
     pub async fn fetch(self) -> Result<BlobHandle> {
-        let cache_key = self.cache_key;
         let (request, _policy) = self.inner.into_http_request()?;
-        let mut blob: BlobRequest<'a, S> = request.into_blob();
-        if let Some(key) = cache_key {
-            blob = blob.with_cache_key(key);
-        }
+        let blob: BlobRequest<'a, S> = request.into_blob();
         let blob_ref = blob.send().await?.error_for_status()?;
         Ok(BlobHandle {
             id: blob_ref.id,

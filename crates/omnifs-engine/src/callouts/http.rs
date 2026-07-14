@@ -14,6 +14,7 @@
 //! sees.
 
 use crate::auth::www_authenticate;
+use crate::cache::identity::BlobRequestId;
 use crate::callouts::{callout_denied, callout_internal, callout_network, record_outcome};
 use crate::capability::CapabilityChecker;
 use crate::log_redaction::{LogUrl, WitHeaders};
@@ -33,6 +34,29 @@ pub struct HttpStack {
     unix_clients: DashMap<PathBuf, reqwest::Client>,
     auth: Option<Arc<AuthBinding>>,
     capability: Arc<CapabilityChecker>,
+}
+
+/// Request after URL, method, capability, and provider-header validation.
+/// Host-injected auth is added only when dispatching and is not identity data.
+pub(crate) struct ValidatedRequest {
+    method: reqwest::Method,
+    url: Url,
+    original_url: String,
+    canonical_url: String,
+    headers: Vec<(String, String)>,
+    body: Option<Vec<u8>>,
+}
+
+impl ValidatedRequest {
+    pub(crate) fn blob_request_id(&self, auth: Option<&AuthBinding>) -> BlobRequestId {
+        BlobRequestId::new(
+            auth.map(|binding| binding.credential_id()),
+            self.method.as_str(),
+            &self.canonical_url,
+            &self.headers,
+            self.body.as_deref(),
+        )
+    }
 }
 
 impl HttpStack {
@@ -78,24 +102,73 @@ impl HttpStack {
         body: Option<&[u8]>,
         timeout: Duration,
     ) -> Result<reqwest::Response, wit_types::CalloutResult> {
+        let request = self.validate(method, url, headers, body)?;
+        self.send_validated(&request, timeout).await
+    }
+
+    pub(crate) fn validate(
+        &self,
+        method: &str,
+        url: &str,
+        headers: &[wit_types::Header],
+        body: Option<&[u8]>,
+    ) -> Result<ValidatedRequest, wit_types::CalloutResult> {
         let parsed =
             Url::parse(url).map_err(|e| callout_denied(format!("invalid URL `{url}`: {e}")))?;
-
+        if !parsed.username().is_empty() || parsed.password().is_some() {
+            return Err(callout_denied("URL credentials are not allowed"));
+        }
         if let Err(e) = self.capability.check_url(url) {
             return Err(callout_denied(e.to_string()));
         }
+        let method = reqwest::Method::from_str(method)
+            .map_err(|_| callout_denied(format!("unsupported HTTP method: {method}")))?;
+        let mut normalized = Vec::with_capacity(headers.len());
+        for header in headers {
+            let name = HeaderName::from_str(&header.name).map_err(|error| {
+                callout_internal(format!(
+                    "invalid request header name `{}`: {error}",
+                    header.name
+                ))
+            })?;
+            HeaderValue::from_str(&header.value).map_err(|error| {
+                callout_internal(format!(
+                    "invalid request header value for `{}`: {error}",
+                    name.as_str()
+                ))
+            })?;
+            normalized.push((name.as_str().to_string(), header.value.clone()));
+        }
+        normalized.sort_by(|left, right| left.0.cmp(&right.0));
+        Ok(ValidatedRequest {
+            method,
+            url: parsed,
+            original_url: url.to_string(),
+            canonical_url: parsed.to_string(),
+            headers: normalized,
+            body: body.map(ToOwned::to_owned),
+        })
+    }
 
-        let Ok(reqwest_method) = reqwest::Method::from_str(method) else {
-            return Err(callout_denied(format!("unsupported HTTP method: {method}")));
-        };
-
+    pub(crate) async fn send_validated(
+        &self,
+        request: &ValidatedRequest,
+        timeout: Duration,
+    ) -> Result<reqwest::Response, wit_types::CalloutResult> {
         let response = self
-            .send_once(reqwest_method.clone(), &parsed, url, headers, body, timeout)
+            .send_once(
+                request.method.clone(),
+                &request.url,
+                &request.original_url,
+                &request.headers,
+                request.body.as_deref(),
+                timeout,
+            )
             .await?;
         let rejection = match &self.auth {
             Some(auth) => {
                 auth.report_rejected_for_response(
-                    url,
+                    &request.original_url,
                     response.status().as_u16(),
                     www_authenticate(response.headers()),
                 )
@@ -105,8 +178,15 @@ impl HttpStack {
         };
         match rejection {
             RefreshOutcome::Refreshed => {
-                self.send_once(reqwest_method, &parsed, url, headers, body, timeout)
-                    .await
+                self.send_once(
+                    request.method.clone(),
+                    &request.url,
+                    &request.original_url,
+                    &request.headers,
+                    request.body.as_deref(),
+                    timeout,
+                )
+                .await
             },
             RefreshOutcome::NoCredential | RefreshOutcome::NotApplicable => Ok(response),
             RefreshOutcome::RefreshFailed(error) => {
@@ -120,7 +200,7 @@ impl HttpStack {
         reqwest_method: reqwest::Method,
         parsed: &Url,
         url: &str,
-        headers: &[wit_types::Header],
+        headers: &[(String, String)],
         body: Option<&[u8]>,
         timeout: Duration,
     ) -> Result<reqwest::Response, wit_types::CalloutResult> {
@@ -136,7 +216,9 @@ impl HttpStack {
             auth_header
                 .iter()
                 .map(|(name, value)| (name.as_str(), value.as_str())),
-            headers.iter().map(|h| (h.name.as_str(), h.value.as_str())),
+            headers
+                .iter()
+                .map(|(name, value)| (name.as_str(), value.as_str())),
         ) {
             Ok(header_map) => header_map,
             Err(message) => return Err(callout_internal(message)),
