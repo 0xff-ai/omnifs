@@ -206,7 +206,8 @@ impl SetupArgs {
                 .auth
                 .as_ref()
                 .map(ProviderAuthManifest::wasm_auth_manifest);
-            let ambient = !crate::commands::mount::detect::detect(auth_manifest.as_ref()).is_empty();
+            let ambient =
+                !crate::commands::mount::detect::detect(auth_manifest.as_ref()).is_empty();
             if manifest.auth.is_none() || ambient {
                 selected.push(name);
             } else {

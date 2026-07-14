@@ -202,6 +202,12 @@ fn resolve_id(
             Ok(FrontendId::new(filesystem, environment, Some(location)))
         },
         FrontendEnvironment::Docker | FrontendEnvironment::Krunkit => {
+            if environment == FrontendEnvironment::Krunkit {
+                ensure!(
+                    cfg!(target_os = "macos"),
+                    "a krunkit frontend requires a macOS host"
+                );
+            }
             ensure!(
                 filesystem == FrontendFilesystem::Fuse,
                 "the {environment} environment only delivers a fuse frontend"

@@ -45,7 +45,7 @@ impl<'a> Launcher<'a> {
             config.telemetry.enabled && omnifs_workspace::telemetry::enabled_from_env();
 
         let revision = self.workspace.commit_mounts()?;
-        let snapshot = self
+        let (snapshot_dir, snapshot) = self
             .workspace
             .repository()?
             .materialize(&revision, &paths.cache_dir)?;
@@ -69,7 +69,7 @@ impl<'a> Launcher<'a> {
         self.output.narrate(format!(
             "Applying mount revision {} from {}",
             revision,
-            snapshot.mounts_dir().display()
+            snapshot_dir.display()
         ));
         launch_host_native(
             self.workspace,
@@ -77,7 +77,7 @@ impl<'a> Launcher<'a> {
             telemetry_enabled,
             self.output,
             &revision,
-            snapshot.mounts_dir(),
+            &snapshot_dir,
         )
         .await?;
         self.workspace.repository()?.mark_applied(&revision)?;

@@ -96,13 +96,7 @@ impl MountArgs {
             MountCommand::Snapshot(args) => args.run(output).await,
             MountCommand::Rm { name, dry_run } => {
                 let workspace = Workspace::resolve()?;
-                let receipt = rm_with_options(
-                    &workspace,
-                    &name,
-                    output.yes(),
-                    dry_run,
-                    output,
-                )?;
+                let receipt = rm_with_options(&workspace, &name, output.yes(), dry_run, output)?;
                 if output.is_structured() {
                     output.emit_result(receipt.output_verdict(), &receipt)?;
                 }

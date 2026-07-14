@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use crate::commands::frontend::{FrontendEnvironment as Environment, FrontendId, FrontendResult};
 use crate::inventory::{AccessPath, FrontendStatus, Inventory};
 use crate::stages::MountInitStatus;
-use crate::ui::consent::Outcome;
+use crate::ui::consent::{Outcome, Plan};
 use crate::ui::output::ResultVerdict;
 use omnifs_workspace::mounts::Name as MountName;
 
@@ -62,8 +62,8 @@ impl UpReceipt {
     }
 }
 
-/// `omnifs down` and `omnifs reset`: the settled operation rows
-/// and a verdict. `Failed` marks a receipt whose exit code is non-zero even
+/// `omnifs down`: the settled operation rows and a verdict. `Failed` marks a
+/// receipt whose exit code is non-zero even
 /// though the document itself is the whole story (no separate error document).
 #[derive(Debug, Serialize)]
 pub(crate) struct TeardownReceipt {

@@ -213,7 +213,7 @@ impl Repository {
         &self,
         revision: &Revision,
         cache_dir: impl AsRef<Path>,
-    ) -> Result<Registry, RepositoryError> {
+    ) -> Result<(PathBuf, Registry), RepositoryError> {
         self.verify_revision(revision)?;
         let snapshot = cache_dir
             .as_ref()
@@ -247,7 +247,8 @@ impl Repository {
                 source,
             })?;
         }
-        self.validate_snapshot(revision, &snapshot)
+        let registry = self.validate_snapshot(revision, &snapshot)?;
+        Ok((snapshot, registry))
     }
 
     /// Return the revision recorded in `refs/omnifs/applied`, if present.
@@ -753,7 +754,7 @@ mod tests {
         repository.put(&spec("demo")).unwrap();
         let revision = repository.commit().unwrap();
         let cache = dir.path().join("cache");
-        let snapshot = repository.materialize(&revision, &cache).unwrap();
+        let (_, snapshot) = repository.materialize(&revision, &cache).unwrap();
         let name = Name::new("demo").unwrap();
         assert_eq!(snapshot.get(&name).unwrap().mount, "demo");
         assert!(
