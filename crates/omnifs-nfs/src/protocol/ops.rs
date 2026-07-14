@@ -680,7 +680,7 @@ pub(crate) fn handle_readdir(
         0 => 0,
         1 | 2 => return error_reply(OP_READDIR, Status::BadCookie),
         _ if verifier != cookie_verifier => {
-            return error_reply(OP_READDIR, Status::BadCookie);
+            return error_reply(OP_READDIR, Status::NotSame);
         },
         cookie => {
             let idx = usize::try_from(cookie - 3).unwrap_or(usize::MAX);
