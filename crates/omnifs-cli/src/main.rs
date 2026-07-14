@@ -15,19 +15,18 @@ mod cli;
 mod client;
 mod commands;
 mod credential_target;
+mod daemon;
 mod daemon_teardown;
 mod error;
 mod frontend_backend;
 mod frontend_container;
 mod guest_image_pull;
-#[cfg(feature = "daemon")]
 mod host_teardown;
 mod inspector;
 mod inventory;
 mod krunkit_backend;
 mod launch;
 mod launch_backend;
-#[cfg(feature = "daemon")]
 mod local_backend;
 mod mount_config;
 mod process;

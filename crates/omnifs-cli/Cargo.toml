@@ -17,11 +17,11 @@ path = "src/main.rs"
 omnifs-caps = { workspace = true }
 omnifs-api = { workspace = true }
 omnifs-engine = { workspace = true, features = ["runtime"] }
-omnifs-daemon = { workspace = true, optional = true }
-omnifs-nfs = { workspace = true, optional = true }
+omnifs-nfs = { workspace = true }
 omnifs-mtab = { workspace = true }
 omnifs-workspace = { workspace = true }
 omnifs-auth = { workspace = true }
+omnifs-vfs-wire = { workspace = true }
 clap = { workspace = true }
 clap_complete = "4"
 tokio = { workspace = true }
@@ -52,10 +52,7 @@ tar = { workspace = true }
 zstd = { workspace = true }
 tabled = { version = "0.21.0", features = ["ansi"] }
 unicode-width = { workspace = true }
-
-[features]
-default = ["daemon"]
-daemon = ["dep:omnifs-daemon", "dep:omnifs-nfs"]
+getrandom = "0.3"
 
 [dev-dependencies]
 tempfile = { workspace = true }
@@ -70,3 +67,6 @@ zstd = { workspace = true }
 
 [lints]
 workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { version = "0.30", features = ["net"] }

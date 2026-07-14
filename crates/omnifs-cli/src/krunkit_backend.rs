@@ -106,7 +106,7 @@ const SEED_CONF_KEYS: [&str; 4] = [
 const EXPECTED_DEVICE_COUNT: usize = 6;
 
 /// Conservative `sockaddr_un.sun_path` byte budget, mirroring
-/// `omnifs-daemon`'s `check_uds_path_length` (kept as its own copy here: the
+/// The daemon's `check_uds_path_length` (kept as its own copy here: the
 /// CLI and daemon do not share a path-validation crate, and this check is
 /// small enough that a shared abstraction would cost more than it saves).
 const UDS_PATH_BYTE_LIMIT: usize = 100;

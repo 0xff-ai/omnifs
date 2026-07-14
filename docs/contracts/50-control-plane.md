@@ -5,7 +5,7 @@ Owns: CLI/daemon split, typed local control protocol, mount delivery, runtime mo
 
 ## Read when
 
-Read this before touching `omnifs-cli`, `omnifs-daemon`, `omnifs-api`, lifecycle commands, daemon status, control operations, mount delivery, desired-state application, the optional Docker-hosted FUSE frontend, provider bundle installation, or dev workspace behavior.
+Read this before touching `omnifs-cli`, `omnifs-api`, lifecycle commands, daemon status, control operations, mount delivery, desired-state application, the optional Docker-hosted FUSE frontend, provider bundle installation, or dev workspace behavior.
 
 ## Rules
 
@@ -157,8 +157,8 @@ whose destination streams are owned by the invoked tools.
 ## Code
 
 - `crates/omnifs-api/src/lib.rs`
-- `crates/omnifs-daemon/src/app.rs`
-- `crates/omnifs-daemon/src/server.rs`
+- `crates/omnifs-cli/src/daemon/app.rs`
+- `crates/omnifs-cli/src/daemon/server.rs`
 - `crates/omnifs-thin/src/fuse.rs`
 - `crates/omnifs-vfs-wire/src/beacon.rs`
 - `crates/omnifs-cli/src/commands/frontend/`

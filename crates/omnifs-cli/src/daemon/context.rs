@@ -2,7 +2,7 @@
 
 use anyhow::Context as _;
 
-use crate::app::DaemonArgs;
+use super::app::DaemonArgs;
 use omnifs_api::{
     CredentialHealth, DaemonBackend, DaemonHealth, DaemonStatus, DaemonSubsystem, FrontendInfo,
     HealthState, MountInfo, SubsystemHealth,

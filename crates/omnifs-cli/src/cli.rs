@@ -84,8 +84,7 @@ pub enum Commands {
     /// command, not invoked directly. The daemon still runs as its own process
     /// over the local control socket; this is the same binary, not a separate entrypoint.
     #[command(hide = true)]
-    #[cfg(feature = "daemon")]
-    Daemon(omnifs_daemon::DaemonArgs),
+    Daemon(crate::daemon::DaemonArgs),
 
     /// Manage filesystem frontends attached to the host-native daemon
     ///
@@ -97,7 +96,6 @@ pub enum Commands {
 
 impl Cli {
     pub(crate) fn runs_daemon(&self) -> bool {
-        #[cfg(feature = "daemon")]
         if matches!(&self.command, Some(Commands::Daemon(_))) {
             return true;
         }
@@ -147,7 +145,6 @@ impl Commands {
             Self::Doctor(_) => (Some("doctor"), "doctor"),
             Self::Completions(_) => (Some("completions"), "completions"),
             Self::Version(_) => (Some("version"), "version"),
-            #[cfg(feature = "daemon")]
             Self::Daemon(_) => (None, "daemon"),
             // Every `frontend` subcommand shares one telemetry label; there is
             // no longer a hidden internal one (like `daemon`'s) to exclude.
@@ -190,8 +187,7 @@ impl Commands {
             Self::Skill(args) => args.run(output).map(|()| ExitCode::Success),
             Self::Completions(args) => args.run(output).map(|()| ExitCode::Success),
             Self::Version(args) => args.run(output).await,
-            #[cfg(feature = "daemon")]
-            Self::Daemon(args) => omnifs_daemon::run(&args).await.map(|()| ExitCode::Success),
+            Self::Daemon(args) => crate::daemon::run(&args).await.map(|()| ExitCode::Success),
             Self::Frontend(args) => args.run(output).await,
         }
     }

@@ -17,7 +17,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tracing::{info, warn};
 
-use crate::context::DaemonContext;
+use super::context::DaemonContext;
 use omnifs_vfs_wire::ListenerTarget;
 
 /// A host address approved for the namespace attach listener. Loopback is
@@ -189,7 +189,7 @@ fn check_startup_events(
     Ok(())
 }
 
-pub struct Daemon {
+pub(crate) struct Daemon {
     context: DaemonContext,
     registry: Arc<MountRuntimes>,
     inspector: Option<Arc<Inspector>>,
@@ -276,13 +276,13 @@ impl Daemon {
     /// Record the shared namespace once it is built after atomic startup load.
     /// A second call is a no-op: the namespace is built exactly once per daemon
     /// start.
-    pub fn set_namespace(&self, namespace: Arc<omnifs_engine::TreeNamespace>) {
+    pub(crate) fn set_namespace(&self, namespace: Arc<omnifs_engine::TreeNamespace>) {
         let server =
             omnifs_vfs_wire::VfsServer::new(namespace, self.context.instance_id().to_string());
         let _ = self.vfs.set(server);
     }
 
-    pub fn ensure_attach_tcp(
+    fn ensure_attach_tcp(
         &self,
         bind_addr: AttachBindAddr,
         port: u16,
@@ -323,7 +323,7 @@ impl Daemon {
         Ok(AttachOutcome::Bound(target))
     }
 
-    pub fn ensure_attach_uds(&self) -> anyhow::Result<AttachOutcome> {
+    fn ensure_attach_uds(&self) -> anyhow::Result<AttachOutcome> {
         if self.vfs.get().is_none_or(|vfs| !vfs.ready()) {
             return Ok(AttachOutcome::NamespaceNotReady);
         }
@@ -363,7 +363,10 @@ impl Daemon {
     /// listener, restores persisted dynamic authority, and publishes the new
     /// record only after all required listeners are alive. The same method owns
     /// task joins, provider shutdown, record removal, and socket cleanup.
-    pub async fn run(self: Arc<Self>, previous: Option<RuntimeRecord>) -> anyhow::Result<()> {
+    pub(crate) async fn run(
+        self: Arc<Self>,
+        previous: Option<RuntimeRecord>,
+    ) -> anyhow::Result<()> {
         let result = self.run_inner(previous).await;
         let _ = self.shutdown_tx.send(true);
         self.stop_tasks().await;
@@ -523,7 +526,7 @@ impl Daemon {
     }
 
     /// Serve the typed control protocol over the workspace-owned Unix socket.
-    pub fn spawn_control_unix(
+    fn spawn_control_unix(
         self: &Arc<Self>,
         listener: std::os::unix::net::UnixListener,
         rt: &tokio::runtime::Handle,
@@ -593,7 +596,7 @@ impl Daemon {
         self.context.status(vfs.ready(), vfs.attachments(), mounts)
     }
 
-    pub fn trigger_shutdown(self: &Arc<Self>) {
+    fn trigger_shutdown(self: &Arc<Self>) {
         let _ = self.shutdown_tx.send(true);
     }
 }
@@ -906,13 +909,13 @@ mod tests {
     }
 
     fn test_daemon(dir: &tempfile::TempDir) -> Arc<super::Daemon> {
-        let args = crate::app::DaemonArgs {
+        let args = crate::daemon::app::DaemonArgs {
             mount_revision: omnifs_workspace::mounts::Revision::new("a".repeat(40)).unwrap(),
             mount_snapshot: dir.path().join("mounts"),
             attach_tcp: None,
         };
         std::fs::create_dir_all(&args.mount_snapshot).unwrap();
-        let context = crate::context::DaemonContext::resolve(&args).unwrap();
+        let context = crate::daemon::context::DaemonContext::resolve(&args).unwrap();
         context.prepare_startup_dirs().unwrap();
         let cloner =
             Arc::new(omnifs_engine::GitCloner::new(context.cache_dir().join("clones")).unwrap());

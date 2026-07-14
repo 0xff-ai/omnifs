@@ -13,7 +13,7 @@ members = [
     "providers/web",
     "providers/test",
 ]
-default-members = ["crates/omnifs-cli", "crates/omnifs-engine", "crates/omnifs-daemon"]
+default-members = ["crates/omnifs-cli", "crates/omnifs-engine"]
 
 [workspace.package]
 version = "0.2.1"
@@ -27,7 +27,6 @@ readme = "README.md"
 omnifs-api = { version = "0.2.1", path = "crates/omnifs-api" }
 omnifs-auth = { version = "0.2.1", path = "crates/omnifs-auth" }
 omnifs-caps = { version = "0.2.1", path = "crates/omnifs-caps" }
-omnifs-daemon = { version = "0.2.1", path = "crates/omnifs-daemon" }
 omnifs-engine = { version = "0.2.1", path = "crates/omnifs-engine", default-features = false }
 omnifs-fuse = { version = "0.2.1", path = "crates/omnifs-fuse", default-features = false }
 omnifs-workspace = { version = "0.2.1", path = "crates/omnifs-workspace" }

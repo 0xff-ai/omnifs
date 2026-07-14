@@ -152,10 +152,8 @@ async function main() {
 
   const builds: Promise<void>[] = [];
   if (!options.skipCliBuild) {
-    // Default features (not `--no-default-features`): the `daemon` feature
-    // pulls in `omnifs-daemon`/`omnifs-nfs`, without which `omnifs up` cannot
-    // launch a host-native daemon at all (`launch_backend.rs`'s non-daemon
-    // stub always bails).
+    // The full CLI package includes the host-native daemon process owner and
+    // NFS frontend support, which `omnifs up` needs to launch the daemon.
     builds.push(
       run($`cargo build -p omnifs-cli`.env({
         ...process.env,

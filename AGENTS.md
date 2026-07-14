@@ -80,8 +80,7 @@ Allowed, but never as a side effect. Surface the tradeoff and get sign-off in th
 - `crates/omnifs-vfs-wire`: the Omnifs VFS wire protocol, including serialization, framing, handshake, attach transport and reconnect, readiness signaling, and the client wire cache for the engine-owned `Namespace` surface.
 - `crates/omnifs-fuse` and `crates/omnifs-nfs`: protocol adapters.
 - `crates/omnifs-mtab`: `/proc/mounts` parsing, NFS mount state files, and shared platform unmount command construction.
-- `crates/omnifs-daemon`: control server, app context, frontend startup, and daemon runtime.
-- `crates/omnifs-cli`: setup, lifecycle, auth commands, dev sessions, and control-plane UX.
+- `crates/omnifs-cli`: daemon process owner, control server, setup, lifecycle, auth commands, dev sessions, and control-plane UX.
 - `crates/omnifs-itest`: host-driven provider and tree conformance tests.
 - `scripts/ci/*` and `just/*.just`: maintainer command surface, CI orchestration, runtime image assembly, and generated-artifact checks.
 - `providers/*`: product providers. Read `providers/DESIGN.md` and `skills/omnifs-provider-sdk/SKILL.md` before changing provider shape.

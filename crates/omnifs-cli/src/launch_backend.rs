@@ -3,7 +3,6 @@
 use std::fmt;
 use std::path::Path;
 
-#[cfg(feature = "daemon")]
 use anyhow::Context as _;
 use anyhow::Result;
 
@@ -192,7 +191,6 @@ impl DockerTarget {
 
 // --- Native launch -----------------------------------------------------------
 
-#[cfg(feature = "daemon")]
 pub(crate) async fn launch_native(
     paths: &omnifs_workspace::layout::WorkspaceLayout,
     telemetry_enabled: bool,
@@ -303,20 +301,6 @@ pub(crate) async fn launch_native(
     )
 }
 
-#[cfg(not(feature = "daemon"))]
-pub(crate) async fn launch_native(
-    _paths: &omnifs_workspace::layout::WorkspaceLayout,
-    _telemetry_enabled: bool,
-    _mount_revision: &omnifs_workspace::mounts::Revision,
-    _mount_snapshot: &std::path::Path,
-) -> Result<()> {
-    anyhow::bail!(
-        "this omnifs binary was built without host-native daemon support; \
-         rebuild with the `daemon` feature"
-    )
-}
-
-#[cfg(feature = "daemon")]
 /// The daemon's last non-empty log line, which is almost always its fatal
 /// error (a startup crash writes the cause last). Surfacing that one line keeps
 /// the failure legible; `omnifs logs` shows the rest. Dumping the whole tail

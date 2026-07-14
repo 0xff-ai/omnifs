@@ -16,11 +16,11 @@ use std::sync::Arc;
 use tokio::runtime::Handle;
 use tracing::info;
 
-use crate::{context::DaemonContext, server};
+use super::{context::DaemonContext, server};
 
 /// Arguments for the `omnifs daemon` subcommand (the runtime daemon).
 #[derive(Args, Debug)]
-pub struct DaemonArgs {
+pub(crate) struct DaemonArgs {
     /// Revision of the immutable mount snapshot served by this daemon start.
     #[arg(long, value_name = "REVISION")]
     pub(crate) mount_revision: Revision,
@@ -40,7 +40,7 @@ pub struct DaemonArgs {
 
 /// Bring up immutable runtime state, then hand the complete serving lifetime to
 /// [`server::Daemon::run`]. The caller owns the tokio runtime and tracing setup.
-pub async fn run(args: &DaemonArgs) -> anyhow::Result<()> {
+pub(crate) async fn run(args: &DaemonArgs) -> anyhow::Result<()> {
     use omnifs_workspace::telemetry::{self, DaemonEvent, TelemetrySink};
 
     let context = DaemonContext::resolve(args)?;
