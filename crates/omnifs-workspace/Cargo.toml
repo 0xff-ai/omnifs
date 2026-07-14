@@ -34,7 +34,6 @@ utoipa = { workspace = true, optional = true }
 utoipa = ["dep:utoipa"]
 
 [dev-dependencies]
-anyhow = { workspace = true }
 tempfile = { workspace = true }
 
 [[bin]]

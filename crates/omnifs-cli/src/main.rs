@@ -31,7 +31,6 @@ mod launch_backend;
 #[cfg(feature = "daemon")]
 mod local_backend;
 mod mount_config;
-mod mount_tree;
 mod process;
 mod provider_bundle;
 mod runtime;

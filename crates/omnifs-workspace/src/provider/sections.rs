@@ -1,8 +1,8 @@
 //! WASM custom-section IO and JSON validation for provider metadata.
 //!
-//! Owns wasmparser scanning for omnifs custom sections, decode entrypoints, and
-//! jsonschema validators shared by file and section readers. Route/manifest
-//! domain types live in sibling modules; this file stays at the IO boundary.
+//! Owns wasmparser scanning, metadata decode and embedding, and the
+//! jsonschema validator shared by metadata readers. This file stays at the IO
+//! boundary; provider metadata domain types live in sibling modules.
 
 use crate::provider::manifest::ProviderManifest;
 use schemars::{Schema, schema_for};
@@ -10,27 +10,7 @@ use std::ops::Range;
 use std::sync::OnceLock;
 use wasmparser::{Parser, Payload};
 
-pub const MANIFEST_SECTION_NAME: &str = "omnifs.provider-manifest.v1";
 pub const PROVIDER_METADATA_SECTION_NAME: &str = "omnifs.provider-metadata.v1";
-
-/// Read all `omnifs.provider-manifest.v1` custom-section bodies from a
-/// wasm component's bytes, concatenating them in order. Recurses into
-/// nested module/component sections so providers built as components
-/// surface their guest module's section.
-pub fn read_manifest_section(bytes: &[u8]) -> Result<Vec<u8>, ManifestSectionError> {
-    let mut out = Vec::new();
-    visit_custom_sections(
-        bytes,
-        |name, data| {
-            if name == MANIFEST_SECTION_NAME {
-                out.extend_from_slice(data);
-            }
-            Ok(())
-        },
-        |offset| ManifestSectionError::Truncated { offset },
-    )?;
-    Ok(out)
-}
 
 /// Read and decode the `omnifs.provider-metadata.v1` custom-section body
 /// from a wasm component's bytes. Recurses into nested module/component
@@ -237,12 +217,4 @@ pub(crate) fn validate_provider_manifest(
     provider_manifest_validator()
         .validate(value)
         .map_err(|error| ProviderMetadataError::Schema(error.to_string()))
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum ManifestSectionError {
-    #[error("parsing wasm: {0}")]
-    Parse(#[from] wasmparser::BinaryReaderError),
-    #[error("unexpected end of wasm data at offset {offset}")]
-    Truncated { offset: usize },
 }

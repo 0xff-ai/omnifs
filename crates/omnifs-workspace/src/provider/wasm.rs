@@ -1,4 +1,4 @@
-//! Loaded provider WASM bytes with shared manifest/metadata decode helpers.
+//! Loaded provider WASM bytes with shared metadata decode helpers.
 
 use std::fs;
 use std::io;
@@ -7,11 +7,7 @@ use std::path::{Path, PathBuf};
 use crate::ids::{IdError, ProviderId, ProviderMeta, ProviderName, ProviderRef, ProviderVersion};
 
 use crate::provider::manifest::ProviderManifest;
-use crate::provider::records::{DecodeError, ManifestRecord, ManifestRecordIter};
-use crate::provider::sections::{
-    ManifestSectionError, ProviderMetadataError, read_manifest_section,
-    read_provider_metadata_section,
-};
+use crate::provider::sections::{ProviderMetadataError, read_provider_metadata_section};
 
 pub struct ProviderWasm {
     bytes: Vec<u8>,
@@ -24,14 +20,6 @@ pub struct Artifact {
     pub(crate) bytes: Vec<u8>,
     pub(crate) id: ProviderId,
     pub(crate) meta: ProviderMeta,
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum ProviderWasmError {
-    #[error(transparent)]
-    Section(#[from] ManifestSectionError),
-    #[error(transparent)]
-    Decode(#[from] DecodeError),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -70,17 +58,8 @@ impl ProviderWasm {
         self.bytes
     }
 
-    pub fn manifest_section(&self) -> Result<Vec<u8>, ManifestSectionError> {
-        read_manifest_section(&self.bytes)
-    }
-
     pub fn metadata(&self) -> Result<Option<ProviderManifest>, ProviderMetadataError> {
         read_provider_metadata_section(&self.bytes)
-    }
-
-    pub fn manifest_records(&self) -> Result<Vec<ManifestRecord>, ProviderWasmError> {
-        let section_bytes = self.manifest_section()?;
-        Ok(ManifestRecordIter::new(&section_bytes).collect::<Result<_, _>>()?)
     }
 }
 

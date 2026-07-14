@@ -107,10 +107,6 @@ pub enum Commands {
     /// Prints the one-line build identity and provider facts.
     Version(commands::version::VersionArgs),
 
-    /// Debug utilities. Hidden from `--help`.
-    #[command(hide = true)]
-    Debug(commands::debug::DebugArgs),
-
     /// Run the runtime daemon. Internal: launched by the host-native lifecycle
     /// command, not invoked directly. The daemon still runs as its own process
     /// over the control API; this is the same binary, not a separate entrypoint.
@@ -182,7 +178,6 @@ impl Commands {
             Self::Doctor(_) => (Some("doctor"), "doctor"),
             Self::Completions(_) => (Some("completions"), "completions"),
             Self::Version(_) => (Some("version"), "version"),
-            Self::Debug(_) => (Some("debug"), "debug"),
             #[cfg(feature = "daemon")]
             Self::Daemon(_) => (None, "daemon"),
             // Every `frontend` subcommand shares one telemetry label; there is
@@ -232,7 +227,6 @@ impl Commands {
                 Ok(ExitCode::Success)
             },
             Self::Version(args) => args.run(output).await,
-            Self::Debug(args) => args.run().map(|()| ExitCode::Success),
             #[cfg(feature = "daemon")]
             Self::Daemon(args) => omnifs_daemon::run(&args).map(|()| ExitCode::Success),
             Self::Frontend(args) => args.run(output).await,
