@@ -2,10 +2,11 @@
 //!
 //! The krunkit guest's FUSE frontend runner has no way to observe its own mount
 //! from outside the guest, so once its mount is live it dials host vsock on a
-//! well-known port and writes a single `ready\n` line; the krunkit backend's
-//! `mount_ready` (`crates/omnifs-cli/src/krunkit_backend.rs`) listens for that
-//! line instead of polling the guest. Non-fatal end to end: the FUSE mount is
-//! served either way, so a timed-out wait or a failed dial only logs a warning.
+//! well-known port and writes a single `ready\n` line; the invocation-scoped
+//! Krunkit launch lease accepts that beacon before publishing launch success
+//! (`crates/omnifs-cli/src/krunkit_backend.rs`). Non-fatal end to end: the FUSE
+//! mount is served either way, so a timed-out wait or a failed dial only logs
+//! a warning.
 
 #[cfg(target_os = "linux")]
 use std::path::PathBuf;

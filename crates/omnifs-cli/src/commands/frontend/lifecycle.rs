@@ -27,16 +27,6 @@ const KRUNKIT_TIMEOUT: Duration = Duration::from_secs(90);
 const POLL: Duration = Duration::from_millis(200);
 const RECONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
-trait MountProbe {
-    async fn mount_ready(&self, path: &str) -> Result<bool>;
-}
-
-impl MountProbe for DockerBackend {
-    async fn mount_ready(&self, path: &str) -> Result<bool> {
-        self.mount_ready(path).await
-    }
-}
-
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd, ValueEnum, Serialize, Deserialize,
 )]
@@ -391,6 +381,9 @@ impl FrontendEnableArgs {
         }
         let mount = inventory.mounts.first().map(|mount| mount.name.as_str());
         match launch(workspace, &id, mount, output).await {
+            Ok(()) if id.environment() == FrontendEnvironment::Krunkit => {
+                Ok(attached_result(id, true))
+            },
             Ok(()) => Ok(wait_attached_result(workspace, id).await),
             Err(error) => {
                 let fix = restart_fix(&id);
@@ -497,6 +490,7 @@ impl FrontendRestartArgs {
         let mut results = Vec::with_capacity(targets.len());
         for id in targets {
             match backend_running(workspace, &id, output).await {
+                Ok(true) if id.environment() == FrontendEnvironment::Krunkit => {},
                 Ok(true) => {
                     if let Err(error) = stop(workspace, &id, output).await {
                         let fix = restart_fix(&id);
@@ -528,6 +522,9 @@ impl FrontendRestartArgs {
                 )
                 .await
                 {
+                    Ok(()) if id.environment() == FrontendEnvironment::Krunkit => {
+                        attached_result(id, true)
+                    },
                     Ok(()) => wait_attached_result(workspace, id).await,
                     Err(error) => failed(id, true, fix, error),
                 },
@@ -648,13 +645,7 @@ async fn wait_attached_result(workspace: &Workspace, id: FrontendId) -> Frontend
                 .iter()
                 .any(|row| matches(row, &id) && row.state == FrontendState::Attached)
         {
-            return FrontendResult {
-                id,
-                state: RuntimeState::Attached,
-                changed: true,
-                fix: None,
-                detail: None,
-            };
+            return attached_result(id, true);
         }
         tokio::time::sleep(POLL).await;
     }
@@ -665,6 +656,16 @@ async fn wait_attached_result(workspace: &Workspace, id: FrontendId) -> Frontend
         fix,
         "frontend launched but did not attach to the daemon",
     )
+}
+
+fn attached_result(id: FrontendId, changed: bool) -> FrontendResult {
+    FrontendResult {
+        id,
+        state: RuntimeState::Attached,
+        changed,
+        fix: None,
+        detail: None,
+    }
 }
 
 async fn backend_running(workspace: &Workspace, id: &FrontendId, output: Output) -> Result<bool> {
@@ -734,7 +735,7 @@ async fn launch(
             .await
         },
         FrontendEnvironment::Docker => launch_docker(workspace, &paths, mount, output).await,
-        FrontendEnvironment::Krunkit => launch_krunkit(workspace, &paths, mount, output).await,
+        FrontendEnvironment::Krunkit => launch_krunkit(workspace, &paths, id, mount, output).await,
     }
 }
 
@@ -776,23 +777,39 @@ async fn launch_docker(
 async fn launch_krunkit(
     workspace: &Workspace,
     paths: &WorkspaceLayout,
+    id: &FrontendId,
     mount: Option<&str>,
     output: Output,
 ) -> Result<()> {
     let config = workspace.config()?;
     let attach = workspace.daemon().frontend_attach_target_vsock().await?;
     let backend = KrunkitBackend::new(paths.config_dir.clone());
+    let attached = async {
+        let result = wait_attached_result(workspace, id.clone()).await;
+        if result.state == RuntimeState::Attached {
+            Ok(())
+        } else {
+            bail!(
+                "{}",
+                result
+                    .detail
+                    .unwrap_or_else(|| "frontend launched but did not attach to the daemon".into())
+            )
+        }
+    };
     backend
-        .launch(KrunkitLaunchRequest {
-            daemon_attach_socket: Path::new(&attach.socket_path),
-            attach_token: &attach.token,
-            image: None,
-            config: &config,
-            cache_dir: &paths.cache_dir,
-            output,
-            mount,
-            timeout: KRUNKIT_TIMEOUT,
-        })
+        .launch(
+            KrunkitLaunchRequest {
+                daemon_attach_socket: Path::new(&attach.socket_path),
+                attach_token: &attach.token,
+                config: &config,
+                cache_dir: &paths.cache_dir,
+                output,
+                mount,
+                timeout: KRUNKIT_TIMEOUT,
+            },
+            attached,
+        )
         .await
 }
 
@@ -821,7 +838,7 @@ async fn stop(workspace: &Workspace, id: &FrontendId, output: Output) -> Result<
 }
 
 async fn wait_for_mount(
-    backend: &(impl FrontendBackend + MountProbe),
+    backend: &DockerBackend,
     mount: Option<&str>,
     timeout: Duration,
 ) -> Result<()> {
@@ -989,11 +1006,6 @@ fn format_failure(result: &FrontendResult) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::Command;
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    };
 
     #[test]
     fn selectors_require_one_observed_identity() {
@@ -1049,37 +1061,5 @@ mod tests {
         );
         assert_eq!(enable_action(true, None, true), EnableAction::Reconnect);
         assert_eq!(enable_action(true, None, false), EnableAction::Launch);
-    }
-
-    #[tokio::test]
-    async fn mount_probe_cleanup_preserves_error() {
-        struct Probe {
-            count: Arc<AtomicUsize>,
-        }
-        impl MountProbe for Probe {
-            async fn mount_ready(&self, _: &str) -> Result<bool> {
-                bail!("probe failed")
-            }
-        }
-        impl FrontendBackend for Probe {
-            async fn is_running(&self) -> Result<Option<bool>> {
-                Ok(Some(true))
-            }
-            async fn tear_down(&self) -> Result<()> {
-                self.count.fetch_add(1, Ordering::SeqCst);
-                bail!("cleanup failed")
-            }
-            fn shell_command(&self, _: Option<&str>, _: &[String]) -> Command {
-                Command::new("true")
-            }
-        }
-        let backend = Probe {
-            count: Arc::new(AtomicUsize::new(0)),
-        };
-        let error = wait_for_mount(&backend, None, Duration::from_secs(1))
-            .await
-            .unwrap_err();
-        assert_eq!(backend.count.load(Ordering::SeqCst), 1);
-        assert!(error.to_string().contains("cleanup also failed"));
     }
 }

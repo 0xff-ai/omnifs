@@ -8,8 +8,8 @@ Type=exec
 # The seed conf is EnvironmentFile-shaped (KEY=VALUE lines): OMNIFS_ATTACH_ADDR,
 # OMNIFS_ATTACH_TOKEN, and OMNIFS_READY_VSOCK_PORT (crates/omnifs-api/src/lib.rs).
 # The runner dials host vsock on that port and writes `ready\n` once the FUSE
-# mount is serving (crates/omnifs-vfs-wire/src/beacon.rs), which is how
-# the krunkit backend's `mount_ready` observes guest readiness. No leading '-':
+# mount is serving (crates/omnifs-vfs-wire/src/beacon.rs); the host launch lease
+# accepts that beacon before publishing the launch. No leading '-':
 # a missing or unreadable file fails this unit's start with a clear journal
 # message instead of running the frontend with no attach target.
 EnvironmentFile=/mnt/seed/omnifs-seed.conf

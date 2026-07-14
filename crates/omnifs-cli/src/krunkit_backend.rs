@@ -17,7 +17,8 @@
 //!   vsock-attach unix socket (bound by `POST /v1/frontend/attach-target/vsock`;
 //!   this backend never creates or removes that socket).
 //! - port 1025 (ready): guest-initiated (`,listen`) onto a unix socket this
-//!   backend binds and accepts on in a loop before spawning krunkit — a
+//!   backend binds before spawning krunkit; the launch lease accepts one later
+//!   readiness beacon on it — a
 //!   `,listen` device requires the host side already listening, since krunkit
 //!   dials it once per guest connection rather than the reverse.
 //! - port 22 (ssh): host-initiated (`,connect`, krunkit's explicit
@@ -33,6 +34,7 @@
 //! argv immediately after spawn, mirroring the Docker backend's
 //! `assert_locked_down`.
 
+use std::future::Future;
 use std::io::Write as _;
 use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -292,7 +294,12 @@ impl KrunkitBackend {
 
     fn read_pidfile(&self) -> Result<Option<u32>> {
         match std::fs::read_to_string(self.pidfile()) {
-            Ok(contents) => Ok(contents.trim().parse::<u32>().ok()),
+            Ok(contents) => Ok(Some(
+                contents
+                    .trim()
+                    .parse::<u32>()
+                    .context("parse the krunkit pidfile")?,
+            )),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(error).context("read krunkit pidfile"),
         }
@@ -331,17 +338,6 @@ impl KrunkitBackend {
         );
         let _ = stream.write_all(request.as_bytes());
         let _ = stream.write_all(body);
-    }
-
-    async fn wait_for_exit(pid: u32, deadline: Duration) -> bool {
-        let until = tokio::time::Instant::now() + deadline;
-        while process_alive(pid) {
-            if tokio::time::Instant::now() >= until {
-                return false;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-        true
     }
 }
 
@@ -456,14 +452,9 @@ fn assert_krunkit_locked_down(
 /// Resolve the configured guest image into the validated local path consumed
 /// by libkrun. Release images remain owned by the OCI/cache module; this
 /// function only chooses the channel-specific input and validates the result.
-async fn resolve_guest_image(
-    image: Option<String>,
-    config: &Config,
-    cache_dir: &Path,
-    output: Output,
-) -> Result<PathBuf> {
-    let resolved = image
-        .or_else(|| std::env::var(ENV_GUEST_IMAGE).ok())
+async fn resolve_guest_image(config: &Config, cache_dir: &Path, output: Output) -> Result<PathBuf> {
+    let resolved = std::env::var(ENV_GUEST_IMAGE)
+        .ok()
         .or_else(|| config.frontend.guest_image.clone())
         .unwrap_or_else(|| default_guest_image_for(BUILD_CHANNEL).to_string());
     let path = match BUILD_CHANNEL {
@@ -497,7 +488,7 @@ struct KrunkitLaunchLease<'a> {
     attach_token: String,
     mount: Option<String>,
     timeout: Duration,
-    pid: Option<u32>,
+    child: Option<std::process::Child>,
     ready_listener: Option<tokio::net::UnixListener>,
     replaced: bool,
 }
@@ -505,7 +496,6 @@ struct KrunkitLaunchLease<'a> {
 pub(crate) struct KrunkitLaunchRequest<'a> {
     pub(crate) daemon_attach_socket: &'a Path,
     pub(crate) attach_token: &'a str,
-    pub(crate) image: Option<String>,
     pub(crate) config: &'a Config,
     pub(crate) cache_dir: &'a Path,
     pub(crate) output: Output,
@@ -522,7 +512,7 @@ impl<'a> KrunkitLaunchLease<'a> {
             attach_token: String::new(),
             mount: None,
             timeout: Duration::ZERO,
-            pid: None,
+            child: None,
             ready_listener: None,
             replaced: false,
         }
@@ -536,7 +526,7 @@ impl<'a> KrunkitLaunchLease<'a> {
             attach_token: String::new(),
             mount: None,
             timeout: Duration::ZERO,
-            pid: None,
+            child: None,
             ready_listener: None,
             replaced: true,
         }
@@ -546,13 +536,8 @@ impl<'a> KrunkitLaunchLease<'a> {
         backend: &'a KrunkitBackend,
         request: KrunkitLaunchRequest<'_>,
     ) -> Result<Self> {
-        let guest_image = resolve_guest_image(
-            request.image,
-            request.config,
-            request.cache_dir,
-            request.output,
-        )
-        .await?;
+        let guest_image =
+            resolve_guest_image(request.config, request.cache_dir, request.output).await?;
         let mut lease = Self::new(backend, request.daemon_attach_socket, guest_image);
         request.attach_token.clone_into(&mut lease.attach_token);
         lease.mount = request.mount.map(str::to_owned);
@@ -560,20 +545,29 @@ impl<'a> KrunkitLaunchLease<'a> {
         Ok(lease)
     }
 
-    async fn run(mut self) -> Result<()> {
-        let result = self.run_to_publish().await;
+    async fn run(mut self, attached: impl Future<Output = Result<()>>) -> Result<()> {
+        let result = self.run_to_publish(attached).await;
         match result {
             Ok(()) => Ok(()),
-            Err(error) => match self.rollback().await {
-                Ok(()) => Err(error),
-                Err(cleanup) => {
-                    Err(error.context(format!("krunkit launch rollback also failed: {cleanup:#}")))
-                },
+            Err(error) => {
+                let cleanup = if self.replaced {
+                    self.stop_and_remove().await
+                } else {
+                    self.ready_listener.take();
+                    Ok(())
+                };
+                match cleanup {
+                    Ok(()) => Err(error),
+                    Err(cleanup) => {
+                        Err(error
+                            .context(format!("krunkit launch rollback also failed: {cleanup:#}")))
+                    },
+                }
             },
         }
     }
 
-    async fn run_to_publish(&mut self) -> Result<()> {
+    async fn run_to_publish(&mut self, attached: impl Future<Output = Result<()>>) -> Result<()> {
         ensure_krunkit_available()?;
         self.replace_stale().await?;
 
@@ -646,10 +640,18 @@ impl<'a> KrunkitLaunchLease<'a> {
         // Detached: the VM outlives this CLI invocation. The lease retains
         // the pid until readiness publishes, while explicit teardown later
         // rediscovers it from the durable pidfile.
-        command.spawn().context("spawn krunkit")?;
+        self.child = Some(command.spawn().context("spawn krunkit")?);
 
         let pid = self.wait_for_pidfile().await?;
-        self.pid = Some(pid);
+        let child_pid = self
+            .child
+            .as_ref()
+            .context("krunkit child identity was lost before pidfile publication")?
+            .id();
+        anyhow::ensure!(
+            child_pid == pid,
+            "krunkit pidfile named pid {pid}, but the spawned process is {child_pid}"
+        );
         let argv = KrunkitBackend::probe_argv(pid)?;
         assert_krunkit_locked_down(
             &argv,
@@ -660,7 +662,8 @@ impl<'a> KrunkitLaunchLease<'a> {
         .map_err(|violation| anyhow::anyhow!("refusing to run the krunkit VM: {violation}"))?;
 
         let mount = self.mount.clone();
-        self.wait_for_ready(mount.as_deref(), self.timeout).await
+        self.wait_for_ready(mount.as_deref(), self.timeout).await?;
+        attached.await
     }
 
     async fn replace_stale(&mut self) -> Result<()> {
@@ -730,46 +733,84 @@ impl<'a> KrunkitLaunchLease<'a> {
         }
     }
 
-    async fn rollback(&mut self) -> Result<()> {
-        if !self.replaced {
-            self.ready_listener.take();
-            return Ok(());
-        }
-        self.stop_and_remove().await
-    }
-
     async fn stop_and_remove(&mut self) -> Result<()> {
         self.ready_listener.take();
-        let pid = match self.pid.take() {
-            Some(pid) => Some(pid),
+        let pid = match self.child.as_ref() {
+            Some(child) => Some(child.id()),
             None => match self.backend.read_pidfile() {
                 Ok(pid) => pid,
-                Err(error) => {
-                    self.remove_owned_artifacts();
-                    return Err(error);
-                },
+                Err(error) => return Err(error),
             },
         };
         if let Some(pid) = pid.filter(|pid| process_alive(*pid)) {
             self.backend.try_restful_shutdown();
-            if !KrunkitBackend::wait_for_exit(pid, Duration::from_secs(5)).await {
+            if !self
+                .wait_for_process_exit(pid, Duration::from_secs(5))
+                .await?
+            {
                 let _ = Command::new("kill")
                     .arg("-TERM")
                     .arg(pid.to_string())
                     .status();
             }
-            if !KrunkitBackend::wait_for_exit(pid, Duration::from_secs(5)).await
-                && process_alive(pid)
+            if !self
+                .wait_for_process_exit(pid, Duration::from_secs(5))
+                .await?
             {
-                let _ = Command::new("kill")
-                    .arg("-KILL")
-                    .arg(pid.to_string())
-                    .status();
-                KrunkitBackend::wait_for_exit(pid, Duration::from_secs(3)).await;
+                if let Some(child) = self.child.as_mut() {
+                    child
+                        .kill()
+                        .with_context(|| format!("kill krunkit process {pid}"))?;
+                } else {
+                    let status = Command::new("kill")
+                        .arg("-KILL")
+                        .arg(pid.to_string())
+                        .status()
+                        .with_context(|| format!("kill krunkit process {pid}"))?;
+                    anyhow::ensure!(
+                        status.success(),
+                        "kill -KILL failed for live krunkit process {pid}"
+                    );
+                }
+                if !self
+                    .wait_for_process_exit(pid, Duration::from_secs(3))
+                    .await?
+                {
+                    anyhow::bail!(
+                        "krunkit process {pid} remained live after termination; \
+                         recovery identity was preserved"
+                    );
+                }
             }
         }
+        if let Some(child) = self.child.as_mut()
+            && child.try_wait()?.is_none()
+        {
+            let pid = child.id();
+            anyhow::bail!(
+                "krunkit process {pid} remained live after termination; recovery identity was preserved"
+            );
+        }
+        self.child = None;
         self.remove_owned_artifacts();
         Ok(())
+    }
+
+    async fn wait_for_process_exit(&mut self, pid: u32, timeout: Duration) -> Result<bool> {
+        let until = tokio::time::Instant::now() + timeout;
+        loop {
+            let exited = match self.child.as_mut() {
+                Some(child) => child.try_wait()?.is_some(),
+                None => !process_alive(pid),
+            };
+            if exited {
+                return Ok(true);
+            }
+            if tokio::time::Instant::now() >= until {
+                return Ok(false);
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
     }
 
     /// Remove only launch artifacts. The attach listener, verified guest
@@ -791,10 +832,14 @@ impl<'a> KrunkitLaunchLease<'a> {
 }
 
 impl KrunkitBackend {
-    pub(crate) async fn launch(&self, request: KrunkitLaunchRequest<'_>) -> Result<()> {
+    pub(crate) async fn launch(
+        &self,
+        request: KrunkitLaunchRequest<'_>,
+        attached: impl Future<Output = Result<()>>,
+    ) -> Result<()> {
         KrunkitLaunchLease::prepare(self, request)
             .await?
-            .run()
+            .run(attached)
             .await
     }
 }
@@ -859,15 +904,15 @@ mod tests {
     #[tokio::test]
     async fn guest_image_resolution_precedence() {
         // Tests run under a dev build (no OMNIFS_RELEASE at compile time), so
-        // the explicit path is resolved locally. The release path is covered
-        // by `default_guest_image_for` directly, mirroring the frontend image
-        // tests.
+        // the configured path is resolved locally. The release path is
+        // covered by `default_guest_image_for` directly, mirroring the
+        // frontend image tests.
         let temp = tempfile::tempdir().unwrap();
         let custom = temp.path().join("custom.raw");
         std::fs::write(&custom, b"guest image").unwrap();
-        let config = Config::default();
+        let mut config = Config::default();
+        config.frontend.guest_image = Some(custom.to_string_lossy().into_owned());
         let image = resolve_guest_image(
-            Some(custom.to_string_lossy().into_owned()),
             &config,
             temp.path(),
             Output::new(crate::ui::output::OutputMode::Human, false),
@@ -877,8 +922,8 @@ mod tests {
         assert_eq!(image, custom);
     }
 
-    #[test]
-    fn launch_lease_cleanup_scope_preserves_long_lived_resources() {
+    #[tokio::test]
+    async fn post_beacon_attachment_failure_rolls_back_invocation_resources() {
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().join("home");
         let dir = home.join(KRUNKIT_SUBDIR);
@@ -899,9 +944,25 @@ mod tests {
         std::fs::create_dir_all(dir.join(SEED_STAGING_NAME)).unwrap();
 
         let backend = KrunkitBackend::new(home);
-        let lease = KrunkitLaunchLease::new(&backend, &attach_socket, PathBuf::new());
-        lease.remove_owned_artifacts();
+        let mut lease = KrunkitLaunchLease::new(&backend, &attach_socket, PathBuf::new());
+        lease.replaced = true;
+        lease.child = Some(
+            std::process::Command::new("sleep")
+                .arg("1")
+                .spawn()
+                .unwrap(),
+        );
+        let pid = lease.child.as_ref().unwrap().id();
+        let attachment = async {
+            Err::<(), _>(anyhow::anyhow!(
+                "daemon attachment failed after the readiness beacon"
+            ))
+        };
+        let error = attachment.await.unwrap_err();
+        assert!(error.to_string().contains("after the readiness beacon"));
+        lease.stop_and_remove().await.unwrap();
 
+        assert!(!process_alive(pid));
         assert!(attach_socket.is_file());
         assert!(dir.join(SSH_KEY_NAME).is_file());
         assert!(!dir.join(PIDFILE_NAME).exists());
