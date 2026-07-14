@@ -7,7 +7,7 @@ use omnifs_workspace::authn::{AuthManifest, AuthScheme, StaticTokenScheme};
 use omnifs_workspace::creds::CredentialStore;
 use omnifs_workspace::ids::ProviderRef;
 use omnifs_workspace::mounts::{Auth, Name as MountName, ProviderMetadataInheritance, Spec};
-use omnifs_workspace::provider::{Catalog, ProviderManifest};
+use omnifs_workspace::provider::{Catalog, ProviderAuthManifest, ProviderManifest};
 
 use super::manifest_view::AuthManifestView;
 use super::readiness::AuthReadiness;
@@ -167,7 +167,12 @@ impl MountAuth {
         let manifest = omnifs_workspace::mounts::pinned_manifest(catalog, &spec)
             .ok()
             .flatten()
-            .and_then(|manifest| manifest.auth.as_ref().map(|auth| auth.wasm_auth_manifest()));
+            .and_then(|manifest| {
+                manifest
+                    .auth
+                    .as_ref()
+                    .map(ProviderAuthManifest::wasm_auth_manifest)
+            });
         Self { spec, manifest }
     }
 

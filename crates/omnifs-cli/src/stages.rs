@@ -13,7 +13,7 @@ use omnifs_caps::{Grants, Limits};
 use omnifs_workspace::config::Config;
 use omnifs_workspace::layout::WorkspaceLayout;
 use omnifs_workspace::mounts::{Name as MountName, Spec, UpgradePlan};
-use omnifs_workspace::provider::{Catalog, ProviderManifest};
+use omnifs_workspace::provider::{Catalog, ProviderAuthManifest, ProviderManifest};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
@@ -283,7 +283,10 @@ pub(crate) fn spec_creation(
         None => None,
     };
 
-    let auth_manifest = manifest.auth.as_ref().map(|auth| auth.wasm_auth_manifest());
+    let auth_manifest = manifest
+        .auth
+        .as_ref()
+        .map(ProviderAuthManifest::wasm_auth_manifest);
     let default_auth = selected_auth(
         args,
         &reference,

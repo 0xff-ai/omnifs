@@ -26,7 +26,9 @@ use omnifs_core::path::Path;
 use omnifs_wit::provider::types as wit_types;
 use omnifs_workspace::ids::ProviderId;
 use omnifs_workspace::mounts::Spec;
-use omnifs_workspace::provider::{ConfigMetadata, HostResourceBinding, ProviderStore};
+use omnifs_workspace::provider::{
+    ConfigMetadata, HostResourceBinding, ProviderAuthManifest, ProviderStore,
+};
 
 use std::path::{Path as StdPath, PathBuf};
 use std::sync::Arc;
@@ -437,7 +439,7 @@ impl Runtime {
         let auth_manifest = manifest
             .as_ref()
             .and_then(|manifest| manifest.auth.as_ref())
-            .map(|auth| auth.wasm_auth_manifest());
+            .map(ProviderAuthManifest::wasm_auth_manifest);
         let auth = Arc::new(
             AuthManager::from_config_manifest_service(
                 config.auth.as_ref(),

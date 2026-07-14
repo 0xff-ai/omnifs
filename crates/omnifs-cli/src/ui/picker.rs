@@ -22,7 +22,7 @@ use crossterm::{
 };
 use omnifs_caps::AccessNeed;
 use omnifs_workspace::authn::AuthScheme;
-use omnifs_workspace::provider::{Provider, ProviderManifest};
+use omnifs_workspace::provider::{Provider, ProviderAuthManifest, ProviderManifest};
 
 use crate::ui::style;
 
@@ -174,7 +174,10 @@ pub(crate) fn default_on(manifest: &ProviderManifest) -> bool {
     if default_is_oauth {
         return true;
     }
-    let auth_manifest = manifest.auth.as_ref().map(|auth| auth.wasm_auth_manifest());
+    let auth_manifest = manifest
+        .auth
+        .as_ref()
+        .map(ProviderAuthManifest::wasm_auth_manifest);
     let ambient = crate::commands::mount::detect::detect(auth_manifest.as_ref());
     !ambient.is_empty()
 }

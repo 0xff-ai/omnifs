@@ -19,7 +19,7 @@ use anyhow::Context;
 use clap::Args;
 use omnifs_workspace::config::{Config, EffectiveFrontend, Environment, HostOs as ResolverHostOs};
 use omnifs_workspace::layout::WorkspaceLayout;
-use omnifs_workspace::provider::{Provider, ProviderManifest};
+use omnifs_workspace::provider::{Provider, ProviderAuthManifest, ProviderManifest};
 
 use crate::commands::mount;
 use crate::launch::{LaunchOutcome, Launcher};
@@ -427,7 +427,10 @@ impl SetupArgs {
                 continue;
             }
             let requires_prompt = manifest.requires_mount_input();
-            let auth_manifest = manifest.auth.as_ref().map(|auth| auth.wasm_auth_manifest());
+            let auth_manifest = manifest
+                .auth
+                .as_ref()
+                .map(ProviderAuthManifest::wasm_auth_manifest);
             let ambient =
                 !crate::commands::mount::detect::detect(auth_manifest.as_ref()).is_empty();
             if requires_prompt {
