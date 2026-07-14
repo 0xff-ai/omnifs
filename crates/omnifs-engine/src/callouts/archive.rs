@@ -9,9 +9,9 @@
 //! per-file callouts; extraction runs once, directly on the host.
 
 #[cfg(test)]
-use crate::blob_cache::BlobMetadata;
+use crate::blob_cache::{BLOB_TMP_DIR, BlobMetadata};
 use crate::blob_cache::{BlobCache, BlobRecord};
-use crate::cache::identity::BlobGeneration;
+use crate::cache::identity::{BlobGeneration, BlobRequestId};
 use crate::callouts::{callout_error, callout_internal, callout_not_found, record_outcome};
 use crate::sandbox::publish;
 use crate::tools::archive::{self, ArchiveFormat, ExtractError, ExtractStats};
@@ -346,7 +346,7 @@ mod tests {
     #[test]
     fn extraction_dir_name_changes_with_full_key() {
         let base = ExtractKey {
-            cache_key: "pkg-1.0.crate".to_string(),
+            generation: BlobGeneration::from_bytes(b"pkg-1.0.crate"),
             format: ArchiveFormat::TarGz,
             strip_prefix: Some("alpha/".into()),
         };
@@ -373,23 +373,31 @@ mod tests {
         }
     }
 
-    fn insert_archive_blob(
-        cache: &BlobCache,
-        cache_key: &str,
-        blob_path: &Path,
-        archive_bytes: &[u8],
-    ) -> u64 {
-        std::fs::write(blob_path, archive_bytes).unwrap();
-        let record = cache.store(
-            cache_key.to_string(),
-            BlobMetadata {
-                status: 200,
-                content_type: Some("application/x-gzip".into()),
-                etag: None,
-                response_headers: Vec::new(),
-                size: archive_bytes.len() as u64,
-            },
+    fn insert_archive_blob(cache: &BlobCache, blob_path: &Path, archive_bytes: &[u8]) -> u64 {
+        let generation = BlobGeneration::from_bytes(archive_bytes);
+        let request = BlobRequestId::new(
+            None,
+            "GET",
+            &format!("https://archive.example.test/{}", blob_path.display()),
+            &[],
+            None,
         );
+        let staged = cache.cache_dir().join(BLOB_TMP_DIR).join("archive-stage");
+        std::fs::write(&staged, archive_bytes).unwrap();
+        let record = cache
+            .publish(
+                request,
+                generation,
+                &staged,
+                BlobMetadata {
+                    status: 200,
+                    content_type: Some("application/x-gzip".into()),
+                    etag: None,
+                    response_headers: Vec::new(),
+                    size: archive_bytes.len() as u64,
+                },
+            )
+            .unwrap();
         record.id
     }
 
@@ -401,10 +409,10 @@ mod tests {
         std::fs::create_dir_all(&blob_cache_dir).unwrap();
         std::fs::create_dir_all(&archive_root).unwrap();
 
-        let cache = Arc::new(BlobCache::new(blob_cache_dir.clone()));
+        let cache = Arc::new(BlobCache::new(blob_cache_dir.clone()).unwrap());
 
         let blob_path = blob_cache_dir.join("pkg-1.0.crate");
-        let blob_id = insert_archive_blob(&cache, "pkg-1.0.crate", &blob_path, &synthesize_targz());
+        let blob_id = insert_archive_blob(&cache, &blob_path, &synthesize_targz());
 
         let trees = Arc::new(TreeRefs::new());
         let executor = Arc::new(ArchiveExecutor::new(cache, trees.clone(), archive_root));
@@ -430,10 +438,9 @@ mod tests {
         std::fs::create_dir_all(&blob_cache_dir).unwrap();
         std::fs::create_dir_all(&archive_root).unwrap();
 
-        let cache = Arc::new(BlobCache::new(blob_cache_dir.clone()));
+        let cache = Arc::new(BlobCache::new(blob_cache_dir.clone()).unwrap());
         let blob_id = insert_archive_blob(
             &cache,
-            "multi-root.crate",
             &blob_cache_dir.join("multi-root.crate"),
             &synthesize_multi_root_targz(),
         );
@@ -480,10 +487,9 @@ mod tests {
         std::fs::create_dir_all(&blob_cache_dir).unwrap();
         std::fs::create_dir_all(&archive_root).unwrap();
 
-        let cache = Arc::new(BlobCache::new(blob_cache_dir.clone()));
+        let cache = Arc::new(BlobCache::new(blob_cache_dir.clone()).unwrap());
         let blob_id = insert_archive_blob(
             &cache,
-            "pkg-1.0.crate",
             &blob_cache_dir.join("pkg-1.0.crate"),
             &synthesize_targz(),
         );
@@ -516,14 +522,14 @@ mod tests {
         let stale = archive_root.join(".7-targz-deadbeef.tmp.123.456");
         std::fs::create_dir_all(&stale).unwrap();
         let key = ExtractKey {
-            cache_key: "pkg-1.0.crate".into(),
+            generation: BlobGeneration::from_bytes(b"pkg-1.0.crate"),
             format: ArchiveFormat::TarGz,
             strip_prefix: Some("pkg-1.0/".into()),
         };
         let keep = archive_root.join(key.dir_name());
         std::fs::create_dir_all(&keep).unwrap();
 
-        let cache = Arc::new(BlobCache::new(blob_cache_dir));
+        let cache = Arc::new(BlobCache::new(blob_cache_dir).unwrap());
         let trees = Arc::new(TreeRefs::new());
         let _executor = ArchiveExecutor::new(cache, trees, archive_root);
 
@@ -539,10 +545,9 @@ mod tests {
         std::fs::create_dir_all(&blob_cache_dir).unwrap();
         std::fs::create_dir_all(&archive_root).unwrap();
 
-        let cache = Arc::new(BlobCache::new(blob_cache_dir.clone()));
+        let cache = Arc::new(BlobCache::new(blob_cache_dir.clone()).unwrap());
         let blob_id = insert_archive_blob(
             &cache,
-            "pkg-1.0.crate",
             &blob_cache_dir.join("pkg-1.0.crate"),
             &synthesize_targz(),
         );

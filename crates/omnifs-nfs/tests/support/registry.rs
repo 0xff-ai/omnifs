@@ -15,7 +15,7 @@ pub fn load_registry_from_mount_dir(
     mounts_dir: &Path,
     handle: &tokio::runtime::Handle,
 ) -> MountRuntimes {
-    let cloner = Arc::new(GitCloner::new(clone_dir.to_path_buf()));
+    let cloner = Arc::new(GitCloner::new(clone_dir.to_path_buf()).unwrap());
     let context = HostContext::new(cache_dir, config_dir, providers_dir, credentials_file)
         .with_wasm_cache_dir(omnifs_engine::test_support::wasm_cache_dir());
     let desired = Registry::load(mounts_dir).expect("load mount snapshot");

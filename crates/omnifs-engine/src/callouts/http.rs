@@ -60,6 +60,12 @@ impl ValidatedRequest {
 }
 
 impl HttpStack {
+    pub(crate) fn auth_binding_for_url(&self, url: &str) -> Option<&AuthBinding> {
+        self.auth
+            .as_deref()
+            .filter(|binding| binding.applies_to_url(url))
+    }
+
     pub fn new(
         auth: Option<Arc<AuthBinding>>,
         capability: Arc<CapabilityChecker>,
@@ -113,13 +119,13 @@ impl HttpStack {
         headers: &[wit_types::Header],
         body: Option<&[u8]>,
     ) -> Result<ValidatedRequest, wit_types::CalloutResult> {
-        let parsed =
-            Url::parse(url).map_err(|e| callout_denied(format!("invalid URL `{url}`: {e}")))?;
+        let parsed = Url::parse(url).map_err(|_| callout_denied("invalid URL"))?;
         if !parsed.username().is_empty() || parsed.password().is_some() {
             return Err(callout_denied("URL credentials are not allowed"));
         }
         if let Err(e) = self.capability.check_url(url) {
-            return Err(callout_denied(e.to_string()));
+            let _ = e;
+            return Err(callout_denied("URL is not allowed"));
         }
         let method = reqwest::Method::from_str(method)
             .map_err(|_| callout_denied(format!("unsupported HTTP method: {method}")))?;

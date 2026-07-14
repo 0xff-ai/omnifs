@@ -644,12 +644,12 @@ pub(crate) fn record_subtree_handoff(operation_id: u64, tree_ref: u64) {
     record_outcome(&span, InspectorOutcome::Ok);
 }
 
-pub(crate) fn clone_span(operation_id: u64, cache_id: &str, clone_url: &str) -> Span {
+pub(crate) fn clone_span(operation_id: u64, cache_key: &str, clone_url: &str) -> Span {
     if !tracing::enabled!(target: TARGET, Level::INFO) {
         return Span::none();
     }
     let remote = omnifs_api::events::redact_git_remote(clone_url);
-    tracing::info_span!(target: TARGET, "provider.clone", operation_id, cache_id, remote, outcome = tracing::field::Empty)
+    tracing::info_span!(target: TARGET, "provider.clone", operation_id, cache_key, remote, outcome = tracing::field::Empty)
 }
 
 /// Record the terminal typed outcome which the layer emits when `span` closes.

@@ -75,12 +75,18 @@ enum BlobError {
     },
     #[error("network: {0}")]
     Network(String),
-    #[error("io: {0}")]
-    Io(#[from] std::io::Error),
+    #[error("I/O error")]
+    Io(#[source] std::io::Error),
     #[error("{0}")]
     NotFound(String),
     #[error("{0}")]
     Internal(String),
+}
+
+impl From<std::io::Error> for BlobError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(error)
+    }
 }
 
 impl BlobError {
@@ -96,7 +102,7 @@ impl BlobError {
 impl From<BlobCacheError> for BlobError {
     fn from(error: BlobCacheError) -> Self {
         match error {
-            BlobCacheError::Io(error) => Self::Io(error),
+            BlobCacheError::Io(_) => Self::Internal("blob cache I/O failed".to_string()),
             BlobCacheError::Internal(message) => Self::Internal(message),
         }
     }
@@ -157,7 +163,8 @@ impl BlobExecutor {
             {
                 Err(early) => early,
                 Ok(request) => {
-                    let request_id = request.blob_request_id(self.http.auth_binding());
+                    let request_id = request
+                        .blob_request_id(self.http.auth_binding_for_url(&request.original_url));
                     let lock = self.cache.request_lock(request_id);
                     let _guard = lock.lock().await;
                     if let Some(record) = self.cache.lookup_by_request(request_id) {

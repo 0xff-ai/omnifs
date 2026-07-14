@@ -53,7 +53,7 @@ pub async fn run(args: &DaemonArgs) -> anyhow::Result<()> {
     let telemetry = TelemetrySink::new(context.config_dir(), telemetry::enabled_from_env());
     telemetry.daemon_event(DaemonEvent::DaemonStart, telemetry_backend, 0);
 
-    let cloner = Arc::new(GitCloner::new(context.cache_dir().join("clones")));
+    let cloner = Arc::new(GitCloner::new(context.cache_dir().join("clones"))?);
 
     let registry = {
         let host_context = context.host_context();

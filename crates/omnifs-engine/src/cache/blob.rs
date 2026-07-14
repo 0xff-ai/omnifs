@@ -245,10 +245,9 @@ fn ensure_directory(path: &Path) -> Result<(), BlobCacheError> {
         match std::fs::symlink_metadata(&current) {
             Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {},
             Ok(_) => {
-                return Err(BlobCacheError::Internal(format!(
-                    "blob cache path is not an owned directory: {}",
-                    current.display()
-                )));
+                return Err(BlobCacheError::Internal(
+                    "blob cache path is not an owned directory".to_string(),
+                ));
             },
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 std::fs::create_dir(&current)?;
@@ -297,8 +296,48 @@ fn valid_body(path: &Path, generation: BlobGeneration, expected_size: u64) -> bo
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum BlobCacheError {
-    #[error("io: {0}")]
-    Io(#[from] std::io::Error),
+    #[error("blob cache I/O failed")]
+    Io(#[source] std::io::Error),
     #[error("internal: {0}")]
     Internal(String),
+}
+
+impl From<std::io::Error> for BlobCacheError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BlobCache;
+
+    #[test]
+    fn cache_root_failure_is_typed_without_host_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("blob-cache");
+        std::fs::write(&root, b"not a directory").unwrap();
+
+        let error = match BlobCache::new(root.clone()) {
+            Ok(_) => panic!("file cache root must fail closed"),
+            Err(error) => error,
+        };
+        assert!(!error.to_string().contains(root.to_string_lossy().as_ref()));
+        assert!(error.to_string().contains("owned directory"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_cache_root_fails_closed_without_host_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("blob-cache");
+        std::os::unix::fs::symlink(temp.path(), &root).unwrap();
+
+        let error = match BlobCache::new(root.clone()) {
+            Ok(_) => panic!("symlinked cache root must fail closed"),
+            Err(error) => error,
+        };
+        assert!(!error.to_string().contains(root.to_string_lossy().as_ref()));
+        assert!(error.to_string().contains("owned directory"));
+    }
 }

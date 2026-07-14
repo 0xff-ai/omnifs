@@ -337,6 +337,8 @@ async fn fetch_blob_uses_same_oauth_retry_path() {
     let tokens = FakeTokenServer::start(false).await;
     let api = FakeHttpsApiServer::start("Bearer access-refresh-1", "blob-body").await;
     let (auth, store, key) = oauth_binding(tokens.endpoint(), FakeHttpsApiServer::domain());
+    assert!(auth.applies_to_url(&api.url()));
+    assert!(!auth.applies_to_url("https://127.0.0.1/resource"));
     seed_oauth(store.as_ref(), &key, "old-access", "refresh-1", 3600);
     auth.authorization_for(&api.url())
         .await

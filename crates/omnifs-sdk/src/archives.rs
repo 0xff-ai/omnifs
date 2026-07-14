@@ -9,14 +9,13 @@
 //! only brokers the handle.
 //!
 //! The blob must already be in the host blob cache (see [`crate::blob`]);
-//! fetch it first with `.into_blob().with_cache_key(..)`. Typical shape:
+//! fetch it first with `.into_blob()`. Typical shape:
 //!
 //! ```ignore
 //! let blob = cx
 //!     .endpoint::<ArxivWeb>()
 //!     .get(source_path)
 //!     .into_blob()
-//!     .cache_key(format!("arxiv/papers/{id}/{version}/source.tar.gz"))
 //!     .fetch()
 //!     .await?;
 //! let tree = cx.archives().open(blob.id).send().await?;

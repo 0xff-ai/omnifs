@@ -1203,7 +1203,7 @@ mod tests {
         let config_dir = tempfile::tempdir().expect("config dir");
         let providers_dir = tempfile::tempdir().expect("providers dir");
         let credentials_file = config_dir.path().join("credentials.json");
-        let cloner = Arc::new(GitCloner::new(cache_dir.path().join("clones")));
+        let cloner = Arc::new(GitCloner::new(cache_dir.path().join("clones")).unwrap());
         let mounts_dir = tempfile::tempdir().expect("mounts dir");
         let desired = omnifs_workspace::mounts::Registry::load(mounts_dir.path())
             .expect("load mount snapshot");

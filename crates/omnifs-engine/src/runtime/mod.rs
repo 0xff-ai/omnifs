@@ -184,7 +184,6 @@ impl CacheDirs {
             blob: provider_root.join(BLOB_CACHE_SUBDIR),
             archive_root: provider_root.join(ARCHIVE_CACHE_SUBDIR),
         };
-        dirs.prepare_all()?;
         Ok(dirs)
     }
 
@@ -195,17 +194,6 @@ impl CacheDirs {
     #[cfg(test)]
     fn blob_path(cache_dir: &StdPath, mount_name: &str) -> PathBuf {
         Self::provider_root(cache_dir, mount_name).join(BLOB_CACHE_SUBDIR)
-    }
-
-    fn prepare_all(&self) -> std::result::Result<(), BuildError> {
-        [&self.blob, &self.archive_root]
-            .into_iter()
-            .try_for_each(|path| {
-                std::fs::create_dir_all(path).map_err(|source| BuildError::CacheDir {
-                    path: path.clone(),
-                    source,
-                })
-            })
     }
 }
 
@@ -713,30 +701,33 @@ fn validate_instance_config(
 
 #[cfg(test)]
 mod tests {
-    use super::{BuildError, CacheDirs};
+    use super::CacheDirs;
+    use crate::blob_cache::BlobCache;
 
     #[test]
-    fn provider_cache_dirs_are_created_before_runtime_uses_them() {
+    fn provider_cache_dirs_are_created_by_their_owners() {
         let dir = tempfile::tempdir().unwrap();
 
         let cache_dirs = CacheDirs::prepare(dir.path(), "linear").unwrap();
 
-        assert!(cache_dirs.blob.is_dir());
-        assert!(cache_dirs.archive_root.is_dir());
+        assert!(!cache_dirs.blob.exists());
+        assert!(!cache_dirs.archive_root.exists());
+        let cache = BlobCache::new(cache_dirs.blob).unwrap();
+        assert!(cache.cache_dir().is_dir());
     }
 
     #[test]
-    fn provider_cache_dir_creation_failure_stops_runtime_build() {
+    fn blob_cache_creation_failure_stops_runtime_build() {
         let dir = tempfile::tempdir().unwrap();
         let blob_path = CacheDirs::blob_path(dir.path(), "linear");
         std::fs::create_dir_all(blob_path.parent().unwrap()).unwrap();
         std::fs::write(&blob_path, "not a directory").unwrap();
 
-        let error = CacheDirs::prepare(dir.path(), "linear").unwrap_err();
+        let error = match BlobCache::new(blob_path) {
+            Ok(_) => panic!("file blob cache root must fail closed"),
+            Err(error) => error,
+        };
 
-        assert!(matches!(
-            error,
-            BuildError::CacheDir { path, .. } if path == blob_path
-        ));
+        assert!(error.to_string().contains("owned directory"));
     }
 }

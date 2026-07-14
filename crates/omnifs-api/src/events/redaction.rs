@@ -33,9 +33,11 @@ pub fn is_sensitive_query_param(name: &str) -> bool {
 /// Build a compact HTTP callout summary: `GET host/path` without query secrets.
 pub fn redact_http_url_for_summary(method: &str, raw_url: &str) -> String {
     let Ok(parsed) = url::Url::parse(raw_url) else {
-        return format!("{method} {raw_url}");
+        return format!("{method} <redacted-url>");
     };
-    let host = parsed.host_str().unwrap_or("unknown");
+    let Some(host) = parsed.host_str() else {
+        return format!("{method} <redacted-url>");
+    };
     let path = parsed.path();
     format!("{method} {host}{path}")
 }
@@ -44,19 +46,26 @@ pub fn redact_http_url_for_summary(method: &str, raw_url: &str) -> String {
 pub fn redact_git_remote(raw: &str) -> String {
     let trimmed = raw.trim();
     if let Some(rest) = trimmed.strip_prefix("git@") {
-        let (host, path) = rest.split_once(':').unwrap_or((rest, ""));
+        let Some((host, path)) = rest.split_once(':') else {
+            return "<redacted-git-remote>".to_string();
+        };
+        if host.is_empty() || path.is_empty() {
+            return "<redacted-git-remote>".to_string();
+        }
         let path = path.trim_end_matches(".git");
         return format!("{host}:{path}");
     }
     if let Ok(parsed) = url::Url::parse(trimmed) {
-        let host = parsed.host_str().unwrap_or("unknown");
+        let Some(host) = parsed.host_str() else {
+            return "<redacted-git-remote>".to_string();
+        };
         let path = parsed
             .path()
             .trim_start_matches('/')
             .trim_end_matches(".git");
         return format!("{host}:{path}");
     }
-    trimmed.to_string()
+    "<redacted-git-remote>".to_string()
 }
 
 pub fn write_truncated(f: &mut fmt::Formatter<'_>, value: &str, max: usize) -> fmt::Result {
@@ -132,9 +141,10 @@ mod tests {
     fn http_summary_falls_back_for_unparseable_url() {
         let raw = "not-a-url";
         let summary = redact_http_url_for_summary("POST", raw);
-        // Must not panic; must include the method and original text.
+        // Malformed input must stay opaque because spans are created before validation.
         assert!(summary.starts_with("POST "));
-        assert!(summary.contains(raw));
+        assert!(!summary.contains(raw));
+        assert_eq!(summary, "POST <redacted-url>");
     }
 
     // ── redact_git_remote ─────────────────────────────────────────────────
@@ -158,7 +168,12 @@ mod tests {
             redact_git_remote("https://github.com/org/repo.git"),
             "github.com:org/repo"
         );
-        assert_eq!(redact_git_remote("  somepath  "), "somepath");
+        assert_eq!(redact_git_remote("  somepath  "), "<redacted-git-remote>");
+        assert_eq!(
+            redact_git_remote("https://user:secret@["),
+            "<redacted-git-remote>"
+        );
+        assert_eq!(redact_git_remote("git@malformed"), "<redacted-git-remote>");
     }
 
     // ── write_truncated ───────────────────────────────────────────────────

@@ -206,7 +206,7 @@ impl OpenedFile {
 /// async fn tree(cx: Cx, key: RepoKey) -> Result<TreeRef> {
 ///     let opened = cx
 ///         .git()
-///         .open_repo("github.com/o/r".to_string(), "git@github.com:o/r.git".to_string())
+///         .open_repo("git@github.com:o/r.git".to_string())
 ///         .await?;
 ///     Ok(TreeRef::new(opened.tree))
 /// }

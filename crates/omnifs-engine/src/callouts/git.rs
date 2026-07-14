@@ -104,15 +104,11 @@ fn canonical_remote(raw: &str) -> Result<String, GitError> {
             .bytes()
             .any(|byte| byte.is_ascii_whitespace() || byte == 0)
     {
-        return Err(GitError::Invalid(
-            "Git remote is empty or contains whitespace".to_string(),
-        ));
+        return Err(GitError::Invalid("invalid Git remote".to_string()));
     }
     if let Ok(mut url) = Url::parse(remote) {
         if !matches!(url.scheme(), "https" | "ssh" | "git") || url.host_str().is_none() {
-            return Err(GitError::Invalid(format!(
-                "unsupported Git remote `{remote}`"
-            )));
+            return Err(GitError::Invalid("unsupported Git remote".to_string()));
         }
         url.set_username("")
             .map_err(|_| GitError::Invalid("invalid Git remote username".to_string()))?;
@@ -123,12 +119,12 @@ fn canonical_remote(raw: &str) -> Result<String, GitError> {
 
     let (user_host, path) = remote
         .split_once(':')
-        .ok_or_else(|| GitError::Invalid(format!("invalid Git remote `{remote}`")))?;
+        .ok_or_else(|| GitError::Invalid("invalid Git remote".to_string()))?;
     let host = user_host
         .rsplit_once('@')
         .map_or(user_host, |(_, host)| host);
     if host.is_empty() || path.is_empty() || path.starts_with('/') {
-        return Err(GitError::Invalid(format!("invalid Git remote `{remote}`")));
+        return Err(GitError::Invalid("invalid Git remote".to_string()));
     }
     Ok(format!("{host}:{path}"))
 }
@@ -144,8 +140,8 @@ enum GitError {
 }
 
 impl From<CapabilityError> for GitError {
-    fn from(error: CapabilityError) -> Self {
-        Self::Denied(error.to_string())
+    fn from(_error: CapabilityError) -> Self {
+        Self::Denied("Git remote is not allowed".to_string())
     }
 }
 
@@ -170,7 +166,12 @@ impl From<GitError> for wit_types::CalloutResult {
 
 #[cfg(test)]
 mod tests {
-    use super::{GitId, canonical_remote};
+    use super::{GitCloner, GitExecutor, GitId, canonical_remote};
+    use crate::capability::CapabilityChecker;
+    use crate::tree_refs::TreeRefs;
+    use omnifs_caps::Allowlist;
+    use omnifs_wit::provider::types as wit_types;
+    use std::sync::Arc;
 
     #[test]
     fn git_identity_excludes_remote_credentials_but_keeps_reference_and_mount() {
@@ -186,5 +187,37 @@ mod tests {
             GitId::new("mount", &first, Some("main")),
             GitId::new("mount", &first, Some("release"))
         );
+    }
+
+    #[test]
+    fn malformed_authenticated_remote_never_enters_wit_error_text() {
+        let temp = tempfile::tempdir().unwrap();
+        let executor = GitExecutor::new(
+            Arc::new(GitCloner::new(temp.path().to_path_buf()).unwrap()),
+            Arc::new(CapabilityChecker::new(Allowlist {
+                domains: Vec::new(),
+                git_repos: vec!["*".to_string()],
+                needs_git: true,
+                unix_sockets: Vec::new(),
+            })),
+            Arc::new(TreeRefs::new()),
+            "mount",
+        );
+
+        for remote in [
+            "ftp://alice:super-secret@example.test/repo.git",
+            "https://alice:super-secret@[",
+        ] {
+            let result = executor.open_repo(
+                &wit_types::GitOpenRequest {
+                    clone_url: remote.to_string(),
+                    reference: None,
+                },
+                1,
+            );
+            let text = format!("{result:?}");
+            assert!(!text.contains(remote));
+            assert!(!text.contains("super-secret"));
+        }
     }
 }

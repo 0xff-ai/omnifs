@@ -25,12 +25,10 @@ pub enum CloneError {
     Timeout { timeout_secs: u64 },
     #[error("failed to spawn git")]
     Spawn(#[from] std::io::Error),
-    #[error("invalid git reference: {0}")]
-    InvalidReference(String),
+    #[error("invalid git reference")]
+    InvalidReference,
     #[error("existing clone identity is unavailable")]
     ExistingEntry,
-    #[error("clone metadata does not match the requested identity")]
-    MetadataConflict,
     #[error("failed to publish clone")]
     Publish,
 }
@@ -42,11 +40,12 @@ pub struct GitCloner {
 }
 
 impl GitCloner {
-    pub fn new(cache_dir: PathBuf) -> Self {
-        Self {
+    pub fn new(cache_dir: PathBuf) -> Result<Self, CloneError> {
+        ensure_directory(&cache_dir)?;
+        Ok(Self {
             cache_dir,
             locks: DashMap::new(),
-        }
+        })
     }
 
     pub(crate) fn validate_reference(reference: &str) -> Result<(), CloneError> {
@@ -68,7 +67,7 @@ impl GitCloner {
                 .split('/')
                 .any(|part| part.is_empty() || part.starts_with('.') || part.ends_with(".lock"))
         {
-            return Err(CloneError::InvalidReference(reference.to_string()));
+            return Err(CloneError::InvalidReference);
         }
         Ok(())
     }
@@ -153,12 +152,14 @@ impl GitCloner {
 
     fn is_valid_clone(path: &Path, remote: &str, reference: Option<&str>) -> bool {
         let wrapper = std::fs::symlink_metadata(path)
+            .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink());
+        let repo = std::fs::symlink_metadata(path.join(CLONE_REPO_DIR))
+            .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink());
+        let git = std::fs::symlink_metadata(path.join(CLONE_REPO_DIR).join(".git"))
             .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
-            && std::fs::symlink_metadata(path.join(CLONE_REPO_DIR).join(".git"))
-                .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
             && std::fs::symlink_metadata(Self::binding_path(path))
                 .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink());
-        if !wrapper {
+        if !(wrapper && repo && git) {
             return false;
         }
         let Ok(raw) = std::fs::read_to_string(Self::binding_path(path)) else {
@@ -250,4 +251,32 @@ fn ensure_directory(path: &Path) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::{CLONE_REPO_DIR, GitCloner};
+
+    #[test]
+    fn clone_validation_rejects_symlinked_wrapper_and_repo() {
+        let temp = tempfile::tempdir().unwrap();
+        let remote = "https://example.test/repo.git";
+        let reference = Some("main");
+
+        let wrapper_target = temp.path().join("wrapper-target");
+        std::fs::create_dir_all(wrapper_target.join(CLONE_REPO_DIR).join(".git")).unwrap();
+        GitCloner::write_binding(&GitCloner::binding_path(&wrapper_target), remote, reference)
+            .unwrap();
+        let wrapper_link = temp.path().join("wrapper-link");
+        std::os::unix::fs::symlink(&wrapper_target, &wrapper_link).unwrap();
+        assert!(!GitCloner::is_valid_clone(&wrapper_link, remote, reference));
+
+        let repo_target = temp.path().join("repo-target");
+        std::fs::create_dir_all(repo_target.join(".git")).unwrap();
+        let wrapper = temp.path().join("wrapper");
+        std::fs::create_dir(&wrapper).unwrap();
+        std::os::unix::fs::symlink(&repo_target, wrapper.join(CLONE_REPO_DIR)).unwrap();
+        GitCloner::write_binding(&GitCloner::binding_path(&wrapper), remote, reference).unwrap();
+        assert!(!GitCloner::is_valid_clone(&wrapper, remote, reference));
+    }
 }

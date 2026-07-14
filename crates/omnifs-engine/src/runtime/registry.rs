@@ -398,7 +398,7 @@ mod tests {
                 &paths.credentials_file,
             )
             .with_wasm_cache_dir(crate::test_support::wasm_cache_dir()),
-            Arc::new(GitCloner::new(cache_dir.path().join("clones"))),
+            Arc::new(GitCloner::new(cache_dir.path().join("clones")).unwrap()),
             &Registry::load(mounts_dir.path()).expect("load selected snapshot"),
             &tokio::runtime::Handle::current(),
         );
@@ -437,7 +437,7 @@ mod tests {
                 .with_wasm_cache_dir(crate::test_support::wasm_cache_dir());
         let result = MountRuntimes::load(
             context,
-            Arc::new(GitCloner::new(root.path().join("clones"))),
+            Arc::new(GitCloner::new(root.path().join("clones")).unwrap()),
             &Registry::load(&mounts).expect("load selected snapshot"),
             &tokio::runtime::Handle::current(),
         );
@@ -458,7 +458,7 @@ mod tests {
         );
         let result = MountRuntimes::load(
             context,
-            Arc::new(GitCloner::new(root.path().join("clones"))),
+            Arc::new(GitCloner::new(root.path().join("clones")).unwrap()),
             &Registry::load(&mounts).expect("load selected snapshot"),
             &tokio::runtime::Handle::current(),
         );
@@ -513,7 +513,7 @@ mod tests {
         .with_wasm_cache_dir(crate::test_support::wasm_cache_dir());
         let result = MountRuntimes::load(
             context,
-            Arc::new(GitCloner::new(root.path().join("clones"))),
+            Arc::new(GitCloner::new(root.path().join("clones")).unwrap()),
             &Registry::load(&mounts).expect("load selected snapshot"),
             &tokio::runtime::Handle::current(),
         );
@@ -562,7 +562,7 @@ mod tests {
         .with_wasm_cache_dir(crate::test_support::wasm_cache_dir());
         let registry = MountRuntimes::load(
             context,
-            Arc::new(GitCloner::new(root.path().join("clones"))),
+            Arc::new(GitCloner::new(root.path().join("clones")).unwrap()),
             &Registry::load(&mounts).expect("load selected snapshot"),
             &tokio::runtime::Handle::current(),
         )

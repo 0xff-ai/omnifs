@@ -969,7 +969,7 @@ async fn test_cache_isolated_by_mount_name() {
     let clone_dir = tempfile::tempdir().unwrap();
     let cache_dir = tempfile::tempdir().unwrap();
     let config_dir = tempfile::tempdir().unwrap();
-    let cloner = Arc::new(GitCloner::new(clone_dir.path().to_path_buf()));
+    let cloner = Arc::new(GitCloner::new(clone_dir.path().to_path_buf()).unwrap());
     let wasm_path = provider_wasm_path("test_provider.wasm");
     let mut config_a = config.clone();
     config_a.mount = "mount-a".to_string();

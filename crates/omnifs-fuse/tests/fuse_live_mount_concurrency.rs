@@ -247,7 +247,7 @@ impl MountFixture {
         let desired =
             omnifs_workspace::mounts::Registry::load(&mounts_dir).expect("load mount snapshot");
 
-        let cloner = Arc::new(GitCloner::new(cache_dir.join("clones")));
+        let cloner = Arc::new(GitCloner::new(cache_dir.join("clones")).unwrap());
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
         let registry = Arc::new(
             omnifs_engine::test_support::load_mount_runtimes_for_callout_tests(

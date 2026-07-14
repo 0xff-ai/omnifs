@@ -90,7 +90,7 @@ fn build_harness() -> FuseHarness {
             }}"#
     );
 
-    let cloner = Arc::new(GitCloner::new(cache_dir.path().join("clones")));
+    let cloner = Arc::new(GitCloner::new(cache_dir.path().join("clones")).unwrap());
     let mounts_dir = tempfile::tempdir().expect("mounts dir");
     std::fs::write(mounts_dir.path().join("test.json"), mount_config.as_bytes())
         .expect("write mount spec");

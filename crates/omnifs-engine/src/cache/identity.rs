@@ -1,5 +1,6 @@
 //! Stable, domain-separated identities for host-owned callout storage.
 
+use omnifs_workspace::authn::CredentialId;
 use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -13,9 +14,10 @@ pub(crate) struct BlobGeneration([u8; 32]);
 pub(crate) struct GitId([u8; 32]);
 
 impl BlobRequestId {
-    /// Hash validated request material. Host-injected auth is deliberately
-    /// absent because it is not part of the provider request identity.
+    /// Hash validated request material plus the stable credential partition.
+    /// Token bytes and refresh generations never enter this identity.
     pub(crate) fn new(
+        auth: Option<&CredentialId>,
         method: &str,
         canonical_url: &str,
         headers: &[(String, String)],
@@ -29,9 +31,14 @@ impl BlobRequestId {
             },
             None => body_material.push(0),
         }
+        let auth_partition = auth.map(ToString::to_string);
         Self(hash_parts(
             b"omnifs/blob-request/v1",
             &[
+                auth_partition
+                    .as_deref()
+                    .unwrap_or("unauthenticated")
+                    .as_bytes(),
                 method.as_bytes(),
                 canonical_url.as_bytes(),
                 &encode_headers(headers),

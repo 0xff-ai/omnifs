@@ -96,7 +96,7 @@ impl RuntimeHarness {
             .map_err(|error| BuildError::InvalidConfig(error.to_string()))?;
         }
         let wasm_path = catalog.provider_path_by_id(&spec.provider.id);
-        let cloner = Arc::new(GitCloner::new(clone_dir.path().to_path_buf()));
+        let cloner = Arc::new(GitCloner::new(clone_dir.path().to_path_buf()).unwrap());
         let caches = Caches::open(cache_dir.path()).map_err(|error| BuildError::CacheDir {
             path: cache_dir.path().to_path_buf(),
             source: std::io::Error::other(error.to_string()),

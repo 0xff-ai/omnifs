@@ -1134,9 +1134,8 @@ mod tests {
         let context = crate::context::DaemonContext::resolve(&args).unwrap();
         context.prepare_startup_dirs().unwrap();
 
-        let cloner = Arc::new(omnifs_engine::GitCloner::new(
-            context.cache_dir().join("clones"),
-        ));
+        let cloner =
+            Arc::new(omnifs_engine::GitCloner::new(context.cache_dir().join("clones")).unwrap());
         let desired = omnifs_workspace::mounts::Registry::load(&args.mount_snapshot).unwrap();
         let registry = Arc::new(
             omnifs_engine::MountRuntimes::load(
