@@ -1,18 +1,20 @@
 //! Mounted object dispatch, collection resolution, and read targets.
 
-use super::super::handlers::Handler;
+use super::super::handlers::{RouteValidator, captures_validator};
 use super::super::pattern::{CaptureLocation, Pattern};
 use super::serve::ObjectRoute;
-use super::spec::{AnchorShape, ComputedFn, ObjectDefinition};
+use super::spec::{AnchorShape, CollectionHandler, ComputedFn, ObjectDefinition};
 use crate::browse::{CachedCanonical, Effects, ReadOutcome};
 use crate::captures::Captures;
 use crate::cx::Cx;
 use crate::error::{ProviderError, Result};
 use crate::file_attrs::{Stability, VersionToken};
 use crate::handler::OpenedFile;
-use crate::object::{FacetAxis, FacetMetadata, Key, Object, ObjectKind};
+use crate::object::{FacetAxis, FacetMetadata, Key, Object};
 use crate::projection::FileProjection;
 use omnifs_core::ContentType;
+use std::future::Future;
+use std::pin::Pin;
 
 /// Which kind of live face a [`ObjectLeaf::Live`] is: the dispatch path
 /// differs (`Direct`/`Blob` serve through `read_file`, `Stream` through
@@ -121,8 +123,8 @@ pub(in crate::router) struct ObjectRouteEntry<S> {
     pub pattern: Pattern,
     pub shape: AnchorShape,
     pub leaves: Vec<ListingLeaf>,
-    pub read: Handler<Cx<S>, ObjectReadInput, ReadOutcome>,
-    pub list: Handler<Cx<S>, ObjectListInput, ObjectListing>,
+    pub read: BoxedObjectRead<S>,
+    pub list: BoxedObjectList<S>,
     /// Per-leaf live-face handlers (direct/blob/stream/object), keyed by leaf
     /// name. Shared with the spec so an alias mount replays the same closures.
     pub face_handlers: std::rc::Rc<std::collections::BTreeMap<String, FaceHandler<S>>>,
@@ -130,6 +132,7 @@ pub(in crate::router) struct ObjectRouteEntry<S> {
     /// template equals this anchor, so it merges into this anchor's listing/lookup
     /// instead of getting a separate dir route.
     pub anchor_collection: Option<AnchorCollection<S>>,
+    pub validator: RouteValidator,
 }
 
 /// An ANCHOR-topology collection attached to a parent object's anchor: the
@@ -137,20 +140,8 @@ pub(in crate::router) struct ObjectRouteEntry<S> {
 /// anchor listing runs it, merges the child-name entries, and emits each fresh
 /// child's canonical store.
 pub(in crate::router) struct AnchorCollection<S> {
-    pub handler: Handler<crate::handler::DirCx<S>, (), crate::projection::DirProjection>,
-}
-
-/// Typed input for one object read. The operation context remains the first
-/// generic of [`Handler`], while these read-specific values stay explicit.
-pub(in crate::router) struct ObjectReadInput {
-    pub target: ObjectReadTarget,
-    pub cached: Option<CachedCanonical>,
-    pub read_path: String,
-}
-
-/// Typed input for one object listing.
-pub(in crate::router) struct ObjectListInput {
-    pub list_path: String,
+    pub handler: CollectionHandler<S>,
+    pub child_view: std::rc::Rc<ResolvedChildView>,
 }
 
 impl<S> ObjectRouteEntry<S> {
@@ -168,7 +159,8 @@ impl<S> ObjectRouteEntry<S> {
         };
         let dir_cx =
             crate::handler::DirCx::new(cx.clone(), crate::handler::DirIntent::List { cursor });
-        let projection = collection.handler.call(&dir_cx, (), caps.clone()).await?;
+        let projection =
+            (collection.handler)(dir_cx, caps.clone(), collection.child_view.clone()).await?;
         Ok(Some(projection))
     }
 }
@@ -177,10 +169,20 @@ impl<S> ObjectRouteEntry<S> {
 /// it (read-file vs open-file).
 pub(in crate::router) enum FaceHandler<S> {
     /// A direct/blob/object face: served through `read_file`.
-    Direct(Handler<Cx<S>, (), FileProjection>),
+    Direct(BoxedFaceRead<S>),
     /// A stream face: served through `open_file`.
-    Stream(Handler<Cx<S>, (), OpenedFile>),
+    Stream(BoxedFaceOpen<S>),
 }
+
+pub(in crate::router) type BoxedFaceRead<S> = Box<
+    dyn for<'a> Fn(
+        &'a Cx<S>,
+        Captures,
+    ) -> Pin<Box<dyn Future<Output = Result<FileProjection>> + 'a>>,
+>;
+pub(in crate::router) type BoxedFaceOpen<S> = Box<
+    dyn for<'a> Fn(&'a Cx<S>, Captures) -> Pin<Box<dyn Future<Output = Result<OpenedFile>> + 'a>>,
+>;
 
 /// What kind of face a listed leaf is, resolved by exact leaf-name match (not
 /// by extension): this is how a computed leaf named `notes.md` routes to its
@@ -216,6 +218,24 @@ impl ListingLeaf {
         matches!(self.kind, LeafKind::Stream)
     }
 }
+
+pub(in crate::router) type BoxedObjectRead<S> = Box<
+    dyn for<'a> Fn(
+        &'a Cx<S>,
+        Captures,
+        ObjectReadTarget,
+        Option<CachedCanonical>,
+        String,
+    ) -> Pin<Box<dyn Future<Output = Result<ReadOutcome>> + 'a>>,
+>;
+
+pub(in crate::router) type BoxedObjectList<S> = Box<
+    dyn for<'a> Fn(
+        &'a Cx<S>,
+        Captures,
+        String,
+    ) -> Pin<Box<dyn Future<Output = Result<ObjectListing>> + 'a>>,
+>;
 
 /// What an anchor's list dispatch needs.
 pub(in crate::router) struct ObjectListing {
@@ -272,6 +292,7 @@ where
         list: route.list_handler(),
         face_handlers: definition.face_handlers.clone(),
         anchor_collection: None,
+        validator: captures_validator::<O::Key>(),
     };
     Ok(entry)
 }
@@ -552,7 +573,7 @@ impl<S> ObjectRouteEntry<S> {
         caps: Captures,
     ) -> Result<FileProjection> {
         match self.face_handlers.get(name) {
-            Some(FaceHandler::Direct(handler)) => handler.call(cx, (), caps).await,
+            Some(FaceHandler::Direct(handler)) => handler(cx, caps).await,
             _ => Err(ProviderError::not_found(format!("face {name} not found"))),
         }
     }
@@ -565,7 +586,7 @@ impl<S> ObjectRouteEntry<S> {
         caps: Captures,
     ) -> Result<OpenedFile> {
         match self.face_handlers.get(name) {
-            Some(FaceHandler::Stream(handler)) => handler.call(cx, (), caps).await,
+            Some(FaceHandler::Stream(handler)) => handler(cx, caps).await,
             _ => Err(ProviderError::not_found(format!(
                 "stream face {name} not found"
             ))),

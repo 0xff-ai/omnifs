@@ -649,7 +649,7 @@ impl<S> RoutedEntry for DirEntry<S> {
         &self.pattern
     }
     fn route_validator(&self) -> &RouteValidator {
-        self.handler.validator()
+        &self.validator
     }
 }
 
@@ -658,7 +658,7 @@ impl<S> RoutedEntry for FileEntry<S> {
         &self.pattern
     }
     fn route_validator(&self) -> &RouteValidator {
-        self.handler.validator()
+        &self.validator
     }
 }
 
@@ -667,7 +667,7 @@ impl<S> RoutedEntry for TreeRefEntry<S> {
         &self.pattern
     }
     fn route_validator(&self) -> &RouteValidator {
-        self.handler.validator()
+        &self.validator
     }
 }
 
@@ -676,7 +676,7 @@ impl<S> RoutedEntry for super::object::ObjectRouteEntry<S> {
         &self.pattern
     }
     fn route_validator(&self) -> &RouteValidator {
-        self.read.validator()
+        &self.validator
     }
 }
 

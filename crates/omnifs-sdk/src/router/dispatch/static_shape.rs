@@ -105,38 +105,26 @@ impl<S> Shape<'_, S> {
         &'a self,
         parent_segments: &'a [&'a str],
     ) -> impl Iterator<Item = (&'a Pattern, &'a RouteValidator, BrowseEntryKind, bool)> + 'a {
-        let dirs = self.router.dirs.iter().map(|r| {
-            (
-                &r.pattern,
-                r.handler.validator(),
-                BrowseEntryKind::Directory,
-                false,
-            )
-        });
-        let files = self.router.files.iter().map(|r| {
-            (
-                &r.pattern,
-                r.handler.validator(),
-                BrowseEntryKind::File,
-                r.ranged,
-            )
-        });
-        let treerefs = self.router.treerefs.iter().map(|r| {
-            (
-                &r.pattern,
-                r.handler.validator(),
-                BrowseEntryKind::Directory,
-                false,
-            )
-        });
-        let objects = self.router.objects.iter().map(|r| {
-            (
-                &r.pattern,
-                r.read.validator(),
-                BrowseEntryKind::Directory,
-                false,
-            )
-        });
+        let dirs = self
+            .router
+            .dirs
+            .iter()
+            .map(|r| (&r.pattern, &r.validator, BrowseEntryKind::Directory, false));
+        let files = self
+            .router
+            .files
+            .iter()
+            .map(|r| (&r.pattern, &r.validator, BrowseEntryKind::File, r.ranged));
+        let treerefs = self
+            .router
+            .treerefs
+            .iter()
+            .map(|r| (&r.pattern, &r.validator, BrowseEntryKind::Directory, false));
+        let objects = self
+            .router
+            .objects
+            .iter()
+            .map(|r| (&r.pattern, &r.validator, BrowseEntryKind::Directory, false));
         dirs.chain(files)
             .chain(treerefs)
             .chain(objects)

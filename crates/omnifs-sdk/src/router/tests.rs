@@ -366,14 +366,7 @@ fn lazy_excluded_eager_leaves_inherit_object_stability() {
         name: "id".into(),
         value: "42".into(),
     }]);
-    let listing = poll_ready(mounted.list.call(
-        &cx,
-        super::object::ObjectListInput {
-            list_path: "/items/42".to_string(),
-        },
-        caps,
-    ))
-    .unwrap();
+    let listing = poll_ready((mounted.list)(&cx, caps, "/items/42".to_string())).unwrap();
     let mut fs: Vec<_> = listing.effects.into_wit().fs;
     fs.sort_by(|a, b| a.path.cmp(&b.path));
 

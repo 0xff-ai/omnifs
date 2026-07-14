@@ -1,9 +1,8 @@
 //! Object route list/read serving pipeline.
 
-use super::super::handlers::{Handler, captures_validator};
 use super::super::pattern::Pattern;
 use super::dispatch::{
-    FacetExpansion, ObjectLeaf, ObjectListInput, ObjectListing, ObjectReadInput, ObjectReadTarget,
+    BoxedObjectList, BoxedObjectRead, FacetExpansion, ObjectLeaf, ObjectListing, ObjectReadTarget,
     SourceLeafAttrs,
 };
 use super::spec::{AnchorShape, ObjectDefinition};
@@ -59,37 +58,31 @@ where
         })
     }
 
-    pub(super) fn read_handler(self) -> Handler<Cx<O::State>, ObjectReadInput, ReadOutcome>
+    pub(super) fn read_handler(self) -> BoxedObjectRead<O::State>
     where
         O::State: 'static,
     {
-        Handler::new(
-            std::sync::Arc::new(
-                move |cx: &Cx<O::State>, input: ObjectReadInput, caps: Captures| {
-                    let route = self.clone();
-                    Box::pin(async move {
-                        route
-                            .read(cx, caps, input.target, input.cached, input.read_path)
-                            .await
-                    })
-                },
-            ),
-            captures_validator::<O::Key>(),
+        Box::new(
+            move |cx: &Cx<O::State>,
+                  caps: Captures,
+                  target: ObjectReadTarget,
+                  cached: Option<CachedCanonical>,
+                  read_path: String| {
+                let route = self.clone();
+                Box::pin(async move { route.read(cx, caps, target, cached, read_path).await })
+            },
         )
     }
 
-    pub(super) fn list_handler(self) -> Handler<Cx<O::State>, ObjectListInput, ObjectListing>
+    pub(super) fn list_handler(self) -> BoxedObjectList<O::State>
     where
         O::State: 'static,
     {
-        Handler::new(
-            std::sync::Arc::new(
-                move |cx: &Cx<O::State>, input: ObjectListInput, caps: Captures| {
-                    let route = self.clone();
-                    Box::pin(async move { route.list(cx, caps, input.list_path).await })
-                },
-            ),
-            captures_validator::<O::Key>(),
+        Box::new(
+            move |cx: &Cx<O::State>, caps: Captures, list_path: String| {
+                let route = self.clone();
+                Box::pin(async move { route.list(cx, caps, list_path).await })
+            },
         )
     }
 

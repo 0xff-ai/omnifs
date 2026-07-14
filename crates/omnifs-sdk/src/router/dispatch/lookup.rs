@@ -51,7 +51,7 @@ impl<S> CompiledRouter<S> {
         if let Some(route) = shape.treeref_route(&child_abs) {
             let tree_ref = super::route_future(
                 route.entry.pattern.template(),
-                route.entry.handler.call(cx, (), route.captures),
+                (route.entry.handler)(cx.clone(), route.captures),
             )
             .await
             .map_err(|error| error.with_context("lookup-child", &child_abs))?;
@@ -100,7 +100,7 @@ impl<S> CompiledRouter<S> {
             );
             let listing = super::route_future(
                 route.entry.pattern.template(),
-                route.entry.handler.call(&dir_cx, (), route.captures),
+                (route.entry.handler)(dir_cx, route.captures),
             )
             .await
             .map_err(|error| error.with_context("lookup-child", &child_abs))?;

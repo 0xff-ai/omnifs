@@ -1,18 +1,21 @@
 //! Object route specification and face registration.
 
-use super::super::handlers::{Handler, captures_validator};
+use super::super::handlers::{RouteValidator, captures_validator};
 use super::super::pattern::Pattern;
-use super::dispatch::{FaceHandler, LiveFaceKind, ObjectLeaf, ResolvedChildView};
+use super::dispatch::{
+    BoxedFaceOpen, BoxedFaceRead, FaceHandler, LiveFaceKind, ObjectLeaf, ResolvedChildView,
+};
 use crate::captures::{Captures, FromCaptures};
 use crate::cx::Cx;
 use crate::error::{ProviderError, Result};
 use crate::file_attrs::Stability;
-use crate::handler::{DirCx, OpenedFile, TreeRef};
+use crate::handler::OpenedFile;
 use crate::object::{FacetMetadata, Key, Load, Object, ObjectKind};
 use crate::projection::FileProjection;
 use crate::repr::{Format, RenderTable, Representable};
 use omnifs_core::ContentType;
 use std::future::Future;
+use std::pin::Pin;
 
 // ===========================================================================
 // Handle + spec
@@ -70,7 +73,8 @@ pub(in crate::router) struct ObjectDefinition<O: Object> {
 /// git-open / archive callout the method issues).
 pub(in crate::router) struct TreeFaceEntry<S> {
     pub name: &'static str,
-    pub handler: Handler<Cx<S>, (), TreeRef>,
+    pub handler: super::super::handlers::BoxedTreeRefHandler<S>,
+    pub validator: RouteValidator,
 }
 
 /// One choices face: the dir face name plus the fixed finite child names. The
@@ -86,11 +90,28 @@ pub(in crate::router) struct ChoicesFace {
 /// child object identity. Compilation supplies the resolved child view.
 pub(in crate::router) struct CollectionDeclaration<S> {
     pub name: String,
-    pub handler:
-        Handler<DirCx<S>, std::rc::Rc<ResolvedChildView>, crate::projection::DirProjection>,
+    pub handler: CollectionHandler<S>,
     pub child_kind: ObjectKind,
     pub requires_canonical: bool,
+    pub validator: RouteValidator,
 }
+
+/// A boxed future yielding a [`crate::projection::DirProjection`].
+pub(super) type DirProjectionFuture =
+    Pin<Box<dyn Future<Output = Result<crate::projection::DirProjection>>>>;
+
+/// The `dyn Fn` a [`CollectionHandler`] boxes: parse the parent key + cursor,
+/// run the typed list method, lower the [`crate::collection::Collection`] to a
+/// [`crate::projection::DirProjection`] against the compiled child view.
+type CollectionListFn<S> = dyn Fn(
+    crate::handler::DirCx<S>,
+    Captures,
+    std::rc::Rc<ResolvedChildView>,
+) -> DirProjectionFuture;
+
+/// A boxed collection list handler, shared so an alias replays the same
+/// closure.
+pub(in crate::router) type CollectionHandler<S> = std::rc::Rc<CollectionListFn<S>>;
 
 impl<O: Object> Clone for ObjectDefinition<O> {
     fn clone(&self) -> Self {
@@ -460,16 +481,13 @@ impl<'a, O: Object> FileFace<'a, O> {
         self.file_shape_guard()?;
         self.block.validate_leaf_path(self.name)?;
         let leaf_name = self.leaf_name();
-        let handler: Handler<Cx<O::State>, (), FileProjection> = Handler::new(
-            std::sync::Arc::new(move |cx: &Cx<O::State>, (), caps: Captures| {
-                let cx = cx.clone();
-                Box::pin(async move {
-                    let key = O::Key::from_captures(&caps)?;
-                    method(cx, key).await
-                })
-            }),
-            super::super::handlers::accept_validator(),
-        );
+        let handler: BoxedFaceRead<O::State> = Box::new(move |cx, caps| {
+            let cx = cx.clone();
+            Box::pin(async move {
+                let key = O::Key::from_captures(&caps)?;
+                method(cx, key).await
+            })
+        });
         self.block
             .face_handlers
             .insert(leaf_name.clone(), FaceHandler::Direct(handler));
@@ -495,16 +513,13 @@ impl<'a, O: Object> FileFace<'a, O> {
         self.file_shape_guard()?;
         self.block.validate_leaf_path(self.name)?;
         let leaf_name = self.leaf_name();
-        let handler: Handler<Cx<O::State>, (), FileProjection> = Handler::new(
-            std::sync::Arc::new(move |cx: &Cx<O::State>, (), caps: Captures| {
-                let cx = cx.clone();
-                Box::pin(async move {
-                    let key = O::Key::from_captures(&caps)?;
-                    Ok(method(cx, key).await?.into_projection())
-                })
-            }),
-            super::super::handlers::accept_validator(),
-        );
+        let handler: BoxedFaceRead<O::State> = Box::new(move |cx, caps| {
+            let cx = cx.clone();
+            Box::pin(async move {
+                let key = O::Key::from_captures(&caps)?;
+                Ok(method(cx, key).await?.into_projection())
+            })
+        });
         self.block
             .face_handlers
             .insert(leaf_name.clone(), FaceHandler::Direct(handler));
@@ -530,17 +545,14 @@ impl<'a, O: Object> FileFace<'a, O> {
         self.file_shape_guard()?;
         self.block.validate_leaf_path(self.name)?;
         let leaf_name = self.leaf_name();
-        let handler: Handler<Cx<O::State>, (), OpenedFile> = Handler::new(
-            std::sync::Arc::new(move |cx: &Cx<O::State>, (), caps: Captures| {
-                let cx = cx.clone();
-                Box::pin(async move {
-                    let key = O::Key::from_captures(&caps)?;
-                    let stream: crate::projection::StreamFile = method(cx, key).await?.into();
-                    Ok(OpenedFile::new(stream.attrs(), stream.reader()))
-                })
-            }),
-            super::super::handlers::accept_validator(),
-        );
+        let handler: BoxedFaceOpen<O::State> = Box::new(move |cx, caps| {
+            let cx = cx.clone();
+            Box::pin(async move {
+                let key = O::Key::from_captures(&caps)?;
+                let stream: crate::projection::StreamFile = method(cx, key).await?.into();
+                Ok(OpenedFile::new(stream.attrs(), stream.reader()))
+            })
+        });
         self.block
             .face_handlers
             .insert(leaf_name.clone(), FaceHandler::Stream(handler));
@@ -567,24 +579,21 @@ impl<'a, O: Object> FileFace<'a, O> {
         // The child object serves its own canonical bytes through a direct
         // read of its load result. The child key is parsed from the parent
         // captures (it must be `FromCaptures`-constructible from them).
-        let handler: Handler<Cx<O::State>, (), FileProjection> = Handler::new(
-            std::sync::Arc::new(move |cx: &Cx<O::State>, (), caps: Captures| {
-                let cx = cx.clone();
-                Box::pin(async move {
-                    let key = C::Key::from_captures(&caps)?;
-                    match C::load(&cx, &key, None).await? {
-                        Load::Fresh { canonical, .. } => Ok(FileProjection::body(canonical.bytes)
-                            .content_type(<C::Canonical as Format>::CT)
-                            .build()),
-                        Load::Unchanged => Err(ProviderError::internal(
-                            "object face returned Unchanged without a cached canonical",
-                        )),
-                        Load::NotFound => Err(ProviderError::not_found("child object not found")),
-                    }
-                })
-            }),
-            super::super::handlers::accept_validator(),
-        );
+        let handler: BoxedFaceRead<O::State> = Box::new(move |cx, caps| {
+            let cx = cx.clone();
+            Box::pin(async move {
+                let key = C::Key::from_captures(&caps)?;
+                match C::load(&cx, &key, None).await? {
+                    Load::Fresh { canonical, .. } => Ok(FileProjection::body(canonical.bytes)
+                        .content_type(<C::Canonical as Format>::CT)
+                        .build()),
+                    Load::Unchanged => Err(ProviderError::internal(
+                        "object face returned Unchanged without a cached canonical",
+                    )),
+                    Load::NotFound => Err(ProviderError::not_found("child object not found")),
+                }
+            })
+        });
         self.block
             .face_handlers
             .insert(leaf_name.clone(), FaceHandler::Direct(handler));
@@ -650,28 +659,26 @@ impl<'a, O: Object> DirFace<'a, O> {
         }
         self.block.collections.push(CollectionDeclaration {
             name: self.name.to_string(),
-            handler: Handler::new(
-                std::sync::Arc::new(
-                    move |dir_cx: &DirCx<O::State>,
-                          child_view: std::rc::Rc<ResolvedChildView>,
-                          caps: Captures| {
-                        let cx = (**dir_cx).clone();
-                        Box::pin(async move {
-                            let key = K::from_captures(&caps)?;
-                            let cursor = match dir_cx.cursor() {
-                                Some(wire) => crate::collection::decode_cursor::<Cur>(wire)?,
-                                None => None,
-                            };
-                            let list_cx = crate::collection::ListCx::new(cx, cursor);
-                            let collection = method(key, list_cx).await?;
-                            collection.into_dir_projection(&child_view)
-                        })
-                    },
-                ),
-                captures_validator::<K>(),
+            handler: std::rc::Rc::new(
+                move |dir_cx: crate::handler::DirCx<O::State>,
+                      caps: Captures,
+                      child_view: std::rc::Rc<ResolvedChildView>| {
+                    Box::pin(async move {
+                        let key = K::from_captures(&caps)?;
+                        let cursor = match dir_cx.cursor() {
+                            Some(wire) => crate::collection::decode_cursor::<Cur>(wire)?,
+                            None => None,
+                        };
+                        let cx = (*dir_cx).clone();
+                        let list_cx = crate::collection::ListCx::new(cx, cursor);
+                        let collection = method(key, list_cx).await?;
+                        collection.into_dir_projection(&child_view)
+                    }) as DirProjectionFuture
+                },
             ),
             child_kind: C::kind(),
             requires_canonical: true,
+            validator: captures_validator::<K>(),
         });
         Ok(self.block)
     }
@@ -697,18 +704,17 @@ impl<'a, O: Object> DirFace<'a, O> {
             )));
         }
         // The treeref route owns this path and claims it during compilation.
-        let handler: Handler<Cx<O::State>, (), TreeRef> = Handler::new(
-            std::sync::Arc::new(move |cx: &Cx<O::State>, (), caps: Captures| {
+        let handler: super::super::handlers::BoxedTreeRefHandler<O::State> =
+            std::sync::Arc::new(move |cx: Cx<O::State>, caps: Captures| {
                 Box::pin(async move {
                     let key = O::Key::from_captures(&caps)?;
-                    method(cx.clone(), key).await
-                })
-            }),
-            captures_validator::<O::Key>(),
-        );
+                    method(cx, key).await
+                }) as Pin<Box<dyn Future<Output = Result<crate::handler::TreeRef>>>>
+            });
         self.block.tree_faces.push(TreeFaceEntry {
             name: self.name,
             handler,
+            validator: captures_validator::<O::Key>(),
         });
         Ok(self.block)
     }

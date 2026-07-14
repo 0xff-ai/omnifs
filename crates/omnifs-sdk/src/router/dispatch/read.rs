@@ -43,7 +43,7 @@ impl<S> CompiledRouter<S> {
             Some(ReadRoute::File(route)) => {
                 let proj = super::route_future(
                     route.entry.pattern.template(),
-                    route.entry.handler.call(cx, (), route.captures),
+                    (route.entry.handler)(cx.clone(), route.captures),
                 )
                 .await
                 .map_err(|error| error.with_context("read-file", &abs))?;
@@ -64,14 +64,12 @@ impl<S> CompiledRouter<S> {
                 ))),
                 canonical_target => super::route_future(
                     route.entry.pattern.template(),
-                    route.entry.read.call(
+                    (route.entry.read)(
                         cx,
-                        super::super::object::ObjectReadInput {
-                            target: canonical_target,
-                            cached,
-                            read_path: path.to_string(),
-                        },
                         route.captures,
+                        canonical_target,
+                        cached,
+                        path.to_string(),
                     ),
                 )
                 .await
@@ -96,7 +94,7 @@ impl<S> CompiledRouter<S> {
         if let Some(route) = shape.file_route(&abs) {
             let proj = super::route_future(
                 route.entry.pattern.template(),
-                route.entry.handler.call(cx, (), route.captures),
+                (route.entry.handler)(cx.clone(), route.captures),
             )
             .await
             .map_err(|error| error.with_context("open-file", &abs))?;

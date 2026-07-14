@@ -49,7 +49,7 @@ impl<S> CompiledRouter<S> {
         if let Some(route) = shape.treeref_route(&abs) {
             let tree_ref = super::route_future(
                 route.entry.pattern.template(),
-                route.entry.handler.call(cx, (), route.captures),
+                (route.entry.handler)(cx.clone(), route.captures),
             )
             .await
             .map_err(|error| error.with_context("list-children", &abs))?;
@@ -60,7 +60,7 @@ impl<S> CompiledRouter<S> {
             let dir_cx = DirCx::new(cx.clone(), DirIntent::List { cursor });
             let listing = super::route_future(
                 route.entry.pattern.template(),
-                route.entry.handler.call(&dir_cx, (), route.captures),
+                (route.entry.handler)(dir_cx, route.captures),
             )
             .await
             .map_err(|error| error.with_context("list-children", &abs))?;
@@ -70,13 +70,7 @@ impl<S> CompiledRouter<S> {
         if let Some(route) = shape.object_route(&abs) {
             let out = super::route_future(
                 route.entry.pattern.template(),
-                route.entry.list.call(
-                    cx,
-                    super::super::object::ObjectListInput {
-                        list_path: path.to_string(),
-                    },
-                    route.captures.clone(),
-                ),
+                (route.entry.list)(cx, route.captures.clone(), path.to_string()),
             )
             .await
             .map_err(|error| error.with_context("list-children", &abs))?;
