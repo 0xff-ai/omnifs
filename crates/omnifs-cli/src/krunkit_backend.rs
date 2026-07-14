@@ -33,16 +33,15 @@
 //! argv immediately after spawn, mirroring the Docker backend's
 //! `assert_locked_down`.
 
-use std::io::{Read as _, Write as _};
+use std::io::Write as _;
 use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result};
+use tokio::io::AsyncReadExt as _;
 
 use crate::frontend_backend::FrontendBackend;
 use crate::launch_backend::{BUILD_CHANNEL, BuildChannel, GUEST_MOUNT, ImageRef};
@@ -84,43 +83,6 @@ const DEFAULT_GUEST_IMAGE: &str = "target/guest-image/omnifs-guest.raw";
 /// to this version (mirrors `FRONTEND_RELEASE_IMAGE`'s version pinning).
 const GUEST_RELEASE_IMAGE: &str =
     concat!("ghcr.io/0xff-ai/omnifs-guest:", env!("CARGO_PKG_VERSION"));
-
-/// Where the krunkit driver's guest disk image comes from, gated purely by
-/// [`BuildChannel`] (never by the shape of an override string): a dev binary
-/// never downloads, so its resolution always yields [`Self::Local`], even
-/// for an explicit override; a release binary always pulls from ghcr, so its
-/// resolution always yields [`Self::Registry`]. See
-/// `crate::guest_image_pull` for the [`Self::Registry`] pull-and-cache path.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum GuestImageSource {
-    Local(PathBuf),
-    Registry(ImageRef),
-}
-
-impl GuestImageSource {
-    /// Resolve the configured source, then turn it into the local disk path
-    /// krunkit needs. Dev images are already local; release images are pulled
-    /// into the workspace cache on first use.
-    pub(crate) fn resolve(image: Option<String>, config: &Config) -> Result<Self> {
-        let resolved = image
-            .or_else(|| std::env::var(ENV_GUEST_IMAGE).ok())
-            .or_else(|| config.frontend.guest_image.clone())
-            .unwrap_or_else(|| default_guest_image_for(BUILD_CHANNEL).to_string());
-        match BUILD_CHANNEL {
-            BuildChannel::Dev => Ok(Self::Local(PathBuf::from(resolved))),
-            BuildChannel::Release => Ok(Self::Registry(ImageRef::new(resolved)?)),
-        }
-    }
-
-    pub(crate) async fn into_local_path(self, cache_dir: &Path, output: Output) -> Result<PathBuf> {
-        match self {
-            Self::Local(path) => Ok(path),
-            Self::Registry(image) => {
-                crate::guest_image_pull::ensure_guest_image(&image, cache_dir, output).await
-            },
-        }
-    }
-}
 
 const SEED_VOLUME_LABEL: &str = "OMNIFS-SEED";
 const SEED_CONF_NAME: &str = "omnifs-seed.conf";
@@ -205,24 +167,15 @@ pub(crate) fn ensure_socat_available() -> Result<()> {
     }
 }
 
-/// The libkrun microVM frontend backend. Instance state is workspace-scoped;
-/// launch-only inputs such as the guest image are passed to [`Self::launch`].
+/// The libkrun microVM frontend backend. Durable workspace state and explicit
+/// teardown live here; one launch's resources live in [`KrunkitLaunchLease`].
 pub(crate) struct KrunkitBackend {
     home: PathBuf,
-    /// Flipped by the readiness accept-loop thread `launch` spawns, once the
-    /// guest's frontend runner has dialed in with its `ready\n` line.
-    /// `Arc` so the loop thread (which outlives the async `launch` call) and
-    /// later `mount_ready` polls share the same flag within one CLI process
-    /// invocation.
-    ready: Arc<AtomicBool>,
 }
 
 impl KrunkitBackend {
     pub(crate) fn new(home: PathBuf) -> Self {
-        Self {
-            home,
-            ready: Arc::new(AtomicBool::new(false)),
-        }
+        Self { home }
     }
 
     fn dir(&self) -> PathBuf {
@@ -337,52 +290,6 @@ impl KrunkitBackend {
         Ok(())
     }
 
-    /// Bind the readiness unix socket and spawn a background thread that
-    /// accepts on it in a loop, flipping `self.ready` on the first `ready`
-    /// line. A `,listen` vsock device requires the host side already
-    /// listening (krunkit dials it once per guest connection), and a
-    /// one-shot listener would die after the first connection, so the loop
-    /// keeps accepting for the process lifetime.
-    fn spawn_ready_accept_loop(&self) -> Result<()> {
-        let path = self.ready_socket();
-        let _ = std::fs::remove_file(&path);
-        let listener = UnixListener::bind(&path)
-            .with_context(|| format!("bind readiness listener {}", path.display()))?;
-        let flag = Arc::clone(&self.ready);
-        std::thread::spawn(move || {
-            loop {
-                let Ok((mut stream, _)) = listener.accept() else {
-                    break;
-                };
-                let mut buf = [0_u8; 64];
-                if let Ok(n) = stream.read(&mut buf)
-                    && buf[..n].starts_with(b"ready")
-                {
-                    flag.store(true, Ordering::SeqCst);
-                }
-            }
-        });
-        Ok(())
-    }
-
-    async fn wait_for_pidfile(&self) -> Result<u32> {
-        let pidfile = self.pidfile();
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        loop {
-            if let Ok(contents) = std::fs::read_to_string(&pidfile)
-                && let Ok(pid) = contents.trim().parse::<u32>()
-            {
-                return Ok(pid);
-            }
-            anyhow::ensure!(
-                tokio::time::Instant::now() < deadline,
-                "krunkit did not write its pidfile at {} within 5s",
-                pidfile.display()
-            );
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    }
-
     fn read_pidfile(&self) -> Result<Option<u32>> {
         match std::fs::read_to_string(self.pidfile()) {
             Ok(contents) => Ok(contents.trim().parse::<u32>().ok()),
@@ -435,23 +342,6 @@ impl KrunkitBackend {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         true
-    }
-
-    /// Remove every artifact this backend owns. Never touches the daemon's
-    /// own vsock-attach socket: that path is not stored on this struct at
-    /// all, only threaded through `launch` from the caller's spec.
-    fn remove_owned_artifacts(&self) {
-        for path in [
-            self.pidfile(),
-            self.seed_iso(),
-            self.ssh_socket(),
-            self.ready_socket(),
-            self.restful_socket(),
-            self.serial_log(),
-        ] {
-            let _ = std::fs::remove_file(path);
-        }
-        let _ = std::fs::remove_dir_all(self.seed_staging());
     }
 }
 
@@ -563,62 +453,173 @@ fn assert_krunkit_locked_down(
     Ok(())
 }
 
-impl KrunkitBackend {
-    pub(crate) async fn launch(
-        &self,
-        daemon_attach_socket: &Path,
-        attach_token: &str,
-        guest_image: PathBuf,
-    ) -> Result<()> {
+/// Resolve the configured guest image into the validated local path consumed
+/// by libkrun. Release images remain owned by the OCI/cache module; this
+/// function only chooses the channel-specific input and validates the result.
+async fn resolve_guest_image(
+    image: Option<String>,
+    config: &Config,
+    cache_dir: &Path,
+    output: Output,
+) -> Result<PathBuf> {
+    let resolved = image
+        .or_else(|| std::env::var(ENV_GUEST_IMAGE).ok())
+        .or_else(|| config.frontend.guest_image.clone())
+        .unwrap_or_else(|| default_guest_image_for(BUILD_CHANNEL).to_string());
+    let path = match BUILD_CHANNEL {
+        BuildChannel::Dev => PathBuf::from(resolved),
+        BuildChannel::Release => {
+            crate::guest_image_pull::ensure_guest_image(
+                &ImageRef::new(resolved)?,
+                cache_dir,
+                output,
+            )
+            .await?
+        },
+    };
+    anyhow::ensure!(
+        path.is_file(),
+        "guest image not found at {}; build it with `just guest-image` \
+         (see docs/contracts/60-build-validation.md)",
+        path.display()
+    );
+    Ok(path)
+}
+
+/// Owns one Krunkit launch from replacement through readiness publication.
+/// Every resource created after replacement is cleaned here when publication
+/// fails. The attach listener, guest image, and SSH key are deliberately not
+/// part of this cleanup set because their owners outlive one launch.
+struct KrunkitLaunchLease<'a> {
+    backend: &'a KrunkitBackend,
+    daemon_attach_socket: PathBuf,
+    guest_image: PathBuf,
+    attach_token: String,
+    mount: Option<String>,
+    timeout: Duration,
+    pid: Option<u32>,
+    ready_listener: Option<tokio::net::UnixListener>,
+    replaced: bool,
+}
+
+pub(crate) struct KrunkitLaunchRequest<'a> {
+    pub(crate) daemon_attach_socket: &'a Path,
+    pub(crate) attach_token: &'a str,
+    pub(crate) image: Option<String>,
+    pub(crate) config: &'a Config,
+    pub(crate) cache_dir: &'a Path,
+    pub(crate) output: Output,
+    pub(crate) mount: Option<&'a str>,
+    pub(crate) timeout: Duration,
+}
+
+impl<'a> KrunkitLaunchLease<'a> {
+    fn new(backend: &'a KrunkitBackend, daemon_attach_socket: &Path, guest_image: PathBuf) -> Self {
+        Self {
+            backend,
+            daemon_attach_socket: daemon_attach_socket.to_path_buf(),
+            guest_image,
+            attach_token: String::new(),
+            mount: None,
+            timeout: Duration::ZERO,
+            pid: None,
+            ready_listener: None,
+            replaced: false,
+        }
+    }
+
+    fn for_teardown(backend: &'a KrunkitBackend) -> Self {
+        Self {
+            backend,
+            daemon_attach_socket: PathBuf::new(),
+            guest_image: PathBuf::new(),
+            attach_token: String::new(),
+            mount: None,
+            timeout: Duration::ZERO,
+            pid: None,
+            ready_listener: None,
+            replaced: true,
+        }
+    }
+
+    async fn prepare(
+        backend: &'a KrunkitBackend,
+        request: KrunkitLaunchRequest<'_>,
+    ) -> Result<Self> {
+        let guest_image = resolve_guest_image(
+            request.image,
+            request.config,
+            request.cache_dir,
+            request.output,
+        )
+        .await?;
+        let mut lease = Self::new(backend, request.daemon_attach_socket, guest_image);
+        request.attach_token.clone_into(&mut lease.attach_token);
+        lease.mount = request.mount.map(str::to_owned);
+        lease.timeout = request.timeout;
+        Ok(lease)
+    }
+
+    async fn run(mut self) -> Result<()> {
+        let result = self.run_to_publish().await;
+        match result {
+            Ok(()) => Ok(()),
+            Err(error) => match self.rollback().await {
+                Ok(()) => Err(error),
+                Err(cleanup) => {
+                    Err(error.context(format!("krunkit launch rollback also failed: {cleanup:#}")))
+                },
+            },
+        }
+    }
+
+    async fn run_to_publish(&mut self) -> Result<()> {
         ensure_krunkit_available()?;
-        anyhow::ensure!(
-            guest_image.is_file(),
-            "guest image not found at {}; build it with `just guest-image` \
-             (see docs/contracts/60-build-validation.md)",
-            guest_image.display()
-        );
+        self.replace_stale().await?;
 
-        // Replace any prior instance before laying down fresh launch state.
-        self.tear_down()
-            .await
-            .context("tear down a prior krunkit instance before relaunch")?;
-
-        let dir = self.dir();
+        let dir = self.backend.dir();
         std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
             .with_context(|| format!("restrict {} to 0700", dir.display()))?;
 
         for path in [
-            daemon_attach_socket,
-            self.ready_socket().as_path(),
-            self.ssh_socket().as_path(),
-            self.restful_socket().as_path(),
+            self.daemon_attach_socket.as_path(),
+            self.backend.ready_socket().as_path(),
+            self.backend.ssh_socket().as_path(),
+            self.backend.restful_socket().as_path(),
         ] {
             check_uds_path_length(path)?;
         }
 
-        let ssh_pubkey = self.ensure_ssh_keypair()?;
-        self.write_seed_iso(attach_token, &ssh_pubkey)?;
-        self.spawn_ready_accept_loop()?;
-        let _ = std::fs::remove_file(self.ssh_socket());
+        let ssh_pubkey = self.backend.ensure_ssh_keypair()?;
+        self.backend
+            .write_seed_iso(&self.attach_token, &ssh_pubkey)?;
+        self.ready_listener = Some(self.bind_ready_listener()?);
+        let _ = std::fs::remove_file(self.backend.ssh_socket());
 
-        let pidfile = self.pidfile();
+        let pidfile = self.backend.pidfile();
         let devices = [
-            format!("virtio-blk,path={},format=raw", guest_image.display()),
-            format!("virtio-blk,path={},format=raw", self.seed_iso().display()),
+            format!("virtio-blk,path={},format=raw", self.guest_image.display()),
+            format!(
+                "virtio-blk,path={},format=raw",
+                self.backend.seed_iso().display()
+            ),
             format!(
                 "virtio-vsock,port={ATTACH_VSOCK_PORT},socketURL={},listen",
-                daemon_attach_socket.display()
+                self.daemon_attach_socket.display()
             ),
             format!(
                 "virtio-vsock,port={READY_VSOCK_PORT},socketURL={},listen",
-                self.ready_socket().display()
+                self.backend.ready_socket().display()
             ),
             format!(
                 "virtio-vsock,port={SSH_VSOCK_PORT},socketURL={},connect",
-                self.ssh_socket().display()
+                self.backend.ssh_socket().display()
             ),
-            format!("virtio-serial,logFilePath={}", self.serial_log().display()),
+            format!(
+                "virtio-serial,logFilePath={}",
+                self.backend.serial_log().display()
+            ),
         ];
         let mut command = Command::new("krunkit");
         command.args(["--cpus", "2", "--memory", "2048"]);
@@ -627,7 +628,10 @@ impl KrunkitBackend {
         }
         command
             .arg("--restful-uri")
-            .arg(format!("unix://{}", self.restful_socket().display()))
+            .arg(format!(
+                "unix://{}",
+                self.backend.restful_socket().display()
+            ))
             .arg("--pidfile")
             .arg(&pidfile)
             .stdin(Stdio::null())
@@ -639,42 +643,163 @@ impl KrunkitBackend {
             command.process_group(0);
         }
 
-        // Detached: the VM outlives this CLI invocation. Do not hold or wait
-        // on the child handle; teardown reads the pidfile instead, mirroring
-        // the host-native daemon's own detached-spawn pattern
-        // (`launch_backend::launch_native`).
+        // Detached: the VM outlives this CLI invocation. The lease retains
+        // the pid until readiness publishes, while explicit teardown later
+        // rediscovers it from the durable pidfile.
         command.spawn().context("spawn krunkit")?;
 
         let pid = self.wait_for_pidfile().await?;
-        let argv = Self::probe_argv(pid)?;
-        if let Err(violation) = assert_krunkit_locked_down(
+        self.pid = Some(pid);
+        let argv = KrunkitBackend::probe_argv(pid)?;
+        assert_krunkit_locked_down(
             &argv,
-            daemon_attach_socket,
-            &self.ready_socket(),
-            &self.ssh_socket(),
-        ) {
-            let _ = Command::new("kill")
-                .arg("-KILL")
-                .arg(pid.to_string())
-                .status();
-            self.remove_owned_artifacts();
-            anyhow::bail!("refusing to run the krunkit VM: {violation}");
-        }
+            &self.daemon_attach_socket,
+            &self.backend.ready_socket(),
+            &self.backend.ssh_socket(),
+        )
+        .map_err(|violation| anyhow::anyhow!("refusing to run the krunkit VM: {violation}"))?;
 
+        let mount = self.mount.clone();
+        self.wait_for_ready(mount.as_deref(), self.timeout).await
+    }
+
+    async fn replace_stale(&mut self) -> Result<()> {
+        self.stop_and_remove()
+            .await
+            .context("tear down a prior krunkit instance before relaunch")?;
+        self.replaced = true;
         Ok(())
+    }
+
+    fn bind_ready_listener(&self) -> Result<tokio::net::UnixListener> {
+        let path = self.backend.ready_socket();
+        let _ = std::fs::remove_file(&path);
+        let listener = UnixListener::bind(&path)
+            .with_context(|| format!("bind readiness listener {}", path.display()))?;
+        listener
+            .set_nonblocking(true)
+            .context("configure the readiness listener")?;
+        tokio::net::UnixListener::from_std(listener)
+            .context("adopt the readiness listener into the async runtime")
+    }
+
+    async fn wait_for_pidfile(&self) -> Result<u32> {
+        let pidfile = self.backend.pidfile();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Ok(contents) = std::fs::read_to_string(&pidfile)
+                && let Ok(pid) = contents.trim().parse::<u32>()
+            {
+                return Ok(pid);
+            }
+            anyhow::ensure!(
+                tokio::time::Instant::now() < deadline,
+                "krunkit did not write its pidfile at {} within 5s",
+                pidfile.display()
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    async fn wait_for_ready(&mut self, mount: Option<&str>, timeout: Duration) -> Result<()> {
+        let listener = self
+            .ready_listener
+            .take()
+            .context("krunkit readiness listener was not prepared")?;
+        let wait = async {
+            loop {
+                let (mut stream, _) = listener.accept().await?;
+                let mut buf = [0_u8; 64];
+                let n = stream.read(&mut buf).await?;
+                if buf[..n].starts_with(b"ready") {
+                    return Ok::<(), std::io::Error>(());
+                }
+            }
+        };
+        if let Ok(result) = tokio::time::timeout(timeout, wait).await {
+            result.context("read the krunkit readiness beacon")
+        } else {
+            let path = mount.map_or_else(
+                || GUEST_MOUNT.to_owned(),
+                |name| format!("{GUEST_MOUNT}/{name}"),
+            );
+            anyhow::bail!(
+                "{path} did not appear inside the frontend within {}s",
+                timeout.as_secs()
+            )
+        }
+    }
+
+    async fn rollback(&mut self) -> Result<()> {
+        if !self.replaced {
+            self.ready_listener.take();
+            return Ok(());
+        }
+        self.stop_and_remove().await
+    }
+
+    async fn stop_and_remove(&mut self) -> Result<()> {
+        self.ready_listener.take();
+        let pid = match self.pid.take() {
+            Some(pid) => Some(pid),
+            None => match self.backend.read_pidfile() {
+                Ok(pid) => pid,
+                Err(error) => {
+                    self.remove_owned_artifacts();
+                    return Err(error);
+                },
+            },
+        };
+        if let Some(pid) = pid.filter(|pid| process_alive(*pid)) {
+            self.backend.try_restful_shutdown();
+            if !KrunkitBackend::wait_for_exit(pid, Duration::from_secs(5)).await {
+                let _ = Command::new("kill")
+                    .arg("-TERM")
+                    .arg(pid.to_string())
+                    .status();
+            }
+            if !KrunkitBackend::wait_for_exit(pid, Duration::from_secs(5)).await
+                && process_alive(pid)
+            {
+                let _ = Command::new("kill")
+                    .arg("-KILL")
+                    .arg(pid.to_string())
+                    .status();
+                KrunkitBackend::wait_for_exit(pid, Duration::from_secs(3)).await;
+            }
+        }
+        self.remove_owned_artifacts();
+        Ok(())
+    }
+
+    /// Remove only launch artifacts. The attach listener, verified guest
+    /// image, and persistent SSH key are owned elsewhere and never appear in
+    /// this set.
+    fn remove_owned_artifacts(&self) {
+        for path in [
+            self.backend.pidfile(),
+            self.backend.seed_iso(),
+            self.backend.ssh_socket(),
+            self.backend.ready_socket(),
+            self.backend.restful_socket(),
+            self.backend.serial_log(),
+        ] {
+            let _ = std::fs::remove_file(path);
+        }
+        let _ = std::fs::remove_dir_all(self.backend.seed_staging());
+    }
+}
+
+impl KrunkitBackend {
+    pub(crate) async fn launch(&self, request: KrunkitLaunchRequest<'_>) -> Result<()> {
+        KrunkitLaunchLease::prepare(self, request)
+            .await?
+            .run()
+            .await
     }
 }
 
 impl FrontendBackend for KrunkitBackend {
-    async fn mount_ready(&self, _path: &str) -> Result<bool> {
-        // Krunkit has no docker-exec-equivalent channel to probe a specific
-        // guest path from outside the VM; the VFS wire readiness beacon
-        // already gates on the FUSE mount being served before it dials in, so
-        // observing that beacon is the whole-guest equivalent of Docker's
-        // per-path probe.
-        Ok(self.ready.load(Ordering::SeqCst))
-    }
-
     async fn is_running(&self) -> Result<Option<bool>> {
         let Some(pid) = self.read_pidfile()? else {
             return Ok(None);
@@ -683,26 +808,9 @@ impl FrontendBackend for KrunkitBackend {
     }
 
     async fn tear_down(&self) -> Result<()> {
-        if let Some(pid) = self.read_pidfile()?
-            && process_alive(pid)
-        {
-            self.try_restful_shutdown();
-            if !Self::wait_for_exit(pid, Duration::from_secs(5)).await {
-                let _ = Command::new("kill")
-                    .arg("-TERM")
-                    .arg(pid.to_string())
-                    .status();
-            }
-            if !Self::wait_for_exit(pid, Duration::from_secs(5)).await && process_alive(pid) {
-                let _ = Command::new("kill")
-                    .arg("-KILL")
-                    .arg(pid.to_string())
-                    .status();
-                Self::wait_for_exit(pid, Duration::from_secs(3)).await;
-            }
-        }
-        self.remove_owned_artifacts();
-        Ok(())
+        KrunkitLaunchLease::for_teardown(self)
+            .stop_and_remove()
+            .await
     }
 
     /// Pure command construction: no I/O. Callers that are about to actually
@@ -748,25 +856,57 @@ impl FrontendBackend for KrunkitBackend {
 mod tests {
     use super::*;
 
-    #[test]
-    fn guest_image_resolution_precedence() {
+    #[tokio::test]
+    async fn guest_image_resolution_precedence() {
         // Tests run under a dev build (no OMNIFS_RELEASE at compile time), so
-        // BUILD_CHANNEL is always Dev here; the release branch is covered by
-        // `default_guest_image_for` directly, mirroring how
-        // `frontend_container.rs` tests its own two channel defaults.
+        // the explicit path is resolved locally. The release path is covered
+        // by `default_guest_image_for` directly, mirroring the frontend image
+        // tests.
+        let temp = tempfile::tempdir().unwrap();
+        let custom = temp.path().join("custom.raw");
+        std::fs::write(&custom, b"guest image").unwrap();
         let config = Config::default();
-        let image = GuestImageSource::resolve(None, &config).unwrap();
-        assert_eq!(
-            image,
-            GuestImageSource::Local(PathBuf::from(DEFAULT_GUEST_IMAGE))
-        );
+        let image = resolve_guest_image(
+            Some(custom.to_string_lossy().into_owned()),
+            &config,
+            temp.path(),
+            Output::new(crate::ui::output::OutputMode::Human, false),
+        )
+        .await
+        .unwrap();
+        assert_eq!(image, custom);
+    }
 
-        let flag =
-            GuestImageSource::resolve(Some("/custom/guest.raw".to_string()), &config).unwrap();
-        assert_eq!(
-            flag,
-            GuestImageSource::Local(PathBuf::from("/custom/guest.raw"))
-        );
+    #[test]
+    fn launch_lease_cleanup_scope_preserves_long_lived_resources() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let dir = home.join(KRUNKIT_SUBDIR);
+        std::fs::create_dir_all(&dir).unwrap();
+        let attach_socket = temp.path().join("daemon-attach.sock");
+        std::fs::write(&attach_socket, b"daemon-owned").unwrap();
+        std::fs::write(dir.join(SSH_KEY_NAME), b"persistent key").unwrap();
+        for name in [
+            PIDFILE_NAME,
+            SEED_ISO_NAME,
+            SSH_SOCK_NAME,
+            READY_SOCK_NAME,
+            RESTFUL_SOCK_NAME,
+            SERIAL_LOG_NAME,
+        ] {
+            std::fs::write(dir.join(name), b"launch-owned").unwrap();
+        }
+        std::fs::create_dir_all(dir.join(SEED_STAGING_NAME)).unwrap();
+
+        let backend = KrunkitBackend::new(home);
+        let lease = KrunkitLaunchLease::new(&backend, &attach_socket, PathBuf::new());
+        lease.remove_owned_artifacts();
+
+        assert!(attach_socket.is_file());
+        assert!(dir.join(SSH_KEY_NAME).is_file());
+        assert!(!dir.join(PIDFILE_NAME).exists());
+        assert!(!dir.join(SEED_ISO_NAME).exists());
+        assert!(!dir.join(SEED_STAGING_NAME).exists());
     }
 
     #[test]

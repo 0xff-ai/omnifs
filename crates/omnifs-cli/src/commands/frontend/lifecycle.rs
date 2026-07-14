@@ -15,7 +15,7 @@ use crate::commands::receipt::FrontendReceipt;
 use crate::frontend_backend::{DockerBackend, FrontendBackend};
 use crate::frontend_container::{frontend_container_name, resolve_frontend_image};
 use crate::inventory::{FrontendState, FrontendStatus, Inventory};
-use crate::krunkit_backend::{GuestImageSource, KrunkitBackend};
+use crate::krunkit_backend::{KrunkitBackend, KrunkitLaunchRequest};
 use crate::launch_backend::{DockerTarget, GUEST_MOUNT};
 use crate::local_backend::LocalBackend;
 use crate::runtime::Runtime;
@@ -26,6 +26,16 @@ const DOCKER_TIMEOUT: Duration = Duration::from_secs(5);
 const KRUNKIT_TIMEOUT: Duration = Duration::from_secs(90);
 const POLL: Duration = Duration::from_millis(200);
 const RECONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
+trait MountProbe {
+    async fn mount_ready(&self, path: &str) -> Result<bool>;
+}
+
+impl MountProbe for DockerBackend {
+    async fn mount_ready(&self, path: &str) -> Result<bool> {
+        self.mount_ready(path).await
+    }
+}
 
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd, ValueEnum, Serialize, Deserialize,
@@ -770,15 +780,20 @@ async fn launch_krunkit(
     output: Output,
 ) -> Result<()> {
     let config = workspace.config()?;
-    let image = GuestImageSource::resolve(None, &config)?
-        .into_local_path(&paths.cache_dir, output)
-        .await?;
     let attach = workspace.daemon().frontend_attach_target_vsock().await?;
     let backend = KrunkitBackend::new(paths.config_dir.clone());
     backend
-        .launch(Path::new(&attach.socket_path), &attach.token, image)
-        .await?;
-    wait_for_mount(&backend, mount, KRUNKIT_TIMEOUT).await
+        .launch(KrunkitLaunchRequest {
+            daemon_attach_socket: Path::new(&attach.socket_path),
+            attach_token: &attach.token,
+            image: None,
+            config: &config,
+            cache_dir: &paths.cache_dir,
+            output,
+            mount,
+            timeout: KRUNKIT_TIMEOUT,
+        })
+        .await
 }
 
 async fn stop(workspace: &Workspace, id: &FrontendId, output: Output) -> Result<()> {
@@ -806,7 +821,7 @@ async fn stop(workspace: &Workspace, id: &FrontendId, output: Output) -> Result<
 }
 
 async fn wait_for_mount(
-    backend: &impl FrontendBackend,
+    backend: &(impl FrontendBackend + MountProbe),
     mount: Option<&str>,
     timeout: Duration,
 ) -> Result<()> {
@@ -1041,10 +1056,12 @@ mod tests {
         struct Probe {
             count: Arc<AtomicUsize>,
         }
-        impl FrontendBackend for Probe {
+        impl MountProbe for Probe {
             async fn mount_ready(&self, _: &str) -> Result<bool> {
                 bail!("probe failed")
             }
+        }
+        impl FrontendBackend for Probe {
             async fn is_running(&self) -> Result<Option<bool>> {
                 Ok(Some(true))
             }

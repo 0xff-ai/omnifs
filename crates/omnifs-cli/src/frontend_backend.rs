@@ -22,10 +22,6 @@ use anyhow::Result;
 /// FUSE frontend. Docker uses the host bridge; krunkit implements the same
 /// contract over a vsock transport.
 pub(crate) trait FrontendBackend {
-    /// Whether `path` is visible inside the running frontend. Used to poll
-    /// for the FUSE mount coming up after launch.
-    async fn mount_ready(&self, path: &str) -> Result<bool>;
-
     /// `Some(running)` when this backend's frontend exists, `None` when it
     /// does not.
     async fn is_running(&self) -> Result<Option<bool>>;
@@ -78,13 +74,13 @@ impl DockerBackend {
         }
         Ok(())
     }
+
+    pub(crate) async fn mount_ready(&self, path: &str) -> Result<bool> {
+        self.runtime.exec_path_exists(path).await
+    }
 }
 
 impl FrontendBackend for DockerBackend {
-    async fn mount_ready(&self, path: &str) -> Result<bool> {
-        self.runtime.exec_path_exists(path).await
-    }
-
     async fn is_running(&self) -> Result<Option<bool>> {
         self.runtime
             .container_running(self.runtime.container_name())

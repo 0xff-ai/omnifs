@@ -1,8 +1,7 @@
 //! Pulls the krunkit guest disk image from its ghcr OCI artifact and caches
 //! it locally: anonymous token, manifest, single blob, sha256 verification,
-//! decompress-once. Only the release channel ever reaches this path (see
-//! `crate::krunkit_backend::GuestImageSource`); the dev channel always
-//! uses a local path and never downloads.
+//! and decompress-once. Only the release channel reaches this module; the dev
+//! channel uses a local path and never downloads.
 //!
 //! Plain HTTP via the CLI's existing reqwest dependency, not an ORAS client:
 //! the guest image is a single-blob OCI artifact, so the full registry
