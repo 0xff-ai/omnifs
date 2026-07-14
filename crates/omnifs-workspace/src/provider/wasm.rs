@@ -48,16 +48,6 @@ impl ProviderWasm {
         Self { bytes }
     }
 
-    #[must_use]
-    fn bytes(&self) -> &[u8] {
-        &self.bytes
-    }
-
-    #[must_use]
-    fn into_bytes(self) -> Vec<u8> {
-        self.bytes
-    }
-
     pub fn metadata(&self) -> Result<Option<ProviderManifest>, ProviderMetadataError> {
         read_provider_metadata_section(&self.bytes)
     }
@@ -83,7 +73,7 @@ impl Artifact {
     pub fn from_bytes(file: impl Into<String>, bytes: Vec<u8>) -> Result<Self, ArtifactError> {
         let file = file.into();
         let wasm = ProviderWasm::from_bytes(bytes);
-        let id = ProviderId::from_wasm_bytes(wasm.bytes());
+        let id = ProviderId::from_wasm_bytes(&wasm.bytes);
         let manifest = wasm.metadata()?.ok_or(ArtifactError::MissingMetadata)?;
         let name = ProviderName::new(manifest.id.clone()).map_err(|source| {
             ArtifactError::InvalidProviderName {
@@ -97,7 +87,7 @@ impl Artifact {
         };
         Ok(Self {
             file,
-            bytes: wasm.into_bytes(),
+            bytes: wasm.bytes,
             id,
             meta,
         })
