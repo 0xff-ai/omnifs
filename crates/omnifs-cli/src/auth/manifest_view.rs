@@ -43,6 +43,35 @@ impl<'a> AuthManifestView<'a> {
         Ok(first)
     }
 
+    pub(super) fn configured_scheme_key(
+        &self,
+        auth: &omnifs_workspace::mounts::Auth,
+    ) -> anyhow::Result<String> {
+        let Some(manifest) = self.manifest else {
+            return match auth {
+                omnifs_workspace::mounts::Auth::StaticToken(_) => Ok(auth
+                    .scheme()
+                    .unwrap_or(DEFAULT_STATIC_SCHEME)
+                    .to_owned()),
+                omnifs_workspace::mounts::Auth::OAuth(_) => auth
+                    .scheme()
+                    .map(str::to_owned)
+                    .ok_or_else(|| anyhow!("missing auth.scheme")),
+            };
+        };
+
+        match auth {
+            omnifs_workspace::mounts::Auth::StaticToken(_) => manifest
+                .resolve_static_scheme(auth.scheme())
+                .map(|scheme| scheme.key.clone())
+                .map_err(anyhow::Error::from),
+            omnifs_workspace::mounts::Auth::OAuth(_) => manifest
+                .resolve_oauth_scheme(auth.scheme())
+                .map(|scheme| scheme.key.clone())
+                .map_err(anyhow::Error::from),
+        }
+    }
+
     pub(crate) fn first_static_token_scheme_key(&self) -> Option<String> {
         self.manifest
             .and_then(|manifest| manifest.first_static_scheme_key().map(str::to_owned))

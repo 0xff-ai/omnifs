@@ -253,23 +253,7 @@ impl MountAuth {
         let Some(auth) = self.primary_auth() else {
             return Ok(CredentialTarget::None);
         };
-        let view = self.manifest_view();
-        let scheme = if auth.is_oauth() {
-            view.oauth_scheme(auth.scheme())
-                .map(|scheme| scheme.key.clone())
-                .or_else(|_| {
-                    auth.scheme()
-                        .map(str::to_owned)
-                        .ok_or_else(|| anyhow!("missing auth.scheme"))
-                })?
-        } else {
-            view.static_token_scheme_key(None, auth.scheme())
-                .or_else(|_| {
-                    auth.scheme()
-                        .map(str::to_owned)
-                        .ok_or_else(|| anyhow!("missing auth.scheme"))
-                })?
-        };
+        let scheme = self.manifest_view().configured_scheme_key(auth)?;
         CredentialTarget::for_configured_auth(&self.spec, auth, Some(&scheme))
     }
 
