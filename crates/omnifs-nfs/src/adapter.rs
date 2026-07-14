@@ -342,10 +342,7 @@ impl Export {
     /// (or joining a backing path) and caching the fresh `NodeId` down the chain.
     /// A name that no longer resolves returns [`Status::Stale`] for that handle
     /// only; a genuinely-gone path is allowed to be stale.
-    fn live_inode(
-        &self,
-        id: u64,
-    ) -> StatusResult<dashmap::mapref::one::Ref<'_, u64, Inode>> {
+    fn live_inode(&self, id: u64) -> StatusResult<dashmap::mapref::one::Ref<'_, u64, Inode>> {
         if let Some(inode) = self.inodes.get(&id) {
             return Ok(inode);
         }
