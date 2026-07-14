@@ -105,7 +105,7 @@ impl MountSnapshot {
     }
 
     fn from_mount_objects(mount: &str, objects: &object::MountObjects) -> Result<Self> {
-        let files = SnapshotFiles::from_entries(objects.canonical_entries()?)?.files;
+        let files = files_from_entries(objects.canonical_entries()?)?;
         let index = SnapshotIndex::new(mount.to_string(), &files);
         Ok(Self { index, files })
     }
@@ -242,48 +242,42 @@ impl SnapshotFile {
     }
 }
 
-struct SnapshotFiles {
-    files: Vec<SnapshotFile>,
-}
+fn files_from_entries(entries: Vec<object::CanonicalEntry>) -> Result<Vec<SnapshotFile>> {
+    let mut files = Vec::new();
+    let mut paths = BTreeSet::new();
 
-impl SnapshotFiles {
-    fn from_entries(entries: Vec<object::CanonicalEntry>) -> Result<Self> {
-        let mut files = Vec::new();
-        let mut paths = BTreeSet::new();
+    for entry in entries {
+        let object_id = ObjectId::from_bytes(entry.id);
+        let Some(wit_id) = object_id.to_wit() else {
+            bail!(
+                "object cache row has an undecodable logical id: {}",
+                hex::encode(object_id.as_bytes())
+            );
+        };
+        let logical_id = SnapshotLogicalId::from_wit(wit_id);
+        let bytes: Arc<[u8]> = entry.canonical.bytes.into();
+        let blake3 = blake3::hash(bytes.as_ref()).to_hex().to_string();
 
-        for entry in entries {
-            let object_id = ObjectId::from_bytes(entry.id);
-            let Some(wit_id) = object_id.to_wit() else {
-                bail!(
-                    "object cache row has an undecodable logical id: {}",
-                    hex::encode(object_id.as_bytes())
-                );
-            };
-            let logical_id = SnapshotLogicalId::from_wit(wit_id);
-            let bytes: Arc<[u8]> = entry.canonical.bytes.into();
-            let blake3 = blake3::hash(bytes.as_ref()).to_hex().to_string();
-
-            for leaf in entry.leaves {
-                let path = Path::parse(&leaf)
-                    .with_context(|| format!("object cache row has invalid leaf path `{leaf}`"))?;
-                if path.is_root() {
-                    bail!("object cache row maps canonical bytes to root path");
-                }
-                if !paths.insert(path.clone()) {
-                    bail!("object cache contains duplicate canonical path `{path}`");
-                }
-                files.push(SnapshotFile {
-                    logical_id: logical_id.clone(),
-                    path,
-                    blake3: blake3.clone(),
-                    bytes: Arc::clone(&bytes),
-                });
+        for leaf in entry.leaves {
+            let path = Path::parse(&leaf)
+                .with_context(|| format!("object cache row has invalid leaf path `{leaf}`"))?;
+            if path.is_root() {
+                bail!("object cache row maps canonical bytes to root path");
             }
+            if !paths.insert(path.clone()) {
+                bail!("object cache contains duplicate canonical path `{path}`");
+            }
+            files.push(SnapshotFile {
+                logical_id: logical_id.clone(),
+                path,
+                blake3: blake3.clone(),
+                bytes: Arc::clone(&bytes),
+            });
         }
-
-        files.sort_by(|a, b| a.path.cmp(&b.path));
-        Ok(Self { files })
     }
+
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(files)
 }
 
 fn prepare_output_dir(out: &StdPath) -> Result<()> {
