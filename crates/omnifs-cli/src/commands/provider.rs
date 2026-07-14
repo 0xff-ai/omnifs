@@ -102,10 +102,11 @@ impl AddArgs {
         for path in &self.paths {
             add_path(&store, path, &mut report)?;
         }
-        match (report.installed, report.found) {
-            (0, 0) => bail!("no provider WASM artifacts found"),
-            (0, _) => bail!("no valid provider WASM artifacts installed"),
-            _ => {},
+        if report.found == 0 {
+            bail!("no provider WASM artifacts found");
+        }
+        if report.installed_ids.is_empty() {
+            bail!("no valid provider WASM artifacts installed");
         }
 
         // Re-collect after installation. Inventory joins exact mount pins, so
@@ -269,7 +270,6 @@ fn print_provider_receipt(rows: &[ProviderStatus]) {
 #[derive(Default)]
 struct AddReport {
     found: usize,
-    installed: usize,
     installed_ids: Vec<String>,
 }
 
@@ -282,7 +282,6 @@ fn add_path(store: &ProviderStore, path: &Path, report: &mut AddReport) -> anyho
         report.found += 1;
         match add_file(store, path) {
             Ok(entry) => {
-                report.installed += 1;
                 report.installed_ids.push(entry.id.to_string());
                 Ok(())
             },
@@ -318,7 +317,6 @@ fn add_dir(store: &ProviderStore, path: &Path, report: &mut AddReport) -> anyhow
         report.found += 1;
         match add_file(store, &path) {
             Ok(entry) => {
-                report.installed += 1;
                 report.installed_ids.push(entry.id.to_string());
             },
             Err(AddError::Load(ArtifactLoadError::Artifact(error))) => {
@@ -461,7 +459,7 @@ mod tests {
         let mut report = AddReport::default();
         add_dir(&store, temp.path(), &mut report).unwrap();
         assert_eq!(report.found, 2);
-        assert_eq!(report.installed, 0);
+        assert!(report.installed_ids.is_empty());
     }
 
     #[test]
