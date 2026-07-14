@@ -3341,7 +3341,6 @@ dependencies = [
 name = "omnifs-workspace"
 version = "0.2.1"
 dependencies = [
- "anyhow",
  "atomic-write-file",
  "blake3",
  "fs2",
