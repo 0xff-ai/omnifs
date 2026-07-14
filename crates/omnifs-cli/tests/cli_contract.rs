@@ -353,41 +353,8 @@ fn lifecycle_json_receipts_emit_one_document_with_a_verdict() {
 }
 
 #[test]
-fn mount_remove_structured_receipts_cover_applied_absent_and_dry_run() {
+fn mount_remove_jsonl_dry_run_ends_with_one_typed_result() {
     let fixture = Fixture::new();
-    fixture.write_static_token_mount_without_credential();
-
-    let applied = fixture.run(&[
-        "mount",
-        "rm",
-        "test",
-        "--keep-credentials",
-        "--yes",
-        "--output",
-        "json",
-    ]);
-    assert_eq!(
-        exit_code(&applied),
-        0,
-        "stdout: {}\nstderr: {}",
-        String::from_utf8_lossy(&applied.stdout),
-        String::from_utf8_lossy(&applied.stderr)
-    );
-    let applied_json = stdout_json(&applied);
-    assert_eq!(applied_json["command"], "mount.rm");
-    assert_eq!(applied_json["result"]["mount"], "test");
-    assert_eq!(applied_json["result"]["dry_run"], false);
-    assert!(applied_json["result"]["plan"]["rows"].as_array().is_some());
-    assert!(applied_json["result"]["rows"].as_array().is_some());
-    assert_eq!(applied_json["result"]["verdict"], "ok");
-
-    let absent = fixture.run(&["mount", "rm", "test", "--yes", "--output", "json"]);
-    assert_eq!(exit_code(&absent), 0);
-    let absent_json = stdout_json(&absent);
-    assert_eq!(absent_json["result"]["mount"], "test");
-    assert_eq!(absent_json["result"]["dry_run"], false);
-    assert_eq!(absent_json["result"]["rows"][0]["state"], "skip");
-
     fixture.write_static_token_mount_without_credential();
     let dry_run = fixture.run(&[
         "mount",

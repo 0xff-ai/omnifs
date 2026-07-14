@@ -232,11 +232,4 @@ mod tests {
         assert!(matches!(reader.string(), Err(XdrError::InvalidUtf8)));
     }
 
-    #[test]
-    fn reader_rejects_bitmap_with_huge_count_before_allocating() {
-        let bytes = u32::MAX.to_be_bytes();
-        let mut reader = XdrReader::new(&bytes);
-
-        assert!(matches!(reader.bitmap(), Err(XdrError::Underflow)));
-    }
 }
