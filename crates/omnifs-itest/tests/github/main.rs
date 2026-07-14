@@ -667,6 +667,15 @@ fn github_owner_listing_tracks_browsed_repos() {
     let mut page_two = harness
         .list_with_cursor("/octocat", Some(Cursor::Opaque("2".to_string())))
         .unwrap();
+    let owner_reload = page_two.expect_single_fetch();
+    assert!(owner_reload.url.ends_with("/users/octocat"));
+    page_two
+        .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
+            status: 200,
+            headers: Vec::<Header>::new(),
+            body: br#"{"login":"octocat","type":"User"}"#.to_vec(),
+        })])
+        .unwrap();
     let classify_fetch = page_two.expect_single_fetch();
     assert!(classify_fetch.url.ends_with("/users/octocat"));
     page_two
