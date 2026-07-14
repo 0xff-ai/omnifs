@@ -9,7 +9,8 @@ use crate::cache::identity::{BlobGeneration, BlobRequestId};
 use crate::sandbox::publish;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::ffi::OsString;
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::Mutex as AsyncMutex;
@@ -58,7 +59,8 @@ pub struct BlobCache {
 }
 
 impl BlobCache {
-    pub fn new(cache_dir: PathBuf) -> Result<Self, BlobCacheError> {
+    pub fn new(cache_dir: PathBuf) -> anyhow::Result<Self> {
+        let cache_dir = Self::canonical_root(&cache_dir)?;
         let cache = Self {
             cache_dir,
             requests: DashMap::new(),
@@ -73,6 +75,62 @@ impl BlobCache {
 
     pub(crate) fn cache_dir(&self) -> &Path {
         &self.cache_dir
+    }
+
+    pub(crate) fn canonical_root(path: &Path) -> std::io::Result<PathBuf> {
+        let absolute = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir()?.join(path)
+        };
+        let mut requested = PathBuf::new();
+        for component in absolute.components() {
+            match component {
+                Component::CurDir => {},
+                Component::ParentDir => {
+                    requested.pop();
+                },
+                other => requested.push(other.as_os_str()),
+            }
+        }
+        let mut existing = requested.clone();
+        let mut missing = Vec::<OsString>::new();
+
+        loop {
+            match std::fs::symlink_metadata(&existing) {
+                Ok(metadata) => {
+                    if missing.is_empty() && metadata.file_type().is_symlink() {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "cache root is a symlink",
+                        ));
+                    }
+                    let canonical_existing = std::fs::canonicalize(&existing)?;
+                    if !std::fs::metadata(&canonical_existing)?.is_dir() {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::NotADirectory,
+                            "cache root is not a directory",
+                        ));
+                    }
+                    let mut canonical = canonical_existing;
+                    for component in missing.iter().rev() {
+                        canonical.push(component);
+                    }
+                    return Ok(canonical);
+                },
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    let Some(name) = existing.file_name() else {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "cache root has no existing parent",
+                        ));
+                    };
+                    missing.push(name.to_os_string());
+                    existing.pop();
+                },
+                Err(error) => return Err(error),
+            }
+        }
     }
 
     fn prepare_dirs(&self) -> Result<(), BlobCacheError> {
@@ -104,10 +162,14 @@ impl BlobCache {
         self.lookup_by_id(id)
     }
 
-    pub(crate) fn generation_path(&self, generation: BlobGeneration) -> PathBuf {
+    fn generation_path(&self, generation: BlobGeneration) -> PathBuf {
         self.cache_dir
             .join(OBJECTS_DIR)
             .join(generation.filesystem_name())
+    }
+
+    pub(crate) fn body_path(&self, record: &BlobRecord) -> PathBuf {
+        self.generation_path(record.generation)
     }
 
     fn ref_path(&self, request_id: BlobRequestId) -> PathBuf {
@@ -205,7 +267,12 @@ impl BlobCache {
             let Ok(entry_meta) = std::fs::symlink_metadata(&path) else {
                 continue;
             };
-            if !entry_meta.is_file() || entry_meta.file_type().is_symlink() {
+            if entry_meta.file_type().is_symlink() {
+                return Err(BlobCacheError::Internal(
+                    "blob reference entry is a symlink".to_string(),
+                ));
+            }
+            if !entry_meta.is_file() {
                 continue;
             }
             let name = entry.file_name().to_string_lossy().into_owned();
@@ -310,7 +377,7 @@ impl From<std::io::Error> for BlobCacheError {
 
 #[cfg(test)]
 mod tests {
-    use super::BlobCache;
+    use super::{BlobCache, OBJECTS_DIR};
 
     #[test]
     fn cache_root_failure_is_typed_without_host_path() {
@@ -323,7 +390,7 @@ mod tests {
             Err(error) => error,
         };
         assert!(!error.to_string().contains(root.to_string_lossy().as_ref()));
-        assert!(error.to_string().contains("owned directory"));
+        assert!(error.to_string().contains("directory"));
     }
 
     #[cfg(unix)]
@@ -338,6 +405,27 @@ mod tests {
             Err(error) => error,
         };
         assert!(!error.to_string().contains(root.to_string_lossy().as_ref()));
-        assert!(error.to_string().contains("owned directory"));
+        assert!(error.to_string().contains("symlink"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cache_root_canonicalizes_a_symlinked_existing_parent() {
+        let temp = tempfile::tempdir().unwrap();
+        let real_parent = temp.path().join("real");
+        std::fs::create_dir(&real_parent).unwrap();
+        let linked_parent = temp.path().join("linked");
+        std::os::unix::fs::symlink(&real_parent, &linked_parent).unwrap();
+
+        let requested = linked_parent.join("blob-cache");
+        let cache = BlobCache::new(requested).unwrap();
+
+        assert_eq!(
+            cache.cache_dir(),
+            std::fs::canonicalize(real_parent)
+                .unwrap()
+                .join("blob-cache")
+        );
+        assert!(cache.cache_dir().join(OBJECTS_DIR).is_dir());
     }
 }

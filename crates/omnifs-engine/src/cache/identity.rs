@@ -57,6 +57,7 @@ impl BlobRequestId {
 }
 
 impl BlobGeneration {
+    #[cfg(test)]
     pub(crate) fn from_bytes(bytes: &[u8]) -> Self {
         Self(*blake3::hash(bytes).as_bytes())
     }

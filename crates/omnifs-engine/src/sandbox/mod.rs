@@ -5,4 +5,3 @@
 //! caching materialized trees by semantic view key.
 
 pub mod publish;
-pub(crate) mod relative_key;

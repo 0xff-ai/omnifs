@@ -110,8 +110,10 @@ fn canonical_remote(raw: &str) -> Result<String, GitError> {
         if !matches!(url.scheme(), "https" | "ssh" | "git") || url.host_str().is_none() {
             return Err(GitError::Invalid("unsupported Git remote".to_string()));
         }
-        url.set_username("")
-            .map_err(|_| GitError::Invalid("invalid Git remote username".to_string()))?;
+        if url.scheme() == "https" || url.scheme() == "git" {
+            url.set_username("")
+                .map_err(|_| GitError::Invalid("invalid Git remote username".to_string()))?;
+        }
         url.set_password(None)
             .map_err(|_| GitError::Invalid("invalid Git remote password".to_string()))?;
         return Ok(url.to_string());
@@ -120,13 +122,16 @@ fn canonical_remote(raw: &str) -> Result<String, GitError> {
     let (user_host, path) = remote
         .split_once(':')
         .ok_or_else(|| GitError::Invalid("invalid Git remote".to_string()))?;
-    let host = user_host
+    let (username, host) = user_host
         .rsplit_once('@')
-        .map_or(user_host, |(_, host)| host);
+        .map_or((None, user_host), |(username, host)| (Some(username), host));
     if host.is_empty() || path.is_empty() || path.starts_with('/') {
         return Err(GitError::Invalid("invalid Git remote".to_string()));
     }
-    Ok(format!("{host}:{path}"))
+    Ok(match username {
+        Some(username) => format!("{username}@{host}:{path}"),
+        None => format!("{host}:{path}"),
+    })
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -187,6 +192,25 @@ mod tests {
             GitId::new("mount", &first, Some("main")),
             GitId::new("mount", &first, Some("release"))
         );
+    }
+
+    #[test]
+    fn git_identity_preserves_ssh_and_scp_usernames() {
+        let ssh_alice = canonical_remote("ssh://alice@example.test/repo.git").unwrap();
+        let ssh_bob = canonical_remote("ssh://bob@example.test/repo.git").unwrap();
+        let scp_alice = canonical_remote("alice@example.test:repo.git").unwrap();
+        let scp_bob = canonical_remote("bob@example.test:repo.git").unwrap();
+
+        assert_ne!(
+            GitId::new("mount", &ssh_alice, Some("main")),
+            GitId::new("mount", &ssh_bob, Some("main"))
+        );
+        assert_ne!(
+            GitId::new("mount", &scp_alice, Some("main")),
+            GitId::new("mount", &scp_bob, Some("main"))
+        );
+        assert_eq!(ssh_alice, "ssh://alice@example.test/repo.git");
+        assert_eq!(scp_alice, "alice@example.test:repo.git");
     }
 
     #[test]

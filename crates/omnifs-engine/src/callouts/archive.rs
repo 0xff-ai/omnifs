@@ -103,6 +103,7 @@ impl ArchiveExecutor {
         trees: Arc<TreeRefs>,
         extract_root: PathBuf,
     ) -> std::io::Result<Self> {
+        let extract_root = BlobCache::canonical_root(&extract_root)?;
         publish::sweep_temp_publish_dirs(&extract_root)?;
         Ok(Self {
             cache,
@@ -209,6 +210,12 @@ impl ArchiveExecutor {
         let dest = self.extract_root.join(key.dir_name());
 
         if let Ok(metadata) = std::fs::symlink_metadata(&dest) {
+            if metadata.file_type().is_symlink() {
+                self.locks.remove(key);
+                return Err(ArchiveError::Internal(
+                    "archive extraction destination is a symlink".to_string(),
+                ));
+            }
             if metadata.is_dir() && !metadata.file_type().is_symlink() {
                 let tree = self.trees.register(dest);
                 self.trees_by_key.insert(key.clone(), tree);
@@ -224,13 +231,19 @@ impl ArchiveExecutor {
         }
 
         let tmp = publish::temp_sibling_path(&dest);
-        if tmp.exists()
-            && let Err(error) = publish::remove_existing_path(&tmp)
-        {
-            self.locks.remove(key);
-            return Err(ArchiveError::Internal(format!(
-                "prepare archive extraction: {error}"
-            )));
+        if let Ok(metadata) = std::fs::symlink_metadata(&tmp) {
+            if metadata.file_type().is_symlink() {
+                self.locks.remove(key);
+                return Err(ArchiveError::Internal(
+                    "archive extraction temporary path is a symlink".to_string(),
+                ));
+            }
+            if let Err(error) = publish::remove_existing_path(&tmp) {
+                self.locks.remove(key);
+                return Err(ArchiveError::Internal(format!(
+                    "prepare archive extraction: {error}"
+                )));
+            }
         }
         if let Err(error) = std::fs::create_dir_all(&tmp) {
             self.locks.remove(key);
@@ -268,7 +281,7 @@ impl ArchiveExecutor {
         key: &ExtractKey,
         record: &BlobRecord,
     ) -> Result<ExtractStats, ArchiveError> {
-        let blob_path = self.cache.generation_path(record.generation);
+        let blob_path = self.cache.body_path(record);
         let stats = match archive::extract(
             key.format,
             &blob_path,

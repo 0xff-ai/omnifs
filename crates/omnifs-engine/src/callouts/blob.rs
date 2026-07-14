@@ -257,7 +257,7 @@ impl BlobExecutor {
             .cache
             .lookup_by_id(blob_id)
             .ok_or_else(|| BlobError::NotFound(format!("blob {blob_id} not found")))?;
-        let path = self.cache.generation_path(record.generation);
+        let path = self.cache.body_path(&record);
         read_range(&path, offset, len, self.limits.max_read_blob_bytes)
             .map_err(|error| error.with_io_context("read blob"))
     }

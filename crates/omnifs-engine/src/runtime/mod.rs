@@ -390,17 +390,20 @@ impl Runtime {
             .cache_dir()
             .join(PROVIDER_CACHE_SUBDIR)
             .join(mount_name);
-        let blob_cache = Arc::new(
-            BlobCache::new(cache_root.join(BLOB_CACHE_SUBDIR))
-                .map_err(|error| BuildError::Cache(format!("blob: {error}")))?,
-        );
+        let blob_path = cache_root.join(BLOB_CACHE_SUBDIR);
+        let blob_cache = Arc::new(BlobCache::new(blob_path.clone()).map_err(|source| {
+            BuildError::Cache(format!("blob cache at {}: {source}", blob_path.display()))
+        })?);
+        let archive_path = cache_root.join(ARCHIVE_CACHE_SUBDIR);
         let archive = Arc::new(
-            ArchiveExecutor::new(
-                blob_cache.clone(),
-                trees.clone(),
-                cache_root.join(ARCHIVE_CACHE_SUBDIR),
-            )
-            .map_err(|error| BuildError::Cache(format!("archive: {error}")))?,
+            ArchiveExecutor::new(blob_cache.clone(), trees.clone(), archive_path.clone()).map_err(
+                |source| {
+                    BuildError::Cache(format!(
+                        "archive cache at {}: {source}",
+                        archive_path.display()
+                    ))
+                },
+            )?,
         );
 
         // Per-mount facade: structurally isolates object and view cache state.
@@ -575,7 +578,7 @@ impl Runtime {
             .blob_cache
             .lookup_by_id(blob_id)
             .ok_or_else(|| EngineError::ProviderProtocol(format!("blob {blob_id} not found")))?;
-        let path = self.blob_cache.generation_path(record.generation);
+        let path = self.blob_cache.body_path(&record);
         std::fs::read(path)
             .map_err(|e| EngineError::ProviderProtocol(format!("read blob {blob_id}: {e}")))
     }

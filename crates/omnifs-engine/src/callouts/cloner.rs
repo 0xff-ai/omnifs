@@ -1,5 +1,6 @@
 //! Git repository cloning with host-owned opaque identities.
 
+use crate::blob_cache::BlobCache;
 use crate::cache::identity::GitId;
 use crate::log_redaction::LogUrl;
 use crate::sandbox::publish;
@@ -25,12 +26,16 @@ pub enum CloneError {
     Timeout { timeout_secs: u64 },
     #[error("failed to spawn git")]
     Spawn(#[from] std::io::Error),
+    #[error("failed to wait for git")]
+    Wait(#[source] std::io::Error),
     #[error("invalid git reference")]
     InvalidReference,
     #[error("existing clone identity is unavailable")]
     ExistingEntry,
     #[error("failed to publish clone")]
-    Publish,
+    Publish(#[source] std::io::Error),
+    #[error("git cache I/O failed")]
+    Cache(#[source] std::io::Error),
 }
 
 /// Shared clone infrastructure rooted at a dedicated host-owned directory.
@@ -41,6 +46,7 @@ pub struct GitCloner {
 
 impl GitCloner {
     pub fn new(cache_dir: PathBuf) -> std::io::Result<Self> {
+        let cache_dir = BlobCache::canonical_root(&cache_dir)?;
         ensure_directory(&cache_dir)?;
         Ok(Self {
             cache_dir,
@@ -81,7 +87,7 @@ impl GitCloner {
         reference: Option<&str>,
         operation_id: u64,
     ) -> Result<PathBuf, CloneError> {
-        ensure_directory(&self.cache_dir).map_err(|_| CloneError::ExistingEntry)?;
+        ensure_directory(&self.cache_dir).map_err(CloneError::Cache)?;
         let cache_id = id.to_string();
         let cache_path = self.cache_dir.join(id.filesystem_name());
         let lock = self
@@ -103,12 +109,12 @@ impl GitCloner {
         let span = crate::inspector::clone_span(operation_id, &cache_id, clone_url);
         let temporary = publish::temp_sibling_path(&cache_path);
         let temporary_repo = temporary.join(CLONE_REPO_DIR);
-        std::fs::create_dir(&temporary).map_err(|_| CloneError::Publish)?;
+        std::fs::create_dir(&temporary).map_err(CloneError::Publish)?;
         let outcome = span.in_scope(|| {
             Self::run_clone(clone_url, reference, &temporary_repo).and_then(|()| {
-                Self::write_binding(&Self::binding_path(&temporary), canonical_remote, reference)?;
-                publish::publish_dir_by_rename(&temporary, &cache_path)
-                    .map_err(|_| CloneError::Publish)
+                Self::write_binding(&Self::binding_path(&temporary), canonical_remote, reference)
+                    .map_err(CloneError::Publish)?;
+                publish::publish_dir_by_rename(&temporary, &cache_path).map_err(CloneError::Publish)
             })
         });
         crate::inspector::record_outcome(
@@ -224,7 +230,7 @@ impl GitCloner {
                     let _ = child.wait();
                     let _ = stderr_thread.join();
                     publish::remove_path_best_effort(dest);
-                    return Err(CloneError::Spawn(error));
+                    return Err(CloneError::Wait(error));
                 },
             }
         }

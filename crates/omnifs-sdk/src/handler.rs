@@ -207,6 +207,7 @@ impl OpenedFile {
 ///     let opened = cx
 ///         .git()
 ///         .open_repo("git@github.com:o/r.git".to_string())
+///         .send()
 ///         .await?;
 ///     Ok(TreeRef::new(opened.tree))
 /// }

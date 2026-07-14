@@ -237,7 +237,7 @@ async fn test_execute_fetch_returns_denied_when_auth_is_required_but_missing() {
         needs_git: false,
         unix_sockets: Vec::new(),
     }));
-    let stack = HttpStack::new(auth, capability).unwrap();
+    let stack = HttpStack::new(Some(auth), capability).unwrap();
 
     let req = wit_types::HttpRequest {
         method: "GET".to_string(),
@@ -267,7 +267,7 @@ async fn oauth_401_refreshes_and_retries_once() {
         .expect("oauth authorization header");
 
     let stack = HttpStack::with_https_client(
-        Arc::clone(&auth),
+        Some(Arc::clone(&auth)),
         Arc::new(CapabilityChecker::new(Allowlist {
             domains: vec![FakeHttpsApiServer::domain()],
             git_repos: Vec::new(),
@@ -346,7 +346,7 @@ async fn fetch_blob_uses_same_oauth_retry_path() {
         .expect("oauth authorization header");
 
     let stack = Arc::new(HttpStack::with_https_client(
-        auth,
+        Some(auth),
         Arc::new(CapabilityChecker::new(Allowlist {
             domains: vec![FakeHttpsApiServer::domain()],
             git_repos: Vec::new(),
@@ -394,7 +394,7 @@ async fn oauth_refresh_failure_surfaces_denied_and_preserves_store() {
         .expect("oauth authorization header");
 
     let stack = HttpStack::with_https_client(
-        Arc::clone(&auth),
+        Some(Arc::clone(&auth)),
         Arc::new(CapabilityChecker::new(Allowlist {
             domains: vec![FakeHttpsApiServer::domain()],
             git_repos: Vec::new(),
