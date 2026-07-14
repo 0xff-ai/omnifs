@@ -419,61 +419,6 @@ struct UserProfile {
     kind: String,
 }
 
-#[derive(Debug, Deserialize)]
-struct RepoListing {
-    name: String,
-}
-
-pub(crate) async fn fetch_owner_repos(
-    cx: &Cx,
-    owner: &OwnerName,
-    kind: OwnerKind,
-) -> Result<Vec<String>> {
-    const MAX_PAGES: u32 = 50;
-    const PAGE_SIZE: usize = 100;
-    const CONCURRENCY: u32 = 5;
-
-    let scope = match kind {
-        OwnerKind::User => "users",
-        OwnerKind::Org => "orgs",
-    };
-    let base = format!("/{scope}/{owner}/repos?per_page={PAGE_SIZE}&sort=updated");
-
-    let first: Vec<RepoListing> = cx
-        .endpoint(GitHubApi)
-        .get(format!("{base}&page=1"))
-        .json()
-        .await?;
-    if first.len() < PAGE_SIZE {
-        return Ok(first.into_iter().map(|r| r.name).collect());
-    }
-
-    let mut names: Vec<String> = first.into_iter().map(|r| r.name).collect();
-    let mut next_page = 2u32;
-
-    while next_page <= MAX_PAGES {
-        let batch_end = (next_page + CONCURRENCY - 1).min(MAX_PAGES);
-        let requests = (next_page..=batch_end).map(|page| {
-            cx.endpoint(GitHubApi)
-                .get(format!("{base}&page={page}"))
-                .json::<Vec<RepoListing>>()
-        });
-
-        for batch in join_all(requests).await {
-            let repos = batch?;
-            let done = repos.len() < PAGE_SIZE;
-            names.extend(repos.into_iter().map(|r| r.name));
-            if done {
-                return Ok(names);
-            }
-        }
-
-        next_page = batch_end + 1;
-    }
-
-    Ok(names)
-}
-
 pub(crate) async fn resolve_owner_kind(cx: &Cx, owner: &OwnerName) -> Result<Option<OwnerKind>> {
     use omnifs_sdk::error::ProviderErrorKind;
 

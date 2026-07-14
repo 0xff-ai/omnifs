@@ -16,7 +16,7 @@ use crate::objects::{
 use crate::{
     CHECK_RUN_PAGE_SIZE, COMMENT_PAGE_SIZE, CheckRunsResponse, FILE_PAGE_SIZE, FilePath,
     NOTIFICATION_PAGE_SIZE, OwnerName, REVIEW_PAGE_SIZE, RepoId, RepoName, StateFilter, ThreadId,
-    WorkflowRunsResponse, fetch_owner_repos, list_items, resolve_owner_kind,
+    WorkflowRunsResponse, list_items, resolve_owner_kind,
 };
 
 /// Identity discriminator for the comment anchor's `{item_kind}` segment. A
@@ -364,28 +364,48 @@ impl Notification {
 // Collections
 // ===========================================================================
 
+#[derive(Debug, Deserialize)]
+struct RepoListing {
+    name: String,
+}
+
 impl Owner {
     /// Anchor-topology collection: the repo names listed under `/{owner}` ARE
     /// the child `Repo` anchors (`/{owner}/{repo}`). The repo listing carries
     /// only the name, not the single-repo canonical, so entries are `key`.
     pub(crate) async fn repos(
         key: OwnerKey,
-        cx: ListCx<NoCursor>,
-    ) -> Result<Collection<Repo, NoCursor>> {
+        cx: ListCx<PageCursor>,
+    ) -> Result<Collection<Repo, PageCursor>> {
         let kind = resolve_owner_kind(&cx, &key.owner)
             .await?
             .ok_or_else(|| ProviderError::not_found("owner not found"))?;
-        let mut names = fetch_owner_repos(&cx, &key.owner, kind).await?;
-        names.sort();
-        let entries = names.into_iter().filter_map(|name| {
-            name.parse::<RepoName>().ok().map(|repo| {
-                CollectionEntry::key(RepoKey {
-                    owner: key.owner.clone(),
-                    repo,
+        let page = cx.cursor().map_or(1, |cursor| cursor.0);
+        let scope = match kind {
+            crate::OwnerKind::User => "users",
+            crate::OwnerKind::Org => "orgs",
+        };
+        let repos: Vec<RepoListing> = cx
+            .endpoint(GitHubApi)
+            .get(format!(
+                "/{scope}/{}/repos?sort=full_name&direction=asc&per_page=100&page={page}",
+                key.owner
+            ))
+            .json()
+            .await?;
+        let len = repos.len() as u64;
+        let entries = repos
+            .into_iter()
+            .filter_map(|row| {
+                row.name.parse::<RepoName>().ok().map(|repo| {
+                    CollectionEntry::key(RepoKey {
+                        owner: key.owner.clone(),
+                        repo,
+                    })
                 })
             })
-        });
-        Ok(Collection::complete(entries))
+            .collect();
+        page_or_complete(entries, len, 100, page)
     }
 }
 
@@ -441,32 +461,40 @@ impl Repo {
 
     pub(crate) async fn workflow_runs(
         key: RepoKey,
-        cx: ListCx<NoCursor>,
-    ) -> Result<Collection<WorkflowRun, NoCursor>> {
+        cx: ListCx<PageCursor>,
+    ) -> Result<Collection<WorkflowRun, PageCursor>> {
+        let page = cx.cursor().map_or(1, |cursor| cursor.0);
         let repo_id = RepoId::new(&key.owner, &key.repo);
         let runs: WorkflowRunsResponse = cx
             .endpoint(GitHubApi)
-            .get(format!("/repos/{repo_id}/actions/runs?per_page=30"))
+            .get(format!(
+                "/repos/{repo_id}/actions/runs?per_page=30&page={page}"
+            ))
             .json()
             .await?;
-        let entries = runs.workflow_runs.into_iter().map(|run| {
-            let files = vec![
-                ("status".to_string(), inline_text(&run.status)),
-                (
-                    "conclusion".to_string(),
-                    inline_text(run.conclusion.as_deref().unwrap_or("")),
-                ),
-            ];
-            CollectionEntry::computed(
-                RunKey {
-                    owner: key.owner.clone(),
-                    repo: key.repo.clone(),
-                    run_id: run.id,
-                },
-                files,
-            )
-        });
-        Ok(Collection::complete(entries))
+        let len = runs.workflow_runs.len() as u64;
+        let entries = runs
+            .workflow_runs
+            .into_iter()
+            .map(|run| {
+                let files = vec![
+                    ("status".to_string(), inline_text(&run.status)),
+                    (
+                        "conclusion".to_string(),
+                        inline_text(run.conclusion.as_deref().unwrap_or("")),
+                    ),
+                ];
+                CollectionEntry::computed(
+                    RunKey {
+                        owner: key.owner.clone(),
+                        repo: key.repo.clone(),
+                        run_id: run.id,
+                    },
+                    files,
+                )
+            })
+            .collect();
+        page_or_complete(entries, len, 30, page)
     }
 }
 

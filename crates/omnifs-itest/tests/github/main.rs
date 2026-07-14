@@ -5,7 +5,7 @@ mod support;
 use omnifs_engine::test_support::{LookupOutcome, NamespaceListOutcome, ReadBytes};
 use omnifs_itest::parse_path;
 use omnifs_wit::provider::types::{
-    CalloutResult, EntryKind, Header, HttpResponse, ListChildrenResult, LookupChildResult,
+    CalloutResult, Cursor, EntryKind, Header, HttpResponse, ListChildrenResult, LookupChildResult,
     OpResult, ReadFileOutcome, Stability,
 };
 use support::{
@@ -86,7 +86,7 @@ fn github_provider_routes_namespace_and_numeric_paths() {
     assert!(
         runs_fetch
             .url
-            .ends_with("/repos/octocat/Hello-World/actions/runs?per_page=30"),
+            .ends_with("/repos/octocat/Hello-World/actions/runs?per_page=30&page=1"),
         "unexpected action runs listing URL: {}",
         runs_fetch.url
     );
@@ -455,7 +455,7 @@ fn github_action_run_list_projects_files() {
     assert!(
         fetch
             .url
-            .ends_with("/repos/octocat/Hello-World/actions/runs?per_page=30"),
+            .ends_with("/repos/octocat/Hello-World/actions/runs?per_page=30&page=1"),
         "unexpected action runs URL: {}",
         fetch.url
     );
@@ -573,6 +573,7 @@ fn github_provider_action_run_lookup_validates_and_listing_validates() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn github_owner_listing_tracks_browsed_repos() {
     // The owner is an OBJECT at `/{owner}`: listing it MERGES the owner's own
     // faces (owner.json canonical, profile.md representation) with the repo
@@ -634,16 +635,28 @@ fn github_owner_listing_tracks_browsed_repos() {
     assert!(
         repos_fetch
             .url
-            .ends_with("/users/octocat/repos?per_page=100&sort=updated&page=1"),
+            .ends_with(
+                "/users/octocat/repos?sort=full_name&direction=asc&per_page=100&page=1"
+            ),
         "expected owner repo listing fetch, got {}",
         repos_fetch.url
     );
 
+    let repo_page = (0..100)
+        .map(|index| {
+            if index == 0 {
+                r#"{"name":"Hello-World"}"#.to_string()
+            } else {
+                format!(r#"{{"name":"repo-{index:03}"}}"#)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(",");
     owner_listing
         .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
             status: 200,
             headers: Vec::<Header>::new(),
-            body: br#"[{"name":"Hello-World"}]"#.to_vec(),
+            body: format!("[{repo_page}]").into_bytes(),
         })])
         .unwrap();
     match owner_listing.result().unwrap() {
@@ -666,9 +679,43 @@ fn github_owner_listing_tracks_browsed_repos() {
                 names.contains(&"profile.md"),
                 "expected profile.md face in owner listing, got {names:?}"
             );
+            assert!(matches!(
+                listing.next_cursor,
+                Some(Cursor::Opaque(ref cursor)) if cursor == "2"
+            ));
         },
         other => panic!("expected owner listing, got {other:?}"),
     }
+
+    let mut page_two = harness
+        .list_with_cursor("/octocat", Some(Cursor::Opaque("2".to_string())))
+        .unwrap();
+    let classify_fetch = page_two.expect_single_fetch();
+    assert!(classify_fetch.url.ends_with("/users/octocat"));
+    page_two
+        .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
+            status: 200,
+            headers: Vec::<Header>::new(),
+            body: br#"{"login":"octocat","type":"User"}"#.to_vec(),
+        })])
+        .unwrap();
+    let repos_fetch = page_two.expect_single_fetch();
+    assert!(
+        repos_fetch
+            .url
+            .ends_with(
+                "/users/octocat/repos?sort=full_name&direction=asc&per_page=100&page=2"
+            ),
+        "expected stable owner repo page 2 URL, got {}",
+        repos_fetch.url
+    );
+    page_two
+        .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
+            status: 200,
+            headers: Vec::<Header>::new(),
+            body: br#"[{"name":"z-last"}]"#.to_vec(),
+        })])
+        .unwrap();
 }
 
 #[test]
@@ -739,7 +786,9 @@ fn github_root_and_owner_listings_ignore_unclassified_repo_paths() {
     assert!(
         repos_fetch
             .url
-            .ends_with("/users/open/repos?per_page=100&sort=updated&page=1"),
+            .ends_with(
+                "/users/open/repos?sort=full_name&direction=asc&per_page=100&page=1"
+            ),
         "expected owner repo listing fetch, got {}",
         repos_fetch.url
     );
@@ -1556,7 +1605,7 @@ fn github_projected_resource_reads_return_all_fetched_siblings() {
     assert!(
         index_fetch
             .url
-            .ends_with("/repos/octocat/Hello-World/actions/runs?per_page=30"),
+            .ends_with("/repos/octocat/Hello-World/actions/runs?per_page=30&page=1"),
         "unexpected runs listing URL: {}",
         index_fetch.url
     );
@@ -2128,7 +2177,9 @@ fn github_provider_lookup_owner_validates_and_owner_listing_classifies_with_org_
     assert!(
         repos_fetch
             .url
-            .ends_with("/orgs/openai/repos?per_page=100&sort=updated&page=1"),
+            .ends_with(
+                "/orgs/openai/repos?sort=full_name&direction=asc&per_page=100&page=1"
+            ),
         "expected repo listing fetch after owner classification, got {}",
         repos_fetch.url
     );
@@ -2270,7 +2321,7 @@ fn github_provider_list_routes_preserve_typed_http_errors() {
         (
             "actions",
             "/octocat/Hello-World/actions/runs",
-            "/repos/octocat/Hello-World/actions/runs?per_page=30",
+            "/repos/octocat/Hello-World/actions/runs?per_page=30&page=1",
         ),
     ];
 
