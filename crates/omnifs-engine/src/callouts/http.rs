@@ -305,7 +305,7 @@ pub(crate) fn decode_response_headers(headers: &HeaderMap) -> Vec<(String, Strin
 #[cfg(test)]
 mod tests {
     use super::HttpStack;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::io::AsyncWriteExt;
     use tokio::net::TcpListener;
 
     #[tokio::test]
@@ -314,8 +314,6 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
-            let mut request = [0; 1024];
-            stream.read(&mut request).await.unwrap();
             stream
                 .write_all(
                     b"HTTP/1.1 302 Found\r\nLocation: /followed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
