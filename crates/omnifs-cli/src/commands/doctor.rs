@@ -7,7 +7,7 @@ use std::path::Path;
 use omnifs_workspace::creds::{CredentialStore, FileStore};
 
 use crate::frontend_container::{frontend_container_name, resolve_frontend_image};
-use crate::inventory::{Inventory, Severity};
+use crate::inventory::{Inventory, ProviderState, Severity};
 use crate::launch_backend::{DockerTarget, ImageRef, names_registry};
 use crate::runtime::Runtime;
 use crate::ui::output::{Output, ResultVerdict};
@@ -19,7 +19,6 @@ use crate::ui::table::{
 };
 use crate::workspace::Workspace;
 use omnifs_workspace::layout::WorkspaceLayout;
-use omnifs_workspace::provider::DirStatus;
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct DoctorArgs {}
@@ -485,22 +484,25 @@ impl Doctor<'_> {
     }
 
     fn probe_providers_discovered(&self) -> ProbeResult {
-        match self.workspace.catalog().dir_status() {
-            DirStatus::Present { wasm_count } if wasm_count > 0 => {
-                match self.workspace.catalog().installable() {
-                    Ok(providers) => ProbeResult::Ok(format!(
-                        "{} providers ({wasm_count} artifacts)",
-                        providers.len()
-                    )),
-                    Err(error) => ProbeResult::Err(format!("provider store unreadable: {error}")),
-                }
-            },
-            DirStatus::Missing | DirStatus::Present { .. } => ProbeResult::Warn(
-                "no providers installed (run `omnifs up` or `omnifs setup`)".into(),
-            ),
-            DirStatus::Unreadable(error) => {
-                ProbeResult::Err(format!("provider store unreadable: {error}"))
-            },
+        let artifacts = self
+            .inventory
+            .providers
+            .iter()
+            .filter(|provider| provider.state != ProviderState::Missing)
+            .count();
+        if artifacts == 0 {
+            ProbeResult::Warn("no providers installed (run `omnifs up` or `omnifs setup`)".into())
+        } else if self
+            .inventory
+            .providers
+            .iter()
+            .any(|provider| provider.state == ProviderState::Missing)
+        {
+            ProbeResult::Warn(format!(
+                "{artifacts} provider artifacts available; one or more pinned artifacts are missing"
+            ))
+        } else {
+            ProbeResult::Ok(format!("{artifacts} provider artifacts available"))
         }
     }
 
@@ -610,7 +612,7 @@ impl Doctor<'_> {
     }
 
     fn probe_live(&self) -> LiveSection {
-        if self.inventory.workspace.daemon == crate::inventory::DaemonState::Stopped {
+        if self.inventory.daemon_state() == crate::inventory::DaemonState::Stopped {
             return LiveSection {
                 skipped: Some("daemon is stopped".to_string()),
                 findings: Vec::new(),
@@ -761,19 +763,12 @@ mod golden {
         let workspace = Workspace::from_layout(layout.clone());
         let doctor = Doctor {
             workspace: &workspace,
-            inventory: Inventory {
-                workspace: crate::inventory::WorkspaceStatus {
-                    home: layout.config_dir.clone(),
-                    daemon: crate::inventory::DaemonState::Stopped,
-                    namespace: crate::inventory::NamespaceState::Offline,
-                    pid: None,
-                    api: None,
-                    runtime_expected: false,
-                },
-                frontends: Vec::new(),
-                mounts: Vec::new(),
-                providers: Vec::new(),
-            },
+            inventory: Inventory::test(
+                crate::inventory::DaemonState::Stopped,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ),
             docker_target: Err("test".to_owned()),
             output: Output::new(crate::ui::output::OutputMode::Human, false),
         };

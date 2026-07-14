@@ -16,6 +16,7 @@ use clap::Args;
 use crate::commands::receipt::TeardownReceipt;
 use crate::daemon_teardown::DaemonTeardown;
 use crate::error::ExitCode;
+use crate::inventory::Inventory;
 use crate::ui::output::{Output, ResultVerdict};
 use crate::workspace::Workspace;
 
@@ -30,8 +31,9 @@ impl DownArgs {
     pub async fn run(self, output: Output) -> anyhow::Result<ExitCode> {
         let DownArgs { force } = self;
         let workspace = Workspace::resolve()?;
+        let inventory = Inventory::collect(&workspace).await?;
 
-        let teardown = DaemonTeardown::new(&workspace, output);
+        let teardown = DaemonTeardown::with_inventory(&workspace, output, inventory);
         let exit = if output.is_structured() {
             // The receipt is the whole story: a failed row already conveys the
             // failure, so this returns a non-zero exit code rather than an

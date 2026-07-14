@@ -27,7 +27,7 @@ impl InventoryReport {
     }
 
     pub(crate) fn exit_code(&self) -> ExitCode {
-        if self.inventory.workspace.daemon == DaemonState::Unreachable {
+        if self.inventory.daemon_state() == DaemonState::Unreachable {
             ExitCode::DaemonUnavailable
         } else {
             match self.inventory.verdict() {
@@ -39,8 +39,8 @@ impl InventoryReport {
 
     pub(crate) fn render(&self, detail: bool) -> TableReport {
         let mut report = TableReport::new();
-        let workspace = &self.inventory.workspace;
-        let context_state = match workspace.daemon {
+        let daemon_state = self.inventory.daemon_state();
+        let context_state = match daemon_state {
             DaemonState::Running => match self.inventory.verdict() {
                 crate::inventory::Verdict::Ok => TableState::positive("healthy"),
                 crate::inventory::Verdict::Degraded => TableState::attention("degraded"),
@@ -54,13 +54,14 @@ impl InventoryReport {
         let mut metadata = vec![
             TableMeta::new(
                 "Daemon",
-                workspace
-                    .pid
+                self.inventory
+                    .daemon
+                    .pid()
                     .map_or_else(|| "stopped".to_owned(), |pid| pid.to_string()),
             ),
             TableMeta::new("namespace", "/"),
         ];
-        if let Some(api) = &workspace.api {
+        if let Some(api) = self.inventory.daemon.api() {
             metadata.push(TableMeta::new(
                 "API",
                 format!("{}.{}", api.major, api.minor),
@@ -68,11 +69,11 @@ impl InventoryReport {
         }
         let mut context = TableContext::new(
             "omnifs",
-            omnifs_workspace::layout::WorkspaceLayout::display(&workspace.home),
+            omnifs_workspace::layout::WorkspaceLayout::display(&self.inventory.home),
             context_state,
         )
         .with_metadata(metadata);
-        match workspace.daemon {
+        match daemon_state {
             DaemonState::Stopped => {
                 context = context.with_action(TableAction::fix("omnifs up"));
             },
@@ -263,24 +264,14 @@ fn table_state(severity: Severity, label: impl Into<String>) -> TableState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::inventory::{
-        ApiVersion, NamespaceState, ProviderState, ProviderStatus, WorkspaceStatus,
-    };
-    use std::path::PathBuf;
+    use crate::inventory::{ProviderState, ProviderStatus};
 
     fn report(daemon: DaemonState, degraded: bool) -> InventoryReport {
-        let inventory = Inventory {
-            workspace: WorkspaceStatus {
-                home: PathBuf::from("/tmp/omnifs"),
-                daemon,
-                namespace: NamespaceState::Offline,
-                pid: None,
-                api: None,
-                runtime_expected: daemon == DaemonState::Unreachable,
-            },
-            frontends: Vec::new(),
-            mounts: Vec::new(),
-            providers: if degraded {
+        let inventory = Inventory::test(
+            daemon,
+            Vec::new(),
+            Vec::new(),
+            if degraded {
                 vec![ProviderStatus {
                     name: "missing".into(),
                     version: None,
@@ -292,7 +283,7 @@ mod tests {
             } else {
                 Vec::new()
             },
-        };
+        );
         InventoryReport { inventory }
     }
 
@@ -329,7 +320,7 @@ mod tests {
     #[test]
     fn context_api_and_actions_follow_observed_daemon_state() {
         let mut healthy = report(DaemonState::Running, false);
-        healthy.inventory.workspace.api = Some(ApiVersion { major: 7, minor: 0 });
+        healthy.inventory.daemon.status.as_mut().unwrap().api_major = 7;
         let healthy_text = healthy
             .render(false)
             .render_with(crate::ui::table::RenderOptions {

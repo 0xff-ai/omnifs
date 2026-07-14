@@ -5,8 +5,6 @@
 //! `Workspace::mounts()`. A spec carries its provider-manifest defaults from
 //! creation time, so reading one needs no resolution step.
 
-use std::collections::{BTreeMap, HashSet};
-
 use omnifs_workspace::mounts::Name as MountName;
 use omnifs_workspace::provider::{Catalog, Provider, ProviderManifest};
 
@@ -46,28 +44,6 @@ pub(crate) fn find_installed<'a>(
     installed
         .iter()
         .find(|(provider, _)| provider.meta.name.as_str() == name)
-}
-
-/// Map of provider name to the mount that already configures it, so the picker
-/// can hide already-configured providers. Intersects the installable provider
-/// names with the configured mount specs.
-pub(crate) fn configured_mounts(
-    catalog: &Catalog,
-    mounts: &[MountConfig],
-) -> anyhow::Result<BTreeMap<String, String>> {
-    let installable: HashSet<String> = catalog
-        .installable()?
-        .iter()
-        .map(|provider| provider.meta.name.to_string())
-        .collect();
-    let mut by_provider = BTreeMap::new();
-    for configured in mounts {
-        let provider_name = configured.config.provider_name().to_string();
-        if installable.contains(&provider_name) {
-            by_provider.insert(provider_name, configured.config.mount.clone());
-        }
-    }
-    Ok(by_provider)
 }
 
 /// Returns `true` when a mount with `name` appears in `mounts`.

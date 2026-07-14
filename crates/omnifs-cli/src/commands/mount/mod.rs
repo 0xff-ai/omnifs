@@ -212,8 +212,7 @@ fn render_mount_show(result: &MountShowResult) -> String {
     for path in &result.access_paths {
         let state = match path.state {
             crate::inventory::AccessState::Available => StateToken::positive(path.state.label()),
-            crate::inventory::AccessState::FrontendStopped
-            | crate::inventory::AccessState::Offline => StateToken::neutral(path.state.label()),
+            crate::inventory::AccessState::Offline => StateToken::neutral(path.state.label()),
             crate::inventory::AccessState::Failed => StateToken::failure(path.state.label()),
         };
         let row_state = state.clone();

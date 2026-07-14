@@ -307,25 +307,11 @@ pub(crate) struct SnapshotReceipt {
 mod tests {
     use super::*;
     use crate::commands::frontend::RuntimeState;
-    use crate::inventory::{
-        ApiVersion, DaemonState, FrontendSource, FrontendState, NamespaceState, WorkspaceStatus,
-    };
+    use crate::inventory::{DaemonState, FrontendState};
     use omnifs_workspace::config::{EffectiveFrontend, Environment, Filesystem, PlanSource};
 
     fn inventory_with_frontends(frontends: Vec<FrontendStatus>) -> Inventory {
-        Inventory {
-            workspace: WorkspaceStatus {
-                home: PathBuf::from("/tmp/omnifs"),
-                daemon: DaemonState::Running,
-                namespace: NamespaceState::Serving,
-                pid: Some(1),
-                api: Some(ApiVersion { major: 1, minor: 0 }),
-                runtime_expected: true,
-            },
-            frontends,
-            mounts: Vec::new(),
-            providers: Vec::new(),
-        }
+        Inventory::test(DaemonState::Running, frontends, Vec::new(), Vec::new())
     }
 
     #[test]
@@ -347,7 +333,6 @@ mod tests {
                 filesystem: selected.filesystem,
                 environment: selected.environment,
                 location: selected.location.clone(),
-                source: FrontendSource::Configured,
                 state: FrontendState::Attached,
                 scope: "all",
                 mount_count: 0,
@@ -357,8 +342,7 @@ mod tests {
                 filesystem: unrelated.filesystem,
                 environment: unrelated.environment,
                 location: unrelated.location.clone(),
-                source: FrontendSource::PlatformDefault,
-                state: FrontendState::Unattached,
+                state: FrontendState::Failed,
                 scope: "all",
                 mount_count: 0,
                 fix: Some("omnifs up".into()),

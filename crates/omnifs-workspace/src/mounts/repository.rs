@@ -110,6 +110,20 @@ pub struct Repository {
 }
 
 impl Repository {
+    /// Read the current mount specs and Git refs without initializing, locking,
+    /// staging, or committing the repository.
+    pub fn observe(mounts_dir: impl AsRef<Path>) -> Result<Self, RepositoryError> {
+        let mounts_dir = mounts_dir.as_ref().to_path_buf();
+        fs::create_dir_all(&mounts_dir).map_err(|source| RepositoryError::Io {
+            path: mounts_dir.clone(),
+            source,
+        })?;
+        Ok(Self {
+            registry: Registry::load(&mounts_dir)?,
+            mounts_dir,
+        })
+    }
+
     /// Open (and, on first use, initialize) the repository at `mounts_dir`.
     /// The registry lock is retained until this value is dropped.
     pub fn open(mounts_dir: impl AsRef<Path>) -> Result<Self, RepositoryError> {
@@ -145,6 +159,21 @@ impl Repository {
         &mut self.registry
     }
 
+    /// Return the immutable commit currently at `HEAD`.
+    pub fn head_revision(&self) -> Result<Option<Revision>, RepositoryError> {
+        let output = self.git(&["rev-parse", "--verify", "HEAD"], "read HEAD")?;
+        if !output.status.success() {
+            return Ok(None);
+        }
+        let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        Revision::new(value.clone())
+            .map(Some)
+            .map_err(|source| RepositoryError::Revision {
+                revision: value,
+                source,
+            })
+    }
+
     /// Persist a spec through Registry's validation and atomic-write path.
     pub fn put(&mut self, spec: &super::Spec) -> Result<(), RepositoryError> {
         self.registry.put(spec)?;
@@ -167,7 +196,7 @@ impl Repository {
         let has_head = self.has_head()?;
         let staged = self.git_status_cached()?;
         if !staged && has_head {
-            return self.head();
+            return self.require_head();
         }
         let message = if has_head {
             "Update mount specs"
@@ -175,7 +204,7 @@ impl Repository {
             "Initialize mount repository"
         };
         self.git(&["commit", "--allow-empty", "-m", message], "commit")?;
-        self.head()
+        self.require_head()
     }
 
     /// Materialize an immutable registry snapshot for `revision` under the
@@ -413,16 +442,14 @@ impl Repository {
     }
 
     fn has_head(&self) -> Result<bool, RepositoryError> {
-        let output = self.git(&["rev-parse", "--verify", "HEAD"], "read HEAD")?;
-        Ok(output.status.success())
+        Ok(self.head_revision()?.is_some())
     }
 
-    fn head(&self) -> Result<Revision, RepositoryError> {
-        let output = self.git(&["rev-parse", "--verify", "HEAD"], "read HEAD")?;
-        let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        Revision::new(value.clone()).map_err(|source| RepositoryError::Revision {
-            revision: value,
-            source,
+    fn require_head(&self) -> Result<Revision, RepositoryError> {
+        self.head_revision()?.ok_or_else(|| RepositoryError::Git {
+            purpose: "read HEAD".to_string(),
+            path: self.mounts_dir.clone(),
+            stderr: "repository has no HEAD after commit".to_string(),
         })
     }
 
@@ -612,6 +639,29 @@ mod tests {
     }
 
     #[test]
+    fn observe_reads_mounts_without_initializing_git() {
+        let dir = tempfile::tempdir().unwrap();
+        let mounts = dir.path().join("mounts");
+        fs::create_dir_all(&mounts).unwrap();
+        fs::write(
+            mounts.join("demo.json"),
+            serde_json::to_vec(&spec("demo")).unwrap(),
+        )
+        .unwrap();
+
+        let repository = Repository::observe(&mounts).unwrap();
+        assert!(!mounts.join(".git").exists());
+        assert_eq!(repository.head_revision().unwrap(), None);
+        assert_eq!(repository.applied().unwrap(), None);
+        assert!(
+            repository
+                .registry()
+                .get(&Name::new("demo").unwrap())
+                .is_some()
+        );
+    }
+
+    #[test]
     fn manual_valid_edit_commits_and_applied_is_explicit() {
         let dir = tempfile::tempdir().unwrap();
         let mounts = dir.path().join("mounts");
@@ -729,7 +779,7 @@ mod tests {
             ],
         );
         assert!(invalid.status.success());
-        let invalid_revision = repository.head().unwrap();
+        let invalid_revision = repository.head_revision().unwrap().unwrap();
         assert!(matches!(
             repository.materialize(&invalid_revision, &cache),
             Err(RepositoryError::UnexpectedTracked { .. })

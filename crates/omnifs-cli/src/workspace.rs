@@ -91,6 +91,13 @@ impl Workspace {
             .borrow_mut())
     }
 
+    /// Observe desired state without opening the mutating repository owner.
+    /// Inventory uses this path so a status read never initializes or commits
+    /// a Git repository as a side effect.
+    pub(crate) fn observe_repository(&self) -> anyhow::Result<Repository> {
+        Ok(Repository::observe(self.home.mounts_dir())?)
+    }
+
     pub(crate) fn put_mount_uncommitted(&self, spec: &Spec) -> anyhow::Result<()> {
         {
             let mut repository = self.repository()?;
@@ -184,11 +191,9 @@ mod tests {
     use super::*;
     use crate::test_support::{fixture_paths, spec_with_provider};
 
-    /// Reproduces the `omnifs setup` bug: `configure_and_launch` calls
-    /// `workspace.mounts()` before any provider is configured (an empty
-    /// read), then `run_init_loop` writes new specs, then `Launcher::launch`
-    /// calls `workspace.mounts()` again on the *same* `Workspace` and must
-    /// see the write, not the pre-write empty snapshot the cache captured.
+    /// A command may inspect desired state before writing a mount, then read it
+    /// again before committing or applying. The second read must see the write,
+    /// not the empty snapshot cached by the first read.
     #[test]
     fn mounts_observes_a_put_after_an_earlier_empty_read() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -196,8 +201,7 @@ mod tests {
         assert!(!paths.mounts_dir.exists());
         let workspace = Workspace::from_layout(paths.clone());
 
-        // Warm the cache empty, mirroring the early `workspace.mounts()?`
-        // call in `configure_and_launch` before any provider is configured.
+        // Warm the cache with an empty desired-state read.
         assert!(workspace.mounts().unwrap().is_empty());
 
         // Write a spec the way `persist_mount_spec` does when the daemon is
@@ -206,7 +210,7 @@ mod tests {
         workspace.put_mount_uncommitted(&spec).unwrap();
         assert!(paths.mounts_dir.join(".git").is_dir());
 
-        // The launch preflight's `self.workspace.mounts()?` must observe it.
+        // The next command-local read must observe the new spec.
         let mounts = workspace.mounts().unwrap();
         assert_eq!(
             mounts.len(),

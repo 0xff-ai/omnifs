@@ -327,7 +327,7 @@ async fn run_bare(output: Output) -> anyhow::Result<ExitCode> {
         crate::inventory::Verdict::Ok => ExitCode::Success,
         crate::inventory::Verdict::Degraded => ExitCode::Degraded,
     };
-    let running = inventory.workspace.daemon == crate::inventory::DaemonState::Running;
+    let running = inventory.daemon_state() == crate::inventory::DaemonState::Running;
     if output.is_structured() {
         output.emit_result(inventory.verdict(), inventory)?;
         return Ok(exit_code);

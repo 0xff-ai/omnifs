@@ -69,24 +69,19 @@ fn nudge_due(path: &std::path::Path) -> bool {
 }
 
 async fn health_nudge(workspace: &Workspace) -> Option<String> {
-    if workspace.daemon().ready().await
-        && let Ok(Some(status)) = workspace.daemon().compatible_status_optional().await
-    {
-        for mount in &status.mounts {
-            if let Some(health) = mount.auth_health
-                && health.needs_attention()
-            {
-                return Some(format!(
-                    "mount `{}` has {}; run `omnifs mount reauth {}`",
-                    mount.mount,
-                    credential_health_noun(health),
-                    mount.mount
-                ));
-            }
+    let inventory = crate::inventory::Inventory::collect(workspace).await.ok()?;
+    for mount in &inventory.startup_credentials {
+        if let Some(health) = mount.health
+            && health.needs_attention()
+        {
+            return Some(format!(
+                "mount `{}` has {}; run `omnifs mount reauth {}`",
+                mount.mount,
+                credential_health_noun(health),
+                mount.mount
+            ));
         }
     }
-
-    let inventory = crate::inventory::Inventory::collect(workspace).await.ok()?;
     for mount in inventory.mounts {
         match mount.auth {
             crate::inventory::AuthState::Missing { .. } => {

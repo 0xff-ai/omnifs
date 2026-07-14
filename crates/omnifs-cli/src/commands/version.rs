@@ -55,16 +55,12 @@ struct ProvidersJson {
 impl VersionJson {
     async fn collect(workspace: &Workspace) -> Result<Self> {
         let inventory = Inventory::collect(workspace).await?;
-        let daemon = inventory
-            .workspace
-            .api
-            .as_ref()
-            .map(|api| DaemonVersionJson {
-                version: env!("CARGO_PKG_VERSION").to_owned(),
-                api_major: api.major,
-                api_minor: api.minor,
-                pid: inventory.workspace.pid.unwrap_or_default(),
-            });
+        let daemon = inventory.daemon.api().map(|api| DaemonVersionJson {
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+            api_major: api.major,
+            api_minor: api.minor,
+            pid: inventory.daemon.pid().unwrap_or_default(),
+        });
         Ok(Self {
             cli: env!("CARGO_PKG_VERSION").to_string(),
             channel: BUILD_CHANNEL.word(),

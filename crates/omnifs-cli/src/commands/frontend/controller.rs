@@ -6,7 +6,6 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail, ensure};
 use clap::{Args, ValueEnum};
-use omnifs_api::{FrontendDelivery, FrontendInfo, FsType};
 use omnifs_mtab::{MountKind, MountState};
 use omnifs_workspace::config::{
     ConfigDocument, EffectiveFrontend, Environment, Filesystem, FrontendId, FrontendPlan,
@@ -18,6 +17,7 @@ use omnifs_workspace::runtime_record::{FrontendKind, RuntimeRecord, Via};
 use crate::commands::receipt::FrontendReceipt;
 use crate::frontend_backend::{DockerBackend, FrontendBackend};
 use crate::frontend_container::{frontend_container_name, resolve_frontend_image};
+use crate::inventory::Inventory;
 use crate::krunkit_backend::{GuestImageSource, KrunkitBackend};
 use crate::launch_backend::{DockerTarget, GUEST_MOUNT};
 use crate::local_backend::LocalBackend;
@@ -176,13 +176,11 @@ impl<'a> FrontendController<'a> {
             self.document.save()?;
         }
         if !changed {
-            let status = self.workspace.daemon().compatible_status_optional().await?;
-            let attached = status.as_ref().is_some_and(|status| {
-                status
-                    .frontends
-                    .iter()
-                    .any(|frontend| observed_id(frontend) == id)
-            });
+            let inventory = self.observed_inventory().await?;
+            let status = inventory.daemon.status.clone();
+            let attached = observed_entries(&inventory)
+                .iter()
+                .any(|frontend| frontend.id() == id);
             match enable_action(status.is_some(), attached) {
                 EnableAction::Stopped => {
                     return Ok(FrontendResult {
@@ -214,7 +212,8 @@ impl<'a> FrontendController<'a> {
                 },
             }
         }
-        let Some(_status) = self.workspace.daemon().compatible_status_optional().await? else {
+        let inventory = self.observed_inventory().await?;
+        let Some(_status) = inventory.daemon.status.as_ref() else {
             return Ok(FrontendResult {
                 id,
                 state: RuntimeState::Stopped,
@@ -235,9 +234,10 @@ impl<'a> FrontendController<'a> {
         let filesystem = args.filesystem.into();
         let environment = args.environment.into();
         let location = args.location;
-        let status = self.workspace.daemon().compatible_status_optional().await?;
+        let inventory = self.observed_inventory().await?;
+        let status = inventory.daemon.status.clone();
         let desired = self.desired()?;
-        let observed = observed_entries(status.as_ref());
+        let observed = observed_entries(&inventory);
         let fully_specified = location.is_some() || environment != Environment::Host;
         let id = match resolve_selector(
             desired.clone(),
@@ -302,9 +302,10 @@ impl<'a> FrontendController<'a> {
     }
 
     pub async fn restart(&mut self, args: FrontendRestartArgs) -> Result<Vec<FrontendResult>> {
-        let status = self.workspace.daemon().compatible_status_optional().await?;
+        let inventory = self.observed_inventory().await?;
+        let status = inventory.daemon.status.clone();
         let desired = self.desired()?;
-        let observed = observed_entries(status.as_ref());
+        let observed = observed_entries(&inventory);
         let no_selector =
             args.filesystem.is_none() && args.environment.is_none() && args.location.is_none();
         let targets = if no_selector {
@@ -418,6 +419,10 @@ impl<'a> FrontendController<'a> {
         Ok(failures)
     }
 
+    async fn observed_inventory(&self) -> Result<Inventory> {
+        Inventory::collect(self.workspace).await
+    }
+
     async fn runner_is_running(&self, target: &EffectiveFrontend) -> Result<bool> {
         match target.environment {
             Environment::Host => {
@@ -465,14 +470,11 @@ impl<'a> FrontendController<'a> {
     }
 
     async fn attached_ids(&self) -> Result<Vec<FrontendId>> {
-        Ok(self
-            .workspace
-            .daemon()
-            .compatible_status_optional()
-            .await?
-            .map_or_else(Vec::new, |status| {
-                status.frontends.iter().map(observed_id).collect()
-            }))
+        let inventory = self.observed_inventory().await?;
+        Ok(observed_entries(&inventory)
+            .into_iter()
+            .map(|entry| entry.id())
+            .collect())
     }
 
     async fn launch_result(&self, target: EffectiveFrontend) -> FrontendResult {
@@ -719,25 +721,6 @@ pub(crate) async fn teardown_all(
     report
 }
 
-fn observed_id(frontend: &FrontendInfo) -> FrontendId {
-    let spec = FrontendSpec {
-        filesystem: match frontend.fs_type {
-            FsType::Fuse => Filesystem::Fuse,
-            FsType::Nfs => Filesystem::Nfs,
-        },
-        environment: match frontend.delivery {
-            FrontendDelivery::Local => Environment::Host,
-            FrontendDelivery::Docker => Environment::Docker,
-            FrontendDelivery::Krunkit => Environment::Krunkit,
-        },
-        location: (frontend.delivery == FrontendDelivery::Local)
-            .then(|| frontend.mount_point.clone()),
-    };
-    spec.resolve(current_host_os(), &frontend.mount_point)
-        .expect("observed frontend identity is valid")
-        .id()
-}
-
 async fn wait_for_mount(
     backend: &impl FrontendBackend,
     mount: Option<&str>,
@@ -901,8 +884,7 @@ fn frontend_access_table(
             crate::inventory::AccessState::Available => {
                 crate::ui::table::StateToken::positive(path.state.label())
             },
-            crate::inventory::AccessState::FrontendStopped
-            | crate::inventory::AccessState::Offline => {
+            crate::inventory::AccessState::Offline => {
                 crate::ui::table::StateToken::neutral(path.state.label())
             },
             crate::inventory::AccessState::Failed => {
@@ -966,22 +948,14 @@ fn stopped_restart_result(id: FrontendId) -> FrontendResult {
     }
 }
 
-fn observed_entries(status: Option<&omnifs_api::DaemonStatus>) -> Vec<EffectiveFrontend> {
-    status
-        .into_iter()
-        .flat_map(|status| status.frontends.iter())
+fn observed_entries(inventory: &Inventory) -> Vec<EffectiveFrontend> {
+    inventory
+        .frontends
+        .iter()
         .map(|frontend| EffectiveFrontend {
-            filesystem: match frontend.fs_type {
-                FsType::Fuse => Filesystem::Fuse,
-                FsType::Nfs => Filesystem::Nfs,
-            },
-            environment: match frontend.delivery {
-                FrontendDelivery::Local => Environment::Host,
-                FrontendDelivery::Docker => Environment::Docker,
-                FrontendDelivery::Krunkit => Environment::Krunkit,
-            },
-            location: (frontend.delivery == FrontendDelivery::Local)
-                .then(|| frontend.mount_point.clone()),
+            filesystem: frontend.filesystem,
+            environment: frontend.environment,
+            location: frontend.location.clone(),
             source: omnifs_workspace::config::PlanSource::Configured,
         })
         .collect()

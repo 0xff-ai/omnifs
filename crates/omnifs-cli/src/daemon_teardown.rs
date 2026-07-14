@@ -4,6 +4,7 @@
 //! outcomes through the UI event stream, so a receipt cannot claim a frontend
 //! or daemon was stopped when the cleanup only produced a warning.
 
+use crate::inventory::{DaemonProbe, Inventory};
 use crate::ui::consent::Outcome;
 use crate::ui::event::{LedgerRenderer, Render, UiEvent};
 use crate::ui::output::Output;
@@ -82,11 +83,28 @@ impl TeardownOutcome {
 pub(crate) struct DaemonTeardown<'a> {
     workspace: &'a Workspace,
     output: Output,
+    initial: Option<Inventory>,
 }
 
 impl<'a> DaemonTeardown<'a> {
     pub(crate) fn new(workspace: &'a Workspace, output: Output) -> Self {
-        Self { workspace, output }
+        Self {
+            workspace,
+            output,
+            initial: None,
+        }
+    }
+
+    pub(crate) fn with_inventory(
+        workspace: &'a Workspace,
+        output: Output,
+        inventory: Inventory,
+    ) -> Self {
+        Self {
+            workspace,
+            output,
+            initial: Some(inventory),
+        }
     }
 
     /// Stop frontends before stopping the namespace daemon they depend on, and
@@ -140,7 +158,7 @@ impl<'a> DaemonTeardown<'a> {
         }
 
         let record_path = self.workspace.layout().runtime_record_file();
-        match self.workspace.daemon().status_optional().await {
+        match self.initial_or_status().await {
             Ok(Some(status)) => {
                 let outcome = self.shutdown_and_wait(status.pid).await;
                 if matches!(
@@ -205,6 +223,14 @@ impl<'a> DaemonTeardown<'a> {
             Err(error) => TeardownOutcome::DaemonShutdownFailed {
                 error: format!("{error:#}"),
             },
+        }
+    }
+
+    async fn initial_or_status(&self) -> anyhow::Result<Option<omnifs_api::DaemonStatus>> {
+        match self.initial.as_ref().map(|inventory| &inventory.daemon) {
+            Some(daemon) if daemon.probe == DaemonProbe::Stopped => Ok(None),
+            Some(daemon) if daemon.probe == DaemonProbe::Responding => Ok(daemon.status.clone()),
+            _ => self.workspace.daemon().status_optional().await,
         }
     }
 

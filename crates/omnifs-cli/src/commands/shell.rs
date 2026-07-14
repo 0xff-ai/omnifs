@@ -35,6 +35,7 @@ use omnifs_mtab::MountState;
 
 use crate::frontend_backend::{DockerBackend, FrontendBackend};
 use crate::frontend_container::FRONTEND_DEV_IMAGE;
+use crate::inventory::{FrontendState, Inventory, RunnerState};
 use crate::krunkit_backend::{self, KrunkitBackend};
 use crate::launch_backend::{ContainerName, DockerTarget, GUEST_MOUNT};
 use crate::runtime::Runtime;
@@ -162,24 +163,25 @@ impl ShellArgs {
         let paths = workspace.layout();
         let guests = self.guest_targets(paths, output).await?;
         let interactive = crate::ui::prompt::is_terminal();
-        let status = if guests.len() == 1 && !self.command.is_empty() && !interactive {
+        let inventory = if guests.len() == 1 && !self.command.is_empty() && !interactive {
             None
         } else {
             shell_status(workspace).await
         };
+        let status = inventory
+            .as_ref()
+            .and_then(|inventory| inventory.daemon.status.clone());
         let configured_roots = if self.command.is_empty() && status.is_none() {
-            match workspace.mounts() {
-                Ok(mounts) => mounts
-                    .into_iter()
-                    .map(|mount| mount.name.to_string())
-                    .collect(),
-                Err(error) => {
-                    output.narrate(format!(
-                        "note: could not read configured mounts for shell banner: {error:#}"
-                    ));
-                    Vec::new()
-                },
-            }
+            inventory
+                .as_ref()
+                .map(|inventory| {
+                    inventory
+                        .mounts
+                        .iter()
+                        .map(|mount| mount.name.clone())
+                        .collect()
+                })
+                .unwrap_or_default()
         } else {
             Vec::new()
         };
@@ -194,7 +196,7 @@ impl ShellArgs {
             || guests.is_empty()
             || (self.environment.is_none() && interactive)
         {
-            Some(LocalMounts::discover(paths, context.status.as_ref())?)
+            Some(local_mounts(inventory.as_ref(), paths)?)
         } else {
             None
         };
@@ -373,11 +375,39 @@ async fn krunkit_frontend_is_running(paths: &WorkspaceLayout) -> bool {
 /// Target selection must not inherit the control client's five-second request
 /// timeout when the daemon is unavailable, so bound this optional lookup to a
 /// short UX budget and fall back to runner-owned state on expiry.
-async fn shell_status(workspace: &Workspace) -> Option<DaemonStatus> {
-    tokio::time::timeout(SHELL_STATUS_TIMEOUT, workspace.daemon().status())
+async fn shell_status(workspace: &Workspace) -> Option<Inventory> {
+    tokio::time::timeout(SHELL_STATUS_TIMEOUT, Inventory::collect(workspace))
         .await
         .ok()
         .and_then(Result::ok)
+}
+
+fn local_mounts(inventory: Option<&Inventory>, paths: &WorkspaceLayout) -> Result<LocalMounts> {
+    let Some(inventory) = inventory else {
+        return LocalMounts::discover(paths, None);
+    };
+    if inventory.daemon.status.is_some() {
+        return Ok(LocalMounts::from_paths(
+            inventory
+                .frontends
+                .iter()
+                .filter(|frontend| {
+                    frontend.environment == omnifs_workspace::config::Environment::Host
+                        && matches!(
+                            frontend.state,
+                            FrontendState::Attached | FrontendState::Running
+                        )
+                })
+                .filter_map(|frontend| frontend.location.clone()),
+        ));
+    }
+    Ok(LocalMounts::from_paths(
+        inventory
+            .runners
+            .iter()
+            .filter(|runner| runner.state == RunnerState::Attached)
+            .filter_map(|runner| runner.location.clone()),
+    ))
 }
 
 /// The target surface selected for one shell invocation. A local target is a

@@ -55,8 +55,8 @@ impl SetupArgs {
             render_docker_reachability(&config, &mut session).await;
         }
 
-        let mounts = workspace.mounts()?;
-        if !mounts.is_empty() && self.providers.is_empty() && !mode.yes {
+        let inventory = crate::inventory::Inventory::collect(&workspace).await?;
+        if !inventory.desired_mounts.is_empty() && self.providers.is_empty() && !mode.yes {
             render_review(&workspace, output).await?;
             if mode.no_input {
                 anyhow::bail!(
@@ -75,7 +75,16 @@ impl SetupArgs {
         if installed.is_empty() {
             anyhow::bail!("no built-in or plugin providers are available");
         }
-        let configured = crate::catalog::configured_mounts(workspace.catalog(), &mounts)?;
+        let configured = inventory
+            .desired_mounts
+            .iter()
+            .map(|mount| {
+                (
+                    mount.config.provider_name().to_string(),
+                    mount.config.mount.clone(),
+                )
+            })
+            .collect();
 
         session.phase("1/4 environment");
         session.row(crate::ui::report::Row::new(
