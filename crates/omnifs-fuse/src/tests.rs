@@ -44,6 +44,7 @@ fn wasm_artifact_path(file_name: &str) -> PathBuf {
 struct FuseHarness {
     fs: Frontend,
     ns: Arc<TreeNamespace>,
+    _registry: Arc<MountRuntimes>,
     _cache_dir: TempDir,
     _config_dir: TempDir,
     _providers_dir: TempDir,
@@ -90,20 +91,28 @@ fn build_harness() -> FuseHarness {
     );
 
     let cloner = Arc::new(GitCloner::new(cache_dir.path().join("clones")));
-    let registry = MountRuntimes::new(
-        HostContext::new(
-            cache_dir.path(),
-            &paths.config_dir,
-            providers_dir.path(),
-            &paths.credentials_file,
-        ),
-        cloner,
-    )
-    .expect("registry init");
+    let mounts_dir = tempfile::tempdir().expect("mounts dir");
+    std::fs::write(mounts_dir.path().join("test.json"), mount_config.as_bytes())
+        .expect("write mount spec");
+    let desired =
+        omnifs_workspace::mounts::Registry::load(mounts_dir.path()).expect("load mount snapshot");
+    let registry = Arc::new(
+        MountRuntimes::load(
+            HostContext::new(
+                cache_dir.path(),
+                &paths.config_dir,
+                providers_dir.path(),
+                &paths.credentials_file,
+            ),
+            cloner,
+            &desired,
+            &tokio::runtime::Handle::current(),
+        )
+        .expect("registry init"),
+    );
 
     let rt = tokio::runtime::Handle::current();
-    let spec = omnifs_workspace::mounts::Spec::parse(&mount_config).expect("parse mount spec");
-    let runtime = registry.add_mount(&spec, &rt).expect("add test mount");
+    let runtime = registry.get("test").expect("load test mount");
 
     let ns = TreeNamespace::single("test".to_string(), runtime, rt.clone());
     let fs = Frontend::new(
@@ -115,6 +124,7 @@ fn build_harness() -> FuseHarness {
     FuseHarness {
         fs,
         ns,
+        _registry: registry,
         _cache_dir: cache_dir,
         _config_dir: config_dir,
         _providers_dir: providers_dir,

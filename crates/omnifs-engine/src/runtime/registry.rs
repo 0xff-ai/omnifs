@@ -33,15 +33,13 @@ pub struct MountRuntimes {
     /// refresh for every mount. Shared so mounts resolving to the same
     /// credential share one refresh state.
     credential_service: Arc<CredentialService>,
-    instances: parking_lot::RwLock<HashMap<String, Arc<Runtime>>>,
+    instances: HashMap<String, Arc<Runtime>>,
     timer_shutdown: watch::Sender<bool>,
     timer_tasks: parking_lot::Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
 }
 
 impl MountRuntimes {
-    /// Build an empty registry: engine and cache handles are created once
-    /// here and shared across every mount added later.
-    pub fn new(context: HostContext, cloner: Arc<GitCloner>) -> Result<Self, RegistryError> {
+    fn initialize(context: HostContext, cloner: Arc<GitCloner>) -> Result<Self, RegistryError> {
         // Compiled component artifacts live with the rest of the host's state,
         // under `<cache>/wasm`, rather than a global per-user wasmtime cache.
         let wasm_cache = context.wasm_cache_dir();
@@ -66,22 +64,32 @@ impl MountRuntimes {
             cloner,
             context,
             credential_service,
-            instances: parking_lot::RwLock::new(HashMap::new()),
+            instances: HashMap::new(),
             timer_shutdown,
             timer_tasks: parking_lot::Mutex::new(HashMap::new()),
         })
     }
 
-    /// Load and publish every mount from the immutable snapshot selected by the
-    /// host context. Any scan, materialization, artifact, duplicate, or runtime
-    /// error aborts startup before the first runtime is visible.
+    /// Load and publish every mount from the supplied immutable snapshot. Any
+    /// snapshot, materialization, artifact, duplicate, or runtime error aborts
+    /// startup before the first runtime is visible.
     pub fn load(
         context: HostContext,
         cloner: Arc<GitCloner>,
         desired: &Registry,
         handle: &tokio::runtime::Handle,
     ) -> Result<Self, RegistryError> {
-        let registry = Self::new(context, cloner)?;
+        Self::load_with_options(context, cloner, desired, handle, false)
+    }
+
+    pub(crate) fn load_with_options(
+        context: HostContext,
+        cloner: Arc<GitCloner>,
+        desired: &Registry,
+        handle: &tokio::runtime::Handle,
+        capture_test_callouts: bool,
+    ) -> Result<Self, RegistryError> {
+        let mut registry = Self::initialize(context, cloner)?;
         if let Some(failure) = desired.failures().first() {
             return Err(RegistryError::ConfigError(format!(
                 "load mount spec {}: {}",
@@ -95,47 +103,18 @@ impl MountRuntimes {
             .map(|(_, spec)| {
                 let spec = materialize(spec.clone(), &catalog)
                     .map_err(|error| RegistryError::ConfigError(error.to_string()))?;
-                registry.build_mount(&spec, false)
+                registry.build_mount(&spec, capture_test_callouts)
             })
             .collect::<Result<Vec<_>, _>>()?;
-        for mount in built {
-            registry.publish_new_mount(mount, handle)?;
+        registry.instances = built
+            .iter()
+            .map(|built| (built.mount.clone(), Arc::clone(&built.runtime)))
+            .collect();
+        for built in built {
+            registry.start_timer(&built.mount, &built.runtime, built.revalidate, handle);
+            info!(mount = built.mount.as_str(), "loaded provider");
         }
         Ok(registry)
-    }
-
-    /// Resolve and instantiate one mount, register it, and start its
-    /// refresh timer (when the provider requests one) on `handle`.
-    pub fn add_mount(
-        &self,
-        spec: &Spec,
-        handle: &tokio::runtime::Handle,
-    ) -> Result<Arc<Runtime>, RegistryError> {
-        let mount = spec.mount.clone();
-        if self.instances.read().contains_key(&mount) {
-            return Err(RegistryError::DuplicateMount(mount));
-        }
-        let built = self.build_mount(spec, false)?;
-        self.publish_new_mount(built, handle)
-    }
-
-    /// Test-support twin of [`ProviderRegistry::add_mount`]: the mount's
-    /// runtime is built with [`Runtime::new_for_callout_tests`], so HTTP and
-    /// blob-fetch callouts suspend until the test answers them through
-    /// [`Runtime::try_recv_test_callout`]. Lets a live frontend test park a
-    /// provider read on a slow upstream the test itself controls.
-    #[doc(hidden)]
-    pub fn add_mount_for_callout_tests(
-        &self,
-        spec: &Spec,
-        handle: &tokio::runtime::Handle,
-    ) -> Result<Arc<Runtime>, RegistryError> {
-        let mount = spec.mount.clone();
-        if self.instances.read().contains_key(&mount) {
-            return Err(RegistryError::DuplicateMount(mount));
-        }
-        let built = self.build_mount(spec, true)?;
-        self.publish_new_mount(built, handle)
     }
 
     fn build_mount(
@@ -153,7 +132,6 @@ impl MountRuntimes {
             ));
         }
 
-        // Instantiation compiles WASM; keep it outside the instances lock.
         let runtime = if capture_test_callouts {
             Runtime::new_for_callout_tests(
                 &self.engine,
@@ -183,44 +161,6 @@ impl MountRuntimes {
         })
     }
 
-    fn publish_new_mount(
-        &self,
-        built: BuiltMount,
-        handle: &tokio::runtime::Handle,
-    ) -> Result<Arc<Runtime>, RegistryError> {
-        let BuiltMount {
-            mount,
-            revalidate,
-            runtime,
-        } = built;
-        {
-            let mut instances = self.instances.write();
-            if instances.contains_key(&mount) {
-                return Err(RegistryError::DuplicateMount(mount));
-            }
-            instances.insert(mount.clone(), Arc::clone(&runtime));
-        }
-        self.start_timer(&mount, &runtime, revalidate, handle);
-        info!(mount = mount.as_str(), "loaded provider");
-        Ok(runtime)
-    }
-
-    /// Stop and unregister a mount: abort its timer, shut the provider
-    /// down, and drop it from the instance map.
-    pub fn remove_mount(&self, mount: &str) -> Result<(), RegistryError> {
-        let Some(runtime) = self.instances.write().remove(mount) else {
-            return Err(RegistryError::MountNotFound(mount.to_string()));
-        };
-        if let Some(task) = self.timer_tasks.lock().remove(mount) {
-            task.abort();
-        }
-        if let Err(e) = runtime.shutdown() {
-            warn!(mount, error = %e, "shutdown failed");
-        }
-        info!(mount, "removed provider");
-        Ok(())
-    }
-
     /// Host context this registry resolves mounts against.
     pub fn context(&self) -> &HostContext {
         &self.context
@@ -233,16 +173,15 @@ impl MountRuntimes {
     }
 
     pub fn get(&self, mount: &str) -> Option<Arc<Runtime>> {
-        self.instances.read().get(mount).cloned()
+        self.instances.get(mount).cloned()
     }
 
     pub fn mounts(&self) -> Vec<String> {
-        self.instances.read().keys().cloned().collect()
+        self.instances.keys().cloned().collect()
     }
 
     pub fn runtime_entries(&self) -> Vec<(String, Arc<Runtime>)> {
         self.instances
-            .read()
             .iter()
             .map(|(mount, runtime)| (mount.clone(), Arc::clone(runtime)))
             .collect()
@@ -261,7 +200,7 @@ impl MountRuntimes {
         for (_, task) in self.timer_tasks.lock().drain() {
             task.abort();
         }
-        for (mount, runtime) in self.instances.read().iter() {
+        for (mount, runtime) in &self.instances {
             if let Err(e) = runtime.shutdown() {
                 warn!(mount, error = %e, "shutdown failed");
             }
@@ -269,7 +208,7 @@ impl MountRuntimes {
     }
 
     fn is_running(&self, mount: &str) -> bool {
-        self.instances.read().contains_key(mount)
+        self.instances.contains_key(mount)
     }
 
     fn start_timer(
@@ -334,10 +273,6 @@ struct BuiltMount {
 pub enum RegistryError {
     #[error("config error: {0}")]
     ConfigError(String),
-    #[error("mount `{0}` is already loaded")]
-    DuplicateMount(String),
-    #[error("mount `{0}` is not loaded")]
-    MountNotFound(String),
     #[error("provider not found: {0}")]
     ProviderNotFound(String),
     #[error("runtime error: {0}")]
@@ -415,12 +350,13 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn add_mount_rejects_invalid_provider_config() {
+    async fn load_rejects_invalid_provider_config() {
         // The test provider's embedded manifest declares empty config metadata,
         // so the host's validate_instance_config rejects a mount config with
         // extra fields.
         let config_dir = tempfile::tempdir().expect("temp config dir");
         let cache_dir = tempfile::tempdir().expect("temp cache dir");
+        let mounts_dir = tempfile::tempdir().expect("temp mounts dir");
         let providers_dir = tempfile::tempdir().expect("temp providers dir");
         let paths = omnifs_workspace::layout::WorkspaceLayout::under_root(config_dir.path());
 
@@ -429,21 +365,6 @@ mod tests {
             base_wasm.exists(),
             "test provider missing at {}. Run `just build providers` first.",
             base_wasm.display()
-        );
-
-        let cloner = Arc::new(GitCloner::new(cache_dir.path().join("clones")));
-        let registry = Arc::new(
-            MountRuntimes::new(
-                HostContext::new(
-                    cache_dir.path(),
-                    &paths.config_dir,
-                    providers_dir.path(),
-                    &paths.credentials_file,
-                )
-                .with_wasm_cache_dir(crate::test_support::wasm_cache_dir()),
-                cloner,
-            )
-            .expect("registry init"),
         );
 
         // Pin the test provider into the provider store, then mount it with an
@@ -465,8 +386,25 @@ mod tests {
                 }
             }),
         );
+        std::fs::write(
+            mounts_dir.path().join("test.json"),
+            serde_json::to_vec_pretty(&spec).expect("serialize spec"),
+        )
+        .expect("write spec");
 
-        match registry.add_mount(&spec, &tokio::runtime::Handle::current()) {
+        let result = MountRuntimes::load(
+            HostContext::new(
+                cache_dir.path(),
+                &paths.config_dir,
+                providers_dir.path(),
+                &paths.credentials_file,
+            )
+            .with_wasm_cache_dir(crate::test_support::wasm_cache_dir()),
+            Arc::new(GitCloner::new(cache_dir.path().join("clones"))),
+            &Registry::load(mounts_dir.path()).expect("load selected snapshot"),
+            &tokio::runtime::Handle::current(),
+        );
+        match result {
             Err(RegistryError::ConfigError(message)) => {
                 assert!(message.contains("failed validation"));
                 assert!(message.contains("mount test"));
@@ -474,7 +412,6 @@ mod tests {
             Err(other) => panic!("expected config error, got {other}"),
             Ok(_) => panic!("expected invalid provider config to be rejected"),
         }
-        assert!(registry.mounts().is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread")]

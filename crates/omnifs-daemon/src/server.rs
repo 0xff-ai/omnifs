@@ -1384,8 +1384,16 @@ mod tests {
         let cloner = Arc::new(omnifs_engine::GitCloner::new(
             context.cache_dir().to_path_buf(),
         ));
-        let registry =
-            Arc::new(omnifs_engine::MountRuntimes::new(context.host_context(), cloner).unwrap());
+        let desired = omnifs_workspace::mounts::Registry::load(&args.mount_snapshot).unwrap();
+        let registry = Arc::new(
+            omnifs_engine::MountRuntimes::load(
+                context.host_context(),
+                cloner,
+                &desired,
+                &tokio::runtime::Handle::current(),
+            )
+            .unwrap(),
+        );
         let runtime_record =
             super::RuntimeRecordStore::new(context.runtime_record_file(), context.runtime_record());
         let control_token = super::ControlToken::from_test_value("test-token");

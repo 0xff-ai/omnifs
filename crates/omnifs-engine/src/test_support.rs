@@ -63,7 +63,7 @@ pub mod auth {
     }
 
     /// A credential service over an on-disk store, matching the production
-    /// wiring in `MountRuntimes::new`. For harnesses that build a `Runtime`
+    /// wiring in `MountRuntimes::load`. For harnesses that build a `Runtime`
     /// directly.
     pub fn credential_service_for_file(
         credentials_file: &std::path::Path,
@@ -71,6 +71,22 @@ pub mod auth {
         crate::auth::credential_service_for_file(credentials_file)
             .expect("build test credential service")
     }
+}
+
+/// Load a complete immutable mount snapshot with provider callout capture
+/// enabled. This keeps live frontend concurrency fixtures on the same startup
+/// construction path as the daemon while exposing the capture option only in
+/// the test-support surface.
+#[doc(hidden)]
+pub fn load_mount_runtimes_for_callout_tests(
+    context: HostContext,
+    cloner: std::sync::Arc<GitCloner>,
+    desired: &omnifs_workspace::mounts::Registry,
+    handle: &tokio::runtime::Handle,
+) -> Result<crate::MountRuntimes, crate::RegistryError> {
+    crate::runtime::registry::MountRuntimes::load_with_options(
+        context, cloner, desired, handle, true,
+    )
 }
 
 pub mod blob {

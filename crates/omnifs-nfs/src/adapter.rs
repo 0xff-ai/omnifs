@@ -1180,8 +1180,11 @@ mod tests {
         let providers_dir = tempfile::tempdir().expect("providers dir");
         let credentials_file = config_dir.path().join("credentials.json");
         let cloner = Arc::new(GitCloner::new(cache_dir.path().join("clones")));
+        let mounts_dir = tempfile::tempdir().expect("mounts dir");
+        let desired = omnifs_workspace::mounts::Registry::load(mounts_dir.path())
+            .expect("load mount snapshot");
         let registry = Arc::new(
-            MountRuntimes::new(
+            MountRuntimes::load(
                 HostContext::new(
                     cache_dir.path(),
                     config_dir.path(),
@@ -1189,8 +1192,10 @@ mod tests {
                     &credentials_file,
                 ),
                 cloner,
+                &desired,
+                &tokio::runtime::Handle::current(),
             )
-            .expect("registry init"),
+            .expect("load mount snapshot"),
         );
 
         let runtime = TokioRuntime::new().expect("tokio runtime");

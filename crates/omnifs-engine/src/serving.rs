@@ -7,8 +7,8 @@
 //! lists (for registry-backed trees). It wraps either
 //! the production `MountRuntimes` registry both renderers hold, or a single
 //! bare `Arc<Runtime>` under a fixed mount name (the kernel-free itest /
-//! single-mount embedding form, because `MountRuntimes::add_mount` instantiates
-//! wasm itself and cannot be populated from a bare `Runtime`).
+//! single-mount embedding form, which can be populated directly from a bare
+//! `Runtime` without constructing the full startup registry).
 //!
 //! # Carries no access policy
 //!
@@ -28,9 +28,7 @@ const MOUNT_ENUMERATION_MOUNT: &str = "";
 /// Internal mount-resolution backing. [`ServingContext::from_runtimes`] wraps a
 /// full `MountRuntimes` (the production form both renderers hold);
 /// [`ServingContext::single`] wraps a single bare `Arc<Runtime>` under a fixed
-/// mount name (the itest / single-mount embedding form), because
-/// `MountRuntimes::add_mount` instantiates wasm itself and cannot be populated
-/// from a bare `Runtime`.
+/// mount name for the itest / single-mount embedding form.
 enum Backing {
     Registry(Arc<MountRuntimes>),
     Single {

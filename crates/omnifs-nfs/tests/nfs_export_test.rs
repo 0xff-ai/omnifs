@@ -6,7 +6,7 @@ use omnifs_engine::view::{
     self as view_types, DirentRecord, DirentsPayload, EntryMeta, FileAttrsCache,
 };
 use omnifs_nfs::{Export, NodeKind, ReadOnlyExport, Status};
-use support::{test_export, test_export_with_mount, test_provider_reference};
+use support::{test_export, test_export_with_mount};
 use tokio::runtime::Builder;
 
 const OLD_OPEN_MATERIALIZE_LIMIT_BYTES: u64 = 64 * 1024 * 1024;
@@ -135,38 +135,25 @@ fn omnifs_export_lists_and_reads_through_runtime() {
 }
 
 #[test]
-fn mount_enumeration_root_change_tracks_loaded_mounts() {
+fn mount_enumeration_root_reflects_startup_mount_set() {
     let harness = test_export();
     let export = &harness.export;
     let root = export.root();
-    let before = export
-        .attr(root)
-        .expect("root attr before mount add")
-        .change;
+    let before = export.attr(root).expect("root attr before listing").change;
 
-    let spec = serde_json::from_value(serde_json::json!({
-        "provider": test_provider_reference(),
-        "mount": "other",
-    }))
-    .expect("build test spec");
-    harness
-        .registry
-        .add_mount(&spec, harness.runtime.handle())
-        .expect("load second test mount");
-
-    let after = export.attr(root).expect("root attr after mount add").change;
-    assert_ne!(
-        before, after,
-        "root directory change must move when the mount set changes so NFS clients drop stale empty listings"
-    );
-
-    let root_listing = export.readdir(root).expect("root listing after mount add");
+    let root_listing = export.readdir(root).expect("root listing");
     let root_names = root_listing
         .entries
         .iter()
         .map(|entry| entry.name.as_str())
         .collect::<Vec<_>>();
-    assert_eq!(root_names, vec!["other", "test"]);
+    assert_eq!(root_names, vec!["test"]);
+
+    let after = export.attr(root).expect("root attr after listing").change;
+    assert_eq!(
+        before, after,
+        "root directory change remains stable for the immutable startup mount set"
+    );
 }
 
 #[test]

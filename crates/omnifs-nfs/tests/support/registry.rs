@@ -1,7 +1,7 @@
 use omnifs_engine::GitCloner;
 use omnifs_engine::HostContext;
 use omnifs_engine::MountRuntimes;
-use omnifs_workspace::mounts::Spec;
+use omnifs_workspace::mounts::Registry;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -18,24 +18,9 @@ pub fn load_registry_from_mount_dir(
     let cloner = Arc::new(GitCloner::new(clone_dir.to_path_buf()));
     let context = HostContext::new(cache_dir, config_dir, providers_dir, credentials_file)
         .with_wasm_cache_dir(omnifs_engine::test_support::wasm_cache_dir());
-    let registry = MountRuntimes::new(context, Arc::clone(&cloner)).expect("registry should load");
-
-    let mut mount_files = std::fs::read_dir(mounts_dir)
-        .expect("mounts dir")
-        .map(|entry| entry.expect("mount entry").path())
-        .filter(|path| {
-            path.extension()
-                .is_some_and(|extension| extension == "json")
-        })
-        .collect::<Vec<_>>();
-    mount_files.sort();
-    for path in mount_files {
-        let bytes = std::fs::read(&path).expect("read mount spec");
-        let spec = serde_json::from_slice::<Spec>(&bytes).expect("parse mount spec");
-        registry
-            .add_mount(&spec, handle)
-            .unwrap_or_else(|error| panic!("load mount {}: {error}", path.display()));
-    }
+    let desired = Registry::load(mounts_dir).expect("load mount snapshot");
+    let registry = MountRuntimes::load(context, cloner, &desired, handle)
+        .unwrap_or_else(|error| panic!("load mount snapshot: {error}"));
 
     // The provider timer interval fires once immediately after spawn. Tests
     // that assert explicit invalidation behavior start from a quiet fixture.

@@ -240,11 +240,17 @@ impl MountFixture {
                 "capabilities": {{ "domains": ["httpbin.org"] }}
             }}"#
         );
-        let spec = omnifs_workspace::mounts::Spec::parse(&mount_config).expect("parse mount spec");
+        let mounts_dir = home.join("mounts");
+        std::fs::create_dir_all(&mounts_dir).expect("mounts dir");
+        std::fs::write(mounts_dir.join("test.json"), mount_config.as_bytes())
+            .expect("write mount spec");
+        let desired =
+            omnifs_workspace::mounts::Registry::load(&mounts_dir).expect("load mount snapshot");
 
         let cloner = Arc::new(GitCloner::new(cache_dir.join("clones")));
+        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
         let registry = Arc::new(
-            MountRuntimes::new(
+            omnifs_engine::test_support::load_mount_runtimes_for_callout_tests(
                 HostContext::new(
                     &cache_dir,
                     &config_dir,
@@ -252,14 +258,12 @@ impl MountFixture {
                     config_dir.join("credentials.json"),
                 ),
                 cloner,
+                &desired,
+                rt.handle(),
             )
-            .expect("registry init"),
+            .expect("load test mount with captured callouts"),
         );
-
-        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-        let runtime = registry
-            .add_mount_for_callout_tests(&spec, rt.handle())
-            .expect("add test mount with captured callouts");
+        let runtime = registry.get("test").expect("load test mount runtime");
 
         Self {
             registry,
