@@ -5,11 +5,8 @@ use omnifs_vfs_wire::{AttachObserver, FrontendIdentity, FrontendKind};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::mpsc;
 
 pub(crate) struct Frontends {
-    stop_tx: mpsc::Sender<()>,
-    stop_rx: std::sync::Mutex<Option<mpsc::Receiver<()>>>,
     attached: Arc<AttachedRegistry>,
     on_change: Arc<dyn Fn(Vec<FrontendInfo>) + Send + Sync>,
 }
@@ -126,7 +123,9 @@ impl AttachObserver for DeliveryObserver {
                 frontend,
                 connections: 1,
             });
-        (self.on_change)(state.snapshot());
+        let snapshot = state.snapshot();
+        drop(state);
+        (self.on_change)(snapshot);
         id
     }
 
@@ -146,16 +145,15 @@ impl AttachObserver for DeliveryObserver {
         if remove {
             state.entries.remove(&key);
         }
-        (self.on_change)(state.snapshot());
+        let snapshot = state.snapshot();
+        drop(state);
+        (self.on_change)(snapshot);
     }
 }
 
 impl Frontends {
     pub(crate) fn new(on_change: Arc<dyn Fn(Vec<FrontendInfo>) + Send + Sync>) -> Self {
-        let (stop_tx, stop_rx) = mpsc::channel();
         Self {
-            stop_tx,
-            stop_rx: std::sync::Mutex::new(Some(stop_rx)),
             attached: AttachedRegistry::new(),
             on_change,
         }
@@ -171,16 +169,6 @@ impl Frontends {
 
     pub(crate) fn attached(&self) -> Vec<FrontendInfo> {
         self.attached.snapshot()
-    }
-
-    pub(crate) fn serve(&self) {
-        if let Some(rx) = self.stop_rx.lock().expect("stop rx lock").take() {
-            let _ = rx.recv();
-        }
-    }
-
-    pub(crate) fn shutdown(&self) {
-        let _ = self.stop_tx.send(());
     }
 }
 

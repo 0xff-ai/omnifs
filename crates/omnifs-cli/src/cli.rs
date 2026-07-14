@@ -228,7 +228,7 @@ impl Commands {
             },
             Self::Version(args) => args.run(output).await,
             #[cfg(feature = "daemon")]
-            Self::Daemon(args) => omnifs_daemon::run(&args).map(|()| ExitCode::Success),
+            Self::Daemon(args) => omnifs_daemon::run(&args).await.map(|()| ExitCode::Success),
             Self::Frontend(args) => args.run(output).await,
         }
     }

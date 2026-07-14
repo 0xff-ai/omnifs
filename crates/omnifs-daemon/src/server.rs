@@ -25,12 +25,14 @@ use omnifs_engine::{InspectorSink, MountRuntimes};
 use omnifs_workspace::authn::CredentialId;
 use omnifs_workspace::provider::{Catalog, CatalogError, Provider};
 use omnifs_workspace::runtime_record::{
-    AttachRecord, FrontendKind as RecordFrontendKind, FrontendRecord, RuntimeRecord, Via,
+    AttachRecord, AttachTransport, FrontendKind as RecordFrontendKind, FrontendRecord,
+    RuntimeRecord, Via,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use time::format_description::well_known::Rfc3339;
 use tokio_stream::StreamExt as _;
@@ -66,6 +68,17 @@ fn generate_attach_token() -> anyhow::Result<String> {
     let mut bytes = [0_u8; ATTACH_TOKEN_BYTES];
     getrandom::fill(&mut bytes).context("generate attach token")?;
     Ok(hex::encode(bytes))
+}
+
+fn validate_attach_token(token: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        token.len() == ATTACH_TOKEN_BYTES * 2
+            && token
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()),
+        "persisted attach token must be 32 lowercase hexadecimal characters"
+    );
+    Ok(())
 }
 
 /// The bearer token guarding the TCP control listener. It lives in memory only;
@@ -151,6 +164,8 @@ struct ApiDoc;
 pub(crate) struct AttachTcpState {
     addr: SocketAddr,
     token: String,
+    id: u64,
+    alive: Arc<AtomicBool>,
 }
 
 /// A bound token-checking UDS namespace attach listener (the krunkit
@@ -160,6 +175,8 @@ pub(crate) struct AttachTcpState {
 pub(crate) struct AttachUdsState {
     socket_path: PathBuf,
     token: String,
+    id: u64,
+    alive: Arc<AtomicBool>,
 }
 
 /// A host address approved for the namespace attach listener. Loopback is
@@ -212,6 +229,7 @@ pub(crate) enum AttachOutcome<T> {
 pub(crate) struct RuntimeRecordStore {
     path: PathBuf,
     record: Mutex<Option<RuntimeRecord>>,
+    published: AtomicBool,
 }
 
 impl RuntimeRecordStore {
@@ -219,19 +237,21 @@ impl RuntimeRecordStore {
         Arc::new(Self {
             path,
             record: Mutex::new(Some(record)),
+            published: AtomicBool::new(false),
         })
     }
 
-    pub(crate) fn write(&self) {
+    pub(crate) fn publish(&self) -> anyhow::Result<()> {
         let guard = self
             .record
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(record) = guard.as_ref()
-            && let Err(error) = record.write(&self.path)
-        {
-            warn!(%error, path = %self.path.display(), "failed to write runtime record");
-        }
+        let Some(record) = guard.as_ref() else {
+            anyhow::bail!("runtime record has already been removed");
+        };
+        record.write(&self.path)?;
+        self.published.store(true, Ordering::Release);
+        Ok(())
     }
 
     fn set_attach(&self, target: AttachRecord) {
@@ -241,8 +261,25 @@ impl RuntimeRecordStore {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(record) = guard.as_mut() {
             record.set_attach(target);
-            if let Err(error) = record.write(&self.path) {
+            if self.published.load(Ordering::Acquire)
+                && let Err(error) = record.write(&self.path)
+            {
                 warn!(%error, path = %self.path.display(), "failed to persist attach listener");
+            }
+        }
+    }
+
+    fn remove_attach(&self, transport: AttachTransport) {
+        let mut guard = self
+            .record
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(record) = guard.as_mut() {
+            record.remove_attach(transport);
+            if self.published.load(Ordering::Acquire)
+                && let Err(error) = record.write(&self.path)
+            {
+                warn!(%error, path = %self.path.display(), "failed to persist removed attach listener");
             }
         }
     }
@@ -269,7 +306,9 @@ impl RuntimeRecordStore {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(record) = guard.as_mut() {
             record.set_frontends(frontends);
-            if let Err(error) = record.write(&self.path) {
+            if self.published.load(Ordering::Acquire)
+                && let Err(error) = record.write(&self.path)
+            {
                 warn!(%error, path = %self.path.display(), "failed to persist attached frontends");
             }
         }
@@ -280,11 +319,20 @@ impl RuntimeRecordStore {
             .record
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let published = self.published.swap(false, Ordering::AcqRel);
         guard.take();
-        if let Err(error) = RuntimeRecord::remove(&self.path) {
+        if published && let Err(error) = RuntimeRecord::remove(&self.path) {
             warn!(%error, path = %self.path.display(), "failed to remove runtime record");
         }
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum TaskEvent {
+    Control,
+    Local,
+    Tcp(u64),
+    Uds(u64),
 }
 
 pub struct Daemon {
@@ -295,7 +343,13 @@ pub struct Daemon {
     runtime_record: Arc<RuntimeRecordStore>,
     control_token: ControlToken,
     /// Set once all startup namespace listeners are serving.
-    attach_serving: std::sync::atomic::AtomicBool,
+    attach_serving: AtomicBool,
+    local_alive: Arc<AtomicBool>,
+    shutdown_tx: tokio::sync::watch::Sender<bool>,
+    events_tx: OnceLock<tokio::sync::mpsc::UnboundedSender<TaskEvent>>,
+    tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    next_listener_id: AtomicU64,
+    socket_paths: Mutex<Vec<PathBuf>>,
     /// The shared namespace every attach listener serves. Set once via
     /// [`Self::set_namespace`], right after startup
     /// startup loading builds it (see `run` in `app.rs`); read by
@@ -325,6 +379,7 @@ impl Daemon {
         let frontends = Frontends::new(Arc::new(move |frontends| {
             record.set_frontends(frontends);
         }));
+        let (shutdown_tx, _) = tokio::sync::watch::channel(false);
         Self {
             context,
             registry,
@@ -332,11 +387,92 @@ impl Daemon {
             frontends,
             runtime_record,
             control_token,
-            attach_serving: std::sync::atomic::AtomicBool::new(false),
+            attach_serving: AtomicBool::new(false),
+            local_alive: Arc::new(AtomicBool::new(false)),
+            shutdown_tx,
+            events_tx: OnceLock::new(),
+            tasks: Mutex::new(Vec::new()),
+            next_listener_id: AtomicU64::new(1),
+            socket_paths: Mutex::new(Vec::new()),
             namespace: OnceLock::new(),
             attach_tcp: Mutex::new(None),
             attach_uds: Mutex::new(None),
         }
+    }
+
+    fn next_listener_id(&self) -> u64 {
+        self.next_listener_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    fn send_event(&self, event: TaskEvent) {
+        if let Some(sender) = self.events_tx.get() {
+            let _ = sender.send(event);
+        }
+    }
+
+    fn track_task(&self, task: tokio::task::JoinHandle<()>) {
+        self.tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(task);
+    }
+
+    fn track_socket(&self, path: PathBuf) {
+        self.socket_paths
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(path);
+    }
+
+    fn cleanup_sockets(&self) {
+        let paths = std::mem::take(
+            &mut *self
+                .socket_paths
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        for path in paths {
+            if let Err(error) = std::fs::remove_file(&path)
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                warn!(%error, path = %path.display(), "failed to remove daemon socket");
+            }
+        }
+    }
+
+    async fn stop_tasks(&self) {
+        let mut tasks = std::mem::take(
+            &mut *self
+                .tasks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        for task in &tasks {
+            task.abort();
+        }
+        while let Some(task) = tasks.pop() {
+            let _ = task.await;
+        }
+    }
+
+    fn set_attach_serving(&self, serving: bool) {
+        self.attach_serving.store(serving, Ordering::Release);
+    }
+
+    fn current_attach_alive(&self) -> bool {
+        self.local_alive.load(Ordering::Acquire)
+            && self
+                .attach_tcp
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+                .is_none_or(|state| state.alive.load(Ordering::Acquire))
+            && self
+                .attach_uds
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+                .is_none_or(|state| state.alive.load(Ordering::Acquire))
     }
 
     /// Record the shared namespace once it is built after atomic startup load.
@@ -359,12 +495,26 @@ impl Daemon {
         port: u16,
         rt: &tokio::runtime::Handle,
     ) -> anyhow::Result<AttachOutcome<AttachTcpState>> {
+        self.ensure_attach_tcp_with_token(bind_addr, port, rt, None)
+    }
+
+    fn ensure_attach_tcp_with_token(
+        self: &Arc<Self>,
+        bind_addr: AttachBindAddr,
+        port: u16,
+        rt: &tokio::runtime::Handle,
+        requested_token: Option<String>,
+    ) -> anyhow::Result<AttachOutcome<AttachTcpState>> {
         let mut guard = self
             .attach_tcp
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(state) = guard.as_ref() {
-            return Ok(AttachOutcome::Bound(state.clone()));
+            if state.alive.load(Ordering::Acquire) {
+                return Ok(AttachOutcome::Bound(state.clone()));
+            }
+            *guard = None;
+            self.runtime_record.remove_attach(AttachTransport::Tcp);
         }
         let Some(namespace) = self.namespace.get() else {
             return Ok(AttachOutcome::NamespaceNotReady);
@@ -380,7 +530,11 @@ impl Daemon {
             .context("read attach TCP listener address")?;
         let listener = tokio::net::TcpListener::from_std(std_listener)
             .context("hand the attach TCP listener to tokio")?;
-        let token = generate_attach_token()?;
+        let token = requested_token.unwrap_or(generate_attach_token()?);
+        validate_attach_token(&token)?;
+        let id = self.next_listener_id();
+        let alive = Arc::new(AtomicBool::new(true));
+        let task_alive = Arc::clone(&alive);
 
         let ns = Arc::clone(namespace) as Arc<dyn omnifs_engine::Namespace>;
         let instance_id = self.context.instance_id().to_string();
@@ -391,21 +545,36 @@ impl Daemon {
         // guest claims about itself.
         let observer = self.frontends.attach_observer(FrontendDelivery::Docker);
         info!(%addr, "serving namespace attach listener (tcp, token-authenticated)");
-        rt.spawn(omnifs_vfs_wire::serve_listener_tcp(
-            ns,
-            listener,
-            instance_id,
-            serve_token,
-            Some(observer),
-        ));
+        let daemon = Arc::clone(self);
+        let listener_task = rt.spawn(async move {
+            omnifs_vfs_wire::serve_listener_tcp(
+                ns,
+                listener,
+                instance_id,
+                serve_token,
+                Some(observer),
+            )
+            .await;
+            task_alive.store(false, Ordering::Release);
+            daemon.send_event(TaskEvent::Tcp(id));
+        });
+        self.track_task(listener_task);
 
-        let state = AttachTcpState { addr, token };
+        let state = AttachTcpState {
+            addr,
+            token,
+            id,
+            alive,
+        };
         *guard = Some(state.clone());
         drop(guard);
         self.runtime_record.set_attach(AttachRecord::Tcp {
             addr: state.addr.to_string(),
             token: state.token.clone(),
         });
+        if self.local_alive.load(Ordering::Acquire) {
+            self.set_attach_serving(true);
+        }
         Ok(AttachOutcome::Bound(state))
     }
 
@@ -425,45 +594,78 @@ impl Daemon {
         self: &Arc<Self>,
         rt: &tokio::runtime::Handle,
     ) -> anyhow::Result<AttachOutcome<AttachUdsState>> {
+        self.ensure_attach_uds_with_token(rt, None)
+    }
+
+    fn ensure_attach_uds_with_token(
+        self: &Arc<Self>,
+        rt: &tokio::runtime::Handle,
+        requested_token: Option<String>,
+    ) -> anyhow::Result<AttachOutcome<AttachUdsState>> {
         let mut guard = self
             .attach_uds
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(state) = guard.as_ref() {
-            return Ok(AttachOutcome::Bound(state.clone()));
+            if state.alive.load(Ordering::Acquire) {
+                return Ok(AttachOutcome::Bound(state.clone()));
+            }
+            *guard = None;
+            self.runtime_record.remove_attach(AttachTransport::Vsock);
         }
         let Some(namespace) = self.namespace.get() else {
             return Ok(AttachOutcome::NamespaceNotReady);
         };
 
         let (std_listener, socket_path) = self.context.bind_vsock_attach_socket()?;
+        self.track_socket(socket_path.clone());
         std_listener
             .set_nonblocking(true)
             .context("set attach UDS listener non-blocking")?;
         let listener = tokio::net::UnixListener::from_std(std_listener)
             .context("hand the attach UDS listener to tokio")?;
-        let token = generate_attach_token()?;
+        let token = requested_token.unwrap_or(generate_attach_token()?);
+        validate_attach_token(&token)?;
+        let id = self.next_listener_id();
+        let alive = Arc::new(AtomicBool::new(true));
+        let task_alive = Arc::clone(&alive);
 
         let ns = Arc::clone(namespace) as Arc<dyn omnifs_engine::Namespace>;
         let instance_id = self.context.instance_id().to_string();
         let serve_token = token.clone();
         let observer = self.frontends.attach_observer(FrontendDelivery::Krunkit);
         info!(path = %socket_path.display(), "serving namespace attach listener (uds, token-authenticated)");
-        rt.spawn(omnifs_vfs_wire::serve_listener(
-            ns,
-            listener,
-            instance_id,
-            Some(serve_token),
-            Some(observer),
-        ));
+        let daemon = Arc::clone(self);
+        let listener_task = rt.spawn(async move {
+            omnifs_vfs_wire::serve_listener(
+                ns,
+                listener,
+                instance_id,
+                Some(serve_token),
+                Some(observer),
+            )
+            .await;
+            task_alive.store(false, Ordering::Release);
+            daemon.send_event(TaskEvent::Uds(id));
+        });
+        self.track_task(listener_task);
 
-        let state = AttachUdsState { socket_path, token };
+        let state = AttachUdsState {
+            socket_path: socket_path.clone(),
+            token,
+            id,
+            alive,
+        };
         *guard = Some(state.clone());
         drop(guard);
+        self.track_socket(socket_path);
         self.runtime_record.set_attach(AttachRecord::Vsock {
             socket_path: state.socket_path.clone(),
             token: state.token.clone(),
         });
+        if self.local_alive.load(Ordering::Acquire) {
+            self.set_attach_serving(true);
+        }
         Ok(AttachOutcome::Bound(state))
     }
 
@@ -480,8 +682,207 @@ impl Daemon {
     /// Mark all startup namespace listeners as serving. Called once after mount
     /// loading and every requested listener bind succeeds.
     pub fn mark_attach_serving(&self) {
-        self.attach_serving
-            .store(true, std::sync::atomic::Ordering::Release);
+        self.set_attach_serving(true);
+    }
+
+    /// Own the daemon's complete serving lifetime. Startup binds every fixed
+    /// listener, restores persisted dynamic authority, and publishes the new
+    /// record only after all required listeners are alive. The same method owns
+    /// task joins, provider shutdown, record removal, and socket cleanup.
+    pub async fn run(
+        self: Arc<Self>,
+        previous: Option<RuntimeRecord>,
+        refresh_loop: tokio::task::JoinHandle<()>,
+    ) -> anyhow::Result<()> {
+        let result = self.run_inner(previous).await;
+        let _ = self.shutdown_tx.send(true);
+        self.stop_tasks().await;
+        refresh_loop.abort();
+        self.registry.shutdown_all();
+        self.runtime_record.remove();
+        self.cleanup_sockets();
+        result
+    }
+
+    async fn run_inner(self: &Arc<Self>, previous: Option<RuntimeRecord>) -> anyhow::Result<()> {
+        let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
+        let _ = self.events_tx.set(events_tx);
+        self.start_fixed_listeners()?;
+        self.restore_attach_listeners(previous.as_ref())?;
+
+        while events_rx.try_recv().is_ok() {}
+        anyhow::ensure!(
+            self.current_attach_alive(),
+            "required namespace attach listener exited before readiness"
+        );
+        self.runtime_record.publish()?;
+        self.mark_attach_serving();
+        info!("namespace listeners ready");
+        self.spawn_signal_task();
+        self.supervise(&mut events_rx).await
+    }
+
+    fn start_fixed_listeners(self: &Arc<Self>) -> anyhow::Result<()> {
+        let control_socket = self.context.control_socket();
+        let control_listener = self.context.bind_control_socket()?;
+        self.track_socket(control_socket);
+        let local = self.context.bind_local_attach_socket()?;
+        self.track_socket(local.path.clone());
+        let control_tcp = self.context.bind_control_listener()?;
+        let rt = tokio::runtime::Handle::current();
+        self.spawn_control_unix(control_listener, &rt)?;
+        if let Some(listener) = control_tcp {
+            self.spawn_control_tcp(listener, &rt)?;
+        }
+
+        let namespace = self
+            .namespace
+            .get()
+            .context("daemon namespace was not initialized before serving")?;
+        let instance_id = self.context.instance_id().to_string();
+        let observer = self.attach_observer(FrontendDelivery::Local);
+        let ns = Arc::clone(namespace) as Arc<dyn omnifs_engine::Namespace>;
+        local.listener.set_nonblocking(true)?;
+        let listener = tokio::net::UnixListener::from_std(local.listener)?;
+        let daemon = Arc::clone(self);
+        let local_alive = Arc::clone(&self.local_alive);
+        local_alive.store(true, Ordering::Release);
+        let local_task = tokio::spawn(async move {
+            omnifs_vfs_wire::serve_listener(ns, listener, instance_id, None, Some(observer)).await;
+            local_alive.store(false, Ordering::Release);
+            daemon.send_event(TaskEvent::Local);
+        });
+        self.track_task(local_task);
+        Ok(())
+    }
+
+    fn restore_attach_listeners(
+        self: &Arc<Self>,
+        previous: Option<&RuntimeRecord>,
+    ) -> anyhow::Result<()> {
+        let rt = tokio::runtime::Handle::current();
+        if let Some(previous) = previous {
+            for target in &previous.attach {
+                match target {
+                    AttachRecord::Tcp { addr, token } => {
+                        let addr: SocketAddr = addr.parse().with_context(|| {
+                            format!("invalid persisted attach TCP address `{addr}`")
+                        })?;
+                        let ip = match addr.ip() {
+                            std::net::IpAddr::V4(ip) => ip,
+                            std::net::IpAddr::V6(_) => {
+                                anyhow::bail!("persisted attach TCP address must be IPv4: {addr}")
+                            },
+                        };
+                        self.ensure_attach_tcp_with_token(
+                            AttachBindAddr::requested(Some(ip))?,
+                            addr.port(),
+                            &rt,
+                            Some(token.clone()),
+                        )?;
+                    },
+                    AttachRecord::Vsock { socket_path, token } => {
+                        anyhow::ensure!(
+                            socket_path == &self.context.vsock_attach_socket(),
+                            "persisted vsock attach socket path {} is not the daemon-approved path",
+                            socket_path.display()
+                        );
+                        self.ensure_attach_uds_with_token(&rt, Some(token.clone()))?;
+                    },
+                }
+            }
+        }
+        let has_tcp = self
+            .attach_tcp
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some();
+        if !has_tcp && let Some(port) = self.context.attach_tcp_port() {
+            self.ensure_attach_tcp(AttachBindAddr::loopback(), port, &rt)?;
+        }
+        Ok(())
+    }
+
+    async fn supervise(
+        &self,
+        events_rx: &mut tokio::sync::mpsc::UnboundedReceiver<TaskEvent>,
+    ) -> anyhow::Result<()> {
+        let mut shutdown = self.shutdown_tx.subscribe();
+        loop {
+            tokio::select! {
+                changed = shutdown.changed() => {
+                    if changed.is_ok() && *shutdown.borrow() {
+                        return Ok(());
+                    }
+                }
+                event = events_rx.recv() => match event {
+                    Some(TaskEvent::Tcp(id)) => self.dynamic_listener_exited(AttachTransport::Tcp, id),
+                    Some(TaskEvent::Uds(id)) => self.dynamic_listener_exited(AttachTransport::Vsock, id),
+                    Some(TaskEvent::Local) => anyhow::bail!("local namespace listener exited"),
+                    Some(TaskEvent::Control) => anyhow::bail!("control API listener exited"),
+                    None => anyhow::bail!("daemon task supervision channel closed"),
+                },
+            }
+        }
+    }
+
+    fn dynamic_listener_exited(&self, transport: AttachTransport, id: u64) {
+        let removed = match transport {
+            AttachTransport::Tcp => {
+                let mut state = self
+                    .attach_tcp
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if state.as_ref().is_some_and(|state| state.id == id) {
+                    state.take();
+                    true
+                } else {
+                    false
+                }
+            },
+            AttachTransport::Vsock => {
+                let mut state = self
+                    .attach_uds
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if state.as_ref().is_some_and(|state| state.id == id) {
+                    state.take();
+                    true
+                } else {
+                    false
+                }
+            },
+        };
+        if removed {
+            self.runtime_record.remove_attach(transport);
+            self.set_attach_serving(false);
+            warn!(
+                ?transport,
+                "dynamic namespace listener exited; target is unavailable"
+            );
+        }
+    }
+
+    fn spawn_signal_task(self: &Arc<Self>) {
+        let daemon = Arc::clone(self);
+        let task = tokio::spawn(async move {
+            #[cfg(unix)]
+            {
+                use tokio::signal::unix::{SignalKind, signal};
+                let Ok(mut term) = signal(SignalKind::terminate()) else {
+                    return;
+                };
+                let Ok(mut interrupt) = signal(SignalKind::interrupt()) else {
+                    return;
+                };
+                tokio::select! {
+                    _ = term.recv() => info!(signal = "SIGTERM", "received shutdown signal"),
+                    _ = interrupt.recv() => info!(signal = "SIGINT", "received shutdown signal"),
+                }
+                let _ = daemon.shutdown_tx.send(true);
+            }
+        });
+        self.track_task(task);
     }
 
     /// Serve the control API over TCP with the bearer-token middleware. Used by
@@ -496,11 +897,14 @@ impl Daemon {
         let addr = listener.local_addr()?;
         info!(%addr, "control API listening (tcp, token-authenticated)");
         let app = Self::router(Arc::clone(self), Auth::BearerToken);
-        rt.spawn(async move {
+        let daemon = Arc::clone(self);
+        let task = rt.spawn(async move {
             if let Err(error) = axum::serve(listener, app).await {
                 warn!(%error, "control API server exited");
             }
+            daemon.send_event(TaskEvent::Control);
         });
+        self.track_task(task);
         Ok(())
     }
 
@@ -515,16 +919,15 @@ impl Daemon {
         let listener = tokio::net::UnixListener::from_std(listener)?;
         info!("control API listening (unix socket, filesystem-permission auth)");
         let app = Self::router(Arc::clone(self), Auth::FilesystemPermissions);
-        rt.spawn(async move {
+        let daemon = Arc::clone(self);
+        let task = rt.spawn(async move {
             if let Err(error) = axum::serve(listener, app).await {
                 warn!(%error, "control API server exited");
             }
+            daemon.send_event(TaskEvent::Control);
         });
+        self.track_task(task);
         Ok(())
-    }
-
-    pub fn serve(&self) {
-        self.frontends.serve();
     }
 
     fn control_status(&self) -> DaemonStatus {
@@ -548,22 +951,15 @@ impl Daemon {
         credential_degraded.sort_by(|a, b| a.0.cmp(&b.0));
 
         self.context.status(
-            self.attach_serving
-                .load(std::sync::atomic::Ordering::Acquire),
+            self.attach_serving.load(Ordering::Acquire),
             self.frontends.attached(),
             mounts,
             &credential_degraded,
         )
     }
 
-    /// Release the process-lifetime serving latch after giving the HTTP response
-    /// a brief chance to flush.
     pub fn trigger_shutdown(self: &Arc<Self>) {
-        let daemon = Arc::clone(self);
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            daemon.frontends.shutdown();
-        });
+        let _ = self.shutdown_tx.send(true);
     }
 
     fn event_stream(&self) -> Response {
@@ -1149,11 +1545,12 @@ mod tests {
             ),
         );
 
-        store.write();
         store.set_attach(AttachRecord::Tcp {
             addr: "127.0.0.1:1".to_string(),
             token: "a".repeat(32),
         });
+        assert!(!path.exists());
+        store.publish().unwrap();
         store.set_attach(AttachRecord::Vsock {
             socket_path: dir.path().join("vsock.sock"),
             token: "b".repeat(32),

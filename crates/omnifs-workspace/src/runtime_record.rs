@@ -56,6 +56,22 @@ pub enum AttachRecord {
     Vsock { socket_path: PathBuf, token: String },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttachTransport {
+    Tcp,
+    Vsock,
+}
+
+impl AttachRecord {
+    #[must_use]
+    pub const fn transport(&self) -> AttachTransport {
+        match self {
+            Self::Tcp { .. } => AttachTransport::Tcp,
+            Self::Vsock { .. } => AttachTransport::Vsock,
+        }
+    }
+}
+
 /// One serving frontend and where it is mounted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -175,11 +191,16 @@ impl RuntimeRecord {
 
     /// Replace the target for one transport and keep transport order stable.
     pub fn set_attach(&mut self, target: AttachRecord) {
-        let transport = std::mem::discriminant(&target);
+        let transport = target.transport();
         self.attach
-            .retain(|existing| std::mem::discriminant(existing) != transport);
+            .retain(|existing| existing.transport() != transport);
         self.attach.push(target);
         self.attach.sort();
+    }
+
+    pub fn remove_attach(&mut self, transport: AttachTransport) {
+        self.attach
+            .retain(|existing| existing.transport() != transport);
     }
 
     /// Replace the live frontend snapshot in semantic order without duplicates.
