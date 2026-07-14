@@ -164,7 +164,7 @@ impl Decision {
         if proceed {
             Ok(Self::Apply)
         } else {
-            Err(super::picker::Canceled.into())
+            Err(super::prompt::Canceled.into())
         }
     }
 }
@@ -328,7 +328,7 @@ mod tests {
     #[test]
     fn declined_confirmation_is_cancellation() {
         let error = Decision::from_confirmation(false).unwrap_err();
-        assert!(super::super::picker::is_canceled(&error));
+        assert!(super::super::prompt::is_canceled(&error));
         assert_eq!(Decision::from_confirmation(true).unwrap(), Decision::Apply);
     }
 }

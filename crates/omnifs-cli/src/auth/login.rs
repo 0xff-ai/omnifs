@@ -146,7 +146,7 @@ async fn login_manual(
                 .await
                 .unwrap_or_else(|error| Err(anyhow::anyhow!("prompt task panicked: {error}")))
                 .map_err(|error| {
-                    if crate::ui::picker::is_canceled(&error) {
+                    if crate::ui::prompt::is_canceled(&error) {
                         omnifs_auth::AuthError::BrowserOpen(MANUAL_PROMPT_CANCELED.to_string())
                     } else {
                         omnifs_auth::AuthError::BrowserOpen(error.to_string())
@@ -159,7 +159,7 @@ async fn login_manual(
         .await;
     match result {
         Err(omnifs_auth::AuthError::BrowserOpen(message)) if message == MANUAL_PROMPT_CANCELED => {
-            Err(anyhow::Error::new(crate::ui::picker::Canceled))
+            Err(anyhow::Error::new(crate::ui::prompt::Canceled))
         },
         result => result.with_hint(format!("Re-run `omnifs mount reauth {mount}` to retry")),
     }

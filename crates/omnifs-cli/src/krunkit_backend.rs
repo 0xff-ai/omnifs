@@ -24,7 +24,7 @@
 //!   host-to-guest mode; omitting both keywords means guest-initiated):
 //!   krunkit itself creates and listens on the unix socket, relaying each
 //!   accepted connection into the guest's vsock-listening dropbear
-//!   (`ListenStream=vsock::22` in the guest image). `omnifs shell` dials it
+//!   (`ListenStream=vsock::22` in the guest image). `omnifs frontend shell` dials it
 //!   through `ssh -o ProxyCommand='socat - UNIX-CONNECT:<path>'`.
 //!
 //! No `virtio-net` device is ever configured: the frontend carries no
@@ -187,7 +187,7 @@ fn ensure_krunkit_available() -> Result<()> {
     }
 }
 
-/// `omnifs shell`'s krunkit dispatch calls this before building the ssh
+/// `omnifs frontend shell`'s krunkit dispatch calls this before building the ssh
 /// command: `shell_command` itself stays pure construction (no I/O), so the
 /// probe belongs at the one call site that is about to actually run it.
 pub(crate) fn ensure_socat_available() -> Result<()> {

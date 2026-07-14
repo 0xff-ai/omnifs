@@ -16,7 +16,6 @@
 pub(crate) mod consent;
 pub(crate) mod event;
 pub(crate) mod output;
-pub(crate) mod picker;
 pub(crate) mod progress;
 pub(crate) mod prompt;
 pub(crate) mod report;
@@ -116,7 +115,7 @@ mod tests {
 
     #[test]
     fn hint_command_column_is_16_wide() {
-        let plain = strip_ansi(&hint("omnifs shell", "browse your files"));
+        let plain = strip_ansi(&hint("frontend shell", "browse your files"));
         assert_eq!(plain.chars().nth(18), Some('b'), "{plain:?}");
         let long = strip_ansi(&hint("omnifs completions", "tab completion"));
         assert!(long.contains("omnifs completions tab"), "{long:?}");

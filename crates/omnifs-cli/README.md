@@ -25,10 +25,11 @@ cargo install omnifs-cli
 ```bash
 omnifs mount add github
 omnifs up
-omnifs shell
+omnifs frontend enable fuse --environment docker
+omnifs frontend shell fuse --environment docker
 ```
 
-The CLI stores credentials and self-contained mount specs under `OMNIFS_HOME`. The daemon runs on the host. Frontends are independent access surfaces over the complete shared namespace; observe and manage them with `omnifs frontend ls`, `enable`, `disable`, and `restart`. `omnifs shell` offers a picker when interactive and otherwise chooses Docker, then krunkit, then the first normalized host location.
+The CLI stores credentials and self-contained mount specs under `OMNIFS_HOME`. The daemon runs on the host. Frontends are independent access surfaces over the complete shared namespace; observe and manage them with `omnifs frontend ls`, `enable`, `disable`, and `restart`. Host frontends are ordinary mounted paths; `omnifs frontend shell` enters one explicit Docker or krunkit frontend.
 
 ## Platform
 

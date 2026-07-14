@@ -120,10 +120,10 @@ async fn main() {
             }
         },
         Err(error) => {
-            // A user cancel (picker Esc/Ctrl-C, or a prompt mapped to the same
-            // marker) is a normal exit, not a failure to spell out with an
-            // `Error:` block. It exits 130 (128 + SIGINT), the shell convention.
-            if ui::picker::is_canceled(&error) {
+            // A user cancel (Esc/Ctrl-C from any prompt) is a normal exit, not
+            // a failure to spell out with an `Error:` block. It exits 130
+            // (128 + SIGINT), the shell convention.
+            if ui::prompt::is_canceled(&error) {
                 let code = ExitCode::Canceled;
                 if let Some(cmd) = telemetry_label {
                     telemetry::record_cli_exit(cmd, code.code());

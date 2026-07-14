@@ -1,5 +1,5 @@
 //! The frontend backend seam: how `omnifs frontend enable|disable` and
-//! `omnifs shell` launch, probe, tear down, and shell into the optional FUSE
+//! `omnifs frontend shell` launch, probe, tear down, and shell into the optional FUSE
 //! frontend, independent of which runtime hosts it.
 //!
 //! Two guest backends implement the seam: `DockerBackend` (this module) and

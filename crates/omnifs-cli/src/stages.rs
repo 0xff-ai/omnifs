@@ -206,10 +206,18 @@ pub(crate) fn spec_creation(
     }
 
     // No provider argument in an interactive session: choose one with the
-    // single-select variant of the setup picker instead of a bare list.
+    // generic single-select prompt instead of a bare list.
     let picked = if args.provider.is_none() && interactive {
-        let rows = crate::ui::picker::build_rows(&installed, &std::collections::BTreeMap::new());
-        Some(crate::ui::picker::select("Which provider?", rows)?)
+        let options =
+            crate::catalog::provider_options(&installed, &std::collections::BTreeMap::new());
+        let choices = options
+            .into_iter()
+            .map(|option| (option.name.clone(), option.name, option.hint));
+        Some(
+            crate::ui::prompt::Select::new("Which provider?")
+                .options(choices)
+                .ask()?,
+        )
     } else {
         None
     };

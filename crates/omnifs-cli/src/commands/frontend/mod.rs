@@ -23,6 +23,7 @@ pub enum FrontendCommand {
     Disable(lifecycle::FrontendDisableArgs),
     Restart(lifecycle::FrontendRestartArgs),
     Ls(lifecycle::FrontendLsArgs),
+    Shell(crate::commands::shell::ShellArgs),
 }
 
 impl FrontendArgs {
@@ -32,6 +33,7 @@ impl FrontendArgs {
             FrontendCommand::Disable(args) => args.run(output).await,
             FrontendCommand::Restart(args) => args.run(output).await,
             FrontendCommand::Ls(args) => args.run(output).await,
+            FrontendCommand::Shell(args) => args.run(output).await.map(|()| ExitCode::Success),
         }
     }
 }

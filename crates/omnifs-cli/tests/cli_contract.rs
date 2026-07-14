@@ -149,19 +149,19 @@ fn frontend_enable_help_requires_filesystem_and_lists_live_attachments_command()
     }
 
     let shell = Command::new(omnifs_bin())
-        .args(["shell", "--help"])
+        .args(["frontend", "shell", "--help"])
         .output()
-        .expect("spawn omnifs shell --help");
+        .expect("spawn omnifs frontend shell --help");
     assert!(shell.status.success());
     let shell_help = String::from_utf8_lossy(&shell.stdout);
     assert!(
         shell_help.contains("--environment <ENVIRONMENT>"),
         "{shell_help}"
     );
-    assert!(shell_help.contains("--location <LOCATION>"), "{shell_help}");
+    assert!(shell_help.contains("<FILESYSTEM>"), "{shell_help}");
     assert!(
         !shell_help.contains("--mount"),
-        "retired shell --mount in {shell_help}"
+        "retired frontend shell --mount in {shell_help}"
     );
 
     let fixture = Fixture::new();

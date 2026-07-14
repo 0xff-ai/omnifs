@@ -1,17 +1,17 @@
 //! Discovery helpers over the provider [`Catalog`] and the configured mounts.
 //!
-//! These wrap the CLI-facing shapes: the picker's installed-provider list, the
+//! These wrap the CLI-facing shapes: the installed-provider selection list, the
 //! already-configured set, and lookups by name. Mount enumeration lives in
 //! `Workspace::mounts()`. A spec carries its provider-manifest defaults from
 //! creation time, so reading one needs no resolution step.
 
 use omnifs_workspace::mounts::Name as MountName;
-use omnifs_workspace::provider::{Catalog, Provider, ProviderManifest};
+use omnifs_workspace::provider::{Catalog, Provider, ProviderAuthManifest, ProviderManifest};
 
 use crate::mount_config::MountConfig;
 
 /// The latest installed artifact per provider name, each paired with its loaded
-/// manifest, for the `mount add` and `setup` provider pickers. A corrupt artifact is
+/// manifest, for the `mount add` and `setup` provider selections. A corrupt artifact is
 /// skipped with a warning rather than bricking enumeration.
 pub(crate) fn installed_providers(
     catalog: &Catalog,
@@ -44,6 +44,71 @@ pub(crate) fn find_installed<'a>(
     installed
         .iter()
         .find(|(provider, _)| provider.meta.name.as_str() == name)
+}
+
+/// One provider choice prepared for an interactive command. Terminal code
+/// receives the value, label, and hint separately so it does not need to know
+/// anything about provider manifests or credential policy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProviderOption {
+    pub(crate) name: String,
+    pub(crate) hint: String,
+    pub(crate) default_selected: bool,
+}
+
+/// Build the provider choices shared by `mount add` and `setup`.
+pub(crate) fn provider_options(
+    installed: &[(Provider, ProviderManifest)],
+    configured: &std::collections::BTreeMap<String, String>,
+) -> Vec<ProviderOption> {
+    let mut options = installed
+        .iter()
+        .filter(|(provider, _)| !configured.contains_key(provider.meta.name.as_str()))
+        .map(|(provider, manifest)| {
+            let name = provider.meta.name.to_string();
+            ProviderOption {
+                hint: manifest
+                    .description
+                    .clone()
+                    .unwrap_or_else(|| manifest.display_name.clone()),
+                name,
+                default_selected: default_selected(manifest),
+            }
+        })
+        .collect::<Vec<_>>();
+    options.sort_by(|a, b| {
+        b.default_selected
+            .cmp(&a.default_selected)
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    options
+}
+
+/// A provider is initially selected when setup can proceed without an
+/// interactive config prompt or an unavailable ambient credential. OAuth is
+/// intentionally considered selectable here because setup can complete its
+/// browser flow interactively; `--yes` keeps its stricter ambient-only policy.
+fn default_selected(manifest: &ProviderManifest) -> bool {
+    if manifest.requires_mount_input() {
+        return false;
+    }
+    if manifest.auth.is_none() {
+        return true;
+    }
+    if matches!(
+        manifest
+            .auth
+            .as_ref()
+            .and_then(|auth| auth.default_scheme()),
+        Some((_, omnifs_workspace::authn::AuthScheme::Oauth(_)))
+    ) {
+        return true;
+    }
+    let auth_manifest = manifest
+        .auth
+        .as_ref()
+        .map(ProviderAuthManifest::wasm_auth_manifest);
+    !crate::commands::mount::detect::detect(auth_manifest.as_ref()).is_empty()
 }
 
 /// Returns `true` when a mount with `name` appears in `mounts`.
@@ -109,5 +174,15 @@ mod tests {
                 .any(|(provider, _)| provider.meta.name.as_str() == "broken"),
             "the broken provider should be skipped"
         );
+
+        let options = provider_options(&providers, &std::collections::BTreeMap::new());
+        assert_eq!(options.len(), 1);
+        assert_eq!(options[0].name, "demo");
+        assert!(options[0].default_selected);
+
+        let configured = [("demo".to_string(), "demo".to_string())]
+            .into_iter()
+            .collect();
+        assert!(provider_options(&providers, &configured).is_empty());
     }
 }

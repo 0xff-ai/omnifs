@@ -1,7 +1,7 @@
 //! Human-readable formatting for provider capability manifest entries.
 //!
 //! This module is the single owner of capability prose. The setup per-provider
-//! block, the picker detail panel, and standalone `omnifs mount add` all render a
+//! block and standalone `omnifs mount add` both render a
 //! manifest's needs and limits through these helpers, so the wording cannot
 //! drift between surfaces.
 
@@ -79,24 +79,6 @@ pub(crate) fn compact_limits(manifest: &ProviderManifest) -> Option<String> {
         .map(|line| format!("up to {} {}", line.value, limit_noun(line.label)))
         .collect();
     Some(parts.join(", "))
-}
-
-/// Two-column needs/limits rows for the picker panel and standalone `mount add`.
-/// Left column is the value or limit noun; right column is the justification or
-/// the limit value. Needs sharing an identical justification merge into one row
-/// so the same sentence never prints twice.
-pub(crate) fn detail_lines(manifest: &ProviderManifest) -> Vec<(String, String)> {
-    let mut rows = need_groups(manifest);
-    for line in limit_lines(&manifest.limits) {
-        rows.push((limit_noun(line.label).to_string(), line.value.clone()));
-    }
-    rows
-}
-
-/// Number of needs rows [`detail_lines`] produces for `manifest` (the rest are
-/// limit rows). Lets the panel place its `needs`/`limits` section headers.
-pub(crate) fn needs_row_count(manifest: &ProviderManifest) -> usize {
-    need_groups(manifest).len()
 }
 
 /// Short noun for a limit kind used in compact and detail rendering.
@@ -210,23 +192,5 @@ mod tests {
         );
         assert!(line.starts_with("needs export.arxiv.org, arxiv.org ("));
         assert!(line.contains('…'), "truncated why must carry an ellipsis");
-    }
-
-    #[test]
-    fn detail_lines_merge_needs_sharing_a_why() {
-        let why = "API calls";
-        let manifest = manifest_with_needs(vec![
-            domain("export.arxiv.org", why),
-            domain("arxiv.org", why),
-        ]);
-        let rows = detail_lines(&manifest);
-        assert_eq!(
-            rows,
-            vec![(
-                "export.arxiv.org, arxiv.org".to_string(),
-                "API calls".to_string()
-            )]
-        );
-        assert_eq!(needs_row_count(&manifest), 1);
     }
 }

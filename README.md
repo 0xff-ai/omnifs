@@ -25,10 +25,10 @@ omnifs is written in Rust. We ship prebuilt Linux and macOS binaries through the
 ```bash
 npm install -g @0xff-ai/omnifs
 omnifs setup
-omnifs shell
+omnifs frontend shell fuse --environment docker
 ```
 
-`omnifs setup` prepares the workspace, creates the selected mounts, completes any required authentication, and may offer a one-time platform frontend after the daemon starts. `omnifs up` starts the host-native daemon only. Enable the frontends you want with explicit commands. `omnifs shell` uses a picker when several frontends are attached; in headless use it chooses Docker, then krunkit, then the first normalized host location.
+`omnifs setup` prepares the workspace, creates the selected mounts, completes any required authentication, and may offer a one-time platform frontend after the daemon starts. `omnifs up` starts the host-native daemon only. Host frontends are ordinary mounted paths. Use `omnifs frontend shell` to enter one explicit Docker or krunkit frontend.
 
 ---
 
@@ -40,7 +40,7 @@ omnifs mount add dns
 omnifs up
 omnifs frontend enable fuse --environment host --location "$HOME/omnifs"
 omnifs status
-omnifs shell
+cd "$HOME/omnifs"
 ```
 
 ---
@@ -63,6 +63,7 @@ omnifs frontend enable nfs --environment host --location "/Users/me/omnifs"
 omnifs frontend enable fuse --environment docker
 omnifs frontend restart fuse --environment docker
 omnifs frontend disable fuse --environment docker
+omnifs frontend shell fuse --environment docker
 ```
 
 Every attached frontend exposes every configured mount. Provider installation and mount creation are separate, and `omnifs up` applies each mount spec's exact provider pin without selecting upgrades.
@@ -76,7 +77,7 @@ omnifs --output json mount ls | jq '.result.mounts[]'
 
 ## Things to try
 
-Once you are in `omnifs shell`, use normal shell tools.
+Once you are inside any frontend mount, use normal shell tools.
 
 ```bash
 # GitHub

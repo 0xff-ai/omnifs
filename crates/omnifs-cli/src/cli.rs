@@ -63,13 +63,6 @@ pub enum Commands {
     Logs(commands::logs::LogsArgs),
     /// Stream FUSE, provider, and callout events
     Inspect(commands::inspect::InspectArgs),
-    /// Open a shell at the projected tree
-    ///
-    /// The mount surface (Docker-hosted frontend or host-native mount) comes
-    /// from live frontend state. Select a surface with `--environment` and,
-    /// for host frontends, an optional `--location`.
-    Shell(commands::shell::ShellArgs),
-
     /// Guided setup: environment, providers, auth, launch
     ///
     /// First-run wizard: detect the OS, pick several providers, authenticate
@@ -77,7 +70,7 @@ pub enum Commands {
     ///
     /// Run this once to get started; use `omnifs mount add` to add a single
     /// provider later. Re-runnable: already-configured providers are listed
-    /// but excluded from the picker.
+    /// but excluded from provider selection.
     Setup(commands::setup::SetupArgs),
 
     /// Add, list, reauthenticate, snapshot, or remove mounts
@@ -144,7 +137,6 @@ impl Commands {
             Self::Down(_) => (Some("down"), "down"),
             Self::Logs(_) => (Some("logs"), "logs"),
             Self::Inspect(_) => (Some("inspect"), "inspect"),
-            Self::Shell(_) => (Some("shell"), "shell"),
             Self::Setup(_) => (Some("setup"), "setup"),
             Self::Mount(args) => (
                 Some("mount"),
@@ -180,6 +172,7 @@ impl Commands {
                     commands::frontend::FrontendCommand::Disable(_) => "frontend.disable",
                     commands::frontend::FrontendCommand::Restart(_) => "frontend.restart",
                     commands::frontend::FrontendCommand::Ls(_) => "frontend.ls",
+                    commands::frontend::FrontendCommand::Shell(_) => "frontend.shell",
                 },
             ),
         }
@@ -208,7 +201,6 @@ impl Commands {
             Self::Down(args) => args.run(output).await,
             Self::Logs(args) => args.run(output).map(|()| ExitCode::Success),
             Self::Inspect(args) => args.run(output).await.map(|()| ExitCode::Success),
-            Self::Shell(args) => args.run(output).await.map(|()| ExitCode::Success),
             Self::Mount(args) => args.run(output).await,
             Self::Provider(args) => args.run(output).await,
             Self::Skill(args) => args.run().map(|()| ExitCode::Success),
@@ -342,7 +334,10 @@ async fn run_bare(output: Output) -> anyhow::Result<ExitCode> {
         ));
     } else if running {
         output.narrate("");
-        output.narrate(crate::ui::hint("omnifs shell", "open a shell at the tree"));
+        output.narrate(crate::ui::hint(
+            "omnifs frontend shell fuse --environment docker",
+            "open a shell at the tree",
+        ));
         output.narrate(crate::ui::hint(
             "omnifs mount add <provider>",
             "add another mount",
@@ -437,9 +432,9 @@ mod tests {
         let table = [
             ("setup orientation", "setup", "yes"),
             ("setup environment check", "setup", "no-input"),
-            ("setup provider picker", "setup", "providers"),
+            ("setup provider selection", "setup", "providers"),
             ("setup provider confirmation", "setup", "yes"),
-            ("mount add provider picker", "mount add", "provider"),
+            ("mount add provider selection", "mount add", "provider"),
             ("mount add mount name collision", "mount add", "as"),
             ("mount add auth scheme", "mount add", "scheme"),
             ("mount add OAuth browser", "mount add", "no-browser"),

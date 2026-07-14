@@ -24,7 +24,7 @@ pub struct SetupArgs {
     /// Skip the final daemon launch.
     #[arg(long)]
     pub no_up: bool,
-    /// Preselect providers and skip the picker.
+    /// Preselect providers and skip provider selection.
     #[arg(long, value_delimiter = ',')]
     pub providers: Vec<String>,
     /// Print the OAuth URL instead of opening a browser.
@@ -151,7 +151,8 @@ impl SetupArgs {
             let result = frontend.enable(&workspace, output).await?;
             render_frontend_result(&mut session, result);
         }
-        session.outro("You're set. Try `omnifs shell`.");
+        session
+            .outro("You're set. Browse a host mount or use `omnifs frontend shell` for a guest.");
         emit_inventory_if_structured(&workspace, output).await
     }
 
@@ -178,12 +179,23 @@ impl SetupArgs {
                 "provider selection needs a terminal; pass --providers <provider>[,<provider>...] or --yes"
             );
         }
-        let rows = crate::ui::picker::build_rows(installed, configured);
-        if rows.is_empty() {
+        let options = crate::catalog::provider_options(installed, configured);
+        if options.is_empty() {
             session.note("all providers already configured");
             return Ok(Vec::new());
         }
-        crate::ui::picker::multiselect("What should omnifs mount?", rows)
+        let defaults = options
+            .iter()
+            .filter(|option| option.default_selected)
+            .map(|option| option.name.clone())
+            .collect::<Vec<_>>();
+        let choices = options
+            .into_iter()
+            .map(|option| (option.name.clone(), option.name, option.hint));
+        crate::ui::prompt::MultiSelect::new("What should omnifs mount?")
+            .options(choices)
+            .initial_values(defaults)
+            .ask()
     }
 
     fn yes_auto_select(
