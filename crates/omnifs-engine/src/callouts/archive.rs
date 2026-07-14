@@ -96,17 +96,19 @@ impl From<ArchiveError> for wit_types::CalloutResult {
 }
 
 impl ArchiveExecutor {
-    pub(crate) fn new(cache: Arc<BlobCache>, trees: Arc<TreeRefs>, extract_root: PathBuf) -> Self {
-        // Startup cleanup is best-effort; later writes report concrete
-        // filesystem errors when the cache root is unusable.
-        let _ = publish::sweep_temp_publish_dirs(&extract_root);
-        Self {
+    pub(crate) fn new(
+        cache: Arc<BlobCache>,
+        trees: Arc<TreeRefs>,
+        extract_root: PathBuf,
+    ) -> std::io::Result<Self> {
+        publish::sweep_temp_publish_dirs(&extract_root)?;
+        Ok(Self {
             cache,
             extract_root,
             trees,
             trees_by_key: DashMap::new(),
             locks: DashMap::new(),
-        }
+        })
     }
 
     #[tracing::instrument(target = "omnifs_callout", skip_all, fields(
@@ -415,7 +417,7 @@ mod tests {
         let blob_id = insert_archive_blob(&cache, &blob_path, &synthesize_targz());
 
         let trees = Arc::new(TreeRefs::new());
-        let executor = Arc::new(ArchiveExecutor::new(cache, trees.clone(), archive_root));
+        let executor = Arc::new(ArchiveExecutor::new(cache, trees.clone(), archive_root).unwrap());
 
         let response = executor
             .open(&open_request_targz(blob_id, "pkg-1.0/"))
@@ -446,7 +448,7 @@ mod tests {
         );
 
         let trees = Arc::new(TreeRefs::new());
-        let executor = Arc::new(ArchiveExecutor::new(cache, trees.clone(), archive_root));
+        let executor = Arc::new(ArchiveExecutor::new(cache, trees.clone(), archive_root).unwrap());
 
         let alpha = match executor.open(&open_request_targz(blob_id, "alpha/")).await {
             wit_types::CalloutResult::ArchiveOpened(wit_types::ArchiveOpened { tree }) => tree,
@@ -495,7 +497,7 @@ mod tests {
         );
 
         let trees = Arc::new(TreeRefs::new());
-        let executor = Arc::new(ArchiveExecutor::new(cache, trees.clone(), archive_root));
+        let executor = Arc::new(ArchiveExecutor::new(cache, trees.clone(), archive_root).unwrap());
 
         let tree = match executor
             .open(&open_request_targz(blob_id, "pkg-1.0/"))
@@ -531,7 +533,7 @@ mod tests {
 
         let cache = Arc::new(BlobCache::new(blob_cache_dir).unwrap());
         let trees = Arc::new(TreeRefs::new());
-        let _executor = ArchiveExecutor::new(cache, trees, archive_root);
+        let _executor = ArchiveExecutor::new(cache, trees, archive_root).unwrap();
 
         assert!(!stale.exists());
         assert!(keep.exists());
@@ -553,11 +555,9 @@ mod tests {
         );
 
         let trees = Arc::new(TreeRefs::new());
-        let executor = Arc::new(ArchiveExecutor::new(
-            cache.clone(),
-            trees.clone(),
-            archive_root.clone(),
-        ));
+        let executor = Arc::new(
+            ArchiveExecutor::new(cache.clone(), trees.clone(), archive_root.clone()).unwrap(),
+        );
 
         let tree = match executor
             .open(&open_request_targz(blob_id, "pkg-1.0/"))
@@ -571,11 +571,9 @@ mod tests {
         std::fs::write(&marker, b"stable").unwrap();
 
         let second_trees = Arc::new(TreeRefs::new());
-        let second_executor = Arc::new(ArchiveExecutor::new(
-            cache,
-            second_trees.clone(),
-            archive_root.clone(),
-        ));
+        let second_executor = Arc::new(
+            ArchiveExecutor::new(cache, second_trees.clone(), archive_root.clone()).unwrap(),
+        );
 
         let tree = match second_executor
             .open(&open_request_targz(blob_id, "pkg-1.0/"))

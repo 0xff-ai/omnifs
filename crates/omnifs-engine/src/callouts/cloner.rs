@@ -40,7 +40,7 @@ pub struct GitCloner {
 }
 
 impl GitCloner {
-    pub fn new(cache_dir: PathBuf) -> Result<Self, CloneError> {
+    pub fn new(cache_dir: PathBuf) -> std::io::Result<Self> {
         ensure_directory(&cache_dir)?;
         Ok(Self {
             cache_dir,

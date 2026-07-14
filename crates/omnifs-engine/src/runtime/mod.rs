@@ -29,11 +29,11 @@ use omnifs_workspace::provider::{
     ConfigMetadata, HostResourceBinding, ProviderAuthManifest, ProviderStore,
 };
 
+use std::fs;
 use std::path::{Path as StdPath, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
-use std::{fs, io};
 use tracing::{debug, warn};
 
 pub(crate) mod instance;
@@ -165,36 +165,10 @@ pub enum BuildError {
     HttpClient(#[from] reqwest::Error),
     #[error("invalid config: {0}")]
     InvalidConfig(String),
-    #[error("cache dir {path}: {source}")]
-    CacheDir { path: PathBuf, source: io::Error },
+    #[error("cache: {0}")]
+    Cache(String),
     #[error("provider protocol: {0}")]
     ProviderProtocol(String),
-}
-
-#[derive(Debug)]
-struct CacheDirs {
-    blob: PathBuf,
-    archive_root: PathBuf,
-}
-
-impl CacheDirs {
-    fn prepare(cache_dir: &StdPath, mount_name: &str) -> std::result::Result<Self, BuildError> {
-        let provider_root = Self::provider_root(cache_dir, mount_name);
-        let dirs = Self {
-            blob: provider_root.join(BLOB_CACHE_SUBDIR),
-            archive_root: provider_root.join(ARCHIVE_CACHE_SUBDIR),
-        };
-        Ok(dirs)
-    }
-
-    fn provider_root(cache_dir: &StdPath, mount_name: &str) -> PathBuf {
-        cache_dir.join(PROVIDER_CACHE_SUBDIR).join(mount_name)
-    }
-
-    #[cfg(test)]
-    fn blob_path(cache_dir: &StdPath, mount_name: &str) -> PathBuf {
-        Self::provider_root(cache_dir, mount_name).join(BLOB_CACHE_SUBDIR)
-    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -412,16 +386,22 @@ impl Runtime {
         let trees = Arc::new(TreeRefs::new());
         let git = git::GitExecutor::new(cloner, capability.clone(), trees.clone(), mount_name);
 
-        let cache_dirs = CacheDirs::prepare(context.cache_dir(), mount_name)?;
+        let cache_root = context
+            .cache_dir()
+            .join(PROVIDER_CACHE_SUBDIR)
+            .join(mount_name);
         let blob_cache = Arc::new(
-            BlobCache::new(cache_dirs.blob)
-                .map_err(|error| BuildError::ProviderProtocol(format!("blob cache: {error}")))?,
+            BlobCache::new(cache_root.join(BLOB_CACHE_SUBDIR))
+                .map_err(|error| BuildError::Cache(format!("blob: {error}")))?,
         );
-        let archive = Arc::new(ArchiveExecutor::new(
-            blob_cache.clone(),
-            trees.clone(),
-            cache_dirs.archive_root,
-        ));
+        let archive = Arc::new(
+            ArchiveExecutor::new(
+                blob_cache.clone(),
+                trees.clone(),
+                cache_root.join(ARCHIVE_CACHE_SUBDIR),
+            )
+            .map_err(|error| BuildError::Cache(format!("archive: {error}")))?,
+        );
 
         // Per-mount facade: structurally isolates object and view cache state.
         let cache = caches.mount(mount_name);
@@ -696,38 +676,5 @@ fn validate_instance_config(
         Err(error) => Err(BuildError::InvalidConfig(format!(
             "config for mount {mount_name} failed validation: {error}"
         ))),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::CacheDirs;
-    use crate::blob_cache::BlobCache;
-
-    #[test]
-    fn provider_cache_dirs_are_created_by_their_owners() {
-        let dir = tempfile::tempdir().unwrap();
-
-        let cache_dirs = CacheDirs::prepare(dir.path(), "linear").unwrap();
-
-        assert!(!cache_dirs.blob.exists());
-        assert!(!cache_dirs.archive_root.exists());
-        let cache = BlobCache::new(cache_dirs.blob).unwrap();
-        assert!(cache.cache_dir().is_dir());
-    }
-
-    #[test]
-    fn blob_cache_creation_failure_stops_runtime_build() {
-        let dir = tempfile::tempdir().unwrap();
-        let blob_path = CacheDirs::blob_path(dir.path(), "linear");
-        std::fs::create_dir_all(blob_path.parent().unwrap()).unwrap();
-        std::fs::write(&blob_path, "not a directory").unwrap();
-
-        let error = match BlobCache::new(blob_path) {
-            Ok(_) => panic!("file blob cache root must fail closed"),
-            Err(error) => error,
-        };
-
-        assert!(error.to_string().contains("owned directory"));
     }
 }

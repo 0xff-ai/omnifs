@@ -7,7 +7,7 @@ pub(crate) struct LogUrl<'a>(pub(crate) &'a str);
 impl fmt::Display for LogUrl<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let Ok(mut parsed) = url::Url::parse(self.0) else {
-            return f.write_str(self.0);
+            return f.write_str("<redacted-url>");
         };
 
         let _ = parsed.set_username("");
@@ -68,6 +68,10 @@ mod callout_log_tests {
         assert!(logged.contains("access_token=redacted"));
         assert!(!logged.contains("user:pass"));
         assert!(!logged.contains("secret"));
+
+        let malformed = LogUrl("https://user:secret@[").to_string();
+        assert_eq!(malformed, "<redacted-url>");
+        assert!(!malformed.contains("secret"));
     }
 
     #[test]
