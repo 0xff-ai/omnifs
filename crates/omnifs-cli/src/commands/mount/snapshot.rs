@@ -58,6 +58,7 @@ impl<'a> SnapshotTar<'a> {
 
         let totals = self.totals()?;
         let mut archive = tar::Archive::new(Cursor::new(self.bytes));
+        archive.set_overwrite(false);
         let mut progress = ExportProgress {
             total_files: totals.total_files,
             total_bytes: totals.total_bytes,
@@ -325,5 +326,34 @@ mod tests {
         assert!(error.to_string().contains("unsafe path"));
         assert!(error.to_string().contains("../outside.txt"));
         assert_eq!(std::fs::read_dir(out).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn unpack_rejects_duplicate_paths_instead_of_overwriting() {
+        let mut bytes = Vec::new();
+        {
+            let mut archive = tar::Builder::new(&mut bytes);
+            for contents in [b"first".as_slice(), b"second".as_slice()] {
+                let mut header = tar::Header::new_gnu();
+                header.set_size(contents.len() as u64);
+                header.set_mode(0o644);
+                header.set_cksum();
+                archive
+                    .append_data(&mut header, "duplicate.txt", contents)
+                    .unwrap();
+            }
+            archive.finish().unwrap();
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let out = temp.path().join("out");
+        let mut row = LiveRow::start_with_output(
+            "snapshot",
+            "preparing",
+            Output::new(OutputMode::Human, false),
+        );
+
+        SnapshotTar::new(&bytes).unpack(&out, &mut row).unwrap_err();
+        assert_eq!(std::fs::read(out.join("duplicate.txt")).unwrap(), b"first");
     }
 }

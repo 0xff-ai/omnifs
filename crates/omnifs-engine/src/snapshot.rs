@@ -156,7 +156,13 @@ impl MountSnapshot {
                 std::fs::create_dir_all(parent)
                     .with_context(|| format!("create snapshot directory {}", parent.display()))?;
             }
-            std::fs::write(&path, file.bytes.as_ref())
+            let mut output_file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .with_context(|| format!("write snapshot file {}", path.display()))?;
+            output_file
+                .write_all(file.bytes.as_ref())
                 .with_context(|| format!("write snapshot file {}", path.display()))?;
             progress.files_written += 1;
             progress.bytes_written += u64::try_from(file.bytes.len())?;
@@ -164,7 +170,13 @@ impl MountSnapshot {
         }
 
         let index_path = out.join(INDEX_FILE);
-        std::fs::write(&index_path, &index_json)
+        let mut index_file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&index_path)
+            .with_context(|| format!("write snapshot index {}", index_path.display()))?;
+        index_file
+            .write_all(&index_json)
             .with_context(|| format!("write snapshot index {}", index_path.display()))?;
         progress.files_written += 1;
         progress.bytes_written += u64::try_from(index_json.len())?;
