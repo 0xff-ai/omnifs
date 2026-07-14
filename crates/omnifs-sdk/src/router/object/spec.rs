@@ -627,8 +627,7 @@ impl<'a, O: Object> FileFace<'a, O> {
             let cx = cx.clone();
             Box::pin(async move {
                 let key = C::Key::from_captures(&caps)?;
-                let since = cx.version().cloned();
-                match C::load(&cx, &key, since).await? {
+                match C::load(&cx, &key, None).await? {
                     Load::Fresh { canonical, .. } => Ok(FileProjection::body(canonical.bytes)
                         .content_type(<C::Canonical as Format>::CT)
                         .build()),

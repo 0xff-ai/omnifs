@@ -792,8 +792,7 @@ fn generate_namespace(type_name: &syn::Ident, state_type: &Type) -> TokenStream2
                 };
                 let cached = cached_canonical
                     .map(omnifs_sdk::browse::CachedCanonical::from_wit);
-                let version = cached.as_ref().and_then(|c| c.validator.clone());
-                let cx = omnifs_sdk::__internal::Cx::<#state_type>::new(id, state).with_version(version);
+                let cx = omnifs_sdk::__internal::Cx::<#state_type>::new(id, state);
                 match router.read_file(&cx, &path, &content_type, cached).await {
                     Ok(outcome) => {
                         let (result, effects) = outcome.into_result_and_effects();

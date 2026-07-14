@@ -5,6 +5,7 @@ use omnifs_engine::EngineError;
 use omnifs_engine::test_support::cache::{BatchRecord, RecordKind};
 use omnifs_engine::test_support::clock::DYNAMIC_TTL_MILLIS;
 use omnifs_engine::test_support::wit_protocol;
+use omnifs_engine::test_support::ReadBytes;
 use omnifs_engine::view::{AttrPayload, FilePayload, LookupPayload};
 use omnifs_itest::make_initialized_runtime;
 use omnifs_wit::provider::types::{
@@ -272,7 +273,7 @@ fn leaf_records_share_one_deadline() {
 }
 
 #[tokio::test]
-async fn unindexed_path_dispatches_then_indexes() {
+async fn plain_path_ignores_unrelated_indexed_validator() {
     let harness = make_initialized_runtime(CONFIG);
     let path = "/hello/message";
 
@@ -292,11 +293,11 @@ async fn unindexed_path_dispatches_then_indexes() {
         .expect("cold read dispatches to provider");
 
     let id = LogicalId {
-        kind: "test.message".to_string(),
+        kind: "test.unrelated".to_string(),
         captures: vec![],
     };
     harness.runtime.apply_effects_for_test(
-        &canonical_effect(&id, path, b"Hello, world!", None),
+        &canonical_effect(&id, path, b"unrelated canonical", Some("unrelated-v1")),
         harness.runtime.cache().current_generation(),
     );
 
@@ -307,6 +308,17 @@ async fn unindexed_path_dispatches_then_indexes() {
             .cached_canonical_for(&p(path))
             .is_some()
     );
+
+    let read = harness
+        .runtime
+        .namespace()
+        .read_file(&p(path), "application/octet-stream".to_string(), None)
+        .await
+        .expect("indexed read still dispatches to plain provider handler");
+    let ReadBytes::Inline(bytes) = read.bytes else {
+        panic!("plain handler must return inline bytes");
+    };
+    assert_eq!(bytes, b"Hello, world!");
 }
 
 #[test]

@@ -475,8 +475,11 @@ async fn hello_dir(_cx: DirCx<State>) -> Result<DirListing> {
     ))
 }
 
-async fn message(_cx: Cx<State>) -> Result<FileProjection> {
-    Ok(FileProjection::body(b"Hello, world!".to_vec()).build())
+async fn message(cx: Cx<State>) -> Result<FileProjection> {
+    let body = cx
+        .version()
+        .map_or("Hello, world!", |version| version.as_str());
+    Ok(FileProjection::body(body.as_bytes().to_vec()).build())
 }
 
 async fn greeting(_cx: Cx<State>) -> Result<FileProjection> {
