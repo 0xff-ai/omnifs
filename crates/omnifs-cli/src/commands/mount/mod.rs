@@ -211,7 +211,7 @@ fn render_mount_show(result: &MountShowResult) -> String {
         CountLabel::number(result.access_paths.len()),
         vec![
             Column::new("Filesystem", Priority::Identity, WidthPolicy::Auto),
-            Column::new("Environment", Priority::Essential, WidthPolicy::Auto),
+            Column::new("Runtime", Priority::Essential, WidthPolicy::Auto),
             Column::new("Path", Priority::Essential, WidthPolicy::Path),
             Column::new("State", Priority::Secondary, WidthPolicy::Auto),
         ],
@@ -226,7 +226,7 @@ fn render_mount_show(result: &MountShowResult) -> String {
         table.push(ResourceRow::new(
             [
                 Cell::new(path.filesystem.label()),
-                Cell::new(path.environment.label()),
+                Cell::new(path.runtime.label()),
                 Cell::new(path.path.display().to_string()),
                 Cell::state(state),
             ],

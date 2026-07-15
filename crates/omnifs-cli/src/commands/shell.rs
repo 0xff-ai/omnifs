@@ -5,13 +5,13 @@ use std::process::Command;
 use anyhow::{Context, Result, bail, ensure};
 use clap::Args;
 
-use crate::commands::frontend::{FrontendEnvironment, FrontendFilesystem};
-use crate::frontend_backend::{DockerBackend, FrontendBackend};
+use crate::commands::frontend::{FrontendFilesystem, FrontendRuntime};
+use crate::docker::DockerClient;
+use crate::docker::DockerRunner;
 use crate::frontend_container::FRONTEND_DEV_IMAGE;
 use crate::inventory::{FrontendState, Inventory};
-use crate::krunkit_backend::{self, KrunkitBackend};
 use crate::launch_backend::{ContainerName, DockerTarget};
-use crate::runtime::Runtime;
+use crate::libkrun_runner::{self, LibkrunRunner};
 use crate::ui::output::Output;
 use crate::workspace::Workspace;
 
@@ -20,9 +20,9 @@ pub struct ShellArgs {
     /// Filesystem exposed by the frontend.
     #[arg(value_enum)]
     pub filesystem: FrontendFilesystem,
-    /// Guest environment hosting the frontend.
+    /// Guest runtime hosting the frontend.
     #[arg(long, value_enum)]
-    pub environment: FrontendEnvironment,
+    pub runtime: FrontendRuntime,
     /// Shell to launch (defaults to the guest's `/bin/sh`).
     #[arg(long)]
     pub shell: Option<String>,
@@ -42,24 +42,24 @@ impl ShellArgs {
         );
         ensure!(
             matches!(
-                self.environment,
-                FrontendEnvironment::Docker | FrontendEnvironment::Krunkit
+                self.runtime,
+                FrontendRuntime::Docker | FrontendRuntime::Libkrun
             ),
-            "frontend shell is available only for docker and krunkit; host mounts are already available in your ordinary shell"
+            "frontend shell is available only for docker and libkrun; host mounts are already available in your ordinary shell"
         );
 
         let workspace = Workspace::resolve()?;
         let inventory = Inventory::collect(&workspace).await?;
-        ensure_observed_guest(&inventory, self.filesystem, self.environment)?;
+        ensure_observed_guest(&inventory, self.filesystem, self.runtime)?;
 
         let paths = workspace.layout();
-        match self.environment {
-            FrontendEnvironment::Docker => {
+        match self.runtime {
+            FrontendRuntime::Docker => {
                 let container_name = crate::frontend_container::frontend_container_name(paths)?;
                 self.exec_in_container(&container_name, output)
             },
-            FrontendEnvironment::Krunkit => self.exec_in_krunkit_guest(paths),
-            FrontendEnvironment::Host => unreachable!("validated above"),
+            FrontendRuntime::Libkrun => self.exec_in_libkrun_guest(paths),
+            FrontendRuntime::Host => unreachable!("validated above"),
         }
     }
 
@@ -71,34 +71,34 @@ impl ShellArgs {
             container_name.as_str().to_string(),
             FRONTEND_DEV_IMAGE.to_string(),
         )?;
-        let backend = DockerBackend::new(Runtime::connect_for(&target, output)?);
+        let backend = DockerRunner::new(DockerClient::connect_for(&target, output)?);
         let cmd = backend.shell_command(self.shell.as_deref(), &self.command);
         spawn_and_propagate(cmd, format!("open shell in container `{container_name}`"))
     }
 
-    /// Attach to the running krunkit guest over ssh-over-vsock.
-    fn exec_in_krunkit_guest(
+    /// Attach to the running libkrun guest over ssh-over-vsock.
+    fn exec_in_libkrun_guest(
         &self,
         paths: &omnifs_workspace::layout::WorkspaceLayout,
     ) -> Result<()> {
-        krunkit_backend::ensure_socat_available()?;
-        let backend = KrunkitBackend::new(paths.config_dir.clone());
+        libkrun_runner::ensure_socat_available()?;
+        let backend = LibkrunRunner::new(paths.config_dir.clone());
         let cmd = backend.shell_command(self.shell.as_deref(), &self.command);
-        spawn_and_propagate(cmd, "open shell in the krunkit guest".to_string())
+        spawn_and_propagate(cmd, "open shell in the libkrun guest".to_string())
     }
 }
 
 fn ensure_observed_guest(
     inventory: &Inventory,
     filesystem: FrontendFilesystem,
-    environment: FrontendEnvironment,
+    runtime: FrontendRuntime,
 ) -> Result<()> {
-    let identity = format!("{filesystem}/{environment}");
-    let remedy = format!("omnifs frontend enable {filesystem} --environment {environment}");
+    let identity = format!("{filesystem}/{runtime}");
+    let remedy = format!("omnifs frontend enable {filesystem} --runtime {runtime}");
     let matches = inventory
         .frontends
         .iter()
-        .filter(|frontend| frontend.filesystem == filesystem && frontend.environment == environment)
+        .filter(|frontend| frontend.filesystem == filesystem && frontend.runtime == runtime)
         .collect::<Vec<_>>();
 
     match matches.as_slice() {
@@ -154,7 +154,7 @@ mod tests {
             runners: Vec::new(),
             frontends: vec![FrontendStatus {
                 filesystem: FrontendFilesystem::Fuse,
-                environment: FrontendEnvironment::Docker,
+                runtime: FrontendRuntime::Docker,
                 location: Some(PathBuf::from("/omnifs")),
                 state,
                 scope: "all",
@@ -172,7 +172,7 @@ mod tests {
             "frontend",
             "shell",
             "fuse",
-            "--environment",
+            "--runtime",
             "docker",
             "--shell",
             "/bin/bash",
@@ -187,7 +187,7 @@ mod tests {
             panic!("expected frontend shell command");
         };
         assert_eq!(args.filesystem, FrontendFilesystem::Fuse);
-        assert_eq!(args.environment, FrontendEnvironment::Docker);
+        assert_eq!(args.runtime, FrontendRuntime::Docker);
         assert_eq!(args.shell.as_deref(), Some("/bin/bash"));
         assert_eq!(args.command, vec!["pwd"]);
 
@@ -207,7 +207,7 @@ mod tests {
                 ensure_observed_guest(
                     &inventory_with(state),
                     FrontendFilesystem::Fuse,
-                    FrontendEnvironment::Docker
+                    FrontendRuntime::Docker
                 )
                 .is_ok()
             );
@@ -220,20 +220,17 @@ mod tests {
             frontends: Vec::new(),
             ..inventory_with(FrontendState::Attached)
         };
-        let error = ensure_observed_guest(
-            &absent,
-            FrontendFilesystem::Fuse,
-            FrontendEnvironment::Docker,
-        )
-        .unwrap_err()
-        .to_string();
+        let error =
+            ensure_observed_guest(&absent, FrontendFilesystem::Fuse, FrontendRuntime::Docker)
+                .unwrap_err()
+                .to_string();
         assert!(error.contains("fuse/docker"));
-        assert!(error.contains("omnifs frontend enable fuse --environment docker"));
+        assert!(error.contains("omnifs frontend enable fuse --runtime docker"));
 
         let failed = ensure_observed_guest(
             &inventory_with(FrontendState::Failed),
             FrontendFilesystem::Fuse,
-            FrontendEnvironment::Docker,
+            FrontendRuntime::Docker,
         )
         .unwrap_err()
         .to_string();
@@ -242,7 +239,7 @@ mod tests {
         let mut ambiguous = inventory_with(FrontendState::Attached);
         ambiguous.frontends.push(FrontendStatus {
             filesystem: FrontendFilesystem::Fuse,
-            environment: FrontendEnvironment::Docker,
+            runtime: FrontendRuntime::Docker,
             location: Some(PathBuf::from("/omnifs-2")),
             state: FrontendState::Running,
             scope: "all",
@@ -252,7 +249,7 @@ mod tests {
         let error = ensure_observed_guest(
             &ambiguous,
             FrontendFilesystem::Fuse,
-            FrontendEnvironment::Docker,
+            FrontendRuntime::Docker,
         )
         .unwrap_err()
         .to_string();

@@ -26,8 +26,8 @@ constant_time_eq = "0.4"
 getrandom = "0.3"
 hex = { workspace = true }
 
-# The guest-side vsock dial for the krunkit frontend backend, and the
-# readiness beacon's own vsock dial back to the host. Linux-only: the krunkit
+# The guest-side vsock dial for the libkrun frontend runner, and the
+# readiness beacon's own vsock dial back to the host. Linux-only: the libkrun
 # guest is Linux, and the crate's socket(AF_VSOCK, ...) call does not build on
 # a non-Linux host in the first place.
 [target.'cfg(target_os = "linux")'.dependencies]

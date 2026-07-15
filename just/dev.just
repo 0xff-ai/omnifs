@@ -55,7 +55,7 @@ dev *args:
 frontend-image:
     docker build -t omnifs-frontend:dev --target frontend-dev .
 
-# Build the krunkit guest disk image: an EFI-bootable Debian trixie arm64 raw
+# Build the libkrun guest disk image: an EFI-bootable Debian trixie arm64 raw
 # disk with fuse3 and the linux/arm64 `omnifs-thin` binary baked in, whose init
 # starts the FUSE frontend runner once a per-launch seed volume delivers the
 # attach parameters. Mirrors `frontend-image`'s reuse of the shared
@@ -71,18 +71,18 @@ guest-image:
 guest-image-smoke:
     bash scripts/guest-image/smoke.sh
 
-# Run the krunkit driver's conformance lane against a live guest: builds the
-# guest image if missing, then runs `crates/omnifs-itest/tests/frontend_krunkit`
+# Run the libkrun runtime conformance lane against a live guest: builds the
+# guest image if missing, then runs `crates/omnifs-itest/tests/frontend_libkrun`
 # with the live-acceptance opt-in set. macOS (Apple Silicon) only, and
 # LOCAL-ONLY: GitHub-hosted macOS runners cannot nest virtualization, so this
 # never runs in CI (see docs/contracts/60-build-validation.md). Requires
-# `krunkit` and `socat` on PATH.
+# the `krunkit` executable and `socat` on PATH.
 [group('dev')]
-krunkit-conformance:
+libkrun-conformance:
     #!/usr/bin/env bash
     set -euo pipefail
     if [[ ! -f target/guest-image/omnifs-guest.raw ]]; then
       echo "guest image missing; building it now (run \`just guest-image\` yourself to rebuild after guest-image source changes)"
       just guest-image
     fi
-    OMNIFS_ACCEPTANCE_LIVE=1 cargo nextest run -p omnifs-itest --test frontend_krunkit
+    OMNIFS_ACCEPTANCE_LIVE=1 cargo nextest run -p omnifs-itest --test frontend_libkrun

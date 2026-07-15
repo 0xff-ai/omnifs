@@ -2,7 +2,7 @@
 //!
 //! Frontends attach to the daemon's shared namespace and contain no provider
 //! runtime or credentials. Local delivery starts a sibling runner binary;
-//! Docker and krunkit deliver the FUSE runner inside an isolated guest.
+//! Docker and libkrun deliver the FUSE runner inside an isolated guest.
 
 mod lifecycle;
 
@@ -39,5 +39,5 @@ impl FrontendArgs {
 }
 
 pub(crate) use lifecycle::{
-    FrontendEnvironment, FrontendFilesystem, FrontendId, FrontendResult, RuntimeState,
+    FrontendFilesystem, FrontendId, FrontendResult, FrontendResultState, FrontendRuntime,
 };

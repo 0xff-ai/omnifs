@@ -16,23 +16,23 @@ mod client;
 mod commands;
 mod credential_target;
 mod daemon;
+mod daemon_launch;
 mod daemon_teardown;
+mod docker;
 mod error;
-mod frontend_backend;
 mod frontend_container;
 mod guest_image_pull;
+mod host_runner;
 mod host_teardown;
 mod inspector;
 mod inventory;
-mod krunkit_backend;
 mod launch;
 mod launch_backend;
-mod local_backend;
+mod libkrun_runner;
 mod mount_config;
 mod process;
 mod provider_bundle;
 mod provider_resolver;
-mod runtime;
 mod stages;
 mod status;
 mod telemetry;
@@ -166,12 +166,12 @@ fn init_tracing(verbose: u8, inspector: Option<&std::sync::Arc<omnifs_engine::In
     use tracing_subscriber::layer::{Layer as _, SubscriberExt as _};
     use tracing_subscriber::util::SubscriberInitExt as _;
 
-    use launch_backend::RunMode;
+    use launch_backend::ProcessRole;
     // `-v` raises the foreground filter to the same baseline the spawned
     // daemon logs at; `-vv` turns on debug.
     let verbosity = match verbose {
-        0 => RunMode::Foreground.default_log_level(),
-        1 => RunMode::Spawned.default_log_level(),
+        0 => ProcessRole::Cli.default_log_level(),
+        1 => ProcessRole::Daemon.default_log_level(),
         _ => "debug",
     };
     let filter = EnvFilter::try_from_default_env()

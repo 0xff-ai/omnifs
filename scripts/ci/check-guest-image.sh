@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Static, fail-closed assertions against a built krunkit guest disk image.
+# Static, fail-closed assertions against a built libkrun guest disk image.
 # The privileged container makes the loop-mount checks portable to macOS.
 # Usage: check-guest-image.sh IMAGE_PATH PROFILE
 set -euo pipefail

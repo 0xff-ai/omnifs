@@ -299,7 +299,7 @@ impl Drop for MultiFrontendDaemon {
 }
 
 impl MultiFrontendDaemon {
-    /// The daemon-owned runtime record for this hermetic home.
+    /// The daemon-owned daemon record for this hermetic home.
     #[must_use]
     pub fn record_path(&self) -> PathBuf {
         self.home.path().join("daemon.json")
@@ -716,19 +716,18 @@ fn wire_frontend(
             frontend_cmd.arg("--attach").arg(&socket);
         },
         AttachTransport::Tcp => {
-            let record = omnifs_workspace::runtime_record::RuntimeRecord::read(
-                &home_path.join("daemon.json"),
-            )
-            .expect("read daemon.json")
-            .expect("daemon.json present once ready");
+            let record =
+                omnifs_workspace::daemon_record::DaemonRecord::read(&home_path.join("daemon.json"))
+                    .expect("read daemon.json")
+                    .expect("daemon.json present once ready");
             let attach = record
                 .attach
                 .into_iter()
                 .find_map(|attach| match attach {
-                    omnifs_workspace::runtime_record::AttachRecord::Tcp { addr, token } => {
+                    omnifs_workspace::daemon_record::AttachRecord::Tcp { addr, token } => {
                         Some((addr, token))
                     },
-                    omnifs_workspace::runtime_record::AttachRecord::Vsock { .. } => None,
+                    omnifs_workspace::daemon_record::AttachRecord::Vsock { .. } => None,
                 })
                 .expect("daemon.json must carry TCP attach after --attach-tcp");
             frontend_cmd

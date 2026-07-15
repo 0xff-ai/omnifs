@@ -43,7 +43,7 @@ pub const LOCAL_ATTACH_SOCKET_NAME: &str = "local.sock";
 /// via the daemon's `AttachVsock` control operation, one per daemon instance;
 /// unlike the fixed local socket, whose auth is filesystem permissions, a
 /// connection here proves itself with a per-instance token, because the
-/// krunkit vsock-proxy path terminates every guest vsock dial on this socket
+/// libkrun's vsock-proxy path terminates every guest vsock dial on this socket
 /// as the same local peer.
 pub const VSOCK_ATTACH_SOCKET_NAME: &str = "vsock-attach.sock";
 pub const OMNIFS_HOME_ENV: &str = "OMNIFS_HOME";
@@ -137,7 +137,7 @@ impl WorkspaceLayout {
     /// protocol identity.
     pub fn frontend_state_dir(
         &self,
-        kind: crate::runtime_record::FrontendKind,
+        kind: crate::daemon_record::FrontendKind,
         mount_point: &Path,
     ) -> PathBuf {
         let normalized = mount_point.components().collect::<PathBuf>();
@@ -147,19 +147,19 @@ impl WorkspaceLayout {
             .join(digest.as_str())
     }
 
-    /// The daemon-owned runtime record (`<config_dir>/daemon.json`). The daemon
+    /// The daemon-owned daemon record (`<config_dir>/daemon.json`). The daemon
     /// writes it on start and removes it on graceful exit; the CLI reads it to
     /// resolve which endpoint to dial.
-    pub fn runtime_record_file(&self) -> PathBuf {
+    pub fn daemon_record_file(&self) -> PathBuf {
         self.config_dir
-            .join(crate::runtime_record::RUNTIME_RECORD_FILE)
+            .join(crate::daemon_record::DAEMON_RECORD_FILE)
     }
 
     /// The host-native control socket (`<config_dir>/control.sock`). Auth on
     /// this socket is filesystem permissions, not a bearer token.
     pub fn control_socket(&self) -> PathBuf {
         self.config_dir
-            .join(crate::runtime_record::CONTROL_SOCKET_FILE)
+            .join(crate::daemon_record::CONTROL_SOCKET_FILE)
     }
 
     /// Directory holding the daemon's namespace attach sockets

@@ -1,6 +1,6 @@
 //! Control-plane acceptance: two daemons, two homes, one socket each.
 //!
-//! Proves the Unix-socket control plane and the daemon-owned runtime record end
+//! Proves the Unix-socket control plane and the daemon-owned daemon record end
 //! to end against real mounts: each daemon binds its own workspace's
 //! `control.sock` and writes its own `daemon.json`; the CLI only ever dials the
 //! endpoint it read from its own workspace's record, so two daemons never
@@ -186,7 +186,7 @@ fn two_daemons_two_homes_resolve_through_their_own_records() {
 
     assert_ne!(pid_a, pid_b, "the two daemons must be distinct processes");
 
-    // A fresh home with no runtime record never dials a default address.
+    // A fresh home with no daemon record never dials a default address.
     //
     // `omnifs status` is informational and exits 0 whether or not a daemon is
     // running (locked by the CLI lifecycle suite's scenario_1). The property
@@ -243,7 +243,7 @@ fn two_daemons_two_homes_resolve_through_their_own_records() {
     );
     assert!(
         !daemon_a.record_path().exists(),
-        "the stale runtime record must be cleaned up after dialing a refused socket"
+        "the stale daemon record must be cleaned up after dialing a refused socket"
     );
 
     // Home B still answers correctly.
@@ -258,7 +258,7 @@ fn two_daemons_two_homes_resolve_through_their_own_records() {
         Some(u64::from(daemon_b.pid())),
     );
 
-    // A graceful SIGTERM removes home B's runtime record.
+    // A graceful SIGTERM removes home B's daemon record.
     let pid_b = daemon_b.pid();
     let _ = Command::new("kill")
         .args(["-TERM", &pid_b.to_string()])
@@ -270,7 +270,7 @@ fn two_daemons_two_homes_resolve_through_their_own_records() {
     }
     assert!(
         !record_b.exists(),
-        "a gracefully stopped daemon must remove its runtime record"
+        "a gracefully stopped daemon must remove its daemon record"
     );
 
     drop(daemon_a);

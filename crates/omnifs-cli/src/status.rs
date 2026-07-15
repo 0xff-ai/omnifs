@@ -102,7 +102,7 @@ pub(crate) fn frontend_table(frontends: &[FrontendStatus]) -> TableResources {
         frontends.len(),
         vec![
             TableColumn::new("Filesystem", TablePriority::Identity, TableWidth::Auto),
-            TableColumn::new("Environment", TablePriority::Identity, TableWidth::Auto),
+            TableColumn::new("Runtime", TablePriority::Identity, TableWidth::Auto),
             TableColumn::new("Location", TablePriority::Essential, TableWidth::Path),
             TableColumn::new("Coverage", TablePriority::Secondary, TableWidth::Auto),
             TableColumn::new("State", TablePriority::Essential, TableWidth::Auto),
@@ -112,7 +112,7 @@ pub(crate) fn frontend_table(frontends: &[FrontendStatus]) -> TableResources {
         let mut row = TableRow::new(
             [
                 TableCell::new(frontend.filesystem.label()),
-                TableCell::new(frontend.environment.label()),
+                TableCell::new(frontend.runtime.label()),
                 TableCell::new(
                     frontend
                         .location

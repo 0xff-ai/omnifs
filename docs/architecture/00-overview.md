@@ -67,13 +67,13 @@ Unknown and non-zero sizes use truthful sentinel behavior until exact size is le
 
 ## Frontends
 
-FUSE and NFS are protocol adapters over the same projected tree. Every frontend is a separate slim `omnifs-thin` runner selected with `fuse` or `nfs`; it contains protocol mechanics only and attaches to the daemon over the Omnifs VFS wire protocol. The CLI owns launch and teardown through drivers (`local`, `docker`, `krunkit`); the daemon is only a namespace server and attachment registry and never mounts or supervises a frontend.
+FUSE and NFS are protocol adapters over the same projected tree. Every frontend is a separate slim `omnifs-thin` runner selected with `fuse` or `nfs`; it contains protocol mechanics only and attaches to the daemon over the Omnifs VFS wire protocol. The CLI owns launch and teardown through drivers (`local`, `docker`, `libkrun`); the daemon is only a namespace server and attachment registry and never mounts or supervises a frontend.
 
 FUSE owns inode tables, kernel notifications, mount/unmount mechanics, and FUSE reply construction. NFSv4.0 loopback (macOS host-native) owns filehandles, stateids, leases, NFS protocol errors, mount readiness, and teardown. Mount discovery and NFS filehandle state live under per-mount leaves under `cache/frontends/<kind>/<hash>`.
 
 Neither frontend owns projection semantics, provider WIT calls, cache schema, root enumeration, learned-size rules, preload policy, inline-byte policy, or negative lookup policy.
 
-A frontend (always out-of-process) consumes the same `omnifs_engine::Namespace` through the Omnifs VFS wire protocol. `omnifs-engine` remains the semantic owner; `omnifs-vfs-wire` owns postcard serialization, framing, the handshake, attach target resolution and reconnect, readiness signaling, and its client-side wire cache. Unix sockets (local), token-authenticated TCP (docker), and vsock (krunkit) are attach transports for this one internal protocol. The VFS wire protocol is separate from the provider WIT contract and does not define another projection model. Delivery is labeled by listener ownership at the daemon (UDS local, TCP docker, vsock krunkit); the guest never self-reports delivery.
+A frontend (always out-of-process) consumes the same `omnifs_engine::Namespace` through the Omnifs VFS wire protocol. `omnifs-engine` remains the semantic owner; `omnifs-vfs-wire` owns postcard serialization, framing, the handshake, attach target resolution and reconnect, readiness signaling, and its client-side wire cache. Unix sockets (local), token-authenticated TCP (docker), and vsock (libkrun) are attach transports for this one internal protocol. The VFS wire protocol is separate from the provider WIT contract and does not define another projection model. Delivery is labeled by listener ownership at the daemon (UDS local, TCP docker, vsock libkrun); the guest never self-reports delivery.
 
 ## Control plane
 
@@ -81,7 +81,7 @@ There is one `omnifs` binary. The runtime loop lives behind hidden `omnifs daemo
 
 Mount desired state is the Git `HEAD` of `$OMNIFS_HOME/mounts`; no other workspace state is versioned. The CLI writes specs through `mounts::Registry`, records desired-state commits through `mounts::Repository`, and applies one complete revision through `omnifs up` or its exact `apply` alias. The daemon receives a revision-named immutable snapshot at process start, loads it completely before readiness, and exposes no mount mutation or reconcile API.
 
-The daemon has one runtime mode: host-native. It is a pure namespace server and attachment registry. Docker and krunkit deliver only FUSE frontends (as separate processes); they are not daemon runtime modes. Contributor dev sessions run through `scripts/dev.ts`, which writes a dedicated `~/.omnifs-dev` home and starts the daemon on the host directly.
+The daemon has one runtime mode: host-native. It is a pure namespace server and attachment registry. Docker and libkrun deliver only FUSE frontends (as separate processes); they are not daemon runtime modes. Contributor dev sessions run through `scripts/dev.ts`, which writes a dedicated `~/.omnifs-dev` home and starts the daemon on the host directly.
 
 ## Auth and sandbox
 

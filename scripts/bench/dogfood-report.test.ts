@@ -20,12 +20,12 @@ test("parseJsonl skips blank and malformed lines", () => {
 
 test("computeReport counts sessions and median duration", () => {
   const daemon = [
-    { ts: "2026-07-01T10:00:00Z", event: "daemon_start", backend: "docker", mounts: 0 },
-    { ts: "2026-07-01T10:00:10Z", event: "frontend_serving", backend: "docker", mounts: 2 },
-    { ts: "2026-07-01T10:00:30Z", event: "frontend_stopped", backend: "docker", mounts: 2 },
-    { ts: "2026-07-01T10:00:30Z", event: "daemon_stop", backend: "docker", mounts: 2 },
-    { ts: "2026-07-01T12:00:00Z", event: "daemon_start", backend: "docker", mounts: 0 },
-    { ts: "2026-07-01T12:00:50Z", event: "daemon_stop", backend: "docker", mounts: 1 },
+    { ts: "2026-07-01T10:00:00Z", event: "daemon_start", mounts: 0 },
+    { ts: "2026-07-01T10:00:10Z", event: "frontend_serving", mounts: 2 },
+    { ts: "2026-07-01T10:00:30Z", event: "frontend_stopped", mounts: 2 },
+    { ts: "2026-07-01T10:00:30Z", event: "daemon_stop", mounts: 2 },
+    { ts: "2026-07-01T12:00:00Z", event: "daemon_start", mounts: 0 },
+    { ts: "2026-07-01T12:00:50Z", event: "daemon_stop", mounts: 1 },
   ];
   const report = computeReport(daemon, [], Date.parse("2026-07-01T13:00:00Z"));
   expect(report.sessions).toBe(2);

@@ -12,7 +12,7 @@ omnifs projects external systems into local filesystem paths. GitHub, DNS, arXiv
 
 The goal is simple: if a tool can read files, it can read the outside world without learning another SDK, auth flow, pagination model, or response schema.
 
-> Alpha status: omnifs is real and usable, but the read surface is still early. The daemon runs natively on Linux and macOS. Frontends are independent whole-namespace access surfaces managed with imperative `frontend enable`, `disable`, and `restart` commands. Docker and krunkit deliver FUSE only. Frontends attach over the wire protocol and carry no providers or credentials.
+> Alpha status: omnifs is real and usable, but the read surface is still early. The daemon runs natively on Linux and macOS. Frontends are independent whole-namespace access surfaces managed with imperative `frontend enable`, `disable`, and `restart` commands. Docker and libkrun deliver FUSE only. Frontends attach over the wire protocol and carry no providers or credentials.
 
 <p align="center">
   <img src="https://github.com/user-attachments/assets/b9598ece-e772-4fdc-b5c7-8ad5ba26d39d" alt="omnifs demo" width="960">
@@ -20,17 +20,17 @@ The goal is simple: if a tool can read files, it can read the outside world with
 
 ## Quickstart
 
-omnifs is written in Rust. We ship prebuilt Linux and macOS binaries through the npm registry, so the npm installation path needs Node.js and npm. Docker or OrbStack is needed only for the optional Docker-hosted FUSE frontend; macOS can use krunkit instead.
+omnifs is written in Rust. We ship prebuilt Linux and macOS binaries through the npm registry, so the npm installation path needs Node.js and npm. Docker or OrbStack is needed only for the optional Docker-hosted FUSE frontend; macOS can use libkrun instead.
 
 ```bash
 npm install -g @0xff-ai/omnifs
 omnifs mount add github
 omnifs up
-omnifs frontend enable fuse --environment host --location "$HOME/omnifs"
+omnifs frontend enable fuse --runtime host --location "$HOME/omnifs"
 omnifs status
 ```
 
-`omnifs mount add <provider>` creates one desired mount and handles its auth and config. `omnifs up` starts the host-native daemon only, and `omnifs frontend enable` imperatively starts one explicit frontend. Host frontends are ordinary mounted paths; use `omnifs frontend shell` only for a Docker or krunkit frontend.
+`omnifs mount add <provider>` creates one desired mount and handles its auth and config. `omnifs up` starts the host-native daemon only, and `omnifs frontend enable` imperatively starts one explicit frontend. Host frontends are ordinary mounted paths; use `omnifs frontend shell` only for a Docker or libkrun frontend.
 
 ---
 
@@ -40,7 +40,7 @@ For a direct, scriptable path, create mounts one at a time with `omnifs mount ad
 omnifs mount add github
 omnifs mount add dns
 omnifs up
-omnifs frontend enable fuse --environment host --location "$HOME/omnifs"
+omnifs frontend enable fuse --runtime host --location "$HOME/omnifs"
 omnifs status
 cd "$HOME/omnifs"
 ```
@@ -54,18 +54,18 @@ omnifs status      # runtime, mount, and auth state
 omnifs frontend ls # observed whole-namespace frontend runners and attachments
 omnifs logs -f     # follow daemon logs
 omnifs inspect     # live TUI for namespace, provider, cache, and callout activity
-omnifs frontend disable fuse --environment host # stop a frontend runner
+omnifs frontend disable fuse --runtime host # stop a frontend runner
 omnifs down        # stop the daemon
 ```
 
-Frontend lifecycle is imperative. Host locations must be absolute; Docker and krunkit own their guest location.
+Frontend lifecycle is imperative. Host locations must be absolute; Docker and libkrun own their guest location.
 
 ```bash
-omnifs frontend enable nfs --environment host --location "/Users/me/omnifs"
-omnifs frontend enable fuse --environment docker
-omnifs frontend restart fuse --environment docker
-omnifs frontend disable fuse --environment docker
-omnifs frontend shell fuse --environment docker
+omnifs frontend enable nfs --runtime host --location "/Users/me/omnifs"
+omnifs frontend enable fuse --runtime docker
+omnifs frontend restart fuse --runtime docker
+omnifs frontend disable fuse --runtime docker
+omnifs frontend shell fuse --runtime docker
 ```
 
 Every attached frontend exposes every configured mount. Provider installation and mount creation are separate, and `omnifs up` applies each mount spec's exact provider pin without selecting upgrades.
@@ -73,7 +73,7 @@ Every attached frontend exposes every configured mount. Provider installation an
 For automation, select one invocation-owned output contract. JSON prints one envelope and keeps resource collections plural; JSONL uses the same terminal result or error envelope with its stream-record discriminator. Live logs and Inspector records remain line streams.
 
 ```bash
-omnifs --output json status | jq '.result.frontends[] | {filesystem, environment, location, scope}'
+omnifs --output json status | jq '.result.frontends[] | {filesystem, runtime, location, scope}'
 omnifs --output json mount ls | jq '.result.mounts[]'
 ```
 
@@ -221,7 +221,7 @@ The current surface is read-only. Write-back is designed around explicit staged 
 
 ## How it works
 
-The host-native daemon owns providers, credentials, caching, callouts, and one shared namespace. FUSE and NFS frontends in host, Docker, or krunkit environments all expose that same tree via the wire protocol.
+The host-native daemon owns providers, credentials, caching, callouts, and one shared namespace. FUSE and NFS frontends in host, Docker, or libkrun runtimes all expose that same tree via the wire protocol.
 
 ```text
                                                                   +----------------+
@@ -267,7 +267,7 @@ tail -n 80 ~/.omnifs-dev/cache/daemon.log
 
 ### ✅ Working today
 
-- FUSE (Linux) and read-only NFSv4 loopback (macOS) frontends in host, Docker, or krunkit environments; enabled explicitly with the frontend lifecycle commands.
+- FUSE (Linux) and read-only NFSv4 loopback (macOS) frontends in host, Docker, or libkrun runtimes; enabled explicitly with the frontend lifecycle commands.
 - A host CLI on npm that handles mounts, auth, lifecycle, logs, status, and inspection.
 - Sandboxed Wasm providers that can only reach the network, Git, sockets, and files the host hands them.
 - Host-held credentials, layered caching, and `omnifs inspect` for a live view of what the runtime is doing.
@@ -288,7 +288,7 @@ tail -n 80 ~/.omnifs-dev/cache/daemon.log
 - Many more providers, including object stores, Postgres, Redis, Slack, Discord, Google Drive, Gmail, Notion, Stripe, Cloudflare, Vercel, and Telegram.
 - A real provider ecosystem: standalone packaging, a community catalog, authoring docs, and sidecars for providers that need native dependencies.
 - Additional mount surfaces beyond Linux FUSE and macOS NFSv4, plus passthrough for host-backed subtrees.
-- Easier install and slimmer packaging: Homebrew or shell installers and smaller frontend images for docker and krunkit delivery.
+- Easier install and slimmer packaging: Homebrew or shell installers and smaller frontend images for docker and libkrun delivery.
 - Offline cache-backed startup and browsing with `omnifs up --offline`, plus background indexing, semantic search, and DNS prefetch.
 - Trust and safety: signed provider manifests, tighter sandboxing for host-run tools, and metered filesystem access.
 

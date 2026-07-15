@@ -197,7 +197,7 @@ jobs:
           push-to-registry: true
           create-storage-record: false
 
-      # The krunkit guest disk image: a non-container OCI artifact (see
+      # The libkrun guest disk image: a non-container OCI artifact (see
       # guest-image-arm64 in ci.yml), so promotion retags via `oras tag`
       # rather than `docker buildx imagetools create`.
       - name: Promote CI guest image to release tags

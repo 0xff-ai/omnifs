@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
-use omnifs_api::{FrontendDelivery, FrontendInfo, FsType};
+use omnifs_api::{FrontendInfo, FrontendRuntime, FsType};
 use omnifs_engine::Namespace;
 use serde::Deserialize;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -34,15 +34,15 @@ use crate::{FrontendIdentity, Handshake, PROTOCOL, WireError, WireRequest, WireR
 const ATTACH_TOKEN_BYTES: usize = 16;
 const UDS_PATH_BYTE_LIMIT: usize = 100;
 
-/// The listener path determines both delivery authority and authentication.
+/// The listener path determines both runtime authority and authentication.
 /// The guest identity in the handshake remains display-only.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ListenerTarget {
     /// The fixed host-native Unix listener authenticated by filesystem mode.
     Local { path: PathBuf },
-    /// The Docker delivery listener and its token-authenticated address.
+    /// The Docker runtime listener and its token-authenticated address.
     Tcp { addr: SocketAddr, token: String },
-    /// The krunkit vsock-proxy listener and its token-authenticated socket.
+    /// The libkrun vsock-proxy listener and its token-authenticated socket.
     Vsock { socket_path: PathBuf, token: String },
 }
 
@@ -104,16 +104,16 @@ struct VfsState {
 struct AttachedFrontend {
     kind: crate::FrontendKind,
     mount_point: PathBuf,
-    delivery: FrontendDelivery,
+    runtime: FrontendRuntime,
 }
 
 impl AttachedFrontend {
     fn key(&self) -> AttachmentKey {
         AttachmentKey {
-            delivery: match self.delivery {
-                FrontendDelivery::Local => 0,
-                FrontendDelivery::Docker => 1,
-                FrontendDelivery::Krunkit => 2,
+            runtime: match self.runtime {
+                FrontendRuntime::Host => 0,
+                FrontendRuntime::Docker => 1,
+                FrontendRuntime::Libkrun => 2,
             },
             kind: match self.kind {
                 crate::FrontendKind::Fuse => 0,
@@ -126,7 +126,7 @@ impl AttachedFrontend {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct AttachmentKey {
-    delivery: u8,
+    runtime: u8,
     kind: u8,
     mount_point: PathBuf,
 }
@@ -157,11 +157,11 @@ impl Attachments {
         })
     }
 
-    fn attached(&self, identity: &crate::FrontendIdentity, delivery: FrontendDelivery) -> u64 {
+    fn attached(&self, identity: &crate::FrontendIdentity, runtime: FrontendRuntime) -> u64 {
         let frontend = AttachedFrontend {
             kind: identity.kind,
             mount_point: identity.mount_point.clone(),
-            delivery,
+            runtime,
         };
         let key = frontend.key();
         let mut state = self
@@ -214,7 +214,7 @@ impl Attachments {
                     crate::FrontendKind::Nfs => FsType::Nfs,
                 },
                 mount_point: entry.frontend.mount_point.clone(),
-                delivery: entry.frontend.delivery,
+                runtime: entry.frontend.runtime,
             })
             .collect()
     }
@@ -358,7 +358,7 @@ impl VfsServer {
     }
 
     /// Hold listener tasks behind one startup gate until the daemon has
-    /// published its durable runtime record.
+    /// published its durable daemon record.
     pub fn begin_startup(&self) -> watch::Receiver<bool> {
         let mut state = self
             .state
@@ -382,7 +382,7 @@ impl VfsServer {
             .map(|(target, _)| target)
     }
 
-    /// Bind or return the token-authenticated TCP listener for Docker delivery.
+    /// Bind or return the token-authenticated TCP listener for Docker runtime.
     pub fn ensure_tcp(
         self: &Arc<Self>,
         bind_addr: Ipv4Addr,
@@ -591,10 +591,10 @@ impl VfsServer {
         let attachments = Arc::clone(&self.attachments);
         let connection_tx = self.connection_tx.clone();
         let exit_tx = self.exit_tx.clone();
-        let delivery = match kind {
-            ListenerKind::Local => FrontendDelivery::Local,
-            ListenerKind::Tcp => FrontendDelivery::Docker,
-            ListenerKind::Vsock => FrontendDelivery::Krunkit,
+        let runtime = match kind {
+            ListenerKind::Local => FrontendRuntime::Host,
+            ListenerKind::Tcp => FrontendRuntime::Docker,
+            ListenerKind::Vsock => FrontendRuntime::Libkrun,
         };
         let task = tokio::spawn(async move {
             if start_rx.await.is_err() {
@@ -615,7 +615,7 @@ impl VfsServer {
                 namespace,
                 instance_id,
                 target_for_task.token().map(str::to_owned),
-                delivery,
+                runtime,
                 attachments,
                 connection_tx,
             )
@@ -680,7 +680,7 @@ async fn accept_loop(
     namespace: Arc<dyn Namespace>,
     instance_id: String,
     token: Option<String>,
-    delivery: FrontendDelivery,
+    runtime: FrontendRuntime,
     attachments: Arc<Attachments>,
     connection_tx: mpsc::UnboundedSender<Connection>,
 ) {
@@ -699,7 +699,7 @@ async fn accept_loop(
                                 stream,
                                 instance_id,
                                 token.as_deref(),
-                                Some((attachments, delivery)),
+                                Some((attachments, runtime)),
                             )
                             .await
                             {
@@ -731,7 +731,7 @@ async fn accept_loop(
                                 stream,
                                 instance_id,
                                 token.as_deref(),
-                                Some((attachments, delivery)),
+                                Some((attachments, runtime)),
                             )
                             .await
                             {
@@ -849,7 +849,7 @@ async fn serve_connection_with_registry<S>(
     stream: S,
     instance_id: String,
     expected_token: Option<&str>,
-    attachment: Option<(Arc<Attachments>, FrontendDelivery)>,
+    attachment: Option<(Arc<Attachments>, FrontendRuntime)>,
 ) -> Result<(), WireError>
 where
     S: AsyncRead + AsyncWrite + Send + 'static,
@@ -888,8 +888,8 @@ where
         },
     };
 
-    let _attach_guard = attachment.map(|(attachments, delivery)| AttachGuard {
-        id: attachments.attached(&identity, delivery),
+    let _attach_guard = attachment.map(|(attachments, runtime)| AttachGuard {
+        id: attachments.attached(&identity, runtime),
         attachments,
     });
 

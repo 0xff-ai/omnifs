@@ -7,23 +7,22 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, bail, ensure};
 use clap::{Args, ValueEnum};
 use omnifs_mtab::{MountKind, MountState};
+use omnifs_workspace::daemon_record::FrontendKind;
 use omnifs_workspace::layout::{WorkspaceLayout, resolve_mount_point};
-use omnifs_workspace::runtime_record::FrontendKind;
 use serde::{Deserialize, Serialize};
 
 use crate::commands::receipt::FrontendReceipt;
-use crate::frontend_backend::{DockerBackend, FrontendBackend};
+use crate::docker::{DockerClient, DockerRunner};
 use crate::frontend_container::{frontend_container_name, resolve_frontend_image};
+use crate::host_runner::HostRunner;
 use crate::inventory::{FrontendState, FrontendStatus, Inventory};
-use crate::krunkit_backend::{KrunkitBackend, KrunkitLaunchRequest};
 use crate::launch_backend::{DockerTarget, GUEST_MOUNT};
-use crate::local_backend::LocalBackend;
-use crate::runtime::Runtime;
+use crate::libkrun_runner::{LibkrunLaunchRequest, LibkrunRunner};
 use crate::ui::output::{Output, ResultVerdict};
 use crate::workspace::Workspace;
 
 const DOCKER_TIMEOUT: Duration = Duration::from_secs(5);
-const KRUNKIT_TIMEOUT: Duration = Duration::from_secs(90);
+const LIBKRUN_TIMEOUT: Duration = Duration::from_secs(90);
 const POLL: Duration = Duration::from_millis(200);
 const RECONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -55,23 +54,23 @@ impl std::fmt::Display for FrontendFilesystem {
     Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd, ValueEnum, Serialize, Deserialize,
 )]
 #[serde(rename_all = "lowercase")]
-pub enum FrontendEnvironment {
+pub enum FrontendRuntime {
     Host,
     Docker,
-    Krunkit,
+    Libkrun,
 }
 
-impl FrontendEnvironment {
+impl FrontendRuntime {
     pub const fn label(self) -> &'static str {
         match self {
             Self::Host => "host",
             Self::Docker => "docker",
-            Self::Krunkit => "krunkit",
+            Self::Libkrun => "libkrun",
         }
     }
 }
 
-impl std::fmt::Display for FrontendEnvironment {
+impl std::fmt::Display for FrontendRuntime {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.label())
     }
@@ -80,27 +79,27 @@ impl std::fmt::Display for FrontendEnvironment {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub struct FrontendId {
     filesystem: FrontendFilesystem,
-    environment: FrontendEnvironment,
+    runtime: FrontendRuntime,
     location: Option<PathBuf>,
 }
 
 impl FrontendId {
     pub fn new(
         filesystem: FrontendFilesystem,
-        environment: FrontendEnvironment,
+        runtime: FrontendRuntime,
         location: Option<PathBuf>,
     ) -> Self {
         Self {
             filesystem,
-            environment,
+            runtime,
             location,
         }
     }
     pub const fn filesystem(&self) -> FrontendFilesystem {
         self.filesystem
     }
-    pub const fn environment(&self) -> FrontendEnvironment {
-        self.environment
+    pub const fn runtime(&self) -> FrontendRuntime {
+        self.runtime
     }
     pub fn location(&self) -> Option<&Path> {
         self.location.as_deref()
@@ -109,7 +108,7 @@ impl FrontendId {
 
 impl std::fmt::Display for FrontendId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}:{}", self.filesystem, self.environment)?;
+        write!(f, "{}:{}", self.filesystem, self.runtime)?;
         if let Some(location) = &self.location {
             write!(f, ":{}", location.display())?;
         }
@@ -131,7 +130,7 @@ pub struct FrontendEnableArgs {
     #[arg(value_enum)]
     pub filesystem: FrontendFilesystem,
     #[arg(long, value_enum)]
-    pub environment: FrontendEnvironment,
+    pub runtime: FrontendRuntime,
     #[arg(long)]
     pub location: Option<PathBuf>,
 }
@@ -141,7 +140,7 @@ pub struct FrontendDisableArgs {
     #[arg(value_enum)]
     pub filesystem: FrontendFilesystem,
     #[arg(long, value_enum)]
-    pub environment: FrontendEnvironment,
+    pub runtime: FrontendRuntime,
     #[arg(long)]
     pub location: Option<PathBuf>,
 }
@@ -151,7 +150,7 @@ pub struct FrontendRestartArgs {
     #[arg(value_enum)]
     pub filesystem: Option<FrontendFilesystem>,
     #[arg(long, value_enum)]
-    pub environment: Option<FrontendEnvironment>,
+    pub runtime: Option<FrontendRuntime>,
     #[arg(long)]
     pub location: Option<PathBuf>,
 }
@@ -161,7 +160,7 @@ pub struct FrontendLsArgs {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum RuntimeState {
+pub enum FrontendResultState {
     Stopped,
     Attached,
     Failed,
@@ -170,7 +169,7 @@ pub enum RuntimeState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FrontendResult {
     pub id: FrontendId,
-    pub state: RuntimeState,
+    pub state: FrontendResultState,
     pub changed: bool,
     pub fix: Option<String>,
     pub detail: Option<String>,
@@ -179,11 +178,11 @@ pub struct FrontendResult {
 fn resolve_id(
     workspace: &Workspace,
     filesystem: FrontendFilesystem,
-    environment: FrontendEnvironment,
+    runtime: FrontendRuntime,
     location: Option<PathBuf>,
 ) -> Result<FrontendId> {
-    match environment {
-        FrontendEnvironment::Host => {
+    match runtime {
+        FrontendRuntime::Host => {
             if filesystem == FrontendFilesystem::Fuse && !cfg!(target_os = "linux") {
                 bail!("a host fuse frontend requires a Linux host");
             }
@@ -199,24 +198,24 @@ fn resolve_id(
                 "host frontend location must be absolute: {}",
                 location.display()
             );
-            Ok(FrontendId::new(filesystem, environment, Some(location)))
+            Ok(FrontendId::new(filesystem, runtime, Some(location)))
         },
-        FrontendEnvironment::Docker | FrontendEnvironment::Krunkit => {
-            if environment == FrontendEnvironment::Krunkit {
+        FrontendRuntime::Docker | FrontendRuntime::Libkrun => {
+            if runtime == FrontendRuntime::Libkrun {
                 ensure!(
                     cfg!(target_os = "macos"),
-                    "a krunkit frontend requires a macOS host"
+                    "a libkrun frontend requires a macOS host"
                 );
             }
             ensure!(
                 filesystem == FrontendFilesystem::Fuse,
-                "the {environment} environment only delivers a fuse frontend"
+                "the {runtime} runtime only delivers a fuse frontend"
             );
             ensure!(
                 location.is_none(),
-                "the {environment} environment owns its mount; location is not allowed"
+                "the {runtime} runtime owns its mount; location is not allowed"
             );
-            Ok(FrontendId::new(filesystem, environment, None))
+            Ok(FrontendId::new(filesystem, runtime, None))
         },
     }
 }
@@ -224,8 +223,8 @@ fn resolve_id(
 fn observed_id(frontend: &FrontendStatus) -> FrontendId {
     FrontendId::new(
         frontend.filesystem,
-        frontend.environment,
-        (frontend.environment == FrontendEnvironment::Host)
+        frontend.runtime,
+        (frontend.runtime == FrontendRuntime::Host)
             .then(|| frontend.location.clone())
             .flatten(),
     )
@@ -237,9 +236,9 @@ fn matches(frontend: &FrontendStatus, id: &FrontendId) -> bool {
 
 fn restart_fix(id: &FrontendId) -> String {
     let mut fix = format!(
-        "omnifs frontend restart {} --environment {}",
+        "omnifs frontend restart {} --runtime {}",
         id.filesystem(),
-        id.environment()
+        id.runtime()
     );
     if let Some(location) = id.location() {
         fix.push_str(" --location ");
@@ -250,9 +249,9 @@ fn restart_fix(id: &FrontendId) -> String {
 
 fn disable_fix(id: &FrontendId) -> String {
     let mut fix = format!(
-        "omnifs frontend disable {} --environment {}",
+        "omnifs frontend disable {} --runtime {}",
         id.filesystem(),
-        id.environment()
+        id.runtime()
     );
     if let Some(location) = id.location() {
         fix.push_str(" --location ");
@@ -264,7 +263,7 @@ fn disable_fix(id: &FrontendId) -> String {
 fn stopped(id: FrontendId, changed: bool) -> FrontendResult {
     FrontendResult {
         id,
-        state: RuntimeState::Stopped,
+        state: FrontendResultState::Stopped,
         changed,
         fix: None,
         detail: None,
@@ -274,7 +273,7 @@ fn stopped(id: FrontendId, changed: bool) -> FrontendResult {
 fn stopped_for_daemon(id: FrontendId) -> FrontendResult {
     FrontendResult {
         id,
-        state: RuntimeState::Stopped,
+        state: FrontendResultState::Stopped,
         changed: false,
         fix: Some("omnifs up".into()),
         detail: None,
@@ -313,7 +312,7 @@ fn failed(
 ) -> FrontendResult {
     FrontendResult {
         id,
-        state: RuntimeState::Failed,
+        state: FrontendResultState::Failed,
         changed,
         fix: Some(fix),
         detail: Some(error.to_string()),
@@ -322,11 +321,11 @@ fn failed(
 
 impl FrontendEnableArgs {
     pub async fn enable(self, workspace: &Workspace, output: Output) -> Result<FrontendResult> {
-        let id = resolve_id(workspace, self.filesystem, self.environment, self.location)?;
+        let id = resolve_id(workspace, self.filesystem, self.runtime, self.location)?;
         let inventory = Inventory::collect(workspace).await?;
-        if id.environment() == FrontendEnvironment::Host
+        if id.runtime() == FrontendRuntime::Host
             && inventory.frontends.iter().any(|row| {
-                row.environment == FrontendEnvironment::Host
+                row.runtime == FrontendRuntime::Host
                     && row.location == id.location().map(Path::to_path_buf)
                     && row.filesystem != id.filesystem()
             })
@@ -348,7 +347,7 @@ impl FrontendEnableArgs {
             EnableAction::Attached => {
                 return Ok(FrontendResult {
                     id,
-                    state: RuntimeState::Attached,
+                    state: FrontendResultState::Attached,
                     changed: false,
                     fix: None,
                     detail: None,
@@ -358,7 +357,7 @@ impl FrontendEnableArgs {
             EnableAction::Stopped => unreachable!("daemon state checked above"),
             EnableAction::Launch => {},
         }
-        let runner_running = match backend_running(workspace, &id, output.clone()).await {
+        let runner_running = match runner_running(workspace, &id, output.clone()).await {
             Ok(running) => running,
             Err(error) => {
                 let fix = restart_fix(&id);
@@ -369,7 +368,7 @@ impl FrontendEnableArgs {
             EnableAction::Attached => {
                 return Ok(FrontendResult {
                     id,
-                    state: RuntimeState::Attached,
+                    state: FrontendResultState::Attached,
                     changed: false,
                     fix: None,
                     detail: None,
@@ -381,9 +380,7 @@ impl FrontendEnableArgs {
         }
         let mount = inventory.mounts.first().map(|mount| mount.name.as_str());
         match launch(workspace, &id, mount, output.clone()).await {
-            Ok(()) if id.environment() == FrontendEnvironment::Krunkit => {
-                Ok(attached_result(id, true))
-            },
+            Ok(()) if id.runtime() == FrontendRuntime::Libkrun => Ok(attached_result(id, true)),
             Ok(()) => Ok(wait_attached_result(workspace, id).await),
             Err(error) => {
                 let fix = restart_fix(&id);
@@ -405,10 +402,10 @@ impl FrontendEnableArgs {
 
 impl FrontendDisableArgs {
     pub async fn disable(self, workspace: &Workspace, output: Output) -> Result<FrontendResult> {
-        if self.environment != FrontendEnvironment::Host && self.location.is_some() {
+        if self.runtime != FrontendRuntime::Host && self.location.is_some() {
             bail!(
-                "the {} environment owns its mount; location is not allowed",
-                self.environment
+                "the {} runtime owns its mount; location is not allowed",
+                self.runtime
             );
         }
         let inventory = Inventory::collect(workspace).await?;
@@ -416,18 +413,18 @@ impl FrontendDisableArgs {
             workspace,
             &inventory,
             self.filesystem,
-            self.environment,
+            self.runtime,
             self.location,
         )?;
         let observed = inventory.frontends.iter().any(|row| matches(row, &id));
-        let running = match backend_running(workspace, &id, output.clone()).await {
+        let running = match runner_running(workspace, &id, output.clone()).await {
             Ok(value) => value,
             Err(error) => {
                 let fix = disable_fix(&id);
                 return Ok(failed(id.clone(), false, fix, error));
             },
         };
-        if !running && (!observed || id.environment() != FrontendEnvironment::Host) {
+        if !running && (!observed || id.runtime() != FrontendRuntime::Host) {
             return Ok(stopped(id, false));
         }
         match stop(workspace, &id, output.clone()).await {
@@ -457,15 +454,15 @@ impl FrontendRestartArgs {
         output: Output,
     ) -> Result<Vec<FrontendResult>> {
         if matches!(
-            self.environment,
-            Some(FrontendEnvironment::Docker | FrontendEnvironment::Krunkit)
+            self.runtime,
+            Some(FrontendRuntime::Docker | FrontendRuntime::Libkrun)
         ) && self.location.is_some()
         {
-            bail!("guest frontend environments own their mount; location is not allowed");
+            bail!("guest frontend runtimes own their mount; location is not allowed");
         }
         let inventory = Inventory::collect(workspace).await?;
         let no_selector =
-            self.filesystem.is_none() && self.environment.is_none() && self.location.is_none();
+            self.filesystem.is_none() && self.runtime.is_none() && self.location.is_none();
         let targets = if no_selector {
             inventory
                 .frontends
@@ -477,7 +474,7 @@ impl FrontendRestartArgs {
             vec![resolve_observed_selector(
                 &inventory.frontends,
                 self.filesystem,
-                self.environment,
+                self.runtime,
                 self.location.as_deref(),
             )?]
         };
@@ -489,8 +486,8 @@ impl FrontendRestartArgs {
         }
         let mut results = Vec::with_capacity(targets.len());
         for id in targets {
-            match backend_running(workspace, &id, output.clone()).await {
-                Ok(true) if id.environment() == FrontendEnvironment::Krunkit => {},
+            match runner_running(workspace, &id, output.clone()).await {
+                Ok(true) if id.runtime() == FrontendRuntime::Libkrun => {},
                 Ok(true) => {
                     if let Err(error) = stop(workspace, &id, output.clone()).await {
                         let fix = restart_fix(&id);
@@ -498,7 +495,7 @@ impl FrontendRestartArgs {
                         continue;
                     }
                 },
-                Ok(false) if id.environment() == FrontendEnvironment::Host => {
+                Ok(false) if id.runtime() == FrontendRuntime::Host => {
                     if let Err(error) = stop(workspace, &id, output.clone()).await {
                         let fix = restart_fix(&id);
                         results.push(failed(id, false, fix, error));
@@ -522,9 +519,7 @@ impl FrontendRestartArgs {
                 )
                 .await
                 {
-                    Ok(()) if id.environment() == FrontendEnvironment::Krunkit => {
-                        attached_result(id, true)
-                    },
+                    Ok(()) if id.runtime() == FrontendRuntime::Libkrun => attached_result(id, true),
                     Ok(()) => wait_attached_result(workspace, id).await,
                     Err(error) => failed(id, true, fix, error),
                 },
@@ -548,11 +543,11 @@ fn select_disable_id(
     workspace: &Workspace,
     inventory: &Inventory,
     filesystem: FrontendFilesystem,
-    environment: FrontendEnvironment,
+    runtime: FrontendRuntime,
     location: Option<PathBuf>,
 ) -> Result<FrontendId> {
-    let exact = match environment {
-        FrontendEnvironment::Host => location.as_deref(),
+    let exact = match runtime {
+        FrontendRuntime::Host => location.as_deref(),
         _ => None,
     };
     let rows = inventory
@@ -560,7 +555,7 @@ fn select_disable_id(
         .iter()
         .filter(|row| {
             row.filesystem == filesystem
-                && row.environment == environment
+                && row.runtime == runtime
                 && exact.is_none_or(|path| row.location.as_deref() == Some(path))
         })
         .collect::<Vec<_>>();
@@ -573,8 +568,8 @@ fn select_disable_id(
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
-        [] if environment != FrontendEnvironment::Host || location.is_some() => {
-            resolve_id(workspace, filesystem, environment, location)
+        [] if runtime != FrontendRuntime::Host || location.is_some() => {
+            resolve_id(workspace, filesystem, runtime, location)
         },
         [] => bail!("no frontend matches the selector"),
     }
@@ -583,14 +578,14 @@ fn select_disable_id(
 fn resolve_observed_selector(
     rows: &[FrontendStatus],
     filesystem: Option<FrontendFilesystem>,
-    environment: Option<FrontendEnvironment>,
+    runtime: Option<FrontendRuntime>,
     location: Option<&Path>,
 ) -> Result<FrontendId> {
     let ids = rows
         .iter()
         .filter(|row| {
             filesystem.is_none_or(|fs| row.filesystem == fs)
-                && environment.is_none_or(|env| row.environment == env)
+                && runtime.is_none_or(|env| row.runtime == env)
                 && location.is_none_or(|path| row.location.as_deref() == Some(path))
         })
         .map(observed_id)
@@ -619,7 +614,7 @@ async fn reconnect_result(workspace: &Workspace, id: FrontendId) -> FrontendResu
         {
             return FrontendResult {
                 id,
-                state: RuntimeState::Attached,
+                state: FrontendResultState::Attached,
                 changed: false,
                 fix: None,
                 detail: None,
@@ -661,16 +656,16 @@ async fn wait_attached_result(workspace: &Workspace, id: FrontendId) -> Frontend
 fn attached_result(id: FrontendId, changed: bool) -> FrontendResult {
     FrontendResult {
         id,
-        state: RuntimeState::Attached,
+        state: FrontendResultState::Attached,
         changed,
         fix: None,
         detail: None,
     }
 }
 
-async fn backend_running(workspace: &Workspace, id: &FrontendId, output: Output) -> Result<bool> {
-    match id.environment() {
-        FrontendEnvironment::Host => {
+async fn runner_running(workspace: &Workspace, id: &FrontendId, output: Output) -> Result<bool> {
+    match id.runtime() {
+        FrontendRuntime::Host => {
             let location = id.location().context("host frontend has no location")?;
             let state_dir = workspace.layout().frontend_state_dir(
                 match id.filesystem() {
@@ -692,22 +687,22 @@ async fn backend_running(workspace: &Workspace, id: &FrontendId, output: Output)
                 && state.mount_point == location
                 && crate::host_teardown::local_mount_is_owned(&state))
         },
-        FrontendEnvironment::Docker => {
+        FrontendRuntime::Docker => {
             let config = workspace.config()?;
             let image = resolve_frontend_image(None, &config)?;
             let name = frontend_container_name(workspace.layout())?;
             let target = DockerTarget::new(name.as_str().to_owned(), image.as_str().to_owned())?;
-            Ok(DockerBackend::new(Runtime::connect_for(&target, output)?)
-                .is_running()
-                .await?
-                .unwrap_or(false))
+            Ok(
+                DockerRunner::new(DockerClient::connect_for(&target, output)?)
+                    .is_running()
+                    .await?
+                    .unwrap_or(false),
+            )
         },
-        FrontendEnvironment::Krunkit => {
-            Ok(KrunkitBackend::new(workspace.layout().config_dir.clone())
-                .is_running()
-                .await?
-                .unwrap_or(false))
-        },
+        FrontendRuntime::Libkrun => Ok(LibkrunRunner::new(workspace.layout().config_dir.clone())
+            .is_running()
+            .await?
+            .unwrap_or(false)),
     }
 }
 
@@ -718,9 +713,9 @@ async fn launch(
     output: Output,
 ) -> Result<()> {
     let paths = workspace.layout().clone();
-    match id.environment() {
-        FrontendEnvironment::Host => {
-            LocalBackend::new(
+    match id.runtime() {
+        FrontendRuntime::Host => {
+            HostRunner::new(
                 paths.clone(),
                 id.location()
                     .context("host frontend has no location")?
@@ -734,8 +729,8 @@ async fn launch(
             .launch(mount)
             .await
         },
-        FrontendEnvironment::Docker => launch_docker(workspace, &paths, mount, output).await,
-        FrontendEnvironment::Krunkit => launch_krunkit(workspace, &paths, id, mount, output).await,
+        FrontendRuntime::Docker => launch_docker(workspace, &paths, mount, output).await,
+        FrontendRuntime::Libkrun => launch_libkrun(workspace, &paths, id, mount, output).await,
     }
 }
 
@@ -749,7 +744,7 @@ async fn launch_docker(
     let image = resolve_frontend_image(None, &config)?;
     let name = frontend_container_name(paths)?;
     let target = DockerTarget::new(name.as_str().to_owned(), image.as_str().to_owned())?;
-    let runtime = Runtime::connect_ready(&target, "omnifs frontend enable", output).await?;
+    let runtime = DockerClient::connect_ready(&target, "omnifs frontend enable", output).await?;
     #[cfg(target_os = "linux")]
     let (bind_ip, expected) = {
         let ip = runtime.frontend_attach_bind_ip().await?;
@@ -767,14 +762,14 @@ async fn launch_docker(
         "daemon attach listener is bound to {}; restart daemon",
         addr.ip()
     );
-    let backend = DockerBackend::new(runtime);
-    backend
+    let runner = DockerRunner::new(runtime);
+    runner
         .launch(&paths.config_dir, addr.port(), &attach.token)
         .await?;
-    wait_for_mount(&backend, mount, DOCKER_TIMEOUT).await
+    wait_for_mount(&runner, mount, DOCKER_TIMEOUT).await
 }
 
-async fn launch_krunkit(
+async fn launch_libkrun(
     workspace: &Workspace,
     paths: &WorkspaceLayout,
     id: &FrontendId,
@@ -783,10 +778,10 @@ async fn launch_krunkit(
 ) -> Result<()> {
     let config = workspace.config()?;
     let attach = workspace.daemon().frontend_attach_target_vsock().await?;
-    let backend = KrunkitBackend::new(paths.config_dir.clone());
+    let runner = LibkrunRunner::new(paths.config_dir.clone());
     let attached = async {
         let result = wait_attached_result(workspace, id.clone()).await;
-        if result.state == RuntimeState::Attached {
+        if result.state == FrontendResultState::Attached {
             Ok(())
         } else {
             bail!(
@@ -797,16 +792,16 @@ async fn launch_krunkit(
             )
         }
     };
-    backend
+    runner
         .launch(
-            KrunkitLaunchRequest {
+            LibkrunLaunchRequest {
                 daemon_attach_socket: Path::new(&attach.socket_path),
                 attach_token: &attach.token,
                 config: &config,
                 cache_dir: &paths.cache_dir,
                 output,
                 mount,
-                timeout: KRUNKIT_TIMEOUT,
+                timeout: LIBKRUN_TIMEOUT,
             },
             attached,
         )
@@ -814,23 +809,23 @@ async fn launch_krunkit(
 }
 
 async fn stop(workspace: &Workspace, id: &FrontendId, output: Output) -> Result<()> {
-    match id.environment() {
-        FrontendEnvironment::Host => crate::host_teardown::teardown_local_frontend(
+    match id.runtime() {
+        FrontendRuntime::Host => crate::host_teardown::teardown_local_frontend(
             &workspace.layout().frontend_state_root(),
             id.location().context("host frontend has no location")?,
             id.filesystem() == FrontendFilesystem::Nfs,
         ),
-        FrontendEnvironment::Docker => {
+        FrontendRuntime::Docker => {
             let config = workspace.config()?;
             let image = resolve_frontend_image(None, &config)?;
             let name = frontend_container_name(workspace.layout())?;
             let target = DockerTarget::new(name.as_str().to_owned(), image.as_str().to_owned())?;
-            DockerBackend::new(Runtime::connect_for(&target, output)?)
+            DockerRunner::new(DockerClient::connect_for(&target, output)?)
                 .tear_down()
                 .await
         },
-        FrontendEnvironment::Krunkit => {
-            KrunkitBackend::new(workspace.layout().config_dir.clone())
+        FrontendRuntime::Libkrun => {
+            LibkrunRunner::new(workspace.layout().config_dir.clone())
                 .tear_down()
                 .await
         },
@@ -838,7 +833,7 @@ async fn stop(workspace: &Workspace, id: &FrontendId, output: Output) -> Result<
 }
 
 async fn wait_for_mount(
-    backend: &DockerBackend,
+    runner: &DockerRunner,
     mount: Option<&str>,
     timeout: Duration,
 ) -> Result<()> {
@@ -848,11 +843,11 @@ async fn wait_for_mount(
     );
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
-        match backend.mount_ready(&path).await {
+        match runner.mount_ready(&path).await {
             Ok(true) => return Ok(()),
             Ok(false) => {},
             Err(error) => {
-                let cleanup = backend.tear_down().await.err();
+                let cleanup = runner.tear_down().await.err();
                 return Err(match cleanup {
                     Some(cleanup) => {
                         error.context(format!("frontend cleanup also failed: {cleanup:#}"))
@@ -866,7 +861,7 @@ async fn wait_for_mount(
                 "{path} did not appear inside the frontend within {}s",
                 timeout.as_secs()
             );
-            return match backend.tear_down().await {
+            return match runner.tear_down().await {
                 Ok(()) => Err(anyhow::anyhow!(message)),
                 Err(cleanup) => Err(anyhow::anyhow!(
                     "{message}; frontend cleanup also failed: {cleanup:#}"
@@ -918,7 +913,7 @@ fn finish_receipt(output: &Output, receipt: &FrontendReceipt) -> Result<crate::e
         for result in receipt
             .rows
             .iter()
-            .filter(|result| result.state == RuntimeState::Failed)
+            .filter(|result| result.state == FrontendResultState::Failed)
         {
             output.narrate(format_failure(result));
         }
@@ -953,7 +948,7 @@ fn frontend_access_table(
                 crate::ui::table::WidthPolicy::Auto,
             ),
             crate::ui::table::Column::new(
-                "Environment",
+                "Runtime",
                 crate::ui::table::Priority::Identity,
                 crate::ui::table::WidthPolicy::Auto,
             ),
@@ -984,7 +979,7 @@ fn frontend_access_table(
         table.push(crate::ui::table::ResourceRow::new(
             [
                 crate::ui::table::Cell::new(path.filesystem.label()),
-                crate::ui::table::Cell::new(path.environment.label()),
+                crate::ui::table::Cell::new(path.runtime.label()),
                 crate::ui::table::Cell::new(path.path.display().to_string()),
                 crate::ui::table::Cell::state(state.clone()),
             ],
@@ -1012,7 +1007,7 @@ mod tests {
         let rows = vec![
             FrontendStatus {
                 filesystem: FrontendFilesystem::Nfs,
-                environment: FrontendEnvironment::Host,
+                runtime: FrontendRuntime::Host,
                 location: Some("/a".into()),
                 state: FrontendState::Attached,
                 scope: "all",
@@ -1021,7 +1016,7 @@ mod tests {
             },
             FrontendStatus {
                 filesystem: FrontendFilesystem::Nfs,
-                environment: FrontendEnvironment::Host,
+                runtime: FrontendRuntime::Host,
                 location: Some("/b".into()),
                 state: FrontendState::Attached,
                 scope: "all",
@@ -1033,7 +1028,7 @@ mod tests {
             resolve_observed_selector(
                 &rows,
                 Some(FrontendFilesystem::Nfs),
-                Some(FrontendEnvironment::Host),
+                Some(FrontendRuntime::Host),
                 None
             )
             .is_err()
@@ -1041,7 +1036,7 @@ mod tests {
         let selected = resolve_observed_selector(
             &rows,
             Some(FrontendFilesystem::Nfs),
-            Some(FrontendEnvironment::Host),
+            Some(FrontendRuntime::Host),
             Some(Path::new("/b")),
         )
         .unwrap();

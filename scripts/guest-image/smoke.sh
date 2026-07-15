@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Boot the krunkit guest image once, with a throwaway seed ISO carrying
+# Boot the libkrun guest image once, with a throwaway seed ISO carrying
 # placeholder (unreachable) attach parameters, and check the serial console
 # log for two things: the guest reaching multi-user (systemd/EFI boot
 # actually worked) and the omnifs-frontend.service runner starting (the seed
@@ -11,7 +11,7 @@
 # startup only; it does not exercise a live attach.
 #
 # Requires target/guest-image/omnifs-guest.raw (`just guest-image`) and
-# krunkit on PATH.
+# the krunkit executable on PATH.
 set -uo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -71,7 +71,7 @@ krunkit \
   >"$work/krunkit.stdout" 2>&1 &
 krunkit_pid=$!
 
-echo "krunkit launched (pid $krunkit_pid), serial log: $serial_log"
+echo "libkrun launched (pid $krunkit_pid), serial log: $serial_log"
 
 reached_multi_user=""
 runner_started=""
@@ -79,7 +79,7 @@ deadline=$((start_epoch + boot_timeout))
 
 while [[ $(date +%s) -lt $deadline ]]; do
   if ! kill -0 "$krunkit_pid" 2>/dev/null; then
-    echo "krunkit exited early (pid $krunkit_pid); see $work/krunkit.stdout" >&2
+    echo "libkrun executable exited early (pid $krunkit_pid); see $work/krunkit.stdout" >&2
     break
   fi
   # The console log interleaves ANSI color codes into status lines (e.g. an

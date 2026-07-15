@@ -1,26 +1,26 @@
-//! The krunkit environment end to end: `omnifs frontend enable fuse --environment krunkit` boots
-//! the mkosi guest image under krunkit on Apple Silicon macOS, attaches the
+//! The libkrun environment end to end: `omnifs frontend enable fuse --runtime libkrun` boots
+//! the mkosi guest image under libkrun on Apple Silicon macOS, attaches the
 //! guest's `omnifs-thin fuse` runner to a host-native daemon's shared namespace
 //! over vsock, and serves `/omnifs` inside the guest. This suite proves the
 //! guest mount behaves like a real filesystem for the standard toolbox (the
-//! `fuse-krunkit` conformance column, reusing the shared matrix machinery
+//! `fuse-libkrun` conformance column, reusing the shared matrix machinery
 //! from `omnifs_itest::matrix`, exactly as `tests/frontend_docker` does for
 //! the Docker-hosted frontend), plus lifecycle and teardown cleanliness.
 //!
 //! LOCAL-ONLY, never CI: GitHub-hosted macOS runners cannot nest
-//! virtualization, so this suite can never boot krunkit there. It is gated on
+//! virtualization, so this suite can never boot libkrun there. It is gated on
 //! **both** `cfg(target_os = "macos")` and the `OMNIFS_ACCEPTANCE_LIVE`
 //! opt-in env var (the same convention the live NFS/Docker-frontend lanes
 //! use), and prints a loud `skip:` line rather than silently passing when
 //! either is absent. See `docs/contracts/60-build-validation.md` for the
-//! exact command and the "why no CI" rationale, and `just krunkit-conformance`
+//! exact command and the "why no CI" rationale, and `just libkrun-conformance`
 //! for the wrapped invocation.
 //!
 //! Every row's matrix execution goes over ssh-over-vsock via the real
-//! `omnifs shell -- <cmd>` CLI path (`matrix::Exec::SshKrunkit`), the same
-//! command construction `KrunkitBackend::shell_command` builds for interactive
+//! `omnifs shell -- <cmd>` CLI path (`matrix::Exec::SshLibkrun`), the same
+//! command construction `LibkrunRunner::shell_command` builds for interactive
 //! `omnifs shell`. One ssh connection per row (mirroring `frontend_docker`,
-//! which is also one `docker exec` per row, not batched): a single krunkit
+//! which is also one `docker exec` per row, not batched): a single libkrun
 //! guest is fast enough over vsock+socat that batching bought nothing
 //! measurable in a live run (see the report for the wall-clock total).
 //!
@@ -29,13 +29,13 @@
 //! (`omnifs_itest::live::nfs_serial_lock`), named for its original NFS-only
 //! use but reused here as-is per this crate's "do not invent a second lock"
 //! rule: nextest runs each integration-test binary as its own process, so an
-//! in-process mutex cannot serialize across binaries, and a krunkit guest's
-//! own vsock ports (fixed per-launch socket paths under `<config_dir>/krunkit/`)
+//! in-process mutex cannot serialize across binaries, and a libkrun guest's
+//! own vsock ports (fixed per-launch socket paths under `<config_dir>/libkrun/`)
 //! would otherwise race a concurrent live lane the same way a second NFS mount
 //! would.
 //!
 //! Never interrupt a running instance of this suite: like the live NFS lanes,
-//! an interrupted run can leave a krunkit process or a host-native mount
+//! an interrupted run can leave a libkrun process or a host-native mount
 //! orphaned for the next run to trip over.
 
 #![cfg(target_os = "macos")]
@@ -46,10 +46,10 @@ use std::time::{Duration, Instant};
 
 use omnifs_itest::matrix::{self, Exec};
 use omnifs_itest::{live, provider_artifact_dir};
-use omnifs_workspace::runtime_record::{RecordedBackend, RuntimeRecord};
+use omnifs_workspace::daemon_record::DaemonRecord;
 use tempfile::TempDir;
 
-/// Scratch dir inside the krunkit guest for the matrix's copy/archive rows.
+/// Scratch dir inside the libkrun guest for the matrix's copy/archive rows.
 /// Distinct path namespace from `frontend_docker`'s `DOCKER_SCRATCH`, though
 /// nothing would collide even if they matched: this is a different guest.
 const GUEST_SCRATCH: &str = "/tmp/omnifs-matrix";
@@ -58,7 +58,7 @@ const ENV_GUEST_IMAGE: &str = "OMNIFS_GUEST_IMAGE";
 
 fn acceptance_gated() -> bool {
     if std::env::var_os("OMNIFS_ACCEPTANCE_LIVE").is_none() {
-        eprintln!("skip: set OMNIFS_ACCEPTANCE_LIVE=1 to run the krunkit acceptance gate");
+        eprintln!("skip: set OMNIFS_ACCEPTANCE_LIVE=1 to run the libkrun acceptance gate");
         return false;
     }
     true
@@ -66,8 +66,8 @@ fn acceptance_gated() -> bool {
 
 /// Every precondition this suite needs beyond the live-acceptance gate: an
 /// Apple Silicon host (the guest image is arm64-only), the test provider
-/// artifact, `krunkit` and `socat` on `PATH` (the driver and its ssh bridge
-/// respectively — mirrors `KrunkitBackend::ensure_krunkit_available`/
+/// artifact, `libkrun` and `socat` on `PATH` (the driver and its ssh bridge
+/// respectively — mirrors `LibkrunRunner::ensure_libkrun_available`/
 /// `ensure_socat_available`, duplicated here as a probe rather than imported
 /// since neither is a public `omnifs-cli` API), and the locally built guest
 /// image. Returns the resolved guest image path, or `None` (skip, message
@@ -75,7 +75,7 @@ fn acceptance_gated() -> bool {
 fn preconditions() -> Option<PathBuf> {
     if std::env::consts::ARCH != "aarch64" {
         eprintln!(
-            "skip: krunkit guest image is arm64-only, this host is {}",
+            "skip: libkrun guest image is arm64-only, this host is {}",
             std::env::consts::ARCH
         );
         return None;
@@ -89,7 +89,9 @@ fn preconditions() -> Option<PathBuf> {
         return None;
     }
     if !command_reachable("krunkit", &["--version"]) {
-        eprintln!("skip: krunkit not on PATH (`brew tap slp/krun && brew install krunkit`)");
+        eprintln!(
+            "skip: the krunkit executable is not on PATH (`brew tap slp/krun && brew install krunkit`)"
+        );
         return None;
     }
     if !command_reachable("socat", &["-V"]) {
@@ -116,7 +118,7 @@ fn command_reachable(program: &str, probe_args: &[&str]) -> bool {
         .is_ok_and(|status| status.success())
 }
 
-/// Resolve the guest image the same way `krunkit_backend::resolve_guest_image`
+/// Resolve the guest image the same way `libkrun_runner::resolve_guest_image`
 /// does for its default case: an explicit `OMNIFS_GUEST_IMAGE` override, else
 /// `just guest-image`'s default output path resolved against the workspace
 /// root (not the current working directory: a test binary's cwd is its own
@@ -145,7 +147,7 @@ fn workspace_root() -> PathBuf {
 // ===========================================================================
 
 /// Drives the real `omnifs` binary against a hermetic `OMNIFS_HOME`, exactly
-/// as a contributor would: `up`, explicit host and krunkit frontend enable,
+/// as a contributor would: `up`, explicit host and libkrun frontend enable,
 /// `frontend ls`, explicit frontend disable, `down`. No test touches the user's real
 /// `~/.omnifs` or default ports.
 struct Fixture {
@@ -170,32 +172,31 @@ impl Fixture {
         self.home.path()
     }
 
-    fn krunkit_dir(&self) -> PathBuf {
-        self.home_path().join("krunkit")
+    fn libkrun_dir(&self) -> PathBuf {
+        self.home_path().join("libkrun")
     }
 
     fn record_path(&self) -> PathBuf {
         self.home_path().join("daemon.json")
     }
 
-    fn record(&self) -> Option<RuntimeRecord> {
-        RuntimeRecord::read(&self.record_path()).ok().flatten()
+    fn record(&self) -> Option<DaemonRecord> {
+        DaemonRecord::read(&self.record_path()).ok().flatten()
     }
 
     fn daemon_pid_from_record(&self) -> Option<u32> {
-        let RecordedBackend::Native { pid } = self.record()?.backend;
-        Some(pid)
+        Some(self.record()?.pid)
     }
 
-    /// The krunkit guest's own pid, read from its pidfile if present.
-    fn krunkit_pid(&self) -> Option<u32> {
-        std::fs::read_to_string(self.krunkit_dir().join("krunkit.pid"))
+    /// The libkrun guest's own pid, read from its pidfile if present.
+    fn libkrun_pid(&self) -> Option<u32> {
+        std::fs::read_to_string(self.libkrun_dir().join("libkrun.pid"))
             .ok()
             .and_then(|contents| contents.trim().parse().ok())
     }
 
     /// Run a CLI subcommand with the hermetic env, including the guest image
-    /// override so krunkit frontend enable never falls back to a
+    /// override so libkrun frontend enable never falls back to a
     /// cwd-relative default.
     fn run(&self, args: &[&str]) -> Output {
         Command::new(live::omnifs_bin())
@@ -227,7 +228,7 @@ impl Fixture {
             "frontend",
             "enable",
             "nfs",
-            "--environment",
+            "--runtime",
             "host",
             "--location",
             location,
@@ -253,18 +254,18 @@ impl Fixture {
     }
 
     fn frontend_enable(&self) -> Output {
-        self.run(&["frontend", "enable", "fuse", "--environment", "krunkit"])
+        self.run(&["frontend", "enable", "fuse", "--runtime", "libkrun"])
     }
 
-    /// Assert krunkit frontend enable succeeded; on failure, dump the krunkit serial
-    /// console log first (the fixture Drop removes the whole `krunkit/` dir,
+    /// Assert libkrun frontend enable succeeded; on failure, dump the libkrun serial
+    /// console log first (the fixture Drop removes the whole `libkrun/` dir,
     /// so this is the only window to capture why the guest never served),
     /// then panic with the CLI's own output.
     fn assert_frontend_enable_ok(&self, out: &Output, context: &str) {
         if out.status.success() {
             return;
         }
-        let serial = self.krunkit_dir().join("serial.log");
+        let serial = self.libkrun_dir().join("serial.log");
         if let Ok(log) = std::fs::read_to_string(&serial) {
             let tail: String = log
                 .lines()
@@ -278,7 +279,7 @@ impl Fixture {
             eprintln!("--- {} (tail) ---\n{tail}\n---", serial.display());
         }
         panic!(
-            "omnifs frontend enable fuse --environment krunkit failed ({context}, exit {})\nstdout: {}\nstderr: {}",
+            "omnifs frontend enable fuse --runtime libkrun failed ({context}, exit {})\nstdout: {}\nstderr: {}",
             out.status,
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr),
@@ -293,13 +294,13 @@ impl Fixture {
         self.run(&["down"])
     }
 
-    /// Every artifact `KrunkitBackend::launch` can lay down under
-    /// `<config_dir>/krunkit/`. Used both to prove teardown removed them and,
+    /// Every artifact `LibkrunRunner::launch` can lay down under
+    /// `<config_dir>/libkrun/`. Used both to prove teardown removed them and,
     /// before that, to prove frontend enable created them.
-    fn krunkit_artifacts(&self) -> Vec<PathBuf> {
-        let dir = self.krunkit_dir();
+    fn libkrun_artifacts(&self) -> Vec<PathBuf> {
+        let dir = self.libkrun_dir();
         [
-            "krunkit.pid",
+            "libkrun.pid",
             "seed.iso",
             "ssh.sock",
             "ready.sock",
@@ -315,7 +316,7 @@ impl Fixture {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
-        if let Some(pid) = self.krunkit_pid() {
+        if let Some(pid) = self.libkrun_pid() {
             let _ = Command::new("kill").args(["-9", &pid.to_string()]).output();
         }
         if let Some(pid) = self.daemon_pid.or_else(|| self.daemon_pid_from_record()) {
@@ -373,15 +374,15 @@ fn assert_serves(fixture: &Fixture) {
 }
 
 // ===========================================================================
-// Cold start: krunkit-run-to-served-mount, recorded not gated
+// Cold start: libkrun-run-to-served-mount, recorded not gated
 // ===========================================================================
 
-/// A krunkit microVM boots a real kernel to multi-user systemd before its
+/// A libkrun microVM boots a real kernel to multi-user systemd before its
 /// frontend runner can even attach — categorically slower and more
 /// host-load-dependent than a container start, and observed locally in the
 /// 4-15s range rather than `fuse-docker`'s sub-5s container budget. A fixed
 /// wall-clock gate at that range would be flaky across developer machines
-/// (thermal throttling, concurrent VMs, a cold krunkit binary page-in), so
+/// (thermal throttling, concurrent VMs, a cold libkrun binary page-in), so
 /// this metric is recorded for trend-watching but never asserted against; a
 /// budget regression is a design conversation, not a test failure.
 #[derive(serde::Serialize)]
@@ -396,14 +397,14 @@ fn record_cold_start(duration: Duration) {
     let report = ColdStart {
         version: 1,
         generated_at: now_rfc3339(),
-        metric: "krunkit-boot-to-served-mount",
+        metric: "libkrun-boot-to-served-mount",
         duration_ms: u64::try_from(duration.as_millis()).unwrap_or(u64::MAX),
     };
-    let path = matrix::scorecard_dir().join("cold-start-fuse-krunkit.json");
+    let path = matrix::scorecard_dir().join("cold-start-fuse-libkrun.json");
     let json = serde_json::to_string_pretty(&report).expect("serialize cold-start report");
     std::fs::write(&path, json).unwrap_or_else(|error| panic!("write {}: {error}", path.display()));
     eprintln!(
-        "cold-start-fuse-krunkit: {} ({} ms, recorded not gated)",
+        "cold-start-fuse-libkrun: {} ({} ms, recorded not gated)",
         path.display(),
         report.duration_ms,
     );
@@ -423,7 +424,7 @@ fn now_rfc3339() -> String {
 // ===========================================================================
 
 #[test]
-fn krunkit_lifecycle_and_matrix() {
+fn libkrun_lifecycle_and_matrix() {
     if !acceptance_gated() {
         return;
     }
@@ -438,7 +439,7 @@ fn krunkit_lifecycle_and_matrix() {
     fixture.up_native();
 
     // Cold start: the daemon is already warm, so the timed span isolates
-    // krunkit-boot-to-served-mount latency from daemon bring-up cost.
+    // libkrun-boot-to-served-mount latency from daemon bring-up cost.
     let started = Instant::now();
     let up_out = fixture.frontend_enable();
     let elapsed = started.elapsed();
@@ -450,14 +451,14 @@ fn krunkit_lifecycle_and_matrix() {
     assert!(status_out.status.success());
     let status_text = String::from_utf8_lossy(&status_out.stdout);
     assert!(
-        status_text.contains("krunkit") && status_text.contains("attached"),
-        "frontend ls must report the krunkit guest attached: {status_text}"
+        status_text.contains("libkrun") && status_text.contains("attached"),
+        "frontend ls must report the libkrun guest attached: {status_text}"
     );
 
     assert_serves(&fixture);
 
-    // The krunkit backend's own launch-time lockdown audit
-    // (`assert_krunkit_locked_down`) already proves the device set from
+    // The libkrun backend's own launch-time lockdown audit
+    // (`assert_libkrun_locked_down`) already proves the device set from
     // inside `omnifs-cli`; this suite's job is the guest-visible conformance
     // contract, not re-proving that audit from outside.
 
@@ -468,16 +469,16 @@ fn krunkit_lifecycle_and_matrix() {
         String::from_utf8_lossy(&mkdir_out.stderr)
     );
 
-    // The fuse-krunkit matrix column, through the shared row/executor
+    // The fuse-libkrun matrix column, through the shared row/executor
     // machinery, over ssh-over-vsock via the real `omnifs shell -- <cmd>`
     // path.
-    let exec = Exec::SshKrunkit {
+    let exec = Exec::SshLibkrun {
         omnifs_bin: live::omnifs_bin(),
         home: fixture.home_path().to_path_buf(),
         root: "/omnifs/test".to_string(),
         scratch: GUEST_SCRATCH.to_string(),
     };
-    let scorecard = matrix::run_column(&exec, &matrix::FUSE_KRUNKIT_FRONTEND, matrix::ROWS);
+    let scorecard = matrix::run_column(&exec, &matrix::FUSE_LIBKRUN_FRONTEND, matrix::ROWS);
     let scorecard_path = matrix::write_scorecard(&scorecard);
     eprintln!("scorecard: {}", scorecard_path.display());
     eprintln!(
@@ -487,30 +488,29 @@ fn krunkit_lifecycle_and_matrix() {
     let mismatches = matrix::mismatches(&scorecard);
     assert!(
         mismatches.is_empty(),
-        "fuse-krunkit column has {} expectation mismatch(es):\n  {}",
+        "fuse-libkrun column has {} expectation mismatch(es):\n  {}",
         mismatches.len(),
         mismatches.join("\n  ")
     );
 
-    // Frontend runners have independent lifecycles. Disable the krunkit and
+    // Frontend runners have independent lifecycles. Disable the libkrun and
     // host runners explicitly, then stop the daemon with `omnifs down`.
     // The host-native NFS mount can be transiently busy at shutdown because
     // macOS spawns indexer handles like mds/mdworker against a fresh mount.
-    let krunkit_disabled =
-        fixture.run(&["frontend", "disable", "fuse", "--environment", "krunkit"]);
+    let libkrun_disabled = fixture.run(&["frontend", "disable", "fuse", "--runtime", "libkrun"]);
     assert!(
-        krunkit_disabled.status.success(),
-        "disabling krunkit frontend before down failed (exit {})\nstdout: {}\nstderr: {}",
-        krunkit_disabled.status,
-        String::from_utf8_lossy(&krunkit_disabled.stdout),
-        String::from_utf8_lossy(&krunkit_disabled.stderr),
+        libkrun_disabled.status.success(),
+        "disabling libkrun frontend before down failed (exit {})\nstdout: {}\nstderr: {}",
+        libkrun_disabled.status,
+        String::from_utf8_lossy(&libkrun_disabled.stdout),
+        String::from_utf8_lossy(&libkrun_disabled.stderr),
     );
     let host_location = fixture.mount_point.to_str().expect("mount point utf8");
     let host_disabled = fixture.run(&[
         "frontend",
         "disable",
         "nfs",
-        "--environment",
+        "--runtime",
         "host",
         "--location",
         host_location,
@@ -544,13 +544,13 @@ fn krunkit_lifecycle_and_matrix() {
         String::from_utf8_lossy(&down_out.stderr),
     );
 
-    // Teardown cleanliness: no leftover krunkit process, pidfile, or sockets
+    // Teardown cleanliness: no leftover libkrun process, pidfile, or sockets
     // (the pidfile check subsumes "no leftover process": a live pid with no
     // pidfile would be unobservable, but `tear_down` always removes the
     // pidfile after the process is confirmed gone, never before).
-    let leftover = fixture.krunkit_artifacts();
+    let leftover = fixture.libkrun_artifacts();
     assert!(
         leftover.is_empty(),
-        "frontend disable must remove every krunkit artifact before omnifs down, found: {leftover:?}"
+        "frontend disable must remove every libkrun artifact before omnifs down, found: {leftover:?}"
     );
 }

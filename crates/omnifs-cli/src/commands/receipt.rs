@@ -9,7 +9,7 @@
 use serde::Serialize;
 use std::path::PathBuf;
 
-use crate::commands::frontend::{FrontendEnvironment as Environment, FrontendId, FrontendResult};
+use crate::commands::frontend::{FrontendId, FrontendResult, FrontendRuntime as Runtime};
 use crate::inventory::{AccessPath, FrontendStatus, Inventory};
 use crate::stages::MountInitStatus;
 use crate::ui::consent::{Outcome, Plan};
@@ -182,7 +182,7 @@ impl FrontendReceipt {
         let access_paths = frontend_access_paths(inventory, &rows);
         let failed = rows
             .iter()
-            .any(|row| row.state == crate::commands::frontend::RuntimeState::Failed);
+            .any(|row| row.state == crate::commands::frontend::FrontendResultState::Failed);
         let selected_degraded = frontends
             .iter()
             .any(|frontend| frontend.state.severity() >= crate::inventory::Severity::Attention);
@@ -219,8 +219,8 @@ impl FrontendReceipt {
 
 fn frontend_matches_id(frontend: &FrontendStatus, id: &FrontendId) -> bool {
     frontend.filesystem == id.filesystem()
-        && frontend.environment == id.environment()
-        && (id.environment() != Environment::Host || frontend.location.as_deref() == id.location())
+        && frontend.runtime == id.runtime()
+        && (id.runtime() != Runtime::Host || frontend.location.as_deref() == id.location())
 }
 
 fn frontend_access_paths(inventory: &Inventory, rows: &[FrontendResult]) -> Vec<AccessPath> {
@@ -234,20 +234,14 @@ fn frontend_access_paths(inventory: &Inventory, rows: &[FrontendResult]) -> Vec<
             .iter()
             .filter_map(|row| {
                 let location = row.id.location().map(PathBuf::from).or_else(|| {
-                    (row.id.environment() != Environment::Host).then(|| PathBuf::from("/omnifs"))
+                    (row.id.runtime() != Runtime::Host).then(|| PathBuf::from("/omnifs"))
                 })?;
-                Some((
-                    row.id.filesystem(),
-                    row.id.environment(),
-                    location.join(root),
-                ))
+                Some((row.id.filesystem(), row.id.runtime(), location.join(root)))
             })
             .collect::<Vec<_>>();
         paths.extend(inventory.access_paths(&name).into_iter().filter(|path| {
-            expected.iter().any(|(filesystem, environment, location)| {
-                path.filesystem == *filesystem
-                    && path.environment == *environment
-                    && path.path == *location
+            expected.iter().any(|(filesystem, runtime, location)| {
+                path.filesystem == *filesystem && path.runtime == *runtime && path.path == *location
             })
         }));
     }
@@ -257,9 +251,9 @@ fn frontend_access_paths(inventory: &Inventory, rows: &[FrontendResult]) -> Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::frontend::RuntimeState;
+    use crate::commands::frontend::FrontendResultState;
     use crate::commands::frontend::{
-        FrontendEnvironment as Environment, FrontendFilesystem as Filesystem, FrontendId,
+        FrontendFilesystem as Filesystem, FrontendId, FrontendRuntime as Runtime,
     };
     use crate::inventory::{DaemonState, FrontendState};
 
@@ -271,14 +265,14 @@ mod tests {
     fn frontend_receipt_ignores_unrelated_degraded_frontends() {
         let selected = FrontendId::new(
             Filesystem::Nfs,
-            Environment::Host,
+            Runtime::Host,
             Some(PathBuf::from("/mnt/omnifs")),
         );
-        let unrelated = FrontendId::new(Filesystem::Fuse, Environment::Docker, None);
+        let unrelated = FrontendId::new(Filesystem::Fuse, Runtime::Docker, None);
         let inventory = inventory_with_frontends(vec![
             FrontendStatus {
                 filesystem: selected.filesystem(),
-                environment: selected.environment(),
+                runtime: selected.runtime(),
                 location: selected.location().map(PathBuf::from),
                 state: FrontendState::Attached,
                 scope: "all",
@@ -287,7 +281,7 @@ mod tests {
             },
             FrontendStatus {
                 filesystem: unrelated.filesystem(),
-                environment: unrelated.environment(),
+                runtime: unrelated.runtime(),
                 location: unrelated.location().map(PathBuf::from),
                 state: FrontendState::Failed,
                 scope: "all",
@@ -301,7 +295,7 @@ mod tests {
             &inventory,
             vec![FrontendResult {
                 id: selected,
-                state: RuntimeState::Attached,
+                state: FrontendResultState::Attached,
                 changed: true,
                 fix: None,
                 detail: None,

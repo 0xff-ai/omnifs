@@ -14,8 +14,8 @@ use omnifs_api::{
     ControlErrorCode, ControlOperation, ControlOutcome, ControlReply, ControlRequest, DaemonStatus,
     TcpAttachTarget, VsockAttachTarget,
 };
+use omnifs_workspace::daemon_record::{DaemonRecord, Endpoint};
 use omnifs_workspace::layout::WorkspaceLayout;
-use omnifs_workspace::runtime_record::{Endpoint, RuntimeRecord};
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::UnixStream;
 
@@ -57,7 +57,7 @@ pub(crate) struct DaemonClient {
 impl DaemonClient {
     pub(crate) fn for_layout(layout: &WorkspaceLayout) -> Self {
         Self {
-            record_path: Some(layout.runtime_record_file()),
+            record_path: Some(layout.daemon_record_file()),
             control_socket: Some(layout.control_socket()),
             cleaned_stale: AtomicBool::new(false),
         }
@@ -74,7 +74,7 @@ impl DaemonClient {
 
     fn resolve(&self) -> Result<Target> {
         let record = match &self.record_path {
-            Some(record_path) => match RuntimeRecord::read(record_path) {
+            Some(record_path) => match DaemonRecord::read(record_path) {
                 Ok(record) => record,
                 Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
                     if let Some(target) = self.control_socket_target() {
@@ -85,7 +85,7 @@ impl DaemonClient {
                 },
                 Err(error) => {
                     return Err(error)
-                        .with_context(|| format!("read runtime record {}", record_path.display()));
+                        .with_context(|| format!("read daemon record {}", record_path.display()));
                 },
             },
             None => None,
@@ -147,7 +147,7 @@ impl DaemonClient {
 
     fn clean_stale_record(&self) {
         if let Some(path) = &self.record_path {
-            let _ = RuntimeRecord::remove(path);
+            let _ = DaemonRecord::remove(path);
         }
         self.cleaned_stale.store(true, Ordering::Relaxed);
     }
@@ -234,13 +234,13 @@ impl DaemonClient {
             return Ok(());
         }
         if let Some(path) = &self.record_path
-            && let Ok(Some(record)) = RuntimeRecord::read(path)
+            && let Ok(Some(record)) = DaemonRecord::read(path)
             && record.instance_id == status.instance_id
         {
             return Ok(());
         }
         Err(anyhow::anyhow!(
-            "the daemon runtime record was overwritten mid-command (daemon instance {}, record instance {expected}); rerun the command",
+            "the daemon daemon record was overwritten mid-command (daemon instance {}, record instance {expected}); rerun the command",
             status.instance_id,
         ))
     }
@@ -464,7 +464,7 @@ mod tests {
     }
 
     #[test]
-    fn corrupt_runtime_record_falls_back_to_fixed_control_socket() {
+    fn corrupt_daemon_record_falls_back_to_fixed_control_socket() {
         let home = tempfile::tempdir().unwrap();
         let record = home.path().join("daemon.json");
         let socket = home.path().join("control.sock");
@@ -478,7 +478,7 @@ mod tests {
     }
 
     #[test]
-    fn corrupt_runtime_record_without_socket_is_cleaned_and_absent() {
+    fn corrupt_daemon_record_without_socket_is_cleaned_and_absent() {
         let home = tempfile::tempdir().unwrap();
         let record = home.path().join("daemon.json");
         std::fs::write(&record, b"not json").unwrap();
@@ -488,7 +488,7 @@ mod tests {
     }
 
     #[test]
-    fn unreadable_runtime_record_is_not_treated_as_stale() {
+    fn unreadable_daemon_record_is_not_treated_as_stale() {
         let home = tempfile::tempdir().unwrap();
         let record = home.path().join("daemon.json");
         std::fs::create_dir(&record).unwrap();
@@ -496,7 +496,7 @@ mod tests {
         std::fs::write(&socket, b"reserved").unwrap();
         let client = client_without_record(record.clone(), socket);
         let error = client.resolve().unwrap_err();
-        assert!(format!("{error:#}").contains("read runtime record"));
+        assert!(format!("{error:#}").contains("read daemon record"));
         assert!(record.exists());
     }
 }

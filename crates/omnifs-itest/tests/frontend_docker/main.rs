@@ -1,6 +1,6 @@
 //! The Docker-hosted FUSE frontend end to end.
 //!
-//! `omnifs frontend enable fuse --environment docker` attaches a separate, credential-free container to a
+//! `omnifs frontend enable fuse --runtime docker` attaches a separate, credential-free container to a
 //! host-native daemon's shared namespace over TCP and renders kernel FUSE
 //! inside it. This suite proves the container behaves like a real mount for
 //! the standard toolbox (the `fuse-docker` conformance column, reusing the
@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 
 use omnifs_itest::matrix::{self, Exec};
 use omnifs_itest::{live, provider_artifact_dir};
-use omnifs_workspace::runtime_record::{RecordedBackend, RuntimeRecord};
+use omnifs_workspace::daemon_record::DaemonRecord;
 use tempfile::TempDir;
 
 /// Scratch dir inside the frontend container for the matrix's copy/archive
@@ -152,13 +152,12 @@ impl Fixture {
         self.home_path().join("daemon.json")
     }
 
-    fn record(&self) -> Option<RuntimeRecord> {
-        RuntimeRecord::read(&self.record_path()).ok().flatten()
+    fn record(&self) -> Option<DaemonRecord> {
+        DaemonRecord::read(&self.record_path()).ok().flatten()
     }
 
     fn daemon_pid_from_record(&self) -> Option<u32> {
-        let RecordedBackend::Native { pid } = self.record()?.backend;
-        Some(pid)
+        Some(self.record()?.pid)
     }
 
     /// Run a CLI subcommand with the hermetic env, including the frontend
@@ -199,7 +198,7 @@ impl Fixture {
             "frontend",
             "enable",
             filesystem,
-            "--environment",
+            "--runtime",
             "host",
             "--location",
             location,
@@ -225,7 +224,7 @@ impl Fixture {
     }
 
     fn frontend_enable(&self) -> Output {
-        self.run(&["frontend", "enable", "fuse", "--environment", "docker"])
+        self.run(&["frontend", "enable", "fuse", "--runtime", "docker"])
     }
 
     /// Assert Docker frontend enable succeeded; on failure, dump the runner logs of
@@ -241,7 +240,7 @@ impl Fixture {
             eprintln!("--- docker logs {name} (tail) ---\n{logs}\n---");
         }
         panic!(
-            "omnifs frontend enable fuse --environment docker failed ({context}, exit {})\nstdout: {}\nstderr: {}",
+            "omnifs frontend enable fuse --runtime docker failed ({context}, exit {})\nstdout: {}\nstderr: {}",
             out.status,
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr),
@@ -678,7 +677,7 @@ fn fuse_docker_lifecycle_and_matrix() {
 
     // Disabling Docker leaves the host frontend serving every mount; enabling
     // it again restores the same whole-namespace view.
-    let disabled = fixture.run(&["frontend", "disable", "fuse", "--environment", "docker"]);
+    let disabled = fixture.run(&["frontend", "disable", "fuse", "--runtime", "docker"]);
     assert!(
         disabled.status.success(),
         "disabling Docker frontend failed (exit {})\nstdout: {}\nstderr: {}",
@@ -702,7 +701,7 @@ fn fuse_docker_lifecycle_and_matrix() {
 
     // Frontend runners have independent lifecycles. Disable Docker and the
     // host runner explicitly, then stop the daemon with `omnifs down`.
-    let disabled = fixture.run(&["frontend", "disable", "fuse", "--environment", "docker"]);
+    let disabled = fixture.run(&["frontend", "disable", "fuse", "--runtime", "docker"]);
     assert!(
         disabled.status.success(),
         "disabling Docker frontend before down failed (exit {})\nstdout: {}\nstderr: {}",
@@ -719,7 +718,7 @@ fn fuse_docker_lifecycle_and_matrix() {
         } else {
             "nfs"
         },
-        "--environment",
+        "--runtime",
         "host",
         "--location",
         host_location,
@@ -805,7 +804,7 @@ fn kill_and_reattach_fuse_semantics() {
         .expect("daemon pid recorded by up_native");
     let old_instance = fixture
         .record()
-        .expect("runtime record present while serving")
+        .expect("daemon record present while serving")
         .instance_id;
     let _ = Command::new("kill")
         .args(["-9", &old_pid.to_string()])
@@ -837,7 +836,7 @@ fn kill_and_reattach_fuse_semantics() {
     fixture.up_native();
     let new_instance = fixture
         .record()
-        .expect("runtime record present after restart")
+        .expect("daemon record present after restart")
         .instance_id;
     assert_ne!(
         old_instance, new_instance,

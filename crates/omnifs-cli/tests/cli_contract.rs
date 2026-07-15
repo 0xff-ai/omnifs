@@ -134,11 +134,8 @@ fn frontend_enable_help_requires_filesystem_and_lists_live_attachments_command()
     assert!(enable.status.success());
     let enable_help = String::from_utf8_lossy(&enable.stdout);
     assert!(enable_help.contains("<FILESYSTEM>"), "{enable_help}");
-    assert!(
-        enable_help.contains("--environment <ENVIRONMENT>"),
-        "{enable_help}"
-    );
-    for value in ["fuse", "nfs", "host", "docker", "krunkit"] {
+    assert!(enable_help.contains("--runtime <RUNTIME>"), "{enable_help}");
+    for value in ["fuse", "nfs", "host", "docker", "libkrun"] {
         assert!(
             enable_help.contains(value),
             "missing {value} in {enable_help}"
@@ -151,10 +148,7 @@ fn frontend_enable_help_requires_filesystem_and_lists_live_attachments_command()
         .expect("spawn omnifs frontend shell --help");
     assert!(shell.status.success());
     let shell_help = String::from_utf8_lossy(&shell.stdout);
-    assert!(
-        shell_help.contains("--environment <ENVIRONMENT>"),
-        "{shell_help}"
-    );
+    assert!(shell_help.contains("--runtime <RUNTIME>"), "{shell_help}");
     assert!(shell_help.contains("<FILESYSTEM>"), "{shell_help}");
     assert!(
         !shell_help.contains("--mount"),

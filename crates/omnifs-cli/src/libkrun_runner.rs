@@ -1,37 +1,37 @@
-//! The krunkit (libkrun) frontend backend: a macOS microVM hosting the same
-//! `omnifs-thin fuse` runner and Omnifs VFS wire protocol the Docker backend runs in a
+//! The libkrun frontend runner: a macOS microVM hosting the same
+//! `omnifs-thin fuse` runner and Omnifs VFS wire protocol the Docker runner runs in a
 //! container, attached to the host-native daemon's namespace over vsock
 //! instead of TCP.
 //!
-//! State lives under `<config_dir>/krunkit/`: a persistent per-workspace ed25519
+//! State lives under `<config_dir>/libkrun/`: a persistent per-workspace ed25519
 //! keypair (survives across launches, since it authenticates guest ssh access
 //! independent of any one VM instance) plus per-launch artifacts (pidfile,
-//! seed ISO, the three unix sockets krunkit bridges vsock onto, and the
+//! seed ISO, the three unix sockets libkrun bridges vsock onto, and the
 //! serial log). Every path lives under the workspace config dir, never a
 //! system temp dir, so `omnifs down`/`frontend disable` can find and remove
-//! exactly what this backend owns.
+//! exactly what this runner owns.
 //!
 //! Three vsock devices bridge the guest to the host, each on its own
-//! `virtio-vsock` device (krunkit multiplexes by port, not by socket):
+//! `virtio-vsock` device (libkrun multiplexes by port, not by socket):
 //! - port 1024 (attach): guest-initiated (`,listen`) onto the daemon's own
 //!   vsock-attach unix socket (returned by the `AttachVsock` control operation;
-//!   this backend never creates or removes that socket).
+//!   this runner never creates or removes that socket).
 //! - port 1025 (ready): guest-initiated (`,listen`) onto a unix socket this
-//!   backend binds before spawning krunkit; the launch lease accepts one later
+//!   runner binds before spawning libkrun; the launch lease accepts one later
 //!   readiness beacon on it — a
-//!   `,listen` device requires the host side already listening, since krunkit
+//!   `,listen` device requires the host side already listening, since libkrun
 //!   dials it once per guest connection rather than the reverse.
-//! - port 22 (ssh): host-initiated (`,connect`, krunkit's explicit
+//! - port 22 (ssh): host-initiated (`,connect`, libkrun's explicit
 //!   host-to-guest mode; omitting both keywords means guest-initiated):
-//!   krunkit itself creates and listens on the unix socket, relaying each
+//!   libkrun itself creates and listens on the unix socket, relaying each
 //!   accepted connection into the guest's vsock-listening dropbear
 //!   (`ListenStream=vsock::22` in the guest image). `omnifs frontend shell` dials it
 //!   through `ssh -o ProxyCommand='socat - UNIX-CONNECT:<path>'`.
 //!
 //! No `virtio-net` device is ever configured: the frontend carries no
 //! credentials and needs no egress, so it gets no network authority at all.
-//! [`assert_krunkit_locked_down`] verifies this against the live process's
-//! argv immediately after spawn, mirroring the Docker backend's
+//! [`assert_libkrun_locked_down`] verifies this against the live process's
+//! argv immediately after spawn, mirroring the Docker runner's
 //! `assert_locked_down`.
 
 use std::future::Future;
@@ -45,15 +45,14 @@ use std::time::Duration;
 use anyhow::{Context as _, Result};
 use tokio::io::AsyncReadExt as _;
 
-use crate::frontend_backend::FrontendBackend;
 use crate::launch_backend::{BUILD_CHANNEL, BuildChannel, GUEST_MOUNT, ImageRef};
 use crate::process::is_alive as process_alive;
 use crate::ui::output::Output;
 use omnifs_workspace::config::Config;
 
-const KRUNKIT_SUBDIR: &str = "krunkit";
+const LIBKRUN_SUBDIR: &str = "libkrun";
 const SSH_KEY_NAME: &str = "id_ed25519";
-const PIDFILE_NAME: &str = "krunkit.pid";
+const PIDFILE_NAME: &str = "libkrun.pid";
 const SEED_ISO_NAME: &str = "seed.iso";
 const SEED_STAGING_NAME: &str = "seed-staging";
 const SSH_SOCK_NAME: &str = "ssh.sock";
@@ -101,7 +100,7 @@ const SEED_CONF_KEYS: [&str; 4] = [
     "OMNIFS_SSH_PUBKEY",
 ];
 
-/// `--device` count a correctly locked-down krunkit process must carry:
+/// `--device` count a correctly locked-down libkrun process must carry:
 /// root disk, seed disk, attach vsock, ready vsock, ssh vsock, serial log.
 const EXPECTED_DEVICE_COUNT: usize = 6;
 
@@ -116,7 +115,7 @@ fn check_uds_path_length(path: &Path) -> Result<()> {
     let len = path.as_os_str().as_bytes().len();
     anyhow::ensure!(
         len < UDS_PATH_BYTE_LIMIT,
-        "krunkit socket path {} is {len} bytes, at or beyond the {UDS_PATH_BYTE_LIMIT}-byte \
+        "libkrun socket path {} is {len} bytes, at or beyond the {UDS_PATH_BYTE_LIMIT}-byte \
          sockaddr_un budget (Linux allows 108, macOS 104); shorten OMNIFS_HOME or move it closer \
          to the filesystem root",
         path.display()
@@ -136,7 +135,7 @@ pub(crate) const fn default_guest_image_for(channel: BuildChannel) -> &'static s
 
 /// A truthful, actionable error naming the install command, rather than a
 /// bare "command not found" surfaced from the failed spawn.
-fn ensure_krunkit_available() -> Result<()> {
+fn ensure_libkrun_available() -> Result<()> {
     match Command::new("krunkit")
         .arg("--version")
         .stdout(Stdio::null())
@@ -145,13 +144,13 @@ fn ensure_krunkit_available() -> Result<()> {
     {
         Ok(_) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => anyhow::bail!(
-            "krunkit is not installed; install it with `brew tap slp/krun && brew install krunkit`"
+            "the krunkit executable is not installed; install it with `brew tap slp/krun && brew install krunkit`"
         ),
-        Err(error) => Err(error).context("probe for krunkit on PATH"),
+        Err(error) => Err(error).context("probe for the krunkit executable on PATH"),
     }
 }
 
-/// `omnifs frontend shell`'s krunkit dispatch calls this before building the ssh
+/// `omnifs frontend shell`'s libkrun dispatch calls this before building the ssh
 /// command: `shell_command` itself stays pure construction (no I/O), so the
 /// probe belongs at the one call site that is about to actually run it.
 pub(crate) fn ensure_socat_available() -> Result<()> {
@@ -163,25 +162,25 @@ pub(crate) fn ensure_socat_available() -> Result<()> {
     {
         Ok(_) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => anyhow::bail!(
-            "socat is required to reach the krunkit guest over vsock; install it with `brew install socat`"
+            "socat is required to reach the libkrun guest over vsock; install it with `brew install socat`"
         ),
         Err(error) => Err(error).context("probe for socat on PATH"),
     }
 }
 
-/// The libkrun microVM frontend backend. Durable workspace state and explicit
-/// teardown live here; one launch's resources live in [`KrunkitLaunchLease`].
-pub(crate) struct KrunkitBackend {
+/// The libkrun microVM frontend runner. Durable workspace state and explicit
+/// teardown live here; one launch's resources live in [`LibkrunLaunchLease`].
+pub(crate) struct LibkrunRunner {
     home: PathBuf,
 }
 
-impl KrunkitBackend {
+impl LibkrunRunner {
     pub(crate) fn new(home: PathBuf) -> Self {
         Self { home }
     }
 
     fn dir(&self) -> PathBuf {
-        self.home.join(KRUNKIT_SUBDIR)
+        self.home.join(LIBKRUN_SUBDIR)
     }
 
     fn ssh_key_path(&self) -> PathBuf {
@@ -233,12 +232,12 @@ impl KrunkitBackend {
                 .arg("-N")
                 .arg("")
                 .arg("-C")
-                .arg("omnifs-krunkit")
+                .arg("omnifs-libkrun")
                 .arg("-f")
                 .arg(&key)
                 .arg("-q")
                 .status()
-                .context("run ssh-keygen to generate the krunkit guest keypair")?;
+                .context("run ssh-keygen to generate the libkrun guest keypair")?;
             anyhow::ensure!(status.success(), "ssh-keygen exited with {status}");
             std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600))
                 .with_context(|| format!("restrict {} to 0600", key.display()))?;
@@ -298,10 +297,10 @@ impl KrunkitBackend {
                 contents
                     .trim()
                     .parse::<u32>()
-                    .context("parse the krunkit pidfile")?,
+                    .context("parse the libkrun pidfile")?,
             )),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(error).context("read krunkit pidfile"),
+            Err(error) => Err(error).context("read libkrun pidfile"),
         }
     }
 
@@ -312,10 +311,10 @@ impl KrunkitBackend {
         let output = Command::new("ps")
             .args(["-ww", "-p", &pid.to_string(), "-o", "command="])
             .output()
-            .context("probe live krunkit argv via ps")?;
+            .context("probe live libkrun argv via ps")?;
         anyhow::ensure!(
             output.status.success() && !output.stdout.is_empty(),
-            "ps could not find krunkit pid {pid} right after spawn"
+            "ps could not find libkrun pid {pid} right after spawn"
         );
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
@@ -323,7 +322,7 @@ impl KrunkitBackend {
     /// Best-effort restful shutdown request. Failures (unreachable socket,
     /// unexpected response) are swallowed: `tear_down` falls through to
     /// SIGTERM/SIGKILL regardless, and the exact restful shutdown API shape
-    /// is not independently confirmed in this build (see the krunkit
+    /// is not independently confirmed in this build (see the libkrun
     /// contract note in `docs/contracts/40-frontends.md`).
     fn try_restful_shutdown(&self) {
         let Ok(mut stream) = UnixStream::connect(self.restful_socket()) else {
@@ -344,7 +343,7 @@ impl KrunkitBackend {
 /// Bounds the seed staging dir to exactly the expected `KEY=VALUE` lines
 /// before it is burned into an ISO the guest can read: one file, the exact
 /// key set, no duplicates. This is the seed half of the launch-time lockdown
-/// audit; [`assert_krunkit_locked_down`] is the device-set half.
+/// audit; [`assert_libkrun_locked_down`] is the device-set half.
 fn audit_seed_staging(staging: &Path) -> Result<(), String> {
     let entries: Vec<_> = std::fs::read_dir(staging)
         .map_err(|error| format!("read seed staging dir: {error}"))?
@@ -386,12 +385,12 @@ fn audit_seed_staging(staging: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Assert the live krunkit process's argv carries exactly the device set the
+/// Assert the live libkrun process's argv carries exactly the device set the
 /// spec demands: no `virtio-net`, exactly two `virtio-blk` (root + seed), the
 /// three expected `virtio-vsock` devices at their expected socket paths, the
 /// serial log, `--restful-uri`, and `--pidfile`. A pure function of the argv
-/// string so it is unit-testable without spawning a real krunkit process.
-fn assert_krunkit_locked_down(
+/// string so it is unit-testable without spawning a real libkrun process.
+fn assert_libkrun_locked_down(
     argv: &str,
     attach_socket: &Path,
     ready_socket: &Path,
@@ -477,12 +476,12 @@ async fn resolve_guest_image(config: &Config, cache_dir: &Path, output: Output) 
     Ok(path)
 }
 
-/// Owns one Krunkit launch from replacement through readiness publication.
+/// Owns one Libkrun launch from replacement through readiness publication.
 /// Every resource created after replacement is cleaned here when publication
 /// fails. The attach listener, guest image, and SSH key are deliberately not
 /// part of this cleanup set because their owners outlive one launch.
-struct KrunkitLaunchLease<'a> {
-    backend: &'a KrunkitBackend,
+struct LibkrunLaunchLease<'a> {
+    runner: &'a LibkrunRunner,
     daemon_attach_socket: PathBuf,
     guest_image: PathBuf,
     attach_token: String,
@@ -493,7 +492,7 @@ struct KrunkitLaunchLease<'a> {
     replaced: bool,
 }
 
-pub(crate) struct KrunkitLaunchRequest<'a> {
+pub(crate) struct LibkrunLaunchRequest<'a> {
     pub(crate) daemon_attach_socket: &'a Path,
     pub(crate) attach_token: &'a str,
     pub(crate) config: &'a Config,
@@ -503,10 +502,10 @@ pub(crate) struct KrunkitLaunchRequest<'a> {
     pub(crate) timeout: Duration,
 }
 
-impl<'a> KrunkitLaunchLease<'a> {
-    fn new(backend: &'a KrunkitBackend, daemon_attach_socket: &Path, guest_image: PathBuf) -> Self {
+impl<'a> LibkrunLaunchLease<'a> {
+    fn new(runner: &'a LibkrunRunner, daemon_attach_socket: &Path, guest_image: PathBuf) -> Self {
         Self {
-            backend,
+            runner,
             daemon_attach_socket: daemon_attach_socket.to_path_buf(),
             guest_image,
             attach_token: String::new(),
@@ -518,9 +517,9 @@ impl<'a> KrunkitLaunchLease<'a> {
         }
     }
 
-    fn for_teardown(backend: &'a KrunkitBackend) -> Self {
+    fn for_teardown(runner: &'a LibkrunRunner) -> Self {
         Self {
-            backend,
+            runner,
             daemon_attach_socket: PathBuf::new(),
             guest_image: PathBuf::new(),
             attach_token: String::new(),
@@ -532,13 +531,10 @@ impl<'a> KrunkitLaunchLease<'a> {
         }
     }
 
-    async fn prepare(
-        backend: &'a KrunkitBackend,
-        request: KrunkitLaunchRequest<'_>,
-    ) -> Result<Self> {
+    async fn prepare(runner: &'a LibkrunRunner, request: LibkrunLaunchRequest<'_>) -> Result<Self> {
         let guest_image =
             resolve_guest_image(request.config, request.cache_dir, request.output).await?;
-        let mut lease = Self::new(backend, request.daemon_attach_socket, guest_image);
+        let mut lease = Self::new(runner, request.daemon_attach_socket, guest_image);
         request.attach_token.clone_into(&mut lease.attach_token);
         lease.mount = request.mount.map(str::to_owned);
         lease.timeout = request.timeout;
@@ -560,7 +556,7 @@ impl<'a> KrunkitLaunchLease<'a> {
                     Ok(()) => Err(error),
                     Err(cleanup) => {
                         Err(error
-                            .context(format!("krunkit launch rollback also failed: {cleanup:#}")))
+                            .context(format!("libkrun launch rollback also failed: {cleanup:#}")))
                     },
                 }
             },
@@ -568,35 +564,35 @@ impl<'a> KrunkitLaunchLease<'a> {
     }
 
     async fn run_to_publish(&mut self, attached: impl Future<Output = Result<()>>) -> Result<()> {
-        ensure_krunkit_available()?;
+        ensure_libkrun_available()?;
         self.replace_stale().await?;
 
-        let dir = self.backend.dir();
+        let dir = self.runner.dir();
         std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
             .with_context(|| format!("restrict {} to 0700", dir.display()))?;
 
         for path in [
             self.daemon_attach_socket.as_path(),
-            self.backend.ready_socket().as_path(),
-            self.backend.ssh_socket().as_path(),
-            self.backend.restful_socket().as_path(),
+            self.runner.ready_socket().as_path(),
+            self.runner.ssh_socket().as_path(),
+            self.runner.restful_socket().as_path(),
         ] {
             check_uds_path_length(path)?;
         }
 
-        let ssh_pubkey = self.backend.ensure_ssh_keypair()?;
-        self.backend
+        let ssh_pubkey = self.runner.ensure_ssh_keypair()?;
+        self.runner
             .write_seed_iso(&self.attach_token, &ssh_pubkey)?;
         self.ready_listener = Some(self.bind_ready_listener()?);
-        let _ = std::fs::remove_file(self.backend.ssh_socket());
+        let _ = std::fs::remove_file(self.runner.ssh_socket());
 
-        let pidfile = self.backend.pidfile();
+        let pidfile = self.runner.pidfile();
         let devices = [
             format!("virtio-blk,path={},format=raw", self.guest_image.display()),
             format!(
                 "virtio-blk,path={},format=raw",
-                self.backend.seed_iso().display()
+                self.runner.seed_iso().display()
             ),
             format!(
                 "virtio-vsock,port={ATTACH_VSOCK_PORT},socketURL={},listen",
@@ -604,15 +600,15 @@ impl<'a> KrunkitLaunchLease<'a> {
             ),
             format!(
                 "virtio-vsock,port={READY_VSOCK_PORT},socketURL={},listen",
-                self.backend.ready_socket().display()
+                self.runner.ready_socket().display()
             ),
             format!(
                 "virtio-vsock,port={SSH_VSOCK_PORT},socketURL={},connect",
-                self.backend.ssh_socket().display()
+                self.runner.ssh_socket().display()
             ),
             format!(
                 "virtio-serial,logFilePath={}",
-                self.backend.serial_log().display()
+                self.runner.serial_log().display()
             ),
         ];
         let mut command = Command::new("krunkit");
@@ -622,10 +618,7 @@ impl<'a> KrunkitLaunchLease<'a> {
         }
         command
             .arg("--restful-uri")
-            .arg(format!(
-                "unix://{}",
-                self.backend.restful_socket().display()
-            ))
+            .arg(format!("unix://{}", self.runner.restful_socket().display()))
             .arg("--pidfile")
             .arg(&pidfile)
             .stdin(Stdio::null())
@@ -646,20 +639,20 @@ impl<'a> KrunkitLaunchLease<'a> {
         let child_pid = self
             .child
             .as_ref()
-            .context("krunkit child identity was lost before pidfile publication")?
+            .context("libkrun child identity was lost before pidfile publication")?
             .id();
         anyhow::ensure!(
             child_pid == pid,
-            "krunkit pidfile named pid {pid}, but the spawned process is {child_pid}"
+            "libkrun pidfile named pid {pid}, but the spawned process is {child_pid}"
         );
-        let argv = KrunkitBackend::probe_argv(pid)?;
-        assert_krunkit_locked_down(
+        let argv = LibkrunRunner::probe_argv(pid)?;
+        assert_libkrun_locked_down(
             &argv,
             &self.daemon_attach_socket,
-            &self.backend.ready_socket(),
-            &self.backend.ssh_socket(),
+            &self.runner.ready_socket(),
+            &self.runner.ssh_socket(),
         )
-        .map_err(|violation| anyhow::anyhow!("refusing to run the krunkit VM: {violation}"))?;
+        .map_err(|violation| anyhow::anyhow!("refusing to run the libkrun VM: {violation}"))?;
 
         let mount = self.mount.clone();
         self.wait_for_ready(mount.as_deref(), self.timeout).await?;
@@ -669,13 +662,13 @@ impl<'a> KrunkitLaunchLease<'a> {
     async fn replace_stale(&mut self) -> Result<()> {
         self.stop_and_remove()
             .await
-            .context("tear down a prior krunkit instance before relaunch")?;
+            .context("tear down a prior libkrun instance before relaunch")?;
         self.replaced = true;
         Ok(())
     }
 
     fn bind_ready_listener(&self) -> Result<tokio::net::UnixListener> {
-        let path = self.backend.ready_socket();
+        let path = self.runner.ready_socket();
         let _ = std::fs::remove_file(&path);
         let listener = UnixListener::bind(&path)
             .with_context(|| format!("bind readiness listener {}", path.display()))?;
@@ -687,7 +680,7 @@ impl<'a> KrunkitLaunchLease<'a> {
     }
 
     async fn wait_for_pidfile(&self) -> Result<u32> {
-        let pidfile = self.backend.pidfile();
+        let pidfile = self.runner.pidfile();
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         loop {
             if let Ok(contents) = std::fs::read_to_string(&pidfile)
@@ -697,7 +690,7 @@ impl<'a> KrunkitLaunchLease<'a> {
             }
             anyhow::ensure!(
                 tokio::time::Instant::now() < deadline,
-                "krunkit did not write its pidfile at {} within 5s",
+                "libkrun did not write its pidfile at {} within 5s",
                 pidfile.display()
             );
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -708,7 +701,7 @@ impl<'a> KrunkitLaunchLease<'a> {
         let listener = self
             .ready_listener
             .take()
-            .context("krunkit readiness listener was not prepared")?;
+            .context("libkrun readiness listener was not prepared")?;
         let wait = async {
             loop {
                 let (mut stream, _) = listener.accept().await?;
@@ -720,7 +713,7 @@ impl<'a> KrunkitLaunchLease<'a> {
             }
         };
         if let Ok(result) = tokio::time::timeout(timeout, wait).await {
-            result.context("read the krunkit readiness beacon")
+            result.context("read the libkrun readiness beacon")
         } else {
             let path = mount.map_or_else(
                 || GUEST_MOUNT.to_owned(),
@@ -737,13 +730,13 @@ impl<'a> KrunkitLaunchLease<'a> {
         self.ready_listener.take();
         let pid = match self.child.as_ref() {
             Some(child) => Some(child.id()),
-            None => match self.backend.read_pidfile() {
+            None => match self.runner.read_pidfile() {
                 Ok(pid) => pid,
                 Err(error) => return Err(error),
             },
         };
         if let Some(pid) = pid.filter(|pid| process_alive(*pid)) {
-            self.backend.try_restful_shutdown();
+            self.runner.try_restful_shutdown();
             if !self
                 .wait_for_process_exit(pid, Duration::from_secs(5))
                 .await?
@@ -760,16 +753,16 @@ impl<'a> KrunkitLaunchLease<'a> {
                 if let Some(child) = self.child.as_mut() {
                     child
                         .kill()
-                        .with_context(|| format!("kill krunkit process {pid}"))?;
+                        .with_context(|| format!("kill libkrun process {pid}"))?;
                 } else {
                     let status = Command::new("kill")
                         .arg("-KILL")
                         .arg(pid.to_string())
                         .status()
-                        .with_context(|| format!("kill krunkit process {pid}"))?;
+                        .with_context(|| format!("kill libkrun process {pid}"))?;
                     anyhow::ensure!(
                         status.success(),
-                        "kill -KILL failed for live krunkit process {pid}"
+                        "kill -KILL failed for live libkrun process {pid}"
                     );
                 }
                 if !self
@@ -777,7 +770,7 @@ impl<'a> KrunkitLaunchLease<'a> {
                     .await?
                 {
                     anyhow::bail!(
-                        "krunkit process {pid} remained live after termination; \
+                        "libkrun process {pid} remained live after termination; \
                          recovery identity was preserved"
                     );
                 }
@@ -788,7 +781,7 @@ impl<'a> KrunkitLaunchLease<'a> {
         {
             let pid = child.id();
             anyhow::bail!(
-                "krunkit process {pid} remained live after termination; recovery identity was preserved"
+                "libkrun process {pid} remained live after termination; recovery identity was preserved"
             );
         }
         self.child = None;
@@ -818,49 +811,53 @@ impl<'a> KrunkitLaunchLease<'a> {
     /// this set.
     fn remove_owned_artifacts(&self) {
         for path in [
-            self.backend.pidfile(),
-            self.backend.seed_iso(),
-            self.backend.ssh_socket(),
-            self.backend.ready_socket(),
-            self.backend.restful_socket(),
-            self.backend.serial_log(),
+            self.runner.pidfile(),
+            self.runner.seed_iso(),
+            self.runner.ssh_socket(),
+            self.runner.ready_socket(),
+            self.runner.restful_socket(),
+            self.runner.serial_log(),
         ] {
             let _ = std::fs::remove_file(path);
         }
-        let _ = std::fs::remove_dir_all(self.backend.seed_staging());
+        let _ = std::fs::remove_dir_all(self.runner.seed_staging());
     }
 }
 
-impl KrunkitBackend {
+impl LibkrunRunner {
     pub(crate) async fn launch(
         &self,
-        request: KrunkitLaunchRequest<'_>,
+        request: LibkrunLaunchRequest<'_>,
         attached: impl Future<Output = Result<()>>,
     ) -> Result<()> {
-        KrunkitLaunchLease::prepare(self, request)
+        LibkrunLaunchLease::prepare(self, request)
             .await?
             .run(attached)
             .await
     }
 }
 
-impl FrontendBackend for KrunkitBackend {
-    async fn is_running(&self) -> Result<Option<bool>> {
+impl LibkrunRunner {
+    pub(crate) async fn is_running(&self) -> Result<Option<bool>> {
         let Some(pid) = self.read_pidfile()? else {
             return Ok(None);
         };
         Ok(Some(process_alive(pid)))
     }
 
-    async fn tear_down(&self) -> Result<()> {
-        KrunkitLaunchLease::for_teardown(self)
+    pub(crate) async fn tear_down(&self) -> Result<()> {
+        LibkrunLaunchLease::for_teardown(self)
             .stop_and_remove()
             .await
     }
 
     /// Pure command construction: no I/O. Callers that are about to actually
     /// run this must probe for `socat` themselves (`ensure_socat_available`).
-    fn shell_command(&self, shell_override: Option<&str>, trailing: &[String]) -> Command {
+    pub(crate) fn shell_command(
+        &self,
+        shell_override: Option<&str>,
+        trailing: &[String],
+    ) -> Command {
         let mut cmd = Command::new("ssh");
         cmd.arg("-i")
             .arg(self.ssh_key_path())
@@ -926,7 +923,7 @@ mod tests {
     async fn post_beacon_attachment_failure_rolls_back_invocation_resources() {
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().join("home");
-        let dir = home.join(KRUNKIT_SUBDIR);
+        let dir = home.join(LIBKRUN_SUBDIR);
         std::fs::create_dir_all(&dir).unwrap();
         let attach_socket = temp.path().join("daemon-attach.sock");
         std::fs::write(&attach_socket, b"daemon-owned").unwrap();
@@ -943,8 +940,8 @@ mod tests {
         }
         std::fs::create_dir_all(dir.join(SEED_STAGING_NAME)).unwrap();
 
-        let backend = KrunkitBackend::new(home);
-        let mut lease = KrunkitLaunchLease::new(&backend, &attach_socket, PathBuf::new());
+        let runner = LibkrunRunner::new(home);
+        let mut lease = LibkrunLaunchLease::new(&runner, &attach_socket, PathBuf::new());
         lease.replaced = true;
         lease.child = Some(
             std::process::Command::new("sleep")
@@ -994,12 +991,12 @@ mod tests {
          --device virtio-vsock,port=1025,socketURL=/h/ready.sock,listen \
          --device virtio-vsock,port=22,socketURL=/h/ssh.sock,connect \
          --device virtio-serial,logFilePath=/h/serial.log \
-         --restful-uri unix:///h/restful.sock --pidfile /h/krunkit.pid"
+         --restful-uri unix:///h/restful.sock --pidfile /h/libkrun.pid"
     }
 
     #[test]
     fn lockdown_accepts_the_exact_expected_device_set() {
-        assert_krunkit_locked_down(
+        assert_libkrun_locked_down(
             sample_argv(),
             Path::new("/h/attach.sock"),
             Path::new("/h/ready.sock"),
@@ -1014,7 +1011,7 @@ mod tests {
             "{} --device virtio-net,unixSocketPath=/h/net.sock",
             sample_argv()
         );
-        let err = assert_krunkit_locked_down(
+        let err = assert_libkrun_locked_down(
             &argv,
             Path::new("/h/attach.sock"),
             Path::new("/h/ready.sock"),
@@ -1026,7 +1023,7 @@ mod tests {
 
     #[test]
     fn lockdown_rejects_an_unexpected_attach_socket() {
-        let err = assert_krunkit_locked_down(
+        let err = assert_libkrun_locked_down(
             sample_argv(),
             Path::new("/h/wrong-attach.sock"),
             Path::new("/h/ready.sock"),
@@ -1039,7 +1036,7 @@ mod tests {
     #[test]
     fn lockdown_rejects_a_missing_device() {
         let argv = sample_argv().replace("--device virtio-serial,logFilePath=/h/serial.log", "");
-        let err = assert_krunkit_locked_down(
+        let err = assert_libkrun_locked_down(
             &argv,
             Path::new("/h/attach.sock"),
             Path::new("/h/ready.sock"),

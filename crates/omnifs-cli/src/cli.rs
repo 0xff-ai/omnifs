@@ -312,7 +312,7 @@ async fn run_bare(output: Output) -> anyhow::Result<ExitCode> {
     } else if running {
         output.narrate("");
         output.narrate(crate::ui::hint(
-            "omnifs frontend shell fuse --environment docker",
+            "omnifs frontend shell fuse --runtime docker",
             "open a shell at the tree",
         ));
         output.narrate(crate::ui::hint(

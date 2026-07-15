@@ -5,22 +5,20 @@
 //! verdict decisions below are pure.
 
 use anyhow::Result;
-use omnifs_api::{DaemonStatus, FrontendDelivery, FsType, HealthState};
+use omnifs_api::{DaemonStatus, FrontendRuntime, FsType, HealthState};
 use omnifs_mtab::{MountKind, MountState};
 use omnifs_workspace::creds::FileStore;
+use omnifs_workspace::daemon_record::DaemonRecord;
 use omnifs_workspace::layout::WorkspaceLayout;
 use omnifs_workspace::mounts::{Name as MountName, Registry, Revision};
 use omnifs_workspace::provider::Catalog;
-use omnifs_workspace::runtime_record::RuntimeRecord;
 use serde::Serialize;
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use crate::auth::{AuthReadiness, MountAuth};
-use crate::commands::frontend::{
-    FrontendEnvironment as Environment, FrontendFilesystem as Filesystem,
-};
+use crate::commands::frontend::{FrontendFilesystem as Filesystem, FrontendRuntime as Runtime};
 use crate::mount_config::MountConfig;
 use crate::workspace::Workspace;
 
@@ -42,7 +40,7 @@ pub(crate) struct DaemonObservation {
     pub(crate) status: Option<DaemonStatus>,
     pub(crate) probe: DaemonProbe,
     #[serde(skip_serializing)]
-    pub(crate) runtime: Option<RuntimeRecord>,
+    pub(crate) runtime: Option<DaemonRecord>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -100,11 +98,10 @@ impl DaemonObservation {
     }
 
     pub(crate) fn pid(&self) -> Option<u32> {
-        self.status.as_ref().map(|status| status.pid).or_else(|| {
-            self.runtime.as_ref().map(|record| match record.backend {
-                omnifs_workspace::runtime_record::RecordedBackend::Native { pid } => pid,
-            })
-        })
+        self.status
+            .as_ref()
+            .map(|status| status.pid)
+            .or_else(|| self.runtime.as_ref().map(|record| record.pid))
     }
 
     #[cfg(test)]
@@ -130,7 +127,6 @@ impl DaemonObservation {
                 cache_dir: "/tmp/omnifs/cache".into(),
                 providers_dir: "/tmp/omnifs/providers".into(),
                 frontends: Vec::new(),
-                backend: omnifs_api::DaemonBackend::Native { pid: 1 },
                 mounts: Vec::new(),
                 health: omnifs_api::DaemonHealth::new(vec![omnifs_api::SubsystemHealth::new(
                     omnifs_api::DaemonSubsystem::Control,
@@ -147,12 +143,12 @@ impl DaemonObservation {
             }),
         };
         let runtime = (state == DaemonState::Unreachable).then(|| {
-            RuntimeRecord::new(
+            DaemonRecord::new(
                 Revision::new("a".repeat(40)).expect("test revision"),
-                omnifs_workspace::runtime_record::Endpoint::Unix {
+                omnifs_workspace::daemon_record::Endpoint::Unix {
                     path: "/tmp/omnifs/control.sock".into(),
                 },
-                omnifs_workspace::runtime_record::RecordedBackend::Native { pid: 1 },
+                1,
                 "test-instance".to_owned(),
             )
         });
@@ -211,7 +207,7 @@ impl Severity {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub(crate) struct FrontendStatus {
     pub(crate) filesystem: Filesystem,
-    pub(crate) environment: Environment,
+    pub(crate) runtime: Runtime,
     pub(crate) location: Option<PathBuf>,
     pub(crate) state: FrontendState,
     pub(crate) scope: &'static str,
@@ -414,7 +410,7 @@ impl ServingState {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub(crate) struct AccessPath {
     pub(crate) filesystem: Filesystem,
-    pub(crate) environment: Environment,
+    pub(crate) runtime: Runtime,
     pub(crate) path: PathBuf,
     pub(crate) state: AccessState,
 }
@@ -448,7 +444,7 @@ impl Inventory {
         let credentials = FileStore::new(&layout.credentials_file);
         let daemon_probe = workspace.daemon().status_optional_checked().await;
         let daemon_status = daemon_probe.as_ref().ok().and_then(Option::as_ref);
-        let runtime = RuntimeRecord::read(&layout.runtime_record_file())
+        let runtime = DaemonRecord::read(&layout.daemon_record_file())
             .ok()
             .flatten();
         let mut mounts = mount_statuses(registry, catalog, &credentials, daemon_status);
@@ -519,7 +515,7 @@ impl Inventory {
                 };
                 Some(AccessPath {
                     filesystem: frontend.filesystem,
-                    environment: frontend.environment,
+                    runtime: frontend.runtime,
                     path,
                     state,
                 })
@@ -643,7 +639,7 @@ fn frontend_statuses(
             };
             FrontendStatus {
                 filesystem: filesystem(observed.fs_type),
-                environment: environment(observed.delivery),
+                runtime: runtime(observed.runtime),
                 location: Some(observed.mount_point.clone()),
                 state,
                 scope: "all",
@@ -656,7 +652,7 @@ fn frontend_statuses(
     for runner in runners {
         let matched = rows.iter().any(|row| {
             row.filesystem == runner.filesystem
-                && row.environment == Environment::Host
+                && row.runtime == Runtime::Host
                 && row.location == runner.location
         });
         if daemon.is_none() || !matched {
@@ -666,7 +662,7 @@ fn frontend_statuses(
             };
             rows.push(FrontendStatus {
                 filesystem: runner.filesystem,
-                environment: Environment::Host,
+                runtime: Runtime::Host,
                 location: runner.location.clone(),
                 state,
                 scope: "all",
@@ -905,25 +901,25 @@ fn filesystem(value: FsType) -> Filesystem {
         FsType::Nfs => Filesystem::Nfs,
     }
 }
-fn environment(value: FrontendDelivery) -> Environment {
+fn runtime(value: FrontendRuntime) -> Runtime {
     match value {
-        FrontendDelivery::Local => Environment::Host,
-        FrontendDelivery::Docker => Environment::Docker,
-        FrontendDelivery::Krunkit => Environment::Krunkit,
+        FrontendRuntime::Host => Runtime::Host,
+        FrontendRuntime::Docker => Runtime::Docker,
+        FrontendRuntime::Libkrun => Runtime::Libkrun,
     }
 }
 fn frontend_cmp(left: &FrontendStatus, right: &FrontendStatus) -> Ordering {
-    environment_rank(left.environment)
-        .cmp(&environment_rank(right.environment))
+    runtime_rank(left.runtime)
+        .cmp(&runtime_rank(right.runtime))
         .then_with(|| left.filesystem.label().cmp(right.filesystem.label()))
         .then_with(|| left.location.cmp(&right.location))
 }
 
-fn environment_rank(environment: Environment) -> u8 {
-    match environment {
-        Environment::Host => 0,
-        Environment::Docker => 1,
-        Environment::Krunkit => 2,
+fn runtime_rank(runtime: Runtime) -> u8 {
+    match runtime {
+        Runtime::Host => 0,
+        Runtime::Docker => 1,
+        Runtime::Libkrun => 2,
     }
 }
 
@@ -1027,7 +1023,7 @@ mod tests {
             DaemonState::Running,
             vec![FrontendStatus {
                 filesystem: Filesystem::Fuse,
-                environment: Environment::Host,
+                runtime: Runtime::Host,
                 location: Some("/mnt".into()),
                 state: FrontendState::Attached,
                 scope: "all",
@@ -1112,12 +1108,12 @@ mod tests {
     #[test]
     fn probe_failure_is_unreachable_only_when_runtime_expected() {
         let probe = Err(anyhow::anyhow!("connection refused"));
-        let expected = RuntimeRecord::new(
+        let expected = DaemonRecord::new(
             omnifs_workspace::mounts::Revision::new("a".repeat(40)).unwrap(),
-            omnifs_workspace::runtime_record::Endpoint::Unix {
+            omnifs_workspace::daemon_record::Endpoint::Unix {
                 path: PathBuf::from("/home/.omnifs/frontends/local.sock"),
             },
-            omnifs_workspace::runtime_record::RecordedBackend::Native { pid: 42 },
+            42,
             "instance".into(),
         );
         let mut unreachable = DaemonObservation::from(probe);
@@ -1146,7 +1142,6 @@ mod tests {
                 cache_dir: "/home/.omnifs/cache".into(),
                 providers_dir: "/home/.omnifs/providers".into(),
                 frontends: Vec::new(),
-                backend: omnifs_api::DaemonBackend::Native { pid: 1 },
                 mounts: Vec::new(),
                 health: omnifs_api::DaemonHealth::new(vec![omnifs_api::SubsystemHealth::new(
                     omnifs_api::DaemonSubsystem::Control,
@@ -1165,7 +1160,7 @@ mod tests {
             vec![
                 FrontendStatus {
                     filesystem: Filesystem::Fuse,
-                    environment: Environment::Host,
+                    runtime: Runtime::Host,
                     location: Some("/host".into()),
                     state: FrontendState::Attached,
                     scope: "all",
@@ -1174,7 +1169,7 @@ mod tests {
                 },
                 FrontendStatus {
                     filesystem: Filesystem::Fuse,
-                    environment: Environment::Docker,
+                    runtime: Runtime::Docker,
                     location: Some("/omnifs".into()),
                     state: FrontendState::Attached,
                     scope: "all",
@@ -1211,7 +1206,7 @@ mod tests {
         let layout = WorkspaceLayout::under_root(tmp.path());
         let mount_point = tmp.path().join("mounted");
         let state_dir = layout.frontend_state_dir(
-            omnifs_workspace::runtime_record::FrontendKind::Fuse,
+            omnifs_workspace::daemon_record::FrontendKind::Fuse,
             &mount_point,
         );
         let _guard = StateFile::write_fuse(&mount_point, &state_dir).unwrap();
@@ -1256,7 +1251,7 @@ mod tests {
         unmanaged.daemon = DaemonObservation::test(DaemonState::Running);
         unmanaged.frontends.push(FrontendStatus {
             filesystem: Filesystem::Fuse,
-            environment: Environment::Host,
+            runtime: Runtime::Host,
             location: Some("/mnt".into()),
             state: FrontendState::Failed,
             scope: "all",

@@ -83,7 +83,7 @@ For release `X.Y.Z`, the npm package version, the CLI `CARGO_PKG_VERSION` / `omn
 
 - npm: `@0xff-ai/omnifs@X.Y.Z` and matching `@0xff-ai/omnifs-cli-*` optional dependencies
 - CLI default frontend: `ghcr.io/0xff-ai/omnifs-frontend:X.Y.Z` (`crates/omnifs-cli/src/frontend_container.rs`)
-- CLI default guest: `ghcr.io/0xff-ai/omnifs-guest:X.Y.Z` (`crates/omnifs-cli/src/krunkit_backend.rs`)
+- CLI default guest: `ghcr.io/0xff-ai/omnifs-guest:X.Y.Z` (`crates/omnifs-cli/src/libkrun_runner.rs`)
 - Git tag / GitHub Release name: `vX.Y.Z` (the `v` prefix is used only here)
 - Both GHCR promotions publish `X.Y.Z` and `vX.Y.Z`; the CLI defaults use the unprefixed tags
 

@@ -74,7 +74,7 @@ pub struct Epoch(pub u64);
 /// variant keeps the wire shape complete.
 /// `Subtree` is a local-directory handoff (a resolved treeref clone).
 /// The consumer can serve `root` only when that path is accessible in its
-/// filesystem namespace; containerized or guest frontends (docker, krunkit)
+/// filesystem namespace; containerized or guest frontends (docker, libkrun)
 /// cannot dereference a host-local path.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EntryKind {

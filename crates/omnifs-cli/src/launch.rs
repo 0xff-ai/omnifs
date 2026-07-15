@@ -2,13 +2,12 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::Context as _;
 use omnifs_api::{DaemonStatus, DaemonSubsystem};
 use omnifs_workspace::creds::{CredentialStore, FileStore};
+use omnifs_workspace::daemon_record::DaemonRecord;
 use omnifs_workspace::layout::WorkspaceLayout;
 use omnifs_workspace::mounts::{Registry, Revision};
 use omnifs_workspace::provider::Catalog;
-use omnifs_workspace::runtime_record::RuntimeRecord;
 
 use crate::client::DaemonClient;
 use crate::daemon_teardown::DaemonTeardown;
@@ -129,7 +128,7 @@ async fn launch_host_native(
             anyhow::bail!(existing);
         }
         let serves_revision =
-            RuntimeRecord::read(&paths.runtime_record_file())?.is_some_and(|record| {
+            DaemonRecord::read(&paths.daemon_record_file())?.is_some_and(|record| {
                 record.instance_id == status.instance_id && record.mount_revision == *revision
             });
         if serves_revision {
@@ -143,7 +142,7 @@ async fn launch_host_native(
         output.narrate("Starting omnifs daemon (host-native)");
     }
 
-    crate::launch_backend::launch_native(paths, telemetry_enabled, revision, snapshot).await?;
+    crate::daemon_launch::launch(paths, telemetry_enabled, revision, snapshot).await?;
 
     let status = client.status().await?;
     report_launch_status(&status);

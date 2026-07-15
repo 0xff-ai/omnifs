@@ -8,7 +8,7 @@ use crate::inventory::{DaemonProbe, Inventory};
 use crate::ui::consent::Outcome;
 use crate::ui::output::Output;
 use crate::workspace::Workspace;
-use omnifs_workspace::runtime_record::{RecordedBackend, RuntimeRecord};
+use omnifs_workspace::daemon_record::DaemonRecord;
 use std::time::Duration;
 
 const SHUTDOWN_SETTLE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -48,7 +48,7 @@ impl TeardownOutcome {
                 Outcome::fail(self.id(), format!("shutdown failed: {error}"))
             },
             Self::StaleRecordRemoved => Outcome::done(self.id(), "stale record removed"),
-            Self::StaleRecordAbsent => Outcome::skip(self.id(), "no runtime record"),
+            Self::StaleRecordAbsent => Outcome::skip(self.id(), "no daemon record"),
             Self::StaleRecordKept { error } => {
                 Outcome::fail(self.id(), format!("record kept: {error}"))
             },
@@ -105,7 +105,7 @@ impl<'a> DaemonTeardown<'a> {
     /// place. Apply uses this path when switching desired mount revisions;
     /// surviving frontends reconnect when the daemon returns.
     pub(crate) async fn stop_daemon(&self) -> anyhow::Result<()> {
-        let record_path = self.workspace.layout().runtime_record_file();
+        let record_path = self.workspace.layout().daemon_record_file();
         let outcome = match self.workspace.daemon().status_optional().await {
             Ok(Some(status)) => self.shutdown_and_wait(status.pid).await,
             Ok(None) => self.remove_stale_record(),
@@ -119,7 +119,7 @@ impl<'a> DaemonTeardown<'a> {
             | TeardownOutcome::DaemonAlreadyStopped
             | TeardownOutcome::StaleRecordRemoved
             | TeardownOutcome::StaleRecordAbsent => {
-                RuntimeRecord::remove(&record_path)?;
+                DaemonRecord::remove(&record_path)?;
                 Ok(())
             },
             failure => anyhow::bail!(failure.outcome().value),
@@ -131,14 +131,14 @@ impl<'a> DaemonTeardown<'a> {
     /// them into a receipt.
     pub(crate) async fn down_collect(&self) -> anyhow::Result<Vec<TeardownOutcome>> {
         let mut outcomes = Vec::new();
-        let record_path = self.workspace.layout().runtime_record_file();
+        let record_path = self.workspace.layout().daemon_record_file();
         match self.initial_or_status().await {
             Ok(Some(status)) => {
                 let outcome = self.shutdown_and_wait(status.pid).await;
                 if matches!(
                     outcome,
                     TeardownOutcome::DaemonStopped { .. } | TeardownOutcome::DaemonAlreadyStopped
-                ) && let Err(error) = RuntimeRecord::remove(&record_path)
+                ) && let Err(error) = DaemonRecord::remove(&record_path)
                 {
                     outcomes.push(TeardownOutcome::StaleRecordKept {
                         error: error.to_string(),
@@ -208,13 +208,13 @@ impl<'a> DaemonTeardown<'a> {
         }
     }
     fn remove_stale_record(&self) -> TeardownOutcome {
-        let path = self.workspace.layout().runtime_record_file();
+        let path = self.workspace.layout().daemon_record_file();
         match self.recorded_pid_liveness() {
             Ok(Some(true)) => TeardownOutcome::StaleRecordKept {
                 error: "the recorded daemon process is still alive; ownership cannot be verified"
                     .to_owned(),
             },
-            Ok(Some(false)) => match RuntimeRecord::remove(&path) {
+            Ok(Some(false)) => match DaemonRecord::remove(&path) {
                 Ok(()) => TeardownOutcome::StaleRecordRemoved,
                 Err(error) => TeardownOutcome::StaleRecordKept {
                     error: error.to_string(),
@@ -228,11 +228,11 @@ impl<'a> DaemonTeardown<'a> {
     }
 
     fn recorded_pid_liveness(&self) -> anyhow::Result<Option<bool>> {
-        let Some(record) = RuntimeRecord::read(&self.workspace.layout().runtime_record_file())?
+        let Some(record) = DaemonRecord::read(&self.workspace.layout().daemon_record_file())?
         else {
             return Ok(None);
         };
-        let RecordedBackend::Native { pid } = record.backend;
+        let pid = record.pid;
         Ok(Some(crate::process::is_alive(pid)))
     }
 }

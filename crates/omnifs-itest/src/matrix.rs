@@ -157,7 +157,7 @@ pub fn is_mismatch(outcome: &Outcome, expect: Expect) -> bool {
 
 /// Where and how a row's script runs. `Local` and `DockerExec` run the script
 /// through `sh -c` with `ROOT`/`SCRATCH` in the environment and
-/// `cwd=$SCRATCH`; `SshKrunkit` sets `ROOT`/`SCRATCH` too but does not set a
+/// `cwd=$SCRATCH`; `SshLibkrun` sets `ROOT`/`SCRATCH` too but does not set a
 /// remote cwd (ssh has no working-directory concept independent of the
 /// remote command itself, and every row script already fully qualifies its
 /// paths under `$ROOT`/`$SCRATCH` rather than relying on an implicit pwd).
@@ -171,14 +171,14 @@ pub enum Exec {
         root: String,
         scratch: String,
     },
-    /// `omnifs shell -- <cmd>` into a krunkit guest, the real CLI path
-    /// `omnifs shell` uses for the krunkit backend (ssh over a vsock-to-unix
-    /// bridge via `socat`, built by `KrunkitBackend::shell_command`). `root`
+    /// `omnifs shell -- <cmd>` into a libkrun guest, the real CLI path
+    /// `omnifs shell` uses for the libkrun backend (ssh over a vsock-to-unix
+    /// bridge via `socat`, built by `LibkrunRunner::shell_command`). `root`
     /// and `scratch` are guest paths, matching `DockerExec`'s shape.
-    /// `omnifs_bin`/`home` select which workspace's krunkit guest to reach:
+    /// `omnifs_bin`/`home` select which workspace's libkrun guest to reach:
     /// `omnifs shell` resolves the running frontend from `OMNIFS_HOME`'s
-    /// runtime record, so no attach-socket path is threaded through here.
-    SshKrunkit {
+    /// daemon record, so no attach-socket path is threaded through here.
+    SshLibkrun {
         omnifs_bin: PathBuf,
         home: PathBuf,
         root: String,
@@ -190,14 +190,14 @@ impl Exec {
     fn root(&self) -> &str {
         match self {
             Exec::Local { root, .. } => root.to_str().expect("root path is utf-8"),
-            Exec::DockerExec { root, .. } | Exec::SshKrunkit { root, .. } => root,
+            Exec::DockerExec { root, .. } | Exec::SshLibkrun { root, .. } => root,
         }
     }
 
     fn scratch(&self) -> &str {
         match self {
             Exec::Local { scratch, .. } => scratch.to_str().expect("scratch path is utf-8"),
-            Exec::DockerExec { scratch, .. } | Exec::SshKrunkit { scratch, .. } => scratch,
+            Exec::DockerExec { scratch, .. } | Exec::SshLibkrun { scratch, .. } => scratch,
         }
     }
 
@@ -232,12 +232,12 @@ impl Exec {
                 ]);
                 cmd
             },
-            Exec::SshKrunkit {
+            Exec::SshLibkrun {
                 omnifs_bin, home, ..
             } => {
                 // ssh has no argv-array remote exec: everything after the
                 // hostname is space-joined into one remote command string
-                // (`KrunkitBackend::shell_command`'s own doc comment), and
+                // (`LibkrunRunner::shell_command`'s own doc comment), and
                 // that backend already wraps every trailing command in
                 // `cd $GUEST_MOUNT && exec <trailing>`. So `remote` must be
                 // exactly the one command `exec` replaces the login shell
@@ -403,7 +403,7 @@ fn first_error_line(stderr: &[u8], code: Option<i32>) -> String {
 }
 
 /// Wrap `s` in single quotes for a POSIX shell, escaping any embedded single
-/// quote as `'\''`. Used by [`Exec::SshKrunkit`] to ship a whole multi-line
+/// quote as `'\''`. Used by [`Exec::SshLibkrun`] to ship a whole multi-line
 /// row script as one already-quoted remote command: ssh's own trailing-argv
 /// concatenation does no quoting of its own, so the string handed to it must
 /// already be safe to re-parse as shell syntax on the other end.
@@ -921,7 +921,7 @@ pub const LINUX_NFS_LOOPBACK: Column = Column {
     ],
 };
 
-/// The Docker-hosted FUSE frontend (`omnifs frontend enable fuse --environment docker`): a separate,
+/// The Docker-hosted FUSE frontend (`omnifs frontend enable fuse --runtime docker`): a separate,
 /// credential-free container attached to a host-native daemon's
 /// shared namespace over TCP, running kernel FUSE inside the container. This
 /// frontend ships its own minimal `debian:trixie-slim` image (`Dockerfile`'s
@@ -934,10 +934,10 @@ pub const FUSE_DOCKER_FRONTEND: Column = Column {
     expectations: &[GREP_R_PAGINATION_CONTROLS],
 };
 
-/// The krunkit guest FUSE frontend (`omnifs frontend enable fuse
-/// --environment krunkit`), a libkrun microVM on Apple Silicon macOS, reached over
+/// The libkrun guest FUSE frontend (`omnifs frontend enable fuse
+/// --runtime libkrun`), a libkrun microVM on Apple Silicon macOS, reached over
 /// ssh-over-vsock via the real `omnifs shell -- <cmd>` CLI path
-/// (`crates/omnifs-itest/tests/frontend_krunkit`). LOCAL-ONLY: GitHub-hosted
+/// (`crates/omnifs-itest/tests/frontend_libkrun`). LOCAL-ONLY: GitHub-hosted
 /// macOS runners cannot nest virtualization, so this column never runs in CI
 /// (see `docs/contracts/60-build-validation.md`).
 ///
@@ -947,8 +947,8 @@ pub const FUSE_DOCKER_FRONTEND: Column = Column {
 /// not bash), and its package set (`scripts/guest-image/mkosi/mkosi.conf`)
 /// has no `rsync`/`jq`/`xxd`/`python3`, all of which already degrade to
 /// `Outcome::ToolMissing` (never a mismatch) rather than a real failure.
-pub const FUSE_KRUNKIT_FRONTEND: Column = Column {
-    id: "fuse-krunkit",
+pub const FUSE_LIBKRUN_FRONTEND: Column = Column {
+    id: "fuse-libkrun",
     platform: "macos",
     expectations: &[GREP_R_PAGINATION_CONTROLS],
 };

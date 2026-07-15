@@ -1,4 +1,4 @@
-//! `omnifs doctor` — environment + auth diagnostics. No auto-fix.
+//! `omnifs doctor` — runtime + auth diagnostics. No auto-fix.
 
 use clap::Args;
 use serde::Serialize;
@@ -6,10 +6,10 @@ use std::path::Path;
 
 use omnifs_workspace::creds::{CredentialStore, FileStore};
 
+use crate::docker::DockerClient;
 use crate::frontend_container::{frontend_container_name, resolve_frontend_image};
 use crate::inventory::{Inventory, Severity};
 use crate::launch_backend::{DockerTarget, ImageRef, names_registry};
-use crate::runtime::Runtime;
 use crate::status::InventoryReport;
 use crate::ui::output::{Output, ResultVerdict};
 use crate::ui::table::{
@@ -257,15 +257,15 @@ impl Doctor<'_> {
         Ok(verdict)
     }
 
-    async fn probe_docker_reachable(&self) -> (Option<Runtime>, ProbeResult) {
-        use crate::runtime::DockerProbeOutcome;
+    async fn probe_docker_reachable(&self) -> (Option<DockerClient>, ProbeResult) {
+        use crate::docker::DockerProbeOutcome;
 
         let target = match &self.docker_target {
             Ok(target) => target,
             Err(error) => return (None, ProbeResult::Err(error.clone())),
         };
 
-        match Runtime::probe_docker(target).await {
+        match DockerClient::probe_docker(target).await {
             DockerProbeOutcome::Reachable(runtime) => (
                 Some(runtime),
                 ProbeResult::Ok("docker daemon responds".into()),
@@ -302,7 +302,7 @@ impl Doctor<'_> {
         }
     }
 
-    async fn probe_image_cached(&self, runtime: &Runtime, image: &ImageRef) -> ProbeResult {
+    async fn probe_image_cached(&self, runtime: &DockerClient, image: &ImageRef) -> ProbeResult {
         match runtime.inspect_image(image.as_str()).await {
             Ok(_) => ProbeResult::Ok(format!("{image} cached")),
             Err(bollard::errors::Error::DockerResponseServerError {

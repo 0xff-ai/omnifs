@@ -136,11 +136,11 @@ fn cli_redesign_contract_wide_headers_are_sentence_case_and_ordered() {
     let text = stdout_text(&output);
 
     let filesystem = text.find("Filesystem").expect("filesystem header");
-    let environment = text.find("Environment").expect("environment header");
+    let runtime = text.find("Runtime").expect("runtime header");
     let location = text.find("Location").expect("location header");
     let coverage = text.find("Coverage").expect("coverage header");
     let state = text.find("State").expect("state header");
-    assert!(filesystem < environment && environment < location);
+    assert!(filesystem < runtime && runtime < location);
     assert!(location < coverage && coverage < state);
     assert!(!text.contains("FILESYSTEM"));
     assert!(!text.contains('|'));
@@ -204,7 +204,7 @@ fn cli_redesign_contract_narrow_status_uses_stacked_schema_fields() {
     let output = fixture.run_with_env(&["status", "--output", "human"], &[("COLUMNS", "71")]);
     let text = stdout_text(&output);
 
-    assert!(text.contains("Filesystem  Environment  Location"));
+    assert!(text.contains("Filesystem  Runtime  Location"));
     assert!(text.contains("Mounts  "), "{text}");
     assert!(text.contains("  /"), "identity field missing from {text}");
     assert!(
@@ -272,7 +272,7 @@ fn cli_redesign_contract_runner_observation_reports_exact_identity() {
     let frontends = json["result"]["frontends"].as_array().expect("frontends");
     assert!(frontends.iter().any(|frontend| {
         frontend["filesystem"].as_str() == Some("fuse")
-            && frontend["environment"].as_str() == Some("host")
+            && frontend["runtime"].as_str() == Some("host")
             && frontend["location"].as_str() == runner_location.to_str()
             && frontend["state"].as_str() == Some("running")
             && frontend["scope"] == "all"
@@ -328,7 +328,7 @@ fn cli_redesign_contract_state_rows_pair_symbols_with_lowercase_labels() {
 fn cli_redesign_contract_frontend_config_is_rejected_as_removed_field() {
     let fixture = Fixture::new();
     write_frontend_config(&fixture, "[[frontends]]\nfilesystem = \"nfs\"\n");
-    let output = fixture.run(&["status", "--output", "json"]);
+    let output = fixture.run(&["up", "--output", "json"]);
     assert!(
         !output.status.success(),
         "removed frontend config must fail"

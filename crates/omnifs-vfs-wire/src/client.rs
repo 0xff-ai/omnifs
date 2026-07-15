@@ -59,12 +59,12 @@ const ATTACH_CAPACITY: usize = 16;
 /// literal address the CLI could resolve ahead of time; `TcpStream::connect`
 /// resolves it same as any other socket address type.
 ///
-/// `Vsock` is the krunkit-on-macOS path: the guest VM has no shared host Unix
-/// socket and no Docker-style loopback either, but krunkit gives it a virtio
+/// `Vsock` is the libkrun-on-macOS path: the guest VM has no shared host Unix
+/// socket and no Docker-style loopback either, but libkrun gives it a virtio
 /// socket device, so it dials host CID 2 (`VMADDR_CID_HOST`) on `port` instead.
-/// krunkit proxies that vsock connection onto a host Unix socket
+/// libkrun proxies that vsock connection onto a host Unix socket
 /// (`--device virtio-vsock,port=N,socketURL=<path>,listen`), and every
-/// connection krunkit forwards looks like the same trusted local peer to that
+/// connection libkrun forwards looks like the same trusted local peer to that
 /// socket, so `token` proves the guest's identity the same way it does over
 /// TCP. The dial itself only builds on Linux (the guest OS); on any other
 /// target it fails at attach time with a named, non-retriable error rather
@@ -93,7 +93,7 @@ impl AttachTarget {
     /// Parse the env-driven target from explicit values so validation remains
     /// testable without mutating process environment.
     ///
-    /// `addr` is `vsock:<port>` for a krunkit guest or `host:port` for TCP. TCP
+    /// `addr` is `vsock:<port>` for a libkrun guest or `host:port` for TCP. TCP
     /// targets remain unresolved because `host.docker.internal` exists only in
     /// the frontend container's DNS and cannot be resolved by the host CLI.
     fn from_env(addr: Option<String>, token: Option<String>) -> Result<Self, AttachTargetError> {
@@ -162,7 +162,7 @@ impl AttachTarget {
     }
 
     /// Connect once, spawn the reader/writer pumps, and complete the handshake.
-    /// Vsock is Linux-only because the krunkit guest is Linux; other targets
+    /// Vsock is Linux-only because the libkrun guest is Linux; other targets
     /// fail without entering the reconnect loop.
     async fn connect_once(
         &self,

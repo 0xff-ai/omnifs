@@ -653,10 +653,10 @@ jobs:
           retention-days: 90
           if-no-files-found: error
 
-  # Builds the krunkit guest disk image (scripts/guest-image/), asserts its
+  # Builds the libkrun guest disk image (scripts/guest-image/), asserts its
   # static shape, and publishes it as a ghcr OCI artifact sha-keyed on this
   # commit; `release`'s `promote` job retags it to the version on ship. The
-  # krunkit BOOT smoke and conformance lanes stay local-only (GH runners
+  # libkrun BOOT smoke and conformance lanes stay local-only (GH runners
   # cannot nest virtualization; see docs/contracts/60-build-validation.md),
   # so this job only proves the image's static shape, never a live boot.
   guest-image-arm64:

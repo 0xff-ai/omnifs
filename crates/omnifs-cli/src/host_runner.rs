@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result};
 use omnifs_mtab::{MountKind, MountState};
+use omnifs_workspace::daemon_record::FrontendKind;
 use omnifs_workspace::layout::WorkspaceLayout;
-use omnifs_workspace::runtime_record::FrontendKind;
 
 const MOUNT_TIMEOUT: Duration = Duration::from_secs(10);
 const MOUNT_POLL_INTERVAL: Duration = Duration::from_millis(200);
@@ -73,14 +73,14 @@ impl fmt::Display for LocalProtocol {
     }
 }
 
-pub(crate) struct LocalBackend {
+pub(crate) struct HostRunner {
     paths: WorkspaceLayout,
     mount_point: PathBuf,
     protocol: LocalProtocol,
     runner: PathBuf,
 }
 
-impl LocalBackend {
+impl HostRunner {
     pub(crate) fn new(
         paths: WorkspaceLayout,
         mount_point: PathBuf,
@@ -293,13 +293,13 @@ mod tests {
     fn runner_argv_names_local_mount_state_and_attach_paths() {
         let paths = WorkspaceLayout::under_root(Path::new("/home/user/.omnifs"));
         for protocol in [LocalProtocol::Fuse, LocalProtocol::Nfs] {
-            let backend = LocalBackend {
+            let runner = HostRunner {
                 runner: PathBuf::from(THIN_RUNNER_NAME),
                 paths: paths.clone(),
                 mount_point: PathBuf::from("/home/user/omnifs"),
                 protocol,
             };
-            let command = backend.runner_command();
+            let command = runner.runner_command();
             let args = command
                 .get_args()
                 .map(|arg| arg.to_string_lossy().into_owned())
@@ -309,7 +309,7 @@ mod tests {
                 args[1..4],
                 ["--mount-point", "/home/user/omnifs", "--state-dir"]
             );
-            assert_eq!(Path::new(&args[4]), backend.state_dir());
+            assert_eq!(Path::new(&args[4]), runner.state_dir());
             assert_eq!(
                 args[5..],
                 ["--attach", "/home/user/.omnifs/frontends/local.sock"]
@@ -320,14 +320,14 @@ mod tests {
     #[test]
     fn both_protocols_use_one_thin_runner_with_distinct_subcommands() {
         let paths = WorkspaceLayout::under_root(Path::new("/home/user/.omnifs"));
-        let backend = |protocol: LocalProtocol| LocalBackend {
+        let runner = |protocol: LocalProtocol| HostRunner {
             runner: LocalProtocol::runner_beside(Path::new("/opt/omnifs/bin/omnifs")).unwrap(),
             paths: paths.clone(),
             mount_point: PathBuf::from("/home/user/omnifs"),
             protocol,
         };
-        let fuse = backend(LocalProtocol::Fuse).runner_command();
-        let nfs = backend(LocalProtocol::Nfs).runner_command();
+        let fuse = runner(LocalProtocol::Fuse).runner_command();
+        let nfs = runner(LocalProtocol::Nfs).runner_command();
         assert_eq!(fuse.get_program(), nfs.get_program());
         assert_eq!(fuse.get_args().next().unwrap(), "fuse");
         assert_eq!(nfs.get_args().next().unwrap(), "nfs");
@@ -336,17 +336,17 @@ mod tests {
     #[test]
     fn state_dirs_are_stable_and_isolated_by_protocol_and_mount() {
         let paths = WorkspaceLayout::under_root(Path::new("/home/user/.omnifs"));
-        let backend = |protocol: LocalProtocol, mount_point: &'static str| LocalBackend {
+        let runner = |protocol: LocalProtocol, mount_point: &'static str| HostRunner {
             runner: PathBuf::from(THIN_RUNNER_NAME),
             paths: paths.clone(),
             mount_point: PathBuf::from(mount_point),
             protocol,
         };
-        let first = backend(LocalProtocol::Nfs, "/mnt/first");
-        let same = backend(LocalProtocol::Nfs, "/mnt/first");
-        let normalized_same = backend(LocalProtocol::Nfs, "/mnt/./first/");
-        let other = backend(LocalProtocol::Nfs, "/mnt/other");
-        let fuse = backend(LocalProtocol::Fuse, "/mnt/first");
+        let first = runner(LocalProtocol::Nfs, "/mnt/first");
+        let same = runner(LocalProtocol::Nfs, "/mnt/first");
+        let normalized_same = runner(LocalProtocol::Nfs, "/mnt/./first/");
+        let other = runner(LocalProtocol::Nfs, "/mnt/other");
+        let fuse = runner(LocalProtocol::Fuse, "/mnt/first");
 
         assert_eq!(first.state_dir(), same.state_dir());
         assert_eq!(first.state_dir(), normalized_same.state_dir());
@@ -359,7 +359,7 @@ mod tests {
     fn nfs_recovery_requires_unique_matching_nfs_state() {
         let tmp = tempfile::tempdir().unwrap();
         let paths = WorkspaceLayout::under_root(tmp.path());
-        let backend = LocalBackend {
+        let runner = HostRunner {
             runner: PathBuf::from("omnifs-thin"),
             paths,
             mount_point: PathBuf::from("/mnt/omnifs"),
@@ -367,14 +367,14 @@ mod tests {
         };
         let addr: SocketAddr = "127.0.0.1:2049".parse().unwrap();
         let state =
-            omnifs_mtab::StateFile::write_nfs(&backend.mount_point, addr, &backend.state_dir())
+            omnifs_mtab::StateFile::write_nfs(&runner.mount_point, addr, &runner.state_dir())
                 .unwrap();
-        assert_eq!(backend.persisted_nfs_addr().unwrap(), addr);
+        assert_eq!(runner.persisted_nfs_addr().unwrap(), addr);
 
         drop(state);
         let wrong =
-            omnifs_mtab::StateFile::write_fuse(&backend.mount_point, &backend.state_dir()).unwrap();
-        assert!(backend.persisted_nfs_addr().is_err());
+            omnifs_mtab::StateFile::write_fuse(&runner.mount_point, &runner.state_dir()).unwrap();
+        assert!(runner.persisted_nfs_addr().is_err());
         drop(wrong);
     }
 

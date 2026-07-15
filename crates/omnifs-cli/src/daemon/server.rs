@@ -8,7 +8,7 @@ use omnifs_api::{
     MountInfo,
 };
 use omnifs_engine::{Inspector, MountRuntimes};
-use omnifs_workspace::runtime_record::{AttachRecord, RuntimeRecord};
+use omnifs_workspace::daemon_record::{AttachRecord, DaemonRecord};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -81,14 +81,14 @@ fn attach_record(target: &ListenerTarget) -> anyhow::Result<AttachRecord> {
     }
 }
 
-pub(crate) struct RuntimeRecordStore {
+pub(crate) struct DaemonRecordStore {
     path: PathBuf,
-    record: Mutex<Option<RuntimeRecord>>,
+    record: Mutex<Option<DaemonRecord>>,
     published: AtomicBool,
 }
 
-impl RuntimeRecordStore {
-    pub(crate) fn new(path: PathBuf, record: RuntimeRecord) -> Arc<Self> {
+impl DaemonRecordStore {
+    pub(crate) fn new(path: PathBuf, record: DaemonRecord) -> Arc<Self> {
         Arc::new(Self {
             path,
             record: Mutex::new(Some(record)),
@@ -102,7 +102,7 @@ impl RuntimeRecordStore {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(record) = guard.as_ref() else {
-            anyhow::bail!("runtime record has already been removed");
+            anyhow::bail!("daemon record has already been removed");
         };
         record.write(&self.path)?;
         self.published.store(true, Ordering::Release);
@@ -115,7 +115,7 @@ impl RuntimeRecordStore {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(record) = guard.as_mut() else {
-            anyhow::bail!("runtime record has already been removed")
+            anyhow::bail!("daemon record has already been removed")
         };
         let previous = record.clone();
         record.set_attach(target);
@@ -125,7 +125,7 @@ impl RuntimeRecordStore {
             *record = previous;
             return Err(error).with_context(|| {
                 format!(
-                    "persist attach listener in runtime record {}",
+                    "persist attach listener in daemon record {}",
                     self.path.display()
                 )
             });
@@ -139,7 +139,7 @@ impl RuntimeRecordStore {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(record) = guard.as_mut() else {
-            anyhow::bail!("runtime record has already been removed")
+            anyhow::bail!("daemon record has already been removed")
         };
         let previous = record.clone();
         record.remove_attach(target);
@@ -152,7 +152,7 @@ impl RuntimeRecordStore {
             *record = previous;
             return Err(error).with_context(|| {
                 format!(
-                    "persist removed attach listener in runtime record {}",
+                    "persist removed attach listener in daemon record {}",
                     self.path.display()
                 )
             });
@@ -167,8 +167,8 @@ impl RuntimeRecordStore {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let published = self.published.swap(false, Ordering::AcqRel);
         guard.take();
-        if published && let Err(error) = RuntimeRecord::remove(&self.path) {
-            warn!(%error, path = %self.path.display(), "failed to remove runtime record");
+        if published && let Err(error) = DaemonRecord::remove(&self.path) {
+            warn!(%error, path = %self.path.display(), "failed to remove daemon record");
         }
     }
 }
@@ -193,7 +193,7 @@ pub(crate) struct Daemon {
     context: DaemonContext,
     registry: Arc<MountRuntimes>,
     inspector: Option<Arc<Inspector>>,
-    runtime_record: Arc<RuntimeRecordStore>,
+    daemon_record: Arc<DaemonRecordStore>,
     vfs: OnceLock<Arc<omnifs_vfs_wire::VfsServer>>,
     shutdown_tx: tokio::sync::watch::Sender<bool>,
     events_tx: OnceLock<tokio::sync::mpsc::UnboundedSender<TaskEvent>>,
@@ -206,14 +206,14 @@ impl Daemon {
         context: DaemonContext,
         registry: Arc<MountRuntimes>,
         inspector: Option<Arc<Inspector>>,
-        runtime_record: Arc<RuntimeRecordStore>,
+        daemon_record: Arc<DaemonRecordStore>,
     ) -> Self {
         let (shutdown_tx, _) = tokio::sync::watch::channel(false);
         Self {
             context,
             registry,
             inspector,
-            runtime_record,
+            daemon_record,
             vfs: OnceLock::new(),
             shutdown_tx,
             events_tx: OnceLock::new(),
@@ -314,7 +314,7 @@ impl Daemon {
                 return Err(error);
             },
         };
-        if let Err(error) = self.runtime_record.set_attach(record) {
+        if let Err(error) = self.daemon_record.set_attach(record) {
             if newly_bound {
                 vfs.remove_listener(&target);
             }
@@ -350,7 +350,7 @@ impl Daemon {
                 return Err(error);
             },
         };
-        if let Err(error) = self.runtime_record.set_attach(record) {
+        if let Err(error) = self.daemon_record.set_attach(record) {
             if newly_bound {
                 vfs.remove_listener(&target);
             }
@@ -363,10 +363,7 @@ impl Daemon {
     /// listener, restores persisted dynamic authority, and publishes the new
     /// record only after all required listeners are alive. The same method owns
     /// task joins, provider shutdown, record removal, and socket cleanup.
-    pub(crate) async fn run(
-        self: Arc<Self>,
-        previous: Option<RuntimeRecord>,
-    ) -> anyhow::Result<()> {
+    pub(crate) async fn run(self: Arc<Self>, previous: Option<DaemonRecord>) -> anyhow::Result<()> {
         let result = self.run_inner(previous).await;
         let _ = self.shutdown_tx.send(true);
         self.stop_tasks().await;
@@ -374,12 +371,12 @@ impl Daemon {
             vfs.shutdown().await;
         }
         self.registry.shutdown_all();
-        self.runtime_record.remove();
+        self.daemon_record.remove();
         self.cleanup_sockets();
         result
     }
 
-    async fn run_inner(self: &Arc<Self>, previous: Option<RuntimeRecord>) -> anyhow::Result<()> {
+    async fn run_inner(self: &Arc<Self>, previous: Option<DaemonRecord>) -> anyhow::Result<()> {
         let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
         let _ = self.events_tx.set(events_tx);
         let vfs = self.vfs.get().context("VFS server was not initialized")?;
@@ -391,7 +388,7 @@ impl Daemon {
         check_startup_events(&mut events_rx)?;
         // The VFS-owned startup gate keeps the bound control and namespace
         // tasks from serving or exiting until this durable publication succeeds.
-        self.runtime_record.publish()?;
+        self.daemon_record.publish()?;
         vfs.mark_ready();
         anyhow::ensure!(
             vfs.ready(),
@@ -419,7 +416,7 @@ impl Daemon {
 
     fn restore_attach_listeners(
         self: &Arc<Self>,
-        previous: Option<&RuntimeRecord>,
+        previous: Option<&DaemonRecord>,
     ) -> anyhow::Result<()> {
         if let Some(previous) = previous {
             for target in &previous.attach {
@@ -481,7 +478,7 @@ impl Daemon {
                         if matches!(target, omnifs_vfs_wire::ListenerTarget::Local { .. }) {
                             anyhow::bail!("local namespace listener exited");
                         }
-                        self.runtime_record.remove_attach(&attach_record(&target)?)?;
+                        self.daemon_record.remove_attach(&attach_record(&target)?)?;
                         match &target {
                             ListenerTarget::Local { path } => {
                                 warn!(transport = "local", path = %path.display(), "namespace listener exited; target is unavailable");
@@ -929,27 +926,25 @@ mod tests {
             )
             .unwrap(),
         );
-        let runtime_record =
-            super::RuntimeRecordStore::new(context.runtime_record_file(), context.runtime_record());
-        Arc::new(super::Daemon::new(context, registry, None, runtime_record))
+        let daemon_record =
+            super::DaemonRecordStore::new(context.daemon_record_file(), context.daemon_record());
+        Arc::new(super::Daemon::new(context, registry, None, daemon_record))
     }
 
     #[test]
-    fn runtime_record_store_fences_late_updates_after_removal() {
-        use omnifs_workspace::runtime_record::{
-            AttachRecord, Endpoint, RecordedBackend, RuntimeRecord,
-        };
+    fn daemon_record_store_fences_late_updates_after_removal() {
+        use omnifs_workspace::daemon_record::{AttachRecord, DaemonRecord, Endpoint};
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("daemon.json");
-        let store = super::RuntimeRecordStore::new(
+        let store = super::DaemonRecordStore::new(
             path.clone(),
-            RuntimeRecord::new(
+            DaemonRecord::new(
                 omnifs_workspace::mounts::Revision::new("a".repeat(40)).unwrap(),
                 Endpoint::Unix {
                     path: dir.path().join("control.sock"),
                 },
-                RecordedBackend::Native { pid: 1 },
+                1,
                 "instance".to_string(),
             ),
         );
@@ -968,7 +963,7 @@ mod tests {
                 token: "b".repeat(32),
             })
             .unwrap();
-        assert_eq!(RuntimeRecord::read(&path).unwrap().unwrap().attach.len(), 2);
+        assert_eq!(DaemonRecord::read(&path).unwrap().unwrap().attach.len(), 2);
 
         std::fs::remove_file(&path).unwrap();
         std::fs::create_dir(&path).unwrap();
@@ -991,7 +986,7 @@ mod tests {
 
         std::fs::remove_dir(&path).unwrap();
         store.publish().unwrap();
-        let recovered = RuntimeRecord::read(&path).unwrap().unwrap();
+        let recovered = DaemonRecord::read(&path).unwrap().unwrap();
         assert!(
             recovered.attach.iter().any(
                 |target| matches!(target, AttachRecord::Tcp { addr, .. } if addr == "127.0.0.1:1")
@@ -1115,7 +1110,7 @@ mod tests {
                 && status
                     .frontends
                     .iter()
-                    .any(|frontend| frontend.delivery == omnifs_api::FrontendDelivery::Docker)
+                    .any(|frontend| frontend.runtime == omnifs_api::FrontendRuntime::Docker)
             {
                 break status;
             }
@@ -1140,7 +1135,7 @@ mod tests {
                 && status
                     .frontends
                     .iter()
-                    .all(|frontend| frontend.delivery != omnifs_api::FrontendDelivery::Docker)
+                    .all(|frontend| frontend.runtime != omnifs_api::FrontendRuntime::Docker)
             {
                 break status;
             }

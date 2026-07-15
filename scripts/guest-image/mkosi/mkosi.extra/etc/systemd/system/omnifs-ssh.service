@@ -1,5 +1,5 @@
 [Unit]
-Description=omnifs krunkit guest ssh vsock-to-loopback proxy
+Description=omnifs libkrun guest ssh vsock-to-loopback proxy
 Requires=omnifs-dropbear.service
 After=omnifs-dropbear.service
 

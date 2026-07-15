@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::io::Write as _;
 #[cfg(target_os = "linux")]
 use std::net::Ipv4Addr;
+use std::process::Command;
 
 use anyhow::{Context, Result, anyhow};
 use bollard::Docker;
@@ -17,8 +18,9 @@ use bollard::query_parameters::{
 use futures_util::TryStreamExt;
 
 use crate::error::WithHint;
+use crate::frontend_container::{FrontendContainerSpec, assert_locked_down};
 use crate::launch_backend::{
-    BUILD_CHANNEL, BuildChannel, ContainerName, DockerTarget, ImageRef, names_registry,
+    BUILD_CHANNEL, BuildChannel, ContainerName, DockerTarget, GUEST_MOUNT, ImageRef, names_registry,
 };
 use crate::ui::output::{Output, OutputMode};
 
@@ -30,21 +32,94 @@ struct LayerProgress {
 
 /// Outcome of a Docker daemon reachability probe.
 pub(crate) enum DockerProbeOutcome {
-    /// Daemon responded to ping; the connected `Runtime` is returned for reuse.
-    Reachable(Runtime),
+    /// Daemon responded to ping; the connected `DockerClient` is returned for reuse.
+    Reachable(DockerClient),
     /// Could not connect to the daemon socket.
     ConnectFailed(bollard::errors::Error),
     /// Connected but the ping RPC failed.
     PingFailed(bollard::errors::Error),
 }
 
-pub(crate) struct Runtime {
+pub(crate) struct DockerClient {
     docker: Docker,
     target: DockerTarget,
     output: Output,
 }
 
-impl Runtime {
+/// The Docker frontend runner, using a client already scoped to its target.
+pub(crate) struct DockerRunner {
+    client: DockerClient,
+}
+
+impl DockerRunner {
+    pub(crate) fn new(client: DockerClient) -> Self {
+        Self { client }
+    }
+
+    pub(crate) async fn launch(
+        &self,
+        home: &std::path::Path,
+        attach_port: u16,
+        attach_token: &str,
+    ) -> Result<()> {
+        let body = FrontendContainerSpec {
+            image: self.client.image(),
+            home,
+            attach_port,
+            attach_token,
+            add_host_gateway: cfg!(target_os = "linux"),
+        }
+        .build_body();
+        self.client.launch_frontend_container(body).await?;
+
+        let (mounts, env) = self.client.inspect_mounts_and_env().await?;
+        if let Err(violation) = assert_locked_down(&mounts, &env) {
+            let _ = self.client.remove().await;
+            anyhow::bail!("refusing to run the frontend container: {violation}");
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn mount_ready(&self, path: &str) -> Result<bool> {
+        self.client.exec_path_exists(path).await
+    }
+
+    pub(crate) async fn is_running(&self) -> Result<Option<bool>> {
+        self.client
+            .container_running(self.client.container_name())
+            .await
+    }
+
+    pub(crate) async fn tear_down(&self) -> Result<()> {
+        self.client.remove().await
+    }
+
+    pub(crate) fn shell_command(
+        &self,
+        shell_override: Option<&str>,
+        trailing: &[String],
+    ) -> Command {
+        use std::io::IsTerminal as _;
+
+        let mut command = Command::new("docker");
+        command.arg("exec").arg("-i");
+        if std::io::stdin().is_terminal() {
+            command.arg("-t");
+        }
+        command
+            .arg("-w")
+            .arg(GUEST_MOUNT)
+            .arg(self.client.container_name().as_str());
+        if trailing.is_empty() {
+            command.arg(shell_override.unwrap_or("/bin/sh"));
+        } else {
+            command.args(trailing);
+        }
+        command
+    }
+}
+
+impl DockerClient {
     pub(crate) fn connect_for(target: &DockerTarget, output: Output) -> Result<Self> {
         Ok(Self {
             docker: Docker::connect_with_local_defaults()
@@ -55,7 +130,7 @@ impl Runtime {
     }
 
     /// This runtime's own container identity, e.g. so
-    /// [`crate::frontend_backend::DockerBackend`] can probe/remove/shell into
+    /// [`DockerRunner`] can probe/remove/shell into
     /// the container it was constructed for without threading the name back
     /// in from the caller.
     pub(crate) fn container_name(&self) -> &ContainerName {
@@ -116,7 +191,7 @@ impl Runtime {
 
     /// Probe Docker daemon reachability without requiring a pre-connected client.
     /// Used by `omnifs doctor` so the probe result carries a typed outcome and
-    /// the resulting `Runtime` can be reused for image inspection.
+    /// the resulting `DockerClient` can be reused for image inspection.
     pub(crate) async fn probe_docker(target: &DockerTarget) -> DockerProbeOutcome {
         let runtime = match Self::connect_for(target, Output::new(OutputMode::Human, false)) {
             Ok(r) => r,
@@ -216,7 +291,7 @@ impl Runtime {
 
     /// `Some(running)` when a container named `name` exists, `None` when it
     /// does not. Generic over `name` (unlike a self-targeted check) so a
-    /// caller can probe the frontend container through any connected `Runtime`.
+    /// caller can probe the frontend container through any connected `DockerClient`.
     pub(crate) async fn container_running(&self, name: &ContainerName) -> Result<Option<bool>> {
         match self
             .docker

@@ -669,23 +669,18 @@ async fn tcp_listener_rejects_wrong_token() {
     server.shutdown().await;
 }
 
-/// The krunkit vsock-proxy path's host-side shape: a real token-authenticated
+/// The libkrun vsock-proxy path's host-side shape: a real token-authenticated
 /// UDS listener, so a connecting peer must present it exactly like the TCP
 /// listener does. Driven with the
 /// raw frame helpers (not `WireNamespace::attach`/`AttachTarget::Unix`, which
 /// by design never sends a token) since production reaches this socket through
-/// krunkit's vsock proxy, not a bare Unix dial.
+/// libkrun's vsock proxy, not a bare Unix dial.
 #[tokio::test]
 async fn unix_listener_with_token_end_to_end() {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("ns.sock");
     let stub = StubNamespace::new();
-    let server = start_vsock_server(
-        Arc::clone(&stub),
-        socket.clone(),
-        "inst-uds-token",
-        VALID_TOKEN,
-    );
+    let server = start_vsock_server(stub.clone(), socket.clone(), "inst-uds-token", VALID_TOKEN);
 
     let mut stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
     let hello = postcard::to_allocvec(&Handshake::Hello {

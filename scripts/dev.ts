@@ -213,13 +213,13 @@ async function main() {
     mkdirSync(hostLocation, { recursive: true });
     console.log(`Starting the host ${hostFilesystem.toUpperCase()} frontend`);
     await run(
-      $`${omnifsCli} frontend enable ${hostFilesystem} --environment host --location ${hostLocation}`.env(
+      $`${omnifsCli} frontend enable ${hostFilesystem} --runtime host --location ${hostLocation}`.env(
         cliEnv(devHome),
       ),
     );
 
     await run(
-      $`${omnifsCli} frontend enable fuse --environment docker`.env({
+      $`${omnifsCli} frontend enable fuse --runtime docker`.env({
         ...cliEnv(devHome),
         OMNIFS_FRONTEND_IMAGE: frontendImage,
       }),
@@ -229,7 +229,7 @@ async function main() {
     if (keepRunning(options)) {
       if (options.detach) {
         console.log(
-          `Detached. Stop with \`${omnifsCli} frontend disable fuse --environment docker && ${omnifsCli} frontend disable ${hostFilesystem} --environment host --location ${hostLocation} && ${omnifsCli} down\`.`,
+          `Detached. Stop with \`${omnifsCli} frontend disable fuse --runtime docker && ${omnifsCli} frontend disable ${hostFilesystem} --runtime host --location ${hostLocation} && ${omnifsCli} down\`.`,
         );
       }
       return;
@@ -648,12 +648,12 @@ async function teardownSession(
   fixturePaths: FixturePaths,
   fixtures: Fixtures,
 ): Promise<void> {
-  await $`${omnifsCli} frontend disable fuse --environment docker`
+  await $`${omnifsCli} frontend disable fuse --runtime docker`
     .env(cliEnv(devHome))
     .quiet()
     .nothrow();
   const hostFilesystem = process.platform === "linux" ? "fuse" : "nfs";
-  await $`${omnifsCli} frontend disable ${hostFilesystem} --environment host --location ${join(devHome, "mnt")}`
+  await $`${omnifsCli} frontend disable ${hostFilesystem} --runtime host --location ${join(devHome, "mnt")}`
     .env(cliEnv(devHome))
     .quiet()
     .nothrow();

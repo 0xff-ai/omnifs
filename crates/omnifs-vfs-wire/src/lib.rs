@@ -23,7 +23,7 @@
 //! (both response frames, `request_id = 0`), then closes the connection in the
 //! rejected case. A plain UDS listener ignores `token` (filesystem permissions
 //! are that transport's whole auth); a TCP attach listener, and a UDS listener
-//! bound with a token (the krunkit vsock-proxy path, where every guest dial
+//! bound with a token (the libkrun vsock-proxy path, where every guest dial
 //! looks like the same trusted local peer to the socket), both require it to
 //! match the per-instance attach token. A protocol mismatch is rejected the
 //! same way. `instance_id` is the daemon's per-start id: a reconnect that
@@ -32,7 +32,7 @@
 //!
 //! `frontend` is display-only for the host: the guest names its own kind and
 //! mount point so the daemon's status surface can report it, but the host
-//! decides how the connection was *delivered* (native/docker/krunkit/external)
+//! decides how the connection was *delivered* (native/docker/libkrun/external)
 //! from which listener it arrived on, never from anything the guest claims.
 //! [`VfsServer`] owns that listener authority and removes an observed identity
 //! when its last connection ends.
@@ -70,7 +70,7 @@ pub const PROTOCOL: u32 = 3;
 
 /// Identity a connecting frontend presents in its handshake `Hello`, naming
 /// its own kind and guest-side mount point (display-only). The server reports
-/// it. The host derives delivery (local/docker/krunkit)
+/// it. The host derives delivery (local/docker/libkrun)
 /// from the listener that accepted the connection, never from the guest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FrontendIdentity {
@@ -212,7 +212,7 @@ pub enum WireError {
         source: std::io::Error,
     },
     /// A [`crate::AttachTarget::Vsock`] attach was attempted on a build that
-    /// cannot dial vsock (only the Linux krunkit guest can). Not retriable:
+    /// cannot dial vsock (only the Linux libkrun guest can). Not retriable:
     /// the platform will not change mid-run.
     #[error("vsock attach is not supported on this platform")]
     VsockUnsupported,

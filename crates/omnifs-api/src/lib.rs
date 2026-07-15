@@ -29,12 +29,12 @@ pub const OMNIFS_ATTACH_TOKEN_ENV: &str = "OMNIFS_ATTACH_TOKEN";
 
 /// Guest vsock port the frontend runner dials on host CID (`VMADDR_CID_HOST`)
 /// once its FUSE mount is serving, writing a single `ready\n` line so the
-/// krunkit backend's `launch` can observe guest readiness without an
+/// libkrun backend's `launch` can observe guest readiness without an
 /// external probe into the guest (the Docker backend instead polls the
 /// mount path via `docker exec` from outside the container). Set only by the
-/// krunkit backend's seed (`omnifs-seed.conf`); absent on the Docker path.
+/// libkrun backend's seed (`omnifs-seed.conf`); absent on the Docker path.
 /// The runner treats this env being set on a non-Linux target as a hard
-/// error rather than silently ignoring it, since only the Linux krunkit
+/// error rather than silently ignoring it, since only the Linux libkrun
 /// guest can dial vsock.
 pub const OMNIFS_READY_VSOCK_PORT_ENV: &str = "OMNIFS_READY_VSOCK_PORT";
 
@@ -45,7 +45,7 @@ pub struct DaemonStatus {
     #[serde(default)]
     pub pid: u32,
     /// Random 16-hex-character id generated per daemon start. The CLI asserts it
-    /// against the runtime record it resolved from, so a record overwritten by a
+    /// against the daemon record it resolved from, so a record overwritten by a
     /// restart mid-command is detected instead of silently trusted.
     #[serde(default)]
     pub instance_id: String,
@@ -57,11 +57,6 @@ pub struct DaemonStatus {
     /// Every filesystem frontend currently attached to the shared namespace.
     #[serde(default)]
     pub frontends: Vec<FrontendInfo>,
-    /// Backend serving this daemon, so the CLI tears down and reports the right
-    /// backend without inferring it from configuration. Missing identity is not
-    /// reclaimable; teardown stops instead of guessing.
-    #[serde(default)]
-    pub backend: DaemonBackend,
     /// Provider mounts loaded in the registry.
     pub mounts: Vec<MountInfo>,
     /// Daemon-owned health for runtime subsystems. CLI status renders these
@@ -147,7 +142,6 @@ impl SubsystemHealth {
 #[serde(rename_all = "snake_case")]
 pub enum DaemonSubsystem {
     Control,
-    Backend,
     Frontend,
     Mounts,
 }
@@ -159,21 +153,6 @@ pub enum HealthState {
     Healthy,
     Degraded,
     Unhealthy,
-}
-
-/// Backend serving a daemon. The daemon always runs host-native; the CLI reads
-/// this (and the runtime record) rather than assuming it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum DaemonBackend {
-    /// Daemon spawned as a host-native child process.
-    Native { pid: u32 },
-}
-
-impl Default for DaemonBackend {
-    fn default() -> Self {
-        Self::Native { pid: 0 }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -196,15 +175,14 @@ impl std::fmt::Display for FsType {
 pub struct FrontendInfo {
     pub source: String,
     pub fs_type: FsType,
-    /// The frontend-reported mount point. It is host-visible for the local
-    /// driver and display-only for Docker and krunkit guests.
+    /// The frontend-reported mount point. It is host-visible for the host
+    /// runner and display-only for Docker and libkrun guests.
     #[serde(default)]
     pub mount_point: PathBuf,
     /// How this frontend reaches the shared namespace. The host assigns this
     /// from which listener the connection arrived on, never from anything a
     /// connecting guest claims about itself.
-    #[serde(default = "FrontendDelivery::default_local")]
-    pub delivery: FrontendDelivery,
+    pub runtime: FrontendRuntime,
 }
 
 /// How a frontend is delivered to the shared namespace. Assigned by the host
@@ -212,29 +190,23 @@ pub struct FrontendInfo {
 /// self-reported by the connecting guest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum FrontendDelivery {
+pub enum FrontendRuntime {
     /// Attached over the fixed `frontends/local.sock` Unix domain socket.
-    Local,
+    Host,
     /// Attached over the TCP namespace listener, the Docker Desktop delivery
     /// path.
     Docker,
     /// Attached over the token-checking UDS vsock-proxy listener, the
-    /// krunkit-on-macOS delivery path.
-    Krunkit,
+    /// libkrun-on-macOS delivery path.
+    Libkrun,
 }
 
-impl FrontendDelivery {
-    const fn default_local() -> Self {
-        Self::Local
-    }
-}
-
-impl std::fmt::Display for FrontendDelivery {
+impl std::fmt::Display for FrontendRuntime {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            Self::Local => "local",
+            Self::Host => "host",
             Self::Docker => "docker",
-            Self::Krunkit => "krunkit",
+            Self::Libkrun => "libkrun",
         })
     }
 }
@@ -279,18 +251,19 @@ impl CredentialHealth {
 
 #[cfg(test)]
 mod tests {
-    use super::{CredentialHealth, FrontendDelivery, FrontendInfo};
+    use super::{CredentialHealth, FrontendInfo, FrontendRuntime};
 
     #[test]
-    fn legacy_frontend_info_defaults_to_local_delivery() {
+    fn frontend_info_round_trips_runtime() {
         let frontend: FrontendInfo = serde_json::from_value(serde_json::json!({
             "source": "native",
-            "fs_type": "nfs"
+            "fs_type": "nfs",
+            "runtime": "host"
         }))
         .unwrap();
 
         assert!(frontend.mount_point.as_os_str().is_empty());
-        assert_eq!(frontend.delivery, FrontendDelivery::Local);
+        assert_eq!(frontend.runtime, FrontendRuntime::Host);
     }
 
     #[test]

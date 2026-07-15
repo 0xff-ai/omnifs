@@ -1,10 +1,10 @@
 #!/bin/sh
 # Mounts the per-launch attach-parameter seed ISO (built fresh by the host on
-# every krunkit launch, see scripts/guest-image/make-seed-iso.sh) by volume
+# every libkrun launch, see scripts/guest-image/make-seed-iso.sh) by volume
 # label, read-only, at /mnt/seed. No cloud-init and no NoCloud data source:
 # this is a plain ISO9660 volume the host attaches as a virtio-blk device,
 # identified purely by its label so the guest never has to guess which
-# device node krunkit assigned it.
+# device node the runtime assigned it.
 #
 # Runs as omnifs-seed-mount.service, ordered before omnifs-frontend.service,
 # which sources the config file this mounts via EnvironmentFile=. Failing

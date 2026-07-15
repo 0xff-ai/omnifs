@@ -49,9 +49,8 @@ pub(crate) async fn run(args: &DaemonArgs) -> anyhow::Result<()> {
     // Local-only dogfood counters. The daemon's off-switch is the
     // `OMNIFS_TELEMETRY` env var (the CLI propagates
     // its `[telemetry] enabled = false` into it when launching the daemon).
-    let telemetry_backend = telemetry::Backend::Native;
     let telemetry = TelemetrySink::new(context.config_dir(), telemetry::enabled_from_env());
-    telemetry.daemon_event(DaemonEvent::DaemonStart, telemetry_backend, 0);
+    telemetry.daemon_event(DaemonEvent::DaemonStart, 0);
 
     let cloner = Arc::new(GitCloner::new(context.cache_dir().join("clones"))?);
 
@@ -91,16 +90,16 @@ pub(crate) async fn run(args: &DaemonArgs) -> anyhow::Result<()> {
     // Read the predecessor before publishing anything for this invocation. It
     // is restoration input, not an ownership claim: startup failure leaves it
     // in place as stale diagnostic evidence.
-    let record_path = context.runtime_record_file();
-    let previous = omnifs_workspace::runtime_record::RuntimeRecord::read(&record_path)
-        .with_context(|| format!("read predecessor runtime record {}", record_path.display()))?;
-    let runtime_record = context.runtime_record();
-    let runtime_record = server::RuntimeRecordStore::new(record_path, runtime_record);
+    let record_path = context.daemon_record_file();
+    let previous = omnifs_workspace::daemon_record::DaemonRecord::read(&record_path)
+        .with_context(|| format!("read predecessor daemon record {}", record_path.display()))?;
+    let daemon_record = context.daemon_record();
+    let daemon_record = server::DaemonRecordStore::new(record_path, daemon_record);
     let daemon = Arc::new(server::Daemon::new(
         context,
         Arc::clone(&registry),
         inspector,
-        Arc::clone(&runtime_record),
+        Arc::clone(&daemon_record),
     ));
     // Build the one shared namespace after atomic startup loading, so its root
     // record reflects the complete mount set.
@@ -110,11 +109,7 @@ pub(crate) async fn run(args: &DaemonArgs) -> anyhow::Result<()> {
     daemon.set_namespace(Arc::clone(&namespace));
     let result = daemon.run(previous).await;
     let served_mounts = registry.runtime_entries().len();
-    telemetry.daemon_event(
-        DaemonEvent::FrontendStopped,
-        telemetry_backend,
-        served_mounts,
-    );
-    telemetry.daemon_event(DaemonEvent::DaemonStop, telemetry_backend, served_mounts);
+    telemetry.daemon_event(DaemonEvent::FrontendStopped, served_mounts);
+    telemetry.daemon_event(DaemonEvent::DaemonStop, served_mounts);
     result
 }

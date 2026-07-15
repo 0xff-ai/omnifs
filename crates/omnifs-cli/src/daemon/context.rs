@@ -4,13 +4,13 @@ use anyhow::Context as _;
 
 use super::app::DaemonArgs;
 use omnifs_api::{
-    CredentialHealth, DaemonBackend, DaemonHealth, DaemonStatus, DaemonSubsystem, FrontendInfo,
-    HealthState, MountInfo, SubsystemHealth,
+    CredentialHealth, DaemonHealth, DaemonStatus, DaemonSubsystem, FrontendInfo, HealthState,
+    MountInfo, SubsystemHealth,
 };
 use omnifs_engine::HostContext;
+use omnifs_workspace::daemon_record::{DaemonRecord, Endpoint};
 use omnifs_workspace::layout::{Daemon, Workspace, WorkspaceLayout};
 use omnifs_workspace::mounts::Revision;
-use omnifs_workspace::runtime_record::{Endpoint, RecordedBackend, RuntimeRecord};
 use std::fmt::Write as _;
 use std::os::unix::fs::{FileTypeExt as _, PermissionsExt as _};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 pub(crate) struct DaemonContext {
     layout: WorkspaceLayout,
     mount_revision: Revision,
-    /// Random per-start id reported in status and written to the runtime record.
+    /// Random per-start id reported in status and written to the daemon record.
     instance_id: String,
     /// `--attach-tcp <port>`: bind a TCP namespace attach listener eagerly at
     /// start (`0` = ephemeral). `None` when the flag was not passed; a TCP
@@ -66,8 +66,8 @@ impl DaemonContext {
         self.layout.control_socket()
     }
 
-    pub(crate) fn runtime_record_file(&self) -> PathBuf {
-        self.layout.runtime_record_file()
+    pub(crate) fn daemon_record_file(&self) -> PathBuf {
+        self.layout.daemon_record_file()
     }
 
     pub(crate) fn vsock_attach_socket(&self) -> PathBuf {
@@ -152,16 +152,14 @@ impl DaemonContext {
         Ok(())
     }
 
-    /// Assemble the initial runtime record for a host-native daemon.
-    pub(crate) fn runtime_record(&self) -> RuntimeRecord {
-        RuntimeRecord::new(
+    /// Assemble the initial daemon record for a host-native daemon.
+    pub(crate) fn daemon_record(&self) -> DaemonRecord {
+        DaemonRecord::new(
             self.mount_revision.clone(),
             Endpoint::Unix {
                 path: self.control_socket(),
             },
-            RecordedBackend::Native {
-                pid: self.process.pid,
-            },
+            self.process.pid,
             self.instance_id.clone(),
         )
     }
@@ -183,7 +181,7 @@ impl DaemonContext {
         &self.layout.config_dir
     }
 
-    /// This daemon start's instance id, reported in status, the runtime record,
+    /// This daemon start's instance id, reported in status, the daemon record,
     /// and the Omnifs VFS wire protocol handshake.
     pub(crate) fn instance_id(&self) -> &str {
         &self.instance_id
@@ -212,9 +210,6 @@ impl DaemonContext {
             cache_dir: self.layout.cache_dir.clone(),
             providers_dir: self.layout.providers_dir.clone(),
             frontends,
-            backend: DaemonBackend::Native {
-                pid: self.process.pid,
-            },
             mounts,
             health,
         }
@@ -235,11 +230,6 @@ impl DaemonContext {
                     self.layout.control_socket().display()
                 ),
             ),
-            SubsystemHealth::new(
-                DaemonSubsystem::Backend,
-                HealthState::Healthy,
-                format!("native daemon pid {}", self.process.pid),
-            ),
             Self::frontend_health(attach_serving, frontends),
             mount_health(mounts),
         ])
@@ -255,7 +245,7 @@ impl DaemonContext {
                 "attached {} at {} via {}",
                 frontend.fs_type,
                 frontend.mount_point.display(),
-                frontend.delivery
+                frontend.runtime
             )
         }));
         let listed = listed.join(", ");

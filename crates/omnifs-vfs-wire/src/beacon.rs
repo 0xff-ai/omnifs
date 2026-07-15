@@ -1,10 +1,10 @@
-//! The krunkit readiness beacon.
+//! The libkrun readiness beacon.
 //!
-//! The krunkit guest's FUSE frontend runner has no way to observe its own mount
+//! The libkrun guest's FUSE frontend runner has no way to observe its own mount
 //! from outside the guest, so once its mount is live it dials host vsock on a
 //! well-known port and writes a single `ready\n` line; the invocation-scoped
-//! Krunkit launch lease accepts that beacon before publishing launch success
-//! (`crates/omnifs-cli/src/krunkit_backend.rs`). Non-fatal end to end: the FUSE
+//! Libkrun launch lease accepts that beacon before publishing launch success
+//! (`crates/omnifs-cli/src/libkrun_runner.rs`). Non-fatal end to end: the FUSE
 //! mount is served either way, so a timed-out wait or a failed dial only logs
 //! a warning.
 
@@ -40,13 +40,13 @@ pub enum ReadyPortError {
         #[source]
         source: std::num::ParseIntError,
     },
-    #[error("{env} is set but vsock is only available on Linux (the krunkit guest)")]
+    #[error("{env} is set but vsock is only available on Linux (the libkrun guest)")]
     UnsupportedPlatform { env: &'static str },
 }
 
-/// Parse `OMNIFS_READY_VSOCK_PORT` if set (only the krunkit guest's seed sets
+/// Parse `OMNIFS_READY_VSOCK_PORT` if set (only the libkrun guest's seed sets
 /// it). Absence is valid for every other runner, but presence on a non-Linux
-/// target is an error: only the Linux krunkit guest can dial vsock.
+/// target is an error: only the Linux libkrun guest can dial vsock.
 pub fn resolve_ready_vsock_port() -> Result<Option<u32>, ReadyPortError> {
     ready_vsock_port_from_env(std::env::var(omnifs_api::OMNIFS_READY_VSOCK_PORT_ENV).ok())
 }
@@ -76,7 +76,7 @@ fn ready_vsock_port_from_env(value: Option<String>) -> Result<Option<u32>, Ready
     }
 }
 
-/// Spawn the krunkit readiness beacon: wait for `mount_point` to become a
+/// Spawn the libkrun readiness beacon: wait for `mount_point` to become a
 /// live mount, then dial host vsock on `port` and write a single `ready\n`
 /// line.
 #[cfg(target_os = "linux")]
@@ -90,8 +90,8 @@ pub fn spawn_ready_signal(rt: &Handle, mount_point: PathBuf, port: u32) {
             return;
         }
         match signal_guest_ready(port).await {
-            Ok(()) => info!(port, "sent the krunkit readiness signal"),
-            Err(error) => warn!(%error, port, "failed to send the krunkit readiness signal"),
+            Ok(()) => info!(port, "sent the libkrun readiness signal"),
+            Err(error) => warn!(%error, port, "failed to send the libkrun readiness signal"),
         }
     });
 }

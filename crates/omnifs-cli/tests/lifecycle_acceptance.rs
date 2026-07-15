@@ -81,7 +81,7 @@ impl Fixture {
         self.home_path().join("mounts")
     }
 
-    fn runtime_record_path(&self) -> PathBuf {
+    fn daemon_record_path(&self) -> PathBuf {
         self.home_path().join("daemon.json")
     }
 
@@ -139,7 +139,7 @@ impl Fixture {
             String::from_utf8_lossy(&out.stderr),
         );
 
-        // Record daemon PID from the runtime record so Drop can kill it.
+        // Record daemon PID from the daemon record so Drop can kill it.
         self.update_pid_from_record();
 
         // Frontends are independent of daemon startup. Enable the host
@@ -155,7 +155,7 @@ impl Fixture {
             "frontend",
             "enable",
             filesystem,
-            "--environment",
+            "--runtime",
             "host",
             "--location",
             &location,
@@ -187,13 +187,13 @@ impl Fixture {
         }
     }
 
-    /// Update the stored daemon PID by reading the runtime record. Best-effort.
+    /// Update the stored daemon PID by reading the daemon record. Best-effort.
     /// A native record carries the pid flat at the top level.
     fn update_pid_from_record(&mut self) {
         self.daemon_pid = recorded_pid(self.home_path());
     }
 
-    /// Force-kill the daemon PID recorded in the runtime record, if present.
+    /// Force-kill the daemon PID recorded in the daemon record, if present.
     fn kill_daemon_from_record(&self) {
         if let Some(pid) = recorded_pid(self.home_path()) {
             // SIGKILL so it cannot clean up voluntarily.
@@ -213,7 +213,7 @@ impl Drop for Fixture {
         if let Some(pid) = self.daemon_pid {
             let _ = Command::new("kill").args(["-9", &pid.to_string()]).output();
         }
-        // Also try the runtime record in case we didn't capture the PID yet.
+        // Also try the daemon record in case we didn't capture the PID yet.
         self.kill_daemon_from_record();
         // Force-unmount.
         force_unmount(&self.mount_point);
@@ -238,9 +238,8 @@ fn scenario_1_status_nothing_running() {
     let json: serde_json::Value =
         serde_json::from_slice(&out.stdout).expect("status --output json must produce valid JSON");
     assert_eq!(
-        json["result"]["workspace"]["daemon"].as_str().unwrap_or(""),
-        "stopped",
-        "workspace.daemon must be 'stopped' when no daemon is up; got:\n{json:#}"
+        json["result"]["daemon"]["probe"]["state"], "stopped",
+        "result.daemon.probe.state must be 'stopped' when no daemon is up; got:\n{json:#}"
     );
 }
 
@@ -321,9 +320,9 @@ fn scenarios_3_to_6_lifecycle_cycle() {
         "test/hello/message content mismatch"
     );
 
-    // The runtime record exists.
+    // The daemon record exists.
     assert!(
-        fixture.runtime_record_path().exists(),
+        fixture.daemon_record_path().exists(),
         "daemon.json must exist after `omnifs up`"
     );
 
@@ -341,9 +340,8 @@ fn scenarios_3_to_6_lifecycle_cycle() {
         serde_json::from_slice(&out.stdout).expect("status --output json must produce valid JSON");
 
     assert_eq!(
-        json["result"]["workspace"]["daemon"].as_str().unwrap_or(""),
-        "running",
-        "workspace.daemon must be 'running'; got:\n{json:#}"
+        json["result"]["daemon"]["probe"]["state"], "running",
+        "result.daemon.probe.state must be 'running'; got:\n{json:#}"
     );
 
     // The `test` mount is loaded.
@@ -355,18 +353,14 @@ fn scenarios_3_to_6_lifecycle_cycle() {
         "result.mounts must include 'test'; got: {mounts:?}"
     );
 
-    // Verify backend is native through the daemon's typed local control socket.
+    // Verify the daemon reports its live PID through the typed local control socket.
     let control_socket = fixture.home_path().join("control.sock");
     let status = control_request(&control_socket, ControlOperation::Status)
         .expect("daemon status control reply");
     let ControlOutcome::Status(status) = status.outcome else {
         panic!("daemon status request returned an unexpected reply");
     };
-    assert!(
-        matches!(&status.backend, omnifs_api::DaemonBackend::Native { pid } if *pid == status.pid),
-        "daemon backend must be native"
-    );
-    assert!(status.pid > 0, "daemon backend must report its pid");
+    assert!(status.pid > 0, "daemon status must report its pid");
 
     // Applying the same revision is a no-op and retains the daemon process.
     let original_pid = recorded_pid(fixture.home_path()).expect("running daemon pid");
@@ -406,7 +400,7 @@ fn scenarios_3_to_6_lifecycle_cycle() {
     let immediate_json: serde_json::Value = serde_json::from_slice(&immediate_status.stdout)
         .expect("immediate status --output json must produce valid JSON");
     assert_eq!(
-        immediate_json["result"]["workspace"]["daemon"], "stopped",
+        immediate_json["result"]["daemon"]["probe"]["state"], "stopped",
         "status immediately after down must report stopped: {immediate_json:#}"
     );
 
@@ -423,7 +417,7 @@ fn scenarios_3_to_6_lifecycle_cycle() {
     assert!(
         frontend.iter().any(|entry| {
             entry["filesystem"].as_str() == Some(filesystem)
-                && entry["environment"].as_str() == Some("host")
+                && entry["runtime"].as_str() == Some("host")
                 && entry["location"].as_str() == Some(mount_location.as_str())
                 && entry["state"].as_str() == Some("running")
         }),
@@ -442,7 +436,7 @@ fn scenarios_3_to_6_lifecycle_cycle() {
         "frontend",
         "disable",
         filesystem,
-        "--environment",
+        "--runtime",
         "host",
         "--location",
         &location,
@@ -489,15 +483,15 @@ fn scenarios_3_to_6_lifecycle_cycle() {
     assert!(
         !remaining_frontends.iter().any(|entry| {
             entry["filesystem"].as_str() == Some(filesystem)
-                && entry["environment"].as_str() == Some("host")
+                && entry["runtime"].as_str() == Some("host")
                 && entry["location"].as_str() == Some(location.as_str())
         }),
         "frontend disable must remove the exact host frontend observation: {remaining_frontends:?}"
     );
 
-    // The runtime record is removed.
+    // The daemon record is removed.
     assert!(
-        !fixture.runtime_record_path().exists(),
+        !fixture.daemon_record_path().exists(),
         "daemon.json must be removed after `omnifs down`"
     );
 
@@ -530,7 +524,7 @@ fn scenarios_3_to_6_lifecycle_cycle() {
 
 // Recovery from a dead daemon.
 
-/// No daemon answers the control socket; `down` falls back to the runtime record
+/// No daemon answers the control socket; `down` falls back to the daemon record
 /// to identify the backend, reclaims, and removes the record, without hanging.
 ///
 /// Uses a synthetic record (dead pid, no live mount) so the test never strands a
@@ -550,22 +544,22 @@ fn scenario_7_dead_daemon_record_fallback() {
     // not actually mounted. No control listener answers, so `down` takes the
     // record-fallback path and liveness-checks the dead pid before sweeping.
     let record = format!(
-        r#"{{"version":3,"mount_revision":"0000000000000000000000000000000000000000","endpoint":{{"kind":"unix","path":"{}"}},"backend":"native","pid":2000000,"instance_id":"deadbeefdeadbeef","frontends":[],"started_at":"2026-07-07T00:00:00Z"}}"#,
+        r#"{{"version":4,"mount_revision":"0000000000000000000000000000000000000000","endpoint":{{"kind":"unix","path":"{}"}},"pid":2000000,"instance_id":"deadbeefdeadbeef","started_at":"2026-07-07T00:00:00Z","attach":[]}}"#,
         fixture.home_path().join("control.sock").display(),
     );
-    std::fs::write(fixture.runtime_record_path(), record).expect("write synthetic runtime record");
+    std::fs::write(fixture.daemon_record_path(), record).expect("write synthetic daemon record");
 
     let out = fixture.run(&["down"]);
     assert!(
         out.status.success(),
-        "omnifs down must consume a stale runtime record and exit 0 (exit {})\nstdout: {}\nstderr: {}",
+        "omnifs down must consume a stale daemon record and exit 0 (exit {})\nstdout: {}\nstderr: {}",
         out.status,
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr),
     );
     assert!(
-        !fixture.runtime_record_path().exists(),
-        "down must remove the runtime record after reclaiming a dead daemon"
+        !fixture.daemon_record_path().exists(),
+        "down must remove the daemon record after reclaiming a dead daemon"
     );
 }
 
@@ -596,10 +590,9 @@ fn scenario_8_revision_restart_and_preflight_failure() {
         String::from_utf8_lossy(&out.stderr),
     );
     fixture.update_pid_from_record();
-    let first =
-        omnifs_workspace::runtime_record::RuntimeRecord::read(&fixture.runtime_record_path())
-            .expect("read initial runtime record")
-            .expect("initial runtime record");
+    let first = omnifs_workspace::daemon_record::DaemonRecord::read(&fixture.daemon_record_path())
+        .expect("read initial daemon record")
+        .expect("initial daemon record");
 
     fixture.write_other_spec();
     let out = fixture.run(&["apply"]);
@@ -611,12 +604,11 @@ fn scenario_8_revision_restart_and_preflight_failure() {
         String::from_utf8_lossy(&out.stderr),
     );
     fixture.update_pid_from_record();
-    let second =
-        omnifs_workspace::runtime_record::RuntimeRecord::read(&fixture.runtime_record_path())
-            .expect("read changed runtime record")
-            .expect("changed runtime record");
+    let second = omnifs_workspace::daemon_record::DaemonRecord::read(&fixture.daemon_record_path())
+        .expect("read changed daemon record")
+        .expect("changed daemon record");
     assert_ne!(
-        first.backend, second.backend,
+        first.pid, second.pid,
         "changed revision must restart the daemon"
     );
     assert_ne!(
@@ -640,11 +632,11 @@ fn scenario_8_revision_restart_and_preflight_failure() {
         "malformed desired state must reject up"
     );
     let after_failure =
-        omnifs_workspace::runtime_record::RuntimeRecord::read(&fixture.runtime_record_path())
-            .expect("read runtime record after rejected apply")
+        omnifs_workspace::daemon_record::DaemonRecord::read(&fixture.daemon_record_path())
+            .expect("read daemon record after rejected apply")
             .expect("healthy daemon must remain recorded after rejected apply");
     assert_eq!(
-        after_failure.backend, second.backend,
+        after_failure.pid, second.pid,
         "preflight failure must not stop the healthy daemon"
     );
     assert_eq!(

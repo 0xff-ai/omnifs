@@ -11,8 +11,8 @@ just dev            # build providers and the CLI, start the native daemon, atta
 target/debug/omnifs status                     # host-native: runs directly, no docker exec needed
 FRONTEND=$(docker ps --filter label=ai.0xff.omnifs.home="$HOME/.omnifs-dev" --format '{{.Names}}')
 docker exec -it -w /omnifs "$FRONTEND" /bin/sh # reattach to the browsing shell
-target/debug/omnifs frontend disable fuse --environment docker # stop the Docker runner
-target/debug/omnifs frontend disable fuse --environment host --location "$HOME/.omnifs-dev/mnt" # stop the host runner
+target/debug/omnifs frontend disable fuse --runtime docker # stop the Docker runner
+target/debug/omnifs frontend disable fuse --runtime host --location "$HOME/.omnifs-dev/mnt" # stop the host runner
 target/debug/omnifs down                       # stop the daemon
 ```
 
@@ -75,7 +75,7 @@ When a repo path returns `Input/output error`, check:
 
 1. `tail -n 80 ~/.omnifs-dev/cache/daemon.log`
 2. SSH auth on the host (the daemon runs host-native, not in a container)
-3. whether the mount is still present (`mount | grep omnifs` on Linux; the daemon's own runtime record on macOS)
+3. whether the mount is still present (`mount | grep omnifs` on Linux; the daemon's own daemon record on macOS)
 
 When debugging hangs or slow paths, start with user-visible probes before theory:
 

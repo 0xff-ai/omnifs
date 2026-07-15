@@ -6,10 +6,10 @@
 pub mod authn;
 pub mod config;
 pub mod creds;
+pub mod daemon_record;
 pub mod ids;
 mod io;
 pub mod layout;
 pub mod mounts;
 pub mod provider;
-pub mod runtime_record;
 pub mod telemetry;

@@ -35,10 +35,10 @@ cleanup() {
     tail -n 200 "$OMNIFS_HOME/cache/daemon.log" >&2 || true
   fi
   local frontend
-  "$OMNIFS_CLI" frontend disable fuse --environment docker >/dev/null 2>&1 || true
+  "$OMNIFS_CLI" frontend disable fuse --runtime docker >/dev/null 2>&1 || true
   frontend="$(docker ps --filter "label=ai.0xff.omnifs.home=$OMNIFS_HOME" --format '{{.Names}}' 2>/dev/null || true)"
   [[ -n "$frontend" ]] && docker rm -f "$frontend" >/dev/null 2>&1
-  "$OMNIFS_CLI" frontend disable fuse --environment host --location "$OMNIFS_HOME/mnt" >/dev/null 2>&1 || true
+  "$OMNIFS_CLI" frontend disable fuse --runtime host --location "$OMNIFS_HOME/mnt" >/dev/null 2>&1 || true
   "$OMNIFS_CLI" down >/dev/null 2>&1 || true
   rm -rf "$OMNIFS_HOME"
 }
@@ -73,7 +73,7 @@ else
 fi
 status_json="$("$OMNIFS_CLI" status --output json)"
 mount_point="$(jq -er --arg filesystem "$host_filesystem" \
-  '.result.frontends[] | select(.environment == "host" and .filesystem == $filesystem) | .location' \
+  '.result.frontends[] | select(.runtime == "host" and .filesystem == $filesystem) | .location' \
   <<<"$status_json" | head -n 1)"
 test -n "$mount_point" && test "$mount_point" != "null"
 read_first_open_issue_title "$mount_point/github"

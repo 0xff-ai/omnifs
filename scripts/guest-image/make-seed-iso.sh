@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Build a per-launch attach-parameter seed ISO for the krunkit guest image.
+# Build a per-launch attach-parameter seed ISO for the libkrun guest image.
 #
 # Plain config-drive, not cloud-init and not NoCloud: an ISO9660+Joliet volume
 # labeled OMNIFS-SEED containing one KEY=VALUE file the guest's
 # omnifs-frontend.service reads via systemd's EnvironmentFile=. macOS builds
-# it with the native hdiutil (no mkisofs/xorriso dependency); a krunkit launch
+# it with the native hdiutil (no mkisofs/xorriso dependency); a libkrun launch
 # regenerates it fresh every time, since the attach token is per-instance.
 #
 # Usage: make-seed-iso.sh --out PATH --attach-addr HOST:PORT --attach-token
@@ -63,7 +63,7 @@ trap 'rm -rf "$staging"' EXIT
 # EnvironmentFile= format (systemd.exec(5)): KEY=VALUE lines, no quoting.
 # OMNIFS_ATTACH_ADDR / OMNIFS_ATTACH_TOKEN are the same env vars the Docker
 # frontend launcher injects (crates/omnifs-api/src/lib.rs), addressed as
-# `vsock:<port>` instead of `host:port` for the krunkit transport
+# `vsock:<port>` instead of `host:port` for the libkrun runtime
 # (docs/contracts/40-frontends.md). OMNIFS_READY_VSOCK_PORT is the port the
 # runner dials on host CID to signal the FUSE mount is serving
 # (crates/omnifs-vfs-wire/src/beacon.rs). OMNIFS_SSH_PUBKEY, when given, is

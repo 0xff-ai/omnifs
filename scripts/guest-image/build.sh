@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the arm64 krunkit guest with containerized mkosi. By default the script
+# Build the arm64 libkrun guest with containerized mkosi. By default the script
 # extracts `omnifs-thin` from Dockerfile's shared `thin-builder`; CI supplies
 # the already-built binary through OMNIFS_THIN_BIN. The dev profile is local
 # and autologins on the console, while the published release profile does not.

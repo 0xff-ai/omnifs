@@ -10,7 +10,7 @@ use crate::ui::output::Output;
 use crate::workspace::Workspace;
 
 /// The inspector's connection label for a live daemon. The daemon always runs
-/// host-native and is addressed through the workspace's runtime record, so
+/// host-native and is addressed through the workspace's daemon record, so
 /// there is no container identity to display here.
 const LIVE_LABEL: &str = "daemon";
 

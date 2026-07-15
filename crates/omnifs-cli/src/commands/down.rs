@@ -3,7 +3,7 @@
 //! Resolution order:
 //!   1. Probe the control endpoint: if a live daemon answers, trust
 //!      `DaemonStatus.backend` to identify the backend.
-//!   2. Fall back to the runtime record: if the daemon is dead, the record
+//!   2. Fall back to the daemon record: if the daemon is dead, the record
 //!      says what was started.
 //!   3. If neither applies, nothing is running.
 //!

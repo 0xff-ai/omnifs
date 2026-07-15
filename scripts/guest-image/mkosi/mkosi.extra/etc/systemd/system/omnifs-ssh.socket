@@ -1,5 +1,5 @@
 [Unit]
-Description=omnifs krunkit guest ssh (vsock)
+Description=omnifs libkrun guest ssh (vsock)
 
 # Deliberately not enabled (no sockets.target.wants symlink): omnifs-ssh-setup.service
 # starts this on demand, only once the seed's OMNIFS_SSH_PUBKEY has been

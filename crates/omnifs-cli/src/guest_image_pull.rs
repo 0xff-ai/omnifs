@@ -1,4 +1,4 @@
-//! Pulls the krunkit guest disk image from its ghcr OCI artifact and caches
+//! Pulls the libkrun guest disk image from its ghcr OCI artifact and caches
 //! it locally: anonymous token, manifest, single blob, sha256 verification,
 //! and decompress-once. Only the release channel reaches this module; the dev
 //! channel uses a local path and never downloads.
@@ -104,7 +104,7 @@ struct TokenResponse {
 /// Ensure the release-channel guest image named by `image` is present as a
 /// decompressed local `.raw` file under `cache_dir`, pulling and caching it
 /// on first use. Returns the local path a launch can hand straight to
-/// krunkit.
+/// libkrun.
 pub(crate) async fn ensure_guest_image(
     image: &ImageRef,
     cache_dir: &Path,

@@ -1,10 +1,6 @@
-//! Host-native daemon launch and the naming types used by the Docker frontend.
+//! Docker target types and process-role naming used by frontend lifecycle code.
 //!
 use std::fmt;
-use std::path::Path;
-
-use anyhow::Context as _;
-use anyhow::Result;
 
 /// Whether this binary was produced by the release packaging lane
 /// (`OMNIFS_RELEASE` set at compile time) or a local/dev build. Release
@@ -62,21 +58,21 @@ pub(crate) const GUEST_MOUNT: &str = "/omnifs";
 
 /// How the omnifs process is running, which sets its default tracing level.
 #[derive(Clone, Copy)]
-pub(crate) enum RunMode {
+pub(crate) enum ProcessRole {
     /// A foreground CLI invocation: stays quiet so ordinary commands are not
     /// noisy.
-    Foreground,
+    Cli,
     /// A background daemon the CLI spawned: defaults louder so its startup
     /// diagnostics are captured in daemon.log rather than hidden.
-    Spawned,
+    Daemon,
 }
 
-impl RunMode {
+impl ProcessRole {
     /// The default `RUST_LOG` level for this run mode.
     pub(crate) const fn default_log_level(self) -> &'static str {
         match self {
-            Self::Foreground => "warn",
-            Self::Spawned => "info",
+            Self::Cli => "warn",
+            Self::Daemon => "info",
         }
     }
 }
@@ -187,136 +183,6 @@ impl DockerTarget {
     pub(crate) fn image(&self) -> &ImageRef {
         &self.image
     }
-}
-
-// --- Native launch -----------------------------------------------------------
-
-pub(crate) async fn launch_native(
-    paths: &omnifs_workspace::layout::WorkspaceLayout,
-    telemetry_enabled: bool,
-    mount_revision: &omnifs_workspace::mounts::Revision,
-    mount_snapshot: &std::path::Path,
-) -> Result<()> {
-    use std::process::Stdio;
-    use std::time::Duration;
-
-    use tokio::process::Command;
-
-    use crate::client::DaemonClient;
-
-    let cache_dir = &paths.cache_dir;
-    std::fs::create_dir_all(cache_dir)
-        .with_context(|| format!("create cache dir {}", cache_dir.display()))?;
-
-    let binary = std::env::current_exe().context("resolve the omnifs executable")?;
-    let log_path = cache_dir.join("daemon.log");
-    let log = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
-        .with_context(|| format!("open daemon log {}", log_path.display()))?;
-    let log_err = log
-        .try_clone()
-        .with_context(|| format!("clone daemon log handle {}", log_path.display()))?;
-
-    let mut command = Command::new(&binary);
-    command
-        .arg("daemon")
-        .arg("--mount-revision")
-        .arg(mount_revision.to_string())
-        .arg("--mount-snapshot")
-        .arg(mount_snapshot);
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(log))
-        .stderr(Stdio::from(log_err));
-
-    // Default the spawned daemon's log level when the user has not set
-    // RUST_LOG. The CLI's own foreground tracing is quieter, which would
-    // otherwise hide the daemon's startup diagnostics in daemon.log.
-    if std::env::var_os("RUST_LOG").is_none() {
-        command.env("RUST_LOG", RunMode::Spawned.default_log_level());
-    }
-
-    // Carry the telemetry off-switch into the daemon child. Only set it when
-    // disabled: an unset `OMNIFS_TELEMETRY` reads as enabled.
-    if !telemetry_enabled {
-        command.env(omnifs_workspace::telemetry::ENV_SWITCH, "0");
-    }
-
-    // Own process group so the daemon is not signalled when the CLI or its
-    // shell exits.
-    #[cfg(unix)]
-    command.process_group(0);
-
-    let mut child = command
-        .spawn()
-        .with_context(|| format!("spawn omnifs daemon ({})", binary.display()))?;
-
-    // Poll readiness at a 100ms cadence (snappy startup) for up to 30s; fail
-    // fast if the child exits first. The client resolves through the runtime
-    // record the daemon writes on start, so `for_layout` sees the daemon the
-    // moment it publishes its record.
-    let child_pid = child.id();
-    let client = DaemonClient::for_layout(paths);
-    for _ in 0..300 {
-        if let Some(status) = child.try_wait().context("poll daemon child status")? {
-            let cause = log_cause_suffix(&log_path);
-            anyhow::bail!(
-                "omnifs daemon exited before the mount became ready ({status}){cause}; run `omnifs logs` for the full daemon log"
-            );
-        }
-        if client.ready().await {
-            if let Some(pid) = child_pid {
-                match client.status().await {
-                    Ok(status) if status.pid == pid => {
-                        // Confirmed our daemon; drop the handle (kill_on_drop
-                        // is false) to detach it.
-                        drop(child);
-                        return Ok(());
-                    },
-                    Ok(status) => {
-                        let _ = child.kill().await;
-                        anyhow::bail!(
-                            "daemon readiness came from pid {}, not spawned pid {pid}; \
-                             another omnifs daemon is already serving",
-                            status.pid
-                        );
-                    },
-                    // A transient status error during our own startup: keep
-                    // polling until ready or the timeout.
-                    Err(_) => {},
-                }
-            } else {
-                drop(child);
-                return Ok(());
-            }
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    let cause = log_cause_suffix(&log_path);
-    let _ = child.kill().await;
-    anyhow::bail!(
-        "omnifs daemon did not become ready within 30s{cause}; run `omnifs logs` for the full daemon log"
-    )
-}
-
-/// The daemon's last non-empty log line, which is almost always its fatal
-/// error (a startup crash writes the cause last). Surfacing that one line keeps
-/// the failure legible; `omnifs logs` shows the rest. Dumping the whole tail
-/// buried the cause under repeated warnings.
-fn last_log_line(log_path: &Path) -> Option<String> {
-    let contents = std::fs::read_to_string(log_path).ok()?;
-    contents
-        .lines()
-        .rev()
-        .find(|line| !line.trim().is_empty())
-        .map(str::to_owned)
-}
-
-/// Format the daemon's fatal line as a `: cause` suffix, or nothing.
-fn log_cause_suffix(log_path: &Path) -> String {
-    last_log_line(log_path).map_or_else(String::new, |line| format!(": {line}"))
 }
 
 #[cfg(test)]
