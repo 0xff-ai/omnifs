@@ -32,6 +32,8 @@ use common::{
 };
 use omnifs_api::{ControlOperation, ControlOutcome};
 use omnifs_itest::live::control_request;
+use omnifs_mtab::MountState;
+use omnifs_workspace::layout::WorkspaceLayout;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -205,6 +207,28 @@ impl Fixture {
     fn mount_is_active(&self) -> bool {
         omnifs_nfs::mount_is_active(&self.mount_point)
     }
+
+    fn host_frontend_states(&self) -> Vec<MountState> {
+        MountState::files_under(
+            &WorkspaceLayout::under_root(self.home_path()).frontend_state_root(),
+        )
+        .expect("read frontend state files")
+        .into_iter()
+        .filter_map(|path| MountState::read_file(&path).ok())
+        .filter(|state| state.mount_point == self.mount_point)
+        .collect()
+    }
+
+    fn host_frontend_pid(&self) -> u32 {
+        let states = self.host_frontend_states();
+        assert_eq!(
+            states.len(),
+            1,
+            "expected one host frontend state for {}; got {states:?}",
+            self.mount_point.display()
+        );
+        states[0].pid
+    }
 }
 
 impl Drop for Fixture {
@@ -377,6 +401,52 @@ fn scenarios_3_to_6_lifecycle_cycle() {
         "applying the served revision must retain the daemon pid"
     );
 
+    // Exact host restarts must wait for the predecessor runner to exit before
+    // launching its replacement, or a detached NFS runner can survive forever
+    // after observing the replacement mount.
+    let restart_filesystem = if cfg!(target_os = "macos") {
+        "nfs"
+    } else {
+        "fuse"
+    };
+    let restart_location = fixture.mount_point.to_string_lossy().into_owned();
+    let mut predecessor_pid = fixture.host_frontend_pid();
+    for restart in 1..=2 {
+        let restarted = fixture.run(&[
+            "frontend",
+            "restart",
+            restart_filesystem,
+            "--runtime",
+            "host",
+            "--location",
+            &restart_location,
+        ]);
+        assert!(
+            restarted.status.success(),
+            "exact host restart {restart} must succeed\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&restarted.stdout),
+            String::from_utf8_lossy(&restarted.stderr),
+        );
+        let replacement_pid = fixture.host_frontend_pid();
+        assert_ne!(
+            replacement_pid, predecessor_pid,
+            "exact host restart {restart} must publish a new runner PID"
+        );
+        assert!(
+            !pid_is_alive(predecessor_pid),
+            "predecessor runner PID {predecessor_pid} must be dead when exact host restart {restart} returns"
+        );
+        assert!(
+            pid_is_alive(replacement_pid),
+            "replacement runner PID {replacement_pid} must be alive when exact host restart {restart} returns"
+        );
+        assert!(
+            fixture.mount_is_active(),
+            "mount must remain active after exact host restart {restart}"
+        );
+        predecessor_pid = replacement_pid;
+    }
+
     // Shutdown stops only the daemon; the independent host frontend and its
     // mount remain available while the daemon is down.
     let out = fixture.run(&["down"]);
@@ -432,6 +502,7 @@ fn scenarios_3_to_6_lifecycle_cycle() {
     // Disable the exact host frontend while the daemon is stopped, then wait
     // for its mount and runner observation to disappear.
     let location = fixture.mount_point.to_string_lossy().into_owned();
+    let final_runner_pid = fixture.host_frontend_pid();
     let disabled = fixture.run(&[
         "frontend",
         "disable",
@@ -466,6 +537,14 @@ fn scenarios_3_to_6_lifecycle_cycle() {
         settled,
         "mount point {} must be gone from the mount table after frontend disable",
         fixture.mount_point.display()
+    );
+    assert!(
+        !pid_is_alive(final_runner_pid),
+        "final host runner PID {final_runner_pid} must be dead after frontend disable"
+    );
+    assert!(
+        fixture.host_frontend_states().is_empty(),
+        "frontend disable must remove the final host runner state"
     );
 
     let after_disable = fixture.run(&["status", "--output", "json"]);
@@ -520,6 +599,16 @@ fn scenarios_3_to_6_lifecycle_cycle() {
             "daemon pid {pid} must have exited within 5s after `omnifs down`"
         );
     }
+}
+
+fn pid_is_alive(pid: u32) -> bool {
+    Command::new("kill")
+        .arg("-0")
+        .arg(pid.to_string())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 // Recovery from a dead daemon.

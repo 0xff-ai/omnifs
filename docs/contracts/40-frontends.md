@@ -37,6 +37,8 @@ Disconnects and broadcast lag are represented by `NsEvent::InvalidateSubtree { p
 
 The public frontend identity is `(filesystem, runtime, location)`: filesystem is `fuse` or `nfs`; runtime is `host`, `docker`, or `libkrun`; location is caller-selected only for host frontends. `mount_point` remains a wire-level observation field. Public commands, tables, and help use filesystem, runtime, and location. `omnifs frontend enable`, `disable`, and `restart` own runner lifecycle; `ls` reports the Inventory observation join. Top-level `up`, `apply`, and `down` mutate only the daemon, so runners remain alive and reconnect across daemon restarts.
 
+For host runners, disable and restart preserve the matched state record's PID through unmount, mount-table disappearance, and state-record removal, then wait for that PID to exit before reporting success. If it remains alive within the bounded lifecycle wait, teardown fails and restart does not launch a replacement. Teardown never signals the PID because the v2 record cannot safely rule out PID reuse.
+
 ### Frontend runtime and runner ownership
 
 Frontend lifecycle commands own concrete host, Docker, and libkrun runners directly. Docker and libkrun use their own clients and process controllers, while protocol kind and attach transport remain separate facts.

@@ -1,12 +1,22 @@
 //! Local frontend teardown driven by runner-owned mount state.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use omnifs_mtab::{MountKind, MountState, Platform, UnmountCommand};
 
 const UNMOUNT_POLL_CADENCE: Duration = Duration::from_millis(500);
 const UNMOUNT_POLL_ATTEMPTS: usize = 12;
+
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "host frontend runner {pid} for {mount_point} remained alive after {attempts} checks; refusing to relaunch until it exits"
+)]
+struct RunnerStillAlive {
+    pid: u32,
+    mount_point: PathBuf,
+    attempts: usize,
+}
 
 pub(crate) fn local_mount_is_owned(state: &MountState) -> bool {
     match &state.kind {
@@ -42,43 +52,48 @@ pub(crate) fn teardown_local_frontend(
         if state.mount_point != root {
             continue;
         }
-        let is_nfs = matches!(state.kind, MountKind::Nfs { .. });
+        let is_nfs = matches!(&state.kind, MountKind::Nfs { .. });
         if is_nfs != nfs {
             continue;
         }
-        if !omnifs_nfs::mount_is_active(&state.mount_point) {
-            if let Some(error) = remove_state_file(&path) {
-                anyhow::bail!(error)
-            }
-            return Ok(());
-        }
-        if !local_mount_is_owned(&state) {
-            anyhow::bail!(
-                "could not unmount {}: mount is not owned by omnifs; refusing to unmount it",
-                state.mount_point.display()
-            );
-        }
         let mount_point = state.mount_point.clone();
-        let command = match state.kind {
-            MountKind::Nfs { .. } => {
-                UnmountCommand::nfs_graceful(Platform::current(), &mount_point)
-            },
-            MountKind::Fuse => UnmountCommand::graceful(Platform::current(), &mount_point),
-        };
-        command.run_quiet().map_err(|error| {
-            anyhow::anyhow!("could not unmount {}: {error}", mount_point.display())
-        })?;
-        if !poll_until_unmounted(&mount_point, UNMOUNT_POLL_CADENCE, UNMOUNT_POLL_ATTEMPTS) {
-            anyhow::bail!(
-                "could not unmount {}: mount remained active after waiting {} seconds",
-                mount_point.display(),
-                UNMOUNT_POLL_CADENCE
-                    .as_secs()
-                    .saturating_mul(UNMOUNT_POLL_ATTEMPTS as u64)
-            );
+        let pid = state.pid;
+        if omnifs_nfs::mount_is_active(&mount_point) {
+            if !local_mount_is_owned(&state) {
+                anyhow::bail!(
+                    "could not unmount {}: mount is not owned by omnifs; refusing to unmount it",
+                    mount_point.display()
+                );
+            }
+            let command = match &state.kind {
+                MountKind::Nfs { .. } => {
+                    UnmountCommand::nfs_graceful(Platform::current(), &mount_point)
+                },
+                MountKind::Fuse => UnmountCommand::graceful(Platform::current(), &mount_point),
+            };
+            command.run_quiet().map_err(|error| {
+                anyhow::anyhow!("could not unmount {}: {error}", mount_point.display())
+            })?;
+            if !poll_until_unmounted(&mount_point, UNMOUNT_POLL_CADENCE, UNMOUNT_POLL_ATTEMPTS) {
+                anyhow::bail!(
+                    "could not unmount {}: mount remained active after waiting {} seconds",
+                    mount_point.display(),
+                    UNMOUNT_POLL_CADENCE
+                        .as_secs()
+                        .saturating_mul(UNMOUNT_POLL_ATTEMPTS as u64)
+                );
+            }
         }
         if let Some(error) = remove_state_file(&path) {
             anyhow::bail!(error)
+        }
+        if !poll_until_runner_exited(pid, UNMOUNT_POLL_CADENCE, UNMOUNT_POLL_ATTEMPTS) {
+            return Err(RunnerStillAlive {
+                pid,
+                mount_point,
+                attempts: UNMOUNT_POLL_ATTEMPTS,
+            }
+            .into());
         }
         return Ok(());
     }
@@ -88,6 +103,18 @@ pub(crate) fn teardown_local_frontend(
 pub(crate) fn poll_until_unmounted(mount_point: &Path, cadence: Duration, attempts: usize) -> bool {
     for attempt in 0..attempts {
         if !omnifs_nfs::mount_is_active(mount_point) {
+            return true;
+        }
+        if attempt + 1 < attempts {
+            std::thread::sleep(cadence);
+        }
+    }
+    false
+}
+
+fn poll_until_runner_exited(pid: u32, cadence: Duration, attempts: usize) -> bool {
+    for attempt in 0..attempts {
+        if !crate::process::is_alive(pid) {
             return true;
         }
         if attempt + 1 < attempts {
