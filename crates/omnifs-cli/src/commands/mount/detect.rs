@@ -153,7 +153,12 @@ mod tests {
         unsafe {
             std::env::set_var("DETECT_TEST_ENV_VAR", "token-value");
         }
-        let manifest = manifest_with(vec![AmbientSource::env_var("DETECT_TEST_ENV_VAR")]);
+        let manifest = manifest_with(vec![AmbientSource {
+            kind: AmbientKind::EnvVar {
+                name: "DETECT_TEST_ENV_VAR".into(),
+            },
+            note: String::new(),
+        }]);
         let found = detect(Some(&manifest));
         assert!(
             found.iter().any(|d| matches!(
@@ -171,7 +176,12 @@ mod tests {
     #[test]
     fn detect_command_source() {
         let manifest = manifest_with(vec![
-            AmbientSource::command(["echo", "  command-token  "]).note("echo probe"),
+            AmbientSource {
+                kind: AmbientKind::Command {
+                    argv: vec!["echo".into(), "  command-token  ".into()],
+                },
+                note: "echo probe".into(),
+            },
         ]);
         let found = detect(Some(&manifest));
         let credential = found
@@ -187,7 +197,12 @@ mod tests {
 
     #[test]
     fn detect_command_source_times_out() {
-        let manifest = manifest_with(vec![AmbientSource::command(["sleep", "10"])]);
+        let manifest = manifest_with(vec![AmbientSource {
+            kind: AmbientKind::Command {
+                argv: vec!["sleep".into(), "10".into()],
+            },
+            note: String::new(),
+        }]);
         let start = Instant::now();
         let found = detect(Some(&manifest));
         assert!(found.is_empty());

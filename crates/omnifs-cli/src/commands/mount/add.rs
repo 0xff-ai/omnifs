@@ -396,9 +396,12 @@ mod tests {
                     inject_domains: vec![],
                     creation_url: None,
                     validation: None,
-                    ambient_sources: vec![omnifs_workspace::authn::AmbientSource::env_var(
-                        "LINEAR_API_KEY",
-                    )],
+                    ambient_sources: vec![omnifs_workspace::authn::AmbientSource {
+                        kind: omnifs_workspace::authn::AmbientKind::EnvVar {
+                            name: "LINEAR_API_KEY".into(),
+                        },
+                        note: String::new(),
+                    }],
                 }),
                 AuthScheme::Oauth(omnifs_workspace::authn::OauthScheme {
                     key: "oauth".to_string(),
@@ -476,9 +479,12 @@ mod tests {
                     inject_domains: vec![],
                     creation_url: None,
                     validation: None,
-                    ambient_sources: vec![omnifs_workspace::authn::AmbientSource::env_var(
-                        "LINEAR_API_KEY",
-                    )],
+                    ambient_sources: vec![omnifs_workspace::authn::AmbientSource {
+                        kind: omnifs_workspace::authn::AmbientKind::EnvVar {
+                            name: "LINEAR_API_KEY".into(),
+                        },
+                        note: String::new(),
+                    }],
                 },
             )],
         };
