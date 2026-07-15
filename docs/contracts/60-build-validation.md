@@ -41,7 +41,7 @@ Run `just check` before a push or PR handoff; it composes formatting, justfile a
 
 ### Cross-language facts on the container boundary
 
-The daemon always runs host-native, so `OMNIFS_HOME` and `OMNIFS_MOUNT_POINT` resolve directly from the host environment on every platform. Their name constants and the layout under the home have one owner: `omnifs_workspace::layout::WorkspaceLayout`. The only remaining guest-container path is the optional Docker-hosted FUSE frontend's fixed mount point, `/omnifs`. It is not env-var-driven (the frontend container is credential-free and gets no `OMNIFS_HOME`), so the literal is hardcoded at its owners instead: the frontend image's `ENTRYPOINT` (`Dockerfile`) and each host launcher that targets it (`crates/omnifs-cli/src/launch_backend.rs`'s `GUEST_MOUNT` for production, `scripts/dev.ts`'s `GUEST_MOUNT` for dev). The value is frozen; a change breaks `just dev` and the integration tests loudly.
+The daemon always runs host-native, so `OMNIFS_HOME` and `OMNIFS_MOUNT_POINT` resolve directly from the host environment on every platform. Their name constants and the layout under the home have one owner: `omnifs_workspace::layout::WorkspaceLayout`. The only remaining guest-container path is the optional Docker-hosted FUSE frontend's fixed mount point, `/omnifs`. It is not env-var-driven (the frontend container is credential-free and gets no `OMNIFS_HOME`), so the literal is hardcoded at its owners instead: the frontend image's `ENTRYPOINT` (`Dockerfile`), `commands::frontend::GUEST_MOUNT` for production launchers, and `scripts/dev.ts`'s `GUEST_MOUNT` for dev. The value is frozen; a change breaks `just dev` and the integration tests loudly.
 
 ### Frontend image artifact
 
