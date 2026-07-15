@@ -323,7 +323,7 @@ fn omnifs_export_positive_cache_evidence_beats_expected_negative_probe() {
             dirents.serialize().expect("dirents serialize"),
         );
         runtime
-            .cache()
+            .resources
             .cache_put(&p("/hello"), RecordKind::Dirents, None, &record);
 
         let id = export
@@ -362,7 +362,7 @@ fn omnifs_export_reads_inline_cached_projection_without_provider_file_route() {
         dirents.serialize().expect("dirents serialize"),
     );
     runtime
-        .cache()
+        .resources
         .cache_put(&p("/"), RecordKind::Dirents, None, &record);
 
     let inline = export
