@@ -102,11 +102,12 @@ Executor-specific child spans on the `omnifs_callout` target retain detailed,
 redacted request and response diagnostics for daemon logging. They do not emit
 a second Inspector lifecycle.
 
-`InspectorLayer` is the sole producer of the existing Inspector record stream.
+`InspectorLayer` is the sole producer of the existing Inspector line stream.
 It translates span open, record, event, and close callbacks into typed records,
-retains bounded history, and broadcasts live records to the typed local control
-protocol. JSON serialization happens only at the file tee or Inspector
-subscription boundary.
+retains bounded history, and broadcasts them to the typed local control
+protocol. `InspectorLine` is the sole newline unit across the daemon
+subscription, file tee, recording, replay, and plain output; its parser and
+serializer own the current JSONL schema at those boundaries.
 Dropping a future closes its span and produces one terminal internal outcome
 unless the operation recorded a more specific result first.
 

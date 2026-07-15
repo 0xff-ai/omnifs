@@ -214,6 +214,47 @@ fn daemon_required_command_exits_3_when_control_socket_is_unreachable() {
     assert!(stderr.contains("daemon not running"));
 }
 
+#[test]
+fn malformed_inspector_replay_is_a_line_numbered_failure() {
+    let fixture = Fixture::new();
+    let replay = fixture.home_path().join("replay.jsonl");
+    std::fs::write(
+        &replay,
+        "{\"type\":\"dropped\",\"value\":{\"count\":1}}\nnot json\n",
+    )
+    .expect("write malformed replay");
+    let output = fixture.run_owned(&[
+        "inspect".into(),
+        "--plain".into(),
+        "--replay".into(),
+        replay.to_string_lossy().into_owned(),
+    ]);
+
+    assert_eq!(exit_code(&output), 1, "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(&replay.display().to_string()), "{stderr}");
+    assert!(stderr.contains("line 2"), "{stderr}");
+    assert!(stderr.contains("invalid json"), "{stderr}");
+    assert!(output.stdout.is_empty());
+}
+
+#[test]
+fn plain_inspector_replay_preserves_canonical_jsonl() {
+    let fixture = Fixture::new();
+    let replay = fixture.home_path().join("replay.jsonl");
+    let contents = "{\"type\":\"dropped\",\"value\":{\"count\":1}}\n";
+    std::fs::write(&replay, contents).expect("write replay");
+    let output = fixture.run_owned(&[
+        "inspect".into(),
+        "--plain".into(),
+        "--replay".into(),
+        replay.to_string_lossy().into_owned(),
+    ]);
+
+    assert_eq!(exit_code(&output), 0, "{output:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), contents);
+}
+
 /// `omnifs up` validates every configured mount's host-managed credential
 /// before spawning the daemon (see `Launcher::launch`'s `preflight_mounts`),
 /// so a missing credential fails fast with exit code 4 and never reaches

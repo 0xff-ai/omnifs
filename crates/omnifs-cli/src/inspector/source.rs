@@ -1,7 +1,7 @@
 //! Event sources: replay file, live typed control-plane subscriber.
 
-use std::fs::File;
-use std::io::{BufRead, BufReader, Write};
+use std::fs::{File, OpenOptions};
+use std::io::{BufRead, BufReader, Lines, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
@@ -23,6 +23,8 @@ pub enum AttachOutcome {
     Unreachable,
     /// Connected and streamed until the daemon closed the response.
     Ended,
+    /// The connected stream produced an invalid or unreadable line.
+    Failed(String),
 }
 
 /// Blocking line-oriented client for the daemon's inspector subscription.
@@ -43,12 +45,11 @@ impl EventsClient {
     }
 
     /// Try to connect once. On success, call `on_connect`, then `on_line`
-    /// for every newline-framed record until the stream ends or `on_line`
-    /// returns an error (which propagates to the caller).
+    /// for every typed newline-framed line until the stream ends or fails.
     pub fn attach<E>(
         &self,
         on_connect: impl FnOnce(),
-        mut on_line: impl FnMut(&str) -> std::result::Result<(), E>,
+        mut on_line: impl FnMut(&InspectorLine) -> std::result::Result<(), E>,
     ) -> std::result::Result<AttachOutcome, E> {
         self.rt.block_on(async {
             match &self.endpoint {
@@ -86,25 +87,31 @@ impl EventsClient {
                     loop {
                         let line = match read_control_line(&mut stream).await {
                             Ok(line) => line,
-                            Err(_) => return Ok(AttachOutcome::Ended),
-                        };
-                        let envelope = match serde_json::from_slice::<InspectorLine>(&line) {
-                            Ok(envelope) => envelope,
-                            Err(_) => return Ok(AttachOutcome::Ended),
-                        };
-                        match envelope {
-                            InspectorLine::Record(record) => {
-                                let line = match serde_json::to_string(&record) {
-                                    Ok(line) => line,
-                                    Err(_) => return Ok(AttachOutcome::Ended),
-                                };
-                                on_line(&line)?;
+                            Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
+                                return Ok(AttachOutcome::Ended);
                             },
-                            InspectorLine::Dropped { count } => {
-                                let line = format!("# dropped {count} events");
-                                on_line(&line)?;
+                            Err(error) => {
+                                return Ok(AttachOutcome::Failed(format!(
+                                    "read inspector stream: {error}"
+                                )));
                             },
-                        }
+                        };
+                        let line = match std::str::from_utf8(&line) {
+                            Ok(line) => match InspectorLine::parse_line(line) {
+                                Ok(line) => line,
+                                Err(error) => {
+                                    return Ok(AttachOutcome::Failed(format!(
+                                        "parse inspector stream: {error}"
+                                    )));
+                                },
+                            },
+                            Err(error) => {
+                                return Ok(AttachOutcome::Failed(format!(
+                                    "parse inspector stream: line is not UTF-8: {error}"
+                                )));
+                            },
+                        };
+                        on_line(&line)?;
                     }
                 },
             }
@@ -115,23 +122,26 @@ impl EventsClient {
 pub enum SourceKind {
     Replay(PathBuf),
     /// Subscribe to the daemon's event stream. Optional `record` also
-    /// appends every line read to a host-side file.
+    /// appends every typed line read to a host-side file.
     Socket {
         endpoint: EventEndpoint,
         record: Option<PathBuf>,
     },
 }
 
-/// Out-of-band signal the source thread sends so the front-end can
-/// surface honest connection state instead of silently looping on a
-/// failed `connect_timeout`.
+/// Source messages retain typed lines and make finite-source termination
+/// explicit, so parse and I/O failures cannot become indistinguishable from EOF.
 pub enum SourceMessage {
-    Line(String),
+    Line(InspectorLine),
     /// First successful socket connection, or a successful reconnect after a drop.
     Connected,
     /// Stream closed after a previously-connected session (daemon
     /// shutdown or transient drop). Reconnection attempts continue.
     Disconnected,
+    /// A finite source reached its end successfully.
+    Finished,
+    /// A source reached a terminal error and will not produce more lines.
+    Failed(String),
 }
 
 pub struct EventSource {
@@ -182,37 +192,81 @@ impl Drop for EventSource {
     }
 }
 
-fn replay_path(path: &Path, tx: &Sender<SourceMessage>) {
-    let Ok(file) = File::open(path) else {
-        return;
-    };
-    let reader = BufReader::new(file);
-    for line in reader.lines().map_while(Result::ok) {
-        if tx.send(SourceMessage::Line(line)).is_err() {
-            break;
-        }
-        thread::sleep(Duration::from_millis(120));
+struct ReplayReader {
+    path: PathBuf,
+    lines: Lines<BufReader<File>>,
+    line_number: usize,
+}
+
+impl ReplayReader {
+    fn open(path: &Path) -> Result<Self> {
+        let file = File::open(path).with_context(|| format!("open replay `{}`", path.display()))?;
+        Ok(Self {
+            path: path.to_path_buf(),
+            lines: BufReader::new(file).lines(),
+            line_number: 0,
+        })
+    }
+
+    fn next_line(&mut self) -> Result<Option<InspectorLine>> {
+        let Some(line) = self.lines.next() else {
+            return Ok(None);
+        };
+        self.line_number += 1;
+        let line = line.with_context(|| {
+            format!(
+                "read replay `{}` line {}",
+                self.path.display(),
+                self.line_number
+            )
+        })?;
+        InspectorLine::parse_line(&line)
+            .with_context(|| format!("replay `{}` line {}", self.path.display(), self.line_number))
+            .map(Some)
     }
 }
 
-/// Subscribe to the daemon's event stream and forward every received
-/// line into `tx`. Reconnects with a short backoff if the daemon is
-/// not yet listening — useful for `omnifs inspect` racing
-/// `just dev`. Connect/disconnect transitions are reported through
-/// `SourceMessage` so the front-end never claims "connected" while the
-/// stream is still failing.
-fn socket_source(endpoint: EventEndpoint, record: Option<&Path>, tx: &Sender<SourceMessage>) {
-    /// Receiver hung up; stop the source thread.
-    struct Hangup;
+fn replay_path(path: &Path, tx: &Sender<SourceMessage>) {
+    let result: Result<bool> = (|| -> Result<bool> {
+        let mut reader = ReplayReader::open(path)?;
+        while let Some(line) = reader.next_line()? {
+            if tx.send(SourceMessage::Line(line)).is_err() {
+                return Ok(false);
+            }
+            thread::sleep(Duration::from_millis(120));
+        }
+        Ok(true)
+    })();
+    match result {
+        Ok(true) => {
+            let _ = tx.send(SourceMessage::Finished);
+        },
+        Ok(false) => {},
+        Err(error) => {
+            let _ = tx.send(SourceMessage::Failed(format!("{error:#}")));
+        },
+    }
+}
 
-    let mut record_file = record.and_then(|path| {
-        std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .ok()
-    });
+/// Subscribe to the daemon's event stream and forward every received typed
+/// line into `tx`. Reconnects with a short backoff if the daemon is not yet
+/// listening, which is useful for `omnifs inspect` racing `just dev`.
+fn socket_source(endpoint: EventEndpoint, record: Option<&Path>, tx: &Sender<SourceMessage>) {
+    let mut record_file = match record {
+        Some(path) => match OpenOptions::new().create(true).append(true).open(path) {
+            Ok(file) => Some(file),
+            Err(error) => {
+                let _ = tx.send(SourceMessage::Failed(format!(
+                    "open record file `{}`: {error}",
+                    path.display()
+                )));
+                return;
+            },
+        },
+        None => None,
+    };
     let Ok(client) = EventsClient::new(endpoint) else {
+        let _ = tx.send(SourceMessage::Failed("build events client runtime".into()));
         return;
     };
 
@@ -223,11 +277,16 @@ fn socket_source(endpoint: EventEndpoint, record: Option<&Path>, tx: &Sender<Sou
             },
             |line| {
                 if let Some(file) = record_file.as_mut() {
-                    let _ = writeln!(file, "{}", line.trim());
-                    let _ = file.flush();
+                    let serialized = line
+                        .to_json_line()
+                        .map_err(|error| SourceForwardError::Failed(error.to_string()))?;
+                    file.write_all(serialized.as_bytes())
+                        .map_err(|error| SourceForwardError::Failed(error.to_string()))?;
+                    file.flush()
+                        .map_err(|error| SourceForwardError::Failed(error.to_string()))?;
                 }
-                tx.send(SourceMessage::Line(line.to_string()))
-                    .map_err(|_| Hangup)
+                tx.send(SourceMessage::Line(line.clone()))
+                    .map_err(|_| SourceForwardError::Hangup)
             },
         );
         match outcome {
@@ -241,12 +300,70 @@ fn socket_source(endpoint: EventEndpoint, record: Option<&Path>, tx: &Sender<Sou
                 }
                 thread::sleep(Duration::from_millis(500));
             },
-            Err(Hangup) => return,
+            Ok(AttachOutcome::Failed(error)) => {
+                let _ = tx.send(SourceMessage::Failed(error));
+                return;
+            },
+            Err(SourceForwardError::Hangup) => return,
+            Err(SourceForwardError::Failed(error)) => {
+                let _ = tx.send(SourceMessage::Failed(format!(
+                    "write inspector record: {error}"
+                )));
+                return;
+            },
         }
     }
 }
 
-pub fn replay_file_blocking(path: &Path) -> Result<Vec<String>> {
-    let file = File::open(path).with_context(|| format!("open `{}`", path.display()))?;
-    Ok(BufReader::new(file).lines().map_while(Result::ok).collect())
+enum SourceForwardError {
+    Hangup,
+    Failed(String),
+}
+
+pub fn replay_file_blocking(path: &Path) -> Result<Vec<InspectorLine>> {
+    let mut reader = ReplayReader::open(path)?;
+    let mut lines = Vec::new();
+    while let Some(line) = reader.next_line()? {
+        lines.push(line);
+    }
+    Ok(lines)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use omnifs_api::events::{InspectorEvent, InspectorRecord};
+
+    #[test]
+    fn replay_reports_malformed_line_as_failed_terminal_message() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("replay.jsonl");
+        let line = InspectorLine::Record(InspectorRecord::new(
+            "2026-05-23T00:00:00Z",
+            1,
+            7,
+            InspectorEvent::FuseStart {
+                op: "lookup".into(),
+                mount: "github".into(),
+                path: "/a".into(),
+            },
+        ))
+        .to_json_line()
+        .expect("serialize");
+        std::fs::write(&path, format!("{line}not json\n")).expect("write replay");
+
+        let source = EventSource::spawn(SourceKind::Replay(path.clone()));
+        assert!(matches!(source.recv(), Some(SourceMessage::Line(_))));
+        match source.recv() {
+            Some(SourceMessage::Failed(error)) => {
+                assert!(error.contains(&path.display().to_string()));
+                assert!(error.contains("line 2"));
+                assert!(error.contains("invalid json"));
+            },
+            Some(SourceMessage::Finished) | None => panic!("malformed replay became EOF"),
+            Some(SourceMessage::Line(_))
+            | Some(SourceMessage::Connected)
+            | Some(SourceMessage::Disconnected) => panic!("unexpected source message"),
+        }
+    }
 }

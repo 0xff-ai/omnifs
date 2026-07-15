@@ -7,8 +7,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use omnifs_api::events::{
-    CacheKind, CalloutKind, InspectorEvent, InspectorLineWriter, InspectorOutcome, InspectorRecord,
-    OpEnd, OutcomeFields, TraceId,
+    CacheKind, CalloutKind, InspectorEvent, InspectorLine, InspectorLineWriter, InspectorOutcome,
+    InspectorRecord, OpEnd, OutcomeFields, TraceId,
 };
 use tokio::sync::broadcast;
 use tracing::Event;
@@ -254,7 +254,7 @@ impl Inspector {
         }
         if let Some(tee) = &self.tee
             && let Ok(mut writer) = tee.lock()
-            && let Err(error) = writer.write_record(&record)
+            && let Err(error) = writer.write_line(&InspectorLine::Record((*record).clone()))
         {
             warn!(%error, "failed to write inspector record to tee");
         }

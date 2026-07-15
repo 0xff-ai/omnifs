@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
-use crate::events::envelope::InspectorRecord;
+use crate::events::InspectorLine;
 
 #[derive(Debug, Error)]
 pub enum LineWriteError {
@@ -14,7 +14,7 @@ pub enum LineWriteError {
     Serialize(#[from] serde_json::Error),
 }
 
-/// Append newline-framed JSONL inspector records.
+/// Append newline-framed typed Inspector lines.
 pub struct InspectorLineWriter {
     path: PathBuf,
     file: File,
@@ -31,8 +31,8 @@ impl InspectorLineWriter {
         &self.path
     }
 
-    pub fn write_record(&mut self, record: &InspectorRecord) -> Result<(), LineWriteError> {
-        let line = record.to_json_line()?;
+    pub fn write_line(&mut self, line: &InspectorLine) -> Result<(), LineWriteError> {
+        let line = line.to_json_line()?;
         self.file.write_all(line.as_bytes())?;
         self.file.flush()?;
         Ok(())
@@ -42,6 +42,7 @@ impl InspectorLineWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::events::InspectorLine;
     use crate::events::envelope::InspectorRecord;
     use crate::events::event::InspectorEvent;
 
@@ -51,7 +52,7 @@ mod tests {
         let path = dir.path().join("inspector.jsonl");
         let mut writer = InspectorLineWriter::open(&path).expect("open");
         writer
-            .write_record(&InspectorRecord::new(
+            .write_line(&InspectorLine::Record(InspectorRecord::new(
                 "2026-05-23T00:00:00Z",
                 1,
                 7,
@@ -60,13 +61,24 @@ mod tests {
                     mount: "github".into(),
                     path: "/a".into(),
                 },
-            ))
+            )))
+            .expect("write record");
+        writer
+            .write_line(&InspectorLine::Dropped { count: 3 })
             .expect("write");
 
         let contents = std::fs::read_to_string(path).expect("read");
-        let line = contents.lines().next().expect("one line");
-        let parsed = InspectorRecord::parse_line(line).expect("parse");
-        assert_eq!(parsed.trace_id, 7);
-        assert!(matches!(parsed.event, InspectorEvent::FuseStart { .. }));
+        let parsed = contents
+            .lines()
+            .map(InspectorLine::parse_line)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("parse every line");
+        assert_eq!(parsed.len(), 2);
+        let InspectorLine::Record(record) = &parsed[0] else {
+            panic!("expected record")
+        };
+        assert_eq!(record.trace_id, 7);
+        assert!(matches!(record.event, InspectorEvent::FuseStart { .. }));
+        assert_eq!(parsed[1], InspectorLine::Dropped { count: 3 });
     }
 }

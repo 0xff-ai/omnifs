@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use anyhow::Context;
+use anyhow::{Context, anyhow};
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind},
     execute,
@@ -31,42 +31,56 @@ pub fn run_tui(mode: ConnectionMode, container: String, source: SourceKind) -> a
     let tick_rate = Duration::from_millis(50);
     let mut last_tick = std::time::Instant::now();
 
-    loop {
-        terminal
-            .draw(|frame| ui::render(frame, &app))
-            .context("draw frame")?;
+    let run_result = (|| -> anyhow::Result<()> {
+        loop {
+            terminal
+                .draw(|frame| ui::render(frame, &app))
+                .context("draw frame")?;
 
-        if app.quit {
-            break;
-        }
-
-        let timeout = tick_rate
-            .checked_sub(last_tick.elapsed())
-            .unwrap_or_else(|| Duration::from_secs(0));
-
-        if event::poll(timeout).context("poll events")?
-            && let Event::Key(key) = event::read().context("read event")?
-            && key.kind == KeyEventKind::Press
-        {
-            app.handle_key(key);
-        }
-
-        if last_tick.elapsed() >= tick_rate {
-            for message in event_source.drain() {
-                app.apply_source_message(message);
+            if app.quit {
+                break;
             }
-            last_tick = std::time::Instant::now();
-        }
-    }
 
-    disable_raw_mode().context("disable raw mode")?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )
-    .context("leave alternate screen")?;
-    terminal.show_cursor().context("show cursor")?;
+            let timeout = tick_rate
+                .checked_sub(last_tick.elapsed())
+                .unwrap_or_else(|| Duration::from_secs(0));
+
+            if event::poll(timeout).context("poll events")?
+                && let Event::Key(key) = event::read().context("read event")?
+                && key.kind == KeyEventKind::Press
+            {
+                app.handle_key(key);
+            }
+
+            if last_tick.elapsed() >= tick_rate {
+                for message in event_source.drain() {
+                    match message {
+                        super::source::SourceMessage::Failed(error) => {
+                            return Err(anyhow!(error));
+                        },
+                        super::source::SourceMessage::Finished => {},
+                        message => app.apply_source_message(message),
+                    }
+                }
+                last_tick = std::time::Instant::now();
+            }
+        }
+        Ok(())
+    })();
+
+    let cleanup_result = (|| -> anyhow::Result<()> {
+        disable_raw_mode().context("disable raw mode")?;
+        execute!(
+            terminal.backend_mut(),
+            LeaveAlternateScreen,
+            DisableMouseCapture
+        )
+        .context("leave alternate screen")?;
+        terminal.show_cursor().context("show cursor")?;
+        Ok(())
+    })();
+    run_result?;
+    cleanup_result?;
     Ok(())
 }
 
@@ -76,7 +90,7 @@ pub fn run_plain(source: SourceKind, output: crate::ui::output::Output) -> anyho
     match source {
         SourceKind::Replay(path) => {
             for line in super::source::replay_file_blocking(&path)? {
-                emit_plain_line(&line);
+                emit_plain_line(&line)?;
             }
         },
         SourceKind::Socket { endpoint, record } => {
@@ -85,7 +99,7 @@ pub fn run_plain(source: SourceKind, output: crate::ui::output::Output) -> anyho
             let event_source = EventSource::spawn(SourceKind::Socket { endpoint, record });
             while let Some(message) = event_source.recv() {
                 match message {
-                    SourceMessage::Line(line) => emit_plain_line(&line),
+                    SourceMessage::Line(line) => emit_plain_line(&line)?,
                     SourceMessage::Connected => {
                         output.narrate(format!("omnifs inspect: connected to {addr}"));
                     },
@@ -94,6 +108,8 @@ pub fn run_plain(source: SourceKind, output: crate::ui::output::Output) -> anyho
                             "omnifs inspect: disconnected from {addr}, reconnecting..."
                         ));
                     },
+                    SourceMessage::Finished => break,
+                    SourceMessage::Failed(error) => return Err(anyhow!(error)),
                 }
             }
         },
@@ -101,23 +117,10 @@ pub fn run_plain(source: SourceKind, output: crate::ui::output::Output) -> anyho
     Ok(())
 }
 
-fn emit_plain_line(line: &str) {
-    use super::format_record;
-    use omnifs_api::events::InspectorRecord;
-
-    let trimmed = line.trim();
-    if trimmed.is_empty() {
-        return;
-    }
-    if let Ok(record) = InspectorRecord::parse_line(trimmed) {
-        crate::ui::print_raw(&format!("{}\n", format_record(&record)))
-    } else if let Some(count) = trimmed
-        .strip_prefix("# dropped ")
-        .and_then(|value| value.strip_suffix(" events"))
-        .and_then(|value| value.parse::<u64>().ok())
-    {
-        crate::ui::print_raw(&format!("# dropped {count} events\n"));
-    } else {
-        crate::ui::print_raw(&format!("{trimmed}\n"));
-    }
+fn emit_plain_line(line: &omnifs_api::events::InspectorLine) -> anyhow::Result<()> {
+    let line = line
+        .to_json_line()
+        .context("serialize inspector line for plain output")?;
+    crate::ui::print_raw(&line);
+    Ok(())
 }

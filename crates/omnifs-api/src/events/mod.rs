@@ -1,8 +1,7 @@
 //! Shared JSONL schema for omnifs inspector observability.
 //!
-//! The daemon tee and replay files contain [`InspectorRecord`] lines. The
-//! control socket wraps those records in [`InspectorLine`] envelopes only for
-//! a live Inspector subscription.
+//! Every Inspector stream uses [`InspectorLine`] as its newline unit. The
+//! typed line owns JSONL framing and validates the nested record schema.
 
 #![forbid(unsafe_code)]
 
@@ -22,7 +21,7 @@ pub use redaction::{
     is_sensitive_header, is_sensitive_query_param, redact_git_remote, redact_http_url_for_summary,
     write_truncated,
 };
-pub use wire::{ParseRecordError, split_complete_lines};
+pub use wire::{ParseLineError, split_complete_lines};
 pub use writer::{InspectorLineWriter, LineWriteError};
 
 /// Typed lines sent after a control-plane inspector subscription is ready.
@@ -31,15 +30,6 @@ pub use writer::{InspectorLineWriter, LineWriteError};
 pub enum InspectorLine {
     Record(InspectorRecord),
     Dropped { count: u64 },
-}
-
-impl InspectorLine {
-    pub fn to_json_line(&self) -> Result<String, serde_json::Error> {
-        serde_json::to_string(self).map(|mut line| {
-            line.push('\n');
-            line
-        })
-    }
 }
 
 /// FUSE-bound correlation id, one per FUSE request.

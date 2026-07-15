@@ -2,7 +2,7 @@
 
 use std::collections::VecDeque;
 
-use omnifs_api::events::{InspectorRecord, TraceId};
+use omnifs_api::events::{InspectorLine, InspectorRecord, TraceId};
 
 use super::filter::{FilterMode, ViewFilter};
 use super::metrics::MountWindow;
@@ -168,18 +168,12 @@ impl App {
         self.traces.ensure_selected_visible(&self.filter);
     }
 
-    pub fn apply_line(&mut self, line: &str) {
-        let line = line.trim();
-        if let Ok(record) = InspectorRecord::parse_line(line) {
-            self.apply_record(&record);
-        } else if let Some(count) = line
-            .strip_prefix("# dropped ")
-            .and_then(|value| value.strip_suffix(" events"))
-            .and_then(|value| value.parse::<u64>().ok())
-        {
-            self.dropped_events = self.dropped_events.saturating_add(count);
-        } else {
-            self.dropped_events += 1;
+    pub fn apply_line(&mut self, line: &InspectorLine) {
+        match line {
+            InspectorLine::Record(record) => self.apply_record(record),
+            InspectorLine::Dropped { count } => {
+                self.dropped_events = self.dropped_events.saturating_add(*count);
+            },
         }
     }
 
@@ -188,9 +182,7 @@ impl App {
     pub fn apply_source_message(&mut self, message: SourceMessage) {
         match message {
             SourceMessage::Line(line) => {
-                if !line.trim().is_empty() {
-                    self.apply_line(&line);
-                }
+                self.apply_line(&line);
             },
             SourceMessage::Connected => {
                 self.connected = true;
@@ -198,6 +190,7 @@ impl App {
             SourceMessage::Disconnected => {
                 self.connected = false;
             },
+            SourceMessage::Finished | SourceMessage::Failed(_) => {},
         }
     }
 
