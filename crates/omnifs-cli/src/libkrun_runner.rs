@@ -274,7 +274,7 @@ impl LibkrunRunner {
 
         let out = self.seed_iso();
         let _ = std::fs::remove_file(&out);
-        let status = Command::new("hdiutil")
+        let output = Command::new("hdiutil")
             .arg("makehybrid")
             .arg("-iso")
             .arg("-joliet")
@@ -283,10 +283,18 @@ impl LibkrunRunner {
             .arg("-o")
             .arg(&out)
             .arg(&staging)
-            .stdout(Stdio::null())
-            .status()
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
             .context("run hdiutil makehybrid to build the seed ISO")?;
-        anyhow::ensure!(status.success(), "hdiutil makehybrid exited with {status}");
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let detail = stderr.trim();
+            if detail.is_empty() {
+                anyhow::bail!("hdiutil makehybrid exited with {}", output.status);
+            }
+            anyhow::bail!("hdiutil makehybrid exited with {}: {detail}", output.status);
+        }
 
         let _ = std::fs::remove_dir_all(&staging);
         Ok(())
