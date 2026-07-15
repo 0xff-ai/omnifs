@@ -28,8 +28,18 @@ if ! command -v krunkit >/dev/null 2>&1; then
 fi
 
 work="$(mktemp -d)"
+root_image="$work/root.raw"
 seed_iso="$work/seed.iso"
 serial_log="$work/serial.log"
+
+image_hash_before="$(shasum -a 256 "$image" | awk '{print $1}')"
+image_mode_before="$(stat -f '%Lp' "$image")"
+cp "$image" "$root_image"
+chmod 600 "$root_image"
+if [[ "$(stat -f '%Lp' "$root_image")" != "600" ]]; then
+  echo "writable root copy did not have mode 0600" >&2
+  exit 1
+fi
 
 # TEST-NET-1 (RFC 5737): guaranteed non-routable from a guest with no network
 # device attached, so the connect fails/keeps retrying instead of accidentally
@@ -51,6 +61,12 @@ cleanup() {
     done
     kill -9 "$krunkit_pid" 2>/dev/null || true
   fi
+  image_hash_after="$(shasum -a 256 "$image" | awk '{print $1}')"
+  image_mode_after="$(stat -f '%Lp' "$image")"
+  if [[ "$image_hash_after" != "$image_hash_before" || "$image_mode_after" != "$image_mode_before" ]]; then
+    echo "FAIL: immutable guest image changed during smoke" >&2
+    exit 1
+  fi
   rm -rf "$work"
 }
 trap cleanup EXIT
@@ -64,7 +80,7 @@ start_epoch=$(date +%s)
 krunkit \
   --cpus 2 \
   --memory 2048 \
-  --device "virtio-blk,path=${image},format=raw" \
+  --device "virtio-blk,path=${root_image},format=raw" \
   --device "virtio-blk,path=${seed_iso},format=raw" \
   --device "virtio-serial,logFilePath=${serial_log}" \
   --restful-uri none:// \

@@ -11,7 +11,8 @@
 //!
 //! Cache layout under `<cache_dir>/guest-images/`:
 //! - `<tag>.raw.zst`: the verified, still-compressed download.
-//! - `<tag>.raw`: decompressed once from the `.zst`, and what callers use.
+//! - `<tag>.raw`: decompressed once from the `.zst`, and the immutable base
+//!   callers materialize into a writable launch root.
 //!
 //! A present `<tag>.raw` is trusted on reuse without re-hashing: it was
 //! produced by decompressing an already sha256-verified `.zst` (or, on a
@@ -103,8 +104,8 @@ struct TokenResponse {
 
 /// Ensure the release-channel guest image named by `image` is present as a
 /// decompressed local `.raw` file under `cache_dir`, pulling and caching it
-/// on first use. Returns the local path a launch can hand straight to
-/// libkrun.
+/// on first use. Returns the immutable base path a launch copies into its
+/// workspace-owned writable root before handing it to libkrun.
 pub(crate) async fn ensure_guest_image(
     image: &ImageRef,
     cache_dir: &Path,

@@ -17,9 +17,10 @@
 //! for the wrapped invocation.
 //!
 //! Every row's matrix execution goes over ssh-over-vsock via the real
-//! `omnifs shell -- <cmd>` CLI path (`matrix::Exec::SshLibkrun`), the same
-//! command construction `LibkrunRunner::shell_command` builds for interactive
-//! `omnifs shell`. One ssh connection per row (mirroring `frontend_docker`,
+//! `omnifs frontend shell fuse --runtime libkrun -- <cmd>` CLI path
+//! (`matrix::Exec::SshLibkrun`), the same command construction
+//! `LibkrunRunner::shell_command` builds for interactive `frontend shell`. One
+//! ssh connection per row (mirroring `frontend_docker`,
 //! which is also one `docker exec` per row, not batched): a single libkrun
 //! guest is fast enough over vsock+socat that batching bought nothing
 //! measurable in a live run (see the report for the wall-clock total).
@@ -40,6 +41,7 @@
 
 #![cfg(target_os = "macos")]
 
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
@@ -300,6 +302,7 @@ impl Fixture {
     fn libkrun_artifacts(&self) -> Vec<PathBuf> {
         let dir = self.libkrun_dir();
         [
+            "root.raw",
             "libkrun.pid",
             "seed.iso",
             "ssh.sock",
@@ -311,6 +314,29 @@ impl Fixture {
         .map(|name| dir.join(name))
         .filter(|path| path.exists())
         .collect()
+    }
+
+    fn guest_image_hash(&self) -> String {
+        let output = Command::new("shasum")
+            .args(["-a", "256"])
+            .arg(&self.guest_image)
+            .output()
+            .expect("run shasum for the immutable guest image");
+        assert!(output.status.success(), "shasum failed: {output:?}");
+        String::from_utf8(output.stdout)
+            .expect("shasum output is UTF-8")
+            .split_whitespace()
+            .next()
+            .expect("shasum output has a digest")
+            .to_owned()
+    }
+
+    fn guest_image_mode(&self) -> u32 {
+        std::fs::metadata(&self.guest_image)
+            .expect("read guest image metadata")
+            .permissions()
+            .mode()
+            & 0o777
     }
 }
 
@@ -358,15 +384,25 @@ fn force_unmount(mount_point: &Path) {
     }
 }
 
-/// `omnifs shell -- cat /omnifs/<mount>/hello/message` returns exact fixture
-/// bytes for every configured mount.
+/// `omnifs frontend shell fuse --runtime libkrun -- cat
+/// /omnifs/<mount>/hello/message` returns exact fixture bytes for every
+/// configured mount.
 fn assert_serves(fixture: &Fixture) {
     for root in ["test", "test2"] {
         let guest_path = format!("/omnifs/{root}/hello/message");
-        let out = fixture.run(&["shell", "--", "cat", &guest_path]);
+        let out = fixture.run(&[
+            "frontend",
+            "shell",
+            "fuse",
+            "--runtime",
+            "libkrun",
+            "--",
+            "cat",
+            &guest_path,
+        ]);
         assert!(
             out.status.success(),
-            "omnifs shell -- cat {guest_path} failed: {}",
+            "omnifs frontend shell fuse --runtime libkrun -- cat {guest_path} failed: {}",
             String::from_utf8_lossy(&out.stderr)
         );
         assert_eq!(String::from_utf8_lossy(&out.stdout), "Hello, world!");
@@ -436,6 +472,8 @@ fn libkrun_lifecycle_and_matrix() {
     // frontend): held for this test's whole lifetime.
     let _nfs_lock = live::nfs_serial_lock();
     let mut fixture = Fixture::new(guest_image);
+    let base_hash = fixture.guest_image_hash();
+    let base_mode = fixture.guest_image_mode();
     fixture.up_native();
 
     // Cold start: the daemon is already warm, so the timed span isolates
@@ -445,6 +483,15 @@ fn libkrun_lifecycle_and_matrix() {
     let elapsed = started.elapsed();
     fixture.assert_frontend_enable_ok(&up_out, "cold start");
     record_cold_start(elapsed);
+    assert_eq!(fixture.guest_image_hash(), base_hash);
+    assert_eq!(fixture.guest_image_mode(), base_mode);
+    let root_raw = fixture.libkrun_dir().join("root.raw");
+    assert!(root_raw.is_file(), "libkrun must materialize a launch root");
+    assert_eq!(
+        std::fs::metadata(&root_raw).unwrap().permissions().mode() & 0o777,
+        0o600,
+        "launch root must be writable only by its owner"
+    );
 
     // `frontend ls` is truthful.
     let status_out = fixture.frontend_status();
@@ -457,21 +504,37 @@ fn libkrun_lifecycle_and_matrix() {
 
     assert_serves(&fixture);
 
+    let restarted = fixture.run(&["frontend", "restart", "fuse", "--runtime", "libkrun"]);
+    fixture.assert_frontend_enable_ok(&restarted, "restart");
+    assert_eq!(fixture.guest_image_hash(), base_hash);
+    assert_eq!(fixture.guest_image_mode(), base_mode);
+    assert_serves(&fixture);
+
     // The libkrun runner's own launch-time lockdown audit
     // (`assert_libkrun_locked_down`) already proves the device set from
     // inside `omnifs-cli`; this suite's job is the guest-visible conformance
     // contract, not re-proving that audit from outside.
 
-    let mkdir_out = fixture.run(&["shell", "--", "mkdir", "-p", GUEST_SCRATCH]);
+    let mkdir_out = fixture.run(&[
+        "frontend",
+        "shell",
+        "fuse",
+        "--runtime",
+        "libkrun",
+        "--",
+        "mkdir",
+        "-p",
+        GUEST_SCRATCH,
+    ]);
     assert!(
         mkdir_out.status.success(),
-        "omnifs shell -- mkdir -p {GUEST_SCRATCH} failed: {}",
+        "omnifs frontend shell fuse --runtime libkrun -- mkdir -p {GUEST_SCRATCH} failed: {}",
         String::from_utf8_lossy(&mkdir_out.stderr)
     );
 
     // The fuse-libkrun matrix column, through the shared row/executor
-    // machinery, over ssh-over-vsock via the real `omnifs shell -- <cmd>`
-    // path.
+    // machinery, over ssh-over-vsock via the real
+    // `omnifs frontend shell fuse --runtime libkrun -- <cmd>` path.
     let exec = Exec::SshLibkrun {
         omnifs_bin: live::omnifs_bin(),
         home: fixture.home_path().to_path_buf(),
@@ -505,6 +568,8 @@ fn libkrun_lifecycle_and_matrix() {
         String::from_utf8_lossy(&libkrun_disabled.stdout),
         String::from_utf8_lossy(&libkrun_disabled.stderr),
     );
+    assert_eq!(fixture.guest_image_hash(), base_hash);
+    assert_eq!(fixture.guest_image_mode(), base_mode);
     let host_location = fixture.mount_point.to_str().expect("mount point utf8");
     let host_disabled = fixture.run(&[
         "frontend",

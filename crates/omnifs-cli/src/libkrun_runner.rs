@@ -5,11 +5,12 @@
 //!
 //! State lives under `<config_dir>/libkrun/`: a persistent per-workspace ed25519
 //! keypair (survives across launches, since it authenticates guest ssh access
-//! independent of any one VM instance) plus per-launch artifacts (pidfile,
-//! seed ISO, the three unix sockets libkrun bridges vsock onto, and the
-//! serial log). Every path lives under the workspace config dir, never a
-//! system temp dir, so `omnifs down`/`frontend disable` can find and remove
-//! exactly what this runner owns.
+//! independent of any one VM instance) plus per-launch artifacts (a writable
+//! root disk, pidfile, seed ISO, the three unix sockets libkrun bridges vsock
+//! onto, and the serial log). Every path lives under the workspace config dir,
+//! never a system temp dir, so `omnifs down`/`frontend disable` can find and
+//! remove exactly what this runner owns. The resolved guest image is an
+//! immutable base artifact and is only the source for that launch-local root.
 //!
 //! Three vsock devices bridge the guest to the host, each on its own
 //! `virtio-vsock` device (libkrun multiplexes by port, not by socket):
@@ -40,7 +41,7 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result};
 use tokio::io::AsyncReadExt as _;
@@ -54,6 +55,8 @@ use omnifs_workspace::config::Config;
 const LIBKRUN_SUBDIR: &str = "libkrun";
 const SSH_KEY_NAME: &str = "id_ed25519";
 const PIDFILE_NAME: &str = "libkrun.pid";
+const ROOT_RAW_NAME: &str = "root.raw";
+const ROOT_RAW_PART_PREFIX: &str = "root.raw.part.";
 const SEED_ISO_NAME: &str = "seed.iso";
 const SEED_STAGING_NAME: &str = "seed-staging";
 const SSH_SOCK_NAME: &str = "ssh.sock";
@@ -196,6 +199,10 @@ impl LibkrunRunner {
         self.dir().join(PIDFILE_NAME)
     }
 
+    fn root_raw(&self) -> PathBuf {
+        self.dir().join(ROOT_RAW_NAME)
+    }
+
     fn seed_iso(&self) -> PathBuf {
         self.dir().join(SEED_ISO_NAME)
     }
@@ -218,6 +225,21 @@ impl LibkrunRunner {
 
     fn serial_log(&self) -> PathBuf {
         self.dir().join(SERIAL_LOG_NAME)
+    }
+
+    fn root_raw_parts(&self) -> Vec<PathBuf> {
+        let Ok(entries) = std::fs::read_dir(self.dir()) else {
+            return Vec::new();
+        };
+        entries
+            .filter_map(std::result::Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(ROOT_RAW_PART_PREFIX))
+            })
+            .collect()
     }
 
     /// Generate the per-workspace ed25519 keypair if absent, returning the
@@ -457,9 +479,10 @@ fn assert_libkrun_locked_down(
     Ok(())
 }
 
-/// Resolve the configured guest image into the validated local path consumed
-/// by libkrun. Release images remain owned by the OCI/cache module; this
-/// function only chooses the channel-specific input and validates the result.
+/// Resolve the configured guest image into the validated immutable base path
+/// used to materialize a launch-local root disk. Release images remain owned
+/// by the OCI/cache module; this function only chooses the channel-specific
+/// input and validates the result.
 async fn resolve_guest_image(config: &Config, cache_dir: &Path, output: Output) -> Result<PathBuf> {
     let resolved = std::env::var(ENV_GUEST_IMAGE)
         .ok()
@@ -487,8 +510,9 @@ async fn resolve_guest_image(config: &Config, cache_dir: &Path, output: Output) 
 
 /// Owns one Libkrun launch from replacement through readiness publication.
 /// Every resource created after replacement is cleaned here when publication
-/// fails. The attach listener, guest image, and SSH key are deliberately not
-/// part of this cleanup set because their owners outlive one launch.
+/// fails. The attach listener, immutable guest image, and SSH key are
+/// deliberately not part of this cleanup set because their owners outlive one
+/// launch.
 struct LibkrunLaunchLease<'a> {
     runner: &'a LibkrunRunner,
     daemon_attach_socket: PathBuf,
@@ -590,6 +614,7 @@ impl<'a> LibkrunLaunchLease<'a> {
             check_uds_path_length(path)?;
         }
 
+        self.materialize_root_disk()?;
         let ssh_pubkey = self.runner.ensure_ssh_keypair()?;
         self.runner
             .write_seed_iso(&self.attach_token, &ssh_pubkey)?;
@@ -598,7 +623,10 @@ impl<'a> LibkrunLaunchLease<'a> {
 
         let pidfile = self.runner.pidfile();
         let devices = [
-            format!("virtio-blk,path={},format=raw", self.guest_image.display()),
+            format!(
+                "virtio-blk,path={},format=raw",
+                self.runner.root_raw().display()
+            ),
             format!(
                 "virtio-blk,path={},format=raw",
                 self.runner.seed_iso().display()
@@ -666,6 +694,42 @@ impl<'a> LibkrunLaunchLease<'a> {
         let mount = self.mount.clone();
         self.wait_for_ready(mount.as_deref(), self.timeout).await?;
         attached.await
+    }
+
+    fn materialize_root_disk(&self) -> Result<()> {
+        let root = self.runner.root_raw();
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_nanos());
+        let part = self.runner.dir().join(format!(
+            "{ROOT_RAW_PART_PREFIX}{}-{nonce}",
+            std::process::id()
+        ));
+
+        let result = (|| {
+            std::fs::copy(&self.guest_image, &part).with_context(|| {
+                format!(
+                    "copy immutable guest image {} to writable libkrun root {}",
+                    self.guest_image.display(),
+                    part.display()
+                )
+            })?;
+            std::fs::set_permissions(&part, std::fs::Permissions::from_mode(0o600))
+                .with_context(|| format!("restrict {} to 0600", part.display()))?;
+            std::fs::rename(&part, &root).with_context(|| {
+                format!(
+                    "publish writable libkrun root {} from {}",
+                    root.display(),
+                    part.display()
+                )
+            })?;
+            Ok::<(), anyhow::Error>(())
+        })();
+
+        if result.is_err() {
+            let _ = std::fs::remove_file(&part);
+        }
+        result
     }
 
     async fn replace_stale(&mut self) -> Result<()> {
@@ -821,12 +885,16 @@ impl<'a> LibkrunLaunchLease<'a> {
     fn remove_owned_artifacts(&self) {
         for path in [
             self.runner.pidfile(),
+            self.runner.root_raw(),
             self.runner.seed_iso(),
             self.runner.ssh_socket(),
             self.runner.ready_socket(),
             self.runner.restful_socket(),
             self.runner.serial_log(),
         ] {
+            let _ = std::fs::remove_file(path);
+        }
+        for path in self.runner.root_raw_parts() {
             let _ = std::fs::remove_file(path);
         }
         let _ = std::fs::remove_dir_all(self.runner.seed_staging());
@@ -937,6 +1005,23 @@ mod tests {
         let attach_socket = temp.path().join("daemon-attach.sock");
         std::fs::write(&attach_socket, b"daemon-owned").unwrap();
         std::fs::write(dir.join(SSH_KEY_NAME), b"persistent key").unwrap();
+        let guest_image = dir.join("base.raw");
+        std::fs::write(&guest_image, b"immutable guest image").unwrap();
+        std::fs::set_permissions(&guest_image, std::fs::Permissions::from_mode(0o444)).unwrap();
+
+        let runner = LibkrunRunner::new(home);
+        let lease = LibkrunLaunchLease::new(&runner, &attach_socket, guest_image.clone());
+        lease.materialize_root_disk().unwrap();
+        assert_eq!(
+            std::fs::metadata(runner.root_raw())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        let root_part = dir.join(format!("{ROOT_RAW_PART_PREFIX}fixture"));
+        std::fs::write(&root_part, b"partial root").unwrap();
         for name in [
             PIDFILE_NAME,
             SEED_ISO_NAME,
@@ -949,8 +1034,7 @@ mod tests {
         }
         std::fs::create_dir_all(dir.join(SEED_STAGING_NAME)).unwrap();
 
-        let runner = LibkrunRunner::new(home);
-        let mut lease = LibkrunLaunchLease::new(&runner, &attach_socket, PathBuf::new());
+        let mut lease = lease;
         lease.replaced = true;
         lease.child = Some(
             std::process::Command::new("sleep")
@@ -971,7 +1055,18 @@ mod tests {
         assert!(!process_alive(pid));
         assert!(attach_socket.is_file());
         assert!(dir.join(SSH_KEY_NAME).is_file());
+        assert!(guest_image.is_file());
+        assert_eq!(
+            std::fs::metadata(&guest_image)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o444
+        );
         assert!(!dir.join(PIDFILE_NAME).exists());
+        assert!(!dir.join(ROOT_RAW_NAME).exists());
+        assert!(!root_part.exists());
         assert!(!dir.join(SEED_ISO_NAME).exists());
         assert!(!dir.join(SEED_STAGING_NAME).exists());
     }
