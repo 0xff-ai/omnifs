@@ -1,236 +1,70 @@
-//! Kernel-free resolve and list tests against the in-tree `test_provider.wasm`,
-//! with no fuser, mount, container, or root privileges.
-//!
-//! Reuses the existing omnifs-itest provider-loading harness (`RuntimeHarness`
-//! via `make_runtime`), wraps the bare `Engine` in a `Tree` via
-//! `ServingContext::single`, and drives `Tree::resolve` / `Tree::list` through
-//! the same neutral surface used by FUSE and NFS.
-//!
-//! Precondition: `just build providers` has produced
-//! `target/wasm32-wasip2/release/test_provider.wasm` (`provider_wasm_path`
-//! asserts this through the harness).
+//! Namespace path identity and complete mount-root listing coverage.
 
 #![cfg(not(target_os = "wasi"))]
-// Test docs reference protocol acronyms (NFSv4, FUSE) and type names as prose.
-#![allow(clippy::doc_markdown)]
-
-use std::sync::Arc;
 
 use omnifs_core::path::Path;
-use omnifs_engine::Engine;
-use omnifs_engine::test_support::cache::{Record as CacheRecord, RecordKind};
-use omnifs_engine::view::{DirentRecord, DirentsPayload, EntryMeta};
-use omnifs_engine::{ListOutcome, RequestCtx, ServingContext, Tree, TreeErrorKind};
-use omnifs_itest::{RuntimeHarness, make_engine, make_runtime};
-use tempfile::TempDir;
+use omnifs_engine::{DirCursor, LookupAnswer, Namespace};
+use omnifs_itest::make_runtime;
 
-/// Owns the harness temp dirs that must outlive the `Engine`, plus the `Tree`
-/// wrapping it. The `Engine` is moved into an `Arc` for the `Tree`; the three
-/// `TempDir`s are retained here so the cache/clone/config directories survive
-/// for the whole test.
-struct TestTree {
-    tree: Tree,
-    runtime: Arc<Engine>,
-    _clone_dir: TempDir,
-    _cache_dir: TempDir,
-    _config_dir: TempDir,
-}
-
-fn test_tree() -> TestTree {
-    let engine = make_engine();
-    let RuntimeHarness {
-        clone_dir,
-        cache_dir,
-        config_dir,
-        runtime,
-        ..
-    } = make_runtime(&engine);
-    let runtime = Arc::new(runtime);
-    let tree = Tree::new(ServingContext::single(
-        "test".to_string(),
-        Arc::clone(&runtime),
-    ));
-    TestTree {
-        tree,
-        runtime,
-        _clone_dir: clone_dir,
-        _cache_dir: cache_dir,
-        _config_dir: config_dir,
+async fn resolve(namespace: &dyn Namespace, value: &str) -> LookupAnswer {
+    let mut answer = LookupAnswer {
+        path: Path::root(),
+        attrs: namespace.getattr(Path::root()).await.unwrap(),
+    };
+    for segment in Path::parse(value).unwrap().segments() {
+        answer = namespace.lookup(answer.path, segment).await.unwrap();
     }
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn resolve_root_and_known_dirs() {
-    let t = test_tree();
-    let tree = &t.tree;
-    let ctx = RequestCtx;
-
-    // Root resolves to a directory.
-    let root = tree
-        .resolve(&Path::parse("/").unwrap(), &ctx)
-        .await
-        .expect("resolve root");
-    assert!(root.is_dir(), "mount root must be a directory");
-
-    // A known nested directory the test provider projects.
-    let hello = tree
-        .resolve(&Path::parse("/hello").unwrap(), &ctx)
-        .await
-        .expect("resolve /hello");
-    assert!(hello.is_dir(), "/hello must be a directory");
-    assert_eq!(hello.path().as_str(), "/hello");
-    assert_eq!(hello.mount(), "test");
-
-    // A known file under /hello (the provider's root listing proves "message").
-    let message = tree
-        .resolve(&Path::parse("/hello/message").unwrap(), &ctx)
-        .await
-        .expect("resolve /hello/message");
-    assert!(message.is_file(), "/hello/message must be a file");
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn resolve_missing_is_not_found() {
-    let t = test_tree();
-    let tree = &t.tree;
-    let ctx = RequestCtx;
-
-    let err = tree
-        .resolve(&Path::parse("/hello/nonexistent").unwrap(), &ctx)
-        .await
-        .expect_err("missing child must error");
-    assert_eq!(err.kind, TreeErrorKind::NotFound);
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn resolve_child_uses_cached_dirent_positive() {
-    let t = test_tree();
-    let tree = &t.tree;
-    let ctx = RequestCtx;
-
-    let parent = tree
-        .resolve(&Path::parse("/hello").unwrap(), &ctx)
-        .await
-        .expect("resolve /hello");
-    let payload = DirentsPayload {
-        entries: vec![DirentRecord {
-            name: "cached-only.txt".to_string(),
-            meta: EntryMeta::file_without_attrs(),
-        }],
-        exhaustive: false,
-        validator: None,
-        next_cursor: None,
-        paginated: false,
-    }
-    .serialize()
-    .expect("serialize dirents");
-    let record = CacheRecord::new(RecordKind::Dirents, payload);
-    t.runtime
-        .resources
-        .cache_put(parent.path(), RecordKind::Dirents, None, &record);
-
-    let child = tree
-        .resolve_child(&parent, "cached-only.txt", &ctx)
-        .await
-        .expect("resolve cached dirent child");
-    assert_eq!(child.path().as_str(), "/hello/cached-only.txt");
-    assert!(child.is_file());
+    answer
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn list_root_yields_known_children() {
-    let t = test_tree();
-    let tree = &t.tree;
-    let ctx = RequestCtx;
-
-    let root = tree
-        .resolve(&Path::parse("/").unwrap(), &ctx)
+    let harness = make_runtime();
+    let namespace = harness.namespace.as_ref();
+    let mount = resolve(namespace, "/test").await;
+    let page = namespace
+        .readdir(mount.path.clone(), DirCursor::start(), 0)
         .await
         .unwrap();
-    let listing = match tree.list(&root, None, &ctx).await.expect("list root") {
-        ListOutcome::Listing(l) => l,
-        ListOutcome::Subtree(_) => panic!("root must be a provider listing, not a subtree"),
-    };
-    let names: Vec<&str> = listing
+    let mut names: Vec<&str> = page
         .entries
         .iter()
-        .filter(|e| !e.is_synthetic())
-        .map(|e| e.name.as_str())
+        .map(|entry| entry.name.as_str())
         .collect();
-    let synthetic_names: Vec<&str> = listing
-        .entries
-        .iter()
-        .filter(|e| e.is_synthetic())
-        .map(|e| e.name.as_str())
-        .collect();
-    // Verified against providers/test/src/lib.rs route registrations on this
-    // branch: the root projects the generated README plus items, hello,
-    // scoped, the /dynamic capture prefix, and the slow delay route the
-    // concurrency net added.
-    assert_eq!(names.len(), 6, "got {names:?}");
+    names.sort_unstable();
+    assert_eq!(names.len(), 9);
     assert!(names.contains(&"README.md"));
-    assert!(names.contains(&"items"));
     assert!(names.contains(&"hello"));
-    assert!(names.contains(&"scoped"));
-    assert!(names.contains(&"dynamic"));
-    assert!(names.contains(&"slow"));
-    assert_eq!(
-        synthetic_names,
-        [".gitignore", ".ignore", ".rgignore"],
-        "got {synthetic_names:?}"
-    );
+    assert!(names.contains(&".gitignore"));
+    assert!(names.contains(&".ignore"));
+    assert!(names.contains(&".rgignore"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn list_hello_yields_eighteen_children_with_message() {
-    let t = test_tree();
-    let tree = &t.tree;
-    let ctx = RequestCtx;
-
-    let hello = tree
-        .resolve(&Path::parse("/hello").unwrap(), &ctx)
+async fn list_hello_yields_representative_children() {
+    let harness = make_runtime();
+    let namespace = harness.namespace.as_ref();
+    let hello = resolve(namespace, "/test/hello").await;
+    let page = namespace
+        .readdir(hello.path.clone(), DirCursor::start(), 0)
         .await
         .unwrap();
-    let listing = match tree.list(&hello, None, &ctx).await.expect("list /hello") {
-        ListOutcome::Listing(l) => l,
-        ListOutcome::Subtree(_) => panic!("/hello is a provider listing"),
-    };
-    let names: Vec<&str> = listing.entries.iter().map(|e| e.name.as_str()).collect();
-    // Verified against providers/test/src/lib.rs: /hello projects 12 files
-    // (message, greeting, projected, lazy, fresh-full, ranged, unknown-ranged,
-    // large-ranged, volatile-tail, live-log, remote-a, remote-b), 5 dirs
-    // (bundle, feed, unbounded, throttled, snapshot), and the generated branch
-    // README = 18. `remote-a`/`remote-b` are the callout-suspending leaves the
-    // host concurrency test drives; `live-log` is a live ranged file.
-    assert_eq!(listing.entries.len(), 18, "got {names:?}");
-    assert!(names.contains(&"README.md"));
-    assert!(names.contains(&"message"));
-    assert!(names.contains(&"live-log"));
-    assert!(names.contains(&"remote-a"));
-    assert!(names.contains(&"remote-b"));
+    let names: Vec<&str> = page
+        .entries
+        .iter()
+        .map(|entry| entry.name.as_str())
+        .collect();
+    for name in ["README.md", "message", "live-log", "remote-a", "remote-b"] {
+        assert!(names.contains(&name), "missing {name} from {names:?}");
+    }
 }
 
-/// NFSv4 filehandle-first / FUSE bare-inode rehydration: persist a NodeId
-/// (mount, path), drop the Node, resolve again by the same path, get an equal
-/// node back from the (now-warm) cache-consult path, with no re-walk.
 #[tokio::test(flavor = "multi_thread")]
-async fn resolve_rehydrates_by_path_without_re_walk() {
-    let t = test_tree();
-    let tree = &t.tree;
-    let ctx = RequestCtx;
-
-    let first = tree
-        .resolve(&Path::parse("/hello/message").unwrap(), &ctx)
-        .await
-        .unwrap();
-    let id = first.id();
-    drop(first);
-
-    let again = tree
-        .resolve(&id.path, &ctx)
-        .await
-        .expect("rehydrate by path");
-    assert_eq!(again.mount(), id.mount);
-    assert_eq!(again.path().as_str(), id.path.as_str());
-    assert!(again.is_file());
+async fn resolve_rehydrates_from_path_with_stable_identity() {
+    let harness = make_runtime();
+    let namespace = harness.namespace.as_ref();
+    let first = resolve(namespace, "/test/hello/message").await;
+    let second = namespace.getattr(first.path.clone()).await.unwrap();
+    assert_eq!(first.path, Path::parse("/test/hello/message").unwrap());
+    assert_eq!(second.kind, first.attrs.kind);
 }

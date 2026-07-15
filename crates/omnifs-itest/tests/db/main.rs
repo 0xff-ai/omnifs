@@ -2,18 +2,14 @@
 
 mod db_fixture;
 
-use omnifs_engine::EngineError;
-use omnifs_engine::test_support::{LookupOutcome, NamespaceListOutcome, ReadBytes};
-use omnifs_itest::{RuntimeHarness, make_initialized_runtime, parse_path};
-use omnifs_wit::provider::types::ErrorKind;
+use omnifs_core::path::Path;
+use omnifs_engine::test_support::clock::now_millis;
+use omnifs_engine::{DirCursor, LookupAnswer, Namespace, NsError};
+use omnifs_itest::{
+    ReadFileOpExt, RuntimeHarness, TestOpExt, expect_inline, make_initialized_runtime, parse_path,
+};
+use omnifs_wit::provider::types::{EntryKind, ListChildrenResult, LookupChildResult};
 use serde::Deserialize;
-
-fn assert_lookup_not_found(lookup: &LookupOutcome) {
-    assert!(
-        matches!(lookup, LookupOutcome::NotFound),
-        "expected lookup miss, got {lookup:?}"
-    );
-}
 
 fn db_config(host_file: &str) -> String {
     format!(
@@ -37,26 +33,29 @@ fn db_harness() -> (tempfile::TempDir, RuntimeHarness) {
 }
 
 async fn read_bytes(harness: &RuntimeHarness, path: &str) -> Vec<u8> {
-    let path = parse_path(path);
-    let result = harness
-        .runtime
-        .namespace()
-        .read_file(&path, path.content_type_mime(None).to_string())
-        .await
-        .unwrap();
-    match &result.bytes {
-        ReadBytes::Inline(bytes) => bytes.clone(),
-        ReadBytes::Canonical => panic!(
-            "db provider must not use canonical cache for {}",
-            path.as_str()
-        ),
-        other @ ReadBytes::Blob(_) => {
-            panic!(
-                "expected inline file content for {}, got {other:?}",
-                path.as_str()
-            )
-        },
+    let result = harness.read(path).unwrap().into_read_file().unwrap();
+    expect_inline(&result).to_vec()
+}
+
+async fn resolve_namespace(namespace: &dyn Namespace, path: &str) -> LookupAnswer {
+    let mut answer = LookupAnswer {
+        path: Path::root(),
+        attrs: namespace.getattr(Path::root()).await.unwrap(),
+    };
+    for segment in parse_path(path).segments() {
+        answer = namespace.lookup(answer.path, segment).await.unwrap();
     }
+    answer
+}
+
+async fn namespace_read_bytes(harness: &RuntimeHarness, path: &str) -> Vec<u8> {
+    let answer = resolve_namespace(harness.namespace.as_ref(), path).await;
+    harness
+        .namespace
+        .read(answer.path, 0, u32::MAX)
+        .await
+        .unwrap()
+        .bytes
 }
 
 #[derive(Debug, Deserialize)]
@@ -80,14 +79,9 @@ struct FileInfo {
 async fn db_tables_listing_exhaustive_names() {
     let (_dir, harness) = db_harness();
 
-    let root = harness
-        .runtime
-        .namespace()
-        .list_children(&parse_path("/"), None, None)
-        .await
-        .unwrap();
+    let root = harness.list("/").unwrap().into_ok().unwrap();
     match root {
-        NamespaceListOutcome::Entries(listing) => {
+        ListChildrenResult::Entries(listing) => {
             let names: Vec<_> = listing.entries.iter().map(|e| e.name.as_str()).collect();
             assert!(names.contains(&"README.md"));
             assert!(names.contains(&"meta"));
@@ -97,14 +91,9 @@ async fn db_tables_listing_exhaustive_names() {
         other => panic!("expected root listing, got {other:?}"),
     }
 
-    let tables = harness
-        .runtime
-        .namespace()
-        .list_children(&parse_path("/tables"), None, None)
-        .await
-        .unwrap();
+    let tables = harness.list("/tables").unwrap().into_ok().unwrap();
     match tables {
-        NamespaceListOutcome::Entries(listing) => {
+        ListChildrenResult::Entries(listing) => {
             assert!(listing.exhaustive);
             let names: Vec<_> = listing.entries.iter().map(|e| e.name.as_str()).collect();
             assert!(names.contains(&"README.md"));
@@ -116,43 +105,41 @@ async fn db_tables_listing_exhaustive_names() {
                     .entries
                     .iter()
                     .filter(|entry| entry.name != "README.md")
-                    .all(|entry| entry.meta.is_directory())
+                    .all(|entry| matches!(entry.kind, EntryKind::Directory))
             );
         },
         other => panic!("expected tables listing, got {other:?}"),
     }
 
     let missing = harness
-        .runtime
-        .namespace()
-        .lookup_child(&parse_path("/tables"), "NoSuchTable")
-        .await
+        .lookup("/tables", "NoSuchTable")
+        .unwrap()
+        .into_ok()
         .unwrap();
-    assert_lookup_not_found(&missing);
+    assert!(matches!(missing, LookupChildResult::NotFound(_)));
 }
 
 #[tokio::test]
 async fn db_meta_listing_is_direct_path_surface() {
     let (_dir, harness) = db_harness();
 
+    let meta_node = resolve_namespace(harness.namespace.as_ref(), "/db/meta").await;
     let meta = harness
-        .runtime
-        .namespace()
-        .list_children(&parse_path("/meta"), None, None)
+        .namespace
+        .readdir(meta_node.path, DirCursor::start(), 0)
         .await
         .unwrap();
 
-    match meta {
-        NamespaceListOutcome::Entries(listing) => {
-            assert!(listing.exhaustive);
-            let names: Vec<_> = listing.entries.iter().map(|e| e.name.as_str()).collect();
-            assert!(names.contains(&"README.md"));
-            assert!(names.contains(&"info.json"));
-            assert!(names.contains(&"version.txt"));
-            assert!(names.contains(&"path.txt"));
-        },
-        other => panic!("expected meta listing, got {other:?}"),
-    }
+    assert!(meta.next.is_none());
+    let names: Vec<_> = meta
+        .entries
+        .iter()
+        .map(|entry| entry.name.as_str())
+        .collect();
+    assert!(names.contains(&"README.md"));
+    assert!(names.contains(&"info.json"));
+    assert!(names.contains(&"version.txt"));
+    assert!(names.contains(&"path.txt"));
     assert!(harness.cached_canonical_for("/meta/info.json").is_none());
     assert!(harness.cached_canonical_for("/meta/version.txt").is_none());
 }
@@ -203,12 +190,12 @@ async fn db_table_direct_files_are_coherent() {
 async fn db_table_direct_files_do_not_use_canonical_cache() {
     let (_dir, harness) = db_harness();
 
-    let table_bytes = read_bytes(&harness, "/tables/Album/table.json").await;
+    let table_bytes = namespace_read_bytes(&harness, "/db/tables/Album/table.json").await;
 
-    let schema_sql = read_bytes(&harness, "/tables/Album/schema.sql").await;
-    let schema_json = read_bytes(&harness, "/tables/Album/schema.json").await;
-    let indexes_json = read_bytes(&harness, "/tables/Album/indexes.json").await;
-    let count_txt = read_bytes(&harness, "/tables/Album/count.txt").await;
+    let schema_sql = namespace_read_bytes(&harness, "/db/tables/Album/schema.sql").await;
+    let schema_json = namespace_read_bytes(&harness, "/db/tables/Album/schema.json").await;
+    let indexes_json = namespace_read_bytes(&harness, "/db/tables/Album/indexes.json").await;
+    let count_txt = namespace_read_bytes(&harness, "/db/tables/Album/count.txt").await;
 
     let doc: TableDoc = serde_json::from_slice(&table_bytes).unwrap();
     assert_eq!(
@@ -239,33 +226,35 @@ async fn db_table_direct_files_do_not_use_canonical_cache() {
 async fn db_missing_table_negative_record() {
     let (_dir, harness) = db_harness();
 
-    let lookup = harness
-        .runtime
-        .namespace()
-        .lookup_child(&parse_path("/tables"), "NoSuchTable")
-        .await
-        .unwrap();
-    assert_lookup_not_found(&lookup);
+    let namespace = harness.namespace.as_ref();
+    let tables = resolve_namespace(namespace, "/db/tables").await;
+    assert!(matches!(
+        namespace.lookup(tables.path.clone(), "NoSuchTable").await,
+        Err(NsError::NotFound)
+    ));
+    assert!(
+        harness
+            .runtime
+            .resources
+            .negative_for(&parse_path("/tables/NoSuchTable"), now_millis())
+            .is_some(),
+        "namespace miss must publish the host negative"
+    );
 
-    let path = parse_path("/tables/NoSuchTable/schema.sql");
-    let read_err = harness
-        .runtime
-        .namespace()
-        .read_file(&path, path.content_type_mime(None).to_string())
-        .await
+    let schema = harness
+        .read("/tables/NoSuchTable/schema.sql")
+        .unwrap()
+        .into_result()
+        .unwrap()
         .unwrap_err();
-    match read_err {
-        EngineError::ProviderError(error) => assert_eq!(error.kind, ErrorKind::NotFound),
-        other => panic!("expected NotFound read, got {other:?}"),
-    }
-
-    let lookup_again = harness
-        .runtime
-        .namespace()
-        .lookup_child(&parse_path("/tables"), "NoSuchTable")
-        .await
-        .unwrap();
-    assert_lookup_not_found(&lookup_again);
+    assert_eq!(
+        schema.kind,
+        omnifs_wit::provider::types::ErrorKind::NotFound
+    );
+    assert!(matches!(
+        namespace.lookup(tables.path, "NoSuchTable").await,
+        Err(NsError::NotFound)
+    ));
 }
 
 #[tokio::test]

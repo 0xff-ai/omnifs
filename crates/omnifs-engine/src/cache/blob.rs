@@ -55,7 +55,7 @@ pub struct BlobCache {
     requests: DashMap<BlobRequestId, u64>,
     blobs: DashMap<u64, Arc<BlobRecord>>,
     locks: DashMap<BlobRequestId, Arc<AsyncMutex<()>>>,
-    next_id: AtomicU64,
+    next_blob_id: AtomicU64,
 }
 
 impl BlobCache {
@@ -66,7 +66,7 @@ impl BlobCache {
             requests: DashMap::new(),
             blobs: DashMap::new(),
             locks: DashMap::new(),
-            next_id: AtomicU64::new(1),
+            next_blob_id: AtomicU64::new(1),
         };
         cache.prepare_dirs()?;
         cache.rehydrate()?;
@@ -236,7 +236,7 @@ impl BlobCache {
         generation: BlobGeneration,
         metadata: BlobMetadata,
     ) -> Arc<BlobRecord> {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let id = self.next_blob_id.fetch_add(1, Ordering::Relaxed);
         let record = Arc::new(BlobRecord {
             id,
             generation,

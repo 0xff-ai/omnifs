@@ -141,8 +141,8 @@ pub fn warm_discovery(harness: &RuntimeHarness) -> Vec<String> {
 
 /// Answer a partial discovery attempt with an optional core failure and a
 /// configurable preferred-group-version failure. The fallback stays readable.
-pub fn answer_partial_discovery(
-    op: &mut TestOp<'_>,
+pub fn answer_partial_discovery<T>(
+    op: &mut TestOp<'_, T>,
     core_error: Option<u16>,
     preferred_error: u16,
 ) {
@@ -196,7 +196,7 @@ pub fn sorted_entry_names(result: ListChildrenResult) -> Vec<String> {
 
 /// The served bytes of a completed read, whether the terminal serves the
 /// canonical store (identity representations) or inline bytes (projections).
-pub fn read_bytes(op: &TestOp<'_>) -> Vec<u8> {
+pub fn read_bytes(op: &TestOp<'_, ReadFileOutcome>) -> Vec<u8> {
     match op.result().unwrap() {
         Ok(ReadFileOutcome::Found(file)) => match &file.bytes {
             ByteSource::Canonical => op.effects().unwrap().canonical[0].bytes.clone(),

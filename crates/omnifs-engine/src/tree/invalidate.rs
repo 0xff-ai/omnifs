@@ -1,9 +1,9 @@
-//! Invalidation report types and the sync `Tree::drain_invalidations` body.
+//! Invalidation report types and synchronous provider invalidation draining.
 
 use omnifs_api::events::CacheKind;
 use omnifs_core::path::Path;
 
-use crate::Tree;
+use crate::TreeNamespace;
 
 /// Neutral half of the invalidation fan-out. `Tree` has already done its own mem
 /// eviction; the renderer consumes this to drive its kernel notifier (FUSE
@@ -17,12 +17,12 @@ pub struct InvalidationReport {
 }
 
 impl InvalidationReport {
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.paths.is_empty() && self.prefixes.is_empty() && self.changed_dirs.is_empty()
     }
 }
 
-impl Tree {
+impl TreeNamespace {
     /// SYNC drain of pending runtime invalidations for a mount. Does the
     /// Tree-owned mem eviction (`Runtime::mem_invalidate_entries_if`) and
     /// returns the neutral `InvalidationReport` so the renderer drives its own
@@ -31,8 +31,8 @@ impl Tree {
     /// `drain_changed_dirs` are sync queue drains touching no provider. Both
     /// renderers call this at the top of each op. This is the shared pull-based
     /// invalidation API.
-    pub fn drain_invalidations(&self, mount: &str) -> InvalidationReport {
-        let Some(runtime) = self.ctx.registry_runtime(mount) else {
+    pub(crate) fn drain_invalidations(&self, mount: &str) -> InvalidationReport {
+        let Some(runtime) = self.registry_runtime(mount) else {
             return InvalidationReport::default();
         };
 

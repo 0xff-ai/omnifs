@@ -2,31 +2,38 @@
 
 mod support;
 
-use omnifs_engine::EngineError;
-use omnifs_engine::test_support::{LookupOutcome, NamespaceListOutcome, ReadBytes};
-use omnifs_itest::{make_initialized_runtime, parse_path, try_make_runtime_from_config};
+use omnifs_itest::{
+    ReadFileOpExt, TestOpExt, expect_inline, make_initialized_runtime, try_make_runtime_from_config,
+};
 use omnifs_wit::provider::types::{
-    CalloutResult, ErrorKind, HttpResponse, ReadFileOutcome, Stability,
+    CalloutResult, ErrorKind, HttpResponse, ListChildrenResult, LookupChildResult, ReadFileOutcome,
+    Stability,
 };
 use support::{canned_a_response, dns_harness, expect_fetch as dns_expect_fetch, expect_fetches};
 
 fn assert_materialized_lookup(
-    lookup: LookupOutcome,
+    lookup: LookupChildResult,
     expected_path: &str,
     expected_directory: bool,
 ) {
     match lookup {
-        LookupOutcome::Entry(entry) => {
-            assert_eq!(entry.path().as_str(), expected_path);
-            assert_eq!(entry.meta().is_directory(), expected_directory);
+        LookupChildResult::Entry(entry) => {
+            assert_eq!(entry.target.name, expected_path.rsplit('/').next().unwrap());
+            assert_eq!(
+                matches!(
+                    entry.target.kind,
+                    omnifs_wit::provider::types::EntryKind::Directory
+                ),
+                expected_directory
+            );
         },
         other => panic!("expected materialized lookup entry, got {other:?}"),
     }
 }
 
-fn assert_lookup_not_found(lookup: &LookupOutcome) {
+fn assert_lookup_not_found(lookup: &LookupChildResult) {
     assert!(
-        matches!(lookup, LookupOutcome::NotFound),
+        matches!(lookup, LookupChildResult::NotFound(_)),
         "expected lookup miss, got {lookup:?}"
     );
 }
@@ -73,78 +80,56 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
     "#,
     );
 
-    let lookup = harness
-        .runtime
-        .namespace()
-        .lookup_child(&parse_path("/"), "resolvers")
-        .await
-        .unwrap();
+    let lookup = harness.lookup("/", "resolvers").unwrap().into_ok().unwrap();
     assert_materialized_lookup(lookup, "/resolvers", false);
 
-    let resolvers_path = parse_path("/resolvers");
     let resolvers_file = harness
-        .runtime
-        .namespace()
-        .read_file(
-            &resolvers_path,
-            resolvers_path.content_type_mime(None).to_string(),
-        )
-        .await
+        .read("/resolvers")
+        .unwrap()
+        .into_read_file()
         .unwrap();
-    let ReadBytes::Inline(bytes) = resolvers_file.bytes else {
-        panic!("expected inline resolvers file, got {resolvers_file:?}");
-    };
-    let body = String::from_utf8(bytes).expect("utf8 resolvers file");
+    let bytes = expect_inline(&resolvers_file);
+    let body = String::from_utf8(bytes.to_vec()).expect("utf8 resolvers file");
     assert!(
         body.contains("cloudflare"),
         "unexpected resolvers file: {body}"
     );
 
-    let reverse_lookup = harness
-        .runtime
-        .namespace()
-        .lookup_child(&parse_path("/"), "reverse")
-        .await
-        .unwrap();
+    let reverse_lookup = harness.lookup("/", "reverse").unwrap().into_ok().unwrap();
     assert_materialized_lookup(reverse_lookup, "/reverse", true);
 
     let resolver_lookup = harness
-        .runtime
-        .namespace()
-        .lookup_child(&parse_path("/"), "@cloudflare")
-        .await
+        .lookup("/", "@cloudflare")
+        .unwrap()
+        .into_ok()
         .unwrap();
     assert_materialized_lookup(resolver_lookup, "/@cloudflare", true);
 
     let resolver_domain_lookup = harness
-        .runtime
-        .namespace()
-        .lookup_child(&parse_path("/@cloudflare"), "example.com")
-        .await
+        .lookup("/@cloudflare", "example.com")
+        .unwrap()
+        .into_ok()
         .unwrap();
     assert_materialized_lookup(resolver_domain_lookup, "/@cloudflare/example.com", true);
 
     let resolver_reverse_lookup = harness
-        .runtime
-        .namespace()
-        .lookup_child(&parse_path("/@cloudflare"), "reverse")
-        .await
+        .lookup("/@cloudflare", "reverse")
+        .unwrap()
+        .into_ok()
         .unwrap();
     assert_materialized_lookup(resolver_reverse_lookup, "/@cloudflare/reverse", true);
 
     let reverse_ip_lookup = harness
-        .runtime
-        .namespace()
-        .lookup_child(&parse_path("/reverse"), "8.8.8.8")
-        .await
+        .lookup("/reverse", "8.8.8.8")
+        .unwrap()
+        .into_ok()
         .unwrap();
     assert_materialized_lookup(reverse_ip_lookup, "/reverse/8.8.8.8", false);
 
     let resolver_reverse_ip_lookup = harness
-        .runtime
-        .namespace()
-        .lookup_child(&parse_path("/@cloudflare/reverse"), "8.8.8.8")
-        .await
+        .lookup("/@cloudflare/reverse", "8.8.8.8")
+        .unwrap()
+        .into_ok()
         .unwrap();
     assert_materialized_lookup(
         resolver_reverse_ip_lookup,
@@ -153,54 +138,40 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
     );
 
     let invalid_reverse_lookup = harness
-        .runtime
-        .namespace()
-        .lookup_child(&parse_path("/reverse"), "not-an-ip")
-        .await
+        .lookup("/reverse", "not-an-ip")
+        .unwrap()
+        .into_ok()
         .unwrap();
     assert_lookup_not_found(&invalid_reverse_lookup);
 
     let invalid_resolver_reverse_lookup = harness
-        .runtime
-        .namespace()
-        .lookup_child(&parse_path("/@cloudflare/reverse"), "not-an-ip")
-        .await
+        .lookup("/@cloudflare/reverse", "not-an-ip")
+        .unwrap()
+        .into_ok()
         .unwrap();
     assert_lookup_not_found(&invalid_resolver_reverse_lookup);
 
-    let direct_ip_lookup = harness
-        .runtime
-        .namespace()
-        .lookup_child(&parse_path("/"), "8.8.8.8")
-        .await
-        .unwrap();
+    let direct_ip_lookup = harness.lookup("/", "8.8.8.8").unwrap().into_ok().unwrap();
     assert_lookup_not_found(&direct_ip_lookup);
 
     let resolver_direct_ip_lookup = harness
-        .runtime
-        .namespace()
-        .lookup_child(&parse_path("/@cloudflare"), "8.8.8.8")
-        .await
+        .lookup("/@cloudflare", "8.8.8.8")
+        .unwrap()
+        .into_ok()
         .unwrap();
     assert_lookup_not_found(&resolver_direct_ip_lookup);
 
     let domain_lookup = harness
-        .runtime
-        .namespace()
-        .lookup_child(&parse_path("/"), "example.com")
-        .await
+        .lookup("/", "example.com")
+        .unwrap()
+        .into_ok()
         .unwrap();
     assert_materialized_lookup(domain_lookup, "/example.com", true);
     // lookup_child does not warm adjacent cache entries.
 
-    let listing = harness
-        .runtime
-        .namespace()
-        .list_children(&parse_path("/example.com"), None, None)
-        .await
-        .unwrap();
+    let listing = harness.list("/example.com").unwrap().into_ok().unwrap();
     match listing {
-        NamespaceListOutcome::Entries(listing) => {
+        ListChildrenResult::Entries(listing) => {
             let names: Vec<&str> = listing
                 .entries
                 .iter()
@@ -215,14 +186,9 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
         },
     }
 
-    let reverse_listing = harness
-        .runtime
-        .namespace()
-        .list_children(&parse_path("/reverse"), None, None)
-        .await
-        .unwrap();
+    let reverse_listing = harness.list("/reverse").unwrap().into_ok().unwrap();
     match reverse_listing {
-        NamespaceListOutcome::Entries(listing) => {
+        ListChildrenResult::Entries(listing) => {
             let names: Vec<&str> = listing
                 .entries
                 .iter()
@@ -236,13 +202,12 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
     }
 
     let resolver_reverse_listing = harness
-        .runtime
-        .namespace()
-        .list_children(&parse_path("/@cloudflare/reverse"), None, None)
-        .await
+        .list("/@cloudflare/reverse")
+        .unwrap()
+        .into_ok()
         .unwrap();
     match resolver_reverse_listing {
-        NamespaceListOutcome::Entries(listing) => {
+        ListChildrenResult::Entries(listing) => {
             assert!(
                 listing.entries.is_empty(),
                 "resolver reverse dir should not eagerly list dynamic children: {listing:?}"
@@ -265,22 +230,20 @@ async fn dns_provider_unknown_resolver_read_is_invalid_input() {
     "#,
     );
 
-    let path = parse_path("/@missing/example.com/A");
     let error = harness
-        .runtime
-        .namespace()
-        .read_file(&path, path.content_type_mime(None).to_string())
-        .await
+        .read("/@missing/example.com/A")
+        .unwrap()
+        .into_result()
+        .unwrap()
         .unwrap_err();
     match error {
-        EngineError::ProviderError(error) => {
+        error => {
             assert_eq!(error.kind, ErrorKind::InvalidInput);
             assert!(
                 error.message.contains("unknown resolver specifier"),
                 "unexpected resolver error: {error:?}"
             );
         },
-        other => panic!("expected invalid-input resolver error, got {other:?}"),
     }
 }
 
@@ -295,32 +258,24 @@ async fn dns_provider_unknown_record_reads_are_not_found() {
     "#,
     );
 
-    let path = parse_path("/example.com/BOGUS");
     let error = harness
-        .runtime
-        .namespace()
-        .read_file(&path, path.content_type_mime(None).to_string())
-        .await
+        .read("/example.com/BOGUS")
+        .unwrap()
+        .into_result()
+        .unwrap()
         .unwrap_err();
     match error {
-        EngineError::ProviderError(error) => {
-            assert_eq!(error.kind, ErrorKind::NotFound);
-        },
-        other => panic!("expected unknown-record NotFound, got {other:?}"),
+        error => assert_eq!(error.kind, ErrorKind::NotFound),
     }
 
-    let path = parse_path("/@cloudflare/example.com/BOGUS");
     let error = harness
-        .runtime
-        .namespace()
-        .read_file(&path, path.content_type_mime(None).to_string())
-        .await
+        .read("/@cloudflare/example.com/BOGUS")
+        .unwrap()
+        .into_result()
+        .unwrap()
         .unwrap_err();
     match error {
-        EngineError::ProviderError(error) => {
-            assert_eq!(error.kind, ErrorKind::NotFound);
-        },
-        other => panic!("expected resolver unknown-record NotFound, got {other:?}"),
+        error => assert_eq!(error.kind, ErrorKind::NotFound),
     }
 }
 

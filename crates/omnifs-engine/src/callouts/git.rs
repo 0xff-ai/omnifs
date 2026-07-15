@@ -1,7 +1,7 @@
 //! Git operations via the system `git` CLI.
 //!
 //! The `open_repo` callout clones a remote if needed and returns a tree-ref
-//! handle that the subtree handoff resolves to a filesystem path. Tree
+//! handle that the namespace host-tree handoff resolves to a filesystem path.
 //! traversal and blob reads run through bind-mount reads of the clone
 //! directory, not through the WIT.
 
@@ -92,7 +92,9 @@ impl GitExecutor {
                 );
                 GitError::from(error)
             })?;
-        Ok(self.trees.register(cache_path))
+        self.trees
+            .register(id, &cache_path)
+            .map_err(|error| GitError::Clone(format!("failed to open clone root: {error}")))
     }
 }
 

@@ -35,7 +35,7 @@ impl Runtime {
                 )
                 .await?;
             crate::op_validate::validate_lookup(&result, &effects, |tree| {
-                self.resolve_tree_ref(tree).is_some()
+                self.tree_ref(tree).is_some()
             })
             .map_err(EngineError::ProviderProtocol)?;
             inspect_result(&span, &result);
@@ -72,7 +72,7 @@ impl Runtime {
                 .list_children(id, path.as_str().to_string(), cached_validator, cursor)
                 .await?;
             crate::op_validate::validate_list(&result, &effects, |tree| {
-                self.resolve_tree_ref(tree).is_some()
+                self.tree_ref(tree).is_some()
             })
             .map_err(EngineError::ProviderProtocol)?;
             inspect_result(&span, &result);
@@ -114,7 +114,7 @@ impl Runtime {
                 )
                 .await?;
             crate::op_validate::validate_read(&result, &effects, |tree| {
-                self.resolve_tree_ref(tree).is_some()
+                self.tree_ref(tree).is_some()
             })
             .map_err(EngineError::ProviderProtocol)?;
             inspect_result(&span, &result);
@@ -144,7 +144,7 @@ impl Runtime {
                 .open_file(id, path.as_str().to_string())
                 .await?;
             crate::op_validate::validate_open(&result, &effects, |tree| {
-                self.resolve_tree_ref(tree).is_some()
+                self.tree_ref(tree).is_some()
             })
             .map_err(EngineError::ProviderProtocol)?;
             inspect_result(&span, &result);
@@ -170,7 +170,7 @@ impl Runtime {
             let op_gen = self.resources.current_generation();
             let (result, effects) = self.instance.read_chunk(id, handle, offset, length).await?;
             crate::op_validate::validate_chunk(&result, &effects, length, |tree| {
-                self.resolve_tree_ref(tree).is_some()
+                self.tree_ref(tree).is_some()
             })
             .map_err(EngineError::ProviderProtocol)?;
             inspect_result(&span, &result);
@@ -191,7 +191,7 @@ impl Runtime {
             let op_gen = self.resources.current_generation();
             let (result, effects) = self.instance.on_event(id, event).await?;
             crate::op_validate::validate_event(&result, &effects, |tree| {
-                self.resolve_tree_ref(tree).is_some()
+                self.tree_ref(tree).is_some()
             })
             .map_err(EngineError::ProviderProtocol)?;
             inspect_result(&span, &result);

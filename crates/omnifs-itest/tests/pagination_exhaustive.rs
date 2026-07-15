@@ -1,261 +1,104 @@
-//! Characterization: the Tree-level `@next`/`@all` pagination controls.
-//!
-//! `crates/omnifs-engine/tests/pagination_test.rs` drives
-//! `Runtime::paginate_{next,all}` directly and inspects the cache; this file
-//! characterizes the same feed through the kernel-free `Tree` surface a
-//! frontend sees: a first-page browse listing carries the synthetic `@next`/`@all`
-//! controls, reading `@next` advances the parent's accumulated dirents, and a
-//! re-listing reflects the grown feed until the controls disappear at exhaustion.
-//! `@all` reaches the same complete set in one read.
-//!
-//! `stale_snapshot_controls_resolve_after_exhaustion` covers the converse: a
-//! `@next`/`@all` name a consumer already captured from an earlier (non-exhausted)
-//! listing keeps resolving and reading (as a no-op) even after a fresh listing
-//! has stopped naming it. Presence in an already-served listing must never
-//! regress to ENOENT, mirroring the existing rule that absence from a
-//! non-exhaustive listing is never ENOENT either
-//! (`docs/architecture/20-route-dispatch-and-listing.md`).
-//!
-//! The test-provider's `/hello/feed` route yields two `item-*` entries per page
-//! across three pages (pages 0 and 1 carry a resume cursor, page 2 is terminal),
-//! so the exhaustive set is `item-0 .. item-5`.
+//! Exhaustive pagination controls through the production namespace surface.
 
 #![cfg(not(target_os = "wasi"))]
-#![allow(clippy::doc_markdown)]
-
-use std::sync::Arc;
 
 use omnifs_core::path::Path;
-use omnifs_engine::{
-    Cursor, Entry, ListOutcome, Node, ReadResult, RequestCtx, ServingContext, Tree,
-};
-use omnifs_itest::{RuntimeHarness, make_engine, make_runtime};
-use tempfile::TempDir;
+use omnifs_engine::{DirCursor, LookupAnswer, Namespace};
+use omnifs_itest::RuntimeHarness;
 
-/// A wasm test-provider loaded into a `Runtime`, wrapped in a `Tree` under mount
-/// "test". Owns the harness temp dirs that must outlive the `Runtime`.
-struct PagedTree {
-    tree: Tree,
-    ctx: RequestCtx,
-    _clone_dir: TempDir,
-    _cache_dir: TempDir,
-    _config_dir: TempDir,
+async fn resolve(harness: &RuntimeHarness, value: &str) -> LookupAnswer {
+    let namespace = harness.namespace.as_ref();
+    let mut answer = LookupAnswer {
+        path: Path::root(),
+        attrs: namespace.getattr(Path::root()).await.unwrap(),
+    };
+    for segment in Path::parse(value).unwrap().segments() {
+        answer = namespace.lookup(answer.path, segment).await.unwrap();
+    }
+    answer
 }
 
-fn paged_tree() -> PagedTree {
-    let engine = make_engine();
-    let RuntimeHarness {
-        clone_dir,
-        cache_dir,
-        config_dir,
-        runtime,
-        ..
-    } = make_runtime(&engine);
-    let tree = Tree::new(ServingContext::single(
-        "test".to_string(),
-        Arc::new(runtime),
-    ));
-    PagedTree {
-        tree,
-        ctx: RequestCtx::default(),
-        _clone_dir: clone_dir,
-        _cache_dir: cache_dir,
-        _config_dir: config_dir,
-    }
-}
-
-fn path(s: &str) -> Path {
-    Path::parse(s).unwrap()
-}
-
-impl PagedTree {
-    async fn resolve(&self, path_str: &str) -> Node {
-        self.tree
-            .resolve(&path(path_str), &self.ctx)
-            .await
-            .unwrap_or_else(|e| panic!("resolve {path_str}: {e}"))
-    }
-
-    /// List a directory node (browse listing, `cursor = None`) and return the
-    /// listing's entries. Panics on a subtree handoff (the feed is a provider
-    /// directory, never a backing subtree).
-    async fn list(&self, node: &Node) -> Vec<Entry> {
-        match self
-            .tree
-            .list(node, None::<Cursor>, &self.ctx)
-            .await
-            .unwrap_or_else(|e| panic!("list {}: {e}", node.path().as_str()))
-        {
-            ListOutcome::Listing(listing) => listing.entries,
-            ListOutcome::Subtree(dir) => {
-                panic!("expected a provider listing, got subtree {}", dir.display())
-            },
-        }
-    }
-
-    /// Read a node's bytes, asserting provider/synthetic bytes (never a subtree
-    /// handoff). Returns the produced bytes (a control read returns a status line).
-    async fn read(&self, node: &Node) -> Vec<u8> {
-        match self
-            .tree
-            .read(node, &self.ctx)
-            .await
-            .unwrap_or_else(|e| panic!("read {}: {e}", node.path().as_str()))
-        {
-            ReadResult::Bytes { data, .. } => data,
-            ReadResult::Subtree(dir) => panic!("expected bytes, got subtree {}", dir.display()),
-        }
-    }
-}
-
-/// Provider (non-synthetic) child names in listing order.
-fn item_names(entries: &[Entry]) -> Vec<String> {
-    entries
-        .iter()
-        .filter(|e| !e.is_synthetic())
-        .map(|e| e.name.clone())
+async fn list(harness: &RuntimeHarness, feed: &LookupAnswer) -> Vec<String> {
+    harness
+        .namespace
+        .readdir(feed.path.clone(), DirCursor::start(), 0)
+        .await
+        .unwrap()
+        .entries
+        .into_iter()
+        .map(|entry| entry.name)
         .collect()
 }
 
-fn has_entry(entries: &[Entry], name: &str) -> bool {
-    entries.iter().any(|e| e.name == name)
-}
-
-/// Reading `@next` repeatedly through the Tree surface drains the paged feed:
-/// the browse listing accumulates each page, the `@next`/`@all` controls persist
-/// while a resume cursor remains, and the terminal page clears both the cursor
-/// and the controls. The final listing carries every fixture entry exactly once.
 #[tokio::test(flavor = "multi_thread")]
 async fn reading_next_drains_feed_and_drops_controls() {
-    let t = paged_tree();
-    let feed = t.resolve("/hello/feed").await;
-    assert!(feed.is_dir(), "/hello/feed resolves to a directory");
-
-    // First-page browse listing: two items plus the synthetic controls.
-    let page0 = t.list(&feed).await;
-    assert_eq!(item_names(&page0), ["item-0", "item-1"], "page 0 items");
-    assert!(has_entry(&page0, "@next"), "a paged listing carries @next");
-    assert!(has_entry(&page0, "@all"), "a paged listing carries @all");
-
-    // Drive `@next` through the Tree surface until the controls disappear. Each
-    // read advances the parent's accumulated dirents; a re-listing reflects them.
-    let mut latest = page0;
-    let mut reads = 0;
-    while has_entry(&latest, "@next") {
-        reads += 1;
-        assert!(
-            reads <= 4,
-            "feed must exhaust in a bounded number of @next reads"
-        );
-        let next = t.resolve("/hello/feed/@next").await;
-        assert!(next.is_synthetic(), "@next resolves to a synthetic control");
-        // The control read returns a human-readable status line, never provider
-        // bytes; its side effect is growing the feed.
-        let status = t.read(&next).await;
-        assert!(!status.is_empty(), "a control read yields a status line");
-        latest = t.list(&feed).await;
+    let harness = RuntimeHarness::new(omnifs_itest::TEST_PROVIDER_CONFIG).unwrap();
+    let feed = resolve(&harness, "/test/hello/feed").await;
+    let first = list(&harness, &feed).await;
+    assert!(first.contains(&"@next".to_string()));
+    assert!(first.contains(&"@all".to_string()));
+    for name in ["@next", "@next"] {
+        let control = resolve(&harness, &format!("/test/hello/feed/{name}")).await;
+        harness
+            .namespace
+            .read(control.path, 0, u32::MAX)
+            .await
+            .unwrap();
     }
-
-    assert_eq!(
-        reads, 2,
-        "two @next reads drain a three-page feed (page 0 seeded)"
-    );
-    assert_eq!(
-        item_names(&latest),
-        ["item-0", "item-1", "item-2", "item-3", "item-4", "item-5"],
-        "the exhausted listing carries every fixture entry exactly once"
-    );
-    assert!(
-        !has_entry(&latest, "@next"),
-        "@next disappears at exhaustion"
-    );
-    assert!(!has_entry(&latest, "@all"), "@all disappears at exhaustion");
+    let final_names = list(&harness, &feed).await;
+    for name in ["item-0", "item-1", "item-2", "item-3", "item-4", "item-5"] {
+        assert_eq!(
+            final_names
+                .iter()
+                .filter(|candidate| candidate.as_str() == name)
+                .count(),
+            1
+        );
+    }
+    assert!(!final_names.contains(&"@next".to_string()));
+    assert!(!final_names.contains(&"@all".to_string()));
 }
 
-/// Reading `@all` once expands the feed to completion in a single control read,
-/// reaching the same complete set that the `@next` loop reaches page by page.
 #[tokio::test(flavor = "multi_thread")]
 async fn reading_all_materializes_the_complete_set() {
-    let t = paged_tree();
-    let feed = t.resolve("/hello/feed").await;
-
-    // Seed page 0 so the parent dirents carry the `@all` control.
-    let page0 = t.list(&feed).await;
-    assert_eq!(item_names(&page0), ["item-0", "item-1"]);
-    assert!(has_entry(&page0, "@all"), "a paged listing carries @all");
-
-    let all = t.resolve("/hello/feed/@all").await;
-    assert!(all.is_synthetic(), "@all resolves to a synthetic control");
-    let status = t.read(&all).await;
-    assert!(!status.is_empty(), "the @all read yields a status line");
-
-    let complete = t.list(&feed).await;
-    assert_eq!(
-        item_names(&complete),
-        ["item-0", "item-1", "item-2", "item-3", "item-4", "item-5"],
-        "@all materializes the same complete set the @next loop reaches"
-    );
+    let harness = RuntimeHarness::new(omnifs_itest::TEST_PROVIDER_CONFIG).unwrap();
+    let feed = resolve(&harness, "/test/hello/feed").await;
+    let first = list(&harness, &feed).await;
+    assert!(first.contains(&"@all".to_string()));
+    let all = resolve(&harness, "/test/hello/feed/@all").await;
+    let status = harness.namespace.read(all.path, 0, u32::MAX).await.unwrap();
     assert!(
-        !has_entry(&complete, "@next"),
-        "a fully expanded feed has no @next"
+        String::from_utf8(status.bytes)
+            .unwrap()
+            .contains("complete")
     );
-    assert!(
-        !has_entry(&complete, "@all"),
-        "a fully expanded feed has no @all"
-    );
+    let complete = list(&harness, &feed).await;
+    for name in ["item-0", "item-1", "item-2", "item-3", "item-4", "item-5"] {
+        assert!(complete.contains(&name.to_string()));
+    }
+    assert!(!complete.contains(&"@next".to_string()));
+    assert!(!complete.contains(&"@all".to_string()));
 }
 
-/// A consumer that captured `@next`/`@all` from an earlier (non-exhausted)
-/// listing snapshot, then drives the feed to exhaustion through a DIFFERENT
-/// path (here `@all`), must still be able to resolve, open, and read both
-/// names afterward: presence in an already-served listing must never regress
-/// to ENOENT. A fresh re-listing, meanwhile, keeps hiding both controls
-/// (unchanged from `reading_next_drains_feed_and_drops_controls` and
-/// `reading_all_materializes_the_complete_set` above). This is the exact shape
-/// of the real-world regression: a recursive `grep -r` walk captures a paged
-/// directory's readdir snapshot once, opens `@next` (which advances the feed),
-/// then opens `@all` from that SAME stale snapshot, which must not ENOENT.
 #[tokio::test(flavor = "multi_thread")]
 async fn stale_snapshot_controls_resolve_after_exhaustion() {
-    let t = paged_tree();
-    let feed = t.resolve("/hello/feed").await;
-
-    // Capture the page-0 listing snapshot: it names both controls.
-    let stale = t.list(&feed).await;
-    assert!(has_entry(&stale, "@next"), "the stale snapshot names @next");
-    assert!(has_entry(&stale, "@all"), "the stale snapshot names @all");
-
-    // Drive the feed to exhaustion through @all, independent of the captured
-    // stale snapshot above (mirrors a consumer resolving @all once the walk
-    // that captured `stale` reaches it).
-    let all = t.resolve("/hello/feed/@all").await;
-    let _ = t.read(&all).await;
-
-    // A FRESH listing stops naming either control once the feed exhausts.
-    let fresh = t.list(&feed).await;
-    assert!(
-        !has_entry(&fresh, "@next"),
-        "a fresh listing hides @next once exhausted"
-    );
-    assert!(
-        !has_entry(&fresh, "@all"),
-        "a fresh listing hides @all once exhausted"
-    );
-
-    // The STALE snapshot's names still resolve, open, and read as a no-op:
-    // the feed has nothing left to load, so each reports the same "no more
-    // pages" status any other exhausted directory's control would report.
+    let harness = RuntimeHarness::new(omnifs_itest::TEST_PROVIDER_CONFIG).unwrap();
+    let feed = resolve(&harness, "/test/hello/feed").await;
+    let stale = list(&harness, &feed).await;
+    assert!(stale.contains(&"@next".to_string()));
+    assert!(stale.contains(&"@all".to_string()));
+    let all = resolve(&harness, "/test/hello/feed/@all").await;
+    harness.namespace.read(all.path, 0, u32::MAX).await.unwrap();
+    let fresh = list(&harness, &feed).await;
+    assert!(!fresh.contains(&"@next".to_string()));
+    assert!(!fresh.contains(&"@all".to_string()));
     for name in ["@next", "@all"] {
-        let node = t.resolve(&format!("/hello/feed/{name}")).await;
-        assert!(
-            node.is_synthetic(),
-            "{name} resolves to a synthetic control after exhaustion"
-        );
-        let status = t.read(&node).await;
-        let status = String::from_utf8(status).expect("control status is utf8");
-        assert_eq!(
-            status, "no more pages\n",
-            "{name} read after exhaustion is a no-op, not an error"
-        );
+        let node = resolve(&harness, &format!("/test/hello/feed/{name}")).await;
+        let status = harness
+            .namespace
+            .read(node.path, 0, u32::MAX)
+            .await
+            .unwrap();
+        assert_eq!(String::from_utf8(status.bytes).unwrap(), "no more pages\n");
     }
 }

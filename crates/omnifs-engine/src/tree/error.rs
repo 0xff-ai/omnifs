@@ -6,7 +6,7 @@ use crate::ProviderErrorClass;
 
 /// Renderer-neutral error kind. Promoted from the omnifs-nfs `ProviderFsError`
 /// shape: the FUSE adapter maps it to errno, the NFS adapter to nfsstat4. The
-/// wit_types `ProviderError` never appears in a public `Tree` type.
+/// wit_types `ProviderError` never crosses the namespace boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TreeErrorKind {
     NotFound,
@@ -80,6 +80,15 @@ impl TreeError {
     pub fn too_large(message: impl Into<String>) -> Self {
         Self {
             kind: TreeErrorKind::TooLarge,
+            message: message.into(),
+            retryable: false,
+            retry_after: None,
+        }
+    }
+
+    pub fn is_directory(message: impl Into<String>) -> Self {
+        Self {
+            kind: TreeErrorKind::IsDirectory,
             message: message.into(),
             retryable: false,
             retry_after: None,

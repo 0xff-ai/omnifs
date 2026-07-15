@@ -60,7 +60,7 @@ fn partial_discovery_stays_open_qualifies_groups_and_retries_unknown_types() {
 
     let mut types = harness.list("/namespaces/demo").unwrap();
     answer_partial_discovery(&mut types, Some(503), 503);
-    match types.into_list_children().unwrap() {
+    match types.into_result().unwrap().unwrap() {
         ListChildrenResult::Entries(listing) => {
             assert!(
                 !listing.exhaustive,

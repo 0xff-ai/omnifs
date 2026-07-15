@@ -2884,6 +2884,7 @@ version = "0.2.1"
 dependencies = [
  "anyhow",
  "blake3",
+ "cap-std",
  "dashmap",
  "fjall",
  "futures",
@@ -2926,6 +2927,7 @@ dependencies = [
  "dashmap",
  "fuser",
  "libc",
+ "omnifs-core",
  "omnifs-engine",
  "omnifs-mtab",
  "omnifs-wit",
@@ -3136,6 +3138,7 @@ dependencies = [
  "getrandom 0.3.4",
  "hex",
  "omnifs-api",
+ "omnifs-core",
  "omnifs-engine",
  "omnifs-itest",
  "postcard",
@@ -3145,6 +3148,7 @@ dependencies = [
  "tokio",
  "tokio-vsock",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

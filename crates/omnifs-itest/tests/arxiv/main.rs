@@ -31,7 +31,7 @@ const SAMPLE_PAPER_ATOM: &[u8] = br#"<?xml version="1.0" encoding="UTF-8"?>
 const PAPER_ID: &str = "2604.00002";
 const PAPER_ID_ANCHOR: &str = "arxiv.paper|paper=2604.00002";
 
-fn resume_http(op: &mut TestOp<'_>, body: Vec<u8>) {
+fn resume_http<T>(op: &mut TestOp<'_, T>, body: Vec<u8>) {
     op.answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
         status: 200,
         headers: Vec::new(),
@@ -40,11 +40,11 @@ fn resume_http(op: &mut TestOp<'_>, body: Vec<u8>) {
     .unwrap();
 }
 
-fn resume_paper_atom(op: &mut TestOp<'_>) {
+fn resume_paper_atom<T>(op: &mut TestOp<'_, T>) {
     resume_http(op, SAMPLE_PAPER_ATOM.to_vec());
 }
 
-fn resume_blob(op: &mut TestOp<'_>, blob: u64) {
+fn resume_blob(op: &mut TestOp<'_, ReadFileOutcome>, blob: u64) {
     op.answer_callouts(vec![CalloutResult::BlobFetched(
         omnifs_wit::provider::types::BlobFetched {
             blob,
@@ -58,7 +58,7 @@ fn resume_blob(op: &mut TestOp<'_>, blob: u64) {
     .unwrap();
 }
 
-fn read_file_bytes(op: &TestOp<'_>) -> Vec<u8> {
+fn read_file_bytes(op: &TestOp<'_, ReadFileOutcome>) -> Vec<u8> {
     match op.result().unwrap() {
         Ok(ReadFileOutcome::Found(file)) => match &file.bytes {
             ByteSource::Inline(bytes) => bytes.clone(),

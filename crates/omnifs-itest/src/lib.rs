@@ -4,8 +4,8 @@ pub mod matrix;
 use omnifs_core::path::{Path, Segment};
 use omnifs_engine::GitCloner;
 use omnifs_engine::test_support::TestOp;
-use omnifs_engine::test_support::cache::{Caches, Record as CacheRecord, RecordKind};
-use omnifs_engine::{BuildError, Engine, EngineError, HostContext};
+use omnifs_engine::test_support::cache::{Record as CacheRecord, RecordKind};
+use omnifs_engine::{BuildError, Engine, EngineError, HostContext, MountRuntimes, TreeNamespace};
 use omnifs_wit::provider::types::{
     ByteSource, Callout, Effects, HttpRequest, ListChildrenResult, LookupChildResult,
     ReadFileOutcome, ReadFileResult,
@@ -24,42 +24,41 @@ use tempfile::TempDir;
 /// provider runtime. Provider execution itself is always delegated to
 /// `omnifs-engine`: tests do not build linkers, stores, or provider bindings.
 pub struct RuntimeHarness {
-    pub engine: wasmtime::Engine,
+    pub registry: Arc<MountRuntimes>,
+    pub runtime: Arc<Engine>,
+    /// The single namespace owner for this immutable startup snapshot.
+    pub namespace: Arc<TreeNamespace>,
     pub clone_dir: TempDir,
     pub cache_dir: TempDir,
     pub config_dir: TempDir,
     /// Per-harness content-addressed provider store the runtime resolves from.
     pub providers_dir: TempDir,
-    pub runtime: Engine,
+    pub mounts_dir: TempDir,
+    /// An owned executor for synchronous fixtures that have no ambient Tokio
+    /// runtime. It is declared last so the namespace, registry, and temporary
+    /// directories drop before the executor.
+    owned_runtime: Option<tokio::runtime::Runtime>,
 }
 
 impl RuntimeHarness {
     pub fn new(config_json: &str) -> Result<Self, BuildError> {
-        let engine = make_engine();
-        Self::with_engine(config_json, &engine)
+        Self::load_many(&[config_json], true)
     }
 
     pub fn new_real_callouts(config_json: &str) -> Result<Self, BuildError> {
-        let engine = make_engine();
-        Self::with_engine_real_callouts(config_json, &engine)
+        Self::load_many(&[config_json], false)
     }
 
-    pub fn with_engine(config_json: &str, engine: &wasmtime::Engine) -> Result<Self, BuildError> {
-        Self::with_engine_and_callouts(config_json, engine, true)
+    pub fn new_multi(configs_json: &[&str]) -> Result<Self, BuildError> {
+        Self::load_many(configs_json, true)
     }
 
-    pub fn with_engine_real_callouts(
-        config_json: &str,
-        engine: &wasmtime::Engine,
-    ) -> Result<Self, BuildError> {
-        Self::with_engine_and_callouts(config_json, engine, false)
-    }
-
-    fn with_engine_and_callouts(
-        config_json: &str,
-        engine: &wasmtime::Engine,
-        capture_test_callouts: bool,
-    ) -> Result<Self, BuildError> {
+    fn load_many(configs_json: &[&str], capture_test_callouts: bool) -> Result<Self, BuildError> {
+        if configs_json.is_empty() {
+            return Err(BuildError::InvalidConfig(
+                "integration-test harness needs at least one mount".to_string(),
+            ));
+        }
         let tempdir = || {
             tempfile::tempdir().map_err(|error| {
                 BuildError::Cache(format!(
@@ -72,31 +71,53 @@ impl RuntimeHarness {
         let cache_dir = tempdir()?;
         let config_dir = tempdir()?;
         let providers_dir = tempdir()?;
+        let mounts_dir = tempdir()?;
         let paths = omnifs_workspace::layout::WorkspaceLayout::under_root(config_dir.path());
+        let (handle, owned_runtime) = match tokio::runtime::Handle::try_current() {
+            Ok(handle) => (handle, None),
+            Err(_) => {
+                let runtime = tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|error| {
+                        BuildError::Cache(format!("integration-test Tokio runtime: {error}"))
+                    })?;
+                (runtime.handle().clone(), Some(runtime))
+            },
+        };
 
         // Pin the named provider into this harness's provider store and rewrite
         // the test config's `provider` field to the resulting `ProviderRef`, so
         // resolution and serving go through the content-addressed path the host
         // uses in production.
-        let mut spec = pin_spec_from_json(config_json, providers_dir.path())?;
+        let mut specs = configs_json
+            .iter()
+            .map(|config_json| pin_spec_from_json(config_json, providers_dir.path()))
+            .collect::<Result<Vec<_>, _>>()?;
 
         // Mirror the CLI's creation-time inheritance: bake the pinned provider's
         // manifest defaults into the spec before serving, so the harness exercises
         // the same already-hydrated spec the daemon sees in production.
         let catalog = Catalog::open(providers_dir.path());
-        let provider = catalog
-            .get(&spec.provider.id)
-            .map_err(|error| BuildError::InvalidConfig(error.to_string()))?
-            .ok_or_else(|| BuildError::InvalidConfig("pinned provider missing".to_string()))?;
-        let manifest = provider
-            .manifest()
+        for spec in &mut specs {
+            let provider = catalog
+                .get(&spec.provider.id)
+                .map_err(|error| BuildError::InvalidConfig(error.to_string()))?
+                .ok_or_else(|| BuildError::InvalidConfig("pinned provider missing".to_string()))?;
+            let manifest = provider
+                .manifest()
+                .map_err(|error| BuildError::InvalidConfig(error.to_string()))?;
+            spec.apply_provider_metadata(
+                &manifest,
+                omnifs_workspace::mounts::ProviderMetadataInheritance::all(),
+            )
             .map_err(|error| BuildError::InvalidConfig(error.to_string()))?;
-        spec.apply_provider_metadata(
-            &manifest,
-            omnifs_workspace::mounts::ProviderMetadataInheritance::all(),
-        )
-        .map_err(|error| BuildError::InvalidConfig(error.to_string()))?;
-        let wasm_path = provider.wasm_path().to_path_buf();
+        }
+        let selected_mount = specs
+            .first()
+            .expect("non-empty harness specs")
+            .mount
+            .clone();
         let cloner = Arc::new(GitCloner::new(clone_dir.path().to_path_buf()).map_err(
             |source| {
                 BuildError::Cache(format!(
@@ -105,51 +126,43 @@ impl RuntimeHarness {
                 ))
             },
         )?);
-        let caches = Caches::open(cache_dir.path()).map_err(|source| {
-            BuildError::Cache(format!(
-                "global cache at {}: {source}",
-                cache_dir.path().display()
-            ))
-        })?;
-        let credential_service =
-            omnifs_engine::test_support::auth::credential_service_for_file(&paths.credentials_file);
         let context = HostContext::new(
             cache_dir.path(),
             &paths.config_dir,
             providers_dir.path(),
             &paths.credentials_file,
         );
-        let runtime = if capture_test_callouts {
-            Engine::new_for_callout_tests(
-                engine,
-                &wasm_path,
-                &spec,
-                &manifest,
-                cloner,
-                &context,
-                &caches,
-                &credential_service,
+        let mut desired = omnifs_workspace::mounts::Registry::load(mounts_dir.path())
+            .map_err(|error| BuildError::InvalidConfig(error.to_string()))?;
+        for spec in &specs {
+            desired
+                .put(spec)
+                .map_err(|error| BuildError::InvalidConfig(error.to_string()))?;
+        }
+        let registry = if capture_test_callouts {
+            omnifs_engine::test_support::load_mount_runtimes_for_callout_tests(
+                context, cloner, &desired, &handle,
             )
         } else {
-            Engine::new(
-                engine,
-                &wasm_path,
-                &spec,
-                &manifest,
-                cloner,
-                &context,
-                &caches,
-                &credential_service,
-            )
-        }?;
+            MountRuntimes::load(context, cloner, &desired, &handle)
+        }
+        .map_err(|error| BuildError::InvalidConfig(error.to_string()))?;
+        let registry = Arc::new(registry);
+        let runtime = registry
+            .get(&selected_mount)
+            .ok_or_else(|| BuildError::InvalidConfig("test mount did not load".to_string()))?;
+        let namespace = TreeNamespace::new(Arc::clone(&registry), handle);
 
         Ok(Self {
-            engine: engine.clone(),
             clone_dir,
             cache_dir,
             config_dir,
             providers_dir,
+            mounts_dir,
+            registry,
             runtime,
+            namespace,
+            owned_runtime,
         })
     }
 
@@ -334,24 +347,11 @@ fn ensure_providers_built() {
     });
 }
 
-pub fn make_engine() -> wasmtime::Engine {
-    static ENGINE: OnceLock<wasmtime::Engine> = OnceLock::new();
-    ENGINE
-        .get_or_init(|| {
-            omnifs_engine::test_support::component_engine(
-                Some(&omnifs_engine::test_support::wasm_cache_dir()),
-                |_| {},
-            )
-            .expect("build provider engine")
-        })
-        .clone()
-}
-
 /// The canonical test-provider mount config the bare `make_runtime` uses.
 pub const TEST_PROVIDER_CONFIG: &str = r#"{"provider":"test_provider.wasm","mount":"test"}"#;
 
-pub fn make_runtime(engine: &wasmtime::Engine) -> RuntimeHarness {
-    RuntimeHarness::with_engine(TEST_PROVIDER_CONFIG, engine).unwrap()
+pub fn make_runtime() -> RuntimeHarness {
+    RuntimeHarness::new(TEST_PROVIDER_CONFIG).unwrap()
 }
 
 pub fn try_make_runtime_from_config(

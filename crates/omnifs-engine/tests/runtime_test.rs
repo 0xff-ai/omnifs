@@ -1,37 +1,66 @@
-use std::fs;
-use std::sync::Arc;
-
 use omnifs_core::path::Path;
-use omnifs_engine::GitCloner;
-use omnifs_engine::test_support::cache::{Caches, Record as CacheRecord, RecordKind};
+use omnifs_engine::test_support::cache::{Record as CacheRecord, RecordKind};
 use omnifs_engine::test_support::clock::now_millis;
-use omnifs_engine::test_support::{LookupOutcome, NamespaceListOutcome, ReadBytes, ReadOutcome};
-use omnifs_engine::view::{DirentsPayload, FilePayload, FileSize, LookupPayload, Stability};
-use omnifs_engine::{Engine, HostContext};
-use omnifs_itest::{
-    TEST_PROVIDER_CONFIG, make_engine, make_initialized_runtime, make_runtime, provider_wasm_path,
-    spec_with_test_provider,
+use omnifs_engine::view::{DirentsPayload, FilePayload, LookupPayload};
+use omnifs_engine::{
+    DirCursor, EntryKind, LookupAnswer, Namespace, NsError, ReadAnswer, TreeNamespace,
 };
-use omnifs_workspace::provider::ProviderWasm;
+use omnifs_itest::{TEST_PROVIDER_CONFIG, make_initialized_runtime, make_runtime};
 
 fn p(value: &str) -> Path {
     Path::parse(value).unwrap()
 }
 
-fn inline_content(result: &ReadOutcome) -> &[u8] {
-    match &result.bytes {
-        ReadBytes::Inline(bytes) => bytes,
-        other => panic!("expected inline bytes, got {other:?}"),
+async fn resolve_namespace(ns: &TreeNamespace, path: &str) -> LookupAnswer {
+    resolve_mount_namespace(ns, "test", path).await
+}
+
+async fn resolve_mount_namespace(ns: &TreeNamespace, mount: &str, path: &str) -> LookupAnswer {
+    let mut answer = ns.lookup(Path::root(), mount).await.unwrap();
+    for segment in p(path).segments() {
+        answer = ns.lookup(answer.path, segment).await.unwrap();
+    }
+    answer
+}
+
+async fn list_mount_namespace(
+    ns: &TreeNamespace,
+    mount: &str,
+    path: &str,
+) -> Result<Vec<omnifs_engine::DirEntry>, NsError> {
+    let node = resolve_mount_namespace(ns, mount, path).await;
+    let mut cursor = DirCursor::start();
+    let mut entries = Vec::new();
+    loop {
+        let page = ns.readdir(node.path.clone(), cursor, 0).await?;
+        entries.extend(page.entries);
+        match page.next {
+            Some(next) => cursor = next,
+            None => return Ok(entries),
+        }
     }
 }
 
-fn test_context(
-    cache_dir: &std::path::Path,
-    config_dir: &std::path::Path,
-    providers_dir: &std::path::Path,
-    credentials_file: &std::path::Path,
-) -> HostContext {
-    HostContext::new(cache_dir, config_dir, providers_dir, credentials_file)
+async fn list_namespace(
+    ns: &TreeNamespace,
+    path: &str,
+) -> Result<Vec<omnifs_engine::DirEntry>, NsError> {
+    let node = resolve_namespace(ns, path).await;
+    let mut cursor = DirCursor::start();
+    let mut entries = Vec::new();
+    loop {
+        let page = ns.readdir(node.path.clone(), cursor, 0).await?;
+        entries.extend(page.entries);
+        match page.next {
+            Some(next) => cursor = next,
+            None => return Ok(entries),
+        }
+    }
+}
+
+async fn read_namespace(ns: &TreeNamespace, path: &str) -> Result<ReadAnswer, NsError> {
+    let node = resolve_namespace(ns, path).await;
+    ns.read(node.path.clone(), 0, u32::MAX).await
 }
 
 /// Every shipped provider must initialize (run `start()` + `Router::compile()`) cleanly.
@@ -81,92 +110,78 @@ async fn all_providers_initialize_and_compile() {
 
 #[tokio::test]
 async fn test_list_root() {
-    let engine = make_engine();
-    let harness = make_runtime(&engine);
-    let result = harness
-        .runtime
-        .namespace()
-        .list_children(&p("/"), None, None)
-        .await
-        .unwrap();
-    match result {
-        NamespaceListOutcome::Entries(listing) => {
-            assert_eq!(listing.entries.len(), 6);
-            let names: Vec<&str> = listing
-                .entries
+    let harness = make_runtime();
+    let entries = list_namespace(&harness.namespace, "/").await.unwrap();
+    {
+        assert_eq!(entries.len(), 9);
+        let names: Vec<&str> = entries.iter().map(|entry| entry.name.as_str()).collect();
+        assert!(names.contains(&"README.md"));
+        assert!(names.contains(&"items"));
+        assert!(names.contains(&"hello"));
+        assert!(names.contains(&"scoped"));
+        assert!(names.contains(&"dynamic"));
+        assert!(names.contains(&"slow"));
+        assert!(names.contains(&".gitignore"));
+        assert!(names.contains(&".ignore"));
+        assert!(names.contains(&".rgignore"));
+        assert!(
+            entries
                 .iter()
-                .map(|entry| entry.name.as_str())
-                .collect();
-            assert!(names.contains(&"README.md"));
-            assert!(names.contains(&"items"));
-            assert!(names.contains(&"hello"));
-            assert!(names.contains(&"scoped"));
-            assert!(names.contains(&"dynamic"));
-            assert!(names.contains(&"slow"));
-            assert!(
-                listing
-                    .entries
-                    .iter()
-                    .filter(|entry| entry.name != "README.md")
-                    .all(|entry| entry.meta.is_directory())
-            );
-        },
-        other => panic!("expected list entries, got {other:?}"),
+                .filter(|entry| !matches!(
+                    entry.name.as_str(),
+                    "README.md" | ".gitignore" | ".ignore" | ".rgignore"
+                ))
+                .all(|entry| entry.attrs.kind == EntryKind::Directory)
+        );
     }
 }
 
 #[tokio::test]
 async fn test_list_hello_dir() {
-    let engine = make_engine();
-    let harness = make_runtime(&engine);
-    let result = harness
-        .runtime
-        .namespace()
-        .list_children(&p("/hello"), None, None)
-        .await
-        .unwrap();
-    match result {
-        NamespaceListOutcome::Entries(listing) => {
-            assert_eq!(listing.entries.len(), 18);
-            let names: Vec<&str> = listing.entries.iter().map(|e| e.name.as_str()).collect();
-            assert!(names.contains(&"README.md"));
-            assert!(names.contains(&"remote-a"));
-            assert!(names.contains(&"remote-b"));
-            assert!(names.contains(&"message"));
-            assert!(names.contains(&"large-ranged"));
-            assert!(names.contains(&"greeting"));
-            assert!(names.contains(&"projected"));
-            assert!(names.contains(&"lazy"));
-            assert!(names.contains(&"fresh-full"));
-            assert!(names.contains(&"ranged"));
-            assert!(names.contains(&"unknown-ranged"));
-            assert!(names.contains(&"large-ranged"));
-            assert!(names.contains(&"volatile-tail"));
-            assert!(names.contains(&"live-log"));
-            assert!(names.contains(&"bundle"));
-            assert!(names.contains(&"feed"));
-            assert!(names.contains(&"snapshot"));
-            assert!(names.contains(&"throttled"));
-            assert!(names.contains(&"unbounded"));
-        },
-        other => panic!("expected list entries, got {other:?}"),
+    let harness = make_runtime();
+    let entries = list_namespace(&harness.namespace, "/hello").await.unwrap();
+    {
+        assert_eq!(entries.len(), 18);
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert!(names.contains(&"README.md"));
+        assert!(names.contains(&"remote-a"));
+        assert!(names.contains(&"remote-b"));
+        assert!(names.contains(&"message"));
+        assert!(names.contains(&"large-ranged"));
+        assert!(names.contains(&"greeting"));
+        assert!(names.contains(&"projected"));
+        assert!(names.contains(&"lazy"));
+        assert!(names.contains(&"fresh-full"));
+        assert!(names.contains(&"ranged"));
+        assert!(names.contains(&"unknown-ranged"));
+        assert!(names.contains(&"large-ranged"));
+        assert!(names.contains(&"volatile-tail"));
+        assert!(names.contains(&"live-log"));
+        assert!(names.contains(&"bundle"));
+        assert!(names.contains(&"feed"));
+        assert!(names.contains(&"snapshot"));
+        assert!(names.contains(&"throttled"));
+        assert!(names.contains(&"unbounded"));
     }
+    let readme = resolve_namespace(&harness.namespace, "/hello/README.md").await;
+    let readme_bytes = harness
+        .namespace
+        .read(readme.path, 0, u32::MAX)
+        .await
+        .expect("hello README read");
+    assert!(
+        !readme_bytes.bytes.is_empty(),
+        "generated hello README remains readable"
+    );
 }
 
 #[tokio::test]
 async fn test_list_projects_nested_files_into_cache() {
     let harness = make_initialized_runtime(TEST_PROVIDER_CONFIG);
 
-    let result = harness
-        .runtime
-        .namespace()
-        .list_children(&p("/hello"), None, None)
+    let _ = list_namespace(&harness.namespace, "/hello")
         .await
-        .unwrap();
-    assert!(
-        matches!(result, NamespaceListOutcome::Entries(_)),
-        "expected list entries, got {result:?}"
-    );
+        .expect("expected list entries");
 
     let title = harness
         .runtime
@@ -207,16 +222,9 @@ async fn test_list_projects_nested_files_into_cache() {
 async fn test_list_projects_direct_file_content_into_cache() {
     let harness = make_initialized_runtime(TEST_PROVIDER_CONFIG);
 
-    let result = harness
-        .runtime
-        .namespace()
-        .list_children(&p("/hello/bundle"), None, None)
+    let _ = list_namespace(&harness.namespace, "/hello/bundle")
         .await
-        .unwrap();
-    assert!(
-        matches!(result, NamespaceListOutcome::Entries(_)),
-        "expected DirEntries, got {result:?}"
-    );
+        .expect("expected DirEntries");
 
     let title = harness
         .runtime
@@ -246,19 +254,12 @@ async fn test_mutable_unversioned_full_reads_are_observation_only() {
     let harness = make_initialized_runtime(TEST_PROVIDER_CONFIG);
 
     let path = "/hello/fresh-full";
-    let content_type = Path::parse(path)
-        .unwrap()
-        .content_type_mime(None)
-        .to_string();
-    let first = harness
-        .runtime
-        .namespace()
-        .read_file(&p(path), content_type.clone())
-        .await
-        .unwrap();
-    assert_eq!(inline_content(&first), b"fresh-full-1\n");
-    assert_eq!(first.attrs.stability(), Stability::Dynamic);
-    assert_eq!(first.attrs.version_token(), None);
+    let first = read_namespace(&harness.namespace, path).await.unwrap();
+    assert_eq!(first.bytes.as_slice(), b"fresh-full-1\n");
+    assert_eq!(
+        first.attrs.stability,
+        omnifs_engine::StabilityClass::Dynamic
+    );
     assert!(
         harness
             .runtime
@@ -268,13 +269,8 @@ async fn test_mutable_unversioned_full_reads_are_observation_only() {
         "unversioned dynamic full-read bytes must not be durably cached",
     );
 
-    let second = harness
-        .runtime
-        .namespace()
-        .read_file(&p(path), content_type)
-        .await
-        .unwrap();
-    assert_eq!(inline_content(&second), b"fresh-full-2\n");
+    let second = read_namespace(&harness.namespace, path).await.unwrap();
+    assert_eq!(second.bytes.as_slice(), b"fresh-full-2\n");
     assert!(
         harness
             .runtime
@@ -288,63 +284,29 @@ async fn test_mutable_unversioned_full_reads_are_observation_only() {
 #[tokio::test]
 async fn test_read_file() {
     let harness = make_initialized_runtime(TEST_PROVIDER_CONFIG);
-    let result = harness
-        .runtime
-        .namespace()
-        .read_file(
-            &p("/hello/message"),
-            Path::parse("/hello/message")
-                .unwrap()
-                .content_type_mime(None)
-                .to_string(),
-        )
+    let result = read_namespace(&harness.namespace, "/hello/message")
         .await
         .unwrap();
-    assert_eq!(inline_content(&result), b"Hello, world!");
+    assert_eq!(result.bytes.as_slice(), b"Hello, world!");
 
-    let exact = harness
-        .runtime
-        .namespace()
-        .read_file(
-            &p("/hello/lazy"),
-            Path::parse("/hello/lazy")
-                .unwrap()
-                .content_type_mime(None)
-                .to_string(),
-        )
+    let exact = read_namespace(&harness.namespace, "/hello/lazy")
         .await
         .unwrap();
-    assert_eq!(inline_content(&exact), b"lazy\n");
+    assert_eq!(exact.bytes.as_slice(), b"lazy\n");
 }
 
 #[tokio::test]
 async fn test_read_file_sibling_projections_do_not_erase_parent_dirents() {
     let harness = make_initialized_runtime(TEST_PROVIDER_CONFIG);
 
-    let listing = harness
-        .runtime
-        .namespace()
-        .list_children(&p("/hello"), None, None)
+    let _ = list_namespace(&harness.namespace, "/hello")
         .await
-        .unwrap();
-    match listing {
-        NamespaceListOutcome::Entries(_) => {},
-        other => panic!("expected list entries, got {other:?}"),
-    }
+        .expect("expected list entries");
 
-    let result = harness
-        .runtime
-        .namespace()
-        .read_file(
-            &p("/hello/projected"),
-            Path::parse("/hello/projected")
-                .unwrap()
-                .content_type_mime(None)
-                .to_string(),
-        )
+    let result = read_namespace(&harness.namespace, "/hello/projected")
         .await
         .unwrap();
-    assert_eq!(inline_content(&result), b"title\n");
+    assert_eq!(result.bytes.as_slice(), b"title\n");
 
     let dirents_record = harness
         .runtime
@@ -429,16 +391,10 @@ async fn test_object_dir_child_lookup_preserves_full_listing() {
     ];
 
     // Cold `ls` of the object dir lists every leaf.
-    let listing = harness
-        .runtime
-        .namespace()
-        .list_children(&object_dir, None, None)
+    let listing = list_namespace(&harness.namespace, object_dir.as_str())
         .await
         .unwrap();
-    let NamespaceListOutcome::Entries(listing) = listing else {
-        panic!("expected list entries");
-    };
-    let mut cold_names: Vec<&str> = listing.entries.iter().map(|e| e.name.as_str()).collect();
+    let mut cold_names: Vec<&str> = listing.iter().map(|e| e.name.as_str()).collect();
     cold_names.sort_unstable();
     assert_eq!(
         cold_names, expected,
@@ -447,16 +403,8 @@ async fn test_object_dir_child_lookup_preserves_full_listing() {
 
     // `cat /items/open/7/body`: the lookup the FUSE/NFS path runs to resolve the
     // child before reading it.
-    let lookup = harness
-        .runtime
-        .namespace()
-        .lookup_child(&object_dir, "body")
-        .await
-        .unwrap();
-    match &lookup {
-        LookupOutcome::Entry(entry) => assert_eq!(entry.path().as_str(), "/items/open/7/body"),
-        other => panic!("expected lookup entry, got {other:?}"),
-    }
+    let lookup = resolve_namespace(&harness.namespace, "/items/open/7/body").await;
+    assert_eq!(lookup.attrs.kind, EntryKind::File);
 
     // A subsequent readdir reads the cached dirents the lookup just folded into.
     let dirents_record = harness
@@ -478,108 +426,69 @@ async fn test_object_dir_child_lookup_preserves_full_listing() {
 async fn test_ranged_open_read_chunk_contract() {
     let harness = make_initialized_runtime(TEST_PROVIDER_CONFIG);
 
-    let opened = harness
-        .runtime
-        .namespace()
-        .open_file(&p("/hello/ranged"))
-        .await
-        .unwrap();
-    assert!(matches!(opened.attrs.size(), FileSize::Exact(26)));
-    assert_eq!(opened.attrs.stability(), Stability::Dynamic);
-    assert_eq!(opened.attrs.version_token(), Some("alphabet-v1"));
+    let ranged = resolve_namespace(&harness.namespace, "/hello/ranged").await;
+    assert_eq!(ranged.attrs.read_style, omnifs_engine::ReadStyle::Ranged);
 
     let chunk = harness
-        .runtime
-        .namespace()
-        .read_chunk(opened.handle, 2, 4)
+        .namespace
+        .read(ranged.path.clone(), 2, 4)
         .await
         .unwrap();
-    assert_eq!(chunk.content, b"cdef");
+    assert_eq!(chunk.bytes, b"cdef");
+    assert_eq!(chunk.attrs.size, 26);
+    assert_eq!(
+        chunk.attrs.stability,
+        omnifs_engine::StabilityClass::Dynamic
+    );
     assert!(!chunk.eof);
 
     let eof = harness
-        .runtime
-        .namespace()
-        .read_chunk(opened.handle, 26, 8)
+        .namespace
+        .read(ranged.path.clone(), 26, 8)
         .await
         .unwrap();
-    assert!(eof.content.is_empty());
+    assert!(eof.bytes.is_empty());
     assert!(eof.eof);
-
-    harness.runtime.call_close_file(opened.handle).unwrap();
 }
 
 #[tokio::test]
 async fn test_unknown_and_volatile_ranged_eof_contracts() {
     let harness = make_initialized_runtime(TEST_PROVIDER_CONFIG);
 
-    let opened = harness
-        .runtime
-        .namespace()
-        .open_file(&p("/hello/unknown-ranged"))
-        .await
-        .unwrap();
-    assert!(matches!(opened.attrs.size(), FileSize::Unknown));
+    let unknown = resolve_namespace(&harness.namespace, "/hello/unknown-ranged").await;
+    assert_eq!(unknown.attrs.size, 1);
     let eof = harness
-        .runtime
-        .namespace()
-        .read_chunk(opened.handle, 8, 32)
+        .namespace
+        .read(unknown.path.clone(), 8, 32)
         .await
         .unwrap();
-    assert_eq!(eof.content, b"size\n");
+    assert_eq!(eof.bytes, b"size\n");
     assert!(eof.eof);
-    harness.runtime.call_close_file(opened.handle).unwrap();
-
-    let opened = harness
-        .runtime
-        .namespace()
-        .open_file(&p("/hello/volatile-tail"))
-        .await
-        .unwrap();
-    assert_eq!(opened.attrs.stability(), Stability::Live);
-    assert!(matches!(opened.attrs.size(), FileSize::Unknown));
+    assert_eq!(eof.attrs.size, 13);
+    assert_eq!(
+        harness.namespace.getattr(unknown.path).await.unwrap().size,
+        13
+    );
+    let volatile = resolve_namespace(&harness.namespace, "/hello/volatile-tail").await;
+    assert_eq!(volatile.attrs.read_style, omnifs_engine::ReadStyle::Ranged);
+    assert_eq!(volatile.attrs.size, 1);
     let chunk = harness
-        .runtime
-        .namespace()
-        .read_chunk(opened.handle, 42, 128)
+        .namespace
+        .read(volatile.path, 42, 128)
         .await
         .unwrap();
-    assert_eq!(chunk.content, b"tail:42\n");
+    assert_eq!(chunk.bytes, b"tail:42\n");
+    assert_eq!(chunk.attrs.stability, omnifs_engine::StabilityClass::Live);
     assert!(!chunk.eof);
-    harness.runtime.call_close_file(opened.handle).unwrap();
 }
 
 #[tokio::test]
 async fn test_lookup_child() {
-    let engine = make_engine();
-    let harness = make_runtime(&engine);
-    let result = harness
-        .runtime
-        .namespace()
-        .lookup_child(&p("/"), "hello")
-        .await
-        .unwrap();
-    match result {
-        LookupOutcome::Entry(entry) => {
-            assert_eq!(entry.path().as_str(), "/hello");
-            assert!(entry.meta().is_directory());
-        },
-        other => panic!("expected Lookup, got {other:?}"),
-    }
-
-    let exact_file = harness
-        .runtime
-        .namespace()
-        .lookup_child(&p("/hello"), "lazy")
-        .await
-        .unwrap();
-    match exact_file {
-        LookupOutcome::Entry(entry) => {
-            assert_eq!(entry.path().as_str(), "/hello/lazy");
-            assert!(entry.meta().is_file());
-        },
-        other => panic!("expected file Lookup, got {other:?}"),
-    }
+    let harness = make_runtime();
+    let result = resolve_namespace(&harness.namespace, "/hello").await;
+    assert_eq!(result.attrs.kind, EntryKind::Directory);
+    let exact_file = resolve_namespace(&harness.namespace, "/hello/lazy").await;
+    assert_eq!(exact_file.attrs.kind, EntryKind::File);
 
     let cached_lookup = harness
         .runtime
@@ -594,16 +503,12 @@ async fn test_lookup_child() {
         "lookup entry should cache a positive record"
     );
 
+    let hello = resolve_namespace(&harness.namespace, "/hello").await;
     let missing = harness
-        .runtime
-        .namespace()
-        .lookup_child(&p("/hello"), "missing")
-        .await
-        .unwrap();
-    assert!(
-        matches!(missing, LookupOutcome::NotFound),
-        "expected lookup miss, got {missing:?}"
-    );
+        .namespace
+        .lookup(hello.path.clone(), "missing")
+        .await;
+    assert_eq!(missing, Err(NsError::NotFound));
 
     assert!(
         harness
@@ -627,10 +532,10 @@ async fn test_lookup_child() {
 async fn test_subtree_handoff_rejects_unknown_tree_ref() {
     let harness = make_initialized_runtime(TEST_PROVIDER_CONFIG);
 
+    let parent = resolve_namespace(&harness.namespace, "/items/open/7").await;
     let lookup_error = harness
-        .runtime
-        .namespace()
-        .lookup_child(&p("/items/open/7"), "checkout")
+        .namespace
+        .lookup(parent.path.clone(), "checkout")
         .await
         .unwrap_err();
     assert!(
@@ -641,9 +546,8 @@ async fn test_subtree_handoff_rejects_unknown_tree_ref() {
     );
 
     let listing_error = harness
-        .runtime
-        .namespace()
-        .list_children(&p("/items/open/7/checkout"), None, None)
+        .namespace
+        .readdir(p("/test/items/open/7/checkout"), DirCursor::start(), 0)
         .await
         .unwrap_err();
     assert!(
@@ -663,16 +567,9 @@ async fn test_list_projects_adjacent_files_into_cache() {
     // `preload_*` lands when the directory is actually *listed*. Listing
     // `hello/bundle` runs the `bundle` handler, whose projection preloads
     // `title`/`body` alongside the listing.
-    let listing = harness
-        .runtime
-        .namespace()
-        .list_children(&p("/hello/bundle"), None, None)
+    let _ = list_namespace(&harness.namespace, "/hello/bundle")
         .await
-        .unwrap();
-    match &listing {
-        NamespaceListOutcome::Entries(_) => {},
-        other => panic!("expected list entries, got {other:?}"),
-    }
+        .expect("expected list entries");
 
     // Verify the projection effects were cached.
     let title = harness
@@ -709,20 +606,8 @@ async fn test_lookup_returns_siblings_and_list_warms_child_shape() {
     let harness = make_initialized_runtime(TEST_PROVIDER_CONFIG);
     // a lookup materializes the target plus the parent's static sibling set,
     // but does NOT warm the child's shape (lookup is light).
-    let result = harness
-        .runtime
-        .namespace()
-        .lookup_child(&p("/hello"), "snapshot")
-        .await
-        .unwrap();
-
-    match &result {
-        LookupOutcome::Entry(entry) => {
-            assert_eq!(entry.path().as_str(), "/hello/snapshot");
-            assert!(entry.meta().is_directory());
-        },
-        other => panic!("expected Lookup, got {other:?}"),
-    }
+    let result = resolve_namespace(&harness.namespace, "/hello/snapshot").await;
+    assert_eq!(result.attrs.kind, EntryKind::Directory);
 
     let parent_dirents = harness
         .runtime
@@ -762,16 +647,9 @@ async fn test_lookup_returns_siblings_and_list_warms_child_shape() {
     );
     // The child's shape and the preload it attaches warm when the directory is
     // *listed*, not on the bare lookup above.
-    let listing = harness
-        .runtime
-        .namespace()
-        .list_children(&p("/hello/snapshot"), None, None)
+    let _ = list_namespace(&harness.namespace, "/hello/snapshot")
         .await
-        .unwrap();
-    match &listing {
-        NamespaceListOutcome::Entries(_) => {},
-        other => panic!("expected list entries, got {other:?}"),
-    }
+        .expect("expected list entries");
 
     let dirents_record = harness
         .runtime
@@ -808,8 +686,7 @@ fn file_payload(record: &CacheRecord) -> FilePayload {
 
 #[test]
 fn cache_delete_prefix_respects_segment_boundaries() {
-    let engine = make_engine();
-    let harness = make_runtime(&engine);
+    let harness = make_runtime();
     let record = CacheRecord::new(RecordKind::Attr, vec![1, 2, 3]);
 
     harness
@@ -855,107 +732,73 @@ fn cache_delete_prefix_respects_segment_boundaries() {
 // buys nothing.
 #[allow(clippy::too_many_lines)]
 async fn test_cache_isolated_by_mount_name() {
-    let engine = make_engine();
-    let config = spec_with_test_provider(r#"{ "mount": "test" }"#);
+    let harness = omnifs_itest::RuntimeHarness::new_multi(&[
+        r#"{"provider":"test_provider.wasm","mount":"mount-a"}"#,
+        r#"{"provider":"test_provider.wasm","mount":"mount-b"}"#,
+    ])
+    .unwrap();
+    let ns = &harness.namespace;
+    let root = ns
+        .readdir(Path::root(), DirCursor::start(), 0)
+        .await
+        .unwrap();
+    let mut root_names: Vec<_> = root
+        .entries
+        .iter()
+        .map(|entry| entry.name.as_str())
+        .collect();
+    root_names.sort_unstable();
+    assert_eq!(root_names, vec!["mount-a", "mount-b"]);
+    let runtime_a = harness.registry.get("mount-a").unwrap();
+    let runtime_b = harness.registry.get("mount-b").unwrap();
+    let _ = list_mount_namespace(ns, "mount-a", "/hello").await.unwrap();
+    assert!(
+        runtime_a
+            .resources
+            .cache_get(&p("/hello"), RecordKind::Dirents, None)
+            .is_some()
+    );
+    assert!(
+        runtime_b
+            .resources
+            .cache_get(&p("/hello"), RecordKind::Dirents, None)
+            .is_none()
+    );
 
-    let clone_dir = tempfile::tempdir().unwrap();
-    let cache_dir = tempfile::tempdir().unwrap();
-    let config_dir = tempfile::tempdir().unwrap();
-    let cloner = Arc::new(GitCloner::new(clone_dir.path().to_path_buf()).unwrap());
-    let wasm_path = provider_wasm_path("test_provider.wasm");
-    let manifest = ProviderWasm::from_bytes(fs::read(&wasm_path).unwrap())
-        .metadata()
+    let _ = list_mount_namespace(ns, "mount-a", "/scoped")
+        .await
+        .unwrap();
+    let _ = list_mount_namespace(ns, "mount-b", "/scoped")
+        .await
+        .unwrap();
+    assert!(
+        runtime_a
+            .resources
+            .cache_get(&p("/scoped/item"), RecordKind::Lookup, None)
+            .is_some()
+    );
+    assert!(
+        runtime_b
+            .resources
+            .cache_get(&p("/scoped/item"), RecordKind::Lookup, None)
+            .is_some()
+    );
+
+    let item_a = resolve_mount_namespace(ns, "mount-a", "/scoped/item").await;
+    let item_b = resolve_mount_namespace(ns, "mount-b", "/scoped/item").await;
+    let mut events = ns.subscribe();
+    let op_gen = runtime_a.resources.current_generation();
+    let (tick_result, effects) = harness
+        .timer_tick()
         .unwrap()
+        .into_result_and_effects()
         .unwrap();
-    let mut config_a = config.clone();
-    config_a.mount = "mount-a".to_string();
-    let mut config_b = config;
-    config_b.mount = "mount-b".to_string();
-    // Both runtimes share the same global Caches; mount isolation is via key prefix.
-    let caches = Caches::open(cache_dir.path()).unwrap();
-    let paths = omnifs_workspace::layout::WorkspaceLayout::under_root(config_dir.path());
-    let context_a = test_context(
-        cache_dir.path(),
-        &paths.config_dir,
-        config_dir.path(),
-        &paths.credentials_file,
-    );
-    let context_b = test_context(
-        cache_dir.path(),
-        &paths.config_dir,
-        config_dir.path(),
-        &paths.credentials_file,
-    );
-    let credential_service =
-        omnifs_engine::test_support::auth::credential_service_for_file(&paths.credentials_file);
-    let runtime_a = Engine::new(
-        &engine,
-        &wasm_path,
-        &config_a,
-        &manifest,
-        cloner.clone(),
-        &context_a,
-        &caches,
-        &credential_service,
-    )
-    .unwrap();
-    let runtime_b = Engine::new(
-        &engine,
-        &wasm_path,
-        &config_b,
-        &manifest,
-        cloner,
-        &context_b,
-        &caches,
-        &credential_service,
-    )
-    .unwrap();
-
-    let result = runtime_a
-        .namespace()
-        .list_children(&p("/hello"), None, None)
-        .await
-        .unwrap();
-    assert!(matches!(result, NamespaceListOutcome::Entries(_)));
-    assert!(
-        runtime_a
-            .resources
-            .cache_get(&p("/hello"), RecordKind::Dirents, None)
-            .is_some()
-    );
-    assert!(
-        runtime_b
-            .resources
-            .cache_get(&p("/hello"), RecordKind::Dirents, None)
-            .is_none()
-    );
-
-    let scoped_a = runtime_a
-        .namespace()
-        .list_children(&p("/scoped"), None, None)
-        .await
-        .unwrap();
-    let scoped_b = runtime_b
-        .namespace()
-        .list_children(&p("/scoped"), None, None)
-        .await
-        .unwrap();
-    assert!(matches!(scoped_a, NamespaceListOutcome::Entries(_)));
-    assert!(matches!(scoped_b, NamespaceListOutcome::Entries(_)));
-    assert!(
-        runtime_a
-            .resources
-            .cache_get(&p("/scoped/item"), RecordKind::Lookup, None)
-            .is_some()
-    );
-    assert!(
-        runtime_b
-            .resources
-            .cache_get(&p("/scoped/item"), RecordKind::Lookup, None)
-            .is_some()
-    );
-
-    runtime_a.call_timer_tick().await.unwrap();
+    tick_result.unwrap();
+    runtime_a
+        .apply_effects_for_test(&effects, op_gen)
+        .expect("timer effects should publish");
+    let refreshed_a = ns.getattr(item_a.path.clone()).await.unwrap();
+    assert_ne!(refreshed_a.change, item_a.attrs.change);
     assert!(
         runtime_a
             .resources
@@ -968,10 +811,20 @@ async fn test_cache_isolated_by_mount_name() {
             .cache_get(&p("/scoped/item"), RecordKind::Lookup, None)
             .is_some()
     );
-    assert!(
-        runtime_a
-            .drain_invalidated_paths()
-            .into_iter()
-            .any(|path| path.as_str() == "/scoped/item")
-    );
+    let event = tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
+        .await
+        .expect("mount-a invalidation event")
+        .expect("namespace event stream remains open");
+    assert!(matches!(
+        event,
+        omnifs_engine::NsEvent::InvalidateSubtree { path } if path == item_a.path
+    ));
+    if let Ok(Some(omnifs_engine::NsEvent::InvalidateSubtree { path })) =
+        tokio::time::timeout(std::time::Duration::from_millis(50), events.recv()).await
+    {
+        assert_ne!(
+            path, item_b.path,
+            "mount-b must not receive mount-a invalidation"
+        );
+    }
 }

@@ -1,12 +1,10 @@
-//! Whole-file read result types and the `Tree::read` body.
+//! Internal whole-file read result types and provider-read execution.
 //!
 //! This is the renderer-neutral read policy shared by FUSE and NFS: the cache
 //! cascade, the per-mount `op_gen` write fence, the canonical-not-copied hybrid,
 //! and learned-size promotion. It is fully async (no `block_on`): the renderer
-//! drives `Tree::read` from its own executor and turns the neutral
+//! drives the internal read path from its own executor and turns the neutral
 //! `ReadResult` into kernel/protocol identity + reply encoding.
-
-use std::path::PathBuf;
 
 use crate::cache::{Record as CacheRecord, RecordKind};
 use crate::clock::{freshness_expiry, now_millis};
@@ -20,10 +18,10 @@ use tracing::warn;
 
 use super::error::{Result, TreeError};
 use super::node::{Node, PaginationControl, SyntheticContent};
-use crate::{RequestCtx, Tree};
+use crate::{RequestCtx, TreeNamespace};
 use omnifs_api::events::CacheKind;
 
-/// Result of `Tree::read`. A two-arm shape so a treeref-backed node (read via
+/// Result of the internal read path. A host-tree node is read via
 /// renderer std::fs passthrough over a real dir) can never be confused with
 /// resolved provider bytes. `Bytes.attrs` is the POST-read learned attrs (exact
 /// size promoted from the bytes) the renderer applies to st_size / the NFSv4
@@ -37,7 +35,6 @@ pub enum ReadResult {
         attrs: Option<FileAttrsCache>,
         content_type: Option<String>,
     },
-    Subtree(PathBuf),
 }
 
 /// One ranged chunk from a `RangedHandle`. `learned_attrs` is `Some` on an
@@ -113,26 +110,7 @@ impl<'a> FileAttrStore<'a> {
     }
 }
 
-impl Tree {
-    pub fn cached_file_attrs(
-        &self,
-        mount: &str,
-        path: &omnifs_core::path::Path,
-    ) -> Option<FileAttrsCache> {
-        let runtime = self.ctx.runtime_for(mount).ok()?;
-        FileAttrStore::new(&runtime, path).cached(now_millis())
-    }
-
-    pub fn publish_file_attrs(
-        &self,
-        mount: &str,
-        path: &omnifs_core::path::Path,
-        attrs: FileAttrsCache,
-    ) -> Result<()> {
-        let runtime = self.ctx.runtime_for(mount)?;
-        FileAttrStore::new(&runtime, path).publish(attrs)
-    }
-
+impl TreeNamespace {
     /// Whole-file read. Owns the shared read cache cascade (exact-0
     /// short-circuit, mem hit, durable view hit, backing-fs read), then on a
     /// view miss the cold provider render
@@ -141,8 +119,8 @@ impl Tree {
     ///
     /// The renderer still owns its kernel-side handle caches (the per-`fh` whole
     /// buffer FUSE keeps, the inode size promotion) and kernel offset/size
-    /// slicing; `Tree::read` returns the whole rendered file.
-    pub async fn read(&self, node: &Node, _ctx: &RequestCtx) -> Result<ReadResult> {
+    /// slicing; the internal read path returns the whole rendered file.
+    pub(crate) async fn read(&self, node: &Node, _ctx: &RequestCtx) -> Result<ReadResult> {
         // A host-synthesized node (a mount-root ignore file or a `@next`/`@all`
         // pagination control) is served by `Tree`, never the provider. The
         // renderer materializes the result into a per-handle buffer so a partial
@@ -151,13 +129,13 @@ impl Tree {
             return self.read_synthetic(node, &synthetic.content).await;
         }
 
-        // A subtree node is served by the renderer from the real backing
+        // A host-tree node is served by the engine from the retained capability
         // dir; `Tree` hands the path back without a provider round trip.
-        if let Some(dir) = node.subtree_path() {
-            return Ok(ReadResult::Subtree(dir.clone()));
+        if node.host().is_some() {
+            return Err(TreeError::is_directory(node.path().as_str()));
         }
 
-        let runtime = self.ctx.runtime_for(node.mount())?;
+        let runtime = self.runtime_for(node.mount())?;
         let path = node.path();
         let attr_store = FileAttrStore::new(&runtime, path);
         let now = now_millis();
@@ -238,7 +216,7 @@ impl Tree {
         // fenced against an invalidation that lands mid-read.
         let op_gen = runtime.resources.current_generation();
         crate::inspector::cache_event(CacheKind::FileMiss);
-        let result = match runtime.namespace().read_file(path, content_type).await {
+        let result = match runtime.read_file(path, content_type).await {
             Ok(result) => result,
             Err(EngineError::ProviderError(error)) => {
                 warn!(
@@ -273,7 +251,7 @@ impl Tree {
                 content_type: None,
             }),
             SyntheticContent::PaginationControl(action) => {
-                let runtime = self.ctx.runtime_for(node.mount())?;
+                let runtime = self.runtime_for(node.mount())?;
                 let Some((parent, _)) = node.path().parent_and_name() else {
                     return Err(TreeError::invalid_input(format!(
                         "pagination control has no parent: {}",
@@ -536,4 +514,34 @@ fn enforce_observed_materialize_cap(path: &omnifs_core::path::Path, size: usize)
 fn materialized_bytes(path: &omnifs_core::path::Path, data: Vec<u8>) -> Result<Vec<u8>> {
     enforce_observed_materialize_cap(path, data.len())?;
     Ok(data)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tree::error::TreeErrorKind;
+
+    #[test]
+    fn declared_materialize_cap_is_inclusive() {
+        let path = omnifs_core::path::Path::parse("/message").expect("valid path");
+        let at_cap = FileAttrsCache::deferred(
+            view_types::FileSize::Exact(MATERIALIZE_MAX_BYTES),
+            view_types::ReadMode::Full,
+            view_types::Stability::Stable,
+            None,
+        )
+        .expect("valid capped attrs");
+        assert!(enforce_declared_materialize_cap(&path, Some(&at_cap)).is_ok());
+
+        let above_cap = FileAttrsCache::deferred(
+            view_types::FileSize::Exact(MATERIALIZE_MAX_BYTES + 1),
+            view_types::ReadMode::Full,
+            view_types::Stability::Stable,
+            None,
+        )
+        .expect("valid oversized attrs");
+        let error = enforce_declared_materialize_cap(&path, Some(&above_cap))
+            .expect_err("full materialization above the cap must be rejected");
+        assert_eq!(error.kind, TreeErrorKind::TooLarge);
+    }
 }

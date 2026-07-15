@@ -10,25 +10,23 @@
 //! tree owns the
 //! things a frontend used to re-derive per protocol:
 //!
-//! - **Identity.** A [`NodeId`] is an opaque, engine-owned handle. The engine
-//!   table maps it to the (mount, mount-relative path) the projection speaks;
-//!   `NodeId(1)` is the namespace root. Ids are NOT stable across a daemon
-//!   restart; within a session an id keeps its meaning so a frontend can cache
-//!   it. Consumers must not reuse ids after observing a daemon restart.
+//! - **Identity.** Namespace identities are the validated full protocol paths
+//!   from `omnifs_core`. They remain meaningful across daemon replacement, while
+//!   frontends keep them opaque and use only namespace answers.
 //! - **Policy.** [`Attrs`] carries the already-decided protocol answer: the
 //!   sentinel/learned size, the cache TTL, the direct-I/O bit, a change counter,
 //!   and a stability class. The frontend copies these into its protocol reply
 //!   without re-running FUSE's `ttl_for_attrs` or NFS's change hash.
 //! - **Invalidation fan-out.** Every op drains its mount's pending
 //!   invalidations before computing its answer (read-your-effects), maps them to
-//!   the ids this table knows, bumps an epoch, and emits an event. A background
-//!   tick keeps events flowing when no op arrives.
+//!   known paths, and emits an event. A background tick keeps events flowing when
+//!   no op arrives.
 //!
 //! # Consistency rule
 //!
-//! An op stamps every id it invalidates with the current epoch; the id's next
-//! answer carries that epoch through [`Attrs::change`]. A frontend must not serve
-//! protocol state older than the epoch of a node's last answer.
+//! An op stamps every invalidated path into the private change counter used by
+//! [`Attrs::change`]. A frontend must not serve protocol state older than the
+//! last answer for a path.
 
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -36,52 +34,27 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use futures::future::BoxFuture;
+use omnifs_core::path::Path;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
 
 use crate::view as view_types;
-/// The reserved namespace-root id.
-const ROOT_ID: u64 = 1;
 
 // -----------------------------------------------------------------------------
 // Plain-data surface
 // -----------------------------------------------------------------------------
 
-/// Opaque, engine-owned node handle. The engine maps it to a (mount, path); a
-/// frontend treats it as a token and never inspects the integer.
-///
-/// No cross-restart persistence: a daemon restart may renumber ids, so consumers
-/// must discard ids associated with the old instance.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct NodeId(pub u64);
-
-impl NodeId {
-    /// The namespace root: the mount-enumeration directory (or the single/rooted
-    /// mount's root). Every resolution starts here.
-    pub const ROOT: NodeId = NodeId(ROOT_ID);
-}
-
-/// A monotonic invalidation epoch. Bumped once per non-empty invalidation report;
-/// stamped onto the nodes that report touched.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct Epoch(pub u64);
-
 /// Node kind at the namespace boundary. A plain mirror of the projection's kinds
 /// so the wire types never depend on `view`/`tree` internals.
 ///
-/// `Symlink` is reserved: the projection does not produce symlinks, but the
-/// variant keeps the wire shape complete.
-/// `Subtree` is a local-directory handoff (a resolved treeref clone).
-/// The consumer can serve `root` only when that path is accessible in its
-/// filesystem namespace; containerized or guest frontends (docker, libkrun)
-/// cannot dereference a host-local path.
+/// Provider and host-tree nodes use the same ordinary file kinds. Host-tree
+/// symlinks are read through [`Namespace::readlink`], never by a frontend.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EntryKind {
     Directory,
     File,
     Symlink,
-    Subtree { root: PathBuf },
 }
 
 /// Freshness class of a file, plain-data mirror of `view::Stability`.
@@ -123,7 +96,20 @@ pub enum ReadStyle {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Attrs {
     pub kind: EntryKind,
+    /// Host identity facts. Provider-derived nodes use zero because the
+    /// provider cache has no host filesystem identity.
+    pub dev: u64,
+    pub ino: u64,
     pub size: u64,
+    pub blocks: u64,
+    pub mode: u16,
+    pub nlink: u32,
+    /// Unix epoch milliseconds. This is the compact timestamp representation
+    /// already used by the engine cache clock; absent means the source has no
+    /// timestamp answer.
+    pub accessed: Option<u64>,
+    pub modified: Option<u64>,
+    pub created: Option<u64>,
     pub ttl: Duration,
     pub change: u64,
     pub direct_io: bool,
@@ -135,19 +121,17 @@ pub struct Attrs {
 
 /// The resolved answer for a lookup.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NodeAnswer {
-    pub node: NodeId,
+pub struct LookupAnswer {
+    pub path: Path,
     pub attrs: Attrs,
-    pub kind: EntryKind,
 }
 
 /// One directory child.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DirEntry {
     pub name: String,
-    pub node: NodeId,
+    pub path: Path,
     pub attrs: Attrs,
-    pub kind: EntryKind,
 }
 
 /// A directory read page: some entries plus an optional continuation cursor.
@@ -157,13 +141,13 @@ pub struct DirPage {
     pub next: Option<DirCursor>,
 }
 
-/// An opaque directory cursor. `Start` begins a listing; `Tree` continues a
+/// An opaque directory cursor. `Start` begins a listing; `Provider` continues a
 /// provider-paged listing; `Buffered` carries the overflow the per-page `budget`
 /// held back, so paging stays stateless (the cursor owns the resume state).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DirCursor {
     Start,
-    Tree(view_types::CachedCursor),
+    Provider(view_types::CachedCursor),
     Buffered {
         entries: Vec<DirEntry>,
         then: Option<view_types::CachedCursor>,
@@ -191,29 +175,11 @@ pub struct ReadAnswer {
 /// same stream.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NsEvent {
-    /// The subtree rooted at `node` may have changed; drop protocol-cached state
+    /// The subtree rooted at `path` may have changed; drop protocol-cached state
     /// for it and re-resolve.
-    InvalidateSubtree { node: NodeId, epoch: Epoch },
+    InvalidateSubtree { path: Path },
     /// `node`'s attributes changed in place (a live file grew).
-    AttrsChanged {
-        node: NodeId,
-        attrs: Attrs,
-        epoch: Epoch,
-    },
-}
-
-/// A change in the daemon a frontend is attached to, delivered out of band from
-/// the [`NsEvent`] invalidation stream. It fires when an out-of-process
-/// renderer's wire connection reconnects onto a *restarted* daemon: every
-/// [`NodeId`] the renderer cached is meaningless against the new instance and
-/// must be re-resolved. The out-of-process runner bridges its wire attach events
-/// into this engine-owned type so a frontend crate need not depend on the wire
-/// crate to act on a reattach.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NsAttachEvent {
-    /// The daemon restarted under the renderer; drop every cached `NodeId` and
-    /// re-resolve lazily from the surviving protocol identity chain.
-    Reattached,
+    AttrsChanged { path: Path, attrs: Attrs },
 }
 
 /// Retry classification for an [`NsError`], derivable without importing the
@@ -270,7 +236,8 @@ impl NsError {
 }
 
 /// The invalidation event stream a subscriber drives. Wraps a broadcast receiver
-/// and drops lag errors (a lagged subscriber simply resyncs on the next event).
+/// and converts lag errors into a root invalidation so subscribers resynchronize
+/// through the same ordered event channel.
 pub struct EventStream {
     inner: BroadcastStream<NsEvent>,
 }
@@ -321,7 +288,9 @@ impl futures::Stream for EventStream {
         loop {
             match Pin::new(&mut self.inner).poll_next(cx) {
                 Poll::Ready(Some(Ok(event))) => return Poll::Ready(Some(event)),
-                Poll::Ready(Some(Err(_))) => {},
+                Poll::Ready(Some(Err(_))) => {
+                    return Poll::Ready(Some(NsEvent::InvalidateSubtree { path: Path::root() }));
+                },
                 Poll::Ready(None) => return Poll::Ready(None),
                 Poll::Pending => return Poll::Pending,
             }
@@ -337,40 +306,36 @@ impl futures::Stream for EventStream {
 /// return [`BoxFuture`] rather than `async fn`, so the projection has no
 /// async-trait dependency and a frontend can hold a `dyn Namespace`.
 pub trait Namespace: Send + Sync {
-    /// Resolve `name` under `parent`, allocating a stable id for the child.
+    /// Resolve `name` under `parent`, returning the child's structural path.
     fn lookup<'a>(
         &'a self,
-        parent: NodeId,
+        parent: Path,
         name: &'a str,
-    ) -> BoxFuture<'a, Result<NodeAnswer, NsError>>;
+    ) -> BoxFuture<'a, Result<LookupAnswer, NsError>>;
 
-    /// The current attributes of `node`.
-    fn getattr(&self, node: NodeId) -> BoxFuture<'_, Result<Attrs, NsError>>;
+    /// The current attributes of `path`.
+    fn getattr(&self, path: Path) -> BoxFuture<'_, Result<Attrs, NsError>>;
 
     /// Like [`getattr`](Namespace::getattr), but may perform provider I/O (the
     /// engine's ranged-attr probe) to learn an exact size. The NFS renderer's
     /// directory flattening needs an exact size per child.
-    fn getattr_exact(&self, node: NodeId) -> BoxFuture<'_, Result<Attrs, NsError>>;
+    fn getattr_exact(&self, path: Path) -> BoxFuture<'_, Result<Attrs, NsError>>;
 
     /// Read one directory page from `cursor`, returning at most `budget` entries
     /// (0 = engine default).
     fn readdir(
         &self,
-        node: NodeId,
+        path: Path,
         cursor: DirCursor,
         budget: usize,
     ) -> BoxFuture<'_, Result<DirPage, NsError>>;
 
-    /// Read `len` bytes at `offset` from `node`.
-    fn read(
-        &self,
-        node: NodeId,
-        offset: u64,
-        len: u32,
-    ) -> BoxFuture<'_, Result<ReadAnswer, NsError>>;
+    /// Read `len` bytes at `offset` from `path`.
+    fn read(&self, path: Path, offset: u64, len: u32)
+    -> BoxFuture<'_, Result<ReadAnswer, NsError>>;
 
     /// The link target of a symlink node.
-    fn readlink(&self, node: NodeId) -> BoxFuture<'_, Result<PathBuf, NsError>>;
+    fn readlink(&self, path: Path) -> BoxFuture<'_, Result<PathBuf, NsError>>;
 
     /// Subscribe to invalidation events.
     fn subscribe(&self) -> EventStream;

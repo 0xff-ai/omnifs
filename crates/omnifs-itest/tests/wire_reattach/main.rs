@@ -13,9 +13,9 @@
 //!   listed directory still lists. No unmount happened.
 //! - **Daemon restart.** SIGKILL the daemon under the live
 //!   frontend and relaunch it. The frontend's VFS wire client reconnects onto a
-//!   fresh instance id, drops every cached `NodeId`, and re-resolves lazily. The
-//!   held fd
-//!   keeps working and a new open succeeds; no ESTALE for surviving handles.
+//!   root invalidation, and resumes using the persisted structural `Path`
+//!   identities. The held fd keeps working and a new open succeeds; no ESTALE
+//!   for surviving handles.
 //!
 //! Gated on `OMNIFS_ACCEPTANCE_LIVE`. Holds the cross-process NFS serialization
 //! lock for the whole run and force-unmounts on teardown (including on panic), so

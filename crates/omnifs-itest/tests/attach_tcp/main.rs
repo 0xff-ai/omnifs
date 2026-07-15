@@ -87,7 +87,11 @@ fn wait_ready(ctrl_socket: &Path, deadline: Duration) {
 fn post_frontend_attach_target(ctrl_socket: &Path, body: Option<&str>) -> serde_json::Value {
     let bind_ip = body
         .and_then(|body| serde_json::from_str::<serde_json::Value>(body).ok())
-        .and_then(|body| body.get("bind_ip").and_then(serde_json::Value::as_str))
+        .and_then(|body| {
+            body.get("bind_ip")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
         .map(|ip| ip.parse().expect("bind_ip is IPv4"));
     let reply = control_request(ctrl_socket, ControlOperation::AttachTcp { bind_ip })
         .expect("attach target control reply");

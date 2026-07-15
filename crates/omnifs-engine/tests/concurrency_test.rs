@@ -4,14 +4,10 @@
 
 use std::time::Duration;
 
-use omnifs_core::path::Path;
-use omnifs_engine::test_support::{PendingTestCallout, ReadBytes};
-use omnifs_itest::{make_engine, make_runtime};
+use omnifs_engine::Namespace;
+use omnifs_engine::test_support::PendingTestCallout;
+use omnifs_itest::make_runtime;
 use omnifs_wit::provider::types::{CalloutResult, Header, HttpResponse};
-
-fn p(value: &str) -> Path {
-    Path::parse(value).unwrap()
-}
 
 fn http_ok(body: &[u8]) -> CalloutResult {
     CalloutResult::HttpResponse(HttpResponse {
@@ -30,15 +26,19 @@ fn http_ok(body: &[u8]) -> CalloutResult {
 /// turns that into a clear failure instead of a hang.
 #[tokio::test]
 async fn two_ops_suspend_concurrently_on_one_instance() {
-    let engine = make_engine();
-    let harness = make_runtime(&engine);
+    let harness = make_runtime();
     let runtime = &harness.runtime;
-
-    let namespace = runtime.namespace();
-    let path_a = p("/hello/remote-a");
-    let path_b = p("/hello/remote-b");
-    let read_a = namespace.read_file(&path_a, String::new());
-    let read_b = namespace.read_file(&path_b, String::new());
+    let namespace = &harness.namespace;
+    let read_a = namespace.read(
+        omnifs_core::path::Path::parse("/test/hello/remote-a").unwrap(),
+        0,
+        4096,
+    );
+    let read_b = namespace.read(
+        omnifs_core::path::Path::parse("/test/hello/remote-b").unwrap(),
+        0,
+        4096,
+    );
 
     let answer_both = async {
         let mut pending: Vec<PendingTestCallout> = Vec::new();
@@ -63,14 +63,10 @@ async fn two_ops_suspend_concurrently_on_one_instance() {
     })
     .await
     .expect("two ops must interleave on one instance, not serialize (timed out)");
+    let result_a = result_a.expect("read a returns");
+    let result_b = result_b.expect("read b returns");
 
-    for result in [
-        result_a.expect("read a returns"),
-        result_b.expect("read b returns"),
-    ] {
-        let ReadBytes::Inline(bytes) = result.bytes else {
-            panic!("remote read serves inline bytes, got {:?}", result.bytes);
-        };
-        assert_eq!(bytes, b"concurrent-ok");
+    for result in [result_a, result_b] {
+        assert_eq!(result.bytes, b"concurrent-ok");
     }
 }

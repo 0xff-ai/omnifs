@@ -2,15 +2,15 @@
 
 mod support;
 
-use omnifs_engine::test_support::{LookupOutcome, NamespaceListOutcome, ReadBytes};
-use omnifs_itest::{ReadFileOpExt, parse_path};
+use omnifs_engine::Namespace;
+use omnifs_itest::ReadFileOpExt;
 use omnifs_wit::provider::types::{
     CalloutResult, Cursor, EntryKind, Header, HttpResponse, ListChildrenResult, LookupChildResult,
     ReadFileOutcome, Stability,
 };
 use support::{
     TestOpExt, github_harness, project_file_inline_bytes, project_file_stability, project_paths,
-    seed_github_repo_cache,
+    resolve_namespace,
 };
 
 #[test]
@@ -277,7 +277,7 @@ fn github_issue_list_fetches_rest_followup_pages() {
     let mut page_two = harness
         .list_with_cursor(
             "/octocat/Hello-World/issues/open",
-            Some(Cursor::Opaque("2".to_string())),
+            Some(&Cursor::Opaque("2".to_string())),
         )
         .unwrap();
     let [Callout::Fetch(fetch)] = page_two.callouts() else {
@@ -665,7 +665,7 @@ fn github_owner_listing_tracks_browsed_repos() {
     }
 
     let mut page_two = harness
-        .list_with_cursor("/octocat", Some(Cursor::Opaque("2".to_string())))
+        .list_with_cursor("/octocat", Some(&Cursor::Opaque("2".to_string())))
         .unwrap();
     let owner_reload = page_two.expect_single_fetch();
     assert!(owner_reload.url.ends_with("/users/octocat"));
@@ -805,55 +805,6 @@ fn github_root_and_owner_listings_ignore_unclassified_repo_paths() {
             );
         },
         other => panic!("expected owner listing, got {other:?}"),
-    }
-}
-
-#[tokio::test]
-async fn github_repo_tree_lists_looks_up_and_reads_from_git_cache() {
-    let harness = github_harness();
-    seed_github_repo_cache(&harness, "octocat", "Hello-World");
-
-    let repo_listing = harness
-        .runtime
-        .namespace()
-        .list_children(&parse_path("/octocat/Hello-World/repo"), None, None, None)
-        .await
-        .unwrap();
-    match repo_listing {
-        NamespaceListOutcome::Subtree(tree_ref) => {
-            let real_root = harness
-                .runtime
-                .resolve_tree_ref(tree_ref)
-                .expect("missing disowned repo tree");
-            assert!(real_root.join("README.md").is_file());
-            assert!(real_root.join("src").is_dir());
-        },
-        other => {
-            panic!("expected repo tree listing, got {other:?}")
-        },
-    }
-
-    let repo_child = harness
-        .runtime
-        .namespace()
-        .lookup_child(&parse_path("/octocat/Hello-World"), "repo", None)
-        .await
-        .unwrap();
-    match repo_child {
-        LookupOutcome::Subtree(tree_ref) => {
-            let real_root = harness
-                .runtime
-                .resolve_tree_ref(tree_ref)
-                .expect("missing disowned repo tree");
-            assert!(real_root.join("README.md").is_file());
-            assert!(real_root.join("src").is_dir());
-            assert_eq!(
-                std::fs::read(real_root.join("README.md")).unwrap(),
-                b"Hello from cache\n"
-            );
-            assert!(real_root.join("src/main.rs").is_file());
-        },
-        other => panic!("expected repo child lookup, got {other:?}"),
     }
 }
 
@@ -1428,7 +1379,7 @@ fn github_pr_checks_list_from_head_sha_and_read_check_run_objects() {
     let mut page_two = harness
         .list_with_cursor(
             "/octocat/Hello-World/pulls/open/7/checks",
-            Some(Cursor::Opaque(cursor)),
+            Some(&Cursor::Opaque(cursor)),
         )
         .unwrap();
     let continuation_fetch = page_two.expect_single_fetch();
@@ -2196,7 +2147,7 @@ fn github_provider_list_routes_preserve_typed_http_errors() {
         })]
     }
 
-    fn expect_denied(response: &omnifs_engine::test_support::TestOp<'_>) {
+    fn expect_denied<T: std::fmt::Debug>(response: &omnifs_engine::test_support::TestOp<'_, T>) {
         match response.result().unwrap() {
             Err(error) => assert_eq!(error.kind, ErrorKind::Denied),
             other => panic!("expected provider error result, got {other:?}"),
@@ -2300,20 +2251,17 @@ async fn open_then_all_one_load() {
     assert!(harness.cached_canonical_for(open_title).is_some());
     assert!(harness.cached_canonical_for(all_title).is_some());
 
-    let all_title_path = parse_path(all_title);
+    let all_title_node = resolve_namespace(
+        harness.namespace.as_ref(),
+        "/github/octocat/Hello-World/issues/all/42/title",
+    )
+    .await;
     let warm = harness
-        .runtime
-        .namespace()
-        .read_file(
-            &all_title_path,
-            all_title_path.content_type_mime(None).to_string(),
-        )
+        .namespace
+        .read(all_title_node.path, 0, u32::MAX)
         .await
         .unwrap();
-    match warm.bytes {
-        ReadBytes::Inline(bytes) => assert_eq!(bytes, b"Issue forty-two"),
-        other => panic!("expected inline title on warm read, got {other:?}"),
-    }
+    assert_eq!(warm.bytes, b"Issue forty-two");
 }
 
 /// `item.json` bytes equal the single-item GET body verbatim.

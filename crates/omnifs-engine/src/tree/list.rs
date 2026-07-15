@@ -1,4 +1,4 @@
-//! Directory listing types and the `Tree::list` body.
+//! Internal directory listing types and provider-listing execution.
 //!
 //! This is the renderer-neutral listing policy shared by FUSE and NFS:
 //!
@@ -18,8 +18,6 @@
 //! synthetic entries, so a renderer that flattens a dynamic dir into a finite
 //! snapshot (NFS) drives the cursor forward over raw provider pages.
 
-use std::path::PathBuf;
-
 use crate::Runtime;
 use crate::cache::{Record as CacheRecord, RecordKind};
 use crate::ops::namespace::{DirEntry as ProviderEntry, DirListing as ProviderListing};
@@ -29,7 +27,8 @@ use tracing::warn;
 use super::error::{Result, TreeError};
 use super::node::{Entry, Node, PaginationControl, Synthetic};
 use super::synthetic;
-use crate::{RequestCtx, Tree};
+use crate::tree_refs::TreeRef;
+use crate::{RequestCtx, TreeNamespace};
 use omnifs_api::events::CacheKind;
 
 /// Opaque pagination cursor. Newtype over the substrate's `CachedCursor` so no
@@ -38,7 +37,7 @@ use omnifs_api::events::CacheKind;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cursor(pub CachedCursor);
 
-/// Result of `Tree::list` when the node is a provider directory. `exhaustive`
+/// Result of provider-list execution when the node is a provider directory. `exhaustive`
 /// MUST survive the boundary: NFS turns a non-exhaustive dynamic dir into a
 /// finite snapshot, and lookup stays the authoritative name oracle (readdir may
 /// be non-exhaustive). `next_cursor` drives pagination through `Tree`.
@@ -57,38 +56,32 @@ pub struct Listing {
 }
 
 /// `list()` either lists a provider directory or hands off a resolved backing
-/// subtree dir (a bind-mounted clone). A distinct variant so a treeref
+/// host-tree directory (a bind-mounted clone). A distinct variant so a tree-ref
 /// dir can never be mistaken for a provider listing.
 #[derive(Debug, Clone)]
 pub enum ListOutcome {
     Listing(Listing),
-    Subtree(PathBuf),
+    Host(TreeRef),
 }
 
-impl Tree {
+impl TreeNamespace {
     /// List a directory node. `cursor = None` starts a first-page browse listing
     /// (coalesced, cache-consulted, and carrying the host-synthesized control /
     /// ignore entries as synthetic `Entry` origins); `Some(cursor)` continues
-    /// pagination as a raw page drain. Returns `ListOutcome::Listing` or
-    /// `ListOutcome::Subtree(backing_dir)`.
-    pub async fn list(
+    /// pagination as a raw page drain. Returns the internal listing outcome.
+    pub(crate) async fn list(
         &self,
         node: &Node,
         cursor: Option<Cursor>,
         _ctx: &RequestCtx,
     ) -> Result<ListOutcome> {
-        if let Some(dir) = node.subtree_path() {
-            return Ok(ListOutcome::Subtree(dir.clone()));
+        if let Some((tree_ref, _, _)) = node.host() {
+            return Ok(ListOutcome::Host(tree_ref.clone()));
         }
 
-        if self
-            .ctx
-            .is_mount_enumeration_root(node.mount(), node.path())
-        {
+        if self.is_mount_enumeration_root(node.mount(), node.path()) {
             let entries = self
-                .ctx
                 .mount_names()
-                .unwrap_or_default()
                 .into_iter()
                 .map(|mount| Entry::provider(mount, EntryMeta::directory()))
                 .collect();
@@ -99,7 +92,7 @@ impl Tree {
             }));
         }
 
-        let runtime = self.ctx.runtime_for(node.mount())?;
+        let runtime = self.runtime_for(node.mount())?;
         let path = node.path();
 
         // An explicit-cursor continuation is a raw page drain: no cache consult,
@@ -133,10 +126,7 @@ impl Tree {
         cursor: Cursor,
     ) -> Result<Listing> {
         crate::inspector::cache_event(CacheKind::BrowseMiss);
-        let result = runtime
-            .namespace()
-            .list_children(path, None, Some(cursor.0))
-            .await?;
+        let result = runtime.list_children(path, None, Some(cursor.0)).await?;
         match result {
             crate::ops::namespace::ListOutcome::Entries(listing) => Ok(Listing {
                 entries: provider_entries(path, &listing.entries),
@@ -151,7 +141,7 @@ impl Tree {
                 next_cursor: None,
             }),
             crate::ops::namespace::ListOutcome::Subtree(_) => Err(TreeError::internal(
-                "list continuation resolved to a subtree handoff",
+                "list continuation resolved to a host-tree handoff",
             )),
         }
     }
@@ -169,10 +159,7 @@ impl Tree {
         let cached_validator = cached_dirents.as_ref().and_then(|d| d.validator.clone());
 
         crate::inspector::cache_event(CacheKind::BrowseMiss);
-        let result = runtime
-            .namespace()
-            .list_children(path, cached_validator, None)
-            .await;
+        let result = runtime.list_children(path, cached_validator, None).await;
 
         match result {
             Ok(crate::ops::namespace::ListOutcome::Entries(listing)) => Ok(ListOutcome::Listing(
@@ -194,9 +181,9 @@ impl Tree {
             },
             Ok(crate::ops::namespace::ListOutcome::Subtree(tref)) => {
                 let dir = runtime
-                    .resolve_tree_ref(tref)
+                    .tree_ref(tref)
                     .ok_or_else(|| TreeError::internal(format!("unresolved tree_ref {tref}")))?;
-                Ok(ListOutcome::Subtree(dir))
+                Ok(ListOutcome::Host(dir))
             },
             Err(error) => {
                 let rate_limited = error.is_provider_rate_limited();

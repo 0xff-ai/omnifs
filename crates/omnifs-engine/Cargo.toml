@@ -31,12 +31,13 @@ wasmtime-wasi = { version = "46.0.1", default-features = false, features = ["p2"
 sha2 = { workspace = true, optional = true }
 tempfile = { workspace = true, optional = true }
 tar = { workspace = true, optional = true }
-omnifs-core = { workspace = true, optional = true }
+omnifs-core = { workspace = true }
 omnifs-workspace = { workspace = true, optional = true }
 omnifs-auth = { workspace = true, optional = true }
 omnifs-api = { workspace = true, optional = true }
 omnifs-wit = { workspace = true, features = ["host-bindings"], optional = true }
 anyhow = { workspace = true, optional = true }
+cap-std = { workspace = true, optional = true }
 fjall = { workspace = true, optional = true }
 moka = { workspace = true, optional = true }
 time = { workspace = true, features = ["formatting"], optional = true }
@@ -45,6 +46,7 @@ time = { workspace = true, features = ["formatting"], optional = true }
 default = ["runtime"]
 runtime = [
     "dep:anyhow",
+    "dep:cap-std",
     "dep:blake3",
     "dep:dashmap",
     "dep:fjall",
@@ -52,7 +54,6 @@ runtime = [
     "dep:moka",
     "dep:omnifs-api",
     "dep:omnifs-auth",
-    "dep:omnifs-core",
     "dep:omnifs-wit",
     "dep:omnifs-workspace",
     "dep:reqwest",

@@ -1,9 +1,22 @@
 //! GitHub provider route-test helpers.
 
-use omnifs_itest::{RuntimeHarness, create_test_repo, make_initialized_runtime};
+use omnifs_core::path::Path;
+use omnifs_engine::{LookupAnswer, Namespace};
+use omnifs_itest::{RuntimeHarness, make_initialized_runtime};
 use omnifs_wit::provider::types::{ByteSource, Effects, FsKind, Stability};
 
 pub use omnifs_itest::{TestOpExt, project_paths};
+
+pub async fn resolve_namespace(namespace: &dyn Namespace, path: &str) -> LookupAnswer {
+    let mut answer = LookupAnswer {
+        path: Path::root(),
+        attrs: namespace.getattr(Path::root()).await.unwrap(),
+    };
+    for segment in Path::parse(path).unwrap().segments() {
+        answer = namespace.lookup(answer.path, segment).await.unwrap();
+    }
+    answer
+}
 
 pub fn github_harness() -> RuntimeHarness {
     make_initialized_runtime(
@@ -14,7 +27,7 @@ pub fn github_harness() -> RuntimeHarness {
             "auth": {
                 "type": "static-token",
                 "scheme": "pat"
-            },
+            }
         }
     "#,
     )
@@ -45,19 +58,4 @@ pub fn project_file_inline_bytes<'a>(effects: &'a Effects, path: &str) -> Option
             FsKind::Directory(_) => None,
         }
     })
-}
-
-pub fn seed_github_repo_cache(harness: &RuntimeHarness, owner: &str, repo: &str) {
-    let cache_path = harness
-        .clone_dir
-        .path()
-        .join("github.com")
-        .join(owner)
-        .join(repo);
-    create_test_repo(&cache_path, "Hello from cache\n");
-    std::fs::write(
-        cache_path.join(".omnifs-clone-url"),
-        format!("git@github.com:{owner}/{repo}.git"),
-    )
-    .unwrap();
 }

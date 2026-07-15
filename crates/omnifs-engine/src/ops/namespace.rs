@@ -1,9 +1,9 @@
 use crate::EngineError;
+use crate::Runtime;
 use crate::cache::{PublicationKey, RecordKind};
 use crate::clock::now_millis;
 use crate::effect_apply::{EffectApplier, LookupOutcome};
 use crate::object_id::ObjectId;
-use crate::runtime::Namespace;
 use crate::runtime::Result;
 use crate::view::{AttrPayload, CachedCursor, EntryMeta, FileAttrsCache, Stability};
 use omnifs_core::path::{Path, Segment};
@@ -263,23 +263,21 @@ pub struct ChunkOutcome {
     pub eof: bool,
 }
 
-impl Namespace<'_> {
-    pub async fn lookup_child(&self, parent_path: &Path, name: &str) -> Result<LookupOutcome> {
+impl Runtime {
+    pub(crate) async fn lookup_child(
+        &self,
+        parent_path: &Path,
+        name: &str,
+    ) -> Result<LookupOutcome> {
         let name = Segment::try_from(name)
             .map_err(|error| EngineError::ProviderProtocol(error.to_string()))?;
         let child_path = parent_path.join_segment(&name);
         let now = now_millis();
-        if self
-            .runtime
-            .resources
-            .negative_for(&child_path, now)
-            .is_some()
-        {
+        if self.resources.negative_for(&child_path, now).is_some() {
             return Ok(LookupOutcome::NotFound);
         }
-        let runtime = self.runtime;
+        let runtime = self;
         let result = self
-            .runtime
             .namespace_flights
             .lookup
             .run(
@@ -305,14 +303,14 @@ impl Namespace<'_> {
         Ok(result)
     }
 
-    pub async fn list_children(
+    pub(crate) async fn list_children(
         &self,
         path: &Path,
         cached_validator: Option<String>,
         cursor: Option<CachedCursor>,
     ) -> Result<ListOutcome> {
         let is_continuation = cursor.is_some();
-        let runtime = self.runtime;
+        let runtime = self;
         let result = if is_continuation {
             let _permit = runtime
                 .resources
@@ -335,8 +333,7 @@ impl Namespace<'_> {
             }
             ListOutcome::from_wit(result)
         } else {
-            self.runtime
-                .namespace_flights
+            self.namespace_flights
                 .list
                 .run(
                     path.clone(),
@@ -369,10 +366,10 @@ impl Namespace<'_> {
         Ok(result)
     }
 
-    pub async fn read_file(&self, path: &Path, content_type: String) -> Result<ReadOutcome> {
+    pub(crate) async fn read_file(&self, path: &Path, content_type: String) -> Result<ReadOutcome> {
         let now = now_millis();
-        let cached_canonical = self.runtime.resources.cached_canonical_for(path);
-        let mode = if cached_canonical.is_some() && self.runtime.resources.view_expired(path, now) {
+        let cached_canonical = self.resources.cached_canonical_for(path);
+        let mode = if cached_canonical.is_some() && self.resources.view_expired(path, now) {
             ReadMode::Revalidate
         } else {
             ReadMode::Serve
@@ -389,7 +386,7 @@ impl Namespace<'_> {
         cached_canonical: Option<crate::cache::CachedCanonical>,
     ) -> Result<ReadOutcome> {
         let now = now_millis();
-        if self.runtime.resources.negative_for(path, now).is_some() {
+        if self.resources.negative_for(path, now).is_some() {
             return Err(enoent(path.as_str()));
         }
 
@@ -437,7 +434,7 @@ impl Namespace<'_> {
             },
             None => PublicationKey::Path(path.clone()),
         };
-        let runtime = self.runtime;
+        let runtime = self;
         let reserve = move || runtime.resources.reserve(publication_key);
         let work = move || async move {
             let result = runtime
@@ -455,8 +452,7 @@ impl Namespace<'_> {
             let _permit = reserve().await;
             work().await
         } else {
-            self.runtime
-                .namespace_flights
+            self.namespace_flights
                 .read
                 .run(read_key, reserve, work)
                 .await
@@ -466,16 +462,17 @@ impl Namespace<'_> {
         Ok(result)
     }
 
-    pub async fn open_file(&self, path: &Path) -> Result<OpenOutcome> {
-        self.runtime
-            .run_open_file(path)
-            .await
-            .map(OpenOutcome::from_wit)
+    pub(crate) async fn open_file(&self, path: &Path) -> Result<OpenOutcome> {
+        self.run_open_file(path).await.map(OpenOutcome::from_wit)
     }
 
-    pub async fn read_chunk(&self, handle: u64, offset: u64, length: u32) -> Result<ChunkOutcome> {
-        self.runtime
-            .run_read_chunk(handle, offset, length)
+    pub(crate) async fn read_chunk(
+        &self,
+        handle: u64,
+        offset: u64,
+        length: u32,
+    ) -> Result<ChunkOutcome> {
+        self.run_read_chunk(handle, offset, length)
             .await
             .map(ChunkOutcome::from_wit)
     }
@@ -571,8 +568,8 @@ impl ChunkOutcome {
     }
 }
 
-fn leaf_stability(ns: &Namespace<'_>, path: &Path, now_millis: u64) -> Option<Stability> {
-    ns.runtime
+fn leaf_stability(runtime: &Runtime, path: &Path, now_millis: u64) -> Option<Stability> {
+    runtime
         .resources
         .view_get(path, RecordKind::Attr, None, now_millis)
         .and_then(|record| AttrPayload::deserialize(&record.payload))

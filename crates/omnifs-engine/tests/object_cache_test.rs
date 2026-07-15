@@ -1,16 +1,15 @@
 //! Host and object-cache coherence tests.
 
 use omnifs_core::path::Path;
-use omnifs_engine::EngineError;
-use omnifs_engine::test_support::ReadBytes;
 use omnifs_engine::test_support::cache::{BatchRecord, RecordKind};
-use omnifs_engine::test_support::clock::DYNAMIC_TTL_MILLIS;
+use omnifs_engine::test_support::clock::{DYNAMIC_TTL_MILLIS, now_millis};
 use omnifs_engine::test_support::wit_protocol;
 use omnifs_engine::view::{AttrPayload, FilePayload, LookupPayload};
+use omnifs_engine::{LookupAnswer, Namespace, NsError};
 use omnifs_itest::make_initialized_runtime;
 use omnifs_wit::provider::types::{
-    ByteSource, Effects, ErrorKind, FileAttrs, FileOut, FileSize, FsKind, FsWrite, IdCapture,
-    Invalidation, LogicalId, PathOrPrefix, Stability,
+    ByteSource, Effects, FileAttrs, FileOut, FileSize, FsKind, FsWrite, IdCapture, Invalidation,
+    LogicalId, PathOrPrefix, Stability,
 };
 
 const CONFIG: &str = r#"
@@ -22,6 +21,17 @@ const CONFIG: &str = r#"
 
 fn p(value: &str) -> Path {
     Path::parse(value).unwrap()
+}
+
+async fn resolve(namespace: &dyn Namespace, value: &str) -> LookupAnswer {
+    let mut answer = LookupAnswer {
+        path: Path::root(),
+        attrs: namespace.getattr(Path::root()).await.unwrap(),
+    };
+    for segment in Path::parse(value).unwrap().segments() {
+        answer = namespace.lookup(answer.path, segment).await.unwrap();
+    }
+    answer
 }
 
 fn issue_id() -> LogicalId {
@@ -152,7 +162,8 @@ fn fence_rejects_stale_preload_and_negative() {
 
     harness
         .runtime
-        .apply_not_found_negative(&p(leaf), Some(&id), op_gen0, 1_000);
+        .apply_not_found_negative(&p(leaf), Some(&id), op_gen0, 1_000)
+        .expect("stale negative publication should be rejected");
     assert!(
         harness
             .runtime
@@ -251,6 +262,12 @@ fn leaf_records_share_one_deadline() {
 
     let runtime = &harness.runtime;
     let op_gen = runtime.resources.current_generation();
+    runtime
+        .apply_effects_for_test(
+            &canonical_effect(&issue_id(), path, b"canonical", None),
+            op_gen,
+        )
+        .expect("test effects should publish the object index");
     assert!(!runtime.resources.view_expired(&p("/missing"), now));
     assert!(
         runtime
@@ -286,6 +303,7 @@ fn leaf_records_share_one_deadline() {
 async fn plain_path_ignores_unrelated_indexed_validator() {
     let harness = make_initialized_runtime(CONFIG);
     let path = "/hello/message";
+    let namespace = harness.namespace.as_ref();
 
     assert!(
         harness
@@ -295,12 +313,14 @@ async fn plain_path_ignores_unrelated_indexed_validator() {
             .is_none()
     );
 
-    let _ = harness
-        .runtime
-        .namespace()
-        .read_file(&p(path), "application/octet-stream".to_string())
-        .await
-        .expect("cold read dispatches to provider");
+    let target = resolve(namespace, "/test/hello/message").await;
+    assert!(
+        harness
+            .runtime
+            .resources
+            .cached_canonical_for(&p(path))
+            .is_none()
+    );
 
     let id = LogicalId {
         kind: "test.unrelated".to_string(),
@@ -322,16 +342,11 @@ async fn plain_path_ignores_unrelated_indexed_validator() {
             .is_some()
     );
 
-    let read = harness
-        .runtime
-        .namespace()
-        .read_file(&p(path), "application/octet-stream".to_string())
+    let read = namespace
+        .read(target.path, 0, u32::MAX)
         .await
         .expect("indexed read still dispatches to plain provider handler");
-    let ReadBytes::Inline(bytes) = read.bytes else {
-        panic!("plain handler must return inline bytes");
-    };
-    assert_eq!(bytes, b"Hello, world!");
+    assert_eq!(read.bytes, b"Hello, world!");
 }
 
 #[test]
@@ -447,7 +462,8 @@ fn negative_returns_enoent_until_deadline_or_invalidate() {
 
     harness
         .runtime
-        .apply_not_found_negative(&p(path), Some(&id), op_gen, now);
+        .apply_not_found_negative(&p(path), Some(&id), op_gen, now)
+        .expect("negative publication should succeed");
 
     assert!(
         harness
@@ -468,7 +484,8 @@ fn negative_returns_enoent_until_deadline_or_invalidate() {
 
     harness
         .runtime
-        .apply_not_found_negative(&p(path), Some(&id), op_gen, now);
+        .apply_not_found_negative(&p(path), Some(&id), op_gen, now)
+        .expect("negative refresh should succeed");
     assert!(
         harness
             .runtime
@@ -502,25 +519,27 @@ fn negative_returns_enoent_until_deadline_or_invalidate() {
 #[tokio::test]
 async fn negative_short_circuits_read_without_provider_dispatch() {
     let harness = make_initialized_runtime(CONFIG);
-    let id = issue_id();
-    let path = "/no/such/leaf";
-    let now = 5_000u64;
-    harness.runtime.apply_not_found_negative(
-        &p(path),
-        Some(&id),
-        harness.runtime.resources.current_generation(),
-        now,
-    );
-
-    let error = harness
+    let namespace = harness.namespace.as_ref();
+    let target = resolve(namespace, "/test/hello/remote-a").await;
+    let path = "/hello/remote-a";
+    let now = now_millis();
+    harness
         .runtime
-        .namespace()
-        .read_file(&p(path), "application/octet-stream".to_string())
-        .await
-        .expect_err("negative must surface as ENOENT");
+        .apply_not_found_negative(
+            &p(path),
+            None,
+            harness.runtime.resources.current_generation(),
+            now,
+        )
+        .expect("negative publication should succeed");
 
-    match error {
-        EngineError::ProviderError(e) => assert_eq!(e.kind, ErrorKind::NotFound),
-        other => panic!("expected provider NotFound, got {other:?}"),
-    }
+    let error = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        namespace.read(target.path, 0, u32::MAX),
+    )
+    .await
+    .expect("negative precheck must not wait for the captured callout")
+    .expect_err("negative must surface as ENOENT");
+    assert_eq!(error, NsError::NotFound);
+    assert!(harness.runtime.try_recv_test_callout().is_none());
 }

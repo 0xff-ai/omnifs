@@ -4,31 +4,57 @@
 //! through bind mounts. A shared u64 ID space keeps a `tree-ref` returned to
 //! the provider unambiguous: there is only one source of truth for resolution.
 
+use crate::cache::identity::GitId;
+use cap_std::ambient_authority;
+use cap_std::fs::Dir;
 use dashmap::DashMap;
-use std::path::PathBuf;
+use std::fmt;
+use std::path::Path;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[derive(Clone)]
+pub(crate) struct TreeRef {
+    pub(crate) id: GitId,
+    pub(crate) root: Arc<Dir>,
+}
+
+impl fmt::Debug for TreeRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TreeRef").field("id", &self.id).finish()
+    }
+}
+
+impl PartialEq for TreeRef {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+
+impl Eq for TreeRef {}
+
 pub struct TreeRefs {
-    paths: DashMap<u64, PathBuf>,
-    next_id: AtomicU64,
+    refs: DashMap<u64, TreeRef>,
+    next_handle: AtomicU64,
 }
 
 impl TreeRefs {
     pub fn new() -> Self {
         Self {
-            paths: DashMap::new(),
-            next_id: AtomicU64::new(1),
+            refs: DashMap::new(),
+            next_handle: AtomicU64::new(1),
         }
     }
 
-    pub fn register(&self, path: PathBuf) -> u64 {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        self.paths.insert(id, path);
-        id
+    pub fn register(&self, id: GitId, path: &Path) -> std::io::Result<u64> {
+        let root = Arc::new(Dir::open_ambient_dir(path, ambient_authority())?);
+        let tree_ref = self.next_handle.fetch_add(1, Ordering::Relaxed);
+        self.refs.insert(tree_ref, TreeRef { id, root });
+        Ok(tree_ref)
     }
 
-    pub fn resolve(&self, tree_ref: u64) -> Option<PathBuf> {
-        self.paths.get(&tree_ref).map(|r| r.clone())
+    pub(crate) fn resolve(&self, tree_ref: u64) -> Option<TreeRef> {
+        self.refs.get(&tree_ref).map(|r| r.clone())
     }
 }
 

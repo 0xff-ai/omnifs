@@ -1,4 +1,4 @@
-//! The `Tree::resolve` / `Tree::resolve_child` bodies.
+//! Internal provider path resolution and child traversal.
 
 use std::sync::Arc;
 
@@ -12,18 +12,18 @@ use omnifs_core::path::Path;
 use super::error::{Result, TreeError};
 use super::node::{Node, NodeBody};
 use super::synthetic;
-use crate::{RequestCtx, Tree};
+use crate::{RequestCtx, TreeNamespace};
 
-impl Tree {
+impl TreeNamespace {
     /// Resolve a full protocol path to a `Node`. Splits the path into
     /// (mount, mount-relative path); the mount root resolves to a directory
     /// without a provider round trip, and any deeper path resolves its leaf via
     /// [`resolve_child`](Self::resolve_child) against the parent directory.
-    /// Doubles as filehandle/inode rehydration: a renderer persisted (mount,
+    /// Doubles as path rehydration: a frontend persisted (mount,
     /// path) in its handle and calls resolve again to rebuild a `Node` after
     /// eviction, without re-walking from root.
-    pub async fn resolve(&self, path: &Path, _ctx: &RequestCtx) -> Result<Node> {
-        let (mount, rel) = self.ctx.split_mount_path(path)?;
+    pub(crate) async fn resolve(&self, path: &Path, _ctx: &RequestCtx) -> Result<Node> {
+        let (mount, rel) = self.split_mount_path(path)?;
 
         // The mount root is always a directory; no provider round trip needed.
         if rel.is_root() {
@@ -35,7 +35,7 @@ impl Tree {
             ));
         }
 
-        let runtime = self.ctx.runtime_for(&mount)?;
+        let runtime = self.runtime_for(&mount)?;
         let Some((parent, name)) = rel.parent_and_name() else {
             return Err(TreeError::invalid_input(format!(
                 "resolve: path has no parent: {}",
@@ -59,14 +59,30 @@ impl Tree {
     /// dirents (absent => NotFound, never a provider round trip), and a
     /// mount-root ignore file is always synthesized at the root before cached
     /// dirents or provider lookup (the host-owned file wins). Subtree outcomes
-    /// resolve through `Runtime::resolve_tree_ref` into `NodeBody::Subtree`.
-    pub async fn resolve_child(
+    /// resolve a provider tree reference into the retained host-tree record.
+    pub(crate) async fn resolve_child(
         &self,
         parent: &Node,
         name: &str,
         _ctx: &RequestCtx,
     ) -> Result<Node> {
-        let runtime = self.ctx.runtime_for(parent.mount())?;
+        if parent.host().is_some() {
+            return self
+                .resolve_host_child(parent, name)
+                .await
+                .map_err(Into::into);
+        }
+        if self.is_mount_enumeration_root(parent.mount(), parent.path())
+            && self.mount_names().iter().any(|mount| mount == name)
+        {
+            return Ok(Node::new(
+                name.to_string(),
+                Path::root(),
+                EntryMeta::directory(),
+                NodeBody::Provider,
+            ));
+        }
+        let runtime = self.runtime_for(parent.mount())?;
         self.resolve_child_in(parent.mount().to_string(), &runtime, parent.path(), name)
             .await
     }
@@ -85,11 +101,8 @@ impl Tree {
             TreeError::invalid_input(format!("resolve_child: invalid name {name:?}: {e}"))
         })?;
 
-        if self.ctx.is_mount_enumeration_root(&mount, parent)
-            && self
-                .ctx
-                .mount_names()
-                .is_some_and(|mounts| mounts.iter().any(|m| m == name))
+        if self.is_mount_enumeration_root(&mount, parent)
+            && self.mount_names().iter().any(|m| m == name)
         {
             return Ok(Node::new(
                 name.to_string(),
@@ -126,7 +139,7 @@ impl Tree {
         }
 
         crate::inspector::cache_event(CacheKind::BrowseMiss);
-        match runtime.namespace().lookup_child(parent, name).await? {
+        match runtime.lookup_child(parent, name).await? {
             LookupOutcome::Entry(entry) => Ok(Node::new(
                 mount,
                 entry.path().clone(),
@@ -135,13 +148,17 @@ impl Tree {
             )),
             LookupOutcome::Subtree(tref) => {
                 let dir = runtime
-                    .resolve_tree_ref(tref)
+                    .tree_ref(tref)
                     .ok_or_else(|| TreeError::internal(format!("unresolved tree_ref {tref}")))?;
                 Ok(Node::new(
                     mount,
                     rel,
                     EntryMeta::directory(),
-                    NodeBody::Subtree(dir),
+                    NodeBody::Host {
+                        tree_ref: dir,
+                        relative: std::path::PathBuf::new(),
+                        kind: super::node::HostKind::Directory,
+                    },
                 ))
             },
             // Controls may have been cached by a prior paged listing. Root

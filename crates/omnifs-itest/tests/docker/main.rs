@@ -23,7 +23,7 @@ fn inspect_body(status: &str, running: bool) -> Vec<u8> {
     .into_bytes()
 }
 
-fn resume_http(op: &mut TestOp<'_>, body: Vec<u8>) {
+fn resume_http<T>(op: &mut TestOp<'_, T>, body: Vec<u8>) {
     op.answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
         status: 200,
         headers: Vec::new(),
@@ -78,7 +78,7 @@ fn assert_no_project_effects(effects: &Effects) {
     );
 }
 
-fn assert_inline_file(op: &TestOp<'_>, expected: &[u8]) {
+fn assert_inline_file(op: &TestOp<'_, ReadFileOutcome>, expected: &[u8]) {
     match op.result().unwrap() {
         Ok(ReadFileOutcome::Found(file)) => {
             assert_eq!(file.attrs.stability, Stability::Dynamic);

@@ -102,11 +102,7 @@ impl Runtime {
         dirents.paginated = true;
 
         // Echo the cursor; no validator on a continuation page.
-        let listing = match self
-            .namespace()
-            .list_children(path, None, Some(cursor))
-            .await
-        {
+        let listing = match self.list_children(path, None, Some(cursor)).await {
             Ok(ListOutcome::Entries(listing)) => listing,
             Ok(ListOutcome::Unchanged) => {
                 // A continuation that resolves to `unchanged` means the feed is

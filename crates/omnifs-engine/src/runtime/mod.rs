@@ -140,10 +140,6 @@ pub struct Runtime {
     pub(crate) test_callouts: Option<std::sync::Mutex<mpsc::Receiver<TestSignal>>>,
 }
 
-pub struct Namespace<'a> {
-    pub(crate) runtime: &'a Runtime,
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum BuildError {
     #[error("wasmtime: {0}")]
@@ -259,10 +255,6 @@ impl Runtime {
 
     pub(crate) fn auth_binding(&self) -> Option<&Arc<AuthBinding>> {
         self.auth.as_ref()
-    }
-
-    pub fn namespace(&self) -> Namespace<'_> {
-        Namespace { runtime: self }
     }
 
     pub fn new(
@@ -489,9 +481,8 @@ impl Runtime {
         self.run_event(wit_types::ProviderEvent::TimerTick).await
     }
 
-    /// Resolve a tree-ref handle to a real filesystem path.
-    /// Resolves a host-issued git tree handle through the shared registry.
-    pub fn resolve_tree_ref(&self, tree_ref: u64) -> Option<PathBuf> {
+    /// Resolve a host-issued Git tree handle for the private namespace facade.
+    pub(crate) fn tree_ref(&self, tree_ref: u64) -> Option<crate::tree_refs::TreeRef> {
         self.trees.resolve(tree_ref)
     }
 
@@ -500,7 +491,7 @@ impl Runtime {
     /// tree resolves the longest covering anchor and returns those bytes
     /// without copying across the WIT. `None` when no stored anchor covers
     /// `path`.
-    pub fn canonical_bytes_for(&self, path: &Path) -> Option<Vec<u8>> {
+    pub(crate) fn canonical_bytes_for(&self, path: &Path) -> Option<Vec<u8>> {
         self.resources
             .cached_canonical_for(path)
             .map(|canonical| canonical.bytes)
@@ -508,7 +499,7 @@ impl Runtime {
 
     /// Read the full bytes of a stored blob for a blob-backed `read-file`
     /// terminal.
-    pub fn read_blob_full(&self, blob_id: u64) -> Result<Vec<u8>> {
+    pub(crate) fn read_blob_full(&self, blob_id: u64) -> Result<Vec<u8>> {
         let record =
             self.resources.blob.lookup_by_id(blob_id).ok_or_else(|| {
                 EngineError::ProviderProtocol(format!("blob {blob_id} not found"))

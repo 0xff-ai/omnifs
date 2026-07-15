@@ -1,16 +1,12 @@
 #![cfg(not(target_os = "wasi"))]
 
-use omnifs_core::path::Path;
-use omnifs_engine::EngineError;
-use omnifs_itest::{RuntimeHarness, TestOpExt, into_inline, make_initialized_runtime};
+use omnifs_itest::{
+    ReadFileOpExt, RuntimeHarness, TestOpExt, into_inline, make_initialized_runtime,
+};
 use omnifs_wit::provider::types::{
     CalloutResult, EntryKind, ErrorKind, Header, HttpResponse, ListChildrenResult,
     LookupChildResult, ReadFileOutcome,
 };
-
-fn p(path: &str) -> Path {
-    Path::parse(path).unwrap()
-}
 
 fn web_harness() -> RuntimeHarness {
     make_initialized_runtime(
@@ -96,7 +92,7 @@ fn web_provider_host_directories_are_enumerable_and_open() {
     let harness = web_harness();
 
     let listing = harness.list("/https").unwrap();
-    match listing.into_list_children().unwrap() {
+    match listing.into_result().unwrap().unwrap() {
         ListChildrenResult::Entries(entries) => {
             assert!(entries.exhaustive);
             let host = entries
@@ -110,7 +106,7 @@ fn web_provider_host_directories_are_enumerable_and_open() {
     }
 
     let lookup = harness.lookup("/https", "example.test").unwrap();
-    match lookup.into_lookup_child().unwrap() {
+    match lookup.into_result().unwrap().unwrap() {
         LookupChildResult::Entry(entry) => {
             assert_eq!(entry.target.name, "example.test");
             assert!(matches!(entry.target.kind, EntryKind::Directory));
@@ -119,7 +115,7 @@ fn web_provider_host_directories_are_enumerable_and_open() {
     }
 
     let host_listing = harness.list("/https/example.test").unwrap();
-    match host_listing.into_list_children().unwrap() {
+    match host_listing.into_result().unwrap().unwrap() {
         ListChildrenResult::Entries(entries) => assert!(!entries.exhaustive),
         other => panic!("expected open host listing, got {other:?}"),
     }
@@ -201,7 +197,7 @@ fn web_provider_only_exposes_configured_hosts() {
     .unwrap();
 
     let listing = harness.list("/https").unwrap();
-    match listing.into_list_children().unwrap() {
+    match listing.into_result().unwrap().unwrap() {
         ListChildrenResult::Entries(entries) => {
             let names = entries
                 .entries
@@ -261,24 +257,18 @@ async fn web_provider_denies_domains_outside_mount_config() {
     )
     .unwrap();
 
-    let path = p("/https/denied.test/articles/readable");
     let error = harness
-        .runtime
-        .namespace()
-        .read_file(&path, path.content_type_mime(None).to_string())
-        .await
+        .read("/https/denied.test/articles/readable")
+        .unwrap()
+        .into_result()
+        .unwrap()
         .unwrap_err();
 
-    match error {
-        EngineError::ProviderError(error) => {
-            assert_eq!(error.kind, ErrorKind::Denied);
-            assert!(
-                error.message.contains("domain not in allowlist"),
-                "unexpected denied error: {error:?}"
-            );
-        },
-        other => panic!("expected denied provider error, got {other:?}"),
-    }
+    assert_eq!(error.kind, ErrorKind::Denied);
+    assert!(
+        error.message.contains("domain not in allowlist"),
+        "unexpected denied error: {error:?}"
+    );
 }
 
 fn html_response(body: &[u8]) -> CalloutResult {

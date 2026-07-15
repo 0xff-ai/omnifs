@@ -16,7 +16,7 @@ pub fn dns_harness() -> RuntimeHarness {
     )
 }
 
-pub fn expect_fetches(op: &omnifs_engine::test_support::TestOp<'_>) -> Vec<HttpRequest> {
+pub fn expect_fetches<T>(op: &omnifs_engine::test_support::TestOp<'_, T>) -> Vec<HttpRequest> {
     op.callouts()
         .iter()
         .map(|callout| match callout {
@@ -26,7 +26,7 @@ pub fn expect_fetches(op: &omnifs_engine::test_support::TestOp<'_>) -> Vec<HttpR
         .collect()
 }
 
-pub fn expect_fetch(op: &omnifs_engine::test_support::TestOp<'_>) -> HttpRequest {
+pub fn expect_fetch<T>(op: &omnifs_engine::test_support::TestOp<'_, T>) -> HttpRequest {
     op.expect_single_fetch().clone()
 }
 

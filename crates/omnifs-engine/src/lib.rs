@@ -30,8 +30,6 @@ pub(crate) mod runtime;
 #[cfg(feature = "runtime")]
 pub(crate) mod sandbox;
 #[cfg(feature = "runtime")]
-pub(crate) mod serving;
-#[cfg(feature = "runtime")]
 pub mod test_support;
 #[cfg(feature = "runtime")]
 pub(crate) mod tools;
@@ -48,22 +46,15 @@ pub use inspect::{Inspector, InspectorLayer, Subscription, init_global_from_env}
 #[cfg(feature = "runtime")]
 pub use namespace::TreeNamespace;
 pub use namespace::{
-    Attrs, DirCursor, DirEntry, DirPage, EntryKind as NsEntryKind, Epoch, EventStream, Namespace,
-    NodeAnswer, NodeId, NsAttachEvent, NsError, NsEvent, NsRetryClass, ReadAnswer, ReadStyle,
-    StabilityClass,
+    Attrs, DirCursor, DirEntry, DirPage, EntryKind, EventStream, LookupAnswer, Namespace, NsError,
+    NsEvent, NsRetryClass, ReadAnswer, ReadStyle, StabilityClass,
 };
 #[cfg(feature = "runtime")]
 pub use runtime::registry::{MountRuntimes, RegistryError};
 #[cfg(feature = "runtime")]
 pub use runtime::{BuildError, EngineError, HostContext, Runtime as Engine};
 #[cfg(feature = "runtime")]
-pub use serving::ServingContext;
-#[cfg(feature = "runtime")]
-pub use tree::{
-    Chunk, Cursor, Entry, EntryOrigin, InvalidationReport, ListOutcome, Listing, Node, NodeBody,
-    PaginationControl, RangedHandle, ReadResult, RequestCtx, RetryClass, Synthetic,
-    SyntheticContent, Tree, TreeError, TreeErrorKind, spawn_live_follow_pump,
-};
+pub(crate) use tree::{Cursor, Node, RequestCtx, TreeError, TreeErrorKind, spawn_live_follow_pump};
 
 #[cfg(feature = "runtime")]
 pub(crate) use auth_inject as auth;
@@ -79,6 +70,7 @@ pub(crate) use effects::invalidation;
 pub(crate) use inspect as inspector;
 #[cfg(feature = "runtime")]
 pub(crate) use omnifs_wit::provider::Provider;
+#[cfg(feature = "runtime")]
 pub(crate) use ops::validate as op_validate;
 #[cfg(feature = "runtime")]
 pub(crate) use runtime::wasm::component_engine;

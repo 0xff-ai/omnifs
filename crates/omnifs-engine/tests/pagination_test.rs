@@ -8,17 +8,16 @@
 //! page 2 is terminal.
 
 use omnifs_core::path::Path;
-use omnifs_engine::test_support::LookupOutcome;
-use omnifs_engine::test_support::NamespaceListOutcome;
 use omnifs_engine::test_support::cache::RecordKind;
 use omnifs_engine::test_support::pagination::NextPageOutcome;
 use omnifs_engine::view::{CachedCursor, DirentsPayload};
+use omnifs_engine::{DirCursor, Namespace};
 use omnifs_itest::{RuntimeHarness, make_initialized_runtime};
 
 const CONFIG: &str = r#"
 {
     "provider": "test_provider.wasm",
-    "mount": "test",
+    "mount": "test"
 }
 "#;
 
@@ -71,22 +70,28 @@ fn cached_cursor(harness: &RuntimeHarness, path: &str) -> Option<CachedCursor> {
 async fn first_page_carries_cursor_and_caches_it() {
     let harness = make_initialized_runtime(CONFIG);
 
-    let result = harness
-        .runtime
-        .namespace()
-        .list_children(&p("/hello/feed"), None, None)
+    let feed = harness
+        .namespace
+        .lookup(Path::root(), "test")
         .await
         .unwrap();
-
-    let NamespaceListOutcome::Entries(listing) = result else {
-        panic!("expected entries, got {result:?}");
-    };
+    let feed = harness.namespace.lookup(feed.path, "hello").await.unwrap();
+    let feed = harness.namespace.lookup(feed.path, "feed").await.unwrap();
+    let listing = harness
+        .namespace
+        .readdir(feed.path, DirCursor::start(), 0)
+        .await
+        .unwrap();
     let names: Vec<&str> = listing.entries.iter().map(|e| e.name.as_str()).collect();
-    assert_eq!(names, vec!["item-0", "item-1"], "page 0 entries");
+    assert_eq!(
+        names,
+        vec!["item-0", "item-1", "@next", "@all"],
+        "page 0 entries and pagination controls"
+    );
     assert!(
-        matches!(listing.next_cursor, Some(CachedCursor::Page(1))),
+        listing.next.is_some(),
         "/page 0 must carry the resume cursor that drives @next/@all, got {:?}",
-        listing.next_cursor
+        listing.next
     );
 
     // The cursor lands on the cached dirents record (where the FUSE layer reads
@@ -101,10 +106,16 @@ async fn first_page_carries_cursor_and_caches_it() {
 async fn lookup_sibling_hints_preserve_paged_parent_state() {
     let harness = make_initialized_runtime(CONFIG);
 
+    let feed = harness
+        .namespace
+        .lookup(Path::root(), "test")
+        .await
+        .unwrap();
+    let feed = harness.namespace.lookup(feed.path, "hello").await.unwrap();
+    let feed = harness.namespace.lookup(feed.path, "feed").await.unwrap();
     harness
-        .runtime
-        .namespace()
-        .list_children(&p("/hello/feed"), None, None)
+        .namespace
+        .readdir(feed.path.clone(), DirCursor::start(), 0)
         .await
         .unwrap();
     let before = cached_dirents(&harness, "/hello/feed");
@@ -112,16 +123,8 @@ async fn lookup_sibling_hints_preserve_paged_parent_state() {
     assert_eq!(before.next_cursor, Some(CachedCursor::Page(1)));
     assert!(before.paginated, "seeded feed is a paginated listing");
 
-    let lookup = harness
-        .runtime
-        .namespace()
-        .lookup_child(&p("/hello/feed"), "item-0")
-        .await
-        .unwrap();
-    let LookupOutcome::Entry(entry) = lookup else {
-        panic!("expected lookup entry");
-    };
-    assert_eq!(entry.path().as_str(), "/hello/feed/item-0");
+    let entry = harness.namespace.lookup(feed.path, "item-0").await.unwrap();
+    assert_eq!(entry.path.as_str(), "/test/hello/feed/item-0");
 
     let after = cached_dirents(&harness, "/hello/feed");
     assert_eq!(
@@ -152,10 +155,16 @@ async fn paginate_next_accumulates_and_advances() {
     let harness = make_initialized_runtime(CONFIG);
 
     // Seed page 0 into the cache.
+    let feed = harness
+        .namespace
+        .lookup(Path::root(), "test")
+        .await
+        .unwrap();
+    let feed = harness.namespace.lookup(feed.path, "hello").await.unwrap();
+    let feed = harness.namespace.lookup(feed.path, "feed").await.unwrap();
     harness
-        .runtime
-        .namespace()
-        .list_children(&p("/hello/feed"), None, None)
+        .namespace
+        .readdir(feed.path, DirCursor::start(), 0)
         .await
         .unwrap();
     assert_eq!(
@@ -227,10 +236,16 @@ async fn paginate_all_expands_to_completion() {
     let harness = make_initialized_runtime(CONFIG);
 
     // Seed page 0.
+    let feed = harness
+        .namespace
+        .lookup(Path::root(), "test")
+        .await
+        .unwrap();
+    let feed = harness.namespace.lookup(feed.path, "hello").await.unwrap();
+    let feed = harness.namespace.lookup(feed.path, "feed").await.unwrap();
     harness
-        .runtime
-        .namespace()
-        .list_children(&p("/hello/feed"), None, None)
+        .namespace
+        .readdir(feed.path, DirCursor::start(), 0)
         .await
         .unwrap();
 
@@ -259,10 +274,24 @@ async fn paginate_next_on_non_paged_directory_is_no_more() {
     let harness = make_initialized_runtime(CONFIG);
 
     // `hello/bundle` is a normal (non-paged) directory; it has no cursor.
+    let bundle = harness
+        .namespace
+        .lookup(Path::root(), "test")
+        .await
+        .unwrap();
+    let bundle = harness
+        .namespace
+        .lookup(bundle.path, "hello")
+        .await
+        .unwrap();
+    let bundle = harness
+        .namespace
+        .lookup(bundle.path, "bundle")
+        .await
+        .unwrap();
     harness
-        .runtime
-        .namespace()
-        .list_children(&p("/hello/bundle"), None, None)
+        .namespace
+        .readdir(bundle.path, DirCursor::start(), 0)
         .await
         .unwrap();
 
