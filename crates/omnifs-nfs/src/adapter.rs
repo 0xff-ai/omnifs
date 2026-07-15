@@ -20,7 +20,7 @@
 //! prunes and closes stale opens before it re-reads its inode, and a polling
 //! `tail -f` picks up an `AttrsChanged` grown size on its next re-stat.
 
-use crate::delayed::{DeferOutcome, Key, Listings};
+use crate::delayed::{PendingListings, PendingOutcome};
 use crate::export::{
     Attr, DirEntry, DirListing, NodeKind, OpenRead, OpenResult, OpenSeed, OpenTable,
     ReadOnlyExport, StateId, Status, StatusResult, ensure_read_access,
@@ -47,7 +47,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, UNIX_EPOCH};
 use tokio::runtime::{Handle, RuntimeFlavor};
 
-/// Inline wait budget for proactive `READDIR` deferral ([`delayed::Listings`]).
+/// Inline wait budget for proactive `READDIR` deferral.
 /// Past this duration the handler replies `NFS4ERR_DELAY` while the listing task
 /// keeps running in the background. Short enough that a cold listing never holds
 /// the reply; long enough that a warm listing still answers in one round trip.
@@ -142,8 +142,8 @@ pub struct Export {
     /// Invalidation and live-growth events, drained inline after each namespace
     /// op so the frontend applies them with drain-before-answer ordering.
     events: Mutex<EventStream>,
-    /// Proactive deferral for provider-backed `READDIR` ([`delayed::Listings`]).
-    delayed_lists: Listings,
+    /// Proactive deferral for provider-backed `READDIR`.
+    delayed_lists: PendingListings,
     /// NFS inode id -> protocol state. `Arc` so the filehandle persister thread
     /// snapshots the same table the adapter mutates.
     inodes: Arc<DashMap<u64, Inode>>,
@@ -196,7 +196,7 @@ impl Export {
             "NFS adapter requires a multi-thread Tokio runtime because sync NFS workers call Handle::block_on"
         );
         let events = Mutex::new(namespace.subscribe());
-        let delayed_lists = Listings::new(rt.clone());
+        let delayed_lists = PendingListings::new(rt.clone());
         let generation = persist
             .as_ref()
             .map_or_else(crate::protocol::filehandle::generation, |init| {
@@ -930,18 +930,18 @@ impl ReadOnlyExport for Export {
         // Proactive deferral only. On persistent failure the namespace does not
         // cache the error, so each retry may re-defer until the listing succeeds
         // or maps to a terminal `Status`.
-        let outcome =
-            self.delayed_lists
-                .resolve(&Key::new(node), NFS_INLINE_BUDGET, self.list_op(node));
+        let outcome = self
+            .delayed_lists
+            .resolve(node, NFS_INLINE_BUDGET, self.list_op(node));
         match outcome {
-            DeferOutcome::Ready(result) => {
+            PendingOutcome::Ready(result) => {
                 self.apply_pending_events();
                 match result.as_ref() {
                     Ok(entries) => Ok(self.snapshot(scope, id, entries)),
                     Err(status) => Err(*status),
                 }
             },
-            DeferOutcome::Pending => Err(Status::Delay),
+            PendingOutcome::Pending => Err(Status::Delay),
         }
     }
 

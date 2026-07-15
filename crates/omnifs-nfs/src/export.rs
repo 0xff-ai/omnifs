@@ -83,7 +83,7 @@ impl Status {
 ///
 /// `RateLimited`, `Timeout`, and `Network` map to [`Status::Delay`] so the client
 /// retries. This path does not spawn background work; proactive `READDIR` deferral
-/// is separate (`omnifs_engine::singleflight::Deferred`).
+/// is separate (`delayed::PendingListings`).
 impl From<&NsError> for Status {
     fn from(error: &NsError) -> Self {
         match error.retry_class() {
