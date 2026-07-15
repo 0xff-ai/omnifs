@@ -41,7 +41,7 @@ The CLI materializes `HEAD` under cache storage and starts the daemon with that 
 
 `omnifs setup [--providers NAME] [--no-up] [--no-browser]` is the thin first-run composition over the existing mount configuration, daemon start, frontend enable, and Inventory operations. Provider names are exact embedded names; `--yes` selects only providers whose existing resolver policy proves safe without required config or a fresh credential flow, while `--no-input` requires explicit providers or `--yes`. With `--no-up`, setup configures mounts only. It emits no setup receipt or frontend desired state, and structured output ends with the single terminal Inventory result after all selected operations.
 
-Mount specs strict-parse their top-level JSON fields. Unknown top-level keys are invalid, while the provider-owned `config` object remains opaque to the host. The control protocol has no mount mutation or reconcile operation; it retains typed frontend, status, event, readiness, attach, and shutdown surfaces.
+Host-owned mount objects, including `auth` and `limits`, strict-parse their fields. Unknown top-level or nested host-owned keys are invalid, while the provider-owned `config` object remains opaque to the host. The control protocol has no mount mutation or reconcile operation; it retains typed frontend, status, event, readiness, attach, and shutdown surfaces.
 
 Add an operation only when it has one owning domain fact and a focused typed reply. Keep credential material off the control protocol.
 

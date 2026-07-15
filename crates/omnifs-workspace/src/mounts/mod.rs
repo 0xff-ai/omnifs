@@ -30,6 +30,7 @@ use crate::provider::{Catalog, CatalogError, LimitDeclarations, ProviderManifest
 
 /// Runtime scalar resource ceilings owned by a mount spec.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct Limits {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_memory_mb: Option<u32>,
@@ -720,7 +721,7 @@ mod tests {
     }
 
     #[test]
-    fn spec_parse_rejects_unknown_top_level_key() {
+    fn spec_parse_rejects_unknown_host_owned_key() {
         let spec = serde_json::json!({
             "provider": provider_ref("demo"),
             "mount": "demo",
@@ -764,6 +765,31 @@ mod tests {
             error.to_string().contains("unknown field `extra`"),
             "error should name the unknown provider metadata key, got: {error}"
         );
+
+        let limits_spec = serde_json::json!({
+            "provider": provider_ref("demo"),
+            "mount": "demo",
+            "limits": {
+                "max_memory_mb": 64
+            }
+        });
+        let parsed = serde_json::from_value::<Spec>(limits_spec.clone())
+            .expect("known limits keys must parse");
+        assert_eq!(parsed.limits.expect("limits").max_memory_mb, Some(64));
+
+        for limits in [
+            serde_json::json!({"bogus": true}),
+            serde_json::json!({"max_memory_mb": 64, "bogus": true}),
+        ] {
+            let mut unknown_limits = limits_spec.clone();
+            unknown_limits["limits"] = limits;
+            let error = serde_json::from_value::<Spec>(unknown_limits)
+                .expect_err("unknown limits key must fail");
+            assert!(
+                error.to_string().contains("unknown field `bogus`"),
+                "error should name the unknown limits key, got: {error}"
+            );
+        }
     }
 
     #[test]

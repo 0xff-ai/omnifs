@@ -651,6 +651,11 @@ fn mount_add_invalid_dynamic_domain_config_never_writes_spec() {
     let fixture = Fixture::new();
     install_web_provider(&fixture);
     let mount_path = fixture.home_path().join("mounts/web.json");
+    let mounts_dir = fixture.home_path().join("mounts");
+    let bootstrap = Repository::open(&mounts_dir)
+        .expect("bootstrap mount repository")
+        .head_revision()
+        .expect("read bootstrap HEAD");
 
     for config in [
         r#"{"domains":[""]}"#,
@@ -678,4 +683,35 @@ fn mount_add_invalid_dynamic_domain_config_never_writes_spec() {
             mount_path.display()
         );
     }
+
+    let output = fixture.run(&[
+        "mount",
+        "add",
+        "web",
+        "--as",
+        "web",
+        "--no-input",
+        "--no-auth",
+        "--config-json",
+        r#"{"domains":["example.com"]}"#,
+        "--limits-json",
+        r#"{"bogus":true}"#,
+    ]);
+    assert_ne!(exit_code(&output), 0, "unknown limits key must fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("bogus"), "error must name bogus: {stderr}");
+    assert!(
+        !mount_path.exists(),
+        "invalid limits must not write {}",
+        mount_path.display()
+    );
+    assert!(
+        !fixture.home_path().join("credentials.json").exists(),
+        "invalid limits must not write credentials"
+    );
+    let after = Repository::open(&mounts_dir)
+        .expect("reopen mount repository after rejection")
+        .head_revision()
+        .expect("read HEAD after rejection");
+    assert_eq!(after, bootstrap, "rejection must not commit desired state");
 }
