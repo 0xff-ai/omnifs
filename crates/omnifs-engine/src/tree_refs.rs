@@ -56,6 +56,12 @@ impl TreeRefs {
     pub(crate) fn resolve(&self, tree_ref: u64) -> Option<TreeRef> {
         self.refs.get(&tree_ref).map(|r| r.clone())
     }
+
+    pub(crate) fn identity(&self, tree_ref: u64) -> Option<GitId> {
+        self.refs
+            .get(&tree_ref)
+            .map(|reference| reference.id.clone())
+    }
 }
 
 impl Default for TreeRefs {

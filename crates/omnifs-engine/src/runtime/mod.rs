@@ -15,7 +15,6 @@ use crate::http::HttpStack;
 use crate::instance::Instance;
 use crate::invalidation::InvalidationState;
 use crate::tree_refs::TreeRefs;
-use dashmap::DashMap;
 use omnifs_auth::{AuthBinding, CredentialHealth, CredentialService};
 use omnifs_core::path::Path;
 use omnifs_wit::provider::types as wit_types;
@@ -35,8 +34,7 @@ pub(crate) mod registry;
 pub(crate) mod wasi;
 pub(crate) mod wasm;
 
-use crate::clock::{self, DYNAMIC_TTL_MILLIS};
-use crate::object_id::ObjectId;
+use crate::clock;
 use crate::op_validate;
 
 pub(crate) const HTTP_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -126,12 +124,6 @@ pub struct Runtime {
     trees: Arc<TreeRefs>,
     pub(crate) invalidation: InvalidationState,
     pub(crate) namespace_flights: crate::ops::namespace::NamespaceFlights,
-    /// Per-path locks serializing the read-modify-write of a paged
-    /// directory's accumulated dirents. Two concurrent `@next` (or `@all`)
-    /// reads on the same directory must not both snapshot the same base and
-    /// each append their page, which would lose a page. Held across the
-    /// continuation fetch in [`paginate_next`](Runtime::paginate_next).
-    pub(crate) pagination_locks: DashMap<String, Arc<tokio::sync::Mutex<()>>>,
     // Per-mount rate-limit window. `Some(open_until)` while the mount's
     // provider is throttled (set from a 429's Retry-After); reads serve stale
     // cache instead of EAGAIN until it clears. std Mutex: the critical section
@@ -389,12 +381,14 @@ impl Runtime {
             trees,
             invalidation: InvalidationState::default(),
             namespace_flights: crate::ops::namespace::NamespaceFlights::new(),
-            pagination_locks: DashMap::new(),
             rate_limit_until: std::sync::Mutex::new(None),
             test_callouts: test_rx.map(std::sync::Mutex::new),
         };
+        let transition = crate::effect_apply::EffectApplier::new(&runtime.resources)
+            .lower_effects(&initialize_effects, clock::now_millis())
+            .map_err(|error| BuildError::ProviderProtocol(error.to_string()))?;
         runtime
-            .publish_effects(&initialize_effects, runtime.resources.current_generation())
+            .publish_transition(transition, runtime.resources.current_epoch())
             .map_err(|error| BuildError::ProviderProtocol(error.to_string()))?;
         Ok(runtime)
     }
@@ -405,43 +399,6 @@ impl Runtime {
 
     pub fn call_close_file(&self, handle: u64) -> Result<()> {
         self.instance.close_file(handle)
-    }
-
-    /// Test-only entry to drive provider effects from FUSE-path pagination
-    /// harnesses without routing through a provider component.
-    #[doc(hidden)]
-    pub fn apply_effects_for_test(&self, effects: &wit_types::Effects, op_gen: u64) -> Result<()> {
-        let now = clock::now_millis();
-        let (prefixes, paths) = crate::effect_apply::EffectApplier::new(&self.resources)
-            .apply(effects, op_gen, now)
-            .map_err(|error| {
-                EngineError::ProviderProtocol(format!("cache publication failed: {error}"))
-            })?;
-        self.record_view_invalidations(prefixes, paths);
-        Ok(())
-    }
-
-    #[doc(hidden)]
-    pub fn apply_not_found_negative(
-        &self,
-        path: &Path,
-        maybe_id: Option<&wit_types::LogicalId>,
-        op_gen: u64,
-        now_millis: u64,
-    ) -> Result<()> {
-        let id_bytes = maybe_id.map(|id| ObjectId::from_wit(id).as_bytes().to_vec());
-        self.resources
-            .put_negative(
-                path,
-                id_bytes.as_deref(),
-                op_gen,
-                DYNAMIC_TTL_MILLIS,
-                now_millis,
-            )
-            .map_err(|error| {
-                EngineError::ProviderProtocol(format!("cache publication failed: {error}"))
-            })?;
-        Ok(())
     }
 
     /// Arm the mount's rate-limit window after a 429. `retry_after` is the
@@ -473,7 +430,11 @@ impl Runtime {
     }
 
     pub async fn call_timer_tick(&self) -> Result<()> {
-        self.run_event(wit_types::ProviderEvent::TimerTick).await
+        self.run_event(
+            wit_types::ProviderEvent::TimerTick,
+            self.resources.current_epoch(),
+        )
+        .await
     }
 
     /// Resolve a host-issued Git tree handle for the private namespace facade.
@@ -486,33 +447,27 @@ impl Runtime {
     /// tree resolves the longest covering anchor and returns those bytes
     /// without copying across the WIT. `None` when no stored anchor covers
     /// `path`.
-    pub(crate) fn canonical_bytes_for(&self, path: &Path) -> Option<Vec<u8>> {
+    pub(crate) fn canonical_bytes_for(
+        &self,
+        path: &Path,
+    ) -> std::result::Result<Option<Vec<u8>>, EngineError> {
         self.resources
             .cached_canonical_for(path)
-            .map(|canonical| canonical.bytes)
+            .map(|canonical| canonical.map(|canonical| canonical.bytes))
+            .map_err(|error| EngineError::ProviderProtocol(error.to_string()))
     }
 
     /// Read the full bytes of a stored blob for a blob-backed `read-file`
     /// terminal.
-    pub(crate) fn read_blob_full(&self, blob_id: u64) -> Result<Vec<u8>> {
-        let record =
-            self.resources.blob.lookup_by_id(blob_id).ok_or_else(|| {
-                EngineError::ProviderProtocol(format!("blob {blob_id} not found"))
-            })?;
-        let path = self.resources.blob.body_path(&record);
-        std::fs::read(path)
-            .map_err(|e| EngineError::ProviderProtocol(format!("read blob {blob_id}: {e}")))
-    }
-
-    pub(crate) fn publish_effects(&self, effects: &wit_types::Effects, op_gen: u64) -> Result<()> {
-        let now = clock::now_millis();
-        let (prefixes, paths) = crate::effect_apply::EffectApplier::new(&self.resources)
-            .apply(effects, op_gen, now)
-            .map_err(|error| {
-                EngineError::ProviderProtocol(format!("cache publication failed: {error}"))
-            })?;
-        self.record_view_invalidations(prefixes, paths);
-        Ok(())
+    pub(crate) fn read_blob_full(
+        &self,
+        body: crate::view::BodyId,
+        expected_len: Option<u64>,
+    ) -> Result<Vec<u8>> {
+        self.resources
+            .body
+            .read(body, expected_len)
+            .map_err(|e| EngineError::ProviderProtocol(format!("read blob body: {e}")))
     }
 }
 

@@ -4,14 +4,11 @@ use omnifs_workspace::authn::CredentialId;
 use omnifs_workspace::ids::ProviderId;
 use std::fmt;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub(crate) struct BlobRequestId([u8; 32]);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct BlobGeneration([u8; 32]);
-
 /// Identity for a mount-scoped Git checkout.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub(crate) struct GitId([u8; 32]);
 
 /// Stable identity of one projected mount revision and provider artifact.
@@ -75,24 +72,9 @@ impl BlobRequestId {
     pub(crate) fn filesystem_name(self) -> String {
         hex(self.0)
     }
-}
 
-impl BlobGeneration {
-    #[cfg(test)]
-    pub(crate) fn from_bytes(bytes: &[u8]) -> Self {
-        Self(*blake3::hash(bytes).as_bytes())
-    }
-
-    pub(crate) fn from_hash(hash: blake3::Hash) -> Self {
-        Self(*hash.as_bytes())
-    }
-
-    pub(crate) fn from_hex(value: &str) -> Option<Self> {
-        parse_hex(value).map(Self)
-    }
-
-    pub(crate) fn filesystem_name(self) -> String {
-        hex(self.0)
+    pub(crate) fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
     }
 }
 
@@ -122,12 +104,6 @@ impl GitId {
 }
 
 impl fmt::Display for BlobRequestId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.filesystem_name())
-    }
-}
-
-impl fmt::Display for BlobGeneration {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.filesystem_name())
     }
@@ -218,18 +194,6 @@ mod tests {
         assert_eq!(same_request(Some(&first)), same_request(Some(&first)));
         assert_ne!(same_request(Some(&first)), same_request(Some(&second)));
         assert_ne!(same_request(None), same_request(Some(&first)));
-    }
-
-    #[test]
-    fn blob_generation_is_content_addressed() {
-        assert_eq!(
-            BlobGeneration::from_bytes(b"body"),
-            BlobGeneration::from_bytes(b"body")
-        );
-        assert_ne!(
-            BlobGeneration::from_bytes(b"body"),
-            BlobGeneration::from_bytes(b"other")
-        );
     }
 
     #[test]

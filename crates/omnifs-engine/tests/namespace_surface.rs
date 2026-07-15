@@ -20,6 +20,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use omnifs_core::path::Path;
+use omnifs_engine::test_support::cache::publish_effects_for_test;
 use omnifs_engine::{DirCursor, Engine, EntryKind, Namespace, NsError, NsEvent, TreeNamespace};
 use omnifs_itest::make_runtime;
 use omnifs_wit::provider::types::{Effects, Invalidation, PathOrPrefix};
@@ -371,12 +372,12 @@ async fn invalidation_bumps_epoch_and_notifies_subscriber() {
 
     // Subscribe, then fire a provider invalidation for the message leaf.
     let mut events = ns.subscribe();
-    t.runtime
-        .apply_effects_for_test(
-            &path_invalidation("/hello/message"),
-            t.runtime.resources.current_generation(),
-        )
-        .expect("test effects should publish");
+    publish_effects_for_test(
+        &t.runtime,
+        &path_invalidation("/hello/message"),
+        t.runtime.resources.current_epoch(),
+    )
+    .expect("test effects should publish");
 
     // Any op drains the pending invalidation before answering: getattr both
     // emits the event and re-resolves fresh state.

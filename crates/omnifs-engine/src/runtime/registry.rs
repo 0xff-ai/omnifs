@@ -260,9 +260,11 @@ impl MountRuntimes {
                 if *shutdown.borrow_and_update() {
                     return;
                 }
-                let mut interval = tokio::time::interval(Duration::from_secs(
-                    u64::from(provider_interval_secs),
-                ));
+                let period = Duration::from_secs(u64::from(provider_interval_secs));
+                let mut interval = tokio::time::interval_at(
+                    tokio::time::Instant::now() + period,
+                    period,
+                );
                 loop {
                     tokio::select! {
                         _ = interval.tick() => {

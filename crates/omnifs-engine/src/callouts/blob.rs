@@ -6,8 +6,9 @@
 //! round-trip back through the provider.
 
 use crate::cache::MountResources;
-use crate::cache::blob::{BLOB_TMP_DIR, BlobCacheError, BlobMetadata, BlobRecord};
-use crate::cache::identity::{BlobGeneration, BlobRequestId};
+use crate::cache::body::{BodyStore, BodyStoreError, BodyWriter};
+use crate::cache::identity::BlobRequestId;
+use crate::cache::mount::{BlobMetadata, BlobRecord};
 use crate::callouts::{callout_internal, callout_network, callout_too_large, record_outcome};
 use crate::http::{HttpStack, decode_response_headers};
 use crate::log_redaction::{LogUrl, WitHeaders};
@@ -15,7 +16,6 @@ use futures::StreamExt;
 use omnifs_wit::provider::types as wit_types;
 use omnifs_workspace::mounts::Spec;
 use std::io::Write;
-use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -84,12 +84,9 @@ impl BlobError {
     }
 }
 
-impl From<BlobCacheError> for BlobError {
-    fn from(error: BlobCacheError) -> Self {
-        match error {
-            BlobCacheError::Io(_) => Self::Internal("blob cache I/O failed".to_string()),
-            BlobCacheError::Internal(message) => Self::Internal(message),
-        }
+impl From<BodyStoreError> for BlobError {
+    fn from(error: BodyStoreError) -> Self {
+        Self::Internal(format!("body store publication failed: {error}"))
     }
 }
 
@@ -139,7 +136,11 @@ impl BlobExecutor {
         error.message = tracing::field::Empty,
         error.retryable = tracing::field::Empty,
     ))]
-    pub async fn fetch(&self, req: &wit_types::BlobFetchRequest) -> wit_types::CalloutResult {
+    pub async fn fetch(
+        &self,
+        req: &wit_types::BlobFetchRequest,
+        operation_id: u64,
+    ) -> wit_types::CalloutResult {
         let result =
             match self
                 .http
@@ -149,20 +150,33 @@ impl BlobExecutor {
                 Ok(request) => {
                     let request_id = request
                         .blob_request_id(self.http.auth_binding_for_url(request.original_url()));
-                    let lock = self.resources.blob.request_lock(request_id);
+                    let lock = self.resources.blob_request_lock(request_id);
                     let _guard = lock.lock().await;
-                    if let Some(record) = self.resources.blob.lookup_by_request(request_id) {
-                        wit_types::CalloutResult::BlobFetched(record.as_ref().into())
-                    } else {
-                        match self.http.send_validated(&request, BLOB_FETCH_TIMEOUT).await {
-                            Ok(response) => match self.materialize(request_id, response).await {
-                                Ok(record) => {
-                                    wit_types::CalloutResult::BlobFetched((&record).into())
+                    match self.resources.blob_for_request(request_id) {
+                        Ok(Some(record)) => {
+                            let record = self.resources.stage_blob_write(
+                                operation_id,
+                                request_id,
+                                record.body,
+                                record.metadata(),
+                            );
+                            wit_types::CalloutResult::BlobFetched(record.as_ref().into())
+                        },
+                        Ok(None) => {
+                            match self.http.send_validated(&request, BLOB_FETCH_TIMEOUT).await {
+                                Ok(response) => {
+                                    match self.materialize(operation_id, request_id, response).await
+                                    {
+                                        Ok(record) => {
+                                            wit_types::CalloutResult::BlobFetched((&record).into())
+                                        },
+                                        Err(error) => error.into(),
+                                    }
                                 },
-                                Err(error) => error.into(),
-                            },
-                            Err(early) => early,
-                        }
+                                Err(early) => early,
+                            }
+                        },
+                        Err(error) => BlobError::Internal(error.to_string()).into(),
                     }
                 },
             };
@@ -176,6 +190,7 @@ impl BlobExecutor {
     /// play here.
     async fn materialize(
         &self,
+        operation_id: u64,
         request_id: BlobRequestId,
         response: reqwest::Response,
     ) -> Result<BlobRecord, BlobError> {
@@ -186,13 +201,17 @@ impl BlobExecutor {
 
         let staged = stream_response_body(
             response,
-            self.resources.blob.cache_dir(),
+            &self.resources.body,
             self.limits.max_fetch_blob_bytes,
         )
         .await
         .map_err(|error| error.with_io_context("fetch blob"))?;
         let size = staged.size;
-        let generation = staged.generation();
+        let body = self
+            .resources
+            .body
+            .publish_staged(staged.writer)
+            .map_err(|error| BlobError::from(error).with_io_context("publish body"))?;
 
         let metadata = BlobMetadata {
             status,
@@ -201,12 +220,10 @@ impl BlobExecutor {
             response_headers,
             size,
         };
-        let record = self
+        Ok((*self
             .resources
-            .blob
-            .publish(request_id, generation, staged.path(), metadata)
-            .map_err(|error| BlobError::from(error).with_io_context("publish blob"))?;
-        Ok((*record).clone())
+            .stage_blob_write(operation_id, request_id, body, metadata))
+        .clone())
     }
 }
 
@@ -231,24 +248,13 @@ impl From<&BlobRecord> for wit_types::BlobFetched {
 }
 
 struct StagedBlob {
-    tmp: tempfile::NamedTempFile,
+    writer: BodyWriter,
     size: u64,
-    hasher: blake3::Hasher,
-}
-
-impl StagedBlob {
-    fn generation(&self) -> BlobGeneration {
-        BlobGeneration::from_hash(self.hasher.clone().finalize())
-    }
-
-    fn path(&self) -> &Path {
-        self.tmp.path()
-    }
 }
 
 async fn stream_response_body(
     response: reqwest::Response,
-    cache_root: &Path,
+    body: &BodyStore,
     max_bytes: u64,
 ) -> Result<StagedBlob, BlobError> {
     if let Some(content_length) = response.content_length()
@@ -260,33 +266,9 @@ async fn stream_response_body(
             actual: content_length,
         });
     }
-    let cache_dir = cache_root.join(BLOB_TMP_DIR);
-    let root_metadata = std::fs::symlink_metadata(cache_root)?;
-    if !root_metadata.is_dir() || root_metadata.file_type().is_symlink() {
-        return Err(BlobError::Internal(
-            "blob cache root is not an owned directory".to_string(),
-        ));
-    }
-    match std::fs::symlink_metadata(&cache_dir) {
-        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {},
-        Ok(_) => {
-            return Err(BlobError::Internal(
-                "blob temp directory is not an owned directory".to_string(),
-            ));
-        },
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            tokio::fs::create_dir(&cache_dir).await?;
-        },
-        Err(error) => return Err(error.into()),
-    }
-    let mut tmp = tempfile::Builder::new()
-        .prefix("fetch-")
-        .suffix(".tmp")
-        .tempfile_in(cache_dir)
-        .map_err(BlobError::Io)?;
+    let mut writer = body.stage().map_err(BlobError::from)?;
     let mut stream = response.bytes_stream();
     let mut total = 0_u64;
-    let mut hasher = blake3::Hasher::new();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| BlobError::Network(e.to_string()))?;
         let chunk_len = u64::try_from(chunk.len()).map_err(|_| BlobError::TooLarge {
@@ -306,14 +288,11 @@ async fn stream_response_body(
                 actual: total,
             });
         }
-        tmp.as_file_mut().write_all(&chunk).map_err(BlobError::Io)?;
-        hasher.update(&chunk);
+        writer.write_all(&chunk).map_err(BlobError::Io)?;
     }
-    tmp.flush().map_err(BlobError::Io)?;
     Ok(StagedBlob {
-        tmp,
+        writer,
         size: total,
-        hasher,
     })
 }
 
@@ -327,25 +306,26 @@ fn lookup_header(headers: &[(String, String)], name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cache::blob::BlobCache;
+    use crate::cache::body::BodyStore;
     #[tokio::test]
     async fn stream_response_body_rejects_large_content_length_before_writing() {
         let tmp = tempfile::tempdir().unwrap();
+        let body = BodyStore::open(tmp.path()).unwrap();
         let response: reqwest::Response = http::Response::builder()
             .header(http::header::CONTENT_LENGTH, "5")
             .body(reqwest::Body::from("abcde"))
             .unwrap()
             .into();
 
-        let result = stream_response_body(response, tmp.path(), 4).await;
+        let result = stream_response_body(response, &body, 4).await;
 
         assert!(matches!(result, Err(BlobError::TooLarge { actual: 5, .. })));
-        assert!(!tmp.path().join(BLOB_TMP_DIR).exists());
     }
 
     #[tokio::test]
     async fn stream_response_body_rejects_body_that_exceeds_cap() {
         let tmp = tempfile::tempdir().unwrap();
+        let body = BodyStore::open(tmp.path()).unwrap();
         let chunks = futures::stream::iter([
             Ok::<_, std::io::Error>(b"abc".to_vec()),
             Ok::<_, std::io::Error>(b"de".to_vec()),
@@ -355,112 +335,26 @@ mod tests {
             .unwrap()
             .into();
 
-        let result = stream_response_body(response, tmp.path(), 4).await;
+        let result = stream_response_body(response, &body, 4).await;
 
         assert!(matches!(result, Err(BlobError::TooLarge { actual: 5, .. })));
-        assert!(
-            std::fs::read_dir(tmp.path().join(BLOB_TMP_DIR))
-                .unwrap()
-                .next()
-                .is_none()
-        );
     }
 
     #[tokio::test]
     async fn stream_response_body_stages_until_explicit_publish() {
         let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("blob");
+        let body = BodyStore::open(tmp.path()).unwrap();
         let response: reqwest::Response = http::Response::builder()
             .body(reqwest::Body::from("abcde"))
             .unwrap()
             .into();
 
-        let staged = stream_response_body(response, tmp.path(), 5)
+        let staged = stream_response_body(response, &body, 5)
             .await
             .expect("stage body");
 
         assert_eq!(staged.size, 5);
-        assert!(!path.exists());
-        std::fs::rename(staged.path(), &path).expect("publish staged body");
-        assert_eq!(std::fs::read(&path).unwrap(), b"abcde");
-    }
-
-    #[test]
-    fn publishes_body_before_ref_and_rehydrates_only_coherent_refs() {
-        let tmp = tempfile::tempdir().unwrap();
-        let cache_root = tmp.path().join("blob-cache");
-        let cache = BlobCache::new(cache_root.clone()).unwrap();
-        let request = BlobRequestId::new(None, "GET", "https://example.test/blob", &[], None);
-        let body = b"hello world";
-        let generation = BlobGeneration::from_bytes(body);
-        let staged = cache_root.join(BLOB_TMP_DIR).join("staged");
-        std::fs::write(&staged, body).unwrap();
-        let _record = cache
-            .publish(
-                request,
-                generation,
-                &staged,
-                BlobMetadata {
-                    status: 200,
-                    content_type: Some("text/plain".into()),
-                    etag: Some("etag-1".into()),
-                    response_headers: vec![("x-test".into(), "value".into())],
-                    size: body.len() as u64,
-                },
-            )
-            .unwrap();
-        assert!(!staged.exists());
-        assert!(
-            cache_root
-                .join("objects")
-                .join(generation.filesystem_name())
-                .is_file()
-        );
-
-        let cache = BlobCache::new(cache_root.clone()).unwrap();
-        let record = cache
-            .lookup_by_request(request)
-            .expect("rehydrated request ref");
-        assert_eq!(record.size, 11);
-        assert_eq!(record.status, 200);
-        assert_eq!(record.content_type, Some("text/plain".to_string()));
-        assert_eq!(record.etag, Some("etag-1".to_string()));
-        assert_eq!(
-            record.response_headers,
-            vec![("x-test".into(), "value".into())]
-        );
-    }
-
-    #[test]
-    fn rehydrate_skips_a_ref_with_wrong_size_or_digest() {
-        let tmp = tempfile::tempdir().unwrap();
-        let cache_root = tmp.path().join("blob-cache");
-        let _cache = BlobCache::new(cache_root.clone()).unwrap();
-        let request = BlobRequestId::new(None, "GET", "https://example.test/bad", &[], None);
-        let generation = BlobGeneration::from_bytes(b"actual");
-        let body = cache_root
-            .join("objects")
-            .join(generation.filesystem_name());
-        std::fs::create_dir_all(body.parent().unwrap()).unwrap();
-        std::fs::write(&body, b"actual").unwrap();
-        let reference = cache_root
-            .join("refs")
-            .join(format!("{}.json", request.filesystem_name()));
-        std::fs::write(
-            reference,
-            serde_json::to_vec(&serde_json::json!({
-                "request_id": request.filesystem_name(),
-                "generation": generation.filesystem_name(),
-                "status": 200,
-                "content_type": null,
-                "etag": null,
-                "response_headers": [],
-                "size": 99,
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-        let cache = BlobCache::new(cache_root).unwrap();
-        assert!(cache.lookup_by_request(request).is_none());
+        let id = body.publish_staged(staged.writer).unwrap();
+        assert_eq!(body.read(id, None).unwrap(), b"abcde");
     }
 }

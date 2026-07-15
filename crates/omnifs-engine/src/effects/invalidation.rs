@@ -40,12 +40,12 @@ impl InvalidationState {
 
 impl Runtime {
     pub fn cache_delete_prefix(&self, prefix: &Path) {
-        self.resources.delete_listing_prefix(prefix);
+        self.resources.memory.invalidate_prefix(prefix);
         self.invalidation.record_prefix(prefix.clone());
     }
 
     pub fn cache_delete_path(&self, path: &Path) {
-        self.resources.delete_listing_path(path);
+        self.resources.memory.delete_exact(path);
         self.invalidation.record_path(path.clone());
     }
 

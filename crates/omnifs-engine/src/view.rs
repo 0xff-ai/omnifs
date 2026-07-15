@@ -7,6 +7,27 @@
 
 use std::collections::BTreeMap;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct BodyId([u8; 32]);
+
+impl BodyId {
+    pub(crate) fn from_bytes(bytes: &[u8]) -> Self {
+        Self(*blake3::hash(bytes).as_bytes())
+    }
+
+    pub(crate) fn from_digest_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    pub(crate) fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    pub(crate) fn hex(self) -> String {
+        hex::encode(self.0)
+    }
+}
+
 pub const MAX_INLINE_PROJECTABLE_BYTES: usize = 64 * 1024;
 pub const MAX_EAGER_RESPONSE_BYTES: usize = 512 * 1024;
 pub const MAX_VERSION_TOKEN_BYTES: usize = 256;
@@ -23,7 +44,7 @@ pub enum ByteSource {
     Inline(Vec<u8>),
     Deferred(ReadMode),
     Canonical,
-    Blob(u64),
+    Body(BodyId),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -85,8 +106,8 @@ pub enum FileAttrsCache {
         size: FileSize,
         freshness: Freshness,
     },
-    Blob {
-        blob: u64,
+    Body {
+        body: BodyId,
         size: FileSize,
         freshness: Freshness,
     },
@@ -110,7 +131,6 @@ struct FileAttrsCacheWire {
     size: FileSize,
     bytes: ByteSource,
     stability: Stability,
-    #[serde(default)]
     version_token: Option<String>,
 }
 
@@ -191,14 +211,14 @@ impl FileAttrsCache {
         })
     }
 
-    pub fn blob(
-        blob: u64,
+    pub(crate) fn body(
+        body: BodyId,
         size: FileSize,
         stability: Stability,
         version_token: Option<String>,
     ) -> Result<Self, String> {
-        Ok(Self::Blob {
-            blob,
+        Ok(Self::Body {
+            body,
             size,
             freshness: Freshness::new(stability, version_token)?,
         })
@@ -229,7 +249,7 @@ impl FileAttrsCache {
             },
             ByteSource::Deferred(mode) => Self::deferred(size, mode, stability, version_token),
             ByteSource::Canonical => Self::canonical(size, stability, version_token),
-            ByteSource::Blob(blob) => Self::blob(blob, size, stability, version_token),
+            ByteSource::Body(body) => Self::body(body, size, stability, version_token),
         }
     }
 
@@ -241,7 +261,7 @@ impl FileAttrsCache {
             Self::DeferredFull { size, .. }
             | Self::DeferredRanged { size, .. }
             | Self::Canonical { size, .. }
-            | Self::Blob { size, .. } => *size,
+            | Self::Body { size, .. } => *size,
         }
     }
 
@@ -251,7 +271,7 @@ impl FileAttrsCache {
             Self::DeferredFull { .. } => ByteSource::Deferred(ReadMode::Full),
             Self::DeferredRanged { .. } => ByteSource::Deferred(ReadMode::Ranged),
             Self::Canonical { .. } => ByteSource::Canonical,
-            Self::Blob { blob, .. } => ByteSource::Blob(*blob),
+            Self::Body { body, .. } => ByteSource::Body(*body),
         }
     }
 
@@ -260,7 +280,7 @@ impl FileAttrsCache {
             Self::Inline { freshness, .. }
             | Self::DeferredFull { freshness, .. }
             | Self::Canonical { freshness, .. }
-            | Self::Blob { freshness, .. } => freshness.stability(),
+            | Self::Body { freshness, .. } => freshness.stability(),
             Self::DeferredRanged { freshness, .. } => freshness.stability(),
         }
     }
@@ -270,7 +290,7 @@ impl FileAttrsCache {
             Self::Inline { freshness, .. }
             | Self::DeferredFull { freshness, .. }
             | Self::Canonical { freshness, .. }
-            | Self::Blob { freshness, .. } => freshness.version_token(),
+            | Self::Body { freshness, .. } => freshness.version_token(),
             Self::DeferredRanged { freshness, .. } => freshness.version_token(),
         }
     }
@@ -315,7 +335,7 @@ impl FileAttrsCache {
             Self::DeferredFull { .. }
             | Self::DeferredRanged { .. }
             | Self::Canonical { .. }
-            | Self::Blob { .. } => None,
+            | Self::Body { .. } => None,
         }
     }
 
@@ -444,10 +464,10 @@ impl FileAttrsCache {
                 size: FileSize::Exact(size),
                 freshness,
             },
-            Self::Blob {
-                blob, freshness, ..
-            } => Self::Blob {
-                blob,
+            Self::Body {
+                body, freshness, ..
+            } => Self::Body {
+                body,
                 size: FileSize::Exact(size),
                 freshness,
             },
@@ -471,7 +491,7 @@ impl FileAttrsCache {
             Self::Inline { freshness, .. }
             | Self::DeferredFull { freshness, .. }
             | Self::Canonical { freshness, .. }
-            | Self::Blob { freshness, .. } => freshness.validate()?,
+            | Self::Body { freshness, .. } => freshness.validate()?,
             Self::DeferredRanged { freshness, .. } => freshness.validate()?,
         }
 
@@ -638,7 +658,7 @@ impl EntryMeta {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum LookupPayload {
     Positive(EntryMeta),
-    Negative,
+    Negative { id: Option<Vec<u8>> },
 }
 
 impl LookupPayload {
@@ -682,11 +702,8 @@ pub enum CachedCursor {
 pub struct DirentsPayload {
     pub entries: Vec<DirentRecord>,
     pub exhaustive: bool,
-    #[serde(default)]
     pub validator: Option<String>,
-    #[serde(default)]
     pub next_cursor: Option<CachedCursor>,
-    #[serde(default)]
     pub paginated: bool,
 }
 
@@ -749,7 +766,7 @@ impl DirentsPayload {
 
         Self {
             entries,
-            exhaustive: previously_exhaustive && !introduced,
+            exhaustive: listing_exhaustive || (previously_exhaustive && !introduced),
             validator,
             next_cursor,
             paginated,
@@ -761,7 +778,6 @@ impl DirentsPayload {
 pub struct FilePayload {
     pub version_token: Option<String>,
     pub content: Vec<u8>,
-    #[serde(default)]
     pub content_type: Option<String>,
 }
 
@@ -936,7 +952,8 @@ mod tests {
         assert!(!result.exhaustive);
     }
 
-    // Introduction appends in name order and demotes exhaustive.
+    // Introduction appends in name order and demotes an exhaustive snapshot;
+    // only an explicit exhaustive input can establish authority.
     #[test]
     fn merged_introduction_appends_and_demotes_exhaustive() {
         let existing = DirentsPayload {
@@ -949,7 +966,6 @@ mod tests {
         // Introduce two new names; BTreeMap order is "delta" then "gamma".
         let result =
             DirentsPayload::merged(Some(existing), new_children(&["gamma", "delta"]), false);
-        // No longer exhaustive because new names appeared.
         assert!(!result.exhaustive);
         // Existing entries first, introductions appended in name (BTreeMap) order.
         assert_eq!(names(&result), vec!["alpha", "beta", "delta", "gamma"]);

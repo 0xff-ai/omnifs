@@ -16,6 +16,7 @@ use crate::Runtime;
 use crate::view::{DirentRecord, EntryMeta, FileAttrsCache, FileSize, ReadMode, Stability};
 use omnifs_core::path::Path;
 
+use super::error::{Result, TreeError};
 use super::node::{Entry, PaginationControl, Synthetic, SyntheticContent};
 
 /// Synthetic control-file leaf that loads the next page of a paged directory.
@@ -194,22 +195,29 @@ pub(crate) fn resolve_synthetic_child(
     runtime: &Runtime,
     parent: &Path,
     name: &str,
-) -> Option<(EntryMeta, Synthetic)> {
+) -> Result<Option<(EntryMeta, Synthetic)>> {
     if parent.is_root() && is_root_ignore_name(name) {
-        return Some((Synthetic::root_ignore_meta(), Synthetic::root_ignore()));
+        return Ok(Some((
+            Synthetic::root_ignore_meta(),
+            Synthetic::root_ignore(),
+        )));
     }
 
     if is_control_name(name) {
-        let action = PaginationControl::from_name(name)?;
+        let Some(action) = PaginationControl::from_name(name) else {
+            return Ok(None);
+        };
         // Probe the view cache for the control dirent; absent => this
         // directory never paged (or its cached dirents were evicted), so the
         // caller surfaces NotFound. Present => resolves regardless of whether
         // a resume cursor remains (the record outlives exhaustion).
-        let dirent = cached_control_dirent(runtime, parent, name)?;
-        return Some((dirent.meta, Synthetic::pagination_control(action)));
+        let Some(dirent) = cached_control_dirent(runtime, parent, name)? else {
+            return Ok(None);
+        };
+        return Ok(Some((dirent.meta, Synthetic::pagination_control(action))));
     }
 
-    None
+    Ok(None)
 }
 
 /// Find a `@next`/`@all` dirent in the parent directory's cached dirents record.
@@ -221,13 +229,18 @@ fn cached_control_dirent(
     runtime: &Runtime,
     parent: &Path,
     name: &str,
-) -> Option<crate::view::DirentRecord> {
+) -> Result<Option<crate::view::DirentRecord>> {
     use crate::cache::RecordKind;
     use crate::view::DirentsPayload;
 
     let record = runtime
         .resources
-        .cache_get(parent, RecordKind::Dirents, None)?;
-    let dirents = DirentsPayload::deserialize(&record.payload)?;
-    dirents.entries.into_iter().find(|e| e.name == name)
+        .cache_get(parent, RecordKind::Dirents, None)
+        .map_err(|error| TreeError::internal(error.to_string()))?;
+    let Some(record) = record else {
+        return Ok(None);
+    };
+    let dirents: DirentsPayload = postcard::from_bytes(&record.payload)
+        .map_err(|error| TreeError::internal(error.to_string()))?;
+    Ok(dirents.entries.into_iter().find(|e| e.name == name))
 }

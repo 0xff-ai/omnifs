@@ -117,11 +117,7 @@ pub mod wit {
 /// Cache APIs used by integration tests without exposing cache internals as a
 /// normal engine surface.
 pub mod cache {
-    pub use crate::cache::mount::{
-        BatchRecord, CachedCanonical, Caches, CanonicalBatchEntry, Key, MountResources, Record,
-        RecordKind, SCHEMA_VERSION,
-    };
-    pub use crate::cache::{object, view};
+    pub use crate::cache::mount::{Caches, MountResources};
 
     pub fn mount(
         caches: &std::sync::Arc<Caches>,
@@ -133,24 +129,41 @@ pub mod cache {
         caches.mount(name, id, provider_id, spec_source)
     }
 
-    pub fn cache_get(
-        runtime: &crate::Runtime,
-        path: &omnifs_core::path::Path,
-        kind: RecordKind,
-        aux: Option<&str>,
-    ) -> Option<Record> {
-        runtime.resources.cache_get(path, kind, aux)
+    pub fn current_epoch(runtime: &crate::Runtime) -> u64 {
+        runtime.resources.current_epoch()
     }
 
-    pub fn cached_canonical_for(
+    #[doc(hidden)]
+    pub fn publish_effects_for_test(
         runtime: &crate::Runtime,
-        path: &omnifs_core::path::Path,
-    ) -> Option<CachedCanonical> {
-        runtime.resources.cached_canonical_for(path)
-    }
-
-    pub fn current_generation(runtime: &crate::Runtime) -> u64 {
-        runtime.resources.current_generation()
+        effects: &omnifs_wit::provider::types::Effects,
+        captured_epoch: u64,
+    ) -> Result<(), crate::EngineError> {
+        let retry_fence = effects.invalidations.is_empty();
+        let mut epoch = captured_epoch;
+        for _ in 0..3 {
+            let transition = crate::effect_apply::EffectApplier::new(&runtime.resources)
+                .lower_effects(effects, crate::clock::now_millis())
+                .map_err(|error| {
+                    crate::EngineError::ProviderProtocol(format!(
+                        "cache publication failed: {error}"
+                    ))
+                })?;
+            match runtime.publish_transition(transition, epoch) {
+                Err(error)
+                    if retry_fence
+                        && error
+                            .to_string()
+                            .contains("cache publication crossed an invalidation fence") =>
+                {
+                    epoch = runtime.resources.current_epoch();
+                },
+                result => return result,
+            }
+        }
+        Err(crate::EngineError::ProviderProtocol(
+            "synthetic cache publication remained fenced".into(),
+        ))
     }
 }
 

@@ -262,7 +262,7 @@ impl CalloutHost {
                     .fetch(req, crate::runtime::HTTP_FETCH_TIMEOUT)
                     .await
             },
-            wit_types::Callout::FetchBlob(req) => self.blob.fetch(req).await,
+            wit_types::Callout::FetchBlob(req) => self.blob.fetch(req, op_id).await,
             // `open_repo` shells out to `git` and blocks (clone, fetch). Run it
             // off the single concurrent-store event-loop thread so other
             // in-flight provider ops on this instance keep progressing while it

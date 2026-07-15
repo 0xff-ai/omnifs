@@ -3,7 +3,7 @@
 #![cfg(not(target_os = "wasi"))]
 
 use omnifs_core::path::Path;
-use omnifs_engine::test_support::cache::RecordKind;
+use omnifs_engine::test_support::cache::publish_effects_for_test;
 use omnifs_engine::{DirCursor, LookupAnswer, Namespace, NsEvent, ReadStyle};
 use omnifs_itest::RuntimeHarness;
 
@@ -69,7 +69,7 @@ async fn generated_readmes_are_visible_and_hidden_by_root_ignore_patterns() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn lazy_derived_face_applies_to_the_declared_leaf_only() {
+async fn lazy_derived_face_returns_the_declared_leaf_bytes() {
     let harness = RuntimeHarness::new(omnifs_itest::TEST_PROVIDER_CONFIG).unwrap();
     let item = resolve(&harness, "/test/items/open/7").await;
     harness
@@ -77,38 +77,31 @@ async fn lazy_derived_face_applies_to_the_declared_leaf_only() {
         .readdir(item.path, DirCursor::start(), 0)
         .await
         .unwrap();
-    assert!(
+    assert_eq!(
         harness
-            .runtime
-            .resources
-            .cache_get(
-                &Path::parse("/items/open/7/state").unwrap(),
-                RecordKind::File,
-                None
+            .namespace
+            .read(
+                resolve(&harness, "/test/items/open/7/state").await.path,
+                0,
+                u32::MAX
             )
-            .is_some()
+            .await
+            .unwrap()
+            .bytes,
+        b"open\n"
     );
-    assert!(
+    assert_eq!(
         harness
-            .runtime
-            .resources
-            .cache_get(
-                &Path::parse("/items/open/7/title").unwrap(),
-                RecordKind::File,
-                None
+            .namespace
+            .read(
+                resolve(&harness, "/test/items/open/7/title").await.path,
+                0,
+                u32::MAX
             )
-            .is_some()
-    );
-    assert!(
-        harness
-            .runtime
-            .resources
-            .cache_get(
-                &Path::parse("/items/open/7/body").unwrap(),
-                RecordKind::File,
-                None
-            )
-            .is_none()
+            .await
+            .unwrap()
+            .bytes,
+        b"title\n"
     );
 }
 
@@ -197,44 +190,19 @@ async fn invalidation_evicts_cached_read() {
         .await
         .unwrap();
     assert_eq!(cold.bytes, b"Hello, world!");
-    assert!(
-        harness
-            .runtime
-            .resources
-            .cache_get(
-                &Path::parse("/hello/message").unwrap(),
-                RecordKind::File,
-                None
-            )
-            .is_some(),
-        "cold read must publish the File cache record"
-    );
     let mut events = harness.namespace.subscribe();
-    harness
-        .runtime
-        .apply_effects_for_test(
-            &omnifs_wit::provider::types::Effects {
-                canonical: Vec::new(),
-                fs: Vec::new(),
-                invalidations: vec![omnifs_wit::provider::types::Invalidation::Listing(
-                    omnifs_wit::provider::types::PathOrPrefix::Path("/hello/message".to_string()),
-                )],
-            },
-            harness.runtime.resources.current_generation(),
-        )
-        .unwrap();
-    assert!(
-        harness
-            .runtime
-            .resources
-            .cache_get(
-                &Path::parse("/hello/message").unwrap(),
-                RecordKind::File,
-                None
-            )
-            .is_none(),
-        "covering invalidation must evict the File cache record"
-    );
+    publish_effects_for_test(
+        &harness.runtime,
+        &omnifs_wit::provider::types::Effects {
+            canonical: Vec::new(),
+            fs: Vec::new(),
+            invalidations: vec![omnifs_wit::provider::types::Invalidation::Listing(
+                omnifs_wit::provider::types::PathOrPrefix::Path("/hello/message".to_string()),
+            )],
+        },
+        harness.runtime.resources.current_epoch(),
+    )
+    .unwrap();
     let after = harness.namespace.getattr(node.path.clone()).await.unwrap();
     assert_ne!(after.change, before.change);
     let reread = harness
@@ -243,18 +211,6 @@ async fn invalidation_evicts_cached_read() {
         .await
         .unwrap();
     assert_eq!(reread.bytes, b"Hello, world!");
-    assert!(
-        harness
-            .runtime
-            .resources
-            .cache_get(
-                &Path::parse("/hello/message").unwrap(),
-                RecordKind::File,
-                None
-            )
-            .is_some(),
-        "reread must repopulate the File cache record"
-    );
     assert!(
         matches!(tokio::time::timeout(std::time::Duration::from_secs(2), events.recv()).await.unwrap().unwrap(), NsEvent::InvalidateSubtree { path } if path == node.path)
     );

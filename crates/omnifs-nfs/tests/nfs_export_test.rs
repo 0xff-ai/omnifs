@@ -1,19 +1,11 @@
 mod support;
 
 use omnifs_core::path::Path;
-use omnifs_engine::test_support::cache::{Record as CacheRecord, RecordKind};
-use omnifs_engine::view::{
-    self as view_types, DirentRecord, DirentsPayload, EntryMeta, FileAttrsCache,
-};
 use omnifs_nfs::{Export, NodeKind, ReadOnlyExport, Status};
 use support::{test_export, test_export_with_mount};
 use tokio::runtime::Builder;
 
 const OLD_OPEN_MATERIALIZE_LIMIT_BYTES: u64 = 64 * 1024 * 1024;
-
-fn p(value: &str) -> Path {
-    Path::parse(value).unwrap()
-}
 
 #[test]
 #[should_panic(expected = "NFS adapter requires a multi-thread Tokio runtime")]
@@ -339,87 +331,6 @@ fn omnifs_export_ranged_read_contract() {
     export
         .close_state(opened.stateid)
         .expect("unknown ranged close");
-}
-
-#[test]
-fn omnifs_export_positive_cache_evidence_beats_expected_negative_probe() {
-    let harness = test_export();
-    let export = &harness.export;
-    let hello = hello_dir(export);
-
-    for name in [".DS_Store", "._message"] {
-        assert!(matches!(export.lookup(hello, name), Err(Status::NoEnt)));
-
-        let runtime = harness.registry.get("test").expect("test runtime");
-        let attrs =
-            FileAttrsCache::inline(b"live\n".to_vec(), view_types::Stability::Dynamic, None)
-                .expect("valid inline attrs");
-        let dirents = DirentsPayload {
-            entries: vec![DirentRecord {
-                name: name.to_string(),
-                meta: EntryMeta::file(attrs),
-            }],
-            exhaustive: false,
-            validator: None,
-            next_cursor: None,
-            paginated: false,
-        };
-        let record = CacheRecord::new(
-            RecordKind::Dirents,
-            dirents.serialize().expect("dirents serialize"),
-        );
-        runtime
-            .resources
-            .cache_put(&p("/hello"), RecordKind::Dirents, None, &record);
-
-        let id = export
-            .lookup(hello, name)
-            .expect("positive cached Finder-probe lookup");
-        assert_eq!(
-            export.read(id).expect("cached probe read"),
-            b"live\n".to_vec()
-        );
-    }
-}
-
-#[test]
-fn omnifs_export_reads_inline_cached_projection_without_provider_file_route() {
-    let harness = test_export();
-    let export = &harness.export;
-    let runtime = harness.registry.get("test").expect("test runtime");
-    let test_root = export
-        .lookup(export.root(), "test")
-        .expect("top-level mount lookup");
-
-    let attrs = FileAttrsCache::inline(b"live\n".to_vec(), view_types::Stability::Dynamic, None)
-        .expect("valid inline attrs");
-    let dirents = DirentsPayload {
-        entries: vec![DirentRecord {
-            name: "inline-only".to_string(),
-            meta: EntryMeta::file(attrs),
-        }],
-        exhaustive: false,
-        validator: None,
-        next_cursor: None,
-        paginated: false,
-    };
-    let record = CacheRecord::new(
-        RecordKind::Dirents,
-        dirents.serialize().expect("dirents serialize"),
-    );
-    runtime
-        .resources
-        .cache_put(&p("/"), RecordKind::Dirents, None, &record);
-
-    let inline = export
-        .lookup(test_root, "inline-only")
-        .expect("inline cached lookup");
-    assert_eq!(export.attr(inline).expect("inline attr").size, 5);
-    assert_eq!(
-        export.read(inline).expect("inline cached read"),
-        b"live\n".to_vec()
-    );
-    assert_eq!(export.attr(inline).expect("learned attr").size, 5);
 }
 
 #[test]

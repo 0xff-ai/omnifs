@@ -2,10 +2,10 @@ use crate::EngineError;
 use crate::Runtime;
 use crate::cache::{PublicationKey, RecordKind};
 use crate::clock::now_millis;
-use crate::effect_apply::{EffectApplier, LookupOutcome};
+use crate::effect_apply::LookupOutcome;
 use crate::object_id::ObjectId;
 use crate::runtime::Result;
-use crate::view::{AttrPayload, CachedCursor, EntryMeta, FileAttrsCache, Stability};
+use crate::view::{AttrPayload, BodyId, CachedCursor, EntryMeta, FileAttrsCache, Stability};
 use omnifs_core::path::{Path, Segment};
 use omnifs_wit::provider::types as wit_types;
 use parking_lot::Mutex;
@@ -240,7 +240,7 @@ pub enum ListOutcome {
 #[derive(Debug, Clone)]
 pub enum ReadBytes {
     Inline(Vec<u8>),
-    Blob(u64),
+    Body(BodyId),
     Canonical,
 }
 
@@ -261,6 +261,7 @@ pub struct OpenOutcome {
 pub struct ChunkOutcome {
     pub content: Vec<u8>,
     pub eof: bool,
+    pub learned_attrs: Option<FileAttrsCache>,
 }
 
 impl Runtime {
@@ -272,8 +273,14 @@ impl Runtime {
         let name = Segment::try_from(name)
             .map_err(|error| EngineError::ProviderProtocol(error.to_string()))?;
         let child_path = parent_path.join_segment(&name);
+        let captured_epoch = self.resources.current_epoch();
         let now = now_millis();
-        if self.resources.negative_for(&child_path, now).is_some() {
+        if self
+            .resources
+            .negative_for_checked(&child_path, now)
+            .map_err(|error| EngineError::ProviderProtocol(error.to_string()))?
+            .is_some()
+        {
             return Ok(LookupOutcome::NotFound);
         }
         let runtime = self;
@@ -288,14 +295,11 @@ impl Runtime {
                         .reserve(PublicationKey::Path(child_path.clone()))
                 },
                 || async {
-                    let op_gen = runtime.resources.current_generation();
                     let result = runtime
-                        .run_lookup_child(parent_path, &name)
+                        .run_lookup_child(parent_path, &name, captured_epoch)
                         .await
                         .map_err(SharedError::from)?;
-                    EffectApplier::new(&runtime.resources)
-                        .lookup(parent_path, &child_path, result, op_gen, now_millis())
-                        .map_err(SharedError::from)
+                    Ok(result)
                 },
             )
             .await
@@ -308,6 +312,7 @@ impl Runtime {
         path: &Path,
         cached_validator: Option<String>,
         cursor: Option<CachedCursor>,
+        captured_epoch: u64,
     ) -> Result<ListOutcome> {
         let is_continuation = cursor.is_some();
         let runtime = self;
@@ -316,22 +321,18 @@ impl Runtime {
                 .resources
                 .reserve(PublicationKey::Path(path.clone()))
                 .await;
-            let op_gen = runtime.resources.current_generation();
             let result = runtime
                 .run_list_children(
                     path,
                     cached_validator,
-                    cursor.map(crate::wit_protocol::cached_cursor_to_wit),
+                    cursor
+                        .clone()
+                        .map(crate::wit_protocol::cached_cursor_to_wit),
+                    cursor,
+                    captured_epoch,
                 )
                 .await?;
-            if let wit_types::ListChildrenResult::Entries(ref listing) = result {
-                EffectApplier::new(&runtime.resources)
-                    .apply_continuation_projection(path, &listing.entries, op_gen)
-                    .map_err(|error| {
-                        EngineError::ProviderProtocol(format!("cache publication failed: {error}"))
-                    })?;
-            }
-            ListOutcome::from_wit(result)
+            result
         } else {
             self.namespace_flights
                 .list
@@ -343,21 +344,17 @@ impl Runtime {
                             .reserve(PublicationKey::Path(path.clone()))
                     },
                     || async {
-                        let op_gen = runtime.resources.current_generation();
                         let result = runtime
                             .run_list_children(
                                 path,
                                 cached_validator,
                                 cursor.map(crate::wit_protocol::cached_cursor_to_wit),
+                                None,
+                                captured_epoch,
                             )
                             .await
                             .map_err(SharedError::from)?;
-                        if let wit_types::ListChildrenResult::Entries(ref listing) = result {
-                            EffectApplier::new(&runtime.resources)
-                                .apply_listing_projection(path, listing, op_gen)
-                                .map_err(SharedError::from)?;
-                        }
-                        Ok(ListOutcome::from_wit(result))
+                        Ok(result)
                     },
                 )
                 .await
@@ -366,15 +363,28 @@ impl Runtime {
         Ok(result)
     }
 
-    pub(crate) async fn read_file(&self, path: &Path, content_type: String) -> Result<ReadOutcome> {
+    pub(crate) async fn read_file(
+        &self,
+        path: &Path,
+        content_type: String,
+        captured_epoch: u64,
+    ) -> Result<ReadOutcome> {
         let now = now_millis();
-        let cached_canonical = self.resources.cached_canonical_for(path);
-        let mode = if cached_canonical.is_some() && self.resources.view_expired(path, now) {
+        let cached_canonical = self
+            .resources
+            .cached_canonical_for(path)
+            .map_err(|error| EngineError::ProviderProtocol(error.to_string()))?;
+        let mode = if cached_canonical.is_some()
+            && self
+                .resources
+                .view_expired(path, now)
+                .map_err(|error| EngineError::ProviderProtocol(error.to_string()))?
+        {
             ReadMode::Revalidate
         } else {
             ReadMode::Serve
         };
-        self.read_file_with_mode(path, content_type, mode, cached_canonical)
+        self.read_file_with_mode(path, content_type, mode, cached_canonical, captured_epoch)
             .await
     }
 
@@ -384,9 +394,15 @@ impl Runtime {
         content_type: String,
         mode: ReadMode,
         cached_canonical: Option<crate::cache::CachedCanonical>,
+        captured_epoch: u64,
     ) -> Result<ReadOutcome> {
         let now = now_millis();
-        if self.resources.negative_for(path, now).is_some() {
+        if self
+            .resources
+            .negative_for_checked(path, now)
+            .map_err(|error| EngineError::ProviderProtocol(error.to_string()))?
+            .is_some()
+        {
             return Err(enoent(path.as_str()));
         }
 
@@ -410,10 +426,12 @@ impl Runtime {
             None => (None, None),
         };
 
-        let live = warm_id
-            .as_ref()
-            .and_then(|_| leaf_stability(self, path, now))
-            .is_some_and(|s| s == Stability::Live);
+        let live = if warm_id.is_some() {
+            leaf_stability(self, path, now)?
+        } else {
+            None
+        }
+        .is_some_and(|s| s == Stability::Live);
 
         // Warm-but-not-live reads share by object identity, so concurrent user
         // reads of distinct paths that alias the same object share one provider
@@ -438,15 +456,10 @@ impl Runtime {
         let reserve = move || runtime.resources.reserve(publication_key);
         let work = move || async move {
             let result = runtime
-                .run_read_file(path, content_type, cached_canonical)
+                .run_read_file(path, content_type, cached_canonical, captured_epoch)
                 .await
                 .map_err(SharedError::from)?;
-            match result {
-                wit_types::ReadFileOutcome::Found(result) => Ok(ReadOutcome::from_wit(result)),
-                wit_types::ReadFileOutcome::NotFound(_) => {
-                    Err(SharedError::from(enoent(path.as_str())))
-                },
-            }
+            Ok(result)
         };
         let result = if live {
             let _permit = reserve().await;
@@ -462,8 +475,8 @@ impl Runtime {
         Ok(result)
     }
 
-    pub(crate) async fn open_file(&self, path: &Path) -> Result<OpenOutcome> {
-        self.run_open_file(path).await.map(OpenOutcome::from_wit)
+    pub(crate) async fn open_file(&self, path: &Path, captured_epoch: u64) -> Result<OpenOutcome> {
+        self.run_open_file(path, captured_epoch).await
     }
 
     pub(crate) async fn read_chunk(
@@ -471,10 +484,30 @@ impl Runtime {
         handle: u64,
         offset: u64,
         length: u32,
+        captured_epoch: u64,
     ) -> Result<ChunkOutcome> {
-        self.run_read_chunk(handle, offset, length)
+        self.run_read_chunk(None, None, handle, offset, length, captured_epoch)
             .await
-            .map(ChunkOutcome::from_wit)
+    }
+
+    pub(crate) async fn read_chunk_with_attrs(
+        &self,
+        path: &Path,
+        attrs: &FileAttrsCache,
+        handle: u64,
+        offset: u64,
+        length: u32,
+        captured_epoch: u64,
+    ) -> Result<ChunkOutcome> {
+        self.run_read_chunk(
+            Some(path),
+            Some(attrs),
+            handle,
+            offset,
+            length,
+            captured_epoch,
+        )
+        .await
     }
 }
 
@@ -490,62 +523,63 @@ impl ReadMode {
     }
 }
 
-impl ListOutcome {
-    fn from_wit(result: wit_types::ListChildrenResult) -> Self {
-        match result {
-            wit_types::ListChildrenResult::Entries(listing) => Self::Entries(DirListing {
-                entries: listing
-                    .entries
-                    .into_iter()
-                    .map(DirEntry::from_wit)
-                    .collect(),
-                exhaustive: listing.exhaustive,
-                validator: listing.validator,
-                next_cursor: listing
-                    .next_cursor
-                    .map(crate::wit_protocol::cached_cursor_from_wit),
-            }),
-            wit_types::ListChildrenResult::Unchanged => Self::Unchanged,
-            wit_types::ListChildrenResult::Subtree(tree_ref) => Self::Subtree(tree_ref),
-        }
-    }
-}
-
-impl DirEntry {
-    fn from_wit(entry: wit_types::DirEntry) -> Self {
-        Self {
-            name: entry.name,
-            meta: crate::wit_protocol::entry_meta_from_kind(&entry.kind),
-        }
-    }
-}
-
 impl ReadOutcome {
-    fn from_wit(result: wit_types::ReadFileResult) -> Self {
-        Self {
-            attrs: crate::wit_protocol::file_attrs_from_attrs(&result.attrs),
-            bytes: ReadBytes::from_wit(result.bytes),
+    pub(crate) fn from_wit(
+        result: wit_types::ReadFileResult,
+        resolve_blob: impl Fn(u64) -> std::result::Result<(BodyId, u64), String>,
+    ) -> std::result::Result<Self, String> {
+        let attrs = match &result.bytes {
+            wit_types::ByteSource::Blob(handle) => {
+                let (body, length) = resolve_blob(*handle)?;
+                let declared = crate::wit_protocol::file_size_from_wit(result.attrs.size);
+                match declared {
+                    crate::view::FileSize::Exact(size) if size != length => {
+                        return Err(format!(
+                            "blob body length {length} disagrees with declared size {size}"
+                        ));
+                    },
+                    crate::view::FileSize::NonZero if length == 0 => {
+                        return Err("blob body declared NonZero but is empty".into());
+                    },
+                    _ => {},
+                }
+                FileAttrsCache::from_parts(
+                    crate::view::FileSize::Exact(length),
+                    crate::view::ByteSource::Body(body),
+                    crate::wit_protocol::stability_from_wit(result.attrs.stability),
+                    result.attrs.version_token.clone(),
+                )?
+            },
+            _ => crate::wit_protocol::file_attrs_from_attrs(&result.attrs),
+        };
+        let bytes = match result.bytes {
+            wit_types::ByteSource::Blob(handle) => ReadBytes::Body(resolve_blob(handle)?.0),
+            bytes => ReadBytes::from_wit(bytes)?,
+        };
+        Ok(Self {
+            attrs,
+            bytes,
             content_type: result.content_type,
-        }
+        })
     }
 }
 
 impl ReadBytes {
-    fn from_wit(bytes: wit_types::ByteSource) -> Self {
+    fn from_wit(bytes: wit_types::ByteSource) -> std::result::Result<Self, String> {
         match bytes {
-            wit_types::ByteSource::Inline(bytes) => Self::Inline(bytes),
-            wit_types::ByteSource::Blob(blob) => Self::Blob(blob),
-            wit_types::ByteSource::Canonical => Self::Canonical,
+            wit_types::ByteSource::Inline(bytes) => Ok(Self::Inline(bytes)),
+            wit_types::ByteSource::Blob(_) => Err("unresolved blob handle".to_string()),
+            wit_types::ByteSource::Canonical => Ok(Self::Canonical),
             // The validator rejects a `deferred` read answer before this path is
             // reached; keep a conservative empty inline value if the invariant
             // is ever violated after validation.
-            wit_types::ByteSource::Deferred(_) => Self::Inline(Vec::new()),
+            wit_types::ByteSource::Deferred(_) => Ok(Self::Inline(Vec::new())),
         }
     }
 }
 
 impl OpenOutcome {
-    fn from_wit(result: wit_types::OpenFileResult) -> Self {
+    pub(crate) fn from_wit(result: wit_types::OpenFileResult) -> Self {
         Self {
             handle: result.handle,
             attrs: FileAttrsCache::deferred(
@@ -560,20 +594,26 @@ impl OpenOutcome {
 }
 
 impl ChunkOutcome {
-    fn from_wit(result: wit_types::ReadChunkResult) -> Self {
+    pub(crate) fn from_wit(result: wit_types::ReadChunkResult) -> Self {
         Self {
             content: result.content,
             eof: result.eof,
+            learned_attrs: None,
         }
     }
 }
 
-fn leaf_stability(runtime: &Runtime, path: &Path, now_millis: u64) -> Option<Stability> {
-    runtime
+fn leaf_stability(runtime: &Runtime, path: &Path, now_millis: u64) -> Result<Option<Stability>> {
+    let record = runtime
         .resources
         .view_get(path, RecordKind::Attr, None, now_millis)
-        .and_then(|record| AttrPayload::deserialize(&record.payload))
-        .and_then(|attr| attr.meta.attrs().map(FileAttrsCache::stability))
+        .map_err(|error| EngineError::ProviderProtocol(error.to_string()))?;
+    let Some(record) = record else {
+        return Ok(None);
+    };
+    let attr: AttrPayload = postcard::from_bytes(&record.payload)
+        .map_err(|error| EngineError::ProviderProtocol(error.to_string()))?;
+    Ok(attr.meta.attrs().map(FileAttrsCache::stability))
 }
 
 fn enoent(path: &str) -> EngineError {

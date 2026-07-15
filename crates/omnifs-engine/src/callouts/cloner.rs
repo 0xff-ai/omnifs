@@ -1,7 +1,6 @@
 //! Git repository cloning with host-owned opaque identities.
 
-use crate::cache::blob::BlobCache;
-use crate::cache::identity::GitId;
+use crate::cache::{canonical_directory, ensure_directory, identity::GitId};
 use crate::log_redaction::LogUrl;
 use crate::sandbox::publish;
 use dashmap::DashMap;
@@ -46,7 +45,7 @@ pub struct GitCloner {
 
 impl GitCloner {
     pub fn new(cache_dir: PathBuf) -> std::io::Result<Self> {
-        let cache_dir = BlobCache::canonical_root(&cache_dir)?;
+        let cache_dir = canonical_directory(&cache_dir)?;
         ensure_directory(&cache_dir)?;
         Ok(Self {
             cache_dir,
@@ -241,22 +240,6 @@ impl GitCloner {
 struct CloneBinding {
     remote: String,
     reference: Option<String>,
-}
-
-fn ensure_directory(path: &Path) -> std::io::Result<()> {
-    let mut current = PathBuf::new();
-    for component in path.components() {
-        current.push(component);
-        match std::fs::symlink_metadata(&current) {
-            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {},
-            Ok(_) => return Err(std::io::Error::other("path is not an owned directory")),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                std::fs::create_dir(&current)?;
-            },
-            Err(error) => return Err(error),
-        }
-    }
-    Ok(())
 }
 
 #[cfg(all(test, unix))]

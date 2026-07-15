@@ -4,7 +4,6 @@ pub mod matrix;
 use omnifs_core::path::{Path, Segment};
 use omnifs_engine::GitCloner;
 use omnifs_engine::test_support::TestOp;
-use omnifs_engine::test_support::cache::{Record as CacheRecord, RecordKind};
 use omnifs_engine::{BuildError, Engine, EngineError, HostContext, MountRuntimes, TreeNamespace};
 use omnifs_wit::provider::types::{
     ByteSource, Callout, Effects, HttpRequest, ListChildrenResult, LookupChildResult,
@@ -201,24 +200,8 @@ impl RuntimeHarness {
             .start_event(omnifs_wit::provider::types::ProviderEvent::TimerTick)
     }
 
-    pub fn cache_get(
-        &self,
-        path: &str,
-        kind: RecordKind,
-        aux: Option<&str>,
-    ) -> Option<CacheRecord> {
-        omnifs_engine::test_support::cache::cache_get(&self.runtime, &parse_path(path), kind, aux)
-    }
-
-    pub fn cached_canonical_for(
-        &self,
-        path: &str,
-    ) -> Option<omnifs_engine::test_support::cache::CachedCanonical> {
-        omnifs_engine::test_support::cache::cached_canonical_for(&self.runtime, &parse_path(path))
-    }
-
-    pub fn current_generation(&self) -> u64 {
-        omnifs_engine::test_support::cache::current_generation(&self.runtime)
+    pub fn current_epoch(&self) -> u64 {
+        omnifs_engine::test_support::cache::current_epoch(&self.runtime)
     }
 }
 

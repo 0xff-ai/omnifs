@@ -16,7 +16,7 @@
 //!   lose coalescing AND EffectApplier cache-populate).
 //! - Byte storage stays in the mount-owned `MountResources`. The projection reaches
 //!   cache state only through the running mount's resource owner; it never constructs a
-//!   raw store, so the per-mount generation/tombstone fence and mount-prefixed
+//!   raw store, so the projection-local invalidation epoch and projection-local
 //!   keys are never bypassed.
 //! - wire->cache translation stays in `EffectApplier` (host-internal, inside
 //!   runtime methods); the public namespace never imports `wit_types`.

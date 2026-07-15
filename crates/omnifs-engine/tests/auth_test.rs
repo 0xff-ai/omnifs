@@ -353,12 +353,15 @@ async fn fetch_blob_uses_same_oauth_retry_path() {
     let executor = BlobExecutor::new(stack, resources, BlobLimits::default());
 
     let result = executor
-        .fetch(&wit_types::BlobFetchRequest {
-            method: "GET".to_string(),
-            url: api.url(),
-            headers: Vec::new(),
-            body: None,
-        })
+        .fetch(
+            &wit_types::BlobFetchRequest {
+                method: "GET".to_string(),
+                url: api.url(),
+                headers: Vec::new(),
+                body: None,
+            },
+            0,
+        )
         .await;
 
     match result {

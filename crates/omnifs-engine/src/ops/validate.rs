@@ -133,6 +133,14 @@ where
                         "canonical-store view-leaf {leaf:?} is not a valid protocol path"
                     ));
                 }
+                let leaf_path = Path::parse(leaf).map_err(|_| {
+                    format!("canonical-store view-leaf {leaf:?} is not a valid protocol path")
+                })?;
+                if crate::tree::synthetic::is_reserved_provider_leaf(leaf_path.name()) {
+                    return Err(format!(
+                        "canonical-store view-leaf {leaf:?} uses a reserved provider name"
+                    ));
+                }
                 Self::track_unique_path_id(&mut canonical_path_to_id, leaf, &id_bytes)?;
             }
             if let Some(token) = &store.validator
@@ -144,9 +152,22 @@ where
             }
         }
         for write in &effects.fs {
-            if Path::parse(&write.path).is_err() {
+            let path = Path::parse(&write.path);
+            if path.is_err() {
                 return Err(format!(
                     "fs-write path {:?} is not a valid protocol path",
+                    write.path
+                ));
+            }
+            let path = path.map_err(|_| {
+                format!(
+                    "fs-write path {:?} is not a valid protocol path",
+                    write.path
+                )
+            })?;
+            if crate::tree::synthetic::is_reserved_provider_leaf(path.name()) {
+                return Err(format!(
+                    "fs-write {:?} uses a reserved provider name",
                     write.path
                 ));
             }
@@ -221,13 +242,27 @@ where
     fn segment_name(name: &str) -> std::result::Result<(), String> {
         Segment::try_from(name)
             .map_err(|error| format!("dir-entry name {name:?} is not a valid segment: {error}"))
-            .map(|_| ())
+            .and_then(|_| {
+                if crate::tree::synthetic::is_reserved_provider_leaf(name) {
+                    Err(format!(
+                        "dir-entry name {name:?} is reserved for host controls"
+                    ))
+                } else {
+                    Ok(())
+                }
+            })
     }
 
     fn file_out(&mut self, file: &wit_types::FileOut) -> std::result::Result<(), String> {
-        let attrs = try_file_attrs_from_file_out(file)?;
-        attrs.validate()?;
-        self.add_eager_bytes(attrs.eager_byte_len())
+        if matches!(file.bytes, wit_types::ByteSource::Blob(_)) {
+            Self::file_attrs_metadata(&file.attrs)
+        } else {
+            let attrs = try_file_attrs_from_file_out(file, |_| {
+                Err("blob handle requires mount resolution".to_string())
+            })?;
+            attrs.validate()?;
+            self.add_eager_bytes(attrs.eager_byte_len())
+        }
     }
 
     fn read_file_result(

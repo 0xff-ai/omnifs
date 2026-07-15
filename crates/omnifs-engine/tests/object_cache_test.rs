@@ -1,27 +1,12 @@
-//! Host and object-cache coherence tests.
+//! Runtime-visible cache behavior, without reaching into durable key layout.
 
 use omnifs_core::path::Path;
-use omnifs_engine::test_support::cache::{BatchRecord, RecordKind};
-use omnifs_engine::test_support::clock::{DYNAMIC_TTL_MILLIS, now_millis};
-use omnifs_engine::test_support::wit_protocol;
-use omnifs_engine::view::{AttrPayload, FilePayload, LookupPayload};
+use omnifs_engine::test_support::cache::publish_effects_for_test;
 use omnifs_engine::{LookupAnswer, Namespace, NsError};
 use omnifs_itest::make_initialized_runtime;
-use omnifs_wit::provider::types::{
-    ByteSource, Effects, FileAttrs, FileOut, FileSize, FsKind, FsWrite, IdCapture, Invalidation,
-    LogicalId, PathOrPrefix, Stability,
-};
+use omnifs_wit::provider::types::{CanonicalStore, Effects, LogicalId};
 
-const CONFIG: &str = r#"
-{
-    "provider": "test_provider.wasm",
-    "mount": "test"
-}
-"#;
-
-fn p(value: &str) -> Path {
-    Path::parse(value).unwrap()
-}
+const CONFIG: &str = r#"{"provider":"test_provider.wasm","mount":"test"}"#;
 
 async fn resolve(namespace: &dyn Namespace, value: &str) -> LookupAnswer {
     let mut answer = LookupAnswer {
@@ -34,512 +19,52 @@ async fn resolve(namespace: &dyn Namespace, value: &str) -> LookupAnswer {
     answer
 }
 
-fn issue_id() -> LogicalId {
-    LogicalId {
-        kind: "github.item".to_string(),
-        captures: vec![
-            IdCapture {
-                name: "owner".to_string(),
-                value: "o".to_string(),
+#[tokio::test(flavor = "multi_thread")]
+async fn plain_path_lookup_ignores_unrelated_indexed_validator() {
+    let harness = make_initialized_runtime(CONFIG);
+    let target = resolve(harness.namespace.as_ref(), "/test/hello/message").await;
+    let effects = Effects {
+        canonical: vec![CanonicalStore {
+            id: LogicalId {
+                kind: "unrelated".into(),
+                captures: Vec::new(),
             },
-            IdCapture {
-                name: "repo".to_string(),
-                value: "r".to_string(),
-            },
-            IdCapture {
-                name: "number".to_string(),
-                value: "42".to_string(),
-            },
-        ],
-    }
-}
-
-fn canonical_effect(id: &LogicalId, leaf: &str, bytes: &[u8], validator: Option<&str>) -> Effects {
-    Effects {
-        canonical: vec![omnifs_wit::provider::types::CanonicalStore {
-            id: id.clone(),
-            validator: validator.map(str::to_string),
-            bytes: bytes.to_vec(),
-            view_leaves: vec![leaf.to_string()],
+            validator: Some("unrelated-v1".into()),
+            bytes: b"wrong".to_vec(),
+            view_leaves: vec!["/hello/message".into()],
         }],
         fs: Vec::new(),
         invalidations: Vec::new(),
-    }
-}
-
-fn preload_file_effect(id: &LogicalId, path: &str, inline: &[u8]) -> Effects {
-    Effects {
-        canonical: Vec::new(),
-        fs: vec![FsWrite {
-            id: Some(id.clone()),
-            path: path.to_string(),
-            kind: FsKind::File(FileOut {
-                content_type: None,
-                attrs: FileAttrs {
-                    size: FileSize::Exact(inline.len() as u64),
-                    stability: Stability::Dynamic,
-                    version_token: None,
-                },
-                bytes: ByteSource::Inline(inline.to_vec()),
-            }),
-        }],
-        invalidations: Vec::new(),
-    }
-}
-
-#[test]
-fn canonical_eviction_drops_validator() {
-    let harness = make_initialized_runtime(CONFIG);
-    let id = issue_id();
-    let leaf = "/o/r/issues/all/42/item.json";
-    let bytes = br#"{"number":42}"#;
-    let op_gen = harness.runtime.resources.current_generation();
-    harness
-        .runtime
-        .apply_effects_for_test(&canonical_effect(&id, leaf, bytes, Some("etag")), op_gen)
-        .expect("test effects should publish");
-
-    let cached = harness.runtime.resources.cached_canonical_for(&p(leaf));
-    assert!(cached.is_some());
-    let cached = cached.unwrap();
-    assert_eq!(cached.bytes, bytes);
-    assert_eq!(cached.validator.as_deref(), Some("etag"));
-
-    let invalidate = Effects {
-        invalidations: vec![Invalidation::Object(id.clone())],
-        ..Effects {
-            canonical: Vec::new(),
-            fs: Vec::new(),
-            invalidations: Vec::new(),
-        }
     };
-    harness
-        .runtime
-        .apply_effects_for_test(&invalidate, harness.runtime.resources.current_generation())
-        .expect("test effects should publish");
-
-    assert!(
-        harness
-            .runtime
-            .resources
-            .cached_canonical_for(&p(leaf))
-            .is_none()
-    );
-}
-
-#[test]
-fn fence_rejects_stale_preload_and_negative() {
-    let harness = make_initialized_runtime(CONFIG);
-    let id = issue_id();
-    let leaf = "/o/r/issues/open/42/title";
-    let op_gen0 = harness.runtime.resources.current_generation();
-
-    let invalidate = Effects {
-        invalidations: vec![Invalidation::Object(id.clone())],
-        ..Effects {
-            canonical: Vec::new(),
-            fs: Vec::new(),
-            invalidations: Vec::new(),
-        }
-    };
-    harness
-        .runtime
-        .apply_effects_for_test(&invalidate, harness.runtime.resources.current_generation())
-        .expect("test effects should publish");
-
-    harness
-        .runtime
-        .apply_effects_for_test(&preload_file_effect(&id, leaf, b"stale"), op_gen0)
-        .expect("test effects should publish");
-    assert!(
-        harness
-            .runtime
-            .resources
-            .cache_get(&p(leaf), RecordKind::File, None)
-            .is_none(),
-        "stale preload must not land after object invalidation"
-    );
-
-    harness
-        .runtime
-        .apply_not_found_negative(&p(leaf), Some(&id), op_gen0, 1_000)
-        .expect("stale negative publication should be rejected");
-    assert!(
-        harness
-            .runtime
-            .resources
-            .negative_for(&p(leaf), 1_500)
-            .is_none(),
-        "stale negative must not land after object invalidation"
-    );
-}
-
-#[test]
-fn stale_canonical_fenced_by_midflight_invalidation() {
-    let harness = make_initialized_runtime(CONFIG);
-    let id = issue_id();
-    let leaf = "/o/r/issues/open/42/title";
-    let op_gen0 = harness.runtime.resources.current_generation();
-
-    let invalidate = Effects {
-        invalidations: vec![Invalidation::Object(id.clone())],
-        ..Effects {
-            canonical: Vec::new(),
-            fs: Vec::new(),
-            invalidations: Vec::new(),
-        }
-    };
-    harness
-        .runtime
-        .apply_effects_for_test(&invalidate, harness.runtime.resources.current_generation())
-        .expect("test effects should publish");
-
-    harness
-        .runtime
-        .apply_effects_for_test(
-            &canonical_effect(&id, leaf, b"stale canonical", None),
-            op_gen0,
-        )
-        .expect("test effects should publish");
-    assert!(
-        harness
-            .runtime
-            .resources
-            .cached_canonical_for(&p(leaf))
-            .is_none()
-    );
-}
-
-#[test]
-fn leaf_records_share_one_deadline() {
-    let harness = make_initialized_runtime(CONFIG);
-    let path = "/o/r/issues/open/42/title";
-    let now = 1_000u64;
-    let ttl = 3_000u64;
-
-    let mut batch = Vec::new();
-    let meta = wit_protocol::entry_meta_from_kind(&omnifs_wit::provider::types::EntryKind::File(
-        FileOut {
-            content_type: None,
-            attrs: FileAttrs {
-                size: FileSize::Exact(5),
-                stability: Stability::Dynamic,
-                version_token: None,
-            },
-            bytes: ByteSource::Inline(b"title".to_vec()),
-        },
-    ));
-    let lookup = LookupPayload::Positive(meta.clone());
-    batch.push(BatchRecord::new(
-        Path::parse(path).unwrap(),
-        RecordKind::Lookup,
-        None,
-        omnifs_engine::test_support::cache::Record::new(
-            RecordKind::Lookup,
-            lookup.serialize().unwrap(),
-        ),
-    ));
-    batch.push(BatchRecord::new(
-        Path::parse(path).unwrap(),
-        RecordKind::Attr,
-        None,
-        omnifs_engine::test_support::cache::Record::new(
-            RecordKind::Attr,
-            AttrPayload { meta }.serialize().unwrap(),
-        ),
-    ));
-    batch.push(BatchRecord::new(
-        Path::parse(path).unwrap(),
-        RecordKind::File,
-        None,
-        omnifs_engine::test_support::cache::Record::new(
-            RecordKind::File,
-            FilePayload::new(None, b"title".to_vec())
-                .serialize()
-                .unwrap(),
-        ),
-    ));
-
-    let runtime = &harness.runtime;
-    let op_gen = runtime.resources.current_generation();
-    runtime
-        .apply_effects_for_test(
-            &canonical_effect(&issue_id(), path, b"canonical", None),
-            op_gen,
-        )
-        .expect("test effects should publish the object index");
-    assert!(!runtime.resources.view_expired(&p("/missing"), now));
-    assert!(
-        runtime
-            .resources
-            .cache_view_leaf(&p(path), &batch, Some(now.saturating_add(ttl)), op_gen,)
-            .unwrap()
-    );
-    assert!(!runtime.resources.view_expired(&p(path), now + 999));
-    assert!(runtime.resources.view_expired(&p(path), now + 4_000));
-
-    for kind in RecordKind::ALL {
-        if kind == RecordKind::Dirents {
-            continue;
-        }
-        assert!(
-            runtime
-                .resources
-                .view_get(&p(path), kind, None, now + 999)
-                .is_some(),
-            "kind {kind:?} should be fresh at t=1999"
-        );
-        assert!(
-            runtime
-                .resources
-                .view_get(&p(path), kind, None, now + 4_000)
-                .is_none(),
-            "kind {kind:?} should expire at t=5000 with the shared stamp"
-        );
-    }
-}
-
-#[tokio::test]
-async fn plain_path_ignores_unrelated_indexed_validator() {
-    let harness = make_initialized_runtime(CONFIG);
-    let path = "/hello/message";
-    let namespace = harness.namespace.as_ref();
-
-    assert!(
-        harness
-            .runtime
-            .resources
-            .cached_canonical_for(&p(path))
-            .is_none()
-    );
-
-    let target = resolve(namespace, "/test/hello/message").await;
-    assert!(
-        harness
-            .runtime
-            .resources
-            .cached_canonical_for(&p(path))
-            .is_none()
-    );
-
-    let id = LogicalId {
-        kind: "test.unrelated".to_string(),
-        captures: vec![],
-    };
-    harness
-        .runtime
-        .apply_effects_for_test(
-            &canonical_effect(&id, path, b"unrelated canonical", Some("unrelated-v1")),
-            harness.runtime.resources.current_generation(),
-        )
-        .expect("test effects should publish");
-
-    assert!(
-        harness
-            .runtime
-            .resources
-            .cached_canonical_for(&p(path))
-            .is_some()
-    );
-
-    let read = namespace
+    publish_effects_for_test(
+        &harness.runtime,
+        &effects,
+        harness.runtime.resources.current_epoch(),
+    )
+    .unwrap();
+    let read = harness
+        .namespace
         .read(target.path, 0, u32::MAX)
         .await
-        .expect("indexed read still dispatches to plain provider handler");
+        .unwrap();
     assert_eq!(read.bytes, b"Hello, world!");
 }
 
-#[test]
-fn object_vs_listing_invalidation() {
+#[tokio::test(flavor = "multi_thread")]
+async fn negative_lookup_is_observable_as_not_found() {
     let harness = make_initialized_runtime(CONFIG);
-    let id = issue_id();
-    let open_leaf = "/o/r/issues/open/42/title";
-    let all_leaf = "/o/r/issues/all/42/title";
-
-    harness
-        .runtime
-        .apply_effects_for_test(
-            &Effects {
-                canonical: vec![omnifs_wit::provider::types::CanonicalStore {
-                    id: id.clone(),
-                    validator: None,
-                    bytes: b"{}".to_vec(),
-                    view_leaves: vec![open_leaf.to_string(), all_leaf.to_string()],
-                }],
-                fs: Vec::new(),
-                invalidations: Vec::new(),
-            },
-            harness.runtime.resources.current_generation(),
-        )
-        .expect("test effects should publish");
-
-    harness
-        .runtime
-        .apply_effects_for_test(
-            &Effects {
-                invalidations: vec![Invalidation::Object(id.clone())],
-                ..Effects {
-                    canonical: Vec::new(),
-                    fs: Vec::new(),
-                    invalidations: Vec::new(),
-                }
-            },
-            harness.runtime.resources.current_generation(),
-        )
-        .expect("test effects should publish");
-    assert!(
-        harness
-            .runtime
-            .resources
-            .cached_canonical_for(&p(open_leaf))
-            .is_none()
-    );
-    assert!(
-        harness
-            .runtime
-            .resources
-            .cached_canonical_for(&p(all_leaf))
-            .is_none()
-    );
-
-    harness
-        .runtime
-        .apply_effects_for_test(
-            &canonical_effect(&id, open_leaf, b"{}", None),
-            harness.runtime.resources.current_generation(),
-        )
-        .expect("test effects should publish");
-    harness
-        .runtime
-        .apply_effects_for_test(
-            &preload_file_effect(&id, all_leaf, b"listed"),
-            harness.runtime.resources.current_generation(),
-        )
-        .expect("test effects should publish");
-
-    harness
-        .runtime
-        .apply_effects_for_test(
-            &Effects {
-                invalidations: vec![Invalidation::Listing(PathOrPrefix::Prefix(
-                    "/o/r/issues/all".to_string(),
-                ))],
-                ..Effects {
-                    canonical: Vec::new(),
-                    fs: Vec::new(),
-                    invalidations: Vec::new(),
-                }
-            },
-            harness.runtime.resources.current_generation(),
-        )
-        .expect("test effects should publish");
-
-    assert!(
-        harness
-            .runtime
-            .resources
-            .cache_get(&p(all_leaf), RecordKind::File, None)
-            .is_none(),
-        "listing prefix invalidation evicts view leaves under the prefix"
-    );
-    assert!(
-        harness
-            .runtime
-            .resources
-            .cached_canonical_for(&p(open_leaf))
-            .is_some(),
-        "object canonical must survive listing-only invalidation"
-    );
-}
-
-#[test]
-fn negative_returns_enoent_until_deadline_or_invalidate() {
-    let harness = make_initialized_runtime(CONFIG);
-    let id = issue_id();
-    let path = "/o/r/issues/open/42/missing";
-    let now = 10_000u64;
-    let op_gen = harness.runtime.resources.current_generation();
-
-    harness
-        .runtime
-        .apply_not_found_negative(&p(path), Some(&id), op_gen, now)
-        .expect("negative publication should succeed");
-
-    assert!(
-        harness
-            .runtime
-            .resources
-            .negative_for(&p(path), now + 100)
-            .is_some()
-    );
-
-    assert!(
-        harness
-            .runtime
-            .resources
-            .negative_for(&p(path), now + DYNAMIC_TTL_MILLIS + 1)
-            .is_none(),
-        "negative expires after TTL"
-    );
-
-    harness
-        .runtime
-        .apply_not_found_negative(&p(path), Some(&id), op_gen, now)
-        .expect("negative refresh should succeed");
-    assert!(
-        harness
-            .runtime
-            .resources
-            .negative_for(&p(path), now + 100)
-            .is_some()
-    );
-
-    let invalidate = Effects {
-        invalidations: vec![Invalidation::Object(id)],
-        ..Effects {
-            canonical: Vec::new(),
-            fs: Vec::new(),
-            invalidations: Vec::new(),
-        }
-    };
-    harness
-        .runtime
-        .apply_effects_for_test(&invalidate, harness.runtime.resources.current_generation())
-        .expect("test effects should publish");
-    assert!(
-        harness
-            .runtime
-            .resources
-            .negative_for(&p(path), now + 100)
-            .is_none(),
-        "object invalidation clears the negative immediately"
-    );
-}
-
-#[tokio::test]
-async fn negative_short_circuits_read_without_provider_dispatch() {
-    let harness = make_initialized_runtime(CONFIG);
-    let namespace = harness.namespace.as_ref();
-    let target = resolve(namespace, "/test/hello/remote-a").await;
-    let path = "/hello/remote-a";
-    let now = now_millis();
-    harness
-        .runtime
-        .apply_not_found_negative(
-            &p(path),
-            None,
-            harness.runtime.resources.current_generation(),
-            now,
-        )
-        .expect("negative publication should succeed");
-
-    let error = tokio::time::timeout(
-        std::time::Duration::from_secs(1),
-        namespace.read(target.path, 0, u32::MAX),
-    )
-    .await
-    .expect("negative precheck must not wait for the captured callout")
-    .expect_err("negative must surface as ENOENT");
+    let hello = resolve(harness.namespace.as_ref(), "/test/hello").await;
+    let error = harness
+        .namespace
+        .lookup(hello.path.clone(), "definitely-missing")
+        .await
+        .expect_err("provider missing lookup should be NotFound");
     assert_eq!(error, NsError::NotFound);
-    assert!(harness.runtime.try_recv_test_callout().is_none());
+    harness.runtime.shutdown().unwrap();
+    let second = harness
+        .namespace
+        .lookup(hello.path, "definitely-missing")
+        .await
+        .expect_err("durable negative lookup should short-circuit to NotFound");
+    assert_eq!(second, NsError::NotFound);
 }

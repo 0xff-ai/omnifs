@@ -1,6 +1,11 @@
 //! Durable projection identity and strict projection manifests.
 
 use super::identity::ProjectionId;
+use fjall::Readable;
+use fjall::{
+    KeyspaceCreateOptions, OptimisticTxDatabase, OptimisticTxKeyspace, OptimisticWriteTx,
+    PersistMode,
+};
 use omnifs_workspace::ids::ProviderId;
 use omnifs_workspace::mounts::Name;
 use serde::{Deserialize, Serialize};
@@ -46,15 +51,22 @@ impl ProjectionManifest {
     }
 }
 
-#[derive(Debug)]
 pub(crate) struct ProjectionStore {
     root: PathBuf,
     manifest: ProjectionManifest,
+    db: OptimisticTxDatabase,
+    facts: OptimisticTxKeyspace,
+}
+
+pub(crate) struct ProjectionRow {
+    pub key: Vec<u8>,
+    pub value: Vec<u8>,
 }
 
 impl ProjectionStore {
     pub(crate) fn open(
         root: impl AsRef<Path>,
+        database: &OptimisticTxDatabase,
         id: ProjectionId,
         mount: &Name,
         spec_source: &[u8],
@@ -63,8 +75,8 @@ impl ProjectionStore {
         if id != ProjectionId::new(spec_source, provider_id) {
             return Err(ProjectionStoreError::InvalidIdentity);
         }
-        let root = root.as_ref().join(id.hex());
-        fs::create_dir_all(&root)?;
+        let root = crate::cache::canonical_directory(&root.as_ref().join(id.hex()))?;
+        crate::cache::ensure_directory(&root)?;
         let root_metadata = fs::symlink_metadata(&root)?;
         if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
             return Err(ProjectionStoreError::InvalidRoot);
@@ -141,7 +153,16 @@ impl ProjectionStore {
             return Err(ProjectionStoreError::Version(manifest.version));
         }
         manifest.validate(mount, spec_source, provider_id)?;
-        Ok(Self { root, manifest })
+        let facts = database.keyspace(
+            &format!("facts.{}", id.hex()),
+            KeyspaceCreateOptions::default,
+        )?;
+        Ok(Self {
+            root,
+            manifest,
+            db: database.clone(),
+            facts,
+        })
     }
 
     #[must_use]
@@ -152,6 +173,32 @@ impl ProjectionStore {
     #[must_use]
     pub(crate) fn manifest(&self) -> &ProjectionManifest {
         &self.manifest
+    }
+
+    pub(crate) fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, ProjectionStoreError> {
+        Ok(self.facts.get(key)?.map(|value| value.to_vec()))
+    }
+
+    pub(crate) fn read_prefix(&self, prefix: &[u8]) -> Result<Vec<Vec<u8>>, ProjectionStoreError> {
+        let tx = self.db.write_tx()?;
+        tx.prefix(&self.facts, prefix)
+            .map(|guard| Ok(guard.key()?.to_vec()))
+            .collect()
+    }
+
+    pub(crate) fn transact<F>(&self, mut plan: F) -> Result<(), ProjectionStoreError>
+    where
+        F: FnMut(&mut OptimisticWriteTx, &OptimisticTxKeyspace) -> Result<(), ProjectionStoreError>,
+    {
+        for _ in 0..8 {
+            let mut tx = self.db.write_tx()?.durability(Some(PersistMode::SyncAll));
+            plan(&mut tx, &self.facts)?;
+            match tx.commit()? {
+                Ok(()) => return Ok(()),
+                Err(_) => continue,
+            }
+        }
+        Err(ProjectionStoreError::Conflict)
     }
 }
 
@@ -173,6 +220,48 @@ fn read_manifest(path: &Path) -> Result<Vec<u8>, ProjectionStoreError> {
     Ok(bytes)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::{
+        PROJECTION_MANIFEST_VERSION, ProjectionManifest, ProjectionStore, ProjectionStoreError,
+    };
+    use crate::cache::identity::ProjectionId;
+    use omnifs_workspace::ids::ProviderId;
+    use omnifs_workspace::mounts::Name;
+
+    #[test]
+    fn manifest_rejects_wrong_identity_and_version() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("projections");
+        let database = fjall::OptimisticTxDatabase::builder(temp.path().join("database"))
+            .open()
+            .unwrap();
+        let mount = Name::new("test").unwrap();
+        let source = br#"{"mount":"test"}"#;
+        let provider = ProviderId::from_wasm_bytes(b"provider");
+        let id = ProjectionId::new(source, provider);
+        let wrong = ProjectionId::new(b"other", provider);
+        assert!(matches!(
+            ProjectionStore::open(&root, &database, wrong, &mount, source, provider),
+            Err(ProjectionStoreError::InvalidIdentity)
+        ));
+
+        let projection_root = crate::cache::canonical_directory(&root.join(id.hex())).unwrap();
+        crate::cache::ensure_directory(&projection_root).unwrap();
+        let mut manifest = ProjectionManifest::new(&mount, source, provider);
+        manifest.version = PROJECTION_MANIFEST_VERSION + 1;
+        std::fs::write(
+            projection_root.join("manifest.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(
+            ProjectionStore::open(&root, &database, id, &mount, source, provider),
+            Err(ProjectionStoreError::Version(version)) if version == PROJECTION_MANIFEST_VERSION + 1
+        ));
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ProjectionStoreError {
     #[error("projection store I/O failed")]
@@ -191,10 +280,22 @@ pub(crate) enum ProjectionStoreError {
     InvalidManifest,
     #[error("projection directory does not match its spec and provider identity")]
     InvalidIdentity,
+    #[error("projection database operation failed")]
+    Fjall(#[source] fjall::Error),
+    #[error("projection transaction conflicted repeatedly")]
+    Conflict,
+    #[error("projection transaction planning failed: {0}")]
+    Transaction(String),
 }
 
 impl From<io::Error> for ProjectionStoreError {
     fn from(error: io::Error) -> Self {
         Self::Io(error)
+    }
+}
+
+impl From<fjall::Error> for ProjectionStoreError {
+    fn from(error: fjall::Error) -> Self {
+        Self::Fjall(error)
     }
 }

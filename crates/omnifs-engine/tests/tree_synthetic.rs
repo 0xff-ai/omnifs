@@ -3,8 +3,6 @@
 #![cfg(not(target_os = "wasi"))]
 
 use omnifs_core::path::Path;
-use omnifs_engine::test_support::cache::RecordKind;
-use omnifs_engine::view::DirentsPayload;
 use omnifs_engine::{DirCursor, LookupAnswer, Namespace};
 use omnifs_itest::make_runtime;
 
@@ -36,19 +34,6 @@ async fn list_emits_pagination_controls() {
     assert!(names.contains(&"@next"));
     assert!(names.contains(&"@all"));
     assert!(page.next.is_some());
-    let cached = harness
-        .runtime
-        .resources
-        .cache_get(
-            &Path::parse("/hello/feed").unwrap(),
-            RecordKind::Dirents,
-            None,
-        )
-        .unwrap();
-    let payload = DirentsPayload::deserialize(&cached.payload).unwrap();
-    assert!(payload.paginated);
-    assert!(!payload.exhaustive);
-    assert!(payload.entries.iter().any(|entry| entry.name == "@next"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -67,18 +52,12 @@ async fn read_next_control_advances_one_page() {
             .unwrap()
             .contains("+2 entries")
     );
-    let cached = harness
-        .runtime
-        .resources
-        .cache_get(
-            &Path::parse("/hello/feed").unwrap(),
-            RecordKind::Dirents,
-            None,
-        )
+    let listing = namespace
+        .readdir(feed.path, DirCursor::start(), 0)
+        .await
         .unwrap();
-    let payload = DirentsPayload::deserialize(&cached.payload).unwrap();
-    for name in ["item-0", "item-1", "item-2", "item-3"] {
-        assert!(payload.entries.iter().any(|entry| entry.name == name));
+    for name in ["item-0", "item-1", "item-2", "item-3", "item-4", "item-5"] {
+        assert!(listing.entries.iter().any(|entry| entry.name == name));
     }
 }
 
@@ -98,18 +77,14 @@ async fn read_all_control_exhausts_then_control_still_resolves() {
             .unwrap()
             .contains("complete")
     );
-    let cached = harness
-        .runtime
-        .resources
-        .cache_get(
-            &Path::parse("/hello/feed").unwrap(),
-            RecordKind::Dirents,
-            None,
-        )
+    let listing = namespace
+        .readdir(feed.path, DirCursor::start(), 0)
+        .await
         .unwrap();
-    let payload = DirentsPayload::deserialize(&cached.payload).unwrap();
-    assert!(payload.next_cursor.is_none());
-    assert!(payload.entries.iter().any(|entry| entry.name == "@all"));
+    assert!(listing.next.is_none());
+    for name in ["item-0", "item-1", "item-2", "item-3", "item-4", "item-5"] {
+        assert!(listing.entries.iter().any(|entry| entry.name == name));
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

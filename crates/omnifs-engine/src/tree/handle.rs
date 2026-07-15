@@ -21,7 +21,7 @@ use tokio::runtime::Handle;
 
 use super::error::{Result, TreeError};
 use super::node::Node;
-use super::read::{Chunk, FileAttrStore, enforce_declared_materialize_cap};
+use super::read::{Chunk, enforce_declared_materialize_cap};
 use crate::TreeNamespace;
 
 /// Runtime-owned ranged read handle for `Deferred(Ranged)` files. Holds an
@@ -38,6 +38,7 @@ pub struct RangedHandle {
     /// probes from it and advances it. The renderer reports this size through
     /// its own getattr so a polling `tail -f` sees the file grow.
     pub(crate) observed_end: Arc<AtomicU64>,
+    pub(crate) open_epoch: u64,
 }
 
 impl RangedHandle {
@@ -62,7 +63,14 @@ impl RangedHandle {
     pub(crate) async fn read(&self, offset: u64, length: u32) -> Result<Chunk> {
         let chunk = match self
             .runtime
-            .read_chunk(self.provider_handle, offset, length)
+            .read_chunk_with_attrs(
+                &self.path,
+                &self.attrs,
+                self.provider_handle,
+                offset,
+                length,
+                self.open_epoch,
+            )
             .await
         {
             Ok(chunk) => chunk,
@@ -72,42 +80,12 @@ impl RangedHandle {
             Err(error) => return Err(error.into()),
         };
 
-        let mut learned_attrs = None;
-        if chunk.eof {
-            let content_len = u64::try_from(chunk.content.len()).map_err(|_| {
-                TreeError::internal(format!(
-                    "ranged chunk length does not fit u64 for {}",
-                    self.path.as_str()
-                ))
-            })?;
-            let eof_size = offset.checked_add(content_len).ok_or_else(|| {
-                TreeError::internal(format!(
-                    "ranged EOF offset overflow for {}",
-                    self.path.as_str()
-                ))
-            })?;
-            if matches!(self.attrs.stability(), view_types::Stability::Live) {
-                // A live file (tail -f shapes) is meant to change while observed,
-                // so a freshly observed end never contradicts the open-time size.
-                // Grow the shared high-water mark monotonically and learn that
-                // size, so the renderer reports a growing file to a polling
-                // reader. No validation: there is no fixed size to contradict.
-                let end = self
-                    .observed_end
-                    .fetch_max(eof_size, Ordering::Relaxed)
-                    .max(eof_size);
-                learned_attrs = Some(self.attrs.clone().with_exact_size(end));
-            } else {
-                learned_attrs = self.attrs.learned_ranged_eof_attrs(eof_size).map_err(|error| {
-                    TreeError::internal(format!(
-                        "provider returned ranged EOF that contradicts file attrs for {}: {error}",
-                        self.path.as_str()
-                    ))
-                })?;
-                if let Some(attrs) = &learned_attrs {
-                    FileAttrStore::new(&self.runtime, &self.path).publish(attrs.clone())?;
-                }
-            }
+        let learned_attrs = chunk.learned_attrs.clone();
+        if let Some(attrs) = &learned_attrs
+            && matches!(self.attrs.stability(), view_types::Stability::Live)
+        {
+            self.observed_end
+                .fetch_max(attrs.st_size(), Ordering::Relaxed);
         }
 
         Ok(Chunk {
@@ -138,6 +116,7 @@ impl TreeNamespace {
     /// way this returns `Ok(None)` so the renderer falls through to the full read
     /// path.
     pub(crate) async fn open(&self, node: &Node) -> Result<Option<RangedHandle>> {
+        let captured_epoch = self.runtime_for(node.mount())?.resources.current_epoch();
         let projected = node.attrs().ok_or_else(|| {
             TreeError::invalid_input(format!(
                 "open requires a deferred file projection: {}",
@@ -156,20 +135,20 @@ impl TreeNamespace {
         }
 
         let runtime = self.runtime_for(node.mount())?;
-        let opened = match runtime.open_file(node.path()).await {
+        let opened = match runtime.open_file(node.path(), captured_epoch).await {
             Ok(opened) => opened,
             Err(error) if error.is_provider_not_found_or_invalid_input() => return Ok(None),
             Err(error) => return Err(error.into()),
         };
 
         let attrs = opened.attrs;
-        FileAttrStore::new(&runtime, node.path()).publish(attrs.clone())?;
         Ok(Some(RangedHandle {
             runtime,
             path: node.path().clone(),
             provider_handle: opened.handle,
             attrs,
             observed_end: Arc::new(AtomicU64::new(0)),
+            open_epoch: captured_epoch,
         }))
     }
 
@@ -184,7 +163,8 @@ impl TreeNamespace {
         path: &Path,
     ) -> Result<Option<FileAttrsCache>> {
         let runtime = self.runtime_for(mount)?;
-        let opened = match runtime.open_file(path).await {
+        let captured_epoch = runtime.resources.current_epoch();
+        let opened = match runtime.open_file(path, captured_epoch).await {
             Ok(opened) => opened,
             Err(error) if error.is_provider_not_found_or_invalid_input() => return Ok(None),
             Err(error) => return Err(error.into()),
@@ -201,7 +181,6 @@ impl TreeNamespace {
             tracing::warn!(path = %path, error = %error, "ranged attr probe close failed");
         }
         validation?;
-        FileAttrStore::new(&runtime, path).publish(attrs.clone())?;
         Ok(Some(attrs))
     }
 }
@@ -217,10 +196,11 @@ pub(crate) async fn probe_live_growth(
     provider_handle: u64,
     observed_end: &AtomicU64,
     probe_len: u32,
+    open_epoch: u64,
 ) -> Result<Option<u64>> {
     let known_end = observed_end.load(Ordering::Relaxed);
     let chunk = runtime
-        .read_chunk(provider_handle, known_end, probe_len)
+        .read_chunk(provider_handle, known_end, probe_len, open_epoch)
         .await?;
     let advanced = u64::try_from(chunk.content.len()).unwrap_or(0);
     if advanced == 0 {
@@ -239,6 +219,7 @@ pub(crate) fn spawn_live_follow_pump(
     mount_name: String,
     provider_handle: u64,
     observed_end: Arc<AtomicU64>,
+    open_epoch: u64,
     mut record_growth: impl FnMut(u64) + Send + 'static,
 ) -> tokio::task::AbortHandle {
     const PROBE_LEN: u32 = 64 * 1024;
@@ -249,7 +230,15 @@ pub(crate) fn spawn_live_follow_pump(
             let Some(runtime) = registry.get(&mount_name) else {
                 break;
             };
-            match probe_live_growth(&runtime, provider_handle, &observed_end, PROBE_LEN).await {
+            match probe_live_growth(
+                &runtime,
+                provider_handle,
+                &observed_end,
+                PROBE_LEN,
+                open_epoch,
+            )
+            .await
+            {
                 Ok(Some(new_end)) => record_growth(new_end),
                 Ok(None) => {},
                 Err(_) => break,

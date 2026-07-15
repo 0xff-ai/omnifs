@@ -5,28 +5,9 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+pub(crate) use crate::view::BodyId;
+
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
-
-/// BLAKE3 identity of one durable body.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct BodyId([u8; 32]);
-
-impl BodyId {
-    #[must_use]
-    pub(crate) fn from_bytes(bytes: &[u8]) -> Self {
-        Self(*blake3::hash(bytes).as_bytes())
-    }
-
-    #[must_use]
-    pub(crate) fn as_bytes(&self) -> &[u8; 32] {
-        &self.0
-    }
-
-    #[must_use]
-    pub(crate) fn hex(self) -> String {
-        hex::encode(self.0)
-    }
-}
 
 /// One append-only body store shared by all projections.
 #[derive(Debug)]
@@ -36,11 +17,20 @@ pub(crate) struct BodyStore {
 
 impl BodyStore {
     pub(crate) fn open(root: impl AsRef<Path>) -> Result<Self, BodyStoreError> {
-        let root = root.as_ref().to_path_buf();
-        fs::create_dir_all(&root)?;
-        if fs::symlink_metadata(&root)?.file_type().is_symlink() {
-            return Err(BodyStoreError::SymlinkRoot);
-        }
+        let root = crate::cache::canonical_directory(root.as_ref()).map_err(|error| {
+            if error.kind() == io::ErrorKind::InvalidInput {
+                BodyStoreError::SymlinkRoot
+            } else {
+                BodyStoreError::Io(error)
+            }
+        })?;
+        crate::cache::ensure_directory(&root).map_err(|error| {
+            if error.kind() == io::ErrorKind::Other {
+                BodyStoreError::SymlinkRoot
+            } else {
+                BodyStoreError::Io(error)
+            }
+        })?;
         for entry in fs::read_dir(&root)? {
             let path = entry?.path();
             let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
@@ -105,19 +95,133 @@ impl BodyStore {
         result
     }
 
-    pub(crate) fn read(&self, id: BodyId) -> Result<Vec<u8>, BodyStoreError> {
+    /// Create a streaming body staged in the global body directory.
+    pub(crate) fn stage(&self) -> Result<BodyWriter, BodyStoreError> {
+        let path = self.temporary_path();
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+        Ok(BodyWriter {
+            root: self.root.clone(),
+            path,
+            file: Some(file),
+            hasher: blake3::Hasher::new(),
+            length: 0,
+            published: false,
+        })
+    }
+
+    /// Publish a streamed body without materializing it in memory.
+    pub(crate) fn publish_staged(&self, mut staged: BodyWriter) -> Result<BodyId, BodyStoreError> {
+        staged
+            .file
+            .as_mut()
+            .expect("staged body file exists")
+            .flush()?;
+        staged
+            .file
+            .as_ref()
+            .expect("staged body file exists")
+            .sync_all()?;
+        let id = BodyId::from_digest_bytes(*staged.hasher.finalize().as_bytes());
+        let expected_len = staged.length;
+        let metadata = staged
+            .file
+            .as_ref()
+            .expect("staged body file exists")
+            .metadata()?;
+        if !metadata.is_file() || metadata.len() != expected_len {
+            return Err(BodyStoreError::Length {
+                id,
+                expected: expected_len,
+                actual: metadata.len(),
+            });
+        }
+        let destination = self.path(id);
+        match fs::symlink_metadata(&destination) {
+            Ok(existing) if existing.file_type().is_symlink() || !existing.is_file() => {
+                return Err(BodyStoreError::Destination { id });
+            },
+            Ok(_) => {
+                self.verify_destination(&destination, id, expected_len)?;
+                drop(staged.file.take());
+                fs::remove_file(&staged.path)?;
+                sync_directory(&self.root)?;
+                staged.published = true;
+                Ok(id)
+            },
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                match fs::hard_link(&staged.path, &destination) {
+                    Ok(()) => {
+                        drop(staged.file.take());
+                        fs::remove_file(&staged.path)?;
+                        sync_directory(&self.root)?;
+                        staged.published = true;
+                        Ok(id)
+                    },
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                        self.verify_destination(&destination, id, expected_len)?;
+                        drop(staged.file.take());
+                        fs::remove_file(&staged.path)?;
+                        sync_directory(&self.root)?;
+                        staged.published = true;
+                        Ok(id)
+                    },
+                    Err(error) => Err(error.into()),
+                }
+            },
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    pub(crate) fn read(
+        &self,
+        id: BodyId,
+        expected_len: Option<u64>,
+    ) -> Result<Vec<u8>, BodyStoreError> {
         let path = self.path(id);
+        let path_metadata = fs::symlink_metadata(&path)?;
+        if path_metadata.file_type().is_symlink() || !path_metadata.is_file() {
+            return Err(BodyStoreError::Destination { id });
+        }
         let mut file = open_nofollow(&path)?;
         let metadata = file.metadata()?;
         if metadata.file_type().is_symlink() || !metadata.is_file() {
             return Err(BodyStoreError::Destination { id });
         }
-        let mut bytes = Vec::with_capacity(metadata.len() as usize);
+        if expected_len.is_some_and(|expected| expected != metadata.len()) {
+            return Err(BodyStoreError::Length {
+                id,
+                expected: expected_len.unwrap_or(metadata.len()),
+                actual: metadata.len(),
+            });
+        }
+        let mut bytes = expected_len
+            .and_then(|length| usize::try_from(length).ok())
+            .map_or_else(Vec::new, Vec::with_capacity);
         file.read_to_end(&mut bytes)?;
         if BodyId::from_bytes(&bytes) != id {
             return Err(BodyStoreError::Digest { id });
         }
         Ok(bytes)
+    }
+
+    pub(crate) fn validate(
+        &self,
+        id: BodyId,
+        expected_len: Option<u64>,
+    ) -> Result<(), BodyStoreError> {
+        let metadata = fs::symlink_metadata(self.path(id))?;
+        let length = metadata.len();
+        if expected_len.is_some_and(|expected| expected != length) {
+            return Err(BodyStoreError::Length {
+                id,
+                expected: expected_len.unwrap_or(length),
+                actual: length,
+            });
+        }
+        self.verify_file(&self.path(id), id, length)
     }
 
     #[must_use]
@@ -182,6 +286,46 @@ impl BodyStore {
     }
 }
 
+/// A body staged by [`BodyStore::stage`]. It owns the temporary file until
+/// publication, so a failed or abandoned stream cannot leave a cache body.
+pub(crate) struct BodyWriter {
+    root: PathBuf,
+    path: PathBuf,
+    file: Option<File>,
+    hasher: blake3::Hasher,
+    length: u64,
+    published: bool,
+}
+
+impl Write for BodyWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let written = self
+            .file
+            .as_mut()
+            .expect("staged body file exists")
+            .write(bytes)?;
+        self.hasher.update(&bytes[..written]);
+        self.length = self
+            .length
+            .checked_add(written as u64)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "body length overflow"))?;
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.file.as_mut().expect("staged body file exists").flush()
+    }
+}
+
+impl Drop for BodyWriter {
+    fn drop(&mut self) {
+        if !self.published {
+            let _ = fs::remove_file(&self.path);
+            let _ = sync_directory(&self.root);
+        }
+    }
+}
+
 fn sync_directory(path: &Path) -> io::Result<()> {
     File::open(path)?.sync_all()
 }
@@ -240,7 +384,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let store = BodyStore::open(temp.path()).unwrap();
         let id = store.publish(b"body").unwrap();
-        assert_eq!(store.read(id).unwrap(), b"body");
+        assert_eq!(store.read(id, None).unwrap(), b"body");
         assert_eq!(store.publish(b"body").unwrap(), id);
         std::fs::write(store.path(id), b"corrupt").unwrap();
         assert!(matches!(
@@ -256,7 +400,7 @@ mod tests {
                 Err(super::BodyStoreError::Destination { .. })
             ));
             assert!(matches!(
-                store.read(id),
+                store.read(id, None),
                 Err(super::BodyStoreError::Destination { .. })
             ));
         }

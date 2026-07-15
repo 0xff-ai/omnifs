@@ -787,6 +787,7 @@ impl TreeNamespace {
             mount,
             handle.provider_handle(),
             handle.observed_end(),
+            handle.open_epoch,
             record_growth,
         ))
     }

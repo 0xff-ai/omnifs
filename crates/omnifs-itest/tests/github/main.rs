@@ -3,6 +3,7 @@
 mod support;
 
 use omnifs_engine::Namespace;
+use omnifs_engine::test_support::cache::publish_effects_for_test;
 use omnifs_itest::ReadFileOpExt;
 use omnifs_wit::provider::types::{
     CalloutResult, Cursor, EntryKind, Header, HttpResponse, ListChildrenResult, LookupChildResult,
@@ -2244,12 +2245,8 @@ async fn open_then_all_one_load() {
     );
 
     let harness = github_harness();
-    harness
-        .runtime
-        .apply_effects_for_test(effects, harness.current_generation())
+    publish_effects_for_test(&harness.runtime, effects, harness.current_epoch())
         .expect("test effects should publish");
-    assert!(harness.cached_canonical_for(open_title).is_some());
-    assert!(harness.cached_canonical_for(all_title).is_some());
 
     let all_title_node = resolve_namespace(
         harness.namespace.as_ref(),

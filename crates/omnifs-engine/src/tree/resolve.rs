@@ -115,7 +115,7 @@ impl TreeNamespace {
         // Root ignore files are host-owned. Resolve them before cached dirents
         // or provider lookup so a provider capture cannot change their kind.
         if parent.is_root() && synthetic::is_root_ignore_name(name) {
-            let (meta, syn) = synthetic::resolve_synthetic_child(runtime, parent, name)
+            let (meta, syn) = synthetic::resolve_synthetic_child(runtime, parent, name)?
                 .expect("root ignore name must resolve synthetically");
             return Ok(Node::synthetic(mount, rel, meta, syn));
         }
@@ -128,13 +128,13 @@ impl TreeNamespace {
         // directory that never paged (no cached record) is NotFound; we never
         // consult the provider for it.
         if synthetic::is_control_name(name) {
-            return match synthetic::resolve_synthetic_child(runtime, parent, name) {
+            return match synthetic::resolve_synthetic_child(runtime, parent, name)? {
                 Some((meta, syn)) => Ok(Node::synthetic(mount, rel, meta, syn)),
                 None => Err(TreeError::not_found(rel.as_str())),
             };
         }
 
-        if let Some(meta) = cached_dirent_child(runtime, parent, name) {
+        if let Some(meta) = cached_dirent_child(runtime, parent, name)? {
             return Ok(Node::new(mount, rel, meta, NodeBody::Provider));
         }
 
@@ -164,7 +164,7 @@ impl TreeNamespace {
             // Controls may have been cached by a prior paged listing. Root
             // ignore names were handled before provider lookup above.
             LookupOutcome::NotFound => {
-                match synthetic::resolve_synthetic_child(runtime, parent, name) {
+                match synthetic::resolve_synthetic_child(runtime, parent, name)? {
                     Some((meta, syn)) => Ok(Node::synthetic(mount, rel, meta, syn)),
                     None => Err(TreeError::not_found(rel.as_str())),
                 }
@@ -173,11 +173,16 @@ impl TreeNamespace {
     }
 }
 
-fn cached_dirent_child(runtime: &Runtime, parent: &Path, name: &str) -> Option<EntryMeta> {
+fn cached_dirent_child(runtime: &Runtime, parent: &Path, name: &str) -> Result<Option<EntryMeta>> {
     let record = runtime
         .resources
-        .cache_get(parent, RecordKind::Dirents, None)?;
-    let dirents = DirentsPayload::deserialize(&record.payload)?;
+        .cache_get(parent, RecordKind::Dirents, None)
+        .map_err(|error| TreeError::internal(error.to_string()))?;
+    let Some(record) = record else {
+        return Ok(None);
+    };
+    let dirents: DirentsPayload = postcard::from_bytes(&record.payload)
+        .map_err(|error| TreeError::internal(error.to_string()))?;
     let entry = dirents
         .entries
         .iter()
@@ -186,5 +191,5 @@ fn cached_dirent_child(runtime: &Runtime, parent: &Path, name: &str) -> Option<E
     if entry.is_some() {
         crate::inspector::cache_event(CacheKind::BrowseHit);
     }
-    entry
+    Ok(entry)
 }

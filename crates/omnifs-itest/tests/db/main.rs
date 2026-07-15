@@ -3,7 +3,6 @@
 mod db_fixture;
 
 use omnifs_core::path::Path;
-use omnifs_engine::test_support::clock::now_millis;
 use omnifs_engine::{DirCursor, LookupAnswer, Namespace, NsError};
 use omnifs_itest::{
     ReadFileOpExt, RuntimeHarness, TestOpExt, expect_inline, make_initialized_runtime, parse_path,
@@ -140,8 +139,6 @@ async fn db_meta_listing_is_direct_path_surface() {
     assert!(names.contains(&"info.json"));
     assert!(names.contains(&"version.txt"));
     assert!(names.contains(&"path.txt"));
-    assert!(harness.cached_canonical_for("/meta/info.json").is_none());
-    assert!(harness.cached_canonical_for("/meta/version.txt").is_none());
 }
 
 #[tokio::test]
@@ -187,7 +184,7 @@ async fn db_table_direct_files_are_coherent() {
 }
 
 #[tokio::test]
-async fn db_table_direct_files_do_not_use_canonical_cache() {
+async fn db_table_direct_files_match_their_database_values() {
     let (_dir, harness) = db_harness();
 
     let table_bytes = namespace_read_bytes(&harness, "/db/tables/Album/table.json").await;
@@ -209,21 +206,10 @@ async fn db_table_direct_files_do_not_use_canonical_cache() {
     expected_indexes_json.push(b'\n');
     assert_eq!(expected_indexes_json, indexes_json);
     assert_eq!(count_txt, b"3\n");
-
-    assert!(
-        harness
-            .cached_canonical_for("/tables/Album/table.json")
-            .is_none()
-    );
-    assert!(
-        harness
-            .cached_canonical_for("/tables/Album/schema.json")
-            .is_none()
-    );
 }
 
 #[tokio::test]
-async fn db_missing_table_negative_record() {
+async fn db_missing_table_is_not_found() {
     let (_dir, harness) = db_harness();
 
     let namespace = harness.namespace.as_ref();
@@ -232,14 +218,6 @@ async fn db_missing_table_negative_record() {
         namespace.lookup(tables.path.clone(), "NoSuchTable").await,
         Err(NsError::NotFound)
     ));
-    assert!(
-        harness
-            .runtime
-            .resources
-            .negative_for(&parse_path("/tables/NoSuchTable"), now_millis())
-            .is_some(),
-        "namespace miss must publish the host negative"
-    );
 
     let schema = harness
         .read("/tables/NoSuchTable/schema.sql")

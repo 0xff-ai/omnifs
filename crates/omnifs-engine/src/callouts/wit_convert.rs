@@ -3,7 +3,8 @@
 //! Single hub for wire-to-view translation at the host boundary.
 
 use crate::view::{
-    ByteSource, CachedCursor, EntryKind, EntryMeta, FileAttrsCache, FileSize, ReadMode, Stability,
+    BodyId, ByteSource, CachedCursor, EntryKind, EntryMeta, FileAttrsCache, FileSize, ReadMode,
+    Stability,
 };
 
 use omnifs_wit::provider::types as wit_types;
@@ -31,29 +32,38 @@ pub(crate) fn read_mode_from_wit(mode: wit_types::ReadMode) -> ReadMode {
     }
 }
 
-pub(crate) fn byte_source_from_wit(source: &wit_types::ByteSource) -> ByteSource {
+pub(crate) fn byte_source_from_wit(source: &wit_types::ByteSource) -> Result<ByteSource, String> {
     match source {
-        wit_types::ByteSource::Inline(bytes) => ByteSource::Inline(bytes.clone()),
-        wit_types::ByteSource::Deferred(mode) => ByteSource::Deferred(read_mode_from_wit(*mode)),
-        wit_types::ByteSource::Canonical => ByteSource::Canonical,
-        wit_types::ByteSource::Blob(blob) => ByteSource::Blob(*blob),
+        wit_types::ByteSource::Inline(bytes) => Ok(ByteSource::Inline(bytes.clone())),
+        wit_types::ByteSource::Deferred(mode) => {
+            Ok(ByteSource::Deferred(read_mode_from_wit(*mode)))
+        },
+        wit_types::ByteSource::Canonical => Ok(ByteSource::Canonical),
+        wit_types::ByteSource::Blob(_) => {
+            Err("runtime blob handle requires mount resolution".into())
+        },
     }
 }
 
 pub(crate) fn try_file_attrs_from_file_out(
     file: &wit_types::FileOut,
+    resolve_blob: impl Fn(u64) -> Result<(BodyId, u64), String>,
 ) -> Result<FileAttrsCache, String> {
+    let declared = file_size_from_wit(file.attrs.size);
+    let (bytes, size) = match &file.bytes {
+        wit_types::ByteSource::Blob(blob) => {
+            let (body, length) = resolve_blob(*blob)?;
+            validate_trusted_size(declared, length)?;
+            (ByteSource::Body(body), crate::view::FileSize::Exact(length))
+        },
+        source => (byte_source_from_wit(source)?, declared),
+    };
     FileAttrsCache::from_parts(
-        file_size_from_wit(file.attrs.size),
-        byte_source_from_wit(&file.bytes),
+        size,
+        bytes,
         stability_from_wit(file.attrs.stability),
         file.attrs.version_token.clone(),
     )
-}
-
-pub(crate) fn file_attrs_from_file_out(file: &wit_types::FileOut) -> FileAttrsCache {
-    try_file_attrs_from_file_out(file)
-        .expect("provider file attrs are validated before view conversion")
 }
 
 pub fn try_file_attrs_from_attrs(attrs: &wit_types::FileAttrs) -> Result<FileAttrsCache, String> {
@@ -70,10 +80,28 @@ pub fn file_attrs_from_attrs(attrs: &wit_types::FileAttrs) -> FileAttrsCache {
         .expect("provider file attrs are validated before view conversion")
 }
 
-pub fn entry_meta_from_kind(kind: &wit_types::EntryKind) -> EntryMeta {
+pub fn entry_meta_from_kind(
+    kind: &wit_types::EntryKind,
+    resolve_blob: impl Fn(u64) -> Result<(BodyId, u64), String>,
+) -> Result<EntryMeta, String> {
     match kind {
-        wit_types::EntryKind::Directory => EntryMeta::directory(),
-        wit_types::EntryKind::File(file) => EntryMeta::file(file_attrs_from_file_out(file)),
+        wit_types::EntryKind::Directory => Ok(EntryMeta::directory()),
+        wit_types::EntryKind::File(file) => Ok(EntryMeta::file(try_file_attrs_from_file_out(
+            file,
+            resolve_blob,
+        )?)),
+    }
+}
+
+fn validate_trusted_size(size: crate::view::FileSize, length: u64) -> Result<(), String> {
+    match size {
+        crate::view::FileSize::Exact(expected) if expected != length => Err(format!(
+            "blob body length {length} disagrees with declared size {expected}"
+        )),
+        crate::view::FileSize::NonZero if length == 0 => {
+            Err("blob body declared NonZero but is empty".into())
+        },
+        _ => Ok(()),
     }
 }
 

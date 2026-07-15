@@ -44,7 +44,7 @@ impl TreeNamespace {
             crate::inspector::cache_event(CacheKind::Invalidated);
             // Tree-owned mem eviction; the kernel-notify half stays
             // renderer-side and consumes the returned report.
-            runtime.resources.mem_invalidate_entries_if({
+            runtime.resources.memory_invalidate_entries_if({
                 let paths = paths.clone();
                 let prefixes = prefixes.clone();
                 move |k, _| {

@@ -1,7 +1,5 @@
 use omnifs_core::path::Path;
-use omnifs_engine::test_support::cache::{Record as CacheRecord, RecordKind};
-use omnifs_engine::test_support::clock::now_millis;
-use omnifs_engine::view::{DirentsPayload, FilePayload, LookupPayload};
+use omnifs_engine::test_support::cache::publish_effects_for_test;
 use omnifs_engine::{
     DirCursor, EntryKind, LookupAnswer, Namespace, NsError, ReadAnswer, TreeNamespace,
 };
@@ -176,80 +174,6 @@ async fn test_list_hello_dir() {
 }
 
 #[tokio::test]
-async fn test_list_projects_nested_files_into_cache() {
-    let harness = make_initialized_runtime(TEST_PROVIDER_CONFIG);
-
-    let _ = list_namespace(&harness.namespace, "/hello")
-        .await
-        .expect("expected list entries");
-
-    let title = harness
-        .runtime
-        .resources
-        .cache_get(&p("/hello/bundle/title"), RecordKind::File, None)
-        .expect("bundle title should be projected");
-    let body = harness
-        .runtime
-        .resources
-        .cache_get(&p("/hello/bundle/body"), RecordKind::File, None)
-        .expect("bundle body should be projected");
-    let empty = harness
-        .runtime
-        .resources
-        .cache_get(&p("/hello/bundle/empty"), RecordKind::File, None)
-        .expect("bundle empty file should be projected");
-    let bundle_dirents = harness
-        .runtime
-        .resources
-        .cache_get(&p("/hello/bundle"), RecordKind::Dirents, None)
-        .expect("bundle dirents should be projected");
-    assert_eq!(file_payload(&title).content, b"title".to_vec());
-    assert_eq!(file_payload(&body).content, b"body".to_vec());
-    assert!(file_payload(&empty).content.is_empty());
-    let dirents = DirentsPayload::deserialize(&bundle_dirents.payload)
-        .expect("bundle dirents payload should deserialize");
-    let mut entry_names: Vec<_> = dirents
-        .entries
-        .iter()
-        .map(|entry| entry.name.as_str())
-        .collect();
-    entry_names.sort_unstable();
-    assert_eq!(entry_names, vec!["body", "empty", "title"]);
-    assert!(!dirents.exhaustive);
-}
-
-#[tokio::test]
-async fn test_list_projects_direct_file_content_into_cache() {
-    let harness = make_initialized_runtime(TEST_PROVIDER_CONFIG);
-
-    let _ = list_namespace(&harness.namespace, "/hello/bundle")
-        .await
-        .expect("expected DirEntries");
-
-    let title = harness
-        .runtime
-        .resources
-        .cache_get(&p("/hello/bundle/title"), RecordKind::File, None)
-        .expect("projected title should be cached at its own path");
-    let body = harness
-        .runtime
-        .resources
-        .cache_get(&p("/hello/bundle/body"), RecordKind::File, None)
-        .expect("projected body should be cached at its own path");
-
-    assert_eq!(file_payload(&title).content, b"title".to_vec());
-    assert_eq!(file_payload(&body).content, b"body".to_vec());
-    assert!(
-        harness
-            .runtime
-            .resources
-            .cache_get(&p("/hello/bundle/title/title"), RecordKind::File, None)
-            .is_none(),
-        "projected file content must not be nested under itself"
-    );
-}
-
-#[tokio::test]
 async fn test_mutable_unversioned_full_reads_are_observation_only() {
     let harness = make_initialized_runtime(TEST_PROVIDER_CONFIG);
 
@@ -260,25 +184,8 @@ async fn test_mutable_unversioned_full_reads_are_observation_only() {
         first.attrs.stability,
         omnifs_engine::StabilityClass::Dynamic
     );
-    assert!(
-        harness
-            .runtime
-            .resources
-            .cache_get(&p(path), RecordKind::File, None)
-            .is_none(),
-        "unversioned dynamic full-read bytes must not be durably cached",
-    );
-
     let second = read_namespace(&harness.namespace, path).await.unwrap();
     assert_eq!(second.bytes.as_slice(), b"fresh-full-2\n");
-    assert!(
-        harness
-            .runtime
-            .resources
-            .cache_get(&p(path), RecordKind::File, None)
-            .is_none(),
-        "second unversioned dynamic read must not create a durable file payload",
-    );
 }
 
 #[tokio::test]
@@ -308,17 +215,11 @@ async fn test_read_file_sibling_projections_do_not_erase_parent_dirents() {
         .unwrap();
     assert_eq!(result.bytes.as_slice(), b"title\n");
 
-    let dirents_record = harness
-        .runtime
-        .resources
-        .cache_get(&p("/hello"), RecordKind::Dirents, None)
-        .expect("hello dirents should stay cached");
-    let dirents = DirentsPayload::deserialize(&dirents_record.payload)
-        .expect("dirents payload should deserialize");
-    let mut entry_names: Vec<_> = dirents
-        .entries
-        .iter()
-        .map(|entry| entry.name.as_str())
+    let mut entry_names: Vec<_> = list_namespace(&harness.namespace, "/hello")
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|entry| entry.name)
         .collect();
     entry_names.sort_unstable();
     assert_eq!(
@@ -344,19 +245,6 @@ async fn test_read_file_sibling_projections_do_not_erase_parent_dirents() {
             "volatile-tail"
         ]
     );
-
-    let body = harness
-        .runtime
-        .resources
-        .cache_get(&p("/hello/body"), RecordKind::File, None)
-        .expect("body sibling projection should be cached");
-    let state = harness
-        .runtime
-        .resources
-        .cache_get(&p("/hello/state"), RecordKind::File, None)
-        .expect("state sibling projection should be cached");
-    assert_eq!(file_payload(&body).content, b"body\n");
-    assert_eq!(file_payload(&state).content, b"open\n");
 }
 
 /// Regression (live FUSE collapse): looking up one child of an object directory
@@ -407,14 +295,12 @@ async fn test_object_dir_child_lookup_preserves_full_listing() {
     assert_eq!(lookup.attrs.kind, EntryKind::File);
 
     // A subsequent readdir reads the cached dirents the lookup just folded into.
-    let dirents_record = harness
-        .runtime
-        .resources
-        .cache_get(&object_dir, RecordKind::Dirents, None)
-        .expect("object dir dirents must stay cached");
-    let dirents = DirentsPayload::deserialize(&dirents_record.payload)
-        .expect("dirents payload should deserialize");
-    let mut warm_names: Vec<&str> = dirents.entries.iter().map(|e| e.name.as_str()).collect();
+    let mut warm_names: Vec<String> = list_namespace(&harness.namespace, object_dir.as_str())
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|entry| entry.name)
+        .collect();
     warm_names.sort_unstable();
     assert_eq!(
         warm_names, expected,
@@ -490,17 +376,14 @@ async fn test_lookup_child() {
     let exact_file = resolve_namespace(&harness.namespace, "/hello/lazy").await;
     assert_eq!(exact_file.attrs.kind, EntryKind::File);
 
-    let cached_lookup = harness
-        .runtime
-        .resources
-        .cache_get(&p("/hello/lazy"), RecordKind::Lookup, None)
-        .expect("lookup entry should be materialized");
-    assert!(
-        matches!(
-            LookupPayload::deserialize(&cached_lookup.payload),
-            Some(LookupPayload::Positive(_))
-        ),
-        "lookup entry should cache a positive record"
+    assert_eq!(
+        harness
+            .namespace
+            .getattr(p("/test/hello/lazy"))
+            .await
+            .unwrap()
+            .kind,
+        EntryKind::File
     );
 
     let hello = resolve_namespace(&harness.namespace, "/hello").await;
@@ -509,23 +392,6 @@ async fn test_lookup_child() {
         .lookup(hello.path.clone(), "missing")
         .await;
     assert_eq!(missing, Err(NsError::NotFound));
-
-    assert!(
-        harness
-            .runtime
-            .resources
-            .cache_get(&p("/hello/missing"), RecordKind::Lookup, None)
-            .is_none(),
-        "lookup miss must not create a non-expiring view-cache record"
-    );
-    assert!(
-        harness
-            .runtime
-            .resources
-            .negative_for(&p("/hello/missing"), now_millis())
-            .is_some(),
-        "lookup miss should update the live negative index"
-    );
 }
 
 #[tokio::test]
@@ -558,175 +424,6 @@ async fn test_subtree_handoff_rejects_unknown_tree_ref() {
     );
 }
 
-/// Test that lookup-adjacent file projections are cached.
-#[tokio::test]
-async fn test_list_projects_adjacent_files_into_cache() {
-    let harness = make_initialized_runtime(TEST_PROVIDER_CONFIG);
-    // Projection-tree contract: a bare `lookup` is light and does not warm
-    // a child's adjacent shape; the preload a dir handler attaches with
-    // `preload_*` lands when the directory is actually *listed*. Listing
-    // `hello/bundle` runs the `bundle` handler, whose projection preloads
-    // `title`/`body` alongside the listing.
-    let _ = list_namespace(&harness.namespace, "/hello/bundle")
-        .await
-        .expect("expected list entries");
-
-    // Verify the projection effects were cached.
-    let title = harness
-        .runtime
-        .resources
-        .cache_get(&p("/hello/bundle/title"), RecordKind::File, None)
-        .expect("title should be in cache");
-    let body = harness
-        .runtime
-        .resources
-        .cache_get(&p("/hello/bundle/body"), RecordKind::File, None)
-        .expect("body should be in cache");
-    let bundle_dirents = harness
-        .runtime
-        .resources
-        .cache_get(&p("/hello/bundle"), RecordKind::Dirents, None)
-        .expect("bundle dirents should be in cache");
-
-    assert_eq!(file_payload(&title).content, b"title".to_vec());
-    assert_eq!(file_payload(&body).content, b"body".to_vec());
-    let dirents = DirentsPayload::deserialize(&bundle_dirents.payload)
-        .expect("bundle dirents payload should deserialize");
-    let mut entry_names: Vec<_> = dirents
-        .entries
-        .iter()
-        .map(|entry| entry.name.as_str())
-        .collect();
-    entry_names.sort_unstable();
-    assert_eq!(entry_names, vec!["body", "title"]);
-}
-
-#[tokio::test]
-async fn test_lookup_returns_siblings_and_list_warms_child_shape() {
-    let harness = make_initialized_runtime(TEST_PROVIDER_CONFIG);
-    // a lookup materializes the target plus the parent's static sibling set,
-    // but does NOT warm the child's shape (lookup is light).
-    let result = resolve_namespace(&harness.namespace, "/hello/snapshot").await;
-    assert_eq!(result.attrs.kind, EntryKind::Directory);
-
-    let parent_dirents = harness
-        .runtime
-        .resources
-        .cache_get(&p("/hello"), RecordKind::Dirents, None)
-        .expect("lookup should materialize parent dirents");
-    let parent_dirents =
-        DirentsPayload::deserialize(&parent_dirents.payload).expect("dirents must deserialize");
-    let mut lookup_names: Vec<_> = parent_dirents
-        .entries
-        .iter()
-        .map(|entry| entry.name.as_str())
-        .collect();
-    lookup_names.sort_unstable();
-    assert_eq!(
-        lookup_names,
-        vec![
-            "README.md",
-            "bundle",
-            "feed",
-            "fresh-full",
-            "greeting",
-            "large-ranged",
-            "lazy",
-            "live-log",
-            "message",
-            "projected",
-            "ranged",
-            "remote-a",
-            "remote-b",
-            "snapshot",
-            "throttled",
-            "unbounded",
-            "unknown-ranged",
-            "volatile-tail"
-        ]
-    );
-    // The child's shape and the preload it attaches warm when the directory is
-    // *listed*, not on the bare lookup above.
-    let _ = list_namespace(&harness.namespace, "/hello/snapshot")
-        .await
-        .expect("expected list entries");
-
-    let dirents_record = harness
-        .runtime
-        .resources
-        .cache_get(&p("/hello/snapshot"), RecordKind::Dirents, None)
-        .expect("snapshot dirents should be cached");
-    let dirents = DirentsPayload::deserialize(&dirents_record.payload)
-        .expect("dirents payload should deserialize");
-    let mut entry_names: Vec<_> = dirents
-        .entries
-        .iter()
-        .map(|entry| entry.name.as_str())
-        .collect();
-    entry_names.sort_unstable();
-    assert_eq!(entry_names, vec!["comments", "status"]);
-    assert!(
-        dirents.exhaustive,
-        "snapshot's handler returns an exhaustive listing, so a subsequent \
-         readdir must hit the cache without re-invoking list_children",
-    );
-
-    // The `status` file the handler preloads is cached alongside the listing.
-    let status = harness
-        .runtime
-        .resources
-        .cache_get(&p("/hello/snapshot/status"), RecordKind::File, None)
-        .expect("status file preload should be cached");
-    assert_eq!(file_payload(&status).content, b"open\n");
-}
-
-fn file_payload(record: &CacheRecord) -> FilePayload {
-    FilePayload::deserialize(&record.payload).expect("file payload should deserialize")
-}
-
-#[test]
-fn cache_delete_prefix_respects_segment_boundaries() {
-    let harness = make_runtime();
-    let record = CacheRecord::new(RecordKind::Attr, vec![1, 2, 3]);
-
-    harness
-        .runtime
-        .resources
-        .cache_put(&p("/owner/repo"), RecordKind::Attr, None, &record);
-    harness
-        .runtime
-        .resources
-        .cache_put(&p("/owner/repo/issues"), RecordKind::Attr, None, &record);
-    harness
-        .runtime
-        .resources
-        .cache_put(&p("/owner/repobaz"), RecordKind::Attr, None, &record);
-
-    harness.runtime.cache_delete_prefix(&p("/owner/repo"));
-
-    assert!(
-        harness
-            .runtime
-            .resources
-            .cache_get(&p("/owner/repo"), RecordKind::Attr, None)
-            .is_none()
-    );
-    assert!(
-        harness
-            .runtime
-            .resources
-            .cache_get(&p("/owner/repo/issues"), RecordKind::Attr, None)
-            .is_none()
-    );
-    assert!(
-        harness
-            .runtime
-            .resources
-            .cache_get(&p("/owner/repobaz"), RecordKind::Attr, None)
-            .is_some()
-    );
-}
-
 #[tokio::test]
 // Long integration test: two full runtimes built end to end. Splitting it
 // buys nothing.
@@ -750,20 +447,9 @@ async fn test_cache_isolated_by_mount_name() {
     root_names.sort_unstable();
     assert_eq!(root_names, vec!["mount-a", "mount-b"]);
     let runtime_a = harness.registry.get("mount-a").unwrap();
-    let runtime_b = harness.registry.get("mount-b").unwrap();
     let _ = list_mount_namespace(ns, "mount-a", "/hello").await.unwrap();
-    assert!(
-        runtime_a
-            .resources
-            .cache_get(&p("/hello"), RecordKind::Dirents, None)
-            .is_some()
-    );
-    assert!(
-        runtime_b
-            .resources
-            .cache_get(&p("/hello"), RecordKind::Dirents, None)
-            .is_none()
-    );
+    assert!(list_mount_namespace(ns, "mount-a", "/hello").await.is_ok());
+    assert!(list_mount_namespace(ns, "mount-b", "/hello").await.is_ok());
 
     let _ = list_mount_namespace(ns, "mount-a", "/scoped")
         .await
@@ -771,46 +457,21 @@ async fn test_cache_isolated_by_mount_name() {
     let _ = list_mount_namespace(ns, "mount-b", "/scoped")
         .await
         .unwrap();
-    assert!(
-        runtime_a
-            .resources
-            .cache_get(&p("/scoped/item"), RecordKind::Lookup, None)
-            .is_some()
-    );
-    assert!(
-        runtime_b
-            .resources
-            .cache_get(&p("/scoped/item"), RecordKind::Lookup, None)
-            .is_some()
-    );
-
     let item_a = resolve_mount_namespace(ns, "mount-a", "/scoped/item").await;
     let item_b = resolve_mount_namespace(ns, "mount-b", "/scoped/item").await;
     let mut events = ns.subscribe();
-    let op_gen = runtime_a.resources.current_generation();
+    let op_gen = runtime_a.resources.current_epoch();
     let (tick_result, effects) = harness
         .timer_tick()
         .unwrap()
         .into_result_and_effects()
         .unwrap();
     tick_result.unwrap();
-    runtime_a
-        .apply_effects_for_test(&effects, op_gen)
-        .expect("timer effects should publish");
+    publish_effects_for_test(&runtime_a, &effects, op_gen).expect("timer effects should publish");
     let refreshed_a = ns.getattr(item_a.path.clone()).await.unwrap();
     assert_ne!(refreshed_a.change, item_a.attrs.change);
-    assert!(
-        runtime_a
-            .resources
-            .cache_get(&p("/scoped/item"), RecordKind::Lookup, None)
-            .is_none()
-    );
-    assert!(
-        runtime_b
-            .resources
-            .cache_get(&p("/scoped/item"), RecordKind::Lookup, None)
-            .is_some()
-    );
+    let refreshed_b = ns.getattr(item_b.path.clone()).await.unwrap();
+    assert_eq!(refreshed_b.change, item_b.attrs.change);
     let event = tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
         .await
         .expect("mount-a invalidation event")
@@ -819,12 +480,9 @@ async fn test_cache_isolated_by_mount_name() {
         event,
         omnifs_engine::NsEvent::InvalidateSubtree { path } if path == item_a.path
     ));
-    if let Ok(Some(omnifs_engine::NsEvent::InvalidateSubtree { path })) =
-        tokio::time::timeout(std::time::Duration::from_millis(50), events.recv()).await
-    {
-        assert_ne!(
-            path, item_b.path,
-            "mount-b must not receive mount-a invalidation"
-        );
+    while let Some(event) = events.try_recv() {
+        if let omnifs_engine::NsEvent::InvalidateSubtree { path } = event {
+            assert_eq!(path, item_a.path, "only mount-a should be invalidated");
+        }
     }
 }

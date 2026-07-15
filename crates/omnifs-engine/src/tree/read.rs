@@ -6,8 +6,10 @@
 //! drives the internal read path from its own executor and turns the neutral
 //! `ReadResult` into kernel/protocol identity + reply encoding.
 
-use crate::cache::{Record as CacheRecord, RecordKind};
-use crate::clock::{freshness_expiry, now_millis};
+use crate::cache::{
+    FactPayload, ProjectionTransition, Record as CacheRecord, RecordKind, RecordWrite,
+};
+use crate::clock::now_millis;
 use crate::ops::namespace::{ReadBytes, ReadOutcome};
 use crate::pagination::NextPageOutcome;
 use crate::render::MATERIALIZE_MAX_BYTES;
@@ -57,56 +59,61 @@ impl<'a> FileAttrStore<'a> {
         Self { runtime, path }
     }
 
-    pub(crate) fn cached(&self, now_millis: u64) -> Option<FileAttrsCache> {
-        if let Some(record) =
-            self.runtime
-                .resources
-                .view_get(self.path, RecordKind::Lookup, None, now_millis)
-            && let Some(LookupPayload::Positive(meta)) = LookupPayload::deserialize(&record.payload)
-            && let Some(attrs) = meta.into_attrs()
+    pub(crate) fn cached(&self, now_millis: u64) -> Result<Option<FileAttrsCache>> {
+        if let Some(record) = self
+            .runtime
+            .resources
+            .view_get(self.path, RecordKind::Lookup, None, now_millis)
+            .map_err(|error| TreeError::internal(error.to_string()))?
         {
-            return Some(attrs);
+            let payload: LookupPayload = postcard::from_bytes(&record.payload)
+                .map_err(|error| TreeError::internal(error.to_string()))?;
+            if let LookupPayload::Positive(meta) = payload
+                && let Some(attrs) = meta.into_attrs()
+            {
+                return Ok(Some(attrs));
+            }
         }
 
-        self.runtime
+        let attrs = self
+            .runtime
             .resources
             .view_get(self.path, RecordKind::Attr, None, now_millis)
-            .and_then(|record| AttrPayload::deserialize(&record.payload))
-            .and_then(|payload| payload.meta.into_attrs())
+            .map_err(|error| TreeError::internal(error.to_string()))?
+            .map(|record| {
+                postcard::from_bytes::<AttrPayload>(&record.payload)
+                    .map_err(|error| TreeError::internal(error.to_string()))
+                    .and_then(|payload| Ok(payload.meta.into_attrs()))
+            })
+            .transpose()?
+            .flatten();
+        Ok(attrs)
     }
 
-    pub(crate) fn publish(&self, attrs: FileAttrsCache) -> Result<()> {
+    pub(crate) fn publish(&self, attrs: FileAttrsCache, captured_epoch: u64) -> Result<()> {
         let meta = EntryMeta::file(attrs);
-        let lookup = LookupPayload::Positive(meta.clone());
-        if let Some(payload) = lookup.serialize() {
-            self.runtime.resources.cache_put(
-                self.path,
-                RecordKind::Lookup,
-                None,
-                &CacheRecord::new(RecordKind::Lookup, payload),
-            );
-        } else {
-            return Err(TreeError::internal(format!(
-                "could not serialize lookup attrs for {}",
-                self.path
-            )));
-        }
-
-        let attr = AttrPayload { meta };
-        if let Some(payload) = attr.serialize() {
-            self.runtime.resources.cache_put(
-                self.path,
-                RecordKind::Attr,
-                None,
-                &CacheRecord::new(RecordKind::Attr, payload),
-            );
-            Ok(())
-        } else {
-            Err(TreeError::internal(format!(
-                "could not serialize file attrs for {}",
-                self.path
-            )))
-        }
+        self.runtime
+            .resources
+            .publish(
+                ProjectionTransition {
+                    records: vec![
+                        RecordWrite {
+                            path: self.path.clone(),
+                            aux: None,
+                            fact: FactPayload::Lookup(LookupPayload::Positive(meta.clone())),
+                        },
+                        RecordWrite {
+                            path: self.path.clone(),
+                            aux: None,
+                            fact: FactPayload::Attr(AttrPayload { meta }),
+                        },
+                    ],
+                    ..ProjectionTransition::default()
+                },
+                captured_epoch,
+            )
+            .map_err(|error| TreeError::internal(error.to_string()))?;
+        Ok(())
     }
 }
 
@@ -137,11 +144,15 @@ impl TreeNamespace {
 
         let runtime = self.runtime_for(node.mount())?;
         let path = node.path();
+        let captured_epoch = runtime.resources.current_epoch();
         let attr_store = FileAttrStore::new(&runtime, path);
         let now = now_millis();
-        let expired = runtime.resources.view_expired(path, now);
+        let expired = runtime
+            .resources
+            .view_expired(path, now)
+            .map_err(|error| TreeError::internal(error.to_string()))?;
         let projected_attrs = attr_store
-            .cached(now)
+            .cached(now)?
             .or_else(|| (!expired).then(|| node.attrs().cloned()).flatten());
         let attrs = projected_attrs.as_ref();
         enforce_declared_materialize_cap(path, attrs)?;
@@ -173,12 +184,36 @@ impl TreeNamespace {
                         "inline projection for {path} contradicts file attrs: {error}"
                     ))
                 })?;
-            attr_store.publish(attrs.clone())?;
+            attr_store.publish(attrs.clone(), captured_epoch)?;
             return Ok(ReadResult::Bytes {
                 data,
                 attrs: Some(attrs),
                 content_type: None,
             });
+        }
+
+        if let Some(attrs) = attrs
+            && matches!(attrs.byte_source(), view_types::ByteSource::Canonical)
+        {
+            if let Some(canonical) = runtime
+                .resources
+                .cached_canonical_for(path)
+                .map_err(|error| TreeError::internal(error.to_string()))?
+            {
+                enforce_observed_materialize_cap(path, canonical.bytes.len())?;
+                let attrs = attrs
+                    .learned_complete_content_attrs(canonical.bytes.len())
+                    .map_err(|error| {
+                        TreeError::internal(format!(
+                            "canonical projection for {path} contradicts its body: {error}"
+                        ))
+                    })?;
+                return Ok(ReadResult::Bytes {
+                    data: canonical.bytes,
+                    attrs: Some(attrs),
+                    content_type: None,
+                });
+            }
         }
 
         let durable_aux = attrs.and_then(FileAttrsCache::durable_cache_aux);
@@ -188,18 +223,19 @@ impl TreeNamespace {
         // against the projected attrs. A hit serves the cached bytes and keeps
         // the node's projected (already size-learned) attrs.
         if let Some(aux) = durable_aux.clone() {
-            if let Some(record) = runtime
-                .resources
-                .mem_get(path, RecordKind::File, aux.as_deref())
+            if let Some(record) =
+                runtime
+                    .resources
+                    .memory_get(path, RecordKind::File, aux.as_deref())
                 && let Some(payload) = file_payload_for_attrs(&record, attrs)
             {
                 crate::inspector::cache_event(CacheKind::FileHit);
                 return read_result_from_cache(path, payload, attrs);
             }
-            if let Some(record) =
-                runtime
-                    .resources
-                    .view_get(path, RecordKind::File, aux.as_deref(), now)
+            if let Some(record) = runtime
+                .resources
+                .view_get(path, RecordKind::File, aux.as_deref(), now)
+                .map_err(|error| TreeError::internal(error.to_string()))?
                 && let Some(payload) = file_payload_for_attrs(&record, attrs)
             {
                 crate::inspector::cache_event(CacheKind::FileHit);
@@ -212,11 +248,10 @@ impl TreeNamespace {
         // SDK-supplied content type is unavailable on a cold read).
         let content_type = node.path().content_type_mime(None).to_string();
 
-        // Capture the generation BEFORE awaiting the render so the result can be
+        // Capture the invalidation epoch BEFORE awaiting the render so the result can be
         // fenced against an invalidation that lands mid-read.
-        let op_gen = runtime.resources.current_generation();
         crate::inspector::cache_event(CacheKind::FileMiss);
-        let result = match runtime.read_file(path, content_type).await {
+        let result = match runtime.read_file(path, content_type, captured_epoch).await {
             Ok(result) => result,
             Err(EngineError::ProviderError(error)) => {
                 warn!(
@@ -234,7 +269,7 @@ impl TreeNamespace {
             },
         };
 
-        finish_read(&runtime, path, result, op_gen)
+        finish_read(&runtime, path, result)
     }
 
     /// Serve a host-synthesized node. A `Fixed` synthetic (a mount-root ignore
@@ -275,7 +310,7 @@ impl TreeNamespace {
                 // renderer-side (driven from the InvalidationReport).
                 runtime
                     .resources
-                    .mem_invalidate(&parent, RecordKind::Dirents, None);
+                    .memory_invalidate(&parent, RecordKind::Dirents, None);
                 let bytes = status.into_bytes();
                 enforce_observed_materialize_cap(node.path(), bytes.len())?;
                 let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
@@ -296,15 +331,8 @@ fn finish_read(
     runtime: &Runtime,
     path: &omnifs_core::path::Path,
     result: ReadOutcome,
-    op_gen: u64,
 ) -> Result<ReadResult> {
-    // An identity representation answered by reference to the canonical store
-    // (`byte-source::canonical`) is NEVER copied into the view cache: the
-    // canonical store is its sole home, so caching it here would duplicate the
-    // bytes across both stores.
-    let from_canonical = matches!(result.bytes, ReadBytes::Canonical);
-
-    let Some((data, result_attrs, content_type)) = resolve_read_payload(runtime, path, result)
+    let Some((data, result_attrs, content_type)) = resolve_read_payload(runtime, path, result)?
     else {
         return Err(TreeError::internal(format!(
             "read for {path} could not resolve its byte source"
@@ -326,72 +354,11 @@ fn finish_read(
                 "read for {path} returned bytes that contradict file attrs"
             ))
         })?;
-    FileAttrStore::new(runtime, path).publish(attrs_cache.clone())?;
-
-    if !from_canonical {
-        cache_durable_file_payload(
-            runtime,
-            path,
-            &attrs_cache,
-            &data,
-            content_type.clone(),
-            op_gen,
-        )?;
-    }
-
-    let _ = runtime
-        .resources
-        .cache_view_leaf(
-            path,
-            &[],
-            freshness_expiry(attrs_cache.stability(), now_millis()),
-            op_gen,
-        )
-        .map_err(|error| {
-            TreeError::internal(format!(
-                "read for {path} could not refresh view expiry: {error}"
-            ))
-        })?;
-
     Ok(ReadResult::Bytes {
         data,
         attrs: Some(attrs_cache),
         content_type,
     })
-}
-
-/// Cache the durable view payload for a freshly rendered cold read, honoring the
-/// per-mount write fence. The captured `op_gen` predates the render, so a write
-/// the fence rejects raced a concurrent invalidation and must be dropped
-/// (caching it would reinstate stale bytes).
-fn cache_durable_file_payload(
-    runtime: &Runtime,
-    path: &omnifs_core::path::Path,
-    attrs_cache: &FileAttrsCache,
-    data: &[u8],
-    content_type: Option<String>,
-    op_gen: u64,
-) -> Result<()> {
-    let Some(aux) = attrs_cache.durable_cache_aux() else {
-        return Ok(());
-    };
-    let payload = FilePayload::new(attrs_cache.version_token_owned(), data.to_vec())
-        .with_content_type(content_type);
-    let Some(payload) = payload.serialize() else {
-        return Err(TreeError::internal(format!(
-            "read for {path} could not serialize its file payload"
-        )));
-    };
-    let record = CacheRecord::new(RecordKind::File, payload);
-    // Drop the write if an invalidation for this path landed after the read
-    // began: caching it would reinstate stale bytes.
-    if runtime.resources.write_fenced(path, op_gen) {
-        return Ok(());
-    }
-    runtime
-        .resources
-        .cache_put(path, RecordKind::File, aux.as_deref(), &record);
-    Ok(())
 }
 
 /// Materialize a `read-file` terminal into bytes. Inline content travels in the
@@ -403,27 +370,36 @@ fn resolve_read_payload(
     runtime: &Runtime,
     path: &omnifs_core::path::Path,
     result: ReadOutcome,
-) -> Option<(Vec<u8>, FileAttrsCache, Option<String>)> {
+) -> Result<Option<(Vec<u8>, FileAttrsCache, Option<String>)>> {
     let attrs = result.attrs;
     let content_type = result.content_type;
     match result.bytes {
-        ReadBytes::Inline(bytes) => Some((bytes, attrs, content_type)),
-        ReadBytes::Blob(blob) => match runtime.read_blob_full(blob) {
-            Ok(bytes) => Some((bytes, attrs, content_type)),
+        ReadBytes::Inline(bytes) => Ok(Some((bytes, attrs, content_type))),
+        ReadBytes::Body(body) => match runtime.read_blob_full(
+            body,
+            match attrs.size() {
+                view_types::FileSize::Exact(length) => Some(length),
+                view_types::FileSize::NonZero | view_types::FileSize::Unknown => None,
+            },
+        ) {
+            Ok(bytes) => Ok(Some((bytes, attrs, content_type))),
             Err(e) => {
                 warn!(path = %path, error = %e, "blob-backed read failed");
-                None
+                Ok(None)
             },
         },
         ReadBytes::Canonical => {
-            if let Some(bytes) = runtime.canonical_bytes_for(path) {
-                Some((bytes, attrs, content_type))
+            if let Some(bytes) = runtime
+                .canonical_bytes_for(path)
+                .map_err(|error| TreeError::internal(error.to_string()))?
+            {
+                Ok(Some((bytes, attrs, content_type)))
             } else {
                 warn!(
                     path = %path,
                     "read answered byte-source::canonical but no canonical covers the path"
                 );
-                None
+                Ok(None)
             }
         },
     }
