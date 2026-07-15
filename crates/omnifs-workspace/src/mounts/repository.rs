@@ -480,6 +480,58 @@ impl Repository {
         revision: &Revision,
         snapshot: &Path,
     ) -> Result<Registry, RepositoryError> {
+        let root = fs::symlink_metadata(snapshot).map_err(|source| RepositoryError::Io {
+            path: snapshot.to_path_buf(),
+            source,
+        })?;
+        if !root.file_type().is_dir() {
+            return Err(RepositoryError::InvalidSnapshot {
+                revision: revision.clone(),
+                path: snapshot.to_path_buf(),
+                details: "snapshot root is not a real directory".to_string(),
+            });
+        }
+        let expected = self.revision_files(revision)?;
+        let expected = expected.into_iter().collect::<BTreeSet<_>>();
+        let mut actual = BTreeSet::new();
+        for entry in fs::read_dir(snapshot).map_err(|source| RepositoryError::Io {
+            path: snapshot.to_path_buf(),
+            source,
+        })? {
+            let entry = entry.map_err(|source| RepositoryError::Io {
+                path: snapshot.to_path_buf(),
+                source,
+            })?;
+            let path = entry.path();
+            let name =
+                entry
+                    .file_name()
+                    .into_string()
+                    .map_err(|_| RepositoryError::InvalidSnapshot {
+                        revision: revision.clone(),
+                        path: path.clone(),
+                        details: "snapshot entry name is not UTF-8".to_string(),
+                    })?;
+            let metadata = fs::symlink_metadata(&path).map_err(|source| RepositoryError::Io {
+                path: path.clone(),
+                source,
+            })?;
+            if !metadata.file_type().is_file() {
+                return Err(RepositoryError::InvalidSnapshot {
+                    revision: revision.clone(),
+                    path,
+                    details: "snapshot entry is not a regular non-symlink file".to_string(),
+                });
+            }
+            actual.insert(name);
+        }
+        if actual != expected {
+            return Err(RepositoryError::InvalidSnapshot {
+                revision: revision.clone(),
+                path: snapshot.to_path_buf(),
+                details: "snapshot file set differs from the requested revision".to_string(),
+            });
+        }
         let registry = Registry::load(snapshot)?;
         if let Some(failure) = registry.failures().first() {
             return Err(RepositoryError::InvalidSnapshot {
@@ -488,7 +540,7 @@ impl Repository {
                 details: failure.error.to_string(),
             });
         }
-        for relative in self.revision_files(revision)? {
+        for relative in expected {
             let expected = self.git(
                 &["show", &format!("{revision}:{relative}")],
                 "read snapshot spec",
@@ -763,6 +815,38 @@ mod tests {
                 .join(revision.as_str())
                 .exists()
         );
+
+        let snapshot_path = cache
+            .join(crate::layout::MOUNT_REVISIONS_SUBDIR)
+            .join(revision.as_str());
+        let expected_bytes = fs::read(snapshot_path.join("demo.json")).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&snapshot_path, std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+        }
+        fs::write(snapshot_path.join("extra.json"), b"{}").unwrap();
+        assert!(matches!(
+            repository.snapshot(&revision, &cache),
+            Err(RepositoryError::InvalidSnapshot { .. })
+        ));
+        fs::remove_file(snapshot_path.join("extra.json")).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            let outside = dir.path().join("outside-demo.json");
+            fs::write(&outside, &expected_bytes).unwrap();
+            fs::remove_file(snapshot_path.join("demo.json")).unwrap();
+            symlink(&outside, snapshot_path.join("demo.json")).unwrap();
+            assert!(matches!(
+                repository.snapshot(&revision, &cache),
+                Err(RepositoryError::InvalidSnapshot { .. })
+            ));
+            fs::remove_file(snapshot_path.join("demo.json")).unwrap();
+            fs::write(snapshot_path.join("demo.json"), expected_bytes).unwrap();
+            fs::remove_file(outside).unwrap();
+        }
 
         fs::create_dir_all(mounts.join("nested")).unwrap();
         fs::write(mounts.join("nested/extra.json"), b"{}").unwrap();
