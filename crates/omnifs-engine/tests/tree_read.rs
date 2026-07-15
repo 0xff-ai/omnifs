@@ -30,7 +30,7 @@ use std::sync::Arc;
 use omnifs_core::path::Path;
 use omnifs_engine::Engine;
 use omnifs_engine::render::MATERIALIZE_MAX_BYTES;
-use omnifs_engine::test_support::cache::RecordKind;
+use omnifs_engine::test_support::cache::{CanonicalBatchEntry, RecordKind};
 use omnifs_engine::view::{EntryMeta, FileAttrsCache, FilePayload, FileSize, ReadMode, Stability};
 use omnifs_engine::{Node, NodeBody, ReadResult, RequestCtx, ServingContext, Tree, TreeErrorKind};
 use omnifs_itest::{RuntimeHarness, make_engine, make_runtime};
@@ -428,55 +428,47 @@ async fn read_item_md_is_durably_cached() {
     );
 }
 
-/// REGRESSION (canonical-not-copied hybrid): an identity `byte-source::canonical`
-/// read is served from the object cache and is NEVER copied into the view cache,
-/// even though it is Stable and would otherwise be durably cacheable. The
-/// object cache is its sole home; copying it into the view cache would duplicate
-/// the bytes across both stores. `item.json` is the item object's identity
-/// representation, so a cold read answers `byte-source::canonical`. If
-/// `finish_read` dropped its `from_canonical` guard, the canonical bytes would
-/// land in the view cache and this test would catch it.
+/// REGRESSION (access-driven revalidation and canonical-not-copied hybrid): an
+/// expired identity leaf revalidates through the object loader, preserves the
+/// canonical store as the sole byte home, and refreshes the shared view expiry
+/// for both unchanged and fresh loads.
 #[tokio::test(flavor = "multi_thread")]
-async fn canonical_identity_read_is_not_copied_into_view_cache() {
+async fn canonical_identity_read_revalidates_without_copying_into_view_cache() {
     let json = "/items/open/7/item.json";
     let t = test_tree();
     let ctx = RequestCtx;
 
-    // Prime the object index, then evict the preloaded view leaf so the read is
-    // a cold render that answers from the canonical store.
+    // Prime the object index and view leaf from the collection listing.
     let items = t.tree.resolve(&path("/items/open"), &ctx).await.unwrap();
     let _ = t
         .tree
         .list(&items, None, &ctx)
         .await
         .expect("list /items/open");
-    t.runtime
-        .apply_effects_for_test(
-            &listing_invalidation(json),
-            t.runtime.resources.current_generation(),
-        )
-        .expect("test effects should publish");
-    assert!(
-        t.runtime
-            .resources
-            .cache_get(&path(json), RecordKind::File, None)
-            .is_none(),
-        "view leaf must be cold before the canonical read"
-    );
-    assert!(
-        t.runtime
-            .resources
-            .cached_canonical_for(&path(json))
-            .is_some(),
-        "the identity representation lives in the object cache"
-    );
-
+    let item_path = path(json);
+    let op_gen = t.runtime.resources.current_generation();
     let node = t
         .tree
-        .resolve(&path(json), &ctx)
+        .resolve(&item_path, &ctx)
         .await
         .expect("resolve item.json");
-    let result = t.tree.read(&node, &ctx).await.expect("read item.json");
+    let canonical = t
+        .runtime
+        .resources
+        .cached_canonical_for(&item_path)
+        .expect("item canonical");
+    assert_eq!(canonical.validator.as_deref(), Some("item-7-v1"));
+    assert!(
+        t.runtime
+            .resources
+            .cache_view_leaf(&item_path, &[], Some(0), op_gen)
+            .unwrap()
+    );
+    assert!(t.runtime.resources.view_expired(&item_path, 1));
+
+    // The matching validator takes the Load::Unchanged path. The canonical
+    // bytes remain in the object cache and the indexed leaf becomes fresh.
+    let result = t.tree.read(&node, &ctx).await.expect("unchanged read");
     let ReadResult::Bytes { data, .. } = result else {
         panic!("expected provider bytes");
     };
@@ -485,21 +477,48 @@ async fn canonical_identity_read_is_not_copied_into_view_cache() {
         br#"{"number":7,"title":"Item 7","body":"Body 7","state":"open"}"#
     );
 
-    // The canonical bytes are served, but the view cache stays empty for this
-    // identity leaf: the object cache is its sole home.
+    assert!(!t.runtime.resources.view_expired(&item_path, u64::MAX));
     assert!(
         t.runtime
             .resources
-            .cache_get(&path(json), RecordKind::File, None)
+            .cache_get(&item_path, RecordKind::File, None)
             .is_none(),
-        "an identity byte-source::canonical read must NOT be copied into the view cache"
+        "an identity byte-source::canonical read must not copy bytes into the view cache"
     );
-    // The object cache still holds the canonical (it was the source, not evicted).
+
+    // Keep valid stale bytes but give them a nonmatching validator. The next
+    // expired access must take Load::Fresh and replace the stale canonical.
+    t.runtime
+        .resources
+        .put_canonical_batch(
+            vec![CanonicalBatchEntry {
+                id: canonical.id.clone(),
+                bytes: canonical.bytes.clone(),
+                validator: Some("item-7-v0".to_string()),
+                view_leaves: vec![item_path.clone()],
+            }],
+            op_gen,
+        )
+        .unwrap();
     assert!(
         t.runtime
             .resources
-            .cached_canonical_for(&path(json))
-            .is_some(),
-        "the canonical store remains the home of the identity bytes"
+            .cache_view_leaf(&item_path, &[], Some(0), op_gen)
+            .unwrap()
+    );
+
+    t.tree.read(&node, &ctx).await.expect("fresh read");
+    let refreshed = t
+        .runtime
+        .resources
+        .cached_canonical_for(&item_path)
+        .expect("refreshed canonical");
+    assert_eq!(refreshed.validator.as_deref(), Some("item-7-v1"));
+    assert!(
+        t.runtime
+            .resources
+            .cache_get(&item_path, RecordKind::File, None)
+            .is_none(),
+        "a fresh identity read must not copy bytes into the view cache"
     );
 }

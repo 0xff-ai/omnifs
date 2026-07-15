@@ -56,7 +56,6 @@ impl<'a> MountSpecCreator<'a> {
         let mut spec = Spec {
             provider: self.reference.clone(),
             mount: self.mount_name.to_string(),
-            revalidate: true,
             auth: None,
             limits: None,
             config_raw: None,

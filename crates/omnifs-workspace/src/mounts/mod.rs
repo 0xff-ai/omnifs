@@ -65,8 +65,6 @@ pub struct Spec {
     /// Serving resolves the artifact by `provider.id`, never by name.
     pub provider: ProviderRef,
     pub mount: String,
-    #[serde(default = "default_revalidate", skip_serializing_if = "is_true")]
-    pub revalidate: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth: Option<Auth>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -115,18 +113,6 @@ impl ProviderMetadataInheritance {
             config: ConfigInheritance::All,
         }
     }
-}
-
-#[expect(
-    clippy::trivially_copy_pass_by_ref,
-    reason = "serde skip predicate ABI"
-)]
-fn is_true(value: &bool) -> bool {
-    *value
-}
-
-fn default_revalidate() -> bool {
-    true
 }
 
 impl Spec {
@@ -942,13 +928,9 @@ mod tests {
         let path = mounts.join("github.json");
         let written = std::fs::read_to_string(&path).expect("spec written");
         // Compact authored shape: a lone auth entry stays a single object (not an
-        // array), absent `capabilities`/`config`/`revalidate` are omitted,
+        // array), absent `capabilities`/`config` are omitted,
         // and the file ends in a trailing newline.
         assert!(written.ends_with("}\n"), "trailing newline: {written:?}");
-        assert!(
-            !written.contains("revalidate"),
-            "default revalidate omitted: {written}"
-        );
         assert!(
             !written.contains("capabilities"),
             "absent capabilities omitted: {written}"
@@ -977,18 +959,6 @@ mod tests {
         assert!(
             !registry.remove(&name).expect("remove absent"),
             "removing an absent mount is Ok(false)"
-        );
-    }
-
-    #[test]
-    fn revalidate_false_serializes_as_mount_kill_switch() {
-        let spec = spec_with_provider("github", r#"{ "mount": "github", "revalidate": false }"#);
-
-        assert!(!spec.revalidate);
-        let written = serde_json::to_string(&spec).unwrap();
-        assert!(
-            written.contains(r#""revalidate":false"#),
-            "explicit kill switch preserved: {written}"
         );
     }
 }

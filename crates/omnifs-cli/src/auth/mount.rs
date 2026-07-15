@@ -30,7 +30,6 @@ impl AuthSelection {
         let mut spec = Spec {
             provider: reference.clone(),
             mount: mount_name.to_string(),
-            revalidate: true,
             auth: None,
             limits: None,
             config_raw: None,

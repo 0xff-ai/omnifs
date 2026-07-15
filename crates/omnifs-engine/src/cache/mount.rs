@@ -608,6 +608,18 @@ impl MountResources {
         Ok(true)
     }
 
+    /// Whether the indexed view leaf has reached its freshness deadline.
+    pub fn view_expired(&self, path: &Path, now_millis: u64) -> bool {
+        self.caches
+            .view
+            .get_expiry(self.scoped(path).as_str())
+            .is_some_and(|expiry| {
+                expiry
+                    .expires_at
+                    .is_some_and(|deadline| deadline <= now_millis)
+            })
+    }
+
     /// Expiry-aware view read: returns `None` when the leaf is past its deadline.
     pub fn view_get(
         &self,
@@ -616,10 +628,7 @@ impl MountResources {
         aux: Option<&str>,
         now_millis: u64,
     ) -> Option<Record> {
-        let scoped = self.scoped(path);
-        if let Some(f) = self.caches.view.get_expiry(scoped.as_str())
-            && f.expires_at.is_some_and(|exp| now_millis >= exp)
-        {
+        if self.view_expired(path, now_millis) {
             return None;
         }
         self.cache_get(path, kind, aux)

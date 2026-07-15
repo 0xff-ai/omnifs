@@ -39,7 +39,6 @@ impl<'a> MountFile<'a> {
         Spec {
             provider: self.reference.clone(),
             mount: self.mount_name.to_string(),
-            revalidate: true,
             auth: self.auth.map(|auth| {
                 let account = auth.account.clone();
                 let scheme = auth.scheme.clone();

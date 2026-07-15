@@ -251,12 +251,15 @@ fn leaf_records_share_one_deadline() {
 
     let runtime = &harness.runtime;
     let op_gen = runtime.resources.current_generation();
+    assert!(!runtime.resources.view_expired(&p("/missing"), now));
     assert!(
         runtime
             .resources
             .cache_view_leaf(&p(path), &batch, Some(now.saturating_add(ttl)), op_gen,)
             .unwrap()
     );
+    assert!(!runtime.resources.view_expired(&p(path), now + 999));
+    assert!(runtime.resources.view_expired(&p(path), now + 4_000));
 
     for kind in RecordKind::ALL {
         if kind == RecordKind::Dirents {

@@ -9,6 +9,7 @@
 use std::path::PathBuf;
 
 use crate::cache::{Record as CacheRecord, RecordKind};
+use crate::clock::{freshness_expiry, now_millis};
 use crate::ops::namespace::{ReadBytes, ReadOutcome};
 use crate::pagination::NextPageOutcome;
 use crate::render::MATERIALIZE_MAX_BYTES;
@@ -59,11 +60,11 @@ impl<'a> FileAttrStore<'a> {
         Self { runtime, path }
     }
 
-    pub(crate) fn cached(&self) -> Option<FileAttrsCache> {
-        if let Some(record) = self
-            .runtime
-            .resources
-            .cache_get(self.path, RecordKind::Lookup, None)
+    pub(crate) fn cached(&self, now_millis: u64) -> Option<FileAttrsCache> {
+        if let Some(record) =
+            self.runtime
+                .resources
+                .view_get(self.path, RecordKind::Lookup, None, now_millis)
             && let Some(LookupPayload::Positive(meta)) = LookupPayload::deserialize(&record.payload)
             && let Some(attrs) = meta.into_attrs()
         {
@@ -72,7 +73,7 @@ impl<'a> FileAttrStore<'a> {
 
         self.runtime
             .resources
-            .cache_get(self.path, RecordKind::Attr, None)
+            .view_get(self.path, RecordKind::Attr, None, now_millis)
             .and_then(|record| AttrPayload::deserialize(&record.payload))
             .and_then(|payload| payload.meta.into_attrs())
     }
@@ -119,7 +120,7 @@ impl Tree {
         path: &omnifs_core::path::Path,
     ) -> Option<FileAttrsCache> {
         let runtime = self.ctx.runtime_for(mount).ok()?;
-        FileAttrStore::new(&runtime, path).cached()
+        FileAttrStore::new(&runtime, path).cached(now_millis())
     }
 
     pub fn publish_file_attrs(
@@ -159,7 +160,11 @@ impl Tree {
         let runtime = self.ctx.runtime_for(node.mount())?;
         let path = node.path();
         let attr_store = FileAttrStore::new(&runtime, path);
-        let projected_attrs = attr_store.cached().or_else(|| node.attrs().cloned());
+        let now = now_millis();
+        let expired = runtime.resources.view_expired(path, now);
+        let projected_attrs = attr_store
+            .cached(now)
+            .or_else(|| (!expired).then(|| node.attrs().cloned()).flatten());
         let attrs = projected_attrs.as_ref();
         enforce_declared_materialize_cap(path, attrs)?;
 
@@ -216,7 +221,7 @@ impl Tree {
             if let Some(record) =
                 runtime
                     .resources
-                    .cache_get(path, RecordKind::File, aux.as_deref())
+                    .view_get(path, RecordKind::File, aux.as_deref(), now)
                 && let Some(payload) = file_payload_for_attrs(&record, attrs)
             {
                 crate::inspector::cache_event(CacheKind::FileHit);
@@ -355,6 +360,20 @@ fn finish_read(
             op_gen,
         )?;
     }
+
+    let _ = runtime
+        .resources
+        .cache_view_leaf(
+            path,
+            &[],
+            freshness_expiry(attrs_cache.stability(), now_millis()),
+            op_gen,
+        )
+        .map_err(|error| {
+            TreeError::internal(format!(
+                "read for {path} could not refresh view expiry: {error}"
+            ))
+        })?;
 
     Ok(ReadResult::Bytes {
         data,

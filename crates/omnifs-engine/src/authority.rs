@@ -539,7 +539,6 @@ mod tests {
                 },
             },
             mount: "authority-test".to_owned(),
-            revalidate: true,
             auth: None,
             limits: None,
             config_raw: None,

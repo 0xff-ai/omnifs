@@ -17,12 +17,10 @@ use std::time::Duration;
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
-pub(crate) const DEFAULT_REVALIDATE_SECS: u64 = 15 * 60;
-
 /// Registry of loaded WASM providers.
 ///
 /// Instantiates providers on demand and manages their lifecycle including
-/// per-mount timer-driven revalidation tasks.
+/// per-mount manifest-driven provider timer tasks.
 pub struct MountRuntimes {
     engine: wasmtime::Engine,
     caches: Arc<Caches>,
@@ -125,7 +123,6 @@ impl MountRuntimes {
                 &built.mount,
                 &built.runtime,
                 built.provider_interval_secs,
-                built.revalidate,
                 handle,
             );
             info!(mount = built.mount.as_str(), "loaded provider");
@@ -200,7 +197,6 @@ impl MountRuntimes {
         Ok(BuiltMount {
             mount,
             provider_interval_secs,
-            revalidate: spec.revalidate,
             runtime: Arc::new(runtime),
         })
     }
@@ -243,18 +239,12 @@ impl MountRuntimes {
         mount: &str,
         runtime: &Arc<Runtime>,
         provider_interval_secs: u32,
-        revalidate: bool,
         handle: &tokio::runtime::Handle,
     ) {
-        if provider_interval_secs == 0 && !revalidate {
+        if provider_interval_secs == 0 {
             return;
         }
 
-        let interval_secs = if provider_interval_secs == 0 {
-            DEFAULT_REVALIDATE_SECS
-        } else {
-            u64::from(provider_interval_secs)
-        };
         let mount = mount.to_string();
         let runtime = Arc::clone(runtime);
         let mut shutdown = self.timer_shutdown.subscribe();
@@ -264,17 +254,15 @@ impl MountRuntimes {
                 if *shutdown.borrow_and_update() {
                     return;
                 }
-                let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
+                let mut interval = tokio::time::interval(Duration::from_secs(
+                    u64::from(provider_interval_secs),
+                ));
                 loop {
                     tokio::select! {
                         _ = interval.tick() => {
-                            if provider_interval_secs != 0
-                                && let Err(e) = runtime.call_timer_tick().await
+                            if let Err(e) = runtime.call_timer_tick().await
                             {
                                 debug!(mount = mount.as_str(), error = %e, "provider timer tick failed");
-                            }
-                            if revalidate {
-                                runtime.revalidate_recent_objects().await;
                             }
                         }
                         changed = shutdown.changed() => {
@@ -293,7 +281,6 @@ impl MountRuntimes {
 struct BuiltMount {
     mount: String,
     provider_interval_secs: u32,
-    revalidate: bool,
     runtime: Arc<Runtime>,
 }
 

@@ -33,7 +33,7 @@ state, generation fences, view admission, and mount blob storage. Durable
 publication and invalidation transitions use its short synchronous boundary;
 the boundary never spans provider execution, filesystem I/O, or an await.
 
-Host revalidation is a cache safety backstop, not a second invalidation channel. `MountRuntimes` drives the per-mount timer, `Runtime::revalidate_recent_objects` chooses from the recent object-read set, and `Namespace::revalidate_file` re-enters `read-file` with the cached canonical id, validator, and bytes so normal provider effects apply any refreshed canonical bytes or invalidations.
+Access-driven revalidation is the cache freshness boundary. An expired indexed view leaf makes the next read enter `read-file` with the cached canonical id, validator, and bytes in `ReadMode::Revalidate`, so normal provider effects apply refreshed canonical bytes or invalidations. Provider-declared timer events remain independent and use the manifest refresh interval.
 
 ### Listing and lookup
 

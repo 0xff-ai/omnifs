@@ -161,16 +161,14 @@ impl Namespace<'_> {
     }
 
     pub async fn read_file(&self, path: &Path, content_type: String) -> Result<ReadOutcome> {
-        self.read_file_with_mode(path, content_type, ReadMode::Serve)
-            .await
-    }
-
-    pub(crate) async fn revalidate_file(
-        &self,
-        path: &Path,
-        content_type: String,
-    ) -> Result<ReadOutcome> {
-        self.read_file_with_mode(path, content_type, ReadMode::Revalidate)
+        let now = now_millis();
+        let cached_canonical = self.runtime.resources.cached_canonical_for(path);
+        let mode = if cached_canonical.is_some() && self.runtime.resources.view_expired(path, now) {
+            ReadMode::Revalidate
+        } else {
+            ReadMode::Serve
+        };
+        self.read_file_with_mode(path, content_type, mode, cached_canonical)
             .await
     }
 
@@ -179,6 +177,7 @@ impl Namespace<'_> {
         path: &Path,
         content_type: String,
         mode: ReadMode,
+        cached_canonical: Option<crate::cache::CachedCanonical>,
     ) -> Result<ReadOutcome> {
         let now = now_millis();
         if self.runtime.resources.negative_for(path, now).is_some() {
@@ -187,7 +186,7 @@ impl Namespace<'_> {
 
         // Single cache lookup: derive both the warm_id (for coalescing key and
         // live check) and the CanonicalInput (byte buffer for the provider).
-        let (warm_id, cached_canonical) = match self.runtime.resources.cached_canonical_for(path) {
+        let (warm_id, cached_canonical) = match cached_canonical {
             Some(crate::cache::CachedCanonical {
                 id,
                 bytes,
@@ -207,7 +206,7 @@ impl Namespace<'_> {
 
         let live = warm_id
             .as_ref()
-            .and_then(|_| leaf_stability(self, path))
+            .and_then(|_| leaf_stability(self, path, now))
             .is_some_and(|s| s == Stability::Live);
 
         // Cheap op for the error arm: no byte buffer, same path/content_type shape.
@@ -258,18 +257,7 @@ impl Namespace<'_> {
         };
 
         match result {
-            wit_types::ReadFileOutcome::Found(result) => {
-                match warm_id {
-                    Some(host_id) => self.runtime.note_read_object(host_id),
-                    None => {
-                        if let Some(canonical) = self.runtime.resources.cached_canonical_for(path) {
-                            self.runtime
-                                .note_read_object(ObjectId::from_bytes(canonical.id));
-                        }
-                    },
-                }
-                Ok(ReadOutcome::from_wit(result))
-            },
+            wit_types::ReadFileOutcome::Found(result) => Ok(ReadOutcome::from_wit(result)),
             wit_types::ReadFileOutcome::NotFound(_) => Err(enoent(path.as_str())),
         }
     }
@@ -379,10 +367,10 @@ impl ChunkOutcome {
     }
 }
 
-fn leaf_stability(ns: &Namespace<'_>, path: &Path) -> Option<Stability> {
+fn leaf_stability(ns: &Namespace<'_>, path: &Path, now_millis: u64) -> Option<Stability> {
     ns.runtime
         .resources
-        .cache_get(path, RecordKind::Attr, None)
+        .view_get(path, RecordKind::Attr, None, now_millis)
         .and_then(|record| AttrPayload::deserialize(&record.payload))
         .and_then(|attr| attr.meta.attrs().map(FileAttrsCache::stability))
 }

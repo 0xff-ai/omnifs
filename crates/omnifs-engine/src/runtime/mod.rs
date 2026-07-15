@@ -30,7 +30,6 @@ use std::path::{Path as StdPath, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
-use tracing::debug;
 
 pub(crate) mod instance;
 pub(crate) mod registry;
@@ -47,7 +46,6 @@ const RATE_LIMIT_DEFAULT_COOLDOWN: std::time::Duration = std::time::Duration::fr
 // Upper bound so a hostile Retry-After cannot overflow `Instant` or wedge the
 // window open indefinitely.
 const RATE_LIMIT_MAX_COOLDOWN: std::time::Duration = std::time::Duration::from_hours(1);
-const RECENT_REVALIDATE_OBJECTS: usize = 32;
 
 /// Host-owned filesystem context for provider runtime.
 #[derive(Clone, Debug)]
@@ -129,7 +127,6 @@ pub struct Runtime {
     trees: Arc<TreeRefs>,
     pub(crate) invalidation: InvalidationState,
     pub(crate) coalesce: InFlight,
-    recent_objects: parking_lot::Mutex<RecentObjects>,
     /// Per-path locks serializing the read-modify-write of a paged
     /// directory's accumulated dirents. Two concurrent `@next` (or `@all`)
     /// reads on the same directory must not both snapshot the same base and
@@ -406,7 +403,6 @@ impl Runtime {
             trees,
             invalidation: InvalidationState::default(),
             coalesce: InFlight::new(),
-            recent_objects: parking_lot::Mutex::new(RecentObjects::new()),
             pagination_locks: DashMap::new(),
             rate_limit_until: std::sync::Mutex::new(None),
             test_callouts: test_rx.map(std::sync::Mutex::new),
@@ -490,35 +486,6 @@ impl Runtime {
         self.next_operation_id.fetch_add(1, Ordering::Relaxed)
     }
 
-    pub(crate) fn note_read_object(&self, id: ObjectId) {
-        self.recent_objects.lock().record(id);
-    }
-
-    pub(crate) async fn revalidate_recent_objects(&self) {
-        let ids = self.recent_objects.lock().snapshot();
-        for id in ids {
-            let Some(path) = self.revalidation_path_for(&id) else {
-                continue;
-            };
-            let content_type = path.content_type_mime(None).to_string();
-            if let Err(error) = self.namespace().revalidate_file(&path, content_type).await {
-                debug!(
-                    mount = self.mount_name.as_str(),
-                    path = path.as_str(),
-                    error = %error,
-                    "host revalidation read failed"
-                );
-            }
-        }
-    }
-
-    fn revalidation_path_for(&self, id: &ObjectId) -> Option<Path> {
-        self.resources
-            .paths_for_id(id.as_bytes())
-            .into_iter()
-            .next()
-    }
-
     pub async fn call_timer_tick(&self) -> Result<()> {
         self.run_event(wit_types::ProviderEvent::TimerTick).await
     }
@@ -561,30 +528,6 @@ impl Runtime {
             })?;
         self.record_view_invalidations(prefixes, paths);
         Ok(())
-    }
-}
-
-struct RecentObjects {
-    ids: Vec<ObjectId>,
-}
-
-impl RecentObjects {
-    fn new() -> Self {
-        Self {
-            ids: Vec::with_capacity(RECENT_REVALIDATE_OBJECTS),
-        }
-    }
-
-    fn record(&mut self, id: ObjectId) {
-        if let Some(index) = self.ids.iter().position(|existing| existing == &id) {
-            self.ids.remove(index);
-        }
-        self.ids.insert(0, id);
-        self.ids.truncate(RECENT_REVALIDATE_OBJECTS);
-    }
-
-    fn snapshot(&self) -> Vec<ObjectId> {
-        self.ids.clone()
     }
 }
 

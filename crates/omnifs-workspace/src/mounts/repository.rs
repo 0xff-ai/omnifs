@@ -670,7 +670,7 @@ mod tests {
         repository.put(&spec("demo")).unwrap();
         let first = repository.commit().unwrap();
         let mut edited = spec("demo");
-        edited.revalidate = false;
+        edited.config_raw = Some(serde_json::json!({"manual": true}));
         fs::write(
             mounts.join("demo.json"),
             serde_json::to_vec_pretty(&edited).unwrap(),
