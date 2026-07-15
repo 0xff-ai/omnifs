@@ -23,13 +23,11 @@ cargo install omnifs-cli
 ## Quick start
 
 ```bash
-omnifs mount add github
-omnifs up
-omnifs frontend enable fuse --runtime docker
+omnifs setup --providers github
 omnifs frontend shell fuse --runtime docker
 ```
 
-The CLI stores credentials and self-contained mount specs under `OMNIFS_HOME`. The daemon runs on the host. Frontends are independent access surfaces over the complete shared namespace; observe and manage them with `omnifs frontend ls`, `enable`, `disable`, and `restart`. Host frontends are ordinary mounted paths; `omnifs frontend shell` enters one explicit Docker or libkrun frontend.
+`omnifs setup` is a thin first-run composition: it configures exact embedded providers, starts the daemon, and enables Linux host FUSE or macOS host NFS plus Docker FUSE. `--no-up` configures mounts without launching lifecycle actions, and structured output ends with one Inventory result. The CLI stores credentials and self-contained mount specs under `OMNIFS_HOME`. Frontends remain independent access surfaces over the complete shared namespace; observe and manage them with `omnifs frontend ls`, `enable`, `disable`, and `restart`. Host frontends are ordinary mounted paths; `omnifs frontend shell` enters one explicit Docker or libkrun frontend.
 
 ## Platform
 

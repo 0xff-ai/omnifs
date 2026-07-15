@@ -66,6 +66,9 @@ pub enum Commands {
     /// Add, list, reauthenticate, revoke, or remove mounts
     Mount(commands::mount::MountArgs),
 
+    /// Configure providers, start the daemon, and enable platform frontends
+    Setup(commands::setup::SetupArgs),
+
     /// Install omnifs usage skills for agent harnesses
     Skill(commands::skill::SkillArgs),
 
@@ -141,6 +144,7 @@ impl Commands {
                     commands::mount::MountCommand::Rm { .. } => "mount.rm",
                 },
             ),
+            Self::Setup(_) => (Some("setup"), "setup"),
             Self::Skill(_) => (Some("skill"), "skill"),
             Self::Doctor(_) => (Some("doctor"), "doctor"),
             Self::Completions(_) => (Some("completions"), "completions"),
@@ -184,6 +188,7 @@ impl Commands {
             Self::Logs(args) => args.run(output).map(|()| ExitCode::Success),
             Self::Inspect(args) => args.run(output).await.map(|()| ExitCode::Success),
             Self::Mount(args) => args.run(output).await,
+            Self::Setup(args) => args.run(output).await,
             Self::Skill(args) => args.run(output).map(|()| ExitCode::Success),
             Self::Completions(args) => args.run(output).map(|()| ExitCode::Success),
             Self::Version(args) => args.run(output).await,

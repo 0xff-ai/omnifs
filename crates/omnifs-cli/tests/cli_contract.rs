@@ -195,7 +195,6 @@ fn removed_top_level_commands_are_usage_errors() {
             ["providers", "ls"].as_slice(),
             "unrecognized subcommand 'providers'",
         ),
-        (["setup"].as_slice(), "unrecognized subcommand 'setup'"),
     ] {
         let output = fixture.run(args);
         assert_eq!(exit_code(&output), 2, "{args:?}: {output:?}");
@@ -257,6 +256,29 @@ fn json_commands_emit_expected_shapes() {
     assert_eq!(status_json["result"]["daemon"]["probe"]["state"], "stopped");
     assert!(status_json["result"]["mounts"].as_array().is_some());
     assert!(status_json["result"].get("providers").is_none());
+
+    let setup = fixture.run(&[
+        "setup",
+        "--no-up",
+        "--providers",
+        "dns",
+        "--no-input",
+        "--output",
+        "jsonl",
+    ]);
+    assert_eq!(exit_code(&setup), 0);
+    let setup_lines = String::from_utf8_lossy(&setup.stdout)
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("setup JSONL line"))
+        .collect::<Vec<_>>();
+    assert_eq!(setup_lines.len(), 1);
+    assert_eq!(setup_lines[0]["type"], "result");
+    assert_eq!(setup_lines[0]["command"], "setup");
+    assert_eq!(
+        setup_lines[0]["result"]["mounts"].as_array().unwrap().len(),
+        1
+    );
+    assert!(setup_lines[0]["result"].get("receipt").is_none());
 
     let mounts = fixture.run(&["mount", "ls", "--output", "json"]);
     assert_eq!(exit_code(&mounts), 0);

@@ -225,6 +225,22 @@ fn default_selected(manifest: &ProviderManifest) -> bool {
     !crate::commands::mount::detect::detect(auth_manifest.as_ref()).is_empty()
 }
 
+/// Returns `true` when setup can configure a provider under `--yes` without
+/// asking for mount input or starting an interactive authentication flow.
+pub(crate) fn safe_for_setup(manifest: &ProviderManifest) -> bool {
+    if manifest.requires_mount_input() {
+        return false;
+    }
+    if manifest.auth.is_none() {
+        return true;
+    }
+    let auth_manifest = manifest
+        .auth
+        .as_ref()
+        .map(omnifs_workspace::provider::ProviderAuthManifest::wasm_auth_manifest);
+    !crate::commands::mount::detect::detect(auth_manifest.as_ref()).is_empty()
+}
+
 /// Returns `true` when a mount with `name` appears in `mounts`.
 pub(crate) fn mount_exists(mounts: &[MountConfig], name: &omnifs_workspace::mounts::Name) -> bool {
     mounts.iter().any(|mount| &mount.name == name)

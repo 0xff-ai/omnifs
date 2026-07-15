@@ -42,5 +42,6 @@ impl FrontendArgs {
 }
 
 pub(crate) use lifecycle::{
-    FrontendFilesystem, FrontendId, FrontendResult, FrontendResultState, FrontendRuntime,
+    FrontendEnableArgs, FrontendFilesystem, FrontendId, FrontendResult, FrontendResultState,
+    FrontendRuntime,
 };

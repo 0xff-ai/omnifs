@@ -24,13 +24,11 @@ omnifs is written in Rust. We ship prebuilt Linux and macOS binaries through the
 
 ```bash
 npm install -g @0xff-ai/omnifs
-omnifs mount add github
-omnifs up
-omnifs frontend enable fuse --runtime host --location "$HOME/omnifs"
+omnifs setup --providers github
 omnifs status
 ```
 
-`omnifs mount add <provider>` creates one desired mount and handles its auth and config. `omnifs up` starts the host-native daemon only, and `omnifs frontend enable` imperatively starts one explicit frontend. Host frontends are ordinary mounted paths; use `omnifs frontend shell` only for a Docker or libkrun frontend.
+`omnifs setup` configures exact embedded providers, starts the host-native daemon, and enables the accepted platform defaults as one imperative first-run flow. Use `omnifs setup --no-up` to configure mounts only, or use `omnifs mount add <provider>`, `omnifs up`, and `omnifs frontend enable` for separate operations. Host frontends are ordinary mounted paths; use `omnifs frontend shell` only for a Docker or libkrun frontend.
 
 ---
 
