@@ -7,7 +7,7 @@
 use crate::auth::binding_from_config;
 use crate::authority::RuntimeAuthority;
 use crate::blob::{BlobExecutor, BlobLimits};
-use crate::cache::{Caches, MountResources};
+use crate::cache::MountResources;
 use crate::callouts::{CalloutHost, TestCallouts, TestSignal};
 use crate::cloner::GitCloner;
 use crate::git;
@@ -264,7 +264,7 @@ impl Runtime {
         manifest: &ProviderManifest,
         cloner: Arc<GitCloner>,
         context: &HostContext,
-        caches: &Arc<Caches>,
+        resources: Arc<MountResources>,
         credential_service: &Arc<CredentialService>,
     ) -> std::result::Result<Self, BuildError> {
         Self::build(
@@ -274,7 +274,7 @@ impl Runtime {
             manifest,
             cloner,
             context,
-            caches,
+            resources,
             credential_service,
             false,
         )
@@ -288,7 +288,7 @@ impl Runtime {
         manifest: &ProviderManifest,
         cloner: Arc<GitCloner>,
         context: &HostContext,
-        caches: &Arc<Caches>,
+        resources: Arc<MountResources>,
         credential_service: &Arc<CredentialService>,
     ) -> std::result::Result<Self, BuildError> {
         Self::build(
@@ -298,7 +298,7 @@ impl Runtime {
             manifest,
             cloner,
             context,
-            caches,
+            resources,
             credential_service,
             true,
         )
@@ -315,7 +315,7 @@ impl Runtime {
         manifest: &ProviderManifest,
         cloner: Arc<GitCloner>,
         _context: &HostContext,
-        caches: &Arc<Caches>,
+        resources: Arc<MountResources>,
         credential_service: &Arc<CredentialService>,
         capture_test_callouts: bool,
     ) -> std::result::Result<Self, BuildError> {
@@ -368,11 +368,6 @@ impl Runtime {
         let trees = Arc::new(TreeRefs::new());
         let git = git::GitExecutor::new(cloner, Arc::clone(&authority), trees.clone(), mount_name);
 
-        let name = omnifs_workspace::mounts::Name::new(mount_name)
-            .map_err(|error| BuildError::Cache(error.to_string()))?;
-        let resources = caches
-            .mount(&name)
-            .map_err(|error| BuildError::Cache(error.to_string()))?;
         let blob_limits = BlobLimits::from_config(config);
         let http = Arc::new(HttpStack::new(auth.clone(), authority)?);
         let blob = BlobExecutor::new(Arc::clone(&http), Arc::clone(&resources), blob_limits);

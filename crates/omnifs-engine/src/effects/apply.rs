@@ -635,7 +635,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let caches = Caches::open(dir.path()).unwrap();
         let name = omnifs_workspace::mounts::Name::new(mount).unwrap();
-        let store = caches.mount(&name).unwrap();
+        let source = mount.as_bytes();
+        let provider_id = omnifs_workspace::ids::ProviderId::from_wasm_bytes(source);
+        let store = caches
+            .mount(
+                &name,
+                crate::cache::ProjectionId::new(source, provider_id),
+                provider_id,
+                source,
+            )
+            .unwrap();
         (dir, caches, store)
     }
 

@@ -1,6 +1,7 @@
 //! Stable, domain-separated identities for host-owned callout storage.
 
 use omnifs_workspace::authn::CredentialId;
+use omnifs_workspace::ids::ProviderId;
 use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -12,6 +13,26 @@ pub(crate) struct BlobGeneration([u8; 32]);
 /// Identity for a mount-scoped Git checkout.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct GitId([u8; 32]);
+
+/// Stable identity of one projected mount revision and provider artifact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct ProjectionId([u8; 32]);
+
+impl ProjectionId {
+    #[must_use]
+    pub(crate) fn new(spec_source: &[u8], provider_id: ProviderId) -> Self {
+        let mut hasher = blake3::Hasher::new();
+        frame(&mut hasher, b"omnifs/projection/v1");
+        frame(&mut hasher, spec_source);
+        frame(&mut hasher, provider_id.as_bytes());
+        Self(*hasher.finalize().as_bytes())
+    }
+
+    #[must_use]
+    pub(crate) fn hex(self) -> String {
+        hex(self.0)
+    }
+}
 
 impl BlobRequestId {
     /// Hash validated request material plus the stable credential partition.
@@ -208,6 +229,21 @@ mod tests {
         assert_ne!(
             BlobGeneration::from_bytes(b"body"),
             BlobGeneration::from_bytes(b"other")
+        );
+    }
+
+    #[test]
+    fn projection_identity_uses_exact_spec_bytes_and_provider_content() {
+        let provider = ProviderId::from_wasm_bytes(b"provider");
+        let same = ProjectionId::new(b"{\"mount\":\"demo\"}\n", provider);
+        assert_eq!(same, ProjectionId::new(b"{\"mount\":\"demo\"}\n", provider));
+        assert_ne!(same, ProjectionId::new(b"{\"mount\":\"demo\"}", provider));
+        assert_ne!(
+            same,
+            ProjectionId::new(
+                b"{\"mount\":\"demo\"}\n",
+                ProviderId::from_wasm_bytes(b"other")
+            )
         );
     }
 }

@@ -10,6 +10,7 @@ categories = ["filesystem", "wasm"]
 keywords = ["omnifs", "fuse", "wasm", "wasmtime", "filesystem"]
 
 [dependencies]
+libc = { workspace = true, optional = true }
 wasmtime = { workspace = true, optional = true }
 tokio = { workspace = true }
 reqwest = { workspace = true, optional = true }
@@ -45,6 +46,7 @@ time = { workspace = true, features = ["formatting"], optional = true }
 [features]
 default = ["runtime"]
 runtime = [
+    "dep:libc",
     "dep:anyhow",
     "dep:cap-std",
     "dep:blake3",

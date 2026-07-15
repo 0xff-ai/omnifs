@@ -123,6 +123,16 @@ pub mod cache {
     };
     pub use crate::cache::{object, view};
 
+    pub fn mount(
+        caches: &std::sync::Arc<Caches>,
+        name: &omnifs_workspace::mounts::Name,
+        spec_source: &[u8],
+        provider_id: omnifs_workspace::ids::ProviderId,
+    ) -> anyhow::Result<std::sync::Arc<MountResources>> {
+        let id = crate::cache::ProjectionId::new(spec_source, provider_id);
+        caches.mount(name, id, provider_id, spec_source)
+    }
+
     pub fn cache_get(
         runtime: &crate::Runtime,
         path: &omnifs_core::path::Path,

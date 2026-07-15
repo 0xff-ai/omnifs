@@ -35,8 +35,12 @@ use std::sync::Arc;
 use tokio::sync::Notify;
 
 use super::blob::{BLOB_TMP_DIR, BlobCache};
+use super::body::BodyStore;
+use super::identity::ProjectionId;
+use super::projection::ProjectionStore;
 use super::{object, view};
 use crate::object_id::ObjectId;
+use omnifs_workspace::ids::ProviderId;
 
 /// Result of a warm canonical lookup: the object id, the canonical bytes, and
 /// the optional validator.
@@ -204,6 +208,8 @@ fn now_millis_for_gc() -> u64 {
 /// reopens a `view/` database, which is always cold after restart.
 pub struct Caches {
     root: std::path::PathBuf,
+    pub(crate) body: Arc<BodyStore>,
+    projection_root: std::path::PathBuf,
     pub object: object::Cache,
     pub view: view::Cache,
 }
@@ -216,18 +222,39 @@ impl Caches {
     pub fn open(dir: &StdPath) -> anyhow::Result<Arc<Self>> {
         std::fs::create_dir_all(dir)?;
         let object = object::Cache::open(&dir.join("object"))?;
+        let body = Arc::new(BodyStore::open(dir.join("bodies"))?);
+        let projection_root = dir.join("projections");
+        std::fs::create_dir_all(&projection_root)?;
+        let projection_metadata = std::fs::symlink_metadata(&projection_root)?;
+        if projection_metadata.file_type().is_symlink() || !projection_metadata.is_dir() {
+            anyhow::bail!("projection store root is not a regular directory");
+        }
         sweep_blob_temps(dir)?;
         let view = view::Cache::open(&dir.join("view"))?;
         Ok(Arc::new(Self {
             root: dir.to_path_buf(),
+            body,
+            projection_root,
             object,
             view,
         }))
     }
 
     /// Return the sole owner of one mount's cache and blob resources.
-    pub fn mount(self: &Arc<Self>, mount: &Name) -> anyhow::Result<Arc<MountResources>> {
-        MountResources::new(Arc::clone(self), mount)
+    pub(crate) fn mount(
+        self: &Arc<Self>,
+        mount: &Name,
+        projection_id: ProjectionId,
+        provider_id: ProviderId,
+        spec_source: &[u8],
+    ) -> anyhow::Result<Arc<MountResources>> {
+        MountResources::new(
+            Arc::clone(self),
+            mount,
+            projection_id,
+            provider_id,
+            spec_source,
+        )
     }
 }
 
@@ -278,6 +305,8 @@ pub struct MountResources {
     /// This mount's object keyspaces (raw-keyed).
     object: object::MountObjects,
     pub(crate) mount: Name,
+    pub(crate) projection: ProjectionStore,
+    pub(crate) body: Arc<BodyStore>,
     pub(crate) coherence: Mutex<Coherence>,
     pub(crate) blob: BlobCache,
     publication: PublicationReservations,
@@ -328,8 +357,21 @@ pub struct Coherence {
 }
 
 impl MountResources {
-    fn new(caches: Arc<Caches>, mount: &Name) -> anyhow::Result<Arc<Self>> {
+    fn new(
+        caches: Arc<Caches>,
+        mount: &Name,
+        projection_id: ProjectionId,
+        provider_id: ProviderId,
+        spec_source: &[u8],
+    ) -> anyhow::Result<Arc<Self>> {
         let object = caches.object.mount(mount.as_str())?;
+        let projection = ProjectionStore::open(
+            &caches.projection_root,
+            projection_id,
+            mount,
+            spec_source,
+            provider_id,
+        )?;
         let blob = BlobCache::new(
             caches
                 .root
@@ -337,10 +379,13 @@ impl MountResources {
                 .join(mount.as_str())
                 .join("blobs"),
         )?;
+        let body = Arc::clone(&caches.body);
         Ok(Arc::new(Self {
             caches,
             object,
             mount: mount.clone(),
+            projection,
+            body,
             coherence: Mutex::new(Coherence {
                 generation: 0,
                 tombstones: DashMap::new(),
@@ -821,7 +866,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let caches = Caches::open(dir.path()).unwrap();
         let name = Name::new(mount).unwrap();
-        let store = caches.mount(&name).unwrap();
+        let source = mount.as_bytes();
+        let provider_id = ProviderId::from_wasm_bytes(source);
+        let projection_id = ProjectionId::new(source, provider_id);
+        let store = caches
+            .mount(&name, projection_id, provider_id, source)
+            .unwrap();
         (dir, caches, store)
     }
 
@@ -908,7 +958,16 @@ mod tests {
     fn mount_isolation() {
         let (_dir, caches, store_a) = open_store("a");
         let name_b = Name::new("b").unwrap();
-        let store_b = caches.mount(&name_b).unwrap();
+        let source = b"b";
+        let provider_id = ProviderId::from_wasm_bytes(source);
+        let store_b = caches
+            .mount(
+                &name_b,
+                ProjectionId::new(source, provider_id),
+                provider_id,
+                source,
+            )
+            .unwrap();
         let path = "/issues/42/item.json";
         let op_gen = store_a.current_generation();
 

@@ -8,7 +8,7 @@ use crate::cache::Caches;
 use crate::cloner::GitCloner;
 use crate::{BuildError, HostContext, Runtime, component_engine};
 use omnifs_auth::CredentialService;
-use omnifs_workspace::mounts::{Registry, Spec};
+use omnifs_workspace::mounts::{LoadedSpec, Registry};
 use omnifs_workspace::provider::ProviderWasm;
 use std::collections::HashMap;
 use std::fs;
@@ -94,8 +94,8 @@ impl MountRuntimes {
             )));
         }
         let built = desired
-            .iter()
-            .map(|(_, spec)| registry.build_mount(spec, capture_test_callouts))
+            .loaded_iter()
+            .map(|(_, loaded)| registry.build_mount(loaded, capture_test_callouts))
             .collect::<Result<Vec<_>, _>>()?;
         for (index, left) in built.iter().enumerate() {
             for right in built.iter().skip(index + 1) {
@@ -132,12 +132,13 @@ impl MountRuntimes {
 
     fn build_mount(
         &self,
-        spec: &Spec,
+        loaded: &LoadedSpec,
         capture_test_callouts: bool,
     ) -> Result<BuiltMount, RegistryError> {
-        omnifs_workspace::mounts::Name::new(spec.mount.clone())
+        let spec = loaded.spec();
+        let name = omnifs_workspace::mounts::Name::new(spec.mount.clone())
             .map_err(|error| RegistryError::ConfigError(format!("invalid mount name: {error}")))?;
-        let mount = spec.mount.clone();
+        let mount = name.to_string();
         let wasm_path = self.context.provider_path_by_id(&spec.provider.id);
         if !wasm_path.exists() {
             return Err(RegistryError::ProviderNotFound(
@@ -169,6 +170,11 @@ impl MountRuntimes {
                 })
             })?;
         let provider_interval_secs = manifest.refresh_interval_secs;
+        let projection_id = crate::cache::ProjectionId::new(loaded.source(), spec.provider.id);
+        let resources = self
+            .caches
+            .mount(&name, projection_id, spec.provider.id, loaded.source())
+            .map_err(|error| RegistryError::RuntimeError(format!("cache open: {error}")))?;
 
         let runtime = if capture_test_callouts {
             Runtime::new_for_callout_tests(
@@ -178,7 +184,7 @@ impl MountRuntimes {
                 &manifest,
                 self.cloner.clone(),
                 &self.context,
-                &self.caches,
+                resources.clone(),
                 &self.credential_service,
             )
         } else {
@@ -189,7 +195,7 @@ impl MountRuntimes {
                 &manifest,
                 self.cloner.clone(),
                 &self.context,
-                &self.caches,
+                resources,
                 &self.credential_service,
             )
         }

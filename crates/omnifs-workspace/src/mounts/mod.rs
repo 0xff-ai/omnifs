@@ -129,17 +129,6 @@ impl Spec {
         &self.provider.meta.name
     }
 
-    pub fn from_file(path: &std::path::Path) -> Result<Self, SpecError> {
-        let content = std::fs::read_to_string(path).map_err(|source| SpecError::ReadSpec {
-            path: path.to_path_buf(),
-            source,
-        })?;
-        Self::parse(&content).map_err(|source| SpecError::ParseSpec {
-            path: path.to_path_buf(),
-            source,
-        })
-    }
-
     #[must_use]
     pub fn config_bytes(&self) -> Vec<u8> {
         self.config_raw.as_ref().map_or_else(
