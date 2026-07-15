@@ -224,7 +224,15 @@ impl Fixture {
     }
 
     fn frontend_enable(&self) -> Output {
-        self.run(&["frontend", "enable", "fuse", "--runtime", "docker"])
+        self.run(&[
+            "frontend",
+            "enable",
+            "fuse",
+            "--runtime",
+            "docker",
+            "--output",
+            "json",
+        ])
     }
 
     /// Assert Docker frontend enable succeeded; on failure, dump the runner logs of
@@ -233,6 +241,11 @@ impl Fixture {
     /// with the CLI's own output.
     fn assert_frontend_enable_ok(&self, out: &Output, context: &str) {
         if out.status.success() {
+            assert!(
+                out.stderr.is_empty(),
+                "structured Docker frontend enable leaked stderr: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
             return;
         }
         for name in self.containers() {

@@ -4,7 +4,6 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::io::Write as _;
 #[cfg(target_os = "linux")]
 use std::net::Ipv4Addr;
 use std::process::Command;
@@ -377,20 +376,18 @@ impl DockerClient {
     }
 
     pub(crate) async fn remove_existing(&self, name: &ContainerName) -> Result<()> {
-        crate::ui::eprint_raw(&format!("Checking for existing container `{name}` "));
-        std::io::stderr().flush().ok();
         match self
             .docker
             .inspect_container(name.as_str(), None::<InspectContainerOptions>)
             .await
         {
             Ok(_) => {
-                crate::ui::eprint_raw("found\n");
+                self.output
+                    .narrate(format!("Found existing container `{name}`"));
                 // Best-effort stop, then remove. Bollard returns errors for
                 // already-stopped containers; we don't care about that case.
-                crate::ui::eprint_raw(&format!(
-                    "Stopping existing container `{name}` (1s timeout)\n"
-                ));
+                self.output
+                    .narrate(format!("Stopping existing container `{name}` (1s timeout)"));
                 let _ = self
                     .docker
                     .stop_container(
@@ -401,7 +398,8 @@ impl DockerClient {
                         }),
                     )
                     .await;
-                crate::ui::eprint_raw(&format!("Removing existing container `{name}`\n"));
+                self.output
+                    .narrate(format!("Removing existing container `{name}`"));
                 self.docker
                     .remove_container(
                         name.as_str(),
@@ -416,7 +414,9 @@ impl DockerClient {
             },
             Err(bollard::errors::Error::DockerResponseServerError {
                 status_code: 404, ..
-            }) => crate::ui::eprint_raw("none\n"),
+            }) => self
+                .output
+                .narrate(format!("No existing container `{name}`")),
             Err(error) => {
                 return Err(error).with_context(|| format!("inspect container `{name}`"));
             },
@@ -431,8 +431,8 @@ impl DockerClient {
         self.ensure_image().await?;
         self.remove().await?;
 
-        crate::ui::eprint_raw(&format!(
-            "Creating frontend container `{}` from image `{}`\n",
+        self.output.narrate(format!(
+            "Creating frontend container `{}` from image `{}`",
             self.container_name(),
             self.image()
         ));
@@ -446,8 +446,8 @@ impl DockerClient {
             )
             .await
             .with_context(|| format!("create frontend container `{}`", self.container_name()))?;
-        crate::ui::eprint_raw(&format!(
-            "Starting frontend container `{}`\n",
+        self.output.narrate(format!(
+            "Starting frontend container `{}`",
             self.container_name()
         ));
         self.docker
@@ -521,17 +521,20 @@ impl DockerClient {
     }
 
     async fn ensure_image(&self) -> Result<()> {
-        crate::ui::eprint_raw(&format!("Checking image `{}` ", self.image()));
-        std::io::stderr().flush().ok();
         match self.docker.inspect_image(self.image().as_str()).await {
             Ok(inspect) => {
                 // Surface the dev image's age so a stale local build is
                 // visible; release channel keeps the terse `present`.
                 match (BUILD_CHANNEL, image_age_words(inspect.created.as_deref())) {
                     (BuildChannel::Dev, Some(age)) => {
-                        crate::ui::eprint_raw(&format!("present (built {age} ago)\n"));
+                        self.output.narrate(format!(
+                            "Image `{}` present (built {age} ago)",
+                            self.image()
+                        ));
                     },
-                    _ => crate::ui::eprint_raw("present\n"),
+                    _ => self
+                        .output
+                        .narrate(format!("Image `{}` present", self.image())),
                 }
                 Ok(())
             },
@@ -540,7 +543,8 @@ impl DockerClient {
             }) if !names_registry(self.image().as_str()) => {
                 // A registry-less reference is a local build product. Never
                 // reach for a registry: refuse and point at the dev build.
-                crate::ui::eprint_raw("missing\n");
+                self.output
+                    .narrate(format!("Image `{}` missing", self.image()));
                 let image = self.image();
                 Err(anyhow!(BUILD_CHANNEL.pull_refusal_reason()))
                     .context(format!("image `{image}` is not present locally"))
@@ -550,7 +554,8 @@ impl DockerClient {
             Err(bollard::errors::Error::DockerResponseServerError {
                 status_code: 404, ..
             }) => {
-                crate::ui::eprint_raw("missing\n");
+                self.output
+                    .narrate(format!("Image `{}` missing", self.image()));
                 self.pull_image_with_progress(self.image().as_str())
                     .await
                     .map_err(|pull_err| {
