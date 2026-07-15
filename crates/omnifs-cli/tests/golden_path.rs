@@ -152,7 +152,25 @@ fn mount_add_up_wait_read_down_golden_path() {
 
     let _guard = nfs_serial_lock();
 
-    let up = fixture.run(&["up", "--wait", "30s"]);
+    let timed_out = fixture.run(&["up", "--wait", "0s"]);
+    assert_eq!(
+        exit_code(&timed_out),
+        3,
+        "up --wait 0s must time out before readiness\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&timed_out.stdout),
+        String::from_utf8_lossy(&timed_out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&timed_out.stderr).contains("within 0s"),
+        "timeout must report the caller's deadline"
+    );
+    assert!(!fixture.home_path().join("daemon.json").exists());
+    let repository = omnifs_workspace::mounts::Repository::open(fixture.home_path().join("mounts"))
+        .expect("open mounts after timeout");
+    assert_eq!(repository.applied().expect("read applied ref"), None);
+    drop(repository);
+
+    let up = fixture.run(&["up", "--wait", "120s"]);
     assert_eq!(
         exit_code(&up),
         0,

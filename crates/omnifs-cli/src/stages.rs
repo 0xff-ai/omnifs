@@ -362,26 +362,6 @@ impl MountInitPlan {
     }
 }
 
-pub(crate) async fn wait_until_ready(
-    workspace: &Workspace,
-    timeout: Duration,
-) -> anyhow::Result<()> {
-    let started = tokio::time::Instant::now();
-    loop {
-        if workspace.daemon().ready().await {
-            return Ok(());
-        }
-        if started.elapsed() >= timeout {
-            return Err(anyhow!(
-                "daemon did not become ready within {}s",
-                timeout.as_secs()
-            ))
-            .with_exit_code(ExitCode::DaemonUnavailable);
-        }
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
-}
-
 pub(crate) fn parse_wait_duration(raw: &str) -> anyhow::Result<Duration> {
     let Some(value) = raw.strip_suffix('s') else {
         anyhow::bail!("duration `{raw}` must use seconds, for example 30s");

@@ -1,5 +1,7 @@
 //! `omnifs up`: daemon lifecycle start.
 
+use std::time::Duration;
+
 use clap::Args;
 
 use crate::commands::receipt::UpReceipt;
@@ -11,7 +13,7 @@ use crate::workspace::Workspace;
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct UpArgs {
-    /// Wait until the daemon reports Ready, failing with exit code 3 on timeout.
+    /// Maximum time to wait for daemon readiness, failing with exit code 3 on timeout.
     #[arg(long, value_name = "DURATION")]
     pub wait: Option<String>,
     /// Start a cache-only daemon from the exact current mount revision.
@@ -29,16 +31,14 @@ impl UpArgs {
             .wait
             .as_deref()
             .map(crate::stages::parse_wait_duration)
-            .transpose()?;
-        Launcher::new(workspace, "omnifs up", output.clone(), self.offline)
+            .transpose()?
+            .unwrap_or(Duration::from_secs(30));
+        Launcher::new(workspace, "omnifs up", output.clone(), self.offline, wait)
             .launch()
             .await?;
 
-        if let Some(timeout) = wait {
-            crate::stages::wait_until_ready(workspace, timeout).await?;
-            if !output.is_structured() {
-                output.narrate("Daemon is ready.");
-            }
+        if self.wait.is_some() && !output.is_structured() {
+            output.narrate("Daemon is ready.");
         }
         Ok(())
     }

@@ -8,6 +8,7 @@ use anyhow::{Context as _, Result};
 use tokio::process::Command;
 
 use crate::client::DaemonClient;
+use crate::error::{ExitCode, WithExitCode};
 use crate::process::ProcessRole;
 
 pub(crate) async fn launch(
@@ -16,6 +17,7 @@ pub(crate) async fn launch(
     mount_revision: &omnifs_workspace::mounts::Revision,
     mount_snapshot: &Path,
     offline: bool,
+    readiness_timeout: Duration,
 ) -> Result<()> {
     let cache_dir = &paths.cache_dir;
     std::fs::create_dir_all(cache_dir)
@@ -62,52 +64,58 @@ pub(crate) async fn launch(
         .id()
         .context("spawned omnifs daemon has no process identity")?;
     let client = DaemonClient::for_layout(paths);
-    for _ in 0..300 {
-        if let Some(status) = child.try_wait().context("poll daemon child status")? {
-            let cause = log_cause_suffix(&log_path);
-            anyhow::bail!(
-                "omnifs daemon exited before the mount became ready ({status}){cause}; run `omnifs logs` for the full daemon log"
-            );
-        }
-        if client.ready().await {
-            match client.status().await {
-                Ok(status) => {
-                    let record = match omnifs_workspace::daemon_record::DaemonRecord::read(
-                        &paths.daemon_record_file(),
-                    ) {
-                        Ok(record) => record,
-                        Err(error) => {
-                            let _ = child.kill().await;
-                            anyhow::bail!("daemon readiness record could not be read: {error}");
-                        },
-                    };
-                    let ready = record.as_ref().is_some_and(|record| {
+    let ready = tokio::time::timeout(readiness_timeout, async {
+        loop {
+            if let Some(status) = child.try_wait().context("poll daemon child status")? {
+                let cause = log_cause_suffix(&log_path);
+                anyhow::bail!(
+                    "omnifs daemon exited before the mount became ready ({status}){cause}; run `omnifs logs` for the full daemon log"
+                );
+            }
+            if client.ready().await
+                && let Ok(status) = client.status().await
+            {
+                let record = omnifs_workspace::daemon_record::DaemonRecord::read(
+                    &paths.daemon_record_file(),
+                )
+                .context("read daemon readiness record")?;
+                anyhow::ensure!(
+                    record.as_ref().is_some_and(|record| {
                         status.pid == child_pid
                             && status.offline == offline
                             && record.pid == child_pid
                             && record.instance_id == status.instance_id
                             && record.mount_revision == *mount_revision
                             && record.offline == offline
-                    });
-                    if ready {
-                        drop(child);
-                        return Ok(());
-                    }
-                    let _ = child.kill().await;
-                    anyhow::bail!(
-                        "daemon readiness did not match spawned pid {child_pid}, revision {mount_revision}, and offline={offline}"
-                    );
-                },
-                Err(_) => {},
+                    }),
+                    "daemon readiness did not match spawned pid {child_pid}, revision {mount_revision}, and offline={offline}"
+                );
+                return Ok(());
             }
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+    })
+    .await;
+
+    match ready {
+        Ok(Ok(())) => {
+            drop(child);
+            Ok(())
+        },
+        Ok(Err(error)) => {
+            let _ = child.kill().await;
+            Err(error)
+        },
+        Err(_) => {
+            let cause = log_cause_suffix(&log_path);
+            let _ = child.kill().await;
+            Err(anyhow::anyhow!(
+                "omnifs daemon did not become ready within {}s{cause}; run `omnifs logs` for the full daemon log",
+                readiness_timeout.as_secs()
+            ))
+            .with_exit_code(ExitCode::DaemonUnavailable)
+        },
     }
-    let cause = log_cause_suffix(&log_path);
-    let _ = child.kill().await;
-    anyhow::bail!(
-        "omnifs daemon did not become ready within 30s{cause}; run `omnifs logs` for the full daemon log"
-    )
 }
 
 fn last_log_line(log_path: &Path) -> Option<String> {

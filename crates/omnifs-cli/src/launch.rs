@@ -1,6 +1,7 @@
 //! Shared launch choreography for `omnifs up`.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::Context as _;
 use omnifs_api::{DaemonStatus, DaemonSubsystem};
@@ -29,6 +30,7 @@ pub(crate) struct Launcher<'a> {
     verb: &'static str,
     output: Output,
     offline: bool,
+    readiness_timeout: Duration,
 }
 
 impl<'a> Launcher<'a> {
@@ -37,12 +39,14 @@ impl<'a> Launcher<'a> {
         verb: &'static str,
         output: Output,
         offline: bool,
+        readiness_timeout: Duration,
     ) -> Self {
         Self {
             workspace,
             verb,
             output,
             offline,
+            readiness_timeout,
         }
     }
 
@@ -85,16 +89,8 @@ impl<'a> Launcher<'a> {
                 "Starting offline daemon from mount revision {}",
                 revision
             ));
-            launch_host_native(
-                self.workspace,
-                self.verb,
-                telemetry_enabled,
-                self.output,
-                &revision,
-                &snapshot_dir,
-                true,
-            )
-            .await?;
+            self.launch_host_native(telemetry_enabled, &revision, &snapshot_dir, true)
+                .await?;
             return Ok(());
         }
 
@@ -110,17 +106,73 @@ impl<'a> Launcher<'a> {
             revision,
             snapshot_dir.display()
         ));
-        launch_host_native(
-            self.workspace,
-            self.verb,
+        self.launch_host_native(telemetry_enabled, &revision, &snapshot_dir, false)
+            .await?;
+        self.workspace.repository()?.mark_applied(&revision)?;
+        Ok(())
+    }
+
+    /// Leave a daemon already serving `revision` alone, or replace only the
+    /// daemon process and wait for the immutable snapshot to become ready.
+    async fn launch_host_native(
+        &self,
+        telemetry_enabled: bool,
+        revision: &Revision,
+        snapshot: &Path,
+        offline: bool,
+    ) -> anyhow::Result<()> {
+        let paths = self.workspace.layout();
+        let client = DaemonClient::for_layout(paths);
+        let current = client.status_optional().await?;
+
+        if let Some(status) = &current {
+            let existing = ExistingDaemon::new(status.clone(), paths, self.verb);
+            if !existing.can_apply() {
+                anyhow::bail!(existing);
+            }
+            let existing_record = DaemonRecord::read(&paths.daemon_record_file())?;
+            let serves_revision = existing_record.as_ref().is_some_and(|record| {
+                record.instance_id == status.instance_id
+                    && record.mount_revision == *revision
+                    && record.offline == offline
+            });
+            if serves_revision {
+                report_launch_status(&self.output, status);
+                return Ok(());
+            }
+
+            if existing_record.as_ref().is_some_and(|record| {
+                record.mount_revision == *revision && record.offline != offline
+            }) {
+                self.output
+                    .narrate("Restarting omnifs daemon for changed online/offline mode");
+            } else {
+                self.output
+                    .narrate("Restarting omnifs daemon for changed mount revision");
+            }
+            if offline {
+                client
+                    .validate_offline(revision)
+                    .await
+                    .context("validate offline projection before replacing daemon")?;
+            }
+            DaemonTeardown::new(self.workspace).stop_daemon().await?;
+        } else {
+            self.output.narrate("Starting omnifs daemon (host-native)");
+        }
+
+        crate::daemon_launch::launch(
+            paths,
             telemetry_enabled,
-            self.output,
-            &revision,
-            &snapshot_dir,
-            false,
+            revision,
+            snapshot,
+            offline,
+            self.readiness_timeout,
         )
         .await?;
-        self.workspace.repository()?.mark_applied(&revision)?;
+
+        let status = client.status().await?;
+        report_launch_status(&self.output, &status);
         Ok(())
     }
 }
@@ -149,63 +201,6 @@ fn preflight_mounts(
         let mount_auth = crate::auth::MountAuth::from_spec(catalog, config.config.clone());
         config.validate_host_managed_credentials(&mount_auth, store)?;
     }
-    Ok(())
-}
-
-/// Leave a daemon already serving `revision` alone, or replace only the daemon
-/// process and wait for the immutable snapshot to become ready.
-async fn launch_host_native(
-    workspace: &Workspace,
-    verb: &str,
-    telemetry_enabled: bool,
-    output: Output,
-    revision: &Revision,
-    snapshot: &Path,
-    offline: bool,
-) -> anyhow::Result<()> {
-    let paths = workspace.layout();
-    let client = DaemonClient::for_layout(paths);
-    let current = client.status_optional().await?;
-
-    if let Some(status) = &current {
-        let existing = ExistingDaemon::new(status.clone(), paths, verb);
-        if !existing.can_apply() {
-            anyhow::bail!(existing);
-        }
-        let existing_record = DaemonRecord::read(&paths.daemon_record_file())?;
-        let serves_revision = existing_record.as_ref().is_some_and(|record| {
-            record.instance_id == status.instance_id
-                && record.mount_revision == *revision
-                && record.offline == offline
-        });
-        if serves_revision {
-            report_launch_status(&output, status);
-            return Ok(());
-        }
-
-        if existing_record
-            .as_ref()
-            .is_some_and(|record| record.mount_revision == *revision && record.offline != offline)
-        {
-            output.narrate("Restarting omnifs daemon for changed online/offline mode");
-        } else {
-            output.narrate("Restarting omnifs daemon for changed mount revision");
-        }
-        if offline {
-            client
-                .validate_offline(revision)
-                .await
-                .context("validate offline projection before replacing daemon")?;
-        }
-        DaemonTeardown::new(workspace).stop_daemon().await?;
-    } else {
-        output.narrate("Starting omnifs daemon (host-native)");
-    }
-
-    crate::daemon_launch::launch(paths, telemetry_enabled, revision, snapshot, offline).await?;
-
-    let status = client.status().await?;
-    report_launch_status(&output, &status);
     Ok(())
 }
 
