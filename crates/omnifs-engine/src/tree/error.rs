@@ -10,6 +10,7 @@ use crate::ProviderErrorClass;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TreeErrorKind {
     NotFound,
+    OfflineMiss,
     NotDirectory,
     IsDirectory,
     PermissionDenied,
@@ -35,7 +36,9 @@ impl TreeErrorKind {
             Self::RateLimited | Self::Timeout | Self::Network => RetryClass::Retry,
             Self::NotFound | Self::NotDirectory | Self::IsDirectory => RetryClass::Gone,
             Self::TooLarge => RetryClass::TooLarge,
-            Self::PermissionDenied | Self::InvalidInput | Self::Internal => RetryClass::Terminal,
+            Self::PermissionDenied | Self::InvalidInput | Self::OfflineMiss | Self::Internal => {
+                RetryClass::Terminal
+            },
         }
     }
 }
@@ -53,6 +56,15 @@ impl TreeError {
     pub fn not_found(message: impl Into<String>) -> Self {
         Self {
             kind: TreeErrorKind::NotFound,
+            message: message.into(),
+            retryable: false,
+            retry_after: None,
+        }
+    }
+
+    pub fn offline_miss(message: impl Into<String>) -> Self {
+        Self {
+            kind: TreeErrorKind::OfflineMiss,
             message: message.into(),
             retryable: false,
             retry_after: None,

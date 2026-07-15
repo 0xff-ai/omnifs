@@ -1,101 +1,123 @@
-//! Provider registry: startup loading and lifecycle management for WASM providers.
+//! Fixed online/offline mount table and provider lifecycle ownership.
 //!
-//! Startup is atomic: the complete immutable mount snapshot is scanned,
-//! snapshotted, and instantiated before any runtime is published.
+//! Startup is atomic: every selected mount is built and validated in a
+//! temporary collection before the fixed table is published.
 
 use crate::auth::credential_service_for_file;
-use crate::cache::Caches;
+use crate::cache::{Caches, MountResources, ProjectionError, ProjectionId};
 use crate::cloner::GitCloner;
+use crate::tree_refs::TreeRefs;
 use crate::{BuildError, HostContext, Runtime, component_engine};
 use omnifs_auth::CredentialService;
-use omnifs_workspace::mounts::{LoadedSpec, Registry};
+use omnifs_workspace::mounts::{LoadedSpec, Name, Registry};
 use omnifs_workspace::provider::ProviderWasm;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
-/// Registry of loaded WASM providers.
-///
-/// Instantiates providers on demand and manages their lifecycle including
-/// per-mount manifest-driven provider timer tasks.
-pub struct MountRuntimes {
-    engine: wasmtime::Engine,
-    caches: Arc<Caches>,
-    cloner: Arc<GitCloner>,
+/// One selected mount revision. Cache-only entries deliberately have no
+/// provider runtime and never fabricate provider handles.
+pub struct MountEntry {
+    name: Name,
+    identity: LoadedSpec,
+    projection_id: ProjectionId,
+    resources: Arc<MountResources>,
+    trees: Arc<TreeRefs>,
+    runtime: Option<Arc<Runtime>>,
+}
+
+impl MountEntry {
+    pub(crate) fn name(&self) -> &Name {
+        &self.name
+    }
+
+    pub(crate) fn identity(&self) -> &LoadedSpec {
+        &self.identity
+    }
+
+    pub(crate) fn projection_id(&self) -> ProjectionId {
+        self.projection_id
+    }
+
+    pub(crate) fn resources(&self) -> &Arc<MountResources> {
+        &self.resources
+    }
+
+    pub(crate) fn trees(&self) -> &Arc<TreeRefs> {
+        &self.trees
+    }
+
+    pub(crate) fn runtime(&self) -> Option<Arc<Runtime>> {
+        self.runtime.clone()
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TableMode {
+    Online,
+    Offline,
+}
+
+/// Fixed selected mount table used by the single namespace implementation.
+pub struct MountTable {
     context: HostContext,
-    /// Shared cache owner and OAuth transport retained for the lifetime of all
-    /// mount-owned bindings.
-    credential_service: Arc<CredentialService>,
-    instances: HashMap<String, Arc<Runtime>>,
+    mode: TableMode,
+    entries: BTreeMap<String, MountEntry>,
     timer_shutdown: watch::Sender<bool>,
     timer_tasks: parking_lot::Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
 }
 
-impl MountRuntimes {
-    fn initialize(context: HostContext, cloner: Arc<GitCloner>) -> Result<Self, RegistryError> {
-        // Compiled component artifacts live with the rest of the host's state,
-        // under `<cache>/wasm`, rather than a global per-user wasmtime cache.
-        let wasm_cache = context.wasm_cache_dir();
-        let engine = component_engine(Some(wasm_cache), |_| {})
-            .map_err(|e| RegistryError::RuntimeError(format!("provider engine init: {e}")))?;
-
-        // Global cache handles: a durable object database and a disposable view
-        // database cleared and reopened on startup. Shared across all
-        // provider runtimes; the object tier isolates mounts by keyspace, the
-        // view tier by a path prefix.
-        let caches = Caches::open(context.cache_dir())
-            .map_err(|e| RegistryError::RuntimeError(format!("cache open: {e}")))?;
-
-        // One credential owner for the whole host, shared across every mount.
-        let credential_service = credential_service_for_file(context.credentials_file())
-            .map_err(|e| RegistryError::RuntimeError(format!("credential service init: {e}")))?;
-
-        let (timer_shutdown, _) = watch::channel(false);
-        Ok(Self {
-            engine,
-            caches,
-            cloner,
-            context,
-            credential_service,
-            instances: HashMap::new(),
-            timer_shutdown,
-            timer_tasks: parking_lot::Mutex::new(HashMap::new()),
-        })
-    }
-
-    /// Load and publish every mount from the supplied immutable snapshot. Any
-    /// snapshot assembly, artifact, duplicate, or runtime error aborts
-    /// startup before the first runtime is visible.
-    pub fn load(
+impl MountTable {
+    /// Load every selected mount with its real provider runtime.
+    pub fn load_online(
         context: HostContext,
         cloner: Arc<GitCloner>,
         desired: &Registry,
         handle: &tokio::runtime::Handle,
     ) -> Result<Self, RegistryError> {
-        Self::load_with_options(context, cloner, desired, handle, false)
+        Self::load_online_with_options(context, cloner, desired, handle, false)
     }
 
-    pub(crate) fn load_with_options(
+    pub(crate) fn load_online_with_options(
         context: HostContext,
         cloner: Arc<GitCloner>,
         desired: &Registry,
         handle: &tokio::runtime::Handle,
         capture_test_callouts: bool,
     ) -> Result<Self, RegistryError> {
-        let mut registry = Self::initialize(context, cloner)?;
-        if let Some(failure) = desired.failures().first() {
-            return Err(RegistryError::ConfigError(format!(
-                "load mount spec {}: {}",
-                failure.path.display(),
-                failure.error
-            )));
-        }
+        validate_registry(desired)?;
+        // Compiled component artifacts live with the rest of the host's state,
+        // under `<cache>/wasm`, rather than a global per-user wasmtime cache.
+        let wasm_cache = context.wasm_cache_dir();
+        let engine = component_engine(Some(wasm_cache), |_| {})
+            .map_err(|e| RegistryError::RuntimeError(format!("provider engine init: {e}")))?;
+
+        // One global body store and projection database. Each selected exact
+        // projection receives one long-lived MountResources owner.
+        let caches = Caches::open(context.cache_dir())
+            .map_err(|e| RegistryError::RuntimeError(format!("cache open: {e}")))?;
+
+        // One credential owner for the whole host, shared across every mount.
+        let credential_service = credential_service_for_file(context.credentials_file())
+            .map_err(|e| RegistryError::RuntimeError(format!("credential service init: {e}")))?;
+        let (timer_shutdown, _) = watch::channel(false);
         let built = desired
             .loaded_iter()
-            .map(|(_, loaded)| registry.build_mount(loaded, capture_test_callouts))
+            .map(|(name, loaded)| {
+                Self::build_online_mount(
+                    name,
+                    loaded,
+                    &engine,
+                    &caches,
+                    &cloner,
+                    &context,
+                    &credential_service,
+                    capture_test_callouts,
+                )
+            })
             .collect::<Result<Vec<_>, _>>()?;
         for (index, left) in built.iter().enumerate() {
             for right in built.iter().skip(index + 1) {
@@ -114,32 +136,43 @@ impl MountRuntimes {
                 }
             }
         }
-        registry.instances = built
+        let entries = built
             .iter()
-            .map(|built| (built.mount.clone(), Arc::clone(&built.runtime)))
+            .map(|built| (built.entry.name.to_string(), built.entry.clone_for_table()))
             .collect();
+        let table = Self {
+            context,
+            mode: TableMode::Online,
+            entries,
+            timer_shutdown,
+            timer_tasks: parking_lot::Mutex::new(HashMap::new()),
+        };
         for built in built {
-            registry.start_timer(
-                &built.mount,
+            table.start_timer(
+                built.entry.name.as_str(),
                 &built.runtime,
                 built.provider_interval_secs,
                 handle,
             );
-            info!(mount = built.mount.as_str(), "loaded provider");
+            info!(mount = built.entry.name.as_str(), "loaded provider");
         }
-        Ok(registry)
+        Ok(table)
     }
 
-    fn build_mount(
-        &self,
+    #[allow(clippy::too_many_arguments)]
+    fn build_online_mount(
+        name: &Name,
         loaded: &LoadedSpec,
+        engine: &wasmtime::Engine,
+        caches: &Arc<Caches>,
+        cloner: &Arc<GitCloner>,
+        context: &HostContext,
+        credential_service: &Arc<CredentialService>,
         capture_test_callouts: bool,
     ) -> Result<BuiltMount, RegistryError> {
         let spec = loaded.spec();
-        let name = omnifs_workspace::mounts::Name::new(spec.mount.clone())
-            .map_err(|error| RegistryError::ConfigError(format!("invalid mount name: {error}")))?;
         let mount = name.to_string();
-        let wasm_path = self.context.provider_path_by_id(&spec.provider.id);
+        let wasm_path = context.provider_path_by_id(&spec.provider.id);
         if !wasm_path.exists() {
             return Err(RegistryError::ProviderNotFound(
                 wasm_path.display().to_string(),
@@ -170,40 +203,118 @@ impl MountRuntimes {
                 })
             })?;
         let provider_interval_secs = manifest.refresh_interval_secs;
-        let projection_id = crate::cache::ProjectionId::new(loaded.source(), spec.provider.id);
-        let resources = self
-            .caches
+        let projection_id = ProjectionId::new(loaded.source(), spec.provider.id);
+        let resources = caches
             .mount(&name, projection_id, spec.provider.id, loaded.source())
             .map_err(|error| RegistryError::RuntimeError(format!("cache open: {error}")))?;
+        let trees = Arc::new(TreeRefs::new());
 
         let runtime = if capture_test_callouts {
             Runtime::new_for_callout_tests(
-                &self.engine,
+                engine,
                 &wasm_path,
                 spec,
                 &manifest,
-                self.cloner.clone(),
-                &self.context,
+                Arc::clone(cloner),
+                context,
                 resources.clone(),
-                &self.credential_service,
+                Arc::clone(&trees),
+                credential_service,
             )
         } else {
             Runtime::new(
-                &self.engine,
+                engine,
                 &wasm_path,
                 spec,
                 &manifest,
-                self.cloner.clone(),
-                &self.context,
-                resources,
-                &self.credential_service,
+                Arc::clone(cloner),
+                context,
+                resources.clone(),
+                Arc::clone(&trees),
+                credential_service,
             )
         }
         .map_err(|error| RegistryError::from_build(&mount, error))?;
+        let runtime = Arc::new(runtime);
         Ok(BuiltMount {
-            mount,
             provider_interval_secs,
-            runtime: Arc::new(runtime),
+            runtime: Arc::clone(&runtime),
+            entry: MountEntry {
+                name: name.clone(),
+                identity: loaded.clone(),
+                projection_id,
+                resources,
+                trees,
+                runtime: Some(runtime),
+            },
+        })
+    }
+
+    /// Load only complete durable facts for the exact current mount snapshot.
+    /// No provider artifact, credential owner, Wasmtime engine, timer, HTTP
+    /// client, or Git process is constructed on this path.
+    pub fn load_offline(context: HostContext, desired: &Registry) -> Result<Self, RegistryError> {
+        validate_registry(desired)?;
+        let caches = Caches::open_existing(context.cache_dir())
+            .map_err(|error| RegistryError::OfflineCache(error.to_string()))?;
+        let mut entries = BTreeMap::new();
+        let mut cloner = None;
+        for (name, loaded) in desired.loaded_iter() {
+            let spec = loaded.spec();
+            let projection_id = ProjectionId::new(loaded.source(), spec.provider.id);
+            let resources = caches
+                .mount_existing(name, projection_id, spec.provider.id, loaded.source())
+                .map_err(|error| RegistryError::offline_projection(name, error))?;
+            let trees = Arc::new(TreeRefs::new());
+            for (_path, fact) in
+                resources
+                    .git_facts()
+                    .map_err(|error| RegistryError::CorruptProjection {
+                        mount: name.to_string(),
+                        message: error.to_string(),
+                    })?
+            {
+                let cloner = match &cloner {
+                    Some(cloner) => cloner,
+                    None => {
+                        let opened =
+                            GitCloner::open_existing(context.cache_dir().join("clones"))
+                                .map_err(|error| RegistryError::OfflineCache(error.to_string()))?;
+                        cloner.insert(opened)
+                    },
+                };
+                let repo = cloner
+                    .open_cached(name.as_str(), &fact.id, &fact.relative_path)
+                    .map_err(|error| RegistryError::OfflineGit {
+                        mount: name.to_string(),
+                        message: error.to_string(),
+                    })?;
+                trees
+                    .open(fact.id, &fact.relative_path, &repo)
+                    .map_err(|error| RegistryError::OfflineGit {
+                        mount: name.to_string(),
+                        message: error.to_string(),
+                    })?;
+            }
+            entries.insert(
+                name.to_string(),
+                MountEntry {
+                    name: name.clone(),
+                    identity: loaded.clone(),
+                    projection_id,
+                    resources,
+                    trees,
+                    runtime: None,
+                },
+            );
+        }
+        let (timer_shutdown, _) = watch::channel(false);
+        Ok(Self {
+            context,
+            mode: TableMode::Offline,
+            entries,
+            timer_shutdown,
+            timer_tasks: parking_lot::Mutex::new(HashMap::new()),
         })
     }
 
@@ -214,17 +325,25 @@ impl MountRuntimes {
 
     /// The immutable runtime for one loaded mount.
     pub fn get(&self, mount: &str) -> Option<Arc<Runtime>> {
-        self.instances.get(mount).cloned()
+        self.entries.get(mount).and_then(MountEntry::runtime)
+    }
+
+    pub(crate) fn entry(&self, mount: &str) -> Option<&MountEntry> {
+        self.entries.get(mount)
+    }
+
+    pub(crate) fn is_offline(&self) -> bool {
+        self.mode == TableMode::Offline
     }
 
     pub fn mounts(&self) -> Vec<String> {
-        self.instances.keys().cloned().collect()
+        self.entries.keys().cloned().collect()
     }
 
     pub fn runtime_entries(&self) -> Vec<(String, Arc<Runtime>)> {
-        self.instances
+        self.entries
             .iter()
-            .map(|(mount, runtime)| (mount.clone(), Arc::clone(runtime)))
+            .filter_map(|(mount, entry)| entry.runtime().map(|runtime| (mount.clone(), runtime)))
             .collect()
     }
 
@@ -233,8 +352,10 @@ impl MountRuntimes {
         for (_, task) in self.timer_tasks.lock().drain() {
             task.abort();
         }
-        for (mount, runtime) in &self.instances {
-            if let Err(e) = runtime.shutdown() {
+        for (mount, entry) in &self.entries {
+            if let Some(runtime) = entry.runtime()
+                && let Err(e) = runtime.shutdown()
+            {
                 warn!(mount, error = %e, "shutdown failed");
             }
         }
@@ -287,9 +408,22 @@ impl MountRuntimes {
 }
 
 struct BuiltMount {
-    mount: String,
+    entry: MountEntry,
     provider_interval_secs: u32,
     runtime: Arc<Runtime>,
+}
+
+impl MountEntry {
+    fn clone_for_table(&self) -> Self {
+        Self {
+            name: self.name.clone(),
+            identity: self.identity.clone(),
+            projection_id: self.projection_id,
+            resources: Arc::clone(&self.resources),
+            trees: Arc::clone(&self.trees),
+            runtime: self.runtime.clone(),
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -300,6 +434,14 @@ pub enum RegistryError {
     ProviderNotFound(String),
     #[error("runtime error: {0}")]
     RuntimeError(String),
+    #[error("offline cache open failed: {0}")]
+    OfflineCache(String),
+    #[error("mount {mount} has no durable projection for its exact spec and provider identity")]
+    MissingProjection { mount: String },
+    #[error("mount {mount} has a corrupt durable projection: {message}")]
+    CorruptProjection { mount: String, message: String },
+    #[error("mount {mount} has an invalid cached Git tree: {message}")]
+    OfflineGit { mount: String, message: String },
 }
 
 impl RegistryError {
@@ -311,13 +453,41 @@ impl RegistryError {
             other => Self::RuntimeError(other.to_string()),
         }
     }
+
+    fn offline_projection(mount: &Name, error: ProjectionError) -> Self {
+        if matches!(
+            error,
+            ProjectionError::Store(crate::cache::projection::ProjectionStoreError::Missing)
+        ) {
+            Self::MissingProjection {
+                mount: mount.to_string(),
+            }
+        } else {
+            Self::CorruptProjection {
+                mount: mount.to_string(),
+                message: error.to_string(),
+            }
+        }
+    }
+}
+
+fn validate_registry(desired: &Registry) -> Result<(), RegistryError> {
+    if let Some(failure) = desired.failures().first() {
+        return Err(RegistryError::ConfigError(format!(
+            "load mount spec {}: {}",
+            failure.path.display(),
+            failure.error
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{MountRuntimes, RegistryError};
+    use super::{MountTable, RegistryError};
     use crate::HostContext;
     use crate::cloner::GitCloner;
+    use omnifs_workspace::ids::ProviderId;
     use omnifs_workspace::mounts::{Registry, Spec};
     use omnifs_workspace::provider::{Artifact, ProviderStore};
     use std::path::{Path, PathBuf};
@@ -363,6 +533,19 @@ mod tests {
         wasm_artifact_path("test_provider.wasm")
     }
 
+    fn run_git(dir: &Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_AUTHOR_NAME", "offline-test")
+            .env("GIT_AUTHOR_EMAIL", "offline@test.invalid")
+            .env("GIT_COMMITTER_NAME", "offline-test")
+            .env("GIT_COMMITTER_EMAIL", "offline@test.invalid")
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git {args:?} failed");
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn load_rejects_invalid_provider_config() {
         // The test provider's embedded manifest declares empty config metadata,
@@ -399,7 +582,7 @@ mod tests {
         )
         .expect("write spec");
 
-        let result = MountRuntimes::load(
+        let result = MountTable::load_online(
             HostContext::new(
                 cache_dir.path(),
                 &paths.config_dir,
@@ -444,7 +627,7 @@ mod tests {
         let context =
             HostContext::new(&cache, &config, &providers, root.path().join("credentials"))
                 .with_wasm_cache_dir(crate::test_support::wasm_cache_dir());
-        let result = MountRuntimes::load(
+        let result = MountTable::load_online(
             context,
             Arc::new(GitCloner::new(root.path().join("clones")).unwrap()),
             &Registry::load(&mounts).expect("load selected snapshot"),
@@ -465,7 +648,7 @@ mod tests {
             root.path().join("providers"),
             root.path().join("credentials"),
         );
-        let result = MountRuntimes::load(
+        let result = MountTable::load_online(
             context,
             Arc::new(GitCloner::new(root.path().join("clones")).unwrap()),
             &Registry::load(&mounts).expect("load selected snapshot"),
@@ -520,7 +703,7 @@ mod tests {
             root.path().join("credentials"),
         )
         .with_wasm_cache_dir(crate::test_support::wasm_cache_dir());
-        let result = MountRuntimes::load(
+        let result = MountTable::load_online(
             context,
             Arc::new(GitCloner::new(root.path().join("clones")).unwrap()),
             &Registry::load(&mounts).expect("load selected snapshot"),
@@ -568,7 +751,7 @@ mod tests {
             root.path().join("credentials"),
         )
         .with_wasm_cache_dir(crate::test_support::wasm_cache_dir());
-        let registry = MountRuntimes::load(
+        let registry = MountTable::load_online(
             context,
             Arc::new(GitCloner::new(root.path().join("clones")).unwrap()),
             &Registry::load(&mounts).expect("load selected snapshot"),
@@ -578,5 +761,423 @@ mod tests {
         assert_eq!(registry.mounts(), ["test"]);
         assert_eq!(registry.timer_tasks.lock().len(), 1);
         registry.shutdown_all();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn offline_table_serves_complete_projection_and_fails_closed() {
+        use crate::cache::identity::{GitId, ProjectionId};
+        use crate::cache::mount::{
+            Caches, DirentsMutation, FactPayload, Freshness, GitWrite, ObjectMutation,
+            ProjectionTransition, RecordWrite,
+        };
+        use crate::namespace::{DirCursor, Namespace, NsError};
+        use crate::object_id::ObjectId;
+        use crate::view::{
+            CachedCursor, DirentRecord, DirentsPayload, EntryMeta, FileAttrsCache, FilePayload,
+            FileSize, LookupPayload, Stability,
+        };
+        use crate::{TreeNamespace, view::BodyId};
+        use fjall::{KeyspaceCreateOptions, PersistMode};
+        use omnifs_core::path::Path as ProjectedPath;
+        use omnifs_wit::provider::types::{IdCapture, LogicalId};
+
+        let root = tempfile::tempdir().expect("offline fixture root");
+        let cache = root.path().join("cache");
+        let mounts = root.path().join("snapshot");
+        std::fs::create_dir_all(&mounts).expect("mount snapshot");
+        let provider_id = ProviderId::from_wasm_bytes(b"offline provider identity");
+        let spec: Spec = serde_json::from_value(serde_json::json!({
+            "provider": {
+                "id": provider_id,
+                "meta": { "name": "offline-only" }
+            },
+            "mount": "test",
+            "config": {}
+        }))
+        .expect("offline mount spec");
+        let mut desired = Registry::load(&mounts).expect("load mount snapshot");
+        desired.put(&spec).expect("write exact mount bytes");
+        let mut root_git_spec = spec.clone();
+        root_git_spec.mount = "rootgit".to_string();
+        desired
+            .put(&root_git_spec)
+            .expect("write root Git mount bytes");
+        let context = HostContext::new(
+            &cache,
+            root.path().join("config"),
+            root.path().join("providers-missing"),
+            root.path().join("credentials-missing"),
+        );
+        let (_, loaded) = desired
+            .loaded_iter()
+            .find(|(name, _)| name.as_str() == "test")
+            .expect("selected mount");
+        let projection_id = ProjectionId::new(loaded.source(), provider_id);
+        let caches = Caches::open(&cache).expect("online projection owner");
+        let resources = caches
+            .mount(
+                &omnifs_workspace::mounts::Name::new("test").unwrap(),
+                projection_id,
+                provider_id,
+                loaded.source(),
+            )
+            .expect("selected projection");
+        let (_, root_git_loaded) = desired
+            .loaded_iter()
+            .find(|(name, _)| name.as_str() == "rootgit")
+            .expect("root Git mount");
+        let root_git_projection =
+            ProjectionId::new(root_git_loaded.source(), root_git_loaded.spec().provider.id);
+        let root_git_resources = caches
+            .mount(
+                &omnifs_workspace::mounts::Name::new("rootgit").unwrap(),
+                root_git_projection,
+                root_git_loaded.spec().provider.id,
+                root_git_loaded.source(),
+            )
+            .expect("root Git projection");
+
+        let source_repo = root.path().join("source-repo");
+        std::fs::create_dir_all(source_repo.join("src")).expect("source repository");
+        std::fs::write(source_repo.join("src/main.rs"), b"fn cached() {}\n").expect("Git body");
+        run_git(&source_repo, &["init", "-b", "main"]);
+        run_git(&source_repo, &["add", "."]);
+        run_git(&source_repo, &["commit", "-m", "offline fixture"]);
+        let remote = "https://fixture.test/offline.git";
+        let git_id = GitId::new("test", remote, Some("main"));
+        let cloner = GitCloner::new(cache.join("clones")).expect("online clone owner");
+        cloner
+            .clone_if_needed(
+                &git_id,
+                &source_repo.to_string_lossy(),
+                remote,
+                Some("main"),
+                1,
+            )
+            .expect("warm Git cache");
+        let root_git_id = GitId::new("rootgit", remote, Some("main"));
+        cloner
+            .clone_if_needed(
+                &root_git_id,
+                &source_repo.to_string_lossy(),
+                remote,
+                Some("main"),
+                2,
+            )
+            .expect("warm root Git cache");
+        root_git_resources
+            .publish(
+                ProjectionTransition {
+                    records: vec![RecordWrite {
+                        path: ProjectedPath::root(),
+                        aux: None,
+                        fact: FactPayload::Lookup(LookupPayload::Positive(EntryMeta::directory())),
+                    }],
+                    git: vec![GitWrite {
+                        path: ProjectedPath::root(),
+                        id: root_git_id,
+                        relative_path: "src".into(),
+                    }],
+                    ..ProjectionTransition::default()
+                },
+                root_git_resources.current_epoch(),
+            )
+            .expect("publish mount-root Git handoff");
+
+        let inline_path = ProjectedPath::parse("/inline.txt").unwrap();
+        let canonical_path = ProjectedPath::parse("/canonical.txt").unwrap();
+        let git_path = ProjectedPath::parse("/git").unwrap();
+        let partial_path = ProjectedPath::parse("/partial").unwrap();
+        let negative_path = ProjectedPath::parse("/partial/gone").unwrap();
+        let inline_bytes = b"offline inline\n".to_vec();
+        let canonical_bytes = b"offline canonical\n".to_vec();
+        let canonical_id = ObjectId::from_wit(&LogicalId {
+            kind: "issue".into(),
+            captures: vec![IdCapture {
+                name: "number".into(),
+                value: "42".into(),
+            }],
+        })
+        .as_bytes()
+        .to_vec();
+        let inline_meta = EntryMeta::file(
+            FileAttrsCache::inline(inline_bytes.clone(), Stability::Dynamic, None).unwrap(),
+        );
+        let canonical_meta = EntryMeta::file(
+            FileAttrsCache::canonical(
+                FileSize::Exact(canonical_bytes.len() as u64),
+                Stability::Dynamic,
+                None,
+            )
+            .unwrap(),
+        );
+        let root_entries = vec![
+            DirentRecord {
+                name: "inline.txt".into(),
+                meta: inline_meta.clone(),
+            },
+            DirentRecord {
+                name: "canonical.txt".into(),
+                meta: canonical_meta.clone(),
+            },
+            DirentRecord {
+                name: "git".into(),
+                meta: EntryMeta::directory(),
+            },
+            DirentRecord {
+                name: "partial".into(),
+                meta: EntryMeta::directory(),
+            },
+        ];
+        resources
+            .publish(
+                ProjectionTransition {
+                    records: vec![
+                        RecordWrite {
+                            path: inline_path.clone(),
+                            aux: None,
+                            fact: FactPayload::Lookup(LookupPayload::Positive(inline_meta.clone())),
+                        },
+                        RecordWrite {
+                            path: inline_path.clone(),
+                            aux: None,
+                            fact: FactPayload::File(FilePayload::new(None, inline_bytes.clone())),
+                        },
+                        RecordWrite {
+                            path: canonical_path.clone(),
+                            aux: None,
+                            fact: FactPayload::Lookup(LookupPayload::Positive(
+                                canonical_meta.clone(),
+                            )),
+                        },
+                        RecordWrite {
+                            path: git_path.clone(),
+                            aux: None,
+                            fact: FactPayload::Lookup(LookupPayload::Positive(
+                                EntryMeta::directory(),
+                            )),
+                        },
+                        RecordWrite {
+                            path: partial_path.clone(),
+                            aux: None,
+                            fact: FactPayload::Lookup(LookupPayload::Positive(
+                                EntryMeta::directory(),
+                            )),
+                        },
+                        RecordWrite {
+                            path: negative_path.clone(),
+                            aux: None,
+                            fact: FactPayload::Lookup(LookupPayload::Negative { id: None }),
+                        },
+                    ],
+                    dirents: vec![
+                        DirentsMutation::Replace {
+                            path: ProjectedPath::root(),
+                            value: DirentsPayload {
+                                entries: root_entries,
+                                exhaustive: true,
+                                validator: None,
+                                next_cursor: None,
+                                paginated: false,
+                            },
+                        },
+                        DirentsMutation::Replace {
+                            path: partial_path.clone(),
+                            value: DirentsPayload {
+                                entries: Vec::new(),
+                                exhaustive: false,
+                                validator: None,
+                                next_cursor: Some(CachedCursor::Page(1)),
+                                paginated: true,
+                            },
+                        },
+                    ],
+                    objects: vec![
+                        ObjectMutation::Canonical {
+                            id: canonical_id.clone(),
+                            bytes: canonical_bytes.clone(),
+                            validator: None,
+                        },
+                        ObjectMutation::Index {
+                            id: canonical_id,
+                            alias: canonical_path.clone(),
+                        },
+                    ],
+                    freshness: [
+                        &inline_path,
+                        &canonical_path,
+                        &git_path,
+                        &partial_path,
+                        &negative_path,
+                    ]
+                    .into_iter()
+                    .map(|path| Freshness {
+                        path: path.clone(),
+                        expires_at: Some(1),
+                    })
+                    .collect(),
+                    git: vec![GitWrite {
+                        path: git_path,
+                        id: git_id,
+                        relative_path: "src".into(),
+                    }],
+                    ..ProjectionTransition::default()
+                },
+                resources.current_epoch(),
+            )
+            .expect("publish complete durable projection");
+        drop(resources);
+        drop(root_git_resources);
+        drop(caches);
+
+        let table = Arc::new(
+            MountTable::load_offline(context.clone(), &desired).expect("offline table startup"),
+        );
+        assert!(table.get("test").is_none());
+        let namespace = TreeNamespace::offline(table, tokio::runtime::Handle::current());
+        let mount = namespace
+            .lookup(ProjectedPath::root(), "test")
+            .await
+            .expect("offline mount");
+        let listing = namespace
+            .readdir(mount.path.clone(), DirCursor::start(), 0)
+            .await
+            .expect("complete expired listing");
+        assert_eq!(
+            listing
+                .entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "inline.txt",
+                "canonical.txt",
+                "git",
+                "partial",
+                ".gitignore",
+                ".ignore",
+                ".rgignore",
+            ]
+        );
+        assert!(matches!(
+            namespace
+                .readdir(
+                    mount.path.clone(),
+                    DirCursor::Buffered {
+                        entries: listing.entries.clone(),
+                        then: None,
+                        offline: false,
+                    },
+                    0,
+                )
+                .await,
+            Err(NsError::OfflineMiss)
+        ));
+        let inline = namespace
+            .lookup(mount.path.clone(), "inline.txt")
+            .await
+            .expect("expired inline lookup");
+        assert_eq!(
+            Namespace::read(namespace.as_ref(), inline.path, 0, 1024)
+                .await
+                .unwrap()
+                .bytes,
+            inline_bytes
+        );
+        let canonical = namespace
+            .lookup(mount.path.clone(), "canonical.txt")
+            .await
+            .expect("expired canonical lookup");
+        assert_eq!(
+            Namespace::read(namespace.as_ref(), canonical.path, 0, 1024)
+                .await
+                .unwrap()
+                .bytes,
+            canonical_bytes
+        );
+        let git = namespace
+            .lookup(mount.path.clone(), "git")
+            .await
+            .expect("offline Git subtree");
+        let git_file = namespace
+            .lookup(git.path, "main.rs")
+            .await
+            .expect("offline Git child");
+        assert_eq!(
+            Namespace::read(namespace.as_ref(), git_file.path, 0, 1024)
+                .await
+                .unwrap()
+                .bytes,
+            b"fn cached() {}\n"
+        );
+        let partial = namespace
+            .lookup(mount.path.clone(), "partial")
+            .await
+            .expect("partial directory identity");
+        assert!(matches!(
+            namespace.lookup(partial.path.clone(), "unknown").await,
+            Err(NsError::OfflineMiss)
+        ));
+        assert!(matches!(
+            namespace.lookup(partial.path, "gone").await,
+            Err(NsError::NotFound)
+        ));
+        assert!(matches!(
+            namespace.lookup(mount.path, "unknown").await,
+            Err(NsError::NotFound)
+        ));
+        let root_git_mount = namespace
+            .lookup(ProjectedPath::root(), "rootgit")
+            .await
+            .expect("root Git mount");
+        let root_git_listing = namespace
+            .readdir(root_git_mount.path.clone(), DirCursor::start(), 0)
+            .await
+            .expect("mount-root Git listing");
+        assert_eq!(root_git_listing.entries[0].name, "main.rs");
+        let root_git_file = namespace
+            .lookup(root_git_mount.path, "main.rs")
+            .await
+            .expect("mount-root Git child");
+        assert_eq!(
+            Namespace::read(namespace.as_ref(), root_git_file.path, 0, 1024)
+                .await
+                .unwrap()
+                .bytes,
+            b"fn cached() {}\n"
+        );
+        drop(namespace);
+
+        let inline_body = BodyId::from_bytes(&inline_bytes);
+        let body_path = cache.join("bodies").join(inline_body.hex());
+        std::fs::write(&body_path, vec![b'x'; inline_bytes.len()]).expect("corrupt body");
+        assert!(matches!(
+            MountTable::load_offline(context.clone(), &desired),
+            Err(RegistryError::CorruptProjection { .. })
+        ));
+        std::fs::write(&body_path, &inline_bytes).expect("restore body");
+
+        let database = fjall::OptimisticTxDatabase::builder(cache.join("projections/database"))
+            .open()
+            .expect("open projection database for corruption witness");
+        let facts = database
+            .keyspace(
+                &format!("facts.{}", projection_id.hex()),
+                KeyspaceCreateOptions::default,
+            )
+            .unwrap();
+        let mut tx = database
+            .write_tx()
+            .unwrap()
+            .durability(Some(PersistMode::SyncAll));
+        tx.insert(&facts, b"i:/canonical.txt", [0xff]);
+        assert!(tx.commit().unwrap().is_ok());
+        drop(facts);
+        drop(database);
+        match MountTable::load_offline(context, &desired) {
+            Err(RegistryError::CorruptProjection { .. }) => {},
+            Err(error) => panic!("expected corrupt projection, got {error:?}"),
+            Ok(_) => panic!("expected corrupt projection, got a table"),
+        }
     }
 }

@@ -126,7 +126,11 @@ impl Namespace for StubNamespace {
                     path: path("/test/child"),
                     attrs: file_attrs(1),
                 }],
-                next: None,
+                next: Some(DirCursor::Buffered {
+                    entries: Vec::new(),
+                    then: None,
+                    offline: false,
+                }),
             })
         }
         .boxed()
@@ -156,8 +160,15 @@ impl Namespace for StubNamespace {
         .boxed()
     }
 
-    fn readlink(&self, _path: Path) -> BoxFuture<'_, Result<PathBuf, NsError>> {
-        async move { Err(NsError::Invalid) }.boxed()
+    fn readlink(&self, path: Path) -> BoxFuture<'_, Result<PathBuf, NsError>> {
+        async move {
+            if path.as_str() == "/test/offline" {
+                Err(NsError::OfflineMiss)
+            } else {
+                Err(NsError::Invalid)
+            }
+        }
+        .boxed()
     }
 
     fn subscribe(&self) -> EventStream {
@@ -333,6 +344,10 @@ async fn round_trips_every_request_variant() {
         (4, WireResponse::Readdir(Ok(page))) => {
             assert_eq!(page.entries.len(), 1);
             assert_eq!(page.entries[0].name, "child");
+            assert!(matches!(
+                page.next,
+                Some(DirCursor::Buffered { offline: false, .. })
+            ));
         },
         other => panic!("unexpected {other:?}"),
     }
@@ -543,9 +558,9 @@ async fn oversized_frame_is_rejected() {
 async fn handshake_version_mismatch_is_rejected() {
     let stub = StubNamespace::new();
     let (mut io, server) = serve_over_duplex(stub);
-    // The client offers a version the server does not speak.
+    // The client offers the immediately previous strict protocol version.
     let hello = postcard::to_allocvec(&Handshake::Hello {
-        protocol: 999,
+        protocol: PROTOCOL - 1,
         token: None,
         frontend: test_identity(),
     })
@@ -557,7 +572,7 @@ async fn handshake_version_mismatch_is_rejected() {
     match server.await.unwrap() {
         Err(WireError::VersionMismatch { ours, theirs }) => {
             assert_eq!(ours, PROTOCOL);
-            assert_eq!(theirs, 999);
+            assert_eq!(theirs, PROTOCOL - 1);
         },
         other => panic!("expected VersionMismatch, got {other:?}"),
     }
@@ -631,6 +646,18 @@ async fn server_side_nserror_propagates() {
     match recv_response(&mut io).await {
         (1, WireResponse::Readlink(Err(NsError::Invalid))) => {},
         other => panic!("expected Invalid, got {other:?}"),
+    }
+    send_request(
+        &mut io,
+        2,
+        &WireRequest::Readlink {
+            path: path("/test/offline"),
+        },
+    )
+    .await;
+    match recv_response(&mut io).await {
+        (2, WireResponse::Readlink(Err(NsError::OfflineMiss))) => {},
+        other => panic!("expected OfflineMiss, got {other:?}"),
     }
 }
 

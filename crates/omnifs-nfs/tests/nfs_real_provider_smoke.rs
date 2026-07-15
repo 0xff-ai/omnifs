@@ -180,7 +180,7 @@ impl RealProviders {
             &mounts_dir,
             runtime.handle(),
         ));
-        let namespace = TreeNamespace::new(Arc::clone(&registry), runtime.handle().clone());
+        let namespace = TreeNamespace::online(Arc::clone(&registry), runtime.handle().clone());
         let export = Arc::new(Export::new(
             runtime.handle().clone(),
             Arc::clone(&namespace) as Arc<dyn Namespace>,

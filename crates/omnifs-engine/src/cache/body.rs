@@ -43,6 +43,19 @@ impl BodyStore {
         Ok(Self { root })
     }
 
+    /// Open the existing global body store without creating directories or
+    /// sweeping abandoned publication files.
+    pub(crate) fn open_existing(root: impl AsRef<Path>) -> Result<Self, BodyStoreError> {
+        let root = crate::cache::existing_directory(root.as_ref()).map_err(|error| {
+            if error.kind() == io::ErrorKind::InvalidInput {
+                BodyStoreError::SymlinkRoot
+            } else {
+                BodyStoreError::Io(error)
+            }
+        })?;
+        Ok(Self { root })
+    }
+
     /// Publish bytes before any projection can reference their returned id.
     /// Existing content is immutable and therefore treated as an idempotent
     /// successful publication after the temporary file is removed.

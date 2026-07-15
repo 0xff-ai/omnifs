@@ -7,7 +7,8 @@
 //! `ReadResult` into kernel/protocol identity + reply encoding.
 
 use crate::cache::{
-    FactPayload, ProjectionTransition, Record as CacheRecord, RecordKind, RecordWrite,
+    FactPayload, MountResources, ProjectionTransition, Record as CacheRecord, RecordKind,
+    RecordWrite,
 };
 use crate::clock::now_millis;
 use crate::ops::namespace::{ReadBytes, ReadOutcome};
@@ -50,22 +51,29 @@ pub struct Chunk {
 }
 
 pub(crate) struct FileAttrStore<'a> {
-    runtime: &'a Runtime,
+    resources: &'a MountResources,
     path: &'a omnifs_core::path::Path,
 }
 
 impl<'a> FileAttrStore<'a> {
-    pub(crate) fn new(runtime: &'a Runtime, path: &'a omnifs_core::path::Path) -> Self {
-        Self { runtime, path }
+    pub(crate) fn new(resources: &'a MountResources, path: &'a omnifs_core::path::Path) -> Self {
+        Self { resources, path }
     }
 
-    pub(crate) fn cached(&self, now_millis: u64) -> Result<Option<FileAttrsCache>> {
-        if let Some(record) = self
-            .runtime
-            .resources
-            .view_get(self.path, RecordKind::Lookup, None, now_millis)
-            .map_err(|error| TreeError::internal(error.to_string()))?
-        {
+    pub(crate) fn cached(
+        &self,
+        now_millis: u64,
+        respect_expiry: bool,
+    ) -> Result<Option<FileAttrsCache>> {
+        let lookup = if respect_expiry {
+            self.resources
+                .view_get(self.path, RecordKind::Lookup, None, now_millis)
+        } else {
+            self.resources
+                .cache_get(self.path, RecordKind::Lookup, None)
+        }
+        .map_err(|error| TreeError::internal(error.to_string()))?;
+        if let Some(record) = lookup {
             let payload: LookupPayload = postcard::from_bytes(&record.payload)
                 .map_err(|error| TreeError::internal(error.to_string()))?;
             if let LookupPayload::Positive(meta) = payload
@@ -75,25 +83,26 @@ impl<'a> FileAttrStore<'a> {
             }
         }
 
-        let attrs = self
-            .runtime
-            .resources
-            .view_get(self.path, RecordKind::Attr, None, now_millis)
-            .map_err(|error| TreeError::internal(error.to_string()))?
-            .map(|record| {
-                postcard::from_bytes::<AttrPayload>(&record.payload)
-                    .map_err(|error| TreeError::internal(error.to_string()))
-                    .and_then(|payload| Ok(payload.meta.into_attrs()))
-            })
-            .transpose()?
-            .flatten();
+        let attrs = if respect_expiry {
+            self.resources
+                .view_get(self.path, RecordKind::Attr, None, now_millis)
+        } else {
+            self.resources.cache_get(self.path, RecordKind::Attr, None)
+        }
+        .map_err(|error| TreeError::internal(error.to_string()))?
+        .map(|record| {
+            postcard::from_bytes::<AttrPayload>(&record.payload)
+                .map_err(|error| TreeError::internal(error.to_string()))
+                .and_then(|payload| Ok(payload.meta.into_attrs()))
+        })
+        .transpose()?
+        .flatten();
         Ok(attrs)
     }
 
     pub(crate) fn publish(&self, attrs: FileAttrsCache, captured_epoch: u64) -> Result<()> {
         let meta = EntryMeta::file(attrs);
-        self.runtime
-            .resources
+        self.resources
             .publish(
                 ProjectionTransition {
                     records: vec![
@@ -142,17 +151,19 @@ impl TreeNamespace {
             return Err(TreeError::is_directory(node.path().as_str()));
         }
 
-        let runtime = self.runtime_for(node.mount())?;
+        let entry = self.entry_for(node.mount())?;
+        let resources = entry.resources();
+        let offline = entry.runtime().is_none();
         let path = node.path();
-        let captured_epoch = runtime.resources.current_epoch();
-        let attr_store = FileAttrStore::new(&runtime, path);
+        let captured_epoch = resources.current_epoch();
+        let attr_store = FileAttrStore::new(resources, path);
         let now = now_millis();
-        let expired = runtime
-            .resources
-            .view_expired(path, now)
-            .map_err(|error| TreeError::internal(error.to_string()))?;
+        let expired = !offline
+            && resources
+                .view_expired(path, now)
+                .map_err(|error| TreeError::internal(error.to_string()))?;
         let projected_attrs = attr_store
-            .cached(now)?
+            .cached(now, !offline)?
             .or_else(|| (!expired).then(|| node.attrs().cloned()).flatten());
         let attrs = projected_attrs.as_ref();
         enforce_declared_materialize_cap(path, attrs)?;
@@ -161,6 +172,7 @@ impl TreeNamespace {
         // empty without any provider call.
         if let Some(attrs) = attrs
             && matches!(attrs.size(), view_types::FileSize::Exact(0))
+            && (!offline || !matches!(attrs.byte_source(), view_types::ByteSource::Deferred(_)))
         {
             return Ok(ReadResult::Bytes {
                 data: Vec::new(),
@@ -184,7 +196,9 @@ impl TreeNamespace {
                         "inline projection for {path} contradicts file attrs: {error}"
                     ))
                 })?;
-            attr_store.publish(attrs.clone(), captured_epoch)?;
+            if !offline {
+                attr_store.publish(attrs.clone(), captured_epoch)?;
+            }
             return Ok(ReadResult::Bytes {
                 data,
                 attrs: Some(attrs),
@@ -195,8 +209,7 @@ impl TreeNamespace {
         if let Some(attrs) = attrs
             && matches!(attrs.byte_source(), view_types::ByteSource::Canonical)
         {
-            if let Some(canonical) = runtime
-                .resources
+            if let Some(canonical) = resources
                 .cached_canonical_for(path)
                 .map_err(|error| TreeError::internal(error.to_string()))?
             {
@@ -223,25 +236,53 @@ impl TreeNamespace {
         // against the projected attrs. A hit serves the cached bytes and keeps
         // the node's projected (already size-learned) attrs.
         if let Some(aux) = durable_aux.clone() {
-            if let Some(record) =
-                runtime
-                    .resources
-                    .memory_get(path, RecordKind::File, aux.as_deref())
+            if let Some(record) = resources.memory_get(path, RecordKind::File, aux.as_deref())
                 && let Some(payload) = file_payload_for_attrs(&record, attrs)
             {
                 crate::inspector::cache_event(CacheKind::FileHit);
                 return read_result_from_cache(path, payload, attrs);
             }
-            if let Some(record) = runtime
-                .resources
-                .view_get(path, RecordKind::File, aux.as_deref(), now)
-                .map_err(|error| TreeError::internal(error.to_string()))?
+            let durable = if offline {
+                resources.cache_get(path, RecordKind::File, aux.as_deref())
+            } else {
+                resources.view_get(path, RecordKind::File, aux.as_deref(), now)
+            }
+            .map_err(|error| TreeError::internal(error.to_string()))?;
+            if let Some(record) = durable
                 && let Some(payload) = file_payload_for_attrs(&record, attrs)
             {
                 crate::inspector::cache_event(CacheKind::FileHit);
                 return read_result_from_cache(path, payload, attrs);
             }
         }
+
+        if offline
+            && let Some(attrs) = attrs
+            && let view_types::ByteSource::Body(body) = attrs.byte_source()
+        {
+            let view_types::FileSize::Exact(length) = attrs.size() else {
+                return Err(TreeError::internal(
+                    "validated durable body metadata lost its exact length",
+                ));
+            };
+            let data = resources
+                .read_body(body, length)
+                .map_err(|error| TreeError::internal(error.to_string()))?;
+            enforce_observed_materialize_cap(path, data.len())?;
+            return Ok(ReadResult::Bytes {
+                data,
+                attrs: Some(attrs.clone()),
+                content_type: None,
+            });
+        }
+
+        if offline {
+            return Err(TreeError::offline_miss(format!(
+                "offline read has no complete body for {path}"
+            )));
+        }
+
+        let runtime = entry.runtime().expect("online entry has a runtime");
 
         // Cold miss. Derive the content type the host echoes into `read-file`:
         // the path's representation suffix wins, else octet-stream (the

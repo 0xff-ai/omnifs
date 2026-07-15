@@ -31,25 +31,25 @@ Provider namespace and notify calls are async component exports that return term
 
 One provider instance can serve multiple concurrent filesystem operations. Wasmtime's component async runtime owns suspension while the host owns the callout executors, auth injection, capability checks, tracing, and cache-visible effects.
 
-Terminal host mutations travel through effects:
+Terminal host mutations travel through effects and the operation's typed result:
 
-- canonical stores write raw upstream bytes into the object cache.
-- filesystem effects write materialized files and directories into the view cache.
+- canonical stores select object identity and content-addressed body bytes.
+- filesystem effects write materialized files, directories, attrs, and listing facts.
 - invalidations remove object or listing state.
 
-Errors do not carry effects. New terminal host mutations should be new explicit effect fields, not tunneled through callouts.
+The operation owner validates and lowers the complete terminal into one projection transition, commits it once, and then exposes the typed result. Errors do not carry effects. New terminal host mutations should be new explicit effect fields, not tunneled through callouts.
 
 ## Caches and reads
 
-The host owns storage as opaque bytes.
+The host owns storage as opaque facts and bytes.
 
-- The object cache is durable canonical storage, scoped per mount.
-- The view cache is derived and disposable. It can be deleted and rebuilt from canonical bytes.
-- The blob cache stores large host-resident binary content by handle.
+- One global `BodyStore` stores every complete body by BLAKE3 identity.
+- One projection keyspace stores object relations, typed lookup/attr/file/listing facts, blob request references, Git identities, and freshness for an exact spec/provider identity.
+- Each projection has a derived process-local memory tier. Provider blob handles and Git tree handles never enter durable rows.
 
 On a warm object read, the host pushes cached canonical bytes into the provider's read operation. The provider decodes and renders from those bytes. There is no provider-to-host canonical-read callout and no host-side render operation.
 
-The object cache has no provider TTL. Entries leave by capacity eviction or explicit invalidation. View leaves can carry freshness derived from stability, because they are derived materialization rather than canonical authority.
+Online access uses freshness deadlines to decide when provider revalidation is needed. Cache-only access ignores those deadlines and serves complete durable facts. A missing body, partial listing, deferred/live/ranged value, or other provider-dependent fact returns `OfflineMiss`; a corrupt relation fails table construction.
 
 ## Dispatch and listing
 
@@ -73,7 +73,7 @@ FUSE owns inode tables, kernel notifications, mount/unmount mechanics, and FUSE 
 
 Neither frontend owns projection semantics, provider WIT calls, cache schema, root enumeration, learned-size rules, preload policy, inline-byte policy, or negative lookup policy.
 
-A frontend (always out-of-process) consumes the same `omnifs_engine::Namespace` through the Omnifs VFS wire protocol. `omnifs-engine` remains the semantic owner; `omnifs-vfs-wire` owns postcard serialization, framing, the v4 handshake, attach target resolution and reconnect, readiness signaling, direct validated `Path` requests, and ordered invalidation events. Unix sockets (local), token-authenticated TCP (docker), and vsock (libkrun) are attach transports for this one internal protocol. The wire carries no semantic cache and does not define another projection model. Delivery is labeled by listener ownership at the daemon (UDS local, TCP docker, vsock libkrun); the guest never self-reports delivery.
+A frontend (always out-of-process) consumes the same `omnifs_engine::Namespace` through the Omnifs VFS wire protocol. `omnifs-engine` remains the semantic owner; `omnifs-vfs-wire` owns postcard serialization, framing, the strict v5 handshake, attach target resolution and reconnect, readiness signaling, direct validated `Path` requests, terminal `OfflineMiss`, and ordered invalidation events. Unix sockets (local), token-authenticated TCP (docker), and vsock (libkrun) are attach transports for this one internal protocol. The wire carries no semantic cache and does not define another projection model. Delivery is labeled by listener ownership at the daemon (UDS local, TCP docker, vsock libkrun); the guest never self-reports delivery.
 
 ## Control plane
 

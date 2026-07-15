@@ -96,6 +96,10 @@ async fn root_enumerates_and_descends_to_message() {
         .await
         .expect("lookup /hello/message");
     assert_eq!(message.attrs.kind, EntryKind::File);
+    assert!(matches!(
+        ns.lookup(message.path.clone(), "child").await,
+        Err(NsError::NotDirectory)
+    ));
 
     // Before any read, the whole-file leaf reports the unknown-size sentinel.
     let attrs = ns
@@ -284,6 +288,10 @@ async fn readdir_budget_buffers_overflow() {
             .expect("budgeted page");
         if first_page_len.is_none() {
             first_page_len = Some(page.entries.len());
+            assert!(matches!(
+                page.next.as_ref(),
+                Some(DirCursor::Buffered { offline: false, .. })
+            ));
         }
         seen += page.entries.len();
         match page.next {

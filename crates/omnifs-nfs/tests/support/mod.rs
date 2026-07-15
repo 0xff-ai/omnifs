@@ -1,7 +1,7 @@
 use omnifs_core::path::Path as NamespacePath;
 use omnifs_engine::{
-    Attrs, DirCursor, DirPage, EventStream, LookupAnswer, MountRuntimes, Namespace, NsError,
-    NsEvent, ReadAnswer, TreeNamespace,
+    Attrs, DirCursor, DirPage, EventStream, LookupAnswer, MountTable, Namespace, NsError, NsEvent,
+    ReadAnswer, TreeNamespace,
 };
 use omnifs_nfs::Export;
 use std::future::Future;
@@ -22,7 +22,7 @@ use registry::load_registry_from_mount_dir;
 pub struct TestExport {
     pub export: Arc<Export>,
     pub runtime: Runtime,
-    pub registry: Arc<MountRuntimes>,
+    pub registry: Arc<MountTable>,
     pub namespace: Arc<TreeNamespace>,
     pub events: broadcast::Sender<NsEvent>,
     _config_dir: TempDir,
@@ -122,7 +122,7 @@ pub fn test_export_with_mount(mount: &str) -> TestExport {
         runtime.handle(),
     );
     let registry = Arc::new(registry);
-    let namespace = TreeNamespace::new(Arc::clone(&registry), runtime.handle().clone());
+    let namespace = TreeNamespace::online(Arc::clone(&registry), runtime.handle().clone());
     let (events, _) = broadcast::channel(64);
     let mut inner_events = namespace.subscribe();
     let forwarded_events = events.clone();

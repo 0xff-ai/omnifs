@@ -151,6 +151,7 @@ pub enum DirCursor {
     Buffered {
         entries: Vec<DirEntry>,
         then: Option<view_types::CachedCursor>,
+        offline: bool,
     },
 }
 
@@ -203,6 +204,8 @@ pub enum NsRetryClass {
 pub enum NsError {
     #[error("not found")]
     NotFound,
+    #[error("durable projection does not contain a complete offline answer")]
+    OfflineMiss,
     #[error("not a directory")]
     NotDirectory,
     #[error("is a directory")]
@@ -230,7 +233,9 @@ impl NsError {
             Self::RateLimited { .. } | Self::Timeout | Self::Network => NsRetryClass::Retry,
             Self::NotFound | Self::NotDirectory | Self::IsDirectory => NsRetryClass::Gone,
             Self::TooLarge => NsRetryClass::TooLarge,
-            Self::Permission | Self::Invalid | Self::Internal { .. } => NsRetryClass::Terminal,
+            Self::Permission | Self::Invalid | Self::OfflineMiss | Self::Internal { .. } => {
+                NsRetryClass::Terminal
+            },
         }
     }
 }

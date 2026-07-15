@@ -26,7 +26,7 @@ use crate::new_notifier_handle;
 use omnifs_core::path::Path;
 use omnifs_engine::{
     Attrs, DirCursor, DirPage, EntryKind, EventStream, GitCloner, HostContext, LookupAnswer,
-    MountRuntimes, Namespace, NsError, ReadAnswer, ReadStyle, StabilityClass, TreeNamespace,
+    MountTable, Namespace, NsError, ReadAnswer, ReadStyle, StabilityClass, TreeNamespace,
 };
 use std::future::Future;
 use std::path::{Path as StdPath, PathBuf};
@@ -53,7 +53,7 @@ fn wasm_artifact_path(file_name: &str) -> PathBuf {
 struct FuseHarness {
     fs: Frontend,
     ns: Arc<TreeNamespace>,
-    _registry: Arc<MountRuntimes>,
+    _registry: Arc<MountTable>,
     _cache_dir: TempDir,
     _config_dir: TempDir,
     _providers_dir: TempDir,
@@ -96,7 +96,7 @@ fn build_harness() -> FuseHarness {
     let desired =
         omnifs_workspace::mounts::Registry::load(mounts_dir.path()).expect("load mount snapshot");
     let registry = Arc::new(
-        MountRuntimes::load(
+        MountTable::load_online(
             HostContext::new(
                 cache_dir.path(),
                 &paths.config_dir,
@@ -111,7 +111,7 @@ fn build_harness() -> FuseHarness {
     );
 
     let rt = tokio::runtime::Handle::current();
-    let ns = TreeNamespace::new(Arc::clone(&registry), rt.clone());
+    let ns = TreeNamespace::online(Arc::clone(&registry), rt.clone());
     let fs = Frontend::new(
         rt,
         Arc::clone(&ns) as Arc<dyn Namespace>,

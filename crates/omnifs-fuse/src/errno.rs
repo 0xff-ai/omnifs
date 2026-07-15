@@ -51,5 +51,9 @@ mod tests {
             i32::from(ns_error_errno(&NsError::IsDirectory)),
             i32::from(Errno::EISDIR)
         );
+        assert_eq!(
+            i32::from(ns_error_errno(&NsError::OfflineMiss)),
+            i32::from(Errno::EIO)
+        );
     }
 }

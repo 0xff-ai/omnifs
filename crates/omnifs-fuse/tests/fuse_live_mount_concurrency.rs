@@ -13,7 +13,7 @@
 
 use omnifs_engine::GitCloner;
 use omnifs_engine::HostContext;
-use omnifs_engine::MountRuntimes;
+use omnifs_engine::MountTable;
 use omnifs_fuse::new_notifier_handle;
 use omnifs_wit::provider::types::{CalloutResult, Header, HttpResponse};
 use std::path::{Path, PathBuf};
@@ -61,7 +61,7 @@ fn fuse_live_mount_serves_fast_ops_while_provider_read_is_parked() {
         move || {
             let notifier = new_notifier_handle();
             // The daemon owns namespace construction; the live test mirrors it.
-            let namespace = omnifs_engine::TreeNamespace::new(registry, handle.clone());
+            let namespace = omnifs_engine::TreeNamespace::online(registry, handle.clone());
             omnifs_fuse::mount::run_blocking(&mount_point, namespace, &handle, &notifier)
         }
     });
@@ -202,7 +202,7 @@ fn fuse_live_mount_serves_fast_ops_while_provider_read_is_parked() {
 /// The registry, tokio runtime, and on-disk layout backing one live mount of
 /// the test provider with captured callouts.
 struct MountFixture {
-    registry: Arc<MountRuntimes>,
+    registry: Arc<MountTable>,
     runtime: Arc<omnifs_engine::Engine>,
     rt: tokio::runtime::Runtime,
     mount_point: PathBuf,

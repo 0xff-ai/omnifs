@@ -431,5 +431,6 @@ mod tests {
     #[test]
     fn too_large_maps_to_nfs_resource() {
         assert_eq!(Status::from(&NsError::TooLarge), Status::Resource);
+        assert_eq!(Status::from(&NsError::OfflineMiss), Status::Io);
     }
 }

@@ -17,7 +17,7 @@
 
 use omnifs_engine::GitCloner;
 use omnifs_engine::HostContext;
-use omnifs_engine::MountRuntimes;
+use omnifs_engine::MountTable;
 use omnifs_engine::TreeNamespace;
 use omnifs_nfs::{NfsMountOptions, mount_blocking, mount_is_active, unmount};
 use omnifs_wit::provider::types::{CalloutResult, Header, HttpResponse};
@@ -88,7 +88,7 @@ fn nfs_live_mount_serves_fast_ops_while_provider_read_is_parked() {
         let handle = fixture.rt.handle().clone();
         let options = fixture.options.clone();
         move || {
-            let namespace = TreeNamespace::new(registry, handle.clone());
+            let namespace = TreeNamespace::online(registry, handle.clone());
             mount_blocking(&mount_point, namespace, handle, &options)
         }
     });
@@ -250,7 +250,7 @@ fn nfs_live_mount_serves_fast_ops_while_provider_read_is_parked() {
 /// The registry, tokio runtime, and on-disk layout backing one live mount of
 /// the test provider with captured callouts.
 struct MountFixture {
-    registry: Arc<MountRuntimes>,
+    registry: Arc<MountTable>,
     runtime: Arc<omnifs_engine::Engine>,
     rt: tokio::runtime::Runtime,
     mount_point: PathBuf,

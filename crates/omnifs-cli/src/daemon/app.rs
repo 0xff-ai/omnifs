@@ -7,7 +7,7 @@
 use anyhow::Context as _;
 use clap::Args;
 use omnifs_engine::GitCloner;
-use omnifs_engine::MountRuntimes;
+use omnifs_engine::MountTable;
 use omnifs_engine::init_global_from_env;
 use omnifs_workspace::mounts::Registry;
 use omnifs_workspace::mounts::Revision;
@@ -69,7 +69,7 @@ pub(crate) async fn run(args: &DaemonArgs) -> anyhow::Result<()> {
             providers = %host_context.providers_dir().display(),
             "starting daemon"
         );
-        Arc::new(MountRuntimes::load(
+        Arc::new(MountTable::load_online(
             host_context,
             Arc::clone(&cloner),
             &desired,
@@ -103,7 +103,7 @@ pub(crate) async fn run(args: &DaemonArgs) -> anyhow::Result<()> {
     ));
     // Build the one shared namespace after atomic startup loading, so its root
     // record reflects the complete mount set.
-    let namespace = omnifs_engine::TreeNamespace::new(Arc::clone(&registry), rt.clone());
+    let namespace = omnifs_engine::TreeNamespace::online(Arc::clone(&registry), rt.clone());
     // Give the daemon's VfsServer a handle to the namespace so typed attach
     // requests can bind a TCP listener on a running daemon without a restart.
     daemon.set_namespace(Arc::clone(&namespace));

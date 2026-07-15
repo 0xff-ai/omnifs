@@ -257,6 +257,7 @@ impl Runtime {
         cloner: Arc<GitCloner>,
         context: &HostContext,
         resources: Arc<MountResources>,
+        trees: Arc<TreeRefs>,
         credential_service: &Arc<CredentialService>,
     ) -> std::result::Result<Self, BuildError> {
         Self::build(
@@ -267,6 +268,7 @@ impl Runtime {
             cloner,
             context,
             resources,
+            trees,
             credential_service,
             false,
         )
@@ -281,6 +283,7 @@ impl Runtime {
         cloner: Arc<GitCloner>,
         context: &HostContext,
         resources: Arc<MountResources>,
+        trees: Arc<TreeRefs>,
         credential_service: &Arc<CredentialService>,
     ) -> std::result::Result<Self, BuildError> {
         Self::build(
@@ -291,6 +294,7 @@ impl Runtime {
             cloner,
             context,
             resources,
+            trees,
             credential_service,
             true,
         )
@@ -308,6 +312,7 @@ impl Runtime {
         cloner: Arc<GitCloner>,
         _context: &HostContext,
         resources: Arc<MountResources>,
+        trees: Arc<TreeRefs>,
         credential_service: &Arc<CredentialService>,
         capture_test_callouts: bool,
     ) -> std::result::Result<Self, BuildError> {
@@ -357,7 +362,6 @@ impl Runtime {
         )
         .map_err(|e| BuildError::ProviderProtocol(format!("auth config error: {e}")))?;
 
-        let trees = Arc::new(TreeRefs::new());
         let git = git::GitExecutor::new(cloner, Arc::clone(&authority), trees.clone(), mount_name);
 
         let blob_limits = BlobLimits::from_config(config);

@@ -721,6 +721,11 @@ impl DirentsPayload {
         self.exhaustive || self.paginated || self.next_cursor.is_some()
     }
 
+    #[must_use]
+    pub fn is_complete_offline(&self) -> bool {
+        self.exhaustive || (self.paginated && self.next_cursor.is_none())
+    }
+
     pub fn merged(
         existing_record: Option<Self>,
         mut new_children: BTreeMap<String, DirentRecord>,

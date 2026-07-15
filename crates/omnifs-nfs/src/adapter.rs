@@ -813,7 +813,7 @@ impl Attr {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use omnifs_engine::{GitCloner, HostContext, MountRuntimes, TreeNamespace};
+    use omnifs_engine::{GitCloner, HostContext, MountTable, TreeNamespace};
     use tempfile::TempDir;
     use tokio::runtime::Runtime as TokioRuntime;
 
@@ -840,7 +840,7 @@ mod tests {
         let desired = omnifs_workspace::mounts::Registry::load(mounts_dir.path())
             .expect("load mount snapshot");
         let registry = Arc::new(
-            MountRuntimes::load(
+            MountTable::load_online(
                 HostContext::new(
                     cache_dir.path(),
                     config_dir.path(),
@@ -854,7 +854,7 @@ mod tests {
             .expect("load mount snapshot"),
         );
 
-        let namespace = TreeNamespace::new(registry, handle.clone());
+        let namespace = TreeNamespace::online(registry, handle.clone());
         let export = Export::new(handle, namespace);
         TestExport {
             export,

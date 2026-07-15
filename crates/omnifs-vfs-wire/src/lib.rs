@@ -63,9 +63,9 @@ pub use client::{AttachTarget, AttachTargetError, WireNamespace};
 pub use server::{ListenerEvent, ListenerTarget, VfsServer, serve_connection};
 
 /// The Omnifs VFS wire protocol version. A client and server that disagree refuse
-/// to serve: there is no version negotiation, so v4 rejects a v3 (or lower)
+/// to serve: there is no version negotiation, so v5 rejects a v4 (or lower)
 /// peer outright with a named reason.
-pub const PROTOCOL: u32 = 4;
+pub const PROTOCOL: u32 = 5;
 
 /// Identity a connecting frontend presents in its handshake `Hello`, naming
 /// its own kind and guest-side mount point (display-only). The server reports

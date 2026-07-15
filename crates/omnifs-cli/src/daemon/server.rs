@@ -7,7 +7,7 @@ use omnifs_api::{
     ControlOperation, ControlOutcome, ControlReply, ControlRequest, CredentialHealth, DaemonStatus,
     MountInfo,
 };
-use omnifs_engine::{Inspector, MountRuntimes};
+use omnifs_engine::{Inspector, MountTable};
 use omnifs_workspace::daemon_record::{AttachRecord, DaemonRecord};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
@@ -191,7 +191,7 @@ fn check_startup_events(
 
 pub(crate) struct Daemon {
     context: DaemonContext,
-    registry: Arc<MountRuntimes>,
+    registry: Arc<MountTable>,
     inspector: Option<Arc<Inspector>>,
     daemon_record: Arc<DaemonRecordStore>,
     vfs: OnceLock<Arc<omnifs_vfs_wire::VfsServer>>,
@@ -204,7 +204,7 @@ pub(crate) struct Daemon {
 impl Daemon {
     pub(crate) fn new(
         context: DaemonContext,
-        registry: Arc<MountRuntimes>,
+        registry: Arc<MountTable>,
         inspector: Option<Arc<Inspector>>,
         daemon_record: Arc<DaemonRecordStore>,
     ) -> Self {
@@ -917,7 +917,7 @@ mod tests {
             Arc::new(omnifs_engine::GitCloner::new(context.cache_dir().join("clones")).unwrap());
         let desired = omnifs_workspace::mounts::Registry::load(&args.mount_snapshot).unwrap();
         let registry = Arc::new(
-            omnifs_engine::MountRuntimes::load(
+            omnifs_engine::MountTable::load_online(
                 context.host_context(),
                 cloner,
                 &desired,
@@ -1043,7 +1043,8 @@ mod tests {
 
         let daemon = test_daemon(&dir);
         let rt = tokio::runtime::Handle::current();
-        let namespace = omnifs_engine::TreeNamespace::new(Arc::clone(&daemon.registry), rt.clone());
+        let namespace =
+            omnifs_engine::TreeNamespace::online(Arc::clone(&daemon.registry), rt.clone());
         daemon.set_namespace(namespace);
 
         let vfs = daemon.vfs.get().unwrap();

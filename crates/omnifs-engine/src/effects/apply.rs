@@ -234,6 +234,11 @@ impl<'a> EffectApplier<'a> {
                     id,
                     relative_path: String::new(),
                 });
+                transition.records.push(RecordWrite {
+                    path: child.clone(),
+                    aux: None,
+                    fact: FactPayload::Lookup(LookupPayload::Positive(EntryMeta::directory())),
+                });
                 LookupOutcome::Subtree(tree)
             },
             wit_types::LookupChildResult::NotFound(id) => {
@@ -357,6 +362,11 @@ impl<'a> EffectApplier<'a> {
                     path: path.clone(),
                     id,
                     relative_path: String::new(),
+                });
+                transition.records.push(RecordWrite {
+                    path: path.clone(),
+                    aux: None,
+                    fact: FactPayload::Lookup(LookupPayload::Positive(EntryMeta::directory())),
                 });
                 ListOutcome::Subtree(tree)
             },

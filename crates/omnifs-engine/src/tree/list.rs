@@ -19,7 +19,7 @@
 //! snapshot (NFS) drives the cursor forward over raw provider pages.
 
 use crate::Runtime;
-use crate::cache::RecordKind;
+use crate::cache::MountResources;
 use crate::ops::namespace::{DirEntry as ProviderEntry, DirListing as ProviderListing};
 use crate::view::{CachedCursor, DirentRecord, DirentsPayload, EntryMeta};
 use tracing::warn;
@@ -92,13 +92,19 @@ impl TreeNamespace {
             }));
         }
 
-        let runtime = self.runtime_for(node.mount())?;
+        let entry = self.entry_for(node.mount())?;
+        let resources = entry.resources();
         let path = node.path();
-        let captured_epoch = runtime.resources.current_epoch();
+        let captured_epoch = resources.current_epoch();
 
         // An explicit-cursor continuation is a raw page drain: no cache consult,
         // no synthetic entries, the direct provider paginated read.
         if let Some(cursor) = cursor {
+            let runtime = entry.runtime().ok_or_else(|| {
+                TreeError::offline_miss(format!(
+                    "offline listing continuation requires a provider for {path}"
+                ))
+            })?;
             return self
                 .list_continuation(&runtime, path, cursor, captured_epoch)
                 .await
@@ -108,12 +114,19 @@ impl TreeNamespace {
         // First-page browse listing. Drain pending invalidations so a stale mem
         // entry never satisfies the consult below, then serve an authoritative
         // cached listing if one exists.
-        self.drain_invalidations(node.mount());
-        if let Some(dirents) = consult_authoritative_listing(&runtime, path)? {
+        if entry.runtime().is_some() {
+            self.drain_invalidations(node.mount());
+        }
+        if let Some(dirents) =
+            consult_authoritative_listing(resources, entry.runtime().as_deref(), path)?
+        {
             crate::inspector::cache_event(CacheKind::BrowseHit);
             return Ok(ListOutcome::Listing(listing_from_dirents(node, &dirents)));
         }
 
+        let runtime = entry.runtime().ok_or_else(|| {
+            TreeError::offline_miss(format!("offline listing has no complete fact for {path}"))
+        })?;
         self.list_via_provider(&runtime, node, captured_epoch).await
     }
 
@@ -164,7 +177,7 @@ impl TreeNamespace {
         // A non-exhaustive cached dirents record may carry a listing validator
         // the provider can revalidate against; echo it so the provider can
         // answer `unchanged`.
-        let cached_dirents = cached_dirents_for_revalidation(runtime, path)?;
+        let cached_dirents = cached_dirents_for_revalidation(&runtime.resources, path)?;
         let cached_validator = cached_dirents.as_ref().and_then(|d| d.validator.clone());
 
         crate::inspector::cache_event(CacheKind::BrowseMiss);
@@ -174,7 +187,7 @@ impl TreeNamespace {
 
         match result {
             Ok(crate::ops::namespace::ListOutcome::Entries(listing)) => Ok(ListOutcome::Listing(
-                snapshot_from_provider_listing(node, runtime, &listing)?,
+                snapshot_from_provider_listing(node, &listing)?,
             )),
             Ok(crate::ops::namespace::ListOutcome::Unchanged) => {
                 // The cached validator still matched: serve the accumulated
@@ -218,11 +231,7 @@ impl TreeNamespace {
 /// included when paged, and never stripped back out even after the feed later
 /// exhausts, so they survive a later cached serve and control-name resolution),
 /// and surface the synthetic control / ignore entries.
-fn snapshot_from_provider_listing(
-    node: &Node,
-    runtime: &Runtime,
-    listing: &ProviderListing,
-) -> Result<Listing> {
+fn snapshot_from_provider_listing(node: &Node, listing: &ProviderListing) -> Result<Listing> {
     let path = node.path();
     let mut dirent_records = Vec::with_capacity(listing.entries.len());
     for e in &listing.entries {
@@ -341,20 +350,23 @@ fn listing_from_dirents(node: &Node, dirents: &DirentsPayload) -> Listing {
 /// to the provider. Mirrors `Frontend::opendir_check_caches` + rate-limit
 /// serve-stale.
 fn consult_authoritative_listing(
-    runtime: &Runtime,
+    resources: &MountResources,
+    runtime: Option<&Runtime>,
     path: &omnifs_core::path::Path,
 ) -> Result<Option<DirentsPayload>> {
-    let dirents = cached_dirents_for_revalidation(runtime, path)?;
-    if dirents
-        .as_ref()
-        .is_some_and(DirentsPayload::is_authoritative_listing)
-    {
+    let dirents = cached_dirents_for_revalidation(resources, path)?;
+    if dirents.as_ref().is_some_and(|dirents| {
+        runtime.map_or_else(
+            || dirents.is_complete_offline(),
+            |_| dirents.is_authoritative_listing(),
+        )
+    }) {
         return Ok(dirents);
     }
     // Serve-stale-while-rate-limited: while the mount's window is open, serve the
     // last-known listing (even a non-authoritative prefix) rather than calling
     // the provider and getting EAGAIN.
-    if runtime.rate_limited_until().is_some() {
+    if runtime.is_some_and(|runtime| runtime.rate_limited_until().is_some()) {
         return Ok(dirents);
     }
     Ok(None)
@@ -364,17 +376,10 @@ fn consult_authoritative_listing(
 /// listing validator for revalidation and to serve an `unchanged` result.
 /// Mirrors `Frontend::cached_dirents_for_revalidation`.
 fn cached_dirents_for_revalidation(
-    runtime: &Runtime,
+    resources: &MountResources,
     path: &omnifs_core::path::Path,
 ) -> Result<Option<DirentsPayload>> {
-    let record = runtime
-        .resources
-        .cache_get(path, RecordKind::Dirents, None)
-        .map_err(|error| TreeError::internal(error.to_string()))?;
-    record
-        .map(|record| {
-            postcard::from_bytes(&record.payload)
-                .map_err(|error| TreeError::internal(error.to_string()))
-        })
-        .transpose()
+    resources
+        .dirents_payload(path)
+        .map_err(|error| TreeError::internal(error.to_string()))
 }

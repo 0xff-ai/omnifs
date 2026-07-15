@@ -21,7 +21,7 @@ use super::{
     NsEvent, ReadAnswer, ReadStyle, StabilityClass, view_types,
 };
 use crate::inspect;
-use crate::registry::MountRuntimes;
+use crate::registry::{MountEntry, MountTable};
 use crate::tree::{HostKind, ListOutcome, RangedHandle, ReadResult, RequestCtx};
 use crate::view::{EntryMeta, FileAttrsCache, FileSize};
 use crate::{Engine, TreeError, TreeErrorKind};
@@ -108,6 +108,7 @@ impl DirPage {
         mut entries: Vec<DirEntry>,
         then: Option<view_types::CachedCursor>,
         budget: usize,
+        offline: bool,
     ) -> Self {
         if budget == 0 || entries.len() <= budget {
             return Self {
@@ -121,6 +122,7 @@ impl DirPage {
             next: Some(DirCursor::Buffered {
                 entries: overflow,
                 then,
+                offline,
             }),
         }
     }
@@ -130,6 +132,7 @@ impl From<TreeError> for NsError {
     fn from(err: TreeError) -> Self {
         match err.kind {
             TreeErrorKind::NotFound => Self::NotFound,
+            TreeErrorKind::OfflineMiss => Self::OfflineMiss,
             TreeErrorKind::NotDirectory => Self::NotDirectory,
             TreeErrorKind::IsDirectory => Self::IsDirectory,
             TreeErrorKind::PermissionDenied => Self::Permission,
@@ -151,6 +154,7 @@ impl From<NsError> for TreeError {
     fn from(error: NsError) -> Self {
         match error {
             NsError::NotFound => TreeError::not_found("host entry not found"),
+            NsError::OfflineMiss => TreeError::offline_miss("offline projection miss"),
             NsError::NotDirectory => TreeError {
                 kind: TreeErrorKind::NotDirectory,
                 message: "host parent is not a directory".to_string(),
@@ -225,7 +229,7 @@ impl Drop for HandleRecord {
 /// The engine-owned [`Namespace`] implementation. Owns node identity, the invalidation
 /// epoch and event fan-out, and the ranged-handle cache.
 pub struct TreeNamespace {
-    registry: Arc<MountRuntimes>,
+    registry: Arc<MountTable>,
     rt: Handle,
     ids: DashMap<Path, NodeRecord>,
     epoch: AtomicU64,
@@ -243,7 +247,23 @@ impl TreeNamespace {
     /// Production constructor: build the namespace over the immutable mount registry and
     /// start the background invalidation drain. The returned value is the
     /// frontend's complete `dyn Namespace` implementation.
-    pub fn new(registry: Arc<MountRuntimes>, rt: Handle) -> Arc<Self> {
+    pub fn online(registry: Arc<MountTable>, rt: Handle) -> Arc<Self> {
+        assert!(
+            !registry.is_offline(),
+            "online namespace requires an online mount table"
+        );
+        Self::construct(registry, rt, true)
+    }
+
+    pub fn offline(registry: Arc<MountTable>, rt: Handle) -> Arc<Self> {
+        assert!(
+            registry.is_offline(),
+            "offline namespace requires an offline mount table"
+        );
+        Self::construct(registry, rt, false)
+    }
+
+    fn construct(registry: Arc<MountTable>, rt: Handle, spawn_drain: bool) -> Arc<Self> {
         let (events, _) = broadcast::channel(EVENT_CAPACITY);
         let this = Arc::new(Self {
             registry,
@@ -257,13 +277,21 @@ impl TreeNamespace {
             tick: std::sync::Mutex::new(None),
         });
         this.install_root();
-        this.spawn_drain_tick();
+        if spawn_drain {
+            this.spawn_drain_tick();
+        }
         this
     }
 
     pub(crate) fn runtime_for(&self, mount: &str) -> Result<Arc<Engine>, TreeError> {
+        self.entry_for(mount)?
+            .runtime()
+            .ok_or_else(|| TreeError::offline_miss(format!("mount {mount} is cache-only")))
+    }
+
+    pub(crate) fn entry_for(&self, mount: &str) -> Result<&MountEntry, TreeError> {
         self.registry
-            .get(mount)
+            .entry(mount)
             .ok_or_else(|| TreeError::not_found(format!("no such mount: {mount}")))
     }
 
@@ -283,7 +311,7 @@ impl TreeNamespace {
             )));
         };
         let mount = mount.to_string();
-        if self.registry.get(&mount).is_none() {
+        if self.registry.entry(&mount).is_none() {
             return Err(TreeError::not_found(format!("no such mount: {mount}")));
         }
         let rest = path
@@ -382,6 +410,7 @@ impl TreeNamespace {
     fn outcome_for(error: &NsError) -> InspectorOutcome {
         match error {
             NsError::NotFound => InspectorOutcome::NotFound,
+            NsError::OfflineMiss => InspectorOutcome::Internal,
             NsError::NotDirectory | NsError::IsDirectory | NsError::Invalid => {
                 InspectorOutcome::InvalidInput
             },
@@ -396,7 +425,6 @@ impl TreeNamespace {
     /// Allocate (or reuse) the id for a resolved node, and refresh its record,
     /// preserving a learned size across placeholder refreshes.
     fn intern(&self, node: &crate::Node) -> Path {
-        let mount = node.mount().to_string();
         let full_path = self.full_path_for(node);
         let id = full_path.clone();
 
@@ -807,8 +835,20 @@ impl TreeNamespace {
         let result = async {
             // A buffered cursor is pure overflow the previous page held back;
             // serve it inside the request span without touching the tree.
-            if let DirCursor::Buffered { entries, then } = cursor {
-                return Ok(DirPage::with_budget(entries, then, budget));
+            if let DirCursor::Buffered {
+                entries,
+                then,
+                offline,
+            } = cursor
+            {
+                if offline != self.registry.is_offline() {
+                    return Err(if self.registry.is_offline() {
+                        NsError::OfflineMiss
+                    } else {
+                        NsError::Invalid
+                    });
+                }
+                return Ok(DirPage::with_budget(entries, then, budget, offline));
             }
 
             let node = self.resolve_node(&full_path).await?;
@@ -823,8 +863,7 @@ impl TreeNamespace {
                     .into_iter()
                     .filter_map(|(name, child_relative, metadata)| {
                         let full = full_path.join(&name).ok()?;
-                        let child =
-                            self.intern_host(&mount, full, child_relative, tree_ref, &metadata);
+                        let child = self.intern_host(full, child_relative, tree_ref, &metadata);
                         Some(DirEntry {
                             name,
                             path: child,
@@ -832,7 +871,12 @@ impl TreeNamespace {
                         })
                     })
                     .collect();
-                return Ok(DirPage::with_budget(entries, None, budget));
+                return Ok(DirPage::with_budget(
+                    entries,
+                    None,
+                    budget,
+                    self.registry.is_offline(),
+                ));
             }
             if !node.is_dir() {
                 return Err(NsError::NotDirectory);
@@ -852,17 +896,19 @@ impl TreeNamespace {
                 },
             };
 
-            let mount = node.mount().to_string();
             let parent_full = full_path;
             let entries = listing
                 .entries
                 .iter()
-                .map(|entry| {
-                    self.dir_entry(&mount, &parent_full, node.path(), &entry.name, &entry.meta)
-                })
+                .map(|entry| self.dir_entry(&parent_full, &entry.name, &entry.meta))
                 .collect();
             let tree_next = listing.next_cursor.map(|c| c.0);
-            Ok(DirPage::with_budget(entries, tree_next, budget))
+            Ok(DirPage::with_budget(
+                entries,
+                tree_next,
+                budget,
+                self.registry.is_offline(),
+            ))
         }
         .instrument(span.clone())
         .await;
@@ -871,14 +917,7 @@ impl TreeNamespace {
     }
 
     /// Turn a listing child into a `DirEntry`, allocating its id.
-    fn dir_entry(
-        &self,
-        mount: &str,
-        parent_full: &Path,
-        parent_rel: &Path,
-        name: &str,
-        meta: &EntryMeta,
-    ) -> DirEntry {
+    fn dir_entry(&self, parent_full: &Path, name: &str, meta: &EntryMeta) -> DirEntry {
         let full = parent_full
             .join(name)
             .unwrap_or_else(|_| parent_full.clone());
@@ -1125,7 +1164,6 @@ impl TreeNamespace {
 
     fn intern_host(
         &self,
-        mount: &str,
         full_path: Path,
         relative: PathBuf,
         tree_ref: &TreeRef,
@@ -1455,13 +1493,13 @@ fn hash_attr_facts(hasher: &mut DefaultHasher, attrs: Option<&FileAttrsCache>, e
 #[cfg(test)]
 mod tests {
     use super::{EntryKind, INSPECTOR_SYNTHETIC_ROOT, TreeNamespace, inspector_identity};
-    use crate::MountRuntimes;
+    use crate::MountTable;
     use crate::namespace::Namespace;
     use omnifs_core::path::Path;
     use std::path::{Path as StdPath, PathBuf};
     use std::sync::Arc;
 
-    fn fixture_registry(root: &StdPath) -> Arc<MountRuntimes> {
+    fn fixture_registry(root: &StdPath) -> Arc<MountTable> {
         use crate::HostContext;
         use crate::cloner::GitCloner;
         use omnifs_workspace::mounts::{Registry, Spec};
@@ -1506,7 +1544,7 @@ mod tests {
         )
         .with_wasm_cache_dir(crate::test_support::wasm_cache_dir());
         Arc::new(
-            MountRuntimes::load_with_options(
+            MountTable::load_online_with_options(
                 context,
                 Arc::new(GitCloner::new(root.join("engine-clones")).expect("git cloner")),
                 &desired,
@@ -1589,6 +1627,28 @@ mod tests {
         large.write_all(b"tail!").expect("large tail");
 
         let trees = Arc::new(TreeRefs::new());
+        let reopened_root = cloner
+            .open_cached("test", &git_id, "")
+            .expect("reopen repository root without Git");
+        let reopened_src = cloner
+            .open_cached("test", &git_id, "src")
+            .expect("reopen selected subtree without Git");
+        let root_ref = trees
+            .open(git_id.clone(), "", &reopened_root)
+            .expect("open root tree");
+        let src_ref = trees
+            .open(git_id.clone(), "src", &reopened_src)
+            .expect("open src tree");
+        assert_ne!(root_ref, src_ref);
+        assert_eq!(
+            trees
+                .open(git_id.clone(), "src", &reopened_src)
+                .expect("deduplicate selected subtree"),
+            src_ref
+        );
+        root_ref.root.metadata("README.md").expect("root selection");
+        src_ref.root.metadata("main.rs").expect("src selection");
+
         let executor = GitExecutor::new(
             Arc::clone(&cloner),
             RuntimeAuthority::for_test(&[], &["*"], &[]),
@@ -1607,7 +1667,7 @@ mod tests {
         };
         assert_eq!(info.repo, info.tree);
         let tree_ref = trees.resolve(info.tree).expect("registered tree ref");
-        let namespace = TreeNamespace::new(
+        let namespace = TreeNamespace::online(
             fixture_registry(temp.path()),
             tokio::runtime::Handle::current(),
         );
@@ -1617,7 +1677,6 @@ mod tests {
             .await
             .expect("checkout stat");
         namespace.intern_host(
-            "test",
             checkout.clone(),
             PathBuf::new(),
             &tree_ref,

@@ -50,7 +50,7 @@ pub use namespace::{
     NsEvent, NsRetryClass, ReadAnswer, ReadStyle, StabilityClass,
 };
 #[cfg(feature = "runtime")]
-pub use runtime::registry::{MountRuntimes, RegistryError};
+pub use runtime::registry::{MountTable, RegistryError};
 #[cfg(feature = "runtime")]
 pub use runtime::{BuildError, EngineError, HostContext, Runtime as Engine};
 #[cfg(feature = "runtime")]

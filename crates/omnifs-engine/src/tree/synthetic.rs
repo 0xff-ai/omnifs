@@ -12,7 +12,7 @@
 //! This module is the source of truth for the synthetic projection surface:
 //! control names, ignore-file names and bytes, metadata, and name predicates.
 
-use crate::Runtime;
+use crate::cache::MountResources;
 use crate::view::{DirentRecord, EntryMeta, FileAttrsCache, FileSize, ReadMode, Stability};
 use omnifs_core::path::Path;
 
@@ -192,7 +192,7 @@ impl Synthetic {
 /// paged (no cached dirents, or cached dirents that never carried a control)
 /// surfaces `None` here.
 pub(crate) fn resolve_synthetic_child(
-    runtime: &Runtime,
+    resources: &MountResources,
     parent: &Path,
     name: &str,
 ) -> Result<Option<(EntryMeta, Synthetic)>> {
@@ -211,7 +211,7 @@ pub(crate) fn resolve_synthetic_child(
         // directory never paged (or its cached dirents were evicted), so the
         // caller surfaces NotFound. Present => resolves regardless of whether
         // a resume cursor remains (the record outlives exhaustion).
-        let Some(dirent) = cached_control_dirent(runtime, parent, name)? else {
+        let Some(dirent) = cached_control_dirent(resources, parent, name)? else {
             return Ok(None);
         };
         return Ok(Some((dirent.meta, Synthetic::pagination_control(action))));
@@ -226,15 +226,14 @@ pub(crate) fn resolve_synthetic_child(
 /// regardless of cursor state, so this does NOT go `None` merely because the
 /// feed exhausted.
 fn cached_control_dirent(
-    runtime: &Runtime,
+    resources: &MountResources,
     parent: &Path,
     name: &str,
 ) -> Result<Option<crate::view::DirentRecord>> {
     use crate::cache::RecordKind;
     use crate::view::DirentsPayload;
 
-    let record = runtime
-        .resources
+    let record = resources
         .cache_get(parent, RecordKind::Dirents, None)
         .map_err(|error| TreeError::internal(error.to_string()))?;
     let Some(record) = record else {

@@ -1,79 +1,46 @@
 # Cache and effects
 
 Status: current-architecture
-Scope: why the host cache is byte-oriented, why canonical bytes are durable, and why effects are the only terminal host-mutation channel. Binding rules live in `docs/contracts/10-system.md`, `docs/contracts/20-provider-sdk.md`, and `docs/contracts/30-projection-tree.md`.
+Scope: why the host cache is a durable projection of provider terminals, how complete facts serve without a provider, and why effects share one publication boundary with typed results. Binding rules live in `docs/contracts/10-system.md`, `docs/contracts/20-provider-sdk.md`, and `docs/contracts/30-projection-tree.md`.
 
-The host owns storage, but not provider meaning. It stores paths, attrs, bytes, ids, and cache metadata as opaque facts. It does not parse provider objects or render representations.
+The host owns storage, but not provider meaning. It stores validated paths, attrs, bytes, opaque ids, listings, Git identities, and freshness as facts. It does not parse provider objects or render representations.
 
-## Cache roles
+## Durable owners
 
-There are three host cache roles:
+`Caches` opens one global Fjall database and one global append-only `BodyStore`. `BodyStore` publishes complete bodies by BLAKE3 identity before any projection row can reference them. Inline file bytes, canonical object bytes, and streamed blob bodies all use that store.
 
-| Cache | Role | Durability |
-|---|---|---|
-| object | canonical upstream or provider-assembled bytes for object-shaped resources | durable |
-| view | derived representations, direct file materializations, dirents, and learned attrs | disposable |
-| blob | large host-resident binary content by handle | durable runtime storage |
+Each exact mount revision selects one `ProjectionStore` by `ProjectionId`, which hashes the exact mount-spec bytes and pinned provider identity. Its strict manifest records the mount, spec digest, and provider identity. One tagged fact keyspace owns object relations, typed lookup/attr/file/listing records, definitive negatives, expiry, blob request references, and Git identities. Runtime blob handles, runtime Git handles, absolute checkout paths, and invalidation epochs are never durable.
 
-The object cache is the durable primary for object-shaped data. The view cache is derived and can be rebuilt from object bytes or provider reads. The blob cache is for large bytes that should not cross into provider memory.
+`MountResources` is the one live process owner for a selected projection. It owns the `ProjectionStore`, shared `BodyStore`, derived memory tier, runtime-only opaque handles, publication reservations, and invalidation epoch. `Caches` deduplicates it with a weak owner slot, so one projection cannot acquire independent coherence fences inside a process.
 
-`MountResources` is the single lifetime owner for one mount's object, view,
-coherence, and blob state. Its synchronous transition boundary publishes
-canonical/index/negative state and admits or removes disposable view records
-under the same generation fence, so a durable failure cannot leave a stale
-view reported as a successful replacement.
+## Publication
 
-Structural providers can self-select out of the object cache by emitting no canonical stores. There is no host flag that says a provider is object-shaped.
+A provider operation validates and lowers its effects plus its operation-specific typed result into one `ProjectionTransition`. Body publication happens first because bodies are immutable and may remain unreferenced after a fence. The short projection transaction then applies object and path relations, records, listing mutations, freshness, and invalidations with `SyncAll` durability. It updates or evicts the derived memory tier only after commit, emits events after that eviction, and exposes the typed operation result last.
 
-## Warm object reads
+The process-local invalidation epoch fences the complete transition. Every operation captures the epoch before reading cache-derived inputs. Any committed object or listing invalidation advances the epoch exactly once, and a terminal captured before that invalidation fails instead of republishing stale facts.
 
-On a warm object read, the host finds the canonical by exact path-to-id map lookup and pushes the cached canonical bytes into the provider read operation.
+Publication also keeps durable relations converged. Forward and reverse object aliases agree, definitive negative reverse rows agree, complete parent listings cannot contradict exact child lookup facts, and stale Git facts leave with non-subtree lookup replacements. Startup treats malformed keys, corrupt rows, dangling bodies, or inconsistent relations as corruption rather than a cache miss.
 
-The provider must self-check the pushed id against the route-derived id. A wrong or stale map entry degrades to a refetch, not silently wrong bytes.
+## Online and cache-only reads
 
-There is no `canonical-read` callout. The provider does not pull cached canonical bytes from the host. The host pushes them into the one read path.
+One fixed `MountTable` feeds one `TreeNamespace`. Online entries own a provider `Runtime`; cache-only entries own the same projection resources and no runtime. Durable-answer paths use `MountResources` in both modes, while provider execution, ranged reads, live values, and pagination continuation require the optional runtime.
 
-## Effects
+Online access uses freshness deadlines to decide when to revalidate. Cache-only access ignores those deadlines because complete durable facts remain facts after their online TTL. Exact positive and definitive negative lookups answer normally. A complete listing proves an unknown child is absent; a partial listing cannot. Missing bodies, incomplete listings, deferred/live/ranged values, and any provider-dependent continuation return terminal `OfflineMiss`.
 
-A provider step either suspends on callouts or returns a terminal result. Terminal host mutation happens only through effects:
+Offline construction is non-creating and non-repairing at the Omnifs semantic layer. It requires the exact projection manifest, body root, database, and fact keyspace and creates no Omnifs directories, manifests, keyspaces, rows, bodies, or temporary files. Fjall has no read-only recovery mode, so opening an existing database may perform storage-engine journal recovery under its exclusivity lock; that maintenance does not authorize semantic cache repair or fallback identity selection.
 
-- canonical effects store canonical bytes and view-leaf associations
-- filesystem effects publish materialized files, dirs, attrs, and byte sources into the view layer
-- invalidation effects remove object or listing state
+## Git handoff
 
-Errors must not carry effects. If a provider needs a new terminal mutation, add an explicit effect field. Do not tunnel host mutation through callouts.
-
-## Object and view coherence
-
-Object eviction removes the canonical and its exact indexed view leaves. It must use the reverse leaf set, not textual prefix deletion.
-
-Identity representations are not double-stored. Canonical bytes live in the object cache. Rendered representations and direct file materializations live in the view cache.
-
-View data can carry freshness deadlines derived from stability. Object cache entries do not have provider TTLs. They leave by capacity eviction or explicit invalidation.
-
-## Fences
-
-Operations that render from a pushed canonical capture a generation before the push. Writes derived from that pushed canonical are admitted only if no newer invalidation tombstone covers the object.
-
-The generation and tombstones are per-mount and runtime-only. They protect in-flight operations and disposable view writes. They do not need to survive restart because stale view data does not survive restart.
-
-## Mount isolation
-
-Object ids are mount-scoped by the host. Two mounts with different credentials must not share canonical bytes simply because a provider computed the same logical id.
-
-The provider computes logical identity. The host supplies mount scoping and storage isolation.
-
-## Rationale
-
-Canonical bytes are the expensive part. Rendering alternate leaves from a canonical is cheap and local. Making the canonical durable lets a view miss after restart render without an upstream call.
-
-Keeping effects as the single mutation channel makes provider behavior auditable. The host can validate, fence, and apply effects consistently instead of finding mutation hidden inside transport calls.
+Durable Git facts store a `GitId` plus one validated relative path. The Git id binds the mount scope, canonical remote, and reference. Offline open validates the existing private clone binding and capability confinement without a Git subprocess or network access, then constructs the host tree from the selected relative directory. Process-local tree identity is the pair `(GitId, relative path)`, so two subtrees from the same clone remain distinct while the same selection deduplicates.
 
 ## Rejected shapes
 
 - host-side object parsing or rendering
 - provider-owned content LRUs or TTLs
-- `canonical-read` callouts
-- prefix scans for object leaf eviction
-- durable view cache that can disagree with canonical bytes after restart
+- separate durable object, view, or blob stores
+- per-mount body stores or mount-name projection selection
 - errors that also mutate host state
+- split result/effect publication
+- persisted runtime handles, absolute host paths, or invalidation generations
+- fallback projections, current pointers, legacy readers, or cache repair during offline open
+- fake runtimes or a second namespace implementation for cache-only serving

@@ -1,9 +1,6 @@
 //! Internal provider path resolution and child traversal.
 
-use std::sync::Arc;
-
-use crate::Runtime;
-use crate::cache::RecordKind;
+use crate::cache::MountResources;
 use crate::effect_apply::LookupOutcome;
 use crate::view::{DirentsPayload, EntryMeta};
 use omnifs_api::events::CacheKind;
@@ -25,17 +22,21 @@ impl TreeNamespace {
     pub(crate) async fn resolve(&self, path: &Path, _ctx: &RequestCtx) -> Result<Node> {
         let (mount, rel) = self.split_mount_path(path)?;
 
-        // The mount root is always a directory; no provider round trip needed.
+        // A provider may hand the mount root itself to a durable Git subtree.
+        // Resolve it only through the coherent exact positive lookup fact.
         if rel.is_root() {
-            return Ok(Node::new(
-                mount,
-                rel,
-                EntryMeta::directory(),
-                NodeBody::Provider,
-            ));
+            if mount.is_empty() {
+                return Ok(Node::new(
+                    mount,
+                    rel,
+                    EntryMeta::directory(),
+                    NodeBody::Provider,
+                ));
+            }
+            return self.mount_root_node(mount);
         }
 
-        let runtime = self.runtime_for(&mount)?;
+        let entry = self.entry_for(&mount)?;
         let Some((parent, name)) = rel.parent_and_name() else {
             return Err(TreeError::invalid_input(format!(
                 "resolve: path has no parent: {}",
@@ -43,7 +44,7 @@ impl TreeNamespace {
             )));
         };
 
-        self.resolve_child_in(mount, &runtime, &parent, name).await
+        self.resolve_child_in(mount, entry, &parent, name).await
     }
 
     /// Resolve a child of an already-resolved parent directory `Node` to a
@@ -72,18 +73,21 @@ impl TreeNamespace {
                 .await
                 .map_err(Into::into);
         }
+        if !parent.is_dir() {
+            return Err(TreeError {
+                kind: super::error::TreeErrorKind::NotDirectory,
+                message: format!("{} is not a directory", parent.path()),
+                retryable: false,
+                retry_after: None,
+            });
+        }
         if self.is_mount_enumeration_root(parent.mount(), parent.path())
             && self.mount_names().iter().any(|mount| mount == name)
         {
-            return Ok(Node::new(
-                name.to_string(),
-                Path::root(),
-                EntryMeta::directory(),
-                NodeBody::Provider,
-            ));
+            return self.mount_root_node(name.to_string());
         }
-        let runtime = self.runtime_for(parent.mount())?;
-        self.resolve_child_in(parent.mount().to_string(), &runtime, parent.path(), name)
+        let entry = self.entry_for(parent.mount())?;
+        self.resolve_child_in(parent.mount().to_string(), entry, parent.path(), name)
             .await
     }
 
@@ -93,10 +97,11 @@ impl TreeNamespace {
     async fn resolve_child_in(
         &self,
         mount: String,
-        runtime: &Arc<Runtime>,
+        entry: &crate::registry::MountEntry,
         parent: &Path,
         name: &str,
     ) -> Result<Node> {
+        let resources = entry.resources();
         let rel = parent.join(name).map_err(|e| {
             TreeError::invalid_input(format!("resolve_child: invalid name {name:?}: {e}"))
         })?;
@@ -104,18 +109,13 @@ impl TreeNamespace {
         if self.is_mount_enumeration_root(&mount, parent)
             && self.mount_names().iter().any(|m| m == name)
         {
-            return Ok(Node::new(
-                name.to_string(),
-                Path::root(),
-                EntryMeta::directory(),
-                NodeBody::Provider,
-            ));
+            return self.mount_root_node(name.to_string());
         }
 
         // Root ignore files are host-owned. Resolve them before cached dirents
         // or provider lookup so a provider capture cannot change their kind.
         if parent.is_root() && synthetic::is_root_ignore_name(name) {
-            let (meta, syn) = synthetic::resolve_synthetic_child(runtime, parent, name)?
+            let (meta, syn) = synthetic::resolve_synthetic_child(resources, parent, name)?
                 .expect("root ignore name must resolve synthetically");
             return Ok(Node::synthetic(mount, rel, meta, syn));
         }
@@ -128,17 +128,79 @@ impl TreeNamespace {
         // directory that never paged (no cached record) is NotFound; we never
         // consult the provider for it.
         if synthetic::is_control_name(name) {
-            return match synthetic::resolve_synthetic_child(runtime, parent, name)? {
+            return match synthetic::resolve_synthetic_child(resources, parent, name)? {
                 Some((meta, syn)) => Ok(Node::synthetic(mount, rel, meta, syn)),
                 None => Err(TreeError::not_found(rel.as_str())),
             };
         }
 
-        if let Some(meta) = cached_dirent_child(runtime, parent, name)? {
+        let offline = entry.runtime().is_none();
+        let expired = !offline
+            && resources
+                .view_expired(&rel, crate::clock::now_millis())
+                .map_err(|error| TreeError::internal(error.to_string()))?;
+        if let Some(payload) = resources
+            .lookup_payload(&rel)
+            .map_err(|error| TreeError::internal(error.to_string()))?
+        {
+            match payload {
+                crate::view::LookupPayload::Positive(meta) if offline || !expired => {
+                    if let Some(git) = resources
+                        .git_for_path(&rel)
+                        .map_err(|error| TreeError::internal(error.to_string()))?
+                    {
+                        let tree_ref = entry
+                            .trees()
+                            .by_identity(&git.id, &git.relative_path)
+                            .ok_or_else(|| TreeError::internal("validated Git tree is not open"))?;
+                        return Ok(Node::new(
+                            mount,
+                            rel,
+                            EntryMeta::directory(),
+                            NodeBody::Host {
+                                tree_ref,
+                                relative: std::path::PathBuf::new(),
+                                kind: super::node::HostKind::Directory,
+                            },
+                        ));
+                    }
+                    crate::inspector::cache_event(CacheKind::BrowseHit);
+                    return Ok(Node::new(mount, rel, meta, NodeBody::Provider));
+                },
+                crate::view::LookupPayload::Negative { .. } if offline || !expired => {
+                    return Err(TreeError::not_found(rel.as_str()));
+                },
+                crate::view::LookupPayload::Positive(_)
+                | crate::view::LookupPayload::Negative { .. } => {},
+            }
+        }
+
+        let cached_parent = cached_dirents(resources, parent)?;
+        if let Some(meta) = cached_parent.as_ref().and_then(|dirents| {
+            dirents
+                .entries
+                .iter()
+                .find(|entry| entry.name == name)
+                .map(|entry| entry.meta.clone())
+        }) {
+            crate::inspector::cache_event(CacheKind::BrowseHit);
             return Ok(Node::new(mount, rel, meta, NodeBody::Provider));
         }
 
+        if offline {
+            if cached_parent
+                .as_ref()
+                .is_some_and(DirentsPayload::is_complete_offline)
+            {
+                return Err(TreeError::not_found(rel.as_str()));
+            }
+            return Err(TreeError::offline_miss(format!(
+                "offline lookup has no complete fact for {rel}"
+            )));
+        }
+
         crate::inspector::cache_event(CacheKind::BrowseMiss);
+        let runtime = entry.runtime().expect("online entry has a runtime");
         match runtime.lookup_child(parent, name).await? {
             LookupOutcome::Entry(entry) => Ok(Node::new(
                 mount,
@@ -164,32 +226,68 @@ impl TreeNamespace {
             // Controls may have been cached by a prior paged listing. Root
             // ignore names were handled before provider lookup above.
             LookupOutcome::NotFound => {
-                match synthetic::resolve_synthetic_child(runtime, parent, name)? {
+                match synthetic::resolve_synthetic_child(resources, parent, name)? {
                     Some((meta, syn)) => Ok(Node::synthetic(mount, rel, meta, syn)),
                     None => Err(TreeError::not_found(rel.as_str())),
                 }
             },
         }
     }
+
+    fn mount_root_node(&self, mount: String) -> Result<Node> {
+        let rel = Path::root();
+        let entry = self.entry_for(&mount)?;
+        let resources = entry.resources();
+        let offline = entry.runtime().is_none();
+        let expired = !offline
+            && resources
+                .view_expired(&rel, crate::clock::now_millis())
+                .map_err(|error| TreeError::internal(error.to_string()))?;
+        if offline || !expired {
+            let positive_directory = resources
+                .lookup_payload(&rel)
+                .map_err(|error| TreeError::internal(error.to_string()))?
+                .is_some_and(|lookup| {
+                    matches!(
+                        lookup,
+                        crate::view::LookupPayload::Positive(meta) if meta.is_directory()
+                    )
+                });
+            if positive_directory
+                && let Some(git) = resources
+                    .git_for_path(&rel)
+                    .map_err(|error| TreeError::internal(error.to_string()))?
+            {
+                let tree_ref = entry
+                    .trees()
+                    .by_identity(&git.id, &git.relative_path)
+                    .ok_or_else(|| TreeError::internal("validated Git tree is not open"))?;
+                return Ok(Node::new(
+                    mount,
+                    rel,
+                    EntryMeta::directory(),
+                    NodeBody::Host {
+                        tree_ref,
+                        relative: std::path::PathBuf::new(),
+                        kind: super::node::HostKind::Directory,
+                    },
+                ));
+            }
+        }
+
+        // Ordinary mount roots remain provider-shaped while their durable
+        // listing and lookup facts are consumed through MountResources.
+        Ok(Node::new(
+            mount,
+            rel,
+            EntryMeta::directory(),
+            NodeBody::Provider,
+        ))
+    }
 }
 
-fn cached_dirent_child(runtime: &Runtime, parent: &Path, name: &str) -> Result<Option<EntryMeta>> {
-    let record = runtime
-        .resources
-        .cache_get(parent, RecordKind::Dirents, None)
-        .map_err(|error| TreeError::internal(error.to_string()))?;
-    let Some(record) = record else {
-        return Ok(None);
-    };
-    let dirents: DirentsPayload = postcard::from_bytes(&record.payload)
-        .map_err(|error| TreeError::internal(error.to_string()))?;
-    let entry = dirents
-        .entries
-        .iter()
-        .find(|entry| entry.name == name)
-        .map(|entry| entry.meta.clone());
-    if entry.is_some() {
-        crate::inspector::cache_event(CacheKind::BrowseHit);
-    }
-    Ok(entry)
+fn cached_dirents(resources: &MountResources, parent: &Path) -> Result<Option<DirentsPayload>> {
+    resources
+        .dirents_payload(parent)
+        .map_err(|error| TreeError::internal(error.to_string()))
 }

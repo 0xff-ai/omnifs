@@ -4,7 +4,7 @@ pub mod matrix;
 use omnifs_core::path::{Path, Segment};
 use omnifs_engine::GitCloner;
 use omnifs_engine::test_support::TestOp;
-use omnifs_engine::{BuildError, Engine, EngineError, HostContext, MountRuntimes, TreeNamespace};
+use omnifs_engine::{BuildError, Engine, EngineError, HostContext, MountTable, TreeNamespace};
 use omnifs_wit::provider::types::{
     ByteSource, Callout, Effects, HttpRequest, ListChildrenResult, LookupChildResult,
     ReadFileOutcome, ReadFileResult,
@@ -23,7 +23,7 @@ use tempfile::TempDir;
 /// provider runtime. Provider execution itself is always delegated to
 /// `omnifs-engine`: tests do not build linkers, stores, or provider bindings.
 pub struct RuntimeHarness {
-    pub registry: Arc<MountRuntimes>,
+    pub registry: Arc<MountTable>,
     pub runtime: Arc<Engine>,
     /// The single namespace owner for this immutable startup snapshot.
     pub namespace: Arc<TreeNamespace>,
@@ -139,18 +139,18 @@ impl RuntimeHarness {
                 .map_err(|error| BuildError::InvalidConfig(error.to_string()))?;
         }
         let registry = if capture_test_callouts {
-            omnifs_engine::test_support::load_mount_runtimes_for_callout_tests(
+            omnifs_engine::test_support::load_mount_table_for_callout_tests(
                 context, cloner, &desired, &handle,
             )
         } else {
-            MountRuntimes::load(context, cloner, &desired, &handle)
+            MountTable::load_online(context, cloner, &desired, &handle)
         }
         .map_err(|error| BuildError::InvalidConfig(error.to_string()))?;
         let registry = Arc::new(registry);
         let runtime = registry
             .get(&selected_mount)
             .ok_or_else(|| BuildError::InvalidConfig("test mount did not load".to_string()))?;
-        let namespace = TreeNamespace::new(Arc::clone(&registry), handle);
+        let namespace = TreeNamespace::online(Arc::clone(&registry), handle);
 
         Ok(Self {
             clone_dir,

@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use crate::registry::MountRuntimes;
+use crate::registry::MountTable;
 use crate::view as view_types;
 use crate::view::FileAttrsCache;
 use crate::{EngineError, Runtime};
@@ -215,7 +215,7 @@ pub(crate) async fn probe_live_growth(
 /// size table, so `record_growth` is frontend-specific.
 pub(crate) fn spawn_live_follow_pump(
     rt: &Handle,
-    registry: Arc<MountRuntimes>,
+    registry: Arc<MountTable>,
     mount_name: String,
     provider_handle: u64,
     observed_end: Arc<AtomicU64>,

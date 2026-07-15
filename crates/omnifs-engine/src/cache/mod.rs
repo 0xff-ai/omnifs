@@ -27,6 +27,16 @@ pub(crate) fn ensure_directory(path: &std::path::Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Open an existing owned directory without creating or repairing any path.
+pub(crate) fn existing_directory(path: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    let path = canonical_directory(path)?;
+    let metadata = std::fs::symlink_metadata(&path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(std::io::Error::other("path is not an owned directory"));
+    }
+    Ok(path)
+}
+
 /// Resolve existing parent components without retaining a symlinked path. An
 /// existing symlink at the requested root is rejected; a platform alias such
 /// as `/var` on macOS is resolved to its real directory before new children

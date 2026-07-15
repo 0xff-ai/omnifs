@@ -14,7 +14,6 @@ use crate::tree_refs::TreeRefs;
 use omnifs_wit::provider::types as wit_types;
 use std::sync::Arc;
 use tracing::warn;
-use url::Url;
 
 #[derive(Clone)]
 pub struct GitExecutor {
@@ -68,7 +67,8 @@ impl GitExecutor {
         operation_id: u64,
     ) -> Result<u64, GitError> {
         self.authority.check_git_url(&req.clone_url)?;
-        let remote = canonical_remote(&req.clone_url)?;
+        let remote = GitCloner::canonical_remote(&req.clone_url)
+            .map_err(|error| GitError::Invalid(error.to_string()))?;
         if let Some(reference) = req.reference.as_deref() {
             GitCloner::validate_reference(reference)
                 .map_err(|error| GitError::Invalid(error.to_string()))?;
@@ -96,43 +96,6 @@ impl GitExecutor {
             .register(id, &cache_path)
             .map_err(|error| GitError::Clone(format!("failed to open clone root: {error}")))
     }
-}
-
-fn canonical_remote(raw: &str) -> Result<String, GitError> {
-    let remote = raw.trim();
-    if remote.is_empty()
-        || remote
-            .bytes()
-            .any(|byte| byte.is_ascii_whitespace() || byte == 0)
-    {
-        return Err(GitError::Invalid("invalid Git remote".to_string()));
-    }
-    if let Ok(mut url) = Url::parse(remote) {
-        if !matches!(url.scheme(), "https" | "ssh" | "git") || url.host_str().is_none() {
-            return Err(GitError::Invalid("unsupported Git remote".to_string()));
-        }
-        if url.scheme() == "https" || url.scheme() == "git" {
-            url.set_username("")
-                .map_err(|_| GitError::Invalid("invalid Git remote username".to_string()))?;
-        }
-        url.set_password(None)
-            .map_err(|_| GitError::Invalid("invalid Git remote password".to_string()))?;
-        return Ok(url.to_string());
-    }
-
-    let (user_host, path) = remote
-        .split_once(':')
-        .ok_or_else(|| GitError::Invalid("invalid Git remote".to_string()))?;
-    let (username, host) = user_host
-        .rsplit_once('@')
-        .map_or((None, user_host), |(username, host)| (Some(username), host));
-    if host.is_empty() || path.is_empty() || path.starts_with('/') {
-        return Err(GitError::Invalid("invalid Git remote".to_string()));
-    }
-    Ok(match username {
-        Some(username) => format!("{username}@{host}:{path}"),
-        None => format!("{host}:{path}"),
-    })
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -172,7 +135,7 @@ impl From<GitError> for wit_types::CalloutResult {
 
 #[cfg(test)]
 mod tests {
-    use super::{GitCloner, GitExecutor, GitId, canonical_remote};
+    use super::{GitCloner, GitExecutor, GitId};
     use crate::authority::RuntimeAuthority;
     use crate::tree_refs::TreeRefs;
     use omnifs_wit::provider::types as wit_types;
@@ -180,8 +143,10 @@ mod tests {
 
     #[test]
     fn git_identity_excludes_remote_credentials_but_keeps_reference_and_mount() {
-        let first = canonical_remote("https://alice:token@example.test/repo.git").unwrap();
-        let second = canonical_remote("https://bob:rotated@example.test/repo.git").unwrap();
+        let first =
+            GitCloner::canonical_remote("https://alice:token@example.test/repo.git").unwrap();
+        let second =
+            GitCloner::canonical_remote("https://bob:rotated@example.test/repo.git").unwrap();
         assert_eq!(first, "https://example.test/repo.git");
         assert_eq!(first, second);
         assert_eq!(
@@ -196,10 +161,10 @@ mod tests {
 
     #[test]
     fn git_identity_preserves_ssh_and_scp_usernames() {
-        let ssh_alice = canonical_remote("ssh://alice@example.test/repo.git").unwrap();
-        let ssh_bob = canonical_remote("ssh://bob@example.test/repo.git").unwrap();
-        let scp_alice = canonical_remote("alice@example.test:repo.git").unwrap();
-        let scp_bob = canonical_remote("bob@example.test:repo.git").unwrap();
+        let ssh_alice = GitCloner::canonical_remote("ssh://alice@example.test/repo.git").unwrap();
+        let ssh_bob = GitCloner::canonical_remote("ssh://bob@example.test/repo.git").unwrap();
+        let scp_alice = GitCloner::canonical_remote("alice@example.test:repo.git").unwrap();
+        let scp_bob = GitCloner::canonical_remote("bob@example.test:repo.git").unwrap();
 
         assert_ne!(
             GitId::new("mount", &ssh_alice, Some("main")),

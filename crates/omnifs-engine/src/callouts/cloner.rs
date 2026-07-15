@@ -12,6 +12,7 @@ use std::process::{Command, ExitStatus, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::warn;
+use url::Url;
 
 const CLONE_TIMEOUT: Duration = Duration::from_mins(2);
 const CLONE_REPO_DIR: &str = "repo";
@@ -29,6 +30,8 @@ pub enum CloneError {
     Wait(#[source] std::io::Error),
     #[error("invalid git reference")]
     InvalidReference,
+    #[error("invalid git remote")]
+    InvalidRemote,
     #[error("existing clone identity is unavailable")]
     ExistingEntry,
     #[error("failed to publish clone")]
@@ -47,6 +50,15 @@ impl GitCloner {
     pub fn new(cache_dir: PathBuf) -> std::io::Result<Self> {
         let cache_dir = canonical_directory(&cache_dir)?;
         ensure_directory(&cache_dir)?;
+        Ok(Self {
+            cache_dir,
+            locks: DashMap::new(),
+        })
+    }
+
+    /// Open the existing clone cache root without creating or sweeping it.
+    pub fn open_existing(cache_dir: PathBuf) -> Result<Self, CloneError> {
+        let cache_dir = crate::cache::existing_directory(&cache_dir).map_err(CloneError::Cache)?;
         Ok(Self {
             cache_dir,
             locks: DashMap::new(),
@@ -75,6 +87,71 @@ impl GitCloner {
             return Err(CloneError::InvalidReference);
         }
         Ok(())
+    }
+
+    pub(crate) fn canonical_remote(raw: &str) -> Result<String, CloneError> {
+        let remote = raw.trim();
+        if remote.is_empty()
+            || remote
+                .bytes()
+                .any(|byte| byte.is_ascii_whitespace() || byte == 0)
+        {
+            return Err(CloneError::InvalidRemote);
+        }
+        if let Ok(mut url) = Url::parse(remote) {
+            if !matches!(url.scheme(), "https" | "ssh" | "git") || url.host_str().is_none() {
+                return Err(CloneError::InvalidRemote);
+            }
+            if url.scheme() == "https" || url.scheme() == "git" {
+                url.set_username("")
+                    .map_err(|_| CloneError::InvalidRemote)?;
+            }
+            url.set_password(None)
+                .map_err(|_| CloneError::InvalidRemote)?;
+            return Ok(url.to_string());
+        }
+
+        let (user_host, path) = remote.split_once(':').ok_or(CloneError::InvalidRemote)?;
+        let (username, host) = user_host
+            .rsplit_once('@')
+            .map_or((None, user_host), |(username, host)| (Some(username), host));
+        if host.is_empty() || path.is_empty() || path.starts_with('/') {
+            return Err(CloneError::InvalidRemote);
+        }
+        Ok(match username {
+            Some(username) => format!("{username}@{host}:{path}"),
+            None => format!("{host}:{path}"),
+        })
+    }
+
+    /// Reopen and validate an existing mount-scoped clone without invoking Git
+    /// or consulting the network. `relative_path` is validated beneath the
+    /// repository root, and the returned path is that confined selected
+    /// directory.
+    pub(crate) fn open_cached(
+        &self,
+        mount_scope: &str,
+        id: &GitId,
+        relative_path: &str,
+    ) -> Result<PathBuf, CloneError> {
+        crate::cache::existing_directory(&self.cache_dir).map_err(CloneError::Cache)?;
+        let wrapper = self.cache_dir.join(id.filesystem_name());
+        let repo = wrapper.join(CLONE_REPO_DIR);
+        validate_owned_directory(&wrapper)?;
+        validate_owned_directory(&repo)?;
+        validate_owned_directory(&repo.join(".git"))?;
+        let binding = Self::read_binding(&Self::binding_path(&wrapper))?;
+        let canonical = Self::canonical_remote(&binding.remote)?;
+        if canonical != binding.remote {
+            return Err(CloneError::ExistingEntry);
+        }
+        if let Some(reference) = binding.reference.as_deref() {
+            Self::validate_reference(reference)?;
+        }
+        if GitId::new(mount_scope, &canonical, binding.reference.as_deref()) != *id {
+            return Err(CloneError::ExistingEntry);
+        }
+        validate_relative_selection(&repo, relative_path)
     }
 
     /// Return the local cache path for a host-derived identity, cloning if needed.
@@ -167,13 +244,32 @@ impl GitCloner {
         if !(wrapper && repo && git) {
             return false;
         }
-        let Ok(raw) = std::fs::read_to_string(Self::binding_path(path)) else {
-            return false;
-        };
-        let Ok(binding) = serde_json::from_str::<CloneBinding>(&raw) else {
+        let Ok(binding) = Self::read_binding(&Self::binding_path(path)) else {
             return false;
         };
         binding.remote == remote && binding.reference.as_deref() == reference
+    }
+
+    fn read_binding(path: &Path) -> Result<CloneBinding, CloneError> {
+        let metadata = std::fs::symlink_metadata(path).map_err(CloneError::Cache)?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(CloneError::ExistingEntry);
+        }
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW);
+        }
+        let mut file = options.open(path).map_err(CloneError::Cache)?;
+        let metadata = file.metadata().map_err(CloneError::Cache)?;
+        if !metadata.is_file() {
+            return Err(CloneError::ExistingEntry);
+        }
+        let mut raw = Vec::with_capacity(metadata.len() as usize);
+        file.read_to_end(&mut raw).map_err(CloneError::Cache)?;
+        serde_json::from_slice(&raw).map_err(|_| CloneError::ExistingEntry)
     }
 
     fn run_clone(url: &str, reference: Option<&str>, dest: &Path) -> Result<(), CloneError> {
@@ -234,6 +330,37 @@ impl GitCloner {
             }
         }
     }
+}
+
+fn validate_owned_directory(path: &Path) -> Result<(), CloneError> {
+    let metadata = std::fs::symlink_metadata(path).map_err(CloneError::Cache)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(CloneError::ExistingEntry);
+    }
+    Ok(())
+}
+
+fn validate_relative_selection(root: &Path, relative: &str) -> Result<PathBuf, CloneError> {
+    let relative = Path::new(relative);
+    if relative.is_absolute()
+        || relative.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::Prefix(_)
+                    | std::path::Component::RootDir
+                    | std::path::Component::ParentDir
+                    | std::path::Component::CurDir
+            )
+        })
+    {
+        return Err(CloneError::ExistingEntry);
+    }
+    let mut selected = root.to_path_buf();
+    for component in relative.components() {
+        selected.push(component.as_os_str());
+        validate_owned_directory(&selected)?;
+    }
+    Ok(selected)
 }
 
 #[derive(Debug, Serialize, Deserialize)]

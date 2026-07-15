@@ -19,7 +19,7 @@ use fjall::Readable;
 use omnifs_core::path::Path;
 use omnifs_workspace::mounts::Name;
 use parking_lot::Mutex;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path as StdPath;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
@@ -29,7 +29,7 @@ use tokio::sync::Notify;
 use super::body::{BodyId, BodyStore};
 use super::identity::ProjectionId;
 use super::identity::{BlobRequestId, GitId};
-use super::projection::{ProjectionStore, ProjectionStoreError};
+use super::projection::{ProjectionRow, ProjectionStore, ProjectionStoreError};
 use crate::cache::memory::MemoryTier;
 use crate::object_id::ObjectId;
 use crate::view::{
@@ -356,6 +356,33 @@ impl Caches {
         }))
     }
 
+    /// Open the existing global projection database and body store without
+    /// creating, sweeping, or repairing cache state.
+    pub(crate) fn open_existing(dir: &StdPath) -> Result<Arc<Self>, ProjectionError> {
+        let dir =
+            crate::cache::existing_directory(dir).map_err(super::body::BodyStoreError::from)?;
+        let projection_root = crate::cache::existing_directory(&dir.join("projections"))
+            .map_err(super::body::BodyStoreError::from)?;
+        let database_root = crate::cache::existing_directory(&projection_root.join("database"))
+            .map_err(super::body::BodyStoreError::from)?;
+        let version = database_root.join("version");
+        let metadata =
+            std::fs::symlink_metadata(&version).map_err(super::body::BodyStoreError::from)?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(ProjectionError::Inconsistent(
+                "projection database version marker is not a regular file".into(),
+            ));
+        }
+        let projection_database = OptimisticTxDatabase::builder(database_root).open()?;
+        let body = Arc::new(BodyStore::open_existing(dir.join("bodies"))?);
+        Ok(Arc::new(Self {
+            body,
+            projection_root,
+            projection_database,
+            projection_owners: Mutex::new(HashMap::new()),
+        }))
+    }
+
     /// Return the sole owner of one mount's cache and blob resources.
     pub(crate) fn mount(
         self: &Arc<Self>,
@@ -375,6 +402,31 @@ impl Caches {
             provider_id,
             spec_source,
         )?;
+        owners.insert(projection_id, Arc::downgrade(&owner));
+        Ok(owner)
+    }
+
+    /// Return the sole owner for one existing projection after validating its
+    /// complete durable fact graph.
+    pub(crate) fn mount_existing(
+        self: &Arc<Self>,
+        mount: &Name,
+        projection_id: ProjectionId,
+        provider_id: ProviderId,
+        spec_source: &[u8],
+    ) -> Result<Arc<MountResources>, ProjectionError> {
+        let mut owners = self.projection_owners.lock();
+        if let Some(owner) = owners.get(&projection_id).and_then(Weak::upgrade) {
+            return Ok(owner);
+        }
+        let owner = MountResources::new_existing(
+            Arc::clone(self),
+            mount,
+            projection_id,
+            provider_id,
+            spec_source,
+        )?;
+        owner.validate_durable_projection()?;
         owners.insert(projection_id, Arc::downgrade(&owner));
         Ok(owner)
     }
@@ -484,8 +536,34 @@ impl MountResources {
             spec_source,
             provider_id,
         )?;
+        Ok(Self::from_projection(caches, mount, projection))
+    }
+
+    fn new_existing(
+        caches: Arc<Caches>,
+        mount: &Name,
+        projection_id: ProjectionId,
+        provider_id: ProviderId,
+        spec_source: &[u8],
+    ) -> Result<Arc<Self>, ProjectionError> {
+        let projection = ProjectionStore::open_existing(
+            &caches.projection_root,
+            &caches.projection_database,
+            projection_id,
+            mount,
+            spec_source,
+            provider_id,
+        )?;
+        Ok(Self::from_projection(caches, mount, projection))
+    }
+
+    fn from_projection(
+        caches: Arc<Caches>,
+        mount: &Name,
+        projection: ProjectionStore,
+    ) -> Arc<Self> {
         let body = Arc::clone(&caches.body);
-        Ok(Arc::new(Self {
+        Arc::new(Self {
             caches,
             mount: mount.clone(),
             projection,
@@ -503,7 +581,7 @@ impl MountResources {
                 active: Mutex::new(HashSet::new()),
                 wake: Notify::new(),
             },
-        }))
+        })
     }
 
     pub(crate) async fn reserve(&self, key: PublicationKey) -> PublicationPermit<'_> {
@@ -722,6 +800,8 @@ impl MountResources {
                 ))
             })
             .collect::<Result<Vec<_>, ProjectionError>>()?;
+        let transition_git_paths: HashSet<Path> =
+            transition.git.iter().map(|git| git.path.clone()).collect();
 
         let mut coherence = self.coherence.lock();
         if captured_epoch != coherence.invalidation_epoch {
@@ -771,7 +851,7 @@ impl MountResources {
                 ProjectionError::Inconsistent("invalidation epoch overflow".into())
             })?)
         };
-        self.projection.transact(|tx, facts| {
+        let reconciled_paths = self.projection.transact(|tx, facts| {
             let mut removals = Vec::<Vec<u8>>::new();
 
             let mut claims = HashMap::<String, Vec<u8>>::new();
@@ -806,6 +886,11 @@ impl MountResources {
 
             for record in &prepared_records {
                 remove_negative_for_path(tx, facts, &record.path)?;
+                if matches!(&record.fact, DurableFact::Lookup(_))
+                    && !transition_git_paths.contains(&record.path)
+                {
+                    tx.remove(facts, git_key(&record.path));
+                }
                 let key = fact_key(
                     record.path.as_str(),
                     record.fact.kind(),
@@ -849,6 +934,13 @@ impl MountResources {
                     postcard::to_allocvec(&freshness.expires_at).map_err(ProjectionError::from)?,
                 );
             }
+            let mut reconciled_paths = reconcile_listing_relations(
+                tx,
+                facts,
+                &prepared_records,
+                &transition.dirents,
+                &mut removals,
+            )?;
             // Apply invalidation scanners after all transition writes. Fjall's
             // transaction reads see those writes, so same-terminal aliases,
             // records, Git facts, and negative reverse rows are retired too.
@@ -859,9 +951,19 @@ impl MountResources {
                 match invalidation {
                     Invalidation::ListingPath(path) => {
                         remove_path_facts(tx, facts, path, &mut removals)?;
+                        if let Some(parent) = invalidate_parent_listing(tx, facts, path)? {
+                            reconciled_paths.insert(parent);
+                        }
                     },
                     Invalidation::ListingPrefix(prefix) => {
-                        remove_prefix_facts(tx, facts, prefix, &mut removals)?;
+                        for path in remove_prefix_facts(tx, facts, prefix, &mut removals)? {
+                            if let Some((parent, _)) = path.parent_and_name()
+                                && !parent.has_prefix(prefix)
+                                && let Some(parent) = invalidate_parent_listing(tx, facts, &path)?
+                            {
+                                reconciled_paths.insert(parent);
+                            }
+                        }
                     },
                     Invalidation::Object(_) => {},
                 }
@@ -869,12 +971,13 @@ impl MountResources {
             for key in removals {
                 tx.remove(facts, key);
             }
-            Ok(())
+            Ok(reconciled_paths)
         })?;
 
         if let Some(next_epoch) = next_epoch {
             coherence.invalidation_epoch = next_epoch;
         }
+        memory_paths.extend(reconciled_paths);
         if memory_object_invalidation {
             self.memory.invalidate_prefix(&Path::root());
         } else {
@@ -958,6 +1061,34 @@ impl MountResources {
         Ok(Some(record))
     }
 
+    pub(crate) fn lookup_payload(
+        &self,
+        path: &Path,
+    ) -> Result<Option<LookupPayload>, ProjectionError> {
+        self.cache_get(path, RecordKind::Lookup, None)?
+            .map(|record| postcard::from_bytes(&record.payload).map_err(ProjectionError::from))
+            .transpose()
+    }
+
+    pub(crate) fn attr_payload(&self, path: &Path) -> Result<Option<AttrPayload>, ProjectionError> {
+        self.cache_get(path, RecordKind::Attr, None)?
+            .map(|record| postcard::from_bytes(&record.payload).map_err(ProjectionError::from))
+            .transpose()
+    }
+
+    pub(crate) fn dirents_payload(
+        &self,
+        path: &Path,
+    ) -> Result<Option<DirentsPayload>, ProjectionError> {
+        self.cache_get(path, RecordKind::Dirents, None)?
+            .map(|record| postcard::from_bytes(&record.payload).map_err(ProjectionError::from))
+            .transpose()
+    }
+
+    pub(crate) fn read_body(&self, body: BodyId, length: u64) -> Result<Vec<u8>, ProjectionError> {
+        self.body.read(body, Some(length)).map_err(Into::into)
+    }
+
     pub(crate) fn memory_get(
         &self,
         path: &Path,
@@ -1037,6 +1168,23 @@ impl MountResources {
         Ok(Some(GitFact { id, relative_path }))
     }
 
+    pub(crate) fn git_facts(&self) -> Result<Vec<(Path, GitFact)>, ProjectionError> {
+        self.projection
+            .rows()?
+            .into_iter()
+            .filter(|row| row.key.starts_with(b"g:"))
+            .map(|row| {
+                let path = decode_path(&row.key[2..], "Git fact")?;
+                let DurableFact::Git { id, relative_path } = postcard::from_bytes(&row.value)?
+                else {
+                    return Err(inconsistent("Git key contains a non-Git fact"));
+                };
+                validate_git_relative(&relative_path)?;
+                Ok((path, GitFact { id, relative_path }))
+            })
+            .collect()
+    }
+
     /// Whether the indexed view leaf has reached its freshness deadline.
     pub(crate) fn view_expired(
         &self,
@@ -1093,7 +1241,357 @@ impl MountResources {
         }))
     }
 
+    /// Validate every row and cross-row relation before an offline mount can
+    /// become visible through the fixed mount table.
+    fn validate_durable_projection(&self) -> Result<(), ProjectionError> {
+        let mut state = ProjectionValidation::default();
+        for row in self.projection.rows()? {
+            state.read_row(row, &self.body)?;
+        }
+        state.finish(&self.body)
+    }
+
     // --- Invalidation ---------------------------------------------------------
+}
+
+#[derive(Default)]
+struct ProjectionValidation {
+    objects: HashMap<Vec<u8>, (BodyId, u64)>,
+    indexes: HashMap<Path, Vec<u8>>,
+    aliases: HashSet<(Vec<u8>, Path)>,
+    negatives: HashMap<Path, Option<Vec<u8>>>,
+    negative_reverse: HashSet<(Vec<u8>, Path)>,
+    positives: HashSet<Path>,
+    positive_directories: HashSet<Path>,
+    git_paths: HashSet<Path>,
+    complete_listings: HashMap<Path, HashSet<String>>,
+    metas: Vec<(Path, EntryMeta)>,
+}
+
+impl ProjectionValidation {
+    fn read_row(&mut self, row: ProjectionRow, bodies: &BodyStore) -> Result<(), ProjectionError> {
+        let ProjectionRow { key, value } = row;
+        if key.starts_with(b"r:") {
+            return self.read_record(&key, &value, bodies);
+        }
+        if let Some(raw) = key.strip_prefix(b"b:") {
+            let request = std::str::from_utf8(raw)
+                .map_err(|_| inconsistent("blob request key is not UTF-8"))?;
+            if BlobRequestId::from_hex(request).is_none() {
+                return Err(inconsistent(
+                    "blob request key is not canonical lowercase hex",
+                ));
+            }
+            let fact: DurableFact = postcard::from_bytes(&value)?;
+            let DurableFact::Blob(fact) = fact else {
+                return Err(inconsistent("blob request key contains a non-blob fact"));
+            };
+            let body = BodyId::from_digest_bytes(fact.body_id);
+            if fact.metadata.size != fact.length {
+                return Err(inconsistent(
+                    "blob metadata size does not match its body length",
+                ));
+            }
+            bodies.validate(body, Some(fact.length))?;
+            return Ok(());
+        }
+        if let Some(raw) = key.strip_prefix(b"g:") {
+            let path = decode_path(raw, "Git fact")?;
+            let fact: DurableFact = postcard::from_bytes(&value)?;
+            let DurableFact::Git { relative_path, .. } = fact else {
+                return Err(inconsistent("Git key contains a non-Git fact"));
+            };
+            validate_git_relative(&relative_path)?;
+            self.git_paths.insert(path);
+            return Ok(());
+        }
+        if let Some(raw) = key.strip_prefix(b"x:") {
+            let _ = decode_path(raw, "expiry")?;
+            let _: Option<u64> = postcard::from_bytes(&value)?;
+            return Ok(());
+        }
+        if let Some(raw) = key.strip_prefix(b"o:") {
+            let id = decode_object_hex(raw, "object")?;
+            let (body, length, _validator): ([u8; 32], u64, Option<String>) =
+                postcard::from_bytes(&value)?;
+            let body = BodyId::from_digest_bytes(body);
+            bodies.validate(body, Some(length))?;
+            if self.objects.insert(id, (body, length)).is_some() {
+                return Err(inconsistent("duplicate durable object identity"));
+            }
+            return Ok(());
+        }
+        if let Some(raw) = key.strip_prefix(b"i:") {
+            let path = decode_path(raw, "object index")?;
+            validate_object_id(&value, "object index")?;
+            if self.indexes.insert(path, value).is_some() {
+                return Err(inconsistent("duplicate durable object index"));
+            }
+            return Ok(());
+        }
+        if let Some(raw) = key.strip_prefix(b"a:") {
+            let (id, path) = decode_id_path(raw, "object alias")?;
+            if !value.is_empty() {
+                return Err(inconsistent("object alias row must have an empty value"));
+            }
+            if !self.aliases.insert((id, path)) {
+                return Err(inconsistent("duplicate durable object alias"));
+            }
+            return Ok(());
+        }
+        if let Some(raw) = key.strip_prefix(b"n:") {
+            let (id, path) = decode_id_path(raw, "negative reverse")?;
+            if value.as_slice() != path.as_str().as_bytes() {
+                return Err(inconsistent(
+                    "negative reverse value does not match its path",
+                ));
+            }
+            if !self.negative_reverse.insert((id, path)) {
+                return Err(inconsistent("duplicate durable negative reverse relation"));
+            }
+            return Ok(());
+        }
+        Err(inconsistent("durable projection row has an unknown prefix"))
+    }
+
+    fn read_record(
+        &mut self,
+        key: &[u8],
+        value: &[u8],
+        bodies: &BodyStore,
+    ) -> Result<(), ProjectionError> {
+        let (path, kind, aux) = decode_fact_key(key)?;
+        if aux.is_some() && kind != RecordKind::File {
+            return Err(inconsistent("only file facts may use an auxiliary key"));
+        }
+        let fact: DurableFact = postcard::from_bytes(value)?;
+        match (kind, fact) {
+            (RecordKind::Lookup, DurableFact::Lookup(payload)) => match payload {
+                LookupPayload::Positive(meta) => {
+                    self.positives.insert(path.clone());
+                    if meta.is_directory() {
+                        self.positive_directories.insert(path.clone());
+                    }
+                    self.metas.push((path, meta));
+                },
+                LookupPayload::Negative { id } => {
+                    if let Some(id) = &id {
+                        validate_object_id(id, "negative lookup")?;
+                    }
+                    if self.negatives.insert(path, id).is_some() {
+                        return Err(inconsistent("duplicate durable negative lookup"));
+                    }
+                },
+            },
+            (RecordKind::Attr, DurableFact::Attr(payload)) => {
+                self.metas.push((path, payload.meta));
+            },
+            (RecordKind::Dirents, DurableFact::Dirents(payload)) => {
+                if payload.next_cursor.is_some() && !payload.paginated {
+                    return Err(inconsistent("listing cursor requires paginated state"));
+                }
+                if payload.next_cursor.is_some() && payload.exhaustive {
+                    return Err(inconsistent("an exhaustive listing cannot retain a cursor"));
+                }
+                let complete =
+                    payload.exhaustive || (payload.paginated && payload.next_cursor.is_none());
+                let mut names = HashSet::new();
+                for entry in payload.entries {
+                    if !names.insert(entry.name.clone()) {
+                        return Err(inconsistent("durable listing contains a duplicate name"));
+                    }
+                    let child = path.join(&entry.name).map_err(|error| {
+                        inconsistent(format!("durable listing name is invalid: {error}"))
+                    })?;
+                    self.metas.push((child, entry.meta));
+                }
+                if complete {
+                    self.complete_listings.insert(path, names);
+                }
+            },
+            (
+                RecordKind::File,
+                DurableFact::File {
+                    body_id, length, ..
+                },
+            ) => bodies.validate(BodyId::from_digest_bytes(body_id), Some(length))?,
+            _ => {
+                return Err(inconsistent(
+                    "durable fact kind does not match its path key",
+                ));
+            },
+        }
+        Ok(())
+    }
+
+    fn finish(self, bodies: &BodyStore) -> Result<(), ProjectionError> {
+        for (path, id) in &self.indexes {
+            if !self.objects.contains_key(id) {
+                return Err(inconsistent("object index points to a missing object row"));
+            }
+            if !self.aliases.contains(&(id.clone(), path.clone())) {
+                return Err(inconsistent("object index is missing its reverse alias"));
+            }
+        }
+        for (id, path) in &self.aliases {
+            if !self.objects.contains_key(id) {
+                return Err(inconsistent("object alias points to a missing object row"));
+            }
+            if self.indexes.get(path) != Some(id) {
+                return Err(inconsistent(
+                    "object alias disagrees with its forward index",
+                ));
+            }
+        }
+        for (path, id) in &self.negatives {
+            if let Some(id) = id
+                && !self.negative_reverse.contains(&(id.clone(), path.clone()))
+            {
+                return Err(inconsistent(
+                    "negative lookup is missing its reverse relation",
+                ));
+            }
+        }
+        for (id, path) in &self.negative_reverse {
+            if self.negatives.get(path).and_then(Option::as_ref) != Some(id) {
+                return Err(inconsistent(
+                    "negative reverse relation has no matching lookup",
+                ));
+            }
+        }
+        if self
+            .git_paths
+            .iter()
+            .any(|path| self.negatives.contains_key(path))
+        {
+            return Err(inconsistent(
+                "durable Git subtree conflicts with an exact negative lookup",
+            ));
+        }
+        for path in &self.git_paths {
+            if self.positives.contains(path) && !self.positive_directories.contains(path) {
+                return Err(inconsistent(
+                    "durable Git subtree conflicts with an exact file lookup",
+                ));
+            }
+            if !self.positive_directories.contains(path) {
+                return Err(inconsistent(
+                    "durable Git subtree has no exact positive directory identity",
+                ));
+            }
+        }
+        for positive in self.positives.iter().chain(&self.git_paths) {
+            if let Some((parent, name)) = positive.parent_and_name()
+                && let Some(names) = self.complete_listings.get(&parent)
+                && !names.contains(name)
+            {
+                return Err(inconsistent(
+                    "completed listing omits an exact durable positive child",
+                ));
+            }
+        }
+        for negative in self.negatives.keys() {
+            if let Some((parent, name)) = negative.parent_and_name()
+                && self
+                    .complete_listings
+                    .get(&parent)
+                    .is_some_and(|names| names.contains(name))
+            {
+                return Err(inconsistent(
+                    "completed listing contains an exact durable negative child",
+                ));
+            }
+        }
+        for (path, meta) in self.metas {
+            validate_durable_meta(&path, &meta, &self.indexes, &self.objects, bodies)?;
+        }
+        Ok(())
+    }
+}
+
+fn inconsistent(message: impl Into<String>) -> ProjectionError {
+    ProjectionError::Inconsistent(message.into())
+}
+
+fn decode_path(bytes: &[u8], owner: &str) -> Result<Path, ProjectionError> {
+    let value = std::str::from_utf8(bytes)
+        .map_err(|_| inconsistent(format!("{owner} path is not UTF-8")))?;
+    Path::parse(value).map_err(|error| inconsistent(format!("{owner} path is invalid: {error}")))
+}
+
+fn decode_object_hex(bytes: &[u8], owner: &str) -> Result<Vec<u8>, ProjectionError> {
+    let value = std::str::from_utf8(bytes)
+        .map_err(|_| inconsistent(format!("{owner} identity is not UTF-8")))?;
+    let decoded = hex::decode(value)
+        .map_err(|_| inconsistent(format!("{owner} identity is not lowercase hex")))?;
+    if hex::encode(&decoded) != value {
+        return Err(inconsistent(format!(
+            "{owner} identity is not canonical lowercase hex"
+        )));
+    }
+    validate_object_id(&decoded, owner)?;
+    Ok(decoded)
+}
+
+fn validate_object_id(id: &[u8], owner: &str) -> Result<(), ProjectionError> {
+    if ObjectId::from_bytes(id.to_vec()).to_wit().is_none() {
+        return Err(inconsistent(format!(
+            "{owner} contains an invalid object identity"
+        )));
+    }
+    Ok(())
+}
+
+fn decode_id_path(bytes: &[u8], owner: &str) -> Result<(Vec<u8>, Path), ProjectionError> {
+    let split = bytes
+        .iter()
+        .position(|byte| *byte == b':')
+        .ok_or_else(|| inconsistent(format!("{owner} key is missing its path separator")))?;
+    let id = decode_object_hex(&bytes[..split], owner)?;
+    let path = decode_path(&bytes[split + 1..], owner)?;
+    Ok((id, path))
+}
+
+fn validate_durable_meta(
+    path: &Path,
+    meta: &EntryMeta,
+    indexes: &HashMap<Path, Vec<u8>>,
+    objects: &HashMap<Vec<u8>, (BodyId, u64)>,
+    bodies: &BodyStore,
+) -> Result<(), ProjectionError> {
+    let EntryMeta::File { attrs: Some(attrs) } = meta else {
+        return Ok(());
+    };
+    attrs.validate().map_err(inconsistent)?;
+    match attrs.byte_source() {
+        ByteSource::Inline(_) => Err(inconsistent(
+            "durable metadata contains inline bytes outside the global body store",
+        )),
+        ByteSource::Body(body) => {
+            let FileSize::Exact(length) = attrs.size() else {
+                return Err(inconsistent(
+                    "durable body metadata requires an exact length",
+                ));
+            };
+            bodies.validate(body, Some(length))?;
+            Ok(())
+        },
+        ByteSource::Canonical => {
+            let id = indexes
+                .get(path)
+                .ok_or_else(|| inconsistent("canonical metadata has no object index"))?;
+            let (_, object_length) = objects
+                .get(id)
+                .ok_or_else(|| inconsistent("canonical metadata has no object row"))?;
+            if attrs.size() != FileSize::Exact(*object_length) {
+                return Err(inconsistent(
+                    "canonical metadata length disagrees with its object body",
+                ));
+            }
+            Ok(())
+        },
+        ByteSource::Deferred(_) => Ok(()),
+    }
 }
 
 fn fact_key(path: &str, kind: RecordKind, aux: Option<&str>) -> Vec<u8> {
@@ -1395,7 +1893,7 @@ fn remove_prefix_facts(
     facts: &fjall::OptimisticTxKeyspace,
     prefix_path: &Path,
     removals: &mut Vec<Vec<u8>>,
-) -> Result<(), ProjectionError> {
+) -> Result<HashSet<Path>, ProjectionError> {
     let prefix = b"r:";
     let mut paths = HashSet::new();
     for guard in tx.prefix(facts, prefix) {
@@ -1420,10 +1918,166 @@ fn remove_prefix_facts(
             paths.insert(path);
         }
     }
-    for path in paths {
-        remove_path_facts(tx, facts, &path, removals)?;
+    for path in &paths {
+        remove_path_facts(tx, facts, path, removals)?;
     }
-    Ok(())
+    Ok(paths)
+}
+
+fn invalidate_parent_listing(
+    tx: &mut fjall::OptimisticWriteTx,
+    facts: &fjall::OptimisticTxKeyspace,
+    path: &Path,
+) -> Result<Option<Path>, ProjectionError> {
+    let Some((parent, name)) = path.parent_and_name() else {
+        return Ok(None);
+    };
+    let Some(mut listing) = read_dirents_fact(tx, facts, &parent)? else {
+        return Ok(None);
+    };
+    let was_complete = listing.is_complete_offline();
+    let had_entry = listing.entries.iter().any(|entry| entry.name == name);
+    if !had_entry && !was_complete {
+        return Ok(None);
+    }
+    listing.entries.retain(|entry| entry.name != name);
+    // An exact child invalidation makes the parent's prior completeness claim
+    // stale even when the child was absent from the stored page. The next
+    // browse must revalidate the parent instead of treating the old listing as
+    // authoritative.
+    listing.exhaustive = false;
+    listing.paginated = false;
+    listing.next_cursor = None;
+    apply_dirents(
+        tx,
+        facts,
+        &DirentsMutation::Replace {
+            path: parent.clone(),
+            value: listing,
+        },
+    )?;
+    Ok(Some(parent))
+}
+
+fn reconcile_listing_relations(
+    tx: &mut fjall::OptimisticWriteTx,
+    facts: &fjall::OptimisticTxKeyspace,
+    records: &[PreparedRecord],
+    dirents: &[DirentsMutation],
+    removals: &mut Vec<Vec<u8>>,
+) -> Result<HashSet<Path>, ProjectionError> {
+    let mut mutated = HashSet::new();
+    // Exact lookup results and a parent's accumulated listing are one logical
+    // projection. A positive hint may extend a snapshot but cannot silently
+    // preserve an exhaustive claim; a definitive negative removes the name.
+    for record in records {
+        let DurableFact::Lookup(lookup) = &record.fact else {
+            continue;
+        };
+        let Some((parent, name)) = record.path.parent_and_name() else {
+            continue;
+        };
+        let Some(mut listing) = read_dirents_fact(tx, facts, &parent)? else {
+            continue;
+        };
+        match lookup {
+            LookupPayload::Positive(meta) => {
+                let mut entries = BTreeMap::new();
+                entries.insert(
+                    name.to_string(),
+                    crate::view::DirentRecord {
+                        name: name.to_string(),
+                        meta: meta.clone(),
+                    },
+                );
+                listing = DirentsPayload::merged(Some(listing), entries, false);
+                apply_dirents(
+                    tx,
+                    facts,
+                    &DirentsMutation::Replace {
+                        path: parent.clone(),
+                        value: listing,
+                    },
+                )?;
+                mutated.insert(parent);
+            },
+            LookupPayload::Negative { .. }
+                if listing.entries.iter().any(|entry| entry.name == name) =>
+            {
+                listing.entries.retain(|entry| entry.name != name);
+                apply_dirents(
+                    tx,
+                    facts,
+                    &DirentsMutation::Replace {
+                        path: parent.clone(),
+                        value: listing,
+                    },
+                )?;
+                mutated.insert(parent);
+            },
+            LookupPayload::Negative { .. } => {},
+        }
+    }
+
+    // When a listing transition reaches a complete state, its omissions and
+    // inclusions retire contradictory direct-child lookup facts in the same
+    // transaction. Object index rows remain independently owned.
+    let touched: HashSet<Path> = dirents
+        .iter()
+        .map(|mutation| match mutation {
+            DirentsMutation::Replace { path, .. }
+            | DirentsMutation::MergeHints { path, .. }
+            | DirentsMutation::AppendPage { path, .. } => path.clone(),
+        })
+        .collect();
+    for parent in touched {
+        let Some(listing) = read_dirents_fact(tx, facts, &parent)? else {
+            continue;
+        };
+        if !listing.is_complete_offline() {
+            continue;
+        }
+        let names: HashSet<&str> = listing
+            .entries
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect();
+        let mut contradictions = Vec::new();
+        for guard in tx.prefix(facts, b"r:L:") {
+            let (key, value) = guard.into_inner()?;
+            let key = key.to_vec();
+            let (path, kind, aux) = decode_fact_key(&key)?;
+            if kind != RecordKind::Lookup || aux.is_some() {
+                return Err(ProjectionError::Inconsistent(
+                    "lookup prefix contained a noncanonical fact key".into(),
+                ));
+            }
+            let Some((candidate_parent, name)) = path.parent_and_name() else {
+                continue;
+            };
+            if candidate_parent != parent {
+                continue;
+            }
+            let fact: DurableFact = postcard::from_bytes(&value)?;
+            let DurableFact::Lookup(lookup) = fact else {
+                return Err(ProjectionError::Inconsistent(
+                    "lookup key contains a non-lookup fact".into(),
+                ));
+            };
+            let contradicts = match lookup {
+                LookupPayload::Positive(_) => !names.contains(name),
+                LookupPayload::Negative { .. } => names.contains(name),
+            };
+            if contradicts {
+                contradictions.push(path);
+            }
+        }
+        for path in contradictions {
+            remove_path_facts(tx, facts, &path, removals)?;
+            mutated.insert(path);
+        }
+    }
+    Ok(mutated)
 }
 
 fn decode_fact_key(key: &[u8]) -> Result<(Path, RecordKind, Option<String>), ProjectionError> {
@@ -1457,10 +2111,15 @@ fn decode_fact_key(key: &[u8]) -> Result<(Path, RecordKind, Option<String>), Pro
     )
     .map_err(|error| ProjectionError::Inconsistent(error.to_string()))?;
     let aux = aux_bytes
-        .map(|bytes| {
-            let bytes = hex::decode(bytes).map_err(|_| {
+        .map(|encoded| {
+            let bytes = hex::decode(encoded).map_err(|_| {
                 ProjectionError::Inconsistent("durable fact auxiliary key is not hex".into())
             })?;
+            if hex::encode(&bytes).as_bytes() != encoded {
+                return Err(ProjectionError::Inconsistent(
+                    "durable fact auxiliary key is not canonical lowercase hex".into(),
+                ));
+            }
             String::from_utf8(bytes).map_err(|_| {
                 ProjectionError::Inconsistent("durable fact auxiliary key is not UTF-8".into())
             })
@@ -1895,6 +2554,203 @@ mod tests {
             )
             .unwrap();
         assert!(store.negative_for_checked(&path, 1_000).unwrap().is_none());
+
+        let parent = p("/dir");
+        let child = p("/dir/child");
+        store
+            .publish(
+                ProjectionTransition {
+                    dirents: vec![DirentsMutation::Replace {
+                        path: parent.clone(),
+                        value: DirentsPayload {
+                            entries: Vec::new(),
+                            exhaustive: true,
+                            validator: None,
+                            next_cursor: None,
+                            paginated: false,
+                        },
+                    }],
+                    ..ProjectionTransition::default()
+                },
+                store.current_epoch(),
+            )
+            .unwrap();
+        store
+            .cache_get(&parent, RecordKind::Dirents, None)
+            .unwrap()
+            .expect("seed derived listing memory");
+        store
+            .publish(
+                ProjectionTransition {
+                    records: vec![RecordWrite {
+                        path: child.clone(),
+                        aux: None,
+                        fact: FactPayload::Lookup(LookupPayload::Positive(EntryMeta::directory())),
+                    }],
+                    ..ProjectionTransition::default()
+                },
+                store.current_epoch(),
+            )
+            .unwrap();
+        let listing: DirentsPayload = postcard::from_bytes(
+            &store
+                .cache_get(&parent, RecordKind::Dirents, None)
+                .unwrap()
+                .unwrap()
+                .payload,
+        )
+        .unwrap();
+        assert_eq!(listing.entries[0].name, "child");
+        assert!(!listing.is_complete_offline());
+        store
+            .publish(
+                ProjectionTransition {
+                    records: vec![RecordWrite {
+                        path: child.clone(),
+                        aux: None,
+                        fact: FactPayload::Lookup(LookupPayload::Positive(
+                            EntryMeta::file_without_attrs(),
+                        )),
+                    }],
+                    ..ProjectionTransition::default()
+                },
+                store.current_epoch(),
+            )
+            .unwrap();
+        assert!(
+            store.dirents_payload(&parent).unwrap().unwrap().entries[0]
+                .meta
+                .is_file()
+        );
+
+        publish_negative(&store, &child, Some(OBJ_ID.to_vec()), 30_000);
+        let listing = store.dirents_payload(&parent).unwrap().unwrap();
+        assert!(listing.entries.is_empty());
+        assert!(store.negative_for_checked(&child, 1_000).unwrap().is_some());
+
+        let stale = p("/dir/stale");
+        let reverse = p("/dir/reverse");
+        store
+            .publish(
+                ProjectionTransition {
+                    records: vec![RecordWrite {
+                        path: stale.clone(),
+                        aux: None,
+                        fact: FactPayload::Lookup(LookupPayload::Positive(EntryMeta::directory())),
+                    }],
+                    ..ProjectionTransition::default()
+                },
+                store.current_epoch(),
+            )
+            .unwrap();
+        publish_negative(&store, &reverse, Some(OBJ_ID.to_vec()), 30_000);
+        store
+            .cache_get(&stale, RecordKind::Lookup, None)
+            .unwrap()
+            .expect("seed stale child memory");
+        store
+            .cache_get(&reverse, RecordKind::Lookup, None)
+            .unwrap()
+            .expect("seed reverse-negative memory");
+        store
+            .publish(
+                ProjectionTransition {
+                    dirents: vec![DirentsMutation::Replace {
+                        path: parent,
+                        value: DirentsPayload {
+                            entries: vec![crate::view::DirentRecord {
+                                name: "reverse".into(),
+                                meta: EntryMeta::directory(),
+                            }],
+                            exhaustive: true,
+                            validator: None,
+                            next_cursor: None,
+                            paginated: false,
+                        },
+                    }],
+                    ..ProjectionTransition::default()
+                },
+                store.current_epoch(),
+            )
+            .unwrap();
+        assert!(store.lookup_payload(&stale).unwrap().is_none());
+        assert!(store.lookup_payload(&reverse).unwrap().is_none());
+        assert!(
+            store
+                .cache_get(&stale, RecordKind::Lookup, None)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .cache_get(&reverse, RecordKind::Lookup, None)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .projection
+                .get(&negative_key(OBJ_ID, &reverse))
+                .unwrap()
+                .is_none()
+        );
+
+        let stale_git = p("/dir/stale-git");
+        store
+            .publish(
+                ProjectionTransition {
+                    records: vec![RecordWrite {
+                        path: stale_git.clone(),
+                        aux: None,
+                        fact: FactPayload::Lookup(LookupPayload::Positive(EntryMeta::directory())),
+                    }],
+                    git: vec![GitWrite {
+                        path: stale_git.clone(),
+                        id: GitId::new("m", "https://example.test/repo.git", None),
+                        relative_path: String::new(),
+                    }],
+                    ..ProjectionTransition::default()
+                },
+                store.current_epoch(),
+            )
+            .unwrap();
+        assert!(store.git_for_path(&stale_git).unwrap().is_some());
+        store
+            .publish(
+                ProjectionTransition {
+                    records: vec![RecordWrite {
+                        path: stale_git.clone(),
+                        aux: None,
+                        fact: FactPayload::Lookup(LookupPayload::Positive(
+                            EntryMeta::file_without_attrs(),
+                        )),
+                    }],
+                    ..ProjectionTransition::default()
+                },
+                store.current_epoch(),
+            )
+            .unwrap();
+        assert!(store.git_for_path(&stale_git).unwrap().is_none());
+        store
+            .publish(
+                ProjectionTransition {
+                    records: vec![RecordWrite {
+                        path: stale_git.clone(),
+                        aux: None,
+                        fact: FactPayload::Lookup(LookupPayload::Positive(EntryMeta::directory())),
+                    }],
+                    git: vec![GitWrite {
+                        path: stale_git.clone(),
+                        id: GitId::new("m", "https://example.test/repo.git", None),
+                        relative_path: String::new(),
+                    }],
+                    ..ProjectionTransition::default()
+                },
+                store.current_epoch(),
+            )
+            .unwrap();
+        publish_negative(&store, &stale_git, None, 40_000);
+        assert!(store.git_for_path(&stale_git).unwrap().is_none());
     }
 
     #[test]
