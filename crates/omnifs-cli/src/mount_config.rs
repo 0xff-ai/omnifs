@@ -153,7 +153,7 @@ mod tests {
             name: MountName::try_from("github").unwrap(),
             config: spec_with_reference(
                 &reference,
-                r#"{ "mount": "github", "auth": {"type":"oauth","scheme":"device","clientId":"client-id"} }"#,
+                r#"{ "mount": "github", "auth": {"type":"oauth","scheme":"device","client_id":"client-id"} }"#,
             ),
             source: PathBuf::from("/dev/null"),
         };

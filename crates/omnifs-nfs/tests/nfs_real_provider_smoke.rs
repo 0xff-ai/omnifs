@@ -262,7 +262,7 @@ fn write_credentials(config_dir: &Path, linear_enabled: bool) {
 
 fn static_token_entry(token: &str) -> String {
     format!(
-        r#"{{"kind":"static-token","access_token":{token:?},"refresh_token":null,"refreshability":"not-applicable","expires_at":null,"token_type":"Bearer","stored_at":"1970-01-01T00:00:00Z","last_validated":null,"scopes":[],"upstream_identity":null,"extras":{{}}}}"#
+        r#"{{"kind":"static-token","access_token":{token:?},"refresh_token":null,"expires_at":null,"token_type":"Bearer","stored_at":"1970-01-01T00:00:00Z","last_validated":null,"scopes":[],"upstream_identity":null,"extras":{{}}}}"#
     )
 }
 

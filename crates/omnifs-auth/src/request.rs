@@ -178,7 +178,7 @@ impl OAuthRequest {
             scheme.inject_header_name = Some(header.to_owned());
         }
         if let Some(redirect_uri) =
-            non_empty_config_value(config.redirect_uri.as_deref(), "auth.redirectUri")?
+            non_empty_config_value(config.redirect_uri.as_deref(), "auth.redirect_uri")?
         {
             match &mut scheme.flow {
                 OAuthFlow::PkceLoopback(flow) => {
@@ -196,7 +196,7 @@ impl OAuthRequest {
 
         let mut request = OAuthRequest::new(scheme);
         if let Some(client_id) =
-            non_empty_config_value(config.client_id.as_deref(), "auth.clientId")?
+            non_empty_config_value(config.client_id.as_deref(), "auth.client_id")?
         {
             request.client_id = Some(client_id.to_owned());
         }
@@ -245,12 +245,12 @@ fn read_oauth_client_secret(config: &OAuth) -> Result<Option<SecretString>, Auth
             Ok(contents) => {
                 return secret_from_config_value(
                     contents.trim(),
-                    &format!("auth.clientSecretFile {path}"),
+                    &format!("auth.client_secret_file {path}"),
                 );
             },
             Err(error) if config.client_secret_env.is_none() => {
                 return Err(AuthError::RequestConfig(format!(
-                    "failed to read auth.clientSecretFile {path}: {error}"
+                    "failed to read auth.client_secret_file {path}: {error}"
                 )));
             },
             Err(_) => {},
@@ -262,10 +262,10 @@ fn read_oauth_client_secret(config: &OAuth) -> Result<Option<SecretString>, Auth
     };
     let value = std::env::var(env_var).map_err(|error| {
         AuthError::RequestConfig(format!(
-            "failed to read auth.clientSecretEnv {env_var}: {error}"
+            "failed to read auth.client_secret_env {env_var}: {error}"
         ))
     })?;
-    secret_from_config_value(value.trim(), &format!("auth.clientSecretEnv {env_var}"))
+    secret_from_config_value(value.trim(), &format!("auth.client_secret_env {env_var}"))
 }
 
 fn secret_from_config_value(value: &str, source: &str) -> Result<Option<SecretString>, AuthError> {

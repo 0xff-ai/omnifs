@@ -494,7 +494,7 @@ mod tests {
                         "type": "oauth",
                         "scheme": "device",
                         "account": "shared",
-                        "clientId": client_id
+                        "client_id": client_id
                     }
                 }),
             );

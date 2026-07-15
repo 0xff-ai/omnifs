@@ -565,7 +565,7 @@ mod golden {
         let bad_key_path = fixture_paths(bad_key.path()).credentials_file;
         std::fs::write(
             &bad_key_path,
-            r#"{"version":1,"entries":{"not-a-credential-key":{"kind":"static-token","access_token":"x","stored_at":"1970-01-01T00:00:00Z"}}}"#,
+            r#"{"version":1,"entries":{"not-a-credential-key":{"kind":"static-token","access_token":"x","refresh_token":null,"expires_at":null,"token_type":"Bearer","stored_at":"1970-01-01T00:00:00Z","last_validated":null,"scopes":[],"upstream_identity":null,"extras":{}}}}"#,
         )
         .unwrap();
         let result = probe_credential_result(bad_key.path());
