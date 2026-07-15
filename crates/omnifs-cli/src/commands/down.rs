@@ -1,14 +1,9 @@
-//! `omnifs down`: daemon lifecycle stop.
+//! `omnifs down`: typed daemon shutdown.
 //!
-//! Resolution order:
-//!   1. Probe the control endpoint: if a live daemon answers, trust
-//!      `DaemonStatus.backend` to identify the backend.
-//!   2. Fall back to the daemon record: if the daemon is dead, the record
-//!      says what was started.
-//!   3. If neither applies, nothing is running.
-//!
-//! The backend is never inferred from `[system].runtime`; the daemon owns its
-//! shutdown protocol, and frontend runners remain independent.
+//! The command first probes the daemon's typed local control endpoint. If the
+//! daemon cannot answer, `DaemonTeardown` falls back to the strict daemon
+//! record and its direct pid for liveness-checked cleanup. Frontend runners
+//! remain independent throughout either shutdown path.
 
 use clap::Args;
 

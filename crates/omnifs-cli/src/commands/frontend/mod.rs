@@ -6,6 +6,9 @@
 
 mod lifecycle;
 
+/// Guest mount path shared by Docker and libkrun frontend runners.
+pub(crate) const GUEST_MOUNT: &str = "/omnifs";
+
 use clap::Subcommand;
 
 use crate::error::ExitCode;

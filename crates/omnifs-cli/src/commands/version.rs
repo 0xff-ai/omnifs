@@ -5,8 +5,8 @@ use clap::Args;
 use serde::Serialize;
 
 use crate::error::ExitCode;
+use crate::image::BUILD_CHANNEL;
 use crate::inventory::Inventory;
-use crate::launch_backend::BUILD_CHANNEL;
 use crate::ui::output::{Output, ResultVerdict};
 use crate::workspace::Workspace;
 

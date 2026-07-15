@@ -7,9 +7,10 @@ use std::path::Path;
 use omnifs_workspace::creds::{CredentialStore, FileStore};
 
 use crate::docker::DockerClient;
+use crate::docker::DockerTarget;
 use crate::frontend_container::{frontend_container_name, resolve_frontend_image};
+use crate::image::{ImageRef, names_registry};
 use crate::inventory::{Inventory, Severity};
-use crate::launch_backend::{DockerTarget, ImageRef, names_registry};
 use crate::status::InventoryReport;
 use crate::ui::output::{Output, ResultVerdict};
 use crate::ui::table::{

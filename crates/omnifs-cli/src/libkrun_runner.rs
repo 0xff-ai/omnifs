@@ -45,7 +45,8 @@ use std::time::Duration;
 use anyhow::{Context as _, Result};
 use tokio::io::AsyncReadExt as _;
 
-use crate::launch_backend::{BUILD_CHANNEL, BuildChannel, GUEST_MOUNT, ImageRef};
+use crate::commands::frontend::GUEST_MOUNT;
+use crate::image::{BUILD_CHANNEL, BuildChannel, ImageRef};
 use crate::process::is_alive as process_alive;
 use crate::ui::output::Output;
 use omnifs_workspace::config::Config;

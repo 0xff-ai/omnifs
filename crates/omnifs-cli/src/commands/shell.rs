@@ -6,11 +6,9 @@ use anyhow::{Context, Result, bail, ensure};
 use clap::Args;
 
 use crate::commands::frontend::{FrontendFilesystem, FrontendRuntime};
-use crate::docker::DockerClient;
-use crate::docker::DockerRunner;
+use crate::docker::{ContainerName, DockerClient, DockerRunner, DockerTarget};
 use crate::frontend_container::FRONTEND_DEV_IMAGE;
 use crate::inventory::{FrontendState, Inventory};
-use crate::launch_backend::{ContainerName, DockerTarget};
 use crate::libkrun_runner::{self, LibkrunRunner};
 use crate::ui::output::Output;
 use crate::workspace::Workspace;
@@ -71,8 +69,8 @@ impl ShellArgs {
             container_name.as_str().to_string(),
             FRONTEND_DEV_IMAGE.to_string(),
         )?;
-        let backend = DockerRunner::new(DockerClient::connect_for(&target, output)?);
-        let cmd = backend.shell_command(self.shell.as_deref(), &self.command);
+        let runner = DockerRunner::new(DockerClient::connect_for(&target, output)?);
+        let cmd = runner.shell_command(self.shell.as_deref(), &self.command);
         spawn_and_propagate(cmd, format!("open shell in container `{container_name}`"))
     }
 
@@ -82,8 +80,8 @@ impl ShellArgs {
         paths: &omnifs_workspace::layout::WorkspaceLayout,
     ) -> Result<()> {
         libkrun_runner::ensure_socat_available()?;
-        let backend = LibkrunRunner::new(paths.config_dir.clone());
-        let cmd = backend.shell_command(self.shell.as_deref(), &self.command);
+        let runner = LibkrunRunner::new(paths.config_dir.clone());
+        let cmd = runner.shell_command(self.shell.as_deref(), &self.command);
         spawn_and_propagate(cmd, "open shell in the libkrun guest".to_string())
     }
 }

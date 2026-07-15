@@ -31,7 +31,7 @@ use anyhow::{Context as _, Result};
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
 
-use crate::launch_backend::ImageRef;
+use crate::image::ImageRef;
 use crate::ui::output::Output;
 
 const GUEST_IMAGE_CACHE_SUBDIR: &str = "guest-images";

@@ -168,7 +168,7 @@ whose destination streams are owned by the invoked tools.
 - `crates/omnifs-thin/src/nfs.rs`
 - `crates/omnifs-workspace/src/mounts/mod.rs`
 - `crates/omnifs-cli/src/launch.rs`
-- `crates/omnifs-cli/src/launch_backend.rs`
+- `crates/omnifs-cli/src/image.rs`, `docker.rs`, and `process.rs`
 - `crates/omnifs-cli/src/docker.rs`
 - `crates/omnifs-cli/src/daemon_teardown.rs`
 - `crates/omnifs-cli/src/provider_bundle.rs`

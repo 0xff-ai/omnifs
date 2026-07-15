@@ -3,6 +3,7 @@
 //! host-native and has no Docker surface here.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::io::Write as _;
 #[cfg(target_os = "linux")]
 use std::net::Ipv4Addr;
@@ -17,12 +18,75 @@ use bollard::query_parameters::{
 };
 use futures_util::TryStreamExt;
 
+use crate::commands::frontend::GUEST_MOUNT;
 use crate::error::WithHint;
 use crate::frontend_container::{FrontendContainerSpec, assert_locked_down};
-use crate::launch_backend::{
-    BUILD_CHANNEL, BuildChannel, ContainerName, DockerTarget, GUEST_MOUNT, ImageRef, names_registry,
-};
+use crate::image::{BUILD_CHANNEL, BuildChannel, ImageRef, names_registry};
 use crate::ui::output::{Output, OutputMode};
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct ContainerName(String);
+
+impl ContainerName {
+    pub(crate) fn new(name: impl Into<String>) -> anyhow::Result<Self> {
+        let name = name.into();
+        validate_container_name(&name)?;
+        Ok(Self(name))
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for ContainerName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+fn validate_container_name(name: &str) -> anyhow::Result<()> {
+    if name.is_empty() {
+        anyhow::bail!("container name must not be empty");
+    }
+    if name.len() > 64 {
+        anyhow::bail!("container name must be at most 64 characters");
+    }
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        anyhow::bail!("container name must not be empty");
+    };
+    if !first.is_ascii_alphanumeric() {
+        anyhow::bail!("container name must start with an ASCII letter or digit");
+    }
+    if !chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-')) {
+        anyhow::bail!("container name may only contain ASCII letters, digits, _, ., and -");
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DockerTarget {
+    container_name: ContainerName,
+    image: ImageRef,
+}
+
+impl DockerTarget {
+    pub(crate) fn new(container_name: String, image: String) -> anyhow::Result<Self> {
+        Ok(Self {
+            container_name: ContainerName::new(container_name)?,
+            image: ImageRef::new(image)?,
+        })
+    }
+
+    pub(crate) fn container_name(&self) -> &ContainerName {
+        &self.container_name
+    }
+
+    pub(crate) fn image(&self) -> &ImageRef {
+        &self.image
+    }
+}
 
 #[derive(Debug, Default)]
 struct LayerProgress {
@@ -138,7 +202,7 @@ impl DockerClient {
     }
 
     /// This runtime's own image, so
-    /// the concrete Docker backend can embed it in the container body without
+    /// the Docker runner can embed it in the container body without
     /// duplicating it in the caller.
     pub(crate) fn image(&self) -> &ImageRef {
         self.target.image()

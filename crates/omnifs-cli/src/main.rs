@@ -24,10 +24,10 @@ mod frontend_container;
 mod guest_image_pull;
 mod host_runner;
 mod host_teardown;
+mod image;
 mod inspector;
 mod inventory;
 mod launch;
-mod launch_backend;
 mod libkrun_runner;
 mod mount_config;
 mod process;
@@ -166,7 +166,7 @@ fn init_tracing(verbose: u8, inspector: Option<&std::sync::Arc<omnifs_engine::In
     use tracing_subscriber::layer::{Layer as _, SubscriberExt as _};
     use tracing_subscriber::util::SubscriberInitExt as _;
 
-    use launch_backend::ProcessRole;
+    use process::ProcessRole;
     // `-v` raises the foreground filter to the same baseline the spawned
     // daemon logs at; `-vv` turns on debug.
     let verbosity = match verbose {

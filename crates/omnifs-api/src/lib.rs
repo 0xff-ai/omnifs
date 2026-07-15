@@ -29,10 +29,10 @@ pub const OMNIFS_ATTACH_TOKEN_ENV: &str = "OMNIFS_ATTACH_TOKEN";
 
 /// Guest vsock port the frontend runner dials on host CID (`VMADDR_CID_HOST`)
 /// once its FUSE mount is serving, writing a single `ready\n` line so the
-/// libkrun backend's `launch` can observe guest readiness without an
-/// external probe into the guest (the Docker backend instead polls the
+/// libkrun runner's `launch` can observe guest readiness without an
+/// external probe into the guest (the Docker runner instead polls the
 /// mount path via `docker exec` from outside the container). Set only by the
-/// libkrun backend's seed (`omnifs-seed.conf`); absent on the Docker path.
+/// libkrun runner's seed (`omnifs-seed.conf`); absent on the Docker path.
 /// The runner treats this env being set on a non-Linux target as a hard
 /// error rather than silently ignoring it, since only the Linux libkrun
 /// guest can dial vsock.

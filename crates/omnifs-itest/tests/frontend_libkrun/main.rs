@@ -457,7 +457,7 @@ fn libkrun_lifecycle_and_matrix() {
 
     assert_serves(&fixture);
 
-    // The libkrun backend's own launch-time lockdown audit
+    // The libkrun runner's own launch-time lockdown audit
     // (`assert_libkrun_locked_down`) already proves the device set from
     // inside `omnifs-cli`; this suite's job is the guest-visible conformance
     // contract, not re-proving that audit from outside.

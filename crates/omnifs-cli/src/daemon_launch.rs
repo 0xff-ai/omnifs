@@ -8,7 +8,7 @@ use anyhow::{Context as _, Result};
 use tokio::process::Command;
 
 use crate::client::DaemonClient;
-use crate::launch_backend::ProcessRole;
+use crate::process::ProcessRole;
 
 pub(crate) async fn launch(
     paths: &omnifs_workspace::layout::WorkspaceLayout,

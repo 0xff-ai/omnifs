@@ -104,7 +104,7 @@ const DB_IMAGE = "omnifs-dev-db:local";
 const DB_CONTAINER = "omnifs-dev-db";
 const K8S_COMPOSE_PROJECT = "omnifs-devcluster";
 const FRONTEND_DEV_IMAGE = "omnifs-frontend:dev";
-// The daemon's own guest-mount constant (`crates/omnifs-cli/src/launch_backend.rs`
+// The frontend guest-mount constant (`crates/omnifs-cli/src/commands/frontend/mod.rs`
 // `GUEST_MOUNT`); the frontend container always mounts here.
 const GUEST_MOUNT = "/omnifs";
 // The frontend image ships a minimal Debian base (fuse3, coreutils, findutils,

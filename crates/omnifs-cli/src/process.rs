@@ -2,6 +2,27 @@
 
 use std::process::{Command, Stdio};
 
+/// How the omnifs process is running, which sets its default tracing level.
+#[derive(Clone, Copy)]
+pub(crate) enum ProcessRole {
+    /// A foreground CLI invocation: stays quiet so ordinary commands are not
+    /// noisy.
+    Cli,
+    /// A background daemon the CLI spawned: defaults louder so its startup
+    /// diagnostics are captured in daemon.log rather than hidden.
+    Daemon,
+}
+
+impl ProcessRole {
+    /// The default `RUST_LOG` level for this process role.
+    pub(crate) const fn default_log_level(self) -> &'static str {
+        match self {
+            Self::Cli => "warn",
+            Self::Daemon => "info",
+        }
+    }
+}
+
 /// Whether `kill -0` reports `pid` as a live process.
 pub(crate) fn is_alive(pid: u32) -> bool {
     Command::new("kill")

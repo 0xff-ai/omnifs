@@ -172,7 +172,7 @@ pub enum Exec {
         scratch: String,
     },
     /// `omnifs shell -- <cmd>` into a libkrun guest, the real CLI path
-    /// `omnifs shell` uses for the libkrun backend (ssh over a vsock-to-unix
+    /// `omnifs shell` uses for the libkrun runner (ssh over a vsock-to-unix
     /// bridge via `socat`, built by `LibkrunRunner::shell_command`). `root`
     /// and `scratch` are guest paths, matching `DockerExec`'s shape.
     /// `omnifs_bin`/`home` select which workspace's libkrun guest to reach:
@@ -238,7 +238,7 @@ impl Exec {
                 // ssh has no argv-array remote exec: everything after the
                 // hostname is space-joined into one remote command string
                 // (`LibkrunRunner::shell_command`'s own doc comment), and
-                // that backend already wraps every trailing command in
+                // that runner already wraps every trailing command in
                 // `cd $GUEST_MOUNT && exec <trailing>`. So `remote` must be
                 // exactly the one command `exec` replaces the login shell
                 // with, shipped as ONE already-shell-quoted argv element:

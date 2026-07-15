@@ -11,12 +11,12 @@ use omnifs_workspace::daemon_record::FrontendKind;
 use omnifs_workspace::layout::{WorkspaceLayout, resolve_mount_point};
 use serde::{Deserialize, Serialize};
 
+use crate::commands::frontend::GUEST_MOUNT;
 use crate::commands::receipt::FrontendReceipt;
-use crate::docker::{DockerClient, DockerRunner};
+use crate::docker::{DockerClient, DockerRunner, DockerTarget};
 use crate::frontend_container::{frontend_container_name, resolve_frontend_image};
 use crate::host_runner::HostRunner;
 use crate::inventory::{FrontendState, FrontendStatus, Inventory};
-use crate::launch_backend::{DockerTarget, GUEST_MOUNT};
 use crate::libkrun_runner::{LibkrunLaunchRequest, LibkrunRunner};
 use crate::ui::output::{Output, ResultVerdict};
 use crate::workspace::Workspace;
