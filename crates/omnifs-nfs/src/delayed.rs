@@ -87,9 +87,10 @@ impl PendingListings {
             runtime.spawn(async move {
                 let result = Arc::new(make().await);
                 let mut slots = lock_slots(&slots);
-                if let Some(sender) = slots.remove(&node) {
+                if let Some(sender) = slots.get(&node) {
                     let _ = sender.send(Some(result));
                 }
+                slots.remove(&node);
             });
         }
 
