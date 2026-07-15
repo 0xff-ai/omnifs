@@ -73,7 +73,7 @@ FUSE owns inode tables, kernel notifications, mount/unmount mechanics, and FUSE 
 
 Neither frontend owns projection semantics, provider WIT calls, cache schema, root enumeration, learned-size rules, preload policy, inline-byte policy, or negative lookup policy.
 
-A frontend (always out-of-process) consumes the same `omnifs_engine::Namespace` through the Omnifs VFS wire protocol. `omnifs-engine` remains the semantic owner; `omnifs-vfs-wire` owns postcard serialization, framing, the handshake, attach target resolution and reconnect, readiness signaling, and its client-side wire cache. Unix sockets (local), token-authenticated TCP (docker), and vsock (libkrun) are attach transports for this one internal protocol. The VFS wire protocol is separate from the provider WIT contract and does not define another projection model. Delivery is labeled by listener ownership at the daemon (UDS local, TCP docker, vsock libkrun); the guest never self-reports delivery.
+A frontend (always out-of-process) consumes the same `omnifs_engine::Namespace` through the Omnifs VFS wire protocol. `omnifs-engine` remains the semantic owner; `omnifs-vfs-wire` owns postcard serialization, framing, the v4 handshake, attach target resolution and reconnect, readiness signaling, direct validated `Path` requests, and ordered invalidation events. Unix sockets (local), token-authenticated TCP (docker), and vsock (libkrun) are attach transports for this one internal protocol. The wire carries no semantic cache and does not define another projection model. Delivery is labeled by listener ownership at the daemon (UDS local, TCP docker, vsock libkrun); the guest never self-reports delivery.
 
 ## Control plane
 

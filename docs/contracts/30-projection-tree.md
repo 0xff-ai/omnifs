@@ -9,11 +9,11 @@ Read this before touching `omnifs-engine/src/tree`, projected node resolution, c
 
 ## Rules
 
-### Tree owns projection semantics
+### TreeNamespace owns projection semantics
 
-`omnifs-engine/src/tree` owns answers to what projected node exists, what bytes or attrs it has, what cache entry should be published, what root children exist, and what provider probe is needed.
+`omnifs-engine::namespace::TreeNamespace` is the sole public semantic facade. Its internal tree implementation owns answers to what projected path exists, what bytes or attrs it has, what cache entry should be published, what root children exist, and what provider probe is needed.
 
-Put shared projection semantics behind `Tree`. Move behavior out of FUSE and NFS when it becomes frontend-neutral. Keep root enumeration as a tree operation.
+Put shared projection semantics behind `TreeNamespace`. Move behavior out of FUSE and NFS when it becomes frontend-neutral. Keep mount-root enumeration and host traversal in the namespace owner.
 
 ### File attributes
 

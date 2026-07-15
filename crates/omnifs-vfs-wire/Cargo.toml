@@ -11,6 +11,7 @@ keywords = ["omnifs", "vfs", "wire", "postcard", "filesystem"]
 
 [dependencies]
 omnifs-engine = { workspace = true }
+omnifs-core = { workspace = true }
 # Owns the attach env var names (`OMNIFS_ATTACH_ADDR_ENV` and friends) that
 # `AttachTarget` resolution and the readiness beacon parse. No cycle:
 # omnifs-engine already depends on omnifs-api, so this is a diamond, not a
@@ -35,9 +36,11 @@ tokio-vsock = "0.7.2"
 
 [dev-dependencies]
 omnifs-engine = { workspace = true, features = ["runtime"] }
+tokio = { workspace = true, features = ["test-util"] }
 tempfile = { workspace = true }
 # Provides a real engine-backed `TreeNamespace` for the trace-propagation test.
 omnifs-itest = { path = "../omnifs-itest" }
+tracing-subscriber = { workspace = true }
 
 [lints]
 workspace = true

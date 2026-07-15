@@ -3,7 +3,7 @@
 //! [`Namespace`](omnifs_engine::Namespace) in `omnifs-engine` owns shared VFS
 //! semantics. This crate owns only their transport representation: postcard
 //! serialization, length-delimited framing, handshake, attach target resolution
-//! and reconnect, readiness signaling, and the client wire cache.
+//! and reconnect, readiness signaling, and ordered namespace events.
 //!
 //! The daemon serves a [`TreeNamespace`](omnifs_engine::TreeNamespace) over a
 //! [`VfsServer`]; an out-of-process renderer attaches a
@@ -19,16 +19,15 @@
 //! On connect the client sends one `Hello { protocol, token, frontend }`
 //! request frame (`request_id = 0`), naming itself with a [`FrontendIdentity`]
 //! so the server can track it live. The server replies
-//! with either `Welcome { protocol, instance_id }` or `Rejected { reason }`
+//! with either `Welcome { protocol }` or `Rejected { reason }`
 //! (both response frames, `request_id = 0`), then closes the connection in the
 //! rejected case. A plain UDS listener ignores `token` (filesystem permissions
 //! are that transport's whole auth); a TCP attach listener, and a UDS listener
 //! bound with a token (the libkrun vsock-proxy path, where every guest dial
 //! looks like the same trusted local peer to the socket), both require it to
 //! match the per-instance attach token. A protocol mismatch is rejected the
-//! same way. `instance_id` is the daemon's per-start id: a reconnect that
-//! lands on a different id means the daemon restarted and every [`NodeId`] the
-//! client holds is stale.
+//! same way. Reconnect identity is carried by the ordered namespace event
+//! stream, not by a second attach channel.
 //!
 //! `frontend` is display-only for the host: the guest names its own kind and
 //! mount point so the daemon's status surface can report it, but the host
@@ -45,7 +44,6 @@
 //! `request_id = 0` and `kind = KIND_EVENT`.
 
 mod beacon;
-mod cache;
 mod client;
 mod frame;
 mod server;
@@ -54,7 +52,8 @@ mod tests;
 
 use std::path::PathBuf;
 
-use omnifs_engine::{Attrs, DirCursor, NodeAnswer, NodeId, NsError, ReadAnswer};
+use omnifs_core::path::Path;
+use omnifs_engine::{Attrs, DirCursor, LookupAnswer, NsError, ReadAnswer};
 use serde::{Deserialize, Serialize};
 
 #[cfg(target_os = "linux")]
@@ -64,9 +63,9 @@ pub use client::{AttachTarget, AttachTargetError, WireNamespace};
 pub use server::{ListenerEvent, ListenerTarget, VfsServer, serve_connection};
 
 /// The Omnifs VFS wire protocol version. A client and server that disagree refuse
-/// to serve: there is no version negotiation, so v3 rejects a v2 (or lower)
+/// to serve: there is no version negotiation, so v4 rejects a v3 (or lower)
 /// peer outright with a named reason.
-pub const PROTOCOL: u32 = 3;
+pub const PROTOCOL: u32 = 4;
 
 /// Identity a connecting frontend presents in its handshake `Hello`, naming
 /// its own kind and guest-side mount point (display-only). The server reports
@@ -95,27 +94,27 @@ pub enum FrontendKind {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) enum WireRequest {
     Lookup {
-        parent: NodeId,
+        parent: Path,
         name: String,
     },
     Getattr {
-        node: NodeId,
+        path: Path,
     },
     GetattrExact {
-        node: NodeId,
+        path: Path,
     },
     Readdir {
-        node: NodeId,
+        path: Path,
         cursor: DirCursor,
         budget: u64,
     },
     Read {
-        node: NodeId,
+        path: Path,
         offset: u64,
         len: u32,
     },
     Readlink {
-        node: NodeId,
+        path: Path,
     },
 }
 
@@ -125,7 +124,7 @@ pub(crate) enum WireRequest {
 /// client matches it against the request it multiplexed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) enum WireResponse {
-    Lookup(Result<NodeAnswer, NsError>),
+    Lookup(Result<LookupAnswer, NsError>),
     Getattr(Result<Attrs, NsError>),
     GetattrExact(Result<Attrs, NsError>),
     Readdir(Result<omnifs_engine::DirPage, NsError>),
@@ -151,27 +150,12 @@ pub(crate) enum Handshake {
     },
     Welcome {
         protocol: u32,
-        instance_id: String,
     },
     /// The server refused the handshake (a protocol mismatch or a bad attach
     /// token) and is about to close the connection. Sent so the client gets a
     /// terminal, named reason instead of an ambiguous closed pipe.
     Rejected {
         reason: String,
-    },
-}
-
-/// A change in the server the client is attached to. Fires only when a reconnect
-/// lands on a *different* daemon instance than before; a plain reconnect to the
-/// same instance fires nothing.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AttachEvent {
-    /// The daemon restarted under the client: every [`NodeId`] the consumer holds
-    /// is invalid. The out-of-process NFS test runner translates this into a
-    /// namespace reattach event; FUSE records it for observability.
-    Reattached {
-        old_instance: String,
-        new_instance: String,
     },
 }
 

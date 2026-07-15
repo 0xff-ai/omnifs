@@ -8,29 +8,27 @@
 //! taps. A disconnect fails every in-flight request with
 //! [`NsError::Network`](omnifs_engine::NsError::Network) and reconnects with
 //! backoff forever until the [`WireNamespace`] is dropped. A reconnect that lands
-//! on a different daemon instance fires an [`AttachEvent::Reattached`].
+//! A disconnect also publishes the existing root invalidation event so every
+//! consumer fences derived state through the same ordered stream.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::Duration;
 
 use futures::future::{BoxFuture, FutureExt};
+use omnifs_core::path::Path;
 use omnifs_engine::{
-    Attrs, DirCursor, DirPage, EventStream, Namespace, NodeAnswer, NodeId, NsError, NsEvent,
-    ReadAnswer,
+    Attrs, DirCursor, DirPage, EventStream, LookupAnswer, Namespace, NsError, NsEvent, ReadAnswer,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpStream, UnixStream};
 use tokio::runtime::Handle;
 use tokio::sync::{broadcast, mpsc, oneshot};
-use tokio::time::sleep;
+use tokio::time::{Instant, sleep, timeout};
 
-use crate::cache::{WINDOW_BYTES, WireCache, window_start};
 use crate::frame::{Frame, KIND_EVENT, KIND_REQUEST, KIND_RESPONSE, read_frame, write_frame};
-use crate::{
-    AttachEvent, FrontendIdentity, Handshake, PROTOCOL, WireError, WireRequest, WireResponse,
-};
+use crate::{FrontendIdentity, Handshake, PROTOCOL, WireError, WireRequest, WireResponse};
 
 /// Initial-connect deadline for [`WireNamespace::attach`]. A socket that never
 /// answers within this window fails the attach with the socket named, rather
@@ -43,10 +41,6 @@ const MAX_BACKOFF: Duration = Duration::from_secs(2);
 /// Local invalidation-event broadcast capacity. A slow subscriber that lags this
 /// far re-syncs on the next event (the engine `EventStream` drops lag errors).
 const EVENT_CAPACITY: usize = 1024;
-/// Attach-event broadcast capacity. Reattach events are rare; a small ring is
-/// plenty.
-const ATTACH_CAPACITY: usize = 16;
-
 /// Where a [`WireNamespace`] dials the daemon it attaches to.
 ///
 /// `Unix` is the host-native path: auth is filesystem permissions on the
@@ -135,10 +129,25 @@ impl AttachTarget {
         &self,
         deadline: Option<Instant>,
         identity: &FrontendIdentity,
-    ) -> Result<(Connection, String), WireError> {
+    ) -> Result<Connection, WireError> {
         let mut backoff = INITIAL_BACKOFF;
         loop {
-            match self.connect_once(identity).await {
+            let attempt = if let Some(deadline) = deadline {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                match timeout(remaining, self.connect_once(identity)).await {
+                    Ok(result) => result,
+                    Err(_) => Err(WireError::ConnectTimeout {
+                        target: self.to_string(),
+                        source: std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "VFS handshake deadline exceeded",
+                        ),
+                    }),
+                }
+            } else {
+                self.connect_once(identity).await
+            };
+            match attempt {
                 Ok(value) => return Ok(value),
                 Err(error) if !error.is_retriable() => return Err(error),
                 Err(error) => {
@@ -154,7 +163,22 @@ impl AttachTarget {
                             source,
                         });
                     }
-                    sleep(backoff).await;
+                    let delay = deadline
+                        .map(|deadline| {
+                            backoff.min(deadline.saturating_duration_since(Instant::now()))
+                        })
+                        .unwrap_or(backoff);
+                    if delay.is_zero() {
+                        let source = match error {
+                            WireError::Io(io) => io,
+                            other => std::io::Error::other(other.to_string()),
+                        };
+                        return Err(WireError::ConnectTimeout {
+                            target: self.to_string(),
+                            source,
+                        });
+                    }
+                    sleep(delay).await;
                     backoff = (backoff * 2).min(MAX_BACKOFF);
                 },
             }
@@ -164,10 +188,7 @@ impl AttachTarget {
     /// Connect once, spawn the reader/writer pumps, and complete the handshake.
     /// Vsock is Linux-only because the libkrun guest is Linux; other targets
     /// fail without entering the reconnect loop.
-    async fn connect_once(
-        &self,
-        identity: &FrontendIdentity,
-    ) -> Result<(Connection, String), WireError> {
+    async fn connect_once(&self, identity: &FrontendIdentity) -> Result<Connection, WireError> {
         match self {
             Self::Unix(path) => {
                 let stream = UnixStream::connect(path).await?;
@@ -237,15 +258,6 @@ struct Outgoing {
 pub struct WireNamespace {
     outgoing: mpsc::UnboundedSender<Outgoing>,
     events: broadcast::Sender<NsEvent>,
-    attach_events: broadcast::Sender<AttachEvent>,
-    /// The client-side batching cache: an answer memo and read windows, both
-    /// keyed off the engine-decided [`Attrs::ttl`]. Shared with the manager task,
-    /// which drops a node's cached state when an invalidation event names it.
-    cache: Arc<WireCache>,
-    /// The current server instance id, updated by the manager on every
-    /// (re)connect. `Arc<Mutex<..>>` because the manager writes it while callers
-    /// read it; the crate deps forbid `arc-swap`.
-    instance_id: Arc<Mutex<String>>,
     /// Aborts the manager task when the namespace is dropped, ending the
     /// reconnect-forever loop.
     _manager: AbortOnDrop,
@@ -270,27 +282,19 @@ impl WireNamespace {
         rt: Handle,
     ) -> Result<Arc<Self>, WireError> {
         let deadline = Instant::now() + INITIAL_CONNECT_DEADLINE;
-        let (connection, instance_id) = target
+        let connection = target
             .connect_with_backoff(Some(deadline), &identity)
             .await?;
 
         let (outgoing_tx, outgoing_rx) = mpsc::unbounded_channel::<Outgoing>();
         let (events_tx, _) = broadcast::channel(EVENT_CAPACITY);
-        let (attach_tx, _) = broadcast::channel(ATTACH_CAPACITY);
-        let instance_slot = Arc::new(Mutex::new(instance_id.clone()));
-        let cache = Arc::new(WireCache::new());
-
         let manager = rt.spawn(
             ManagerState {
                 target,
                 identity,
                 connection,
-                instance: instance_id,
-                instance_slot: Arc::clone(&instance_slot),
                 outgoing_rx,
                 events: events_tx.clone(),
-                attach_events: attach_tx.clone(),
-                cache: Arc::clone(&cache),
             }
             .run(),
         );
@@ -298,29 +302,8 @@ impl WireNamespace {
         Ok(Arc::new(Self {
             outgoing: outgoing_tx,
             events: events_tx,
-            attach_events: attach_tx,
-            instance_id: instance_slot,
-            cache,
             _manager: AbortOnDrop(manager),
         }))
-    }
-
-    /// The current server instance id. Changes when a reconnect lands on a
-    /// restarted daemon (see [`AttachEvent::Reattached`]).
-    #[must_use]
-    pub fn instance_id(&self) -> String {
-        self.instance_id
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-    }
-
-    /// Subscribe to [`AttachEvent`]s. `Reattached` fires when a reconnect lands
-    /// on a different daemon instance than before; a plain reconnect fires
-    /// nothing.
-    #[must_use]
-    pub fn subscribe_attach_events(&self) -> broadcast::Receiver<AttachEvent> {
-        self.attach_events.subscribe()
     }
 
     /// Issue one request and await its answer. A closed manager (the connection
@@ -336,17 +319,8 @@ impl WireNamespace {
         reply_rx.await.map_err(|_| NsError::Network)?
     }
 
-    /// A read that goes straight to the server, bypassing the window cache. Used
-    /// for the pass-through paths (a `ttl == 0` node, a large read, or a
-    /// concurrent read while a window fetch is already in flight) and for the
-    /// window fetch itself.
-    async fn read_passthrough(
-        &self,
-        node: NodeId,
-        offset: u64,
-        len: u32,
-    ) -> Result<ReadAnswer, NsError> {
-        match self.call(WireRequest::Read { node, offset, len }).await? {
+    async fn read_request(&self, path: Path, offset: u64, len: u32) -> Result<ReadAnswer, NsError> {
+        match self.call(WireRequest::Read { path, offset, len }).await? {
             WireResponse::Read(answer) => answer,
             _ => Err(variant_mismatch()),
         }
@@ -364,15 +338,11 @@ fn variant_mismatch() -> NsError {
 impl Namespace for WireNamespace {
     fn lookup<'a>(
         &'a self,
-        parent: NodeId,
+        parent: Path,
         name: &'a str,
-    ) -> BoxFuture<'a, Result<NodeAnswer, NsError>> {
+    ) -> BoxFuture<'a, Result<LookupAnswer, NsError>> {
         let name = name.to_string();
         async move {
-            // A memoized lookup (only ever a ttl>0 answer) serves without a hop.
-            if let Some(answer) = self.cache.lookup(parent, &name) {
-                return Ok(answer);
-            }
             let answer = match self
                 .call(WireRequest::Lookup {
                     parent,
@@ -383,39 +353,28 @@ impl Namespace for WireNamespace {
                 WireResponse::Lookup(answer) => answer?,
                 _ => return Err(variant_mismatch()),
             };
-            self.cache.put_lookup(parent, &name, &answer);
             Ok(answer)
         }
         .boxed()
     }
 
-    fn getattr(&self, node: NodeId) -> BoxFuture<'_, Result<Attrs, NsError>> {
+    fn getattr(&self, path: Path) -> BoxFuture<'_, Result<Attrs, NsError>> {
         async move {
-            if let Some(attrs) = self.cache.attrs(node) {
-                return Ok(attrs);
-            }
-            let attrs = match self.call(WireRequest::Getattr { node }).await? {
+            let attrs = match self.call(WireRequest::Getattr { path }).await? {
                 WireResponse::Getattr(answer) => answer?,
                 _ => return Err(variant_mismatch()),
             };
-            self.cache.put_attrs(node, &attrs);
             Ok(attrs)
         }
         .boxed()
     }
 
-    fn getattr_exact(&self, node: NodeId) -> BoxFuture<'_, Result<Attrs, NsError>> {
+    fn getattr_exact(&self, path: Path) -> BoxFuture<'_, Result<Attrs, NsError>> {
         async move {
-            // A ttl>0 memo entry already carries the exact, stable size that
-            // `getattr_exact` would otherwise probe for, so it serves both.
-            if let Some(attrs) = self.cache.attrs(node) {
-                return Ok(attrs);
-            }
-            let attrs = match self.call(WireRequest::GetattrExact { node }).await? {
+            let attrs = match self.call(WireRequest::GetattrExact { path }).await? {
                 WireResponse::GetattrExact(answer) => answer?,
                 _ => return Err(variant_mismatch()),
             };
-            self.cache.put_attrs(node, &attrs);
             Ok(attrs)
         }
         .boxed()
@@ -423,17 +382,14 @@ impl Namespace for WireNamespace {
 
     fn readdir(
         &self,
-        node: NodeId,
+        path: Path,
         cursor: DirCursor,
         budget: usize,
     ) -> BoxFuture<'_, Result<DirPage, NsError>> {
         async move {
-            // Directory pages are never cached (pagination cursors carry resume
-            // state), but every ttl>0 child seeds the answer memo so the walk's
-            // per-child stat chatter resolves locally.
             let page = match self
                 .call(WireRequest::Readdir {
-                    node,
+                    path,
                     cursor,
                     budget: budget as u64,
                 })
@@ -442,7 +398,6 @@ impl Namespace for WireNamespace {
                 WireResponse::Readdir(answer) => answer?,
                 _ => return Err(variant_mismatch()),
             };
-            self.cache.seed_dir_entries(node, &page.entries);
             Ok(page)
         }
         .boxed()
@@ -450,54 +405,16 @@ impl Namespace for WireNamespace {
 
     fn read(
         &self,
-        node: NodeId,
+        path: Path,
         offset: u64,
         len: u32,
     ) -> BoxFuture<'_, Result<ReadAnswer, NsError>> {
-        async move {
-            // Only a small read on a stable, exact-size (ttl>0) node windows;
-            // everything else passes through byte-for-byte identical.
-            let Some(size) = self.cache.known_size(node) else {
-                return self.read_passthrough(node, offset, len).await;
-            };
-            if u64::from(len) >= WINDOW_BYTES {
-                return self.read_passthrough(node, offset, len).await;
-            }
-            if let Some(answer) = self.cache.window_slice(node, offset, len, size) {
-                return Ok(answer);
-            }
-            // Miss: claim the sole window fetch for this node, or, if one is
-            // already outstanding, read straight through to avoid a duplicate.
-            if !self.cache.try_begin_window(node) {
-                return self.read_passthrough(node, offset, len).await;
-            }
-            // A concurrent fetch may have filled the window between the miss and
-            // the claim; if so, release the claim and serve it.
-            if let Some(answer) = self.cache.window_slice(node, offset, len, size) {
-                self.cache.abort_window(node);
-                return Ok(answer);
-            }
-            let start = window_start(offset);
-            let want = u64::from(len)
-                .max(WINDOW_BYTES)
-                .min(size.saturating_sub(start));
-            let win_len = u32::try_from(want).unwrap_or(u32::MAX);
-            match self.read_passthrough(node, start, win_len).await {
-                Ok(window) => Ok(self
-                    .cache
-                    .finish_window(node, start, window, offset, len, size)),
-                Err(error) => {
-                    self.cache.abort_window(node);
-                    Err(error)
-                },
-            }
-        }
-        .boxed()
+        async move { self.read_request(path, offset, len).await }.boxed()
     }
 
-    fn readlink(&self, node: NodeId) -> BoxFuture<'_, Result<PathBuf, NsError>> {
+    fn readlink(&self, path: Path) -> BoxFuture<'_, Result<PathBuf, NsError>> {
         async move {
-            match self.call(WireRequest::Readlink { node }).await? {
+            match self.call(WireRequest::Readlink { path }).await? {
                 WireResponse::Readlink(answer) => answer,
                 _ => Err(variant_mismatch()),
             }
@@ -514,19 +431,15 @@ impl Namespace for WireNamespace {
 // The connection manager
 // ---------------------------------------------------------------------------
 
-/// The manager's owned connection and cache state.
+/// The manager's owned connection and request state.
 struct ManagerState {
     target: AttachTarget,
     /// This frontend's identity, sent in every reconnect's Hello (the initial
     /// connect sends it too, before the manager task is spawned).
     identity: FrontendIdentity,
     connection: Connection,
-    instance: String,
-    instance_slot: Arc<Mutex<String>>,
     outgoing_rx: mpsc::UnboundedReceiver<Outgoing>,
     events: broadcast::Sender<NsEvent>,
-    attach_events: broadcast::Sender<AttachEvent>,
-    cache: Arc<WireCache>,
 }
 
 impl ManagerState {
@@ -535,7 +448,8 @@ impl ManagerState {
     async fn run(mut self) {
         let mut pending: HashMap<u64, oneshot::Sender<Result<WireResponse, NsError>>> =
             HashMap::new();
-        let mut next_id: u64 = 1;
+        let mut next_request_id: u64 = 1;
+        let mut reconnect: Option<tokio::task::JoinHandle<Result<Connection, WireError>>> = None;
 
         loop {
             tokio::select! {
@@ -543,39 +457,50 @@ impl ManagerState {
                 // before another request is queued onto a dead connection.
                 biased;
 
-                frame = self.connection.frame_rx.recv() => {
+                frame = self.connection.frame_rx.recv(), if reconnect.is_none() => {
                     if let Some(frame) = frame {
                         self.handle_inbound(&frame, &mut pending);
                     } else {
-                        // The connection died: fail every in-flight request, then
-                        // reconnect forever (aborted only by dropping the namespace).
+                        let _ = self.events.send(NsEvent::InvalidateSubtree {
+                            path: Path::root(),
+                        });
+                        // The root invalidation is the first observable disconnect
+                        // signal. Complete requests that were already in flight only
+                        // after publishing it, so frontends cannot process Network
+                        // without also seeing the ordering fence.
                         for (_, reply) in pending.drain() {
                             let _ = reply.send(Err(NsError::Network));
                         }
-                        match self.target.connect_with_backoff(None, &self.identity).await {
-                            Ok((connection, new_instance)) => {
-                                if new_instance != self.instance {
-                                    // A restarted daemon renumbered every NodeId, so
-                                    // every memoized answer is stale; drop the cache
-                                    // before serving answers from the new instance.
-                                    self.cache.clear();
-                                    let _ = self.attach_events.send(AttachEvent::Reattached {
-                                        old_instance: self.instance.clone(),
-                                        new_instance: new_instance.clone(),
-                                    });
-                                }
-                                self.instance.clone_from(&new_instance);
-                                *self
-                                    .instance_slot
-                                    .lock()
-                                    .unwrap_or_else(std::sync::PoisonError::into_inner) = new_instance;
-                                self.connection = connection;
-                            },
-                            Err(error) => {
-                                tracing::warn!(%error, "wire: gave up reconnecting; namespace is offline");
-                                return;
-                            },
-                        }
+                        let target = self.target.clone();
+                        let identity = self.identity.clone();
+                        reconnect = Some(tokio::spawn(async move {
+                            target.connect_with_backoff(None, &identity).await
+                        }));
+                    }
+                }
+
+                result = async {
+                        reconnect
+                        .as_mut()
+                        .expect("reconnect branch is guarded")
+                        .await
+                        .unwrap_or_else(|_| Err(WireError::HandshakeClosed))
+                }, if reconnect.is_some() => {
+                    match result {
+                        Ok(connection) => {
+                            self.connection = connection;
+                            reconnect = None;
+                            // No request accumulated while disconnected may be
+                            // replayed on the replacement connection.
+                            while let Ok(Outgoing { reply, .. }) = self.outgoing_rx.try_recv() {
+                                let _ = reply.send(Err(NsError::Network));
+                            }
+                        },
+                        Err(error) => {
+                            tracing::warn!(%error, "wire: reconnect task ended");
+                            reconnect = None;
+                            return;
+                        },
                     }
                 }
 
@@ -584,8 +509,12 @@ impl ManagerState {
                         // The namespace was dropped: no more callers, stop.
                         return;
                     };
-                    let id = next_id;
-                    next_id = next_id.checked_add(1).unwrap_or(1);
+                    if reconnect.is_some() {
+                        let _ = reply.send(Err(NsError::Network));
+                        continue;
+                    }
+                    let id = next_request_id;
+                    next_request_id = next_request_id.checked_add(1).unwrap_or(1);
                     match postcard::to_allocvec(&request) {
                         Ok(body) => {
                             pending.insert(id, reply);
@@ -632,7 +561,6 @@ impl ManagerState {
             },
             KIND_EVENT => {
                 if let Ok(event) = postcard::from_bytes::<NsEvent>(&frame.body) {
-                    self.cache.apply_event(&event);
                     let _ = self.events.send(event);
                 }
             },
@@ -671,11 +599,37 @@ async fn handshake_over<S>(
     stream: S,
     token: Option<String>,
     frontend: FrontendIdentity,
-) -> Result<(Connection, String), WireError>
+) -> Result<Connection, WireError>
 where
     S: AsyncRead + AsyncWrite + Send + 'static,
 {
     let (mut read_half, mut write_half) = tokio::io::split(stream);
+
+    let hello = postcard::to_allocvec(&Handshake::Hello {
+        protocol: PROTOCOL,
+        token,
+        frontend,
+    })?;
+    write_frame(&mut write_half, &Frame::new(0, KIND_REQUEST, hello)).await?;
+    let welcome_frame = read_frame(&mut read_half)
+        .await?
+        .ok_or(WireError::HandshakeClosed)?;
+    let welcome: Handshake = postcard::from_bytes(&welcome_frame.body)?;
+    match welcome {
+        Handshake::Welcome { protocol } if protocol == PROTOCOL => {},
+        Handshake::Welcome { protocol } => {
+            return Err(WireError::VersionMismatch {
+                ours: PROTOCOL,
+                theirs: protocol,
+            });
+        },
+        Handshake::Rejected { reason } => return Err(WireError::Rejected(reason)),
+        Handshake::Hello { .. } => {
+            return Err(WireError::HandshakeUnexpected {
+                expected: "welcome",
+            });
+        },
+    }
 
     let (frame_tx, mut writer_rx) = mpsc::unbounded_channel::<Frame>();
     let (reader_tx, mut frame_rx) = mpsc::unbounded_channel::<Frame>();
@@ -694,55 +648,12 @@ where
             }
         }
     });
-
-    // Handshake: send Hello, expect Welcome or Rejected as the first inbound
-    // frame.
-    let hello = postcard::to_allocvec(&Handshake::Hello {
-        protocol: PROTOCOL,
-        token,
-        frontend,
-    })?;
-    frame_tx
-        .send(Frame::new(0, KIND_REQUEST, hello))
-        .map_err(|_| WireError::HandshakeClosed)?;
-    let welcome_frame = frame_rx.recv().await.ok_or(WireError::HandshakeClosed)?;
-    let welcome: Handshake = postcard::from_bytes(&welcome_frame.body)?;
-    match welcome {
-        Handshake::Welcome {
-            protocol,
-            instance_id,
-        } => {
-            if protocol != PROTOCOL {
-                reader.abort();
-                writer.abort();
-                return Err(WireError::VersionMismatch {
-                    ours: PROTOCOL,
-                    theirs: protocol,
-                });
-            }
-            Ok((
-                Connection {
-                    frame_tx,
-                    frame_rx,
-                    reader,
-                    writer,
-                },
-                instance_id,
-            ))
-        },
-        Handshake::Rejected { reason } => {
-            reader.abort();
-            writer.abort();
-            Err(WireError::Rejected(reason))
-        },
-        Handshake::Hello { .. } => {
-            reader.abort();
-            writer.abort();
-            Err(WireError::HandshakeUnexpected {
-                expected: "welcome",
-            })
-        },
-    }
+    Ok(Connection {
+        frame_tx,
+        frame_rx,
+        reader,
+        writer,
+    })
 }
 
 impl WireError {

@@ -277,8 +277,7 @@ impl Daemon {
     /// A second call is a no-op: the namespace is built exactly once per daemon
     /// start.
     pub(crate) fn set_namespace(&self, namespace: Arc<omnifs_engine::TreeNamespace>) {
-        let server =
-            omnifs_vfs_wire::VfsServer::new(namespace, self.context.instance_id().to_string());
+        let server = omnifs_vfs_wire::VfsServer::new(namespace);
         let _ = self.vfs.set(server);
     }
 

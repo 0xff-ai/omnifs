@@ -21,8 +21,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use omnifs_api::{FrontendInfo, FrontendRuntime, FsType};
-use omnifs_engine::Namespace;
-use serde::Deserialize;
+use omnifs_engine::{Namespace, NsEvent};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, UnixListener};
 use tokio::sync::{broadcast, mpsc, watch};
@@ -137,7 +136,7 @@ struct AttachedEntry {
 }
 
 struct AttachmentState {
-    next_id: u64,
+    next_attachment_id: u64,
     ids: BTreeMap<u64, AttachmentKey>,
     entries: BTreeMap<AttachmentKey, AttachedEntry>,
 }
@@ -150,7 +149,7 @@ impl Attachments {
     fn new() -> Arc<Self> {
         Arc::new(Self {
             state: Mutex::new(AttachmentState {
-                next_id: 1,
+                next_attachment_id: 1,
                 ids: BTreeMap::new(),
                 entries: BTreeMap::new(),
             }),
@@ -168,8 +167,8 @@ impl Attachments {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let id = state.next_id;
-        state.next_id += 1;
+        let id = state.next_attachment_id;
+        state.next_attachment_id += 1;
         state.ids.insert(id, key.clone());
         state
             .entries
@@ -224,7 +223,6 @@ impl Attachments {
 /// authority, live attachment snapshot, readiness, and shutdown.
 pub struct VfsServer {
     namespace: Arc<dyn Namespace>,
-    instance_id: String,
     attachments: Arc<Attachments>,
     state: Mutex<VfsState>,
     connection_tx: mpsc::UnboundedSender<Connection>,
@@ -237,13 +235,12 @@ pub struct VfsServer {
 impl VfsServer {
     /// Construct one invocation-scoped listener and attachment owner.
     #[must_use]
-    pub fn new(namespace: Arc<dyn Namespace>, instance_id: String) -> Arc<Self> {
+    pub fn new(namespace: Arc<dyn Namespace>) -> Arc<Self> {
         let (connection_tx, mut connection_rx) = mpsc::unbounded_channel();
         let (exit_tx, mut exit_rx) = mpsc::unbounded_channel();
         let (event_tx, _) = broadcast::channel(16);
         let server = Arc::new(Self {
             namespace,
-            instance_id,
             attachments: Attachments::new(),
             state: Mutex::new(VfsState {
                 listeners: BTreeMap::new(),
@@ -587,7 +584,6 @@ impl VfsServer {
         let task_identity = Arc::clone(&identity);
         let (start_tx, start_rx) = tokio::sync::oneshot::channel();
         let namespace = Arc::clone(&self.namespace);
-        let instance_id = self.instance_id.clone();
         let attachments = Arc::clone(&self.attachments);
         let connection_tx = self.connection_tx.clone();
         let exit_tx = self.exit_tx.clone();
@@ -613,7 +609,6 @@ impl VfsServer {
             accept_loop(
                 listener,
                 namespace,
-                instance_id,
                 target_for_task.token().map(str::to_owned),
                 runtime,
                 attachments,
@@ -678,7 +673,6 @@ fn unlink_socket(path: &Path) {
 async fn accept_loop(
     listener: Listener,
     namespace: Arc<dyn Namespace>,
-    instance_id: String,
     token: Option<String>,
     runtime: FrontendRuntime,
     attachments: Arc<Attachments>,
@@ -689,7 +683,6 @@ async fn accept_loop(
             match listener.accept().await {
                 Ok((stream, _)) => {
                     let namespace = Arc::clone(&namespace);
-                    let instance_id = instance_id.clone();
                     let token = token.clone();
                     let attachments = Arc::clone(&attachments);
                     if connection_tx
@@ -697,7 +690,6 @@ async fn accept_loop(
                             if let Err(error) = serve_connection_with_registry(
                                 namespace,
                                 stream,
-                                instance_id,
                                 token.as_deref(),
                                 Some((attachments, runtime)),
                             )
@@ -721,7 +713,6 @@ async fn accept_loop(
             match listener.accept().await {
                 Ok((stream, _)) => {
                     let namespace = Arc::clone(&namespace);
-                    let instance_id = instance_id.clone();
                     let token = token.clone();
                     let attachments = Arc::clone(&attachments);
                     if connection_tx
@@ -729,7 +720,6 @@ async fn accept_loop(
                             if let Err(error) = serve_connection_with_registry(
                                 namespace,
                                 stream,
-                                instance_id,
                                 token.as_deref(),
                                 Some((attachments, runtime)),
                             )
@@ -754,7 +744,7 @@ async fn accept_loop(
 
 fn generate_attach_token() -> io::Result<String> {
     let mut bytes = [0_u8; ATTACH_TOKEN_BYTES];
-    getrandom::fill(&mut bytes).map_err(io::Error::other)?;
+    getrandom::fill(&mut bytes).map_err(|error| io::Error::other(error.to_string()))?;
     Ok(hex::encode(bytes))
 }
 
@@ -822,9 +812,8 @@ fn bind_unix(path: &Path, description: &str) -> io::Result<UnixListener> {
     Ok(listener)
 }
 
-/// Serve one attached client over `stream` until it disconnects. `instance_id`
-/// is the daemon's per-start id, reported in the handshake so the client can
-/// detect a restart on reconnect. `expected_token` is `None` for a Unix-socket
+/// Serve one attached client over `stream` until it disconnects. `expected_token`
+/// is `None` for a Unix-socket
 /// listener (the field is ignored) and `Some(token)` for a TCP attach listener,
 /// which rejects a Hello whose token does not match. Production listeners are
 /// owned by [`VfsServer`]; this direct helper is retained for protocol tests.
@@ -835,55 +824,34 @@ fn bind_unix(path: &Path, description: &str) -> io::Result<UnixListener> {
 pub async fn serve_connection<S>(
     namespace: Arc<dyn Namespace>,
     stream: S,
-    instance_id: String,
     expected_token: Option<&str>,
 ) -> Result<(), WireError>
 where
     S: AsyncRead + AsyncWrite + Send + 'static,
 {
-    serve_connection_with_registry(namespace, stream, instance_id, expected_token, None).await
+    serve_connection_with_registry(namespace, stream, expected_token, None).await
 }
 
 async fn serve_connection_with_registry<S>(
     namespace: Arc<dyn Namespace>,
     stream: S,
-    instance_id: String,
     expected_token: Option<&str>,
     attachment: Option<(Arc<Attachments>, FrontendRuntime)>,
 ) -> Result<(), WireError>
 where
     S: AsyncRead + AsyncWrite + Send + 'static,
 {
-    let (mut reader, writer) = tokio::io::split(stream);
+    let (mut reader, mut writer) = tokio::io::split(stream);
 
     // A single writer task owns the write half; responses (from per-request
     // tasks) and events (from the forwarder) are serialized through its channel,
     // so frames never interleave on the wire.
-    let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel::<Frame>();
-    let writer_task = tokio::spawn(async move {
-        let mut writer = writer;
-        while let Some(frame) = outbound_rx.recv().await {
-            if write_frame(&mut writer, &frame).await.is_err() {
-                break;
-            }
-        }
-    });
-
-    // Handshake: read the client's Hello, validate, answer with Welcome or
-    // Rejected. A version mismatch or a bad token is a clean, named error that
-    // drops the connection.
-    let handshake_result =
-        server_handshake(&mut reader, &outbound_tx, &instance_id, expected_token).await;
+    // Complete the handshake before subscribing to namespace events so Welcome
+    // is always the first server frame on a new connection.
+    let handshake_result = server_handshake(&mut reader, &mut writer, expected_token).await;
     let identity = match handshake_result {
         Ok(identity) => identity,
         Err(error) => {
-            // A rejection queues a `Handshake::Rejected` frame on `outbound_tx`
-            // before returning; drop the sender and let the writer task drain
-            // that frame and exit on its own, rather than aborting it and
-            // racing the flush (the same drain-on-drop pattern the end of this
-            // function uses).
-            drop(outbound_tx);
-            let _ = writer_task.await;
             return Err(error);
         },
     };
@@ -893,31 +861,40 @@ where
         attachments,
     });
 
-    // Forward namespace invalidation events as event frames for the connection's
-    // lifetime. Aborted when the read loop ends.
-    let event_task = {
-        let namespace = Arc::clone(&namespace);
-        let outbound_tx = outbound_tx.clone();
-        tokio::spawn(async move {
-            let mut events = namespace.subscribe();
-            while let Some(event) = events.recv().await {
-                match postcard::to_allocvec(&event) {
-                    Ok(body) => {
-                        if outbound_tx.send(Frame::new(0, KIND_EVENT, body)).is_err() {
+    let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel::<Frame>();
+    let mut events = namespace.subscribe();
+    let writer_task = tokio::spawn(async move {
+        let mut writer = writer;
+        loop {
+            tokio::select! {
+                biased;
+                frame = outbound_rx.recv() => {
+                    let Some(frame) = frame else { break; };
+                    let mut drained = 0;
+                    while let Some(event) = events.try_recv() {
+                        let Ok(body) = postcard::to_allocvec(&event) else { continue; };
+                        if write_frame(&mut writer, &Frame::new(0, KIND_EVENT, body)).await.is_err() { return; }
+                        drained += 1;
+                        if drained >= 1024 {
+                            let root = NsEvent::InvalidateSubtree { path: omnifs_core::path::Path::root() };
+                            let Ok(body) = postcard::to_allocvec(&root) else { return; };
+                            if write_frame(&mut writer, &Frame::new(0, KIND_EVENT, body)).await.is_err() { return; }
                             break;
                         }
-                    },
-                    Err(error) => {
-                        tracing::warn!(%error, "wire: failed to encode namespace event");
-                    },
+                    }
+                    if write_frame(&mut writer, &frame).await.is_err() { break; }
+                }
+                event = events.recv() => {
+                    let Some(event) = event else { break; };
+                    let Ok(body) = postcard::to_allocvec(&event) else { continue; };
+                    if write_frame(&mut writer, &Frame::new(0, KIND_EVENT, body)).await.is_err() { break; }
                 }
             }
-        })
-    };
+        }
+    });
 
     let read_result = read_loop(&mut reader, &namespace, &outbound_tx).await;
 
-    event_task.abort();
     // Dropping the last outbound sender lets the writer task drain and exit.
     drop(outbound_tx);
     let _ = writer_task.await;
@@ -927,14 +904,14 @@ where
 /// Read the client's `Hello`, check the protocol and (when `expected_token` is
 /// set) the token, and answer with `Welcome` or `Rejected`. On success returns
 /// the connecting frontend's identity.
-async fn server_handshake<R>(
+async fn server_handshake<R, W>(
     reader: &mut R,
-    outbound_tx: &mpsc::UnboundedSender<Frame>,
-    instance_id: &str,
+    writer: &mut W,
     expected_token: Option<&str>,
 ) -> Result<FrontendIdentity, WireError>
 where
     R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
 {
     let frame = read_frame(reader)
         .await?
@@ -942,23 +919,7 @@ where
     if frame.kind != KIND_REQUEST {
         return Err(WireError::HandshakeUnexpected { expected: "hello" });
     }
-    let hello: Handshake = match postcard::from_bytes(&frame.body) {
-        Ok(hello) => hello,
-        Err(error) => {
-            if let Ok(LegacyHandshake::Hello { protocol, token }) =
-                postcard::from_bytes(&frame.body)
-            {
-                let _ = token;
-                let error = WireError::VersionMismatch {
-                    ours: PROTOCOL,
-                    theirs: protocol,
-                };
-                send_rejected(outbound_tx, error.to_string());
-                return Err(error);
-            }
-            return Err(error.into());
-        },
-    };
+    let hello: Handshake = postcard::from_bytes(&frame.body)?;
     let Handshake::Hello {
         protocol,
         token,
@@ -972,36 +933,20 @@ where
             ours: PROTOCOL,
             theirs: protocol,
         };
-        send_rejected(outbound_tx, error.to_string());
+        send_rejected(writer, error.to_string()).await?;
         return Err(error);
     }
     if let Some(expected) = expected_token {
         let presented = token.as_deref().unwrap_or_default();
         if !constant_time_eq::constant_time_eq(presented.as_bytes(), expected.as_bytes()) {
-            send_rejected(outbound_tx, "attach token rejected".to_string());
+            send_rejected(writer, "attach token rejected".to_string()).await?;
             return Err(WireError::TokenRejected);
         }
     }
-    let welcome = Handshake::Welcome {
-        protocol: PROTOCOL,
-        instance_id: instance_id.to_string(),
-    };
+    let welcome = Handshake::Welcome { protocol: PROTOCOL };
     let body = postcard::to_allocvec(&welcome)?;
-    // The writer task owns the socket; a send failure means it already exited.
-    outbound_tx
-        .send(Frame::new(0, KIND_RESPONSE, body))
-        .map_err(|_| WireError::HandshakeClosed)?;
+    write_frame(writer, &Frame::new(0, KIND_RESPONSE, body)).await?;
     Ok(frontend)
-}
-
-/// The v2 client Hello, decoded only to return a useful rejection after v3
-/// added [`FrontendIdentity`]. It is never accepted as a current handshake.
-#[derive(Deserialize)]
-enum LegacyHandshake {
-    Hello {
-        protocol: u32,
-        token: Option<String>,
-    },
 }
 
 struct AttachGuard {
@@ -1018,10 +963,14 @@ impl Drop for AttachGuard {
 /// Queue a `Handshake::Rejected` frame naming `reason`, best-effort: the caller
 /// is already on its way to returning an error regardless of whether the frame
 /// lands (the writer task may already be gone).
-fn send_rejected(outbound_tx: &mpsc::UnboundedSender<Frame>, reason: String) {
+async fn send_rejected<W>(writer: &mut W, reason: String) -> Result<(), WireError>
+where
+    W: AsyncWrite + Unpin,
+{
     if let Ok(body) = postcard::to_allocvec(&Handshake::Rejected { reason }) {
-        let _ = outbound_tx.send(Frame::new(0, KIND_RESPONSE, body));
+        write_frame(writer, &Frame::new(0, KIND_RESPONSE, body)).await?;
     }
+    Ok(())
 }
 
 /// The per-connection read loop: decode each request frame and dispatch it onto
@@ -1071,22 +1020,22 @@ async fn dispatch(namespace: &dyn Namespace, request: WireRequest) -> WireRespon
         WireRequest::Lookup { parent, name } => {
             WireResponse::Lookup(namespace.lookup(parent, &name).await)
         },
-        WireRequest::Getattr { node } => WireResponse::Getattr(namespace.getattr(node).await),
-        WireRequest::GetattrExact { node } => {
-            WireResponse::GetattrExact(namespace.getattr_exact(node).await)
+        WireRequest::Getattr { path } => WireResponse::Getattr(namespace.getattr(path).await),
+        WireRequest::GetattrExact { path } => {
+            WireResponse::GetattrExact(namespace.getattr_exact(path).await)
         },
         WireRequest::Readdir {
-            node,
+            path,
             cursor,
             budget,
         } => WireResponse::Readdir(
             namespace
-                .readdir(node, cursor, usize::try_from(budget).unwrap_or(usize::MAX))
+                .readdir(path, cursor, usize::try_from(budget).unwrap_or(usize::MAX))
                 .await,
         ),
-        WireRequest::Read { node, offset, len } => {
-            WireResponse::Read(namespace.read(node, offset, len).await)
+        WireRequest::Read { path, offset, len } => {
+            WireResponse::Read(namespace.read(path, offset, len).await)
         },
-        WireRequest::Readlink { node } => WireResponse::Readlink(namespace.readlink(node).await),
+        WireRequest::Readlink { path } => WireResponse::Readlink(namespace.readlink(path).await),
     }
 }
