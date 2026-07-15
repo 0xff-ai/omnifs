@@ -96,9 +96,9 @@ Each lifecycle, namespace, and notify export returns only its operation-specific
 - `crates/omnifs-sdk/src/http.rs`
 - `crates/omnifs-sdk/src/cx.rs`
 - `crates/omnifs-sdk-macros/src/provider_macro.rs`
+- `crates/omnifs-sdk-macros/src/config_macro.rs`
 - `crates/omnifs-sdk/src/config_resource.rs`
 - `crates/omnifs-sdk/tests/wit_boundary.rs`
-- `crates/omnifs-sdk/src/metadata.rs`
 - `crates/omnifs-workspace/src/provider/sections.rs`
 - `crates/omnifs-engine/src/authority.rs`
 - `providers/*/src/lib.rs`

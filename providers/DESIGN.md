@@ -613,7 +613,7 @@ Load::fresh(value, canonical)
 This replaces hand-built raw effect plumbing at provider call sites. The effect
 channel still exists below the SDK, but provider authors should return domain
 objects, object entries, files, and invalidations. If a preloaded file needs
-parent directories, the SDK can computed those directory effects from the path.
+parent directories, the SDK can compute those directory effects from the path.
 
 Events and invalidation remain first-class:
 
@@ -692,7 +692,7 @@ Reject:
 
 - two contributors creating the same leaf;
 - fixed object metadata colliding with collection child names;
-- a collection path that cannot computed the target object key;
+- a collection path that cannot compute the target object key;
 - a paged collection whose cursor type cannot round-trip through opaque bytes;
 - an alias missing captures required by the target key;
 - path captures unused by the key or by route facets;

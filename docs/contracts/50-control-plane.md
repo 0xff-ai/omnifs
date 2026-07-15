@@ -1,11 +1,11 @@
 # Control plane contracts
 
 Status: current-contract
-Owns: CLI/daemon split, typed local control protocol, mount delivery, runtime modes, workspace layout, and dev home.
+Owns: CLI/daemon split, typed local control protocol, mount desired state, frontend runtimes, workspace layout, and dev home.
 
 ## Read when
 
-Read this before touching `omnifs-cli`, `omnifs-api`, lifecycle commands, daemon status, control operations, mount delivery, desired-state application, the optional Docker-hosted FUSE frontend, provider bundle installation, or dev workspace behavior.
+Read this before touching `omnifs-cli`, `omnifs-api`, lifecycle commands, daemon status, control operations, mount desired state, revision application, frontend runtimes, the embedded provider bundle, or dev workspace behavior.
 
 ## Rules
 
@@ -27,7 +27,7 @@ The control protocol exposes only operational state that contains no secrets. Mo
 
 Mount wire payloads distinguish provider identity from provider naming. `provider_name` is the human/catalog slug used by credentials and UX. `provider_id` is the pinned provider content hash for the exact artifact the mount runs.
 
-### Mount delivery
+### Mount desired state
 
 Only `$OMNIFS_HOME/mounts` is a local Git repository. Its `HEAD` is desired mount state and `refs/omnifs/applied` is the last revision that reached daemon readiness. Credentials, provider artifacts, cache data, sockets, logs, and runtime records remain outside Git. First use initializes the repository without a remote and commits existing valid specs with a stable Omnifs-local author, so behavior never depends on the operator's Git configuration.
 

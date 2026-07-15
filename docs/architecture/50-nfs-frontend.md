@@ -45,7 +45,7 @@ If NFS needs local handle or attr caches, invalidation must flow from tree or ho
 
 ## Mount lifecycle
 
-NFS loopback mount startup and teardown are frontend delivery concerns. The CLI launches `omnifs-thin nfs` as a host runner; the daemon serves the projected tree over the fixed local socket and reports readiness through the control plane. The runner attaches and serves until unmount.
+NFS loopback mount startup and teardown belong to the host runner lifecycle. The CLI launches `omnifs-thin nfs` as a host runner; the daemon serves the projected tree over the fixed local socket and reports readiness through the control plane. The runner attaches and serves until unmount.
 
 Do not describe macFUSE, `diskutil`, or macOS FUSE mounting as current behavior. macOS host-native integration is NFSv4 loopback.
 

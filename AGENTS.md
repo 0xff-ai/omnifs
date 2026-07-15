@@ -14,7 +14,6 @@ The product contract is simple: the projected tree must behave like real files f
 
 - `docs/contracts/`: binding rules by task area. Read only the contract relevant to the code you are touching.
 - `docs/architecture/`: current explanatory model and rationale. Read only the architecture note relevant to the subsystem or boundary you need to understand.
-- `docs/future/`: proposals and non-current direction.
 
 If a rule here and a contract disagree, follow current code plus the relevant contract, then update this file in the same change. If architecture prose disagrees with code or contracts, treat it as stale explanation and fix it when practical.
 
@@ -55,7 +54,7 @@ Allowed, but never as a side effect. Surface the tradeoff and get sign-off in th
 | Provider SDK, provider macros, objects, routes, WIT, metadata, provider config, endpoints | `docs/contracts/20-provider-sdk.md` |
 | Projection tree, cache, attrs, listing, lookup, traversal, learned sizes, live growth | `docs/contracts/30-projection-tree.md` |
 | FUSE, NFS, mount protocol behavior, frontend state, protocol replies | `docs/contracts/40-frontends.md` |
-| CLI, daemon, typed local control protocol, runtime modes, workspace layout, mount delivery, dev home | `docs/contracts/50-control-plane.md` |
+| CLI, daemon, typed local control protocol, frontend runtimes, workspace layout, mount desired state, dev home | `docs/contracts/50-control-plane.md` |
 | CI, validation commands, provider artifacts, generated schema, docs checks | `docs/contracts/60-build-validation.md` |
 | System model or rationale | `docs/architecture/00-overview.md` |
 
@@ -117,7 +116,7 @@ Allowed, but never as a side effect. Surface the tradeoff and get sign-off in th
 - Mount specs are one file per mount under `mounts/`, and a spec file's stem is its mount name. Only this directory is a local Git repository: `HEAD` is desired state and `refs/omnifs/applied` is the last revision that reached daemon readiness. `mounts::Registry` owns spec parsing, naming, and atomic writes; `mounts::Repository` owns the shared lock, Git operations, revision validation, and immutable snapshots under cache storage. The daemon receives one snapshot path and revision at startup and never invokes Git or reads the mutable worktree. `omnifs up --offline` observes and snapshots the committed `HEAD` without mutating dirty specs, skips provider, credential, network, and runtime startup, serves only validated durable facts, never advances `refs/omnifs/applied`, and replaces a live daemon when its mode differs.
 - Provider storage is an internal append-only cache. `mount add` resolves an existing Wasm path, a directory containing one Wasm, an embedded provider name, or an exact/unique lowercase digest prefix, validates and retains that artifact, and commits its exact pin. Existing pins change only through an explicit desired-spec edit; `omnifs up` and its exact `apply` alias validate and apply the committed pin without installing or choosing another artifact.
 - The daemon is a pure namespace server and control-plane owner; `omnifs_vfs_wire::VfsServer` owns the fixed local, requested TCP/vsock listeners, attach tokens, listener and connection tasks, readiness, and live attachment observation. The daemon never builds, mounts, supervises, or unmounts a renderer and has no `--frontend` or named attach-socket flags. Every filesystem frontend is a separate slim `omnifs-thin` runner, selected with `fuse` or `nfs`. It contains protocol mechanics only: no engine runtime, no Wasmtime, no provider bundle, no daemon control plane. It attaches over the Omnifs VFS wire protocol.
-- The CLI owns frontend launch and teardown through three frontend runtimes: `host` (local process), `docker` (container), and `libkrun` (libkrun microVM on macOS). Docker and libkrun serve FUSE only. Public commands, tables, and help use filesystem, runtime, and location.
+- The CLI owns frontend launch and teardown through three frontend runtimes: `host` (native runner process), `docker` (container), and `libkrun` (libkrun microVM on macOS). Docker and libkrun serve FUSE only. Public commands, tables, and help use filesystem, runtime, and location.
 - Libkrun resolves an immutable guest image base, then materializes a workspace-owned `libkrun/root.raw` with mode 0600 for each launch. Only that writable per-launch root reaches the first virtio-blk device; temporary roots and `root.raw` are launch-owned cleanup artifacts, while the base image and persistent SSH key survive.
 - Frontends are durable, independent access surfaces over all mounts. `omnifs frontend enable`, `disable`, and `restart` own runner lifecycle; `ls` reports observations only. `omnifs up` and its exact `apply` alias start or replace only the daemon, and `down` stops only the daemon. A daemon restart never replaces a live frontend process, and every runner reconnects through the wire protocol. `setup` may launch the platform defaults once as imperative actions: Linux = host FUSE; macOS = host NFS plus Docker FUSE. No frontend desired state is persisted. The daemon always binds the fixed host socket `$OMNIFS_HOME/frontends/local.sock` (dir 0700, socket 0600; filesystem permissions are the auth). Durable token-authenticated TCP/vsock targets live in `$OMNIFS_HOME/frontends/targets.json` (strict schema, atomic 0600 writes) and survive graceful daemon shutdown; unexpected listener exit removes only its exact target. TCP (docker) and vsock (libkrun) listeners are bound on request and token-authenticated.
 - Wire protocol v5 carries the connecting frontend's identity (kind + guest-side mount point, display-only) and the terminal `OfflineMiss` namespace error. v4-or-lower clients are rejected outright with a named reason. Namespace identities are validated `Path` values and disconnects publish root invalidation on the ordered event stream. Runtime is labeled by listener ownership at the daemon (UDS host, TCP docker, vsock libkrun); the guest never self-reports.
@@ -163,6 +162,8 @@ When a feature touches mount behavior, prove no regression through `crates/omnif
 - Add an abstraction only for two honest pressures or one genuinely volatile external boundary.
 - Prefer parsed forms after parse boundaries. Do not fall back to strings, maps, or JSON values for internal policy unless the format itself is the domain.
 - Delete bridge layers when the direct path exists. Transitional adapters, duplicate DTOs, compatibility aliases, and one-caller forwarding helpers should not harden.
+- This project is pre-alpha and carries no backward-compatibility obligation. Delete obsolete APIs, wire fields, readers, aliases, and migrations outright unless the task explicitly establishes a current interoperability requirement.
+- Prefer extending an existing representative test over adding a situational regression case. Add a new fixture only when it protects a durable concurrency, lifecycle, protocol, security, previously silent failure, or public output invariant that existing coverage cannot express cleanly.
 - Dependencies must pay rent. Remove unused direct dependencies in the same change that makes them unused.
 
 ### Worktree and agent handoff
@@ -171,7 +172,7 @@ When a feature touches mount behavior, prove no regression through `crates/omnif
 - Tracked diffs do not include every handoff artifact. Copy required untracked files explicitly, but exclude ignored local state such as `.cache`, `.serena`, `dist`, and `target`.
 - Do not infer task ownership from branch names, worktree names, or public branches. Use an explicit local ledger or handoff note for manual multi-agent work.
 - Prefer local handoff paths such as `git fetch /path` or `format-patch | git am`. Reserve public branches for integration or review boundaries unless the user explicitly asks to publish.
-- `docs/future/codebase-simplification-tracker.md` is the operational source of truth for redesign work. Update it immediately when a redesign is recorded, assigned, starts implementation, produces a stable handoff, starts integration, finishes integration, is blocked, or is superseded. Do not report a redesign lifecycle transition until the tracker records it.
+- Keep transient trackers, test plans, implementation ledgers, and handoff notes outside the tracked repository. During active work the task thread or an ignored local file may coordinate it; after integration, current code, contracts, architecture notes, and Git history are the durable authority.
 - Create redesign implementation tasks with the user's **approve for me** permission profile whenever the thread tool exposes that setting. Luna subagents inherit the parent thread's permission profile when no per-agent setting exists; their briefs must require immediate approval requests for necessary escalations rather than treating sandbox or network denial as a product blocker or silently skipping required work.
 
 ## Validation
@@ -218,7 +219,7 @@ Do not use `cargo check --workspace --all-targets` as the host gate. If validati
 - Update `docs/contracts/` when a boundary, ownership rule, gated decision, or validation contract changes.
 - Update `docs/architecture/` when the current explanatory model or rationale changes.
 - Keep task instructions next to the owning surface until a repeated pattern justifies a guide namespace.
-- Keep `docs/future/` clearly non-current.
+- Keep tracked documentation about the current system. Carry proposals and campaign planning in the active task or issue, then update current contracts and architecture when the decision lands.
 - Do not transcribe WIT blocks, struct definitions, or crate layouts into docs. Cite symbols and files instead.
 - Grep docs for old names when renaming a crate, type, route verb, command, generated artifact, or doc path.
 - `just docs-check` fails on nonexistent `docs/` links and enforces the `docs/contracts/` theme-file template. It does not check code paths.

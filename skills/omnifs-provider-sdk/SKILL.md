@@ -5,7 +5,7 @@ description: Build omnifs providers (sandboxed WASM components that project exte
 
 # Building omnifs providers
 
-A provider is one `wasm32-wasip2` component implementing the `omnifs:provider` WIT contract through `omnifs-sdk`. The host mounts it, calls browse operations (lookup-child, list-children, read-file, open/read-chunk/close), and runs every side effect (HTTP, git, blob, archive) for it via suspend/resume callouts. The provider owns meaning (what paths exist, what bytes they hold); the host owns trust, I/O, and all caching.
+A provider is one `wasm32-wasip2` component implementing the `omnifs:provider` WIT contract through `omnifs-sdk`. The host loads it, calls browse operations (lookup-child, list-children, read-file, open/read-chunk/close), and runs every side effect (HTTP, git, blob, archive) through awaited async WIT imports. The provider owns meaning (what paths exist, what bytes they hold); the host owns trust, I/O, and all caching.
 
 Read the rustdocs in `crates/omnifs-sdk/src/lib.rs` for the full guide; `providers/DESIGN.md` for the flavour doctrine with per-provider rationale; this skill is the operational distillation.
 
@@ -24,7 +24,7 @@ Read the rustdocs in `crates/omnifs-sdk/src/lib.rs` for the full guide; `provide
 11. **Use `#[omnifs_sdk::path_segment]` for simple path segment types.** Finite enums get generated `FromStr`, `Display`, `AsRef<str>`, and `PathSegment::choices()` from `#[strum(serialize_all = "snake_case")]` or per-variant `#[strum(serialize = "...")]`; validated `String` newtypes use `#[path_segment(validate = pred, normalize = f)]`. Keep manual parsers for structured syntax (`TEAM-123`, dates, versions, encoded ids). Use `strum` only when the enum also needs extra behavior such as `VariantArray` or `EnumProperty`.
 12. **Use `hashbrown::HashMap`** (re-exported by the SDK) for provider-internal maps.
 13. **Error semantics:** `NotFound` for absent upstream resources or rows; `InvalidInput` for impossible path syntax; `rate_limited(..).with_retry_after(..)` on 429 (drives the SDK breaker and host window); `from_http_status` for the rest. Put operation context in the message.
-14. **No provider unit tests in-crate.** Verify behavior through host-driven integration tests and the live `just dev` container (repo policy).
+14. **Test the boundary that matters.** Prefer the existing host-driven integration tests and live `just dev` path over situational provider unit tests. Add a narrow in-crate test only for a durable pure-parser or pure-policy invariant that the host path cannot express cleanly.
 
 ## One route API: which face
 
@@ -174,7 +174,7 @@ A file-shaped object projects as a single file, not a directory: `r.file_object:
 
 - Conditional loads: `cx.version()` is the host-pushed validator for this anchor; map it with `.maybe_if_none_match(..)`. Object loads get `since` handed to them.
 - Two terminal layers on the request builder: object-layer `.load::<T>()`/`conditional` (three-state) vs structural `.json::<T>()`/`.send_checked()` (two-state, errors on non-2xx). Pick deliberately.
-- Batch parallel fetches with `join_all([f1, f2, ..])`: one suspension round, host runs them concurrently, results return in order. Every child must come from the same `Cx` and yield exactly one callout per suspension or results silently misalign.
+- Batch independent fetches with `join_all([f1, f2, ..])`: it polls the async host-import futures together and returns results in input order. There is no provider-managed resume batch or positional callout queue.
 - Pagination: for a raw dir listing return `DirListing::paged(entries, Cursor::Page(n + 1))`; for an object collection return `Collection::page(entries).next(cursor)`; the host echoes the cursor back on continuation.
 - Rate limits: a 429 arms a per-authority breaker (cooldown from `Retry-After` or the endpoint's `rate_limit` policy); further calls fast-fail without a callout until cooldown passes.
 - Large bytes stay host-side: `fetch-blob` lands a body in the host blob cache for a blob byte-source, and the returned handle is used only to project a host-served file.
@@ -202,8 +202,10 @@ Each auth scheme is self-contained: it carries its own injection domains, header
 cargo build -p <provider-crate> --target wasm32-wasip2          # the component artifact
 cargo clippy -p 'omnifs-provider-*' -p test-provider --target wasm32-wasip2 -- -D warnings
 just check providers                                             # the repo gate
-just dev -y                                                      # live container with all builtin providers
-docker exec omnifs /bin/zsh -lc 'omnifs status'
+just dev -y --detach                                             # live host daemon and frontends
+target/debug/omnifs status
+FRONTEND=$(docker ps --filter label=ai.0xff.omnifs.home="$HOME/.omnifs-dev" --format '{{.Names}}')
+docker exec "$FRONTEND" sh -c 'ls /omnifs'
 ```
 
 For any path-surface change, test whole-shell traversal in the live container, not just the leaf: `ll`, `cd`, and `find` from the provider root through every intermediate directory; verify parents do not synthesize duplicate roots, scaffolding names do not bind as captures, and the standard toolbox (`cat`, `grep -r`, `find`, `tar`, `diff`, editors) behaves. That toolbox compatibility list in AGENTS.md is the acceptance bar.
@@ -225,7 +227,7 @@ For any path-surface change, test whole-shell traversal in the live container, n
 ## Where to look
 
 - `crates/omnifs-sdk/src/lib.rs`: the crate-level authoring guide; module map
-- `crates/omnifs-sdk/src/object.rs`, `collection.rs`, `invalidation.rs`, `router/object.rs`: the `Object`/`Key`/`Load`/`Collection`/`Invalidation` surface and the face builder
+- `crates/omnifs-sdk/src/object.rs`, `collection.rs`, `invalidation.rs`, `router/object/`: the `Object`/`Key`/`Load`/`Collection`/`Invalidation` surface and the face builder
 - `crates/omnifs-sdk/tests/wit_boundary.rs`: canonical end-to-end usage examples (faces driven through the WIT boundary)
 - `providers/DESIGN.md`: route-API doctrine and per-provider classification
 - `providers/test/src/lib.rs`: SDK conformance fixture (every face exercised)

@@ -66,7 +66,7 @@ omnifs frontend disable fuse --runtime docker
 omnifs frontend shell fuse --runtime docker
 ```
 
-Every attached frontend exposes every configured mount. Provider installation and mount creation are separate, and `omnifs up` applies each mount spec's exact provider pin without selecting upgrades.
+Every attached frontend exposes every configured mount. `omnifs mount add` resolves and retains one exact content-addressed provider artifact, records that pin in desired state, and `omnifs up` applies the pin without installing or selecting another artifact.
 
 For automation, select one invocation-owned output contract. JSON prints one envelope and keeps resource collections plural; JSONL uses the same terminal result or error envelope with its stream-record discriminator. Live logs and Inspector records remain line streams.
 
@@ -144,7 +144,7 @@ omnifs makes the path the interface:
 
 That gives existing tools a common substrate. `grep -r`, `find`, `jq`, `tar`, `diff`, `head`, `tail`, and editors can all operate without provider-specific clients. Agents get the same benefit: open a path and read bytes.
 
-The current surface is read-only. Write-back is designed around explicit staged transactions, but projected issue, PR, container, and DNS files are not directly writable today.
+The projected namespace is read-only. Mount commands change the local Git-backed desired state under `OMNIFS_HOME`, and `omnifs up` applies one complete committed revision; projected issue, PR, container, and DNS files are never direct mutation controls.
 
 ## Providers
 
@@ -261,34 +261,14 @@ omnifs status
 tail -n 80 ~/.omnifs-dev/cache/daemon.log
 ```
 
-## Roadmap
-
-### ✅ Working today
+## Current status
 
 - FUSE (Linux) and read-only NFSv4 loopback (macOS) frontends in host, Docker, or libkrun runtimes; enabled explicitly with the frontend lifecycle commands.
 - A host CLI on npm that handles mounts, auth, lifecycle, logs, status, and inspection.
 - Sandboxed Wasm providers that can only reach the network, Git, sockets, and files the host hands them.
 - Host-held credentials, layered caching, and `omnifs inspect` for a live view of what the runtime is doing.
+- Git-backed mount desired state, immutable daemon startup revisions, and cache-only browsing through `omnifs up --offline`.
 - Nine live providers: GitHub, DNS, arXiv, Docker, Linear, SQLite, Kubernetes, Web, and Oura.
-
-### 🚧 In progress
-
-- Making the provider SDK nicer to write against, especially for object-shaped providers.
-- Letting providers build paths from their registered routes instead of hand-formatting strings.
-- Caching polish: clearer traces, bounded disk usage, and identities that survive a remount.
-- Better behavior under stuck reads and aggressive directory walkers (shells, prompt tools, crawlers).
-- Smoother mount, auth, status, and `doctor` output, plus stronger frontend acceptance tests.
-- Provider reference docs generated straight from each provider's manifest and routes.
-
-### 🔭 Planned
-
-- Write support: stage your intent first, then apply it upstream.
-- Many more providers, including object stores, Postgres, Redis, Slack, Discord, Google Drive, Gmail, Notion, Stripe, Cloudflare, Vercel, and Telegram.
-- A real provider ecosystem: standalone packaging, a community catalog, authoring docs, and sidecars for providers that need native dependencies.
-- Additional mount surfaces beyond Linux FUSE and macOS NFSv4, plus passthrough for host-backed subtrees.
-- Easier install and slimmer packaging: Homebrew or shell installers and smaller frontend images for docker and libkrun delivery.
-- Offline cache-backed startup and browsing with `omnifs up --offline`, plus background indexing, semantic search, and DNS prefetch.
-- Trust and safety: signed provider manifests, tighter sandboxing for host-run tools, and metered filesystem access.
 
 ## License
 

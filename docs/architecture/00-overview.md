@@ -3,7 +3,7 @@
 Status: current-architecture
 Scope: the current explanatory model and rationale for `omnifs`. Binding rules live in `docs/contracts/`; this document explains how the pieces fit together.
 
-`omnifs` projects external services such as GitHub, DNS, arXiv, Docker, Linear, and databases as a filesystem. A trusted host runtime loads each provider as a `wasm32-wasip2` component and drives it through the byte-level `omnifs:provider` WIT interface. Every consumer of the projected tree sees the same mount.
+`omnifs` projects external services such as GitHub, DNS, arXiv, Docker, Linear, and databases as a filesystem. A trusted host runtime loads each provider as a `wasm32-wasip2` component and drives it through the byte-level `omnifs:provider` WIT interface. Every frontend exposes the same projected namespace.
 
 ## The spine
 
@@ -67,13 +67,13 @@ Unknown and non-zero sizes use truthful sentinel behavior until exact size is le
 
 ## Frontends
 
-FUSE and NFS are protocol adapters over the same projected tree. Every frontend is a separate slim `omnifs-thin` runner selected with `fuse` or `nfs`; it contains protocol mechanics only and attaches to the daemon over the Omnifs VFS wire protocol. The CLI owns launch and teardown through drivers (`local`, `docker`, `libkrun`); the daemon is only a namespace server and attachment registry and never mounts or supervises a frontend.
+FUSE and NFS are protocol adapters over the same projected tree. Every frontend is a separate slim `omnifs-thin` runner selected with `fuse` or `nfs`; it contains protocol mechanics only and attaches to the daemon over the Omnifs VFS wire protocol. The CLI owns launch and teardown through the `host`, `docker`, and `libkrun` runtimes; the daemon is only a namespace server and attachment registry and never mounts or supervises a frontend.
 
 FUSE owns inode tables, kernel notifications, mount/unmount mechanics, and FUSE reply construction. NFSv4.0 loopback (macOS host-native) owns filehandles, stateids, leases, NFS protocol errors, mount readiness, and teardown. Mount discovery and NFS filehandle state live under per-mount leaves under `cache/frontends/<kind>/<hash>`.
 
 Neither frontend owns projection semantics, provider WIT calls, cache schema, root enumeration, learned-size rules, preload policy, inline-byte policy, or negative lookup policy.
 
-A frontend (always out-of-process) consumes the same `omnifs_engine::Namespace` through the Omnifs VFS wire protocol. `omnifs-engine` remains the semantic owner; `omnifs-vfs-wire` owns postcard serialization, framing, the strict v5 handshake, attach target resolution and reconnect, readiness signaling, direct validated `Path` requests, terminal `OfflineMiss`, and ordered invalidation events. Unix sockets (local), token-authenticated TCP (docker), and vsock (libkrun) are attach transports for this one internal protocol. The wire carries no semantic cache and does not define another projection model. Delivery is labeled by listener ownership at the daemon (UDS local, TCP docker, vsock libkrun); the guest never self-reports delivery.
+A frontend (always out-of-process) consumes the same `omnifs_engine::Namespace` through the Omnifs VFS wire protocol. `omnifs-engine` remains the semantic owner; `omnifs-vfs-wire` owns postcard serialization, framing, the strict v5 handshake, attach target resolution and reconnect, readiness signaling, direct validated `Path` requests, terminal `OfflineMiss`, and ordered invalidation events. Local UDS, token-authenticated TCP, and vsock are attach transports for this one internal protocol. The wire carries no semantic cache and does not define another projection model. Listener ownership assigns runtime identity at the daemon: local UDS means `host`, TCP means `docker`, and the vsock proxy means `libkrun`. The guest never self-reports its runtime.
 
 ## Control plane
 
@@ -81,7 +81,7 @@ There is one `omnifs` binary. The runtime loop lives behind hidden `omnifs daemo
 
 Mount desired state is the Git `HEAD` of `$OMNIFS_HOME/mounts`; no other workspace state is versioned. The CLI writes specs through `mounts::Registry`, records desired-state commits through `mounts::Repository`, and applies one complete revision through `omnifs up` or its exact `apply` alias. The daemon receives a revision-named immutable snapshot at process start, loads it completely before readiness, and exposes no mount mutation or reconcile API.
 
-The daemon has one runtime mode: host-native. It is a pure namespace server and attachment registry. Docker and libkrun deliver only FUSE frontends (as separate processes); they are not daemon runtime modes. Contributor dev sessions run through `scripts/dev.ts`, which writes a dedicated `~/.omnifs-dev` home and starts the daemon on the host directly.
+The daemon has one runtime mode: host-native. It is a pure namespace server and attachment registry. Docker and libkrun run only FUSE frontends as separate processes; they are not daemon runtime modes. Contributor dev sessions run through `scripts/dev.ts`, which writes a dedicated `~/.omnifs-dev` home and starts the daemon on the host directly.
 
 ## Auth and sandbox
 
@@ -114,4 +114,3 @@ These directions were explicitly ruled out and should not return without a new g
 - NFS frontend rationale: `docs/architecture/50-nfs-frontend.md`
 - Async provider runtime: `docs/architecture/60-async-provider-runtime.md`
 - Provider authoring: `providers/DESIGN.md` and `skills/omnifs-provider-sdk/SKILL.md`
-- Roadmap and non-current ideas: `docs/future/`

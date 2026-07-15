@@ -21,7 +21,7 @@ The daemon constructs one `TreeNamespace` over the shared mount registry and giv
 
 ### FUSE
 
-FUSE is the Linux frontend protocol. The slim `omnifs-thin fuse` mode can be delivered as a local process, Docker container, or libkrun guest; see `docs/contracts/60-build-validation.md` for image build and publish contracts.
+FUSE is the Linux frontend protocol. The slim `omnifs-thin fuse` mode runs under the `host`, `docker`, or `libkrun` frontend runtime; see `docs/contracts/60-build-validation.md` for image build and publish contracts.
 
 The Docker-hosted FUSE frontend's mount lives entirely inside the container's own mount namespace, so killing the container is an accepted, clean failure mode: the mount disappears with it, with nothing left to unmount host-side, and `omnifs frontend restart fuse --runtime docker` creates a fresh container that serves again.
 
@@ -96,7 +96,7 @@ The NFS mode of `omnifs-thin` uses `NFS4ERR_DELAY` in two distinct ways. Do not 
 - Put provider policy or cache schema knowledge in FUSE or NFS.
 - Add macOS-specific FUSE behavior.
 - Reintroduce macFUSE, `diskutil`, or macOS-specific FUSE mounting.
-- Treat container FUSE as the architecture; the Docker-hosted frontend is one optional delivery mechanism attached to a host-native daemon.
+- Treat container FUSE as a frontend runtime attached to the host-native daemon, never as the daemon architecture.
 - Remove live NFS test serialization casually.
 - Claim NFS gives FUSE-equivalent permission isolation.
 - Put wait budgets or `DELAY` policy in `omnifs-engine`.

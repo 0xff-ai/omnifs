@@ -1,11 +1,11 @@
 ---
 name: omnifs-usage
-description: Navigate an omnifs mount as a read-only projected filesystem. Use when exploring mounted providers, reading route README leaves, handling paginated directories, or using shell tools against /omnifs.
+description: Navigate an omnifs frontend as a read-only projected filesystem. Use when exploring mounted providers, reading route README leaves, handling paginated directories, or using shell tools against a host location or the guest /omnifs path.
 ---
 
 # Navigating omnifs mounts
 
-An omnifs mount is a read-only filesystem projection of external services. Treat it like a normal directory tree, but discover it incrementally: list first, read the generated `README.md` route schema where available, then follow concrete paths.
+An omnifs frontend is a read-only filesystem projection of external services. Treat its location like a normal directory tree, but discover it incrementally: list first, read the generated `README.md` route schema where available, then follow concrete paths. Docker and libkrun expose the tree at `/omnifs`; a host frontend uses the absolute location chosen when it was enabled.
 
 ## Ground rules
 
@@ -17,11 +17,12 @@ An omnifs mount is a read-only filesystem projection of external services. Treat
 
 ## Discovery loop
 
-1. `ls /omnifs` to see configured mounts.
-2. `ls /omnifs/<mount>` to see provider roots and `README.md`.
-3. `cat /omnifs/<mount>/README.md` to read the generated route schema.
-4. Substitute concrete values for captures in the route templates.
-5. List each intermediate directory before reading leaves.
+1. Set `ROOT` to the frontend location, such as `/omnifs` in a guest or the host mount path.
+2. `ls "$ROOT"` to see configured mounts.
+3. `ls "$ROOT/<mount>"` to see provider roots and `README.md`.
+4. `cat "$ROOT/<mount>/README.md"` to read the generated route schema.
+5. Substitute concrete values for captures in the route templates.
+6. List each intermediate directory before reading leaves.
 
 ## Pagination
 
@@ -35,6 +36,8 @@ Some directories expose pagination controls:
 ## Freshness
 
 Projected data can be dynamic. A file read or directory listing may call upstream, serve cached bytes, or use a validator. If a result looks stale, re-read the specific path or list the specific parent directory again. Do not assume a recursive scan refreshes the whole mount.
+
+With `omnifs up --offline`, the daemon serves only complete durable cache facts. A path that needs upstream work returns an offline miss rather than silently becoming `NotFound`; switch back to ordinary `omnifs up` when the missing data must be fetched.
 
 ## Do not
 

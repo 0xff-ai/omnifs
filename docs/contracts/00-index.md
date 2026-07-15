@@ -15,7 +15,7 @@ Read this first when deciding which contract applies. Do not load every contract
 | Provider SDK, provider macros, objects, routes, WIT, metadata, provider config, endpoints | `20-provider-sdk.md` |
 | Projection tree, cache, attrs, listing, lookup, traversal, learned sizes, live growth | `30-projection-tree.md` |
 | FUSE, NFS, mount protocol behavior, frontend state, protocol replies | `40-frontends.md` |
-| CLI, daemon, typed local control protocol, runtime modes, workspace layout, mount delivery, dev home | `50-control-plane.md` |
+| CLI, daemon, typed local control protocol, frontend runtimes, workspace layout, mount desired state, dev home | `50-control-plane.md` |
 | CI, validation commands, provider artifacts, generated schema, docs checks | `60-build-validation.md` |
 
 Documentation types:
@@ -23,7 +23,6 @@ Documentation types:
 - `AGENTS.md`: always-loaded operating guide.
 - `docs/contracts/`: binding rules by task area.
 - `docs/architecture/`: current explanatory model and rationale, loaded only when a task needs subsystem context.
-- `docs/future/`: proposals and non-current direction.
 
 ## Must not
 
