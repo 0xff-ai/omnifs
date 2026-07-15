@@ -48,14 +48,20 @@ impl SharedError {
 type Shared<T> = std::result::Result<T, SharedError>;
 
 struct Flight<V> {
-    result: Mutex<Option<Shared<V>>>,
+    state: Mutex<FlightState<V>>,
     wake: Notify,
+}
+
+enum FlightState<V> {
+    Running,
+    Finished(Shared<V>),
+    Cancelled,
 }
 
 impl<V> Flight<V> {
     fn new() -> Self {
         Self {
-            result: Mutex::new(None),
+            state: Mutex::new(FlightState::Running),
             wake: Notify::new(),
         }
     }
@@ -64,13 +70,16 @@ impl<V> Flight<V> {
     where
         V: Clone,
     {
-        let mut notified = Box::pin(self.wake.notified());
-        notified.as_mut().enable();
-        if let Some(result) = self.result.lock().clone() {
-            return Some(result);
+        loop {
+            let mut notified = Box::pin(self.wake.notified());
+            notified.as_mut().enable();
+            match &*self.state.lock() {
+                FlightState::Running => {},
+                FlightState::Finished(result) => return Some(result.clone()),
+                FlightState::Cancelled => return None,
+            }
+            notified.await;
         }
-        notified.await;
-        self.result.lock().clone()
     }
 }
 
@@ -151,7 +160,7 @@ where
     K: Eq + Hash,
 {
     fn finish(&mut self, result: Shared<V>) {
-        *self.flight.result.lock() = Some(result);
+        *self.flight.state.lock() = FlightState::Finished(result);
         let mut slots = self.flights.slots.lock();
         if slots
             .get(&self.key)
@@ -179,6 +188,7 @@ where
         {
             slots.remove(&self.key);
         }
+        *self.flight.state.lock() = FlightState::Cancelled;
         self.flight.wake.notify_waiters();
     }
 }
@@ -662,8 +672,18 @@ mod tests {
             })
         };
         started.notified().await;
+        let follower = match flights.claim(path("/x")) {
+            FlightClaim::Follower(flight) => flight,
+            FlightClaim::Leader(_) => panic!("the running leader must own the exact slot"),
+        };
         leader.abort();
         let _ = leader.await;
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), follower.wait())
+                .await
+                .expect("a late waiter must observe leader cancellation")
+                .is_none()
+        );
         let recovered = tokio::time::timeout(
             std::time::Duration::from_millis(100),
             flights.run(
