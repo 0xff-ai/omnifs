@@ -32,7 +32,7 @@ impl UpArgs {
             .as_deref()
             .map(crate::stages::parse_wait_duration)
             .transpose()?
-            .unwrap_or(Duration::from_secs(30));
+            .unwrap_or(Duration::from_secs(120));
         Launcher::new(workspace, "omnifs up", output.clone(), self.offline, wait)
             .launch()
             .await?;

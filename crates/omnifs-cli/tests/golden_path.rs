@@ -170,11 +170,11 @@ fn mount_add_up_wait_read_down_golden_path() {
     assert_eq!(repository.applied().expect("read applied ref"), None);
     drop(repository);
 
-    let up = fixture.run(&["up", "--wait", "120s"]);
+    let up = fixture.run(&["up"]);
     assert_eq!(
         exit_code(&up),
         0,
-        "up --wait must exit 0\nstdout: {}\nstderr: {}",
+        "up must exit 0 with the default readiness wait\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&up.stdout),
         String::from_utf8_lossy(&up.stderr)
     );
