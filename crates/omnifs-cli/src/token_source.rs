@@ -26,10 +26,9 @@ impl TokenSource {
     ) -> anyhow::Result<Self> {
         match (token, token_env) {
             (Some("-"), None) => Ok(Self::Stdin),
-            (Some(other), None) => bail!(
+            (Some(_), None) => bail!(
                 "--token VALUE is rejected to keep secrets out of shell history; \
-                 use --token - to read stdin, or --token-env VAR to read an env var \
-                 (got --token {other:?})"
+                 use --token - to read stdin, or --token-env VAR to read an env var"
             ),
             (None, Some(var)) => Ok(Self::Env(var.to_string())),
             (Some(_), Some(_)) => {

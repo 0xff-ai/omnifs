@@ -400,6 +400,7 @@ fn destructive_mount_jsonl_commands_end_with_one_typed_result() {
 fn mount_add_json_receipt_names_the_mount() {
     let fixture = Fixture::new();
     let mounts_dir = fixture.home_path().join("mounts");
+    let sentinel = "CLI_SECRET_SENTINEL_MOUNT_ADD";
     let bootstrap = Repository::open(&mounts_dir)
         .expect("bootstrap mount repository")
         .head_revision()
@@ -412,15 +413,34 @@ fn mount_add_json_receipt_names_the_mount() {
         "--as",
         "dogfood-github",
         "--token",
-        "dummy",
+        sentinel,
         "--no-validate",
+        "--output",
+        "json",
     ]);
     assert_ne!(exit_code(&rejected), 0);
+    let rejected_json = stdout_json(&rejected);
+    let message = rejected_json["error"]["message"]
+        .as_str()
+        .expect("structured rejection message");
     assert!(
-        String::from_utf8_lossy(&rejected.stderr).contains("--token VALUE is rejected"),
-        "unexpected direct-token rejection: {}",
-        String::from_utf8_lossy(&rejected.stderr)
+        message.contains("--token VALUE is rejected")
+            && message.contains("--token -")
+            && message.contains("--token-env VAR"),
+        "unexpected direct-token rejection: {message}"
     );
+    let telemetry = std::fs::read_to_string(fixture.home_path().join("telemetry/cli.jsonl"))
+        .expect("CLI telemetry record");
+    for (label, bytes) in [
+        ("stdout", rejected.stdout.as_slice()),
+        ("stderr", rejected.stderr.as_slice()),
+        ("workspace telemetry", telemetry.as_bytes()),
+    ] {
+        assert!(
+            !String::from_utf8_lossy(bytes).contains(sentinel),
+            "credential sentinel leaked into {label}"
+        );
+    }
     assert!(
         !mounts_dir.join("dogfood-github.json").exists(),
         "rejected mount add must not write a mount spec"

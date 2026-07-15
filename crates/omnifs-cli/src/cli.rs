@@ -239,7 +239,7 @@ where
     (occurrences == 1).then_some(selected).flatten()
 }
 
-pub(crate) fn raw_command_path<I>(args: I) -> String
+pub(crate) fn raw_command_path<I>(args: I) -> &'static str
 where
     I: IntoIterator<Item = OsString>,
 {
@@ -278,12 +278,38 @@ where
         index = index.saturating_add(1);
     }
     match positional.as_slice() {
-        [command, subcommand] if matches!(command.as_str(), "mount" | "frontend") => {
-            format!("{command}.{subcommand}")
+        [command, subcommand, ..] if command == "mount" && subcommand == "add" => "mount.add",
+        [command, subcommand, ..] if command == "mount" && subcommand == "ls" => "mount.ls",
+        [command, subcommand, ..] if command == "mount" && subcommand == "show" => "mount.show",
+        [command, subcommand, ..] if command == "mount" && subcommand == "reauth" => "mount.reauth",
+        [command, subcommand, ..] if command == "mount" && subcommand == "revoke" => "mount.revoke",
+        [command, subcommand, ..] if command == "mount" && subcommand == "rm" => "mount.rm",
+        [command, subcommand, ..] if command == "frontend" && subcommand == "enable" => {
+            "frontend.enable"
         },
-        [command, ..] if command == "apply" => "up".to_owned(),
-        [command, ..] => command.clone(),
-        [] => "status".to_owned(),
+        [command, subcommand, ..] if command == "frontend" && subcommand == "disable" => {
+            "frontend.disable"
+        },
+        [command, subcommand, ..] if command == "frontend" && subcommand == "restart" => {
+            "frontend.restart"
+        },
+        [command, subcommand, ..] if command == "frontend" && subcommand == "ls" => "frontend.ls",
+        [command, subcommand, ..] if command == "frontend" && subcommand == "shell" => {
+            "frontend.shell"
+        },
+        [command, ..] if command == "apply" => "up",
+        [command, ..] if command == "status" => "status",
+        [command, ..] if command == "up" => "up",
+        [command, ..] if command == "down" => "down",
+        [command, ..] if command == "logs" => "logs",
+        [command, ..] if command == "inspect" => "inspect",
+        [command, ..] if command == "setup" => "setup",
+        [command, ..] if command == "skill" => "skill",
+        [command, ..] if command == "doctor" => "doctor",
+        [command, ..] if command == "completions" => "completions",
+        [command, ..] if command == "version" => "version",
+        [command, ..] if command == "daemon" => "daemon",
+        _ => "status",
     }
 }
 
@@ -401,6 +427,11 @@ mod tests {
         assert_eq!(
             raw_command_path(argv(&["apply", "--output", "json", "--unknown"])),
             "up"
+        );
+        let sentinel = "CLI_SECRET_SENTINEL_RAW_COMMAND";
+        assert_eq!(
+            raw_command_path(argv(&["--output", "json", "--token", sentinel])),
+            "status"
         );
     }
 
