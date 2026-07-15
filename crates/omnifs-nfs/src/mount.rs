@@ -3,7 +3,7 @@ use crate::error::NfsFrontendError;
 use crate::persist::{FH_STATE_FILE, FhState, PersistInit};
 use crate::protocol::consts::EXPORT_ROOT_ID;
 use crate::server::start_server;
-use omnifs_engine::namespace::{Namespace, NsAttachEvent};
+use omnifs_engine::namespace::Namespace;
 #[cfg(target_os = "linux")]
 use omnifs_mtab::proc_mounts;
 use omnifs_mtab::{MountState, Platform, StateError, StateFile, UnmountCommand};
@@ -15,7 +15,6 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 use tokio::runtime::Handle;
-use tokio::sync::broadcast;
 
 const MOUNT_WAIT_INTERVAL: Duration = Duration::from_millis(500);
 
@@ -97,7 +96,6 @@ pub fn mount_blocking(
     namespace: Arc<dyn Namespace>,
     rt: Handle,
     options: &NfsMountOptions,
-    attach_events: Option<broadcast::Receiver<NsAttachEvent>>,
 ) -> Result<(), NfsFrontendError> {
     std::fs::create_dir_all(mount_point)?;
     ensure_private_state_dir(&options.state_dir)?;
@@ -108,24 +106,9 @@ pub fn mount_blocking(
     // path, keep the fresh-per-process random generation.
     let persist_init = options.persist_init()?;
 
-    let task_runtime = rt.clone();
     let export = Arc::new(match persist_init {
         Some(init) => Export::with_persistence(rt, namespace, init),
         None => Export::new(rt, namespace),
-    });
-
-    // On a daemon reattach (a wire reconnect onto a restarted daemon), every
-    // cached NodeId is stale; drop them so subsequent ops re-resolve. Opens and
-    // leases survive untouched.
-    let reattach_task = attach_events.map(|mut attach_events| {
-        let listener = Arc::clone(&export);
-        export.handle().spawn(async move {
-            while let Ok(event) = attach_events.recv().await {
-                match event {
-                    NsAttachEvent::Reattached => listener.on_reattach(),
-                }
-            }
-        })
     });
 
     let server = start_server(
@@ -165,13 +148,6 @@ pub fn mount_blocking(
     );
 
     wait_for_mount_exit(mount_point);
-    if let Some(task) = reattach_task {
-        task.abort();
-        task_runtime.block_on(async {
-            let _ = task.await;
-        });
-    }
-
     drop(server);
     Ok(())
 }
@@ -787,6 +763,7 @@ mod tests {
                 parent: 1,
                 name: "test".to_string(),
                 kind: NodeKind::Directory,
+                path: omnifs_core::path::Path::parse("/test").unwrap(),
             }],
         };
         std::fs::write(

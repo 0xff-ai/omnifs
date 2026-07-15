@@ -1,9 +1,9 @@
 //! NFS-local proactive deferral of provider-backed directory listings.
 //!
-//! `Tree` computes the truthful projection result and may block on cold provider
+//! `TreeNamespace` computes the truthful projection result and may block on cold provider
 //! work for as long as it takes. The NFS frontend decides how long an individual
 //! RPC handler may wait for that truth before replying `NFS4ERR_DELAY` and
-//! letting the client retry. That wait budget is frontend policy; `Tree`
+//! letting the client retry. That wait budget is frontend policy; `TreeNamespace`
 //! deliberately does not own it.
 //!
 //! Concurrent RPC dispatch already keeps one slow op from head-of-line blocking
@@ -26,7 +26,8 @@ use std::future::Future;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use omnifs_engine::namespace::{DirEntry as NsDirEntry, NodeId};
+use omnifs_core::path::Path;
+use omnifs_engine::namespace::DirEntry as NsDirEntry;
 use tokio::runtime::Handle;
 use tokio::sync::watch;
 
@@ -45,7 +46,13 @@ pub(crate) enum PendingOutcome {
 }
 
 type SlotSender = watch::Sender<Option<Arc<ListResult>>>;
-type Slots = HashMap<NodeId, SlotSender>;
+type SlotKey = (Path, u64);
+type Slots = HashMap<SlotKey, SlotSender>;
+
+struct ListingState {
+    generation: u64,
+    slots: Slots,
+}
 
 /// Per-directory detached work with a per-caller wait budget for NFS listings.
 ///
@@ -54,52 +61,68 @@ type Slots = HashMap<NodeId, SlotSender>;
 /// return to the namespace rather than being served by an NFS-side cache.
 pub(crate) struct PendingListings {
     runtime: Handle,
-    slots: Arc<Mutex<Slots>>,
+    state: Arc<Mutex<ListingState>>,
 }
 
 impl PendingListings {
     pub(crate) fn new(runtime: Handle) -> Self {
         Self {
             runtime,
-            slots: Arc::new(Mutex::new(HashMap::new())),
+            state: Arc::new(Mutex::new(ListingState {
+                generation: 0,
+                slots: HashMap::new(),
+            })),
         }
     }
 
-    pub(crate) fn resolve<F, Fut>(&self, node: NodeId, budget: Duration, make: F) -> PendingOutcome
+    pub(crate) fn resolve<F, Fut>(&self, path: Path, budget: Duration, make: F) -> PendingOutcome
     where
         F: FnOnce() -> Fut + Send + 'static,
         Fut: Future<Output = ListResult> + Send + 'static,
     {
-        let (receiver, leader) = {
-            let mut slots = lock_slots(&self.slots);
-            if let Some(sender) = slots.get(&node) {
-                (sender.subscribe(), false)
+        let (receiver, leader, generation) = {
+            let mut state = lock_state(&self.state);
+            let generation = state.generation;
+            let key = (path.clone(), generation);
+            if let Some(sender) = state.slots.get(&key) {
+                (sender.subscribe(), false, generation)
             } else {
                 let (sender, receiver) = watch::channel::<Option<Arc<ListResult>>>(None);
-                slots.insert(node, sender.clone());
-                (receiver, true)
+                state.slots.insert(key, sender.clone());
+                (receiver, true, generation)
             }
         };
 
         if leader {
-            let slots = Arc::clone(&self.slots);
+            let state = Arc::clone(&self.state);
             let runtime = self.runtime.clone();
             runtime.spawn(async move {
                 let result = Arc::new(make().await);
-                let mut slots = lock_slots(&slots);
-                if let Some(sender) = slots.get(&node) {
+                let mut state = lock_state(&state);
+                let key = (path, generation);
+                if let Some(sender) = state.slots.get(&key) {
                     let _ = sender.send(Some(result));
                 }
-                slots.remove(&node);
+                state.slots.remove(&key);
             });
         }
 
         self.runtime.block_on(wait_for(receiver, budget))
     }
+
+    /// Invalidate all pending work in `path`'s subtree and advance the token so
+    /// a detached completion cannot publish into a newly-created same-path slot.
+    pub(crate) fn reset(&self, path: &Path) {
+        let mut state = lock_state(&self.state);
+        state.generation = state.generation.wrapping_add(1);
+        state
+            .slots
+            .retain(|(slot_path, _), _| !slot_path.has_prefix(path));
+    }
 }
 
-fn lock_slots(slots: &Mutex<Slots>) -> MutexGuard<'_, Slots> {
-    slots.lock().unwrap_or_else(PoisonError::into_inner)
+fn lock_state(state: &Mutex<ListingState>) -> MutexGuard<'_, ListingState> {
+    state.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 async fn wait_for(
@@ -122,11 +145,16 @@ async fn wait_for(
 #[cfg(test)]
 mod tests {
     use super::{PendingListings, PendingOutcome};
+    use crate::export::Status;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
-    use omnifs_engine::namespace::NodeId;
+    use omnifs_core::path::Path;
+
+    fn path(value: &str) -> Path {
+        Path::parse(value).expect("test path")
+    }
 
     fn multi_thread_runtime() -> tokio::runtime::Runtime {
         tokio::runtime::Builder::new_multi_thread()
@@ -141,31 +169,45 @@ mod tests {
         let runtime = multi_thread_runtime();
         let listings = Arc::new(PendingListings::new(runtime.handle().clone()));
         let calls = Arc::new(AtomicUsize::new(0));
-        let node = NodeId(7);
+        let node = path("/test/items");
 
         assert!(matches!(
-            listings.resolve(node, Duration::from_millis(40), {
+            listings.resolve(node.clone(), Duration::from_millis(40), {
                 let calls = Arc::clone(&calls);
                 move || async move {
                     calls.fetch_add(1, Ordering::SeqCst);
                     tokio::time::sleep(Duration::from_millis(300)).await;
+                    Err(Status::Io)
+                }
+            }),
+            PendingOutcome::Pending
+        ));
+
+        listings.reset(&node);
+
+        assert!(matches!(
+            listings.resolve(node.clone(), Duration::from_millis(40), {
+                let calls = Arc::clone(&calls);
+                move || async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(500)).await;
                     Ok(Vec::new())
                 }
             }),
             PendingOutcome::Pending
         ));
 
-        match listings.resolve(node, Duration::from_secs(2), {
+        match listings.resolve(node.clone(), Duration::from_secs(2), {
             let calls = Arc::clone(&calls);
             move || async move {
                 calls.fetch_add(1, Ordering::SeqCst);
-                Ok(Vec::new())
+                Err(Status::Io)
             }
         }) {
             PendingOutcome::Ready(result) => assert!(result.is_ok()),
             PendingOutcome::Pending => panic!("expected the shared listing to finish"),
         }
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
     #[test]
@@ -173,9 +215,9 @@ mod tests {
         let runtime = multi_thread_runtime();
         let listings = PendingListings::new(runtime.handle().clone());
         let calls = Arc::new(AtomicUsize::new(0));
-        let node = NodeId(9);
+        let node = path("/test/items");
 
-        match listings.resolve(node, Duration::from_secs(2), {
+        match listings.resolve(node.clone(), Duration::from_secs(2), {
             let calls = Arc::clone(&calls);
             move || async move {
                 calls.fetch_add(1, Ordering::SeqCst);
@@ -186,7 +228,7 @@ mod tests {
             PendingOutcome::Pending => panic!("expected the listing to finish"),
         }
 
-        match listings.resolve(node, Duration::from_secs(2), {
+        match listings.resolve(node.clone(), Duration::from_secs(2), {
             let calls = Arc::clone(&calls);
             move || async move {
                 calls.fetch_add(1, Ordering::SeqCst);

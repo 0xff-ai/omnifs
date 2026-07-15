@@ -6,16 +6,12 @@ use std::sync::Arc;
 
 use anyhow::Context as _;
 use clap::Args as ClapArgs;
-use omnifs_engine::{Namespace, NsAttachEvent};
+use omnifs_engine::Namespace;
 use omnifs_vfs_wire::{
-    AttachEvent, AttachTarget, FrontendIdentity, FrontendKind, WireNamespace,
-    resolve_ready_vsock_port,
+    AttachTarget, FrontendIdentity, FrontendKind, WireNamespace, resolve_ready_vsock_port,
 };
 use tokio::runtime::Handle;
-use tokio::sync::broadcast;
 use tracing::{info, warn};
-
-const ATTACH_CAPACITY: usize = 16;
 
 /// Arguments for the `NFSv4` loopback frontend.
 #[derive(Debug, ClapArgs)]
@@ -56,11 +52,9 @@ pub(crate) fn run(args: Args) -> anyhow::Result<()> {
         .context("attach to the namespace")?;
     info!(
         target = %target_label,
-        instance = %namespace.instance_id(),
         "attached to namespace"
     );
 
-    let attach_events = attach_events(&handle, &namespace);
     #[cfg(target_os = "linux")]
     if let Some(port) = ready_port {
         omnifs_vfs_wire::spawn_ready_signal(&handle, args.mount_point.clone(), port);
@@ -76,35 +70,11 @@ pub(crate) fn run(args: Args) -> anyhow::Result<()> {
         Arc::clone(&namespace) as Arc<dyn Namespace>,
         handle,
         &options,
-        Some(attach_events),
     )
     .context("serve the NFS mount")?;
 
     info!(mount = %args.mount_point.display(), "frontend exited");
     Ok(())
-}
-
-fn attach_events(
-    runtime: &Handle,
-    namespace: &Arc<WireNamespace>,
-) -> broadcast::Receiver<NsAttachEvent> {
-    let (events, receiver) = broadcast::channel(ATTACH_CAPACITY);
-    let mut wire_events = namespace.subscribe_attach_events();
-    drop(runtime.spawn(async move {
-        while let Ok(AttachEvent::Reattached {
-            old_instance,
-            new_instance,
-        }) = wire_events.recv().await
-        {
-            warn!(
-                %old_instance,
-                %new_instance,
-                "daemon restarted under the frontend; invalidating cached node ids"
-            );
-            let _ = events.send(NsAttachEvent::Reattached);
-        }
-    }));
-    receiver
 }
 
 #[cfg(unix)]

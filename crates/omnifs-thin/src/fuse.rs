@@ -8,8 +8,7 @@ use clap::Args as ClapArgs;
 use omnifs_engine::Namespace;
 use omnifs_mtab::StateFile;
 use omnifs_vfs_wire::{
-    AttachEvent, AttachTarget, FrontendIdentity, FrontendKind, WireNamespace,
-    resolve_ready_vsock_port,
+    AttachTarget, FrontendIdentity, FrontendKind, WireNamespace, resolve_ready_vsock_port,
 };
 use tokio::runtime::Handle;
 use tracing::{info, warn};
@@ -56,11 +55,8 @@ pub(crate) fn run(args: Args) -> anyhow::Result<()> {
         .context("attach to the namespace")?;
     info!(
         target = %target_label,
-        instance = %namespace.instance_id(),
         "attached to namespace"
     );
-
-    spawn_reattach_logger(&handle, &namespace);
 
     if let Some(port) = ready_port {
         omnifs_vfs_wire::spawn_ready_signal(&handle, args.mount_point.clone(), port);
@@ -81,25 +77,6 @@ pub(crate) fn run(args: Args) -> anyhow::Result<()> {
 
     info!(mount = %args.mount_point.display(), "frontend exited");
     Ok(())
-}
-
-/// Log every reattach. FUSE's inode table is in-memory, per-mount kernel state
-/// a daemon restart cannot invalidate out from under it, so there is nothing
-/// to re-resolve here; this is observability only.
-fn spawn_reattach_logger(rt: &Handle, namespace: &Arc<WireNamespace>) {
-    let mut receiver = namespace.subscribe_attach_events();
-    drop(rt.spawn(async move {
-        while let Ok(event) = receiver.recv().await {
-            let AttachEvent::Reattached {
-                old_instance,
-                new_instance,
-            } = event;
-            warn!(
-                %old_instance, %new_instance,
-                "daemon restarted under the frontend; reconnected"
-            );
-        }
-    }));
 }
 
 /// On `SIGTERM`/`SIGINT`, unmount the mount point so the blocking FUSE loop

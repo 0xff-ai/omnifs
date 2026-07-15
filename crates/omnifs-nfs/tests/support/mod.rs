@@ -1,9 +1,16 @@
-use omnifs_engine::{MountRuntimes, TreeNamespace};
+use omnifs_core::path::Path as NamespacePath;
+use omnifs_engine::{
+    Attrs, DirCursor, DirPage, EventStream, LookupAnswer, MountRuntimes, Namespace, NsError,
+    NsEvent, ReadAnswer, TreeNamespace,
+};
 use omnifs_nfs::Export;
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::runtime::Runtime;
+use tokio::sync::broadcast;
 
 mod registry;
 use registry::load_registry_from_mount_dir;
@@ -17,9 +24,68 @@ pub struct TestExport {
     pub runtime: Runtime,
     pub registry: Arc<MountRuntimes>,
     pub namespace: Arc<TreeNamespace>,
+    pub events: broadcast::Sender<NsEvent>,
     _config_dir: TempDir,
     _cache_dir: TempDir,
     _clone_dir: TempDir,
+}
+
+struct EventNamespace {
+    inner: Arc<TreeNamespace>,
+    events: broadcast::Sender<NsEvent>,
+}
+
+type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+impl Namespace for EventNamespace {
+    fn lookup<'a>(
+        &'a self,
+        parent: NamespacePath,
+        name: &'a str,
+    ) -> BoxFuture<'a, Result<LookupAnswer, NsError>> {
+        let inner = Arc::clone(&self.inner);
+        let name = name.to_owned();
+        Box::pin(async move { inner.lookup(parent, &name).await })
+    }
+
+    fn getattr(&self, path: NamespacePath) -> BoxFuture<'_, Result<Attrs, NsError>> {
+        let inner = Arc::clone(&self.inner);
+        Box::pin(async move { inner.getattr(path).await })
+    }
+
+    fn getattr_exact(&self, path: NamespacePath) -> BoxFuture<'_, Result<Attrs, NsError>> {
+        let inner = Arc::clone(&self.inner);
+        Box::pin(async move { inner.getattr_exact(path).await })
+    }
+
+    fn readdir(
+        &self,
+        path: NamespacePath,
+        cursor: DirCursor,
+        budget: usize,
+    ) -> BoxFuture<'_, Result<DirPage, NsError>> {
+        let inner = Arc::clone(&self.inner);
+        Box::pin(async move { inner.readdir(path, cursor, budget).await })
+    }
+
+    fn read(
+        &self,
+        path: NamespacePath,
+        offset: u64,
+        len: u32,
+    ) -> BoxFuture<'_, Result<ReadAnswer, NsError>> {
+        let inner = Arc::clone(&self.inner);
+        Box::pin(async move { inner.read(path, offset, len).await })
+    }
+
+    fn readlink(&self, path: NamespacePath) -> BoxFuture<'_, Result<std::path::PathBuf, NsError>> {
+        let inner = Arc::clone(&self.inner);
+        Box::pin(async move { inner.readlink(path).await })
+    }
+
+    fn subscribe(&self) -> EventStream {
+        EventStream::from_broadcast(self.events.subscribe())
+    }
 }
 
 pub fn test_export() -> TestExport {
@@ -39,7 +105,7 @@ pub fn test_export_with_mount(mount: &str) -> TestExport {
     let provider_config = format!(
         r#"{{
             "provider": {reference},
-            "mount": {mount:?},
+            "mount": {mount:?}
         }}"#,
     );
     std::fs::write(mounts_dir.join(format!("{mount}.json")), provider_config)
@@ -57,15 +123,25 @@ pub fn test_export_with_mount(mount: &str) -> TestExport {
     );
     let registry = Arc::new(registry);
     let namespace = TreeNamespace::new(Arc::clone(&registry), runtime.handle().clone());
-    let export = Arc::new(Export::new(
-        runtime.handle().clone(),
-        Arc::clone(&namespace) as Arc<dyn omnifs_engine::Namespace>,
-    ));
+    let (events, _) = broadcast::channel(64);
+    let mut inner_events = namespace.subscribe();
+    let forwarded_events = events.clone();
+    runtime.spawn(async move {
+        while let Some(event) = inner_events.recv().await {
+            let _ = forwarded_events.send(event);
+        }
+    });
+    let export_namespace = Arc::new(EventNamespace {
+        inner: Arc::clone(&namespace),
+        events: events.clone(),
+    });
+    let export = Arc::new(Export::new(runtime.handle().clone(), export_namespace));
     TestExport {
         export,
         runtime,
         registry,
         namespace,
+        events,
         _config_dir: config_dir,
         _cache_dir: cache_dir,
         _clone_dir: clone_dir,

@@ -139,6 +139,16 @@ fn mount_enumeration_root_reflects_startup_mount_set() {
     let harness = test_export();
     let export = &harness.export;
     let root = export.root();
+    let (clientid, confirm) = export.set_clientid(*b"root-id!", b"root-owner".to_vec());
+    export
+        .confirm_client(clientid, &confirm)
+        .expect("client confirmation");
+    let test_root = export.lookup(root, "test").expect("test mount");
+    let hello = export.lookup(test_root, "hello").expect("hello directory");
+    let message = export.lookup(hello, "message").expect("message file");
+    let opened = export
+        .open_state(message, clientid, 1)
+        .expect("message open");
     let before = export.attr(root).expect("root attr before listing").change;
 
     let root_listing = export.readdir(root).expect("root listing");
@@ -153,6 +163,42 @@ fn mount_enumeration_root_reflects_startup_mount_set() {
     assert_eq!(
         before, after,
         "root directory change remains stable for the immutable startup mount set"
+    );
+
+    let root_event = omnifs_engine::NsEvent::InvalidateSubtree { path: Path::root() };
+    harness
+        .events
+        .send(root_event)
+        .expect("root event receiver");
+    let refreshed_root = export.attr(root).expect("root attr after reset");
+    assert_eq!(refreshed_root.change, after);
+    assert!(export.client_confirmed(clientid));
+    assert_eq!(
+        export.lookup(root, "test").expect("mount survives reset"),
+        test_root
+    );
+    assert_eq!(
+        export
+            .lookup(hello, "message")
+            .expect("file survives reset"),
+        message
+    );
+    assert_eq!(
+        export
+            .readdir(root)
+            .expect("root listing after reset")
+            .entries
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect::<Vec<_>>(),
+        root_names
+    );
+    assert_eq!(
+        export
+            .read_state(opened.stateid, 0, 32)
+            .expect("open survives reset")
+            .data,
+        b"Hello, world!"
     );
 }
 
@@ -383,6 +429,10 @@ fn omnifs_export_invalidates_path_state_and_open_cache() {
     let test_root = export
         .lookup(export.root(), "test")
         .expect("top-level mount lookup");
+    let root = export.root();
+    let hello = export.lookup(test_root, "hello").expect("hello lookup");
+    let sibling = export.lookup(hello, "message").expect("unaffected sibling");
+    let root_attr = export.attr(root).expect("root attr");
     let scoped = export.lookup(test_root, "scoped").expect("scoped lookup");
     let item = export.lookup(scoped, "item").expect("item lookup");
     let opened = export.open_state(item, 1, 1).expect("item open");
@@ -406,6 +456,16 @@ fn omnifs_export_invalidates_path_state_and_open_cache() {
         .lookup(scoped, "item")
         .expect("item lookup after invalidation");
     assert_ne!(refreshed_item, item);
+    assert_eq!(
+        export.attr(root).expect("root remains live").change,
+        root_attr.change
+    );
+    assert_eq!(
+        export
+            .lookup(hello, "message")
+            .expect("sibling remains live"),
+        sibling
+    );
 }
 
 #[test]

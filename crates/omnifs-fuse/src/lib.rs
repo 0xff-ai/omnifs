@@ -1,7 +1,7 @@
 //! FUSE filesystem frontend over the engine [`Namespace`] surface.
 //!
 //! The adapter bridges the omnifs projected tree to the kernel FUSE subsystem.
-//! It consumes only the plain-data namespace surface (node ids, policied attrs,
+//! It consumes only the plain-data namespace surface (validated paths, policied attrs,
 //! directory pages, byte reads, and the invalidation event stream) and keeps
 //! FUSE protocol state only: kernel inode numbers, the per-`fh` file-handle
 //! tables (whole-file buffers and ranged read-through nodes), directory
@@ -30,20 +30,20 @@ mod read_helpers;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use common::{Body, DirSnapshot, Inode, NodeKind, ROOT_INO};
+pub(crate) use common::{DirSnapshot, Inode, NodeKind, ROOT_INO};
 
 use dashmap::DashMap;
-use fuser::{INodeNo, MountOption, Notifier};
-use omnifs_engine::{EventStream, Namespace, NodeId, NsEvent};
+use fuser::{Errno, INodeNo, MountOption, Notifier};
+use omnifs_core::path::Path;
+use omnifs_engine::{Namespace, NsEvent};
 use parking_lot::Mutex;
 use std::ffi::OsStr;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use tokio::runtime::Handle;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{mpsc, oneshot};
 
-const MAX_IN_FLIGHT_OPS: usize = 64;
+type FlushRequest = oneshot::Sender<()>;
 
 /// Shared slot for the kernel notifier. The daemon owns one, passes it to
 /// [`mount::run_blocking`] (which fills it once the session is up), and uses
@@ -71,15 +71,10 @@ pub(crate) struct Frontend {
     /// The projection surface. Every name resolution, attribute, listing, and
     /// read goes through it; the adapter holds nothing else of the engine.
     namespace: Arc<dyn Namespace>,
-    /// Invalidation and live-growth events, drained inline after each namespace
-    /// op so the kernel is notified and grown sizes are folded promptly.
-    events: Arc<Mutex<EventStream>>,
     /// Kernel inode id -> protocol state.
     inodes: Arc<DashMap<u64, Inode>>,
     /// namespace node -> inode, so a re-resolved node keeps its inode.
-    by_node: Arc<DashMap<NodeId, u64>>,
-    /// backing path -> inode, for subtree-local children.
-    by_backing: Arc<DashMap<PathBuf, u64>>,
+    by_node: Arc<DashMap<Path, u64>>,
     next_ino: Arc<AtomicU64>,
     notifier: NotifierHandle,
     next_fh: Arc<AtomicU64>,
@@ -89,38 +84,35 @@ pub(crate) struct Frontend {
     file_cache: Arc<DashMap<u64, Vec<u8>>>,
     /// Per-`fh` namespace node for a `Ranged` read style: each kernel read is a
     /// read-through, deduped behind the namespace's internal handle cache.
-    ranged_fhs: Arc<DashMap<u64, NodeId>>,
+    ranged_fhs: Arc<DashMap<u64, Path>>,
     /// Per-node live-follow size learned from an `AttrsChanged` event. `getattr`
     /// reports `max(namespace size, grown[node])`, so a polling `tail -f`
     /// re-stats, sees growth, and reads the new bytes through the ranged path.
-    grown_sizes: Arc<DashMap<NodeId, u64>>,
-    op_permits: Arc<Semaphore>,
+    grown_sizes: Arc<DashMap<Path, u64>>,
+    flush_tx: Arc<Mutex<Option<mpsc::UnboundedSender<FlushRequest>>>>,
 }
 
 impl Frontend {
     pub(crate) fn new(rt: Handle, namespace: Arc<dyn Namespace>, notifier: NotifierHandle) -> Self {
-        let events = Arc::new(Mutex::new(namespace.subscribe()));
         let inodes = Arc::new(DashMap::new());
         let by_node = Arc::new(DashMap::new());
-        // The root inode projects the namespace root (the mount-enumeration root
-        // or the single/rooted mount's root); every resolution starts here.
+        // The root inode projects the namespace mount-enumeration root; every
+        // resolution starts here.
         inodes.insert(
             ROOT_INO,
             Inode {
                 parent: ROOT_INO,
                 name: String::new(),
                 kind: NodeKind::Directory,
-                body: Body::Node(NodeId::ROOT),
+                body: Path::root(),
             },
         );
-        by_node.insert(NodeId::ROOT, ROOT_INO);
+        by_node.insert(Path::root(), ROOT_INO);
         Self {
             rt,
             namespace,
-            events,
             inodes,
             by_node,
-            by_backing: Arc::new(DashMap::new()),
             next_ino: Arc::new(AtomicU64::new(ROOT_INO + 1)),
             notifier,
             next_fh: Arc::new(AtomicU64::new(1)),
@@ -128,7 +120,7 @@ impl Frontend {
             file_cache: Arc::new(DashMap::new()),
             ranged_fhs: Arc::new(DashMap::new()),
             grown_sizes: Arc::new(DashMap::new()),
-            op_permits: Arc::new(Semaphore::new(MAX_IN_FLIGHT_OPS)),
+            flush_tx: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -138,28 +130,7 @@ impl Frontend {
         config
     }
 
-    async fn acquire_op_permit(&self) -> OwnedSemaphorePermit {
-        self.op_permits
-            .clone()
-            .acquire_owned()
-            .await
-            .expect("FUSE op semaphore is never closed")
-    }
-
     // --- events --------------------------------------------------------------
-
-    /// Drain the buffered namespace events emitted since the last drain and
-    /// apply them. Called inline after every namespace op so a caller's own
-    /// invalidation is folded in before it answers, and the kernel is told to
-    /// drop the dentry it cached with a huge TTL.
-    pub(crate) fn apply_pending_events(&self) {
-        let mut events = self.events.lock();
-        while let Some(event) = events.try_recv() {
-            drop(events);
-            self.apply_event(&event);
-            events = self.events.lock();
-        }
-    }
 
     /// Background pump: apply namespace events continuously so an invalidation
     /// from the engine's background drain tick reaches the kernel even when no
@@ -167,47 +138,87 @@ impl Frontend {
     pub(crate) fn spawn_event_pump(&self) {
         let fs = self.clone();
         let mut sub = fs.namespace.subscribe();
+        let (flush_tx, mut flush_rx) = mpsc::unbounded_channel();
+        *fs.flush_tx.lock() = Some(flush_tx);
         drop(fs.rt.spawn({
             let fs = fs.clone();
             async move {
-                while let Some(event) = sub.recv().await {
-                    fs.apply_event(&event);
+                loop {
+                    tokio::select! {
+                        event = sub.recv() => {
+                            let Some(event) = event else { break; };
+                            fs.apply_event(&event).await;
+                        }
+                        request = flush_rx.recv() => {
+                            let Some(request) = request else { break; };
+                            while let Some(event) = sub.try_recv() {
+                                fs.apply_event(&event).await;
+                            }
+                            let _ = request.send(());
+                        }
+                    }
                 }
             }
         }));
     }
 
-    fn apply_event(&self, event: &NsEvent) {
+    /// Wait for the sole background event owner to apply every event already
+    /// buffered by the wire before the operation publishes local identity.
+    pub(crate) async fn flush_events(&self) -> Result<(), Errno> {
+        let Some(sender) = self.flush_tx.lock().clone() else {
+            return Ok(());
+        };
+        let (reply, receiver) = oneshot::channel();
+        sender.send(reply).map_err(|_| Errno::EIO)?;
+        receiver.await.map_err(|_| Errno::EIO)
+    }
+
+    async fn apply_event(&self, event: &NsEvent) {
         match event {
-            NsEvent::InvalidateSubtree { node, .. } => self.invalidate_node(*node),
-            NsEvent::AttrsChanged { node, attrs, .. } => {
+            NsEvent::InvalidateSubtree { path } if path.is_root() => {
+                self.grown_sizes.clear();
+                for entry in self.inodes.iter() {
+                    self.notify_entry_deleted(entry.parent, &entry.name);
+                    self.notify_inode_changed(*entry.key());
+                }
+            },
+            NsEvent::InvalidateSubtree { path } => self.invalidate_node(path),
+            NsEvent::AttrsChanged { path, attrs } => {
                 // Live growth is monotonic; never let a stale event shrink it.
-                let mut entry = self.grown_sizes.entry(*node).or_insert(0);
+                let mut entry = self.grown_sizes.entry(path.clone()).or_insert(0);
                 *entry = (*entry).max(attrs.size);
                 drop(entry);
-                if let Some(ino) = self.by_node.get(node).map(|r| *r) {
+                if let Some(ino) = self.by_node.get(path).map(|r| *r) {
                     self.notify_inode_changed(ino);
                 }
             },
         }
     }
 
-    /// Prune the inode for an invalidated node and fire the kernel dentry/inode
-    /// notifications so the kernel re-looks-up and re-stats. The root inode is
-    /// preserved so a client's root handle never goes stale.
-    fn invalidate_node(&self, node: NodeId) {
-        let Some((_, ino)) = self.by_node.remove(&node) else {
-            return;
-        };
-        if ino == ROOT_INO {
-            self.by_node.insert(node, ino);
-            return;
+    /// Invalidate every known descendant by structural path prefix. FUSE keeps
+    /// the path-backed inode and ranged-handle identities, while the kernel is
+    /// told to refresh each affected dentry and inode.
+    fn invalidate_node(&self, path: &Path) {
+        let affected: Vec<(Path, u64, u64, String)> = self
+            .by_node
+            .iter()
+            .filter_map(|entry| {
+                entry.key().has_prefix(path).then(|| {
+                    let ino = *entry.value();
+                    let (parent, name) = self
+                        .inodes
+                        .get(&ino)
+                        .map(|inode| (inode.parent, inode.name.clone()))
+                        .unwrap_or((ROOT_INO, String::new()));
+                    (entry.key().clone(), ino, parent, name)
+                })
+            })
+            .collect();
+        for (affected_path, ino, parent, name) in affected {
+            self.grown_sizes.remove(&affected_path);
+            self.notify_entry_deleted(parent, &name);
+            self.notify_inode_changed(ino);
         }
-        self.grown_sizes.remove(&node);
-        if let Some((_, inode)) = self.inodes.remove(&ino) {
-            self.notify_entry_deleted(inode.parent, &inode.name);
-        }
-        self.notify_inode_changed(ino);
     }
 
     fn notify_entry_deleted(&self, parent_ino: u64, name: &str) {

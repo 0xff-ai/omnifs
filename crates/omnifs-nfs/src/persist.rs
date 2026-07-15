@@ -6,9 +6,8 @@
 //! (the transport-level ESTALE the frontend must not surface). So the restartable
 //! out-of-process runner persists the protocol identity table: the `generation`,
 //! the `next_ino` allocation cursor, and one entry per inode id carrying only the
-//! protocol-local `{ scope, parent, name, kind }`. No [`NodeId`](omnifs_engine::NodeId)
-//! is persisted; ids are meaningless across processes, so a reloaded id
-//! re-resolves lazily by walking its parent/name chain through the namespace.
+//! protocol-local `{ scope, parent, name, kind }` plus the validated namespace
+//! path, which remains meaningful across processes and daemon replacement.
 //!
 //! # Ownership
 //!
@@ -43,9 +42,10 @@ use std::time::Duration;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 
-use crate::adapter::{ColdEntry, Inode};
+use crate::adapter::{Body, Inode};
 use crate::export::NodeKind;
 use crate::protocol::consts::{EXPORT_ROOT_ID, ROOT_ID, is_reserved_inode};
+use omnifs_core::path::Path as CorePath;
 
 /// Basename of the filehandle-table state file inside the NFS state directory. A
 /// restart must find its predecessor by a name stable across pids, so this is a
@@ -68,7 +68,7 @@ pub(crate) struct FhState {
 }
 
 impl FhState {
-    pub(crate) const VERSION: u8 = 1;
+    pub(crate) const VERSION: u8 = 2;
 
     /// Load a persisted table. `Ok(None)` when the file is absent (a fresh
     /// start). An unreadable or unknown-version file is a hard error rather than a
@@ -116,8 +116,8 @@ impl FhState {
     }
 }
 
-/// One inode's persistable protocol identity: no [`NodeId`](omnifs_engine::NodeId),
-/// only the `{ scope, parent, name, kind }` a reloaded id re-resolves from.
+/// One inode's persistable protocol identity. The namespace path is validated
+/// before it reaches this schema and remains stable across daemon replacement.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct FhEntry {
     pub id: u64,
@@ -125,6 +125,7 @@ pub(crate) struct FhEntry {
     pub parent: u64,
     pub name: String,
     pub kind: NodeKind,
+    pub path: CorePath,
 }
 
 impl FhEntry {
@@ -135,16 +136,10 @@ impl FhEntry {
             parent: inode.parent,
             name: inode.name.clone(),
             kind: inode.kind,
-        }
-    }
-
-    fn from_cold(id: u64, cold: &ColdEntry) -> Self {
-        Self {
-            id,
-            scope: cold.scope,
-            parent: cold.parent,
-            name: cold.name.clone(),
-            kind: cold.kind,
+            path: match &inode.body {
+                Body::Node(path) => path.clone(),
+                Body::Synthetic(_) => CorePath::root(),
+            },
         }
     }
 }
@@ -178,20 +173,13 @@ pub(crate) struct PersistTables {
     pub generation: u64,
     pub next_ino: Arc<AtomicU64>,
     pub inodes: Arc<DashMap<u64, Inode>>,
-    pub cold: Arc<DashMap<u64, ColdEntry>>,
 }
 
 impl PersistTables {
-    /// Build the on-disk table from the current live and cold entries. A live
-    /// inode supersedes a same-id cold entry (it carries a resolved body but the
-    /// same identity chain). The two export roots are constants re-seeded on load,
-    /// so they are omitted.
+    /// Build the on-disk table from live path-bearing inodes. The two export roots
+    /// are constants re-seeded on load, so they are omitted.
     fn snapshot(&self) -> FhState {
         let mut by_id: std::collections::HashMap<u64, FhEntry> = std::collections::HashMap::new();
-        for entry in self.cold.iter() {
-            let id = *entry.key();
-            by_id.insert(id, FhEntry::from_cold(id, entry.value()));
-        }
         for entry in self.inodes.iter() {
             let id = *entry.key();
             if id == ROOT_ID || id == EXPORT_ROOT_ID || is_reserved_inode(id) {
@@ -328,6 +316,7 @@ mod tests {
                     parent: ROOT_ID,
                     name: "test".to_string(),
                     kind: NodeKind::Directory,
+                    path: CorePath::parse("/test").unwrap(),
                 },
                 FhEntry {
                     id: 11,
@@ -335,6 +324,7 @@ mod tests {
                     parent: 10,
                     name: "message".to_string(),
                     kind: NodeKind::File,
+                    path: CorePath::parse("/test/message").unwrap(),
                 },
             ],
         }
@@ -370,7 +360,7 @@ mod tests {
             FhState::load(&path),
             Err(PersistError::Version {
                 found: 99,
-                expected: 1
+                expected: FhState::VERSION
             })
         ));
         std::fs::remove_dir_all(&dir).ok();

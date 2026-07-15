@@ -279,7 +279,7 @@ const DOCKER_MOUNT_JSON: &str = r#"{
     "config":{"endpoint":"unix:///var/run/docker.sock"}
 }"#;
 
-fn db_mount_json(db_dir: &Path) -> String {
+fn db_mount_json(_db_dir: &Path) -> String {
     format!(
         r#"{{
             "provider":"omnifs_provider_db.wasm",
@@ -290,8 +290,7 @@ fn db_mount_json(db_dir: &Path) -> String {
                 "read_only":true,
                 "sample_limit":20
             }}
-        }}"#,
-        host = db_dir.display().to_string()
+        }}"#
     )
 }
 

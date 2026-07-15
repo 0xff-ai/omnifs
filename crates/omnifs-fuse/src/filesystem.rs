@@ -169,7 +169,7 @@ impl Filesystem for Frontend {
     fn readlink(&self, _req: &Request, ino: INodeNo, reply: ReplyData) {
         let fs = self.clone();
         drop(self.rt.spawn(async move {
-            match fs.do_readlink(ino.0) {
+            match fs.do_readlink(ino.0).await {
                 Ok(bytes) => reply.data(&bytes),
                 Err(errno) => reply.error(errno),
             }
