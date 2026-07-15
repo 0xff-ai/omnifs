@@ -76,7 +76,7 @@ pub mod auth {
 #[doc(hidden)]
 pub fn load_mount_table_for_callout_tests(
     context: HostContext,
-    cloner: std::sync::Arc<GitCloner>,
+    cloner: &std::sync::Arc<GitCloner>,
     desired: &omnifs_workspace::mounts::Registry,
     handle: &tokio::runtime::Handle,
 ) -> Result<crate::MountTable, crate::RegistryError> {
@@ -230,10 +230,10 @@ impl PendingTestCallout {
 
 impl Runtime {
     /// Non-blocking receive of the next captured provider callout, if one has
-    /// been issued and not yet answered. Only yields values on runtimes built
-    /// with [`Engine::new_for_callout_tests`]; returns `None` otherwise or when
-    /// no callout is pending. Lets a concurrency test observe that two ops are
-    /// suspended on host imports at the same instant before answering either.
+    /// been issued and not yet answered. Returns `None` outside a mount built by
+    /// [`load_mount_table_for_callout_tests`] or when no callout is pending.
+    /// Lets a concurrency test observe that two ops are suspended on host
+    /// imports at the same instant before answering either.
     #[doc(hidden)]
     pub fn try_recv_test_callout(&self) -> Option<PendingTestCallout> {
         let inbox = self.test_callouts.as_ref()?;

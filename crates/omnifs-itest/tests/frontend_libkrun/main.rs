@@ -460,6 +460,7 @@ fn now_rfc3339() -> String {
 // ===========================================================================
 
 #[test]
+#[allow(clippy::too_many_lines)] // one live lifecycle and filesystem matrix scenario
 fn libkrun_lifecycle_and_matrix() {
     if !acceptance_gated() {
         return;

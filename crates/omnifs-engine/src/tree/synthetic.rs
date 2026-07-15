@@ -111,13 +111,7 @@ impl PaginationControl {
         control_entries()
             .into_iter()
             .filter_map(|record| {
-                Self::from_name(&record.name).map(|action| {
-                    Entry::synthetic(
-                        record.name,
-                        record.meta,
-                        Synthetic::pagination_control(action),
-                    )
-                })
+                Self::from_name(&record.name).map(|_| Entry::synthetic(record.name, record.meta))
             })
             .collect()
     }
@@ -153,11 +147,7 @@ impl Synthetic {
     }
 
     fn root_ignore_entry(name: &str) -> Entry {
-        Entry::synthetic(
-            name.to_string(),
-            Self::root_ignore_meta(),
-            Self::root_ignore(),
-        )
+        Entry::synthetic(name.to_string(), Self::root_ignore_meta())
     }
 
     /// The mount-root ignore `Entry`s to append to a root listing.

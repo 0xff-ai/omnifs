@@ -48,7 +48,7 @@ impl Daemon {
     fn spawn() -> Option<Self> {
         let hermetic = hermetic_home();
         let child = Command::new(omnifs_bin())
-            .arg("daemon")
+            .args(live::daemon_args(hermetic.home.path()))
             .env("OMNIFS_HOME", hermetic.home.path())
             .env("RUST_LOG", "warn")
             .spawn();

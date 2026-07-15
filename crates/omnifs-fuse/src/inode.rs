@@ -58,8 +58,13 @@ impl Frontend {
     /// Build a kernel `FileAttr` from the policied namespace [`Attrs`], folding
     /// in a live-follow grown size so a polling `tail -f` re-stats to the latest
     /// end. The TTL is engine-decided; FUSE copies it through.
-    pub(crate) fn ns_file_attr(&self, ino: u64, node: Path, attrs: &Attrs) -> (FileAttr, Duration) {
-        let grown = self.grown_sizes.get(&node).map_or(0, |g| *g);
+    pub(crate) fn ns_file_attr(
+        &self,
+        ino: u64,
+        node: &Path,
+        attrs: &Attrs,
+    ) -> (FileAttr, Duration) {
+        let grown = self.grown_sizes.get(node).map_or(0, |g| *g);
         let size = attrs.size.max(grown);
         (
             NodeKind::from(&attrs.kind).attr(ino, attrs, size),
@@ -75,10 +80,10 @@ impl NodeKind {
             ino: INodeNo(ino),
             size,
             blocks: attrs.blocks,
-            atime: attrs.accessed.map(millis_to_system_time).unwrap_or(now),
-            mtime: attrs.modified.map(millis_to_system_time).unwrap_or(now),
-            ctime: attrs.modified.map(millis_to_system_time).unwrap_or(now),
-            crtime: attrs.created.map(millis_to_system_time).unwrap_or(now),
+            atime: attrs.accessed.map_or(now, millis_to_system_time),
+            mtime: attrs.modified.map_or(now, millis_to_system_time),
+            ctime: attrs.modified.map_or(now, millis_to_system_time),
+            crtime: attrs.created.map_or(now, millis_to_system_time),
             kind: self.file_type(),
             perm: attrs.mode,
             nlink: attrs.nlink,

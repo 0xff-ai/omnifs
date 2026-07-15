@@ -164,10 +164,11 @@ fn wire_reattach_survives_frontend_and_daemon_restart() {
     let mount_point = home.join("mnt-reattach");
     std::fs::create_dir_all(&mount_point).expect("mount point");
     let state_dir = home.join("nfs-state");
+    let daemon_args = live::daemon_args(&home);
 
     let spawn_daemon = || {
         Command::new(live::omnifs_bin())
-            .args(["daemon"])
+            .args(&daemon_args)
             .env("OMNIFS_HOME", &home)
             .env_remove("OMNIFS_MOUNT_POINT")
             .env("RUST_LOG", "warn")

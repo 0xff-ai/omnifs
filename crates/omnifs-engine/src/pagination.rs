@@ -19,7 +19,7 @@ pub enum NextPageOutcome {
 impl Runtime {
     /// Read the accumulated cursor and settle the continuation while holding
     /// the same path publication permit as the initial listing. The lifecycle
-    /// owner performs the AppendPage transaction before this method observes
+    /// owner performs the `AppendPage` transaction before this method observes
     /// the typed outcome.
     pub async fn paginate_next(&self, path: &Path) -> NextPageOutcome {
         let _permit = self

@@ -5,6 +5,7 @@
 //! construction, and native-daemon bring-up/readiness/teardown. The matrix and
 //! CLI lifecycle suite share this lock owner and daemon contract.
 
+use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::os::unix::net::UnixStream;
@@ -18,6 +19,7 @@ use omnifs_api::{
     ControlReply, ControlRequest,
 };
 use omnifs_workspace::ids::ProviderId;
+use omnifs_workspace::mounts::Repository;
 use omnifs_workspace::provider::{Artifact, ProviderStore};
 use tempfile::TempDir;
 
@@ -175,9 +177,9 @@ pub fn test_mount_spec_at(id: &ProviderId, mount: &str) -> String {
     format!(r#"{{"provider":{{"id":"{id}","meta":{{"name":"test-provider"}}}},"mount":"{mount}"}}"#)
 }
 
-/// A hermetic `OMNIFS_HOME` with the test provider installed and its mount spec
-/// written to `mounts/`, plus an empty mount point. The daemon loads from
-/// `mounts/` on startup, so no control-plane mount mutation is needed.
+/// A hermetic `OMNIFS_HOME` with the test provider installed, its mount specs
+/// committed as desired state, an immutable daemon snapshot, and an empty
+/// mount point.
 pub struct HermeticHome {
     pub home: TempDir,
     pub mount_point: PathBuf,
@@ -201,11 +203,35 @@ pub fn hermetic_home() -> HermeticHome {
         test_mount_spec_at(&test_id, "test2"),
     )
     .expect("write second test mount spec");
+    let _ = daemon_args(home.path());
 
     let mount_point = home.path().join("mnt");
     std::fs::create_dir_all(&mount_point).expect("mount point");
 
     HermeticHome { home, mount_point }
+}
+
+/// Build the immutable desired-state arguments for a direct hidden-daemon
+/// test launch. This is the sole test helper that initializes and snapshots a
+/// mount repository, so direct launches cannot accidentally read mutable
+/// `mounts/` state.
+#[must_use]
+pub fn daemon_args(home: &Path) -> Vec<OsString> {
+    let repository = Repository::open(home.join("mounts")).expect("open mount repository");
+    let revision = repository
+        .head_revision()
+        .expect("read mount revision")
+        .expect("initialized mount repository has HEAD");
+    let (snapshot, _) = repository
+        .snapshot(&revision, home.join("cache"))
+        .expect("snapshot mount revision");
+    vec![
+        OsString::from("daemon"),
+        OsString::from("--mount-revision"),
+        OsString::from(revision.as_str()),
+        OsString::from("--mount-snapshot"),
+        snapshot.into_os_string(),
+    ]
 }
 
 /// A running `omnifs daemon` and explicit local frontend runner with the test
@@ -382,7 +408,7 @@ pub fn start_multi_frontend_daemon(kinds: &[&str]) -> Option<MultiFrontendDaemon
     }
 
     let daemon = Command::new(omnifs_bin())
-        .args(["daemon"])
+        .args(daemon_args(home.path()))
         .env("OMNIFS_HOME", home.path())
         .env_remove("OMNIFS_MOUNT_POINT")
         .env("RUST_LOG", "warn")
@@ -639,10 +665,10 @@ fn wire_frontend(
     // The daemon always serves its fixed local control socket. The TCP lane
     // additionally requests the token-guarded VFS listener it intentionally
     // exercises.
-    let mut daemon_args = vec!["daemon".to_string()];
+    let mut daemon_args = daemon_args(&home_path);
     if matches!(transport, AttachTransport::Tcp) {
-        daemon_args.push("--attach-tcp".to_string());
-        daemon_args.push("0".to_string());
+        daemon_args.push(OsString::from("--attach-tcp"));
+        daemon_args.push(OsString::from("0"));
     }
     let daemon = Command::new(omnifs_bin())
         .args(&daemon_args)
@@ -857,7 +883,7 @@ fn native_daemon(nfs_lock: Option<TcpListener>) -> Option<NativeDaemon> {
     let control_socket = hermetic.home.path().join("control.sock");
 
     let daemon = Command::new(omnifs_bin())
-        .args(["daemon"])
+        .args(daemon_args(hermetic.home.path()))
         .env("OMNIFS_HOME", hermetic.home.path())
         .env_remove("OMNIFS_MOUNT_POINT")
         .env("RUST_LOG", "warn")

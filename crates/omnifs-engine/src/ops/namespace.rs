@@ -279,7 +279,6 @@ impl Runtime {
             .resources
             .negative_for_checked(&child_path, now)
             .map_err(|error| EngineError::ProviderProtocol(error.to_string()))?
-            .is_some()
         {
             return Ok(LookupOutcome::NotFound);
         }
@@ -321,7 +320,8 @@ impl Runtime {
                 .resources
                 .reserve(PublicationKey::Path(path.clone()))
                 .await;
-            let result = runtime
+
+            runtime
                 .run_list_children(
                     path,
                     cached_validator,
@@ -331,8 +331,7 @@ impl Runtime {
                     cursor,
                     captured_epoch,
                 )
-                .await?;
-            result
+                .await?
         } else {
             self.namespace_flights
                 .list
@@ -401,7 +400,6 @@ impl Runtime {
             .resources
             .negative_for_checked(path, now)
             .map_err(|error| EngineError::ProviderProtocol(error.to_string()))?
-            .is_some()
         {
             return Err(enoent(path.as_str()));
         }

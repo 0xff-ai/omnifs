@@ -10,7 +10,7 @@ pub fn arxiv_harness() -> RuntimeHarness {
         r#"
         {
             "provider": "omnifs_provider_arxiv.wasm",
-            "mount": "arxiv",
+            "mount": "arxiv"
         }
     "#,
     )

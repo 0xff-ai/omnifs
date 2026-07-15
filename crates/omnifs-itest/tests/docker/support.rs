@@ -9,7 +9,7 @@ pub fn docker_harness() -> RuntimeHarness {
         r#"
         {
             "provider": "omnifs_provider_docker.wasm",
-            "mount": "docker",
+            "mount": "docker"
         }
     "#,
     )

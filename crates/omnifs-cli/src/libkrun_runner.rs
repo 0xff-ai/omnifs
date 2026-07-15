@@ -915,7 +915,7 @@ impl LibkrunRunner {
 }
 
 impl LibkrunRunner {
-    pub(crate) async fn is_running(&self) -> Result<Option<bool>> {
+    pub(crate) fn is_running(&self) -> Result<Option<bool>> {
         let Some(pid) = self.read_pidfile()? else {
             return Ok(None);
         };

@@ -10,7 +10,7 @@ pub fn dns_harness() -> RuntimeHarness {
         r#"
         {
             "provider": "omnifs_provider_dns.wasm",
-            "mount": "dns",
+            "mount": "dns"
         }
     "#,
     )

@@ -345,17 +345,6 @@ impl CountLabel {
     pub(crate) fn named(count: usize, noun: &'static str) -> Self {
         Self(format!("{count} {noun}"))
     }
-
-    pub(crate) fn with_secondary(
-        primary_count: usize,
-        primary_noun: &'static str,
-        secondary_count: usize,
-        secondary_noun: &'static str,
-    ) -> Self {
-        Self(format!(
-            "{primary_count} {primary_noun} · {secondary_count} {secondary_noun}"
-        ))
-    }
 }
 
 impl From<usize> for CountLabel {
@@ -393,7 +382,6 @@ pub(crate) enum Priority {
 pub(crate) enum WidthPolicy {
     Auto,
     Path,
-    Digest,
 }
 
 #[derive(Debug, Clone)]
@@ -534,7 +522,6 @@ fn column_value(value: &str, policy: WidthPolicy) -> String {
     match policy {
         WidthPolicy::Auto => value.to_owned(),
         WidthPolicy::Path => truncate_display(value, 32),
-        WidthPolicy::Digest => truncate_display(value, 12),
     }
 }
 
@@ -620,7 +607,7 @@ mod tests {
         let columns = vec![
             Column::new("Name", Priority::Identity, WidthPolicy::Auto),
             Column::new("Location", Priority::Essential, WidthPolicy::Path),
-            Column::new("Digest", Priority::Secondary, WidthPolicy::Digest),
+            Column::new("Digest", Priority::Secondary, WidthPolicy::Auto),
             Column::new("Details", Priority::Detail, WidthPolicy::Auto),
         ];
         let action = Action::fix("omnifs mount reauth github");
@@ -820,25 +807,6 @@ mod tests {
                     color: false
                 })
                 .contains("(none)")
-        );
-    }
-
-    #[test]
-    fn count_labels_keep_named_secondary_counts_in_heading() {
-        let table = ResourceTable::new(
-            "Providers",
-            CountLabel::with_secondary(4, "artifacts", 1, "missing"),
-            vec![],
-        );
-        let mut report = Report::new();
-        report.push(Block::Resources(table));
-        assert!(
-            report
-                .render_with(RenderOptions {
-                    width: 120,
-                    color: false
-                })
-                .starts_with("Providers  4 artifacts · 1 missing\n")
         );
     }
 }

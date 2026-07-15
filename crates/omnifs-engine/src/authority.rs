@@ -74,6 +74,9 @@ pub struct RuntimeAuthority {
 }
 
 impl RuntimeAuthority {
+    // Authority resolution is one fail-closed validation boundary. Splitting it
+    // would distribute partially validated grants across helper return values.
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn resolve(
         manifest: &ProviderManifest,
         spec: &Spec,
@@ -525,8 +528,8 @@ mod tests {
     use omnifs_workspace::ids::{ProviderId, ProviderMeta, ProviderName, ProviderRef};
     use omnifs_workspace::mounts::Spec;
     use omnifs_workspace::provider::{
-        AccessNeed, ConfigField, ConfigMetadata, ConfigType, HostResourceBinding, PreopenMode,
-        PreopenedPath, ProviderManifest,
+        AccessNeed, ConfigField, ConfigMetadata, ConfigType, HostResourceBinding,
+        LimitDeclarations, PreopenMode, PreopenedPath, ProviderManifest,
     };
 
     fn spec() -> Spec {
@@ -557,7 +560,7 @@ mod tests {
             sdk_version: None,
             refresh_interval_secs: 0,
             capabilities,
-            limits: Default::default(),
+            limits: LimitDeclarations::default(),
             auth: None,
             config,
         }
@@ -575,8 +578,17 @@ mod tests {
     }
 
     #[test]
-    fn approved_http_transport_decodes_socket_once() {
-        let authority = RuntimeAuthority::for_test(&[], &[], &["/run/omnifs.sock"]);
+    fn http_authority_accepts_selected_transports_and_denies_unselected_domains() {
+        let authority = RuntimeAuthority::for_test(&["allowed.test"], &[], &["/run/omnifs.sock"]);
+        assert!(matches!(
+            authority.approve_http("https://allowed.test/resource"),
+            Ok(super::ApprovedHttpTransport::Https(_))
+        ));
+        assert!(matches!(
+            authority.approve_http("https://denied.test/resource"),
+            Err(AuthorityError::Denied { kind: "domain" })
+        ));
+
         let url = format!("unix://{}/v1/info", hex::encode("/run/omnifs.sock"));
         let transport = authority.approve_http(&url).unwrap();
         assert!(matches!(

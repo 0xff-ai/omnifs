@@ -28,15 +28,13 @@ use omnifs_api::events::CacheKind;
 /// renderer std::fs passthrough over a real dir) can never be confused with
 /// resolved provider bytes. `Bytes.attrs` is the POST-read learned attrs (exact
 /// size promoted from the bytes) the renderer applies to st_size / the NFSv4
-/// change attribute; `content_type` echoes the rendered representation type. On
-/// a cache hit it is the node's projected attrs (the size was already learned
-/// when the entry was first materialized).
+/// change attribute. On a cache hit it is the node's projected attrs (the size
+/// was already learned when the entry was first materialized).
 #[derive(Debug, Clone)]
 pub enum ReadResult {
     Bytes {
         data: Vec<u8>,
         attrs: Option<FileAttrsCache>,
-        content_type: Option<String>,
     },
 }
 
@@ -93,7 +91,7 @@ impl<'a> FileAttrStore<'a> {
         .map(|record| {
             postcard::from_bytes::<AttrPayload>(&record.payload)
                 .map_err(|error| TreeError::internal(error.to_string()))
-                .and_then(|payload| Ok(payload.meta.into_attrs()))
+                .map(|payload| payload.meta.into_attrs())
         })
         .transpose()?
         .flatten();
@@ -168,119 +166,13 @@ impl TreeNamespace {
         let attrs = projected_attrs.as_ref();
         enforce_declared_materialize_cap(path, attrs)?;
 
-        // Exact-0 short-circuit: a file the projection sizes at exactly zero is
-        // empty without any provider call.
-        if let Some(attrs) = attrs
-            && matches!(attrs.size(), view_types::FileSize::Exact(0))
-            && (!offline || !matches!(attrs.byte_source(), view_types::ByteSource::Deferred(_)))
+        if let Some(result) =
+            projected_read(&attr_store, resources, path, attrs, offline, captured_epoch)?
         {
-            return Ok(ReadResult::Bytes {
-                data: Vec::new(),
-                attrs: Some(attrs.clone()),
-                content_type: None,
-            });
+            return Ok(result);
         }
-
-        // Inline projected bytes are already the canonical answer for this view
-        // leaf. Serve them here instead of forcing each frontend to decode cached
-        // lookup/attr payloads or know whether a provider file route exists.
-        if let Some(attrs) = attrs
-            && let Some(bytes) = attrs.inline_bytes()
-        {
-            let data = bytes.to_vec();
-            enforce_observed_materialize_cap(path, data.len())?;
-            let attrs = attrs
-                .learned_complete_content_attrs(data.len())
-                .map_err(|error| {
-                    TreeError::internal(format!(
-                        "inline projection for {path} contradicts file attrs: {error}"
-                    ))
-                })?;
-            if !offline {
-                attr_store.publish(attrs.clone(), captured_epoch)?;
-            }
-            return Ok(ReadResult::Bytes {
-                data,
-                attrs: Some(attrs),
-                content_type: None,
-            });
-        }
-
-        if let Some(attrs) = attrs
-            && matches!(attrs.byte_source(), view_types::ByteSource::Canonical)
-        {
-            if let Some(canonical) = resources
-                .cached_canonical_for(path)
-                .map_err(|error| TreeError::internal(error.to_string()))?
-            {
-                enforce_observed_materialize_cap(path, canonical.bytes.len())?;
-                let attrs = attrs
-                    .learned_complete_content_attrs(canonical.bytes.len())
-                    .map_err(|error| {
-                        TreeError::internal(format!(
-                            "canonical projection for {path} contradicts its body: {error}"
-                        ))
-                    })?;
-                return Ok(ReadResult::Bytes {
-                    data: canonical.bytes,
-                    attrs: Some(attrs),
-                    content_type: None,
-                });
-            }
-        }
-
-        let file_cache_aux = attrs.and_then(|attrs| {
-            if offline {
-                attrs.durable_observation_cache_aux()
-            } else {
-                attrs.online_cache_aux()
-            }
-        });
-
-        // Read cache cascade: mem (the FUSE pagination/in-memory tier), then the
-        // durable view cache. Online reuse and offline observation use separate
-        // keys, and both validate hits against the projected attrs. A hit serves
-        // the cached bytes and keeps the node's projected (already size-learned)
-        // attrs.
-        if let Some(aux) = file_cache_aux {
-            if let Some(record) = resources.memory_get(path, RecordKind::File, aux.as_deref())
-                && let Some(payload) = file_payload_for_attrs(&record, attrs)
-            {
-                crate::inspector::cache_event(CacheKind::FileHit);
-                return read_result_from_cache(path, payload, attrs);
-            }
-            let durable = if offline {
-                resources.cache_get(path, RecordKind::File, aux.as_deref())
-            } else {
-                resources.view_get(path, RecordKind::File, aux.as_deref(), now)
-            }
-            .map_err(|error| TreeError::internal(error.to_string()))?;
-            if let Some(record) = durable
-                && let Some(payload) = file_payload_for_attrs(&record, attrs)
-            {
-                crate::inspector::cache_event(CacheKind::FileHit);
-                return read_result_from_cache(path, payload, attrs);
-            }
-        }
-
-        if offline
-            && let Some(attrs) = attrs
-            && let view_types::ByteSource::Body(body) = attrs.byte_source()
-        {
-            let view_types::FileSize::Exact(length) = attrs.size() else {
-                return Err(TreeError::internal(
-                    "validated durable body metadata lost its exact length",
-                ));
-            };
-            let data = resources
-                .read_body(body, length)
-                .map_err(|error| TreeError::internal(error.to_string()))?;
-            enforce_observed_materialize_cap(path, data.len())?;
-            return Ok(ReadResult::Bytes {
-                data,
-                attrs: Some(attrs.clone()),
-                content_type: None,
-            });
+        if let Some(result) = cached_read(resources, path, attrs, offline, now)? {
+            return Ok(result);
         }
 
         if offline {
@@ -331,7 +223,6 @@ impl TreeNamespace {
             SyntheticContent::Fixed(bytes) => Ok(ReadResult::Bytes {
                 data: materialized_bytes(node.path(), bytes.clone())?,
                 attrs: node.attrs().cloned(),
-                content_type: None,
             }),
             SyntheticContent::PaginationControl(action) => {
                 let runtime = self.runtime_for(node.mount())?;
@@ -365,11 +256,130 @@ impl TreeNamespace {
                 Ok(ReadResult::Bytes {
                     data: bytes,
                     attrs: Some(super::synthetic::control_read_attrs(len)),
-                    content_type: None,
                 })
             },
         }
     }
+}
+
+fn projected_read(
+    attr_store: &FileAttrStore<'_>,
+    resources: &MountResources,
+    path: &omnifs_core::path::Path,
+    attrs: Option<&FileAttrsCache>,
+    offline: bool,
+    captured_epoch: u64,
+) -> Result<Option<ReadResult>> {
+    if let Some(attrs) = attrs
+        && matches!(attrs.size(), view_types::FileSize::Exact(0))
+        && (!offline || !matches!(attrs.byte_source(), view_types::ByteSource::Deferred(_)))
+    {
+        return Ok(Some(ReadResult::Bytes {
+            data: Vec::new(),
+            attrs: Some(attrs.clone()),
+        }));
+    }
+
+    if let Some(attrs) = attrs
+        && let Some(bytes) = attrs.inline_bytes()
+    {
+        let data = bytes.to_vec();
+        enforce_observed_materialize_cap(path, data.len())?;
+        let attrs = attrs
+            .learned_complete_content_attrs(data.len())
+            .map_err(|error| {
+                TreeError::internal(format!(
+                    "inline projection for {path} contradicts file attrs: {error}"
+                ))
+            })?;
+        if !offline {
+            attr_store.publish(attrs.clone(), captured_epoch)?;
+        }
+        return Ok(Some(ReadResult::Bytes {
+            data,
+            attrs: Some(attrs),
+        }));
+    }
+
+    if let Some(attrs) = attrs
+        && matches!(attrs.byte_source(), view_types::ByteSource::Canonical)
+        && let Some(canonical) = resources
+            .cached_canonical_for(path)
+            .map_err(|error| TreeError::internal(error.to_string()))?
+    {
+        enforce_observed_materialize_cap(path, canonical.bytes.len())?;
+        let attrs = attrs
+            .learned_complete_content_attrs(canonical.bytes.len())
+            .map_err(|error| {
+                TreeError::internal(format!(
+                    "canonical projection for {path} contradicts its body: {error}"
+                ))
+            })?;
+        return Ok(Some(ReadResult::Bytes {
+            data: canonical.bytes,
+            attrs: Some(attrs),
+        }));
+    }
+
+    Ok(None)
+}
+
+fn cached_read(
+    resources: &MountResources,
+    path: &omnifs_core::path::Path,
+    attrs: Option<&FileAttrsCache>,
+    offline: bool,
+    now: u64,
+) -> Result<Option<ReadResult>> {
+    let file_cache_aux = attrs.and_then(|attrs| {
+        if offline {
+            attrs.durable_observation_cache_aux()
+        } else {
+            attrs.online_cache_aux()
+        }
+    });
+
+    if let Some(aux) = file_cache_aux {
+        if let Some(record) = resources.memory_get(path, RecordKind::File, aux.as_deref())
+            && let Some(payload) = file_payload_for_attrs(&record, attrs)
+        {
+            crate::inspector::cache_event(CacheKind::FileHit);
+            return read_result_from_cache(path, payload, attrs).map(Some);
+        }
+        let durable = if offline {
+            resources.cache_get(path, RecordKind::File, aux.as_deref())
+        } else {
+            resources.view_get(path, RecordKind::File, aux.as_deref(), now)
+        }
+        .map_err(|error| TreeError::internal(error.to_string()))?;
+        if let Some(record) = durable
+            && let Some(payload) = file_payload_for_attrs(&record, attrs)
+        {
+            crate::inspector::cache_event(CacheKind::FileHit);
+            return read_result_from_cache(path, payload, attrs).map(Some);
+        }
+    }
+
+    if offline
+        && let Some(attrs) = attrs
+        && let view_types::ByteSource::Body(body) = attrs.byte_source()
+    {
+        let view_types::FileSize::Exact(length) = attrs.size() else {
+            return Err(TreeError::internal(
+                "validated durable body metadata lost its exact length",
+            ));
+        };
+        let data = resources
+            .read_body(body, length)
+            .map_err(|error| TreeError::internal(error.to_string()))?;
+        enforce_observed_materialize_cap(path, data.len())?;
+        return Ok(Some(ReadResult::Bytes {
+            data,
+            attrs: Some(attrs.clone()),
+        }));
+    }
+
+    Ok(None)
 }
 
 /// Resolve a cold `read-file` terminal into bytes + learned attrs, validate, and
@@ -380,8 +390,7 @@ fn finish_read(
     path: &omnifs_core::path::Path,
     result: ReadOutcome,
 ) -> Result<ReadResult> {
-    let Some((data, result_attrs, content_type)) = resolve_read_payload(runtime, path, result)?
-    else {
+    let Some((data, result_attrs)) = resolve_read_payload(runtime, path, result)? else {
         return Err(TreeError::internal(format!(
             "read for {path} could not resolve its byte source"
         )));
@@ -405,7 +414,6 @@ fn finish_read(
     Ok(ReadResult::Bytes {
         data,
         attrs: Some(attrs_cache),
-        content_type,
     })
 }
 
@@ -418,11 +426,10 @@ fn resolve_read_payload(
     runtime: &Runtime,
     path: &omnifs_core::path::Path,
     result: ReadOutcome,
-) -> Result<Option<(Vec<u8>, FileAttrsCache, Option<String>)>> {
+) -> Result<Option<(Vec<u8>, FileAttrsCache)>> {
     let attrs = result.attrs;
-    let content_type = result.content_type;
     match result.bytes {
-        ReadBytes::Inline(bytes) => Ok(Some((bytes, attrs, content_type))),
+        ReadBytes::Inline(bytes) => Ok(Some((bytes, attrs))),
         ReadBytes::Body(body) => match runtime.read_blob_full(
             body,
             match attrs.size() {
@@ -430,7 +437,7 @@ fn resolve_read_payload(
                 view_types::FileSize::NonZero | view_types::FileSize::Unknown => None,
             },
         ) {
-            Ok(bytes) => Ok(Some((bytes, attrs, content_type))),
+            Ok(bytes) => Ok(Some((bytes, attrs))),
             Err(e) => {
                 warn!(path = %path, error = %e, "blob-backed read failed");
                 Ok(None)
@@ -441,7 +448,7 @@ fn resolve_read_payload(
                 .canonical_bytes_for(path)
                 .map_err(|error| TreeError::internal(error.to_string()))?
             {
-                Ok(Some((bytes, attrs, content_type)))
+                Ok(Some((bytes, attrs)))
             } else {
                 warn!(
                     path = %path,
@@ -500,7 +507,6 @@ fn read_result_from_cache(
     Ok(ReadResult::Bytes {
         data: payload.content,
         attrs,
-        content_type: payload.content_type,
     })
 }
 

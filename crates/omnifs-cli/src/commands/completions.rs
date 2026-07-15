@@ -15,7 +15,7 @@ pub struct CompletionsArgs {
 }
 
 impl CompletionsArgs {
-    pub fn run(self, output: Output) -> anyhow::Result<()> {
+    pub fn run(self, output: &Output) -> anyhow::Result<()> {
         if output.is_structured() {
             anyhow::bail!("completions is a passthrough command and only supports human output")
         }

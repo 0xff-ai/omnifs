@@ -43,8 +43,8 @@ fn github_pat_auth() -> AuthConfig {
     })
 }
 
-fn github_pat_binding(auth: AuthConfig) -> Arc<AuthBinding> {
-    auth_binding(Some(&auth), Some(&github_pat_manifest())).expect("configured auth")
+fn github_pat_binding(auth: &AuthConfig) -> Arc<AuthBinding> {
+    auth_binding(Some(auth), Some(&github_pat_manifest())).expect("configured auth")
 }
 
 fn auth_binding(
@@ -68,7 +68,7 @@ async fn test_no_injection_without_config() {
 
 #[tokio::test]
 async fn test_missing_credential_fails_closed() {
-    let manager = github_pat_binding(github_pat_auth());
+    let manager = github_pat_binding(&github_pat_auth());
     let error = manager
         .authorization_for("https://api.github.com/repos")
         .await
@@ -223,7 +223,7 @@ async fn test_execute_fetch_returns_denied_when_auth_is_required_but_missing() {
     // Create a mount binding with a config that requires auth for api.github.com
     // but has no stored credential. Authorization must fail closed before the
     // request is dispatched.
-    let auth = github_pat_binding(github_pat_auth());
+    let auth = github_pat_binding(&github_pat_auth());
 
     assert!(
         auth.authorization_for("https://api.github.com/repos")

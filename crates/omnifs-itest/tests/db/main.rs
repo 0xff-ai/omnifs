@@ -31,7 +31,7 @@ fn db_harness() -> (tempfile::TempDir, RuntimeHarness) {
     (dir, harness)
 }
 
-async fn read_bytes(harness: &RuntimeHarness, path: &str) -> Vec<u8> {
+fn read_bytes(harness: &RuntimeHarness, path: &str) -> Vec<u8> {
     let result = harness.read(path).unwrap().into_read_file().unwrap();
     expect_inline(&result).to_vec()
 }
@@ -145,13 +145,13 @@ async fn db_meta_listing_is_direct_path_surface() {
 async fn db_table_direct_files_are_coherent() {
     let (_dir, harness) = db_harness();
 
-    let table_bytes = read_bytes(&harness, "/tables/Album/table.json").await;
+    let table_bytes = read_bytes(&harness, "/tables/Album/table.json");
     let doc: TableDoc = serde_json::from_slice(&table_bytes).unwrap();
 
-    let schema_sql = read_bytes(&harness, "/tables/Album/schema.sql").await;
-    let schema_json = read_bytes(&harness, "/tables/Album/schema.json").await;
-    let indexes_json = read_bytes(&harness, "/tables/Album/indexes.json").await;
-    let count_txt = read_bytes(&harness, "/tables/Album/count.txt").await;
+    let schema_sql = read_bytes(&harness, "/tables/Album/schema.sql");
+    let schema_json = read_bytes(&harness, "/tables/Album/schema.json");
+    let indexes_json = read_bytes(&harness, "/tables/Album/indexes.json");
+    let count_txt = read_bytes(&harness, "/tables/Album/count.txt");
 
     assert_eq!(
         doc.create_sql.as_deref().unwrap_or("").as_bytes(),
@@ -242,7 +242,7 @@ async fn db_sample_served_whole_uncapped() {
     // `sample.json` is a fully-materialized body projection, served whole
     // through the read-file terminal with no inline-size cap. The Wide sample
     // (20 rows * ~4 KiB at LIMIT 20) exceeds 64 KiB, proving it is not capped.
-    let wide = read_bytes(&harness, "/tables/Wide/sample.json").await;
+    let wide = read_bytes(&harness, "/tables/Wide/sample.json");
     assert!(wide.starts_with(b"["));
     assert!(
         wide.len() > 64 * 1024,
@@ -250,7 +250,7 @@ async fn db_sample_served_whole_uncapped() {
         wide.len()
     );
 
-    let album = read_bytes(&harness, "/tables/Album/sample.json").await;
+    let album = read_bytes(&harness, "/tables/Album/sample.json");
     let album_text = String::from_utf8_lossy(&album);
     assert!(album_text.contains("For Those About To Rock"));
 }
@@ -259,11 +259,11 @@ async fn db_sample_served_whole_uncapped() {
 async fn db_meta_direct_files() {
     let (dir, harness) = db_harness();
 
-    let info_bytes = read_bytes(&harness, "/meta/info.json").await;
+    let info_bytes = read_bytes(&harness, "/meta/info.json");
     let info: FileInfo = serde_json::from_slice(&info_bytes).unwrap();
 
-    let version = read_bytes(&harness, "/meta/version.txt").await;
-    let path = read_bytes(&harness, "/meta/path.txt").await;
+    let version = read_bytes(&harness, "/meta/version.txt");
+    let path = read_bytes(&harness, "/meta/path.txt");
 
     assert_eq!(version, format!("{}\n", info.sqlite_version).into_bytes());
     // path.txt echoes the configured path verbatim: under guest == host the

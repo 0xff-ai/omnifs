@@ -147,12 +147,12 @@ impl Frontend {
                     tokio::select! {
                         event = sub.recv() => {
                             let Some(event) = event else { break; };
-                            fs.apply_event(&event).await;
+                            fs.apply_event(&event);
                         }
                         request = flush_rx.recv() => {
                             let Some(request) = request else { break; };
                             while let Some(event) = sub.try_recv() {
-                                fs.apply_event(&event).await;
+                                fs.apply_event(&event);
                             }
                             let _ = request.send(());
                         }
@@ -173,7 +173,7 @@ impl Frontend {
         receiver.await.map_err(|_| Errno::EIO)
     }
 
-    async fn apply_event(&self, event: &NsEvent) {
+    fn apply_event(&self, event: &NsEvent) {
         match event {
             NsEvent::InvalidateSubtree { path } if path.is_root() => {
                 self.grown_sizes.clear();
@@ -208,8 +208,9 @@ impl Frontend {
                     let (parent, name) = self
                         .inodes
                         .get(&ino)
-                        .map(|inode| (inode.parent, inode.name.clone()))
-                        .unwrap_or((ROOT_INO, String::new()));
+                        .map_or((ROOT_INO, String::new()), |inode| {
+                            (inode.parent, inode.name.clone())
+                        });
                     (entry.key().clone(), ino, parent, name)
                 })
             })

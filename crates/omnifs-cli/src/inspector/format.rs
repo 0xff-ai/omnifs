@@ -1,6 +1,6 @@
-//! Format [`InspectorEvent`] records for terminal output.
+//! Formatting policies shared by the inspector UI and trace model.
 
-use omnifs_api::events::{CacheKind, InspectorEvent, InspectorRecord, TraceId};
+use omnifs_api::events::CacheKind;
 
 /// Map a wire `CacheKind` to the user-facing display label. The wire
 /// schema distinguishes browse/file/blob tiers so a debugger can see
@@ -9,7 +9,7 @@ use omnifs_api::events::{CacheKind, InspectorEvent, InspectorRecord, TraceId};
 /// non-hit/miss variants by their literal name. Shared by the
 /// plain-mode formatter and the TUI's stage construction so both
 /// surfaces use the same vocabulary.
-pub fn cache_event_label(kind: CacheKind) -> &'static str {
+pub(super) fn cache_event_label(kind: CacheKind) -> &'static str {
     use CacheKind::{
         BlobHit, BlobMiss, BrowseHit, BrowseMiss, FileHit, FileMiss, Invalidated, PreloadStored,
     };
@@ -21,118 +21,7 @@ pub fn cache_event_label(kind: CacheKind) -> &'static str {
     }
 }
 
-pub fn format_record(record: &InspectorRecord) -> String {
-    format!(
-        "[{} +{}µs] {}",
-        record.ts,
-        record.mono_us,
-        format_event(record.trace_id, &record.event)
-    )
-}
-
-// One exhaustive variant ladder over `InspectorEvent`. Splitting it into
-// per-variant helpers obscures the wire-vs-display correspondence
-// without saving a meaningful number of lines, so the lint is allowed.
-#[allow(clippy::too_many_lines)]
-fn format_event(trace_id: TraceId, event: &InspectorEvent) -> String {
-    match event {
-        InspectorEvent::FuseStart { op, mount, path } => {
-            format!("fuse.start #{trace_id} {op} {}", mount_path(mount, path))
-        },
-        InspectorEvent::FuseEnd { op, end } => format!(
-            "fuse.end   #{trace_id} {op} {} {}µs",
-            end.result.outcome, end.elapsed_us
-        ),
-        InspectorEvent::ProviderStart {
-            operation_id,
-            mount,
-            provider,
-            method,
-            path,
-        } => format!(
-            "provider.start #{trace_id} op={operation_id} {mount}/{provider} {method} {path}"
-        ),
-        InspectorEvent::ProviderEnd { operation_id, end } => format!(
-            "provider.end   #{trace_id} op={operation_id} {} {}µs",
-            end.result.outcome, end.elapsed_us
-        ),
-        InspectorEvent::CalloutStart {
-            operation_id,
-            callout_index,
-            kind,
-            summary,
-        } => format!(
-            "callout.start #{trace_id} op={operation_id} idx={callout_index} {kind} {summary}"
-        ),
-        InspectorEvent::CalloutEnd {
-            operation_id,
-            callout_index,
-            end,
-        } => format!(
-            "callout.end   #{trace_id} op={operation_id} idx={callout_index} {} {}µs",
-            end.result.outcome, end.elapsed_us
-        ),
-        InspectorEvent::SubtreeStart {
-            operation_id,
-            tree_ref,
-        } => format!("subtree.start #{trace_id} op={operation_id} {tree_ref}"),
-        InspectorEvent::SubtreeEnd {
-            operation_id,
-            tree_ref,
-            end,
-        } => format!(
-            "subtree.end   #{trace_id} op={operation_id} {tree_ref} {} {}µs",
-            end.result.outcome, end.elapsed_us
-        ),
-        InspectorEvent::CloneStart {
-            operation_id,
-            cache_key,
-            remote,
-        } => format!("clone.start #{trace_id} op={operation_id} {cache_key} {remote}"),
-        InspectorEvent::CloneEnd {
-            operation_id,
-            cache_key,
-            end,
-        } => format!(
-            "clone.end   #{trace_id} op={operation_id} {cache_key} {} {}µs",
-            end.result.outcome, end.elapsed_us
-        ),
-        InspectorEvent::CacheEvent {
-            operation_id,
-            mount,
-            path,
-            kind,
-            elapsed_us,
-        } => format_cache(trace_id, *operation_id, mount, path, *kind, *elapsed_us),
-    }
-}
-
-fn format_cache(
-    trace_id: u64,
-    operation_id: Option<u64>,
-    mount: &str,
-    path: &str,
-    kind: CacheKind,
-    elapsed_us: Option<u64>,
-) -> String {
-    let label = cache_event_label(kind);
-    let op = operation_id.map_or_else(|| "host".to_string(), |id| format!("op={id}"));
-    let timing = elapsed_us.map_or_else(String::new, |us| format!(" {us}µs"));
-    format!(
-        "{label} #{trace_id} {op} {}{timing}",
-        mount_path(mount, path)
-    )
-}
-
-fn mount_path(mount: &str, path: &str) -> String {
-    if path.starts_with('/') {
-        format!("{mount}{path}")
-    } else {
-        format!("{mount}/{path}")
-    }
-}
-
-pub fn shorten_path(path: &str, max: usize) -> String {
+pub(super) fn shorten_path(path: &str, max: usize) -> String {
     if max <= 3 {
         return "…".to_string();
     }
@@ -167,7 +56,7 @@ pub fn shorten_path(path: &str, max: usize) -> String {
 // Microsecond elapsed times are presented to users with one decimal of
 // precision; the f64 cast cannot lose visible precision at this scale.
 #[allow(clippy::cast_precision_loss)]
-pub fn format_latency_us(us: u64) -> String {
+pub(super) fn format_latency_us(us: u64) -> String {
     if us >= 1_000_000 {
         format!("{:.1}s", us as f64 / 1_000_000.0)
     } else if us >= 1_000 {
@@ -177,7 +66,7 @@ pub fn format_latency_us(us: u64) -> String {
     }
 }
 
-pub fn compact_mode(cols: u16, rows: u16) -> bool {
+pub(super) fn compact_mode(cols: u16, rows: u16) -> bool {
     cols < 80 || rows < 24
 }
 

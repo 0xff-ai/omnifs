@@ -17,7 +17,7 @@ pub struct LogsArgs {
 }
 
 impl LogsArgs {
-    pub fn run(self, output: Output) -> anyhow::Result<()> {
+    pub fn run(self, output: &Output) -> anyhow::Result<()> {
         if output.is_structured() {
             anyhow::bail!("logs is a passthrough command and only supports human output")
         }

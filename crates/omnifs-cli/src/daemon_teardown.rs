@@ -169,7 +169,7 @@ impl<'a> DaemonTeardown<'a> {
     /// successful POST alone is not enough to report `DaemonStopped`.
     async fn shutdown_and_wait(&self, pid: u32) -> TeardownOutcome {
         match self.workspace.daemon().shutdown().await {
-            Ok(Some(_)) => {
+            Ok(Some(())) => {
                 let deadline = tokio::time::Instant::now() + SHUTDOWN_SETTLE_TIMEOUT;
                 let mut last_error = None;
                 loop {
@@ -177,8 +177,7 @@ impl<'a> DaemonTeardown<'a> {
                         Ok(None) if !crate::process::is_alive(pid) => {
                             return TeardownOutcome::DaemonStopped { pid };
                         },
-                        Ok(Some(_)) => {},
-                        Ok(None) => {},
+                        Ok(Some(_) | None) => {},
                         Err(error) => last_error = Some(format!("{error:#}")),
                     }
                     if tokio::time::Instant::now() >= deadline {

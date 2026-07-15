@@ -290,15 +290,13 @@ impl futures::Stream for EventStream {
     type Item = NsEvent;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<NsEvent>> {
-        loop {
-            match Pin::new(&mut self.inner).poll_next(cx) {
-                Poll::Ready(Some(Ok(event))) => return Poll::Ready(Some(event)),
-                Poll::Ready(Some(Err(_))) => {
-                    return Poll::Ready(Some(NsEvent::InvalidateSubtree { path: Path::root() }));
-                },
-                Poll::Ready(None) => return Poll::Ready(None),
-                Poll::Pending => return Poll::Pending,
-            }
+        match Pin::new(&mut self.inner).poll_next(cx) {
+            Poll::Ready(Some(Ok(event))) => Poll::Ready(Some(event)),
+            Poll::Ready(Some(Err(_))) => {
+                Poll::Ready(Some(NsEvent::InvalidateSubtree { path: Path::root() }))
+            },
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
         }
     }
 }

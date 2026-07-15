@@ -256,7 +256,7 @@ impl ReauthArgs {
         result?;
         Ok(crate::commands::receipt::MountReauthReceipt {
             verdict: crate::commands::receipt::Verdict::Ok,
-            mount: self.name.to_string(),
+            mount: self.name.clone(),
         })
     }
 

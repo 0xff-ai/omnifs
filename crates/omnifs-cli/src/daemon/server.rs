@@ -132,10 +132,8 @@ enum TaskEvent {
 fn check_startup_events(
     events_rx: &mut tokio::sync::mpsc::UnboundedReceiver<TaskEvent>,
 ) -> anyhow::Result<()> {
-    while let Ok(event) = events_rx.try_recv() {
-        match event {
-            TaskEvent::Control => anyhow::bail!("control listener exited before readiness"),
-        }
+    if let Ok(TaskEvent::Control) = events_rx.try_recv() {
+        anyhow::bail!("control listener exited before readiness");
     }
     Ok(())
 }
@@ -144,7 +142,7 @@ pub(crate) struct Daemon {
     context: DaemonContext,
     registry: Arc<MountTable>,
     inspector: Option<Arc<Inspector>>,
-    daemon_record: Arc<DaemonRecordStore>,
+    record_store: Arc<DaemonRecordStore>,
     attach_store: Arc<AttachStore>,
     vfs: OnceLock<Arc<omnifs_vfs_wire::VfsServer>>,
     shutdown_tx: tokio::sync::watch::Sender<bool>,
@@ -158,7 +156,7 @@ impl Daemon {
         context: DaemonContext,
         registry: Arc<MountTable>,
         inspector: Option<Arc<Inspector>>,
-        daemon_record: Arc<DaemonRecordStore>,
+        record_store: Arc<DaemonRecordStore>,
         attach_store: Arc<AttachStore>,
     ) -> Self {
         let (shutdown_tx, _) = tokio::sync::watch::channel(false);
@@ -166,7 +164,7 @@ impl Daemon {
             context,
             registry,
             inspector,
-            daemon_record,
+            record_store,
             attach_store,
             vfs: OnceLock::new(),
             shutdown_tx,
@@ -264,7 +262,7 @@ impl Daemon {
                 if newly_bound {
                     vfs.remove_listener(&listener_target);
                 }
-                return Err(error.into());
+                return Err(error);
             },
         };
         if let Err(error) = self.attach_store.set(target) {
@@ -292,7 +290,7 @@ impl Daemon {
         };
         let path = self.context.vsock_attach_socket();
         let (listener_target, newly_bound) = vfs
-            .ensure_vsock_with_status(path, requested_token)
+            .ensure_vsock_with_status(&path, requested_token)
             .context("bind namespace vsock listener")?;
         let target = match attach_target(&listener_target) {
             Ok(record) => record,
@@ -300,7 +298,7 @@ impl Daemon {
                 if newly_bound {
                     vfs.remove_listener(&listener_target);
                 }
-                return Err(error.into());
+                return Err(error);
             },
         };
         if let Err(error) = self.attach_store.set(target) {
@@ -324,7 +322,7 @@ impl Daemon {
             vfs.shutdown().await;
         }
         self.registry.shutdown_all();
-        self.daemon_record.remove();
+        self.record_store.remove();
         self.cleanup_sockets();
         result
     }
@@ -341,7 +339,7 @@ impl Daemon {
         check_startup_events(&mut events_rx)?;
         // The VFS-owned startup gate keeps the bound control and namespace
         // tasks from serving or exiting until this durable publication succeeds.
-        self.daemon_record.publish()?;
+        self.record_store.publish()?;
         vfs.mark_ready();
         anyhow::ensure!(
             vfs.ready(),
@@ -561,6 +559,7 @@ impl Daemon {
     }
 }
 
+#[allow(clippy::too_many_lines)] // one exhaustive typed control-protocol dispatch boundary
 async fn handle_control_connection(
     daemon: Arc<Daemon>,
     mut stream: UnixStream,
@@ -763,9 +762,9 @@ async fn handle_control_connection(
             for record in subscription.history {
                 write_inspector_line(&mut stream, InspectorLine::Record((*record).clone())).await?;
             }
-            let mut live = subscription.live;
+            let mut live_events = subscription.live;
             loop {
-                match live.recv().await {
+                match live_events.recv().await {
                     Ok(record) => {
                         write_inspector_line(&mut stream, InspectorLine::Record((*record).clone()))
                             .await?;
@@ -857,7 +856,7 @@ fn api_credential_health_kind(health: &omnifs_auth::CredentialHealth) -> Credent
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
     use omnifs_api::{
         CONTROL_MAX_LINE_BYTES, CONTROL_PROTOCOL_VERSION, ControlErrorCode, ControlOperation,
@@ -865,7 +864,7 @@ mod tests {
     };
     use tokio::io::AsyncWriteExt as _;
 
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     async fn request(path: &std::path::Path, operation: ControlOperation) -> ControlReply {
         let mut stream = tokio::net::UnixStream::connect(path).await.unwrap();
@@ -903,7 +902,7 @@ mod tests {
         let registry = Arc::new(
             omnifs_engine::MountTable::load_online(
                 context.host_context(),
-                cloner,
+                &cloner,
                 &desired,
                 &tokio::runtime::Handle::current(),
             )
@@ -948,11 +947,10 @@ mod tests {
 
     #[tokio::test]
     #[allow(unsafe_code)]
+    #[allow(clippy::too_many_lines)] // one end-to-end control and listener lifecycle scenario
     async fn control_socket_dispatches_ready_status_attach_persists_across_restart_and_shutdown() {
         let dir = tempfile::tempdir().unwrap();
-        let _env_guard = ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _env_guard = ENV_LOCK.lock().await;
         let home = std::fs::canonicalize(dir.path()).unwrap();
         unsafe {
             std::env::set_var("OMNIFS_HOME", &home);
@@ -1139,9 +1137,7 @@ mod tests {
     #[allow(unsafe_code)]
     async fn control_socket_rejects_malformed_and_oversized_lines() {
         let dir = tempfile::tempdir().unwrap();
-        let _env_guard = ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _env_guard = ENV_LOCK.lock().await;
         let home = std::fs::canonicalize(dir.path()).unwrap();
         unsafe {
             std::env::set_var("OMNIFS_HOME", &home);

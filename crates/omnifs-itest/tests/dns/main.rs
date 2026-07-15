@@ -75,7 +75,7 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
         r#"
         {
             "provider": "omnifs_provider_dns.wasm",
-            "mount": "dns",
+            "mount": "dns"
         }
     "#,
     );
@@ -225,7 +225,7 @@ async fn dns_provider_unknown_resolver_read_is_invalid_input() {
         r#"
         {
             "provider": "omnifs_provider_dns.wasm",
-            "mount": "dns",
+            "mount": "dns"
         }
     "#,
     );
@@ -236,15 +236,11 @@ async fn dns_provider_unknown_resolver_read_is_invalid_input() {
         .into_result()
         .unwrap()
         .unwrap_err();
-    match error {
-        error => {
-            assert_eq!(error.kind, ErrorKind::InvalidInput);
-            assert!(
-                error.message.contains("unknown resolver specifier"),
-                "unexpected resolver error: {error:?}"
-            );
-        },
-    }
+    assert_eq!(error.kind, ErrorKind::InvalidInput);
+    assert!(
+        error.message.contains("unknown resolver specifier"),
+        "unexpected resolver error: {error:?}"
+    );
 }
 
 #[tokio::test]
@@ -253,7 +249,7 @@ async fn dns_provider_unknown_record_reads_are_not_found() {
         r#"
         {
             "provider": "omnifs_provider_dns.wasm",
-            "mount": "dns",
+            "mount": "dns"
         }
     "#,
     );
@@ -264,9 +260,7 @@ async fn dns_provider_unknown_record_reads_are_not_found() {
         .into_result()
         .unwrap()
         .unwrap_err();
-    match error {
-        error => assert_eq!(error.kind, ErrorKind::NotFound),
-    }
+    assert_eq!(error.kind, ErrorKind::NotFound);
 
     let error = harness
         .read("/@cloudflare/example.com/BOGUS")
@@ -274,9 +268,7 @@ async fn dns_provider_unknown_record_reads_are_not_found() {
         .into_result()
         .unwrap()
         .unwrap_err();
-    match error {
-        error => assert_eq!(error.kind, ErrorKind::NotFound),
-    }
+    assert_eq!(error.kind, ErrorKind::NotFound);
 }
 
 #[test]

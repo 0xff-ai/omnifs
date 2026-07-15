@@ -19,7 +19,6 @@ use std::path::{Path, PathBuf};
 
 use crate::auth::{AuthReadiness, MountAuth};
 use crate::commands::frontend::{FrontendFilesystem as Filesystem, FrontendRuntime as Runtime};
-use crate::mount_config::MountConfig;
 use crate::workspace::Workspace;
 
 #[derive(Debug, Clone, Serialize)]
@@ -27,8 +26,6 @@ pub(crate) struct Inventory {
     pub(crate) home: PathBuf,
     pub(crate) mount_revision: Option<Revision>,
     pub(crate) applied_revision: Option<Revision>,
-    #[serde(skip_serializing)]
-    pub(crate) desired_mounts: Vec<MountConfig>,
     pub(crate) daemon: DaemonObservation,
     pub(crate) runners: Vec<RunnerStatus>,
     pub(crate) frontends: Vec<FrontendStatus>,
@@ -401,8 +398,7 @@ impl ServingState {
     pub(crate) const fn severity(&self) -> Severity {
         match self {
             Self::Live => Severity::Positive,
-            Self::Offline => Severity::Neutral,
-            Self::Stopped => Severity::Neutral,
+            Self::Offline | Self::Stopped => Severity::Neutral,
             Self::Failed { .. } | Self::NotLoaded => Severity::Error,
         }
     }
@@ -475,21 +471,12 @@ impl Inventory {
         for mount in &mut mounts {
             mount.access_count = access_count;
         }
-        let desired_mounts = registry
-            .iter()
-            .map(|(name, spec)| MountConfig {
-                name: name.clone(),
-                config: spec.clone(),
-                source: registry.spec_path(name),
-            })
-            .collect();
         let mut daemon = DaemonObservation::from(daemon_probe);
         daemon.runtime = runtime;
         Ok(Self {
             home: layout.config_dir,
             mount_revision,
             applied_revision,
-            desired_mounts,
             daemon,
             runners,
             frontends,
@@ -574,7 +561,6 @@ impl Inventory {
             home: PathBuf::from("/tmp/omnifs"),
             mount_revision: None,
             applied_revision: None,
-            desired_mounts: Vec::new(),
             daemon: DaemonObservation::test(state),
             runners: Vec::new(),
             frontends,
@@ -962,8 +948,6 @@ fn derive_serving_state(observation: MountObservation) -> ServingState {
     }
     if matches!(observation.loaded, Presence::Present) {
         ServingState::Live
-    } else if matches!(observation.daemon, Presence::Present) {
-        ServingState::NotLoaded
     } else {
         ServingState::NotLoaded
     }

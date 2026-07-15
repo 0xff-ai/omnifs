@@ -143,7 +143,6 @@ mod tests {
             home: PathBuf::new(),
             mount_revision: None,
             applied_revision: None,
-            desired_mounts: Vec::new(),
             daemon: crate::inventory::DaemonObservation {
                 status: None,
                 probe: crate::inventory::DaemonProbe::Stopped,

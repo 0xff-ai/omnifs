@@ -82,7 +82,6 @@ impl BlobRecord {
 pub(crate) enum FactPayload {
     Lookup(LookupPayload),
     Attr(AttrPayload),
-    Dirents(DirentsPayload),
     File(FilePayload),
     FileBody {
         version_token: Option<String>,
@@ -195,14 +194,6 @@ pub struct Key {
 }
 
 impl Key {
-    pub fn new(path: &Path, kind: RecordKind) -> Self {
-        Self {
-            path: path.clone(),
-            kind,
-            aux: None,
-        }
-    }
-
     pub fn with_aux(path: &Path, kind: RecordKind, aux: Option<impl Into<String>>) -> Self {
         Self {
             path: path.clone(),
@@ -395,13 +386,7 @@ impl Caches {
         if let Some(owner) = owners.get(&projection_id).and_then(Weak::upgrade) {
             return Ok(owner);
         }
-        let owner = MountResources::new(
-            Arc::clone(self),
-            mount,
-            projection_id,
-            provider_id,
-            spec_source,
-        )?;
+        let owner = MountResources::new(self, mount, projection_id, provider_id, spec_source)?;
         owners.insert(projection_id, Arc::downgrade(&owner));
         Ok(owner)
     }
@@ -423,31 +408,16 @@ impl Caches {
             owner.validate_durable_projection()?;
             return Ok(owner);
         }
-        let owner = MountResources::new_existing(
-            Arc::clone(self),
-            mount,
-            projection_id,
-            provider_id,
-            spec_source,
-        )?;
+        let owner =
+            MountResources::new_existing(self, mount, projection_id, provider_id, spec_source)?;
         owner.validate_durable_projection()?;
         owners.insert(projection_id, Arc::downgrade(&owner));
         Ok(owner)
     }
 }
 
-/// Scoped negative cache entry for a `NotFound` terminal.
-#[derive(Clone)]
-pub(crate) struct Negative {
-    id: Option<Vec<u8>>,
-    expires_at: Option<u64>,
-    as_of_epoch: u64,
-}
-
 /// Per-projection owner over the global body store and Fjall database.
 pub struct MountResources {
-    pub(crate) caches: Arc<Caches>,
-    pub(crate) mount: Name,
     pub(crate) projection: ProjectionStore,
     pub(crate) body: Arc<BodyStore>,
     pub(crate) memory: MemoryTier,
@@ -494,7 +464,7 @@ impl PublicationKey {
     fn blocks(&self, requested: &Self) -> bool {
         match (self, requested) {
             (Self::Path(holder), Self::Path(waiter)) => {
-                holder == waiter || (waiter.has_prefix(holder) && holder != waiter)
+                holder == waiter || waiter.has_prefix(holder)
             },
             (Self::Object(holder), Self::Object(waiter))
             | (Self::Revalidate(holder), Self::Revalidate(waiter)) => holder == waiter,
@@ -526,7 +496,7 @@ pub struct Coherence {
 
 impl MountResources {
     fn new(
-        caches: Arc<Caches>,
+        caches: &Caches,
         mount: &Name,
         projection_id: ProjectionId,
         provider_id: ProviderId,
@@ -540,11 +510,11 @@ impl MountResources {
             spec_source,
             provider_id,
         )?;
-        Ok(Self::from_projection(caches, mount, projection))
+        Ok(Self::from_projection(caches, projection))
     }
 
     fn new_existing(
-        caches: Arc<Caches>,
+        caches: &Caches,
         mount: &Name,
         projection_id: ProjectionId,
         provider_id: ProviderId,
@@ -558,18 +528,12 @@ impl MountResources {
             spec_source,
             provider_id,
         )?;
-        Ok(Self::from_projection(caches, mount, projection))
+        Ok(Self::from_projection(caches, projection))
     }
 
-    fn from_projection(
-        caches: Arc<Caches>,
-        mount: &Name,
-        projection: ProjectionStore,
-    ) -> Arc<Self> {
+    fn from_projection(caches: &Caches, projection: ProjectionStore) -> Arc<Self> {
         let body = Arc::clone(&caches.body);
         Arc::new(Self {
-            caches,
-            mount: mount.clone(),
             projection,
             body,
             memory: MemoryTier::new(),
@@ -715,16 +679,28 @@ impl MountResources {
             .map_or_else(Vec::new, |(_, writes)| writes)
     }
 
+    // Every publication phase shares one coherence guard and one Fjall
+    // transaction, so keeping this boundary whole is the atomicity invariant.
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn publish(
         &self,
         transition: ProjectionTransition,
         captured_epoch: u64,
     ) -> Result<PublicationOutcome, ProjectionError> {
+        let ProjectionTransition {
+            records,
+            dirents,
+            objects,
+            freshness,
+            invalidations,
+            blobs,
+            git,
+        } = transition;
         // Bodies become immutable and addressable before the projection
         // transaction can publish a reference to them. This work intentionally
         // happens before taking the coherence mutex.
         let mut prepared_objects = Vec::new();
-        for object in &transition.objects {
+        for object in &objects {
             if let ObjectMutation::Canonical {
                 id,
                 bytes,
@@ -741,15 +717,12 @@ impl MountResources {
         }
 
         let mut prepared_records = Vec::new();
-        for record in &transition.records {
+        for record in &records {
             let fact = match &record.fact {
                 FactPayload::Lookup(value) => {
                     DurableFact::Lookup(normalize_lookup(value, &self.body)?)
                 },
                 FactPayload::Attr(value) => DurableFact::Attr(normalize_attr(value, &self.body)?),
-                FactPayload::Dirents(value) => {
-                    DurableFact::Dirents(normalize_dirents(value, &self.body)?)
-                },
                 FactPayload::File(value) => DurableFact::File {
                     version_token: value.version_token.clone(),
                     content_type: value.content_type.clone(),
@@ -779,7 +752,7 @@ impl MountResources {
         }
 
         let mut prepared_blobs = Vec::new();
-        for blob in &transition.blobs {
+        for blob in &blobs {
             self.body.validate(blob.body, Some(blob.metadata.size))?;
             prepared_blobs.push((
                 blob_key(blob.request),
@@ -790,22 +763,20 @@ impl MountResources {
                 }),
             ));
         }
-        let prepared_git = transition
-            .git
+        let prepared_git = git
             .iter()
             .map(|git| {
                 validate_git_relative(&git.relative_path)?;
                 Ok((
                     git_key(&git.path),
                     DurableFact::Git {
-                        id: git.id.clone(),
+                        id: git.id,
                         relative_path: git.relative_path.clone(),
                     },
                 ))
             })
             .collect::<Result<Vec<_>, ProjectionError>>()?;
-        let transition_git_paths: HashSet<Path> =
-            transition.git.iter().map(|git| git.path.clone()).collect();
+        let transition_git_paths: HashSet<Path> = git.iter().map(|git| git.path.clone()).collect();
 
         let mut coherence = self.coherence.lock();
         if captured_epoch != coherence.invalidation_epoch {
@@ -815,10 +786,10 @@ impl MountResources {
         let mut memory_paths = HashSet::new();
         let mut memory_prefixes = Vec::new();
         let mut memory_object_invalidation = false;
-        for record in &transition.records {
+        for record in &records {
             memory_paths.insert(record.path.clone());
         }
-        for mutation in &transition.dirents {
+        for mutation in &dirents {
             let path = match mutation {
                 DirentsMutation::Replace { path, .. }
                 | DirentsMutation::MergeHints { path, .. }
@@ -826,10 +797,10 @@ impl MountResources {
             };
             memory_paths.insert(path.clone());
         }
-        for freshness in &transition.freshness {
+        for freshness in &freshness {
             memory_paths.insert(freshness.path.clone());
         }
-        for invalidation in &transition.invalidations {
+        for invalidation in &invalidations {
             match invalidation {
                 Invalidation::Object(id) => {
                     retired.insert(id.clone());
@@ -847,7 +818,6 @@ impl MountResources {
             }
         }
 
-        let invalidations = transition.invalidations.clone();
         let next_epoch = if invalidations.is_empty() {
             None
         } else {
@@ -859,7 +829,7 @@ impl MountResources {
             let mut removals = Vec::<Vec<u8>>::new();
 
             let mut claims = HashMap::<String, Vec<u8>>::new();
-            for object in &transition.objects {
+            for object in &objects {
                 match object {
                     ObjectMutation::Canonical { .. } => {},
                     ObjectMutation::Index { id, alias } => {
@@ -875,7 +845,7 @@ impl MountResources {
                     .map_err(ProjectionError::from)?;
                 tx.insert(facts, key, value);
             }
-            for object in &transition.objects {
+            for object in &objects {
                 if let ObjectMutation::Index { id, alias } = object {
                     let (body, length, validator) =
                         read_object_row(tx, facts, id)?.ok_or_else(|| {
@@ -902,14 +872,14 @@ impl MountResources {
                 );
                 let value = postcard::to_allocvec(&record.fact).map_err(ProjectionError::from)?;
                 tx.insert(facts, key, value);
-                if let DurableFact::Lookup(lookup) = &record.fact {
-                    if let LookupPayload::Negative { id: Some(id) } = lookup {
-                        tx.insert(
-                            facts,
-                            negative_key(&id, &record.path),
-                            record.path.as_str().as_bytes(),
-                        );
-                    }
+                if let DurableFact::Lookup(lookup) = &record.fact
+                    && let LookupPayload::Negative { id: Some(id) } = lookup
+                {
+                    tx.insert(
+                        facts,
+                        negative_key(id, &record.path),
+                        record.path.as_str().as_bytes(),
+                    );
                 }
             }
             for (key, fact) in &prepared_blobs {
@@ -926,10 +896,10 @@ impl MountResources {
                     postcard::to_allocvec(fact).map_err(ProjectionError::from)?,
                 );
             }
-            for mutation in &transition.dirents {
+            for mutation in &dirents {
                 apply_dirents(tx, facts, mutation)?;
             }
-            for freshness in &transition.freshness {
+            for freshness in &freshness {
                 let mut expiry = b"x:".to_vec();
                 expiry.extend_from_slice(freshness.path.as_str().as_bytes());
                 tx.insert(
@@ -938,20 +908,15 @@ impl MountResources {
                     postcard::to_allocvec(&freshness.expires_at).map_err(ProjectionError::from)?,
                 );
             }
-            let mut reconciled_paths = reconcile_listing_relations(
-                tx,
-                facts,
-                &prepared_records,
-                &transition.dirents,
-                &mut removals,
-            )?;
+            let mut reconciled_paths =
+                reconcile_listing_relations(tx, facts, &prepared_records, &dirents, &mut removals)?;
             // Apply invalidation scanners after all transition writes. Fjall's
             // transaction reads see those writes, so same-terminal aliases,
             // records, Git facts, and negative reverse rows are retired too.
             for id in &retired {
                 remove_object_facts(tx, facts, id, &mut removals)?;
             }
-            for invalidation in &transition.invalidations {
+            for invalidation in &invalidations {
                 match invalidation {
                     Invalidation::ListingPath(path) => {
                         remove_path_facts(tx, facts, path, &mut removals)?;
@@ -1074,12 +1039,6 @@ impl MountResources {
             .transpose()
     }
 
-    pub(crate) fn attr_payload(&self, path: &Path) -> Result<Option<AttrPayload>, ProjectionError> {
-        self.cache_get(path, RecordKind::Attr, None)?
-            .map(|record| postcard::from_bytes(&record.payload).map_err(ProjectionError::from))
-            .transpose()
-    }
-
     pub(crate) fn dirents_payload(
         &self,
         path: &Path,
@@ -1132,6 +1091,48 @@ impl MountResources {
         Ok(Some(CachedCanonical {
             id,
             bytes,
+            validator,
+        }))
+    }
+
+    /// Resolve the canonical selected for `path` by the transition currently
+    /// being lowered, falling back to the durable selection when the terminal
+    /// does not replace it. This keeps cold object reads within one atomic
+    /// publication instead of requiring an index write before the rest of the
+    /// provider terminal can be validated and committed.
+    pub(crate) fn selected_canonical_for(
+        &self,
+        path: &Path,
+        objects: &[ObjectMutation],
+    ) -> Result<Option<CachedCanonical>, ProjectionError> {
+        let Some(id) = objects.iter().rev().find_map(|mutation| match mutation {
+            ObjectMutation::Index { id, alias } if alias == path => Some(id),
+            ObjectMutation::Canonical { .. } | ObjectMutation::Index { .. } => None,
+        }) else {
+            return self.cached_canonical_for(path);
+        };
+
+        if let Some((bytes, validator)) = objects.iter().rev().find_map(|mutation| match mutation {
+            ObjectMutation::Canonical {
+                id: candidate,
+                bytes,
+                validator,
+            } if candidate == id => Some((bytes, validator)),
+            ObjectMutation::Canonical { .. } | ObjectMutation::Index { .. } => None,
+        }) {
+            return Ok(Some(CachedCanonical {
+                id: id.clone(),
+                bytes: bytes.clone(),
+                validator: validator.clone(),
+            }));
+        }
+
+        let Some((body, length, validator)) = read_object_row_direct(&self.projection, id)? else {
+            return Ok(None);
+        };
+        Ok(Some(CachedCanonical {
+            id: id.clone(),
+            bytes: self.body.read(body, Some(length))?,
             validator,
         }))
     }
@@ -1221,13 +1222,13 @@ impl MountResources {
         &self,
         path: &Path,
         now_millis: u64,
-    ) -> Result<Option<Negative>, ProjectionError> {
+    ) -> Result<bool, ProjectionError> {
         let Some(record) = self.cache_get(path, RecordKind::Lookup, None)? else {
-            return Ok(None);
+            return Ok(false);
         };
         let payload: LookupPayload = postcard::from_bytes(&record.payload)?;
-        let LookupPayload::Negative { id } = payload else {
-            return Ok(None);
+        let LookupPayload::Negative { .. } = payload else {
+            return Ok(false);
         };
         let expiry = self
             .projection
@@ -1236,13 +1237,9 @@ impl MountResources {
             .transpose()?
             .flatten();
         if expiry.is_some_and(|deadline| now_millis >= deadline) {
-            return Ok(None);
+            return Ok(false);
         }
-        Ok(Some(Negative {
-            id,
-            expires_at: expiry,
-            as_of_epoch: self.current_epoch(),
-        }))
+        Ok(true)
     }
 
     /// Validate every row and cross-row relation before an offline mount can
@@ -1668,17 +1665,6 @@ fn normalize_attr(value: &AttrPayload, body: &BodyStore) -> Result<AttrPayload, 
     })
 }
 
-fn normalize_dirents(
-    value: &DirentsPayload,
-    body: &BodyStore,
-) -> Result<DirentsPayload, ProjectionError> {
-    let mut value = value.clone();
-    for entry in &mut value.entries {
-        entry.meta = normalize_meta(&entry.meta, body)?;
-    }
-    Ok(value)
-}
-
 fn normalize_meta(meta: &EntryMeta, body: &BodyStore) -> Result<EntryMeta, ProjectionError> {
     let EntryMeta::File { attrs: Some(attrs) } = meta else {
         return Ok(meta.clone());
@@ -1958,6 +1944,9 @@ fn invalidate_parent_listing(
     Ok(Some(parent))
 }
 
+// Lookup and listing reconciliation is one transaction scan. Splitting it
+// would obscure which mutations participate in the same durable update.
+#[allow(clippy::too_many_lines)]
 fn reconcile_listing_relations(
     tx: &mut fjall::OptimisticWriteTx,
     facts: &fjall::OptimisticTxKeyspace,
@@ -2164,7 +2153,7 @@ fn apply_dirents(
             }
             let mut merged = current;
             merged.entries.extend(entries.iter().cloned());
-            merged.next_cursor = next_cursor.clone();
+            merged.next_cursor.clone_from(next_cursor);
             merged.exhaustive = *exhaustive;
             (path, merged)
         },
@@ -2337,9 +2326,9 @@ mod tests {
             transition_for_object(rebound_id, b"new-rebound", std::slice::from_ref(&rebound))
                 .objects,
         );
-        transition
-            .objects
-            .extend(transition_for_object(survivor_id, b"other", &[survivor.clone()]).objects);
+        transition.objects.extend(
+            transition_for_object(survivor_id, b"other", std::slice::from_ref(&survivor)).objects,
+        );
         transition
             .invalidations
             .push(Invalidation::Object(OBJ_ID.to_vec()));
@@ -2423,6 +2412,9 @@ mod tests {
     }
 
     #[test]
+    // One fixture proves that failed, fenced, and successful publication paths
+    // preserve the same object/path coherence boundary.
+    #[allow(clippy::too_many_lines)]
     fn stale_object_and_path_facts_are_fenced() {
         let (_dir, _caches, store) = open_store("m");
         let path = p("/x");
@@ -2535,14 +2527,17 @@ mod tests {
     }
 
     #[test]
+    // This is the representative durable-cache lifecycle fixture; splitting it
+    // would hide the ordering between TTL replacement and object invalidation.
+    #[allow(clippy::too_many_lines)]
     fn negative_ttl_replacement_and_object_invalidation_are_durable() {
         let (_dir, _caches, store) = open_store("m");
         let path = p("/missing");
         publish_negative(&store, &path, Some(OBJ_ID.to_vec()), 10_000);
-        assert!(store.negative_for_checked(&path, 1_000).unwrap().is_some());
-        assert!(store.negative_for_checked(&path, 11_000).unwrap().is_none());
+        assert!(store.negative_for_checked(&path, 1_000).unwrap());
+        assert!(!store.negative_for_checked(&path, 11_000).unwrap());
         publish_negative(&store, &path, Some(OBJ_ID.to_vec()), 20_000);
-        assert!(store.negative_for_checked(&path, 1_000).unwrap().is_some());
+        assert!(store.negative_for_checked(&path, 1_000).unwrap());
         store
             .publish(
                 ProjectionTransition {
@@ -2552,7 +2547,7 @@ mod tests {
                 store.current_epoch(),
             )
             .unwrap();
-        assert!(store.negative_for_checked(&path, 1_000).unwrap().is_none());
+        assert!(!store.negative_for_checked(&path, 1_000).unwrap());
 
         let parent = p("/dir");
         let child = p("/dir/child");
@@ -2625,7 +2620,7 @@ mod tests {
         publish_negative(&store, &child, Some(OBJ_ID.to_vec()), 30_000);
         let listing = store.dirents_payload(&parent).unwrap().unwrap();
         assert!(listing.entries.is_empty());
-        assert!(store.negative_for_checked(&child, 1_000).unwrap().is_some());
+        assert!(store.negative_for_checked(&child, 1_000).unwrap());
 
         let invalidated_parent = p("/invalidated");
         let invalidated_child = p("/invalidated/child");

@@ -104,7 +104,11 @@ mod tests {
     use omnifs_core::path::Path;
 
     fn key(path: &str) -> Key {
-        Key::new(&Path::parse(path).unwrap(), RecordKind::Attr)
+        Key::with_aux(
+            &Path::parse(path).unwrap(),
+            RecordKind::Attr,
+            None::<String>,
+        )
     }
 
     #[test]

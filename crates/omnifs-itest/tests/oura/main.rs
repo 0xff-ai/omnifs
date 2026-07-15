@@ -32,7 +32,7 @@ fn oura_harness() -> RuntimeHarness {
         r#"
         {
             "provider": "omnifs_provider_oura.wasm",
-            "mount": "oura",
+            "mount": "oura"
         }
     "#,
     )

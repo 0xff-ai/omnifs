@@ -1,11 +1,23 @@
 mod support;
 
 use omnifs_core::path::Path;
-use omnifs_nfs::{Export, NodeKind, ReadOnlyExport, Status};
+use omnifs_nfs::{DirListing, Export, NodeKind, ReadOnlyExport, Status};
+use std::time::{Duration, Instant};
 use support::{test_export, test_export_with_mount};
 use tokio::runtime::Builder;
 
 const OLD_OPEN_MATERIALIZE_LIMIT_BYTES: u64 = 64 * 1024 * 1024;
+
+fn readdir(export: &Export, id: u64, context: &str) -> DirListing {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        match export.readdir(id) {
+            Ok(listing) => return listing,
+            Err(Status::Delay) if Instant::now() < deadline => {},
+            Err(error) => panic!("{context}: {error:?}"),
+        }
+    }
+}
 
 #[test]
 #[should_panic(expected = "NFS adapter requires a multi-thread Tokio runtime")]
@@ -33,7 +45,7 @@ fn hello_dir(export: &Export) -> u64 {
 fn omnifs_export_lists_and_reads_through_runtime() {
     let harness = test_export();
     let export = &harness.export;
-    let root_listing = export.readdir(export.root()).expect("root listing");
+    let root_listing = readdir(export, export.root(), "root listing");
     assert!(root_listing.exhaustive);
     let root_names = root_listing
         .entries
@@ -52,7 +64,7 @@ fn omnifs_export_lists_and_reads_through_runtime() {
     let hello_attr = export.attr(hello).expect("hello attr");
     assert_eq!(hello_attr.kind, NodeKind::Directory);
 
-    let listing = export.readdir(hello).expect("hello listing");
+    let listing = readdir(export, hello, "hello listing");
     let names = listing
         .entries
         .iter()
@@ -88,7 +100,7 @@ fn omnifs_export_lists_and_reads_through_runtime() {
         13
     );
 
-    let _listing_after_read = export.readdir(hello).expect("hello relisting");
+    let _listing_after_read = readdir(export, hello, "hello relisting");
     assert_eq!(
         export
             .attr(message)
@@ -109,7 +121,7 @@ fn omnifs_export_lists_and_reads_through_runtime() {
     );
 
     let bundle = export.lookup(hello, "bundle").expect("bundle lookup");
-    for entry in export.readdir(bundle).expect("bundle listing").entries {
+    for entry in readdir(export, bundle, "bundle listing").entries {
         if entry.attr.kind == NodeKind::File {
             assert!(matches!(export.readdir(entry.id), Err(Status::NotDir)));
         }
@@ -143,7 +155,7 @@ fn mount_enumeration_root_reflects_startup_mount_set() {
         .expect("message open");
     let before = export.attr(root).expect("root attr before listing").change;
 
-    let root_listing = export.readdir(root).expect("root listing");
+    let root_listing = readdir(export, root, "root listing");
     let root_names = root_listing
         .entries
         .iter()
@@ -202,7 +214,7 @@ fn omnifs_export_treats_omnifs_as_a_normal_provider_mount_name() {
     let omnifs_dir = export
         .lookup(export.root(), "omnifs")
         .expect("provider named omnifs must resolve from root");
-    let root_listing = export.readdir(export.root()).expect("root listing");
+    let root_listing = readdir(export, export.root(), "root listing");
     let omnifs_entries = root_listing
         .entries
         .iter()
@@ -231,7 +243,7 @@ fn omnifs_export_does_not_synthesize_top_level_omnifs_alias() {
     let harness = test_export();
     let export = &harness.export;
 
-    let root_listing = export.readdir(export.root()).expect("root listing");
+    let root_listing = readdir(export, export.root(), "root listing");
     let root_names = root_listing
         .entries
         .iter()
@@ -242,7 +254,7 @@ fn omnifs_export_does_not_synthesize_top_level_omnifs_alias() {
     let export_root = export
         .lookup(export.root(), "omnifs")
         .expect("mount export lookup");
-    let export_listing = export.readdir(export_root).expect("export listing");
+    let export_listing = readdir(export, export_root, "export listing");
     let export_names = export_listing
         .entries
         .iter()
@@ -403,7 +415,7 @@ fn omnifs_export_handles_concurrent_lookup_and_readdir_allocation() {
         for _ in 0..4 {
             scope.spawn(|| {
                 for _ in 0..50 {
-                    let listing = export.readdir(test_root).expect("test root listing");
+                    let listing = readdir(export, test_root, "test root listing");
                     assert!(listing.entries.iter().any(|entry| entry.name == "hello"));
                 }
             });

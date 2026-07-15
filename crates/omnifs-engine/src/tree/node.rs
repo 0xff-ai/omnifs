@@ -150,41 +150,25 @@ impl Node {
     }
 }
 
-/// One child within a `Listing`. Renderer-neutral: name + meta + origin. The
+/// One child within a `Listing`. Renderer-neutral: name + metadata. The
 /// renderer mints its own inode/filehandle over (parent.mount, parent.path.join(name))
-/// and reads attrs from meta without a second resolve. Synthetic entries carry
-/// their byte source directly, so a frontend can mark its inode/handle without
-/// side-channel vectors.
+/// and reads attrs from metadata without a second resolve. Synthetic identity
+/// is resolved from the host-owned path when the child is opened.
 #[derive(Debug, Clone)]
 pub struct Entry {
     pub name: String,
     pub meta: EntryMeta,
-    pub origin: EntryOrigin,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum EntryOrigin {
-    Provider,
-    Synthetic(Synthetic),
 }
 
 impl Entry {
     /// A normal provider-projected child.
     pub(crate) fn provider(name: String, meta: EntryMeta) -> Self {
-        Self {
-            name,
-            meta,
-            origin: EntryOrigin::Provider,
-        }
+        Self { name, meta }
     }
 
     /// A host-synthesized child surfaced by `Tree` and materialized by a
     /// frontend through the namespace.
-    pub(crate) fn synthetic(name: String, meta: EntryMeta, synthetic: Synthetic) -> Self {
-        Self {
-            name,
-            meta,
-            origin: EntryOrigin::Synthetic(synthetic),
-        }
+    pub(crate) fn synthetic(name: String, meta: EntryMeta) -> Self {
+        Self { name, meta }
     }
 }

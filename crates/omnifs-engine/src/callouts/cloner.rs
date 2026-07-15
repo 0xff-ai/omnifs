@@ -47,8 +47,8 @@ pub struct GitCloner {
 }
 
 impl GitCloner {
-    pub fn new(cache_dir: PathBuf) -> std::io::Result<Self> {
-        let cache_dir = canonical_directory(&cache_dir)?;
+    pub fn new(cache_dir: impl AsRef<Path>) -> std::io::Result<Self> {
+        let cache_dir = canonical_directory(cache_dir.as_ref())?;
         ensure_directory(&cache_dir)?;
         Ok(Self {
             cache_dir,
@@ -57,8 +57,9 @@ impl GitCloner {
     }
 
     /// Open the existing clone cache root without creating or sweeping it.
-    pub fn open_existing(cache_dir: PathBuf) -> Result<Self, CloneError> {
-        let cache_dir = crate::cache::existing_directory(&cache_dir).map_err(CloneError::Cache)?;
+    pub fn open_existing(cache_dir: impl AsRef<Path>) -> Result<Self, CloneError> {
+        let cache_dir =
+            crate::cache::existing_directory(cache_dir.as_ref()).map_err(CloneError::Cache)?;
         Ok(Self {
             cache_dir,
             locks: DashMap::new(),
@@ -80,9 +81,11 @@ impl GitCloner {
             || reference
                 .chars()
                 .any(|ch| matches!(ch, '~' | '^' | ':' | '?' | '*' | '[' | '\\'))
-            || reference
-                .split('/')
-                .any(|part| part.is_empty() || part.starts_with('.') || part.ends_with(".lock"))
+            || reference.split('/').any(|part| {
+                part.is_empty()
+                    || part.starts_with('.')
+                    || Path::new(part).extension().is_some_and(|ext| ext == "lock")
+            })
         {
             return Err(CloneError::InvalidReference);
         }
@@ -104,10 +107,10 @@ impl GitCloner {
             }
             if url.scheme() == "https" || url.scheme() == "git" {
                 url.set_username("")
-                    .map_err(|_| CloneError::InvalidRemote)?;
+                    .map_err(|()| CloneError::InvalidRemote)?;
             }
             url.set_password(None)
-                .map_err(|_| CloneError::InvalidRemote)?;
+                .map_err(|()| CloneError::InvalidRemote)?;
             return Ok(url.to_string());
         }
 
@@ -177,9 +180,8 @@ impl GitCloner {
             Ok(_) if Self::is_valid_clone(&cache_path, canonical_remote, reference) => {
                 return Ok(cache_path.join(CLONE_REPO_DIR));
             },
-            Ok(_) => return Err(CloneError::ExistingEntry),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
-            Err(_) => return Err(CloneError::ExistingEntry),
+            Ok(_) | Err(_) => return Err(CloneError::ExistingEntry),
         }
 
         let span = crate::inspector::clone_span(operation_id, &cache_id, clone_url);
@@ -267,7 +269,8 @@ impl GitCloner {
         if !metadata.is_file() {
             return Err(CloneError::ExistingEntry);
         }
-        let mut raw = Vec::with_capacity(metadata.len() as usize);
+        let capacity = usize::try_from(metadata.len()).map_err(|_| CloneError::ExistingEntry)?;
+        let mut raw = Vec::with_capacity(capacity);
         file.read_to_end(&mut raw).map_err(CloneError::Cache)?;
         serde_json::from_slice(&raw).map_err(|_| CloneError::ExistingEntry)
     }
@@ -376,20 +379,22 @@ mod tests {
     #[test]
     fn clone_validation_rejects_symlinked_wrapper_and_repo() {
         let temp = tempfile::tempdir().unwrap();
+        let cloner = GitCloner::new(temp.path().join("clones")).unwrap();
+        let root = &cloner.cache_dir;
         let remote = "https://example.test/repo.git";
         let reference = Some("main");
 
-        let wrapper_target = temp.path().join("wrapper-target");
+        let wrapper_target = root.join("wrapper-target");
         std::fs::create_dir_all(wrapper_target.join(CLONE_REPO_DIR).join(".git")).unwrap();
         GitCloner::write_binding(&GitCloner::binding_path(&wrapper_target), remote, reference)
             .unwrap();
-        let wrapper_link = temp.path().join("wrapper-link");
+        let wrapper_link = root.join("wrapper-link");
         std::os::unix::fs::symlink(&wrapper_target, &wrapper_link).unwrap();
         assert!(!GitCloner::is_valid_clone(&wrapper_link, remote, reference));
 
-        let repo_target = temp.path().join("repo-target");
+        let repo_target = root.join("repo-target");
         std::fs::create_dir_all(repo_target.join(".git")).unwrap();
-        let wrapper = temp.path().join("wrapper");
+        let wrapper = root.join("wrapper");
         std::fs::create_dir(&wrapper).unwrap();
         std::os::unix::fs::symlink(&repo_target, wrapper.join(CLONE_REPO_DIR)).unwrap();
         GitCloner::write_binding(&GitCloner::binding_path(&wrapper), remote, reference).unwrap();

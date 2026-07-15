@@ -10,7 +10,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::ids::{ProviderId, ProviderMeta, ProviderRef};
+use crate::ids::{ProviderId, ProviderMeta, ProviderRef, ProviderVersion};
 
 use crate::provider::store::{IndexEntry, ProviderStore, StoreError};
 use crate::provider::{ProviderManifest, ProviderMetadataError, read_provider_metadata_section};
@@ -107,7 +107,7 @@ impl Catalog {
                 actual: actual_name,
             });
         }
-        let expected_version = entry.version.as_ref().map(|version| version.as_str());
+        let expected_version = entry.version.as_ref().map(ProviderVersion::as_str);
         let actual_version = manifest.version.as_deref();
         if actual_version != expected_version {
             return Err(CatalogError::ManifestMismatch {

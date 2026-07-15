@@ -121,7 +121,7 @@ The driver runs one provider instance on a single event-loop thread, so same-ins
 
 ## Test harness
 
-Provider integration tests need deterministic canned HTTP and blob responses. The harness uses `Runtime::new_for_callout_tests`, which captures selected host imports and lets tests answer them.
+Provider integration tests need deterministic canned HTTP and blob responses. The harness builds the immutable mount table through `load_mount_table_for_callout_tests`, which enables callout capture while retaining the production runtime-construction path.
 
 This is test-only host plumbing, not a provider continuation export. The component suspends on async host imports. The test controller intercepts HTTP and blob fetch imports, records the callout, and waits for the test to provide the corresponding `callout-result`.
 

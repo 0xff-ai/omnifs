@@ -12,8 +12,7 @@ use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
 use omnifs_api::{ControlOperation, ControlOutcome};
-use omnifs_itest::live::omnifs_bin;
-use omnifs_itest::live::{control_ready, control_request};
+use omnifs_itest::live::{control_ready, control_request, daemon_args, omnifs_bin};
 use tempfile::TempDir;
 
 /// A host-native daemon with no frontend runner. It reconciles an empty mount
@@ -43,6 +42,12 @@ impl NamespaceOnlyDaemon {
         let bytes = std::fs::read(self.record_path()).expect("read daemon.json");
         serde_json::from_slice(&bytes).expect("daemon.json is valid JSON")
     }
+
+    fn attach_targets(&self) -> Vec<omnifs_workspace::attach::Target> {
+        omnifs_workspace::attach::Store::open(self.home.path().join("frontends/targets.json"))
+            .expect("open attach target store")
+            .targets()
+    }
 }
 
 /// Spawn a daemon in a fresh, empty `OMNIFS_HOME` (no provider,
@@ -51,8 +56,8 @@ fn spawn_namespace_only(extra_args: &[&str]) -> NamespaceOnlyDaemon {
     let home = tempfile::tempdir().expect("home tempdir");
     std::fs::create_dir_all(home.path().join("mounts")).expect("mounts dir");
 
-    let mut args = vec!["daemon"];
-    args.extend_from_slice(extra_args);
+    let mut args = daemon_args(home.path());
+    args.extend(extra_args.iter().map(std::ffi::OsString::from));
     let child = Command::new(omnifs_bin())
         .args(&args)
         .env("OMNIFS_HOME", home.path())
@@ -65,7 +70,7 @@ fn spawn_namespace_only(extra_args: &[&str]) -> NamespaceOnlyDaemon {
 /// Poll the typed Ready operation over the Unix control socket until it succeeds. Ready means
 /// mounts reconciled and every requested surface (including a startup
 /// `--attach-tcp` bind) is up, so once this returns, `daemon.json` reflects
-/// every startup flag.
+/// every startup listener.
 fn wait_ready(ctrl_socket: &Path, deadline: Duration) {
     let start = Instant::now();
     loop {
@@ -114,38 +119,28 @@ fn assert_looks_like_a_token(token: &str) {
 }
 
 #[test]
-fn attach_tcp_flag_binds_at_start_and_the_record_carries_it() {
+fn attach_tcp_flag_binds_at_start_and_persists_the_target() {
     let daemon = spawn_namespace_only(&["--attach-tcp", "0"]);
     wait_ready(&daemon.control_socket(), Duration::from_secs(30));
 
-    let record = daemon.record();
-    let attach = record
-        .get("attach")
-        .and_then(serde_json::Value::as_array)
-        .expect("daemon.json must carry an attach array");
-    assert_eq!(attach.len(), 1, "exactly one attach target: {record}");
-    let entry = &attach[0];
-    assert_eq!(entry["transport"], "tcp", "the entry must be tcp: {entry}");
-    let addr = entry["addr"].as_str().expect("attach addr").to_string();
-    let token = entry["token"].as_str().expect("attach token").to_string();
-    assert_looks_like_a_token(&token);
+    let targets = daemon.attach_targets();
+    let [omnifs_workspace::attach::Target::Tcp { addr, token }] = targets.as_slice() else {
+        panic!("expected one durable TCP attach target, got {targets:?}");
+    };
+    assert_looks_like_a_token(token);
 
     // The listener is really up: a bare TCP connect succeeds (the handshake
     // itself, including the token, is proven at the wire-crate level).
-    TcpStream::connect(&addr)
+    TcpStream::connect(addr)
         .unwrap_or_else(|error| panic!("connect to the attach listener at {addr}: {error}"));
 }
 
 #[test]
-fn no_attach_tcp_flag_means_no_attach_in_the_record() {
+fn no_attach_tcp_flag_means_no_durable_attach_target() {
     let daemon = spawn_namespace_only(&[]);
     wait_ready(&daemon.control_socket(), Duration::from_secs(30));
 
-    let record = daemon.record();
-    assert!(
-        record.get("attach").is_none(),
-        "daemon.json must not carry attach when --attach-tcp was never passed: {record}"
-    );
+    assert!(daemon.attach_targets().is_empty());
 }
 
 #[test]
@@ -153,10 +148,8 @@ fn frontend_attach_target_route_binds_on_demand_and_is_idempotent() {
     let daemon = spawn_namespace_only(&[]);
     let ctrl_socket = daemon.control_socket();
     wait_ready(&ctrl_socket, Duration::from_secs(30));
-    assert!(
-        daemon.record().get("attach").is_none(),
-        "no attach listener before the route is ever called"
-    );
+    assert!(daemon.attach_targets().is_empty());
+    let daemon_record = daemon.record();
 
     let first = post_frontend_attach_target(&ctrl_socket, Some(r#"{"bind_ip":"127.0.0.1"}"#));
     let addr = first["addr"].as_str().expect("addr").to_string();
@@ -179,22 +172,23 @@ fn frontend_attach_target_route_binds_on_demand_and_is_idempotent() {
         "a repeat call must return the same token"
     );
 
-    // The record was patched in place with the same values, and nothing else
-    // about it (notably started_at) shifted just because attach bound later.
-    let before = daemon.record();
+    // Attach authority is durable but separate from process identity. Reusing
+    // the binding must not rewrite the daemon record.
     std::thread::sleep(Duration::from_millis(50));
     post_frontend_attach_target(&ctrl_socket, None);
-    let after = daemon.record();
-    assert_eq!(before["started_at"], after["started_at"]);
-    let attach = after
-        .get("attach")
-        .and_then(serde_json::Value::as_array)
-        .expect("daemon.json must carry an attach array");
-    assert_eq!(attach.len(), 1, "exactly one attach target: {after}");
-    let entry = &attach[0];
-    assert_eq!(entry["transport"], "tcp", "the entry must be tcp: {entry}");
-    assert_eq!(entry["addr"], addr);
-    assert_eq!(entry["token"], token);
+    assert_eq!(daemon.record(), daemon_record);
+    let targets = daemon.attach_targets();
+    let [
+        omnifs_workspace::attach::Target::Tcp {
+            addr: stored_addr,
+            token: stored_token,
+        },
+    ] = targets.as_slice()
+    else {
+        panic!("expected one durable TCP attach target, got {targets:?}");
+    };
+    assert_eq!(stored_addr.to_string(), addr);
+    assert_eq!(stored_token, &token);
 
     TcpStream::connect(&addr)
         .unwrap_or_else(|error| panic!("connect to the attach listener at {addr}: {error}"));

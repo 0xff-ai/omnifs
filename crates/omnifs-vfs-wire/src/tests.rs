@@ -5,7 +5,7 @@
 //! runs a real [`WireNamespace`] over a `UnixListener` in a tempdir.
 
 use std::net::Ipv4Addr;
-use std::path::PathBuf;
+use std::path::{Path as StdPath, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -244,7 +244,11 @@ fn start_tcp_server(
     (server, target)
 }
 
-fn start_vsock_server(namespace: Arc<dyn Namespace>, path: PathBuf, token: &str) -> Arc<VfsServer> {
+fn start_vsock_server(
+    namespace: Arc<dyn Namespace>,
+    path: &StdPath,
+    token: &str,
+) -> Arc<VfsServer> {
     let server = VfsServer::new(namespace);
     server.ensure_vsock(path, Some(token.to_string())).unwrap();
     server
@@ -420,6 +424,9 @@ async fn concurrent_requests_answered_out_of_order() {
 }
 
 #[tokio::test]
+// One fixture proves the initial snapshot plus ordered push delivery over the
+// same connection; splitting it would duplicate the protocol setup.
+#[allow(clippy::too_many_lines)]
 async fn server_pushes_events() {
     let stub = StubNamespace::new();
     let events = stub.events.clone();
@@ -785,7 +792,7 @@ async fn unix_listener_with_token_end_to_end() {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("ns.sock");
     let stub = StubNamespace::new();
-    let server = start_vsock_server(stub.clone(), socket.clone(), VALID_TOKEN);
+    let server = start_vsock_server(stub.clone(), &socket, VALID_TOKEN);
 
     let mut stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
     let hello = postcard::to_allocvec(&Handshake::Hello {
@@ -809,7 +816,7 @@ async fn unix_listener_with_token_end_to_end() {
     server.shutdown().await;
     assert!(!socket.exists(), "dynamic UDS must be removed on shutdown");
 
-    let rebound = start_vsock_server(stub, socket.clone(), VALID_TOKEN);
+    let rebound = start_vsock_server(stub, &socket, VALID_TOKEN);
     assert!(socket.exists(), "dynamic UDS must be bindable again");
     rebound.shutdown().await;
     assert!(!socket.exists(), "rebound UDS must be cleaned too");
@@ -820,7 +827,7 @@ async fn unix_listener_with_token_rejects_wrong_token() {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("ns.sock");
     let stub = StubNamespace::new();
-    let server = start_vsock_server(stub, socket.clone(), VALID_TOKEN);
+    let server = start_vsock_server(stub, &socket, VALID_TOKEN);
 
     let mut stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
     let hello = postcard::to_allocvec(&Handshake::Hello {
@@ -850,7 +857,7 @@ async fn invalid_vsock_token_is_rejected_before_binding() {
     let server = VfsServer::new(StubNamespace::new());
 
     let error = server
-        .ensure_vsock(socket.clone(), Some("not-a-valid-token".to_string()))
+        .ensure_vsock(&socket, Some("not-a-valid-token".to_string()))
         .unwrap_err();
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
     assert!(!socket.exists());
@@ -908,6 +915,9 @@ async fn unix_listener_never_follows_an_existing_symlink() {
 /// outage request promptly, drops that request before the replacement
 /// handshake, and accepts fresh uncached requests after reconnect.
 #[tokio::test]
+// Keep disconnect invalidation, queued-request rejection, and reconnect in one
+// lifecycle fixture so their ordering remains observable.
+#[allow(clippy::too_many_lines)]
 async fn tcp_disconnect_invalidates_root_and_queued_path_request_reconnects() {
     // Exercise the complete dial-plus-Welcome deadline without waiting thirty
     // real seconds. The server accepts Hello but deliberately never answers it.

@@ -711,8 +711,7 @@ async fn runner_running(workspace: &Workspace, id: &FrontendId, output: Output) 
             )
         },
         FrontendRuntime::Libkrun => Ok(LibkrunRunner::new(workspace.layout().config_dir.clone())
-            .is_running()
-            .await?
+            .is_running()?
             .unwrap_or(false)),
     }
 }

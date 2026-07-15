@@ -8,7 +8,7 @@ use std::fmt;
 pub(crate) struct BlobRequestId([u8; 32]);
 
 /// Identity for a mount-scoped Git checkout.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub(crate) struct GitId([u8; 32]);
 
 /// Stable identity of one projected mount revision and provider artifact.
@@ -71,10 +71,6 @@ impl BlobRequestId {
 
     pub(crate) fn filesystem_name(self) -> String {
         hex(self.0)
-    }
-
-    pub(crate) fn as_bytes(&self) -> &[u8; 32] {
-        &self.0
     }
 }
 

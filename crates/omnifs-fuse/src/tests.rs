@@ -103,7 +103,7 @@ fn build_harness() -> FuseHarness {
                 providers_dir.path(),
                 &paths.credentials_file,
             ),
-            cloner,
+            &cloner,
             &desired,
             &tokio::runtime::Handle::current(),
         )
@@ -303,7 +303,7 @@ impl PathNamespace {
         let is_directory = matches!(kind, EntryKind::Directory);
         let is_file = matches!(kind, EntryKind::File);
         Attrs {
-            kind: kind.clone(),
+            kind,
             dev: 0,
             ino: 0,
             size,
@@ -325,9 +325,9 @@ impl PathNamespace {
         }
     }
 
-    fn wrong_node(path: Path) -> NsError {
+    fn wrong_node(path: &Path) -> NsError {
         NsError::Internal {
-            message: format!("unknown path {:?}", path),
+            message: format!("unknown path {path:?}"),
         }
     }
 }
@@ -348,7 +348,7 @@ impl Namespace for PathNamespace {
                 (parent, "test") if parent.is_root() => (mount, EntryKind::Directory),
                 (node, "hello") if node == mount => (hello, EntryKind::Directory),
                 (node, "ranged") if node == hello => (file, EntryKind::File),
-                _ => return Err(Self::wrong_node(parent_for_error)),
+                _ => return Err(Self::wrong_node(&parent_for_error)),
             };
             let size = if matches!(kind, EntryKind::File) {
                 2
@@ -365,10 +365,9 @@ impl Namespace for PathNamespace {
     fn getattr(&self, path: Path) -> TestFuture<'_, Result<Attrs, NsError>> {
         Box::pin(async move {
             match path.as_str() {
-                "/test" => Ok(Self::attrs(EntryKind::Directory, 0)),
-                "/test/hello" => Ok(Self::attrs(EntryKind::Directory, 0)),
+                "/test" | "/test/hello" => Ok(Self::attrs(EntryKind::Directory, 0)),
                 "/test/hello/ranged" => Ok(Self::attrs(EntryKind::File, 2)),
-                _ => Err(Self::wrong_node(path)),
+                _ => Err(Self::wrong_node(&path)),
             }
         })
     }
@@ -408,7 +407,7 @@ impl Namespace for PathNamespace {
         let bytes = self.bytes.lock().expect("path bytes lock").clone();
         Box::pin(async move {
             if path != Path::parse("/test/hello/ranged").unwrap() {
-                return Err(Self::wrong_node(path));
+                return Err(Self::wrong_node(&path));
             }
             let start = usize::try_from(offset)
                 .unwrap_or(usize::MAX)
@@ -423,7 +422,7 @@ impl Namespace for PathNamespace {
     }
 
     fn readlink(&self, path: Path) -> TestFuture<'_, Result<PathBuf, NsError>> {
-        Box::pin(async move { Err(Self::wrong_node(path)) })
+        Box::pin(async move { Err(Self::wrong_node(&path)) })
     }
 
     fn subscribe(&self) -> EventStream {

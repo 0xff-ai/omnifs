@@ -560,19 +560,6 @@ impl Output {
         self
     }
 
-    fn settle_result<W: Write, T: Serialize>(
-        &self,
-        writer: &mut W,
-        verdict: impl Into<ResultVerdict>,
-        result: T,
-    ) -> anyhow::Result<()> {
-        if !self.mode.is_structured() {
-            anyhow::bail!("structured terminal output is unavailable in human mode");
-        }
-        let mut current = state(self);
-        self.settle_result_locked(&mut current, writer, verdict, result)
-    }
-
     fn settle_result_locked<W: Write, T: Serialize>(
         &self,
         current: &mut OutputState,
@@ -847,20 +834,19 @@ mod tests {
             }
         }
 
-        let output = Output::new(OutputMode::Jsonl, false).with_command("status");
-        let mut broken = Broken;
+        let output = Output::new(OutputMode::Jsonl, false)
+            .with_command("status")
+            .with_writer(Broken);
         assert!(
             output
-                .settle_result(&mut broken, ResultVerdict::Ok, serde_json::json!({}))
+                .emit_result(ResultVerdict::Ok, serde_json::json!({}))
                 .is_err()
         );
 
-        let mut bytes = Vec::new();
         let error = output
-            .settle_result(&mut bytes, ResultVerdict::Ok, serde_json::json!({}))
+            .emit_result(ResultVerdict::Ok, serde_json::json!({}))
             .unwrap_err();
         assert!(error.to_string().contains("broken stdout"));
-        assert!(bytes.is_empty());
     }
 
     #[test]

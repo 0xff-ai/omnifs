@@ -174,6 +174,7 @@ When a feature touches mount behavior, prove no regression through `crates/omnif
 - Prefer local handoff paths such as `git fetch /path` or `format-patch | git am`. Reserve public branches for integration or review boundaries unless the user explicitly asks to publish.
 - Keep transient trackers, test plans, implementation ledgers, and handoff notes outside the tracked repository. During active work the task thread or an ignored local file may coordinate it; after integration, current code, contracts, architecture notes, and Git history are the durable authority.
 - Create redesign implementation tasks with the user's **approve for me** permission profile whenever the thread tool exposes that setting. Luna subagents inherit the parent thread's permission profile when no per-agent setting exists; their briefs must require immediate approval requests for necessary escalations rather than treating sandbox or network denial as a product blocker or silently skipping required work.
+- Apply the global coordination contract to this repo. Record live NFS locks, provider-build contention, generated-artifact provenance, and other shared runtime resources in the local task ledger before dispatch.
 
 ## Validation
 

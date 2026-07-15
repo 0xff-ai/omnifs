@@ -370,7 +370,7 @@ impl Export {
     // --- reads ---------------------------------------------------------------
 
     /// Read a whole namespace file by paging through the namespace until EOF.
-    fn read_node_all(&self, node: Path) -> StatusResult<Vec<u8>> {
+    fn read_node_all(&self, node: &Path) -> StatusResult<Vec<u8>> {
         let mut data = Vec::new();
         let mut offset = 0_u64;
         loop {
@@ -653,7 +653,7 @@ impl ReadOnlyExport for Export {
         drop(inode);
 
         match body {
-            Body::Node(node) => self.read_node_all(node),
+            Body::Node(node) => self.read_node_all(&node),
             Body::Synthetic(data) => Ok(data.to_vec()),
         }
     }
@@ -847,7 +847,7 @@ mod tests {
                     providers_dir.path(),
                     &credentials_file,
                 ),
-                cloner,
+                &cloner,
                 &desired,
                 &handle,
             )

@@ -87,12 +87,7 @@ async fn read_item_md_returns_stable_representation() {
 async fn canonical_read_repeats_with_stable_bytes() {
     let harness = make_runtime();
     let namespace = harness.namespace.as_ref();
-    let collection = resolve(namespace, "/test/items/open").await;
-    namespace
-        .readdir(collection.path, DirCursor::start(), 0)
-        .await
-        .unwrap();
-    let item = resolve(namespace, "/test/items/open/7/item.json").await;
+    let item = resolve(namespace, "/test/items/all/7/item.json").await;
     let first = namespace
         .read(item.path.clone(), 0, u32::MAX)
         .await

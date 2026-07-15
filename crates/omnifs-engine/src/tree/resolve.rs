@@ -81,7 +81,7 @@ impl TreeNamespace {
                 retry_after: None,
             });
         }
-        if self.is_mount_enumeration_root(parent.mount(), parent.path())
+        if Self::is_mount_enumeration_root(parent.mount(), parent.path())
             && self.mount_names().iter().any(|mount| mount == name)
         {
             return self.mount_root_node(name.to_string());
@@ -106,7 +106,7 @@ impl TreeNamespace {
             TreeError::invalid_input(format!("resolve_child: invalid name {name:?}: {e}"))
         })?;
 
-        if self.is_mount_enumeration_root(&mount, parent)
+        if Self::is_mount_enumeration_root(&mount, parent)
             && self.mount_names().iter().any(|m| m == name)
         {
             return self.mount_root_node(name.to_string());
@@ -139,40 +139,15 @@ impl TreeNamespace {
             && resources
                 .view_expired(&rel, crate::clock::now_millis())
                 .map_err(|error| TreeError::internal(error.to_string()))?;
-        if let Some(payload) = resources
-            .lookup_payload(&rel)
-            .map_err(|error| TreeError::internal(error.to_string()))?
-        {
-            match payload {
-                crate::view::LookupPayload::Positive(meta) if offline || !expired => {
-                    if let Some(git) = resources
-                        .git_for_path(&rel)
-                        .map_err(|error| TreeError::internal(error.to_string()))?
-                    {
-                        let tree_ref = entry
-                            .trees()
-                            .by_identity(&git.id, &git.relative_path)
-                            .ok_or_else(|| TreeError::internal("validated Git tree is not open"))?;
-                        return Ok(Node::new(
-                            mount,
-                            rel,
-                            EntryMeta::directory(),
-                            NodeBody::Host {
-                                tree_ref,
-                                relative: std::path::PathBuf::new(),
-                                kind: super::node::HostKind::Directory,
-                            },
-                        ));
-                    }
-                    crate::inspector::cache_event(CacheKind::BrowseHit);
-                    return Ok(Node::new(mount, rel, meta, NodeBody::Provider));
-                },
-                crate::view::LookupPayload::Negative { .. } if offline || !expired => {
-                    return Err(TreeError::not_found(rel.as_str()));
-                },
-                crate::view::LookupPayload::Positive(_)
-                | crate::view::LookupPayload::Negative { .. } => {},
-            }
+        if let Some(node) = cached_lookup_node(
+            resources,
+            entry.trees(),
+            mount.as_str(),
+            &rel,
+            offline,
+            expired,
+        )? {
+            return Ok(node);
         }
 
         let cached_parent = cached_dirents(resources, parent)?;
@@ -283,6 +258,58 @@ impl TreeNamespace {
             EntryMeta::directory(),
             NodeBody::Provider,
         ))
+    }
+}
+
+fn cached_lookup_node(
+    resources: &MountResources,
+    trees: &crate::tree_refs::TreeRefs,
+    mount: &str,
+    rel: &Path,
+    offline: bool,
+    expired: bool,
+) -> Result<Option<Node>> {
+    let Some(payload) = resources
+        .lookup_payload(rel)
+        .map_err(|error| TreeError::internal(error.to_string()))?
+    else {
+        return Ok(None);
+    };
+
+    match payload {
+        crate::view::LookupPayload::Positive(meta) if offline || !expired => {
+            if let Some(git) = resources
+                .git_for_path(rel)
+                .map_err(|error| TreeError::internal(error.to_string()))?
+            {
+                let tree_ref = trees
+                    .by_identity(&git.id, &git.relative_path)
+                    .ok_or_else(|| TreeError::internal("validated Git tree is not open"))?;
+                return Ok(Some(Node::new(
+                    mount.to_string(),
+                    rel.clone(),
+                    EntryMeta::directory(),
+                    NodeBody::Host {
+                        tree_ref,
+                        relative: std::path::PathBuf::new(),
+                        kind: super::node::HostKind::Directory,
+                    },
+                )));
+            }
+            crate::inspector::cache_event(CacheKind::BrowseHit);
+            Ok(Some(Node::new(
+                mount.to_string(),
+                rel.clone(),
+                meta,
+                NodeBody::Provider,
+            )))
+        },
+        crate::view::LookupPayload::Negative { .. } if offline || !expired => {
+            Err(TreeError::not_found(rel.as_str()))
+        },
+        crate::view::LookupPayload::Positive(_) | crate::view::LookupPayload::Negative { .. } => {
+            Ok(None)
+        },
     }
 }
 

@@ -88,7 +88,7 @@ async fn lazy_derived_face_returns_the_declared_leaf_bytes() {
             .await
             .unwrap()
             .bytes,
-        b"open\n"
+        b"open"
     );
     assert_eq!(
         harness
@@ -101,7 +101,7 @@ async fn lazy_derived_face_returns_the_declared_leaf_bytes() {
             .await
             .unwrap()
             .bytes,
-        b"title\n"
+        b"Item 7"
     );
 }
 

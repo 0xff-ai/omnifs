@@ -50,7 +50,7 @@ pub(crate) struct ValidatedRequest {
 impl ValidatedRequest {
     pub(crate) fn blob_request_id(&self, auth: Option<&AuthBinding>) -> BlobRequestId {
         BlobRequestId::new(
-            auth.map(|binding| binding.credential_id()),
+            auth.map(omnifs_auth::AuthBinding::credential_id),
             self.method.as_str(),
             &self.canonical_url,
             &self.headers,

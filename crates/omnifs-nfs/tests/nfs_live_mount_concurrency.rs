@@ -277,7 +277,7 @@ impl MountFixture {
         let mount_config = format!(
             r#"{{
                 "provider": {{ "id": "{id}", "meta": {{ "name": "test-provider" }} }},
-                "mount": "test",
+                "mount": "test"
             }}"#
         );
         let spec = omnifs_workspace::mounts::Spec::parse(&mount_config).expect("parse mount spec");
@@ -294,14 +294,14 @@ impl MountFixture {
         let cloner = Arc::new(GitCloner::new(cache_dir.join("clones")).unwrap());
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
         let registry = Arc::new(
-            omnifs_engine::test_support::load_mount_runtimes_for_callout_tests(
+            omnifs_engine::test_support::load_mount_table_for_callout_tests(
                 HostContext::new(
                     &cache_dir,
                     &config_dir,
                     &providers_dir,
                     config_dir.join("credentials.json"),
                 ),
-                cloner,
+                &cloner,
                 &desired,
                 rt.handle(),
             )

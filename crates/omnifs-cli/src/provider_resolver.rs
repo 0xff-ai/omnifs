@@ -39,7 +39,7 @@ impl<'a> ProviderResolver<'a> {
     pub(crate) fn resolve(&self, selector: &str) -> anyhow::Result<ResolvedProvider> {
         let path = Path::new(selector);
         match fs::symlink_metadata(path) {
-            Ok(metadata) => return self.resolve_path(path, metadata),
+            Ok(metadata) => return self.resolve_path(path, &metadata),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {},
             Err(error) => return Err(error).with_context(|| format!("stat provider `{selector}`")),
         }
@@ -58,7 +58,7 @@ impl<'a> ProviderResolver<'a> {
     fn resolve_path(
         &self,
         path: &Path,
-        metadata: fs::Metadata,
+        metadata: &fs::Metadata,
     ) -> anyhow::Result<ResolvedProvider> {
         if metadata.is_dir() {
             let wasm_files = fs::read_dir(path)

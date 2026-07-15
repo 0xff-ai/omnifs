@@ -577,7 +577,7 @@ fn github_owner_listing_tracks_browsed_repos() {
         })])
         .unwrap();
     assert!(
-        matches!(repo_listing.result().unwrap(), Ok(_)),
+        repo_listing.result().unwrap().is_ok(),
         "expected repo listing after gate, got {repo_listing:?}"
     );
 
@@ -722,7 +722,7 @@ fn github_root_and_owner_listings_ignore_unclassified_repo_paths() {
         })])
         .unwrap();
         assert!(
-            matches!(step.result().unwrap(), Ok(_)),
+            step.result().unwrap().is_ok(),
             "expected repo listing for {path}, got {step:?}"
         );
     }
@@ -2248,11 +2248,8 @@ async fn open_then_all_one_load() {
     publish_effects_for_test(&harness.runtime, effects, harness.current_epoch())
         .expect("test effects should publish");
 
-    let all_title_node = resolve_namespace(
-        harness.namespace.as_ref(),
-        "/github/octocat/Hello-World/issues/all/42/title",
-    )
-    .await;
+    let all_title_node =
+        resolve_namespace(harness.namespace.as_ref(), &format!("/github{all_title}")).await;
     let warm = harness
         .namespace
         .read(all_title_node.path, 0, u32::MAX)

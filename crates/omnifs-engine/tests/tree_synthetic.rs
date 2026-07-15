@@ -56,9 +56,18 @@ async fn read_next_control_advances_one_page() {
         .readdir(feed.path, DirCursor::start(), 0)
         .await
         .unwrap();
-    for name in ["item-0", "item-1", "item-2", "item-3", "item-4", "item-5"] {
-        assert!(listing.entries.iter().any(|entry| entry.name == name));
+    let names: Vec<&str> = listing
+        .entries
+        .iter()
+        .map(|entry| entry.name.as_str())
+        .collect();
+    for name in ["item-0", "item-1", "item-2", "item-3"] {
+        assert!(names.contains(&name), "missing {name} from {names:?}");
     }
+    for name in ["item-4", "item-5"] {
+        assert!(!names.contains(&name), "@next loaded too far: {names:?}");
+    }
+    assert!(listing.next.is_some(), "the third page remains: {names:?}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

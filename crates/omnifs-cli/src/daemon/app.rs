@@ -75,7 +75,7 @@ pub(crate) async fn run(args: &DaemonArgs) -> anyhow::Result<()> {
         );
         Arc::new(MountTable::load_online(
             host_context,
-            Arc::clone(&cloner),
+            &cloner,
             &desired,
             &Handle::current(),
         )?)

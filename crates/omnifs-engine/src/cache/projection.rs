@@ -10,7 +10,7 @@ use omnifs_workspace::ids::ProviderId;
 use omnifs_workspace::mounts::Name;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -54,7 +54,6 @@ impl ProjectionManifest {
 pub(crate) struct ProjectionStore {
     root: PathBuf,
     id: ProjectionId,
-    manifest: ProjectionManifest,
     db: OptimisticTxDatabase,
     facts: OptimisticTxKeyspace,
 }
@@ -87,7 +86,9 @@ impl ProjectionStore {
             let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
                 continue;
             };
-            if name.starts_with(".manifest-") && name.ends_with(".tmp") {
+            if name.starts_with(".manifest-")
+                && Path::new(name).extension().is_some_and(|ext| ext == "tmp")
+            {
                 fs::remove_file(path)?;
             }
         }
@@ -114,7 +115,6 @@ impl ProjectionStore {
                         .write(true)
                         .create_new(true)
                         .open(&temporary)?;
-                    use std::io::Write as _;
                     file.write_all(&bytes)?;
                     file.sync_all()?;
                     match fs::hard_link(&temporary, &path) {
@@ -161,7 +161,6 @@ impl ProjectionStore {
         Ok(Self {
             root,
             id,
-            manifest,
             db: database.clone(),
             facts,
         })
@@ -180,7 +179,7 @@ impl ProjectionStore {
         if id != ProjectionId::new(spec_source, provider_id) {
             return Err(ProjectionStoreError::InvalidIdentity);
         }
-        let (root, manifest) = Self::read_existing_projection(
+        let root = Self::read_existing_projection(
             &root.as_ref().join(id.hex()),
             database,
             id,
@@ -193,7 +192,6 @@ impl ProjectionStore {
         Ok(Self {
             root,
             id,
-            manifest,
             db: database.clone(),
             facts,
         })
@@ -206,7 +204,7 @@ impl ProjectionStore {
         mount: &Name,
         spec_source: &[u8],
         provider_id: ProviderId,
-    ) -> Result<(PathBuf, ProjectionManifest), ProjectionStoreError> {
+    ) -> Result<PathBuf, ProjectionStoreError> {
         let root = crate::cache::existing_directory(root).map_err(|error| {
             if error.kind() == io::ErrorKind::NotFound {
                 ProjectionStoreError::Missing
@@ -239,7 +237,7 @@ impl ProjectionStore {
         if !database.keyspace_exists(&keyspace) {
             return Err(ProjectionStoreError::Missing);
         }
-        Ok((root, manifest))
+        Ok(root)
     }
 
     pub(crate) fn validate_existing(
@@ -257,16 +255,6 @@ impl ProjectionStore {
             provider_id,
         )?;
         Ok(())
-    }
-
-    #[must_use]
-    pub(crate) fn root(&self) -> &Path {
-        &self.root
-    }
-
-    #[must_use]
-    pub(crate) fn manifest(&self) -> &ProjectionManifest {
-        &self.manifest
     }
 
     pub(crate) fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, ProjectionStoreError> {
@@ -301,9 +289,8 @@ impl ProjectionStore {
         for _ in 0..8 {
             let mut tx = self.db.write_tx()?.durability(Some(PersistMode::SyncAll));
             let result = plan(&mut tx, &self.facts)?;
-            match tx.commit()? {
-                Ok(()) => return Ok(result),
-                Err(_) => continue,
+            if let Ok(()) = tx.commit()? {
+                return Ok(result);
             }
         }
         Err(ProjectionStoreError::Conflict)
@@ -323,7 +310,9 @@ fn read_manifest(path: &Path) -> Result<Vec<u8>, ProjectionStoreError> {
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err(ProjectionStoreError::InvalidManifest);
     }
-    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    let capacity =
+        usize::try_from(metadata.len()).map_err(|_| ProjectionStoreError::InvalidManifest)?;
+    let mut bytes = Vec::with_capacity(capacity);
     file.read_to_end(&mut bytes)?;
     Ok(bytes)
 }

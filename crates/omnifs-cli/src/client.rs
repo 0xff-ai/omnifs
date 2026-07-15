@@ -23,7 +23,7 @@ use tokio::net::UnixStream;
 use crate::error::{ExitCode, WithExitCode};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(CONTROL_REQUEST_TIMEOUT_SECS);
-const OFFLINE_VALIDATION_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+const OFFLINE_VALIDATION_TIMEOUT: Duration = Duration::from_mins(5);
 
 #[derive(Debug)]
 enum Target {
@@ -185,7 +185,7 @@ impl DaemonClient {
             Err(error) => return DaemonControlState::Sick { error },
         };
         match self.status_from_reply(&reply, &target) {
-            Ok(status) => DaemonControlState::Responding(status),
+            Ok(status) => DaemonControlState::Responding(Box::new(status)),
             Err(error) => DaemonControlState::Sick { error },
         }
     }
@@ -225,7 +225,7 @@ impl DaemonClient {
     }
 
     fn status_from_reply(&self, reply: &ControlReply, target: &Target) -> Result<DaemonStatus> {
-        self.check_version(reply)?;
+        Self::check_version(reply)?;
         if let ControlOutcome::Error(error) = &reply.outcome {
             return Err(control_error("daemon status request failed", error));
         }
@@ -255,7 +255,7 @@ impl DaemonClient {
         ))
     }
 
-    fn check_version(&self, reply: &ControlReply) -> Result<()> {
+    fn check_version(reply: &ControlReply) -> Result<()> {
         if reply.version != CONTROL_PROTOCOL_VERSION {
             return Err(anyhow::anyhow!(
                 "daemon speaks control protocol v{}, this CLI speaks v{}; stop it with `omnifs down`, then rerun",
@@ -266,12 +266,8 @@ impl DaemonClient {
         Ok(())
     }
 
-    fn reply_result<'a>(
-        &self,
-        reply: &'a ControlReply,
-        operation: &str,
-    ) -> Result<&'a ControlOutcome> {
-        self.check_version(reply)?;
+    fn reply_result<'a>(reply: &'a ControlReply, operation: &str) -> Result<&'a ControlOutcome> {
+        Self::check_version(reply)?;
         if let ControlOutcome::Error(error) = &reply.outcome {
             return Err(control_error(operation, error));
         }
@@ -288,7 +284,7 @@ impl DaemonClient {
         else {
             return Err(self.unavailable_error());
         };
-        match self.reply_result(&reply, "daemon attach-target request failed")? {
+        match Self::reply_result(&reply, "daemon attach-target request failed")? {
             ControlOutcome::AttachTcp(target) => Ok(target.clone()),
             _ => Err(unexpected_reply("attach_tcp")),
         }
@@ -298,7 +294,7 @@ impl DaemonClient {
         let Some(reply) = self.request(ControlOperation::AttachVsock).await? else {
             return Err(self.unavailable_error());
         };
-        match self.reply_result(&reply, "daemon attach-target vsock request failed")? {
+        match Self::reply_result(&reply, "daemon attach-target vsock request failed")? {
             ControlOutcome::AttachVsock(target) => Ok(target.clone()),
             _ => Err(unexpected_reply("attach_vsock")),
         }
@@ -308,7 +304,7 @@ impl DaemonClient {
         let Some(reply) = self.request(ControlOperation::Shutdown).await? else {
             return Ok(None);
         };
-        match self.reply_result(&reply, "daemon shutdown request failed")? {
+        match Self::reply_result(&reply, "daemon shutdown request failed")? {
             ControlOutcome::Shutdown => Ok(Some(())),
             _ => Err(unexpected_reply("shutdown")),
         }
@@ -326,7 +322,7 @@ impl DaemonClient {
         else {
             return Err(self.unavailable_error());
         };
-        match self.reply_result(&reply, "offline projection validation failed")? {
+        match Self::reply_result(&reply, "offline projection validation failed")? {
             ControlOutcome::OfflineValidated => Ok(()),
             _ => Err(unexpected_reply("validate_offline")),
         }
@@ -337,7 +333,7 @@ impl DaemonClient {
             return false;
         };
         matches!(
-            self.reply_result(&reply, "daemon readiness request failed"),
+            Self::reply_result(&reply, "daemon readiness request failed"),
             Ok(ControlOutcome::Ready)
         )
     }
@@ -359,7 +355,7 @@ impl EventEndpoint {
 #[derive(Debug)]
 pub(crate) enum DaemonControlState {
     Absent,
-    Responding(DaemonStatus),
+    Responding(Box<DaemonStatus>),
     Sick { error: anyhow::Error },
 }
 
@@ -367,7 +363,7 @@ impl DaemonControlState {
     fn into_optional(self, label: &str) -> Result<Option<DaemonStatus>> {
         match self {
             Self::Absent => Ok(None),
-            Self::Responding(status) => Ok(Some(status)),
+            Self::Responding(status) => Ok(Some(*status)),
             Self::Sick { error } => Err(error.context(if label.is_empty() {
                 "a daemon answered, but its status could not be read".to_string()
             } else {

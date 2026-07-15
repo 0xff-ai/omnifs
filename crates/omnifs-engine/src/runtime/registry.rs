@@ -30,18 +30,6 @@ pub struct MountEntry {
 }
 
 impl MountEntry {
-    pub(crate) fn name(&self) -> &Name {
-        &self.name
-    }
-
-    pub(crate) fn identity(&self) -> &LoadedSpec {
-        &self.identity
-    }
-
-    pub(crate) fn projection_id(&self) -> ProjectionId {
-        self.projection_id
-    }
-
     pub(crate) fn resources(&self) -> &Arc<MountResources> {
         &self.resources
     }
@@ -75,7 +63,7 @@ impl MountTable {
     /// Load every selected mount with its real provider runtime.
     pub fn load_online(
         context: HostContext,
-        cloner: Arc<GitCloner>,
+        cloner: &Arc<GitCloner>,
         desired: &Registry,
         handle: &tokio::runtime::Handle,
     ) -> Result<Self, RegistryError> {
@@ -84,7 +72,7 @@ impl MountTable {
 
     pub(crate) fn load_online_with_options(
         context: HostContext,
-        cloner: Arc<GitCloner>,
+        cloner: &Arc<GitCloner>,
         desired: &Registry,
         handle: &tokio::runtime::Handle,
         capture_test_callouts: bool,
@@ -113,7 +101,7 @@ impl MountTable {
                     loaded,
                     &engine,
                     &caches,
-                    &cloner,
+                    cloner,
                     &context,
                     &credential_service,
                     capture_test_callouts,
@@ -124,16 +112,15 @@ impl MountTable {
             for right in built.iter().skip(index + 1) {
                 if let (Some(left), Some(right)) =
                     (left.runtime.auth_binding(), right.runtime.auth_binding())
+                    && left.credential_id() == right.credential_id()
+                    && !left.same_runtime_as(right)
                 {
-                    if left.credential_id() == right.credential_id() && !left.same_runtime_as(right)
-                    {
-                        return Err(RegistryError::ConfigError(
-                            omnifs_auth::AuthError::CredentialBindingConflict {
-                                id: left.credential_id().clone(),
-                            }
-                            .to_string(),
-                        ));
-                    }
+                    return Err(RegistryError::ConfigError(
+                        omnifs_auth::AuthError::CredentialBindingConflict {
+                            id: left.credential_id().clone(),
+                        }
+                        .to_string(),
+                    ));
                 }
             }
         }
@@ -207,35 +194,22 @@ impl MountTable {
         let provider_interval_secs = manifest.refresh_interval_secs;
         let projection_id = ProjectionId::new(loaded.source(), spec.provider.id);
         let resources = caches
-            .mount(&name, projection_id, spec.provider.id, loaded.source())
+            .mount(name, projection_id, spec.provider.id, loaded.source())
             .map_err(|error| RegistryError::RuntimeError(format!("cache open: {error}")))?;
         let trees = Arc::new(TreeRefs::new());
 
-        let runtime = if capture_test_callouts {
-            Runtime::new_for_callout_tests(
-                engine,
-                &wasm_path,
-                spec,
-                &manifest,
-                Arc::clone(cloner),
-                context,
-                resources.clone(),
-                Arc::clone(&trees),
-                credential_service,
-            )
-        } else {
-            Runtime::new(
-                engine,
-                &wasm_path,
-                spec,
-                &manifest,
-                Arc::clone(cloner),
-                context,
-                resources.clone(),
-                Arc::clone(&trees),
-                credential_service,
-            )
-        }
+        let runtime = Runtime::build(
+            engine,
+            &wasm_path,
+            spec,
+            &manifest,
+            Arc::clone(cloner),
+            context,
+            resources.clone(),
+            Arc::clone(&trees),
+            credential_service,
+            capture_test_callouts,
+        )
         .map_err(|error| RegistryError::from_build(&mount, error))?;
         let runtime = Arc::new(runtime);
         Ok(BuiltMount {
@@ -274,7 +248,7 @@ impl MountTable {
             let projection_id = ProjectionId::new(loaded.source(), spec.provider.id);
             let resources = caches
                 .mount_existing(name, projection_id, spec.provider.id, loaded.source())
-                .map_err(|error| RegistryError::offline_projection(name, error))?;
+                .map_err(|error| RegistryError::offline_projection(name, &error))?;
             let trees = Arc::new(TreeRefs::new());
             for (_path, fact) in
                 resources
@@ -284,14 +258,12 @@ impl MountTable {
                         message: error.to_string(),
                     })?
             {
-                let cloner = match &cloner {
-                    Some(cloner) => cloner,
-                    None => {
-                        let opened =
-                            GitCloner::open_existing(context.cache_dir().join("clones"))
-                                .map_err(|error| RegistryError::OfflineCache(error.to_string()))?;
-                        cloner.insert(opened)
-                    },
+                let cloner = if let Some(cloner) = &cloner {
+                    cloner
+                } else {
+                    let opened = GitCloner::open_existing(context.cache_dir().join("clones"))
+                        .map_err(|error| RegistryError::OfflineCache(error.to_string()))?;
+                    cloner.insert(opened)
                 };
                 let repo = cloner
                     .open_cached(name.as_str(), &fact.id, &fact.relative_path)
@@ -487,7 +459,7 @@ impl RegistryError {
         }
     }
 
-    fn offline_projection(mount: &Name, error: ProjectionError) -> Self {
+    fn offline_projection(mount: &Name, error: &ProjectionError) -> Self {
         if matches!(
             error,
             ProjectionError::Store(crate::cache::projection::ProjectionStoreError::Missing)
@@ -623,7 +595,7 @@ mod tests {
                 &paths.credentials_file,
             )
             .with_wasm_cache_dir(crate::test_support::wasm_cache_dir()),
-            Arc::new(GitCloner::new(cache_dir.path().join("clones")).unwrap()),
+            &Arc::new(GitCloner::new(cache_dir.path().join("clones")).unwrap()),
             &Registry::load(mounts_dir.path()).expect("load selected snapshot"),
             &tokio::runtime::Handle::current(),
         );
@@ -662,7 +634,7 @@ mod tests {
                 .with_wasm_cache_dir(crate::test_support::wasm_cache_dir());
         let result = MountTable::load_online(
             context,
-            Arc::new(GitCloner::new(root.path().join("clones")).unwrap()),
+            &Arc::new(GitCloner::new(root.path().join("clones")).unwrap()),
             &Registry::load(&mounts).expect("load selected snapshot"),
             &tokio::runtime::Handle::current(),
         );
@@ -683,7 +655,7 @@ mod tests {
         );
         let result = MountTable::load_online(
             context,
-            Arc::new(GitCloner::new(root.path().join("clones")).unwrap()),
+            &Arc::new(GitCloner::new(root.path().join("clones")).unwrap()),
             &Registry::load(&mounts).expect("load selected snapshot"),
             &tokio::runtime::Handle::current(),
         );
@@ -738,7 +710,7 @@ mod tests {
         .with_wasm_cache_dir(crate::test_support::wasm_cache_dir());
         let result = MountTable::load_online(
             context,
-            Arc::new(GitCloner::new(root.path().join("clones")).unwrap()),
+            &Arc::new(GitCloner::new(root.path().join("clones")).unwrap()),
             &Registry::load(&mounts).expect("load selected snapshot"),
             &tokio::runtime::Handle::current(),
         );
@@ -786,7 +758,7 @@ mod tests {
         .with_wasm_cache_dir(crate::test_support::wasm_cache_dir());
         let registry = MountTable::load_online(
             context,
-            Arc::new(GitCloner::new(root.path().join("clones")).unwrap()),
+            &Arc::new(GitCloner::new(root.path().join("clones")).unwrap()),
             &Registry::load(&mounts).expect("load selected snapshot"),
             &tokio::runtime::Handle::current(),
         )
@@ -797,6 +769,9 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    // This fixture exercises the complete offline namespace from one durable
+    // projection and keeps every fail-closed assertion on the same snapshot.
+    #[allow(clippy::too_many_lines)]
     async fn offline_table_serves_complete_projection_and_fails_closed() {
         use crate::cache::identity::{GitId, ProjectionId};
         use crate::cache::mount::{
@@ -981,6 +956,7 @@ mod tests {
                     },
                     bytes: wit_types::ByteSource::Inline(dynamic_bytes.clone()),
                 }),
+                &[],
             )
             .expect("lower unversioned dynamic read");
         resources

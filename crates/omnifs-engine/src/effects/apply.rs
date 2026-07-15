@@ -259,6 +259,9 @@ impl<'a> EffectApplier<'a> {
         Ok((outcome, transition))
     }
 
+    // One typed provider terminal lowers into one coherent projection
+    // transition; helper carriers would only duplicate that transactional state.
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn lower_list(
         &self,
         path: &Path,
@@ -378,6 +381,7 @@ impl<'a> EffectApplier<'a> {
         &self,
         path: &Path,
         result: wit_types::ReadFileOutcome,
+        staged_objects: &[ObjectMutation],
     ) -> anyhow::Result<(ReadOutcome, ProjectionTransition)> {
         let wit_types::ReadFileOutcome::Found(value) = result else {
             anyhow::bail!("read-file result is not a found file")
@@ -412,7 +416,7 @@ impl<'a> EffectApplier<'a> {
             ReadBytes::Canonical => {
                 let canonical = self
                     .store
-                    .cached_canonical_for(path)
+                    .selected_canonical_for(path, staged_objects)
                     .map_err(|error| anyhow::anyhow!(error.to_string()))?
                     .ok_or_else(|| anyhow::anyhow!("canonical read has no selected object"))?;
                 let length = u64::try_from(canonical.bytes.len())

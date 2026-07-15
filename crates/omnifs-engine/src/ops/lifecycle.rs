@@ -56,7 +56,7 @@ impl Runtime {
                     &child_path,
                     wire_result,
                     clock::now_millis(),
-                    |tree| self.tree_ref(tree).map(|reference| reference.id.clone()),
+                    |tree| self.tree_ref(tree).map(|reference| reference.id),
                 )
                 .map_err(|error| EngineError::ProviderProtocol(error.to_string()))?;
             merge_transition(&mut transition, result_transition);
@@ -107,7 +107,7 @@ impl Runtime {
             transition.blobs.extend(pending_blobs);
             let (result, result_transition) = applier
                 .lower_list(path, wire_result, expected_cursor, |tree| {
-                    self.tree_ref(tree).map(|reference| reference.id.clone())
+                    self.tree_ref(tree).map(|reference| reference.id)
                 })
                 .map_err(|error| EngineError::ProviderProtocol(error.to_string()))?;
             merge_transition(&mut transition, result_transition);
@@ -162,7 +162,11 @@ impl Runtime {
             let result = match wire_result {
                 wit_types::ReadFileOutcome::Found(value) => {
                     let (result, result_transition) = applier
-                        .lower_read(path, wit_types::ReadFileOutcome::Found(value))
+                        .lower_read(
+                            path,
+                            wit_types::ReadFileOutcome::Found(value),
+                            &transition.objects,
+                        )
                         .map_err(|error| EngineError::ProviderProtocol(error.to_string()))?;
                     merge_transition(&mut transition, result_transition);
                     transition.blobs.extend(pending_blobs);

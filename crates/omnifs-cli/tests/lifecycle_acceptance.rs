@@ -686,6 +686,7 @@ fn scenario_7_dead_daemon_record_fallback() {
 /// A changed valid revision restarts the daemon and advances the applied ref;
 /// malformed desired state fails before stopping it and leaves the ref alone.
 #[test]
+#[allow(clippy::too_many_lines)] // one end-to-end revision lifecycle scenario
 fn scenario_8_revision_restart_and_preflight_failure() {
     if !live_acceptance_enabled() {
         eprintln!("skip: set OMNIFS_ACCEPTANCE_LIVE=1 to run live-mount acceptance tests");

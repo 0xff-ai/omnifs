@@ -54,29 +54,27 @@ impl EventsClient {
         self.rt.block_on(async {
             match &self.endpoint {
                 EventEndpoint::Unix { socket } => {
-                    let mut stream = match UnixStream::connect(socket).await {
-                        Ok(stream) => stream,
-                        Err(_) => return Ok(AttachOutcome::Unreachable),
+                    let Ok(mut stream) = UnixStream::connect(socket).await else {
+                        return Ok(AttachOutcome::Unreachable);
                     };
                     let request = ControlRequest {
                         version: CONTROL_PROTOCOL_VERSION,
                         operation: ControlOperation::SubscribeInspector,
                     };
-                    let mut request_line = match serde_json::to_vec(&request) {
-                        Ok(line) => line,
-                        Err(_) => return Ok(AttachOutcome::Unreachable),
+                    let Ok(mut request_line) = serde_json::to_vec(&request) else {
+                        return Ok(AttachOutcome::Unreachable);
                     };
                     request_line.push(b'\n');
                     if stream.write_all(&request_line).await.is_err() {
                         return Ok(AttachOutcome::Unreachable);
                     }
-                    let reply_line = match read_control_line(&mut stream).await {
-                        Ok(line) => line,
-                        Err(_) => return Ok(AttachOutcome::Unreachable),
+                    let Ok(reply_line) = read_control_line(&mut stream).await else {
+                        return Ok(AttachOutcome::Unreachable);
                     };
-                    let reply: ControlReply = match serde_json::from_slice(&reply_line) {
-                        Ok(reply) => reply,
-                        Err(_) => return Ok(AttachOutcome::Unreachable),
+                    let Ok(reply): std::result::Result<ControlReply, _> =
+                        serde_json::from_slice(&reply_line)
+                    else {
+                        return Ok(AttachOutcome::Unreachable);
                     };
                     if reply.version != CONTROL_PROTOCOL_VERSION
                         || !matches!(reply.outcome, ControlOutcome::InspectorReady)
@@ -361,9 +359,9 @@ mod tests {
                 assert!(error.contains("invalid json"));
             },
             Some(SourceMessage::Finished) | None => panic!("malformed replay became EOF"),
-            Some(SourceMessage::Line(_))
-            | Some(SourceMessage::Connected)
-            | Some(SourceMessage::Disconnected) => panic!("unexpected source message"),
+            Some(
+                SourceMessage::Line(_) | SourceMessage::Connected | SourceMessage::Disconnected,
+            ) => panic!("unexpected source message"),
         }
     }
 }

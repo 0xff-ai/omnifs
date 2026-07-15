@@ -8,6 +8,9 @@ The keying schema is the path grammar below. Literal segments are written as-is.
 
 ## Route templates
 
+- `/{owner}/{repo}/repo` - directory
+  - `{owner}`: `OwnerName`
+  - `{repo}`: `RepoName`
 - `/{owner}/{repo}/issues` - directory
   - `{owner}`: `String`
   - `{repo}`: `String`
@@ -15,9 +18,6 @@ The keying schema is the path grammar below. Literal segments are written as-is.
   - `{owner}`: `String`
   - `{repo}`: `String`
 - `/notifications` - directory
-- `/{owner}/{repo}/repo` - subtree
-  - `{owner}`: `OwnerName`
-  - `{repo}`: `RepoName`
 - `/{owner}` - object `github.owner`
   - `{owner}`: `OwnerName`
 - `/{owner}/{repo}` - object `github.repo`
@@ -120,7 +120,7 @@ The keying schema is the path grammar below. Literal segments are written as-is.
 ## Example commands
 
 - `ls .`
-- `ls './{owner}/{repo}/issues'`
+- `ls './{owner}/{repo}/repo'`
 - `cat './{owner}/owner.json'`
 
 ## Bulk traversal

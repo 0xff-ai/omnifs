@@ -194,12 +194,6 @@ impl DaemonContext {
         &self.layout.config_dir
     }
 
-    /// This daemon start's instance id, reported in status, the daemon record,
-    /// and the Omnifs VFS wire protocol handshake.
-    pub(crate) fn instance_id(&self) -> &str {
-        &self.instance_id
-    }
-
     /// The `--attach-tcp` port request, if the flag was passed. `Some(0)` asks
     /// for an ephemeral port.
     pub(crate) fn attach_tcp_port(&self) -> Option<u16> {
@@ -304,8 +298,7 @@ fn mount_health(mounts: &[MountInfo]) -> SubsystemHealth {
             .join("; ");
         let _ = write!(
             message,
-            ", {} mount(s) with a degraded credential ({detail})",
-            degraded
+            ", {degraded} mount(s) with a degraded credential ({detail})"
         );
     }
     SubsystemHealth::new(DaemonSubsystem::Mounts, state, message)

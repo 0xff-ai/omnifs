@@ -163,11 +163,9 @@ impl AttachTarget {
                             source,
                         });
                     }
-                    let delay = deadline
-                        .map(|deadline| {
-                            backoff.min(deadline.saturating_duration_since(Instant::now()))
-                        })
-                        .unwrap_or(backoff);
+                    let delay = deadline.map_or(backoff, |deadline| {
+                        backoff.min(deadline.saturating_duration_since(Instant::now()))
+                    });
                     if delay.is_zero() {
                         let source = match error {
                             WireError::Io(io) => io,
@@ -498,7 +496,6 @@ impl ManagerState {
                         },
                         Err(error) => {
                             tracing::warn!(%error, "wire: reconnect task ended");
-                            reconnect = None;
                             return;
                         },
                     }
@@ -632,7 +629,7 @@ where
     }
 
     let (frame_tx, mut writer_rx) = mpsc::unbounded_channel::<Frame>();
-    let (reader_tx, mut frame_rx) = mpsc::unbounded_channel::<Frame>();
+    let (reader_tx, frame_rx) = mpsc::unbounded_channel::<Frame>();
 
     let writer = tokio::spawn(async move {
         while let Some(frame) = writer_rx.recv().await {

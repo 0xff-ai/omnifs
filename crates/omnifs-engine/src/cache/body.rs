@@ -36,7 +36,9 @@ impl BodyStore {
             let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
                 continue;
             };
-            if name.starts_with(".body-") && name.ends_with(".tmp") {
+            if name.starts_with(".body-")
+                && Path::new(name).extension().is_some_and(|ext| ext == "tmp")
+            {
                 fs::remove_file(path)?;
             }
         }
@@ -67,7 +69,7 @@ impl BodyStore {
                 return Err(BodyStoreError::Destination { id });
             },
             Ok(_) => {
-                self.verify_file(&destination, id, bytes.len() as u64)?;
+                Self::verify_file(&destination, id, bytes.len() as u64)?;
                 return Ok(id);
             },
             Err(error) if error.kind() == io::ErrorKind::NotFound => {},
@@ -83,7 +85,7 @@ impl BodyStore {
             file.write_all(bytes)?;
             file.sync_all()?;
             drop(file);
-            self.verify_file(&temporary, id, bytes.len() as u64)?;
+            Self::verify_file(&temporary, id, bytes.len() as u64)?;
             match fs::hard_link(&temporary, &destination) {
                 Ok(()) => {
                     fs::remove_file(&temporary)?;
@@ -91,7 +93,7 @@ impl BodyStore {
                     Ok(id)
                 },
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                    let winner = self.verify_destination(&destination, id, bytes.len() as u64);
+                    let winner = Self::verify_destination(&destination, id, bytes.len() as u64);
                     let removed = fs::remove_file(&temporary);
                     let synced = sync_directory(&self.root);
                     winner?;
@@ -154,10 +156,10 @@ impl BodyStore {
         let destination = self.path(id);
         match fs::symlink_metadata(&destination) {
             Ok(existing) if existing.file_type().is_symlink() || !existing.is_file() => {
-                return Err(BodyStoreError::Destination { id });
+                Err(BodyStoreError::Destination { id })
             },
             Ok(_) => {
-                self.verify_destination(&destination, id, expected_len)?;
+                Self::verify_destination(&destination, id, expected_len)?;
                 drop(staged.file.take());
                 fs::remove_file(&staged.path)?;
                 sync_directory(&self.root)?;
@@ -174,7 +176,7 @@ impl BodyStore {
                         Ok(id)
                     },
                     Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                        self.verify_destination(&destination, id, expected_len)?;
+                        Self::verify_destination(&destination, id, expected_len)?;
                         drop(staged.file.take());
                         fs::remove_file(&staged.path)?;
                         sync_directory(&self.root)?;
@@ -234,7 +236,7 @@ impl BodyStore {
                 actual: length,
             });
         }
-        self.verify_file(&self.path(id), id, length)
+        Self::verify_file(&self.path(id), id, length)
     }
 
     #[must_use]
@@ -248,12 +250,7 @@ impl BodyStore {
             .join(format!(".body-{}-{sequence}.tmp", std::process::id()))
     }
 
-    fn verify_file(
-        &self,
-        path: &Path,
-        id: BodyId,
-        expected_len: u64,
-    ) -> Result<(), BodyStoreError> {
+    fn verify_file(path: &Path, id: BodyId, expected_len: u64) -> Result<(), BodyStoreError> {
         let metadata = fs::symlink_metadata(path)?;
         if metadata.file_type().is_symlink() || !metadata.is_file() {
             return Err(BodyStoreError::Destination { id });
@@ -284,7 +281,6 @@ impl BodyStore {
     }
 
     fn verify_destination(
-        &self,
         path: &Path,
         id: BodyId,
         expected_len: u64,
@@ -293,7 +289,7 @@ impl BodyStore {
             Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
                 Err(BodyStoreError::Destination { id })
             },
-            Ok(_) => self.verify_file(path, id, expected_len),
+            Ok(_) => Self::verify_file(path, id, expected_len),
             Err(error) => Err(error.into()),
         }
     }
@@ -347,10 +343,10 @@ fn open_nofollow(path: &Path) -> io::Result<File> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        return OpenOptions::new()
+        OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NOFOLLOW)
-            .open(path);
+            .open(path)
     }
     #[cfg(not(unix))]
     {

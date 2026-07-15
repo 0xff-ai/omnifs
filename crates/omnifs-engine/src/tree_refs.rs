@@ -25,7 +25,7 @@ impl fmt::Debug for TreeRef {
         f.debug_struct("TreeRef")
             .field("id", &self.id)
             .field("relative_path", &self.relative_path)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -65,12 +65,12 @@ impl TreeRefs {
         relative_path: &str,
         selected_path: &Path,
     ) -> std::io::Result<TreeRef> {
-        let key = (id.clone(), relative_path.to_string());
+        let key = (id, relative_path.to_string());
         if let Some(existing) = self.identities.get(&key) {
             return Ok(existing.clone());
         }
         let opened = TreeRef {
-            id: id.clone(),
+            id,
             relative_path: relative_path.to_string(),
             root: Arc::new(Dir::open_ambient_dir(selected_path, ambient_authority())?),
         };
@@ -80,7 +80,7 @@ impl TreeRefs {
 
     pub(crate) fn by_identity(&self, id: &GitId, relative_path: &str) -> Option<TreeRef> {
         self.identities
-            .get(&(id.clone(), relative_path.to_string()))
+            .get(&(*id, relative_path.to_string()))
             .map(|reference| reference.clone())
     }
 

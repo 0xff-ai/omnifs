@@ -33,7 +33,7 @@ pub enum InstallTarget {
 }
 
 impl SkillArgs {
-    pub fn run(self, output: Output) -> anyhow::Result<()> {
+    pub fn run(self, output: &Output) -> anyhow::Result<()> {
         if output.is_structured() {
             anyhow::bail!("skill is a passthrough command and only supports human output")
         }

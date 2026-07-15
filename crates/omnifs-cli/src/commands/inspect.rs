@@ -35,7 +35,7 @@ impl InspectArgs {
             anyhow::bail!("inspect is a passthrough command and only supports human output")
         }
         if self.plain {
-            return self.run_plain(output).await;
+            return self.run_plain(&output).await;
         }
 
         let (mode, source, label) = if let Some(path) = self.replay.clone() {
@@ -71,7 +71,7 @@ impl InspectArgs {
         Ok(())
     }
 
-    async fn run_plain(self, output: Output) -> anyhow::Result<()> {
+    async fn run_plain(self, output: &Output) -> anyhow::Result<()> {
         if let Some(path) = self.replay {
             return run_plain(SourceKind::Replay(path), output);
         }
@@ -83,8 +83,9 @@ impl InspectArgs {
             .event_endpoint()?
             .context("daemon is not running")?;
         let record = self.record.clone();
+        let output = output.clone();
         tokio::task::spawn_blocking(move || {
-            run_plain(SourceKind::Socket { endpoint, record }, output)
+            run_plain(SourceKind::Socket { endpoint, record }, &output)
         })
         .await
         .context("inspector plain task")?

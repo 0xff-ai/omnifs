@@ -249,62 +249,11 @@ impl Runtime {
         self.auth.as_ref()
     }
 
-    pub fn new(
-        engine: &wasmtime::Engine,
-        wasm_path: &StdPath,
-        config: &Spec,
-        manifest: &ProviderManifest,
-        cloner: Arc<GitCloner>,
-        context: &HostContext,
-        resources: Arc<MountResources>,
-        trees: Arc<TreeRefs>,
-        credential_service: &Arc<CredentialService>,
-    ) -> std::result::Result<Self, BuildError> {
-        Self::build(
-            engine,
-            wasm_path,
-            config,
-            manifest,
-            cloner,
-            context,
-            resources,
-            trees,
-            credential_service,
-            false,
-        )
-    }
-
-    #[doc(hidden)]
-    pub fn new_for_callout_tests(
-        engine: &wasmtime::Engine,
-        wasm_path: &StdPath,
-        config: &Spec,
-        manifest: &ProviderManifest,
-        cloner: Arc<GitCloner>,
-        context: &HostContext,
-        resources: Arc<MountResources>,
-        trees: Arc<TreeRefs>,
-        credential_service: &Arc<CredentialService>,
-    ) -> std::result::Result<Self, BuildError> {
-        Self::build(
-            engine,
-            wasm_path,
-            config,
-            manifest,
-            cloner,
-            context,
-            resources,
-            trees,
-            credential_service,
-            true,
-        )
-    }
-
     #[allow(clippy::too_many_arguments)]
     // Keep mount construction ordered in one boundary: manifest validation,
     // provider initialization, auth, caches, and runtime wiring are coupled.
     #[allow(clippy::too_many_lines)]
-    fn build(
+    pub(crate) fn build(
         engine: &wasmtime::Engine,
         wasm_path: &StdPath,
         config: &Spec,
@@ -328,7 +277,7 @@ impl Runtime {
 
         validate_instance_config(config_metadata, config, mount_name)?;
 
-        let authority = RuntimeAuthority::resolve(&manifest, config)?;
+        let authority = RuntimeAuthority::resolve(manifest, config)?;
         let park_signal = test_callouts.as_ref().map(TestCallouts::park_signal);
         let instance = Instance::new(
             engine,
@@ -347,7 +296,7 @@ impl Runtime {
             },
         )?;
         let initialize_effects = init_result
-            .map(|_| initialize_effects)
+            .map(|()| initialize_effects)
             .map_err(EngineError::ProviderError)
             .map_err(BuildError::from)?;
         let auth_manifest = manifest

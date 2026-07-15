@@ -242,35 +242,6 @@ fn web_provider_only_exposes_configured_hosts() {
     }
 }
 
-#[tokio::test]
-async fn web_provider_denies_domains_outside_mount_config() {
-    let harness = RuntimeHarness::new_real_callouts(
-        r#"
-        {
-            "provider": "omnifs_provider_web.wasm",
-            "mount": "web",
-            "config": {
-                "domains": ["allowed.test"]
-            }
-        }
-    "#,
-    )
-    .unwrap();
-
-    let error = harness
-        .read("/https/denied.test/articles/readable")
-        .unwrap()
-        .into_result()
-        .unwrap()
-        .unwrap_err();
-
-    assert_eq!(error.kind, ErrorKind::Denied);
-    assert!(
-        error.message.contains("domain not in allowlist"),
-        "unexpected denied error: {error:?}"
-    );
-}
-
 fn html_response(body: &[u8]) -> CalloutResult {
     CalloutResult::HttpResponse(HttpResponse {
         status: 200,

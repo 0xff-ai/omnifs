@@ -182,7 +182,7 @@ mod tests {
     fn malformed_authenticated_remote_never_enters_wit_error_text() {
         let temp = tempfile::tempdir().unwrap();
         let executor = GitExecutor::new(
-            Arc::new(GitCloner::new(temp.path().to_path_buf()).unwrap()),
+            Arc::new(GitCloner::new(temp.path()).unwrap()),
             RuntimeAuthority::for_test(&[], &["*"], &[]),
             Arc::new(TreeRefs::new()),
             "mount",

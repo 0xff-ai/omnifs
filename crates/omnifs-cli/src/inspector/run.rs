@@ -84,7 +84,7 @@ pub fn run_tui(mode: ConnectionMode, container: String, source: SourceKind) -> a
     Ok(())
 }
 
-pub fn run_plain(source: SourceKind, output: crate::ui::output::Output) -> anyhow::Result<()> {
+pub fn run_plain(source: SourceKind, output: &crate::ui::output::Output) -> anyhow::Result<()> {
     use super::source::SourceMessage;
 
     match source {

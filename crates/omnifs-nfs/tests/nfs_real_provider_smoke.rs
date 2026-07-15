@@ -280,18 +280,17 @@ const DOCKER_MOUNT_JSON: &str = r#"{
 }"#;
 
 fn db_mount_json(_db_dir: &Path) -> String {
-    format!(
-        r#"{{
+    r#"{
             "provider":"omnifs_provider_db.wasm",
             "mount":"db",
-            "limits":{{"max_memory_mb":128}},
-            "config":{{
+            "limits":{"max_memory_mb":128},
+            "config":{
                 "path":"/data/test.db",
                 "read_only":true,
                 "sample_limit":20
-            }}
-        }}"#
-    )
+            }
+        }"#
+    .to_string()
 }
 
 fn lookup_path(export: &Export, path: &[&str]) -> u64 {

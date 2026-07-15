@@ -8,7 +8,7 @@ use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const RPC_CALL: u32 = 0;
 const RPC_REPLY: u32 = 1;
@@ -18,6 +18,7 @@ const AUTH_NONE: u32 = 0;
 const NFS_PROGRAM: u32 = 100_003;
 const NFS_VERSION_4: u32 = 4;
 const PROC_COMPOUND: u32 = 1;
+const NFS4ERR_DELAY: u32 = 10_008;
 
 const CLAIM_NULL: u32 = 0;
 const OP_CLOSE: u32 = 4;
@@ -307,7 +308,25 @@ impl NfsTcpClient {
     fn readdir(&mut self, path: &[&str]) -> Vec<String> {
         let mut ops = path_ops(path);
         ops.push(op_readdir());
-        let body = self.compound(&ops);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let body = loop {
+            let (xid, body) = self.compound_reply(&ops);
+            let top_status = u32::from_be_bytes(
+                body.get(..4)
+                    .expect("compound response contains a status")
+                    .try_into()
+                    .expect("status is u32"),
+            );
+            if top_status == NFS4ERR_DELAY && Instant::now() < deadline {
+                continue;
+            }
+            if top_status != NFS4_OK {
+                let trace =
+                    std::fs::read_to_string(&self.trace_path).unwrap_or_else(|_| String::new());
+                panic!("READDIR compound xid={xid} failed with status {top_status}\n{trace}");
+            }
+            break body;
+        };
         let mut reader = XdrReader::new(&body);
         assert_compound_header(&mut reader, ops.len());
         for op in ops.iter().take(ops.len() - 1) {
@@ -385,9 +404,7 @@ impl NfsTcpClient {
     }
 
     fn compound(&mut self, ops: &[Vec<u8>]) -> Vec<u8> {
-        let xid = self.next_xid();
-        write_rpc_record(&mut self.stream, &rpc_call(xid, &compound_payload(ops)));
-        let body = read_rpc_success(&mut self.stream, xid);
+        let (xid, body) = self.compound_reply(ops);
         if body.len() >= 4 {
             let top_status = u32::from_be_bytes(body[..4].try_into().expect("status is u32"));
             if top_status != NFS4_OK {
@@ -397,6 +414,13 @@ impl NfsTcpClient {
             }
         }
         body
+    }
+
+    fn compound_reply(&mut self, ops: &[Vec<u8>]) -> (u32, Vec<u8>) {
+        let xid = self.next_xid();
+        write_rpc_record(&mut self.stream, &rpc_call(xid, &compound_payload(ops)));
+        let body = read_rpc_success(&mut self.stream, xid);
+        (xid, body)
     }
 
     fn next_xid(&mut self) -> u32 {

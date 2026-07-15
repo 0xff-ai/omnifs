@@ -27,7 +27,7 @@ impl Frontend {
     /// parent/name chain to the nearest hot ancestor and descending iteratively.
     /// The walk never reconstructs a path string, and all returned ids are from
     /// the currently attached daemon instance.
-    pub(crate) async fn live_node(&self, ino: u64) -> Result<Path, Errno> {
+    pub(crate) fn live_node(&self, ino: u64) -> Result<Path, Errno> {
         self.inodes
             .get(&ino)
             .map(|inode| inode.body.clone())
@@ -47,7 +47,7 @@ impl Frontend {
         }
         drop(inode);
 
-        let parent_node = self.live_node(parent_ino).await?;
+        let parent_node = self.live_node(parent_ino)?;
         let answer = self
             .settle(
                 self.namespace
@@ -58,7 +58,7 @@ impl Frontend {
             .await?;
         let kind = NodeKind::from(&answer.attrs.kind);
         let ino = self.intern_node(parent_ino, name, answer.path.clone(), kind);
-        let (attr, ttl) = self.ns_file_attr(ino, answer.path, &answer.attrs);
+        let (attr, ttl) = self.ns_file_attr(ino, &answer.path, &answer.attrs);
         Ok((ino, attr, ttl))
     }
 
@@ -82,9 +82,9 @@ impl Frontend {
                 stability: omnifs_engine::StabilityClass::Stable,
                 read_style: omnifs_engine::ReadStyle::Whole,
             };
-            return Ok(self.ns_file_attr(ROOT_INO, Path::root(), &attrs));
+            return Ok(self.ns_file_attr(ROOT_INO, &Path::root(), &attrs));
         }
-        let node = self.live_node(ino).await?;
+        let node = self.live_node(ino)?;
         let attrs = self
             .settle(
                 self.namespace
@@ -94,7 +94,7 @@ impl Frontend {
             )
             .await?;
 
-        Ok(self.ns_file_attr(ino, node, &attrs))
+        Ok(self.ns_file_attr(ino, &node, &attrs))
     }
 
     /// Build the kernel directory snapshot for `ino` by draining every namespace
@@ -106,7 +106,7 @@ impl Frontend {
                 return Err(Errno::ENOTDIR);
             }
         }
-        let node = self.live_node(ino).await?;
+        let node = self.live_node(ino)?;
         let mut snapshot = DirSnapshot::new();
         let mut cursor = DirCursor::start();
         loop {
@@ -135,7 +135,7 @@ impl Frontend {
     /// buffer; a ranged file binds the node for per-read read-through. Returns the
     /// kernel open flags.
     pub(crate) async fn do_open(&self, ino: u64, fh: u64) -> Result<FopenFlags, Errno> {
-        let node = self.live_node(ino).await?;
+        let node = self.live_node(ino)?;
         let attrs = self
             .settle(
                 self.namespace
@@ -208,7 +208,7 @@ impl Frontend {
 
         // Defensive fallback for a whole namespace file opened without cached
         // data.
-        let body = self.live_node(ino).await?;
+        let body = self.live_node(ino)?;
         let answer = self
             .settle(
                 self.namespace
@@ -224,7 +224,7 @@ impl Frontend {
 
     /// Read the link target through the namespace facade.
     pub(crate) async fn do_readlink(&self, ino: u64) -> Result<Vec<u8>, Errno> {
-        let node = self.live_node(ino).await?;
+        let node = self.live_node(ino)?;
         let target = self
             .settle(
                 self.namespace

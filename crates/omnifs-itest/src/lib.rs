@@ -9,7 +9,7 @@ use omnifs_wit::provider::types::{
     ByteSource, Callout, Effects, HttpRequest, ListChildrenResult, LookupChildResult,
     ReadFileOutcome, ReadFileResult,
 };
-use omnifs_workspace::ids::{ProviderId, ProviderMeta, ProviderName, ProviderRef};
+use omnifs_workspace::ids::ProviderRef;
 use omnifs_workspace::mounts::Spec;
 use omnifs_workspace::provider::{Artifact, Catalog, ProviderStore};
 use std::path::{Path as StdPath, PathBuf};
@@ -36,7 +36,7 @@ pub struct RuntimeHarness {
     /// An owned executor for synchronous fixtures that have no ambient Tokio
     /// runtime. It is declared last so the namespace, registry, and temporary
     /// directories drop before the executor.
-    owned_runtime: Option<tokio::runtime::Runtime>,
+    _owned_runtime: Option<tokio::runtime::Runtime>,
 }
 
 impl RuntimeHarness {
@@ -72,17 +72,16 @@ impl RuntimeHarness {
         let providers_dir = tempdir()?;
         let mounts_dir = tempdir()?;
         let paths = omnifs_workspace::layout::WorkspaceLayout::under_root(config_dir.path());
-        let (handle, owned_runtime) = match tokio::runtime::Handle::try_current() {
-            Ok(handle) => (handle, None),
-            Err(_) => {
-                let runtime = tokio::runtime::Builder::new_multi_thread()
-                    .enable_all()
-                    .build()
-                    .map_err(|error| {
-                        BuildError::Cache(format!("integration-test Tokio runtime: {error}"))
-                    })?;
-                (runtime.handle().clone(), Some(runtime))
-            },
+        let (handle, owned_runtime) = if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            (handle, None)
+        } else {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| {
+                    BuildError::Cache(format!("integration-test Tokio runtime: {error}"))
+                })?;
+            (runtime.handle().clone(), Some(runtime))
         };
 
         // Pin the named provider into this harness's provider store and rewrite
@@ -117,14 +116,12 @@ impl RuntimeHarness {
             .expect("non-empty harness specs")
             .mount
             .clone();
-        let cloner = Arc::new(GitCloner::new(clone_dir.path().to_path_buf()).map_err(
-            |source| {
-                BuildError::Cache(format!(
-                    "git clone cache at {}: {source}",
-                    clone_dir.path().display()
-                ))
-            },
-        )?);
+        let cloner = Arc::new(GitCloner::new(clone_dir.path()).map_err(|source| {
+            BuildError::Cache(format!(
+                "git clone cache at {}: {source}",
+                clone_dir.path().display()
+            ))
+        })?);
         let context = HostContext::new(
             cache_dir.path(),
             &paths.config_dir,
@@ -140,10 +137,10 @@ impl RuntimeHarness {
         }
         let registry = if capture_test_callouts {
             omnifs_engine::test_support::load_mount_table_for_callout_tests(
-                context, cloner, &desired, &handle,
+                context, &cloner, &desired, &handle,
             )
         } else {
-            MountTable::load_online(context, cloner, &desired, &handle)
+            MountTable::load_online(context, &cloner, &desired, &handle)
         }
         .map_err(|error| BuildError::InvalidConfig(error.to_string()))?;
         let registry = Arc::new(registry);
@@ -153,15 +150,15 @@ impl RuntimeHarness {
         let namespace = TreeNamespace::online(Arc::clone(&registry), handle);
 
         Ok(Self {
+            registry,
+            runtime,
+            namespace,
             clone_dir,
             cache_dir,
             config_dir,
             providers_dir,
             mounts_dir,
-            registry,
-            runtime,
-            namespace,
-            owned_runtime,
+            _owned_runtime: owned_runtime,
         })
     }
 
@@ -381,30 +378,6 @@ fn pin_provider(providers_dir: &StdPath, provider_file: &str) -> Result<Provider
         .retain(&artifact)
         .map_err(|error| BuildError::InvalidConfig(error.to_string()))?;
     Ok(reference)
-}
-
-/// A pinned reference for the test provider with a placeholder id, for tests
-/// that pass the wasm path to `Runtime::new` directly and never resolve through
-/// a store.
-#[must_use]
-pub fn test_provider_ref() -> ProviderRef {
-    ProviderRef {
-        id: ProviderId::from_wasm_bytes(b"test-provider"),
-        meta: ProviderMeta {
-            name: ProviderName::new("test-provider").unwrap(),
-            version: None,
-        },
-    }
-}
-
-/// Build a `Spec` from a JSON `body` (with no `provider` field) plus the test
-/// provider's placeholder reference. For tests that drive `Runtime::new`
-/// directly with a known wasm path rather than through the store.
-#[must_use]
-pub fn spec_with_test_provider(body: &str) -> Spec {
-    let mut value: serde_json::Value = serde_json::from_str(body).expect("test body json");
-    value["provider"] = serde_json::to_value(test_provider_ref()).expect("serialize provider ref");
-    serde_json::from_value(value).expect("build test spec")
 }
 
 pub fn project_paths(effects: &Effects) -> Vec<&str> {

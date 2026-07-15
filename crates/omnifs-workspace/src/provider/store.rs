@@ -176,7 +176,7 @@ impl ProviderStore {
     fn publish_artifact(&self, artifact: &Artifact) -> Result<(), StoreError> {
         let final_path = self.artifact_path(&artifact.id);
         match fs::symlink_metadata(&final_path) {
-            Ok(metadata) => self.validate_existing_artifact(&final_path, metadata, artifact),
+            Ok(metadata) => Self::validate_existing_artifact(&final_path, &metadata, artifact),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 let tmp = self.write_artifact_temp(&artifact.id, &artifact.bytes)?;
                 match fs::hard_link(&tmp, &final_path) {
@@ -185,7 +185,7 @@ impl ProviderStore {
                         remove_temp(&tmp, &final_path)?;
                         match fs::symlink_metadata(&final_path) {
                             Ok(metadata) => {
-                                self.validate_existing_artifact(&final_path, metadata, artifact)
+                                Self::validate_existing_artifact(&final_path, &metadata, artifact)
                             },
                             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                                 self.publish_artifact(artifact)
@@ -213,9 +213,8 @@ impl ProviderStore {
     }
 
     fn validate_existing_artifact(
-        &self,
         path: &Path,
-        metadata: fs::Metadata,
+        metadata: &fs::Metadata,
         artifact: &Artifact,
     ) -> Result<(), StoreError> {
         if !metadata.file_type().is_file() {

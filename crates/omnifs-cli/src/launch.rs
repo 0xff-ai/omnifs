@@ -86,8 +86,7 @@ impl<'a> Launcher<'a> {
 
         if self.offline {
             self.output.narrate(format!(
-                "Starting offline daemon from mount revision {}",
-                revision
+                "Starting offline daemon from mount revision {revision}"
             ));
             self.launch_host_native(telemetry_enabled, &revision, &snapshot_dir, true)
                 .await?;

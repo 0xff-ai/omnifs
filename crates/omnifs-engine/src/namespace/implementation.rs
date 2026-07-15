@@ -326,7 +326,7 @@ impl TreeNamespace {
         Ok((mount, rel))
     }
 
-    pub(crate) fn is_mount_enumeration_root(&self, mount: &str, path: &Path) -> bool {
+    pub(crate) fn is_mount_enumeration_root(mount: &str, path: &Path) -> bool {
         mount == MOUNT_ENUMERATION_MOUNT && path.is_root()
     }
 
@@ -371,13 +371,13 @@ impl TreeNamespace {
 
     // --- identity -----------------------------------------------------------
 
-    fn record(&self, id: &Path) -> Result<(Path, String), NsError> {
+    fn record(id: &Path) -> (Path, String) {
         let full_path = id.clone();
         let mount = full_path
             .segments()
             .next()
             .map_or_else(String::new, ToOwned::to_owned);
-        Ok((full_path, mount))
+        (full_path, mount)
     }
 
     // --- inspector tracing ---------------------------------------------------
@@ -393,10 +393,6 @@ impl TreeNamespace {
     /// Inspector paths are mount-relative, while namespace records keep the
     /// full protocol path needed to resolve a node. The synthetic root has no
     /// mount, so it gets an explicit identity instead of a blank mount row.
-    fn inspector_identity(&self, mount: &str, full_path: &Path) -> (String, String) {
-        inspector_identity(mount, full_path)
-    }
-
     /// Record every completed request, including successful and failed
     /// operations. The tracing inspector otherwise treats an unset outcome as
     /// an internal failure when the root span closes.
@@ -410,7 +406,7 @@ impl TreeNamespace {
     fn outcome_for(error: &NsError) -> InspectorOutcome {
         match error {
             NsError::NotFound => InspectorOutcome::NotFound,
-            NsError::OfflineMiss => InspectorOutcome::Internal,
+            NsError::OfflineMiss | NsError::Internal { .. } => InspectorOutcome::Internal,
             NsError::NotDirectory | NsError::IsDirectory | NsError::Invalid => {
                 InspectorOutcome::InvalidInput
             },
@@ -418,14 +414,13 @@ impl TreeNamespace {
             NsError::TooLarge => InspectorOutcome::TooLarge,
             NsError::RateLimited { .. } | NsError::Timeout => InspectorOutcome::Timeout,
             NsError::Network => InspectorOutcome::Network,
-            NsError::Internal { .. } => InspectorOutcome::Internal,
         }
     }
 
     /// Allocate (or reuse) the id for a resolved node, and refresh its record,
     /// preserving a learned size across placeholder refreshes.
     fn intern(&self, node: &crate::Node) -> Path {
-        let full_path = self.full_path_for(node);
+        let full_path = Self::full_path_for(node);
         let id = full_path.clone();
 
         let merged = FileAttrsCache::merge_preserving_learned_size(
@@ -437,10 +432,7 @@ impl TreeNamespace {
             relative: relative.clone(),
             kind,
         });
-        let host = merge_host_record(
-            self.ids.get(&id).and_then(|record| record.host.clone()),
-            incoming_host,
-        );
+        let host = incoming_host;
         self.ids.insert(
             id.clone(),
             NodeRecord {
@@ -452,7 +444,7 @@ impl TreeNamespace {
     }
 
     /// The full protocol path for a freshly resolved node.
-    fn full_path_for(&self, node: &crate::Node) -> Path {
+    fn full_path_for(node: &crate::Node) -> Path {
         let mount = node.mount();
         let rel = node.path();
         let joined = if rel.is_root() {
@@ -596,7 +588,7 @@ impl TreeNamespace {
 
     /// Build the policied [`Attrs`] for a node from its best-known file attrs.
     fn attrs_for(&self, id: &Path, node: &crate::Node) -> Attrs {
-        let record = self.ids.get(&id);
+        let record = self.ids.get(id);
         let attrs = record
             .as_ref()
             .and_then(|record| record.attrs.as_ref())
@@ -610,7 +602,7 @@ impl TreeNamespace {
         node: &crate::Node,
         attrs: Option<&FileAttrsCache>,
     ) -> Attrs {
-        let epoch = self.node_epochs.get(&id).map_or(0, |e| *e);
+        let epoch = self.node_epochs.get(id).map_or(0, |e| *e);
         Attrs::from_cache(
             EntryKind::from_node(node),
             attrs,
@@ -647,9 +639,9 @@ impl TreeNamespace {
     // --- read ---------------------------------------------------------------
 
     async fn read_inner(&self, id: Path, offset: u64, len: u32) -> Result<ReadAnswer, NsError> {
-        let (full_path, mount) = self.record(&id)?;
+        let (full_path, mount) = Self::record(&id);
         self.process_invalidations(&mount);
-        let (display_mount, display_path) = self.inspector_identity(&mount, &full_path);
+        let (display_mount, display_path) = inspector_identity(&mount, &full_path);
         let span = Self::begin_span("read", &display_mount, &display_path);
         let result = async {
             // A live ranged handle already open on this node serves the read
@@ -741,19 +733,19 @@ impl TreeNamespace {
 
     /// Compute `Attrs` for a read answer, folding in the size the read learned.
     fn attrs_for_read(&self, id: &Path, kind: EntryKind, attrs: Option<&FileAttrsCache>) -> Attrs {
-        let epoch = self.node_epochs.get(&id).map_or(0, |e| *e);
+        let epoch = self.node_epochs.get(id).map_or(0, |e| *e);
         Attrs::from_cache(kind, attrs, change_counter_parts(id, attrs, epoch))
     }
 
     fn store_learned(&self, id: &Path, learned: FileAttrsCache) {
-        if let Some(mut record) = self.ids.get_mut(&id) {
+        if let Some(mut record) = self.ids.get_mut(id) {
             record.attrs =
                 FileAttrsCache::merge_preserving_learned_size(record.attrs.as_ref(), Some(learned));
         }
     }
 
     fn take_cached_handle(&self, id: &Path) -> Option<Arc<RangedHandle>> {
-        let mut record = self.handles.get_mut(&id)?;
+        let mut record = self.handles.get_mut(id)?;
         record.last_use = Instant::now();
         Some(Arc::clone(&record.handle))
     }
@@ -793,7 +785,7 @@ impl TreeNamespace {
         let mount = node.mount().to_string();
         let base = handle.attrs().clone();
         let events = self.events.clone();
-        let node_epoch = self.node_epochs.get(&id).map_or(0, |e| *e);
+        let node_epoch = self.node_epochs.get(id).map_or(0, |e| *e);
         // The pump is a detached task; it reports growth by cloning the shared
         // pieces it needs (no back-reference to `self`).
         let id = id.clone();
@@ -828,9 +820,9 @@ impl TreeNamespace {
         cursor: DirCursor,
         budget: usize,
     ) -> Result<DirPage, NsError> {
-        let (full_path, mount) = self.record(&id)?;
+        let (full_path, mount) = Self::record(&id);
         self.process_invalidations(&mount);
-        let (display_mount, display_path) = self.inspector_identity(&mount, &full_path);
+        let (display_mount, display_path) = inspector_identity(&mount, &full_path);
         let span = Self::begin_span("readdir", &display_mount, &display_path);
         let result = async {
             // A buffered cursor is pure overflow the previous page held back;
@@ -863,11 +855,11 @@ impl TreeNamespace {
                     .into_iter()
                     .filter_map(|(name, child_relative, metadata)| {
                         let full = full_path.join(&name).ok()?;
-                        let child = self.intern_host(full, child_relative, tree_ref, &metadata);
+                        let child = self.intern_host(&full, child_relative, tree_ref, &metadata);
                         Some(DirEntry {
                             name,
                             path: child,
-                            attrs: metadata.attrs(self.host_change(&metadata)),
+                            attrs: metadata.attrs(Self::host_change(&metadata)),
                         })
                     })
                     .collect();
@@ -889,7 +881,7 @@ impl TreeNamespace {
             };
             let listing = match self.list(&node, tree_cursor, &RequestCtx).await? {
                 ListOutcome::Listing(listing) => listing,
-                ListOutcome::Host(_) => {
+                ListOutcome::Host => {
                     return Err(NsError::Internal {
                         message: "host listing escaped namespace traversal".to_string(),
                     });
@@ -927,10 +919,7 @@ impl TreeNamespace {
             self.ids.get(&id).and_then(|r| r.attrs.clone()).as_ref(),
             attrs,
         );
-        let host = merge_host_record(
-            self.ids.get(&id).and_then(|record| record.host.clone()),
-            None,
-        );
+        let host = None;
         self.ids.insert(
             id.clone(),
             NodeRecord {
@@ -955,16 +944,16 @@ impl TreeNamespace {
     // --- getattr ------------------------------------------------------------
 
     async fn getattr_inner(&self, id: Path, exact: bool) -> Result<Attrs, NsError> {
-        let (full_path, mount) = self.record(&id)?;
+        let (full_path, mount) = Self::record(&id);
         self.process_invalidations(&mount);
         let op = if exact { "getattr_exact" } else { "getattr" };
-        let (display_mount, display_path) = self.inspector_identity(&mount, &full_path);
+        let (display_mount, display_path) = inspector_identity(&mount, &full_path);
         let span = Self::begin_span(op, &display_mount, &display_path);
         let result = async {
             let node = self.resolve_node(&full_path).await?;
             if let Some((tree_ref, relative, _)) = node.host() {
                 let metadata = self.host_stat(tree_ref, relative).await?;
-                return Ok(metadata.attrs(self.host_change(&metadata)));
+                return Ok(metadata.attrs(Self::host_change(&metadata)));
             }
             let refreshed = self.refresh_record(&id, &node);
 
@@ -996,10 +985,10 @@ impl TreeNamespace {
     /// size, and return the best-known attrs.
     fn refresh_record(&self, id: &Path, node: &crate::Node) -> Option<FileAttrsCache> {
         let merged = FileAttrsCache::merge_preserving_learned_size(
-            self.ids.get(&id).and_then(|r| r.attrs.clone()).as_ref(),
+            self.ids.get(id).and_then(|r| r.attrs.clone()).as_ref(),
             node.attrs().cloned(),
         );
-        if let Some(mut record) = self.ids.get_mut(&id) {
+        if let Some(mut record) = self.ids.get_mut(id) {
             record.attrs.clone_from(&merged);
         }
         merged
@@ -1087,7 +1076,6 @@ impl TreeNamespace {
             .map_err(|error| NsError::Internal {
                 message: error.to_string(),
             })?
-            .map_err(|error| error)
     }
 
     async fn host_read(
@@ -1108,10 +1096,11 @@ impl TreeNamespace {
             return Ok(ReadAnswer {
                 bytes: Vec::new(),
                 eof: true,
-                attrs: metadata.attrs(self.host_change(&metadata)),
+                attrs: metadata.attrs(Self::host_change(&metadata)),
             });
         }
-        let read_len = u64::from(len).min(metadata.size - offset) as usize;
+        let read_len = usize::try_from(u64::from(len).min(metadata.size - offset))
+            .map_err(|_| NsError::TooLarge)?;
         let root = Arc::clone(&tree_ref.root);
         let relative = relative.to_path_buf();
         let bytes = self
@@ -1133,7 +1122,7 @@ impl TreeNamespace {
         Ok(ReadAnswer {
             bytes,
             eof,
-            attrs: metadata.attrs(self.host_change(&metadata)),
+            attrs: metadata.attrs(Self::host_change(&metadata)),
         })
     }
 
@@ -1153,7 +1142,7 @@ impl TreeNamespace {
             .map_err(ns_error_from_io)
     }
 
-    fn host_change(&self, metadata: &HostMetadata) -> u64 {
+    fn host_change(metadata: &HostMetadata) -> u64 {
         let mut hasher = DefaultHasher::new();
         metadata.dev.hash(&mut hasher);
         metadata.ino.hash(&mut hasher);
@@ -1164,20 +1153,17 @@ impl TreeNamespace {
 
     fn intern_host(
         &self,
-        full_path: Path,
+        full_path: &Path,
         relative: PathBuf,
         tree_ref: &TreeRef,
         metadata: &HostMetadata,
     ) -> Path {
         let id = full_path.clone();
-        let host = merge_host_record(
-            self.ids.get(&id).and_then(|record| record.host.clone()),
-            Some(HostRecord {
-                tree_ref: tree_ref.clone(),
-                relative,
-                kind: host_kind(&metadata.kind),
-            }),
-        );
+        let host = Some(HostRecord {
+            tree_ref: tree_ref.clone(),
+            relative,
+            kind: host_kind(&metadata.kind),
+        });
         self.ids
             .insert(id.clone(), NodeRecord { attrs: None, host });
         let _ = metadata;
@@ -1208,14 +1194,6 @@ fn host_node_path(full_path: &Path) -> Path {
         .next()
         .expect("host paths have a mount segment");
     mount_relative_path(mount, full_path)
-}
-
-fn merge_host_record(
-    existing: Option<HostRecord>,
-    incoming: Option<HostRecord>,
-) -> Option<HostRecord> {
-    let _ = existing;
-    incoming
 }
 
 #[derive(Debug, Clone)]
@@ -1308,14 +1286,15 @@ fn timestamp_millis(value: std::io::Result<cap_std::time::SystemTime>) -> Option
 }
 
 fn ns_error_from_io(error: std::io::Error) -> NsError {
-    match error.kind() {
+    let kind = error.kind();
+    let message = error.to_string();
+    drop(error);
+    match kind {
         std::io::ErrorKind::NotFound => NsError::NotFound,
         std::io::ErrorKind::PermissionDenied => NsError::Permission,
         std::io::ErrorKind::NotADirectory => NsError::NotDirectory,
         std::io::ErrorKind::InvalidInput => NsError::Invalid,
-        _ => NsError::Internal {
-            message: error.to_string(),
-        },
+        _ => NsError::Internal { message },
     }
 }
 
@@ -1349,10 +1328,10 @@ impl Namespace for TreeNamespace {
         name: &'a str,
     ) -> BoxFuture<'a, Result<LookupAnswer, NsError>> {
         async move {
-            let (parent_full, mount) = self.record(&parent)?;
+            let (parent_full, mount) = Self::record(&parent);
             self.process_invalidations(&mount);
             let child_full = parent_full.join(name).map_err(|_| NsError::Invalid)?;
-            let (display_mount, display_path) = self.inspector_identity(&mount, &child_full);
+            let (display_mount, display_path) = inspector_identity(&mount, &child_full);
             let span = Self::begin_span("lookup", &display_mount, &display_path);
             let result = async {
                 let parent_node = self.resolve_node(&parent_full).await?;
@@ -1360,7 +1339,7 @@ impl Namespace for TreeNamespace {
                 let id = self.intern(&node);
                 let attrs = if let Some((tree_ref, relative, _)) = node.host() {
                     let metadata = self.host_stat(tree_ref, relative).await?;
-                    metadata.attrs(self.host_change(&metadata))
+                    metadata.attrs(Self::host_change(&metadata))
                 } else {
                     self.attrs_for(&id, &node)
                 };
@@ -1402,7 +1381,7 @@ impl Namespace for TreeNamespace {
 
     fn readlink(&self, node: Path) -> BoxFuture<'_, Result<PathBuf, NsError>> {
         async move {
-            let (full_path, _) = self.record(&node)?;
+            let (full_path, _) = Self::record(&node);
             let node = self.resolve_node(&full_path).await?;
             let Some((tree_ref, relative, _)) = node.host() else {
                 return Err(NsError::Invalid);
@@ -1546,7 +1525,7 @@ mod tests {
         Arc::new(
             MountTable::load_online_with_options(
                 context,
-                Arc::new(GitCloner::new(root.join("engine-clones")).expect("git cloner")),
+                &Arc::new(GitCloner::new(root.join("engine-clones")).expect("git cloner")),
                 &desired,
                 &tokio::runtime::Handle::current(),
                 true,
@@ -1578,6 +1557,9 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    // Keep the complete host-projection fixture together so clone identity,
+    // subtree routing, file modes, symlinks, and ranged reads share one setup.
+    #[allow(clippy::too_many_lines)]
     async fn git_clone_tree_ref_namespace_fixture_preserves_host_projection() {
         use crate::authority::RuntimeAuthority;
         use crate::cache::identity::GitId;
@@ -1634,15 +1616,15 @@ mod tests {
             .open_cached("test", &git_id, "src")
             .expect("reopen selected subtree without Git");
         let root_ref = trees
-            .open(git_id.clone(), "", &reopened_root)
+            .open(git_id, "", &reopened_root)
             .expect("open root tree");
         let src_ref = trees
-            .open(git_id.clone(), "src", &reopened_src)
+            .open(git_id, "src", &reopened_src)
             .expect("open src tree");
         assert_ne!(root_ref, src_ref);
         assert_eq!(
             trees
-                .open(git_id.clone(), "src", &reopened_src)
+                .open(git_id, "src", &reopened_src)
                 .expect("deduplicate selected subtree"),
             src_ref
         );
@@ -1676,12 +1658,7 @@ mod tests {
             .host_stat(&tree_ref, StdPath::new(""))
             .await
             .expect("checkout stat");
-        namespace.intern_host(
-            checkout.clone(),
-            PathBuf::new(),
-            &tree_ref,
-            &checkout_metadata,
-        );
+        namespace.intern_host(&checkout, PathBuf::new(), &tree_ref, &checkout_metadata);
 
         let checkout_attrs = namespace
             .getattr(checkout.clone())

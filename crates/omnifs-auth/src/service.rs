@@ -124,13 +124,17 @@ impl AuthBinding {
     fn new(
         service: Arc<CredentialService>,
         id: CredentialId,
-        kind: AuthKind,
         domains: Vec<String>,
         header_name: String,
         value_prefix: String,
         request: Option<OAuthRequest>,
         current: Option<CredentialEntry>,
     ) -> Self {
+        let kind = if request.is_some() {
+            AuthKind::OAuth
+        } else {
+            AuthKind::StaticToken
+        };
         Self {
             service,
             id,
@@ -248,8 +252,7 @@ impl AuthBinding {
         }
         match self.refresh(true).await {
             Ok(Some(_)) => RefreshOutcome::Refreshed,
-            Ok(None) => RefreshOutcome::NoCredential,
-            Err(AuthUnavailable::Missing) => RefreshOutcome::NoCredential,
+            Ok(None) | Err(AuthUnavailable::Missing) => RefreshOutcome::NoCredential,
             Err(error) => RefreshOutcome::RefreshFailed(error.to_string()),
         }
     }
@@ -341,7 +344,6 @@ impl CredentialService {
         Ok(AuthBinding::new(
             Arc::clone(self),
             id,
-            AuthKind::StaticToken,
             domains,
             header_name,
             value_prefix,
@@ -363,7 +365,6 @@ impl CredentialService {
         Ok(AuthBinding::new(
             Arc::clone(self),
             id,
-            AuthKind::OAuth,
             domains,
             header_name,
             value_prefix,

@@ -185,12 +185,12 @@ impl Commands {
             Self::Status(args) => args.run(output).await,
             Self::Up(args) => args.run(output).await,
             Self::Down(args) => args.run(output).await,
-            Self::Logs(args) => args.run(output).map(|()| ExitCode::Success),
+            Self::Logs(args) => args.run(&output).map(|()| ExitCode::Success),
             Self::Inspect(args) => args.run(output).await.map(|()| ExitCode::Success),
             Self::Mount(args) => args.run(output).await,
             Self::Setup(args) => args.run(output).await,
-            Self::Skill(args) => args.run(output).map(|()| ExitCode::Success),
-            Self::Completions(args) => args.run(output).map(|()| ExitCode::Success),
+            Self::Skill(args) => args.run(&output).map(|()| ExitCode::Success),
+            Self::Completions(args) => args.run(&output).map(|()| ExitCode::Success),
             Self::Version(args) => args.run(output).await,
             Self::Daemon(args) => crate::daemon::run(&args).await.map(|()| ExitCode::Success),
             Self::Frontend(args) => args.run(output).await,
@@ -360,8 +360,7 @@ async fn run_bare(output: Output) -> anyhow::Result<ExitCode> {
 fn exit_for_verdict(verdict: DoctorVerdict) -> ExitCode {
     match verdict {
         DoctorVerdict::Clean => ExitCode::Success,
-        DoctorVerdict::Failures => ExitCode::Degraded,
-        DoctorVerdict::Warnings => ExitCode::Degraded,
+        DoctorVerdict::Failures | DoctorVerdict::Warnings => ExitCode::Degraded,
     }
 }
 

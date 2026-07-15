@@ -13,7 +13,7 @@
 //!   entries).
 //!
 //! A first-page browse listing (`cursor = None`) carries synthetic entries
-//! (controls + ignore files) in `Listing::entries` with `EntryOrigin::Synthetic`;
+//! (controls + ignore files) in `Listing::entries`;
 //! an explicit-cursor continuation (`cursor = Some`) is a raw page drain with no
 //! synthetic entries, so a renderer that flattens a dynamic dir into a finite
 //! snapshot (NFS) drives the cursor forward over raw provider pages.
@@ -27,7 +27,6 @@ use tracing::warn;
 use super::error::{Result, TreeError};
 use super::node::{Entry, Node, PaginationControl, Synthetic};
 use super::synthetic;
-use crate::tree_refs::TreeRef;
 use crate::{RequestCtx, TreeNamespace};
 use omnifs_api::events::CacheKind;
 
@@ -37,13 +36,10 @@ use omnifs_api::events::CacheKind;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cursor(pub CachedCursor);
 
-/// Result of provider-list execution when the node is a provider directory. `exhaustive`
-/// MUST survive the boundary: NFS turns a non-exhaustive dynamic dir into a
-/// finite snapshot, and lookup stays the authoritative name oracle (readdir may
-/// be non-exhaustive). `next_cursor` drives pagination through `Tree`.
-///
-/// `entries` contains both provider-projected children (with reserved-`@` names
-/// already dropped) and host-synthesized entries tagged with `EntryOrigin::Synthetic`:
+/// Result of provider-list execution when the node is a provider directory.
+/// `next_cursor` drives pagination through `Tree`. `entries` contains both
+/// provider-projected children (with reserved-`@` names already dropped) and
+/// host-synthesized entries:
 /// the `@next`/`@all` pagination controls when the listing carries a resume
 /// cursor, and the mount-root ignore files at the mount root. Every renderer
 /// materializes them identically. A continuation page (`cursor = Some`) returns
@@ -51,7 +47,6 @@ pub struct Cursor(pub CachedCursor);
 #[derive(Debug, Clone)]
 pub struct Listing {
     pub entries: Vec<Entry>,
-    pub exhaustive: bool,
     pub next_cursor: Option<Cursor>,
 }
 
@@ -61,7 +56,7 @@ pub struct Listing {
 #[derive(Debug, Clone)]
 pub enum ListOutcome {
     Listing(Listing),
-    Host(TreeRef),
+    Host,
 }
 
 impl TreeNamespace {
@@ -75,11 +70,11 @@ impl TreeNamespace {
         cursor: Option<Cursor>,
         _ctx: &RequestCtx,
     ) -> Result<ListOutcome> {
-        if let Some((tree_ref, _, _)) = node.host() {
-            return Ok(ListOutcome::Host(tree_ref.clone()));
+        if node.host().is_some() {
+            return Ok(ListOutcome::Host);
         }
 
-        if self.is_mount_enumeration_root(node.mount(), node.path()) {
+        if Self::is_mount_enumeration_root(node.mount(), node.path()) {
             let entries = self
                 .mount_names()
                 .into_iter()
@@ -87,7 +82,6 @@ impl TreeNamespace {
                 .collect();
             return Ok(ListOutcome::Listing(Listing {
                 entries,
-                exhaustive: true,
                 next_cursor: None,
             }));
         }
@@ -150,14 +144,12 @@ impl TreeNamespace {
         match result {
             crate::ops::namespace::ListOutcome::Entries(listing) => Ok(Listing {
                 entries: provider_entries(path, &listing.entries),
-                exhaustive: listing.exhaustive && listing.next_cursor.is_none(),
                 next_cursor: listing.next_cursor.map(Cursor),
             }),
             // A continuation that resolves to `unchanged` means the feed is
             // stable; treat it as exhausted with no further entries.
             crate::ops::namespace::ListOutcome::Unchanged => Ok(Listing {
                 entries: Vec::new(),
-                exhaustive: true,
                 next_cursor: None,
             }),
             crate::ops::namespace::ListOutcome::Subtree(_) => Err(TreeError::internal(
@@ -190,7 +182,7 @@ impl TreeNamespace {
 
         match result {
             Ok(crate::ops::namespace::ListOutcome::Entries(listing)) => Ok(ListOutcome::Listing(
-                snapshot_from_provider_listing(node, &listing)?,
+                snapshot_from_provider_listing(node, &listing),
             )),
             Ok(crate::ops::namespace::ListOutcome::Unchanged) => {
                 // The cached validator still matched: serve the accumulated
@@ -209,10 +201,10 @@ impl TreeNamespace {
                 )))
             },
             Ok(crate::ops::namespace::ListOutcome::Subtree(tref)) => {
-                let dir = runtime
+                runtime
                     .tree_ref(tref)
                     .ok_or_else(|| TreeError::internal(format!("unresolved tree_ref {tref}")))?;
-                Ok(ListOutcome::Host(dir))
+                Ok(ListOutcome::Host)
             },
             Err(error) => {
                 let rate_limited = error.is_provider_rate_limited();
@@ -238,7 +230,7 @@ impl TreeNamespace {
 /// included when paged, and never stripped back out even after the feed later
 /// exhausts, so they survive a later cached serve and control-name resolution),
 /// and surface the synthetic control / ignore entries.
-fn snapshot_from_provider_listing(node: &Node, listing: &ProviderListing) -> Result<Listing> {
+fn snapshot_from_provider_listing(node: &Node, listing: &ProviderListing) -> Listing {
     let path = node.path();
     let mut dirent_records = Vec::with_capacity(listing.entries.len());
     for e in &listing.entries {
@@ -258,33 +250,15 @@ fn snapshot_from_provider_listing(node: &Node, listing: &ProviderListing) -> Res
 
     let next_cursor = listing.next_cursor.clone();
     let paginated = next_cursor.is_some();
-
-    // The dirents record the host accumulates carries the `@next`/`@all` control
-    // records when paged, so a later cached serve (and a control lookup) still
-    // finds them. Build the persisted record before splitting out the
-    // renderer-facing synthetic entries.
-    let mut persisted = dirent_records.clone();
-    if paginated {
-        persisted.extend(synthetic::control_entries());
-    }
-    let dirents_payload = DirentsPayload {
-        entries: persisted,
-        // A paged listing is never exhaustive while a cursor remains.
-        exhaustive: listing.exhaustive && next_cursor.is_none(),
-        validator: listing.validator.clone(),
-        next_cursor: next_cursor.clone(),
-        paginated,
-    };
     let mut entries: Vec<Entry> = dirent_records
         .into_iter()
         .map(|r| Entry::provider(r.name, r.meta))
         .collect();
     entries.extend(synthetic_entries_for(node, paginated));
-    Ok(Listing {
+    Listing {
         entries,
-        exhaustive: dirents_payload.exhaustive,
         next_cursor: next_cursor.map(Cursor),
-    })
+    }
 }
 
 /// The host-synthesized entries for a first-page browse listing: `@next`/`@all`
@@ -343,7 +317,6 @@ fn listing_from_dirents(node: &Node, dirents: &DirentsPayload, offline: bool) ->
 
     Listing {
         entries,
-        exhaustive: dirents.exhaustive,
         next_cursor: (!offline)
             .then(|| dirents.next_cursor.clone())
             .flatten()
@@ -364,7 +337,7 @@ fn consult_authoritative_listing(
     let dirents = cached_dirents_for_revalidation(resources, path)?;
     if dirents
         .as_ref()
-        .is_some_and(|dirents| runtime.map_or(true, |_| dirents.is_authoritative_listing()))
+        .is_some_and(|dirents| runtime.is_none_or(|_| dirents.is_authoritative_listing()))
     {
         return Ok(dirents);
     }

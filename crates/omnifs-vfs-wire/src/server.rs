@@ -413,7 +413,7 @@ impl VfsServer {
     /// Bind or return the token-authenticated UDS used by the vsock proxy.
     pub fn ensure_vsock(
         self: &Arc<Self>,
-        path: PathBuf,
+        path: &Path,
         requested_token: Option<String>,
     ) -> io::Result<ListenerTarget> {
         self.ensure_vsock_with_status(path, requested_token)
@@ -425,7 +425,7 @@ impl VfsServer {
     /// created by the failing control operation.
     pub fn ensure_vsock_with_status(
         self: &Arc<Self>,
-        path: PathBuf,
+        path: &Path,
         requested_token: Option<String>,
     ) -> io::Result<(ListenerTarget, bool)> {
         if let Some(target) = self.existing(ListenerKind::Vsock) {
@@ -433,19 +433,19 @@ impl VfsServer {
         }
         let token = requested_token.map_or_else(generate_attach_token, validate_attach_token)?;
         let target = ListenerTarget::Vsock {
-            socket_path: path.clone(),
+            socket_path: path.to_path_buf(),
             token,
         };
-        let listener = bind_unix(&path, "vsock attach socket")?;
+        let listener = bind_unix(path, "vsock attach socket")?;
         match self.install(target, Listener::Unix(listener)) {
             Ok(binding) => {
-                if !binding.1 && binding.0.path() != Some(path.as_path()) {
-                    unlink_socket(&path);
+                if !binding.1 && binding.0.path() != Some(path) {
+                    unlink_socket(path);
                 }
                 Ok(binding)
             },
             Err(error) => {
-                unlink_socket(&path);
+                unlink_socket(path);
                 Err(error)
             },
         }
@@ -793,7 +793,7 @@ fn bind_unix(path: &Path, description: &str) -> io::Result<UnixListener> {
                     io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound
                 ) =>
             {
-                std::fs::remove_file(path)?
+                std::fs::remove_file(path)?;
             },
             Err(error) => return Err(error),
         },
