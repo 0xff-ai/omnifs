@@ -351,6 +351,17 @@ fn destructive_mount_jsonl_commands_end_with_one_typed_result() {
     );
     assert!(terminal["result"]["plan"]["rows"].as_array().is_some());
 
+    let absent_dry_run = fixture.run(&["mount", "rm", "missing", "--dry-run", "--output", "jsonl"]);
+    let terminal = terminal_result(&absent_dry_run);
+    assert_eq!(terminal["command"], "mount.rm");
+    assert_eq!(terminal["result"]["mount"], "missing");
+    assert_eq!(terminal["result"]["dry_run"], true);
+    assert!(
+        terminal["result"]["rows"]
+            .as_array()
+            .is_some_and(Vec::is_empty)
+    );
+
     let test_spec = std::fs::read_to_string(fixture.home_path().join("mounts/test.json"))
         .expect("read test mount");
     std::fs::write(

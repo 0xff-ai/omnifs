@@ -399,6 +399,13 @@ fn rm_with_options(
         {
             output.note(format!("Did you mean `{suggestion}`?"));
         }
+        if dry_run {
+            output.outro("Dry run; no changes made.");
+            return Ok(crate::commands::receipt::MountRemoveReceipt::dry_run(
+                name.to_string(),
+                plan,
+            ));
+        }
         let receipt = plan.receipt([Outcome::skip("spec", "already absent")]);
         output.receipt(&receipt);
         output.outro(format!("Mount `{name}` already absent."));
