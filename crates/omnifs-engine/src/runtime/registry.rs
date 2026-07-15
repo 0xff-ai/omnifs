@@ -806,13 +806,13 @@ mod tests {
         use crate::namespace::{DirCursor, Namespace, NsError};
         use crate::object_id::ObjectId;
         use crate::view::{
-            CachedCursor, DirentRecord, DirentsPayload, EntryMeta, FileAttrsCache, FilePayload,
-            FileSize, LookupPayload, Stability,
+            CachedCursor, DirentRecord, DirentsPayload, EntryMeta, FileAttrsCache, FileSize,
+            LookupPayload, Stability,
         };
         use crate::{TreeNamespace, view::BodyId};
         use fjall::{KeyspaceCreateOptions, PersistMode};
         use omnifs_core::path::Path as ProjectedPath;
-        use omnifs_wit::provider::types::{IdCapture, LogicalId};
+        use omnifs_wit::provider::types::{self as wit_types, IdCapture, LogicalId};
 
         let root = tempfile::tempdir().expect("offline fixture root");
         let cache = root.path().join("cache");
@@ -917,12 +917,13 @@ mod tests {
             )
             .expect("publish mount-root Git handoff");
 
-        let inline_path = ProjectedPath::parse("/inline.txt").unwrap();
+        let dynamic_path = ProjectedPath::parse("/dynamic.txt").unwrap();
         let canonical_path = ProjectedPath::parse("/canonical.txt").unwrap();
         let git_path = ProjectedPath::parse("/git").unwrap();
         let partial_path = ProjectedPath::parse("/partial").unwrap();
         let negative_path = ProjectedPath::parse("/partial/gone").unwrap();
-        let inline_bytes = b"offline inline\n".to_vec();
+        let known_path = ProjectedPath::parse("/partial/known").unwrap();
+        let dynamic_bytes = b"offline dynamic\n".to_vec();
         let canonical_bytes = b"offline canonical\n".to_vec();
         let canonical_id = ObjectId::from_wit(&LogicalId {
             kind: "issue".into(),
@@ -933,8 +934,14 @@ mod tests {
         })
         .as_bytes()
         .to_vec();
-        let inline_meta = EntryMeta::file(
-            FileAttrsCache::inline(inline_bytes.clone(), Stability::Dynamic, None).unwrap(),
+        let dynamic_meta = EntryMeta::file(
+            FileAttrsCache::deferred(
+                FileSize::Exact(dynamic_bytes.len() as u64),
+                crate::view::ReadMode::Full,
+                Stability::Dynamic,
+                None,
+            )
+            .unwrap(),
         );
         let canonical_meta = EntryMeta::file(
             FileAttrsCache::canonical(
@@ -946,8 +953,8 @@ mod tests {
         );
         let root_entries = vec![
             DirentRecord {
-                name: "inline.txt".into(),
-                meta: inline_meta.clone(),
+                name: "dynamic.txt".into(),
+                meta: dynamic_meta.clone(),
             },
             DirentRecord {
                 name: "canonical.txt".into(),
@@ -962,20 +969,24 @@ mod tests {
                 meta: EntryMeta::directory(),
             },
         ];
+        let (_, dynamic_transition) = crate::effect_apply::EffectApplier::new(&resources)
+            .lower_read(
+                &dynamic_path,
+                wit_types::ReadFileOutcome::Found(wit_types::ReadFileResult {
+                    content_type: None,
+                    attrs: wit_types::FileAttrs {
+                        size: wit_types::FileSize::Exact(dynamic_bytes.len() as u64),
+                        stability: wit_types::Stability::Dynamic,
+                        version_token: None,
+                    },
+                    bytes: wit_types::ByteSource::Inline(dynamic_bytes.clone()),
+                }),
+            )
+            .expect("lower unversioned dynamic read");
         resources
             .publish(
                 ProjectionTransition {
                     records: vec![
-                        RecordWrite {
-                            path: inline_path.clone(),
-                            aux: None,
-                            fact: FactPayload::Lookup(LookupPayload::Positive(inline_meta.clone())),
-                        },
-                        RecordWrite {
-                            path: inline_path.clone(),
-                            aux: None,
-                            fact: FactPayload::File(FilePayload::new(None, inline_bytes.clone())),
-                        },
                         RecordWrite {
                             path: canonical_path.clone(),
                             aux: None,
@@ -1037,10 +1048,10 @@ mod tests {
                         },
                     ],
                     freshness: [
-                        &inline_path,
                         &canonical_path,
                         &git_path,
                         &partial_path,
+                        &known_path,
                         &negative_path,
                     ]
                     .into_iter()
@@ -1059,6 +1070,9 @@ mod tests {
                 resources.current_epoch(),
             )
             .expect("publish complete durable projection");
+        resources
+            .publish(dynamic_transition, resources.current_epoch())
+            .expect("publish dynamic read projection");
         drop(resources);
         drop(root_git_resources);
         drop(caches);
@@ -1083,7 +1097,7 @@ mod tests {
                 .map(|entry| entry.name.as_str())
                 .collect::<Vec<_>>(),
             [
-                "inline.txt",
+                "dynamic.txt",
                 "canonical.txt",
                 "git",
                 "partial",
@@ -1106,16 +1120,16 @@ mod tests {
                 .await,
             Err(NsError::OfflineMiss)
         ));
-        let inline = namespace
-            .lookup(mount.path.clone(), "inline.txt")
+        let dynamic = namespace
+            .lookup(mount.path.clone(), "dynamic.txt")
             .await
-            .expect("expired inline lookup");
+            .expect("expired dynamic lookup");
         assert_eq!(
-            Namespace::read(namespace.as_ref(), inline.path, 0, 1024)
+            Namespace::read(namespace.as_ref(), dynamic.path, 0, 1024)
                 .await
                 .unwrap()
                 .bytes,
-            inline_bytes
+            dynamic_bytes
         );
         let canonical = namespace
             .lookup(mount.path.clone(), "canonical.txt")
@@ -1181,14 +1195,14 @@ mod tests {
         );
         drop(namespace);
 
-        let inline_body = BodyId::from_bytes(&inline_bytes);
-        let body_path = cache.join("bodies").join(inline_body.hex());
-        std::fs::write(&body_path, vec![b'x'; inline_bytes.len()]).expect("corrupt body");
+        let dynamic_body = BodyId::from_bytes(&dynamic_bytes);
+        let body_path = cache.join("bodies").join(dynamic_body.hex());
+        std::fs::write(&body_path, vec![b'x'; dynamic_bytes.len()]).expect("corrupt body");
         assert!(matches!(
             MountTable::load_offline(context.clone(), &desired),
             Err(RegistryError::CorruptProjection { .. })
         ));
-        std::fs::write(&body_path, &inline_bytes).expect("restore body");
+        std::fs::write(&body_path, &dynamic_bytes).expect("restore body");
 
         let database = fjall::OptimisticTxDatabase::builder(cache.join("projections/database"))
             .open()

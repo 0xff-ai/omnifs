@@ -351,7 +351,9 @@ impl FileAttrsCache {
         }
     }
 
-    pub fn durable_cache_aux(&self) -> Option<Option<String>> {
+    /// Cache key used for online file reuse. Unversioned dynamic content must
+    /// re-enter the provider on every online read, so it has no reuse key.
+    pub fn online_cache_aux(&self) -> Option<Option<String>> {
         match self.stability() {
             Stability::Stable => Some(None),
             Stability::Dynamic => self.cache_key_aux().map(Some),
@@ -359,12 +361,17 @@ impl FileAttrsCache {
         }
     }
 
-    pub fn durable_content_cacheable(&self) -> bool {
+    /// Cache key used for durable observation. Every complete non-live body is
+    /// retained for cache-only serving, including unversioned dynamic content.
+    pub fn durable_observation_cache_aux(&self) -> Option<Option<String>> {
         match self.stability() {
-            Stability::Stable => true,
-            Stability::Dynamic => self.version_token().is_some(),
-            Stability::Live => false,
+            Stability::Stable | Stability::Dynamic => Some(self.cache_key_aux()),
+            Stability::Live => None,
         }
+    }
+
+    pub fn durable_content_cacheable(&self) -> bool {
+        self.durable_observation_cache_aux().is_some()
     }
 
     /// Whether a size learned from a complete read on `self` survives being

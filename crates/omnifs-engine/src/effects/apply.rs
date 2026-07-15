@@ -162,7 +162,7 @@ impl<'a> EffectApplier<'a> {
         if let wit_types::FsKind::File(file) = kind {
             let attrs = self.file_meta(file)?;
             if let Some(bytes) = attrs.inline_bytes()
-                && let Some(aux) = attrs.durable_cache_aux()
+                && let Some(aux) = attrs.durable_observation_cache_aux()
             {
                 transition.records.push(RecordWrite {
                     path: path.clone(),
@@ -455,7 +455,7 @@ impl<'a> EffectApplier<'a> {
             fact: FactPayload::Attr(AttrPayload { meta }),
         });
         if let Some(file) = durable_file
-            && let Some(aux) = attrs.durable_cache_aux()
+            && let Some(aux) = attrs.durable_observation_cache_aux()
         {
             transition.records.push(RecordWrite {
                 path: path.clone(),

@@ -229,13 +229,20 @@ impl TreeNamespace {
             }
         }
 
-        let durable_aux = attrs.and_then(FileAttrsCache::durable_cache_aux);
+        let file_cache_aux = attrs.and_then(|attrs| {
+            if offline {
+                attrs.durable_observation_cache_aux()
+            } else {
+                attrs.online_cache_aux()
+            }
+        });
 
         // Read cache cascade: mem (the FUSE pagination/in-memory tier), then the
-        // durable view cache. Both are keyed by the durable aux and validated
-        // against the projected attrs. A hit serves the cached bytes and keeps
-        // the node's projected (already size-learned) attrs.
-        if let Some(aux) = durable_aux.clone() {
+        // durable view cache. Online reuse and offline observation use separate
+        // keys, and both validate hits against the projected attrs. A hit serves
+        // the cached bytes and keeps the node's projected (already size-learned)
+        // attrs.
+        if let Some(aux) = file_cache_aux {
             if let Some(record) = resources.memory_get(path, RecordKind::File, aux.as_deref())
                 && let Some(payload) = file_payload_for_attrs(&record, attrs)
             {
