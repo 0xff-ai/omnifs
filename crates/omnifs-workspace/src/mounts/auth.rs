@@ -41,29 +41,17 @@ pub struct OAuth {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub header: Option<String>,
     /// OAuth public client id override for BYO OAuth applications.
-    #[serde(default, alias = "clientId", skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_id: Option<String>,
     /// Environment variable containing an OAuth client secret.
-    #[serde(
-        default,
-        alias = "clientSecretEnv",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_secret_env: Option<String>,
     /// File containing an OAuth client secret.
-    #[serde(
-        default,
-        alias = "clientSecretFile",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_secret_file: Option<String>,
     /// OAuth redirect URI override for BYO apps that require an exact
     /// registered callback.
-    #[serde(
-        default,
-        alias = "redirectUri",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub redirect_uri: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scopes: Option<Vec<String>>,

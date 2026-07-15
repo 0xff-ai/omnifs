@@ -664,15 +664,18 @@ mod tests {
         let spec = serde_json::json!({
             "provider": provider_ref("demo"),
             "mount": "demo",
-            "moutn": "typo"
+            "auth": {
+                "type": "oauth",
+                "clientId": "retired"
+            }
         });
 
         let error = serde_json::from_value::<Spec>(spec).expect_err("unknown key must fail");
 
         let message = error.to_string();
         assert!(
-            message.contains("unknown field `moutn`"),
-            "error should name the typo'd key, got: {message}"
+            message.contains("unknown field `clientId`"),
+            "error should name the retired key, got: {message}"
         );
     }
 
