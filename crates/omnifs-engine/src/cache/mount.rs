@@ -1935,15 +1935,10 @@ fn invalidate_parent_listing(
     let Some(mut listing) = read_dirents_fact(tx, facts, &parent)? else {
         return Ok(None);
     };
-    let was_complete = listing.is_complete_offline();
-    let had_entry = listing.entries.iter().any(|entry| entry.name == name);
-    if !had_entry && !was_complete {
-        return Ok(None);
-    }
     listing.entries.retain(|entry| entry.name != name);
-    // An exact child invalidation makes the parent's prior completeness claim
-    // and validator stale. The next ordinary browse revalidates the parent;
-    // rate-limited serve-stale may retain unaffected siblings in the meantime.
+    // An exact child invalidation makes the parent's prior completeness claim,
+    // cursor, and validator stale. The next ordinary browse revalidates the
+    // parent; rate-limited serve-stale may retain unaffected siblings.
     listing.exhaustive = false;
     listing.paginated = false;
     listing.next_cursor = None;
@@ -2668,6 +2663,46 @@ mod tests {
         let listing = store.dirents_payload(&invalidated_parent).unwrap().unwrap();
         assert!(listing.entries.is_empty());
         assert!(listing.validator.is_none());
+        assert!(!listing.is_complete_offline());
+
+        let partial_parent = p("/partial");
+        let partial_child = p("/partial/absent");
+        store
+            .publish(
+                ProjectionTransition {
+                    dirents: vec![DirentsMutation::Replace {
+                        path: partial_parent.clone(),
+                        value: DirentsPayload {
+                            entries: vec![crate::view::DirentRecord {
+                                name: "sibling".into(),
+                                meta: EntryMeta::directory(),
+                            }],
+                            exhaustive: false,
+                            validator: Some("cursor-validator".into()),
+                            next_cursor: Some(crate::view::CachedCursor::Opaque("cursor".into())),
+                            paginated: true,
+                        },
+                    }],
+                    ..ProjectionTransition::default()
+                },
+                store.current_epoch(),
+            )
+            .unwrap();
+        store
+            .publish(
+                ProjectionTransition {
+                    invalidations: vec![Invalidation::ListingPath(partial_child)],
+                    ..ProjectionTransition::default()
+                },
+                store.current_epoch(),
+            )
+            .unwrap();
+        let listing = store.dirents_payload(&partial_parent).unwrap().unwrap();
+        assert_eq!(listing.entries.len(), 1);
+        assert_eq!(listing.entries[0].name, "sibling");
+        assert!(listing.validator.is_none());
+        assert!(listing.next_cursor.is_none());
+        assert!(!listing.paginated);
         assert!(!listing.is_complete_offline());
 
         let stale = p("/dir/stale");
