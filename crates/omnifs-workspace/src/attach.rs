@@ -70,7 +70,20 @@ impl Store {
                         ),
                     ));
                 }
-                sorted(file.targets)
+                let targets = sorted(file.targets);
+                if targets
+                    .windows(2)
+                    .any(|pair| pair[0].transport() == pair[1].transport())
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "attach targets at {} contain duplicate transports",
+                            path.display()
+                        ),
+                    ));
+                }
+                targets
             },
             Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
             Err(error) => return Err(error),
@@ -216,6 +229,12 @@ mod tests {
         std::fs::write(
             &path,
             br#"{"version":1,"targets":[{"transport":"tcp","addr":"bad","token":"x"}]}"#,
+        )
+        .unwrap();
+        assert!(Store::open(&path).is_err());
+        std::fs::write(
+            &path,
+            br#"{"version":1,"targets":[{"transport":"tcp","addr":"127.0.0.1:1","token":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},{"transport":"tcp","addr":"127.0.0.1:2","token":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}]}"#,
         )
         .unwrap();
         assert!(Store::open(&path).is_err());

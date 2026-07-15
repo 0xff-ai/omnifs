@@ -129,10 +129,11 @@ Inventory and receipt models are typed and sorted before both rendering and seri
 Observation commands exit 0 when collection succeeds and every resource is positive or neutral, including a deliberately stopped daemon, observed runners waiting to reconnect, offline mounts while stopped, and unnecessary auth. Inventory never adds a row for an unlaunched default. A complete inventory with an actionable or failed row exits 5. When a runtime record says the daemon should be live but its control probe is unavailable, status emits the trustworthy degraded inventory and exits 3. Human, JSON, and JSONL derive the same resource verdict; the exit mapper applies the unreachable override.
 
 `down` stops the daemon only and leaves frontend runners alive. It treats shutdown as complete only
-after the acknowledged shutdown request's control surface becomes unavailable;
-the CLI polls that surface with a bounded timeout and reports a failed teardown
-row if the daemon remains reachable, so a successful `DaemonStopped` outcome
-always means a subsequent status probe can observe `not_running`. `down` never
+after the acknowledged shutdown request's control surface becomes unavailable and
+the recorded daemon process exits; the CLI polls both facts with a bounded timeout
+and reports a failed teardown row if either remains live, so a successful
+`DaemonStopped` outcome always means a subsequent status probe can observe
+`not_running` and replacement cannot overlap its predecessor. `down` never
 deletes mount desired state, credentials, provider artifacts, cache or workspace
 files, or `$OMNIFS_HOME`; users and uninstallers remove `$OMNIFS_HOME` through
 ordinary filesystem operations.
