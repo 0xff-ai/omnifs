@@ -46,6 +46,8 @@ pub const LOCAL_ATTACH_SOCKET_NAME: &str = "local.sock";
 /// libkrun's vsock-proxy path terminates every guest vsock dial on this socket
 /// as the same local peer.
 pub const VSOCK_ATTACH_SOCKET_NAME: &str = "vsock-attach.sock";
+/// Durable token-authenticated TCP and vsock listener authority.
+pub const ATTACH_TARGETS_FILE: &str = "targets.json";
 pub const OMNIFS_HOME_ENV: &str = "OMNIFS_HOME";
 /// Overrides the host-visible mount point the daemon serves at.
 pub const OMNIFS_MOUNT_POINT_ENV: &str = "OMNIFS_MOUNT_POINT";
@@ -153,6 +155,11 @@ impl WorkspaceLayout {
     pub fn daemon_record_file(&self) -> PathBuf {
         self.config_dir
             .join(crate::daemon_record::DAEMON_RECORD_FILE)
+    }
+
+    /// The durable token-authenticated namespace attach targets.
+    pub fn attach_targets_file(&self) -> PathBuf {
+        self.frontends_dir().join(ATTACH_TARGETS_FILE)
     }
 
     /// The host-native control socket (`<config_dir>/control.sock`). Auth on

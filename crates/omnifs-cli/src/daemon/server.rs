@@ -8,9 +8,10 @@ use omnifs_api::{
     MountInfo,
 };
 use omnifs_engine::{Inspector, MountTable};
-use omnifs_workspace::daemon_record::{AttachRecord, DaemonRecord};
+use omnifs_workspace::attach::{Store as AttachStore, Target as AttachTarget};
+use omnifs_workspace::daemon_record::DaemonRecord;
 use omnifs_workspace::mounts::{Registry, Revision};
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -66,13 +67,13 @@ pub(crate) enum AttachOutcome {
     NamespaceNotReady,
 }
 
-fn attach_record(target: &ListenerTarget) -> anyhow::Result<AttachRecord> {
+fn attach_target(target: &ListenerTarget) -> anyhow::Result<AttachTarget> {
     match target {
-        ListenerTarget::Tcp { addr, token } => Ok(AttachRecord::Tcp {
-            addr: addr.to_string(),
+        ListenerTarget::Tcp { addr, token } => Ok(AttachTarget::Tcp {
+            addr: *addr,
             token: token.clone(),
         }),
-        ListenerTarget::Vsock { socket_path, token } => Ok(AttachRecord::Vsock {
+        ListenerTarget::Vsock { socket_path, token } => Ok(AttachTarget::Vsock {
             socket_path: socket_path.clone(),
             token: token.clone(),
         }),
@@ -110,57 +111,6 @@ impl DaemonRecordStore {
         Ok(())
     }
 
-    fn set_attach(&self, target: AttachRecord) -> anyhow::Result<()> {
-        let mut guard = self
-            .record
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Some(record) = guard.as_mut() else {
-            anyhow::bail!("daemon record has already been removed")
-        };
-        let previous = record.clone();
-        record.set_attach(target);
-        if self.published.load(Ordering::Acquire)
-            && let Err(error) = record.write(&self.path)
-        {
-            *record = previous;
-            return Err(error).with_context(|| {
-                format!(
-                    "persist attach listener in daemon record {}",
-                    self.path.display()
-                )
-            });
-        }
-        Ok(())
-    }
-
-    fn remove_attach(&self, target: &AttachRecord) -> anyhow::Result<()> {
-        let mut guard = self
-            .record
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Some(record) = guard.as_mut() else {
-            anyhow::bail!("daemon record has already been removed")
-        };
-        let previous = record.clone();
-        record.remove_attach(target);
-        if record.attach == previous.attach {
-            return Ok(());
-        }
-        if self.published.load(Ordering::Acquire)
-            && let Err(error) = record.write(&self.path)
-        {
-            *record = previous;
-            return Err(error).with_context(|| {
-                format!(
-                    "persist removed attach listener in daemon record {}",
-                    self.path.display()
-                )
-            });
-        }
-        Ok(())
-    }
-
     pub(crate) fn remove(&self) {
         let mut guard = self
             .record
@@ -195,6 +145,7 @@ pub(crate) struct Daemon {
     registry: Arc<MountTable>,
     inspector: Option<Arc<Inspector>>,
     daemon_record: Arc<DaemonRecordStore>,
+    attach_store: Arc<AttachStore>,
     vfs: OnceLock<Arc<omnifs_vfs_wire::VfsServer>>,
     shutdown_tx: tokio::sync::watch::Sender<bool>,
     events_tx: OnceLock<tokio::sync::mpsc::UnboundedSender<TaskEvent>>,
@@ -208,6 +159,7 @@ impl Daemon {
         registry: Arc<MountTable>,
         inspector: Option<Arc<Inspector>>,
         daemon_record: Arc<DaemonRecordStore>,
+        attach_store: Arc<AttachStore>,
     ) -> Self {
         let (shutdown_tx, _) = tokio::sync::watch::channel(false);
         Self {
@@ -215,6 +167,7 @@ impl Daemon {
             registry,
             inspector,
             daemon_record,
+            attach_store,
             vfs: OnceLock::new(),
             shutdown_tx,
             events_tx: OnceLock::new(),
@@ -302,25 +255,25 @@ impl Daemon {
         let Some(vfs) = self.vfs.get() else {
             return Ok(AttachOutcome::NamespaceNotReady);
         };
-        let (target, newly_bound) = vfs
+        let (listener_target, newly_bound) = vfs
             .ensure_tcp_with_status(bind_addr.0, port, requested_token)
             .context("bind namespace TCP listener")?;
-        let record = match attach_record(&target) {
+        let target = match attach_target(&listener_target) {
             Ok(record) => record,
             Err(error) => {
                 if newly_bound {
-                    vfs.remove_listener(&target);
+                    vfs.remove_listener(&listener_target);
                 }
-                return Err(error);
+                return Err(error.into());
             },
         };
-        if let Err(error) = self.daemon_record.set_attach(record) {
+        if let Err(error) = self.attach_store.set(target) {
             if newly_bound {
-                vfs.remove_listener(&target);
+                vfs.remove_listener(&listener_target);
             }
-            return Err(error);
+            return Err(error.into());
         }
-        Ok(AttachOutcome::Bound(target))
+        Ok(AttachOutcome::Bound(listener_target))
     }
 
     fn ensure_attach_uds(&self) -> anyhow::Result<AttachOutcome> {
@@ -338,33 +291,33 @@ impl Daemon {
             return Ok(AttachOutcome::NamespaceNotReady);
         };
         let path = self.context.vsock_attach_socket();
-        let (target, newly_bound) = vfs
+        let (listener_target, newly_bound) = vfs
             .ensure_vsock_with_status(path, requested_token)
             .context("bind namespace vsock listener")?;
-        let record = match attach_record(&target) {
+        let target = match attach_target(&listener_target) {
             Ok(record) => record,
             Err(error) => {
                 if newly_bound {
-                    vfs.remove_listener(&target);
+                    vfs.remove_listener(&listener_target);
                 }
-                return Err(error);
+                return Err(error.into());
             },
         };
-        if let Err(error) = self.daemon_record.set_attach(record) {
+        if let Err(error) = self.attach_store.set(target) {
             if newly_bound {
-                vfs.remove_listener(&target);
+                vfs.remove_listener(&listener_target);
             }
-            return Err(error);
+            return Err(error.into());
         }
-        Ok(AttachOutcome::Bound(target))
+        Ok(AttachOutcome::Bound(listener_target))
     }
 
     /// Own the daemon's complete serving lifetime. Startup binds every fixed
     /// listener, restores persisted dynamic authority, and publishes the new
     /// record only after all required listeners are alive. The same method owns
     /// task joins, provider shutdown, record removal, and socket cleanup.
-    pub(crate) async fn run(self: Arc<Self>, previous: Option<DaemonRecord>) -> anyhow::Result<()> {
-        let result = self.run_inner(previous).await;
+    pub(crate) async fn run(self: Arc<Self>) -> anyhow::Result<()> {
+        let result = self.run_inner().await;
         let _ = self.shutdown_tx.send(true);
         self.stop_tasks().await;
         if let Some(vfs) = self.vfs.get() {
@@ -376,14 +329,14 @@ impl Daemon {
         result
     }
 
-    async fn run_inner(self: &Arc<Self>, previous: Option<DaemonRecord>) -> anyhow::Result<()> {
+    async fn run_inner(self: &Arc<Self>) -> anyhow::Result<()> {
         let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
         let _ = self.events_tx.set(events_tx);
         let vfs = self.vfs.get().context("VFS server was not initialized")?;
         let listener_events = vfs.listener_events();
         let startup_gate = vfs.begin_startup();
         self.start_fixed_listeners(startup_gate)?;
-        self.restore_attach_listeners(previous.as_ref())?;
+        self.restore_attach_listeners()?;
 
         check_startup_events(&mut events_rx)?;
         // The VFS-owned startup gate keeps the bound control and namespace
@@ -414,38 +367,30 @@ impl Daemon {
         Ok(())
     }
 
-    fn restore_attach_listeners(
-        self: &Arc<Self>,
-        previous: Option<&DaemonRecord>,
-    ) -> anyhow::Result<()> {
-        if let Some(previous) = previous {
-            for target in &previous.attach {
-                match target {
-                    AttachRecord::Tcp { addr, token } => {
-                        let addr: SocketAddr = addr.parse().with_context(|| {
-                            format!("invalid persisted attach TCP address `{addr}`")
-                        })?;
-                        let ip = match addr.ip() {
-                            std::net::IpAddr::V4(ip) => ip,
-                            std::net::IpAddr::V6(_) => {
-                                anyhow::bail!("persisted attach TCP address must be IPv4: {addr}")
-                            },
-                        };
-                        self.ensure_attach_tcp_with_token(
-                            AttachBindAddr::requested(Some(ip))?,
-                            addr.port(),
-                            Some(token.clone()),
-                        )?;
-                    },
-                    AttachRecord::Vsock { socket_path, token } => {
-                        anyhow::ensure!(
-                            socket_path == &self.context.vsock_attach_socket(),
-                            "persisted vsock attach socket path {} is not the daemon-approved path",
-                            socket_path.display()
-                        );
-                        self.ensure_attach_uds_with_token(Some(token.clone()))?;
-                    },
-                }
+    fn restore_attach_listeners(self: &Arc<Self>) -> anyhow::Result<()> {
+        for target in self.attach_store.targets() {
+            match target {
+                AttachTarget::Tcp { addr, token } => {
+                    let ip = match addr.ip() {
+                        std::net::IpAddr::V4(ip) => ip,
+                        std::net::IpAddr::V6(_) => {
+                            anyhow::bail!("persisted attach TCP address must be IPv4: {addr}")
+                        },
+                    };
+                    self.ensure_attach_tcp_with_token(
+                        AttachBindAddr::requested(Some(ip))?,
+                        addr.port(),
+                        Some(token),
+                    )?;
+                },
+                AttachTarget::Vsock { socket_path, token } => {
+                    anyhow::ensure!(
+                        socket_path == self.context.vsock_attach_socket(),
+                        "persisted vsock attach socket path {} is not the daemon-approved path",
+                        socket_path.display()
+                    );
+                    self.ensure_attach_uds_with_token(Some(token))?;
+                },
             }
         }
         if let Some(port) = self.context.attach_tcp_port()
@@ -478,7 +423,7 @@ impl Daemon {
                         if matches!(target, omnifs_vfs_wire::ListenerTarget::Local { .. }) {
                             anyhow::bail!("local namespace listener exited");
                         }
-                        self.daemon_record.remove_attach(&attach_record(&target)?)?;
+                        self.attach_store.remove(&attach_target(&target)?)?;
                         match &target {
                             ListenerTarget::Local { path } => {
                                 warn!(transport = "local", path = %path.display(), "namespace listener exited; target is unavailable");
@@ -966,83 +911,15 @@ mod tests {
         );
         let daemon_record =
             super::DaemonRecordStore::new(context.daemon_record_file(), context.daemon_record());
-        Arc::new(super::Daemon::new(context, registry, None, daemon_record))
-    }
-
-    #[test]
-    fn daemon_record_store_fences_late_updates_after_removal() {
-        use omnifs_workspace::daemon_record::{AttachRecord, DaemonRecord, Endpoint};
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("daemon.json");
-        let store = super::DaemonRecordStore::new(
-            path.clone(),
-            DaemonRecord::new(
-                omnifs_workspace::mounts::Revision::new("a".repeat(40)).unwrap(),
-                Endpoint::Unix {
-                    path: dir.path().join("control.sock"),
-                },
-                1,
-                "instance".to_string(),
-                false,
-            ),
-        );
-
-        store
-            .set_attach(AttachRecord::Tcp {
-                addr: "127.0.0.1:1".to_string(),
-                token: "a".repeat(32),
-            })
-            .unwrap();
-        assert!(!path.exists());
-        store.publish().unwrap();
-        store
-            .set_attach(AttachRecord::Vsock {
-                socket_path: dir.path().join("vsock.sock"),
-                token: "b".repeat(32),
-            })
-            .unwrap();
-        assert_eq!(DaemonRecord::read(&path).unwrap().unwrap().attach.len(), 2);
-
-        std::fs::remove_file(&path).unwrap();
-        std::fs::create_dir(&path).unwrap();
-        assert!(
-            store
-                .set_attach(AttachRecord::Tcp {
-                    addr: "127.0.0.1:3".to_string(),
-                    token: "d".repeat(32),
-                })
-                .is_err()
-        );
-        assert!(
-            store
-                .remove_attach(&AttachRecord::Tcp {
-                    addr: "127.0.0.1:1".to_string(),
-                    token: "a".repeat(32),
-                })
-                .is_err()
-        );
-
-        std::fs::remove_dir(&path).unwrap();
-        store.publish().unwrap();
-        let recovered = DaemonRecord::read(&path).unwrap().unwrap();
-        assert!(
-            recovered.attach.iter().any(
-                |target| matches!(target, AttachRecord::Tcp { addr, .. } if addr == "127.0.0.1:1")
-            ),
-            "failed persistence must roll back the in-memory replacement"
-        );
-        assert_eq!(recovered.attach.len(), 2);
-        store.remove();
-        assert!(
-            store
-                .set_attach(AttachRecord::Tcp {
-                    addr: "127.0.0.1:2".to_string(),
-                    token: "c".repeat(32),
-                })
-                .is_err()
-        );
-        assert!(!path.exists());
+        let attach_store =
+            Arc::new(omnifs_workspace::attach::Store::open(context.attach_targets_file()).unwrap());
+        Arc::new(super::Daemon::new(
+            context,
+            registry,
+            None,
+            daemon_record,
+            attach_store,
+        ))
     }
 
     #[test]
@@ -1071,7 +948,7 @@ mod tests {
 
     #[tokio::test]
     #[allow(unsafe_code)]
-    async fn control_socket_dispatches_ready_status_attach_and_shutdown() {
+    async fn control_socket_dispatches_ready_status_attach_persists_across_restart_and_shutdown() {
         let dir = tempfile::tempdir().unwrap();
         let _env_guard = ENV_LOCK
             .lock()
@@ -1121,8 +998,8 @@ mod tests {
             outcome => panic!("unexpected attach reply: {outcome:?}"),
         };
         let attach_target = omnifs_vfs_wire::AttachTarget::Tcp {
-            addr: target.addr,
-            token: target.token,
+            addr: target.addr.clone(),
+            token: target.token.clone(),
         };
         let identity = omnifs_vfs_wire::FrontendIdentity {
             kind: omnifs_vfs_wire::FrontendKind::Fuse,
@@ -1184,12 +1061,78 @@ mod tests {
         };
         assert!(status.frontends.is_empty());
 
+        let persisted =
+            omnifs_workspace::attach::Store::open(dir.path().join("frontends/targets.json"))
+                .unwrap()
+                .targets();
+        assert_eq!(
+            persisted,
+            vec![omnifs_workspace::attach::Target::Tcp {
+                addr: target.addr.parse().unwrap(),
+                token: target.token.clone(),
+            }]
+        );
+
+        daemon.vfs.get().unwrap().shutdown().await;
+        daemon.stop_tasks().await;
+        std::fs::remove_file(&control_socket).unwrap();
+        drop(daemon);
+
+        let daemon = test_daemon(&dir);
+        let namespace =
+            omnifs_engine::TreeNamespace::online(Arc::clone(&daemon.registry), rt.clone());
+        daemon.set_namespace(namespace);
+        let vfs = daemon.vfs.get().unwrap();
+        vfs.serve_local(dir.path().join("local-2.sock")).unwrap();
+        daemon.restore_attach_listeners().unwrap();
+        vfs.mark_ready();
+
+        let control_socket = dir.path().join("control.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&control_socket).unwrap();
+        let (_gate_tx, gate_rx) = tokio::sync::watch::channel(true);
+        daemon.spawn_control_unix(listener, &rt, gate_rx).unwrap();
         assert!(matches!(
-            request(&control_socket, ControlOperation::Shutdown)
+            request(&control_socket, ControlOperation::Ready)
                 .await
                 .outcome,
-            ControlOutcome::Shutdown
+            ControlOutcome::Ready
         ));
+
+        let wire = omnifs_vfs_wire::WireNamespace::attach(
+            omnifs_vfs_wire::AttachTarget::Tcp {
+                addr: target.addr.parse().unwrap(),
+                token: target.token,
+            },
+            omnifs_vfs_wire::FrontendIdentity {
+                kind: omnifs_vfs_wire::FrontendKind::Fuse,
+                mount_point: std::path::PathBuf::from("/guest/omnifs"),
+            },
+            rt.clone(),
+        )
+        .await
+        .unwrap();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        let status = loop {
+            let reply = request(&control_socket, ControlOperation::Status).await;
+            if let ControlOutcome::Status(status) = reply.outcome
+                && status
+                    .frontends
+                    .iter()
+                    .any(|frontend| frontend.runtime == omnifs_api::FrontendRuntime::Docker)
+            {
+                break status;
+            }
+            assert!(tokio::time::Instant::now() < deadline);
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        };
+        assert!(status.frontends.iter().any(|frontend| {
+            frontend.runtime == omnifs_api::FrontendRuntime::Docker
+                && frontend.mount_point == std::path::Path::new("/guest/omnifs")
+        }));
+        drop(wire);
+        daemon.vfs.get().unwrap().shutdown().await;
+        daemon.stop_tasks().await;
+        std::fs::remove_file(control_socket).unwrap();
     }
 
     #[tokio::test]

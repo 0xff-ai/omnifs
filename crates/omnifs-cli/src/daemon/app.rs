@@ -90,19 +90,19 @@ pub(crate) async fn run(args: &DaemonArgs) -> anyhow::Result<()> {
         }
     }
 
-    // Read the predecessor before publishing anything for this invocation. It
-    // is restoration input, not an ownership claim: startup failure leaves it
-    // in place as stale diagnostic evidence.
     let record_path = context.daemon_record_file();
-    let previous = omnifs_workspace::daemon_record::DaemonRecord::read(&record_path)
-        .with_context(|| format!("read predecessor daemon record {}", record_path.display()))?;
     let daemon_record = context.daemon_record();
     let daemon_record = server::DaemonRecordStore::new(record_path, daemon_record);
+    let attach_store = Arc::new(
+        omnifs_workspace::attach::Store::open(context.attach_targets_file())
+            .with_context(|| "open durable frontend attach targets")?,
+    );
     let daemon = Arc::new(server::Daemon::new(
         context,
         Arc::clone(&registry),
         inspector,
         Arc::clone(&daemon_record),
+        attach_store,
     ));
     // Build the one shared namespace after atomic startup loading, so its root
     // record reflects the complete mount set.
@@ -114,7 +114,7 @@ pub(crate) async fn run(args: &DaemonArgs) -> anyhow::Result<()> {
     // Give the daemon's VfsServer a handle to the namespace so typed attach
     // requests can bind a TCP listener on a running daemon without a restart.
     daemon.set_namespace(Arc::clone(&namespace));
-    let result = daemon.run(previous).await;
+    let result = daemon.run().await;
     let served_mounts = registry.mounts().len();
     telemetry.daemon_event(DaemonEvent::FrontendStopped, served_mounts);
     telemetry.daemon_event(DaemonEvent::DaemonStop, served_mounts);

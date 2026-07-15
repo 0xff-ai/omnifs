@@ -164,7 +164,7 @@ impl<'a> DaemonTeardown<'a> {
         Ok(outcomes)
     }
 
-    /// Request shutdown and wait until the control surface is observably gone.
+    /// Request shutdown and wait until the control surface and process are gone.
     /// The daemon acknowledges shutdown before its serving task exits, so a
     /// successful POST alone is not enough to report `DaemonStopped`.
     async fn shutdown_and_wait(&self, pid: u32) -> TeardownOutcome {
@@ -174,13 +174,23 @@ impl<'a> DaemonTeardown<'a> {
                 let mut last_error = None;
                 loop {
                     match self.workspace.daemon().status_optional().await {
-                        Ok(None) => return TeardownOutcome::DaemonStopped { pid },
+                        Ok(None) if !crate::process::is_alive(pid) => {
+                            return TeardownOutcome::DaemonStopped { pid };
+                        },
                         Ok(Some(_)) => {},
+                        Ok(None) => {},
                         Err(error) => last_error = Some(format!("{error:#}")),
                     }
                     if tokio::time::Instant::now() >= deadline {
                         let detail = last_error.map_or_else(
-                            || "the control surface remained reachable".to_owned(),
+                            || {
+                                if crate::process::is_alive(pid) {
+                                    "the control surface or daemon process remained alive"
+                                        .to_owned()
+                                } else {
+                                    "the control surface remained reachable".to_owned()
+                                }
+                            },
                             |error| format!("the control surface could not be verified: {error}"),
                         );
                         return TeardownOutcome::DaemonShutdownFailed {

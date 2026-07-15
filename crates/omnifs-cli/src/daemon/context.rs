@@ -74,6 +74,10 @@ impl DaemonContext {
         self.layout.daemon_record_file()
     }
 
+    pub(crate) fn attach_targets_file(&self) -> PathBuf {
+        self.layout.attach_targets_file()
+    }
+
     pub(crate) fn vsock_attach_socket(&self) -> PathBuf {
         self.layout.vsock_attach_socket()
     }

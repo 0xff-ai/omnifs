@@ -11,7 +11,7 @@ use crate::io::write_atomic;
 use crate::mounts::Revision;
 
 /// Schema version this build understands. Older records are rejected outright.
-pub const DAEMON_RECORD_VERSION: u32 = 5;
+pub const DAEMON_RECORD_VERSION: u32 = 6;
 
 /// How a client reaches the daemon's control socket.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -19,30 +19,6 @@ pub const DAEMON_RECORD_VERSION: u32 = 5;
 pub enum Endpoint {
     /// Host-native daemon serving a Unix domain socket.
     Unix { path: PathBuf },
-}
-
-/// One token-authenticated namespace attach target owned by the daemon.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(tag = "transport", rename_all = "lowercase", deny_unknown_fields)]
-pub enum AttachRecord {
-    Tcp { addr: String, token: String },
-    Vsock { socket_path: PathBuf, token: String },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AttachTransport {
-    Tcp,
-    Vsock,
-}
-
-impl AttachRecord {
-    #[must_use]
-    pub const fn transport(&self) -> AttachTransport {
-        match self {
-            Self::Tcp { .. } => AttachTransport::Tcp,
-            Self::Vsock { .. } => AttachTransport::Vsock,
-        }
-    }
 }
 
 /// Filesystem protocol served by a host runner.
@@ -75,8 +51,6 @@ pub struct DaemonRecord {
     pub offline: bool,
     /// RFC3339 UTC timestamp of when the daemon started serving.
     pub started_at: String,
-    /// Token-authenticated TCP and vsock attach targets bound this start.
-    pub attach: Vec<AttachRecord>,
 }
 
 impl DaemonRecord {
@@ -99,7 +73,6 @@ impl DaemonRecord {
             instance_id,
             offline,
             started_at,
-            attach: Vec::new(),
         }
     }
 
@@ -111,19 +84,6 @@ impl DaemonRecord {
         let json = serde_json::to_vec_pretty(self)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         write_atomic(path, &json, 0o600)
-    }
-
-    /// Replace the target for one transport and keep transport order stable.
-    pub fn set_attach(&mut self, target: AttachRecord) {
-        let transport = target.transport();
-        self.attach
-            .retain(|existing| existing.transport() != transport);
-        self.attach.push(target);
-        self.attach.sort();
-    }
-
-    pub fn remove_attach(&mut self, target: &AttachRecord) {
-        self.attach.retain(|existing| existing != target);
     }
 
     /// Read the record, rejecting unknown versions and fields.
@@ -206,26 +166,6 @@ mod tests {
                 0o600
             );
         }
-    }
-
-    #[test]
-    fn attach_is_always_present_and_sorted() {
-        let mut record = sample();
-        record.set_attach(AttachRecord::Vsock {
-            socket_path: PathBuf::from("/vsock.sock"),
-            token: "b".repeat(32),
-        });
-        record.set_attach(AttachRecord::Tcp {
-            addr: "127.0.0.1:1".to_string(),
-            token: "a".repeat(32),
-        });
-        assert!(matches!(record.attach[0], AttachRecord::Tcp { .. }));
-        assert!(
-            serde_json::to_value(record)
-                .unwrap()
-                .get("attach")
-                .is_some()
-        );
     }
 
     #[test]

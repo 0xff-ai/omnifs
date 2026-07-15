@@ -716,20 +716,18 @@ fn wire_frontend(
             frontend_cmd.arg("--attach").arg(&socket);
         },
         AttachTransport::Tcp => {
-            let record =
-                omnifs_workspace::daemon_record::DaemonRecord::read(&home_path.join("daemon.json"))
-                    .expect("read daemon.json")
-                    .expect("daemon.json present once ready");
-            let attach = record
-                .attach
-                .into_iter()
-                .find_map(|attach| match attach {
-                    omnifs_workspace::daemon_record::AttachRecord::Tcp { addr, token } => {
-                        Some((addr, token))
-                    },
-                    omnifs_workspace::daemon_record::AttachRecord::Vsock { .. } => None,
-                })
-                .expect("daemon.json must carry TCP attach after --attach-tcp");
+            let attach =
+                omnifs_workspace::attach::Store::open(home_path.join("frontends/targets.json"))
+                    .expect("read attach targets")
+                    .targets()
+                    .into_iter()
+                    .find_map(|target| match target {
+                        omnifs_workspace::attach::Target::Tcp { addr, token } => {
+                            Some((addr.to_string(), token))
+                        },
+                        omnifs_workspace::attach::Target::Vsock { .. } => None,
+                    })
+                    .expect("targets.json must carry TCP attach after --attach-tcp");
             frontend_cmd
                 .env(omnifs_api::OMNIFS_ATTACH_ADDR_ENV, &attach.0)
                 .env(omnifs_api::OMNIFS_ATTACH_TOKEN_ENV, &attach.1);

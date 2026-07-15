@@ -17,7 +17,7 @@ A frontend consumes the narrow `omnifs_engine::namespace` surface (`Namespace`, 
 
 ### Frontend registry
 
-The daemon constructs one `TreeNamespace` over the shared mount registry and gives it to `omnifs_vfs_wire::VfsServer`. `VfsServer` owns the fixed local and requested TCP/vsock listeners, attach tokens, listener and connection tasks, readiness, and the deduplicated live attachment snapshot; the daemon owns namespace construction, control serving, durable attach-target records, and process lifetime. Every frontend exposes the complete namespace, so adding or removing a mount changes every frontend together. Frontends never store mount membership, selection, or filtering. Each frontend process owns one protocol surface and its own lifetime; the CLI owns launch and teardown through the concrete runner.
+The daemon constructs one `TreeNamespace` over the shared mount registry and gives it to `omnifs_vfs_wire::VfsServer`. `VfsServer` owns the fixed local and requested TCP/vsock listeners, attach tokens, listener and connection tasks, readiness, and the deduplicated live attachment snapshot; the daemon owns namespace construction, control serving, the durable per-transport targets in `$OMNIFS_HOME/frontends/targets.json`, and process lifetime. Graceful daemon shutdown preserves those targets for runner reconnect, while unexpected listener death removes only its exact target. Every frontend exposes the complete namespace, so adding or removing a mount changes every frontend together. Frontends never store mount membership, selection, or filtering. Each frontend process owns one protocol surface and its own lifetime; the CLI owns launch and teardown through the concrete runner.
 
 ### FUSE
 
