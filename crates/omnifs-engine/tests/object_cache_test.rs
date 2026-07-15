@@ -16,7 +16,7 @@ use omnifs_wit::provider::types::{
 const CONFIG: &str = r#"
 {
     "provider": "test_provider.wasm",
-    "mount": "test",
+    "mount": "test"
 }
 "#;
 
