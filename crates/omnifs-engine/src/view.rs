@@ -11,18 +11,22 @@ use std::collections::BTreeMap;
 pub struct BodyId([u8; 32]);
 
 impl BodyId {
+    #[cfg(feature = "runtime")]
     pub(crate) fn from_bytes(bytes: &[u8]) -> Self {
         Self(*blake3::hash(bytes).as_bytes())
     }
 
+    #[cfg(feature = "runtime")]
     pub(crate) fn from_digest_bytes(bytes: [u8; 32]) -> Self {
         Self(bytes)
     }
 
+    #[cfg(feature = "runtime")]
     pub(crate) fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
 
+    #[cfg(feature = "runtime")]
     pub(crate) fn hex(self) -> String {
         hex::encode(self.0)
     }
