@@ -520,6 +520,35 @@ fn scenarios_3_to_6_lifecycle_cycle() {
         String::from_utf8_lossy(&disabled.stderr),
     );
 
+    let repeated_disable = fixture.run(&[
+        "frontend",
+        "disable",
+        filesystem,
+        "--runtime",
+        "host",
+        "--location",
+        &location,
+        "--output",
+        "json",
+    ]);
+    assert!(
+        repeated_disable.status.success(),
+        "repeated frontend disable must succeed (exit {})\nstdout: {}\nstderr: {}",
+        repeated_disable.status,
+        String::from_utf8_lossy(&repeated_disable.stdout),
+        String::from_utf8_lossy(&repeated_disable.stderr),
+    );
+    let repeated_disable_json: serde_json::Value = serde_json::from_slice(&repeated_disable.stdout)
+        .expect("repeated frontend disable must produce valid JSON");
+    assert_eq!(
+        repeated_disable_json["result"]["rows"][0]["state"], "stopped",
+        "repeated frontend disable must report stopped: {repeated_disable_json:#}"
+    );
+    assert_eq!(
+        repeated_disable_json["result"]["rows"][0]["changed"], false,
+        "repeated frontend disable must report changed=false: {repeated_disable_json:#}"
+    );
+
     // Poll briefly: the OS may take a moment to acknowledge the unmount.
     let settled = {
         let deadline = Instant::now() + Duration::from_secs(10);

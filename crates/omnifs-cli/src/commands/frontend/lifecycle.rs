@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail, ensure};
 use clap::{Args, ValueEnum};
-use omnifs_mtab::{MountKind, MountState};
+use omnifs_mtab::{MountKind, MountState, StateError};
 use omnifs_workspace::daemon_record::FrontendKind;
 use omnifs_workspace::layout::{WorkspaceLayout, resolve_mount_point};
 use serde::{Deserialize, Serialize};
@@ -674,18 +674,29 @@ async fn runner_running(workspace: &Workspace, id: &FrontendId, output: Output) 
                 },
                 location,
             );
-            if !state_dir.try_exists()? {
-                return Ok(false);
+            let states = MountState::read_all(&state_dir)?;
+            match states.as_slice() {
+                [] => {
+                    if omnifs_nfs::mount_is_active_checked(location)? {
+                        bail!(
+                            "active host frontend mount {} has no unique typed state; refusing to operate",
+                            location.display()
+                        );
+                    }
+                    Ok(false)
+                },
+                [state] => {
+                    let kind_matches = matches!(
+                        (id.filesystem(), &state.kind),
+                        (FrontendFilesystem::Fuse, MountKind::Fuse)
+                            | (FrontendFilesystem::Nfs, MountKind::Nfs { .. })
+                    );
+                    Ok(kind_matches
+                        && state.mount_point == location
+                        && crate::host_teardown::local_mount_is_owned(state))
+                },
+                states => Err(StateError::RecordCount(states.len()).into()),
             }
-            let state = MountState::read_unique(&state_dir)?;
-            let kind_matches = matches!(
-                (id.filesystem(), &state.kind),
-                (FrontendFilesystem::Fuse, MountKind::Fuse)
-                    | (FrontendFilesystem::Nfs, MountKind::Nfs { .. })
-            );
-            Ok(kind_matches
-                && state.mount_point == location
-                && crate::host_teardown::local_mount_is_owned(&state))
         },
         FrontendRuntime::Docker => {
             let config = workspace.config()?;
