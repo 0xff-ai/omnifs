@@ -1942,12 +1942,12 @@ fn invalidate_parent_listing(
     }
     listing.entries.retain(|entry| entry.name != name);
     // An exact child invalidation makes the parent's prior completeness claim
-    // stale even when the child was absent from the stored page. The next
-    // browse must revalidate the parent instead of treating the old listing as
-    // authoritative.
+    // and validator stale. The next ordinary browse revalidates the parent;
+    // rate-limited serve-stale may retain unaffected siblings in the meantime.
     listing.exhaustive = false;
     listing.paginated = false;
     listing.next_cursor = None;
+    listing.validator = None;
     apply_dirents(
         tx,
         facts,
@@ -2627,6 +2627,48 @@ mod tests {
         let listing = store.dirents_payload(&parent).unwrap().unwrap();
         assert!(listing.entries.is_empty());
         assert!(store.negative_for_checked(&child, 1_000).unwrap().is_some());
+
+        let invalidated_parent = p("/invalidated");
+        let invalidated_child = p("/invalidated/child");
+        store
+            .publish(
+                ProjectionTransition {
+                    records: vec![RecordWrite {
+                        path: invalidated_child.clone(),
+                        aux: None,
+                        fact: FactPayload::Lookup(LookupPayload::Positive(EntryMeta::directory())),
+                    }],
+                    dirents: vec![DirentsMutation::Replace {
+                        path: invalidated_parent.clone(),
+                        value: DirentsPayload {
+                            entries: vec![crate::view::DirentRecord {
+                                name: "child".into(),
+                                meta: EntryMeta::directory(),
+                            }],
+                            exhaustive: true,
+                            validator: Some("validator".into()),
+                            next_cursor: None,
+                            paginated: false,
+                        },
+                    }],
+                    ..ProjectionTransition::default()
+                },
+                store.current_epoch(),
+            )
+            .unwrap();
+        store
+            .publish(
+                ProjectionTransition {
+                    invalidations: vec![Invalidation::ListingPath(invalidated_child)],
+                    ..ProjectionTransition::default()
+                },
+                store.current_epoch(),
+            )
+            .unwrap();
+        let listing = store.dirents_payload(&invalidated_parent).unwrap().unwrap();
+        assert!(listing.entries.is_empty());
+        assert!(listing.validator.is_none());
+        assert!(!listing.is_complete_offline());
 
         let stale = p("/dir/stale");
         let reverse = p("/dir/reverse");
