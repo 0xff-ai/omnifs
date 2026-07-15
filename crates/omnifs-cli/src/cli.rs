@@ -334,7 +334,7 @@ async fn run_bare(output: Output) -> anyhow::Result<ExitCode> {
 fn exit_for_verdict(verdict: DoctorVerdict) -> ExitCode {
     match verdict {
         DoctorVerdict::Clean => ExitCode::Success,
-        DoctorVerdict::Failures => ExitCode::GenericFailure,
+        DoctorVerdict::Failures => ExitCode::Degraded,
         DoctorVerdict::Warnings => ExitCode::Degraded,
     }
 }

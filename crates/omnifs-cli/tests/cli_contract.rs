@@ -295,8 +295,9 @@ fn json_commands_emit_expected_shapes() {
     assert!(version_json["paths"].is_null());
 
     let doctor = fixture.run(&["doctor", "--output", "json"]);
+    assert_eq!(exit_code(&doctor), 5);
     let doctor_json = stdout_json(&doctor);
-    assert!(doctor_json["verdict"].as_str().is_some());
+    assert_eq!(doctor_json["verdict"], "degraded");
     assert!(doctor_json["result"]["inventory"].is_object());
     assert!(doctor_json["result"]["findings"].as_array().is_some());
 }
