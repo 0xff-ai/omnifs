@@ -182,6 +182,10 @@ impl DaemonContext {
         &self.layout.cache_dir
     }
 
+    pub(crate) fn mount_snapshot(&self, revision: &Revision) -> PathBuf {
+        self.layout.mount_revisions_root().join(revision.as_str())
+    }
+
     pub(crate) fn config_dir(&self) -> &Path {
         &self.layout.config_dir
     }

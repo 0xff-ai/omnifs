@@ -64,6 +64,7 @@ enum TableMode {
 /// Fixed selected mount table used by the single namespace implementation.
 pub struct MountTable {
     context: HostContext,
+    caches: Arc<Caches>,
     mode: TableMode,
     entries: BTreeMap<String, MountEntry>,
     timer_shutdown: watch::Sender<bool>,
@@ -142,6 +143,7 @@ impl MountTable {
             .collect();
         let table = Self {
             context,
+            caches: Arc::clone(&caches),
             mode: TableMode::Online,
             entries,
             timer_shutdown,
@@ -254,9 +256,17 @@ impl MountTable {
     /// No provider artifact, credential owner, Wasmtime engine, timer, HTTP
     /// client, or Git process is constructed on this path.
     pub fn load_offline(context: HostContext, desired: &Registry) -> Result<Self, RegistryError> {
-        validate_registry(desired)?;
         let caches = Caches::open_existing(context.cache_dir())
             .map_err(|error| RegistryError::OfflineCache(error.to_string()))?;
+        Self::load_offline_with_caches(context, desired, caches)
+    }
+
+    fn load_offline_with_caches(
+        context: HostContext,
+        desired: &Registry,
+        caches: Arc<Caches>,
+    ) -> Result<Self, RegistryError> {
+        validate_registry(desired)?;
         let mut entries = BTreeMap::new();
         let mut cloner = None;
         for (name, loaded) in desired.loaded_iter() {
@@ -311,11 +321,25 @@ impl MountTable {
         let (timer_shutdown, _) = watch::channel(false);
         Ok(Self {
             context,
+            caches,
             mode: TableMode::Offline,
             entries,
             timer_shutdown,
             timer_tasks: parking_lot::Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Validate an exact desired snapshot against this table's already-open
+    /// durable cache without publishing a second table or opening another
+    /// cache database.
+    pub fn validate_offline(&self, desired: &Registry) -> Result<(), RegistryError> {
+        let table = Self::load_offline_with_caches(
+            self.context.clone(),
+            desired,
+            Arc::clone(&self.caches),
+        )?;
+        drop(table);
+        Ok(())
     }
 
     /// Host context this registry resolves mounts against.

@@ -624,12 +624,52 @@ fn scenario_8_revision_restart_and_preflight_failure() {
     );
     drop(repository);
 
+    let test_spec_path = fixture.mounts_dir().join("test.json");
+    let committed_spec = std::fs::read(&test_spec_path).expect("read committed test spec");
+
+    // An exact spec-byte change creates a new projection identity even when
+    // the parsed mount semantics are unchanged. The live daemon validates it
+    // before teardown, so a missing projection must leave the online daemon
+    // and applied ref untouched.
+    let mut unprojected_spec = committed_spec.clone();
+    unprojected_spec.extend_from_slice(b"\n");
+    std::fs::write(&test_spec_path, &unprojected_spec).expect("write unprojected spec bytes");
+    let repository = omnifs_workspace::mounts::Repository::open(fixture.mounts_dir())
+        .expect("commit unprojected spec bytes");
+    let unprojected_revision = repository
+        .head_revision()
+        .expect("read unprojected HEAD")
+        .expect("unprojected HEAD");
+    assert_ne!(unprojected_revision, second.mount_revision);
+    drop(repository);
+    let rejected = fixture.run(&["up", "--offline"]);
+    assert!(
+        !rejected.status.success(),
+        "offline replacement must reject an unprojected exact spec"
+    );
+    let surviving =
+        omnifs_workspace::daemon_record::DaemonRecord::read(&fixture.daemon_record_path())
+            .expect("read daemon after rejected offline replacement")
+            .expect("online daemon must remain recorded");
+    assert_eq!(surviving.pid, second.pid);
+    assert_eq!(surviving.mount_revision, second.mount_revision);
+    assert!(!surviving.offline);
+    assert_eq!(
+        omnifs_workspace::mounts::Repository::observe(fixture.mounts_dir())
+            .expect("observe after rejected offline replacement")
+            .applied()
+            .expect("read applied after rejected offline replacement"),
+        Some(second.mount_revision.clone())
+    );
+    std::fs::write(&test_spec_path, &committed_spec).expect("restore exact projected spec bytes");
+    let repository = omnifs_workspace::mounts::Repository::open(fixture.mounts_dir())
+        .expect("commit restored exact spec bytes");
+    drop(repository);
+
     // Offline startup observes the committed HEAD while the mutable worktree
     // is dirty. It does not need the provider artifact or credentials, does
     // not move the applied ref, and opposite-mode reuse at the same revision
     // restarts the daemon.
-    let test_spec_path = fixture.mounts_dir().join("test.json");
-    let committed_spec = std::fs::read(&test_spec_path).expect("read committed test spec");
     let mut dirty_spec = committed_spec.clone();
     dirty_spec.extend_from_slice(b"\n");
     let dirty_spec_snapshot = dirty_spec.clone();

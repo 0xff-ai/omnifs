@@ -9,6 +9,7 @@ use omnifs_api::{
 };
 use omnifs_engine::{Inspector, MountTable};
 use omnifs_workspace::daemon_record::{AttachRecord, DaemonRecord};
+use omnifs_workspace::mounts::{Registry, Revision};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -597,6 +598,22 @@ impl Daemon {
     fn trigger_shutdown(self: &Arc<Self>) {
         let _ = self.shutdown_tx.send(true);
     }
+
+    async fn validate_offline(&self, revision: String) -> anyhow::Result<()> {
+        let revision = Revision::new(revision).context("invalid offline validation revision")?;
+        let snapshot = self.context.mount_snapshot(&revision);
+        let table = Arc::clone(&self.registry);
+        tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+            let desired = Registry::load(&snapshot)
+                .with_context(|| format!("load mount snapshot {}", snapshot.display()))?;
+            table
+                .validate_offline(&desired)
+                .map_err(|error| anyhow::anyhow!(error.to_string()))
+        })
+        .await
+        .context("offline projection validation task failed")??;
+        Ok(())
+    }
 }
 
 async fn handle_control_connection(
@@ -639,7 +656,13 @@ async fn handle_control_connection(
     let known_operation = matches!(
         operation_name,
         Some(
-            "ready" | "status" | "shutdown" | "attach_tcp" | "attach_vsock" | "subscribe_inspector"
+            "ready"
+                | "status"
+                | "shutdown"
+                | "validate_offline"
+                | "attach_tcp"
+                | "attach_vsock"
+                | "subscribe_inspector",
         )
     );
     if !known_operation {
@@ -712,6 +735,19 @@ async fn handle_control_connection(
                 },
             )
             .await?;
+        },
+        ControlOperation::ValidateOffline { revision } => {
+            let reply = match daemon.validate_offline(revision).await {
+                Ok(()) => ControlReply {
+                    version: CONTROL_PROTOCOL_VERSION,
+                    outcome: ControlOutcome::OfflineValidated,
+                },
+                Err(error) => ControlReply::error(ControlError::new(
+                    ControlErrorCode::OfflineValidationFailed,
+                    error.to_string(),
+                )),
+            };
+            write_control_reply(&mut stream, reply).await?;
         },
         ControlOperation::AttachTcp { bind_ip } => {
             let reply = match AttachBindAddr::requested(bind_ip)
@@ -1183,7 +1219,7 @@ mod tests {
 
         let unknown = raw_request(
             &control_socket,
-            br#"{"version":2,"operation":"unknown"}
+            br#"{"version":3,"operation":"unknown"}
 "#
             .to_vec(),
         )
@@ -1191,6 +1227,19 @@ mod tests {
         assert!(matches!(
             unknown.outcome,
             ControlOutcome::Error(error) if error.code == ControlErrorCode::UnknownOperation
+        ));
+
+        let invalid_offline_revision = raw_request(
+            &control_socket,
+            br#"{"version":3,"operation":"validate_offline","revision":"invalid"}
+"#
+            .to_vec(),
+        )
+        .await;
+        assert!(matches!(
+            invalid_offline_revision.outcome,
+            ControlOutcome::Error(error)
+                if error.code == ControlErrorCode::OfflineValidationFailed
         ));
 
         let oversized = raw_request(&control_socket, vec![b'x'; CONTROL_MAX_LINE_BYTES + 1]).await;

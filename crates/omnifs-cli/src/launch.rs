@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
+use anyhow::Context as _;
 use omnifs_api::{DaemonStatus, DaemonSubsystem};
 use omnifs_workspace::creds::{CredentialStore, FileStore};
 use omnifs_workspace::daemon_record::DaemonRecord;
@@ -187,6 +188,12 @@ async fn launch_host_native(
             output.narrate("Restarting omnifs daemon for changed online/offline mode");
         } else {
             output.narrate("Restarting omnifs daemon for changed mount revision");
+        }
+        if offline {
+            client
+                .validate_offline(revision)
+                .await
+                .context("validate offline projection before replacing daemon")?;
         }
         DaemonTeardown::new(workspace).stop_daemon().await?;
     } else {

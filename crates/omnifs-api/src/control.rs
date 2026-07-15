@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use crate::DaemonStatus;
 
 /// The only control protocol version understood by this build.
-pub const CONTROL_PROTOCOL_VERSION: u16 = 2;
+pub const CONTROL_PROTOCOL_VERSION: u16 = 3;
 
 /// Maximum size of one request, reply, or inspector event line, including its
 /// trailing newline. The control plane is local and bounded, so oversized
@@ -30,6 +30,9 @@ pub enum ControlOperation {
     Ready,
     Status,
     Shutdown,
+    ValidateOffline {
+        revision: String,
+    },
     AttachTcp {
         #[serde(default)]
         bind_ip: Option<Ipv4Addr>,
@@ -51,6 +54,7 @@ pub enum ControlOutcome {
     Ready,
     Status(DaemonStatus),
     Shutdown,
+    OfflineValidated,
     AttachTcp(TcpAttachTarget),
     AttachVsock(VsockAttachTarget),
     InspectorReady,
@@ -97,6 +101,7 @@ pub enum ControlErrorCode {
     LineTooLarge,
     NotReady,
     InvalidRequest,
+    OfflineValidationFailed,
     Internal,
 }
 
@@ -140,7 +145,21 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_string(&request).unwrap(),
-            r#"{"version":2,"operation":"attach_tcp","bind_ip":"127.0.0.1"}"#
+            r#"{"version":3,"operation":"attach_tcp","bind_ip":"127.0.0.1"}"#
+        );
+
+        let validate = ControlRequest {
+            version: CONTROL_PROTOCOL_VERSION,
+            operation: ControlOperation::ValidateOffline {
+                revision: "a".repeat(40),
+            },
+        };
+        assert_eq!(
+            serde_json::to_string(&validate).unwrap(),
+            format!(
+                r#"{{"version":3,"operation":"validate_offline","revision":"{}"}}"#,
+                "a".repeat(40)
+            )
         );
 
         let reply = ControlReply::error(ControlError::new(
@@ -149,7 +168,7 @@ mod tests {
         ));
         assert_eq!(
             serde_json::to_string(&reply).unwrap(),
-            r#"{"version":2,"result":"error","value":{"code":"not_ready","message":"namespace listeners are not serving yet"}}"#
+            r#"{"version":3,"result":"error","value":{"code":"not_ready","message":"namespace listeners are not serving yet"}}"#
         );
 
         assert!(

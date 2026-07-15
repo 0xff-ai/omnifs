@@ -417,6 +417,7 @@ impl Caches {
     ) -> Result<Arc<MountResources>, ProjectionError> {
         let mut owners = self.projection_owners.lock();
         if let Some(owner) = owners.get(&projection_id).and_then(Weak::upgrade) {
+            owner.validate_durable_projection()?;
             return Ok(owner);
         }
         let owner = MountResources::new_existing(

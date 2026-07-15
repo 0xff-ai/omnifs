@@ -16,12 +16,14 @@ use omnifs_api::{
 };
 use omnifs_workspace::daemon_record::{DaemonRecord, Endpoint};
 use omnifs_workspace::layout::WorkspaceLayout;
+use omnifs_workspace::mounts::Revision;
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::UnixStream;
 
 use crate::error::{ExitCode, WithExitCode};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(CONTROL_REQUEST_TIMEOUT_SECS);
+const OFFLINE_VALIDATION_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Debug)]
 enum Target {
@@ -116,6 +118,14 @@ impl DaemonClient {
     }
 
     async fn request(&self, operation: ControlOperation) -> Result<Option<ControlReply>> {
+        self.request_with_timeout(operation, REQUEST_TIMEOUT).await
+    }
+
+    async fn request_with_timeout(
+        &self,
+        operation: ControlOperation,
+        timeout: Duration,
+    ) -> Result<Option<ControlReply>> {
         let target = self.resolve()?;
         let Target::Unix { socket, .. } = &target else {
             return Ok(None);
@@ -124,7 +134,7 @@ impl DaemonClient {
             version: CONTROL_PROTOCOL_VERSION,
             operation,
         };
-        let result = tokio::time::timeout(REQUEST_TIMEOUT, async {
+        let result = tokio::time::timeout(timeout, async {
             let mut stream = UnixStream::connect(socket).await?;
             let mut line = serde_json::to_vec(&request).context("serialize control request")?;
             line.push(b'\n');
@@ -304,6 +314,24 @@ impl DaemonClient {
         }
     }
 
+    pub(crate) async fn validate_offline(&self, revision: &Revision) -> Result<()> {
+        let Some(reply) = self
+            .request_with_timeout(
+                ControlOperation::ValidateOffline {
+                    revision: revision.to_string(),
+                },
+                OFFLINE_VALIDATION_TIMEOUT,
+            )
+            .await?
+        else {
+            return Err(self.unavailable_error());
+        };
+        match self.reply_result(&reply, "offline projection validation failed")? {
+            ControlOutcome::OfflineValidated => Ok(()),
+            _ => Err(unexpected_reply("validate_offline")),
+        }
+    }
+
     pub(crate) async fn ready(&self) -> bool {
         let Ok(Some(reply)) = self.request(ControlOperation::Ready).await else {
             return false;
@@ -357,6 +385,7 @@ fn control_error(context: &str, error: &ControlError) -> anyhow::Error {
         | ControlErrorCode::UnknownOperation
         | ControlErrorCode::LineTooLarge
         | ControlErrorCode::InvalidRequest
+        | ControlErrorCode::OfflineValidationFailed
         | ControlErrorCode::Internal => ExitCode::GenericFailure,
     };
     match Err::<(), _>(anyhow::anyhow!("{context}: {}", error.message)).with_exit_code(exit_code) {
