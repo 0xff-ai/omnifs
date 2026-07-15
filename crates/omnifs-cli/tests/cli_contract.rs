@@ -10,6 +10,7 @@ use std::process::{Command, Output};
 use common::{install_test_provider, omnifs_bin, release_wasm_dir};
 use omnifs_workspace::authn::CredentialId;
 use omnifs_workspace::creds::{CredentialEntry, CredentialStore, FileStore};
+use omnifs_workspace::mounts::Repository;
 use secrecy::SecretString;
 use time::OffsetDateTime;
 
@@ -398,6 +399,45 @@ fn destructive_mount_jsonl_commands_end_with_one_typed_result() {
 #[test]
 fn mount_add_json_receipt_names_the_mount() {
     let fixture = Fixture::new();
+    let mounts_dir = fixture.home_path().join("mounts");
+    let bootstrap = Repository::open(&mounts_dir)
+        .expect("bootstrap mount repository")
+        .head_revision()
+        .expect("read bootstrap HEAD");
+
+    let rejected = fixture.run(&[
+        "mount",
+        "add",
+        "github",
+        "--as",
+        "dogfood-github",
+        "--token",
+        "dummy",
+        "--no-validate",
+    ]);
+    assert_ne!(exit_code(&rejected), 0);
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr).contains("--token VALUE is rejected"),
+        "unexpected direct-token rejection: {}",
+        String::from_utf8_lossy(&rejected.stderr)
+    );
+    assert!(
+        !mounts_dir.join("dogfood-github.json").exists(),
+        "rejected mount add must not write a mount spec"
+    );
+    assert!(
+        !fixture.home_path().join("credentials.json").exists(),
+        "rejected mount add must not write credentials"
+    );
+    let after_rejection = Repository::open(&mounts_dir)
+        .expect("reopen mount repository after rejection")
+        .head_revision()
+        .expect("read HEAD after rejection");
+    assert_eq!(
+        after_rejection, bootstrap,
+        "rejection must not commit desired state"
+    );
+
     let provider_id = install_test_provider(&fixture.home_path().join("providers"));
     let provider_id = provider_id.to_string();
 

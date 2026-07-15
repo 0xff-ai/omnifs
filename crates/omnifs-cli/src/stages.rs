@@ -95,8 +95,8 @@ pub(crate) async fn configure_mount(
     prompt: PromptMode,
 ) -> anyhow::Result<MountInitOutcome> {
     let mut plan = spec_creation(&args, workspace, output, prompt)?;
-    persist_mount_spec(workspace, &plan, output)?;
     let status = plan.authenticate(&args, workspace, output, prompt).await?;
+    persist_mount_spec(workspace, &plan, output)?;
 
     match status {
         MountInitStatus::Ready => output.row(&crate::ui::report::Row::new(
