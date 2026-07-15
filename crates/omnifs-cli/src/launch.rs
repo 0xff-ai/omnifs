@@ -14,6 +14,8 @@ use crate::client::DaemonClient;
 use crate::daemon_teardown::DaemonTeardown;
 use crate::mount_config::MountConfig;
 use crate::ui::output::Output;
+use crate::ui::report::Row;
+use crate::ui::style::Glyph;
 use crate::workspace::Workspace;
 
 /// Command-owned daemon launcher.
@@ -177,7 +179,7 @@ async fn launch_host_native(
                 && record.offline == offline
         });
         if serves_revision {
-            report_launch_status(status);
+            report_launch_status(&output, status);
             return Ok(());
         }
 
@@ -203,7 +205,7 @@ async fn launch_host_native(
     crate::daemon_launch::launch(paths, telemetry_enabled, revision, snapshot, offline).await?;
 
     let status = client.status().await?;
-    report_launch_status(&status);
+    report_launch_status(&output, &status);
     Ok(())
 }
 
@@ -325,19 +327,24 @@ fn display_path(path: &Path) -> String {
     }
 }
 
-fn report_launch_status(status: &DaemonStatus) {
+fn report_launch_status(output: &Output, status: &DaemonStatus) {
     if let Some(frontend) = status.health.subsystem(DaemonSubsystem::Frontend) {
-        crate::ui::eprint_raw(&format!("✓ {}\n", frontend.message));
+        output.row(&Row::new(Glyph::Done, "frontend", frontend.message.clone()));
     } else {
-        crate::ui::eprint_raw("✓ Namespace daemon is serving\n");
+        output.row(&Row::new(
+            Glyph::Done,
+            "frontend",
+            "namespace daemon is serving",
+        ));
     }
 
     if let Some(mounts) = status.health.subsystem(DaemonSubsystem::Mounts) {
-        crate::ui::eprint_raw(&format!("✓ {}\n", mounts.message));
+        output.row(&Row::new(Glyph::Done, "mounts", mounts.message.clone()));
     } else {
-        crate::ui::eprint_raw(&format!(
-            "✓ Runtime serves {} mount(s)\n",
-            status.mounts.len()
+        output.row(&Row::new(
+            Glyph::Done,
+            "mounts",
+            format!("runtime serves {} mount(s)", status.mounts.len()),
         ));
     }
 }

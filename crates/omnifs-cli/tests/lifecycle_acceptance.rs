@@ -595,7 +595,7 @@ fn scenario_8_revision_restart_and_preflight_failure() {
         .expect("initial daemon record");
 
     fixture.write_other_spec();
-    let out = fixture.run(&["apply"]);
+    let out = fixture.run(&["apply", "--output", "json"]);
     assert!(
         out.status.success(),
         "changed-revision apply failed (exit {})\nstdout: {}\nstderr: {}",
@@ -603,6 +603,11 @@ fn scenario_8_revision_restart_and_preflight_failure() {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr),
     );
+    assert!(out.stderr.is_empty(), "structured apply leaked stderr");
+    let stdout = String::from_utf8(out.stdout).expect("structured apply stdout");
+    assert_eq!(stdout.lines().count(), 1, "structured apply result count");
+    let envelope: serde_json::Value = serde_json::from_str(&stdout).expect("apply result envelope");
+    assert_eq!(envelope["command"], "up");
     fixture.update_pid_from_record();
     let second = omnifs_workspace::daemon_record::DaemonRecord::read(&fixture.daemon_record_path())
         .expect("read changed daemon record")
@@ -615,6 +620,19 @@ fn scenario_8_revision_restart_and_preflight_failure() {
         first.mount_revision, second.mount_revision,
         "changed desired state must load a new revision"
     );
+    let reused = fixture.run(&["up", "--output", "json"]);
+    assert!(
+        reused.status.success(),
+        "same-revision up failed (exit {})\nstdout: {}\nstderr: {}",
+        reused.status,
+        String::from_utf8_lossy(&reused.stdout),
+        String::from_utf8_lossy(&reused.stderr),
+    );
+    assert!(reused.stderr.is_empty(), "structured reuse leaked stderr");
+    let stdout = String::from_utf8(reused.stdout).expect("structured reuse stdout");
+    assert_eq!(stdout.lines().count(), 1, "structured reuse result count");
+    let envelope: serde_json::Value = serde_json::from_str(&stdout).expect("reuse result envelope");
+    assert_eq!(envelope["command"], "up");
     let repository = omnifs_workspace::mounts::Repository::open(fixture.mounts_dir())
         .expect("open mount repository after apply");
     assert_eq!(
