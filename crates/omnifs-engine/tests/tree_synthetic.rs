@@ -118,7 +118,7 @@ async fn root_ignore_synthesized() {
             .await
             .unwrap()
             .bytes,
-        b"@*\n/README.md\n/*/README.md\n"
+        b"@next\n@all\n/README.md\n/*/README.md\n"
     );
     let hello = namespace.lookup(mount.path, "hello").await.unwrap();
     let message = namespace.lookup(hello.path, "message").await.unwrap();

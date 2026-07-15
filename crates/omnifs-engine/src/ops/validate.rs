@@ -639,7 +639,7 @@ mod tests {
     }
 
     #[test]
-    fn list_rejects_multi_segment_entry_names() {
+    fn list_validates_entry_names_and_reserves_exact_control_leaves() {
         let result = Ok(wit_types::ListChildrenResult::Entries(
             wit_types::DirListing {
                 entries: vec![entry("nested/name")],
@@ -650,5 +650,28 @@ mod tests {
         ));
         let error = validate_list(&result, &effects(), |_| true).unwrap_err();
         assert!(error.contains("nested/name"));
+
+        for control in ["@next", "@all"] {
+            let result = Ok(wit_types::ListChildrenResult::Entries(
+                wit_types::DirListing {
+                    entries: vec![entry(control)],
+                    exhaustive: true,
+                    validator: None,
+                    next_cursor: None,
+                },
+            ));
+            let error = validate_list(&result, &effects(), |_| true).unwrap_err();
+            assert!(error.contains(control));
+        }
+
+        let result = Ok(wit_types::ListChildrenResult::Entries(
+            wit_types::DirListing {
+                entries: vec![entry("@cloudflare")],
+                exhaustive: true,
+                validator: None,
+                next_cursor: None,
+            },
+        ));
+        validate_list(&result, &effects(), |_| true).unwrap();
     }
 }

@@ -65,7 +65,7 @@ async fn generated_readmes_are_visible_and_hidden_by_root_ignore_patterns() {
         .await
         .unwrap()
         .bytes;
-    assert_eq!(bytes, b"@*\n/README.md\n/*/README.md\n");
+    assert_eq!(bytes, b"@next\n@all\n/README.md\n/*/README.md\n");
 }
 
 #[tokio::test(flavor = "multi_thread")]

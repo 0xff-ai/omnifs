@@ -23,19 +23,14 @@ use super::node::{Entry, PaginationControl, Synthetic, SyntheticContent};
 const CTRL_NEXT: &str = "@next";
 /// Synthetic control-file leaf that loads every remaining page (capped).
 const CTRL_ALL: &str = "@all";
-/// Reserved prefix for host control entries. A provider listing must never
-/// yield a child whose name starts with this; such entries are skipped so
-/// provider data cannot shadow `@next`/`@all`.
-const CTRL_PREFIX: char = '@';
-
 /// Mount-root ignore files. Each carries patterns so recursive tools that
 /// honor ignore files (`rg`, `fd`, git) skip the `@next`/`@all` control files
 /// and generated README leaves by default.
 pub const IGNORE_FILES: [&str; 3] = [".gitignore", ".ignore", ".rgignore"];
 
-/// Content served for any mount-root ignore file: ignore every `@`-prefixed
-/// control entry, the provider-root README, and one top-level branch README.
-pub const IGNORE_CONTENT: &str = "@*\n/README.md\n/*/README.md\n";
+/// Content served for any mount-root ignore file: ignore the two pagination
+/// controls, the provider-root README, and one top-level branch README.
+pub const IGNORE_CONTENT: &str = "@next\n@all\n/README.md\n/*/README.md\n";
 
 /// True when `name` is one of the synthetic control-file leaves.
 #[must_use]
@@ -43,11 +38,10 @@ pub(crate) fn is_control_name(name: &str) -> bool {
     name == CTRL_NEXT || name == CTRL_ALL
 }
 
-/// True when a provider listing must not use this leaf name (`@` is reserved
-/// for host-synthesized control entries and mount-root ignore patterns).
+/// True when a provider listing would shadow a host-synthesized control leaf.
 #[must_use]
 pub fn is_reserved_provider_leaf(name: &str) -> bool {
-    name.starts_with(CTRL_PREFIX)
+    is_control_name(name)
 }
 
 /// True when `name` is a host-owned ignore file at a mount root.
