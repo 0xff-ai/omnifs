@@ -1009,6 +1009,13 @@ mod tests {
                             )),
                         },
                         RecordWrite {
+                            path: known_path.clone(),
+                            aux: None,
+                            fact: FactPayload::Lookup(LookupPayload::Positive(
+                                EntryMeta::file_without_attrs(),
+                            )),
+                        },
+                        RecordWrite {
                             path: negative_path.clone(),
                             aux: None,
                             fact: FactPayload::Lookup(LookupPayload::Negative { id: None }),
@@ -1028,7 +1035,10 @@ mod tests {
                         DirentsMutation::Replace {
                             path: partial_path.clone(),
                             value: DirentsPayload {
-                                entries: Vec::new(),
+                                entries: vec![DirentRecord {
+                                    name: "known".into(),
+                                    meta: EntryMeta::file_without_attrs(),
+                                }],
                                 exhaustive: false,
                                 validator: None,
                                 next_cursor: Some(CachedCursor::Page(1)),
@@ -1161,6 +1171,24 @@ mod tests {
             .lookup(mount.path.clone(), "partial")
             .await
             .expect("partial directory identity");
+        let partial_listing = namespace
+            .readdir(partial.path.clone(), DirCursor::start(), 0)
+            .await
+            .expect("partial offline listing");
+        assert_eq!(
+            partial_listing
+                .entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            ["known"]
+        );
+        assert!(partial_listing.next.is_none());
+        let known = namespace
+            .lookup(partial.path.clone(), "known")
+            .await
+            .expect("known partial child");
+        assert_eq!(known.attrs.kind, crate::namespace::EntryKind::File);
         assert!(matches!(
             namespace.lookup(partial.path.clone(), "unknown").await,
             Err(NsError::OfflineMiss)

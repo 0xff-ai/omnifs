@@ -117,11 +117,14 @@ impl TreeNamespace {
         if entry.runtime().is_some() {
             self.drain_invalidations(node.mount());
         }
+        let offline = entry.runtime().is_none();
         if let Some(dirents) =
             consult_authoritative_listing(resources, entry.runtime().as_deref(), path)?
         {
             crate::inspector::cache_event(CacheKind::BrowseHit);
-            return Ok(ListOutcome::Listing(listing_from_dirents(node, &dirents)));
+            return Ok(ListOutcome::Listing(listing_from_dirents(
+                node, &dirents, offline,
+            )));
         }
 
         let runtime = entry.runtime().ok_or_else(|| {
@@ -201,7 +204,9 @@ impl TreeNamespace {
                         "list_children returned unchanged with no cached listing",
                     ));
                 };
-                Ok(ListOutcome::Listing(listing_from_dirents(node, &dirents)))
+                Ok(ListOutcome::Listing(listing_from_dirents(
+                    node, &dirents, false,
+                )))
             },
             Ok(crate::ops::namespace::ListOutcome::Subtree(tref)) => {
                 let dir = runtime
@@ -218,7 +223,9 @@ impl TreeNamespace {
                 );
                 // Serve stale so `ls` survives upstream throttling.
                 if rate_limited && let Some(dirents) = cached_dirents {
-                    return Ok(ListOutcome::Listing(listing_from_dirents(node, &dirents)));
+                    return Ok(ListOutcome::Listing(listing_from_dirents(
+                        node, &dirents, false,
+                    )));
                 }
                 Err(error.into())
             },
@@ -309,13 +316,12 @@ fn provider_entries(path: &omnifs_core::path::Path, entries: &[ProviderEntry]) -
 /// Build a `Listing` from an accumulated/cached dirents record (the
 /// serve-cached, `Unchanged`, and rate-limit-stale paths). The cached record
 /// keeps the `@next`/`@all` control records for the directory's whole
-/// paginated lifetime (`pagination.rs` never strips them, even at
-/// exhaustion, so a name a consumer resolved from an earlier listing keeps
-/// resolving); they are dropped from `entries` here and re-surfaced as
-/// synthetic entries ONLY while `next_cursor` is still `Some`, so a FRESH
-/// listing stops naming them the moment the feed exhausts even though the
-/// persisted records outlive that moment.
-fn listing_from_dirents(node: &Node, dirents: &DirentsPayload) -> Listing {
+/// paginated lifetime (`pagination.rs` never strips them, even at exhaustion,
+/// so a name a consumer resolved from an earlier listing keeps resolving).
+/// Offline serving suppresses those provider-dependent controls and the
+/// continuation cursor because cache-only traversal must terminate after the
+/// known snapshot.
+fn listing_from_dirents(node: &Node, dirents: &DirentsPayload, offline: bool) -> Listing {
     let mut entries = Vec::with_capacity(dirents.entries.len());
     for record in &dirents.entries {
         if synthetic::is_reserved_provider_leaf(&record.name)
@@ -327,7 +333,7 @@ fn listing_from_dirents(node: &Node, dirents: &DirentsPayload) -> Listing {
     }
 
     let mut synthetic_entries = Vec::new();
-    if dirents.next_cursor.is_some() {
+    if !offline && dirents.next_cursor.is_some() {
         synthetic_entries.extend(PaginationControl::entries());
     }
     if node.path().is_root() {
@@ -338,29 +344,28 @@ fn listing_from_dirents(node: &Node, dirents: &DirentsPayload) -> Listing {
     Listing {
         entries,
         exhaustive: dirents.exhaustive,
-        next_cursor: dirents.next_cursor.clone().map(Cursor),
+        next_cursor: (!offline)
+            .then(|| dirents.next_cursor.clone())
+            .flatten()
+            .map(Cursor),
     }
 }
 
-/// Serve a directory listing from cache only for an authoritative record: an
-/// exhaustive record, or a host-accumulated paginated record (still paging, or
-/// exhausted-but-complete). A plain non-exhaustive record is a partial
-/// prefetched snapshot (e.g. from a Lookup that merged route-derived structural
-/// children) and must NOT be returned as authoritative; the caller falls through
-/// to the provider. Mirrors `Frontend::opendir_check_caches` + rate-limit
-/// serve-stale.
+/// Serve a directory listing from cache. Online serving still requires an
+/// authoritative listing, while offline serving returns any persisted snapshot
+/// because its known entries are useful even when the provider-dependent tail
+/// is incomplete. Lookup keeps the exhaustive check for unknown-child
+/// semantics.
 fn consult_authoritative_listing(
     resources: &MountResources,
     runtime: Option<&Runtime>,
     path: &omnifs_core::path::Path,
 ) -> Result<Option<DirentsPayload>> {
     let dirents = cached_dirents_for_revalidation(resources, path)?;
-    if dirents.as_ref().is_some_and(|dirents| {
-        runtime.map_or_else(
-            || dirents.is_complete_offline(),
-            |_| dirents.is_authoritative_listing(),
-        )
-    }) {
+    if dirents
+        .as_ref()
+        .is_some_and(|dirents| runtime.map_or(true, |_| dirents.is_authoritative_listing()))
+    {
         return Ok(dirents);
     }
     // Serve-stale-while-rate-limited: while the mount's window is open, serve the
