@@ -19,6 +19,7 @@ use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::ids::{ProviderName, ProviderRef};
 use fs2::FileExt;
@@ -281,8 +282,33 @@ pub struct Registry {
     mounts_dir: PathBuf,
     lock_path: PathBuf,
     lock_guard: Option<File>,
-    specs: BTreeMap<name::Name, Spec>,
+    specs: BTreeMap<name::Name, LoadedSpec>,
     failures: Vec<SpecLoadFailure>,
+}
+
+/// One validated mount spec together with the exact bytes that established its
+/// identity. The parsed projection is for ordinary callers; startup identity
+/// consumers use [`Self::source`] and never reconstruct bytes from `Spec`.
+#[derive(Debug, Clone)]
+pub struct LoadedSpec {
+    spec: Spec,
+    source: Arc<[u8]>,
+}
+
+impl LoadedSpec {
+    fn new(spec: Spec, source: Arc<[u8]>) -> Self {
+        Self { spec, source }
+    }
+
+    #[must_use]
+    pub fn spec(&self) -> &Spec {
+        &self.spec
+    }
+
+    #[must_use]
+    pub fn source(&self) -> &[u8] {
+        &self.source
+    }
 }
 
 /// A `mounts/*.json` file that failed to load, retained so startup validation
@@ -340,10 +366,45 @@ impl Registry {
             source,
         })?;
         for path in paths {
-            let spec = match Spec::from_file(&path) {
-                Ok(spec) => spec,
+            let source = match fs::read(&path) {
+                Ok(source) => Arc::<[u8]>::from(source),
+                Err(source) => {
+                    self.failures.push(SpecLoadFailure {
+                        path: path.clone(),
+                        error: SpecError::ReadSpec {
+                            path: path.clone(),
+                            source,
+                        },
+                    });
+                    continue;
+                },
+            };
+            let text = match std::str::from_utf8(&source) {
+                Ok(text) => text,
                 Err(error) => {
-                    self.failures.push(SpecLoadFailure { path, error });
+                    self.failures.push(SpecLoadFailure {
+                        path: path.clone(),
+                        error: SpecError::ParseSpec {
+                            path: path.clone(),
+                            source: serde_json::Error::io(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                error,
+                            )),
+                        },
+                    });
+                    continue;
+                },
+            };
+            let spec = match Spec::parse(text) {
+                Ok(spec) => spec,
+                Err(source_error) => {
+                    self.failures.push(SpecLoadFailure {
+                        path: path.clone(),
+                        error: SpecError::ParseSpec {
+                            path: path.clone(),
+                            source: source_error,
+                        },
+                    });
                     continue;
                 },
             };
@@ -382,7 +443,7 @@ impl Registry {
                 });
                 continue;
             }
-            self.specs.insert(name, spec);
+            self.specs.insert(name, LoadedSpec::new(spec, source));
         }
         Ok(())
     }
@@ -395,11 +456,18 @@ impl Registry {
     /// The pinned spec for `name`, if loaded.
     #[must_use]
     pub fn get(&self, name: &name::Name) -> Option<&Spec> {
-        self.specs.get(name)
+        self.specs.get(name).map(LoadedSpec::spec)
     }
 
     /// Every loaded spec, in mount-name order.
     pub fn iter(&self) -> impl Iterator<Item = (&name::Name, &Spec)> + '_ {
+        self.specs
+            .iter()
+            .map(|(name, loaded)| (name, loaded.spec()))
+    }
+
+    /// Every loaded spec with its exact source bytes, in mount-name order.
+    pub fn loaded_iter(&self) -> impl Iterator<Item = (&name::Name, &LoadedSpec)> + '_ {
         self.specs.iter()
     }
 
@@ -454,7 +522,10 @@ impl Registry {
             })?;
         json.push('\n');
         self.write_spec_atomic(&path, json.as_bytes())?;
-        self.specs.insert(name, spec.clone());
+        self.specs.insert(
+            name,
+            LoadedSpec::new(spec.clone(), Arc::from(json.into_bytes())),
+        );
         Ok(())
     }
 
