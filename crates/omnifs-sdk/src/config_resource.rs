@@ -1,38 +1,24 @@
-//! Host-resource config fields and the config-metadata bridge.
+//! Host-resource config fields and compile-time config metadata bytes.
 //!
-//! The `#[config]` macro implements [`ProvidesConfigMetadata`] directly from the
-//! config struct's field syntax. A field whose value names a host resource is
-//! still declared ergonomically as [`HostFile`] or [`HostSocket`], but the
+//! The `#[config]` macro emits the static JSON field dialect used by the
+//! provider metadata section. A field whose value names a host resource is
+//! still declared ergonomically as [`HostFile`] or [`HostSocket`], while the
 //! manifest records it as a string field with an omnifs host-resource binding
 //! that the host resolves at mount-start.
-//!
-//! The config-metadata wire types live in `omnifs-provider` (re-exported from
-//! the crate root for non-wasm targets); the harvester serializes them verbatim.
-//! Only the runtime field types ([`HostFile`], [`HostSocket`]) are referenced
-//! inside the wasm guest.
 
 use std::ops::Deref;
 use std::path::Path;
 
-/// Provides the config metadata of a provider's config type for the embedded
-/// manifest. The `#[config]` macro implements it; [`NoConfig`] has no config
-/// metadata.
+/// Compile-time JSON bytes for a provider config's field dialect.
 ///
-/// Host-only: a provider's metadata is constructed and serialized by the
-/// build-time harvester, never inside the wasm guest.
+/// `JSON` is the UTF-8 JSON array of config fields, and `LEN` is its exact byte
+/// length. The provider macro wraps those fields in the manifest's `config`
+/// object while assembling the metadata custom section at compile time.
 ///
 /// [`NoConfig`]: crate::NoConfig
-#[cfg(not(target_arch = "wasm32"))]
-pub trait ProvidesConfigMetadata {
-    /// The config metadata, or `None` when the provider takes no config.
-    fn metadata() -> Option<crate::ConfigMetadata>;
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-impl ProvidesConfigMetadata for crate::NoConfig {
-    fn metadata() -> Option<crate::ConfigMetadata> {
-        None
-    }
+pub trait ConfigMetadataBytes {
+    const LEN: usize;
+    const JSON: &'static [u8];
 }
 
 /// A config field whose value is a host file the provider opens through a

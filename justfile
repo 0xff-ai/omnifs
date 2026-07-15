@@ -62,8 +62,7 @@ build scope='': (_install-wasi-sdk "build" scope)
     build_host() {
       cargo build --workspace \
         --exclude 'omnifs-provider-*' \
-        --exclude test-provider \
-        --exclude omnifs-embed-metadata
+        --exclude test-provider
     }
 
     case "{{ scope }}" in
@@ -101,7 +100,6 @@ check scope='': (_install-wasi-sdk "check" scope)
       cargo clippy --workspace \
         --exclude 'omnifs-provider-*' \
         --exclude test-provider \
-        --exclude omnifs-embed-metadata \
         --all-targets \
         -- -D warnings
     }
@@ -109,8 +107,7 @@ check scope='': (_install-wasi-sdk "check" scope)
     test_host() {
       OMNIFS_ITEST_SKIP_PROVIDER_BUILD=1 cargo nextest run --profile ci --workspace \
         --exclude 'omnifs-provider-*' \
-        --exclude test-provider \
-        --exclude omnifs-embed-metadata
+        --exclude test-provider
     }
 
     check_repository() {
@@ -166,8 +163,7 @@ test scope='host':
     fi
     OMNIFS_ITEST_SKIP_PROVIDER_BUILD=1 cargo nextest run --profile ci --workspace \
       --exclude 'omnifs-provider-*' \
-      --exclude test-provider \
-      --exclude omnifs-embed-metadata
+      --exclude test-provider
 
 import 'just/dev.just'
 mod npm 'just/npm.just'

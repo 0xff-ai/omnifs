@@ -16,11 +16,6 @@ use objects::{
     ChangedFile, CheckRun, Comment, Issue, Notification, Owner, PullRequest, Repo, Review,
     ReviewComment, WorkflowRun,
 };
-#[cfg(not(target_arch = "wasm32"))]
-use omnifs_sdk::{
-    AmbientSource, DevicePollCompat, OauthScheme, ProviderAuthManifest, SchemeGuidance,
-    StaticTokenScheme, TokenValidation,
-};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OwnerKind {
@@ -46,52 +41,6 @@ impl StateFilter {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-fn auth() -> ProviderAuthManifest {
-    ProviderAuthManifest::builder("device")
-        .static_token(
-            StaticTokenScheme::new("pat", "GitHub personal access token")
-                .inject(["api.github.com"])
-                .creation_url(
-                    "https://github.com/settings/tokens/new?scopes=read:user&description=omnifs",
-                )
-                .validation(
-                    TokenValidation::get("https://api.github.com/user")
-                        .extract([("identity", "/login")]),
-                )
-                .ambient([
-                    AmbientSource::env_var("GITHUB_TOKEN"),
-                    AmbientSource::command(["gh", "auth", "token"]).note("gh CLI login"),
-                ]),
-            SchemeGuidance::new()
-                .summary(
-                    "A classic personal access token; the create link pre-selects the read:user scope.",
-                )
-                .setup([
-                    "Add the repo scope as well if you want to browse private repositories and their issues or pull requests.",
-                ])
-                .docs_url(
-                    "https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens",
-                ),
-        )
-        .oauth(
-            OauthScheme::device_code(
-                "device",
-                "GitHub OAuth device flow",
-                "https://github.com/login/oauth/authorize",
-                "https://github.com/login/device/code",
-                "https://github.com/login/oauth/access_token",
-            )
-            .inject(["api.github.com"])
-            .client_id("Ov23licogxMDzS47s9sF")
-            .device_poll_compat(DevicePollCompat::ErrorInOkBody),
-            SchemeGuidance::new().summary(
-                "Approve a one-time code at github.com/login/device using omnifs's GitHub app; nothing to copy back.",
-            ),
-        )
-        .build()
-}
-
 #[omnifs_sdk::provider(
     id = "github",
     display_name = "GitHub",
@@ -107,13 +56,11 @@ fn auth() -> ProviderAuthManifest {
             "Clone repository contents over SSH when browsing repo paths."
         ),
     ),
-    limits(
-        memory_mb(
-            256,
-            "Leave room for larger GitHub API payloads and repository tree projections."
-        ),
-    ),
-    auth = auth()
+    limits(memory_mb(
+        256,
+        "Leave room for larger GitHub API payloads and repository tree projections."
+    ),),
+    auth = r#"{"default":"device","schemes":[{"staticToken":{"key":"pat","valuePrefix":"Bearer ","description":"GitHub personal access token","injectDomains":["api.github.com"],"creationUrl":"https://github.com/settings/tokens/new?scopes=read:user&description=omnifs","validation":{"method":"GET","url":"https://api.github.com/user","expectStatus":200,"extract":{"identity":"/login"}},"ambientSources":[{"kind":{"envVar":{"name":"GITHUB_TOKEN"}}},{"kind":{"command":{"argv":["gh","auth","token"]}},"note":"gh CLI login"}]}},{"oauth":{"key":"device","displayName":"GitHub OAuth device flow","authorizationEndpoint":"https://github.com/login/oauth/authorize","tokenEndpoint":"https://github.com/login/oauth/access_token","defaultClientId":"Ov23licogxMDzS47s9sF","flow":{"deviceCode":{"deviceAuthorizationEndpoint":"https://github.com/login/device/code","devicePollCompat":"errorInOkBody"}},"injectDomains":["api.github.com"],"injectValuePrefix":"Bearer "}}],"guidance":{"pat":{"summary":"A classic personal access token; the create link pre-selects the read:user scope.","setupSteps":["Add the repo scope as well if you want to browse private repositories and their issues or pull requests."],"docsUrl":"https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens"},"device":{"summary":"Approve a one-time code at github.com/login/device using omnifs's GitHub app; nothing to copy back."}}}"#
 )]
 impl GithubProvider {
     fn start(r: &mut Router) -> Result<()> {

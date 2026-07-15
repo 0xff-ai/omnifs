@@ -359,7 +359,7 @@ async fn item_comments(
         "Synthetic fixture endpoint exercised by host guest-loader tests."
     ),),
     limits(memory_mb(16, "Canned-data fixture needs only a small heap."),),
-    events(timer(Duration::from_mins(1), Self::on_tick))
+    events(timer(60, Self::on_tick))
 )]
 impl TestProvider {
     fn start(config: Config, r: &mut Router<State>) -> Result<State> {

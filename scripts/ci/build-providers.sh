@@ -12,7 +12,6 @@ if (( ${#wasms[@]} == 0 )); then
   exit 1
 fi
 
-cargo run -p omnifs-embed-metadata -- target/wasm32-wasip2/release
 bundle_wasms=(target/wasm32-wasip2/release/omnifs_provider_*.wasm)
 cargo run --release -p omnifs-workspace --bin omnifs-provider-store-bundle -- \
   --out target/omnifs-provider-store \

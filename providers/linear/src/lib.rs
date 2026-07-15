@@ -11,11 +11,6 @@ use core::str::FromStr;
 
 use omnifs_sdk::hashbrown::HashSet;
 use omnifs_sdk::prelude::*;
-#[cfg(not(target_arch = "wasm32"))]
-use omnifs_sdk::{
-    AmbientSource, OauthScheme, ProviderAuthManifest, SchemeGuidance, StaticTokenScheme,
-    TokenValidation,
-};
 use serde_json::json;
 
 use crate::api::{
@@ -143,65 +138,20 @@ impl Issue {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-fn auth() -> ProviderAuthManifest {
-    ProviderAuthManifest::builder("oauth")
-        .static_token(
-            StaticTokenScheme::new("pat", "Linear personal access token or API key")
-                .inject(["api.linear.app"])
-                .prefix("")
-                .creation_url("https://linear.app/settings/api")
-                .validation(
-                    TokenValidation::post(
-                        "https://api.linear.app/graphql",
-                        "{\"query\":\"query { viewer { id name email organization { name urlKey } } }\"}",
-                    )
-                    .json_pointer("/data/viewer/id")
-                    .extract([
-                        ("identity", "/data/viewer/email"),
-                        ("workspace", "/data/viewer/organization/urlKey"),
-                    ]),
-                )
-                .ambient([AmbientSource::env_var("LINEAR_API_KEY")]),
-            SchemeGuidance::new().summary("A personal API key created in Linear's API settings."),
-        )
-        .oauth(
-            OauthScheme::pkce_loopback(
-                "oauth",
-                "Linear OAuth",
-                "https://linear.app/oauth/authorize",
-                "https://api.linear.app/oauth/token",
-                "http://127.0.0.1:{port}/callback",
-            )
-            .inject(["api.linear.app"])
-            .prefix("")
-            .client_id("4dc7b7c05f651306a318de6f9f963b40")
-            .scopes(["read"]),
-            SchemeGuidance::new().summary(
-                "Browser sign-in through omnifs's Linear app, granting read access to your workspace.",
-            ),
-        )
-        .build()
-}
-
 #[omnifs_sdk::provider(
     id = "linear",
     display_name = "Linear",
     description = "issues and projects from your workspace",
     mount = "linear",
-    capabilities(
-        domain(
-            "api.linear.app",
-            "Fetch Linear GraphQL resources for teams, issues, projects, and workflow metadata."
-        ),
-    ),
-    limits(
-        memory_mb(
-            128,
-            "Leave room for GraphQL response decoding and issue tree projections."
-        ),
-    ),
-    auth = auth()
+    capabilities(domain(
+        "api.linear.app",
+        "Fetch Linear GraphQL resources for teams, issues, projects, and workflow metadata."
+    ),),
+    limits(memory_mb(
+        128,
+        "Leave room for GraphQL response decoding and issue tree projections."
+    ),),
+    auth = r#"{"default":"oauth","schemes":[{"staticToken":{"key":"pat","valuePrefix":"","description":"Linear personal access token or API key","injectDomains":["api.linear.app"],"creationUrl":"https://linear.app/settings/api","validation":{"method":"POST","url":"https://api.linear.app/graphql","body":"{\"query\":\"query { viewer { id name email organization { name urlKey } } }\"}","expectStatus":200,"jsonPointer":"/data/viewer/id","extract":{"identity":"/data/viewer/email","workspace":"/data/viewer/organization/urlKey"}},"ambientSources":[{"kind":{"envVar":{"name":"LINEAR_API_KEY"}}}]}},{"oauth":{"key":"oauth","displayName":"Linear OAuth","authorizationEndpoint":"https://linear.app/oauth/authorize","tokenEndpoint":"https://api.linear.app/oauth/token","defaultClientId":"4dc7b7c05f651306a318de6f9f963b40","defaultScopes":["read"],"flow":{"pkceLoopback":{"redirectUriTemplate":"http://127.0.0.1:{port}/callback"}},"refreshTokenRotates":true,"injectDomains":["api.linear.app"],"injectValuePrefix":""}}],"guidance":{"pat":{"summary":"A personal API key created in Linear's API settings."},"oauth":{"summary":"Browser sign-in through omnifs's Linear app, granting read access to your workspace."}}}"#
 )]
 impl LinearProvider {
     fn start(r: &mut Router) -> Result<()> {

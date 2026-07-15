@@ -136,14 +136,13 @@
 //! `serde_json` are re-exported for generated code and provider maps (use
 //! `hashbrown::HashMap` for provider-internal maps).
 
-#[cfg(not(target_arch = "wasm32"))]
-pub use config_resource::ProvidesConfigMetadata;
+#[doc(hidden)]
+pub use config_resource::ConfigMetadataBytes;
 pub use config_resource::{HostFile, HostSocket};
 
-// The provider metadata block. These wire types live in omnifs-workspace; a
-// provider constructs and the harvester serializes them entirely
-// host-side, so they are re-exported only for non-wasm targets. The wasm guest
-// never references them.
+// These host-side provider metadata wire types are re-exported only for native
+// tooling. The wasm guest emits its metadata as compile-time JSON bytes and
+// does not depend on these types.
 #[cfg(not(target_arch = "wasm32"))]
 pub use omnifs_workspace::authn::{
     AmbientKind, AmbientSource, DevicePollCompat, OauthScheme, SchemeGuidance, StaticTokenScheme,
@@ -227,6 +226,20 @@ pub mod __internal {
     pub use crate::cx::Cx;
     pub use crate::range_handles::RangeReaders;
     pub use crate::rate_limit::clear_breaker;
+
+    #[doc(hidden)]
+    pub const fn copy_bytes<const N: usize>(
+        output: &mut [u8; N],
+        offset: &mut usize,
+        bytes: &[u8],
+    ) {
+        let mut index = 0;
+        while index < bytes.len() {
+            output[*offset] = bytes[index];
+            *offset += 1;
+            index += 1;
+        }
+    }
 }
 
 /// Empty provider configuration.
@@ -236,6 +249,11 @@ pub mod __internal {
 /// instead.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct NoConfig;
+
+impl config_resource::ConfigMetadataBytes for NoConfig {
+    const LEN: usize = 2;
+    const JSON: &'static [u8] = b"[]";
+}
 
 impl<'de> serde::Deserialize<'de> for NoConfig {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>

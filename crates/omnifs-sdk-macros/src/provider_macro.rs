@@ -5,19 +5,20 @@
 //! provider config, state, and routes.
 
 use proc_macro2::{Span, TokenStream as TokenStream2};
-use quote::{format_ident, quote};
+use quote::{format_ident, quote, quote_spanned};
+use serde_json::Value;
 use syn::parse::{Parse, ParseStream};
 use syn::spanned::Spanned;
 use syn::{
-    Expr, FnArg, ImplItem, ImplItemFn, ItemImpl, LitInt, LitStr, Path, PathArguments, Token, Type,
+    FnArg, ImplItem, ImplItemFn, ItemImpl, LitInt, LitStr, Path, PathArguments, Token, Type,
     parse_quote,
 };
 
-use crate::util::generic_type_arg;
+use crate::util::{BytePiece, byte_array_tokens, generic_type_arg};
 
-/// A `timer(Duration, Self::method)` event declaration.
+/// A `timer(seconds, Self::method)` event declaration.
 struct TimerSpec {
-    interval: Expr,
+    interval_secs: u32,
     handler: Path,
 }
 
@@ -50,6 +51,12 @@ struct ParsedLimitDeclarations {
     max_fetch_blob_bytes: Option<ParsedResourceLimit<u64>>,
 }
 
+impl ParsedLimitDeclarations {
+    fn is_empty(&self) -> bool {
+        self.max_memory_mb.is_none() && self.max_fetch_blob_bytes.is_none()
+    }
+}
+
 pub struct ProviderArgs {
     id: Option<LitStr>,
     display_name: Option<LitStr>,
@@ -57,7 +64,7 @@ pub struct ProviderArgs {
     mount: Option<LitStr>,
     capabilities: Vec<ParsedAccessNeed>,
     limits: ParsedLimitDeclarations,
-    auth: Option<syn::Expr>,
+    auth: Option<LitStr>,
     timer: Option<TimerSpec>,
 }
 
@@ -111,7 +118,7 @@ impl Parse for ProviderArgs {
                 },
                 "auth" => {
                     let _: Token![=] = input.parse()?;
-                    args.auth = Some(input.parse()?);
+                    args.auth = Some(parse_auth_literal(input)?);
                 },
                 "events" => {
                     let content;
@@ -304,10 +311,13 @@ fn parse_events(content: ParseStream<'_>, args: &mut ProviderArgs) -> syn::Resul
             "timer" => {
                 let inner;
                 syn::parenthesized!(inner in content);
-                let interval: Expr = inner.parse()?;
+                let interval: LitInt = inner.parse()?;
                 let _: Token![,] = inner.parse()?;
                 let handler: Path = inner.parse()?;
-                args.timer = Some(TimerSpec { interval, handler });
+                args.timer = Some(TimerSpec {
+                    interval_secs: interval.base10_parse()?,
+                    handler,
+                });
             },
             _ => {
                 return Err(syn::Error::new(
@@ -321,6 +331,35 @@ fn parse_events(content: ParseStream<'_>, args: &mut ProviderArgs) -> syn::Resul
         }
     }
     Ok(())
+}
+
+fn parse_auth_literal(input: ParseStream<'_>) -> syn::Result<LitStr> {
+    let literal: LitStr = input.parse()?;
+    let value: Value = serde_json::from_str(&literal.value()).map_err(|error| {
+        syn::Error::new(
+            literal.span(),
+            format!("auth declaration must be valid JSON: {error}"),
+        )
+    })?;
+    let Value::Object(object) = &value else {
+        return Err(syn::Error::new(
+            literal.span(),
+            "auth declaration must be a JSON object",
+        ));
+    };
+    if !matches!(object.get("default"), Some(Value::String(_))) {
+        return Err(syn::Error::new(
+            literal.span(),
+            "auth declaration requires a string default",
+        ));
+    }
+    if !matches!(object.get("schemes"), Some(Value::Array(schemes)) if !schemes.is_empty()) {
+        return Err(syn::Error::new(
+            literal.span(),
+            "auth declaration requires a non-empty schemes array",
+        ));
+    }
+    Ok(literal)
 }
 
 /// The pieces extracted from the provider impl block.
@@ -473,134 +512,185 @@ impl ManifestFacts {
         config_type: &Type,
         capabilities: &[ParsedAccessNeed],
         limits: &ParsedLimitDeclarations,
-        auth: Option<&syn::Expr>,
-        refresh_interval: &TokenStream2,
-    ) -> TokenStream2 {
-        let id = LitStr::new(&self.name, Span::call_site());
-        let display_name = LitStr::new(&self.display_name, Span::call_site());
-        let description = self.description.as_ref().map_or_else(
-            || quote! { None },
-            |description| {
-                let description = LitStr::new(description, Span::call_site());
-                quote! { Some(#description.to_string()) }
-            },
-        );
-        let provider_file = LitStr::new(&self.provider_file, Span::call_site());
-        let default_mount = LitStr::new(&self.default_mount, Span::call_site());
-        let version = self.version.as_ref().map_or_else(
-            || quote! { None },
-            |version| {
-                let version = LitStr::new(version, Span::call_site());
-                quote! { Some(#version.to_string()) }
-            },
-        );
-        let capability_entries = capabilities.iter().map(capability_tokens);
-        let limits = limit_declarations_tokens(limits);
-        let auth = auth.map_or_else(|| quote! { None }, |auth| quote! { Some(#auth) });
-        quote! {
-            omnifs_sdk::ProviderManifest {
-                id: #id.to_string(),
-                display_name: #display_name.to_string(),
-                description: #description,
-                provider: #provider_file.to_string(),
-                default_mount: #default_mount.to_string(),
-                version: #version,
-                wit_package: Some(omnifs_sdk::PROVIDER_WIT_PACKAGE.to_string()),
-                sdk_version: Some(omnifs_sdk::SDK_VERSION.to_string()),
-                refresh_interval_secs: #refresh_interval,
-                capabilities: ::std::vec![#(#capability_entries),*],
-                limits: #limits,
-                auth: #auth,
-                config: <#config_type as omnifs_sdk::ProvidesConfigMetadata>::metadata(),
-            }
+        auth: Option<&LitStr>,
+        refresh_interval_secs: u32,
+        has_config: bool,
+    ) -> syn::Result<TokenStream2> {
+        let mut fields = Vec::new();
+        fields.push(("id", json_string(&self.name)));
+        fields.push(("displayName", json_string(&self.display_name)));
+        if let Some(description) = &self.description {
+            fields.push(("description", json_string(description)));
         }
+        fields.push(("provider", json_string(&self.provider_file)));
+        fields.push(("defaultMount", json_string(&self.default_mount)));
+        if let Some(version) = &self.version {
+            fields.push(("version", json_string(version)));
+        }
+        fields.push(("witPackage", json_string("package omnifs:provider@0.6.0;")));
+        fields.push(("sdkVersion", json_string(env!("CARGO_PKG_VERSION"))));
+        fields.push(("refreshIntervalSecs", refresh_interval_secs.to_string()));
+        if !capabilities.is_empty() {
+            fields.push(("capabilities", capabilities_json(capabilities)));
+        }
+        if !limits.is_empty() {
+            fields.push(("limits", limits_json(limits)));
+        }
+        if let Some(auth) = auth {
+            let value: Value = serde_json::from_str(&auth.value()).map_err(|error| {
+                syn::Error::new(auth.span(), format!("invalid auth declaration: {error}"))
+            })?;
+            fields.push((
+                "auth",
+                serde_json::to_string(&value).expect("auth JSON serializes"),
+            ));
+        }
+
+        let mut pieces = vec![MetadataPiece::Static("{".to_string())];
+        for (index, (key, value)) in fields.iter().enumerate() {
+            if index != 0 {
+                pieces.push(MetadataPiece::Static(",".to_string()));
+            }
+            pieces.push(MetadataPiece::Static(format!(
+                "{}:{}",
+                json_string(key),
+                value
+            )));
+        }
+        if has_config {
+            if !fields.is_empty() {
+                pieces.push(MetadataPiece::Static(",".to_string()));
+            }
+            pieces.push(MetadataPiece::Static(r#""config":{"fields":"#.to_string()));
+            pieces.push(MetadataPiece::Config(config_type.clone()));
+            pieces.push(MetadataPiece::Static("}}".to_string()));
+        } else {
+            pieces.push(MetadataPiece::Static("}".to_string()));
+        }
+        Ok(metadata_bytes_tokens(&pieces))
     }
 }
 
-fn capability_tokens(need: &ParsedAccessNeed) -> TokenStream2 {
-    // A dynamic socket/preopen need resolves its concrete value from a config
-    // field at mount-start; the placeholder mirrors the host's marker.
+enum MetadataPiece {
+    Static(String),
+    Config(Type),
+}
+
+fn metadata_bytes_tokens(pieces: &[MetadataPiece]) -> TokenStream2 {
+    let byte_pieces = pieces
+        .iter()
+        .map(|piece| match piece {
+            MetadataPiece::Static(value) => {
+                let length = syn::LitInt::new(&value.len().to_string(), Span::call_site());
+                let value = LitStr::new(value, Span::call_site());
+                BytePiece {
+                    length: quote! { #length },
+                    copy: quote! {
+                        omnifs_sdk::__internal::copy_bytes(
+                            &mut bytes,
+                            &mut offset,
+                            (#value).as_bytes(),
+                        );
+                    },
+                }
+            },
+            MetadataPiece::Config(ty) => BytePiece {
+                length: quote_spanned! {ty.span()=>
+                    <#ty as omnifs_sdk::ConfigMetadataBytes>::LEN
+                },
+                copy: quote_spanned! {ty.span()=>
+                    omnifs_sdk::__internal::copy_bytes(
+                        &mut bytes,
+                        &mut offset,
+                        <#ty as omnifs_sdk::ConfigMetadataBytes>::JSON,
+                    );
+                },
+            },
+        })
+        .collect::<Vec<_>>();
+    let length_terms = byte_pieces.iter().map(|piece| &piece.length);
+    let length = quote! { 0usize #(+ #length_terms)* };
+    let bytes = byte_array_tokens(&byte_pieces, &length);
+    quote! {
+        const __OMNIFS_PROVIDER_METADATA_LEN: usize = #length;
+        const __OMNIFS_PROVIDER_METADATA_BYTES: [u8; __OMNIFS_PROVIDER_METADATA_LEN] = #bytes;
+        #[cfg(target_arch = "wasm32")]
+        #[used]
+        #[unsafe(link_section = "omnifs.provider-metadata.v1")]
+        static __OMNIFS_PROVIDER_METADATA_SECTION: [u8; __OMNIFS_PROVIDER_METADATA_LEN] =
+            __OMNIFS_PROVIDER_METADATA_BYTES;
+    }
+}
+
+fn json_string(value: &str) -> String {
+    serde_json::to_string(value).expect("metadata string serializes")
+}
+
+fn capabilities_json(capabilities: &[ParsedAccessNeed]) -> String {
+    let values = capabilities
+        .iter()
+        .map(capability_value)
+        .collect::<Vec<_>>();
+    serde_json::to_string(&values).expect("capabilities serialize")
+}
+
+fn capability_value(need: &ParsedAccessNeed) -> Value {
     let dynamic_placeholder = DYNAMIC_PLACEHOLDER;
     match need {
         ParsedAccessNeed::Domain {
             value,
             why,
             dynamic,
-            ..
-        } => {
-            let value = LitStr::new(value, Span::call_site());
-            let why = LitStr::new(why, Span::call_site());
-            quote! { omnifs_sdk::AccessNeed::Domain { value: #value.to_string(), why: #why.to_string(), dynamic: #dynamic } }
-        },
-        ParsedAccessNeed::GitRepo { value, why } => {
-            let value = LitStr::new(value, Span::call_site());
-            let why = LitStr::new(why, Span::call_site());
-            quote! { omnifs_sdk::AccessNeed::GitRepo { value: #value.to_string(), why: #why.to_string(), dynamic: false } }
-        },
-        ParsedAccessNeed::UnixSocket { why } => {
-            let why = LitStr::new(why, Span::call_site());
-            quote! { omnifs_sdk::AccessNeed::UnixSocket { value: #dynamic_placeholder.to_string(), why: #why.to_string(), dynamic: true } }
-        },
-        ParsedAccessNeed::PreopenedPath { why } => {
-            let why = LitStr::new(why, Span::call_site());
-            quote! {
-                omnifs_sdk::AccessNeed::PreopenedPath {
-                    value: omnifs_sdk::PreopenedPath {
-                        host: #dynamic_placeholder.to_string(),
-                        guest: #dynamic_placeholder.to_string(),
-                        mode: omnifs_sdk::PreopenMode::default(),
-                    },
-                    why: #why.to_string(),
-                    dynamic: true,
-                }
-            }
-        },
+        } => serde_json::json!({
+            "kind": "domain",
+            "value": value,
+            "why": why,
+            "dynamic": dynamic,
+        }),
+        ParsedAccessNeed::GitRepo { value, why } => serde_json::json!({
+            "kind": "gitRepo",
+            "value": value,
+            "why": why,
+            "dynamic": false,
+        }),
+        ParsedAccessNeed::UnixSocket { why } => serde_json::json!({
+            "kind": "unixSocket",
+            "value": dynamic_placeholder,
+            "why": why,
+            "dynamic": true,
+        }),
+        ParsedAccessNeed::PreopenedPath { why } => serde_json::json!({
+            "kind": "preopenedPath",
+            "value": {
+                "host": dynamic_placeholder,
+                "guest": dynamic_placeholder,
+                "mode": "ro",
+            },
+            "why": why,
+            "dynamic": true,
+        }),
     }
 }
 
-fn limit_declarations_tokens(limits: &ParsedLimitDeclarations) -> TokenStream2 {
-    let max_memory_mb = optional_limit_tokens(limits.max_memory_mb.as_ref());
-    let max_fetch_blob_bytes = optional_limit_tokens(limits.max_fetch_blob_bytes.as_ref());
-    quote! {
-        omnifs_sdk::LimitDeclarations {
-            max_memory_mb: #max_memory_mb,
-            max_fetch_blob_bytes: #max_fetch_blob_bytes,
-        }
+fn limits_json(limits: &ParsedLimitDeclarations) -> String {
+    let mut fields = Vec::new();
+    if let Some(limit) = &limits.max_memory_mb {
+        fields.push(format!(
+            "{}:{{\"value\":{},\"why\":{}}}",
+            json_string("maxMemoryMb"),
+            limit.value,
+            json_string(&limit.why)
+        ));
     }
-}
-
-fn optional_limit_tokens<T>(limit: Option<&ParsedResourceLimit<T>>) -> TokenStream2
-where
-    T: quote::ToTokens,
-{
-    limit.map_or_else(
-        || quote! { None },
-        |limit| {
-            let value = &limit.value;
-            let why = LitStr::new(&limit.why, Span::call_site());
-            quote! {
-                Some(omnifs_sdk::ResourceLimit {
-                    value: #value,
-                    why: #why.to_string(),
-                })
-            }
-        },
-    )
-}
-
-fn provider_metadata_impl_tokens(metadata: &TokenStream2) -> TokenStream2 {
-    quote! {
-        /// Build-time accessor for the provider's metadata. The native metadata
-        /// harvester links this crate as a library, calls this, and serializes
-        /// the result verbatim into the wasm `omnifs.provider-metadata.v1`
-        /// section. Never compiled into the wasm guest.
-        #[cfg(not(target_arch = "wasm32"))]
-        #[doc(hidden)]
-        #[must_use]
-        pub fn provider_metadata() -> omnifs_sdk::ProviderManifest {
-            #metadata
-        }
+    if let Some(limit) = &limits.max_fetch_blob_bytes {
+        fields.push(format!(
+            "{}:{{\"value\":{},\"why\":{}}}",
+            json_string("maxFetchBlobBytes"),
+            limit.value,
+            json_string(&limit.why)
+        ));
     }
+    format!("{{{}}}", fields.join(","))
 }
 
 // Codegen aggregator: each argument is a distinct token source for the lifecycle
@@ -1025,21 +1115,15 @@ pub(crate) fn provider_impl(args: &ProviderArgs, input: ItemImpl) -> syn::Result
         ));
     }
     let manifest = ManifestFacts::from_args(args)?;
-    let refresh_interval = args.timer.as_ref().map_or_else(
-        || quote! { 0u32 },
-        |timer| {
-            let interval = &timer.interval;
-            quote! { (#interval).as_secs() as u32 }
-        },
-    );
+    let refresh_interval_secs = args.timer.as_ref().map_or(0, |timer| timer.interval_secs);
     let metadata = manifest.metadata_tokens(
         config_type,
         &args.capabilities,
         &args.limits,
         args.auth.as_ref(),
-        &refresh_interval,
-    );
-    let provider_metadata = provider_metadata_impl_tokens(&metadata);
+        refresh_interval_secs,
+        matches!(start_kind, StartKind::ConfigAndRouter),
+    )?;
 
     let state_management = generate_state_management(state_type);
     let lifecycle = generate_lifecycle(&type_name, config_type, state_type, start_kind);
@@ -1057,7 +1141,7 @@ pub(crate) fn provider_impl(args: &ProviderArgs, input: ItemImpl) -> syn::Result
             #(#methods)*
         }
 
-        #provider_metadata
+        #metadata
         #lifecycle
         #namespace
         #notify

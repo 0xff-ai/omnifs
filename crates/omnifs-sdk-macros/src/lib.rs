@@ -33,11 +33,9 @@ mod util;
 /// are inferred from the `start` signature.
 ///
 /// The manifest (identity, access capabilities, scalar limits, config metadata,
-/// auth) is authored from these arguments, the config type's static metadata,
-/// and static auth metadata. The macro lowers it into `Provider::METADATA` and
-/// emits the JSON bytes into the `omnifs.provider-metadata.v1` custom section.
-/// There is no hand-written `omnifs.provider.json` and no host-side metadata
-/// postprocessor.
+/// auth) is authored from these arguments, the config type's static JSON bytes,
+/// and a literal auth JSON declaration. The macro emits one metadata byte array
+/// into the `omnifs.provider-metadata.v1` custom section.
 ///
 /// Arguments:
 ///
@@ -53,12 +51,12 @@ mod util;
 ///   [`HostFile`](../omnifs_sdk/struct.HostFile.html) config field binding.
 /// - `limits(memory_mb(<int>, "why"))`: scalar runtime ceilings seeded into new
 ///   mount specs separately from access grants.
-/// - `auth = <expr>`: a typed static [`omnifs_sdk::auth::Auth`](../omnifs_sdk/auth/struct.Auth.html)
-///   value included in `Provider::METADATA`.
+/// - `auth = <JSON string>`: a literal wire-shaped auth object validated and
+///   included in the metadata section.
 /// - The config metadata is derived from the inferred or explicit config type's
 ///   static config dialect (via `#[config]`) and spliced in automatically; no
 ///   argument is needed.
-/// - `events(timer(<Duration expr>, Self::method))`: register a timer
+/// - `events(timer(<seconds>, Self::method))`: register a timer
 ///   handler `async fn method(cx: Cx<State>) -> Result<Invalidation>`; the
 ///   interval is exported as the manifest's `refresh-interval-secs`. The
 ///   returned [`Invalidation`](../omnifs_sdk/invalidation/struct.Invalidation.html)

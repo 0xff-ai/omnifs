@@ -1,9 +1,10 @@
-use proc_macro2::TokenStream as TokenStream2;
+use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::{quote, quote_spanned};
+use serde_json::to_string;
 use syn::spanned::Spanned;
 use syn::{Attribute, Expr, Field, Fields, Item, Lit, Meta, Type};
 
-use crate::util::{generic_type_arg, has_angle_args};
+use crate::util::{BytePiece, byte_array_tokens, generic_type_arg, has_angle_args};
 
 pub(crate) fn config_item_impl(item: Item) -> Result<TokenStream2, syn::Error> {
     match item {
@@ -18,18 +19,12 @@ pub(crate) fn config_item_impl(item: Item) -> Result<TokenStream2, syn::Error> {
             let fields = config_fields_from(&mut item_struct.fields)?;
             add_config_attrs(&mut item_struct.attrs);
             let ident = &item_struct.ident;
-            let metadata = metadata_tokens(&fields);
-            let provides = quote! {
-                #[cfg(not(target_arch = "wasm32"))]
-                impl omnifs_sdk::ProvidesConfigMetadata for #ident {
-                    fn metadata() -> Option<omnifs_sdk::ConfigMetadata> {
-                        Some(#metadata)
-                    }
-                }
-            };
+            let metadata_bytes = metadata_bytes_tokens(&fields)?;
             Ok(quote! {
                 #item_struct
-                #provides
+                impl omnifs_sdk::ConfigMetadataBytes for #ident {
+                    #metadata_bytes
+                }
             })
         },
         other => Err(syn::Error::new(
@@ -68,11 +63,72 @@ fn config_fields_from(fields: &mut Fields) -> syn::Result<Vec<ConfigField>> {
         .collect()
 }
 
-fn metadata_tokens(fields: &[ConfigField]) -> TokenStream2 {
-    let fields = fields.iter().map(ConfigField::metadata_tokens);
-    quote! {
-        omnifs_sdk::ConfigMetadata {
-            fields: ::std::vec![#(#fields),*],
+enum JsonPiece {
+    Static(String),
+    Nested(Type),
+}
+
+fn metadata_bytes_tokens(fields: &[ConfigField]) -> syn::Result<TokenStream2> {
+    let mut pieces = vec![JsonPiece::Static("[".to_string())];
+    for (index, field) in fields.iter().enumerate() {
+        if index != 0 {
+            pieces.push(JsonPiece::Static(",".to_string()));
+        }
+        pieces.extend(field.json_pieces()?);
+    }
+    pieces.push(JsonPiece::Static("]".to_string()));
+
+    let byte_pieces = pieces
+        .iter()
+        .map(|piece| BytePiece {
+            length: piece.length_tokens(),
+            copy: piece.copy_tokens(),
+        })
+        .collect::<Vec<_>>();
+    let length_terms = byte_pieces.iter().map(|piece| &piece.length);
+    let length = quote! { 0usize #(+ #length_terms)* };
+    let bytes = byte_array_tokens(&byte_pieces, &length);
+    Ok(quote! {
+        const LEN: usize = #length;
+        const JSON: &'static [u8] = {
+            const BYTES: [u8; #length] = #bytes;
+            &BYTES
+        };
+    })
+}
+
+impl JsonPiece {
+    fn length_tokens(&self) -> TokenStream2 {
+        match self {
+            Self::Static(value) => {
+                let length = syn::LitInt::new(&value.len().to_string(), Span::call_site());
+                quote! { #length }
+            },
+            Self::Nested(ty) => quote_spanned! {ty.span()=>
+                <#ty as omnifs_sdk::ConfigMetadataBytes>::LEN
+            },
+        }
+    }
+
+    fn copy_tokens(&self) -> TokenStream2 {
+        match self {
+            Self::Static(value) => {
+                let value = syn::LitStr::new(value, Span::call_site());
+                quote! {
+                    omnifs_sdk::__internal::copy_bytes(
+                        &mut bytes,
+                        &mut offset,
+                        (#value).as_bytes(),
+                    );
+                }
+            },
+            Self::Nested(ty) => quote_spanned! {ty.span()=>
+                omnifs_sdk::__internal::copy_bytes(
+                    &mut bytes,
+                    &mut offset,
+                    <#ty as omnifs_sdk::ConfigMetadataBytes>::JSON,
+                );
+            },
         }
     }
 }
@@ -104,28 +160,32 @@ impl ConfigField {
         })
     }
 
-    fn metadata_tokens(&self) -> TokenStream2 {
-        let name = &self.name;
-        let value_type = self.ty.type_tokens();
-        let required = self.required;
-        let default = self.ty.default_tokens(self.default.as_ref());
-        let description = self.description.as_ref().map_or_else(
-            || quote! { None },
-            |description| {
-                quote! { Some(#description.to_string()) }
-            },
-        );
-        let binding = self.ty.binding_tokens().unwrap_or_else(|| quote! { None });
-        quote! {
-            omnifs_sdk::ConfigField {
-                name: #name.to_string(),
-                value_type: #value_type,
-                required: #required,
-                default: #default,
-                description: #description,
-                binding: #binding,
-            }
+    fn json_pieces(&self) -> syn::Result<Vec<JsonPiece>> {
+        let mut pieces = vec![JsonPiece::Static(format!(
+            r#"{{"name":{},"type":"#,
+            to_string(&self.name).expect("config field name serializes")
+        ))];
+        pieces.extend(self.ty.json_pieces());
+        if self.required {
+            pieces.push(JsonPiece::Static(r#","required":true"#.to_string()));
         }
+        if let Some(default) = self.default.as_ref() {
+            pieces.push(JsonPiece::Static(format!(
+                r#","default":{}"#,
+                self.ty.default_json(default)?
+            )));
+        }
+        if let Some(description) = self.description.as_ref() {
+            pieces.push(JsonPiece::Static(format!(
+                r#","description":{}"#,
+                to_string(description).expect("config description serializes")
+            )));
+        }
+        if let Some(binding) = self.ty.binding_json() {
+            pieces.push(JsonPiece::Static(format!(r#","binding":{binding}"#)));
+        }
+        pieces.push(JsonPiece::Static("}".to_string()));
+        Ok(pieces)
     }
 }
 
@@ -168,67 +228,104 @@ impl FieldType {
         }
     }
 
-    fn type_tokens(&self) -> TokenStream2 {
+    fn json_pieces(&self) -> Vec<JsonPiece> {
         match self {
-            Self::String(_) => quote! {
-                omnifs_sdk::ConfigType::String
-            },
-            Self::Boolean => quote! {
-                omnifs_sdk::ConfigType::Boolean
-            },
-            Self::Integer => quote! {
-                omnifs_sdk::ConfigType::Integer
-            },
+            Self::String(_) => vec![JsonPiece::Static(r#"{"kind":"string"}"#.to_string())],
+            Self::Boolean => vec![JsonPiece::Static(r#"{"kind":"boolean"}"#.to_string())],
+            Self::Integer => vec![JsonPiece::Static(r#"{"kind":"integer"}"#.to_string())],
             Self::Array(items) => {
-                let items = items.type_tokens();
-                quote! {
-                    omnifs_sdk::ConfigType::Array { items: ::std::boxed::Box::new(#items) }
-                }
+                let mut pieces = vec![JsonPiece::Static(r#"{"kind":"array","items":"#.to_string())];
+                pieces.extend(items.json_pieces());
+                pieces.push(JsonPiece::Static("}".to_string()));
+                pieces
             },
             Self::Map(values) => {
-                let values = values.type_tokens();
-                quote! {
-                    omnifs_sdk::ConfigType::Map { values: ::std::boxed::Box::new(#values) }
-                }
+                let mut pieces = vec![JsonPiece::Static(r#"{"kind":"map","values":"#.to_string())];
+                pieces.extend(values.json_pieces());
+                pieces.push(JsonPiece::Static("}".to_string()));
+                pieces
             },
-            Self::Object(ty) => quote_spanned! {ty.span()=>
-                omnifs_sdk::ConfigType::Object {
-                    fields: match <#ty as omnifs_sdk::ProvidesConfigMetadata>::metadata() {
-                        Some(metadata) => metadata.fields,
-                        None => ::std::vec![],
-                    },
-                }
-            },
+            Self::Object(ty) => vec![
+                JsonPiece::Static(r#"{"kind":"object","fields":"#.to_string()),
+                JsonPiece::Nested((**ty).clone()),
+                JsonPiece::Static("}".to_string()),
+            ],
         }
     }
 
-    fn default_tokens(&self, default: Option<&Expr>) -> TokenStream2 {
-        let Some(default) = default else {
-            return quote! { None };
-        };
+    fn default_json(&self, default: &Expr) -> syn::Result<String> {
         match self {
-            Self::String(_) => quote! {
-                Some(omnifs_sdk::serde_json::Value::String((#default).to_string()))
+            Self::String(_) => match default {
+                Expr::Lit(expr) => match &expr.lit {
+                    Lit::Str(value) => Ok(to_string(&value.value()).expect("string serializes")),
+                    _ => Err(syn::Error::new(
+                        default.span(),
+                        "string config defaults must be string literals for compile-time metadata",
+                    )),
+                },
+                _ => Err(syn::Error::new(
+                    default.span(),
+                    "string config defaults must be string literals for compile-time metadata",
+                )),
             },
-            Self::Boolean => quote! {
-                Some(omnifs_sdk::serde_json::Value::Bool(#default))
+            Self::Boolean => match default {
+                Expr::Lit(expr) => match &expr.lit {
+                    Lit::Bool(value) => Ok(value.value.to_string()),
+                    _ => Err(syn::Error::new(
+                        default.span(),
+                        "boolean config defaults must be boolean literals for compile-time metadata",
+                    )),
+                },
+                _ => Err(syn::Error::new(
+                    default.span(),
+                    "boolean config defaults must be boolean literals for compile-time metadata",
+                )),
             },
-            Self::Integer => quote! {
-                Some(omnifs_sdk::serde_json::Value::Number(
-                    omnifs_sdk::serde_json::Number::from((#default) as i64),
-                ))
-            },
-            Self::Array(_) | Self::Map(_) | Self::Object(_) => quote_spanned! {default.span()=>
-                compile_error!("#[omnifs(default = ...)] supports string, bool, and integer config fields")
-            },
+            Self::Integer => integer_default_json(default),
+            Self::Array(_) | Self::Map(_) | Self::Object(_) => Err(syn::Error::new(
+                default.span(),
+                "#[omnifs(default = ...)] supports string, bool, and integer config fields",
+            )),
         }
     }
 
-    fn binding_tokens(&self) -> Option<TokenStream2> {
+    fn binding_json(&self) -> Option<&'static str> {
         match self {
-            Self::String(binding) => binding.metadata_tokens(),
+            Self::String(FieldBinding::HostFile) => Some(r#"{"kind":"file","mode":"ro"}"#),
+            Self::String(FieldBinding::HostSocket) => Some(r#"{"kind":"socket"}"#),
             _ => None,
         }
+    }
+}
+
+fn integer_default_json(default: &Expr) -> syn::Result<String> {
+    match default {
+        Expr::Lit(expr) => match &expr.lit {
+            Lit::Int(value) => Ok(value.base10_digits().to_string()),
+            _ => Err(syn::Error::new(
+                default.span(),
+                "integer config defaults must be integer literals for compile-time metadata",
+            )),
+        },
+        Expr::Unary(expr) if matches!(expr.op, syn::UnOp::Neg(_)) => {
+            let Expr::Lit(inner) = expr.expr.as_ref() else {
+                return Err(syn::Error::new(
+                    default.span(),
+                    "integer config defaults must be integer literals for compile-time metadata",
+                ));
+            };
+            let Lit::Int(value) = &inner.lit else {
+                return Err(syn::Error::new(
+                    default.span(),
+                    "integer config defaults must be integer literals for compile-time metadata",
+                ));
+            };
+            Ok(format!("-{}", value.base10_digits()))
+        },
+        _ => Err(syn::Error::new(
+            default.span(),
+            "integer config defaults must be integer literals for compile-time metadata",
+        )),
     }
 }
 
@@ -237,20 +334,6 @@ enum FieldBinding {
     None,
     HostFile,
     HostSocket,
-}
-
-impl FieldBinding {
-    fn metadata_tokens(self) -> Option<TokenStream2> {
-        match self {
-            Self::None => None,
-            Self::HostFile => Some(quote! {
-                Some(omnifs_sdk::HostResourceBinding::File { mode: omnifs_sdk::PreopenMode::default() })
-            }),
-            Self::HostSocket => Some(quote! {
-                Some(omnifs_sdk::HostResourceBinding::Socket)
-            }),
-        }
-    }
 }
 
 struct SerdeAttrs {

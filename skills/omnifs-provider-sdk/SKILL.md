@@ -181,20 +181,20 @@ A file-shaped object projects as a single file, not a directory: `r.file_object:
 
 ## Events and freshness
 
-`events(timer(Duration::from_secs(n), Self::on_tick))` registers `async fn on_tick(cx: Cx<State>) -> Result<Invalidation>`; build the invalidation with `Invalidation::new().listing_path(..).listing_prefix(..).object::<O>(&key)`, which the macro lowers to the host invalidation channel. Non-timer provider events are currently swallowed. A provider that never invalidates and never sets validators serves stale data forever; pick at least one freshness mechanism per dynamic route family.
+`events(timer(n, Self::on_tick))` registers `async fn on_tick(cx: Cx<State>) -> Result<Invalidation>`, where `n` is a literal interval in seconds. Build the invalidation with `Invalidation::new().listing_path(..).listing_prefix(..).object::<O>(&key)`, which the macro lowers to the host invalidation channel. Non-timer provider events are currently swallowed. A provider that never invalidates and never sets validators serves stale data forever; pick at least one freshness mechanism per dynamic route family.
 
 ## Manifest (provider metadata)
 
-The manifest (identity, access capabilities, scalar limits, config metadata, auth) is authored from `#[omnifs_sdk::provider(...)]` arguments plus `#[omnifs_sdk::config]` metadata, and embedded as the `omnifs.provider-metadata.v1` wasm custom section at build time by `just build providers`. There is no hand-written `omnifs.provider.json`.
+The manifest (identity, access capabilities, scalar limits, config metadata, auth) is authored from `#[omnifs_sdk::provider(...)]` arguments plus `#[omnifs_sdk::config]` metadata, and embedded as the `omnifs.provider-metadata.v1` wasm custom section by the provider macro. There is no hand-written `omnifs.provider.json` or post-build injector.
 
 - `id = ".."`, `display_name = ".."`, `mount = ".."` set identity.
 - `capabilities(domain("v","why"), git_repo("v","why"), unix_socket(dynamic,"why"), preopened_path(dynamic,"why"))` declare authority needs; `unix_socket`/`preopened_path` `dynamic` forms resolve at mount-start from a `HostSocket`/`HostFile` config field.
 - `limits(memory_mb(<int>,"why"))` declares scalar runtime ceilings seeded into new mount specs separately from access grants.
-- `auth = <expr>` splices a typed `omnifs_sdk::auth::Auth` builder value (covering `StaticToken`, `OAuth` device-code/PKCE/client-side-token flows, and `Validation`) into the manifest auth block.
+- `auth = <JSON string>` declares the wire-shaped auth block directly; the macro parses and validates the literal before embedding it.
 - The config metadata is derived automatically from the `start` config type (via `#[omnifs_sdk::config]`, which emits the SDK's static config dialect); no manifest argument is needed.
 - Host-resource config fields are typed: `omnifs_sdk::HostFile` (host file -> read-only WASI preopen) and `omnifs_sdk::HostSocket` (`unix://` socket). The manifest records them as string fields with a host-resource binding.
 
-Each auth scheme is self-contained: it carries its own injection domains, header, and prefix. Author them per scheme with `StaticToken::new(..).inject(&["api.host"])` or `OAuth::device_code(..).inject(&["api.host"])`, plus `.header(..)`/`.prefix(..)` overrides (e.g. `.prefix("")` for a raw token). `Auth::new(default, schemes)` takes no block-level inject. At build time the native `omnifs-embed-metadata` harvester converts each provider's typed `Provider::METADATA` const into the host `ProviderManifest` JSON and injects it as the custom section; the SDK metadata types never serialize themselves.
+Each auth scheme is self-contained: it carries its own injection domains, header, and prefix. The host reads the embedded wire shape directly, while provider declarations remain literal and compile-time validated.
 
 ## Build and verify
 

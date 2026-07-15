@@ -1,5 +1,5 @@
 use omnifs_sdk::serde_json::json;
-use omnifs_sdk::{ConfigType, HostFile, HostResourceBinding, HostSocket, ProvidesConfigMetadata};
+use omnifs_sdk::{ConfigMetadataBytes, ConfigType, HostFile, HostResourceBinding, HostSocket};
 use std::collections::BTreeMap;
 
 #[allow(dead_code)]
@@ -32,8 +32,8 @@ fn default_endpoint() -> HostSocket {
 
 #[test]
 fn config_metadata_is_generated_from_the_static_dialect() {
-    let metadata = <Config as ProvidesConfigMetadata>::metadata().expect("config metadata missing");
-    let fields = &metadata.fields;
+    let fields: Vec<omnifs_sdk::ConfigField> =
+        omnifs_sdk::serde_json::from_slice(Config::JSON).expect("config metadata missing");
 
     assert_eq!(fields[0].name, "endpoint");
     assert_eq!(fields[0].value_type, ConfigType::String);

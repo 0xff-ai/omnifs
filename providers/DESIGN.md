@@ -618,7 +618,7 @@ parent directories, the SDK can computed those directory effects from the path.
 Events and invalidation remain first-class:
 
 ```rust
-#[omnifs_sdk::provider(events(timer(Duration::from_secs(60), Self::on_tick)))]
+#[omnifs_sdk::provider(events(timer(60, Self::on_tick)))]
 impl Provider {
     async fn on_tick(cx: Cx<State>) -> Result<Invalidation> {
         Ok(Invalidation::new()

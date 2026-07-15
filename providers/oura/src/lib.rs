@@ -11,9 +11,6 @@ use strum::{EnumProperty, VariantArray};
 use time::format_description::well_known::{Iso8601, Rfc3339};
 use time::{Date, Duration, Time};
 
-#[cfg(not(target_arch = "wasm32"))]
-use omnifs_sdk::{OauthScheme, ProviderAuthManifest, SchemeGuidance};
-
 const PRELOAD_RADIUS: Duration = Duration::days(15);
 const JSON_SUFFIX: &str = ".json";
 const DATE_FIELDS: &[&str] = &[
@@ -33,45 +30,17 @@ const DATE_FIELDS: &[&str] = &[
 )]
 struct Api;
 
-#[cfg(not(target_arch = "wasm32"))]
-fn auth() -> ProviderAuthManifest {
-    ProviderAuthManifest::builder("oauth")
-        .oauth(
-            OauthScheme::client_side_token(
-                "oauth",
-                "Oura OAuth",
-                "https://cloud.ouraring.com/oauth/authorize",
-                "https://api.ouraring.com/oauth/token",
-                "http://localhost:58880/",
-            )
-            .inject(["api.ouraring.com"])
-            .client_id("9443bed5-98df-4a2d-b08e-d2a10c1851ae")
-            .scopes([
-                "email", "personal", "daily", "heartrate", "workout", "tag", "session",
-                "spo2Daily",
-            ]),
-            SchemeGuidance::new().summary(
-                "Browser sign-in through omnifs's Oura app; the access token returns directly in the redirect.",
-            ),
-        )
-        .build()
-}
-
 #[omnifs_sdk::provider(
     id = "oura",
     display_name = "Oura",
     description = "your Oura ring health data",
     mount = "oura",
-    capabilities(
-        domain(
-            "api.ouraring.com",
-            "Fetch Oura API v2 user collection resources such as sleep, activity, readiness, heart rate, and device data."
-        ),
-    ),
-    limits(
-        memory_mb(128, "Leave room for date-range and time-series JSON responses."),
-    ),
-    auth = auth()
+    capabilities(domain(
+        "api.ouraring.com",
+        "Fetch Oura API v2 user collection resources such as sleep, activity, readiness, heart rate, and device data."
+    ),),
+    limits(memory_mb(128, "Leave room for date-range and time-series JSON responses."),),
+    auth = r#"{"default":"oauth","schemes":[{"oauth":{"key":"oauth","displayName":"Oura OAuth","authorizationEndpoint":"https://cloud.ouraring.com/oauth/authorize","tokenEndpoint":"https://api.ouraring.com/oauth/token","defaultClientId":"9443bed5-98df-4a2d-b08e-d2a10c1851ae","defaultScopes":["email","personal","daily","heartrate","workout","tag","session","spo2Daily"],"flow":{"clientSideToken":{"redirectUriTemplate":"http://localhost:58880/"}},"refreshTokenRotates":false,"injectDomains":["api.ouraring.com"],"injectValuePrefix":"Bearer "}}],"guidance":{"oauth":{"summary":"Browser sign-in through omnifs's Oura app; the access token returns directly in the redirect."}}}"#
 )]
 impl OuraProvider {
     fn start(r: &mut Router) -> Result<()> {

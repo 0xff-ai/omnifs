@@ -2879,24 +2879,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "omnifs-embed-metadata"
-version = "0.2.1"
-dependencies = [
- "omnifs-provider-arxiv",
- "omnifs-provider-db",
- "omnifs-provider-dns",
- "omnifs-provider-docker",
- "omnifs-provider-github",
- "omnifs-provider-kubernetes",
- "omnifs-provider-linear",
- "omnifs-provider-oura",
- "omnifs-provider-web",
- "omnifs-workspace",
- "serde_json",
- "test-provider",
-]
-
-[[package]]
 name = "omnifs-engine"
 version = "0.2.1"
 dependencies = [
@@ -3125,6 +3107,7 @@ version = "0.2.1"
 dependencies = [
  "proc-macro2",
  "quote",
+ "serde_json",
  "syn",
 ]
 
