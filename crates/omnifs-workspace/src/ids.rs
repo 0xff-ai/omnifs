@@ -9,7 +9,7 @@ const KEY_PART_HINT: &str = "letters, digits, dashes, underscores, or dots; 1-12
 /// Provider name slug: the catalog index and UI label, never content identity.
 /// This is the human-facing provider name (e.g. `github`), the slug
 /// credentials are keyed by, distinct from the content [`ProviderId`] hash.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub struct ProviderName(String);
 
 impl ProviderName {
@@ -41,6 +41,13 @@ impl FromStr for ProviderName {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         Self::new(value)
+    }
+}
+
+impl<'de> Deserialize<'de> for ProviderName {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
     }
 }
 
@@ -196,6 +203,7 @@ impl fmt::Display for ProviderVersion {
 
 /// Catalog/UI context carried alongside a pinned provider; never identity.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProviderMeta {
     pub name: ProviderName,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -206,6 +214,7 @@ pub struct ProviderMeta {
 /// [`ProviderMeta`] context resolved at pin time. This is what a mount spec
 /// stores and what the daemon resolves to serve.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProviderRef {
     pub id: ProviderId,
     pub meta: ProviderMeta,
@@ -220,6 +229,11 @@ mod tests {
         assert_eq!(ProviderName::new("github").unwrap().as_str(), "github");
         assert!(ProviderName::new("bad id!").is_err());
         assert!(ProviderName::new("").is_err());
+        assert_eq!(
+            serde_json::to_string(&ProviderName::new("github").unwrap()).unwrap(),
+            "\"github\""
+        );
+        assert!(serde_json::from_str::<ProviderName>("\"bad id!\"").is_err());
     }
 
     #[test]

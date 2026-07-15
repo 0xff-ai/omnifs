@@ -1,5 +1,4 @@
 use crate::ids::{self as ids, ProviderName};
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 use std::str::FromStr;
 
@@ -183,32 +182,6 @@ impl FromStr for CredentialId {
     }
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-struct CredentialIdWire {
-    provider_id: String,
-    scheme: String,
-    account: String,
-}
-
-impl Serialize for CredentialId {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        CredentialIdWire {
-            provider_id: self.provider_name.to_string(),
-            scheme: self.scheme.to_string(),
-            account: self.account.to_string(),
-        }
-        .serialize(serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for CredentialId {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let wire = CredentialIdWire::deserialize(deserializer)?;
-        Self::new(wire.provider_id, wire.scheme, wire.account).map_err(serde::de::Error::custom)
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum CredentialIdError {
     #[error("invalid credential storage key: {value}")]
@@ -266,20 +239,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn credential_id_keys_on_name_and_wire_is_byte_stable() {
+    fn credential_id_keys_on_name_and_storage_key_is_stable() {
         let id = CredentialId::new("github", "pat", "user").unwrap();
         assert_eq!(id.provider_name(), "github");
         assert_eq!(id.scheme(), "pat");
         assert_eq!(id.account(), "user");
         // The storage-key format is unchanged: name:scheme:account.
         assert_eq!(id.storage_key(), "github:pat:user");
-        // The JSON wire keeps the field name `provider_id` so credentials.json
-        // stays byte-stable across the slug -> ProviderName type rename.
-        let value = serde_json::to_value(&id).unwrap();
-        assert_eq!(value["provider_id"], "github");
-        assert_eq!(value["scheme"], "pat");
-        assert_eq!(value["account"], "user");
-        assert_eq!(serde_json::from_value::<CredentialId>(value).unwrap(), id);
     }
 
     #[test]

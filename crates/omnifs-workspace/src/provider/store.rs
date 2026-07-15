@@ -18,7 +18,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::ids::{IdError, ProviderId, ProviderName, ProviderVersion};
+use crate::ids::{ProviderId, ProviderName, ProviderVersion};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
@@ -43,8 +43,6 @@ pub enum StoreError {
     Version(u32),
     #[error("provider index contains duplicate provider id {0}")]
     DuplicateId(ProviderId),
-    #[error("provider index contains invalid provider name `{name}`: {source}")]
-    InvalidProviderName { name: String, source: IdError },
     #[error("provider artifact at {} is not a regular file", path.display())]
     ArtifactNotRegular { path: PathBuf },
     #[error(
@@ -72,18 +70,6 @@ pub struct IndexEntry {
     pub version: Option<ProviderVersion>,
 }
 
-impl IndexEntry {
-    fn validate(&self) -> Result<(), StoreError> {
-        ProviderName::new(self.name.as_str()).map_err(|source| {
-            StoreError::InvalidProviderName {
-                name: self.name.to_string(),
-                source,
-            }
-        })?;
-        Ok(())
-    }
-}
-
 /// The provider index: every retained artifact, with no lifecycle state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -104,7 +90,6 @@ impl Index {
     fn validate(&self) -> Result<(), StoreError> {
         let mut ids = HashSet::with_capacity(self.providers.len());
         for entry in &self.providers {
-            entry.validate()?;
             if !ids.insert(entry.id) {
                 return Err(StoreError::DuplicateId(entry.id));
             }
@@ -148,7 +133,6 @@ impl ProviderStore {
             name: artifact.meta.name.clone(),
             version: artifact.meta.version.clone(),
         };
-        entry.validate()?;
         create_dir_all(&self.root)?;
         let lock = self.lock()?;
         let result = self.retain_locked(artifact, entry.clone());
@@ -560,10 +544,18 @@ mod tests {
         .unwrap();
         let store = ProviderStore::new(dir.path());
 
-        assert!(matches!(
-            store.read_index(),
-            Err(StoreError::InvalidProviderName { name, .. }) if name == "bad name"
-        ));
+        let error = store
+            .read_index()
+            .expect_err("invalid provider names must fail during JSON deserialization");
+        let StoreError::Index { source, .. } = error else {
+            panic!("expected corrupt index error");
+        };
+        assert!(
+            source
+                .to_string()
+                .contains("invalid provider_name `bad name`"),
+            "error should name the invalid provider name, got: {source}"
+        );
 
         std::fs::write(
             dir.path().join("index.json"),

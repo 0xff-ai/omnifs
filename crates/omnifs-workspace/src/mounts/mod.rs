@@ -670,12 +670,39 @@ mod tests {
             }
         });
 
-        let error = serde_json::from_value::<Spec>(spec).expect_err("unknown key must fail");
+        let error =
+            serde_json::from_value::<Spec>(spec.clone()).expect_err("unknown key must fail");
 
         let message = error.to_string();
         assert!(
             message.contains("unknown field `clientId`"),
             "error should name the retired key, got: {message}"
+        );
+
+        let mut nested_provider = spec.clone();
+        nested_provider
+            .as_object_mut()
+            .expect("spec object")
+            .remove("auth");
+        nested_provider["provider"]["extra"] = serde_json::json!(true);
+        let error = serde_json::from_value::<Spec>(nested_provider)
+            .expect_err("unknown provider key must fail");
+        assert!(
+            error.to_string().contains("unknown field `extra`"),
+            "error should name the unknown provider key, got: {error}"
+        );
+
+        let mut nested_meta = spec;
+        nested_meta
+            .as_object_mut()
+            .expect("spec object")
+            .remove("auth");
+        nested_meta["provider"]["meta"]["extra"] = serde_json::json!(true);
+        let error = serde_json::from_value::<Spec>(nested_meta)
+            .expect_err("unknown provider metadata key must fail");
+        assert!(
+            error.to_string().contains("unknown field `extra`"),
+            "error should name the unknown provider metadata key, got: {error}"
         );
     }
 
