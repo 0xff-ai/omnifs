@@ -1,6 +1,6 @@
 //! Git repository cloning with host-owned opaque identities.
 
-use crate::blob_cache::BlobCache;
+use crate::cache::blob::BlobCache;
 use crate::cache::identity::GitId;
 use crate::log_redaction::LogUrl;
 use crate::sandbox::publish;

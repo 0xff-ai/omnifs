@@ -27,6 +27,12 @@ The host owns all caching as opaque byte storage. Providers do not add private L
 
 Keep object cache durable and provider-scoped. Treat view cache as derived and disposable. Access cache schema through shared host/tree APIs.
 
+Each immutable running mount owns one `Arc<MountResources>`. That owner is the
+authority for canonical bytes, forward and reverse object indexes, negative
+state, generation fences, view admission, and mount blob storage. Durable
+publication and invalidation transitions use its short synchronous boundary;
+the boundary never spans provider execution, filesystem I/O, or an await.
+
 Host revalidation is a cache safety backstop, not a second invalidation channel. `MountRuntimes` drives the per-mount timer, `Runtime::revalidate_recent_objects` chooses from the recent object-read set, and `Namespace::revalidate_file` re-enters `read-file` with the cached canonical id, validator, and bytes so normal provider effects apply any refreshed canonical bytes or invalidations.
 
 ### Listing and lookup

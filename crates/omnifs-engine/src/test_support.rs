@@ -87,7 +87,7 @@ pub fn load_mount_runtimes_for_callout_tests(
 }
 
 pub mod blob {
-    pub use crate::blob::{BlobCache, BlobExecutor, BlobLimits};
+    pub use crate::blob::{BlobExecutor, BlobLimits};
 }
 
 pub mod authority {
@@ -118,11 +118,31 @@ pub mod wit {
 /// Cache APIs used by integration tests without exposing cache internals as a
 /// normal engine surface.
 pub mod cache {
-    pub use crate::cache::store::{
-        BatchRecord, CachedCanonical, Caches, CanonicalBatchEntry, Handle, Key, Record, RecordKind,
-        SCHEMA_VERSION, Store,
+    pub use crate::cache::mount::{
+        BatchRecord, CachedCanonical, Caches, CanonicalBatchEntry, Key, MountResources, Record,
+        RecordKind, SCHEMA_VERSION,
     };
     pub use crate::cache::{object, view};
+
+    pub fn cache_get(
+        runtime: &crate::Runtime,
+        path: &omnifs_core::path::Path,
+        kind: RecordKind,
+        aux: Option<&str>,
+    ) -> Option<Record> {
+        runtime.resources.cache_get(path, kind, aux)
+    }
+
+    pub fn cached_canonical_for(
+        runtime: &crate::Runtime,
+        path: &omnifs_core::path::Path,
+    ) -> Option<CachedCanonical> {
+        runtime.resources.cached_canonical_for(path)
+    }
+
+    pub fn current_generation(runtime: &crate::Runtime) -> u64 {
+        runtime.resources.current_generation()
+    }
 }
 
 /// Test operation driver used by provider integration tests that need to

@@ -1,12 +1,12 @@
 //! Provider-facing `fetch-blob` executor.
 //!
 //! Provider HTTP fetches whose payload should never cross the WIT
-//! boundary are streamed into [`crate::blob_cache::BlobCache`].
+//! boundary are streamed into the mount-owned blob cache.
 //! Other host-side machinery consumes the file in place, so the bytes never
 //! round-trip back through the provider.
 
-pub use crate::blob_cache::BlobCache;
-use crate::blob_cache::{BLOB_TMP_DIR, BlobCacheError, BlobMetadata, BlobRecord};
+use crate::cache::MountResources;
+use crate::cache::blob::{BLOB_TMP_DIR, BlobCacheError, BlobMetadata, BlobRecord};
 use crate::cache::identity::{BlobGeneration, BlobRequestId};
 use crate::callouts::{callout_internal, callout_network, callout_too_large, record_outcome};
 use crate::http::{HttpStack, decode_response_headers};
@@ -108,16 +108,16 @@ impl From<BlobError> for wit_types::CalloutResult {
 #[derive(Clone)]
 pub struct BlobExecutor {
     http: Arc<HttpStack>,
-    cache: Arc<BlobCache>,
+    resources: Arc<MountResources>,
     limits: BlobLimits,
 }
 
 impl BlobExecutor {
     /// Construct an executor with explicit host blob limits.
-    pub fn new(http: Arc<HttpStack>, cache: Arc<BlobCache>, limits: BlobLimits) -> Self {
+    pub fn new(http: Arc<HttpStack>, resources: Arc<MountResources>, limits: BlobLimits) -> Self {
         Self {
             http,
-            cache,
+            resources,
             limits,
         }
     }
@@ -149,9 +149,9 @@ impl BlobExecutor {
                 Ok(request) => {
                     let request_id = request
                         .blob_request_id(self.http.auth_binding_for_url(request.original_url()));
-                    let lock = self.cache.request_lock(request_id);
+                    let lock = self.resources.blob.request_lock(request_id);
                     let _guard = lock.lock().await;
-                    if let Some(record) = self.cache.lookup_by_request(request_id) {
+                    if let Some(record) = self.resources.blob.lookup_by_request(request_id) {
                         wit_types::CalloutResult::BlobFetched(record.as_ref().into())
                     } else {
                         match self.http.send_validated(&request, BLOB_FETCH_TIMEOUT).await {
@@ -186,7 +186,7 @@ impl BlobExecutor {
 
         let staged = stream_response_body(
             response,
-            self.cache.cache_dir(),
+            self.resources.blob.cache_dir(),
             self.limits.max_fetch_blob_bytes,
         )
         .await
@@ -202,7 +202,8 @@ impl BlobExecutor {
             size,
         };
         let record = self
-            .cache
+            .resources
+            .blob
             .publish(request_id, generation, staged.path(), metadata)
             .map_err(|error| BlobError::from(error).with_io_context("publish blob"))?;
         Ok((*record).clone())
@@ -326,6 +327,7 @@ fn lookup_header(headers: &[(String, String)], name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cache::blob::BlobCache;
     #[tokio::test]
     async fn stream_response_body_rejects_large_content_length_before_writing() {
         let tmp = tempfile::tempdir().unwrap();

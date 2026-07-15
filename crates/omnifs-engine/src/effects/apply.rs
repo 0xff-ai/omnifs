@@ -1,13 +1,13 @@
 //! Host-owned cache materialization.
 //!
 //! `EffectApplier` owns the translation from provider wire types (`wit_types`)
-//! into cache storage primitives. The cache (`crate::cache::Store`) is pure
+//! into cache storage primitives. The mount resource is pure
 //! byte storage; it knows nothing about the provider component protocol. All
 //! wire→storage translation lives here.
 
 use std::collections::BTreeMap;
 
-use crate::cache::{BatchRecord, CanonicalBatchEntry, Record, RecordKind, Store};
+use crate::cache::{BatchRecord, CanonicalBatchEntry, MountResources, Record, RecordKind};
 use crate::view::{
     AttrPayload, CachedCursor, DirentRecord, DirentsPayload, EntryMeta, FilePayload, LookupPayload,
     Stability,
@@ -50,14 +50,14 @@ impl LookupEntry {
 }
 
 /// Translates provider wire effects and browse results into cache storage
-/// calls. Holds a reference to the per-mount `Store` for the duration of
+/// calls. Holds a reference to the per-mount `MountResources` for the duration of
 /// one materialization call.
 pub struct EffectApplier<'a> {
-    store: &'a Store,
+    store: &'a MountResources,
 }
 
 impl<'a> EffectApplier<'a> {
-    pub fn new(store: &'a Store) -> Self {
+    pub fn new(store: &'a MountResources) -> Self {
         Self { store }
     }
 
@@ -70,9 +70,9 @@ impl<'a> EffectApplier<'a> {
         effects: &wit_types::Effects,
         op_gen: u64,
         now_millis: u64,
-    ) -> (Vec<Path>, Vec<Path>) {
-        self.apply_canonical_batch(effects, op_gen);
-        let mut fs_effects = self.apply_fs_effects(effects, op_gen, now_millis);
+    ) -> anyhow::Result<(Vec<Path>, Vec<Path>)> {
+        self.apply_canonical_batch(effects, op_gen)?;
+        let mut fs_effects = self.apply_fs_effects(effects, op_gen, now_millis)?;
         self.merge_dirents(fs_effects.dirs, &mut fs_effects.children);
         if !fs_effects.batch.is_empty() {
             debug!(
@@ -83,10 +83,14 @@ impl<'a> EffectApplier<'a> {
             );
             self.store.cache_put_batch(&fs_effects.batch);
         }
-        self.apply_invalidations(effects)
+        Ok(self.apply_invalidations(effects)?)
     }
 
-    fn apply_canonical_batch(&self, effects: &wit_types::Effects, op_gen: u64) {
+    fn apply_canonical_batch(
+        &self,
+        effects: &wit_types::Effects,
+        op_gen: u64,
+    ) -> anyhow::Result<()> {
         // Collect canonical-store effects that pass conflict detection, then
         // write them all in one batch via put_canonical_batch.
         let canonical_batch: Vec<CanonicalBatchEntry> = effects
@@ -106,9 +110,6 @@ impl<'a> EffectApplier<'a> {
                         return None;
                     },
                 };
-                if self.rejects_conflicting_id(&view_leaves.iter().collect::<Vec<_>>(), &id) {
-                    return None;
-                }
                 Some(CanonicalBatchEntry {
                     id: id.as_bytes().to_vec(),
                     bytes: store.bytes.clone(),
@@ -118,8 +119,9 @@ impl<'a> EffectApplier<'a> {
             })
             .collect();
         if !canonical_batch.is_empty() {
-            self.store.put_canonical_batch(canonical_batch, op_gen);
+            self.store.put_canonical_batch(canonical_batch, op_gen)?;
         }
+        Ok(())
     }
 
     fn apply_fs_effects(
@@ -127,7 +129,7 @@ impl<'a> EffectApplier<'a> {
         effects: &wit_types::Effects,
         op_gen: u64,
         now_millis: u64,
-    ) -> FsEffectRecords {
+    ) -> anyhow::Result<FsEffectRecords> {
         let mut records = FsEffectRecords::default();
         for write in &effects.fs {
             let Ok(write_path) = Path::parse(&write.path) else {
@@ -153,14 +155,6 @@ impl<'a> EffectApplier<'a> {
                 let oid = ObjectId::from_wit(id);
                 if self.rejects_conflicting_id(&[&write_path], &oid) {
                     continue;
-                }
-                self.store.put_index_only(
-                    oid.as_bytes(),
-                    std::slice::from_ref(&write_path),
-                    op_gen,
-                );
-                if self.store.write_fenced(&write_path, op_gen) {
-                    admit_view = false;
                 }
             }
 
@@ -193,17 +187,38 @@ impl<'a> EffectApplier<'a> {
                     if write.id.is_some() {
                         let stability = stability_from_wit(file.attrs.stability);
                         let expires_at = freshness_expiry(stability, now_millis);
-                        self.store
-                            .cache_view_leaf(&write_path, &leaf_records, expires_at, op_gen);
+                        admit_view = self.store.put_index_only_with_view(
+                            ObjectId::from_wit(write.id.as_ref().expect("id checked")).as_bytes(),
+                            &write_path,
+                            &leaf_records,
+                            expires_at,
+                            op_gen,
+                        )?;
+                        if !admit_view {
+                            continue;
+                        }
                     } else {
                         records.batch.extend(leaf_records);
                     }
                 } else {
-                    records.batch.extend(leaf_records);
+                    if let Some(id) = &write.id {
+                        admit_view = self.store.put_index_only_with_view(
+                            ObjectId::from_wit(id).as_bytes(),
+                            &write_path,
+                            &leaf_records,
+                            None,
+                            op_gen,
+                        )?;
+                        if !admit_view {
+                            continue;
+                        }
+                    } else {
+                        records.batch.extend(leaf_records);
+                    }
                 }
             }
         }
-        records
+        Ok(records)
     }
 
     fn merge_dirents(
@@ -232,7 +247,10 @@ impl<'a> EffectApplier<'a> {
         }
     }
 
-    fn apply_invalidations(&self, effects: &wit_types::Effects) -> (Vec<Path>, Vec<Path>) {
+    fn apply_invalidations(
+        &self,
+        effects: &wit_types::Effects,
+    ) -> anyhow::Result<(Vec<Path>, Vec<Path>)> {
         let mut invalidated_prefixes = Vec::new();
         let mut invalidated_paths = Vec::new();
         for invalidation in &effects.invalidations {
@@ -240,7 +258,7 @@ impl<'a> EffectApplier<'a> {
                 wit_types::Invalidation::Object(id) => {
                     let oid = ObjectId::from_wit(id);
                     let paths = self.store.paths_for_id(oid.as_bytes());
-                    self.store.delete_object(oid.as_bytes());
+                    self.store.delete_object(oid.as_bytes())?;
                     invalidated_paths.extend(paths);
                 },
                 wit_types::Invalidation::Listing(wit_types::PathOrPrefix::Path(p)) => {
@@ -268,7 +286,7 @@ impl<'a> EffectApplier<'a> {
             }
         }
 
-        (invalidated_prefixes, invalidated_paths)
+        Ok((invalidated_prefixes, invalidated_paths))
     }
 
     /// Materialize a `lookup-child` result into cache storage and return the
@@ -280,19 +298,19 @@ impl<'a> EffectApplier<'a> {
         result: wit_types::LookupChildResult,
         op_gen: u64,
         now_millis: u64,
-    ) -> LookupOutcome {
+    ) -> anyhow::Result<LookupOutcome> {
         match result {
             wit_types::LookupChildResult::Entry(entry) => {
-                self.apply_lookup_projection(parent_path, &entry, op_gen);
-                LookupOutcome::Entry(LookupEntry {
+                self.apply_lookup_projection(parent_path, &entry, op_gen)?;
+                Ok(LookupOutcome::Entry(LookupEntry {
                     path: child_path.clone(),
                     meta: entry_meta_from_kind(&entry.target.kind),
-                })
+                }))
             },
-            wit_types::LookupChildResult::Subtree(tree_ref) => LookupOutcome::Subtree(tree_ref),
+            wit_types::LookupChildResult::Subtree(tree_ref) => Ok(LookupOutcome::Subtree(tree_ref)),
             wit_types::LookupChildResult::NotFound(maybe_id) => {
-                self.apply_negative_lookup(child_path, maybe_id.as_ref(), op_gen, now_millis);
-                LookupOutcome::NotFound
+                self.apply_negative_lookup(child_path, maybe_id.as_ref(), op_gen, now_millis)?;
+                Ok(LookupOutcome::NotFound)
             },
         }
     }
@@ -304,15 +322,16 @@ impl<'a> EffectApplier<'a> {
         parent_path: &Path,
         entry: &wit_types::LookupEntry,
         op_gen: u64,
-    ) {
+    ) -> anyhow::Result<()> {
         cache_projection_batch(
             self.store,
             parent_path,
             std::iter::once(&entry.target).chain(entry.siblings.iter()),
             entry.exhaustive,
             ProjectionDirentsWrite::LookupHints,
-        );
-        self.index_entry_ids(parent_path, entry, op_gen);
+        )?;
+        self.index_entry_ids(parent_path, entry, op_gen)?;
+        Ok(())
     }
 
     fn apply_negative_lookup(
@@ -321,7 +340,7 @@ impl<'a> EffectApplier<'a> {
         maybe_id: Option<&wit_types::LogicalId>,
         op_gen: u64,
         now_millis: u64,
-    ) {
+    ) -> anyhow::Result<()> {
         let id_bytes = maybe_id.map(|id| ObjectId::from_wit(id).as_bytes().to_vec());
         self.store.put_negative(
             child_path,
@@ -329,7 +348,8 @@ impl<'a> EffectApplier<'a> {
             op_gen,
             DYNAMIC_TTL_MILLIS,
             now_millis,
-        );
+        )?;
+        Ok(())
     }
 
     /// Cache the authoritative listing from a `list-children` response.
@@ -338,7 +358,7 @@ impl<'a> EffectApplier<'a> {
         path: &Path,
         listing: &wit_types::DirListing,
         op_gen: u64,
-    ) {
+    ) -> anyhow::Result<()> {
         cache_projection_batch(
             self.store,
             path,
@@ -348,10 +368,11 @@ impl<'a> EffectApplier<'a> {
                 validator: listing.validator.clone(),
                 next_cursor: listing.next_cursor.clone().map(cached_cursor_from_wit),
             },
-        );
+        )?;
         for entry in &listing.entries {
-            self.index_single_entry_id(path, entry, op_gen);
+            self.index_single_entry_id(path, entry, op_gen)?;
         }
+        Ok(())
     }
 
     /// Cache a continuation page from a paged `list-children` response.
@@ -360,29 +381,41 @@ impl<'a> EffectApplier<'a> {
         path: &Path,
         entries: &[wit_types::DirEntry],
         op_gen: u64,
-    ) {
+    ) -> anyhow::Result<()> {
         cache_projection_batch(
             self.store,
             path,
             entries,
             false,
             ProjectionDirentsWrite::Suppressed,
-        );
+        )?;
         for entry in entries {
-            self.index_single_entry_id(path, entry, op_gen);
+            self.index_single_entry_id(path, entry, op_gen)?;
         }
+        Ok(())
     }
 
-    fn index_entry_ids(&self, parent_path: &Path, entry: &wit_types::LookupEntry, op_gen: u64) {
-        self.index_single_entry_id(parent_path, &entry.target, op_gen);
+    fn index_entry_ids(
+        &self,
+        parent_path: &Path,
+        entry: &wit_types::LookupEntry,
+        op_gen: u64,
+    ) -> anyhow::Result<()> {
+        self.index_single_entry_id(parent_path, &entry.target, op_gen)?;
         for sibling in &entry.siblings {
-            self.index_single_entry_id(parent_path, sibling, op_gen);
+            self.index_single_entry_id(parent_path, sibling, op_gen)?;
         }
+        Ok(())
     }
 
-    fn index_single_entry_id(&self, parent_path: &Path, entry: &wit_types::DirEntry, op_gen: u64) {
+    fn index_single_entry_id(
+        &self,
+        parent_path: &Path,
+        entry: &wit_types::DirEntry,
+        op_gen: u64,
+    ) -> anyhow::Result<()> {
         let Some(id) = &entry.id else {
-            return;
+            return Ok(());
         };
         let Ok(entry_path) = parent_path.join(&entry.name) else {
             warn!(
@@ -390,14 +423,15 @@ impl<'a> EffectApplier<'a> {
                 name = entry.name.as_str(),
                 "provider entry id used an invalid protocol path segment; skipping id index"
             );
-            return;
+            return Ok(());
         };
         let oid = ObjectId::from_wit(id);
         if self.rejects_conflicting_id(&[&entry_path], &oid) {
-            return;
+            return Ok(());
         }
         self.store
-            .put_index_only(oid.as_bytes(), std::slice::from_ref(&entry_path), op_gen);
+            .put_index_only(oid.as_bytes(), std::slice::from_ref(&entry_path), op_gen)?;
+        Ok(())
     }
 
     /// True if any of `paths` is already indexed to an id != `id` (a provider bug).
@@ -495,7 +529,7 @@ enum ProjectionDirentsWrite {
 impl ProjectionDirentsWrite {
     fn payload(
         self,
-        store: &Store,
+        store: &MountResources,
         parent_path: &Path,
         exhaustive: bool,
         dirent_map: BTreeMap<String, DirentRecord>,
@@ -530,12 +564,13 @@ impl ProjectionDirentsWrite {
 }
 
 fn cache_projection_batch<'a, I>(
-    store: &Store,
+    store: &MountResources,
     parent_path: &Path,
     entries: I,
     exhaustive: bool,
     dirents_write: ProjectionDirentsWrite,
-) where
+) -> anyhow::Result<()>
+where
     I: IntoIterator<Item = &'a wit_types::DirEntry>,
 {
     let entries: Vec<(&wit_types::DirEntry, EntryMeta)> = entries
@@ -596,6 +631,7 @@ fn cache_projection_batch<'a, I>(
         );
         store.cache_put_batch(&batch);
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -604,10 +640,11 @@ mod tests {
     use crate::cache::Caches;
     use std::sync::Arc;
 
-    fn open_store(mount: &str) -> (tempfile::TempDir, Arc<Caches>, Store) {
+    fn open_store(mount: &str) -> (tempfile::TempDir, Arc<Caches>, Arc<MountResources>) {
         let dir = tempfile::tempdir().unwrap();
         let caches = Caches::open(dir.path()).unwrap();
-        let store = caches.mount(mount);
+        let name = omnifs_workspace::mounts::Name::new(mount).unwrap();
+        let store = caches.mount(&name).unwrap();
         (dir, caches, store)
     }
 
@@ -635,7 +672,7 @@ mod tests {
         Path::parse(raw).unwrap()
     }
 
-    fn put_paged_dirents(store: &Store, path: &str) {
+    fn put_paged_dirents(store: &MountResources, path: &str) {
         let payload = DirentsPayload {
             entries: vec![DirentRecord {
                 name: "first".to_string(),
@@ -657,7 +694,7 @@ mod tests {
         );
     }
 
-    fn cached_dirents(store: &Store, path: &str) -> DirentsPayload {
+    fn cached_dirents(store: &MountResources, path: &str) -> DirentsPayload {
         let path = p(path);
         let record = store
             .cache_get(&path, RecordKind::Dirents, None)

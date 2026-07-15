@@ -274,7 +274,7 @@ fn snapshot_from_provider_listing(
     if let Some(encoded) = dirents_payload.serialize() {
         let record = CacheRecord::new(RecordKind::Dirents, encoded);
         runtime
-            .cache()
+            .resources
             .cache_put(path, RecordKind::Dirents, None, &record);
     }
 
@@ -386,6 +386,8 @@ fn cached_dirents_for_revalidation(
     runtime: &Runtime,
     path: &omnifs_core::path::Path,
 ) -> Option<DirentsPayload> {
-    let record = runtime.cache().cache_get(path, RecordKind::Dirents, None)?;
+    let record = runtime
+        .resources
+        .cache_get(path, RecordKind::Dirents, None)?;
     DirentsPayload::deserialize(&record.payload)
 }

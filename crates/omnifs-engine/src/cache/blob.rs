@@ -145,8 +145,8 @@ impl BlobCache {
                     "blob temporary root is a symlink".to_string(),
                 ));
             },
-            Ok(metadata) if metadata.is_dir() => std::fs::remove_dir_all(&tmp)?,
-            Ok(_) => std::fs::remove_file(&tmp)?,
+            Ok(metadata) if metadata.is_dir() => {},
+            Ok(_) => {},
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
             Err(error) => return Err(error.into()),
         }

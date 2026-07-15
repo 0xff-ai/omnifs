@@ -83,12 +83,12 @@ fn canonical_eviction_drops_validator() {
     let id = issue_id();
     let leaf = "/o/r/issues/all/42/item.json";
     let bytes = br#"{"number":42}"#;
-    let op_gen = harness.runtime.cache().current_generation();
+    let op_gen = harness.runtime.resources.current_generation();
     harness
         .runtime
         .apply_effects_for_test(&canonical_effect(&id, leaf, bytes, Some("etag")), op_gen);
 
-    let cached = harness.runtime.cache().cached_canonical_for(&p(leaf));
+    let cached = harness.runtime.resources.cached_canonical_for(&p(leaf));
     assert!(cached.is_some());
     let cached = cached.unwrap();
     assert_eq!(cached.bytes, bytes);
@@ -104,12 +104,12 @@ fn canonical_eviction_drops_validator() {
     };
     harness
         .runtime
-        .apply_effects_for_test(&invalidate, harness.runtime.cache().current_generation());
+        .apply_effects_for_test(&invalidate, harness.runtime.resources.current_generation());
 
     assert!(
         harness
             .runtime
-            .cache()
+            .resources
             .cached_canonical_for(&p(leaf))
             .is_none()
     );
@@ -120,7 +120,7 @@ fn fence_rejects_stale_preload_and_negative() {
     let harness = make_initialized_runtime(CONFIG);
     let id = issue_id();
     let leaf = "/o/r/issues/open/42/title";
-    let op_gen0 = harness.runtime.cache().current_generation();
+    let op_gen0 = harness.runtime.resources.current_generation();
 
     let invalidate = Effects {
         invalidations: vec![Invalidation::Object(id.clone())],
@@ -132,7 +132,7 @@ fn fence_rejects_stale_preload_and_negative() {
     };
     harness
         .runtime
-        .apply_effects_for_test(&invalidate, harness.runtime.cache().current_generation());
+        .apply_effects_for_test(&invalidate, harness.runtime.resources.current_generation());
 
     harness
         .runtime
@@ -140,7 +140,7 @@ fn fence_rejects_stale_preload_and_negative() {
     assert!(
         harness
             .runtime
-            .cache()
+            .resources
             .cache_get(&p(leaf), RecordKind::File, None)
             .is_none(),
         "stale preload must not land after object invalidation"
@@ -152,7 +152,7 @@ fn fence_rejects_stale_preload_and_negative() {
     assert!(
         harness
             .runtime
-            .cache()
+            .resources
             .negative_for(&p(leaf), 1_500)
             .is_none(),
         "stale negative must not land after object invalidation"
@@ -164,7 +164,7 @@ fn stale_canonical_fenced_by_midflight_invalidation() {
     let harness = make_initialized_runtime(CONFIG);
     let id = issue_id();
     let leaf = "/o/r/issues/open/42/title";
-    let op_gen0 = harness.runtime.cache().current_generation();
+    let op_gen0 = harness.runtime.resources.current_generation();
 
     let invalidate = Effects {
         invalidations: vec![Invalidation::Object(id.clone())],
@@ -176,7 +176,7 @@ fn stale_canonical_fenced_by_midflight_invalidation() {
     };
     harness
         .runtime
-        .apply_effects_for_test(&invalidate, harness.runtime.cache().current_generation());
+        .apply_effects_for_test(&invalidate, harness.runtime.resources.current_generation());
 
     harness.runtime.apply_effects_for_test(
         &canonical_effect(&id, leaf, b"stale canonical", None),
@@ -185,7 +185,7 @@ fn stale_canonical_fenced_by_midflight_invalidation() {
     assert!(
         harness
             .runtime
-            .cache()
+            .resources
             .cached_canonical_for(&p(leaf))
             .is_none()
     );
@@ -242,13 +242,13 @@ fn leaf_records_share_one_deadline() {
     ));
 
     let runtime = &harness.runtime;
-    let op_gen = runtime.cache().current_generation();
-    assert!(runtime.cache().cache_view_leaf(
-        &p(path),
-        &batch,
-        Some(now.saturating_add(ttl)),
-        op_gen,
-    ));
+    let op_gen = runtime.resources.current_generation();
+    assert!(
+        runtime
+            .resources
+            .cache_view_leaf(&p(path), &batch, Some(now.saturating_add(ttl)), op_gen,)
+            .unwrap()
+    );
 
     for kind in RecordKind::ALL {
         if kind == RecordKind::Dirents {
@@ -256,14 +256,14 @@ fn leaf_records_share_one_deadline() {
         }
         assert!(
             runtime
-                .cache()
+                .resources
                 .view_get(&p(path), kind, None, now + 999)
                 .is_some(),
             "kind {kind:?} should be fresh at t=1999"
         );
         assert!(
             runtime
-                .cache()
+                .resources
                 .view_get(&p(path), kind, None, now + 4_000)
                 .is_none(),
             "kind {kind:?} should expire at t=5000 with the shared stamp"
@@ -279,7 +279,7 @@ async fn plain_path_ignores_unrelated_indexed_validator() {
     assert!(
         harness
             .runtime
-            .cache()
+            .resources
             .cached_canonical_for(&p(path))
             .is_none()
     );
@@ -297,13 +297,13 @@ async fn plain_path_ignores_unrelated_indexed_validator() {
     };
     harness.runtime.apply_effects_for_test(
         &canonical_effect(&id, path, b"unrelated canonical", Some("unrelated-v1")),
-        harness.runtime.cache().current_generation(),
+        harness.runtime.resources.current_generation(),
     );
 
     assert!(
         harness
             .runtime
-            .cache()
+            .resources
             .cached_canonical_for(&p(path))
             .is_some()
     );
@@ -338,7 +338,7 @@ fn object_vs_listing_invalidation() {
             fs: Vec::new(),
             invalidations: Vec::new(),
         },
-        harness.runtime.cache().current_generation(),
+        harness.runtime.resources.current_generation(),
     );
 
     harness.runtime.apply_effects_for_test(
@@ -350,30 +350,30 @@ fn object_vs_listing_invalidation() {
                 invalidations: Vec::new(),
             }
         },
-        harness.runtime.cache().current_generation(),
+        harness.runtime.resources.current_generation(),
     );
     assert!(
         harness
             .runtime
-            .cache()
+            .resources
             .cached_canonical_for(&p(open_leaf))
             .is_none()
     );
     assert!(
         harness
             .runtime
-            .cache()
+            .resources
             .cached_canonical_for(&p(all_leaf))
             .is_none()
     );
 
     harness.runtime.apply_effects_for_test(
         &canonical_effect(&id, open_leaf, b"{}", None),
-        harness.runtime.cache().current_generation(),
+        harness.runtime.resources.current_generation(),
     );
     harness.runtime.apply_effects_for_test(
         &preload_file_effect(&id, all_leaf, b"listed"),
-        harness.runtime.cache().current_generation(),
+        harness.runtime.resources.current_generation(),
     );
 
     harness.runtime.apply_effects_for_test(
@@ -387,13 +387,13 @@ fn object_vs_listing_invalidation() {
                 invalidations: Vec::new(),
             }
         },
-        harness.runtime.cache().current_generation(),
+        harness.runtime.resources.current_generation(),
     );
 
     assert!(
         harness
             .runtime
-            .cache()
+            .resources
             .cache_get(&p(all_leaf), RecordKind::File, None)
             .is_none(),
         "listing prefix invalidation evicts view leaves under the prefix"
@@ -401,7 +401,7 @@ fn object_vs_listing_invalidation() {
     assert!(
         harness
             .runtime
-            .cache()
+            .resources
             .cached_canonical_for(&p(open_leaf))
             .is_some(),
         "object canonical must survive listing-only invalidation"
@@ -414,7 +414,7 @@ fn negative_returns_enoent_until_deadline_or_invalidate() {
     let id = issue_id();
     let path = "/o/r/issues/open/42/missing";
     let now = 10_000u64;
-    let op_gen = harness.runtime.cache().current_generation();
+    let op_gen = harness.runtime.resources.current_generation();
 
     harness
         .runtime
@@ -423,7 +423,7 @@ fn negative_returns_enoent_until_deadline_or_invalidate() {
     assert!(
         harness
             .runtime
-            .cache()
+            .resources
             .negative_for(&p(path), now + 100)
             .is_some()
     );
@@ -431,7 +431,7 @@ fn negative_returns_enoent_until_deadline_or_invalidate() {
     assert!(
         harness
             .runtime
-            .cache()
+            .resources
             .negative_for(&p(path), now + DYNAMIC_TTL_MILLIS + 1)
             .is_none(),
         "negative expires after TTL"
@@ -443,7 +443,7 @@ fn negative_returns_enoent_until_deadline_or_invalidate() {
     assert!(
         harness
             .runtime
-            .cache()
+            .resources
             .negative_for(&p(path), now + 100)
             .is_some()
     );
@@ -458,11 +458,11 @@ fn negative_returns_enoent_until_deadline_or_invalidate() {
     };
     harness
         .runtime
-        .apply_effects_for_test(&invalidate, harness.runtime.cache().current_generation());
+        .apply_effects_for_test(&invalidate, harness.runtime.resources.current_generation());
     assert!(
         harness
             .runtime
-            .cache()
+            .resources
             .negative_for(&p(path), now + 100)
             .is_none(),
         "object invalidation clears the negative immediately"
@@ -478,7 +478,7 @@ async fn negative_short_circuits_read_without_provider_dispatch() {
     harness.runtime.apply_not_found_negative(
         &p(path),
         Some(&id),
-        harness.runtime.cache().current_generation(),
+        harness.runtime.resources.current_generation(),
         now,
     );
 

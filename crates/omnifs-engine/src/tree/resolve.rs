@@ -158,7 +158,7 @@ impl Tree {
 
 fn cached_dirent_child(runtime: &Runtime, parent: &Path, name: &str) -> Option<EntryMeta> {
     let record = runtime
-        .cache()
+        .resources
         .cache_get(parent, RecordKind::Dirents, None)?;
     let dirents = DirentsPayload::deserialize(&record.payload)?;
     let entry = dirents

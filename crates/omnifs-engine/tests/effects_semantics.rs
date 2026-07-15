@@ -80,7 +80,7 @@ fn file_write(id: Option<LogicalId>, path: &str, bytes: &[u8]) -> FsWrite {
 fn dirent_names(harness: &omnifs_itest::RuntimeHarness, path: &str) -> Vec<String> {
     let record = harness
         .runtime
-        .cache()
+        .resources
         .cache_get(&p(path), RecordKind::Dirents, None)
         .expect("dirents must be cached");
     DirentsPayload::deserialize(&record.payload)
@@ -110,12 +110,12 @@ fn one_batch_applies_canonical_fs_and_dirents_merge() {
 
     harness
         .runtime
-        .apply_effects_for_test(&effects, harness.runtime.cache().current_generation());
+        .apply_effects_for_test(&effects, harness.runtime.resources.current_generation());
 
     // Canonical store landed.
     let canonical = harness
         .runtime
-        .cache()
+        .resources
         .cached_canonical_for(&p("/o/r/item.json"))
         .expect("canonical object stored from the batch");
     assert_eq!(canonical.bytes, b"{\"n\":42}");
@@ -124,7 +124,7 @@ fn one_batch_applies_canonical_fs_and_dirents_merge() {
     assert!(
         harness
             .runtime
-            .cache()
+            .resources
             .cache_get(&p("/d/a"), RecordKind::File, None)
             .is_some(),
         "fs file write landed as a view leaf"
@@ -132,7 +132,7 @@ fn one_batch_applies_canonical_fs_and_dirents_merge() {
     assert!(
         harness
             .runtime
-            .cache()
+            .resources
             .cache_get(&p("/d/b"), RecordKind::File, None)
             .is_some()
     );
@@ -170,7 +170,7 @@ fn invalidations_run_after_writes_in_one_batch() {
 
     harness
         .runtime
-        .apply_effects_for_test(&effects, harness.runtime.cache().current_generation());
+        .apply_effects_for_test(&effects, harness.runtime.resources.current_generation());
 
     // The same-batch Object(target) invalidation ran after the writes: had it run
     // first, `target` would not yet be indexed, nothing would be deleted, and both
@@ -179,7 +179,7 @@ fn invalidations_run_after_writes_in_one_batch() {
     assert!(
         harness
             .runtime
-            .cache()
+            .resources
             .cached_canonical_for(&p("/objects/target/view"))
             .is_none(),
         "same-batch object invalidation deletes the canonical it targets"
@@ -187,7 +187,7 @@ fn invalidations_run_after_writes_in_one_batch() {
     assert!(
         harness
             .runtime
-            .cache()
+            .resources
             .cache_get(&p("/objects/target/file"), RecordKind::File, None)
             .is_none(),
         "same-batch object invalidation deletes the fs leaf it targets"
@@ -197,7 +197,7 @@ fn invalidations_run_after_writes_in_one_batch() {
     assert!(
         harness
             .runtime
-            .cache()
+            .resources
             .cached_canonical_for(&p("/objects/survivor/view"))
             .is_some(),
         "an object not named by any invalidation survives the batch"
@@ -220,12 +220,12 @@ fn object_invalidation_deletes_durable_object_not_just_fences() {
             fs: Vec::new(),
             invalidations: Vec::new(),
         },
-        harness.runtime.cache().current_generation(),
+        harness.runtime.resources.current_generation(),
     );
     assert!(
         harness
             .runtime
-            .cache()
+            .resources
             .cached_canonical_for(&p(leaf))
             .is_some(),
         "canonical object is durably stored before invalidation"
@@ -234,7 +234,7 @@ fn object_invalidation_deletes_durable_object_not_just_fences() {
     // `ObjectId` type is crate-private), to probe the reverse index after delete.
     let id_bytes = harness
         .runtime
-        .cache()
+        .resources
         .id_of_path(&p(leaf))
         .expect("the leaf is indexed to the object before invalidation");
 
@@ -244,14 +244,14 @@ fn object_invalidation_deletes_durable_object_not_just_fences() {
             fs: Vec::new(),
             invalidations: vec![Invalidation::Object(id.clone())],
         },
-        harness.runtime.cache().current_generation(),
+        harness.runtime.resources.current_generation(),
     );
 
     // A subsequent cold read misses: the durable canonical is gone.
     assert!(
         harness
             .runtime
-            .cache()
+            .resources
             .cached_canonical_for(&p(leaf))
             .is_none(),
         "object invalidation deletes the durable canonical bytes"
@@ -259,11 +259,11 @@ fn object_invalidation_deletes_durable_object_not_just_fences() {
     // Physical deletion, not a fence: the reverse index carries no paths and the
     // forward index no longer maps the leaf.
     assert!(
-        harness.runtime.cache().paths_for_id(&id_bytes).is_empty(),
+        harness.runtime.resources.paths_for_id(&id_bytes).is_empty(),
         "object invalidation removes the id->path index entirely"
     );
     assert!(
-        harness.runtime.cache().id_of_path(&p(leaf)).is_none(),
+        harness.runtime.resources.id_of_path(&p(leaf)).is_none(),
         "the leaf is no longer indexed to the deleted object"
     );
 }

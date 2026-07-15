@@ -28,7 +28,7 @@ pub struct MountRuntimes {
     caches: Arc<Caches>,
     cloner: Arc<GitCloner>,
     context: HostContext,
-    /// Shared store and OAuth transport retained for the lifetime of all
+    /// Shared cache owner and OAuth transport retained for the lifetime of all
     /// mount-owned bindings.
     credential_service: Arc<CredentialService>,
     instances: HashMap<String, Arc<Runtime>>,

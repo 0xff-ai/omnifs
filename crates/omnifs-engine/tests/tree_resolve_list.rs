@@ -126,7 +126,7 @@ async fn resolve_child_uses_cached_dirent_positive() {
     .expect("serialize dirents");
     let record = CacheRecord::new(RecordKind::Dirents, payload);
     t.runtime
-        .cache()
+        .resources
         .cache_put(parent.path(), RecordKind::Dirents, None, &record);
 
     let child = tree

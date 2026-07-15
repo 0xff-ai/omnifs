@@ -10,7 +10,7 @@
 //! always merges onto the latest value, so the lock-free plain writes never lose
 //! a concurrent merge.
 
-use super::store::{BatchRecord, Key, Record, RecordKind};
+use super::mount::{BatchRecord, Key, Record, RecordKind};
 use anyhow::Result;
 use fjall::{KeyspaceCreateOptions, OptimisticTxDatabase, OptimisticTxKeyspace};
 use moka::sync::Cache as MokaCache;

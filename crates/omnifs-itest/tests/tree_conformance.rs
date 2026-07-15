@@ -274,7 +274,7 @@ async fn lazy_derived_face_applies_to_the_declared_leaf_only() {
     for eager in ["/items/open/7/state", "/items/open/7/title"] {
         assert!(
             t.runtime
-                .cache()
+                .resources
                 .cache_get(&path(eager), RecordKind::File, None)
                 .is_some(),
             "eager derived leaf {eager} must be projected during anchor listing"
@@ -283,7 +283,7 @@ async fn lazy_derived_face_applies_to_the_declared_leaf_only() {
 
     assert!(
         t.runtime
-            .cache()
+            .resources
             .cache_get(&path("/items/open/7/body"), RecordKind::File, None)
             .is_none(),
         "lazy body leaf must remain visible but not be preloaded"
@@ -311,7 +311,7 @@ async fn reads_whole_file_exact_bytes() {
     // The read durably cached the immutable payload (aux None).
     assert!(
         t.runtime
-            .cache()
+            .resources
             .cache_get(&path("/hello/message"), RecordKind::File, None)
             .is_some(),
         "an immutable whole-file read is durably cached"
@@ -421,7 +421,7 @@ async fn resolves_unrouted_path_as_not_found() {
 /// raw stale-write rejection (a write whose `op_gen` predates a live tombstone)
 /// cannot be induced kernel-free: `Tree::read` captures `op_gen` and writes the
 /// durable cache in one synchronous poll for the canned (no-callout) provider,
-/// so the fenced ordering never arises. The underlying `Store::write_fenced`
+/// so the fenced ordering never arises. The underlying mount-resource fence
 /// mechanism is covered by engine cache's `fence_rejects_stale_write`; this
 /// asserts the coherence outcome the fence exists to guarantee.
 #[tokio::test(flavor = "multi_thread")]
@@ -432,7 +432,7 @@ async fn invalidation_evicts_cached_read() {
     t.assert_read("/hello/greeting", b"Hi there!\n").await;
     assert!(
         t.runtime
-            .cache()
+            .resources
             .cache_get(&path("/hello/greeting"), RecordKind::File, None)
             .is_some(),
         "the cold read must populate the durable view cache"
@@ -442,11 +442,11 @@ async fn invalidation_evicts_cached_read() {
     // evicts the view leaf (the coherence the read-path fence protects).
     t.runtime.apply_effects_for_test(
         &listing_invalidation("/hello/greeting"),
-        t.runtime.cache().current_generation(),
+        t.runtime.resources.current_generation(),
     );
     assert!(
         t.runtime
-            .cache()
+            .resources
             .cache_get(&path("/hello/greeting"), RecordKind::File, None)
             .is_none(),
         "the invalidation must evict the durable view leaf"
@@ -458,7 +458,7 @@ async fn invalidation_evicts_cached_read() {
     t.assert_read("/hello/greeting", b"Hi there!\n").await;
     assert!(
         t.runtime
-            .cache()
+            .resources
             .cache_get(&path("/hello/greeting"), RecordKind::File, None)
             .is_some(),
         "the re-render must re-populate the durable view cache"

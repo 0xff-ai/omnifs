@@ -194,18 +194,18 @@ impl RuntimeHarness {
         kind: RecordKind,
         aux: Option<&str>,
     ) -> Option<CacheRecord> {
-        self.runtime.cache().cache_get(&parse_path(path), kind, aux)
+        omnifs_engine::test_support::cache::cache_get(&self.runtime, &parse_path(path), kind, aux)
     }
 
     pub fn cached_canonical_for(
         &self,
         path: &str,
     ) -> Option<omnifs_engine::test_support::cache::CachedCanonical> {
-        self.runtime.cache().cached_canonical_for(&parse_path(path))
+        omnifs_engine::test_support::cache::cached_canonical_for(&self.runtime, &parse_path(path))
     }
 
     pub fn current_generation(&self) -> u64 {
-        self.runtime.cache().current_generation()
+        omnifs_engine::test_support::cache::current_generation(&self.runtime)
     }
 }
 

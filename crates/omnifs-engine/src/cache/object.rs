@@ -7,7 +7,7 @@
 //!
 //! Mount isolation is structural (separate LSM-trees), not a key-prefix
 //! convention, so there is no in-key mount separator. The per-mount generation
-//! fence lives in `Store`.
+//! fence lives in `MountResources`.
 //!
 //! Writes are not fsynced per commit: this backs a read-through cache, so any
 //! writes lost in a crash are simply refetched from upstream on the next read.
@@ -16,6 +16,7 @@
 
 use anyhow::Result;
 use fjall::{Config, Database, Keyspace, KeyspaceCreateOptions};
+use std::collections::BTreeMap;
 use std::path::Path as StdPath;
 
 /// On-disk schema version for `ObjectRecord`. Bump on layout change.
@@ -120,7 +121,7 @@ pub struct MountObjects {
 impl MountObjects {
     /// Index-only upsert for preload fs-writes. Stored bytes beat preload: an
     /// existing `Some` canonical is never clobbered to `None`.
-    pub fn store_index_only(&self, id: &[u8], new_leaves: &[String]) -> bool {
+    pub fn store_index_only(&self, id: &[u8], new_leaves: &[String]) -> Result<()> {
         let existing = self.get(id);
         let (canonical, base_leaves) = match existing {
             Some(obj) => (obj.canonical, obj.leaves),
@@ -137,45 +138,43 @@ impl MountObjects {
     /// responsibility (done before this call so they can be rejected
     /// individually without aborting the batch). Each entry reads existing
     /// leaves, merges, serializes, then all writes land in one atomic batch.
-    pub fn store_batch(&self, entries: &[StoreBatchEntry]) {
+    pub fn store_batch(&self, entries: &[StoreBatchEntry]) -> Result<()> {
         if entries.is_empty() {
-            return;
+            return Ok(());
         }
 
-        // Read phase: collect prior leaves + build ObjectRecord for each entry.
-        let prepared: Vec<(&StoreBatchEntry, Vec<u8>)> = entries
-            .iter()
-            .filter_map(|e| {
-                let prior_leaves = self.leaves_of(&e.id);
-                let merged_leaves = merge_leaves(&prior_leaves, &e.new_leaves);
-                let stored = ObjectRecord::new(Some(e.canonical.clone()), merged_leaves);
-                match postcard::to_allocvec(&stored) {
-                    Ok(payload) => Some((e, payload)),
-                    Err(err) => {
-                        tracing::warn!(
-                            error = %err,
-                            "object cache: batch serialize failed; skipping entry"
-                        );
-                        None
-                    },
-                }
+        // Group by object id before reading durable state. The last canonical
+        // wins while every alias from every entry is retained.
+        let mut grouped = BTreeMap::<Vec<u8>, (StoredObject, Vec<String>)>::new();
+        for entry in entries {
+            let group = grouped
+                .entry(entry.id.clone())
+                .or_insert_with(|| (entry.canonical.clone(), Vec::new()));
+            group.0 = entry.canonical.clone();
+            group.1.extend(entry.new_leaves.iter().cloned());
+        }
+
+        // Read phase: each object row is decoded once before the durable batch.
+        let prepared: Vec<(Vec<u8>, Vec<String>, Vec<u8>)> = grouped
+            .into_iter()
+            .map(|(id, (canonical, new_leaves))| {
+                let prior_leaves = self.leaves_of(&id);
+                let merged_leaves = merge_leaves(&prior_leaves, &new_leaves);
+                let stored = ObjectRecord::new(Some(canonical), merged_leaves);
+                let payload = postcard::to_allocvec(&stored)?;
+                Ok::<_, postcard::Error>((id, new_leaves, payload))
             })
-            .collect();
-
-        if prepared.is_empty() {
-            return;
-        }
+            .collect::<std::result::Result<_, _>>()?;
 
         let mut batch = self.db.batch();
-        for (entry, payload) in &prepared {
-            batch.insert(&self.objects, entry.id.as_slice(), payload.as_slice());
-            for leaf in &entry.new_leaves {
-                batch.insert(&self.view, leaf.as_bytes(), entry.id.as_slice());
+        for (id, new_leaves, payload) in &prepared {
+            batch.insert(&self.objects, id.as_slice(), payload.as_slice());
+            for leaf in new_leaves {
+                batch.insert(&self.view, leaf.as_bytes(), id.as_slice());
             }
         }
-        if let Err(e) = batch.commit() {
-            tracing::warn!(error = %e, "object cache: batch write failed");
-        }
+        batch.commit()?;
+        Ok(())
     }
 
     pub fn get(&self, id: &[u8]) -> Option<ObjectRecord> {
@@ -195,7 +194,7 @@ impl MountObjects {
     }
 
     /// Full eviction: OBJECTS row, every VIEW row in the alias set, and view leaves.
-    pub fn evict_object(&self, id: &[u8], mut view_evict: impl FnMut(&str)) {
+    pub fn evict_object(&self, id: &[u8], mut view_evict: impl FnMut(&str)) -> Result<()> {
         let leaves = self.leaves_of(id);
         for leaf in &leaves {
             view_evict(leaf);
@@ -206,32 +205,20 @@ impl MountObjects {
         for leaf in &leaves {
             batch.remove(&self.view, leaf.as_bytes());
         }
-        if let Err(e) = batch.commit() {
-            tracing::warn!(error = %e, "object cache: evict_object failed");
-        }
+        batch.commit()?;
+        Ok(())
     }
 
-    fn commit_object(&self, id: &[u8], stored: &ObjectRecord, new_leaves: &[String]) -> bool {
-        let payload = match postcard::to_allocvec(stored) {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::warn!(error = %e, "object cache: serialize failed");
-                return false;
-            },
-        };
+    fn commit_object(&self, id: &[u8], stored: &ObjectRecord, new_leaves: &[String]) -> Result<()> {
+        let payload = postcard::to_allocvec(stored)?;
 
         let mut batch = self.db.batch();
         batch.insert(&self.objects, id, payload.as_slice());
         for leaf in new_leaves {
             batch.insert(&self.view, leaf.as_bytes(), id);
         }
-        match batch.commit() {
-            Ok(()) => true,
-            Err(e) => {
-                tracing::warn!(error = %e, "object cache: write failed");
-                false
-            },
-        }
+        batch.commit()?;
+        Ok(())
     }
 }
 
@@ -294,7 +281,7 @@ mod tests {
         }]);
 
         let l3 = "/issues/open/42/title".to_string();
-        assert!(cache.store_index_only(OBJ, &[l3]));
+        cache.store_index_only(OBJ, &[l3]).unwrap();
 
         let got = cache.get(OBJ).unwrap();
         assert!(got.canonical.is_some());

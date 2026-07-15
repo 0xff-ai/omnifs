@@ -70,8 +70,6 @@ pub use tree::{
 #[cfg(feature = "runtime")]
 pub(crate) use auth_inject as auth;
 #[cfg(feature = "runtime")]
-pub(crate) use cache::blob as blob_cache;
-#[cfg(feature = "runtime")]
 pub(crate) use callouts::wit_convert as wit_protocol;
 #[cfg(feature = "runtime")]
 pub(crate) use callouts::{blob, cloner, git, http};

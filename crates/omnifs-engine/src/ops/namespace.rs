@@ -63,10 +63,15 @@ impl Namespace<'_> {
             .map_err(|error| EngineError::ProviderProtocol(error.to_string()))?;
         let child_path = parent_path.join_segment(&name);
         let now = now_millis();
-        if self.runtime.cache.negative_for(&child_path, now).is_some() {
+        if self
+            .runtime
+            .resources
+            .negative_for(&child_path, now)
+            .is_some()
+        {
             return Ok(LookupOutcome::NotFound);
         }
-        let op_gen = self.runtime.cache().current_generation();
+        let op_gen = self.runtime.resources.current_generation();
         let key = NsKey::Lookup(child_path.clone());
         let order_key = OrderKey::Path(child_path.clone());
         let result = self
@@ -85,13 +90,11 @@ impl Namespace<'_> {
             })
             .await
             .map_err(SharedError::into_engine)?;
-        Ok(EffectApplier::new(&self.runtime.cache).lookup(
-            parent_path,
-            &child_path,
-            result,
-            op_gen,
-            now_millis(),
-        ))
+        Ok(EffectApplier::new(&self.runtime.resources)
+            .lookup(parent_path, &child_path, result, op_gen, now_millis())
+            .map_err(|error| {
+                EngineError::ProviderProtocol(format!("cache publication failed: {error}"))
+            })?)
     }
 
     pub async fn list_children(
@@ -101,7 +104,7 @@ impl Namespace<'_> {
         cursor: Option<CachedCursor>,
     ) -> Result<ListOutcome> {
         let is_continuation = cursor.is_some();
-        let op_gen = self.runtime.cache().current_generation();
+        let op_gen = self.runtime.resources.current_generation();
         let key = NsKey::List(path.clone());
         let order_key = OrderKey::Path(path.clone());
         let result = if is_continuation {
@@ -140,11 +143,17 @@ impl Namespace<'_> {
         };
 
         if let wit_types::ListChildrenResult::Entries(ref listing) = result {
-            let m = EffectApplier::new(&self.runtime.cache);
+            let m = EffectApplier::new(&self.runtime.resources);
             if is_continuation {
-                m.apply_continuation_projection(path, &listing.entries, op_gen);
+                m.apply_continuation_projection(path, &listing.entries, op_gen)
+                    .map_err(|error| {
+                        EngineError::ProviderProtocol(format!("cache publication failed: {error}"))
+                    })?;
             } else {
-                m.apply_listing_projection(path, listing, op_gen);
+                m.apply_listing_projection(path, listing, op_gen)
+                    .map_err(|error| {
+                        EngineError::ProviderProtocol(format!("cache publication failed: {error}"))
+                    })?;
             }
         }
 
@@ -172,13 +181,13 @@ impl Namespace<'_> {
         mode: ReadMode,
     ) -> Result<ReadOutcome> {
         let now = now_millis();
-        if self.runtime.cache.negative_for(path, now).is_some() {
+        if self.runtime.resources.negative_for(path, now).is_some() {
             return Err(enoent(path.as_str()));
         }
 
         // Single cache lookup: derive both the warm_id (for coalescing key and
         // live check) and the CanonicalInput (byte buffer for the provider).
-        let (warm_id, cached_canonical) = match self.runtime.cache.cached_canonical_for(path) {
+        let (warm_id, cached_canonical) = match self.runtime.resources.cached_canonical_for(path) {
             Some(crate::cache::CachedCanonical {
                 id,
                 bytes,
@@ -253,7 +262,7 @@ impl Namespace<'_> {
                 match warm_id {
                     Some(host_id) => self.runtime.note_read_object(host_id),
                     None => {
-                        if let Some(canonical) = self.runtime.cache.cached_canonical_for(path) {
+                        if let Some(canonical) = self.runtime.resources.cached_canonical_for(path) {
                             self.runtime
                                 .note_read_object(ObjectId::from_bytes(canonical.id));
                         }
@@ -372,7 +381,7 @@ impl ChunkOutcome {
 
 fn leaf_stability(ns: &Namespace<'_>, path: &Path) -> Option<Stability> {
     ns.runtime
-        .cache()
+        .resources
         .cache_get(path, RecordKind::Attr, None)
         .and_then(|record| AttrPayload::deserialize(&record.payload))
         .and_then(|attr| attr.meta.attrs().map(FileAttrsCache::stability))

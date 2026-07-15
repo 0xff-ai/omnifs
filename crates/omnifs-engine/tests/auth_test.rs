@@ -1,6 +1,7 @@
 use omnifs_engine::test_support::auth::{AuthBinding, RefreshOutcome, binding_with_store_and_http};
 use omnifs_engine::test_support::authority::RuntimeAuthority;
-use omnifs_engine::test_support::blob::{BlobCache, BlobExecutor, BlobLimits};
+use omnifs_engine::test_support::blob::{BlobExecutor, BlobLimits};
+use omnifs_engine::test_support::cache::Caches;
 use omnifs_engine::test_support::http::HttpStack;
 use omnifs_wit::provider::types as wit_types;
 use omnifs_workspace::authn::CredentialId;
@@ -340,11 +341,10 @@ async fn fetch_blob_uses_same_oauth_retry_path() {
         test_https_client(),
     ));
     let temp = tempfile::tempdir().unwrap();
-    let executor = BlobExecutor::new(
-        stack,
-        Arc::new(BlobCache::new(temp.path().to_path_buf()).unwrap()),
-        BlobLimits::default(),
-    );
+    let caches = Caches::open(temp.path()).unwrap();
+    let name = omnifs_workspace::mounts::Name::new("test").unwrap();
+    let resources = caches.mount(&name).unwrap();
+    let executor = BlobExecutor::new(stack, resources, BlobLimits::default());
 
     let result = executor
         .fetch(&wit_types::BlobFetchRequest {

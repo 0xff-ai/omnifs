@@ -344,7 +344,7 @@ async fn invalidation_bumps_epoch_and_notifies_subscriber() {
     let mut events = ns.subscribe();
     t.runtime.apply_effects_for_test(
         &path_invalidation("/hello/message"),
-        t.runtime.cache().current_generation(),
+        t.runtime.resources.current_generation(),
     );
 
     // Any op drains the pending invalidation before answering: getattr both

@@ -5,17 +5,16 @@
 //! purely by capacity and explicit invalidation (`invalidate_prefix` or
 //! host-applied invalidation effects).
 //!
-//! ## Global caches, per-mount facade
+//! ## Global caches, per-mount resource
 //!
 //! `Caches` holds the two fjall databases (a durable `object/` and a
 //! non-durable `view/` cleared on startup). It is opened once at process start
-//! and shared via `Arc`. `Caches::mount(name)` returns a per-mount `Store`. The
+//! and shared via `Arc`. `Caches::mount(name)` returns a per-mount `MountResources`. The
 //! object tier is isolated per mount by its own keyspaces (raw keys); the
 //! shared view tier is isolated by a `/{mount}` path prefix on its keys.
 //!
-//! The per-mount generation fence lives in `Store`: each `Store` owns an
-//! atomic generation counter and a tombstone map. Object writes are rejected
-//! if their tombstone is newer than the originating op's `op_gen`.
+//! The per-mount generation fence lives in `MountResources` and is serialized
+//! with durable object and view transitions.
 
 /// On-disk schema version for view records. Bump on any encoding-affecting
 /// change to host-owned cached payload types. The cache reader rejects records
@@ -26,18 +25,16 @@
 /// fixture round-trip test against the new version.
 pub const SCHEMA_VERSION: u8 = 7;
 
-use omnifs_core::path::{Path, Segment};
+use dashmap::DashMap;
+use omnifs_core::path::Path;
+use omnifs_workspace::mounts::Name;
+use parking_lot::Mutex;
 use std::collections::HashSet;
 use std::path::Path as StdPath;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
-use dashmap::DashMap;
-
+use super::blob::{BLOB_TMP_DIR, BlobCache};
 use super::{object, view};
-
-/// Shared handle to a host view store.
-pub type Handle = Arc<Store>;
 
 /// Result of a warm canonical lookup: the object id, the canonical bytes, and
 /// the optional validator.
@@ -47,7 +44,7 @@ pub struct CachedCanonical {
     pub validator: Option<String>,
 }
 
-/// One entry for `Store::put_canonical_batch`.
+/// One entry for `MountResources::put_canonical_batch`.
 pub struct CanonicalBatchEntry {
     pub id: Vec<u8>,
     pub bytes: Vec<u8>,
@@ -182,7 +179,7 @@ impl Record {
 }
 
 /// Soft cap on retained tombstones per mount. GC fires past this to amortise
-/// the scan. See `Store::gc_tombstones`.
+/// the scan. See `MountResources::gc_tombstones`.
 const TOMBSTONE_SOFT_CAP: usize = 4096;
 
 /// Generations of tombstone history retained after GC.
@@ -204,6 +201,7 @@ fn now_millis_for_gc() -> u64 {
 /// `Caches::open(dir)` opens a durable `object/` database and clears and
 /// reopens a `view/` database, which is always cold after restart.
 pub struct Caches {
+    root: std::path::PathBuf,
     pub object: object::Cache,
     pub view: view::Cache,
 }
@@ -216,15 +214,44 @@ impl Caches {
     pub fn open(dir: &StdPath) -> anyhow::Result<Arc<Self>> {
         std::fs::create_dir_all(dir)?;
         let object = object::Cache::open(&dir.join("object"))?;
+        sweep_blob_temps(dir)?;
         let view = view::Cache::open(&dir.join("view"))?;
-        Ok(Arc::new(Self { object, view }))
+        Ok(Arc::new(Self {
+            root: dir.to_path_buf(),
+            object,
+            view,
+        }))
     }
 
-    /// Return a per-mount `Store` facade. The object tier gets its own
-    /// keyspaces (raw keys); view keys are scoped by `Store::scoped`.
-    pub fn mount(self: &Arc<Self>, mount: impl Into<String>) -> Store {
-        Store::new(Arc::clone(self), mount)
+    /// Return the sole owner of one mount's cache and blob resources.
+    pub fn mount(self: &Arc<Self>, mount: &Name) -> anyhow::Result<Arc<MountResources>> {
+        MountResources::new(Arc::clone(self), mount)
     }
+}
+
+fn sweep_blob_temps(root: &StdPath) -> anyhow::Result<()> {
+    let providers = root.join("providers");
+    let Ok(entries) = std::fs::read_dir(&providers) else {
+        return Ok(());
+    };
+    for entry in entries {
+        let mount = entry?.path();
+        let metadata = std::fs::symlink_metadata(&mount)?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            continue;
+        }
+        let tmp = mount.join("blobs").join(BLOB_TMP_DIR);
+        match std::fs::symlink_metadata(&tmp) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                anyhow::bail!("blob temporary root is a symlink: {}", tmp.display());
+            },
+            Ok(metadata) if metadata.is_dir() => std::fs::remove_dir_all(tmp)?,
+            Ok(_) => std::fs::remove_file(tmp)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
 }
 
 /// Scoped negative cache entry for a `NotFound` terminal.
@@ -235,48 +262,53 @@ pub struct Negative {
     pub as_of_gen: u64,
 }
 
-/// Per-mount facade over the global `Caches`.
+/// Per-mount owner over the global `Caches`.
 ///
 /// The object tier is structurally isolated per mount (its own keyspaces), so
 /// its keys are raw: object ids and view-leaf paths carry no mount prefix. The
 /// shared view tier is isolated by a `/{mount}` path prefix on its keys
-/// (`Store::scoped`).
+/// (`MountResources::scoped`).
 ///
-/// The generation fence is per-mount and runtime-only: `generation`,
-/// `tombstones`, and `negatives` are reset on construction and never persisted.
-pub struct Store {
-    caches: Arc<Caches>,
+/// The generation fence is per-mount and runtime-only. It is held under one
+/// short synchronous mutex for every durable publication transition.
+pub struct MountResources {
+    pub(crate) caches: Arc<Caches>,
     /// This mount's object keyspaces (raw-keyed).
     object: object::MountObjects,
-    mount: String,
-    generation: AtomicU64,
-    /// `ObjectId` bytes → generation at which the id was invalidated.
-    tombstones: DashMap<Vec<u8>, u64>,
-    /// Unscoped path → negative record.
-    negatives: DashMap<String, Negative>,
-    /// `ObjectId` bytes → unscoped paths with negatives.
-    neg_by_id: DashMap<Vec<u8>, HashSet<String>>,
+    pub(crate) mount: Name,
+    pub(crate) coherence: Mutex<Coherence>,
+    pub(crate) blob: BlobCache,
 }
 
-impl Store {
-    fn new(caches: Arc<Caches>, mount: impl Into<String>) -> Self {
-        let mount = mount.into();
-        // Mount names must be a single path segment; fail fast at construction
-        // so `scope_unscoped` can build keys without re-validating.
-        Segment::try_from(mount.as_str()).expect("store mount must be a path segment");
-        let object = caches
-            .object
-            .mount(&mount)
-            .expect("open object keyspaces for mount");
-        Self {
+pub struct Coherence {
+    pub generation: u64,
+    pub tombstones: DashMap<Vec<u8>, u64>,
+    pub negatives: DashMap<String, Negative>,
+    pub neg_by_id: DashMap<Vec<u8>, HashSet<String>>,
+}
+
+impl MountResources {
+    fn new(caches: Arc<Caches>, mount: &Name) -> anyhow::Result<Arc<Self>> {
+        let object = caches.object.mount(mount.as_str())?;
+        let blob = BlobCache::new(
+            caches
+                .root
+                .join("providers")
+                .join(mount.as_str())
+                .join("blobs"),
+        )?;
+        Ok(Arc::new(Self {
             caches,
             object,
-            mount,
-            generation: AtomicU64::new(0),
-            tombstones: DashMap::new(),
-            negatives: DashMap::new(),
-            neg_by_id: DashMap::new(),
-        }
+            mount: mount.clone(),
+            coherence: Mutex::new(Coherence {
+                generation: 0,
+                tombstones: DashMap::new(),
+                negatives: DashMap::new(),
+                neg_by_id: DashMap::new(),
+            }),
+            blob,
+        }))
     }
 
     /// Scoped view-cache key as a valid protocol path: `/{mount}{path}`.
@@ -291,20 +323,20 @@ impl Store {
     /// string to `/{mount}`.
     fn scope_unscoped(&self, unscoped: &str) -> Path {
         if unscoped == "/" {
-            Path::from_validated(format!("/{}", self.mount))
+            Path::from_validated(format!("/{}", self.mount.as_str()))
         } else {
-            Path::from_validated(format!("/{}{}", self.mount, unscoped))
+            Path::from_validated(format!("/{}{}", self.mount.as_str(), unscoped))
         }
     }
 
-    fn id_tombstoned_after(&self, id: &[u8], op_gen: u64) -> bool {
-        self.tombstones.get(id).is_some_and(|g| *g > op_gen)
+    fn id_tombstoned_after(coherence: &Coherence, id: &[u8], op_gen: u64) -> bool {
+        coherence.tombstones.get(id).is_some_and(|g| *g > op_gen)
     }
 
     /// Current per-mount generation. Capture this before starting a browse op
     /// and pass it back as `op_gen` to `put_canonical_batch`.
     pub fn current_generation(&self) -> u64 {
-        self.generation.load(Ordering::Acquire)
+        self.coherence.lock().generation
     }
 
     /// Whether a view write for `path` derived at `op_gen` must be dropped
@@ -313,7 +345,7 @@ impl Store {
         let Some(id) = self.object.id_of(path.as_str().as_bytes()) else {
             return false;
         };
-        self.id_tombstoned_after(&id, op_gen)
+        Self::id_tombstoned_after(&self.coherence.lock(), &id, op_gen)
     }
 
     // --- View cache reads -----------------------------------------------------
@@ -407,14 +439,29 @@ impl Store {
     ///
     /// Ownership is consumed so the caller need not clone; the function drains
     /// the Vec.
-    pub fn put_canonical_batch(&self, entries: Vec<CanonicalBatchEntry>, op_gen: u64) -> bool {
+    pub fn put_canonical_batch(
+        &self,
+        entries: Vec<CanonicalBatchEntry>,
+        op_gen: u64,
+    ) -> anyhow::Result<()> {
+        let coherence = self.coherence.lock();
         let view = &self.caches.view;
 
         // Per-entry fence check and view eviction; collect accepted entries.
         let batch: Vec<object::StoreBatchEntry> = entries
             .into_iter()
             .filter_map(|entry| {
-                if self.id_tombstoned_after(&entry.id, op_gen) {
+                if Self::id_tombstoned_after(&coherence, &entry.id, op_gen) {
+                    return None;
+                }
+                if entry.view_leaves.iter().any(|path| {
+                    self.object
+                        .id_of(path.as_str().as_bytes())
+                        .is_some_and(|existing| existing != entry.id)
+                }) {
+                    tracing::warn!(
+                        "canonical publication maps an indexed path to a different id; rejecting"
+                    );
                     return None;
                 }
                 // Evict prior view leaves before the object is replaced.
@@ -437,20 +484,55 @@ impl Store {
             })
             .collect();
 
-        self.object.store_batch(&batch);
-        true
+        self.object.store_batch(&batch)?;
+        Ok(())
     }
 
     /// Preload index-only store, fenced. Canonical-beats-preload in the object tier.
-    pub fn put_index_only(&self, id: &[u8], view_leaves: &[Path], op_gen: u64) -> bool {
-        if self.id_tombstoned_after(id, op_gen) {
-            return false;
+    pub fn put_index_only(
+        &self,
+        id: &[u8],
+        view_leaves: &[Path],
+        op_gen: u64,
+    ) -> anyhow::Result<bool> {
+        let coherence = self.coherence.lock();
+        if Self::id_tombstoned_after(&coherence, id, op_gen) {
+            return Ok(false);
         }
         let leaves: Vec<String> = view_leaves.iter().map(|p| p.as_str().to_string()).collect();
-        self.object.store_index_only(id, &leaves)
+        self.object.store_index_only(id, &leaves)?;
+        Ok(true)
     }
 
-    /// Store a fenced negative for `path`. Rejected when the id tombstone is newer than `op_gen`.
+    /// Publish an index entry and its admitted view records as one fenced
+    /// transition. The mutex stays synchronous and short, while all durable
+    /// object/index writes and disposable view admission observe the same fence.
+    pub fn put_index_only_with_view(
+        &self,
+        id: &[u8],
+        path: &Path,
+        records: &[BatchRecord],
+        expires_at: Option<u64>,
+        op_gen: u64,
+    ) -> anyhow::Result<bool> {
+        let coherence = self.coherence.lock();
+        if Self::id_tombstoned_after(&coherence, id, op_gen) {
+            return Ok(false);
+        }
+        let leaves = [path.as_str().to_string()];
+        self.object.store_index_only(id, &leaves)?;
+        self.cache_put_batch(records);
+        self.caches.view.put_expiry(
+            self.scoped(path).as_str(),
+            view::Expiry {
+                expires_at,
+                generation: op_gen,
+            },
+        );
+        Ok(true)
+    }
+
+    /// Publish a fenced negative for `path`. Rejected when the id tombstone is newer than `op_gen`.
     pub fn put_negative(
         &self,
         path: &Path,
@@ -458,11 +540,12 @@ impl Store {
         op_gen: u64,
         ttl_millis: u64,
         now_millis: u64,
-    ) -> bool {
+    ) -> anyhow::Result<bool> {
+        let coherence = self.coherence.lock();
         if let Some(id) = id
-            && self.id_tombstoned_after(id, op_gen)
+            && Self::id_tombstoned_after(&coherence, id, op_gen)
         {
-            return false;
+            return Ok(false);
         }
 
         let path_key = path.as_str().to_string();
@@ -474,14 +557,15 @@ impl Store {
             expires_at,
             as_of_gen: op_gen,
         };
-        self.negatives.insert(path_key.clone(), neg);
+        coherence.negatives.insert(path_key.clone(), neg);
         if let Some(id) = id {
-            self.neg_by_id
+            coherence
+                .neg_by_id
                 .entry(id.to_vec())
                 .or_default()
                 .insert(path_key);
         }
-        true
+        Ok(true)
     }
 
     /// Forward index: path → object id bytes.
@@ -505,9 +589,13 @@ impl Store {
         records: &[BatchRecord],
         expires_at: Option<u64>,
         op_gen: u64,
-    ) -> bool {
-        if self.write_fenced(path, op_gen) {
-            return false;
+    ) -> anyhow::Result<bool> {
+        let coherence = self.coherence.lock();
+        let Some(id) = self.object.id_of(path.as_str().as_bytes()) else {
+            return Ok(false);
+        };
+        if Self::id_tombstoned_after(&coherence, &id, op_gen) {
+            return Ok(false);
         }
         self.cache_put_batch(records);
         self.caches.view.put_expiry(
@@ -517,7 +605,7 @@ impl Store {
                 generation: op_gen,
             },
         );
-        true
+        Ok(true)
     }
 
     /// Expiry-aware view read: returns `None` when the leaf is past its deadline.
@@ -556,7 +644,8 @@ impl Store {
 
     /// Live negative for `path`. `None` when absent or expired.
     pub fn negative_for(&self, path: &Path, now_millis: u64) -> Option<Negative> {
-        let neg = self.negatives.get(path.as_str())?;
+        let coherence = self.coherence.lock();
+        let neg = coherence.negatives.get(path.as_str())?;
         if neg.expires_at.is_some_and(|exp| now_millis >= exp) {
             return None;
         }
@@ -566,19 +655,22 @@ impl Store {
     // --- Invalidation ---------------------------------------------------------
 
     /// Invalidate object(id): bump gen, tombstone id, evict object + index + negatives.
-    pub fn delete_object(&self, id: &[u8]) {
-        let g = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
-        self.tombstones.insert(id.to_vec(), g);
-        self.clear_negatives_for_id(id);
+    pub fn delete_object(&self, id: &[u8]) -> anyhow::Result<()> {
+        let mut coherence = self.coherence.lock();
+        coherence.generation += 1;
+        let g = coherence.generation;
+        coherence.tombstones.insert(id.to_vec(), g);
+        Self::clear_negatives_for_id(&coherence, id);
 
         let view = &self.caches.view;
         self.object.evict_object(id, |leaf| {
             view.delete_exact(&self.scope_unscoped(leaf));
-        });
-        self.gc_tombstones();
-        if self.negatives.len() > NEGATIVES_SOFT_CAP {
-            self.gc_negatives(now_millis_for_gc());
+        })?;
+        Self::gc_tombstones(&coherence);
+        if coherence.negatives.len() > NEGATIVES_SOFT_CAP {
+            Self::gc_negatives(&coherence, now_millis_for_gc());
         }
+        Ok(())
     }
 
     /// View-only listing invalidation at an exact path.
@@ -593,30 +685,30 @@ impl Store {
 
     // --- Private helpers ------------------------------------------------------
 
-    fn clear_negatives_for_id(&self, id: &[u8]) {
-        if let Some((_, paths)) = self.neg_by_id.remove(id) {
+    fn clear_negatives_for_id(coherence: &Coherence, id: &[u8]) {
+        if let Some((_, paths)) = coherence.neg_by_id.remove(id) {
             for path in paths {
-                self.negatives.remove(&path);
+                coherence.negatives.remove(&path);
             }
         }
     }
 
-    fn gc_tombstones(&self) {
-        if self.tombstones.len() <= TOMBSTONE_SOFT_CAP {
+    fn gc_tombstones(coherence: &Coherence) {
+        if coherence.tombstones.len() <= TOMBSTONE_SOFT_CAP {
             return;
         }
-        let cutoff = self
-            .current_generation()
+        let cutoff = coherence
+            .generation
             .saturating_sub(TOMBSTONE_RETAIN_GENERATIONS);
-        self.tombstones.retain(|_, g| *g >= cutoff);
+        coherence.tombstones.retain(|_, g| *g >= cutoff);
     }
 
     /// Prune expired negative entries from `negatives` and keep `neg_by_id`
     /// consistent. The caller is responsible for checking the soft cap before
     /// calling (see `delete_object`).
-    fn gc_negatives(&self, now_millis: u64) {
+    fn gc_negatives(coherence: &Coherence, now_millis: u64) {
         // Collect paths of expired entries.
-        let expired: Vec<String> = self
+        let expired: Vec<String> = coherence
             .negatives
             .iter()
             .filter_map(|entry| {
@@ -629,14 +721,15 @@ impl Store {
             .collect();
 
         for path in &expired {
-            if let Some((_, neg)) = self.negatives.remove(path) {
+            if let Some((_, neg)) = coherence.negatives.remove(path) {
                 // Drop this path from the reverse index; remove empty sets.
                 if let Some(id) = &neg.id {
-                    if let Some(mut paths_set) = self.neg_by_id.get_mut(id) {
+                    if let Some(mut paths_set) = coherence.neg_by_id.get_mut(id) {
                         paths_set.remove(path);
                     }
                     // Remove the reverse-index entry if its set is now empty.
-                    self.neg_by_id
+                    coherence
+                        .neg_by_id
                         .remove_if(id, |_, paths_set| paths_set.is_empty());
                 }
             }
@@ -648,10 +741,11 @@ impl Store {
 mod tests {
     use super::*;
 
-    fn open_store(mount: &str) -> (tempfile::TempDir, Arc<Caches>, Store) {
+    fn open_store(mount: &str) -> (tempfile::TempDir, Arc<Caches>, Arc<MountResources>) {
         let dir = tempfile::tempdir().unwrap();
         let caches = Caches::open(dir.path()).unwrap();
-        let store = caches.mount(mount);
+        let name = Name::new(mount).unwrap();
+        let store = caches.mount(&name).unwrap();
         (dir, caches, store)
     }
 
@@ -668,15 +762,17 @@ mod tests {
             p("/issues/open/42/item.json"),
             p("/issues/all/42/item.json"),
         ];
-        assert!(store.put_canonical_batch(
-            vec![CanonicalBatchEntry {
-                id: OBJ_ID.to_vec(),
-                bytes: b"payload".to_vec(),
-                validator: None,
-                view_leaves: leaves.to_vec(),
-            }],
-            store.current_generation(),
-        ));
+        store
+            .put_canonical_batch(
+                vec![CanonicalBatchEntry {
+                    id: OBJ_ID.to_vec(),
+                    bytes: b"payload".to_vec(),
+                    validator: None,
+                    view_leaves: leaves.to_vec(),
+                }],
+                store.current_generation(),
+            )
+            .unwrap();
 
         assert_eq!(
             store.object.id_of(b"/issues/open/42/item.json").as_deref(),
@@ -696,28 +792,33 @@ mod tests {
     #[test]
     fn mount_isolation() {
         let (_dir, caches, store_a) = open_store("a");
-        let store_b = caches.mount("b");
+        let name_b = Name::new("b").unwrap();
+        let store_b = caches.mount(&name_b).unwrap();
         let path = "/issues/42/item.json";
         let op_gen = store_a.current_generation();
 
-        assert!(store_a.put_canonical_batch(
-            vec![CanonicalBatchEntry {
-                id: OBJ_ID.to_vec(),
-                bytes: b"from-a".to_vec(),
-                validator: None,
-                view_leaves: vec![p(path)],
-            }],
-            op_gen,
-        ));
-        assert!(store_b.put_canonical_batch(
-            vec![CanonicalBatchEntry {
-                id: OBJ_ID.to_vec(),
-                bytes: b"from-b".to_vec(),
-                validator: None,
-                view_leaves: vec![p(path)],
-            }],
-            op_gen,
-        ));
+        store_a
+            .put_canonical_batch(
+                vec![CanonicalBatchEntry {
+                    id: OBJ_ID.to_vec(),
+                    bytes: b"from-a".to_vec(),
+                    validator: None,
+                    view_leaves: vec![p(path)],
+                }],
+                op_gen,
+            )
+            .unwrap();
+        store_b
+            .put_canonical_batch(
+                vec![CanonicalBatchEntry {
+                    id: OBJ_ID.to_vec(),
+                    bytes: b"from-b".to_vec(),
+                    validator: None,
+                    view_leaves: vec![p(path)],
+                }],
+                op_gen,
+            )
+            .unwrap();
 
         let a = store_a.cached_canonical_for(&p(path)).unwrap();
         let b = store_b.cached_canonical_for(&p(path)).unwrap();
@@ -745,15 +846,17 @@ mod tests {
         let record = Record::new(RecordKind::File, vec![9, 9, 9]);
         store.cache_put(&p(&l1), RecordKind::File, None, &record);
 
-        assert!(store.put_canonical_batch(
-            vec![CanonicalBatchEntry {
-                id: OBJ_ID.to_vec(),
-                bytes: b"v2".to_vec(),
-                validator: None,
-                view_leaves: vec![l2.clone()],
-            }],
-            0,
-        ));
+        store
+            .put_canonical_batch(
+                vec![CanonicalBatchEntry {
+                    id: OBJ_ID.to_vec(),
+                    bytes: b"v2".to_vec(),
+                    validator: None,
+                    view_leaves: vec![l2.clone()],
+                }],
+                0,
+            )
+            .unwrap();
 
         let obj = store.object.get(OBJ_ID).unwrap();
         assert!(obj.leaves.iter().any(|p| p.ends_with("/p/L1")));
@@ -781,7 +884,11 @@ mod tests {
             }],
             0,
         );
-        assert!(store.put_negative(&p(&leaf), Some(OBJ_ID), 0, 10_000, 1_000));
+        assert!(
+            store
+                .put_negative(&p(&leaf), Some(OBJ_ID), 0, 10_000, 1_000)
+                .unwrap()
+        );
 
         store.delete_object(OBJ_ID);
 
@@ -830,15 +937,17 @@ mod tests {
         let (_dir, _caches, store) = open_store("m");
         let op_gen = store.current_generation();
         store.delete_object(OBJ_ID);
-        assert!(store.put_canonical_batch(
-            vec![CanonicalBatchEntry {
-                id: OBJ_ID.to_vec(),
-                bytes: b"late".to_vec(),
-                validator: None,
-                view_leaves: vec![p("/x")],
-            }],
-            op_gen,
-        ));
+        store
+            .put_canonical_batch(
+                vec![CanonicalBatchEntry {
+                    id: OBJ_ID.to_vec(),
+                    bytes: b"late".to_vec(),
+                    validator: None,
+                    view_leaves: vec![p("/x")],
+                }],
+                op_gen,
+            )
+            .unwrap();
         assert!(store.cached_canonical_for(&p("/x")).is_none());
     }
 
@@ -847,7 +956,11 @@ mod tests {
         let (_dir, _caches, store) = open_store("m");
         let op_gen = store.current_generation();
         store.delete_object(OBJ_ID);
-        assert!(!store.put_negative(&p("/missing"), Some(OBJ_ID), op_gen, 10_000, 0));
+        assert!(
+            !store
+                .put_negative(&p("/missing"), Some(OBJ_ID), op_gen, 10_000, 0)
+                .unwrap()
+        );
     }
 
     #[test]
@@ -855,12 +968,18 @@ mod tests {
         let (_dir, _caches, store) = open_store("m");
         let path = "/issues/42/missing";
         let now = 1_000_u64;
-        assert!(store.put_negative(&p(path), Some(OBJ_ID), 0, 10_000, now));
+        assert!(
+            store
+                .put_negative(&p(path), Some(OBJ_ID), 0, 10_000, now)
+                .unwrap()
+        );
         assert!(store.negative_for(&p(path), now).is_some());
         assert!(store.negative_for(&p(path), now + 11_000).is_none());
 
-        store.put_negative(&p(path), Some(OBJ_ID), 0, 10_000, now);
-        store.delete_object(OBJ_ID);
+        store
+            .put_negative(&p(path), Some(OBJ_ID), 0, 10_000, now)
+            .unwrap();
+        store.delete_object(OBJ_ID).unwrap();
         assert!(store.negative_for(&p(path), now).is_none());
     }
 
@@ -909,15 +1028,27 @@ mod tests {
         let id_fresh = b"obj:fresh" as &[u8];
 
         // Expired: TTL puts deadline in the past relative to `now`.
-        assert!(store.put_negative(&p(expired_path), Some(id_expired), 0, 1_000, 1_000));
+        assert!(
+            store
+                .put_negative(&p(expired_path), Some(id_expired), 0, 1_000, 1_000)
+                .unwrap()
+        );
         // Fresh: deadline is in the future relative to `now`.
-        assert!(store.put_negative(&p(fresh_path), Some(id_fresh), 0, 10_000, now));
+        assert!(
+            store
+                .put_negative(&p(fresh_path), Some(id_fresh), 0, 10_000, now)
+                .unwrap()
+        );
         // No TTL (no expiry): must never be swept.
-        assert!(store.put_negative(&p(no_ttl_path), None, 0, 0, now));
+        assert!(
+            store
+                .put_negative(&p(no_ttl_path), None, 0, 0, now)
+                .unwrap()
+        );
 
         // Force gc_negatives by lowering the negatives count below threshold is
         // impractical for a unit test, so call the private helper directly.
-        store.gc_negatives(now);
+        MountResources::gc_negatives(&store.coherence.lock(), now);
 
         // The expired negative must be gone.
         assert!(
@@ -937,11 +1068,21 @@ mod tests {
 
         // Reverse index consistency: id_expired must have no entry (or empty set).
         assert!(
-            store.neg_by_id.get(id_expired).is_none_or(|s| s.is_empty()),
+            store
+                .coherence
+                .lock()
+                .neg_by_id
+                .get(id_expired)
+                .is_none_or(|s| s.is_empty()),
             "neg_by_id for expired id should be absent or empty"
         );
         assert!(
-            store.neg_by_id.get(id_fresh).is_some_and(|s| !s.is_empty()),
+            store
+                .coherence
+                .lock()
+                .neg_by_id
+                .get(id_fresh)
+                .is_some_and(|s| !s.is_empty()),
             "neg_by_id for fresh id should still have entries"
         );
     }

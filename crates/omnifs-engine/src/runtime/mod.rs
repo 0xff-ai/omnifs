@@ -7,8 +7,7 @@
 use crate::auth::binding_from_config;
 use crate::authority::RuntimeAuthority;
 use crate::blob::{BlobExecutor, BlobLimits};
-use crate::blob_cache::BlobCache;
-use crate::cache::{Caches, Store};
+use crate::cache::{Caches, MountResources};
 use crate::callouts::{CalloutHost, TestCallouts, TestSignal};
 use crate::cloner::GitCloner;
 use crate::coalesce::ns::InFlight;
@@ -48,8 +47,6 @@ const RATE_LIMIT_DEFAULT_COOLDOWN: std::time::Duration = std::time::Duration::fr
 // Upper bound so a hostile Retry-After cannot overflow `Instant` or wedge the
 // window open indefinitely.
 const RATE_LIMIT_MAX_COOLDOWN: std::time::Duration = std::time::Duration::from_hours(1);
-const PROVIDER_CACHE_SUBDIR: &str = "providers";
-const BLOB_CACHE_SUBDIR: &str = "blobs";
 const RECENT_REVALIDATE_OBJECTS: usize = 32;
 
 /// Host-owned filesystem context for provider runtime.
@@ -128,9 +125,8 @@ pub struct Runtime {
     provider_id: ProviderId,
     auth: Option<Arc<AuthBinding>>,
     next_operation_id: AtomicU64,
-    blob_cache: Arc<BlobCache>,
+    pub resources: Arc<MountResources>,
     trees: Arc<TreeRefs>,
-    pub(crate) cache: Store,
     pub(crate) invalidation: InvalidationState,
     pub(crate) coalesce: InFlight,
     recent_objects: parking_lot::Mutex<RecentObjects>,
@@ -330,7 +326,7 @@ impl Runtime {
         config: &Spec,
         manifest: &ProviderManifest,
         cloner: Arc<GitCloner>,
-        context: &HostContext,
+        _context: &HostContext,
         caches: &Arc<Caches>,
         credential_service: &Arc<CredentialService>,
         capture_test_callouts: bool,
@@ -355,16 +351,21 @@ impl Runtime {
             config_bytes,
             Arc::clone(&authority),
             park_signal,
-        )?;
+        )
+        .map_err(|error| {
+            EngineError::ProviderProtocol(format!("cache publication failed: {error}"))
+        })?;
 
         let (init_result, initialize_effects) = instance.initialize().map_err(BuildError::from)?;
-        op_validate::validate_initialize(&init_result, &initialize_effects, |_| false).map_err(
-            |message| {
+        op_validate::validate_initialize(&init_result, &initialize_effects, |_| false)
+            .map_err(|message| {
                 BuildError::ProviderProtocol(format!(
                     "initialize returned invalid result: {message}"
                 ))
-            },
-        )?;
+            })
+            .map_err(|error| {
+                EngineError::ProviderProtocol(format!("cache publication failed: {error}"))
+            })?;
         let initialize_effects = init_result
             .map(|_| initialize_effects)
             .map_err(EngineError::ProviderError)
@@ -384,19 +385,14 @@ impl Runtime {
         let trees = Arc::new(TreeRefs::new());
         let git = git::GitExecutor::new(cloner, Arc::clone(&authority), trees.clone(), mount_name);
 
-        let cache_root = context
-            .cache_dir()
-            .join(PROVIDER_CACHE_SUBDIR)
-            .join(mount_name);
-        let blob_path = cache_root.join(BLOB_CACHE_SUBDIR);
-        let blob_cache = Arc::new(BlobCache::new(blob_path.clone()).map_err(|source| {
-            BuildError::Cache(format!("blob cache at {}: {source}", blob_path.display()))
-        })?);
-        // Per-mount facade: structurally isolates object and view cache state.
-        let cache = caches.mount(mount_name);
+        let name = omnifs_workspace::mounts::Name::new(mount_name)
+            .map_err(|error| BuildError::Cache(error.to_string()))?;
+        let resources = caches
+            .mount(&name)
+            .map_err(|error| BuildError::Cache(error.to_string()))?;
         let blob_limits = BlobLimits::from_config(config);
         let http = Arc::new(HttpStack::new(auth.clone(), authority)?);
-        let blob = BlobExecutor::new(Arc::clone(&http), blob_cache.clone(), blob_limits);
+        let blob = BlobExecutor::new(Arc::clone(&http), Arc::clone(&resources), blob_limits);
         let mut callout_host = CalloutHost::new(Arc::clone(&http), git.clone(), blob.clone());
         if let Some(test_callouts) = test_callouts {
             callout_host = callout_host.with_test_callouts(test_callouts);
@@ -411,9 +407,8 @@ impl Runtime {
             provider_id: config.provider.id,
             auth,
             next_operation_id: AtomicU64::new(1),
-            blob_cache,
+            resources,
             trees,
-            cache,
             invalidation: InvalidationState::default(),
             coalesce: InFlight::new(),
             recent_objects: parking_lot::Mutex::new(RecentObjects::new()),
@@ -421,7 +416,9 @@ impl Runtime {
             rate_limit_until: std::sync::Mutex::new(None),
             test_callouts: test_rx.map(std::sync::Mutex::new),
         };
-        runtime.publish_effects(&initialize_effects, runtime.cache.current_generation());
+        runtime
+            .publish_effects(&initialize_effects, runtime.resources.current_generation())
+            .map_err(|error| BuildError::ProviderProtocol(error.to_string()))?;
         Ok(runtime)
     }
 
@@ -433,18 +430,18 @@ impl Runtime {
         self.instance.close_file(handle)
     }
 
-    pub fn cache(&self) -> &Store {
-        &self.cache
-    }
-
     /// Test-only entry to drive provider effects from FUSE-path pagination
     /// harnesses without routing through a provider component.
     #[doc(hidden)]
-    pub fn apply_effects_for_test(&self, effects: &wit_types::Effects, op_gen: u64) {
+    pub fn apply_effects_for_test(&self, effects: &wit_types::Effects, op_gen: u64) -> Result<()> {
         let now = clock::now_millis();
-        let (prefixes, paths) =
-            crate::effect_apply::EffectApplier::new(&self.cache).apply(effects, op_gen, now);
+        let (prefixes, paths) = crate::effect_apply::EffectApplier::new(&self.resources)
+            .apply(effects, op_gen, now)
+            .map_err(|error| {
+                EngineError::ProviderProtocol(format!("cache publication failed: {error}"))
+            })?;
         self.record_view_invalidations(prefixes, paths);
+        Ok(())
     }
 
     #[doc(hidden)]
@@ -454,15 +451,20 @@ impl Runtime {
         maybe_id: Option<&wit_types::LogicalId>,
         op_gen: u64,
         now_millis: u64,
-    ) {
+    ) -> Result<()> {
         let id_bytes = maybe_id.map(|id| ObjectId::from_wit(id).as_bytes().to_vec());
-        self.cache.put_negative(
-            path,
-            id_bytes.as_deref(),
-            op_gen,
-            DYNAMIC_TTL_MILLIS,
-            now_millis,
-        );
+        self.resources
+            .put_negative(
+                path,
+                id_bytes.as_deref(),
+                op_gen,
+                DYNAMIC_TTL_MILLIS,
+                now_millis,
+            )
+            .map_err(|error| {
+                EngineError::ProviderProtocol(format!("cache publication failed: {error}"))
+            })?;
+        Ok(())
     }
 
     /// Arm the mount's rate-limit window after a 429. `retry_after` is the
@@ -516,7 +518,10 @@ impl Runtime {
     }
 
     fn revalidation_path_for(&self, id: &ObjectId) -> Option<Path> {
-        self.cache.paths_for_id(id.as_bytes()).into_iter().next()
+        self.resources
+            .paths_for_id(id.as_bytes())
+            .into_iter()
+            .next()
     }
 
     pub async fn call_timer_tick(&self) -> Result<()> {
@@ -535,7 +540,7 @@ impl Runtime {
     /// without copying across the WIT. `None` when no stored anchor covers
     /// `path`.
     pub fn canonical_bytes_for(&self, path: &Path) -> Option<Vec<u8>> {
-        self.cache
+        self.resources
             .cached_canonical_for(path)
             .map(|canonical| canonical.bytes)
     }
@@ -543,20 +548,24 @@ impl Runtime {
     /// Read the full bytes of a stored blob for a blob-backed `read-file`
     /// terminal.
     pub fn read_blob_full(&self, blob_id: u64) -> Result<Vec<u8>> {
-        let record = self
-            .blob_cache
-            .lookup_by_id(blob_id)
-            .ok_or_else(|| EngineError::ProviderProtocol(format!("blob {blob_id} not found")))?;
-        let path = self.blob_cache.body_path(&record);
+        let record =
+            self.resources.blob.lookup_by_id(blob_id).ok_or_else(|| {
+                EngineError::ProviderProtocol(format!("blob {blob_id} not found"))
+            })?;
+        let path = self.resources.blob.body_path(&record);
         std::fs::read(path)
             .map_err(|e| EngineError::ProviderProtocol(format!("read blob {blob_id}: {e}")))
     }
 
-    pub(crate) fn publish_effects(&self, effects: &wit_types::Effects, op_gen: u64) {
+    pub(crate) fn publish_effects(&self, effects: &wit_types::Effects, op_gen: u64) -> Result<()> {
         let now = clock::now_millis();
-        let (prefixes, paths) =
-            crate::effect_apply::EffectApplier::new(&self.cache).apply(effects, op_gen, now);
+        let (prefixes, paths) = crate::effect_apply::EffectApplier::new(&self.resources)
+            .apply(effects, op_gen, now)
+            .map_err(|error| {
+                EngineError::ProviderProtocol(format!("cache publication failed: {error}"))
+            })?;
         self.record_view_invalidations(prefixes, paths);
+        Ok(())
     }
 }
 

@@ -14,8 +14,8 @@
 //!   gets in-flight dedup for free; `Tree` NEVER adds a second coalescer.
 //! - `Tree` calls `Namespace`, NEVER `Runtime::run_op` directly (that would
 //!   lose coalescing AND EffectApplier cache-populate).
-//! - Byte storage stays in `crate::cache::Store`. `Tree` reaches the cache ONLY
-//!   through the mount-owned `Runtime::cache()` handle; it never constructs a
+//! - Byte storage stays in the mount-owned `MountResources`. `Tree` reaches
+//!   cache state only through the running mount's resource owner; it never constructs a
 //!   raw store, so the per-mount generation/tombstone fence and mount-prefixed
 //!   keys are never bypassed.
 //! - wire->cache translation stays in `EffectApplier` (host-internal, inside

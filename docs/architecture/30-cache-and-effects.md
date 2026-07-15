@@ -17,6 +17,12 @@ There are three host cache roles:
 
 The object cache is the durable primary for object-shaped data. The view cache is derived and can be rebuilt from object bytes or provider reads. The blob cache is for large bytes that should not cross into provider memory.
 
+`MountResources` is the single lifetime owner for one mount's object, view,
+coherence, and blob state. Its synchronous transition boundary publishes
+canonical/index/negative state and admits or removes disposable view records
+under the same generation fence, so a durable failure cannot leave a stale
+view reported as a successful replacement.
+
 Structural providers can self-select out of the object cache by emitting no canonical stores. There is no host flag that says a provider is object-shaped.
 
 ## Warm object reads

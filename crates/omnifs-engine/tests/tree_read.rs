@@ -14,7 +14,7 @@
 //! path's object, and `Tree::read` captures `op_gen` and writes the durable
 //! cache in one synchronous poll for the canned (no-callout) test provider, so
 //! the fenced ordering cannot be induced kernel-free. The underlying
-//! `Store::write_fenced` mechanism is covered by engine cache's
+//! mount-resource write-fence mechanism is covered by engine cache's
 //! `fence_rejects_stale_write`.
 //!
 //! Precondition: `just build providers` has produced
@@ -109,7 +109,7 @@ async fn read_whole_file_returns_provider_bytes() {
     // The payload is now in the durable view cache (immutable -> aux None).
     let record = t
         .runtime
-        .cache()
+        .resources
         .cache_get(&path("/hello/message"), RecordKind::File, None)
         .expect("immutable whole-file read is durably cached");
     let payload = FilePayload::deserialize(&record.payload).expect("decode cached payload");
@@ -133,7 +133,7 @@ async fn read_whole_file_second_read_hits_cache() {
     // The cold read durably cached "lazy\n" under the immutable (aux None) key.
     assert!(
         t.runtime
-            .cache()
+            .resources
             .cache_get(&path("/hello/lazy"), RecordKind::File, None)
             .is_some(),
         "cold read must populate the durable view cache"
@@ -372,18 +372,18 @@ async fn prime_cold_item_md(t: &TestTree, ctx: &RequestCtx) {
         .expect("list /items/open");
     t.runtime.apply_effects_for_test(
         &listing_invalidation(ITEM_MD),
-        t.runtime.cache().current_generation(),
+        t.runtime.resources.current_generation(),
     );
     assert!(
         t.runtime
-            .cache()
+            .resources
             .cache_get(&path(ITEM_MD), RecordKind::File, None)
             .is_none(),
         "view leaf must be cold before the cold read"
     );
     assert!(
         t.runtime
-            .cache()
+            .resources
             .cached_canonical_for(&path(ITEM_MD))
             .is_some(),
         "the item object must stay indexed for the read"
@@ -419,7 +419,7 @@ async fn read_item_md_is_durably_cached() {
 
     assert!(
         t.runtime
-            .cache()
+            .resources
             .cache_get(&path(ITEM_MD), RecordKind::File, None)
             .is_some(),
         "an Inline rendered representation must be durably cached"
@@ -450,18 +450,18 @@ async fn canonical_identity_read_is_not_copied_into_view_cache() {
         .expect("list /items/open");
     t.runtime.apply_effects_for_test(
         &listing_invalidation(json),
-        t.runtime.cache().current_generation(),
+        t.runtime.resources.current_generation(),
     );
     assert!(
         t.runtime
-            .cache()
+            .resources
             .cache_get(&path(json), RecordKind::File, None)
             .is_none(),
         "view leaf must be cold before the canonical read"
     );
     assert!(
         t.runtime
-            .cache()
+            .resources
             .cached_canonical_for(&path(json))
             .is_some(),
         "the identity representation lives in the object cache"
@@ -485,7 +485,7 @@ async fn canonical_identity_read_is_not_copied_into_view_cache() {
     // identity leaf: the object cache is its sole home.
     assert!(
         t.runtime
-            .cache()
+            .resources
             .cache_get(&path(json), RecordKind::File, None)
             .is_none(),
         "an identity byte-source::canonical read must NOT be copied into the view cache"
@@ -493,7 +493,7 @@ async fn canonical_identity_read_is_not_copied_into_view_cache() {
     // The object cache still holds the canonical (it was the source, not evicted).
     assert!(
         t.runtime
-            .cache()
+            .resources
             .cached_canonical_for(&path(json))
             .is_some(),
         "the canonical store remains the home of the identity bytes"

@@ -25,7 +25,7 @@ impl Runtime {
             joined_path.as_str(),
         );
         async {
-            let op_gen = self.cache.current_generation();
+            let op_gen = self.resources.current_generation();
             let (result, effects) = self
                 .instance
                 .lookup_child(
@@ -40,7 +40,7 @@ impl Runtime {
             .map_err(EngineError::ProviderProtocol)?;
             inspect_result(&span, &result);
             let result = self.provider_result(result)?;
-            self.publish_effects(&effects, op_gen);
+            self.publish_effects(&effects, op_gen)?;
             inspector::record_outcome(&span, InspectorOutcome::Ok);
             if let wit_types::LookupChildResult::Subtree(tree) = &result {
                 inspector::record_subtree_handoff(id, *tree);
@@ -66,7 +66,7 @@ impl Runtime {
             path.as_str(),
         );
         async {
-            let op_gen = self.cache.current_generation();
+            let op_gen = self.resources.current_generation();
             let (result, effects) = self
                 .instance
                 .list_children(id, path.as_str().to_string(), cached_validator, cursor)
@@ -77,7 +77,7 @@ impl Runtime {
             .map_err(EngineError::ProviderProtocol)?;
             inspect_result(&span, &result);
             let result = self.provider_result(result)?;
-            self.publish_effects(&effects, op_gen);
+            self.publish_effects(&effects, op_gen)?;
             inspector::record_outcome(&span, InspectorOutcome::Ok);
             if let wit_types::ListChildrenResult::Subtree(tree) = &result {
                 inspector::record_subtree_handoff(id, *tree);
@@ -103,7 +103,7 @@ impl Runtime {
             path.as_str(),
         );
         async {
-            let op_gen = self.cache.current_generation();
+            let op_gen = self.resources.current_generation();
             let (result, effects) = self
                 .instance
                 .read_file(
@@ -119,8 +119,8 @@ impl Runtime {
             .map_err(EngineError::ProviderProtocol)?;
             inspect_result(&span, &result);
             let result = self.provider_result(result)?;
-            self.publish_effects(&effects, op_gen);
-            self.store_read_not_found_negative(path, &result, op_gen);
+            self.publish_effects(&effects, op_gen)?;
+            self.store_read_not_found_negative(path, &result, op_gen)?;
             inspector::record_outcome(&span, InspectorOutcome::Ok);
             Ok(result)
         }
@@ -138,7 +138,7 @@ impl Runtime {
             path.as_str(),
         );
         async {
-            let op_gen = self.cache.current_generation();
+            let op_gen = self.resources.current_generation();
             let (result, effects) = self
                 .instance
                 .open_file(id, path.as_str().to_string())
@@ -149,7 +149,7 @@ impl Runtime {
             .map_err(EngineError::ProviderProtocol)?;
             inspect_result(&span, &result);
             let result = self.provider_result(result)?;
-            self.publish_effects(&effects, op_gen);
+            self.publish_effects(&effects, op_gen)?;
             inspector::record_outcome(&span, InspectorOutcome::Ok);
             Ok(result)
         }
@@ -167,7 +167,7 @@ impl Runtime {
         let span =
             inspector::provider_span(id, &self.mount_name, &self.provider_name, "read_chunk", "");
         async {
-            let op_gen = self.cache.current_generation();
+            let op_gen = self.resources.current_generation();
             let (result, effects) = self.instance.read_chunk(id, handle, offset, length).await?;
             crate::op_validate::validate_chunk(&result, &effects, length, |tree| {
                 self.resolve_tree_ref(tree).is_some()
@@ -175,7 +175,7 @@ impl Runtime {
             .map_err(EngineError::ProviderProtocol)?;
             inspect_result(&span, &result);
             let result = self.provider_result(result)?;
-            self.publish_effects(&effects, op_gen);
+            self.publish_effects(&effects, op_gen)?;
             inspector::record_outcome(&span, InspectorOutcome::Ok);
             Ok(result)
         }
@@ -188,7 +188,7 @@ impl Runtime {
         let span =
             inspector::provider_span(id, &self.mount_name, &self.provider_name, "on_event", "");
         async {
-            let op_gen = self.cache.current_generation();
+            let op_gen = self.resources.current_generation();
             let (result, effects) = self.instance.on_event(id, event).await?;
             crate::op_validate::validate_event(&result, &effects, |tree| {
                 self.resolve_tree_ref(tree).is_some()
@@ -196,7 +196,7 @@ impl Runtime {
             .map_err(EngineError::ProviderProtocol)?;
             inspect_result(&span, &result);
             self.provider_result(result)?;
-            self.publish_effects(&effects, op_gen);
+            self.publish_effects(&effects, op_gen)?;
             inspector::record_outcome(&span, InspectorOutcome::Ok);
             Ok(())
         }
@@ -229,10 +229,11 @@ impl Runtime {
         path: &Path,
         result: &wit_types::ReadFileOutcome,
         op_gen: u64,
-    ) {
+    ) -> Result<()> {
         if let wit_types::ReadFileOutcome::NotFound(maybe_id) = result {
-            self.apply_not_found_negative(path, maybe_id.as_ref(), op_gen, clock::now_millis());
+            self.apply_not_found_negative(path, maybe_id.as_ref(), op_gen, clock::now_millis())?;
         }
+        Ok(())
     }
 }
 

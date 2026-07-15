@@ -226,7 +226,7 @@ fn cached_control_dirent(
     use crate::view::DirentsPayload;
 
     let record = runtime
-        .cache()
+        .resources
         .cache_get(parent, RecordKind::Dirents, None)?;
     let dirents = DirentsPayload::deserialize(&record.payload)?;
     dirents.entries.into_iter().find(|e| e.name == name)

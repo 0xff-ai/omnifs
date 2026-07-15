@@ -62,7 +62,7 @@ impl<'a> FileAttrStore<'a> {
     pub(crate) fn cached(&self) -> Option<FileAttrsCache> {
         if let Some(record) = self
             .runtime
-            .cache()
+            .resources
             .cache_get(self.path, RecordKind::Lookup, None)
             && let Some(LookupPayload::Positive(meta)) = LookupPayload::deserialize(&record.payload)
             && let Some(attrs) = meta.into_attrs()
@@ -71,7 +71,7 @@ impl<'a> FileAttrStore<'a> {
         }
 
         self.runtime
-            .cache()
+            .resources
             .cache_get(self.path, RecordKind::Attr, None)
             .and_then(|record| AttrPayload::deserialize(&record.payload))
             .and_then(|payload| payload.meta.into_attrs())
@@ -81,7 +81,7 @@ impl<'a> FileAttrStore<'a> {
         let meta = EntryMeta::file(attrs);
         let lookup = LookupPayload::Positive(meta.clone());
         if let Some(payload) = lookup.serialize() {
-            self.runtime.cache().cache_put(
+            self.runtime.resources.cache_put(
                 self.path,
                 RecordKind::Lookup,
                 None,
@@ -96,7 +96,7 @@ impl<'a> FileAttrStore<'a> {
 
         let attr = AttrPayload { meta };
         if let Some(payload) = attr.serialize() {
-            self.runtime.cache().cache_put(
+            self.runtime.resources.cache_put(
                 self.path,
                 RecordKind::Attr,
                 None,
@@ -206,16 +206,17 @@ impl Tree {
         // the node's projected (already size-learned) attrs.
         if let Some(aux) = durable_aux.clone() {
             if let Some(record) = runtime
-                .cache()
+                .resources
                 .mem_get(path, RecordKind::File, aux.as_deref())
                 && let Some(payload) = file_payload_for_attrs(&record, attrs)
             {
                 crate::inspector::cache_event(CacheKind::FileHit);
                 return read_result_from_cache(path, payload, attrs);
             }
-            if let Some(record) = runtime
-                .cache()
-                .cache_get(path, RecordKind::File, aux.as_deref())
+            if let Some(record) =
+                runtime
+                    .resources
+                    .cache_get(path, RecordKind::File, aux.as_deref())
                 && let Some(payload) = file_payload_for_attrs(&record, attrs)
             {
                 crate::inspector::cache_event(CacheKind::FileHit);
@@ -230,7 +231,7 @@ impl Tree {
 
         // Capture the generation BEFORE awaiting the render so the result can be
         // fenced against an invalidation that lands mid-read.
-        let op_gen = runtime.cache().current_generation();
+        let op_gen = runtime.resources.current_generation();
         crate::inspector::cache_event(CacheKind::FileMiss);
         let result = match runtime.namespace().read_file(path, content_type).await {
             Ok(result) => result,
@@ -290,7 +291,7 @@ impl Tree {
                 // re-reads the stored record. The kernel re-list notify stays
                 // renderer-side (driven from the InvalidationReport).
                 runtime
-                    .cache()
+                    .resources
                     .mem_invalidate(&parent, RecordKind::Dirents, None);
                 let bytes = status.into_bytes();
                 enforce_observed_materialize_cap(node.path(), bytes.len())?;
@@ -387,11 +388,11 @@ fn cache_durable_file_payload(
     let record = CacheRecord::new(RecordKind::File, payload);
     // Drop the write if an invalidation for this path landed after the read
     // began: caching it would reinstate stale bytes.
-    if runtime.cache().write_fenced(path, op_gen) {
+    if runtime.resources.write_fenced(path, op_gen) {
         return Ok(());
     }
     runtime
-        .cache()
+        .resources
         .cache_put(path, RecordKind::File, aux.as_deref(), &record);
     Ok(())
 }
