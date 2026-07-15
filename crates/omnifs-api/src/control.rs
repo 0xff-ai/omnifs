@@ -58,18 +58,21 @@ pub enum ControlOutcome {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TcpAttachTarget {
     pub addr: String,
     pub token: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct VsockAttachTarget {
     pub socket_path: PathBuf,
     pub token: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ControlError {
     pub code: ControlErrorCode,
     pub message: String,
@@ -147,6 +150,22 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&reply).unwrap(),
             r#"{"version":1,"result":"error","value":{"code":"not_ready","message":"namespace listeners are not serving yet"}}"#
+        );
+
+        assert!(
+            serde_json::from_value::<TcpAttachTarget>(serde_json::json!({
+                "addr": "127.0.0.1:1234",
+                "token": "secret",
+                "unexpected": true
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<ControlRequest>(serde_json::json!({
+                "version": CONTROL_PROTOCOL_VERSION,
+                "operation": "attach_tcp"
+            }))
+            .is_ok()
         );
     }
 }

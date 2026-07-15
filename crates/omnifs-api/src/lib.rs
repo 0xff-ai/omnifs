@@ -40,28 +40,24 @@ pub const OMNIFS_READY_VSOCK_PORT_ENV: &str = "OMNIFS_READY_VSOCK_PORT";
 
 /// The daemon's runtime facts, loaded mounts, and non-secret operational health.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DaemonStatus {
     pub version: String,
-    #[serde(default)]
     pub pid: u32,
     /// Random 16-hex-character id generated per daemon start. The CLI asserts it
     /// against the daemon record it resolved from, so a record overwritten by a
     /// restart mid-command is detected instead of silently trusted.
-    #[serde(default)]
     pub instance_id: String,
-    #[serde(default)]
     pub executable: PathBuf,
     pub config_dir: PathBuf,
     pub cache_dir: PathBuf,
     pub providers_dir: PathBuf,
     /// Every filesystem frontend currently attached to the shared namespace.
-    #[serde(default)]
     pub frontends: Vec<FrontendInfo>,
     /// Provider mounts loaded in the registry.
     pub mounts: Vec<MountInfo>,
     /// Daemon-owned health for runtime subsystems. CLI status renders these
     /// entries instead of reconstructing daemon health from raw fields.
-    #[serde(default)]
     pub health: DaemonHealth,
 }
 
@@ -70,13 +66,12 @@ impl DaemonStatus {
     pub fn ready(&self) -> bool {
         self.health
             .subsystem(DaemonSubsystem::Frontend)
-            .map_or(!self.frontends.is_empty(), |entry| {
-                entry.state == HealthState::Healthy
-            })
+            .is_some_and(|entry| entry.state == HealthState::Healthy)
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DaemonHealth {
     pub subsystems: Vec<SubsystemHealth>,
 }
@@ -121,6 +116,7 @@ impl DaemonHealth {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SubsystemHealth {
     pub subsystem: DaemonSubsystem,
     pub state: HealthState,
@@ -172,12 +168,12 @@ impl std::fmt::Display for FsType {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FrontendInfo {
     pub source: String,
     pub fs_type: FsType,
     /// The frontend-reported mount point. It is host-visible for the host
     /// runner and display-only for Docker and libkrun guests.
-    #[serde(default)]
     pub mount_point: PathBuf,
     /// How this frontend reaches the shared namespace. The host assigns this
     /// from which listener the connection arrived on, never from anything a
@@ -212,6 +208,7 @@ impl std::fmt::Display for FrontendRuntime {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MountInfo {
     pub mount: String,
     /// Provider NAME slug, e.g. `github`; credentials key on this value.
@@ -258,12 +255,34 @@ mod tests {
         let frontend: FrontendInfo = serde_json::from_value(serde_json::json!({
             "source": "native",
             "fs_type": "nfs",
+            "mount_point": "/omnifs",
             "runtime": "host"
         }))
         .unwrap();
 
-        assert!(frontend.mount_point.as_os_str().is_empty());
-        assert_eq!(frontend.runtime, FrontendRuntime::Host);
+        let round_trip: FrontendInfo =
+            serde_json::from_value(serde_json::to_value(&frontend).unwrap()).unwrap();
+        assert_eq!(round_trip.mount_point, std::path::Path::new("/omnifs"));
+        assert_eq!(round_trip.runtime, FrontendRuntime::Host);
+
+        assert!(
+            serde_json::from_value::<FrontendInfo>(serde_json::json!({
+                "source": "native",
+                "fs_type": "nfs",
+                "runtime": "host"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<FrontendInfo>(serde_json::json!({
+                "source": "native",
+                "fs_type": "nfs",
+                "mount_point": "/omnifs",
+                "runtime": "host",
+                "unexpected": true
+            }))
+            .is_err()
+        );
     }
 
     #[test]
