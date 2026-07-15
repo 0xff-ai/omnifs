@@ -175,14 +175,12 @@ mod tests {
 
     #[test]
     fn detect_command_source() {
-        let manifest = manifest_with(vec![
-            AmbientSource {
-                kind: AmbientKind::Command {
-                    argv: vec!["echo".into(), "  command-token  ".into()],
-                },
-                note: "echo probe".into(),
+        let manifest = manifest_with(vec![AmbientSource {
+            kind: AmbientKind::Command {
+                argv: vec!["echo".into(), "  command-token  ".into()],
             },
-        ]);
+            note: "echo probe".into(),
+        }]);
         let found = detect(Some(&manifest));
         let credential = found
             .into_iter()

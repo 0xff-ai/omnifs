@@ -11,7 +11,7 @@ use crate::io::write_atomic;
 use crate::mounts::Revision;
 
 /// Schema version this build understands. Older records are rejected outright.
-pub const DAEMON_RECORD_VERSION: u32 = 4;
+pub const DAEMON_RECORD_VERSION: u32 = 5;
 
 /// How a client reaches the daemon's control socket.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -72,6 +72,7 @@ pub struct DaemonRecord {
     pub endpoint: Endpoint,
     pub pid: u32,
     pub instance_id: String,
+    pub offline: bool,
     /// RFC3339 UTC timestamp of when the daemon started serving.
     pub started_at: String,
     /// Token-authenticated TCP and vsock attach targets bound this start.
@@ -85,6 +86,7 @@ impl DaemonRecord {
         endpoint: Endpoint,
         pid: u32,
         instance_id: String,
+        offline: bool,
     ) -> Self {
         let started_at = OffsetDateTime::now_utc()
             .format(&Rfc3339)
@@ -95,6 +97,7 @@ impl DaemonRecord {
             endpoint,
             pid,
             instance_id,
+            offline,
             started_at,
             attach: Vec::new(),
         }
@@ -183,6 +186,7 @@ mod tests {
             },
             4321,
             "b1946ac92492d234".to_string(),
+            false,
         )
     }
 

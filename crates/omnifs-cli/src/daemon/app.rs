@@ -27,6 +27,9 @@ pub(crate) struct DaemonArgs {
     /// Immutable mount snapshot directory to load before readiness.
     #[arg(long, value_name = "PATH")]
     pub(crate) mount_snapshot: PathBuf,
+    /// Serve only validated durable projection facts, without provider startup.
+    #[arg(long)]
+    pub(crate) offline: bool,
     /// Additionally serve the shared namespace over a TCP loopback listener at
     /// `127.0.0.1:<port>` (`0` asks the OS for an ephemeral port), guarded by a
     /// per-instance attach token instead of filesystem permissions. This is the
@@ -44,7 +47,7 @@ pub(crate) async fn run(args: &DaemonArgs) -> anyhow::Result<()> {
     use omnifs_workspace::telemetry::{self, DaemonEvent, TelemetrySink};
 
     let context = DaemonContext::resolve(args)?;
-    context.prepare_startup_dirs()?;
+    context.prepare_startup_dirs(args.offline)?;
 
     // Local-only dogfood counters. The daemon's off-switch is the
     // `OMNIFS_TELEMETRY` env var (the CLI propagates
@@ -52,17 +55,18 @@ pub(crate) async fn run(args: &DaemonArgs) -> anyhow::Result<()> {
     let telemetry = TelemetrySink::new(context.config_dir(), telemetry::enabled_from_env());
     telemetry.daemon_event(DaemonEvent::DaemonStart, 0);
 
-    let cloner = Arc::new(GitCloner::new(context.cache_dir().join("clones"))?);
-
-    let registry = {
+    let desired = Registry::load(&args.mount_snapshot).with_context(|| {
+        format!(
+            "load selected mount revision {} from {}",
+            args.mount_revision,
+            args.mount_snapshot.display()
+        )
+    })?;
+    let registry = if args.offline {
+        Arc::new(MountTable::load_offline(context.host_context(), &desired)?)
+    } else {
+        let cloner = Arc::new(GitCloner::new(context.cache_dir().join("clones"))?);
         let host_context = context.host_context();
-        let desired = Registry::load(&args.mount_snapshot).with_context(|| {
-            format!(
-                "load selected mount revision {} from {}",
-                args.mount_revision,
-                args.mount_snapshot.display()
-            )
-        })?;
         info!(
             config = %host_context.config_dir().display(),
             cache = %cloner.cache_dir().display(),
@@ -76,7 +80,6 @@ pub(crate) async fn run(args: &DaemonArgs) -> anyhow::Result<()> {
             &Handle::current(),
         )?)
     };
-
     let rt = Handle::current();
     let inspector = init_global_from_env();
     if let Some(inspector) = &inspector {
@@ -103,12 +106,16 @@ pub(crate) async fn run(args: &DaemonArgs) -> anyhow::Result<()> {
     ));
     // Build the one shared namespace after atomic startup loading, so its root
     // record reflects the complete mount set.
-    let namespace = omnifs_engine::TreeNamespace::online(Arc::clone(&registry), rt.clone());
+    let namespace = if args.offline {
+        omnifs_engine::TreeNamespace::offline(Arc::clone(&registry), rt.clone())
+    } else {
+        omnifs_engine::TreeNamespace::online(Arc::clone(&registry), rt.clone())
+    };
     // Give the daemon's VfsServer a handle to the namespace so typed attach
     // requests can bind a TCP listener on a running daemon without a restart.
     daemon.set_namespace(Arc::clone(&namespace));
     let result = daemon.run(previous).await;
-    let served_mounts = registry.runtime_entries().len();
+    let served_mounts = registry.mounts().len();
     telemetry.daemon_event(DaemonEvent::FrontendStopped, served_mounts);
     telemetry.daemon_event(DaemonEvent::DaemonStop, served_mounts);
     result

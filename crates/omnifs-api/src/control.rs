@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use crate::DaemonStatus;
 
 /// The only control protocol version understood by this build.
-pub const CONTROL_PROTOCOL_VERSION: u16 = 1;
+pub const CONTROL_PROTOCOL_VERSION: u16 = 2;
 
 /// Maximum size of one request, reply, or inspector event line, including its
 /// trailing newline. The control plane is local and bounded, so oversized
@@ -140,7 +140,7 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_string(&request).unwrap(),
-            r#"{"version":1,"operation":"attach_tcp","bind_ip":"127.0.0.1"}"#
+            r#"{"version":2,"operation":"attach_tcp","bind_ip":"127.0.0.1"}"#
         );
 
         let reply = ControlReply::error(ControlError::new(
@@ -149,7 +149,7 @@ mod tests {
         ));
         assert_eq!(
             serde_json::to_string(&reply).unwrap(),
-            r#"{"version":1,"result":"error","value":{"code":"not_ready","message":"namespace listeners are not serving yet"}}"#
+            r#"{"version":2,"result":"error","value":{"code":"not_ready","message":"namespace listeners are not serving yet"}}"#
         );
 
         assert!(

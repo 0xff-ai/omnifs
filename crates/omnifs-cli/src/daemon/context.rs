@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 pub(crate) struct DaemonContext {
     layout: WorkspaceLayout,
     mount_revision: Revision,
+    offline: bool,
     /// Random per-start id reported in status and written to the daemon record.
     instance_id: String,
     /// `--attach-tcp <port>`: bind a TCP namespace attach listener eagerly at
@@ -50,15 +51,18 @@ impl DaemonContext {
         Ok(Self {
             layout,
             mount_revision: args.mount_revision.clone(),
+            offline: args.offline,
             instance_id: generate_instance_id(),
             attach_tcp,
             process,
         })
     }
 
-    pub(crate) fn prepare_startup_dirs(&self) -> anyhow::Result<()> {
+    pub(crate) fn prepare_startup_dirs(&self, offline: bool) -> anyhow::Result<()> {
         std::fs::create_dir_all(&self.layout.config_dir)?;
-        std::fs::create_dir_all(&self.layout.cache_dir)?;
+        if !offline {
+            std::fs::create_dir_all(&self.layout.cache_dir)?;
+        }
         Ok(())
     }
 
@@ -161,6 +165,7 @@ impl DaemonContext {
             },
             self.process.pid,
             self.instance_id.clone(),
+            self.offline,
         )
     }
 
@@ -211,6 +216,7 @@ impl DaemonContext {
             providers_dir: self.layout.providers_dir.clone(),
             frontends,
             mounts,
+            offline: self.offline,
             health,
         }
     }
@@ -331,6 +337,7 @@ mod tests {
         DaemonContext {
             layout: WorkspaceLayout::under_root(root),
             mount_revision: Revision::new("a".repeat(40)).unwrap(),
+            offline: false,
             instance_id: "test-instance".to_owned(),
             attach_tcp: None,
             process: ProcessInfo {

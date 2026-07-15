@@ -15,6 +15,7 @@ pub(crate) async fn launch(
     telemetry_enabled: bool,
     mount_revision: &omnifs_workspace::mounts::Revision,
     mount_snapshot: &Path,
+    offline: bool,
 ) -> Result<()> {
     let cache_dir = &paths.cache_dir;
     std::fs::create_dir_all(cache_dir)
@@ -41,6 +42,9 @@ pub(crate) async fn launch(
         .stdin(Stdio::null())
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log_err));
+    if offline {
+        command.arg("--offline");
+    }
 
     if std::env::var_os("RUST_LOG").is_none() {
         command.env("RUST_LOG", ProcessRole::Daemon.default_log_level());
@@ -54,7 +58,9 @@ pub(crate) async fn launch(
     let mut child = command
         .spawn()
         .with_context(|| format!("spawn omnifs daemon ({})", binary.display()))?;
-    let child_pid = child.id();
+    let child_pid = child
+        .id()
+        .context("spawned omnifs daemon has no process identity")?;
     let client = DaemonClient::for_layout(paths);
     for _ in 0..300 {
         if let Some(status) = child.try_wait().context("poll daemon child status")? {
@@ -64,25 +70,35 @@ pub(crate) async fn launch(
             );
         }
         if client.ready().await {
-            if let Some(pid) = child_pid {
-                match client.status().await {
-                    Ok(status) if status.pid == pid => {
+            match client.status().await {
+                Ok(status) => {
+                    let record = match omnifs_workspace::daemon_record::DaemonRecord::read(
+                        &paths.daemon_record_file(),
+                    ) {
+                        Ok(record) => record,
+                        Err(error) => {
+                            let _ = child.kill().await;
+                            anyhow::bail!("daemon readiness record could not be read: {error}");
+                        },
+                    };
+                    let ready = record.as_ref().is_some_and(|record| {
+                        status.pid == child_pid
+                            && status.offline == offline
+                            && record.pid == child_pid
+                            && record.instance_id == status.instance_id
+                            && record.mount_revision == *mount_revision
+                            && record.offline == offline
+                    });
+                    if ready {
                         drop(child);
                         return Ok(());
-                    },
-                    Ok(status) => {
-                        let _ = child.kill().await;
-                        anyhow::bail!(
-                            "daemon readiness came from pid {}, not spawned pid {pid}; \
-                             another omnifs daemon is already serving",
-                            status.pid
-                        );
-                    },
-                    Err(_) => {},
-                }
-            } else {
-                drop(child);
-                return Ok(());
+                    }
+                    let _ = child.kill().await;
+                    anyhow::bail!(
+                        "daemon readiness did not match spawned pid {child_pid}, revision {mount_revision}, and offline={offline}"
+                    );
+                },
+                Err(_) => {},
             }
         }
         tokio::time::sleep(Duration::from_millis(100)).await;

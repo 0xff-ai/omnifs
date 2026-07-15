@@ -573,16 +573,18 @@ impl Daemon {
     }
 
     fn control_status(&self) -> DaemonStatus {
-        let entries = self.registry.runtime_entries();
-        let mut mounts = Vec::with_capacity(entries.len());
-        for (mount, runtime) in entries {
+        let mut mounts = Vec::with_capacity(self.registry.mounts().len());
+        for (name, loaded, runtime) in self.registry.selected_entries() {
+            let spec = loaded.spec();
             mounts.push(MountInfo {
-                provider_name: runtime.provider_name().to_string(),
-                provider_id: runtime.provider_id().to_string(),
-                auth_health: runtime
-                    .auth_health()
-                    .map(|health| api_credential_health_kind(&health)),
-                mount,
+                provider_name: spec.provider.meta.name.to_string(),
+                provider_id: spec.provider.id.to_string(),
+                auth_health: runtime.and_then(|runtime| {
+                    runtime
+                        .auth_health()
+                        .map(|health| api_credential_health_kind(&health))
+                }),
+                mount: name.to_string(),
             });
         }
         mounts.sort_by(|a, b| a.mount.cmp(&b.mount));
@@ -908,11 +910,12 @@ mod tests {
         let args = crate::daemon::app::DaemonArgs {
             mount_revision: omnifs_workspace::mounts::Revision::new("a".repeat(40)).unwrap(),
             mount_snapshot: dir.path().join("mounts"),
+            offline: false,
             attach_tcp: None,
         };
         std::fs::create_dir_all(&args.mount_snapshot).unwrap();
         let context = crate::daemon::context::DaemonContext::resolve(&args).unwrap();
-        context.prepare_startup_dirs().unwrap();
+        context.prepare_startup_dirs(false).unwrap();
         let cloner =
             Arc::new(omnifs_engine::GitCloner::new(context.cache_dir().join("clones")).unwrap());
         let desired = omnifs_workspace::mounts::Registry::load(&args.mount_snapshot).unwrap();
@@ -945,6 +948,7 @@ mod tests {
                 },
                 1,
                 "instance".to_string(),
+                false,
             ),
         );
 
@@ -1179,7 +1183,7 @@ mod tests {
 
         let unknown = raw_request(
             &control_socket,
-            br#"{"version":1,"operation":"unknown"}
+            br#"{"version":2,"operation":"unknown"}
 "#
             .to_vec(),
         )

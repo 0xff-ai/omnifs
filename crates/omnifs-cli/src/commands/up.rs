@@ -14,6 +14,9 @@ pub struct UpArgs {
     /// Wait until the daemon reports Ready, failing with exit code 3 on timeout.
     #[arg(long, value_name = "DURATION")]
     pub wait: Option<String>,
+    /// Start a cache-only daemon from the exact current mount revision.
+    #[arg(long)]
+    pub offline: bool,
 }
 
 impl UpArgs {
@@ -27,7 +30,7 @@ impl UpArgs {
             .as_deref()
             .map(crate::stages::parse_wait_duration)
             .transpose()?;
-        Launcher::new(workspace, "omnifs up", output.clone())
+        Launcher::new(workspace, "omnifs up", output.clone(), self.offline)
             .launch()
             .await?;
 

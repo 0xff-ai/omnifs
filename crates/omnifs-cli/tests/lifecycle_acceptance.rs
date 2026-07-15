@@ -624,6 +624,99 @@ fn scenario_8_revision_restart_and_preflight_failure() {
     );
     drop(repository);
 
+    // Offline startup observes the committed HEAD while the mutable worktree
+    // is dirty. It does not need the provider artifact or credentials, does
+    // not move the applied ref, and opposite-mode reuse at the same revision
+    // restarts the daemon.
+    let test_spec_path = fixture.mounts_dir().join("test.json");
+    let committed_spec = std::fs::read(&test_spec_path).expect("read committed test spec");
+    let mut dirty_spec = committed_spec.clone();
+    dirty_spec.extend_from_slice(b"\n");
+    let dirty_spec_snapshot = dirty_spec.clone();
+    std::fs::write(&test_spec_path, dirty_spec).expect("dirty mutable spec");
+    let repository = omnifs_workspace::mounts::Repository::observe(fixture.mounts_dir())
+        .expect("observe dirty mount repository");
+    let head_before_offline = repository
+        .head_revision()
+        .expect("read HEAD before offline startup")
+        .expect("committed HEAD before offline startup");
+    let applied_before_offline = repository.applied().expect("read applied before offline");
+    drop(repository);
+    let provider_path =
+        omnifs_workspace::provider::ProviderStore::new(fixture.home_path().join("providers"))
+            .artifact_path(&fixture.test_provider_id);
+    let provider_backup = fixture.home_path().join("provider-offline-backup.wasm");
+    std::fs::rename(&provider_path, &provider_backup).expect("hide provider artifact");
+    std::fs::write(fixture.home_path().join("credentials.json"), b"not-json")
+        .expect("write malformed credentials");
+    let offline = fixture.run(&["up", "--offline"]);
+    assert!(
+        offline.status.success(),
+        "offline up failed without provider artifact (exit {})\nstdout: {}\nstderr: {}",
+        offline.status,
+        String::from_utf8_lossy(&offline.stdout),
+        String::from_utf8_lossy(&offline.stderr),
+    );
+    fixture.update_pid_from_record();
+    let offline_record =
+        omnifs_workspace::daemon_record::DaemonRecord::read(&fixture.daemon_record_path())
+            .expect("read offline daemon record")
+            .expect("offline daemon record");
+    assert!(
+        offline_record.offline,
+        "record must identify cache-only mode"
+    );
+    assert_eq!(offline_record.mount_revision, head_before_offline);
+    let after_offline = omnifs_workspace::mounts::Repository::observe(fixture.mounts_dir())
+        .expect("observe repository after offline startup");
+    assert_eq!(
+        after_offline
+            .head_revision()
+            .expect("read HEAD after offline startup"),
+        Some(head_before_offline.clone())
+    );
+    assert_eq!(
+        std::fs::read(&test_spec_path).expect("read dirty spec after offline startup"),
+        dirty_spec_snapshot,
+        "offline startup must preserve dirty worktree bytes"
+    );
+    assert_eq!(
+        omnifs_workspace::mounts::Repository::observe(fixture.mounts_dir())
+            .expect("observe after offline startup")
+            .applied()
+            .expect("read applied after offline"),
+        applied_before_offline,
+        "offline startup must not advance refs/omnifs/applied"
+    );
+    let status = fixture.run(&["status", "--output", "json"]);
+    assert!(status.status.success(), "offline status failed");
+    let status_json: serde_json::Value =
+        serde_json::from_slice(&status.stdout).expect("decode offline status");
+    assert_eq!(status_json["result"]["daemon"]["status"]["offline"], true);
+    assert_eq!(
+        status_json["result"]["mounts"][0]["provider"]["state"],
+        "not_required"
+    );
+    assert_eq!(
+        status_json["result"]["mounts"][0]["serving"]["state"],
+        "offline"
+    );
+
+    std::fs::rename(&provider_backup, &provider_path).expect("restore provider artifact");
+    std::fs::remove_file(fixture.home_path().join("credentials.json"))
+        .expect("remove malformed credentials");
+    std::fs::write(&test_spec_path, committed_spec).expect("restore mutable spec");
+    let online = fixture.run(&["up"]);
+    assert!(online.status.success(), "online mode switch failed");
+    fixture.update_pid_from_record();
+    let online_record =
+        omnifs_workspace::daemon_record::DaemonRecord::read(&fixture.daemon_record_path())
+            .expect("read online daemon record")
+            .expect("online daemon record");
+    assert!(!online_record.offline);
+    assert_ne!(online_record.pid, offline_record.pid);
+    assert_eq!(online_record.mount_revision, head_before_offline);
+
     std::fs::write(fixture.mounts_dir().join("malformed.json"), b"{")
         .expect("write malformed desired state");
     let out = fixture.run(&["up"]);
@@ -636,11 +729,11 @@ fn scenario_8_revision_restart_and_preflight_failure() {
             .expect("read daemon record after rejected apply")
             .expect("healthy daemon must remain recorded after rejected apply");
     assert_eq!(
-        after_failure.pid, second.pid,
+        after_failure.pid, online_record.pid,
         "preflight failure must not stop the healthy daemon"
     );
     assert_eq!(
-        after_failure.mount_revision, second.mount_revision,
+        after_failure.mount_revision, online_record.mount_revision,
         "preflight failure must not change the running revision"
     );
     let alive = recorded_pid(fixture.home_path()).is_some_and(|pid| {

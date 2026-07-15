@@ -347,6 +347,15 @@ impl MountTable {
             .collect()
     }
 
+    /// The selected identity and optional provider runtime for every mount.
+    pub fn selected_entries(
+        &self,
+    ) -> impl Iterator<Item = (&Name, &LoadedSpec, Option<Arc<Runtime>>)> + '_ {
+        self.entries
+            .values()
+            .map(|entry| (&entry.name, &entry.identity, entry.runtime()))
+    }
+
     pub fn shutdown_all(&self) {
         let _ = self.timer_shutdown.send(true);
         for (_, task) in self.timer_tasks.lock().drain() {

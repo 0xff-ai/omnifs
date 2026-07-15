@@ -128,6 +128,7 @@ impl DaemonObservation {
                 providers_dir: "/tmp/omnifs/providers".into(),
                 frontends: Vec::new(),
                 mounts: Vec::new(),
+                offline: false,
                 health: omnifs_api::DaemonHealth::new(vec![omnifs_api::SubsystemHealth::new(
                     omnifs_api::DaemonSubsystem::Control,
                     match state {
@@ -150,6 +151,7 @@ impl DaemonObservation {
                 },
                 1,
                 "test-instance".to_owned(),
+                false,
             )
         });
         Self {
@@ -270,6 +272,7 @@ pub(crate) struct ProviderPin {
 #[serde(tag = "state", rename_all = "snake_case")]
 pub(crate) enum ProviderPinState {
     Available,
+    NotRequired,
     Missing,
     Corrupt { message: String },
 }
@@ -278,6 +281,7 @@ impl ProviderPinState {
     pub(crate) const fn severity(&self) -> Severity {
         match self {
             Self::Available => Severity::Positive,
+            Self::NotRequired => Severity::Neutral,
             Self::Missing => Severity::Attention,
             Self::Corrupt { .. } => Severity::Error,
         }
@@ -286,6 +290,7 @@ impl ProviderPinState {
     pub(crate) const fn label(&self) -> &'static str {
         match self {
             Self::Available => "available",
+            Self::NotRequired => "not required",
             Self::Missing => "missing",
             Self::Corrupt { .. } => "corrupt",
         }
@@ -377,6 +382,7 @@ impl AuthState {
 pub(crate) enum ServingState {
     Live,
     Offline,
+    Stopped,
     Failed { message: String },
     NotLoaded,
 }
@@ -386,6 +392,7 @@ impl ServingState {
         match self {
             Self::Live => "live",
             Self::Offline => "offline",
+            Self::Stopped => "stopped",
             Self::Failed { .. } => "failed",
             Self::NotLoaded => "not loaded",
         }
@@ -395,6 +402,7 @@ impl ServingState {
         match self {
             Self::Live => Severity::Positive,
             Self::Offline => Severity::Neutral,
+            Self::Stopped => Severity::Neutral,
             Self::Failed { .. } | Self::NotLoaded => Severity::Error,
         }
     }
@@ -402,7 +410,7 @@ impl ServingState {
     pub(crate) const fn fix(&self) -> Option<&'static str> {
         match self {
             Self::Failed { .. } => Some("omnifs logs"),
-            Self::Live | Self::Offline | Self::NotLoaded => None,
+            Self::Live | Self::Offline | Self::Stopped | Self::NotLoaded => None,
         }
     }
 }
@@ -440,14 +448,18 @@ impl Inventory {
         let registry = repository.registry();
         let mount_revision = repository.head_revision()?;
         let applied_revision = repository.applied()?;
-        let catalog = workspace.catalog();
-        let credentials = FileStore::new(&layout.credentials_file);
         let daemon_probe = workspace.daemon().status_optional_checked().await;
         let daemon_status = daemon_probe.as_ref().ok().and_then(Option::as_ref);
         let runtime = DaemonRecord::read(&layout.daemon_record_file())
             .ok()
             .flatten();
-        let mut mounts = mount_statuses(registry, catalog, &credentials, daemon_status);
+        let mut mounts = if let Some(status) = daemon_status.filter(|status| status.offline) {
+            offline_mount_statuses(registry, status)
+        } else {
+            let catalog = workspace.catalog();
+            let credentials = FileStore::new(&layout.credentials_file);
+            online_mount_statuses(registry, catalog, &credentials, daemon_status)
+        };
         let mount_count = mounts.len();
         let runners = runner_statuses(&layout)?;
         let frontends = frontend_statuses(daemon_status, mount_count, &runners);
@@ -508,7 +520,9 @@ impl Inventory {
                         match mount_status.serving {
                             ServingState::Live => AccessState::Available,
                             ServingState::Failed { .. } => AccessState::Failed,
-                            ServingState::Offline | ServingState::NotLoaded => AccessState::Offline,
+                            ServingState::Offline
+                            | ServingState::Stopped
+                            | ServingState::NotLoaded => AccessState::Offline,
                         }
                     },
                     FrontendState::Failed => AccessState::Failed,
@@ -678,7 +692,7 @@ fn frontend_statuses(
     rows
 }
 
-fn mount_statuses(
+fn online_mount_statuses(
     registry: &Registry,
     catalog: &Catalog,
     credentials: &FileStore,
@@ -785,6 +799,55 @@ fn desired_mount_rows(
         .collect::<Vec<_>>()
 }
 
+fn offline_mount_rows(registry: &Registry, loaded: &BTreeSet<&str>) -> Vec<MountStatus> {
+    registry
+        .iter()
+        .map(|(name, spec)| {
+            let name = name.to_string();
+            let serving = if loaded.contains(name.as_str()) {
+                ServingState::Offline
+            } else {
+                ServingState::NotLoaded
+            };
+            MountStatus {
+                name: name.clone(),
+                root: PathBuf::from(format!("/{name}")),
+                provider: ProviderPin {
+                    name: spec.provider.meta.name.to_string(),
+                    version: spec.provider.meta.version.as_ref().map(ToString::to_string),
+                    artifact: spec.provider.id.to_string(),
+                    state: ProviderPinState::NotRequired,
+                },
+                auth: AuthState::NotNeeded,
+                serving,
+                access_count: 0,
+                fix: None,
+            }
+        })
+        .collect()
+}
+
+fn offline_mount_statuses(registry: &Registry, status: &DaemonStatus) -> Vec<MountStatus> {
+    let loaded = status
+        .mounts
+        .iter()
+        .map(|mount| mount.mount.as_str())
+        .collect::<BTreeSet<_>>();
+    let desired = registry
+        .iter()
+        .map(|(name, _)| name.to_string())
+        .collect::<BTreeSet<_>>();
+    let mut rows = offline_mount_rows(registry, &loaded);
+    rows.extend(observed_mount_rows(status, &desired));
+    rows.extend(invalid_mount_rows(registry));
+    rows.sort_by(|left, right| {
+        left.root
+            .cmp(&right.root)
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    rows
+}
+
 fn mount_auth_state(mount: &str, local: AuthState, daemon: Option<&DaemonStatus>) -> AuthState {
     let Some(observed) =
         daemon.and_then(|status| status.mounts.iter().find(|entry| entry.mount == mount))
@@ -843,10 +906,18 @@ fn observed_mount_rows(status: &DaemonStatus, desired: &BTreeSet<String>) -> Vec
                     name: mount.provider_name.clone(),
                     version: None,
                     artifact: mount.provider_id.clone(),
-                    state: ProviderPinState::Available,
+                    state: if status.offline {
+                        ProviderPinState::NotRequired
+                    } else {
+                        ProviderPinState::Available
+                    },
                 },
                 auth,
-                serving: ServingState::Live,
+                serving: if status.offline {
+                    ServingState::Offline
+                } else {
+                    ServingState::Live
+                },
                 access_count: 0,
                 fix,
             }
@@ -878,6 +949,9 @@ struct MountObservation {
 }
 
 fn derive_serving_state(observation: MountObservation) -> ServingState {
+    if matches!(observation.daemon, Presence::Absent) {
+        return ServingState::Stopped;
+    }
     if matches!(observation.provider, Presence::Absent) {
         return ServingState::NotLoaded;
     }
@@ -891,7 +965,7 @@ fn derive_serving_state(observation: MountObservation) -> ServingState {
     } else if matches!(observation.daemon, Presence::Present) {
         ServingState::NotLoaded
     } else {
-        ServingState::Offline
+        ServingState::NotLoaded
     }
 }
 
@@ -1005,7 +1079,7 @@ mod tests {
                 state: ProviderPinState::Available,
             },
             auth: auth.clone(),
-            serving: ServingState::Offline,
+            serving: ServingState::Stopped,
             access_count: 0,
             fix: auth.command().map(ToOwned::to_owned),
         };
@@ -1101,7 +1175,7 @@ mod tests {
                 loaded: Presence::Absent,
                 health: Health::Healthy,
             }),
-            ServingState::Offline
+            ServingState::Stopped
         );
     }
 
@@ -1115,6 +1189,7 @@ mod tests {
             },
             42,
             "instance".into(),
+            false,
         );
         let mut unreachable = DaemonObservation::from(probe);
         unreachable.runtime = Some(expected);
@@ -1143,6 +1218,7 @@ mod tests {
                 providers_dir: "/home/.omnifs/providers".into(),
                 frontends: Vec::new(),
                 mounts: Vec::new(),
+                offline: false,
                 health: omnifs_api::DaemonHealth::new(vec![omnifs_api::SubsystemHealth::new(
                     omnifs_api::DaemonSubsystem::Control,
                     health,
@@ -1232,7 +1308,7 @@ mod tests {
                     state: ProviderPinState::Available,
                 },
                 auth: AuthState::Ready,
-                serving: ServingState::Offline,
+                serving: ServingState::Stopped,
                 access_count: 0,
                 fix: None,
             }],
@@ -1279,7 +1355,7 @@ mod tests {
                     state: ProviderPinState::Available,
                 },
                 auth: AuthState::NotNeeded,
-                serving: ServingState::Offline,
+                serving: ServingState::Stopped,
                 access_count: 0,
                 fix: None,
             }],

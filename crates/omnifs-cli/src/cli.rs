@@ -429,13 +429,14 @@ mod tests {
 
     #[test]
     fn apply_alias_parses_identically_to_up() {
-        let up = Cli::try_parse_from(["omnifs", "up", "--wait", "3s"]).unwrap();
-        let apply = Cli::try_parse_from(["omnifs", "apply", "--wait", "3s"]).unwrap();
+        let up = Cli::try_parse_from(["omnifs", "up", "--wait", "3s", "--offline"]).unwrap();
+        let apply = Cli::try_parse_from(["omnifs", "apply", "--wait", "3s", "--offline"]).unwrap();
         let (Commands::Up(up), Commands::Up(apply)) = (up.command.unwrap(), apply.command.unwrap())
         else {
             panic!("up and apply must parse to Commands::Up");
         };
         assert_eq!(up.wait, apply.wait);
+        assert_eq!(up.offline, apply.offline);
     }
 
     #[test]

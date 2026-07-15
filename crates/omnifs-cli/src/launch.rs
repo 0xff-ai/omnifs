@@ -25,14 +25,21 @@ pub(crate) struct Launcher<'a> {
     workspace: &'a Workspace,
     verb: &'static str,
     output: Output,
+    offline: bool,
 }
 
 impl<'a> Launcher<'a> {
-    pub(crate) fn new(workspace: &'a Workspace, verb: &'static str, output: Output) -> Self {
+    pub(crate) fn new(
+        workspace: &'a Workspace,
+        verb: &'static str,
+        output: Output,
+        offline: bool,
+    ) -> Self {
         Self {
             workspace,
             verb,
             output,
+            offline,
         }
     }
 
@@ -42,17 +49,50 @@ impl<'a> Launcher<'a> {
         let telemetry_enabled =
             config.telemetry.enabled && omnifs_workspace::telemetry::enabled_from_env();
 
-        let revision = self.workspace.commit_mounts()?;
-        let (snapshot_dir, snapshot) = self
-            .workspace
-            .repository()?
-            .snapshot(&revision, &paths.cache_dir)?;
+        let (revision, snapshot_dir, snapshot) = if self.offline {
+            anyhow::ensure!(
+                paths.mounts_dir.is_dir(),
+                "offline startup requires an existing mount repository at {}",
+                paths.mounts_dir.display()
+            );
+            let repository = self.workspace.observe_repository()?;
+            let revision = repository
+                .head_revision()?
+                .ok_or_else(|| anyhow::anyhow!("offline startup requires a current mount HEAD"))?;
+            let (snapshot_dir, snapshot) = repository.snapshot(&revision, &paths.cache_dir)?;
+            (revision, snapshot_dir, snapshot)
+        } else {
+            let revision = self.workspace.commit_mounts()?;
+            let (snapshot_dir, snapshot) = self
+                .workspace
+                .repository()?
+                .snapshot(&revision, &paths.cache_dir)?;
+            (revision, snapshot_dir, snapshot)
+        };
         let configs = mount_configs(&snapshot);
         if configs.is_empty() {
             anyhow::bail!(
                 "no mount configs found in {}; run `omnifs mount add <provider>` to create one",
                 paths.mounts_dir.display()
             );
+        }
+
+        if self.offline {
+            self.output.narrate(format!(
+                "Starting offline daemon from mount revision {}",
+                revision
+            ));
+            launch_host_native(
+                self.workspace,
+                self.verb,
+                telemetry_enabled,
+                self.output,
+                &revision,
+                &snapshot_dir,
+                true,
+            )
+            .await?;
+            return Ok(());
         }
 
         // Fail fast, before a healthy daemon is stopped or a new daemon spawns,
@@ -74,6 +114,7 @@ impl<'a> Launcher<'a> {
             self.output,
             &revision,
             &snapshot_dir,
+            false,
         )
         .await?;
         self.workspace.repository()?.mark_applied(&revision)?;
@@ -117,6 +158,7 @@ async fn launch_host_native(
     output: Output,
     revision: &Revision,
     snapshot: &Path,
+    offline: bool,
 ) -> anyhow::Result<()> {
     let paths = workspace.layout();
     let client = DaemonClient::for_layout(paths);
@@ -127,22 +169,31 @@ async fn launch_host_native(
         if !existing.can_apply() {
             anyhow::bail!(existing);
         }
-        let serves_revision =
-            DaemonRecord::read(&paths.daemon_record_file())?.is_some_and(|record| {
-                record.instance_id == status.instance_id && record.mount_revision == *revision
-            });
+        let existing_record = DaemonRecord::read(&paths.daemon_record_file())?;
+        let serves_revision = existing_record.as_ref().is_some_and(|record| {
+            record.instance_id == status.instance_id
+                && record.mount_revision == *revision
+                && record.offline == offline
+        });
         if serves_revision {
             report_launch_status(status);
             return Ok(());
         }
 
-        output.narrate("Restarting omnifs daemon for changed mount revision");
+        if existing_record
+            .as_ref()
+            .is_some_and(|record| record.mount_revision == *revision && record.offline != offline)
+        {
+            output.narrate("Restarting omnifs daemon for changed online/offline mode");
+        } else {
+            output.narrate("Restarting omnifs daemon for changed mount revision");
+        }
         DaemonTeardown::new(workspace).stop_daemon().await?;
     } else {
         output.narrate("Starting omnifs daemon (host-native)");
     }
 
-    crate::daemon_launch::launch(paths, telemetry_enabled, revision, snapshot).await?;
+    crate::daemon_launch::launch(paths, telemetry_enabled, revision, snapshot, offline).await?;
 
     let status = client.status().await?;
     report_launch_status(&status);

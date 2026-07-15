@@ -56,6 +56,8 @@ pub struct DaemonStatus {
     pub frontends: Vec<FrontendInfo>,
     /// Provider mounts loaded in the registry.
     pub mounts: Vec<MountInfo>,
+    /// True when this daemon serves validated durable projections only.
+    pub offline: bool,
     /// Daemon-owned health for runtime subsystems. CLI status renders these
     /// entries instead of reconstructing daemon health from raw fields.
     pub health: DaemonHealth,
