@@ -14,7 +14,6 @@ name = "omnifs"
 path = "src/main.rs"
 
 [dependencies]
-omnifs-caps = { workspace = true }
 omnifs-api = { workspace = true }
 omnifs-engine = { workspace = true, features = ["runtime"] }
 omnifs-nfs = { workspace = true }

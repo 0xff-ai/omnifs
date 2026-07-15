@@ -32,7 +32,6 @@ sha2 = { workspace = true, optional = true }
 tempfile = { workspace = true, optional = true }
 tar = { workspace = true, optional = true }
 omnifs-core = { workspace = true, optional = true }
-omnifs-caps = { workspace = true, optional = true }
 omnifs-workspace = { workspace = true, optional = true }
 omnifs-auth = { workspace = true, optional = true }
 omnifs-api = { workspace = true, optional = true }
@@ -53,7 +52,6 @@ runtime = [
     "dep:moka",
     "dep:omnifs-api",
     "dep:omnifs-auth",
-    "dep:omnifs-caps",
     "dep:omnifs-core",
     "dep:omnifs-wit",
     "dep:omnifs-workspace",

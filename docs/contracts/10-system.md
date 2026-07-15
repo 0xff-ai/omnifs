@@ -67,7 +67,8 @@ The Docker-hosted frontend receives no credentials or host filesystem mounts. It
 - `crates/omnifs-engine/src/callouts/http.rs`
 - `crates/omnifs-auth`
 - `crates/omnifs-workspace/src/creds`
-- `crates/omnifs-caps`
+- `crates/omnifs-workspace/src/provider/manifest.rs`
+- `crates/omnifs-workspace/src/provider/config.rs`
 - `crates/omnifs-workspace/src/authn/resolve.rs`
 - `crates/omnifs-workspace/src/mounts/materialize.rs`
 - `crates/omnifs-cli/src/commands/auth`

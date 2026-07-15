@@ -4,8 +4,9 @@
 //! renders a manifest's needs and limits through these helpers, so the wording
 //! stays consistent.
 
-use omnifs_caps::{AccessNeed, LimitDeclarations, PreopenMode, PreopenedPath};
-use omnifs_workspace::provider::ProviderManifest;
+use omnifs_workspace::provider::{
+    AccessNeed, LimitDeclarations, PreopenMode, PreopenedPath, ProviderManifest,
+};
 
 /// Maximum visible width of a compact needs line.
 const COMPACT_NEEDS_WIDTH: usize = 72;
@@ -143,7 +144,7 @@ pub(crate) fn limit_lines(limits: &LimitDeclarations) -> Vec<LimitLine> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use omnifs_caps::AccessNeed;
+    use omnifs_workspace::provider::AccessNeed;
 
     fn manifest_with_needs(needs: Vec<AccessNeed>) -> ProviderManifest {
         ProviderManifest {

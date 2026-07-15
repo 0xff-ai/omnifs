@@ -1,14 +1,111 @@
 //! Typed provider manifest embedded in the `omnifs.provider-metadata.v1` wasm custom section.
 
+use super::config::PreopenedPath;
 use crate::authn::scheme::{AuthManifest, AuthScheme, OAuthFlow, OauthScheme, SchemeGuidance};
 use crate::provider::config::ConfigMetadata;
 use crate::provider::sections::{
     ProviderMetadataError, is_hostname_only, validate_provider_manifest,
 };
-use omnifs_caps::{AccessNeed, LimitDeclarations, Limits};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
+
+/// A scalar resource ceiling a provider declares in its manifest.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ResourceLimit<T> {
+    pub value: T,
+    pub why: String,
+}
+
+/// Scalar resource limits declared by a provider manifest.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LimitDeclarations {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_memory_mb: Option<ResourceLimit<u32>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_fetch_blob_bytes: Option<ResourceLimit<u64>>,
+}
+
+impl LimitDeclarations {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.max_memory_mb.is_none() && self.max_fetch_blob_bytes.is_none()
+    }
+}
+
+/// One provider access declaration embedded in its manifest.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+pub enum AccessNeed {
+    Domain {
+        value: String,
+        why: String,
+        #[serde(default)]
+        dynamic: bool,
+    },
+    GitRepo {
+        value: String,
+        why: String,
+        #[serde(default)]
+        dynamic: bool,
+    },
+    UnixSocket {
+        value: String,
+        why: String,
+        #[serde(default)]
+        dynamic: bool,
+    },
+    PreopenedPath {
+        value: PreopenedPath,
+        why: String,
+        #[serde(default)]
+        dynamic: bool,
+    },
+}
+
+impl AccessNeed {
+    #[must_use]
+    pub fn why(&self) -> &str {
+        match self {
+            Self::Domain { why, .. }
+            | Self::GitRepo { why, .. }
+            | Self::UnixSocket { why, .. }
+            | Self::PreopenedPath { why, .. } => why,
+        }
+    }
+
+    #[must_use]
+    pub fn is_dynamic(&self) -> bool {
+        match self {
+            Self::Domain { dynamic, .. }
+            | Self::GitRepo { dynamic, .. }
+            | Self::UnixSocket { dynamic, .. }
+            | Self::PreopenedPath { dynamic, .. } => *dynamic,
+        }
+    }
+
+    #[must_use]
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Domain { .. } => "domain",
+            Self::GitRepo { .. } => "gitRepo",
+            Self::UnixSocket { .. } => "unixSocket",
+            Self::PreopenedPath { .. } => "preopenedPath",
+        }
+    }
+
+    #[must_use]
+    pub fn value(&self) -> String {
+        match self {
+            Self::Domain { value, .. }
+            | Self::GitRepo { value, .. }
+            | Self::UnixSocket { value, .. } => value.clone(),
+            Self::PreopenedPath { value, .. } => format!("{} -> {}", value.host, value.guest),
+        }
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -234,14 +331,6 @@ impl ProviderManifest {
         Ok(())
     }
 
-    /// The scalar limits this provider declares, lowered into mount-owned
-    /// runtime values. Used by `omnifs init` to seed a mount's explicit limits;
-    /// never read at serve time as provider defaults.
-    #[must_use]
-    pub fn provider_limits(&self) -> Limits {
-        Limits::from_declarations(&self.limits)
-    }
-
     /// The `domains` config field that supplies a dynamic domain authority when
     /// this provider declares a dynamic domain need.
     #[must_use]
@@ -277,7 +366,7 @@ impl ProviderManifest {
 
 fn validate_limit_why<T>(
     field: &str,
-    limit: Option<&omnifs_caps::ResourceLimit<T>>,
+    limit: Option<&ResourceLimit<T>>,
 ) -> Result<(), ProviderMetadataError> {
     if let Some(limit) = limit {
         validate_non_empty(field, &limit.why)?;

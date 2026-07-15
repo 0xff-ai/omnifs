@@ -10,7 +10,6 @@ categories = ["filesystem"]
 keywords = ["omnifs", "filesystem", "paths"]
 
 [dependencies]
-omnifs-caps = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 toml = "0.8"

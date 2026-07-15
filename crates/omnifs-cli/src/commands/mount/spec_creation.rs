@@ -1,7 +1,6 @@
 use anyhow::{Context, anyhow};
-use omnifs_caps::Limits;
 use omnifs_workspace::ids::ProviderRef;
-use omnifs_workspace::mounts::{Name as MountName, ProviderMetadataInheritance, Spec};
+use omnifs_workspace::mounts::{Limits, Name as MountName, ProviderMetadataInheritance, Spec};
 use omnifs_workspace::provider::{
     ConfigField, ConfigMetadata, HostResourceBinding, ProviderManifest, is_hostname_only,
 };
@@ -42,7 +41,8 @@ impl<'a> MountSpecCreator<'a> {
     pub(crate) fn create_for_config_override(&self) -> CreatedMountSpec {
         CreatedMountSpec {
             config: None,
-            limits: (!self.manifest.limits.is_empty()).then(|| self.manifest.provider_limits()),
+            limits: (!self.manifest.limits.is_empty())
+                .then(|| Limits::from_declarations(&self.manifest.limits)),
         }
     }
 
@@ -51,7 +51,8 @@ impl<'a> MountSpecCreator<'a> {
         output: &Output,
         interactive: bool,
     ) -> anyhow::Result<CreatedMountSpec> {
-        let limits = (!self.manifest.limits.is_empty()).then(|| self.manifest.provider_limits());
+        let limits = (!self.manifest.limits.is_empty())
+            .then(|| Limits::from_declarations(&self.manifest.limits));
         let mut spec = Spec {
             provider: self.reference.clone(),
             mount: self.mount_name.to_string(),

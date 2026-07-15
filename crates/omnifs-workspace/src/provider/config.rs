@@ -1,8 +1,25 @@
 use crate::provider::sections::ProviderMetadataError;
-use omnifs_caps::PreopenMode;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+
+/// Access mode for a preopened directory declared by a provider.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum PreopenMode {
+    #[default]
+    Ro,
+    Rw,
+}
+
+/// A host directory exposed into the provider sandbox at a guest path.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct PreopenedPath {
+    pub host: String,
+    pub guest: String,
+    #[serde(default)]
+    pub mode: PreopenMode,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

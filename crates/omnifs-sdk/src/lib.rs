@@ -140,18 +140,18 @@
 pub use config_resource::ProvidesConfigMetadata;
 pub use config_resource::{HostFile, HostSocket};
 
-// The provider metadata block. These wire types live in omnifs-workspace and
-// omnifs-caps; a provider constructs and the harvester serializes them entirely
+// The provider metadata block. These wire types live in omnifs-workspace; a
+// provider constructs and the harvester serializes them entirely
 // host-side, so they are re-exported only for non-wasm targets. The wasm guest
 // never references them.
-#[cfg(not(target_arch = "wasm32"))]
-pub use omnifs_caps::{AccessNeed, PreopenMode, PreopenedPath};
-#[cfg(not(target_arch = "wasm32"))]
-pub use omnifs_caps::{LimitDeclarations, ResourceLimit};
 #[cfg(not(target_arch = "wasm32"))]
 pub use omnifs_workspace::authn::{
     AmbientKind, AmbientSource, DevicePollCompat, OauthScheme, SchemeGuidance, StaticTokenScheme,
     TokenValidation,
+};
+#[cfg(not(target_arch = "wasm32"))]
+pub use omnifs_workspace::provider::{
+    AccessNeed, LimitDeclarations, PreopenMode, PreopenedPath, ResourceLimit,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use omnifs_workspace::provider::{

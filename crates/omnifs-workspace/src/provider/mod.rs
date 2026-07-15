@@ -12,8 +12,13 @@ pub(crate) mod wasm;
 
 pub use authoring::ProviderAuthBuilder;
 pub use catalog::{Catalog, CatalogError, DirStatus, Provider};
-pub use config::{ConfigError, ConfigField, ConfigMetadata, ConfigType, HostResourceBinding};
-pub use manifest::{ProviderAuthManifest, ProviderManifest};
+pub use config::{
+    ConfigError, ConfigField, ConfigMetadata, ConfigType, HostResourceBinding, PreopenMode,
+    PreopenedPath,
+};
+pub use manifest::{
+    AccessNeed, LimitDeclarations, ProviderAuthManifest, ProviderManifest, ResourceLimit,
+};
 pub use sections::{
     PROVIDER_METADATA_SECTION_NAME, ProviderMetadataError, embed_provider_metadata_section,
     is_hostname_only, provider_manifest_json, read_provider_metadata_section,

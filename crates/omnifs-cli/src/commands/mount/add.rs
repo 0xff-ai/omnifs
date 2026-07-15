@@ -205,13 +205,13 @@ mod tests {
     use crate::commands::mount::mount_file::MountFile;
     use crate::commands::mount::spec_creation::{CreatedMountSpec, MountSpecCreator};
     use crate::workspace::Workspace;
-    use omnifs_caps::{LimitDeclarations, Limits as ProviderLimits, PreopenMode, ResourceLimit};
     use omnifs_workspace::authn::{AuthManifest, AuthScheme};
     use omnifs_workspace::ids::{ProviderId, ProviderMeta, ProviderName, ProviderRef};
-    use omnifs_workspace::mounts::Name as MountName;
     use omnifs_workspace::mounts::Registry;
+    use omnifs_workspace::mounts::{Limits as ProviderLimits, Name as MountName};
     use omnifs_workspace::provider::{
-        ConfigField, ConfigMetadata, ConfigType, HostResourceBinding, ProviderManifest,
+        AccessNeed, ConfigField, ConfigMetadata, ConfigType, HostResourceBinding,
+        LimitDeclarations, PreopenMode, ProviderManifest, ResourceLimit,
     };
     use serde_json::Value;
 
@@ -528,7 +528,7 @@ mod tests {
         manifest.display_name = "Web".to_string();
         manifest.default_mount = "web".to_string();
         manifest.auth = None;
-        manifest.capabilities = vec![omnifs_caps::AccessNeed::Domain {
+        manifest.capabilities = vec![AccessNeed::Domain {
             value: "resolved from config at mount-start".to_string(),
             why: "fetch configured domains".to_string(),
             dynamic: true,
@@ -596,7 +596,7 @@ mod tests {
             wit_package: None,
             sdk_version: None,
             refresh_interval_secs: 0,
-            capabilities: vec![omnifs_caps::AccessNeed::Domain {
+            capabilities: vec![AccessNeed::Domain {
                 value: "api.linear.app".to_string(),
                 why: "api calls".to_string(),
                 dynamic: false,

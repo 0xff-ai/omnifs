@@ -7,9 +7,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context, anyhow};
-use omnifs_caps::Limits;
 use omnifs_workspace::layout::WorkspaceLayout;
-use omnifs_workspace::mounts::{Name as MountName, Spec};
+use omnifs_workspace::mounts::{Limits, Name as MountName, Spec};
 use omnifs_workspace::provider::{ProviderAuthManifest, ProviderManifest};
 use serde::de::DeserializeOwned;
 use serde_json::Value;

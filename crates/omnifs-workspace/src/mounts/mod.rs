@@ -22,10 +22,37 @@ use std::path::{Path, PathBuf};
 
 use crate::ids::{ProviderName, ProviderRef};
 use fs2::FileExt;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::provider::{Catalog, CatalogError, ProviderManifest};
-use omnifs_caps::Limits;
+use crate::provider::{Catalog, CatalogError, LimitDeclarations, ProviderManifest};
+
+/// Runtime scalar resource ceilings owned by a mount spec.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct Limits {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_memory_mb: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_fetch_blob_bytes: Option<u64>,
+}
+
+impl Limits {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.max_memory_mb.is_none() && self.max_fetch_blob_bytes.is_none()
+    }
+
+    #[must_use]
+    pub fn from_declarations(declarations: &LimitDeclarations) -> Self {
+        Self {
+            max_memory_mb: declarations.max_memory_mb.as_ref().map(|limit| limit.value),
+            max_fetch_blob_bytes: declarations
+                .max_fetch_blob_bytes
+                .as_ref()
+                .map(|limit| limit.value),
+        }
+    }
+}
 
 /// Raw user-authored mount JSON.
 ///

@@ -25,7 +25,6 @@ url = { workspace = true }
 # omnifs-workspace and are re-exported here for non-wasm targets only.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 omnifs-workspace = { workspace = true }
-omnifs-caps = { workspace = true }
 
 [dev-dependencies]
 trybuild = { workspace = true }

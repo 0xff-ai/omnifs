@@ -9,9 +9,10 @@ use std::net::IpAddr;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
-use omnifs_caps::{AccessNeed, PreopenMode, PreopenedPath};
 use omnifs_workspace::mounts::Spec;
-use omnifs_workspace::provider::{ConfigMetadata, HostResourceBinding, ProviderManifest};
+use omnifs_workspace::provider::{
+    AccessNeed, ConfigMetadata, HostResourceBinding, PreopenMode, PreopenedPath, ProviderManifest,
+};
 use reqwest::Url;
 
 #[derive(Debug, thiserror::Error)]
@@ -521,11 +522,11 @@ fn is_private_or_link_local(ip: &IpAddr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{AuthorityError, RuntimeAuthority, decode_socket_endpoint};
-    use omnifs_caps::{AccessNeed, PreopenMode};
     use omnifs_workspace::ids::{ProviderId, ProviderMeta, ProviderName, ProviderRef};
     use omnifs_workspace::mounts::Spec;
     use omnifs_workspace::provider::{
-        ConfigField, ConfigMetadata, ConfigType, HostResourceBinding, ProviderManifest,
+        AccessNeed, ConfigField, ConfigMetadata, ConfigType, HostResourceBinding, PreopenMode,
+        PreopenedPath, ProviderManifest,
     };
 
     fn spec() -> Spec {
@@ -590,7 +591,7 @@ mod tests {
     fn resource_binding_pairing_fails_closed_in_authority_resolution() {
         let dynamic_preopen = manifest(
             vec![AccessNeed::PreopenedPath {
-                value: omnifs_caps::PreopenedPath {
+                value: PreopenedPath {
                     host: "/data/file".to_owned(),
                     guest: "/data".to_owned(),
                     mode: PreopenMode::Ro,
@@ -632,7 +633,7 @@ mod tests {
         let file = tempfile::NamedTempFile::new().unwrap();
         let mut paired_manifest = unpaired_file.clone();
         paired_manifest.capabilities = vec![AccessNeed::PreopenedPath {
-            value: omnifs_caps::PreopenedPath {
+            value: PreopenedPath {
                 host: "/data/file".to_owned(),
                 guest: "/data".to_owned(),
                 mode: PreopenMode::Ro,

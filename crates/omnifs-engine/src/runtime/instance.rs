@@ -547,8 +547,8 @@ fn build_wasi_ctx(
         // would silently confuse later guest-side path resolution.
         let _ = validate_preopen_path(&entry.guest)?;
         let (dir_perms, file_perms) = match entry.mode {
-            omnifs_caps::PreopenMode::Ro => (DirPerms::READ, FilePerms::READ),
-            omnifs_caps::PreopenMode::Rw => (
+            omnifs_workspace::provider::PreopenMode::Ro => (DirPerms::READ, FilePerms::READ),
+            omnifs_workspace::provider::PreopenMode::Rw => (
                 DirPerms::READ | DirPerms::MUTATE,
                 FilePerms::READ | FilePerms::WRITE,
             ),

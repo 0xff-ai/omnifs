@@ -21,13 +21,42 @@ struct TimerSpec {
     handler: Path,
 }
 
+enum ParsedAccessNeed {
+    Domain {
+        value: String,
+        why: String,
+        dynamic: bool,
+    },
+    GitRepo {
+        value: String,
+        why: String,
+    },
+    UnixSocket {
+        why: String,
+    },
+    PreopenedPath {
+        why: String,
+    },
+}
+
+struct ParsedResourceLimit<T> {
+    value: T,
+    why: String,
+}
+
+#[derive(Default)]
+struct ParsedLimitDeclarations {
+    max_memory_mb: Option<ParsedResourceLimit<u32>>,
+    max_fetch_blob_bytes: Option<ParsedResourceLimit<u64>>,
+}
+
 pub struct ProviderArgs {
     id: Option<LitStr>,
     display_name: Option<LitStr>,
     description: Option<LitStr>,
     mount: Option<LitStr>,
-    capabilities: Vec<omnifs_caps::AccessNeed>,
-    limits: omnifs_caps::LimitDeclarations,
+    capabilities: Vec<ParsedAccessNeed>,
+    limits: ParsedLimitDeclarations,
     auth: Option<syn::Expr>,
     timer: Option<TimerSpec>,
 }
@@ -40,7 +69,7 @@ impl Parse for ProviderArgs {
             description: None,
             mount: None,
             capabilities: Vec::new(),
-            limits: omnifs_caps::LimitDeclarations::default(),
+            limits: ParsedLimitDeclarations::default(),
             auth: None,
             timer: None,
         };
@@ -115,7 +144,7 @@ const DYNAMIC_PLACEHOLDER: &str = "resolved from config at mount-start";
 /// preopened_path(dynamic, "why"), ...)` into the manifest's declared
 /// `AccessNeed`s. Literal string kinds take `("value", "why")`; dynamic
 /// capabilities resolve at mount-start from config fields.
-fn parse_capabilities(content: ParseStream<'_>) -> syn::Result<Vec<omnifs_caps::AccessNeed>> {
+fn parse_capabilities(content: ParseStream<'_>) -> syn::Result<Vec<ParsedAccessNeed>> {
     let mut needs = Vec::new();
     while !content.is_empty() {
         let kind: syn::Ident = content.parse()?;
@@ -125,25 +154,13 @@ fn parse_capabilities(content: ParseStream<'_>) -> syn::Result<Vec<omnifs_caps::
             "domain" => parse_domain_need(&inner, &kind)?,
             "git_repo" => {
                 let (value, why) = parse_literal_need(&inner)?;
-                omnifs_caps::AccessNeed::GitRepo {
-                    value,
-                    why,
-                    dynamic: false,
-                }
+                ParsedAccessNeed::GitRepo { value, why }
             },
-            "unix_socket" => omnifs_caps::AccessNeed::UnixSocket {
-                value: DYNAMIC_PLACEHOLDER.to_string(),
+            "unix_socket" => ParsedAccessNeed::UnixSocket {
                 why: parse_dynamic_why(&inner, &kind)?,
-                dynamic: true,
             },
-            "preopened_path" => omnifs_caps::AccessNeed::PreopenedPath {
-                value: omnifs_caps::PreopenedPath {
-                    host: DYNAMIC_PLACEHOLDER.to_string(),
-                    guest: DYNAMIC_PLACEHOLDER.to_string(),
-                    mode: omnifs_caps::PreopenMode::Ro,
-                },
+            "preopened_path" => ParsedAccessNeed::PreopenedPath {
                 why: parse_dynamic_why(&inner, &kind)?,
-                dynamic: true,
             },
             "memory_mb" | "fetch_blob_bytes" => {
                 return Err(syn::Error::new(
@@ -172,8 +189,8 @@ fn parse_capabilities(content: ParseStream<'_>) -> syn::Result<Vec<omnifs_caps::
 
 /// Parse `limits(memory_mb(32, "why"), fetch_blob_bytes(1048576, "why"), ...)`
 /// into provider scalar resource declarations.
-fn parse_limits(content: ParseStream<'_>) -> syn::Result<omnifs_caps::LimitDeclarations> {
-    let mut limits = omnifs_caps::LimitDeclarations::default();
+fn parse_limits(content: ParseStream<'_>) -> syn::Result<ParsedLimitDeclarations> {
+    let mut limits = ParsedLimitDeclarations::default();
     while !content.is_empty() {
         let kind: syn::Ident = content.parse()?;
         let inner;
@@ -184,7 +201,7 @@ fn parse_limits(content: ParseStream<'_>) -> syn::Result<omnifs_caps::LimitDecla
                 let amount: LitInt = inner.parse()?;
                 let _: Token![,] = inner.parse()?;
                 let why: LitStr = inner.parse()?;
-                limits.max_memory_mb = Some(omnifs_caps::ResourceLimit {
+                limits.max_memory_mb = Some(ParsedResourceLimit {
                     value: amount.base10_parse::<u32>()?,
                     why: why.value(),
                 });
@@ -194,7 +211,7 @@ fn parse_limits(content: ParseStream<'_>) -> syn::Result<omnifs_caps::LimitDecla
                 let amount: LitInt = inner.parse()?;
                 let _: Token![,] = inner.parse()?;
                 let why: LitStr = inner.parse()?;
-                limits.max_fetch_blob_bytes = Some(omnifs_caps::ResourceLimit {
+                limits.max_fetch_blob_bytes = Some(ParsedResourceLimit {
                     value: amount.base10_parse::<u64>()?,
                     why: why.value(),
                 });
@@ -216,7 +233,7 @@ fn parse_limits(content: ParseStream<'_>) -> syn::Result<omnifs_caps::LimitDecla
 }
 
 fn reject_duplicate_limit<T>(
-    field: Option<&omnifs_caps::ResourceLimit<T>>,
+    field: Option<&ParsedResourceLimit<T>>,
     kind: &syn::Ident,
 ) -> syn::Result<()> {
     if field.is_some() {
@@ -236,16 +253,13 @@ fn parse_literal_need(inner: ParseStream<'_>) -> syn::Result<(String, String)> {
     Ok((value.value(), why.value()))
 }
 
-fn parse_domain_need(
-    inner: ParseStream<'_>,
-    kind: &syn::Ident,
-) -> syn::Result<omnifs_caps::AccessNeed> {
+fn parse_domain_need(inner: ParseStream<'_>, kind: &syn::Ident) -> syn::Result<ParsedAccessNeed> {
     if inner.peek(syn::Ident) {
         let marker: syn::Ident = inner.parse()?;
         if marker == "dynamic" {
             let _: Token![,] = inner.parse()?;
             let why: LitStr = inner.parse()?;
-            return Ok(omnifs_caps::AccessNeed::Domain {
+            return Ok(ParsedAccessNeed::Domain {
                 value: DYNAMIC_PLACEHOLDER.to_string(),
                 why: why.value(),
                 dynamic: true,
@@ -258,7 +272,7 @@ fn parse_domain_need(
     }
 
     let (value, why) = parse_literal_need(inner)?;
-    Ok(omnifs_caps::AccessNeed::Domain {
+    Ok(ParsedAccessNeed::Domain {
         value,
         why,
         dynamic: false,
@@ -457,8 +471,8 @@ impl ManifestFacts {
     fn metadata_tokens(
         &self,
         config_type: &Type,
-        capabilities: &[omnifs_caps::AccessNeed],
-        limits: &omnifs_caps::LimitDeclarations,
+        capabilities: &[ParsedAccessNeed],
+        limits: &ParsedLimitDeclarations,
         auth: Option<&syn::Expr>,
         refresh_interval: &TokenStream2,
     ) -> TokenStream2 {
@@ -503,12 +517,12 @@ impl ManifestFacts {
     }
 }
 
-fn capability_tokens(need: &omnifs_caps::AccessNeed) -> TokenStream2 {
+fn capability_tokens(need: &ParsedAccessNeed) -> TokenStream2 {
     // A dynamic socket/preopen need resolves its concrete value from a config
     // field at mount-start; the placeholder mirrors the host's marker.
     let dynamic_placeholder = DYNAMIC_PLACEHOLDER;
     match need {
-        omnifs_caps::AccessNeed::Domain {
+        ParsedAccessNeed::Domain {
             value,
             why,
             dynamic,
@@ -518,16 +532,16 @@ fn capability_tokens(need: &omnifs_caps::AccessNeed) -> TokenStream2 {
             let why = LitStr::new(why, Span::call_site());
             quote! { omnifs_sdk::AccessNeed::Domain { value: #value.to_string(), why: #why.to_string(), dynamic: #dynamic } }
         },
-        omnifs_caps::AccessNeed::GitRepo { value, why, .. } => {
+        ParsedAccessNeed::GitRepo { value, why } => {
             let value = LitStr::new(value, Span::call_site());
             let why = LitStr::new(why, Span::call_site());
             quote! { omnifs_sdk::AccessNeed::GitRepo { value: #value.to_string(), why: #why.to_string(), dynamic: false } }
         },
-        omnifs_caps::AccessNeed::UnixSocket { why, .. } => {
+        ParsedAccessNeed::UnixSocket { why } => {
             let why = LitStr::new(why, Span::call_site());
             quote! { omnifs_sdk::AccessNeed::UnixSocket { value: #dynamic_placeholder.to_string(), why: #why.to_string(), dynamic: true } }
         },
-        omnifs_caps::AccessNeed::PreopenedPath { why, .. } => {
+        ParsedAccessNeed::PreopenedPath { why } => {
             let why = LitStr::new(why, Span::call_site());
             quote! {
                 omnifs_sdk::AccessNeed::PreopenedPath {
@@ -544,7 +558,7 @@ fn capability_tokens(need: &omnifs_caps::AccessNeed) -> TokenStream2 {
     }
 }
 
-fn limit_declarations_tokens(limits: &omnifs_caps::LimitDeclarations) -> TokenStream2 {
+fn limit_declarations_tokens(limits: &ParsedLimitDeclarations) -> TokenStream2 {
     let max_memory_mb = optional_limit_tokens(limits.max_memory_mb.as_ref());
     let max_fetch_blob_bytes = optional_limit_tokens(limits.max_fetch_blob_bytes.as_ref());
     quote! {
@@ -555,7 +569,7 @@ fn limit_declarations_tokens(limits: &omnifs_caps::LimitDeclarations) -> TokenSt
     }
 }
 
-fn optional_limit_tokens<T>(limit: Option<&omnifs_caps::ResourceLimit<T>>) -> TokenStream2
+fn optional_limit_tokens<T>(limit: Option<&ParsedResourceLimit<T>>) -> TokenStream2
 where
     T: quote::ToTokens,
 {
