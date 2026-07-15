@@ -627,6 +627,49 @@ fn scenario_8_revision_restart_and_preflight_failure() {
     let test_spec_path = fixture.mounts_dir().join("test.json");
     let committed_spec = std::fs::read(&test_spec_path).expect("read committed test spec");
 
+    let projection_root = std::fs::read_dir(fixture.home_path().join("cache/projections"))
+        .expect("read projection roots")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|root| {
+            let Ok(bytes) = std::fs::read(root.join("manifest.json")) else {
+                return false;
+            };
+            let Ok(manifest) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+                return false;
+            };
+            manifest["mount"] == "test"
+                && manifest["provider_id"] == fixture.test_provider_id.to_string()
+                && manifest["spec_digest"] == blake3::hash(&committed_spec).to_hex().to_string()
+        })
+        .expect("find current test projection");
+    let manifest_path = projection_root.join("manifest.json");
+    let manifest_bytes = std::fs::read(&manifest_path).expect("read current projection manifest");
+    std::fs::write(&manifest_path, b"{").expect("corrupt current projection manifest");
+    let rejected_manifest = fixture.run(&["up", "--offline"]);
+    assert!(
+        !rejected_manifest.status.success(),
+        "offline replacement must reject a corrupt reused projection manifest"
+    );
+    let surviving_manifest_failure =
+        omnifs_workspace::daemon_record::DaemonRecord::read(&fixture.daemon_record_path())
+            .expect("read daemon after manifest validation failure")
+            .expect("online daemon must remain recorded after manifest failure");
+    assert_eq!(surviving_manifest_failure.pid, second.pid);
+    assert_eq!(
+        surviving_manifest_failure.mount_revision,
+        second.mount_revision
+    );
+    assert!(!surviving_manifest_failure.offline);
+    assert_eq!(
+        omnifs_workspace::mounts::Repository::observe(fixture.mounts_dir())
+            .expect("observe after manifest validation failure")
+            .applied()
+            .expect("read applied after manifest validation failure"),
+        Some(second.mount_revision.clone())
+    );
+    std::fs::write(&manifest_path, manifest_bytes).expect("restore current projection manifest");
+
     // An exact spec-byte change creates a new projection identity even when
     // the parsed mount semantics are unchanged. The live daemon validates it
     // before teardown, so a missing projection must leave the online daemon

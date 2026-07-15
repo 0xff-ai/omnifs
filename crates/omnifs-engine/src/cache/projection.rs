@@ -53,6 +53,7 @@ impl ProjectionManifest {
 
 pub(crate) struct ProjectionStore {
     root: PathBuf,
+    id: ProjectionId,
     manifest: ProjectionManifest,
     db: OptimisticTxDatabase,
     facts: OptimisticTxKeyspace,
@@ -159,6 +160,7 @@ impl ProjectionStore {
         )?;
         Ok(Self {
             root,
+            id,
             manifest,
             db: database.clone(),
             facts,
@@ -178,14 +180,43 @@ impl ProjectionStore {
         if id != ProjectionId::new(spec_source, provider_id) {
             return Err(ProjectionStoreError::InvalidIdentity);
         }
-        let root =
-            crate::cache::existing_directory(&root.as_ref().join(id.hex())).map_err(|error| {
-                if error.kind() == io::ErrorKind::NotFound {
-                    ProjectionStoreError::Missing
-                } else {
-                    ProjectionStoreError::Io(error)
-                }
-            })?;
+        let (root, manifest) = Self::read_existing_projection(
+            &root.as_ref().join(id.hex()),
+            database,
+            id,
+            mount,
+            spec_source,
+            provider_id,
+        )?;
+        let keyspace = format!("facts.{}", id.hex());
+        let facts = database.keyspace(&keyspace, KeyspaceCreateOptions::default)?;
+        Ok(Self {
+            root,
+            id,
+            manifest,
+            db: database.clone(),
+            facts,
+        })
+    }
+
+    fn read_existing_projection(
+        root: &Path,
+        database: &OptimisticTxDatabase,
+        id: ProjectionId,
+        mount: &Name,
+        spec_source: &[u8],
+        provider_id: ProviderId,
+    ) -> Result<(PathBuf, ProjectionManifest), ProjectionStoreError> {
+        let root = crate::cache::existing_directory(root).map_err(|error| {
+            if error.kind() == io::ErrorKind::NotFound {
+                ProjectionStoreError::Missing
+            } else {
+                ProjectionStoreError::Io(error)
+            }
+        })?;
+        if root.file_name().and_then(|name| name.to_str()) != Some(id.hex().as_str()) {
+            return Err(ProjectionStoreError::InvalidRoot);
+        }
         let manifest_path = root.join("manifest.json");
         let metadata = fs::symlink_metadata(&manifest_path).map_err(|error| {
             if error.kind() == io::ErrorKind::NotFound {
@@ -208,13 +239,24 @@ impl ProjectionStore {
         if !database.keyspace_exists(&keyspace) {
             return Err(ProjectionStoreError::Missing);
         }
-        let facts = database.keyspace(&keyspace, KeyspaceCreateOptions::default)?;
-        Ok(Self {
-            root,
-            manifest,
-            db: database.clone(),
-            facts,
-        })
+        Ok((root, manifest))
+    }
+
+    pub(crate) fn validate_existing(
+        &self,
+        mount: &Name,
+        spec_source: &[u8],
+        provider_id: ProviderId,
+    ) -> Result<(), ProjectionStoreError> {
+        Self::read_existing_projection(
+            &self.root,
+            &self.db,
+            self.id,
+            mount,
+            spec_source,
+            provider_id,
+        )?;
+        Ok(())
     }
 
     #[must_use]
