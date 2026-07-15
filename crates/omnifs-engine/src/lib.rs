@@ -10,7 +10,6 @@ pub(crate) mod cache;
 pub(crate) mod callouts;
 #[cfg(feature = "runtime")]
 pub(crate) mod clock;
-pub mod coalesce;
 #[cfg(feature = "runtime")]
 pub(crate) mod effects;
 #[cfg(feature = "runtime")]
@@ -32,7 +31,6 @@ pub(crate) mod runtime;
 pub(crate) mod sandbox;
 #[cfg(feature = "runtime")]
 pub(crate) mod serving;
-pub mod singleflight;
 #[cfg(feature = "runtime")]
 pub mod test_support;
 #[cfg(feature = "runtime")]

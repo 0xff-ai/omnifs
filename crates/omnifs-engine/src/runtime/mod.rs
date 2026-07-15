@@ -10,7 +10,6 @@ use crate::blob::{BlobExecutor, BlobLimits};
 use crate::cache::{Caches, MountResources};
 use crate::callouts::{CalloutHost, TestCallouts, TestSignal};
 use crate::cloner::GitCloner;
-use crate::coalesce::ns::InFlight;
 use crate::git;
 use crate::http::HttpStack;
 use crate::instance::Instance;
@@ -126,7 +125,7 @@ pub struct Runtime {
     pub resources: Arc<MountResources>,
     trees: Arc<TreeRefs>,
     pub(crate) invalidation: InvalidationState,
-    pub(crate) coalesce: InFlight,
+    pub(crate) namespace_flights: crate::ops::namespace::NamespaceFlights,
     /// Per-path locks serializing the read-modify-write of a paged
     /// directory's accumulated dirents. Two concurrent `@next` (or `@all`)
     /// reads on the same directory must not both snapshot the same base and
@@ -402,7 +401,7 @@ impl Runtime {
             resources,
             trees,
             invalidation: InvalidationState::default(),
-            coalesce: InFlight::new(),
+            namespace_flights: crate::ops::namespace::NamespaceFlights::new(),
             pagination_locks: DashMap::new(),
             rate_limit_until: std::sync::Mutex::new(None),
             test_callouts: test_rx.map(std::sync::Mutex::new),

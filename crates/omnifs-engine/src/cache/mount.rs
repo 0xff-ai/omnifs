@@ -32,9 +32,11 @@ use parking_lot::Mutex;
 use std::collections::HashSet;
 use std::path::Path as StdPath;
 use std::sync::Arc;
+use tokio::sync::Notify;
 
 use super::blob::{BLOB_TMP_DIR, BlobCache};
 use super::{object, view};
+use crate::object_id::ObjectId;
 
 /// Result of a warm canonical lookup: the object id, the canonical bytes, and
 /// the optional validator.
@@ -278,6 +280,44 @@ pub struct MountResources {
     pub(crate) mount: Name,
     pub(crate) coherence: Mutex<Coherence>,
     pub(crate) blob: BlobCache,
+    publication: PublicationReservations,
+}
+
+#[derive(Clone, Eq, Hash, PartialEq)]
+pub(crate) enum PublicationKey {
+    Path(Path),
+    Object(ObjectId),
+    Revalidate(ObjectId),
+}
+
+impl PublicationKey {
+    fn blocks(&self, requested: &Self) -> bool {
+        match (self, requested) {
+            (Self::Path(holder), Self::Path(waiter)) => {
+                holder == waiter || (waiter.has_prefix(holder) && holder != waiter)
+            },
+            (Self::Object(holder), Self::Object(waiter))
+            | (Self::Revalidate(holder), Self::Revalidate(waiter)) => holder == waiter,
+            _ => false,
+        }
+    }
+}
+
+struct PublicationReservations {
+    active: Mutex<HashSet<PublicationKey>>,
+    wake: Notify,
+}
+
+pub(crate) struct PublicationPermit<'a> {
+    reservations: &'a PublicationReservations,
+    key: PublicationKey,
+}
+
+impl Drop for PublicationPermit<'_> {
+    fn drop(&mut self) {
+        self.reservations.active.lock().remove(&self.key);
+        self.reservations.wake.notify_waiters();
+    }
 }
 
 pub struct Coherence {
@@ -308,7 +348,34 @@ impl MountResources {
                 neg_by_id: DashMap::new(),
             }),
             blob,
+            publication: PublicationReservations {
+                active: Mutex::new(HashSet::new()),
+                wake: Notify::new(),
+            },
         }))
+    }
+
+    pub(crate) async fn reserve(&self, key: PublicationKey) -> PublicationPermit<'_> {
+        loop {
+            let mut notified = Box::pin(self.publication.wake.notified());
+            notified.as_mut().enable();
+            let available = {
+                let mut active = self.publication.active.lock();
+                if active.iter().any(|holder| holder.blocks(&key)) {
+                    false
+                } else {
+                    active.insert(key.clone());
+                    true
+                }
+            };
+            if available {
+                return PublicationPermit {
+                    reservations: &self.publication,
+                    key,
+                };
+            }
+            notified.await;
+        }
     }
 
     /// Scoped view-cache key as a valid protocol path: `/{mount}{path}`.
@@ -760,6 +827,45 @@ mod tests {
 
     fn p(path: &str) -> Path {
         Path::parse(path).unwrap()
+    }
+
+    #[tokio::test]
+    async fn publication_reservations_order_path_ancestors_and_boundaries() {
+        let (_dir, _caches, resources) = open_store("gh");
+        let parent = resources.reserve(PublicationKey::Path(p("/a"))).await;
+
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(20),
+                resources.reserve(PublicationKey::Path(p("/a/b")))
+            )
+            .await
+            .is_err()
+        );
+
+        let boundary = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            resources.reserve(PublicationKey::Path(p("/abcd"))),
+        )
+        .await
+        .expect("a non-descendant path is not covered by /a");
+        drop(boundary);
+        drop(parent);
+
+        let child = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            resources.reserve(PublicationKey::Path(p("/a/b"))),
+        )
+        .await
+        .expect("the descendant becomes available after its ancestor drops");
+        let ancestor = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            resources.reserve(PublicationKey::Path(p("/a"))),
+        )
+        .await
+        .expect("an ancestor does not wait for a descendant");
+        drop(ancestor);
+        drop(child);
     }
 
     const OBJ_ID: &[u8] = b"issue:42";
