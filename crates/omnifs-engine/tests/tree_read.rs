@@ -370,10 +370,12 @@ async fn prime_cold_item_md(t: &TestTree, ctx: &RequestCtx) {
         .list(&items, None, ctx)
         .await
         .expect("list /items/open");
-    t.runtime.apply_effects_for_test(
-        &listing_invalidation(ITEM_MD),
-        t.runtime.resources.current_generation(),
-    );
+    t.runtime
+        .apply_effects_for_test(
+            &listing_invalidation(ITEM_MD),
+            t.runtime.resources.current_generation(),
+        )
+        .expect("test effects should publish");
     assert!(
         t.runtime
             .resources
@@ -448,10 +450,12 @@ async fn canonical_identity_read_is_not_copied_into_view_cache() {
         .list(&items, None, &ctx)
         .await
         .expect("list /items/open");
-    t.runtime.apply_effects_for_test(
-        &listing_invalidation(json),
-        t.runtime.resources.current_generation(),
-    );
+    t.runtime
+        .apply_effects_for_test(
+            &listing_invalidation(json),
+            t.runtime.resources.current_generation(),
+        )
+        .expect("test effects should publish");
     assert!(
         t.runtime
             .resources

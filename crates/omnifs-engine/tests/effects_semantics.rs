@@ -110,7 +110,8 @@ fn one_batch_applies_canonical_fs_and_dirents_merge() {
 
     harness
         .runtime
-        .apply_effects_for_test(&effects, harness.runtime.resources.current_generation());
+        .apply_effects_for_test(&effects, harness.runtime.resources.current_generation())
+        .expect("test effects should publish");
 
     // Canonical store landed.
     let canonical = harness
@@ -170,7 +171,8 @@ fn invalidations_run_after_writes_in_one_batch() {
 
     harness
         .runtime
-        .apply_effects_for_test(&effects, harness.runtime.resources.current_generation());
+        .apply_effects_for_test(&effects, harness.runtime.resources.current_generation())
+        .expect("test effects should publish");
 
     // The same-batch Object(target) invalidation ran after the writes: had it run
     // first, `target` would not yet be indexed, nothing would be deleted, and both
@@ -214,14 +216,17 @@ fn object_invalidation_deletes_durable_object_not_just_fences() {
     let id = object_id("durable");
     let leaf = "/objects/durable/view";
 
-    harness.runtime.apply_effects_for_test(
-        &Effects {
-            canonical: vec![canonical_store(&id, leaf, b"durable-bytes")],
-            fs: Vec::new(),
-            invalidations: Vec::new(),
-        },
-        harness.runtime.resources.current_generation(),
-    );
+    harness
+        .runtime
+        .apply_effects_for_test(
+            &Effects {
+                canonical: vec![canonical_store(&id, leaf, b"durable-bytes")],
+                fs: Vec::new(),
+                invalidations: Vec::new(),
+            },
+            harness.runtime.resources.current_generation(),
+        )
+        .expect("test effects should publish");
     assert!(
         harness
             .runtime
@@ -238,14 +243,17 @@ fn object_invalidation_deletes_durable_object_not_just_fences() {
         .id_of_path(&p(leaf))
         .expect("the leaf is indexed to the object before invalidation");
 
-    harness.runtime.apply_effects_for_test(
-        &Effects {
-            canonical: Vec::new(),
-            fs: Vec::new(),
-            invalidations: vec![Invalidation::Object(id.clone())],
-        },
-        harness.runtime.resources.current_generation(),
-    );
+    harness
+        .runtime
+        .apply_effects_for_test(
+            &Effects {
+                canonical: Vec::new(),
+                fs: Vec::new(),
+                invalidations: vec![Invalidation::Object(id.clone())],
+            },
+            harness.runtime.resources.current_generation(),
+        )
+        .expect("test effects should publish");
 
     // A subsequent cold read misses: the durable canonical is gone.
     assert!(

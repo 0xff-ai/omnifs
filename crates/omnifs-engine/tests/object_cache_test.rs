@@ -86,7 +86,8 @@ fn canonical_eviction_drops_validator() {
     let op_gen = harness.runtime.resources.current_generation();
     harness
         .runtime
-        .apply_effects_for_test(&canonical_effect(&id, leaf, bytes, Some("etag")), op_gen);
+        .apply_effects_for_test(&canonical_effect(&id, leaf, bytes, Some("etag")), op_gen)
+        .expect("test effects should publish");
 
     let cached = harness.runtime.resources.cached_canonical_for(&p(leaf));
     assert!(cached.is_some());
@@ -104,7 +105,8 @@ fn canonical_eviction_drops_validator() {
     };
     harness
         .runtime
-        .apply_effects_for_test(&invalidate, harness.runtime.resources.current_generation());
+        .apply_effects_for_test(&invalidate, harness.runtime.resources.current_generation())
+        .expect("test effects should publish");
 
     assert!(
         harness
@@ -132,11 +134,13 @@ fn fence_rejects_stale_preload_and_negative() {
     };
     harness
         .runtime
-        .apply_effects_for_test(&invalidate, harness.runtime.resources.current_generation());
+        .apply_effects_for_test(&invalidate, harness.runtime.resources.current_generation())
+        .expect("test effects should publish");
 
     harness
         .runtime
-        .apply_effects_for_test(&preload_file_effect(&id, leaf, b"stale"), op_gen0);
+        .apply_effects_for_test(&preload_file_effect(&id, leaf, b"stale"), op_gen0)
+        .expect("test effects should publish");
     assert!(
         harness
             .runtime
@@ -176,12 +180,16 @@ fn stale_canonical_fenced_by_midflight_invalidation() {
     };
     harness
         .runtime
-        .apply_effects_for_test(&invalidate, harness.runtime.resources.current_generation());
+        .apply_effects_for_test(&invalidate, harness.runtime.resources.current_generation())
+        .expect("test effects should publish");
 
-    harness.runtime.apply_effects_for_test(
-        &canonical_effect(&id, leaf, b"stale canonical", None),
-        op_gen0,
-    );
+    harness
+        .runtime
+        .apply_effects_for_test(
+            &canonical_effect(&id, leaf, b"stale canonical", None),
+            op_gen0,
+        )
+        .expect("test effects should publish");
     assert!(
         harness
             .runtime
@@ -295,10 +303,13 @@ async fn plain_path_ignores_unrelated_indexed_validator() {
         kind: "test.unrelated".to_string(),
         captures: vec![],
     };
-    harness.runtime.apply_effects_for_test(
-        &canonical_effect(&id, path, b"unrelated canonical", Some("unrelated-v1")),
-        harness.runtime.resources.current_generation(),
-    );
+    harness
+        .runtime
+        .apply_effects_for_test(
+            &canonical_effect(&id, path, b"unrelated canonical", Some("unrelated-v1")),
+            harness.runtime.resources.current_generation(),
+        )
+        .expect("test effects should publish");
 
     assert!(
         harness
@@ -327,31 +338,37 @@ fn object_vs_listing_invalidation() {
     let open_leaf = "/o/r/issues/open/42/title";
     let all_leaf = "/o/r/issues/all/42/title";
 
-    harness.runtime.apply_effects_for_test(
-        &Effects {
-            canonical: vec![omnifs_wit::provider::types::CanonicalStore {
-                id: id.clone(),
-                validator: None,
-                bytes: b"{}".to_vec(),
-                view_leaves: vec![open_leaf.to_string(), all_leaf.to_string()],
-            }],
-            fs: Vec::new(),
-            invalidations: Vec::new(),
-        },
-        harness.runtime.resources.current_generation(),
-    );
-
-    harness.runtime.apply_effects_for_test(
-        &Effects {
-            invalidations: vec![Invalidation::Object(id.clone())],
-            ..Effects {
-                canonical: Vec::new(),
+    harness
+        .runtime
+        .apply_effects_for_test(
+            &Effects {
+                canonical: vec![omnifs_wit::provider::types::CanonicalStore {
+                    id: id.clone(),
+                    validator: None,
+                    bytes: b"{}".to_vec(),
+                    view_leaves: vec![open_leaf.to_string(), all_leaf.to_string()],
+                }],
                 fs: Vec::new(),
                 invalidations: Vec::new(),
-            }
-        },
-        harness.runtime.resources.current_generation(),
-    );
+            },
+            harness.runtime.resources.current_generation(),
+        )
+        .expect("test effects should publish");
+
+    harness
+        .runtime
+        .apply_effects_for_test(
+            &Effects {
+                invalidations: vec![Invalidation::Object(id.clone())],
+                ..Effects {
+                    canonical: Vec::new(),
+                    fs: Vec::new(),
+                    invalidations: Vec::new(),
+                }
+            },
+            harness.runtime.resources.current_generation(),
+        )
+        .expect("test effects should publish");
     assert!(
         harness
             .runtime
@@ -367,28 +384,37 @@ fn object_vs_listing_invalidation() {
             .is_none()
     );
 
-    harness.runtime.apply_effects_for_test(
-        &canonical_effect(&id, open_leaf, b"{}", None),
-        harness.runtime.resources.current_generation(),
-    );
-    harness.runtime.apply_effects_for_test(
-        &preload_file_effect(&id, all_leaf, b"listed"),
-        harness.runtime.resources.current_generation(),
-    );
+    harness
+        .runtime
+        .apply_effects_for_test(
+            &canonical_effect(&id, open_leaf, b"{}", None),
+            harness.runtime.resources.current_generation(),
+        )
+        .expect("test effects should publish");
+    harness
+        .runtime
+        .apply_effects_for_test(
+            &preload_file_effect(&id, all_leaf, b"listed"),
+            harness.runtime.resources.current_generation(),
+        )
+        .expect("test effects should publish");
 
-    harness.runtime.apply_effects_for_test(
-        &Effects {
-            invalidations: vec![Invalidation::Listing(PathOrPrefix::Prefix(
-                "/o/r/issues/all".to_string(),
-            ))],
-            ..Effects {
-                canonical: Vec::new(),
-                fs: Vec::new(),
-                invalidations: Vec::new(),
-            }
-        },
-        harness.runtime.resources.current_generation(),
-    );
+    harness
+        .runtime
+        .apply_effects_for_test(
+            &Effects {
+                invalidations: vec![Invalidation::Listing(PathOrPrefix::Prefix(
+                    "/o/r/issues/all".to_string(),
+                ))],
+                ..Effects {
+                    canonical: Vec::new(),
+                    fs: Vec::new(),
+                    invalidations: Vec::new(),
+                }
+            },
+            harness.runtime.resources.current_generation(),
+        )
+        .expect("test effects should publish");
 
     assert!(
         harness
@@ -458,7 +484,8 @@ fn negative_returns_enoent_until_deadline_or_invalidate() {
     };
     harness
         .runtime
-        .apply_effects_for_test(&invalidate, harness.runtime.resources.current_generation());
+        .apply_effects_for_test(&invalidate, harness.runtime.resources.current_generation())
+        .expect("test effects should publish");
     assert!(
         harness
             .runtime

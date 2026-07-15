@@ -440,10 +440,12 @@ async fn invalidation_evicts_cached_read() {
 
     // A listing invalidation for the path bumps the per-mount generation and
     // evicts the view leaf (the coherence the read-path fence protects).
-    t.runtime.apply_effects_for_test(
-        &listing_invalidation("/hello/greeting"),
-        t.runtime.resources.current_generation(),
-    );
+    t.runtime
+        .apply_effects_for_test(
+            &listing_invalidation("/hello/greeting"),
+            t.runtime.resources.current_generation(),
+        )
+        .expect("test effects should publish");
     assert!(
         t.runtime
             .resources

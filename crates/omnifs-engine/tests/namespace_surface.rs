@@ -342,10 +342,12 @@ async fn invalidation_bumps_epoch_and_notifies_subscriber() {
 
     // Subscribe, then fire a provider invalidation for the message leaf.
     let mut events = ns.subscribe();
-    t.runtime.apply_effects_for_test(
-        &path_invalidation("/hello/message"),
-        t.runtime.resources.current_generation(),
-    );
+    t.runtime
+        .apply_effects_for_test(
+            &path_invalidation("/hello/message"),
+            t.runtime.resources.current_generation(),
+        )
+        .expect("test effects should publish");
 
     // Any op drains the pending invalidation before answering: getattr both
     // emits the event and re-resolves fresh state.

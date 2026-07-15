@@ -2295,7 +2295,8 @@ async fn open_then_all_one_load() {
     let harness = github_harness();
     harness
         .runtime
-        .apply_effects_for_test(effects, harness.current_generation());
+        .apply_effects_for_test(effects, harness.current_generation())
+        .expect("test effects should publish");
     assert!(harness.cached_canonical_for(open_title).is_some());
     assert!(harness.cached_canonical_for(all_title).is_some());
 

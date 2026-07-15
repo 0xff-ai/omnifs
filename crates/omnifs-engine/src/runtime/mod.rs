@@ -351,21 +351,16 @@ impl Runtime {
             config_bytes,
             Arc::clone(&authority),
             park_signal,
-        )
-        .map_err(|error| {
-            EngineError::ProviderProtocol(format!("cache publication failed: {error}"))
-        })?;
+        )?;
 
         let (init_result, initialize_effects) = instance.initialize().map_err(BuildError::from)?;
-        op_validate::validate_initialize(&init_result, &initialize_effects, |_| false)
-            .map_err(|message| {
+        op_validate::validate_initialize(&init_result, &initialize_effects, |_| false).map_err(
+            |message| {
                 BuildError::ProviderProtocol(format!(
                     "initialize returned invalid result: {message}"
                 ))
-            })
-            .map_err(|error| {
-                EngineError::ProviderProtocol(format!("cache publication failed: {error}"))
-            })?;
+            },
+        )?;
         let initialize_effects = init_result
             .map(|_| initialize_effects)
             .map_err(EngineError::ProviderError)
