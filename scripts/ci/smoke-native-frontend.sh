@@ -17,6 +17,7 @@ test -x "$OMNIFS_CLI" || {
   echo "omnifs CLI not found; set OMNIFS_CLI or install it on PATH" >&2
   exit 1
 }
+export OMNIFS_CLI
 
 if [[ -z "${GITHUB_TOKEN:-}" ]]; then
   echo "GITHUB_TOKEN must be set: scripts/dev.ts provisions the github dev mount from it" >&2
