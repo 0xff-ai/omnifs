@@ -120,12 +120,5 @@ cargo zigbuild --release -p "$package" --target "$target" --bin "$bin"
 
 artifact="$(find_artifact "$bin")"
 emit_output artifact "$artifact"
-artifacts=("$artifact")
-if [[ "$package" == "omnifs-cli" && "$bin" == "omnifs" ]]; then
-  cargo zigbuild --release -p omnifs-thin --target "$target" --bin omnifs-thin
-  thin_artifact="$(find_artifact omnifs-thin)"
-  emit_output thin_artifact "$thin_artifact"
-  artifacts+=("$thin_artifact")
-fi
-file "${artifacts[@]}"
-inspect_linux_artifacts "${artifacts[@]}"
+file "$artifact"
+inspect_linux_artifacts "$artifact"

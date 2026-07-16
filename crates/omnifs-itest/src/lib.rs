@@ -127,7 +127,8 @@ impl RuntimeHarness {
             &paths.config_dir,
             providers_dir.path(),
             &paths.credentials_file,
-        );
+        )
+        .with_wasm_cache_dir(omnifs_engine::test_support::wasm_cache_dir());
         let mut desired = omnifs_workspace::mounts::Registry::load(mounts_dir.path())
             .map_err(|error| BuildError::InvalidConfig(error.to_string()))?;
         for spec in &specs {

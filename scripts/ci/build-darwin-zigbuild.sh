@@ -3,6 +3,20 @@ set -euo pipefail
 
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
+if [[ $# -ne 1 ]]; then
+  echo "usage: scripts/ci/build-darwin-zigbuild.sh TARGET" >&2
+  exit 2
+fi
+
+target="$1"
+case "$target" in
+  x86_64-apple-darwin | aarch64-apple-darwin) ;;
+  *)
+    echo "unsupported Darwin target: $target" >&2
+    exit 2
+    ;;
+esac
+
 target_dir="${CARGO_TARGET_DIR:-$root/target/zigbuild-darwin}"
 cargo_home="${CARGO_HOME:-$HOME/.cargo}"
 
@@ -30,6 +44,7 @@ docker run --rm \
   -e HOST_UID="$(id -u)" \
   -e HOST_GID="$(id -g)" \
   -e OMNIFS_RELEASE \
+  -e TARGET="$target" \
   "$image" \
   bash -lc '
     set -euo pipefail
@@ -38,7 +53,7 @@ docker run --rm \
     if [[ -f /usr/local/cargo/config.toml && ! -f /cargo-home/config.toml ]]; then
       cp /usr/local/cargo/config.toml /cargo-home/config.toml
     fi
-    rustup target add x86_64-apple-darwin aarch64-apple-darwin
+    rustup target add "$TARGET"
 
     export CARGO_TARGET_X86_64_APPLE_DARWIN_RUSTFLAGS=
     export CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS=
@@ -47,22 +62,17 @@ docker run --rm \
     cargo zigbuild --release \
       -p omnifs-cli \
       -p omnifs-thin \
-      --target x86_64-apple-darwin \
-      --target aarch64-apple-darwin \
+      --target "$TARGET" \
       --bin omnifs \
       --bin omnifs-thin
   '
 
 if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
   {
-    echo "x64_artifact=$target_dir/x86_64-apple-darwin/release/omnifs"
-    echo "arm64_artifact=$target_dir/aarch64-apple-darwin/release/omnifs"
-    echo "x64_thin_artifact=$target_dir/x86_64-apple-darwin/release/omnifs-thin"
-    echo "arm64_thin_artifact=$target_dir/aarch64-apple-darwin/release/omnifs-thin"
+    echo "artifact=$target_dir/$target/release/omnifs"
+    echo "thin_artifact=$target_dir/$target/release/omnifs-thin"
   } >>"$GITHUB_OUTPUT"
 fi
 
-file "$target_dir/x86_64-apple-darwin/release/omnifs"
-file "$target_dir/aarch64-apple-darwin/release/omnifs"
-file "$target_dir/x86_64-apple-darwin/release/omnifs-thin"
-file "$target_dir/aarch64-apple-darwin/release/omnifs-thin"
+file "$target_dir/$target/release/omnifs"
+file "$target_dir/$target/release/omnifs-thin"

@@ -241,14 +241,13 @@ jobs:
           cp "$keep/wasm/"*.wasm target/wasm32-wasip2/release/
 
       - name: Cache wasmtime component compilations
-        # Wasmtime's on-disk cache is internally content-addressed (WASM hash +
-        # wasmtime version), so stale entries are harmless and won't be served
-        # to mismatched callers. GitHub caches are immutable, so use a unique
+        # The integration harness explicitly stores Wasmtime's content-addressed
+        # compiled components here. GitHub caches are immutable, so use a unique
         # write key but restore through a stable OS/arch namespace shared by
         # push and pull_request runs.
         uses: actions/cache@v5
         with:
-          path: ~/.cache/wasmtime
+          path: target/wasm-cache
           key: wasmtime-cache-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             wasmtime-cache-${{ runner.os }}-${{ runner.arch }}-
@@ -274,7 +273,7 @@ jobs:
 
   cli-linux-x64:
     name: cli linux x64
-    needs: [preflight, components]
+    needs: [preflight, components, thin-linux-x64]
     if: >-
       github.event_name == 'push' ||
       (github.event_name == 'pull_request' &&
@@ -313,6 +312,15 @@ jobs:
           name: omnifs-wasm
           path: target/wasm32-wasip2/release
 
+      - name: Download Linux x64 omnifs-thin binary
+        uses: actions/download-artifact@v8
+        with:
+          name: omnifs-thin-linux-x64
+          path: dist-thin
+
+      - name: Mark omnifs-thin binary executable
+        run: chmod 0755 dist-thin/omnifs-thin
+
       - name: Build Linux x64 CLI
         id: build
         env:
@@ -323,7 +331,7 @@ jobs:
         run: >-
           scripts/ci/package-cli.sh linux-x64
           "${{ steps.build.outputs.artifact }}"
-          "${{ steps.build.outputs.thin_artifact }}"
+          "${{ github.workspace }}/dist-thin/omnifs-thin"
 
       - name: Attest Linux x64 CLI archive
         if: env.CI_MAIN_PUSH == 'true'
@@ -420,7 +428,7 @@ jobs:
 
   cli-linux-arm64:
     name: cli linux arm64
-    needs: [preflight, components]
+    needs: [preflight, components, thin-linux-arm64]
     if: >-
       github.event_name == 'push' ||
       (github.event_name == 'pull_request' &&
@@ -456,6 +464,15 @@ jobs:
           name: omnifs-wasm
           path: target/wasm32-wasip2/release
 
+      - name: Download Linux arm64 omnifs-thin binary
+        uses: actions/download-artifact@v8
+        with:
+          name: omnifs-thin-linux-arm64
+          path: dist-thin
+
+      - name: Mark omnifs-thin binary executable
+        run: chmod 0755 dist-thin/omnifs-thin
+
       - name: Build Linux arm64 CLI
         id: build
         env:
@@ -466,7 +483,7 @@ jobs:
         run: >-
           scripts/ci/package-cli.sh linux-arm64
           "${{ steps.build.outputs.artifact }}"
-          "${{ steps.build.outputs.thin_artifact }}"
+          "${{ github.workspace }}/dist-thin/omnifs-thin"
 
       - name: Attest Linux arm64 CLI archive
         if: env.CI_MAIN_PUSH == 'true'
@@ -483,7 +500,7 @@ jobs:
           if-no-files-found: error
 
   cli-darwin:
-    name: cli darwin
+    name: cli darwin ${{ matrix.arch }}
     needs: [preflight, components]
     if: >-
       github.event_name == 'push' ||
@@ -491,9 +508,19 @@ jobs:
         (github.event.pull_request.user.login == 'raulk' ||
          contains(github.event.pull_request.labels.*.name, 'ci-full')))
     runs-on: *linux_runner
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            platform: darwin-x64
+            target: x86_64-apple-darwin
+          - arch: arm64
+            platform: darwin-arm64
+            target: aarch64-apple-darwin
     env:
       CARGO_INCREMENTAL: "0"
-      CARGO_TARGET_DIR: ${{ github.workspace }}/target/cli-darwin
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/cli-darwin-${{ matrix.arch }}
     permissions:
       contents: read
       packages: read
@@ -510,7 +537,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: cli-darwin
+          shared-key: cli-darwin-${{ matrix.arch }}
           cache-on-failure: true
           cache-directories: .cache/darwin-rustup
 
@@ -520,42 +547,30 @@ jobs:
           name: omnifs-wasm
           path: target/wasm32-wasip2/release
 
-      - name: Build Darwin CLI binaries
+      - name: Build Darwin ${{ matrix.arch }} CLI binaries
         id: build
         env:
           DARWIN_RUSTUP_HOME: ${{ github.workspace }}/.cache/darwin-rustup
           OMNIFS_RELEASE: "1"
-        run: scripts/ci/build-darwin-zigbuild.sh
+        run: scripts/ci/build-darwin-zigbuild.sh "${{ matrix.target }}"
 
-      - name: Package Darwin CLI archives
-        run: |
-          set -euo pipefail
-          scripts/ci/package-cli.sh darwin-x64 \
-            "${{ steps.build.outputs.x64_artifact }}" \
-            "${{ steps.build.outputs.x64_thin_artifact }}"
-          scripts/ci/package-cli.sh darwin-arm64 \
-            "${{ steps.build.outputs.arm64_artifact }}" \
-            "${{ steps.build.outputs.arm64_thin_artifact }}"
+      - name: Package Darwin ${{ matrix.arch }} CLI archive
+        run: >-
+          scripts/ci/package-cli.sh "${{ matrix.platform }}"
+          "${{ steps.build.outputs.artifact }}"
+          "${{ steps.build.outputs.thin_artifact }}"
 
-      - name: Attest Darwin CLI archives
+      - name: Attest Darwin ${{ matrix.arch }} CLI archive
         if: env.CI_MAIN_PUSH == 'true'
         uses: actions/attest-build-provenance@v4
         with:
-          subject-path: dist/cli/*/omnifs-cli-*.tar.xz
+          subject-path: dist/cli/${{ matrix.platform }}/omnifs-cli-${{ matrix.platform }}.tar.xz
 
-      - name: Upload Darwin x64 CLI archive
+      - name: Upload Darwin ${{ matrix.arch }} CLI archive
         uses: actions/upload-artifact@v7
         with:
-          name: omnifs-cli-darwin-x64
-          path: dist/cli/darwin-x64/omnifs-cli-darwin-x64.tar.xz*
-          retention-days: 90
-          if-no-files-found: error
-
-      - name: Upload Darwin arm64 CLI archive
-        uses: actions/upload-artifact@v7
-        with:
-          name: omnifs-cli-darwin-arm64
-          path: dist/cli/darwin-arm64/omnifs-cli-darwin-arm64.tar.xz*
+          name: omnifs-cli-${{ matrix.platform }}
+          path: dist/cli/${{ matrix.platform }}/omnifs-cli-${{ matrix.platform }}.tar.xz*
           retention-days: 90
           if-no-files-found: error
 

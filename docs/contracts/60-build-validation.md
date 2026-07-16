@@ -15,6 +15,8 @@ Provider WASM artifacts are built with the pinned wasi-sdk. `just build provider
 
 Provider build and check recipes install the pinned wasi-sdk when needed. Run `just build providers` before host tests that need generated provider artifacts. Use `OMNIFS_ITEST_SKIP_PROVIDER_BUILD=1` after prebuilding providers for nextest runs that would otherwise contend (`just test host` sets it for you).
 
+Host integration fixtures keep runtime data private but share Wasmtime's content-addressed compiled-component cache through `omnifs_engine::test_support::wasm_cache_dir`. CI must cache that exact explicit directory after isolating the nextest archive inputs; caching Wasmtime's global default does not accelerate fixtures whose `HostContext` selects another path.
+
 Provider runtime changes must validate both binding surfaces separately: `omnifs-wit` host bindings with `--features host-bindings`, and SDK/provider guest bindings without that feature. Do not combine those into one Cargo invocation that enables host bindings while compiling the SDK.
 
 Provider component validation must enable the component-model async validation features used by provider exports.
@@ -46,6 +48,8 @@ The daemon always runs host-native, so `OMNIFS_HOME` and `OMNIFS_MOUNT_POINT` re
 ### Frontend image artifact
 
 Platform CLI archives include exactly `omnifs` and the sibling `omnifs-thin` runner. Linux thin supports `fuse` and `nfs`; Darwin thin supports `nfs`. The matching npm platform package must whitelist the same files, and CI extraction smokes assert every expected executable before running acceptance lanes.
+
+CI has one authoritative Linux `omnifs-thin` producer per architecture. CLI packaging consumes that binary together with the separately built full CLI, while frontend and guest-image jobs consume the same artifact. Darwin x64 and arm64 packages build in independent matrix jobs so target-specific code generation runs in parallel; the four platform archive names and their two-executable payload contract remain stable.
 
 The Docker-hosted FUSE frontend (`omnifs frontend enable fuse --runtime docker`) ships a minimal image from `Dockerfile`: `frontend-base` (`debian:trixie-slim`, chosen because Debian's default coreutils/findutils are GNU, which `tail -f` fidelity requires), `frontend-dev` (contributor, built by `just frontend-image`, copies the binary from the `thin-builder` stage), and `frontend-release` (built by `scripts/ci/build-frontend-image.sh`, injects a prebuilt Linux binary as the `omnifs-thin-bin` build context). The image runs `omnifs-thin fuse` with no engine runtime, Wasmtime, or provider bundle, not the full `omnifs` CLI/daemon binary, so neither stage needs a provider-store build context. The frontend image carries no launch-protocol/min-launcher-version label: `DockerRunner::launch` (`crates/omnifs-cli/src/docker.rs`) starts the container and checks its credential-free shape without consulting such a label.
 
