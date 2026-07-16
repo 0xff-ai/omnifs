@@ -41,6 +41,9 @@ cleanup() {
   [[ -n "$frontend" ]] && docker rm -f "$frontend" >/dev/null 2>&1
   "$OMNIFS_CLI" frontend disable fuse --runtime host --location "$OMNIFS_HOME/mnt" >/dev/null 2>&1 || true
   "$OMNIFS_CLI" down >/dev/null 2>&1 || true
+  # Revision snapshots are deliberately immutable (directories 0555, files
+  # 0444), so make this throwaway workspace writable before deleting it.
+  chmod -R u+w "$OMNIFS_HOME/cache/mount-revisions" 2>/dev/null || true
   rm -rf "$OMNIFS_HOME"
 }
 trap cleanup EXIT
