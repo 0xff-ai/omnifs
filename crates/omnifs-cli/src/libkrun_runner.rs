@@ -179,6 +179,10 @@ pub(crate) struct LibkrunRunner {
 }
 
 impl LibkrunRunner {
+    pub(crate) fn probe() -> Result<()> {
+        ensure_libkrun_available()
+    }
+
     pub(crate) fn new(home: PathBuf) -> Self {
         Self { home }
     }

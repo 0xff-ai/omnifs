@@ -52,6 +52,8 @@ pub use namespace::{
 #[cfg(feature = "runtime")]
 pub use runtime::registry::{MountTable, RegistryError};
 #[cfg(feature = "runtime")]
+pub use runtime::wasm::ComponentCompiler;
+#[cfg(feature = "runtime")]
 pub use runtime::{BuildError, EngineError, HostContext, Runtime as Engine};
 #[cfg(feature = "runtime")]
 pub(crate) use tree::{Cursor, Node, RequestCtx, TreeError, TreeErrorKind, spawn_live_follow_pump};

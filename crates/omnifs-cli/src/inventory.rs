@@ -12,13 +12,20 @@ use omnifs_workspace::daemon_record::DaemonRecord;
 use omnifs_workspace::layout::WorkspaceLayout;
 use omnifs_workspace::mounts::{Name as MountName, Registry, Revision};
 use omnifs_workspace::provider::Catalog;
+use omnifs_workspace::provider::preparation::{
+    Preparation, Provider as PreparedProvider, RunState,
+};
 use serde::Serialize;
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use crate::auth::{AuthReadiness, MountAuth};
+#[cfg(target_os = "macos")]
+use crate::commands::frontend::GUEST_MOUNT;
 use crate::commands::frontend::{FrontendFilesystem as Filesystem, FrontendRuntime as Runtime};
+#[cfg(target_os = "macos")]
+use crate::libkrun_runner::LibkrunRunner;
 use crate::workspace::Workspace;
 
 #[derive(Debug, Clone, Serialize)]
@@ -30,6 +37,8 @@ pub(crate) struct Inventory {
     pub(crate) runners: Vec<RunnerStatus>,
     pub(crate) frontends: Vec<FrontendStatus>,
     pub(crate) mounts: Vec<MountStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) preparation: Option<PreparationStatus>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -51,9 +60,94 @@ pub(crate) enum DaemonProbe {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub(crate) struct RunnerStatus {
     pub(crate) filesystem: Filesystem,
+    pub(crate) runtime: Runtime,
     pub(crate) location: Option<PathBuf>,
     pub(crate) state: RunnerState,
     pub(crate) error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub(crate) struct PreparationStatus {
+    pub(crate) state: PreparationState,
+    pub(crate) completed: usize,
+    pub(crate) total: usize,
+    pub(crate) failed: usize,
+    pub(crate) started_at: Option<String>,
+    pub(crate) finished_at: Option<String>,
+    pub(crate) providers: Vec<PreparedProvider>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum PreparationState {
+    Running,
+    Complete,
+    Failed,
+    Interrupted,
+    Unreadable,
+}
+
+impl PreparationStatus {
+    fn collect(layout: &WorkspaceLayout) -> Option<Self> {
+        let preparation = Preparation::new(&layout.cache_dir);
+        match preparation.read() {
+            Ok(None) => None,
+            Ok(Some(record)) => {
+                let state = match record.state {
+                    RunState::Running => match preparation.is_active() {
+                        Ok(true) => PreparationState::Running,
+                        Ok(false) => PreparationState::Interrupted,
+                        Err(error) => {
+                            return Some(Self::unreadable(error.to_string()));
+                        },
+                    },
+                    RunState::Complete => PreparationState::Complete,
+                    RunState::Failed => PreparationState::Failed,
+                };
+                Some(Self {
+                    state,
+                    completed: record.completed(),
+                    total: record.providers.len(),
+                    failed: record.failed(),
+                    started_at: Some(record.started_at),
+                    finished_at: record.finished_at,
+                    providers: record.providers,
+                    error: None,
+                })
+            },
+            Err(error) => Some(Self::unreadable(error.to_string())),
+        }
+    }
+
+    fn unreadable(error: String) -> Self {
+        Self {
+            state: PreparationState::Unreadable,
+            completed: 0,
+            total: 0,
+            failed: 0,
+            started_at: None,
+            finished_at: None,
+            providers: Vec::new(),
+            error: Some(error),
+        }
+    }
+
+    pub(crate) fn summary(&self) -> String {
+        let state = match self.state {
+            PreparationState::Running => "running",
+            PreparationState::Complete => "complete",
+            PreparationState::Failed => "failed",
+            PreparationState::Interrupted => "interrupted",
+            PreparationState::Unreadable => "unreadable",
+        };
+        if self.total == 0 {
+            state.to_owned()
+        } else {
+            format!("{}/{} {state}", self.completed, self.total)
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -459,6 +553,7 @@ impl Inventory {
         let mount_count = mounts.len();
         let runners = runner_statuses(&layout)?;
         let frontends = frontend_statuses(daemon_status, mount_count, &runners);
+        let preparation = PreparationStatus::collect(&layout);
         let access_count = frontends
             .iter()
             .filter(|frontend| {
@@ -481,6 +576,7 @@ impl Inventory {
             runners,
             frontends,
             mounts,
+            preparation,
         })
     }
 
@@ -565,6 +661,7 @@ impl Inventory {
             runners: Vec::new(),
             frontends,
             mounts,
+            preparation: None,
         }
     }
 }
@@ -590,6 +687,7 @@ fn runner_statuses(layout: &WorkspaceLayout) -> Result<Vec<RunnerStatus>> {
                 };
                 rows.push(RunnerStatus {
                     filesystem,
+                    runtime: Runtime::Host,
                     location: Some(state.mount_point),
                     state: RunnerState::Attached,
                     error: None,
@@ -611,12 +709,36 @@ fn runner_statuses(layout: &WorkspaceLayout) -> Result<Vec<RunnerStatus>> {
                     .unwrap_or(Filesystem::Fuse);
                 rows.push(RunnerStatus {
                     filesystem,
+                    runtime: Runtime::Host,
                     location: None,
                     state: RunnerState::Failed,
                     error: Some(error.to_string()),
                 });
             },
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    match LibkrunRunner::new(layout.config_dir.clone()).is_running() {
+        Ok(Some(running)) => rows.push(RunnerStatus {
+            filesystem: Filesystem::Fuse,
+            runtime: Runtime::Libkrun,
+            location: Some(PathBuf::from(GUEST_MOUNT)),
+            state: if running {
+                RunnerState::Attached
+            } else {
+                RunnerState::Failed
+            },
+            error: (!running).then(|| "libkrun process is not running".to_owned()),
+        }),
+        Ok(None) => {},
+        Err(error) => rows.push(RunnerStatus {
+            filesystem: Filesystem::Fuse,
+            runtime: Runtime::Libkrun,
+            location: Some(PathBuf::from(GUEST_MOUNT)),
+            state: RunnerState::Failed,
+            error: Some(error.to_string()),
+        }),
     }
     Ok(rows)
 }
@@ -652,7 +774,7 @@ fn frontend_statuses(
     for runner in runners {
         let matched = rows.iter().any(|row| {
             row.filesystem == runner.filesystem
-                && row.runtime == Runtime::Host
+                && row.runtime == runner.runtime
                 && row.location == runner.location
         });
         if daemon.is_none() || !matched {
@@ -662,7 +784,7 @@ fn frontend_statuses(
             };
             rows.push(FrontendStatus {
                 filesystem: runner.filesystem,
-                runtime: Runtime::Host,
+                runtime: runner.runtime,
                 location: runner.location.clone(),
                 state,
                 scope: "all",

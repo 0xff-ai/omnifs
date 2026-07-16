@@ -53,8 +53,8 @@ impl<'a> Launcher<'a> {
     pub(crate) async fn launch(self) -> anyhow::Result<()> {
         let paths = self.workspace.layout();
         let config = self.workspace.config()?;
-        let telemetry_enabled =
-            config.telemetry.enabled && omnifs_workspace::telemetry::enabled_from_env();
+        let metrics_enabled =
+            config.metrics.enabled && omnifs_workspace::metrics::enabled_from_env();
 
         let (revision, snapshot_dir, snapshot) = if self.offline {
             anyhow::ensure!(
@@ -88,7 +88,7 @@ impl<'a> Launcher<'a> {
             self.output.narrate(format!(
                 "Starting offline daemon from mount revision {revision}"
             ));
-            self.launch_host_native(telemetry_enabled, &revision, &snapshot_dir, true)
+            self.launch_host_native(metrics_enabled, &revision, &snapshot_dir, true)
                 .await?;
             return Ok(());
         }
@@ -100,12 +100,19 @@ impl<'a> Launcher<'a> {
         let store = FileStore::new(&paths.credentials_file);
         preflight_mounts(&configs, self.workspace.catalog(), &store)?;
 
+        crate::provider_preparation::Manager::new(paths)
+            .prepare_for_up(
+                configs.iter().map(|config| config.config.provider.id),
+                &self.output,
+            )
+            .await?;
+
         self.output.narrate(format!(
             "Applying mount revision {} from {}",
             revision,
             snapshot_dir.display()
         ));
-        self.launch_host_native(telemetry_enabled, &revision, &snapshot_dir, false)
+        self.launch_host_native(metrics_enabled, &revision, &snapshot_dir, false)
             .await?;
         self.workspace.repository()?.mark_applied(&revision)?;
         Ok(())
@@ -115,7 +122,7 @@ impl<'a> Launcher<'a> {
     /// daemon process and wait for the immutable snapshot to become ready.
     async fn launch_host_native(
         &self,
-        telemetry_enabled: bool,
+        metrics_enabled: bool,
         revision: &Revision,
         snapshot: &Path,
         offline: bool,
@@ -162,7 +169,7 @@ impl<'a> Launcher<'a> {
 
         crate::daemon_launch::launch(
             paths,
-            telemetry_enabled,
+            metrics_enabled,
             revision,
             snapshot,
             offline,

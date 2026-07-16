@@ -7,6 +7,7 @@ use std::fmt;
 #[cfg(target_os = "linux")]
 use std::net::Ipv4Addr;
 use std::process::Command;
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use bollard::Docker;
@@ -183,6 +184,15 @@ impl DockerRunner {
 }
 
 impl DockerClient {
+    pub(crate) async fn probe() -> Result<()> {
+        let docker = Docker::connect_with_local_defaults().context("connect to Docker daemon")?;
+        tokio::time::timeout(Duration::from_secs(2), docker.ping())
+            .await
+            .context("Docker daemon probe timed out")?
+            .map(|_| ())
+            .context("Docker daemon did not respond")
+    }
+
     pub(crate) fn connect_for(target: &DockerTarget, output: Output) -> Result<Self> {
         Ok(Self {
             docker: Docker::connect_with_local_defaults()

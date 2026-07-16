@@ -95,11 +95,11 @@ fn exit_code(output: &Output) -> i32 {
 }
 
 fn record_wall_clock(home: &Path, elapsed: Duration) {
-    let dir = home.join("telemetry");
-    std::fs::create_dir_all(&dir).expect("telemetry dir");
+    let dir = home.join("metrics");
+    std::fs::create_dir_all(&dir).expect("metrics dir");
     let path = dir.join("golden-path.json");
     let body = serde_json::json!({ "wall_clock_ms": elapsed.as_millis() });
-    std::fs::write(path, format!("{body}\n")).expect("write golden path telemetry");
+    std::fs::write(path, format!("{body}\n")).expect("write golden path metrics");
 }
 
 #[test]

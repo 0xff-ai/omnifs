@@ -1,17 +1,17 @@
-//! Workspace-local dogfood telemetry.
+//! Workspace-local dogfood metrics.
 //!
 //! Local-only usage counters used to compute product kill criteria denominators
 //! (mount sessions that survive without manual recovery; weekly-active use). The
 //! privacy contract is non-negotiable and enforced here:
 //!
-//! - Records are written only under `<config_dir>/telemetry/`, inside the user's
+//! - Records are written only under `<config_dir>/metrics/`, inside the user's
 //!   own `OMNIFS_HOME`. The directory is created `0700` and every file `0600`.
 //! - Nothing here is ever transmitted anywhere. This module performs no network
 //!   I/O and pulls in no networking dependency; the only side effect is
 //!   appending a line to a local file.
 //! - Writes are strictly best-effort. Any failure (directory, permissions,
 //!   serialization, or the write itself) is logged at `debug` and swallowed;
-//!   telemetry never propagates an error into a real code path.
+//!   metric recording never propagates an error into a real code path.
 //!
 //! The daemon and the CLI are the two writers. They share this appender and the
 //! record schemas so the on-disk format has a single owner.
@@ -23,23 +23,23 @@ use tracing::debug;
 
 use crate::io::ensure_private_dir;
 
-/// Subdirectory of `config_dir` that holds the telemetry JSONL files. The Bun
+/// Subdirectory of `config_dir` that holds the metrics JSONL files. The Bun
 /// reporter (`scripts/bench/dogfood-report.ts`) hardcodes the same relative
 /// path; keep the two in sync.
-pub const TELEMETRY_SUBDIR: &str = "telemetry";
+pub const SUBDIR: &str = "metrics";
 
-/// Environment variable that turns telemetry off for a process. Any of `0`,
+/// Environment variable that turns metrics off for a process. Any of `0`,
 /// `false`, `no`, or `off` (case-insensitive) disables it; anything else, or
 /// being unset, leaves it on. The daemon reads this because no strict-config
 /// channel reaches it; the CLI honors it too, as a global kill switch on
-/// top of its `[telemetry] enabled` config field, and propagates it to the
+/// top of its `[metrics] enabled` config field, and propagates it to the
 /// daemon it launches.
-pub const ENV_SWITCH: &str = "OMNIFS_TELEMETRY";
+pub const ENV_SWITCH: &str = "OMNIFS_METRICS";
 
 const DAEMON_FILE: &str = "daemon.jsonl";
 const CLI_FILE: &str = "cli.jsonl";
 
-/// Read the process-wide telemetry kill switch from [`ENV_SWITCH`]. Enabled
+/// Read the process-wide metrics kill switch from [`ENV_SWITCH`]. Enabled
 /// unless the variable is explicitly set to a falsey token.
 #[must_use]
 pub fn enabled_from_env() -> bool {
@@ -80,21 +80,21 @@ struct CliRecord<'a> {
     exit: i32,
 }
 
-/// Appends dogfood records under `<config_dir>/telemetry/`. Construct once and
+/// Appends dogfood records under `<config_dir>/metrics/`. Construct once and
 /// reuse; every method is best-effort and never fails.
 #[derive(Debug, Clone)]
-pub struct TelemetrySink {
+pub struct Sink {
     dir: PathBuf,
     enabled: bool,
 }
 
-impl TelemetrySink {
-    /// Build a sink writing under `<config_dir>/telemetry/`. When `enabled` is
+impl Sink {
+    /// Build a sink writing under `<config_dir>/metrics/`. When `enabled` is
     /// false every method is a no-op and no files are touched.
     #[must_use]
     pub fn new(config_dir: &Path, enabled: bool) -> Self {
         Self {
-            dir: config_dir.join(TELEMETRY_SUBDIR),
+            dir: config_dir.join(SUBDIR),
             enabled,
         }
     }
@@ -132,8 +132,8 @@ impl TelemetrySink {
 
     fn append<T: Serialize>(&self, file: &str, record: &T) {
         if let Err(error) = self.try_append(file, record) {
-            // Never propagate: telemetry is a side channel, not a code path.
-            debug!(%error, file, "dogfood telemetry write skipped");
+            // Never propagate: local metrics are a side channel, not a code path.
+            debug!(%error, file, "dogfood metrics write skipped");
         }
     }
 
@@ -194,23 +194,23 @@ mod tests {
     #[test]
     fn disabled_sink_writes_nothing() {
         let tmp = tempfile::tempdir().unwrap();
-        let sink = TelemetrySink::new(tmp.path(), false);
+        let sink = Sink::new(tmp.path(), false);
         sink.daemon_event(DaemonEvent::DaemonStart, 0);
         sink.cli_event("status", 0);
         assert!(
-            !tmp.path().join(TELEMETRY_SUBDIR).exists(),
-            "a disabled sink must not create the telemetry directory"
+            !tmp.path().join(SUBDIR).exists(),
+            "a disabled sink must not create the metrics directory"
         );
     }
 
     #[test]
     fn daemon_event_appends_one_json_line_per_call() {
         let tmp = tempfile::tempdir().unwrap();
-        let sink = TelemetrySink::new(tmp.path(), true);
+        let sink = Sink::new(tmp.path(), true);
         sink.daemon_event(DaemonEvent::DaemonStart, 0);
         sink.daemon_event(DaemonEvent::FrontendServing, 3);
 
-        let path = tmp.path().join(TELEMETRY_SUBDIR).join(DAEMON_FILE);
+        let path = tmp.path().join(SUBDIR).join(DAEMON_FILE);
         let contents = std::fs::read_to_string(&path).unwrap();
         let lines: Vec<&str> = contents.lines().collect();
         assert_eq!(lines.len(), 2, "each call appends exactly one line");
@@ -228,11 +228,11 @@ mod tests {
     #[test]
     fn cli_event_records_cmd_and_exit() {
         let tmp = tempfile::tempdir().unwrap();
-        let sink = TelemetrySink::new(tmp.path(), true);
+        let sink = Sink::new(tmp.path(), true);
         sink.cli_event("up", 0);
         sink.cli_event("doctor", 2);
 
-        let path = tmp.path().join(TELEMETRY_SUBDIR).join(CLI_FILE);
+        let path = tmp.path().join(SUBDIR).join(CLI_FILE);
         let contents = std::fs::read_to_string(&path).unwrap();
         let lines: Vec<&str> = contents.lines().collect();
         assert_eq!(lines.len(), 2);
@@ -246,12 +246,12 @@ mod tests {
     #[test]
     fn directory_is_0700_and_files_are_0600() {
         let tmp = tempfile::tempdir().unwrap();
-        let sink = TelemetrySink::new(tmp.path(), true);
+        let sink = Sink::new(tmp.path(), true);
         sink.daemon_event(DaemonEvent::DaemonStart, 0);
         sink.cli_event("status", 0);
 
-        let dir = tmp.path().join(TELEMETRY_SUBDIR);
-        assert_eq!(mode_of(&dir), 0o700, "telemetry dir must be private");
+        let dir = tmp.path().join(SUBDIR);
+        assert_eq!(mode_of(&dir), 0o700, "metrics dir must be private");
         assert_eq!(mode_of(&dir.join(DAEMON_FILE)), 0o600);
         assert_eq!(mode_of(&dir.join(CLI_FILE)), 0o600);
     }
@@ -261,13 +261,13 @@ mod tests {
     fn append_tightens_permissions_on_a_preexisting_loose_file() {
         use std::os::unix::fs::PermissionsExt as _;
         let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().join(TELEMETRY_SUBDIR);
+        let dir = tmp.path().join(SUBDIR);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(DAEMON_FILE);
         std::fs::write(&path, b"{\"pre\":true}\n").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
 
-        let sink = TelemetrySink::new(tmp.path(), true);
+        let sink = Sink::new(tmp.path(), true);
         sink.daemon_event(DaemonEvent::DaemonStop, 0);
 
         assert_eq!(mode_of(&path), 0o600, "a loose file is tightened on append");

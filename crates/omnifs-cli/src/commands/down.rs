@@ -53,7 +53,7 @@ impl DownArgs {
             teardown.down(&output).await?;
             ExitCode::Success
         };
-        crate::telemetry::maybe_print_health_nudge(&workspace, output).await;
+        crate::metrics::maybe_print_health_nudge(&workspace, output).await;
         Ok(exit)
     }
 }

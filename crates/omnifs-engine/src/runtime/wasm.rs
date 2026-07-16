@@ -2,6 +2,9 @@
 
 use std::path::Path;
 
+use omnifs_workspace::ids::ProviderId;
+use omnifs_workspace::provider::ProviderStore;
+use wasmtime::component::Component;
 use wasmtime::{Cache, CacheConfig, Config, Engine};
 
 /// Build a Wasmtime engine configured for the component model.
@@ -38,4 +41,25 @@ pub fn component_engine(
     }
     configure(&mut config);
     Engine::new(&config)
+}
+
+/// Compiles exact retained provider components into the same Wasmtime cache
+/// used by the daemon, without instantiating or executing provider code.
+#[derive(Clone)]
+pub struct ComponentCompiler {
+    engine: Engine,
+    providers: ProviderStore,
+}
+
+impl ComponentCompiler {
+    pub fn new(cache_dir: &Path, providers_dir: &Path) -> wasmtime::Result<Self> {
+        Ok(Self {
+            engine: component_engine(Some(cache_dir), |_| {})?,
+            providers: ProviderStore::new(providers_dir),
+        })
+    }
+
+    pub fn prepare(&self, id: &ProviderId) -> wasmtime::Result<()> {
+        Component::from_file(&self.engine, self.providers.artifact_path(id)).map(|_| ())
+    }
 }

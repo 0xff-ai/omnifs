@@ -22,10 +22,15 @@ pub struct FrontendArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum FrontendCommand {
+    /// Start or reconnect one supported frontend
     Enable(lifecycle::FrontendEnableArgs),
+    /// Stop one instantiated frontend
     Disable(lifecycle::FrontendDisableArgs),
+    /// Restart matching instantiated frontends
     Restart(lifecycle::FrontendRestartArgs),
+    /// Show OS support, runtime readiness, and instantiated frontends
     Ls(lifecycle::FrontendLsArgs),
+    /// Enter an instantiated Docker or libkrun frontend
     Shell(crate::commands::shell::ShellArgs),
 }
 

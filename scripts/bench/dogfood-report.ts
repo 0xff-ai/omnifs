@@ -1,9 +1,9 @@
 #!/usr/bin/env bun
 //
-// Dogfood telemetry reporter.
+// Dogfood metrics reporter.
 //
-// Reads the workspace-local, never-transmitted telemetry JSONL written by the
-// daemon and CLI (see `omnifs_workspace::telemetry`) and reports mount sessions
+// Reads the workspace-local, never-transmitted metrics JSONL written by the
+// daemon and CLI (see `omnifs_workspace::metrics`) and reports mount sessions
 // and manual recoveries for the manual-recovery rate, plus weekly-active use.
 // This reader only reads local files; it performs no network I/O.
 //
@@ -16,9 +16,9 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-// Mirrors `omnifs_workspace::telemetry::TELEMETRY_SUBDIR` and the on-disk file
+// Mirrors `omnifs_workspace::metrics::SUBDIR` and the on-disk file
 // names.
-const TELEMETRY_SUBDIR = "telemetry";
+const METRICS_SUBDIR = "metrics";
 const DAEMON_FILE = "daemon.jsonl";
 const CLI_FILE = "cli.jsonl";
 
@@ -173,9 +173,9 @@ function main() {
     return;
   }
 
-  const telemetryDir = join(options.home, TELEMETRY_SUBDIR);
-  const daemonRecords = readRecords(join(telemetryDir, DAEMON_FILE));
-  const cliRecords = readRecords(join(telemetryDir, CLI_FILE));
+  const metricsDir = join(options.home, METRICS_SUBDIR);
+  const daemonRecords = readRecords(join(metricsDir, DAEMON_FILE));
+  const cliRecords = readRecords(join(metricsDir, CLI_FILE));
   const report = computeReport(daemonRecords, cliRecords);
 
   if (options.json) {
@@ -183,7 +183,7 @@ function main() {
     return;
   }
 
-  console.log(`omnifs dogfood report (${telemetryDir})`);
+  console.log(`omnifs dogfood report (${metricsDir})`);
   console.log("");
   console.log(`  daemon sessions:        ${report.sessions}`);
   console.log(`  completed sessions:     ${report.completedSessions}`);

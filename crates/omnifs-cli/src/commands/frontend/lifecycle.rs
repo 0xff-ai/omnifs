@@ -15,7 +15,7 @@ use crate::commands::frontend::GUEST_MOUNT;
 use crate::commands::receipt::FrontendReceipt;
 use crate::docker::{DockerClient, DockerRunner, DockerTarget};
 use crate::frontend_container::{frontend_container_name, resolve_frontend_image};
-use crate::host_runner::HostRunner;
+use crate::host_runner::{HostRunner, LocalProtocol};
 use crate::inventory::{FrontendState, FrontendStatus, Inventory};
 use crate::libkrun_runner::{LibkrunLaunchRequest, LibkrunRunner};
 use crate::ui::output::{Output, ResultVerdict};
@@ -40,6 +40,13 @@ impl FrontendFilesystem {
         match self {
             Self::Fuse => "fuse",
             Self::Nfs => "nfs",
+        }
+    }
+
+    const fn default_runtime(self) -> FrontendRuntime {
+        match self {
+            Self::Fuse if cfg!(target_os = "macos") => FrontendRuntime::Libkrun,
+            Self::Fuse | Self::Nfs => FrontendRuntime::Host,
         }
     }
 }
@@ -129,8 +136,9 @@ impl Serialize for FrontendId {
 pub struct FrontendEnableArgs {
     #[arg(value_enum)]
     pub filesystem: FrontendFilesystem,
+    /// Runner environment. Defaults to libkrun for FUSE on macOS and host otherwise.
     #[arg(long, value_enum)]
-    pub runtime: FrontendRuntime,
+    pub runtime: Option<FrontendRuntime>,
     #[arg(long)]
     pub location: Option<PathBuf>,
 }
@@ -157,6 +165,250 @@ pub struct FrontendRestartArgs {
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct FrontendLsArgs {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+struct Platform {
+    os: &'static str,
+    arch: &'static str,
+}
+
+impl Platform {
+    const fn current() -> Self {
+        Self {
+            os: std::env::consts::OS,
+            arch: std::env::consts::ARCH,
+        }
+    }
+
+    #[cfg(test)]
+    const fn for_target(os: &'static str, arch: &'static str) -> Self {
+        Self { os, arch }
+    }
+
+    fn label(self) -> String {
+        let os = match self.os {
+            "macos" => "macOS",
+            "linux" => "Linux",
+            other => other,
+        };
+        format!("{os} {}", self.arch)
+    }
+
+    fn frontend_specs(self) -> &'static [FrontendSpec] {
+        match self.os {
+            "macos" => &MACOS_FRONTENDS,
+            "linux" => &LINUX_FRONTENDS,
+            _ => &OTHER_FRONTENDS,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum InstancePolicy {
+    MultipleLocations,
+    OnePerWorkspace,
+}
+
+impl InstancePolicy {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::MultipleLocations => "multiple locations",
+            Self::OnePerWorkspace => "one per workspace",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FrontendSpec {
+    filesystem: FrontendFilesystem,
+    runtime: FrontendRuntime,
+    default: bool,
+    instances: InstancePolicy,
+}
+
+impl FrontendSpec {
+    const fn new(
+        filesystem: FrontendFilesystem,
+        runtime: FrontendRuntime,
+        default: bool,
+        instances: InstancePolicy,
+    ) -> Self {
+        Self {
+            filesystem,
+            runtime,
+            default,
+            instances,
+        }
+    }
+
+    async fn inspect(self) -> FrontendSupport {
+        let readiness = match self.runtime {
+            FrontendRuntime::Host => HostRunner::probe(match self.filesystem {
+                FrontendFilesystem::Fuse => LocalProtocol::Fuse,
+                FrontendFilesystem::Nfs => LocalProtocol::Nfs,
+            }),
+            FrontendRuntime::Docker => DockerClient::probe().await,
+            FrontendRuntime::Libkrun => LibkrunRunner::probe(),
+        };
+        let (available, detail) = match readiness {
+            Ok(()) => (true, None),
+            Err(error) => (false, Some(format!("{error:#}"))),
+        };
+        let command = if self.default {
+            format!("omnifs frontend enable {}", self.filesystem)
+        } else {
+            format!(
+                "omnifs frontend enable {} --runtime {}",
+                self.filesystem, self.runtime
+            )
+        };
+        FrontendSupport {
+            filesystem: self.filesystem,
+            runtime: self.runtime,
+            default: self.default,
+            instances: self.instances,
+            available,
+            detail,
+            command,
+        }
+    }
+}
+
+const MACOS_FRONTENDS: [FrontendSpec; 3] = [
+    FrontendSpec::new(
+        FrontendFilesystem::Fuse,
+        FrontendRuntime::Libkrun,
+        true,
+        InstancePolicy::OnePerWorkspace,
+    ),
+    FrontendSpec::new(
+        FrontendFilesystem::Fuse,
+        FrontendRuntime::Docker,
+        false,
+        InstancePolicy::OnePerWorkspace,
+    ),
+    FrontendSpec::new(
+        FrontendFilesystem::Nfs,
+        FrontendRuntime::Host,
+        true,
+        InstancePolicy::MultipleLocations,
+    ),
+];
+
+const LINUX_FRONTENDS: [FrontendSpec; 2] = [
+    FrontendSpec::new(
+        FrontendFilesystem::Fuse,
+        FrontendRuntime::Host,
+        true,
+        InstancePolicy::MultipleLocations,
+    ),
+    FrontendSpec::new(
+        FrontendFilesystem::Fuse,
+        FrontendRuntime::Docker,
+        false,
+        InstancePolicy::OnePerWorkspace,
+    ),
+];
+
+const OTHER_FRONTENDS: [FrontendSpec; 0] = [];
+
+#[derive(Debug, Clone, Serialize)]
+struct FrontendSupport {
+    filesystem: FrontendFilesystem,
+    runtime: FrontendRuntime,
+    default: bool,
+    instances: InstancePolicy,
+    available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<String>,
+    command: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct FrontendList {
+    platform: Platform,
+    supported_frontends: Vec<FrontendSupport>,
+    frontends: Vec<FrontendStatus>,
+    verdict: crate::inventory::Verdict,
+}
+
+impl FrontendList {
+    async fn collect(inventory: &Inventory) -> Self {
+        let platform = Platform::current();
+        let mut supported_frontends = Vec::with_capacity(platform.frontend_specs().len());
+        for spec in platform.frontend_specs() {
+            supported_frontends.push(spec.inspect().await);
+        }
+        Self {
+            platform,
+            supported_frontends,
+            frontends: inventory.frontends.clone(),
+            verdict: inventory.verdict(),
+        }
+    }
+
+    fn support_table(&self) -> crate::ui::table::ResourceTable {
+        use crate::ui::table::{
+            Cell, Column, Priority, ResourceRow, ResourceTable, StateToken, WidthPolicy,
+        };
+
+        let mut table = ResourceTable::new(
+            "Supported frontends",
+            self.supported_frontends.len(),
+            vec![
+                Column::new("Filesystem", Priority::Identity, WidthPolicy::Auto),
+                Column::new("Runtime", Priority::Identity, WidthPolicy::Auto),
+                Column::new("Default", Priority::Detail, WidthPolicy::Auto),
+                Column::new("Instances", Priority::Essential, WidthPolicy::Auto),
+                Column::new("Availability", Priority::Essential, WidthPolicy::Auto),
+                Column::new("Enable or reason", Priority::Essential, WidthPolicy::Path),
+            ],
+        );
+        for support in &self.supported_frontends {
+            let state = if support.available {
+                StateToken::positive("available")
+            } else {
+                StateToken::neutral("unavailable")
+            };
+            table.push(ResourceRow::new(
+                [
+                    Cell::new(support.filesystem.label()),
+                    Cell::new(support.runtime.label()),
+                    Cell::new(if support.default { "yes" } else { "no" }),
+                    Cell::new(support.instances.label()),
+                    Cell::state(state.clone()),
+                    Cell::new(support.detail.as_ref().unwrap_or(&support.command).clone()),
+                ],
+                state,
+            ));
+        }
+        table
+    }
+
+    fn render(&self, workspace: &Workspace) -> crate::ui::table::Report {
+        use crate::ui::table::{Block, ContextStrip, Meta, Report, StateToken};
+
+        let mut report = Report::new();
+        report.push(Block::Context(
+            ContextStrip::new(
+                "Frontends",
+                WorkspaceLayout::display(&workspace.layout().config_dir),
+                StateToken::neutral("local"),
+            )
+            .with_metadata([
+                Meta::new("Platform", self.platform.label()),
+                Meta::new("Supported", self.supported_frontends.len().to_string()),
+                Meta::new("Instantiated", self.frontends.len().to_string()),
+            ]),
+        ));
+        report.push(Block::Resources(self.support_table()));
+        let mut instantiated = crate::status::frontend_table(&self.frontends);
+        "Instantiated frontends".clone_into(&mut instantiated.title);
+        report.push(Block::Resources(instantiated));
+        report
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -321,7 +573,10 @@ fn failed(
 
 impl FrontendEnableArgs {
     pub async fn enable(self, workspace: &Workspace, output: Output) -> Result<FrontendResult> {
-        let id = resolve_id(workspace, self.filesystem, self.runtime, self.location)?;
+        let runtime = self
+            .runtime
+            .unwrap_or_else(|| self.filesystem.default_runtime());
+        let id = resolve_id(workspace, self.filesystem, runtime, self.location)?;
         let inventory = Inventory::collect(workspace).await?;
         if id.runtime() == FrontendRuntime::Host
             && inventory.frontends.iter().any(|row| {
@@ -884,32 +1139,18 @@ async fn wait_for_mount(
 
 impl FrontendLsArgs {
     pub async fn run(self, output: Output) -> Result<crate::error::ExitCode> {
-        let ws = Workspace::resolve()?;
-        let inventory = Inventory::collect(&ws).await?;
+        let workspace = Workspace::resolve()?;
+        let inventory = Inventory::collect(&workspace).await?;
+        let list = FrontendList::collect(&inventory).await;
         let exit = if inventory.verdict() == crate::inventory::Verdict::Degraded {
             crate::error::ExitCode::Degraded
         } else {
             crate::error::ExitCode::Success
         };
         if output.is_structured() {
-            #[derive(Serialize)]
-            struct FrontendList {
-                frontends: Vec<FrontendStatus>,
-                verdict: crate::inventory::Verdict,
-            }
-            output.emit_result(
-                ResultVerdict::from(inventory.verdict()),
-                FrontendList {
-                    frontends: inventory.frontends.clone(),
-                    verdict: inventory.verdict(),
-                },
-            )?;
+            output.emit_result(ResultVerdict::from(inventory.verdict()), &list)?;
         } else {
-            let mut report = crate::ui::table::Report::new();
-            report.push(crate::ui::table::Block::Resources(
-                crate::status::frontend_table(&inventory.frontends),
-            ));
-            report.print();
+            list.render(&workspace).print();
         }
         Ok(exit)
     }
@@ -1011,6 +1252,50 @@ fn format_failure(result: &FrontendResult) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frontend_defaults_follow_the_platform_surface() {
+        assert_eq!(
+            FrontendFilesystem::Nfs.default_runtime(),
+            FrontendRuntime::Host
+        );
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            FrontendFilesystem::Fuse.default_runtime(),
+            FrontendRuntime::Libkrun
+        );
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(
+            FrontendFilesystem::Fuse.default_runtime(),
+            FrontendRuntime::Host
+        );
+    }
+
+    #[test]
+    fn platform_support_declares_copy_policy() {
+        let macos = Platform::for_target("macos", "aarch64");
+        assert_eq!(macos.frontend_specs(), &MACOS_FRONTENDS);
+        assert!(macos.frontend_specs().iter().any(|spec| {
+            spec.filesystem == FrontendFilesystem::Nfs
+                && spec.runtime == FrontendRuntime::Host
+                && spec.instances == InstancePolicy::MultipleLocations
+        }));
+        assert!(macos.frontend_specs().iter().any(|spec| {
+            spec.runtime == FrontendRuntime::Libkrun
+                && spec.instances == InstancePolicy::OnePerWorkspace
+        }));
+
+        let linux = Platform::for_target("linux", "x86_64");
+        assert_eq!(linux.frontend_specs(), &LINUX_FRONTENDS);
+        assert!(linux.frontend_specs().iter().any(|spec| {
+            spec.runtime == FrontendRuntime::Host
+                && spec.instances == InstancePolicy::MultipleLocations
+        }));
+        assert!(linux.frontend_specs().iter().any(|spec| {
+            spec.runtime == FrontendRuntime::Docker
+                && spec.instances == InstancePolicy::OnePerWorkspace
+        }));
+    }
 
     #[test]
     fn selectors_require_one_observed_identity() {

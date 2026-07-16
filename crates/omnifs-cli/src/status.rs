@@ -49,7 +49,7 @@ impl InventoryReport {
             DaemonState::Unreachable => TableState::failure("unreachable"),
             DaemonState::Failed => TableState::failure("failed"),
         };
-        let metadata = vec![
+        let mut metadata = vec![
             TableMeta::new(
                 "Daemon",
                 self.inventory
@@ -59,6 +59,9 @@ impl InventoryReport {
             ),
             TableMeta::new("namespace", "/"),
         ];
+        if let Some(preparation) = &self.inventory.preparation {
+            metadata.push(TableMeta::new("providers", preparation.summary()));
+        }
         let mut context = TableContext::new(
             "omnifs",
             omnifs_workspace::layout::WorkspaceLayout::display(&self.inventory.home),

@@ -44,7 +44,7 @@ Keep credentials out of WIT payloads and daemon control payloads. Route provider
 
 OAuth client ids in provider declarations are public application identifiers, not secrets. User access tokens, refresh tokens, and client secrets remain sensitive host-side values. `omnifs mount add` owns first-run OAuth mount generation; `omnifs mount reauth <mount>` owns repair and re-authentication, and both write the store for the next startup. Credentials live only in the host credential store: a mount's auth declares identity (scheme, account) and never a sourcing mechanism, so there is no read-from-env or read-from-file path at serve time.
 
-Credential values must never appear in CLI output, errors, tracing, telemetry, or structured envelopes. Source identifiers such as environment-variable names may appear when they make an error actionable.
+Credential values must never appear in CLI output, errors, tracing, metrics, or structured envelopes. Source identifiers such as environment-variable names may appear when they make an error actionable.
 
 ### Frontend attach authority
 
