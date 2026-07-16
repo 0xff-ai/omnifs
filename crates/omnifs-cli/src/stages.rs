@@ -182,11 +182,11 @@ pub(crate) fn spec_creation(
     )?;
     let resolved = ProviderResolver::new(&paths.providers_dir, &embedded).resolve(&selector)?;
     if resolved.newly_retained
-        && let Err(error) =
-            crate::provider_preparation::Manager::new(workspace.layout()).spawn_background(output)
+        && let Err(error) = crate::provider_preparation::Preparation::new(workspace.layout())
+            .spawn_background(output)
     {
         output.narrate(crate::ui::style::warn(format!(
-            "Couldn't start background provider preparation ({error:#}); `omnifs up` will prepare it synchronously."
+            "Couldn't start background provider preparation ({error:#}); daemon startup will compile the provider."
         )));
     }
     let provider_name = resolved.reference.meta.name.to_string();

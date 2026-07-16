@@ -5,7 +5,6 @@
 pub(crate) mod catalog;
 pub(crate) mod config;
 pub(crate) mod manifest;
-pub mod preparation;
 pub(crate) mod sections;
 pub(crate) mod store;
 pub(crate) mod wasm;

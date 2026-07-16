@@ -12,9 +12,6 @@ use omnifs_workspace::daemon_record::DaemonRecord;
 use omnifs_workspace::layout::WorkspaceLayout;
 use omnifs_workspace::mounts::{Name as MountName, Registry, Revision};
 use omnifs_workspace::provider::Catalog;
-use omnifs_workspace::provider::preparation::{
-    Preparation, Provider as PreparedProvider, RunState,
-};
 use serde::Serialize;
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
@@ -26,6 +23,7 @@ use crate::commands::frontend::GUEST_MOUNT;
 use crate::commands::frontend::{FrontendFilesystem as Filesystem, FrontendRuntime as Runtime};
 #[cfg(target_os = "macos")]
 use crate::libkrun_runner::LibkrunRunner;
+use crate::provider_preparation::{Preparation, Status as PreparationStatus};
 use crate::workspace::Workspace;
 
 #[derive(Debug, Clone, Serialize)]
@@ -64,90 +62,6 @@ pub(crate) struct RunnerStatus {
     pub(crate) location: Option<PathBuf>,
     pub(crate) state: RunnerState,
     pub(crate) error: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub(crate) struct PreparationStatus {
-    pub(crate) state: PreparationState,
-    pub(crate) completed: usize,
-    pub(crate) total: usize,
-    pub(crate) failed: usize,
-    pub(crate) started_at: Option<String>,
-    pub(crate) finished_at: Option<String>,
-    pub(crate) providers: Vec<PreparedProvider>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) error: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum PreparationState {
-    Running,
-    Complete,
-    Failed,
-    Interrupted,
-    Unreadable,
-}
-
-impl PreparationStatus {
-    fn collect(layout: &WorkspaceLayout) -> Option<Self> {
-        let preparation = Preparation::new(&layout.cache_dir);
-        match preparation.read() {
-            Ok(None) => None,
-            Ok(Some(record)) => {
-                let state = match record.state {
-                    RunState::Running => match preparation.is_active() {
-                        Ok(true) => PreparationState::Running,
-                        Ok(false) => PreparationState::Interrupted,
-                        Err(error) => {
-                            return Some(Self::unreadable(error.to_string()));
-                        },
-                    },
-                    RunState::Complete => PreparationState::Complete,
-                    RunState::Failed => PreparationState::Failed,
-                };
-                Some(Self {
-                    state,
-                    completed: record.completed(),
-                    total: record.providers.len(),
-                    failed: record.failed(),
-                    started_at: Some(record.started_at),
-                    finished_at: record.finished_at,
-                    providers: record.providers,
-                    error: None,
-                })
-            },
-            Err(error) => Some(Self::unreadable(error.to_string())),
-        }
-    }
-
-    fn unreadable(error: String) -> Self {
-        Self {
-            state: PreparationState::Unreadable,
-            completed: 0,
-            total: 0,
-            failed: 0,
-            started_at: None,
-            finished_at: None,
-            providers: Vec::new(),
-            error: Some(error),
-        }
-    }
-
-    pub(crate) fn summary(&self) -> String {
-        let state = match self.state {
-            PreparationState::Running => "running",
-            PreparationState::Complete => "complete",
-            PreparationState::Failed => "failed",
-            PreparationState::Interrupted => "interrupted",
-            PreparationState::Unreadable => "unreadable",
-        };
-        if self.total == 0 {
-            state.to_owned()
-        } else {
-            format!("{}/{} {state}", self.completed, self.total)
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -553,7 +467,7 @@ impl Inventory {
         let mount_count = mounts.len();
         let runners = runner_statuses(&layout)?;
         let frontends = frontend_statuses(daemon_status, mount_count, &runners);
-        let preparation = PreparationStatus::collect(&layout);
+        let preparation = Preparation::new(&layout).status();
         let access_count = frontends
             .iter()
             .filter(|frontend| {

@@ -100,11 +100,8 @@ impl<'a> Launcher<'a> {
         let store = FileStore::new(&paths.credentials_file);
         preflight_mounts(&configs, self.workspace.catalog(), &store)?;
 
-        crate::provider_preparation::Manager::new(paths)
-            .prepare_for_up(
-                configs.iter().map(|config| config.config.provider.id),
-                &self.output,
-            )
+        crate::provider_preparation::Preparation::new(paths)
+            .wait(&self.output)
             .await?;
 
         self.output.narrate(format!(

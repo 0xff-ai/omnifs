@@ -125,22 +125,17 @@ fn write_mount_fixture(fixture: &Fixture, name: &str) {
 }
 
 fn write_preparation_observation(fixture: &Fixture, complete: bool) {
-    use omnifs_workspace::ids::{ProviderId, ProviderName};
-    use omnifs_workspace::provider::IndexEntry;
-    use omnifs_workspace::provider::preparation::{Preparation, Record};
-
-    let entry = IndexEntry {
-        id: ProviderId::from_wasm_bytes(b"provider"),
-        name: ProviderName::new("example").unwrap(),
-        version: None,
-    };
-    let preparation = Preparation::new(fixture.home().join("cache"));
-    let lease = preparation.acquire().unwrap();
-    let mut record = Record::running([entry.clone()]);
-    if complete {
-        record.settle(entry.id, 12, None);
-    }
-    lease.write(&record).unwrap();
+    let cache = fixture.home().join("cache");
+    std::fs::create_dir_all(&cache).unwrap();
+    std::fs::write(
+        cache.join("provider-preparation.jsonl"),
+        format!(
+            "{{\"pid\":{},\"completed\":{},\"total\":1}}\n",
+            std::process::id(),
+            usize::from(complete)
+        ),
+    )
+    .unwrap();
 }
 
 #[test]
@@ -220,8 +215,10 @@ fn cli_redesign_contract_frontend_list_separates_support_from_instances() {
     } else {
         std::env::consts::OS
     };
-    assert!(text.contains(&format!("Platform {os}")), "{text}");
-    assert!(text.contains("Supported frontends"), "{text}");
+    assert!(
+        text.contains(&format!("Supported frontends on {os}")),
+        "{text}"
+    );
     assert!(text.contains("Instantiated frontends  0"), "{text}");
     if cfg!(any(target_os = "macos", target_os = "linux")) {
         assert!(text.contains("multiple locations"), "{text}");
@@ -324,7 +321,6 @@ fn cli_redesign_contract_status_exposes_provider_preparation() {
     assert_eq!(preparation["state"], "complete");
     assert_eq!(preparation["completed"], 1);
     assert_eq!(preparation["total"], 1);
-    assert_eq!(preparation["providers"][0]["name"], "example");
 
     let human = fixture.run(&["status", "--output", "human"]);
     assert!(stdout_text(&human).contains("providers 1/1 complete"));

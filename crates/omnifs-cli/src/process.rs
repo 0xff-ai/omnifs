@@ -11,8 +11,6 @@ pub(crate) enum ProcessRole {
     /// A background daemon the CLI spawned: defaults louder so its startup
     /// diagnostics are captured in daemon.log rather than hidden.
     Daemon,
-    /// A detached provider compiler whose diagnostics go to its own cache log.
-    ProviderPreparation,
 }
 
 impl ProcessRole {
@@ -20,7 +18,7 @@ impl ProcessRole {
     pub(crate) const fn default_log_level(self) -> &'static str {
         match self {
             Self::Cli => "warn",
-            Self::Daemon | Self::ProviderPreparation => "info",
+            Self::Daemon => "info",
         }
     }
 }

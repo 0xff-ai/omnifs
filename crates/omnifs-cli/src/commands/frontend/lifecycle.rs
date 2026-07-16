@@ -36,6 +36,8 @@ pub enum FrontendFilesystem {
 }
 
 impl FrontendFilesystem {
+    const ALL: [Self; 2] = [Self::Fuse, Self::Nfs];
+
     pub const fn label(self) -> &'static str {
         match self {
             Self::Fuse => "fuse",
@@ -68,11 +70,32 @@ pub enum FrontendRuntime {
 }
 
 impl FrontendRuntime {
+    const ALL: [Self; 3] = [Self::Host, Self::Docker, Self::Libkrun];
+
     pub const fn label(self) -> &'static str {
         match self {
             Self::Host => "host",
             Self::Docker => "docker",
             Self::Libkrun => "libkrun",
+        }
+    }
+
+    fn supports(self, filesystem: FrontendFilesystem) -> bool {
+        matches!(
+            (std::env::consts::OS, filesystem, self),
+            (
+                "macos",
+                FrontendFilesystem::Fuse,
+                Self::Docker | Self::Libkrun
+            ) | ("macos", FrontendFilesystem::Nfs, Self::Host)
+                | ("linux", FrontendFilesystem::Fuse, Self::Host | Self::Docker)
+        )
+    }
+
+    const fn instances(self) -> InstancePolicy {
+        match self {
+            Self::Host => InstancePolicy::MultipleLocations,
+            Self::Docker | Self::Libkrun => InstancePolicy::OnePerWorkspace,
         }
     }
 }
@@ -180,11 +203,6 @@ impl Platform {
         }
     }
 
-    #[cfg(test)]
-    const fn for_target(os: &'static str, arch: &'static str) -> Self {
-        Self { os, arch }
-    }
-
     fn label(self) -> String {
         let os = match self.os {
             "macos" => "macOS",
@@ -192,14 +210,6 @@ impl Platform {
             other => other,
         };
         format!("{os} {}", self.arch)
-    }
-
-    fn frontend_specs(self) -> &'static [FrontendSpec] {
-        match self.os {
-            "macos" => &MACOS_FRONTENDS,
-            "linux" => &LINUX_FRONTENDS,
-            _ => &OTHER_FRONTENDS,
-        }
     }
 }
 
@@ -219,100 +229,6 @@ impl InstancePolicy {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct FrontendSpec {
-    filesystem: FrontendFilesystem,
-    runtime: FrontendRuntime,
-    default: bool,
-    instances: InstancePolicy,
-}
-
-impl FrontendSpec {
-    const fn new(
-        filesystem: FrontendFilesystem,
-        runtime: FrontendRuntime,
-        default: bool,
-        instances: InstancePolicy,
-    ) -> Self {
-        Self {
-            filesystem,
-            runtime,
-            default,
-            instances,
-        }
-    }
-
-    async fn inspect(self) -> FrontendSupport {
-        let readiness = match self.runtime {
-            FrontendRuntime::Host => HostRunner::probe(match self.filesystem {
-                FrontendFilesystem::Fuse => LocalProtocol::Fuse,
-                FrontendFilesystem::Nfs => LocalProtocol::Nfs,
-            }),
-            FrontendRuntime::Docker => DockerClient::probe().await,
-            FrontendRuntime::Libkrun => LibkrunRunner::probe(),
-        };
-        let (available, detail) = match readiness {
-            Ok(()) => (true, None),
-            Err(error) => (false, Some(format!("{error:#}"))),
-        };
-        let command = if self.default {
-            format!("omnifs frontend enable {}", self.filesystem)
-        } else {
-            format!(
-                "omnifs frontend enable {} --runtime {}",
-                self.filesystem, self.runtime
-            )
-        };
-        FrontendSupport {
-            filesystem: self.filesystem,
-            runtime: self.runtime,
-            default: self.default,
-            instances: self.instances,
-            available,
-            detail,
-            command,
-        }
-    }
-}
-
-const MACOS_FRONTENDS: [FrontendSpec; 3] = [
-    FrontendSpec::new(
-        FrontendFilesystem::Fuse,
-        FrontendRuntime::Libkrun,
-        true,
-        InstancePolicy::OnePerWorkspace,
-    ),
-    FrontendSpec::new(
-        FrontendFilesystem::Fuse,
-        FrontendRuntime::Docker,
-        false,
-        InstancePolicy::OnePerWorkspace,
-    ),
-    FrontendSpec::new(
-        FrontendFilesystem::Nfs,
-        FrontendRuntime::Host,
-        true,
-        InstancePolicy::MultipleLocations,
-    ),
-];
-
-const LINUX_FRONTENDS: [FrontendSpec; 2] = [
-    FrontendSpec::new(
-        FrontendFilesystem::Fuse,
-        FrontendRuntime::Host,
-        true,
-        InstancePolicy::MultipleLocations,
-    ),
-    FrontendSpec::new(
-        FrontendFilesystem::Fuse,
-        FrontendRuntime::Docker,
-        false,
-        InstancePolicy::OnePerWorkspace,
-    ),
-];
-
-const OTHER_FRONTENDS: [FrontendSpec; 0] = [];
-
 #[derive(Debug, Clone, Serialize)]
 struct FrontendSupport {
     filesystem: FrontendFilesystem,
@@ -320,9 +236,38 @@ struct FrontendSupport {
     default: bool,
     instances: InstancePolicy,
     available: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    detail: Option<String>,
-    command: String,
+    detail: String,
+}
+
+impl FrontendSupport {
+    async fn inspect(filesystem: FrontendFilesystem, runtime: FrontendRuntime) -> Self {
+        let default = filesystem.default_runtime() == runtime;
+        let readiness = match runtime {
+            FrontendRuntime::Host => HostRunner::probe(match filesystem {
+                FrontendFilesystem::Fuse => LocalProtocol::Fuse,
+                FrontendFilesystem::Nfs => LocalProtocol::Nfs,
+            }),
+            FrontendRuntime::Docker => DockerClient::probe().await,
+            FrontendRuntime::Libkrun => LibkrunRunner::probe(),
+        };
+        let command = if default {
+            format!("omnifs frontend enable {filesystem}")
+        } else {
+            format!("omnifs frontend enable {filesystem} --runtime {runtime}")
+        };
+        let (available, detail) = match readiness {
+            Ok(()) => (true, command),
+            Err(error) => (false, format!("{error:#}")),
+        };
+        FrontendSupport {
+            filesystem,
+            runtime,
+            default,
+            instances: runtime.instances(),
+            available,
+            detail,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -336,9 +281,13 @@ struct FrontendList {
 impl FrontendList {
     async fn collect(inventory: &Inventory) -> Self {
         let platform = Platform::current();
-        let mut supported_frontends = Vec::with_capacity(platform.frontend_specs().len());
-        for spec in platform.frontend_specs() {
-            supported_frontends.push(spec.inspect().await);
+        let mut supported_frontends = Vec::new();
+        for filesystem in FrontendFilesystem::ALL {
+            for runtime in FrontendRuntime::ALL {
+                if runtime.supports(filesystem) {
+                    supported_frontends.push(FrontendSupport::inspect(filesystem, runtime).await);
+                }
+            }
         }
         Self {
             platform,
@@ -354,7 +303,7 @@ impl FrontendList {
         };
 
         let mut table = ResourceTable::new(
-            "Supported frontends",
+            format!("Supported frontends on {}", self.platform.label()),
             self.supported_frontends.len(),
             vec![
                 Column::new("Filesystem", Priority::Identity, WidthPolicy::Auto),
@@ -378,7 +327,7 @@ impl FrontendList {
                     Cell::new(if support.default { "yes" } else { "no" }),
                     Cell::new(support.instances.label()),
                     Cell::state(state.clone()),
-                    Cell::new(support.detail.as_ref().unwrap_or(&support.command).clone()),
+                    Cell::new(&support.detail),
                 ],
                 state,
             ));
@@ -386,22 +335,9 @@ impl FrontendList {
         table
     }
 
-    fn render(&self, workspace: &Workspace) -> crate::ui::table::Report {
-        use crate::ui::table::{Block, ContextStrip, Meta, Report, StateToken};
-
+    fn render(&self) -> crate::ui::table::Report {
+        use crate::ui::table::{Block, Report};
         let mut report = Report::new();
-        report.push(Block::Context(
-            ContextStrip::new(
-                "Frontends",
-                WorkspaceLayout::display(&workspace.layout().config_dir),
-                StateToken::neutral("local"),
-            )
-            .with_metadata([
-                Meta::new("Platform", self.platform.label()),
-                Meta::new("Supported", self.supported_frontends.len().to_string()),
-                Meta::new("Instantiated", self.frontends.len().to_string()),
-            ]),
-        ));
         report.push(Block::Resources(self.support_table()));
         let mut instantiated = crate::status::frontend_table(&self.frontends);
         "Instantiated frontends".clone_into(&mut instantiated.title);
@@ -433,14 +369,13 @@ fn resolve_id(
     runtime: FrontendRuntime,
     location: Option<PathBuf>,
 ) -> Result<FrontendId> {
+    ensure!(
+        runtime.supports(filesystem),
+        "a {filesystem}/{runtime} frontend is not supported on {}",
+        std::env::consts::OS
+    );
     match runtime {
         FrontendRuntime::Host => {
-            if filesystem == FrontendFilesystem::Fuse && !cfg!(target_os = "linux") {
-                bail!("a host fuse frontend requires a Linux host");
-            }
-            if filesystem == FrontendFilesystem::Nfs && !cfg!(target_os = "macos") {
-                bail!("a host nfs frontend requires a macOS host");
-            }
             let location = location.unwrap_or_else(|| {
                 resolve_mount_point()
                     .unwrap_or_else(|| workspace.layout().config_dir.join("omnifs"))
@@ -453,16 +388,6 @@ fn resolve_id(
             Ok(FrontendId::new(filesystem, runtime, Some(location)))
         },
         FrontendRuntime::Docker | FrontendRuntime::Libkrun => {
-            if runtime == FrontendRuntime::Libkrun {
-                ensure!(
-                    cfg!(target_os = "macos"),
-                    "a libkrun frontend requires a macOS host"
-                );
-            }
-            ensure!(
-                filesystem == FrontendFilesystem::Fuse,
-                "the {runtime} runtime only delivers a fuse frontend"
-            );
             ensure!(
                 location.is_none(),
                 "the {runtime} runtime owns its mount; location is not allowed"
@@ -1150,7 +1075,7 @@ impl FrontendLsArgs {
         if output.is_structured() {
             output.emit_result(ResultVerdict::from(inventory.verdict()), &list)?;
         } else {
-            list.render(&workspace).print();
+            list.render().print();
         }
         Ok(exit)
     }
@@ -1259,42 +1184,14 @@ mod tests {
             FrontendFilesystem::Nfs.default_runtime(),
             FrontendRuntime::Host
         );
-        #[cfg(target_os = "macos")]
         assert_eq!(
             FrontendFilesystem::Fuse.default_runtime(),
-            FrontendRuntime::Libkrun
+            if cfg!(target_os = "macos") {
+                FrontendRuntime::Libkrun
+            } else {
+                FrontendRuntime::Host
+            }
         );
-        #[cfg(not(target_os = "macos"))]
-        assert_eq!(
-            FrontendFilesystem::Fuse.default_runtime(),
-            FrontendRuntime::Host
-        );
-    }
-
-    #[test]
-    fn platform_support_declares_copy_policy() {
-        let macos = Platform::for_target("macos", "aarch64");
-        assert_eq!(macos.frontend_specs(), &MACOS_FRONTENDS);
-        assert!(macos.frontend_specs().iter().any(|spec| {
-            spec.filesystem == FrontendFilesystem::Nfs
-                && spec.runtime == FrontendRuntime::Host
-                && spec.instances == InstancePolicy::MultipleLocations
-        }));
-        assert!(macos.frontend_specs().iter().any(|spec| {
-            spec.runtime == FrontendRuntime::Libkrun
-                && spec.instances == InstancePolicy::OnePerWorkspace
-        }));
-
-        let linux = Platform::for_target("linux", "x86_64");
-        assert_eq!(linux.frontend_specs(), &LINUX_FRONTENDS);
-        assert!(linux.frontend_specs().iter().any(|spec| {
-            spec.runtime == FrontendRuntime::Host
-                && spec.instances == InstancePolicy::MultipleLocations
-        }));
-        assert!(linux.frontend_specs().iter().any(|spec| {
-            spec.runtime == FrontendRuntime::Docker
-                && spec.instances == InstancePolicy::OnePerWorkspace
-        }));
     }
 
     #[test]

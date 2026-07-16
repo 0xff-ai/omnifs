@@ -89,9 +89,9 @@ The Omnifs VFS wire protocol also serves over token-authenticated TCP because a 
 
 Provider-store indexes strict-parse both the top-level index object and retained provider entries. Unknown keys make the store unreadable instead of being silently accepted.
 
-Retaining a new provider starts the hidden `prepare-providers` child as detached best-effort work. It compiles retained components concurrently into the same workspace-owned Wasmtime cache used by the daemon, writes diagnostics to `cache/provider-preparation.log`, and atomically records current or last-run progress in `cache/provider-preparation.json`. The record is an observation for status, never cache authority.
+Retaining a new provider starts the hidden `prepare-providers` child as detached best-effort work. It compiles retained components concurrently into the same workspace-owned Wasmtime cache used by the daemon and appends aggregate progress to `cache/provider-preparation.jsonl`. Progress is an observation for status, never cache authority.
 
-Online `omnifs up` joins preparation through one workspace advisory lock before replacing a serving daemon. It then loads every unique provider ID selected by the immutable mount revision through the production Wasmtime engine while holding that lock. A former worker's successful work becomes cache hits; a failed or interrupted worker is retried synchronously and the original daemon remains serving when preparation fails. Offline startup skips provider preparation.
+Online `omnifs up` joins preparation through one workspace advisory lock before replacing a serving daemon. The daemon then performs its normal production-engine load, so successful background work becomes cache hits while failed, interrupted, evicted, or incompatible entries compile or fail through the existing authoritative startup path. Offline startup skips provider preparation.
 
 ### Local metrics
 
