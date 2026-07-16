@@ -212,33 +212,8 @@ jobs:
           name: omnifs-wasm
           path: target/wasm32-wasip2/release
 
-      - name: Lint and archive host tests
-        run: |
-          set -euo pipefail
-          rm -rf dist/host-tests
-          mkdir -p dist/host-tests
-          just check host
-          cargo nextest archive --profile ci --workspace \
-            --exclude 'omnifs-provider-*' \
-            --exclude test-provider \
-            --archive-file dist/host-tests/host-tests.tar.zst
-
-      - name: Isolate host test archive inputs
-        run: |
-          set -euo pipefail
-          keep="${RUNNER_TEMP:-/tmp}/omnifs-engine-test-inputs"
-          rm -rf "$keep"
-          mkdir -p "$keep/dist/host-tests" "$keep/wasm" "$keep/target-preserve"
-          cp dist/host-tests/host-tests.tar.zst "$keep/dist/host-tests/"
-          cp target/wasm32-wasip2/release/*.wasm "$keep/wasm/"
-          if [[ -d target/host-build ]]; then
-            mv target/host-build "$keep/target-preserve/host-build"
-          fi
-          find target -mindepth 1 -maxdepth 1 ! -name wasm32-wasip2 -exec rm -rf {} +
-          rm -rf dist/host-tests target/wasm32-wasip2/release
-          mkdir -p dist/host-tests target/wasm32-wasip2/release
-          cp "$keep/dist/host-tests/host-tests.tar.zst" dist/host-tests/
-          cp "$keep/wasm/"*.wasm target/wasm32-wasip2/release/
+      - name: Lint host tests
+        run: just check host
 
       - name: Cache wasmtime component compilations
         # The integration harness explicitly stores Wasmtime's content-addressed
@@ -247,7 +222,7 @@ jobs:
         # push and pull_request runs.
         uses: actions/cache@v5
         with:
-          path: target/wasm-cache
+          path: target/host-build/wasm-cache
           key: wasmtime-cache-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             wasmtime-cache-${{ runner.os }}-${{ runner.arch }}-
@@ -256,20 +231,9 @@ jobs:
       - name: Run host tests
         run: |
           set -euo pipefail
-          unset CARGO_TARGET_DIR
-          test -f dist/host-tests/host-tests.tar.zst
-          cargo nextest run --profile ci --archive-file dist/host-tests/host-tests.tar.zst
-
-      - name: Restore host build cache inputs
-        if: always()
-        run: |
-          set -euo pipefail
-          keep="${RUNNER_TEMP:-/tmp}/omnifs-engine-test-inputs"
-          if [[ -d "$keep/target-preserve/host-build" ]]; then
-            rm -rf target/host-build
-            mkdir -p target
-            mv "$keep/target-preserve/host-build" target/host-build
-          fi
+          cargo nextest run --profile ci --workspace \
+            --exclude 'omnifs-provider-*' \
+            --exclude test-provider
 
   cli-linux-x64:
     name: cli linux x64

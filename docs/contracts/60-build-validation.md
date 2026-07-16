@@ -15,7 +15,7 @@ Provider WASM artifacts are built with the pinned wasi-sdk. `just build provider
 
 Provider build and check recipes install the pinned wasi-sdk when needed. Run `just build providers` before host tests that need generated provider artifacts. Use `OMNIFS_ITEST_SKIP_PROVIDER_BUILD=1` after prebuilding providers for nextest runs that would otherwise contend (`just test host` sets it for you).
 
-Host integration fixtures keep runtime data private but share Wasmtime's content-addressed compiled-component cache through `omnifs_engine::test_support::wasm_cache_dir`. CI must cache that exact explicit directory after isolating the nextest archive inputs; caching Wasmtime's global default does not accelerate fixtures whose `HostContext` selects another path.
+Host integration fixtures keep runtime data private but share Wasmtime's content-addressed compiled-component cache through `omnifs_engine::test_support::wasm_cache_dir`. CI runs nextest directly from its dedicated host target directory and caches the exact compiled-component directory selected beneath it; caching Wasmtime's global default does not accelerate fixtures whose `HostContext` selects another path. Do not archive and re-extract the test binaries in the same job: the archive duplicates several gigabytes of statically linked executables, increases peak disk use, and adds no transfer boundary.
 
 Provider runtime changes must validate both binding surfaces separately: `omnifs-wit` host bindings with `--features host-bindings`, and SDK/provider guest bindings without that feature. Do not combine those into one Cargo invocation that enables host bindings while compiling the SDK.
 
