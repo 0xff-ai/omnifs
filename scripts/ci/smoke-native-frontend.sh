@@ -30,7 +30,7 @@ cleanup() {
   local exit_code=$?
   if [[ "$exit_code" != 0 ]]; then
     echo "== omnifs status ==" >&2
-    "$OMNIFS_CLI" status --detail >&2 || true
+    "$OMNIFS_CLI" status >&2 || true
     echo "== daemon.log (tail) ==" >&2
     tail -n 200 "$OMNIFS_HOME/cache/daemon.log" >&2 || true
   fi

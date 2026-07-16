@@ -328,9 +328,17 @@ function commandExists(command: string): boolean {
   return Bun.which(command) !== null;
 }
 
-/// Resolve the compiled worktree binary this script drives. The control-plane
-/// fixtures must never accidentally invoke a stale globally-installed shim.
+/// Resolve the exact binary this script drives. CI may provide a packaged CLI
+/// through `OMNIFS_CLI`; contributor runs use the compiled worktree binary.
+/// Neither path may fall back to a globally-installed shim implicitly.
 function resolveCli(): string {
+  if (process.env.OMNIFS_CLI) {
+    const configured = resolve(process.env.OMNIFS_CLI);
+    if (existsSync(configured)) {
+      return configured;
+    }
+    throw new Error(`configured omnifs CLI does not exist at ${configured}`);
+  }
   const built = join(workspace, "target/debug/omnifs");
   if (existsSync(built)) {
     return built;
