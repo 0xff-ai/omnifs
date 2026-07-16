@@ -664,10 +664,9 @@ fn fuse_docker_lifecycle_and_matrix() {
     // (b) the fuse-docker matrix column, through the shared row/executor
     // machinery: every read row must pass, including tar and tail-f-growing
     // (the debian frontend image ships GNU coreutils); write rows stay
-    // expected-fail (no write path yet); grep-r stays expected-fail (an
-    // unrelated stream-face `log` read-file/open-file gap; the
-    // pagination-controls half of this row is fixed and covered by
-    // `omnifs-itest`'s `pagination_exhaustive` suite).
+    // expected-fail (no write path yet). The recursive grep excludes the
+    // provider's deliberately invalid `checkout` tree-ref fixture while still
+    // traversing the paged comments collection and live stream leaf.
     let exec = Exec::DockerExec {
         container: container.clone(),
         root: "/omnifs/test".to_string(),

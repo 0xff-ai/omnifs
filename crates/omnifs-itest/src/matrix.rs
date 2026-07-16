@@ -667,7 +667,11 @@ lines=$(wc -l < "$SCRATCH/tailf.out" | tr -d ' ')
         id: "grep-r",
         class: RowClass::Read,
         tool: None,
-        script: r#"grep -r "Body 7" "$ROOT/items/open/7" >/dev/null"#,
+        // `checkout` intentionally returns an unknown tree ref so the engine's
+        // rejection path stays covered. Exclude that deliberately broken
+        // fixture while still traversing pagination controls, comments, and
+        // the live stream leaf under the same object.
+        script: r#"grep -r --exclude-dir=checkout "Body 7" "$ROOT/items/open/7" >/dev/null"#,
     },
     Row {
         id: "find-name",
@@ -852,6 +856,9 @@ ls "$ROOT/hello/bundle" >/dev/null 2>&1 || true
 /// ignore-respecting walkers like `rg`/`fd`/git from ever reaching a control
 /// at all, but plain `grep -r` is not one). It also walks into
 /// `items/open/7/log`, an object stream face (`.stream(Item::log)`).
+/// The provider's `checkout` child deliberately returns unknown tree ref 777
+/// to exercise engine rejection, so this row excludes that one invalid fixture
+/// rather than treating its expected `EIO` as a frontend failure.
 ///
 /// Two invariants keep this row passing:
 ///

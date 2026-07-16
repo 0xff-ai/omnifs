@@ -153,8 +153,8 @@ fn two_daemons_two_homes_resolve_through_their_own_records() {
     );
     let json_a = status_json(&out_a);
     let result_a = json_a["result"].as_object().expect("status result");
-    assert_eq!(result_a["workspace"]["daemon_state"], "running");
-    let pid_a = result_a["workspace"]["pid"].as_u64().expect("A pid");
+    assert_eq!(result_a["daemon"]["probe"]["state"], "responding");
+    let pid_a = result_a["daemon"]["status"]["pid"].as_u64().expect("A pid");
     assert_eq!(
         pid_a,
         u64::from(daemon_a.pid()),
@@ -170,7 +170,7 @@ fn two_daemons_two_homes_resolve_through_their_own_records() {
     let out_b = run_status(daemon_b.home.path());
     assert_eq!(exit_code(&out_b), 0, "status for home B must exit 0");
     let json_b = status_json(&out_b);
-    let pid_b = json_b["result"]["workspace"]["pid"]
+    let pid_b = json_b["result"]["daemon"]["status"]["pid"]
         .as_u64()
         .expect("B pid");
     assert_eq!(
@@ -202,7 +202,7 @@ fn two_daemons_two_homes_resolve_through_their_own_records() {
         String::from_utf8_lossy(&out_fresh.stderr)
     );
     assert_eq!(
-        status_json(&out_fresh)["result"]["workspace"]["daemon_state"],
+        status_json(&out_fresh)["result"]["daemon"]["probe"]["state"],
         "stopped",
         "a home with no record must report not_running, never a foreign daemon"
     );
@@ -237,7 +237,7 @@ fn two_daemons_two_homes_resolve_through_their_own_records() {
         String::from_utf8_lossy(&out_dead.stderr)
     );
     assert_eq!(
-        status_json(&out_dead)["result"]["workspace"]["daemon_state"],
+        status_json(&out_dead)["result"]["daemon"]["probe"]["state"],
         "stopped",
         "the killed home A must report not_running"
     );
@@ -254,7 +254,7 @@ fn two_daemons_two_homes_resolve_through_their_own_records() {
         "home B must still answer after A is gone"
     );
     assert_eq!(
-        status_json(&out_b2)["result"]["workspace"]["pid"].as_u64(),
+        status_json(&out_b2)["result"]["daemon"]["status"]["pid"].as_u64(),
         Some(u64::from(daemon_b.pid())),
     );
 

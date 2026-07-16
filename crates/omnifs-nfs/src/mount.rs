@@ -370,6 +370,7 @@ impl SpotlightCommand {
         }
     }
 
+    #[cfg(target_os = "macos")]
     fn run(&self) -> Result<(), NfsFrontendError> {
         let output = Command::new(self.program)
             .args(&self.args)

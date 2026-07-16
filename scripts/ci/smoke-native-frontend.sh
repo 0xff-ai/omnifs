@@ -12,9 +12,9 @@
 set -euo pipefail
 
 : "${FRONTEND_IMAGE:?FRONTEND_IMAGE must be set to the frontend image ref}"
-OMNIFS_CLI="${OMNIFS_CLI:-$PWD/target/debug/omnifs}"
+OMNIFS_CLI="${OMNIFS_CLI:-$(command -v omnifs || true)}"
 test -x "$OMNIFS_CLI" || {
-  echo "compiled omnifs CLI not found at $OMNIFS_CLI" >&2
+  echo "omnifs CLI not found; set OMNIFS_CLI or install it on PATH" >&2
   exit 1
 }
 
