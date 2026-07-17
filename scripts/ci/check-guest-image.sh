@@ -58,12 +58,29 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# losetup -P asks the kernel to register partition block devices, but this
-# container's /dev is a plain tmpfs (no devtmpfs, no udev), so nothing
-# creates the /dev nodes on its own; make them by hand from sysfs.
+# losetup -P asks the kernel to register partition block devices, but
+# registration may finish after losetup returns. This container's /dev is a
+# plain tmpfs (no devtmpfs, no udev), so wait for the stable sysfs class entry
+# and make each node by hand.
+partition_devno() {
+  local part="$1"
+  local sysfs="/sys/class/block/${part}/dev"
+  local attempt
+  for ((attempt = 0; attempt < 50; attempt++)); do
+    if [[ -r "$sysfs" ]]; then
+      cat "$sysfs"
+      return 0
+    fi
+    sleep 0.1
+  done
+  echo "partition device $part did not appear after losetup -P" >&2
+  lsblk -o NAME,MAJ:MIN,TYPE,SIZE,PARTN "$loopdev" >&2 || true
+  return 1
+}
+
 for part in "${base}p1" "${base}p2"; do
   if [[ ! -e "/dev/$part" ]]; then
-    devno="$(cat "/sys/block/${base}/${part}/dev")"
+    devno="$(partition_devno "$part")"
     mknod "/dev/$part" b "${devno%%:*}" "${devno##*:}"
   fi
 done
