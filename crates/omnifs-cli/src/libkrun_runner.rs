@@ -608,8 +608,8 @@ impl<'a> LibkrunLaunchLease<'a> {
         self.replace_stale().await?;
 
         let dir = self.runner.dir();
-        std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+        std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
             .with_context(|| format!("restrict {} to 0700", dir.display()))?;
 
         for path in [

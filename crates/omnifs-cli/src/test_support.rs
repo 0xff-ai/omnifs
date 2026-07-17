@@ -8,26 +8,6 @@ pub(crate) fn fixture_paths(root: &std::path::Path) -> omnifs_workspace::layout:
     omnifs_workspace::layout::WorkspaceLayout::under_root(root)
 }
 
-/// A `ProviderRef` JSON value pinned to a placeholder id, for building mount
-/// spec fixtures whose serving path is never resolved.
-#[cfg(test)]
-fn provider_ref_value(name: &str) -> serde_json::Value {
-    use omnifs_workspace::ids::ProviderId;
-    serde_json::json!({
-        "id": ProviderId::from_wasm_bytes(name.as_bytes()).to_string(),
-        "meta": { "name": name }
-    })
-}
-
-/// Build a mount `Spec` from a JSON `body` (with no `provider` field) plus a
-/// placeholder `ProviderRef` named `name`.
-#[cfg(test)]
-pub(crate) fn spec_with_provider(name: &str, body: &str) -> omnifs_workspace::mounts::Spec {
-    let mut value: serde_json::Value = serde_json::from_str(body).expect("parse test spec body");
-    value["provider"] = provider_ref_value(name);
-    serde_json::from_value(value).expect("build test spec")
-}
-
 /// Build a mount `Spec` from a JSON `body` (no `provider` field) plus an
 /// explicit `reference`, for tests that first install a fixture provider.
 #[cfg(test)]
