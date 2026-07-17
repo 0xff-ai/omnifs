@@ -14,8 +14,8 @@ use omnifs_api::{
     ControlErrorCode, ControlOperation, ControlOutcome, ControlReply, ControlRequest, DaemonStatus,
     TcpAttachTarget, VsockAttachTarget,
 };
+use omnifs_workspace::Workspace;
 use omnifs_workspace::daemon_record::{DaemonRecord, Endpoint};
-use omnifs_workspace::layout::WorkspaceLayout;
 use omnifs_workspace::mounts::Revision;
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::UnixStream;
@@ -55,16 +55,19 @@ pub(crate) struct DaemonClient {
     control_socket: Option<PathBuf>,
     config_dir: PathBuf,
     cache_dir: PathBuf,
+    log_file: PathBuf,
     cleaned_stale: AtomicBool,
 }
 
 impl DaemonClient {
-    pub(crate) fn for_layout(layout: &WorkspaceLayout) -> Self {
+    pub(crate) fn for_workspace(workspace: &Workspace) -> Self {
+        let files = workspace.daemon();
         Self {
-            record_path: Some(layout.daemon_record_file()),
-            control_socket: Some(layout.control_socket()),
-            config_dir: layout.config_dir.clone(),
-            cache_dir: layout.cache_dir.clone(),
+            record_path: Some(files.record_file().to_path_buf()),
+            control_socket: Some(files.control_socket().to_path_buf()),
+            config_dir: files.config_dir().to_path_buf(),
+            cache_dir: files.cache_dir().to_path_buf(),
+            log_file: files.log_file(),
             cleaned_stale: AtomicBool::new(false),
         }
     }
@@ -84,7 +87,7 @@ impl DaemonClient {
     }
 
     pub(crate) fn log_file(&self) -> PathBuf {
-        self.cache_dir.join("daemon.log")
+        self.log_file.clone()
     }
 
     pub(crate) fn matches_status(&self, status: &DaemonStatus) -> bool {
@@ -107,6 +110,7 @@ impl DaemonClient {
             control_socket: None,
             config_dir: PathBuf::new(),
             cache_dir: PathBuf::new(),
+            log_file: PathBuf::new(),
             cleaned_stale: AtomicBool::new(false),
         }
     }
@@ -501,6 +505,7 @@ mod tests {
             control_socket: Some(control_socket),
             config_dir: PathBuf::new(),
             cache_dir: PathBuf::new(),
+            log_file: PathBuf::new(),
             cleaned_stale: AtomicBool::new(false),
         }
     }

@@ -25,7 +25,7 @@ use crate::stages::PromptMode;
 use crate::token_source::TokenSource;
 use crate::ui::consent::{Decision, Outcome, Plan, Row};
 use crate::ui::output::{Output, ResultVerdict};
-use crate::workspace::Workspace;
+use omnifs_workspace::Workspace;
 
 #[derive(Args, Debug, Clone)]
 pub struct MountArgs {
@@ -266,7 +266,7 @@ impl ReauthArgs {
         prompt: PromptMode,
     ) -> anyhow::Result<()> {
         let mount_name = self.name.as_str();
-        let mounts = workspace.desired_state().mounts()?;
+        let mounts = crate::mount_config::load_mounts(workspace)?;
         let mount_config = mounts
             .iter()
             .find(|m| m.name.as_str() == mount_name)
@@ -370,7 +370,7 @@ fn rm_with_options(
 ) -> anyhow::Result<crate::commands::receipt::MountRemoveReceipt> {
     output.intro(format!("omnifs mount rm {name}"))?;
     let output = output.clone();
-    let mounts = workspace.desired_state().mounts()?;
+    let mounts = crate::mount_config::load_mounts(workspace)?;
     let name =
         MountName::new(name.to_owned()).with_context(|| format!("invalid mount name `{name}`"))?;
 
@@ -500,7 +500,7 @@ mod tests {
     async fn rejects_invalid_mount_name() {
         let tmp = TempDir::new().unwrap();
         let paths = fixture_paths(tmp.path());
-        let workspace = Workspace::from_layout(paths);
+        let workspace = Workspace::under_root(&paths.config_dir);
         let err = rm(&workspace, "../leak", true).unwrap_err();
         assert!(format!("{err:#}").contains("invalid mount name"));
     }
@@ -509,7 +509,7 @@ mod tests {
     async fn removing_missing_valid_mount_is_a_noop_without_credentials() {
         let tmp = TempDir::new().unwrap();
         let paths = fixture_paths(tmp.path());
-        let workspace = Workspace::from_layout(paths.clone());
+        let workspace = Workspace::under_root(&paths.config_dir);
         rm(&workspace, "missing", true).unwrap();
         assert!(!paths.credentials_file.exists());
     }

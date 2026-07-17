@@ -7,7 +7,7 @@ use crate::commands;
 use crate::commands::doctor::DoctorVerdict;
 use crate::error::ExitCode;
 use crate::ui::output::{Output, OutputMode};
-use crate::workspace::Workspace;
+use omnifs_workspace::Workspace;
 
 #[derive(Parser)]
 #[command(

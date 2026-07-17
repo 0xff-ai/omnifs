@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use super::explain::AuthMode;
 use crate::credential_target::CredentialTarget;
 use crate::ui::style;
-use crate::workspace::Workspace;
+use omnifs_workspace::Workspace;
 use omnifs_workspace::authn::SchemeGuidance;
 use omnifs_workspace::mounts::Spec;
 use omnifs_workspace::provider::Catalog;
@@ -174,7 +174,7 @@ pub(crate) async fn login_with_workspace(
     output: &crate::ui::output::Output,
 ) -> anyhow::Result<CredentialTarget> {
     let store = workspace.credentials();
-    let mounts = workspace.desired_state().mounts()?;
+    let mounts = crate::mount_config::load_mounts(workspace)?;
     let mount_auth = crate::auth::MountAuth::load(workspace.catalog(), &mounts, mount)?;
     login(
         workspace.catalog(),
@@ -364,9 +364,13 @@ mod tests {
         std::fs::create_dir_all(&paths.mounts_dir).unwrap();
         std::fs::create_dir_all(&paths.providers_dir).unwrap();
         let reference = install_fixture_provider(&paths.providers_dir, "planned-oauth");
-        let workspace = Workspace::from_layout(paths);
+        let workspace = Workspace::under_root(&paths.config_dir);
 
-        assert!(workspace.desired_state().mounts().unwrap().is_empty());
+        assert!(
+            crate::mount_config::load_mounts(&workspace)
+                .unwrap()
+                .is_empty()
+        );
         let spec = spec_with_reference(
             &reference,
             r#"{
@@ -380,6 +384,10 @@ mod tests {
 
         assert_eq!(request.scheme().key, "device");
         assert!(target.primary_key().is_some());
-        assert!(workspace.desired_state().mounts().unwrap().is_empty());
+        assert!(
+            crate::mount_config::load_mounts(&workspace)
+                .unwrap()
+                .is_empty()
+        );
     }
 }

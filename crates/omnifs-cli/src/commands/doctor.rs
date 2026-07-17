@@ -8,7 +8,7 @@ use omnifs_workspace::creds::CredentialStore;
 
 use crate::docker::DockerClient;
 use crate::docker::DockerTarget;
-use crate::frontend_container::resolve_frontend_image;
+use crate::frontend_container::{frontend_container_name, resolve_frontend_image};
 use crate::image::{ImageRef, names_registry};
 use crate::inventory::{Inventory, Severity};
 use crate::status::InventoryReport;
@@ -18,7 +18,7 @@ use crate::ui::table::{
     Priority as TablePriority, ResourceRow as TableRow, ResourceTable as TableResources,
     StateToken as TableState, WidthPolicy as TableWidth,
 };
-use crate::workspace::Workspace;
+use omnifs_workspace::Workspace;
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct DoctorArgs {}
@@ -54,7 +54,7 @@ impl DoctorArgs {
 fn resolve_frontend_target(workspace: &Workspace) -> anyhow::Result<DockerTarget> {
     let config = workspace.config()?;
     let image = resolve_frontend_image(None, &config)?;
-    let container_name = workspace.frontend().container_name()?;
+    let container_name = frontend_container_name(workspace.frontend().workspace_label())?;
     DockerTarget::new(
         container_name.as_str().to_string(),
         image.as_str().to_string(),
@@ -503,7 +503,7 @@ mod golden {
 
     fn probe_credential_result(root: &std::path::Path) -> ProbeResult {
         let layout = fixture_paths(root);
-        let workspace = Workspace::from_layout(layout.clone());
+        let workspace = Workspace::under_root(&layout.config_dir);
         let doctor = Doctor {
             workspace: &workspace,
             inventory: Inventory::test(

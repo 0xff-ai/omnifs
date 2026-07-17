@@ -12,7 +12,7 @@ use crate::daemon_teardown::DaemonTeardown;
 use crate::error::ExitCode;
 use crate::inventory::Inventory;
 use crate::ui::output::{Output, ResultVerdict};
-use crate::workspace::Workspace;
+use omnifs_workspace::Workspace;
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct DownArgs {}

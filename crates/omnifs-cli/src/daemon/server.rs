@@ -896,8 +896,7 @@ mod tests {
         std::fs::create_dir_all(&args.mount_snapshot).unwrap();
         let context = crate::daemon::context::DaemonContext::resolve(&args).unwrap();
         context.prepare_startup_dirs(false).unwrap();
-        let cloner =
-            Arc::new(omnifs_engine::GitCloner::new(context.cache_dir().join("clones")).unwrap());
+        let cloner = Arc::new(omnifs_engine::GitCloner::new(context.clone_cache()).unwrap());
         let desired = omnifs_workspace::mounts::Registry::load(&args.mount_snapshot).unwrap();
         let registry = Arc::new(
             omnifs_engine::MountTable::load_online(
@@ -910,8 +909,7 @@ mod tests {
         );
         let daemon_record =
             super::DaemonRecordStore::new(context.daemon_record_file(), context.daemon_record());
-        let attach_store =
-            Arc::new(omnifs_workspace::attach::Store::open(context.attach_targets_file()).unwrap());
+        let attach_store = Arc::new(context.attach_store().unwrap());
         Arc::new(super::Daemon::new(
             context,
             registry,

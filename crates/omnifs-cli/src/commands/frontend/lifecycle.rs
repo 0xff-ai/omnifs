@@ -14,11 +14,13 @@ use serde::{Deserialize, Serialize};
 use crate::commands::frontend::GUEST_MOUNT;
 use crate::commands::receipt::FrontendReceipt;
 use crate::docker::{DockerClient, DockerRunner, DockerTarget};
-use crate::frontend_container::resolve_frontend_image;
+use crate::frontend_container::{frontend_container_name, resolve_frontend_image};
+use crate::host_runner::HostRunner;
 use crate::inventory::{FrontendState, FrontendStatus, Inventory};
 use crate::libkrun_runner::LibkrunLaunchRequest;
+use crate::libkrun_runner::LibkrunRunner;
 use crate::ui::output::Output;
-use crate::workspace::Workspace;
+use omnifs_workspace::Workspace;
 
 const DOCKER_TIMEOUT: Duration = Duration::from_secs(5);
 const LIBKRUN_TIMEOUT: Duration = Duration::from_secs(90);
@@ -624,7 +626,7 @@ async fn runner_running(workspace: &Workspace, id: &FrontendId, output: Output) 
         FrontendRuntime::Docker => {
             let config = workspace.config()?;
             let image = resolve_frontend_image(None, &config)?;
-            let name = workspace.frontend().container_name()?;
+            let name = frontend_container_name(workspace.frontend().workspace_label())?;
             let target = DockerTarget::new(name.as_str().to_owned(), image.as_str().to_owned())?;
             Ok(
                 DockerRunner::new(DockerClient::connect_for(&target, output)?)
@@ -633,9 +635,7 @@ async fn runner_running(workspace: &Workspace, id: &FrontendId, output: Output) 
                     .unwrap_or(false),
             )
         },
-        FrontendRuntime::Libkrun => Ok(workspace
-            .frontend()
-            .libkrun_runner()
+        FrontendRuntime::Libkrun => Ok(LibkrunRunner::new(workspace.frontend().libkrun_root())
             .is_running()?
             .unwrap_or(false)),
     }
@@ -649,20 +649,20 @@ async fn launch(
 ) -> Result<()> {
     match id.runtime() {
         FrontendRuntime::Host => {
-            workspace
-                .frontend()
-                .host_runner(
-                    id.location()
-                        .context("host frontend has no location")?
-                        .to_path_buf(),
-                    match id.filesystem() {
-                        FrontendFilesystem::Fuse => FrontendKind::Fuse,
-                        FrontendFilesystem::Nfs => FrontendKind::Nfs,
-                    }
-                    .into(),
-                )?
-                .launch(mount)
-                .await?;
+            HostRunner::new(
+                workspace.frontend(),
+                workspace.daemon(),
+                id.location()
+                    .context("host frontend has no location")?
+                    .to_path_buf(),
+                match id.filesystem() {
+                    FrontendFilesystem::Fuse => FrontendKind::Fuse,
+                    FrontendFilesystem::Nfs => FrontendKind::Nfs,
+                }
+                .into(),
+            )?
+            .launch(mount)
+            .await?;
         },
         FrontendRuntime::Docker => {
             launch_docker(workspace, mount, output).await?;
@@ -681,7 +681,7 @@ async fn launch(
 async fn launch_docker(workspace: &Workspace, mount: Option<&str>, output: Output) -> Result<()> {
     let config = workspace.config()?;
     let image = resolve_frontend_image(None, &config)?;
-    let name = workspace.frontend().container_name()?;
+    let name = frontend_container_name(workspace.frontend().workspace_label())?;
     let target = DockerTarget::new(name.as_str().to_owned(), image.as_str().to_owned())?;
     let runtime = DockerClient::connect_ready(&target, "omnifs frontend enable", output).await?;
     #[cfg(target_os = "linux")]
@@ -691,7 +691,9 @@ async fn launch_docker(workspace: &Workspace, mount: Option<&str>, output: Outpu
     };
     #[cfg(not(target_os = "linux"))]
     let (bind_ip, expected) = (None, std::net::Ipv4Addr::LOCALHOST);
-    let attach = workspace.daemon().frontend_attach_target(bind_ip).await?;
+    let attach = crate::client::DaemonClient::for_workspace(workspace)
+        .frontend_attach_target(bind_ip)
+        .await?;
     let addr: SocketAddr = attach
         .addr
         .parse()
@@ -719,8 +721,11 @@ async fn launch_libkrun(
     output: Output,
 ) -> Result<()> {
     let config = workspace.config()?;
-    let attach = workspace.daemon().frontend_attach_target_vsock().await?;
-    let runner = workspace.frontend().libkrun_runner();
+    let attach = crate::client::DaemonClient::for_workspace(workspace)
+        .frontend_attach_target_vsock()
+        .await?;
+    let runner = LibkrunRunner::new(workspace.frontend().libkrun_root());
+    let guest_image_cache = workspace.frontend().guest_image_cache();
     let attached = async {
         ensure!(
             wait_for_attachment(workspace, id).await,
@@ -734,7 +739,7 @@ async fn launch_libkrun(
                 daemon_attach_socket: Path::new(&attach.socket_path),
                 attach_token: &attach.token,
                 config: &config,
-                cache_dir: workspace.frontend().guest_image_cache(),
+                guest_image_cache: &guest_image_cache,
                 output,
                 mount,
                 timeout: LIBKRUN_TIMEOUT,
@@ -754,13 +759,17 @@ async fn stop(workspace: &Workspace, id: &FrontendId, output: Output) -> Result<
         FrontendRuntime::Docker => {
             let config = workspace.config()?;
             let image = resolve_frontend_image(None, &config)?;
-            let name = workspace.frontend().container_name()?;
+            let name = frontend_container_name(workspace.frontend().workspace_label())?;
             let target = DockerTarget::new(name.as_str().to_owned(), image.as_str().to_owned())?;
             DockerRunner::new(DockerClient::connect_for(&target, output)?)
                 .tear_down()
                 .await
         },
-        FrontendRuntime::Libkrun => workspace.frontend().libkrun_runner().tear_down().await,
+        FrontendRuntime::Libkrun => {
+            LibkrunRunner::new(workspace.frontend().libkrun_root())
+                .tear_down()
+                .await
+        },
     }
 }
 

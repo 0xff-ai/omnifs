@@ -7,7 +7,7 @@
 use crate::inventory::{DaemonProbe, Inventory};
 use crate::ui::consent::Outcome;
 use crate::ui::output::Output;
-use crate::workspace::Workspace;
+use omnifs_workspace::Workspace;
 use std::time::Duration;
 
 const SHUTDOWN_SETTLE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -68,22 +68,22 @@ impl TeardownOutcome {
     }
 }
 
-pub(crate) struct DaemonTeardown<'a> {
-    workspace: &'a Workspace,
+pub(crate) struct DaemonTeardown {
+    client: crate::client::DaemonClient,
     initial: Option<Inventory>,
 }
 
-impl<'a> DaemonTeardown<'a> {
-    pub(crate) fn new(workspace: &'a Workspace) -> Self {
+impl DaemonTeardown {
+    pub(crate) fn new(workspace: &Workspace) -> Self {
         Self {
-            workspace,
+            client: crate::client::DaemonClient::for_workspace(workspace),
             initial: None,
         }
     }
 
-    pub(crate) fn with_inventory(workspace: &'a Workspace, inventory: Inventory) -> Self {
+    pub(crate) fn with_inventory(workspace: &Workspace, inventory: Inventory) -> Self {
         Self {
-            workspace,
+            client: crate::client::DaemonClient::for_workspace(workspace),
             initial: Some(inventory),
         }
     }
@@ -104,7 +104,7 @@ impl<'a> DaemonTeardown<'a> {
     /// place. Apply uses this path when switching desired mount revisions;
     /// surviving frontends reconnect when the daemon returns.
     pub(crate) async fn stop_daemon(&self) -> anyhow::Result<()> {
-        let outcome = match self.workspace.daemon().status_optional().await {
+        let outcome = match self.client.status_optional().await {
             Ok(Some(status)) => self.shutdown_and_wait(status.pid).await,
             Ok(None) => self.remove_stale_record(),
             Err(error) => anyhow::bail!(
@@ -117,7 +117,7 @@ impl<'a> DaemonTeardown<'a> {
             | TeardownOutcome::DaemonAlreadyStopped
             | TeardownOutcome::StaleRecordRemoved
             | TeardownOutcome::StaleRecordAbsent => {
-                self.workspace.daemon().remove_record()?;
+                self.client.remove_record()?;
                 Ok(())
             },
             failure => anyhow::bail!(failure.outcome().value),
@@ -135,7 +135,7 @@ impl<'a> DaemonTeardown<'a> {
                 if matches!(
                     outcome,
                     TeardownOutcome::DaemonStopped { .. } | TeardownOutcome::DaemonAlreadyStopped
-                ) && let Err(error) = self.workspace.daemon().remove_record()
+                ) && let Err(error) = self.client.remove_record()
                 {
                     outcomes.push(TeardownOutcome::StaleRecordKept {
                         error: error.to_string(),
@@ -165,12 +165,12 @@ impl<'a> DaemonTeardown<'a> {
     /// The daemon acknowledges shutdown before its serving task exits, so a
     /// successful POST alone is not enough to report `DaemonStopped`.
     async fn shutdown_and_wait(&self, pid: u32) -> TeardownOutcome {
-        match self.workspace.daemon().shutdown().await {
+        match self.client.shutdown().await {
             Ok(Some(())) => {
                 let deadline = tokio::time::Instant::now() + SHUTDOWN_SETTLE_TIMEOUT;
                 let mut last_error = None;
                 loop {
-                    match self.workspace.daemon().status_optional().await {
+                    match self.client.status_optional().await {
                         Ok(None) if !crate::process::is_alive(pid) => {
                             return TeardownOutcome::DaemonStopped { pid };
                         },
@@ -210,7 +210,7 @@ impl<'a> DaemonTeardown<'a> {
         match self.initial.as_ref().map(|inventory| &inventory.daemon) {
             Some(daemon) if daemon.probe == DaemonProbe::Stopped => Ok(None),
             Some(daemon) if daemon.probe == DaemonProbe::Responding => Ok(daemon.status.clone()),
-            _ => self.workspace.daemon().status_optional().await,
+            _ => self.client.status_optional().await,
         }
     }
     fn remove_stale_record(&self) -> TeardownOutcome {
@@ -219,7 +219,7 @@ impl<'a> DaemonTeardown<'a> {
                 error: "the recorded daemon process is still alive; ownership cannot be verified"
                     .to_owned(),
             },
-            Ok(Some(false)) => match self.workspace.daemon().remove_record() {
+            Ok(Some(false)) => match self.client.remove_record() {
                 Ok(()) => TeardownOutcome::StaleRecordRemoved,
                 Err(error) => TeardownOutcome::StaleRecordKept {
                     error: error.to_string(),
@@ -233,7 +233,7 @@ impl<'a> DaemonTeardown<'a> {
     }
 
     fn recorded_pid_liveness(&self) -> anyhow::Result<Option<bool>> {
-        let Some(record) = self.workspace.daemon().record()? else {
+        let Some(record) = self.client.record()? else {
             return Ok(None);
         };
         let pid = record.pid;

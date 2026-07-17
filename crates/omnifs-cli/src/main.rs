@@ -41,7 +41,6 @@ mod status;
 mod test_support;
 mod token_source;
 mod ui;
-mod workspace;
 
 use clap::Parser;
 use cli::{Cli, raw_command_path, raw_output_mode};

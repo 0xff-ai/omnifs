@@ -7,11 +7,11 @@ use clap::Args;
 
 use crate::commands::frontend::{FrontendFilesystem, FrontendRuntime};
 use crate::docker::{ContainerName, DockerClient, DockerRunner, DockerTarget};
-use crate::frontend_container::FRONTEND_DEV_IMAGE;
+use crate::frontend_container::{FRONTEND_DEV_IMAGE, frontend_container_name};
 use crate::inventory::{FrontendState, Inventory};
 use crate::libkrun_runner;
 use crate::ui::output::Output;
-use crate::workspace::Workspace;
+use omnifs_workspace::Workspace;
 
 #[derive(Args, Debug, Clone)]
 pub struct ShellArgs {
@@ -52,7 +52,8 @@ impl ShellArgs {
 
         match self.runtime {
             FrontendRuntime::Docker => {
-                let container_name = workspace.frontend().container_name()?;
+                let container_name =
+                    frontend_container_name(workspace.frontend().workspace_label())?;
                 self.exec_in_container(&container_name, output)
             },
             FrontendRuntime::Libkrun => self.exec_in_libkrun_guest(workspace.frontend()),
@@ -74,9 +75,9 @@ impl ShellArgs {
     }
 
     /// Attach to the running libkrun guest over ssh-over-vsock.
-    fn exec_in_libkrun_guest(&self, paths: &crate::workspace::FrontendOwner) -> Result<()> {
+    fn exec_in_libkrun_guest(&self, paths: &omnifs_workspace::FrontendFiles) -> Result<()> {
         libkrun_runner::ensure_socat_available()?;
-        let runner = paths.libkrun_runner();
+        let runner = crate::libkrun_runner::LibkrunRunner::new(paths.libkrun_root());
         let cmd = runner.shell_command(self.shell.as_deref(), &self.command);
         spawn_and_propagate(cmd, "open shell in the libkrun guest".to_string())
     }

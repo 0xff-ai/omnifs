@@ -10,8 +10,7 @@
 //! self-contained and never fail or block: a broken workspace or config simply
 //! skips the record.
 
-use crate::workspace::Workspace;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use omnifs_workspace::Workspace;
 
 /// Record a completed CLI invocation. `cmd` is the top-level subcommand and
 /// `exit` the process exit code. Best-effort; the internal `daemon` subcommand
@@ -32,8 +31,7 @@ pub(crate) async fn maybe_print_health_nudge(
     workspace: &Workspace,
     output: crate::ui::output::Output,
 ) {
-    let path = workspace.metrics().last_nudge();
-    if !nudge_due(&path) {
+    if !workspace.metrics().health_nudge_due() {
         return;
     }
     let Some(line) = health_nudge(workspace).await else {
@@ -41,25 +39,7 @@ pub(crate) async fn maybe_print_health_nudge(
     };
     // The nudge is a conversational aside; `-q` drops it.
     output.narrate(line);
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_secs());
-    let _ = std::fs::write(path, format!("{now}\n"));
-}
-
-fn nudge_due(path: &std::path::Path) -> bool {
-    let Ok(metadata) = std::fs::metadata(path) else {
-        return true;
-    };
-    let Ok(modified) = metadata.modified() else {
-        return true;
-    };
-    modified
-        .elapsed()
-        .map_or(true, |elapsed| elapsed >= Duration::from_hours(24))
+    let _ = workspace.metrics().record_health_nudge();
 }
 
 async fn health_nudge(workspace: &Workspace) -> Option<String> {

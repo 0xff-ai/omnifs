@@ -15,7 +15,7 @@ use time::OffsetDateTime;
 use super::token_validation::StaticTokenValidator;
 use crate::auth::AuthSelection;
 use crate::credential_target::CredentialTarget;
-use crate::workspace::Workspace;
+use omnifs_workspace::Workspace;
 
 #[derive(Args, Debug, Clone)]
 pub struct AddArgs {
@@ -202,7 +202,7 @@ mod tests {
     use crate::commands::mount::AuthImportDecision;
     use crate::commands::mount::mount_file::MountFile;
     use crate::commands::mount::spec_creation::{CreatedMountSpec, MountSpecCreator};
-    use crate::workspace::Workspace;
+    use omnifs_workspace::Workspace;
     use omnifs_workspace::authn::{AuthManifest, AuthScheme};
     use omnifs_workspace::ids::{ProviderId, ProviderMeta, ProviderName, ProviderRef};
     use omnifs_workspace::mounts::Registry;
@@ -335,7 +335,7 @@ mod tests {
     fn add_dns_writes_snapshot_spec() {
         let dir = tempfile::tempdir().unwrap();
         let paths = omnifs_workspace::layout::WorkspaceLayout::under_root(dir.path());
-        let workspace = Workspace::from_layout(paths.clone());
+        let workspace = Workspace::under_root(&paths.config_dir);
         let args = AddArgs {
             provider: Some("dns".to_string()),
             as_name: None,

@@ -6,6 +6,7 @@
 //! exist but does not copy or rewrite them into per-session files.
 
 use anyhow::{Context, anyhow};
+use omnifs_workspace::Workspace;
 use omnifs_workspace::creds::CredentialStore;
 use omnifs_workspace::mounts::Name as MountName;
 use omnifs_workspace::mounts::Spec;
@@ -65,6 +66,23 @@ impl MountConfig {
                 .with_exit_code(ExitCode::AuthRequired),
         }
     }
+}
+
+/// Convert the workspace-owned registry into the CLI payload only at the
+/// command boundary that needs it.
+pub(crate) fn load_mounts(workspace: &Workspace) -> anyhow::Result<Vec<MountConfig>> {
+    let registry = workspace.desired_state().registry()?;
+    if let Some(failure) = registry.failures().first() {
+        anyhow::bail!("{}", failure.error);
+    }
+    Ok(registry
+        .iter()
+        .map(|(name, spec)| MountConfig {
+            name: name.clone(),
+            config: spec.clone(),
+            source: registry.spec_path(name),
+        })
+        .collect())
 }
 
 #[cfg(test)]

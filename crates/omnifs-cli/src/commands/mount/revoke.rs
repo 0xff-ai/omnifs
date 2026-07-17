@@ -11,7 +11,7 @@ use crate::credential_target::CredentialTarget;
 use crate::stages::PromptMode;
 use crate::ui::consent::{Decision, Outcome, Plan, Receipt, Row};
 use crate::ui::output::Output;
-use crate::workspace::Workspace;
+use omnifs_workspace::Workspace;
 
 #[derive(Args, Debug, Clone)]
 pub struct RevokeArgs {
@@ -24,7 +24,7 @@ impl RevokeArgs {
     pub(crate) async fn run(self, output: Output) -> anyhow::Result<Receipt> {
         let workspace = Workspace::resolve()?;
         output.intro(format!("omnifs mount revoke {}", self.name))?;
-        let mounts = workspace.desired_state().mounts()?;
+        let mounts = crate::mount_config::load_mounts(workspace)?;
         let requested = mounts
             .iter()
             .find(|mount| mount.name.as_str() == self.name)

@@ -35,8 +35,6 @@ use sha2::{Digest as _, Sha256};
 use crate::image::ImageRef;
 use crate::ui::output::Output;
 
-const GUEST_IMAGE_CACHE_SUBDIR: &str = "guest-images";
-
 const ACCEPT_MANIFEST: &str = "application/vnd.oci.image.manifest.v1+json";
 
 /// The registry, repository, and reference (tag) parsed out of an
@@ -103,17 +101,16 @@ struct TokenResponse {
 }
 
 /// Ensure the release-channel guest image named by `image` is present as a
-/// decompressed local `.raw` file under `cache_dir`, pulling and caching it
+/// decompressed local `.raw` file under `images_dir`, pulling and caching it
 /// on first use. Returns the immutable base path a launch copies into its
 /// workspace-owned writable root before handing it to libkrun.
 pub(crate) async fn ensure_guest_image(
     image: &ImageRef,
-    cache_dir: &Path,
+    images_dir: &Path,
     output: Output,
 ) -> Result<PathBuf> {
     let oci_ref = OciRef::parse(image.as_str())?;
-    let images_dir = cache_dir.join(GUEST_IMAGE_CACHE_SUBDIR);
-    std::fs::create_dir_all(&images_dir)
+    std::fs::create_dir_all(images_dir)
         .with_context(|| format!("create {}", images_dir.display()))?;
 
     let raw_path = images_dir.join(format!("{}.raw", oci_ref.reference));

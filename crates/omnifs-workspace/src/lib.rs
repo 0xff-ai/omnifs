@@ -14,3 +14,6 @@ pub mod layout;
 pub mod metrics;
 pub mod mounts;
 pub mod provider;
+pub mod workspace;
+
+pub use workspace::{DaemonFiles, FrontendFiles, WarmupProgress, WarmupStore, Workspace};

@@ -52,7 +52,6 @@ use crate::process::is_alive as process_alive;
 use crate::ui::output::Output;
 use omnifs_workspace::config::Config;
 
-const LIBKRUN_SUBDIR: &str = "libkrun";
 const SSH_KEY_NAME: &str = "id_ed25519";
 const PIDFILE_NAME: &str = "libkrun.pid";
 const ROOT_RAW_NAME: &str = "root.raw";
@@ -175,7 +174,7 @@ pub(crate) fn ensure_socat_available() -> Result<()> {
 /// The libkrun microVM frontend runner. Durable workspace state and explicit
 /// teardown live here; one launch's resources live in [`LibkrunLaunchLease`].
 pub(crate) struct LibkrunRunner {
-    home: PathBuf,
+    dir: PathBuf,
 }
 
 impl LibkrunRunner {
@@ -183,12 +182,12 @@ impl LibkrunRunner {
         ensure_libkrun_available()
     }
 
-    pub(crate) fn new(home: PathBuf) -> Self {
-        Self { home }
+    pub(crate) fn new(dir: PathBuf) -> Self {
+        Self { dir }
     }
 
-    fn dir(&self) -> PathBuf {
-        self.home.join(LIBKRUN_SUBDIR)
+    fn dir(&self) -> &Path {
+        &self.dir
     }
 
     fn ssh_key_path(&self) -> PathBuf {
@@ -487,7 +486,11 @@ fn assert_libkrun_locked_down(
 /// used to materialize a launch-local root disk. Release images remain owned
 /// by the OCI/cache module; this function only chooses the channel-specific
 /// input and validates the result.
-async fn resolve_guest_image(config: &Config, cache_dir: &Path, output: Output) -> Result<PathBuf> {
+async fn resolve_guest_image(
+    config: &Config,
+    guest_image_cache: &Path,
+    output: Output,
+) -> Result<PathBuf> {
     let resolved = std::env::var(ENV_GUEST_IMAGE)
         .ok()
         .or_else(|| config.frontend.guest_image.clone())
@@ -497,7 +500,7 @@ async fn resolve_guest_image(config: &Config, cache_dir: &Path, output: Output) 
         BuildChannel::Release => {
             crate::guest_image_pull::ensure_guest_image(
                 &ImageRef::new(resolved)?,
-                cache_dir,
+                guest_image_cache,
                 output,
             )
             .await?
@@ -533,7 +536,7 @@ pub(crate) struct LibkrunLaunchRequest<'a> {
     pub(crate) daemon_attach_socket: &'a Path,
     pub(crate) attach_token: &'a str,
     pub(crate) config: &'a Config,
-    pub(crate) cache_dir: &'a Path,
+    pub(crate) guest_image_cache: &'a Path,
     pub(crate) output: Output,
     pub(crate) mount: Option<&'a str>,
     pub(crate) timeout: Duration,
@@ -570,7 +573,7 @@ impl<'a> LibkrunLaunchLease<'a> {
 
     async fn prepare(runner: &'a LibkrunRunner, request: LibkrunLaunchRequest<'_>) -> Result<Self> {
         let guest_image =
-            resolve_guest_image(request.config, request.cache_dir, request.output).await?;
+            resolve_guest_image(request.config, request.guest_image_cache, request.output).await?;
         let mut lease = Self::new(runner, request.daemon_attach_socket, guest_image);
         request.attach_token.clone_into(&mut lease.attach_token);
         lease.mount = request.mount.map(str::to_owned);
@@ -1003,8 +1006,7 @@ mod tests {
     #[tokio::test]
     async fn post_beacon_attachment_failure_rolls_back_invocation_resources() {
         let temp = tempfile::tempdir().unwrap();
-        let home = temp.path().join("home");
-        let dir = home.join(LIBKRUN_SUBDIR);
+        let dir = temp.path().join("home").join("libkrun");
         std::fs::create_dir_all(&dir).unwrap();
         let attach_socket = temp.path().join("daemon-attach.sock");
         std::fs::write(&attach_socket, b"daemon-owned").unwrap();
@@ -1013,7 +1015,7 @@ mod tests {
         std::fs::write(&guest_image, b"immutable guest image").unwrap();
         std::fs::set_permissions(&guest_image, std::fs::Permissions::from_mode(0o444)).unwrap();
 
-        let runner = LibkrunRunner::new(home);
+        let runner = LibkrunRunner::new(dir.clone());
         let lease = LibkrunLaunchLease::new(&runner, &attach_socket, guest_image.clone());
         lease.materialize_root_disk().unwrap();
         assert_eq!(

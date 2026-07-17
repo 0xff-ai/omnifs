@@ -15,7 +15,7 @@ use crate::mount_config::MountConfig;
 use crate::ui::output::Output;
 use crate::ui::report::Row;
 use crate::ui::style::Glyph;
-use crate::workspace::Workspace;
+use omnifs_workspace::Workspace;
 
 /// Command-owned daemon launcher.
 ///
@@ -99,14 +99,15 @@ impl<'a> Launcher<'a> {
             self.workspace.credentials(),
         )?;
 
-        let warmup = self
-            .workspace
-            .provider_warmup()
-            .warm_for_up(
-                configs.iter().map(|config| config.config.provider.id),
-                &self.output,
-            )
-            .await?;
+        let warmup = crate::provider_warmup::ProviderWarmup::new(
+            self.workspace.warmup().clone(),
+            self.workspace.catalog().clone(),
+        )
+        .warm_for_up(
+            configs.iter().map(|config| config.config.provider.id),
+            &self.output,
+        )
+        .await?;
 
         self.output.narrate(format!(
             "Applying mount revision {} from {}",
@@ -129,7 +130,7 @@ impl<'a> Launcher<'a> {
         snapshot: &Path,
         offline: bool,
     ) -> anyhow::Result<()> {
-        let client = self.workspace.daemon();
+        let client = crate::client::DaemonClient::for_workspace(self.workspace);
         let current = client.status_optional().await?;
 
         if let Some(status) = &current {

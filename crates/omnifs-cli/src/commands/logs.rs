@@ -8,7 +8,7 @@ use anyhow::Context as _;
 use clap::Args;
 
 use crate::ui::output::Output;
-use crate::workspace::Workspace;
+use omnifs_workspace::Workspace;
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct LogsArgs {

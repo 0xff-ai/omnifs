@@ -11,7 +11,7 @@ use anyhow::{Context as _, Result};
 use omnifs_mtab::{MountKind, MountState};
 use omnifs_workspace::daemon_record::FrontendKind;
 
-use crate::workspace::FrontendOwner;
+use omnifs_workspace::{DaemonFiles, FrontendFiles};
 
 const MOUNT_TIMEOUT: Duration = Duration::from_secs(10);
 const MOUNT_POLL_INTERVAL: Duration = Duration::from_millis(200);
@@ -75,7 +75,8 @@ impl fmt::Display for LocalProtocol {
 }
 
 pub(crate) struct HostRunner {
-    paths: FrontendOwner,
+    paths: FrontendFiles,
+    attach_socket: PathBuf,
     mount_point: PathBuf,
     protocol: LocalProtocol,
     runner: PathBuf,
@@ -104,13 +105,15 @@ impl HostRunner {
     }
 
     pub(crate) fn new(
-        paths: &FrontendOwner,
+        paths: &FrontendFiles,
+        daemon: &DaemonFiles,
         mount_point: PathBuf,
         protocol: LocalProtocol,
     ) -> Result<Self> {
         let runner = Self::resolve_runner(protocol)?;
         Ok(Self {
             paths: paths.clone(),
+            attach_socket: daemon.local_attach_socket().to_path_buf(),
             mount_point,
             protocol,
             runner,
@@ -170,7 +173,7 @@ impl HostRunner {
             .arg("--state-dir")
             .arg(self.state_dir())
             .arg("--attach")
-            .arg(self.paths.local_attach_socket());
+            .arg(&self.attach_socket);
         command
     }
 
@@ -296,11 +299,10 @@ impl HostRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use omnifs_workspace::layout::WorkspaceLayout;
-
-    fn frontend_owner(root: &Path) -> FrontendOwner {
-        let layout = WorkspaceLayout::under_root(root);
-        FrontendOwner::for_test(layout.config_dir, layout.cache_dir)
+    fn frontend_owner(root: &Path) -> FrontendFiles {
+        omnifs_workspace::Workspace::under_root(root)
+            .frontend()
+            .clone()
     }
 
     #[test]
@@ -316,6 +318,7 @@ mod tests {
             let runner = HostRunner {
                 runner: PathBuf::from(THIN_RUNNER_NAME),
                 paths: paths.clone(),
+                attach_socket: PathBuf::from("/home/user/.omnifs/frontends/local.sock"),
                 mount_point: PathBuf::from("/home/user/omnifs"),
                 protocol,
             };
@@ -343,6 +346,7 @@ mod tests {
         let runner = |protocol: LocalProtocol| HostRunner {
             runner: LocalProtocol::runner_beside(Path::new("/opt/omnifs/bin/omnifs")).unwrap(),
             paths: paths.clone(),
+            attach_socket: PathBuf::from("/home/user/.omnifs/frontends/local.sock"),
             mount_point: PathBuf::from("/home/user/omnifs"),
             protocol,
         };
@@ -359,6 +363,7 @@ mod tests {
         let runner = |protocol: LocalProtocol, mount_point: &'static str| HostRunner {
             runner: PathBuf::from(THIN_RUNNER_NAME),
             paths: paths.clone(),
+            attach_socket: PathBuf::from("/home/user/.omnifs/frontends/local.sock"),
             mount_point: PathBuf::from(mount_point),
             protocol,
         };
@@ -382,6 +387,7 @@ mod tests {
         let runner = HostRunner {
             runner: PathBuf::from("omnifs-thin"),
             paths,
+            attach_socket: tmp.path().join("frontends/local.sock"),
             mount_point: PathBuf::from("/mnt/omnifs"),
             protocol: LocalProtocol::Nfs,
         };

@@ -1,9 +1,9 @@
 //! omnifs home directory layout and path resolution.
 //!
 //! This crate is the single source of truth for the omnifs on-disk layout.
-//! Both the CLI and daemon depend on it; neither duplicates the resolution
-//! logic. Higher-level CLI factories layer config and daemon handles on top of
-//! this path-only layout.
+//! Lower-level storage code and hermetic fixtures may construct this layout;
+//! application code should use [`crate::Workspace`] so component ownership
+//! stays behind typed brokers.
 //!
 //! Resolution order:
 //!   1. `OMNIFS_HOME`

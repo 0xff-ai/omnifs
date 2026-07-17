@@ -21,7 +21,7 @@ use crate::error::{ExitCode, WithExitCode};
 use crate::provider_bundle::EmbeddedProviders;
 use crate::provider_resolver::ProviderResolver;
 use crate::token_source::TokenSource;
-use crate::workspace::Workspace;
+use omnifs_workspace::Workspace;
 
 pub(crate) struct MountInitOutcome {
     pub(crate) mount_name: String,
@@ -112,11 +112,16 @@ pub(crate) async fn configure_mount(
             ),
         )),
     }
-    if !workspace.daemon().ready().await {
+    if !crate::client::DaemonClient::for_workspace(workspace)
+        .ready()
+        .await
+    {
         output.note("run `omnifs up` to start serving it");
     }
 
-    let running = workspace.daemon().ready().await;
+    let running = crate::client::DaemonClient::for_workspace(workspace)
+        .ready()
+        .await;
     if running {
         let path = browse_path(plan.mount_name.as_str());
         output.note(crate::ui::hint(
@@ -151,7 +156,7 @@ pub(crate) fn spec_creation(
     prompt: PromptMode,
 ) -> anyhow::Result<MountInitPlan> {
     let interactive = init_interactive(prompt);
-    let mounts = workspace.desired_state().mounts()?;
+    let mounts = crate::mount_config::load_mounts(workspace)?;
     let embedded = EmbeddedProviders::load()?;
     let provider_selection = ProviderSelection::new(&mounts, &embedded);
 
@@ -180,9 +185,11 @@ pub(crate) fn spec_creation(
     )?;
     let resolved = ProviderResolver::new(workspace.catalog(), &embedded).resolve(&selector)?;
     if resolved.newly_retained
-        && let Err(error) = workspace
-            .provider_warmup()
-            .spawn_background(resolved.reference.id, output)
+        && let Err(error) = crate::provider_warmup::ProviderWarmup::new(
+            workspace.warmup().clone(),
+            workspace.catalog().clone(),
+        )
+        .spawn_background(resolved.reference.id, output)
     {
         output.narrate(crate::ui::style::warn(format!(
             "Couldn't start background provider warmup ({error:#}); daemon startup will load the provider."
