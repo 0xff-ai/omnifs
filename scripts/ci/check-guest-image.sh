@@ -49,45 +49,45 @@ violation() {
   fail=1
 }
 
-loopdev="$(losetup -fP --show "/img/${RAW_NAME}")"
-base="$(basename "$loopdev")"
+esp_loop=""
+root_loop=""
 cleanup() {
   umount /mnt/root 2>/dev/null || true
   umount /mnt/esp 2>/dev/null || true
-  losetup -d "$loopdev" 2>/dev/null || true
+  [[ -z "$root_loop" ]] || losetup -d "$root_loop" 2>/dev/null || true
+  [[ -z "$esp_loop" ]] || losetup -d "$esp_loop" 2>/dev/null || true
 }
 trap cleanup EXIT
 
-# losetup -P asks the kernel to register partition block devices, but
-# registration may finish after losetup returns. This container's /dev is a
-# plain tmpfs (no devtmpfs, no udev), so wait for the stable sysfs class entry
-# and make each node by hand.
-partition_devno() {
-  local part="$1"
-  local sysfs="/sys/class/block/${part}/dev"
-  local attempt
-  for ((attempt = 0; attempt < 50; attempt++)); do
-    if [[ -r "$sysfs" ]]; then
-      cat "$sysfs"
-      return 0
-    fi
-    sleep 0.1
-  done
-  echo "partition device $part did not appear after losetup -P" >&2
-  lsblk -o NAME,MAJ:MIN,TYPE,SIZE,PARTN "$loopdev" >&2 || true
-  return 1
+partition_loop() {
+  local number="$1"
+  local geometry start sectors extra
+  geometry="$(
+    partx --raw --noheadings --nr "$number" \
+      --output START,SECTORS --sector-size 512 "/img/${RAW_NAME}"
+  )"
+  if ! read -r start sectors extra <<<"$geometry" ||
+    [[ ! $start =~ ^[0-9]+$ || ! $sectors =~ ^[1-9][0-9]*$ || -n $extra ]]; then
+    echo "invalid geometry for partition $number: ${geometry:-<missing>}" >&2
+    partx --show "/img/${RAW_NAME}" >&2 || true
+    return 1
+  fi
+  losetup --find --show --read-only \
+    --offset "$((start * 512))" \
+    --sizelimit "$((sectors * 512))" \
+    "/img/${RAW_NAME}"
 }
 
-for part in "${base}p1" "${base}p2"; do
-  if [[ ! -e "/dev/$part" ]]; then
-    devno="$(partition_devno "$part")"
-    mknod "/dev/$part" b "${devno%%:*}" "${devno##*:}"
-  fi
-done
+# Do not rely on the host kernel to materialize partition child devices.
+# Privileged CI containers share the runner's block-device namespace, and some
+# runners expose unrelated loop partition children. Parse the image's GPT and
+# attach each partition as its own read-only loop instead.
+esp_loop="$(partition_loop 1)"
+root_loop="$(partition_loop 2)"
 
 mkdir -p /mnt/root /mnt/esp
-mount -o ro "/dev/${base}p2" /mnt/root
-mount -o ro "/dev/${base}p1" /mnt/esp
+mount -o ro "$root_loop" /mnt/root
+mount -o ro "$esp_loop" /mnt/esp
 
 note "checking /usr/local/bin/omnifs-thin"
 bin=/mnt/root/usr/local/bin/omnifs-thin
