@@ -64,7 +64,7 @@ impl InventoryReport {
         }
         let mut context = TableContext::new(
             "omnifs",
-            omnifs_workspace::layout::WorkspaceLayout::display(&self.inventory.home),
+            omnifs_workspace::layout::display(&self.inventory.home),
             context_state,
         )
         .with_metadata(metadata);

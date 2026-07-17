@@ -1,6 +1,6 @@
 pub mod file_store;
 pub mod memory_store;
-pub use file_store::FileStore;
+pub use file_store::{FileStore, FileStoreDiagnostic};
 pub use memory_store::MemoryStore;
 
 use secrecy::SecretString;

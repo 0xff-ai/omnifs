@@ -3,6 +3,11 @@
 Status: current-contract
 Owns: CLI/daemon split, typed local control protocol, mount desired state, frontend runtimes, workspace layout, and dev home.
 
+The CLI `Workspace` is the command-scoped composition root. It does not expose
+`WorkspaceLayout` or raw `$OMNIFS_HOME` paths. It returns typed owners or domain
+handles, and a concrete path may leave them only at the immediate filesystem,
+process, protocol, or final output boundary that consumes it.
+
 ## Read when
 
 Read this before touching `omnifs-cli`, `omnifs-api`, lifecycle commands, daemon status, control operations, mount desired state, revision application, frontend runtimes, the embedded provider bundle, or dev workspace behavior.

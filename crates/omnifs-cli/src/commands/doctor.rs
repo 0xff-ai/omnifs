@@ -4,11 +4,11 @@ use clap::Args;
 use serde::Serialize;
 use std::path::Path;
 
-use omnifs_workspace::creds::{CredentialStore, FileStore};
+use omnifs_workspace::creds::CredentialStore;
 
 use crate::docker::DockerClient;
 use crate::docker::DockerTarget;
-use crate::frontend_container::{frontend_container_name, resolve_frontend_image};
+use crate::frontend_container::resolve_frontend_image;
 use crate::image::{ImageRef, names_registry};
 use crate::inventory::{Inventory, Severity};
 use crate::status::InventoryReport;
@@ -19,7 +19,6 @@ use crate::ui::table::{
     StateToken as TableState, WidthPolicy as TableWidth,
 };
 use crate::workspace::Workspace;
-use omnifs_workspace::layout::WorkspaceLayout;
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct DoctorArgs {}
@@ -54,9 +53,8 @@ impl DoctorArgs {
 /// runs host-native, so there is no daemon Docker target to resolve here.
 fn resolve_frontend_target(workspace: &Workspace) -> anyhow::Result<DockerTarget> {
     let config = workspace.config()?;
-    let paths = workspace.layout();
     let image = resolve_frontend_image(None, &config)?;
-    let container_name = frontend_container_name(paths)?;
+    let container_name = workspace.frontend().container_name()?;
     DockerTarget::new(
         container_name.as_str().to_string(),
         image.as_str().to_string(),
@@ -322,37 +320,31 @@ impl Doctor<'_> {
     }
 
     fn probe_credential_store(&self) -> ProbeResult {
-        let credentials_file = &self.workspace.layout().credentials_file;
-        let Some(parent) = credentials_file.parent() else {
-            return ProbeResult::Err(format!(
-                "credential file has no parent: {}",
-                credentials_file.display()
-            ));
-        };
-        if !parent.exists() {
+        let diagnostic = self.workspace.credentials().diagnostic();
+        if !diagnostic.parent_exists {
             ProbeResult::Warn(format!(
                 "credential directory will be created on first write: {}",
-                WorkspaceLayout::display(parent)
+                diagnostic.display
             ))
-        } else if !credentials_file.exists() {
+        } else if !diagnostic.exists {
             ProbeResult::Warn(format!(
                 "credential store not created yet: {}",
-                WorkspaceLayout::display(credentials_file)
+                diagnostic.display
             ))
         } else {
-            match FileStore::new(credentials_file).list() {
+            match self.workspace.credentials().list() {
                 Ok(Some(keys)) => ProbeResult::Ok(format!(
                     "{} credential(s) in {}",
                     keys.len(),
-                    WorkspaceLayout::display(credentials_file)
+                    diagnostic.display
                 )),
                 Ok(None) => ProbeResult::Ok(format!(
                     "credential store available at {}",
-                    WorkspaceLayout::display(credentials_file)
+                    diagnostic.display
                 )),
                 Err(error) => ProbeResult::Err(format!(
                     "credential store {} unreadable: {error}",
-                    WorkspaceLayout::display(credentials_file)
+                    diagnostic.display
                 )),
             }
         }
@@ -362,7 +354,7 @@ impl Doctor<'_> {
     fn probe_ssh_agent(&self) -> ProbeResult {
         match std::env::var_os("SSH_AUTH_SOCK") {
             Some(sock) if Path::new(&sock).exists() => {
-                ProbeResult::Ok(WorkspaceLayout::display(Path::new(&sock)))
+                ProbeResult::Ok(omnifs_workspace::layout::display(Path::new(&sock)))
             },
             Some(_) => ProbeResult::Warn("SSH_AUTH_SOCK set but socket not found".into()),
             None => ProbeResult::Warn("SSH_AUTH_SOCK unset; git callouts will fail".into()),
@@ -370,14 +362,11 @@ impl Doctor<'_> {
     }
 
     fn probe_config_file(&self) -> ProbeResult {
-        let config_file = &self.workspace.layout().config_file;
-        if config_file.exists() {
-            ProbeResult::Ok(WorkspaceLayout::display(config_file))
+        let diagnostic = self.workspace.config_diagnostic();
+        if diagnostic.exists {
+            ProbeResult::Ok(diagnostic.display)
         } else {
-            ProbeResult::Ok(format!(
-                "(default; {} absent)",
-                WorkspaceLayout::display(config_file)
-            ))
+            ProbeResult::Ok(format!("(default; {} absent)", diagnostic.display))
         }
     }
 

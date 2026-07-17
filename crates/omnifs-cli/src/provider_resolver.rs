@@ -7,7 +7,7 @@
 
 use anyhow::{Context as _, anyhow, bail};
 use omnifs_workspace::ids::{ProviderId, ProviderRef};
-use omnifs_workspace::provider::{Catalog, ProviderManifest, ProviderStore};
+use omnifs_workspace::provider::{Catalog, ProviderManifest};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
@@ -23,18 +23,13 @@ pub(crate) struct ResolvedProvider {
 }
 
 pub(crate) struct ProviderResolver<'a> {
-    store: ProviderStore,
-    catalog: Catalog,
+    catalog: &'a Catalog,
     embedded: &'a EmbeddedProviders,
 }
 
 impl<'a> ProviderResolver<'a> {
-    pub(crate) fn new(providers_dir: &Path, embedded: &'a EmbeddedProviders) -> Self {
-        Self {
-            store: ProviderStore::new(providers_dir),
-            catalog: Catalog::open(providers_dir),
-            embedded,
-        }
+    pub(crate) fn new(catalog: &'a Catalog, embedded: &'a EmbeddedProviders) -> Self {
+        Self { catalog, embedded }
     }
 
     pub(crate) fn resolve(&self, selector: &str) -> anyhow::Result<ResolvedProvider> {
@@ -102,7 +97,7 @@ impl<'a> ProviderResolver<'a> {
     }
 
     fn resolve_digest(&self, selector: &str) -> anyhow::Result<ResolvedProvider> {
-        let index = self.store.read_index()?;
+        let index = self.catalog.store().read_index()?;
         let mut ids = BTreeMap::<String, ProviderId>::new();
         for entry in &index.providers {
             let id = entry.id.to_string();
@@ -138,7 +133,7 @@ impl<'a> ProviderResolver<'a> {
         &self,
         artifact: &omnifs_workspace::provider::Artifact,
     ) -> anyhow::Result<ResolvedProvider> {
-        let newly_retained = self.store.retain(artifact)?;
+        let newly_retained = self.catalog.store().retain(artifact)?;
         self.resolve_id(&artifact.id(), newly_retained)
     }
 
@@ -269,7 +264,8 @@ mod tests {
     fn artifact_resolution_reports_only_the_first_retention_as_new() {
         let home = tempfile::tempdir().unwrap();
         let embedded = EmbeddedProviders::load().unwrap();
-        let resolver = ProviderResolver::new(home.path(), &embedded);
+        let catalog = Catalog::open(home.path());
+        let resolver = ProviderResolver::new(&catalog, &embedded);
         let artifact = embedded.entries()[0].artifact();
 
         assert!(resolver.resolve_artifact(artifact).unwrap().newly_retained);

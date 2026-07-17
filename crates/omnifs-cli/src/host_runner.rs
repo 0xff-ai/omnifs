@@ -10,7 +10,8 @@ use std::time::Duration;
 use anyhow::{Context as _, Result};
 use omnifs_mtab::{MountKind, MountState};
 use omnifs_workspace::daemon_record::FrontendKind;
-use omnifs_workspace::layout::WorkspaceLayout;
+
+use crate::workspace::FrontendOwner;
 
 const MOUNT_TIMEOUT: Duration = Duration::from_secs(10);
 const MOUNT_POLL_INTERVAL: Duration = Duration::from_millis(200);
@@ -74,7 +75,7 @@ impl fmt::Display for LocalProtocol {
 }
 
 pub(crate) struct HostRunner {
-    paths: WorkspaceLayout,
+    paths: FrontendOwner,
     mount_point: PathBuf,
     protocol: LocalProtocol,
     runner: PathBuf,
@@ -103,13 +104,13 @@ impl HostRunner {
     }
 
     pub(crate) fn new(
-        paths: WorkspaceLayout,
+        paths: &FrontendOwner,
         mount_point: PathBuf,
         protocol: LocalProtocol,
     ) -> Result<Self> {
         let runner = Self::resolve_runner(protocol)?;
         Ok(Self {
-            paths,
+            paths: paths.clone(),
             mount_point,
             protocol,
             runner,
@@ -124,12 +125,12 @@ impl HostRunner {
         {
             self.validate_active_mount_recovery()?;
         }
-        std::fs::create_dir_all(&self.paths.cache_dir)
-            .with_context(|| format!("create {}", self.paths.cache_dir.display()))?;
-        let log_path = self
-            .paths
-            .cache_dir
-            .join(format!("frontend-{}.log", self.protocol.subcommand()));
+        let log_path = self.paths.host_log(self.protocol.subcommand());
+        let cache_dir = log_path
+            .parent()
+            .context("frontend log path has no cache directory")?;
+        std::fs::create_dir_all(cache_dir)
+            .with_context(|| format!("create {}", cache_dir.display()))?;
         let log = OpenOptions::new()
             .create(true)
             .append(true)
@@ -175,7 +176,7 @@ impl HostRunner {
 
     fn state_dir(&self) -> PathBuf {
         self.paths
-            .frontend_state_dir(self.protocol.kind(), &self.mount_point)
+            .state_dir(self.protocol.kind(), &self.mount_point)
     }
 
     fn validate_active_mount_recovery(&self) -> Result<()> {
@@ -295,6 +296,12 @@ impl HostRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use omnifs_workspace::layout::WorkspaceLayout;
+
+    fn frontend_owner(root: &Path) -> FrontendOwner {
+        let layout = WorkspaceLayout::under_root(root);
+        FrontendOwner::for_test(layout.config_dir, layout.cache_dir)
+    }
 
     #[test]
     fn runner_is_resolved_only_beside_current_executable() {
@@ -304,7 +311,7 @@ mod tests {
 
     #[test]
     fn runner_argv_names_local_mount_state_and_attach_paths() {
-        let paths = WorkspaceLayout::under_root(Path::new("/home/user/.omnifs"));
+        let paths = frontend_owner(Path::new("/home/user/.omnifs"));
         for protocol in [LocalProtocol::Fuse, LocalProtocol::Nfs] {
             let runner = HostRunner {
                 runner: PathBuf::from(THIN_RUNNER_NAME),
@@ -332,7 +339,7 @@ mod tests {
 
     #[test]
     fn both_protocols_use_one_thin_runner_with_distinct_subcommands() {
-        let paths = WorkspaceLayout::under_root(Path::new("/home/user/.omnifs"));
+        let paths = frontend_owner(Path::new("/home/user/.omnifs"));
         let runner = |protocol: LocalProtocol| HostRunner {
             runner: LocalProtocol::runner_beside(Path::new("/opt/omnifs/bin/omnifs")).unwrap(),
             paths: paths.clone(),
@@ -348,7 +355,7 @@ mod tests {
 
     #[test]
     fn state_dirs_are_stable_and_isolated_by_protocol_and_mount() {
-        let paths = WorkspaceLayout::under_root(Path::new("/home/user/.omnifs"));
+        let paths = frontend_owner(Path::new("/home/user/.omnifs"));
         let runner = |protocol: LocalProtocol, mount_point: &'static str| HostRunner {
             runner: PathBuf::from(THIN_RUNNER_NAME),
             paths: paths.clone(),
@@ -371,7 +378,7 @@ mod tests {
     #[test]
     fn nfs_recovery_requires_unique_matching_nfs_state() {
         let tmp = tempfile::tempdir().unwrap();
-        let paths = WorkspaceLayout::under_root(tmp.path());
+        let paths = frontend_owner(tmp.path());
         let runner = HostRunner {
             runner: PathBuf::from("omnifs-thin"),
             paths,

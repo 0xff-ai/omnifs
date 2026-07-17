@@ -17,6 +17,7 @@ use omnifs_workspace::provider::Catalog;
 use serde::{Deserialize, Serialize};
 
 use crate::ui::output::Output;
+use crate::workspace::Workspace;
 
 const CHILD_READY_POLL: Duration = Duration::from_millis(10);
 const CHILD_READY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -31,7 +32,8 @@ pub(crate) struct WarmProvidersArgs {
 
 impl WarmProvidersArgs {
     pub(crate) async fn run(self) -> Result<()> {
-        ProviderWarmup::new(&WorkspaceLayout::resolve()?)
+        Workspace::resolve()?
+            .provider_warmup()
             .run_background(self.id)
             .await
     }

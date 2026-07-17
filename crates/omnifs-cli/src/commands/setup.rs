@@ -71,7 +71,7 @@ impl SetupArgs {
             .await?;
         }
 
-        if !self.no_up && !workspace.mounts()?.is_empty() {
+        if !self.no_up && !workspace.desired_state().mounts()?.is_empty() {
             output.narrate("Starting the daemon.");
             UpArgs::default()
                 .start_in_workspace(workspace, output.clone())
@@ -109,7 +109,7 @@ impl SetupArgs {
         prompt: PromptMode,
     ) -> Result<Vec<String>> {
         let embedded = EmbeddedProviders::load()?;
-        let mounts = workspace.mounts()?;
+        let mounts = workspace.desired_state().mounts()?;
         let mut configured = mounts
             .iter()
             .map(|mount| {
