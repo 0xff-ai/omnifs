@@ -27,9 +27,8 @@ fn workspace_under_root_owns_component_paths() {
 #[test]
 fn workspace_resolve_requires_home_or_omnifs_home() {
     with_env(&[("HOME", None), (OMNIFS_HOME_ENV, None)], || {
-        let error = match Workspace::resolve() {
-            Ok(_) => panic!("workspace unexpectedly resolved"),
-            Err(error) => error,
+        let Err(error) = Workspace::resolve() else {
+            panic!("workspace unexpectedly resolved");
         };
         assert_eq!(error, ResolveError);
     });
