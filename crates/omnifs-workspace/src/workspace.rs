@@ -262,10 +262,6 @@ impl DaemonFiles {
     pub fn control_socket(&self) -> &Path {
         &self.control_socket
     }
-    #[must_use]
-    fn attach_targets_file(&self) -> &Path {
-        &self.attach_targets_file
-    }
     pub fn attach_store(&self) -> io::Result<crate::attach::Store> {
         crate::attach::Store::open(self.attach_targets_file.clone())
     }

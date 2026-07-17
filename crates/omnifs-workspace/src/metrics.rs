@@ -40,7 +40,7 @@ pub const ENV_SWITCH: &str = "OMNIFS_METRICS";
 const DAEMON_FILE: &str = "daemon.jsonl";
 const CLI_FILE: &str = "cli.jsonl";
 const HEALTH_NUDGE_FILE: &str = "last-nudge";
-const HEALTH_NUDGE_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+const HEALTH_NUDGE_INTERVAL: Duration = Duration::from_hours(24);
 
 /// Read the process-wide metrics kill switch from [`ENV_SWITCH`]. Enabled
 /// unless the variable is explicitly set to a falsey token.

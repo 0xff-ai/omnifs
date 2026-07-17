@@ -134,7 +134,7 @@ impl<'a> Launcher<'a> {
         let current = client.status_optional().await?;
 
         if let Some(status) = &current {
-            let existing = ExistingDaemon::new(status.clone(), client, self.verb);
+            let existing = ExistingDaemon::new(status.clone(), &client, self.verb);
             if !existing.can_apply() {
                 anyhow::bail!(existing);
             }
@@ -170,7 +170,7 @@ impl<'a> Launcher<'a> {
         }
 
         crate::daemon_launch::launch(
-            client,
+            &client,
             metrics_enabled,
             revision,
             snapshot,

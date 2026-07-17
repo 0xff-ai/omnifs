@@ -49,14 +49,10 @@ impl InspectArgs {
             // Probe readiness before entering the TUI so a down daemon exits 3
             // (DaemonUnavailable) the same as the `--plain` path, instead of
             // opening an empty canvas and exiting 0.
-            crate::client::DaemonClient::for_workspace(&workspace)
-                .require_status()
-                .await?;
+            let client = crate::client::DaemonClient::for_workspace(&workspace);
+            client.require_status().await?;
             check_record_path(self.record.as_deref())?;
-            let endpoint = workspace
-                .daemon()
-                .event_endpoint()?
-                .context("daemon is not running")?;
+            let endpoint = client.event_endpoint()?.context("daemon is not running")?;
             (
                 ConnectionMode::Inspector,
                 SourceKind::Socket {
@@ -78,14 +74,10 @@ impl InspectArgs {
             return run_plain(SourceKind::Replay(path), output);
         }
         let workspace = Workspace::resolve()?;
-        crate::client::DaemonClient::for_workspace(&workspace)
-            .require_status()
-            .await?;
+        let client = crate::client::DaemonClient::for_workspace(&workspace);
+        client.require_status().await?;
         check_record_path(self.record.as_deref())?;
-        let endpoint = workspace
-            .daemon()
-            .event_endpoint()?
-            .context("daemon is not running")?;
+        let endpoint = client.event_endpoint()?.context("daemon is not running")?;
         let record = self.record.clone();
         let output = output.clone();
         tokio::task::spawn_blocking(move || {

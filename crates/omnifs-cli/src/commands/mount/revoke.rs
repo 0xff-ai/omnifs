@@ -24,7 +24,7 @@ impl RevokeArgs {
     pub(crate) async fn run(self, output: Output) -> anyhow::Result<Receipt> {
         let workspace = Workspace::resolve()?;
         output.intro(format!("omnifs mount revoke {}", self.name))?;
-        let mounts = crate::mount_config::load_mounts(workspace)?;
+        let mounts = crate::mount_config::load_mounts(&workspace)?;
         let requested = mounts
             .iter()
             .find(|mount| mount.name.as_str() == self.name)
