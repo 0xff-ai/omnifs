@@ -91,7 +91,7 @@ Provider-store indexes strict-parse both the top-level index object and retained
 
 Retaining a new provider starts the hidden `warm-providers` child as detached best-effort work for that exact provider ID. It loads the retained component through the same `ComponentEngine` used by the daemon, warming the workspace-owned Wasmtime cache, and atomically records aggregate progress in `cache/provider-warmup.json`. Progress is historical status only, never cache authority.
 
-Online `omnifs up` joins warmup through one workspace advisory lock before replacing a serving daemon. It then loads every unique provider ID selected by the immutable mount revision through `ComponentEngine` while holding that lock. Successful background work becomes cache hits, while failed, interrupted, evicted, or incompatible entries are retried synchronously and leave the current daemon serving when warmup fails. Offline startup skips provider warmup.
+Online `omnifs up` joins warmup through one workspace advisory lock before replacing a serving daemon and retains that lease until the replacement reports readiness. It loads every unique provider ID selected by the immutable mount revision through `ComponentEngine` while holding the lease, so detached warmup cannot overlap the daemon's component loading. The launcher owns this coordination; the daemon has no warmup state or control operation. Successful background work becomes cache hits, while failed, interrupted, evicted, or incompatible entries are retried synchronously and leave the current daemon serving when warmup fails. Offline startup skips provider warmup.
 
 ### Local metrics
 

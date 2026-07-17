@@ -100,7 +100,7 @@ impl<'a> Launcher<'a> {
         let store = FileStore::new(&paths.credentials_file);
         preflight_mounts(&configs, self.workspace.catalog(), &store)?;
 
-        crate::provider_warmup::ProviderWarmup::new(paths)
+        let warmup = crate::provider_warmup::ProviderWarmup::new(paths)
             .warm_for_up(
                 configs.iter().map(|config| config.config.provider.id),
                 &self.output,
@@ -114,6 +114,7 @@ impl<'a> Launcher<'a> {
         ));
         self.launch_host_native(metrics_enabled, &revision, &snapshot_dir, false)
             .await?;
+        drop(warmup);
         self.workspace.repository()?.mark_applied(&revision)?;
         Ok(())
     }

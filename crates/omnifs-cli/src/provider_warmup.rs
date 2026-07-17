@@ -103,6 +103,12 @@ pub(crate) struct ProviderWarmup {
     layout: WorkspaceLayout,
 }
 
+/// Exclusive warmup ownership retained by `omnifs up` through daemon readiness.
+#[must_use = "dropping the lease allows detached provider warmup to resume"]
+pub(crate) struct WarmupLease {
+    _lock: File,
+}
+
 impl ProviderWarmup {
     pub(crate) fn new(layout: &WorkspaceLayout) -> Self {
         Self {
@@ -202,21 +208,18 @@ impl ProviderWarmup {
         &self,
         ids: impl IntoIterator<Item = ProviderId>,
         output: &Output,
-    ) -> Result<()> {
+    ) -> Result<WarmupLease> {
         let ids: Vec<_> = ids
             .into_iter()
             .collect::<HashSet<_>>()
             .into_iter()
             .collect();
-        if ids.is_empty() {
-            return Ok(());
-        }
         let mut progress = output.progress("provider warmup");
         if self.is_active()? {
             progress.update("waiting for background provider warmup");
         }
         // ponytail: one workspace lock; split by provider only if contention is measurable.
-        let _lock = tokio::task::spawn_blocking({
+        let lock = tokio::task::spawn_blocking({
             let warmup = self.clone();
             move || warmup.acquire()
         })
@@ -228,7 +231,8 @@ impl ProviderWarmup {
             Ok(()) => progress.settle_ok("ready"),
             Err(_) => progress.settle_fail("warmup failed"),
         }
-        result
+        result?;
+        Ok(WarmupLease { _lock: lock })
     }
 
     async fn run_background(&self, id: ProviderId) -> Result<()> {
@@ -373,7 +377,7 @@ mod tests {
     use crate::ui::output::OutputMode;
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn foreground_warmup_joins_an_existing_worker() {
+    async fn foreground_warmup_joins_an_existing_worker_and_retains_the_lease() {
         let home = tempfile::tempdir().unwrap();
         let layout = WorkspaceLayout::under_root(home.path());
         std::fs::create_dir_all(&layout.providers_dir).unwrap();
@@ -403,16 +407,18 @@ mod tests {
         ready_rx.recv().unwrap();
 
         let started = Instant::now();
-        ProviderWarmup::new(&layout)
+        let warmup = ProviderWarmup::new(&layout);
+        let lease = warmup
             .warm_for_up([id], &Output::new(OutputMode::Human, true))
             .await
             .unwrap();
         holder.join().unwrap();
 
         assert!(started.elapsed() >= Duration::from_millis(200));
-        assert_eq!(
-            ProviderWarmup::new(&layout).status().unwrap().state,
-            WarmupState::Complete
-        );
+        assert!(warmup.is_active().unwrap());
+        assert_eq!(warmup.status().unwrap().state, WarmupState::Running);
+        drop(lease);
+        assert!(!warmup.is_active().unwrap());
+        assert_eq!(warmup.status().unwrap().state, WarmupState::Complete);
     }
 }
