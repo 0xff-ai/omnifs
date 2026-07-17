@@ -53,7 +53,6 @@ esp_loop=""
 root_loop=""
 cleanup() {
   umount /mnt/root 2>/dev/null || true
-  umount /mnt/esp 2>/dev/null || true
   [[ -z "$root_loop" ]] || losetup -d "$root_loop" 2>/dev/null || true
   [[ -z "$esp_loop" ]] || losetup -d "$esp_loop" 2>/dev/null || true
 }
@@ -85,9 +84,16 @@ partition_loop() {
 esp_loop="$(partition_loop 1)"
 root_loop="$(partition_loop 2)"
 
-mkdir -p /mnt/root /mnt/esp
+note "checking EFI system partition"
+esp_type="$(blkid -p -s TYPE -o value "$esp_loop" || true)"
+if [[ "$esp_type" != "vfat" ]]; then
+  echo "partition 1 filesystem is '${esp_type:-unknown}', expected vfat" >&2
+  blkid -p "$esp_loop" >&2 || true
+  exit 1
+fi
+
+mkdir -p /mnt/root
 mount -o ro "$root_loop" /mnt/root
-mount -o ro "$esp_loop" /mnt/esp
 
 note "checking /usr/local/bin/omnifs-thin"
 bin=/mnt/root/usr/local/bin/omnifs-thin
