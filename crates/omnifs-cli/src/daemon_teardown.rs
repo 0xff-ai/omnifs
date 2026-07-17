@@ -8,7 +8,6 @@ use crate::inventory::{DaemonProbe, Inventory};
 use crate::ui::consent::Outcome;
 use crate::ui::output::Output;
 use crate::workspace::Workspace;
-use omnifs_workspace::daemon_record::DaemonRecord;
 use std::time::Duration;
 
 const SHUTDOWN_SETTLE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -105,7 +104,6 @@ impl<'a> DaemonTeardown<'a> {
     /// place. Apply uses this path when switching desired mount revisions;
     /// surviving frontends reconnect when the daemon returns.
     pub(crate) async fn stop_daemon(&self) -> anyhow::Result<()> {
-        let record_path = self.workspace.layout().daemon_record_file();
         let outcome = match self.workspace.daemon().status_optional().await {
             Ok(Some(status)) => self.shutdown_and_wait(status.pid).await,
             Ok(None) => self.remove_stale_record(),
@@ -119,7 +117,7 @@ impl<'a> DaemonTeardown<'a> {
             | TeardownOutcome::DaemonAlreadyStopped
             | TeardownOutcome::StaleRecordRemoved
             | TeardownOutcome::StaleRecordAbsent => {
-                DaemonRecord::remove(&record_path)?;
+                self.workspace.daemon().remove_record()?;
                 Ok(())
             },
             failure => anyhow::bail!(failure.outcome().value),
@@ -131,14 +129,13 @@ impl<'a> DaemonTeardown<'a> {
     /// them into a receipt.
     pub(crate) async fn down_collect(&self) -> anyhow::Result<Vec<TeardownOutcome>> {
         let mut outcomes = Vec::new();
-        let record_path = self.workspace.layout().daemon_record_file();
         match self.initial_or_status().await {
             Ok(Some(status)) => {
                 let outcome = self.shutdown_and_wait(status.pid).await;
                 if matches!(
                     outcome,
                     TeardownOutcome::DaemonStopped { .. } | TeardownOutcome::DaemonAlreadyStopped
-                ) && let Err(error) = DaemonRecord::remove(&record_path)
+                ) && let Err(error) = self.workspace.daemon().remove_record()
                 {
                     outcomes.push(TeardownOutcome::StaleRecordKept {
                         error: error.to_string(),
@@ -217,13 +214,12 @@ impl<'a> DaemonTeardown<'a> {
         }
     }
     fn remove_stale_record(&self) -> TeardownOutcome {
-        let path = self.workspace.layout().daemon_record_file();
         match self.recorded_pid_liveness() {
             Ok(Some(true)) => TeardownOutcome::StaleRecordKept {
                 error: "the recorded daemon process is still alive; ownership cannot be verified"
                     .to_owned(),
             },
-            Ok(Some(false)) => match DaemonRecord::remove(&path) {
+            Ok(Some(false)) => match self.workspace.daemon().remove_record() {
                 Ok(()) => TeardownOutcome::StaleRecordRemoved,
                 Err(error) => TeardownOutcome::StaleRecordKept {
                     error: error.to_string(),
@@ -237,8 +233,7 @@ impl<'a> DaemonTeardown<'a> {
     }
 
     fn recorded_pid_liveness(&self) -> anyhow::Result<Option<bool>> {
-        let Some(record) = DaemonRecord::read(&self.workspace.layout().daemon_record_file())?
-        else {
+        let Some(record) = self.workspace.daemon().record()? else {
             return Ok(None);
         };
         let pid = record.pid;

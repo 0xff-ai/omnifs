@@ -65,6 +65,12 @@ impl Catalog {
         }
     }
 
+    /// The retained provider store behind this catalog.
+    #[must_use]
+    pub fn store(&self) -> &ProviderStore {
+        &self.store
+    }
+
     fn provider_from_entry(&self, entry: &IndexEntry) -> Provider {
         Provider {
             id: entry.id,

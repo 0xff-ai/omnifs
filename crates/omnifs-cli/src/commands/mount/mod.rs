@@ -26,7 +26,6 @@ use crate::token_source::TokenSource;
 use crate::ui::consent::{Decision, Outcome, Plan, Row};
 use crate::ui::output::{Output, ResultVerdict};
 use crate::workspace::Workspace;
-use omnifs_workspace::layout::WorkspaceLayout;
 
 #[derive(Args, Debug, Clone)]
 pub struct MountArgs {
@@ -266,9 +265,8 @@ impl ReauthArgs {
         output: &crate::ui::output::Output,
         prompt: PromptMode,
     ) -> anyhow::Result<()> {
-        let paths = workspace.layout();
         let mount_name = self.name.as_str();
-        let mounts = workspace.mounts()?;
+        let mounts = workspace.desired_state().mounts()?;
         let mount_config = mounts
             .iter()
             .find(|m| m.name.as_str() == mount_name)
@@ -332,7 +330,7 @@ impl ReauthArgs {
                 &manifest,
                 &selection,
                 token,
-                &paths.credentials_file,
+                workspace.credentials(),
                 !self.no_validate,
                 output,
             )
@@ -370,10 +368,9 @@ fn rm_with_options(
     dry_run: bool,
     output: &Output,
 ) -> anyhow::Result<crate::commands::receipt::MountRemoveReceipt> {
-    let layout = workspace.layout();
     output.intro(format!("omnifs mount rm {name}"))?;
     let output = output.clone();
-    let mounts = workspace.mounts()?;
+    let mounts = workspace.desired_state().mounts()?;
     let name =
         MountName::new(name.to_owned()).with_context(|| format!("invalid mount name `{name}`"))?;
 
@@ -388,7 +385,7 @@ fn rm_with_options(
             "spec",
             format!(
                 "{} (already absent)",
-                WorkspaceLayout::display(&layout.mounts_dir.join(format!("{name}.json")))
+                omnifs_workspace::layout::display(&workspace.desired_state().spec_path(&name))
             ),
         ));
         output.plan(&plan);
@@ -436,14 +433,14 @@ fn rm_with_options(
         Decision::Apply => {},
     }
 
-    let spec_outcome = match workspace.remove_mount_uncommitted(&name) {
+    let spec_outcome = match workspace.desired_state().remove_uncommitted(&name) {
         Ok(true) => Outcome::done("spec", "desired-state deletion recorded"),
         Ok(false) => Outcome::skip("spec", "already absent"),
         Err(error) => Outcome::fail("spec", format!("spec kept; local delete failed: {error:#}")),
     };
     let mut outcomes = vec![spec_outcome];
     if outcomes[0].state != crate::ui::consent::OutcomeState::Fail
-        && let Err(error) = workspace.commit_mounts()
+        && let Err(error) = workspace.desired_state().commit()
     {
         outcomes[0] = Outcome::fail(
             "spec",
@@ -481,7 +478,7 @@ fn mount_remove_plan(config_path: &Path) -> Plan {
     plan.push(Row::remove(
         "spec",
         "spec",
-        WorkspaceLayout::display(config_path).clone(),
+        omnifs_workspace::layout::display(config_path).clone(),
     ));
     plan
 }
@@ -490,6 +487,7 @@ fn mount_remove_plan(config_path: &Path) -> Plan {
 mod tests {
     use super::*;
     use crate::test_support::fixture_paths as base_fixture_paths;
+    use omnifs_workspace::layout::WorkspaceLayout;
     use tempfile::TempDir;
 
     fn fixture_paths(root: &Path) -> WorkspaceLayout {

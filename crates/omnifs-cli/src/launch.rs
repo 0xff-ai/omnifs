@@ -5,9 +5,7 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 use omnifs_api::{DaemonStatus, DaemonSubsystem};
-use omnifs_workspace::creds::{CredentialStore, FileStore};
-use omnifs_workspace::daemon_record::DaemonRecord;
-use omnifs_workspace::layout::WorkspaceLayout;
+use omnifs_workspace::creds::CredentialStore;
 use omnifs_workspace::mounts::{Registry, Revision};
 use omnifs_workspace::provider::Catalog;
 
@@ -51,36 +49,34 @@ impl<'a> Launcher<'a> {
     }
 
     pub(crate) async fn launch(self) -> anyhow::Result<()> {
-        let paths = self.workspace.layout();
+        let desired_state = self.workspace.desired_state();
         let config = self.workspace.config()?;
         let metrics_enabled =
             config.metrics.enabled && omnifs_workspace::metrics::enabled_from_env();
 
         let (revision, snapshot_dir, snapshot) = if self.offline {
             anyhow::ensure!(
-                paths.mounts_dir.is_dir(),
+                desired_state.repository_exists(),
                 "offline startup requires an existing mount repository at {}",
-                paths.mounts_dir.display()
+                desired_state.repository_display()
             );
-            let repository = self.workspace.observe_repository()?;
+            let repository = desired_state.observe_repository()?;
             let revision = repository
                 .head_revision()?
                 .ok_or_else(|| anyhow::anyhow!("offline startup requires a current mount HEAD"))?;
-            let (snapshot_dir, snapshot) = repository.snapshot(&revision, &paths.cache_dir)?;
+            let (snapshot_dir, snapshot) = desired_state.snapshot(&repository, &revision)?;
             (revision, snapshot_dir, snapshot)
         } else {
-            let revision = self.workspace.commit_mounts()?;
-            let (snapshot_dir, snapshot) = self
-                .workspace
-                .repository()?
-                .snapshot(&revision, &paths.cache_dir)?;
+            let revision = desired_state.commit()?;
+            let repository = desired_state.repository()?;
+            let (snapshot_dir, snapshot) = desired_state.snapshot(&repository, &revision)?;
             (revision, snapshot_dir, snapshot)
         };
         let configs = mount_configs(&snapshot);
         if configs.is_empty() {
             anyhow::bail!(
                 "no mount configs found in {}; run `omnifs mount add <provider>` to create one",
-                paths.mounts_dir.display()
+                desired_state.repository_display()
             );
         }
 
@@ -97,10 +93,15 @@ impl<'a> Launcher<'a> {
         // when a configured mount's host-managed credential is missing. The
         // daemon resolves the pinned manifest and bound config into authority
         // before constructing any provider instance.
-        let store = FileStore::new(&paths.credentials_file);
-        preflight_mounts(&configs, self.workspace.catalog(), &store)?;
+        preflight_mounts(
+            &configs,
+            self.workspace.catalog(),
+            self.workspace.credentials(),
+        )?;
 
-        let warmup = crate::provider_warmup::ProviderWarmup::new(paths)
+        let warmup = self
+            .workspace
+            .provider_warmup()
             .warm_for_up(
                 configs.iter().map(|config| config.config.provider.id),
                 &self.output,
@@ -115,7 +116,7 @@ impl<'a> Launcher<'a> {
         self.launch_host_native(metrics_enabled, &revision, &snapshot_dir, false)
             .await?;
         drop(warmup);
-        self.workspace.repository()?.mark_applied(&revision)?;
+        desired_state.repository()?.mark_applied(&revision)?;
         Ok(())
     }
 
@@ -128,16 +129,15 @@ impl<'a> Launcher<'a> {
         snapshot: &Path,
         offline: bool,
     ) -> anyhow::Result<()> {
-        let paths = self.workspace.layout();
-        let client = DaemonClient::for_layout(paths);
+        let client = self.workspace.daemon();
         let current = client.status_optional().await?;
 
         if let Some(status) = &current {
-            let existing = ExistingDaemon::new(status.clone(), paths, self.verb);
+            let existing = ExistingDaemon::new(status.clone(), client, self.verb);
             if !existing.can_apply() {
                 anyhow::bail!(existing);
             }
-            let existing_record = DaemonRecord::read(&paths.daemon_record_file())?;
+            let existing_record = client.record()?;
             let serves_revision = existing_record.as_ref().is_some_and(|record| {
                 record.instance_id == status.instance_id
                     && record.mount_revision == *revision
@@ -169,7 +169,7 @@ impl<'a> Launcher<'a> {
         }
 
         crate::daemon_launch::launch(
-            paths,
+            client,
             metrics_enabled,
             revision,
             snapshot,
@@ -214,15 +214,20 @@ fn preflight_mounts(
 #[derive(Debug)]
 struct ExistingDaemon {
     status: DaemonStatus,
-    paths: WorkspaceLayout,
+    paths_match: bool,
+    config_display: String,
+    cache_display: String,
     verb: String,
 }
 
 impl ExistingDaemon {
-    fn new(status: DaemonStatus, paths: &WorkspaceLayout, verb: &str) -> Self {
+    fn new(status: DaemonStatus, client: &DaemonClient, verb: &str) -> Self {
+        let paths_match = client.matches_status(&status);
         Self {
             status,
-            paths: paths.clone(),
+            paths_match,
+            config_display: client.config_display(),
+            cache_display: client.cache_display(),
             verb: verb.to_string(),
         }
     }
@@ -232,8 +237,7 @@ impl ExistingDaemon {
     }
 
     fn paths_match(&self) -> bool {
-        same_path(&self.status.config_dir, &self.paths.config_dir)
-            && same_path(&self.status.cache_dir, &self.paths.cache_dir)
+        self.paths_match
     }
 
     fn executable_matches(&self) -> Option<bool> {
@@ -286,9 +290,9 @@ impl std::fmt::Display for ExistingDaemon {
         )?;
         writeln!(f)?;
         writeln!(f, "  daemon config  {}", self.status.config_dir.display())?;
-        writeln!(f, "  this config    {}", self.paths.config_dir.display())?;
+        writeln!(f, "  this config    {}", self.config_display)?;
         writeln!(f, "  daemon cache   {}", self.status.cache_dir.display())?;
-        writeln!(f, "  this cache     {}", self.paths.cache_dir.display())?;
+        writeln!(f, "  this cache     {}", self.cache_display)?;
         writeln!(f)?;
         if self.version_skew() {
             writeln!(

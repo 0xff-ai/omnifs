@@ -9,7 +9,7 @@ use omnifs_api::{
 };
 use omnifs_engine::HostContext;
 use omnifs_workspace::daemon_record::{DaemonRecord, Endpoint};
-use omnifs_workspace::layout::{Daemon, Workspace, WorkspaceLayout};
+use omnifs_workspace::layout::WorkspaceLayout;
 use omnifs_workspace::mounts::Revision;
 use std::fmt::Write as _;
 use std::os::unix::fs::{FileTypeExt as _, PermissionsExt as _};
@@ -39,8 +39,7 @@ struct ProcessInfo {
 impl DaemonContext {
     pub(crate) fn resolve(args: &DaemonArgs) -> anyhow::Result<Self> {
         let attach_tcp = args.attach_tcp;
-        let workspace: Workspace<Daemon> = Workspace::resolve()?;
-        let layout = workspace.into_layout();
+        let layout = WorkspaceLayout::resolve()?;
         let process = ProcessInfo::current();
         anyhow::ensure!(
             args.mount_snapshot.is_dir(),

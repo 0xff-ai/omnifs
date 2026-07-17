@@ -7,10 +7,9 @@
 
 use anyhow::Context;
 use clap::Args;
-use omnifs_workspace::creds::{CredentialEntry, CredentialStore, FileStore};
+use omnifs_workspace::creds::{CredentialEntry, CredentialStore};
 use omnifs_workspace::provider::ProviderManifest;
 use secrecy::{ExposeSecret, SecretString};
-use std::path::Path;
 use time::OffsetDateTime;
 
 use super::token_validation::StaticTokenValidator;
@@ -125,7 +124,7 @@ pub(crate) async fn run_static_token_init(
     manifest: &ProviderManifest,
     auth: &AuthSelection,
     token: SecretString,
-    credentials_file: &Path,
+    store: &dyn CredentialStore,
     validate: bool,
     output: &crate::ui::output::Output,
 ) -> anyhow::Result<CredentialTarget> {
@@ -165,7 +164,6 @@ pub(crate) async fn run_static_token_init(
         output.note(workspace);
     }
 
-    let store = FileStore::new(credentials_file);
     let now = OffsetDateTime::now_utc();
     let mut entry = CredentialEntry::static_token(token, now);
     entry.set_last_validated(validation.as_ref().map(|_| now));
@@ -336,9 +334,8 @@ mod tests {
     #[test]
     fn add_dns_writes_snapshot_spec() {
         let dir = tempfile::tempdir().unwrap();
-        let workspace = Workspace::from_layout(
-            omnifs_workspace::layout::WorkspaceLayout::under_root(dir.path()),
-        );
+        let paths = omnifs_workspace::layout::WorkspaceLayout::under_root(dir.path());
+        let workspace = Workspace::from_layout(paths.clone());
         let args = AddArgs {
             provider: Some("dns".to_string()),
             as_name: None,
@@ -363,7 +360,7 @@ mod tests {
             ))
             .unwrap();
 
-        let spec = std::fs::read_to_string(workspace.layout().mounts_dir.join("dns.json")).unwrap();
+        let spec = std::fs::read_to_string(paths.mounts_dir.join("dns.json")).unwrap();
         // The provider content id hashes the built wasm, which differs across
         // build environments; normalize it before the byte comparison.
         let parsed: serde_json::Value = serde_json::from_str(&spec).unwrap();

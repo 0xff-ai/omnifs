@@ -6,7 +6,7 @@ use omnifs_auth::{
     DeviceCodePrompt, LoginRequest, ManualCode, ManualCodeLoginRequest, OAuthClient, OAuthRequest,
     UrlOpener,
 };
-use omnifs_workspace::creds::{CredentialEntry, CredentialStore, FileStore};
+use omnifs_workspace::creds::{CredentialEntry, CredentialStore};
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
@@ -34,7 +34,7 @@ struct LoginInteractivity<'a> {
 async fn login(
     catalog: &Catalog,
     mount_auth: crate::auth::MountAuth,
-    store: Box<dyn CredentialStore>,
+    store: &dyn CredentialStore,
     account: Option<&str>,
     interactivity: LoginInteractivity<'_>,
     output: &crate::ui::output::Output,
@@ -173,8 +173,8 @@ pub(crate) async fn login_with_workspace(
     scopes: &[String],
     output: &crate::ui::output::Output,
 ) -> anyhow::Result<CredentialTarget> {
-    let store = Box::new(FileStore::new(&workspace.layout().credentials_file));
-    let mounts = workspace.mounts()?;
+    let store = workspace.credentials();
+    let mounts = workspace.desired_state().mounts()?;
     let mount_auth = crate::auth::MountAuth::load(workspace.catalog(), &mounts, mount)?;
     login(
         workspace.catalog(),
@@ -204,7 +204,7 @@ pub(crate) async fn login_with_spec(
     scopes: &[String],
     output: &crate::ui::output::Output,
 ) -> anyhow::Result<CredentialTarget> {
-    let store = Box::new(FileStore::new(&workspace.layout().credentials_file));
+    let store = workspace.credentials();
     let mount_auth = crate::auth::MountAuth::from_spec(workspace.catalog(), spec.clone());
     login(
         workspace.catalog(),
@@ -366,7 +366,7 @@ mod tests {
         let reference = install_fixture_provider(&paths.providers_dir, "planned-oauth");
         let workspace = Workspace::from_layout(paths);
 
-        assert!(workspace.mounts().unwrap().is_empty());
+        assert!(workspace.desired_state().mounts().unwrap().is_empty());
         let spec = spec_with_reference(
             &reference,
             r#"{
@@ -380,6 +380,6 @@ mod tests {
 
         assert_eq!(request.scheme().key, "device");
         assert!(target.primary_key().is_some());
-        assert!(workspace.mounts().unwrap().is_empty());
+        assert!(workspace.desired_state().mounts().unwrap().is_empty());
     }
 }

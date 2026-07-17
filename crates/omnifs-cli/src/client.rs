@@ -4,7 +4,7 @@
 //! sends one versioned JSON line, and reads one versioned reply line. Inspector
 //! uses the same socket with a persistent subscription connection.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -53,6 +53,8 @@ impl Target {
 pub(crate) struct DaemonClient {
     record_path: Option<PathBuf>,
     control_socket: Option<PathBuf>,
+    config_dir: PathBuf,
+    cache_dir: PathBuf,
     cleaned_stale: AtomicBool,
 }
 
@@ -61,8 +63,41 @@ impl DaemonClient {
         Self {
             record_path: Some(layout.daemon_record_file()),
             control_socket: Some(layout.control_socket()),
+            config_dir: layout.config_dir.clone(),
+            cache_dir: layout.cache_dir.clone(),
             cleaned_stale: AtomicBool::new(false),
         }
+    }
+
+    pub(crate) fn record(&self) -> anyhow::Result<Option<DaemonRecord>> {
+        Ok(match &self.record_path {
+            Some(path) => DaemonRecord::read(path)?,
+            None => None,
+        })
+    }
+
+    pub(crate) fn remove_record(&self) -> anyhow::Result<()> {
+        if let Some(path) = &self.record_path {
+            DaemonRecord::remove(path)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn log_file(&self) -> PathBuf {
+        self.cache_dir.join("daemon.log")
+    }
+
+    pub(crate) fn matches_status(&self, status: &DaemonStatus) -> bool {
+        same_path(&status.config_dir, &self.config_dir)
+            && same_path(&status.cache_dir, &self.cache_dir)
+    }
+
+    pub(crate) fn config_display(&self) -> String {
+        self.config_dir.display().to_string()
+    }
+
+    pub(crate) fn cache_display(&self) -> String {
+        self.cache_dir.display().to_string()
     }
 
     #[cfg(test)]
@@ -70,6 +105,8 @@ impl DaemonClient {
         Self {
             record_path,
             control_socket: None,
+            config_dir: PathBuf::new(),
+            cache_dir: PathBuf::new(),
             cleaned_stale: AtomicBool::new(false),
         }
     }
@@ -339,6 +376,12 @@ impl DaemonClient {
     }
 }
 
+fn same_path(left: &Path, right: &Path) -> bool {
+    let canonical =
+        |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    canonical(left) == canonical(right)
+}
+
 #[derive(Clone)]
 pub(crate) enum EventEndpoint {
     Unix { socket: PathBuf },
@@ -456,6 +499,8 @@ mod tests {
         DaemonClient {
             record_path: Some(record),
             control_socket: Some(control_socket),
+            config_dir: PathBuf::new(),
+            cache_dir: PathBuf::new(),
             cleaned_stale: AtomicBool::new(false),
         }
     }

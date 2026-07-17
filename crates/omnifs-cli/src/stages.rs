@@ -7,7 +7,6 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context, anyhow};
-use omnifs_workspace::layout::WorkspaceLayout;
 use omnifs_workspace::mounts::{Limits, Name as MountName, Spec};
 use omnifs_workspace::provider::{ProviderAuthManifest, ProviderManifest};
 use serde::de::DeserializeOwned;
@@ -151,9 +150,8 @@ pub(crate) fn spec_creation(
     output: &crate::ui::output::Output,
     prompt: PromptMode,
 ) -> anyhow::Result<MountInitPlan> {
-    let paths = workspace.layout();
     let interactive = init_interactive(prompt);
-    let mounts = workspace.mounts()?;
+    let mounts = workspace.desired_state().mounts()?;
     let embedded = EmbeddedProviders::load()?;
     let provider_selection = ProviderSelection::new(&mounts, &embedded);
 
@@ -180,9 +178,10 @@ pub(crate) fn spec_creation(
         interactive,
         output,
     )?;
-    let resolved = ProviderResolver::new(&paths.providers_dir, &embedded).resolve(&selector)?;
+    let resolved = ProviderResolver::new(workspace.catalog(), &embedded).resolve(&selector)?;
     if resolved.newly_retained
-        && let Err(error) = crate::provider_warmup::ProviderWarmup::new(workspace.layout())
+        && let Err(error) = workspace
+            .provider_warmup()
             .spawn_background(resolved.reference.id, output)
     {
         output.narrate(crate::ui::style::warn(format!(
@@ -261,7 +260,7 @@ pub(crate) fn spec_creation(
         created,
     );
     let spec = mount_file.into_spec();
-    let mount_path = paths.mounts_dir.join(format!("{mount_name}.json"));
+    let mount_path = workspace.desired_state().spec_path(&mount_name);
 
     Ok(MountInitPlan {
         mount_name,
@@ -292,7 +291,7 @@ impl MountInitPlan {
                 &plan.manifest,
                 auth,
                 token,
-                &workspace.layout().credentials_file,
+                workspace.credentials(),
                 !args.no_validate,
                 output,
             )
@@ -360,7 +359,7 @@ impl MountInitPlan {
                 &plan.manifest,
                 auth,
                 token,
-                &workspace.layout().credentials_file,
+                workspace.credentials(),
                 !args.no_validate,
                 output,
             )
@@ -406,8 +405,8 @@ fn persist_mount_spec(
     plan: &MountInitPlan,
     output: &crate::ui::output::Output,
 ) -> anyhow::Result<()> {
-    workspace.put_mount_uncommitted(&plan.spec)?;
-    workspace.commit_mounts()?;
+    workspace.desired_state().put_uncommitted(&plan.spec)?;
+    workspace.desired_state().commit()?;
     output.row(&crate::ui::report::Row::new(
         crate::ui::style::Glyph::Done,
         "desired state",
@@ -416,7 +415,7 @@ fn persist_mount_spec(
     // `Wrote <path>` collapses to a single dim continuation, printed once.
     output.note(format!(
         "wrote {}",
-        WorkspaceLayout::display(&plan.mount_path)
+        omnifs_workspace::layout::display(&plan.mount_path)
     ));
     Ok(())
 }

@@ -11,7 +11,7 @@ use std::path::Path;
 
 use bollard::models::{ContainerCreateBody, DeviceMapping, HostConfig, MountPoint};
 use omnifs_api::{OMNIFS_ATTACH_ADDR_ENV, OMNIFS_ATTACH_TOKEN_ENV};
-use omnifs_workspace::layout::{OMNIFS_HOME_ENV, WorkspaceLayout};
+use omnifs_workspace::layout::OMNIFS_HOME_ENV;
 
 use crate::docker::ContainerName;
 use crate::image::{BUILD_CHANNEL, BuildChannel, ImageRef};
@@ -59,11 +59,8 @@ pub(crate) fn resolve_frontend_image(
 /// The frontend container's name: the bare base name for the default
 /// workspace (no `OMNIFS_HOME` override), else the base name suffixed with an
 /// 8-hex-char hash of the config dir so multiple workspaces never collide.
-pub(crate) fn frontend_container_name(paths: &WorkspaceLayout) -> anyhow::Result<ContainerName> {
-    container_name_for(
-        &paths.config_dir,
-        std::env::var_os(OMNIFS_HOME_ENV).is_none(),
-    )
+pub(crate) fn frontend_container_name(config_dir: &Path) -> anyhow::Result<ContainerName> {
+    container_name_for(config_dir, std::env::var_os(OMNIFS_HOME_ENV).is_none())
 }
 
 fn container_name_for(config_dir: &Path, is_default_home: bool) -> anyhow::Result<ContainerName> {

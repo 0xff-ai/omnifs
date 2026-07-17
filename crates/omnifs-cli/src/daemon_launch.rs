@@ -12,19 +12,21 @@ use crate::error::{ExitCode, WithExitCode};
 use crate::process::ProcessRole;
 
 pub(crate) async fn launch(
-    paths: &omnifs_workspace::layout::WorkspaceLayout,
+    daemon: &DaemonClient,
     metrics_enabled: bool,
     mount_revision: &omnifs_workspace::mounts::Revision,
     mount_snapshot: &Path,
     offline: bool,
     readiness_timeout: Duration,
 ) -> Result<()> {
-    let cache_dir = &paths.cache_dir;
+    let log_path = daemon.log_file();
+    let cache_dir = log_path
+        .parent()
+        .context("daemon log path has no cache directory")?;
     std::fs::create_dir_all(cache_dir)
         .with_context(|| format!("create cache dir {}", cache_dir.display()))?;
 
     let binary = std::env::current_exe().context("resolve the omnifs executable")?;
-    let log_path = cache_dir.join("daemon.log");
     let log = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -63,7 +65,6 @@ pub(crate) async fn launch(
     let child_pid = child
         .id()
         .context("spawned omnifs daemon has no process identity")?;
-    let client = DaemonClient::for_layout(paths);
     let ready = tokio::time::timeout(readiness_timeout, async {
         loop {
             if let Some(status) = child.try_wait().context("poll daemon child status")? {
@@ -72,13 +73,10 @@ pub(crate) async fn launch(
                     "omnifs daemon exited before the mount became ready ({status}){cause}; run `omnifs logs` for the full daemon log"
                 );
             }
-            if client.ready().await
-                && let Ok(status) = client.status().await
+            if daemon.ready().await
+                && let Ok(status) = daemon.status().await
             {
-                let record = omnifs_workspace::daemon_record::DaemonRecord::read(
-                    &paths.daemon_record_file(),
-                )
-                .context("read daemon readiness record")?;
+                let record = daemon.record().context("read daemon readiness record")?;
                 anyhow::ensure!(
                     record.as_ref().is_some_and(|record| {
                         status.pid == child_pid

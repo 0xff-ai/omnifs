@@ -4,7 +4,7 @@ use anyhow::{Context, anyhow};
 use clap::Args;
 use omnifs_auth::{OAuthClient, OAuthRevokeOutcome};
 use omnifs_workspace::authn::AuthKind;
-use omnifs_workspace::creds::{CredentialStore, FileStore};
+use omnifs_workspace::creds::CredentialStore;
 
 use crate::auth::MountAuth;
 use crate::credential_target::CredentialTarget;
@@ -24,7 +24,7 @@ impl RevokeArgs {
     pub(crate) async fn run(self, output: Output) -> anyhow::Result<Receipt> {
         let workspace = Workspace::resolve()?;
         output.intro(format!("omnifs mount revoke {}", self.name))?;
-        let mounts = workspace.mounts()?;
+        let mounts = workspace.desired_state().mounts()?;
         let requested = mounts
             .iter()
             .find(|mount| mount.name.as_str() == self.name)
@@ -46,7 +46,7 @@ impl RevokeArgs {
             .cloned()
             .ok_or_else(|| anyhow!("mount `{}` has no configured credential", self.name))?;
 
-        let store = FileStore::new(workspace.layout().credentials_file.clone());
+        let store = workspace.credentials();
         let entry = store
             .get(&credential_id)
             .with_context(|| format!("read credential `{credential_id}`"))?;

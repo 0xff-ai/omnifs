@@ -9,6 +9,7 @@ use omnifs_api::{DaemonStatus, FrontendRuntime, FsType, HealthState};
 use omnifs_mtab::{MountKind, MountState};
 use omnifs_workspace::creds::FileStore;
 use omnifs_workspace::daemon_record::DaemonRecord;
+#[cfg(test)]
 use omnifs_workspace::layout::WorkspaceLayout;
 use omnifs_workspace::mounts::{Name as MountName, Registry, Revision};
 use omnifs_workspace::provider::Catalog;
@@ -21,10 +22,8 @@ use crate::auth::{AuthReadiness, MountAuth};
 #[cfg(target_os = "macos")]
 use crate::commands::frontend::GUEST_MOUNT;
 use crate::commands::frontend::{FrontendFilesystem as Filesystem, FrontendRuntime as Runtime};
-#[cfg(target_os = "macos")]
-use crate::libkrun_runner::LibkrunRunner;
-use crate::provider_warmup::{ProviderWarmup, WarmupStatus};
-use crate::workspace::Workspace;
+use crate::provider_warmup::WarmupStatus;
+use crate::workspace::{FrontendOwner, Workspace};
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct Inventory {
@@ -430,27 +429,24 @@ impl AccessState {
 
 impl Inventory {
     pub(crate) async fn collect(workspace: &Workspace) -> Result<Self> {
-        let layout = workspace.layout().clone();
-        let repository = workspace.observe_repository()?;
+        let frontend = workspace.frontend();
+        let repository = workspace.desired_state().observe_repository()?;
         let registry = repository.registry();
         let mount_revision = repository.head_revision()?;
         let applied_revision = repository.applied()?;
         let daemon_probe = workspace.daemon().status_optional_checked().await;
         let daemon_status = daemon_probe.as_ref().ok().and_then(Option::as_ref);
-        let runtime = DaemonRecord::read(&layout.daemon_record_file())
-            .ok()
-            .flatten();
+        let runtime = workspace.daemon().record().ok().flatten();
         let mut mounts = if let Some(status) = daemon_status.filter(|status| status.offline) {
             offline_mount_statuses(registry, status)
         } else {
             let catalog = workspace.catalog();
-            let credentials = FileStore::new(&layout.credentials_file);
-            online_mount_statuses(registry, catalog, &credentials, daemon_status)
+            online_mount_statuses(registry, catalog, workspace.credentials(), daemon_status)
         };
         let mount_count = mounts.len();
-        let discovered = discovered_frontends(&layout, mount_count)?;
+        let discovered = discovered_frontends(frontend, mount_count)?;
         let frontends = frontend_statuses(daemon_status, mount_count, discovered);
-        let warmup = ProviderWarmup::new(&layout).status();
+        let warmup = workspace.provider_warmup().status();
         let access_count = frontends
             .iter()
             .filter(|frontend| {
@@ -466,7 +462,7 @@ impl Inventory {
         let mut daemon = DaemonObservation::from(daemon_probe);
         daemon.runtime = runtime;
         Ok(Self {
-            home: layout.config_dir,
+            home: frontend.home_for_output(),
             mount_revision,
             applied_revision,
             daemon,
@@ -571,11 +567,11 @@ pub(crate) enum Verdict {
 /// Discover runner-owned frontend observations. A daemon-down inventory keeps
 /// these rows because runner and attachment lifetimes are independent.
 fn discovered_frontends(
-    layout: &WorkspaceLayout,
+    frontend: &FrontendOwner,
     mount_count: usize,
 ) -> Result<Vec<FrontendStatus>> {
     let mut rows = Vec::new();
-    for path in MountState::files_under(&layout.frontend_state_root())? {
+    for path in MountState::files_under(&frontend.frontend_state_root())? {
         match MountState::read_file(&path) {
             Ok(state) => {
                 let filesystem = match state.kind {
@@ -620,7 +616,7 @@ fn discovered_frontends(
     }
 
     #[cfg(target_os = "macos")]
-    match LibkrunRunner::new(layout.config_dir.clone()).is_running() {
+    match frontend.libkrun_runner().is_running() {
         Ok(Some(running)) => rows.push(FrontendStatus {
             filesystem: Filesystem::Fuse,
             runtime: Runtime::Libkrun,
@@ -1275,14 +1271,14 @@ mod tests {
     #[test]
     fn daemon_down_keeps_runner_owned_local_frontend_visible() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let layout = WorkspaceLayout::under_root(tmp.path());
+        let workspace = Workspace::from_layout(WorkspaceLayout::under_root(tmp.path()));
         let mount_point = tmp.path().join("mounted");
-        let state_dir = layout.frontend_state_dir(
+        let state_dir = workspace.frontend().state_dir(
             omnifs_workspace::daemon_record::FrontendKind::Fuse,
             &mount_point,
         );
         let _guard = StateFile::write_fuse(&mount_point, &state_dir).unwrap();
-        let fallback = discovered_frontends(&layout, 1).unwrap();
+        let fallback = discovered_frontends(workspace.frontend(), 1).unwrap();
         let rows = frontend_statuses(None, 1, fallback);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].state, FrontendState::Running);

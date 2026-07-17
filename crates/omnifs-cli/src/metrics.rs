@@ -17,26 +17,22 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 /// `exit` the process exit code. Best-effort; the internal `daemon` subcommand
 /// is excluded by its callers (it records `daemon.jsonl` instead).
 pub(crate) fn record_cli_exit(cmd: &str, exit: i32) {
-    let Ok(layout) = omnifs_workspace::layout::WorkspaceLayout::resolve() else {
+    let Ok(workspace) = Workspace::resolve() else {
         return;
     };
     // A malformed config disables metrics rather than guessing: metrics is
     // never allowed to surface an error, and off is the safe default.
-    let enabled = omnifs_workspace::config::Config::load(&layout.config_file).is_ok_and(|config| {
+    let enabled = workspace.config().is_ok_and(|config| {
         config.metrics.enabled && omnifs_workspace::metrics::enabled_from_env()
     });
-    omnifs_workspace::metrics::Sink::new(&layout.config_dir, enabled).cli_event(cmd, exit);
+    workspace.metrics().sink(enabled).cli_event(cmd, exit);
 }
 
 pub(crate) async fn maybe_print_health_nudge(
     workspace: &Workspace,
     output: crate::ui::output::Output,
 ) {
-    let path = workspace
-        .layout()
-        .config_dir
-        .join(omnifs_workspace::metrics::SUBDIR)
-        .join("last-nudge");
+    let path = workspace.metrics().last_nudge();
     if !nudge_due(&path) {
         return;
     }
