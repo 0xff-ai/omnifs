@@ -2830,6 +2830,7 @@ dependencies = [
  "anstream",
  "anyhow",
  "arboard",
+ "atomic-write-file",
  "blake3",
  "bollard",
  "clap",

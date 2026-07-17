@@ -45,6 +45,7 @@ time = { workspace = true }
 bollard = { workspace = true }
 futures-util = "0.3"
 fs2 = { workspace = true }
+atomic-write-file = "0.3"
 webbrowser = { workspace = true }
 ratatui = "0.29"
 crossterm = "0.28"

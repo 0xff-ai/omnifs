@@ -101,7 +101,10 @@ impl<'a> Launcher<'a> {
         preflight_mounts(&configs, self.workspace.catalog(), &store)?;
 
         crate::provider_preparation::Preparation::new(paths)
-            .wait(&self.output)
+            .prepare_for_up(
+                configs.iter().map(|config| config.config.provider.id),
+                &self.output,
+            )
             .await?;
 
         self.output.narrate(format!(

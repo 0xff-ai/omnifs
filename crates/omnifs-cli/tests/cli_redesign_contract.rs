@@ -128,9 +128,9 @@ fn write_preparation_observation(fixture: &Fixture, complete: bool) {
     let cache = fixture.home().join("cache");
     std::fs::create_dir_all(&cache).unwrap();
     std::fs::write(
-        cache.join("provider-preparation.jsonl"),
+        cache.join("provider-preparation.json"),
         format!(
-            "{{\"pid\":{},\"completed\":{},\"total\":1}}\n",
+            "{{\"pid\":{},\"completed\":{},\"total\":1}}",
             std::process::id(),
             usize::from(complete)
         ),

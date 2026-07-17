@@ -4,6 +4,7 @@
 //! runtime or credentials. Local delivery starts a sibling runner binary;
 //! Docker and libkrun deliver the FUSE runner inside an isolated guest.
 
+mod discovery;
 mod lifecycle;
 
 /// Guest mount path shared by Docker and libkrun frontend runners.
@@ -29,7 +30,7 @@ pub enum FrontendCommand {
     /// Restart matching instantiated frontends
     Restart(lifecycle::FrontendRestartArgs),
     /// Show OS support, runtime readiness, and instantiated frontends
-    Ls(lifecycle::FrontendLsArgs),
+    Ls(discovery::FrontendLsArgs),
     /// Enter an instantiated Docker or libkrun frontend
     Shell(crate::commands::shell::ShellArgs),
 }
