@@ -1,4 +1,4 @@
-// Tests for the dogfood telemetry reporter. Run with `bun test scripts/bench`.
+// Tests for the dogfood metrics reporter. Run with `bun test scripts/bench`.
 
 import { expect, test } from "bun:test";
 import { computeReport, parseJsonl } from "./dogfood-report.ts";

@@ -106,7 +106,7 @@ fn help_documents_exit_codes() {
 }
 
 #[test]
-fn frontend_enable_help_requires_filesystem_and_lists_live_attachments_command() {
+fn frontend_enable_help_defaults_runtime_and_lists_live_attachments_command() {
     let frontend = Command::new(omnifs_bin())
         .args(["frontend", "--help"])
         .output()
@@ -136,6 +136,11 @@ fn frontend_enable_help_requires_filesystem_and_lists_live_attachments_command()
     let enable_help = String::from_utf8_lossy(&enable.stdout);
     assert!(enable_help.contains("<FILESYSTEM>"), "{enable_help}");
     assert!(enable_help.contains("--runtime <RUNTIME>"), "{enable_help}");
+    assert!(
+        enable_help.contains("Defaults to libkrun for FUSE on macOS and host"),
+        "{enable_help}"
+    );
+    assert!(enable_help.contains("[OPTIONS]"), "{enable_help}");
     for value in ["fuse", "nfs", "host", "docker", "libkrun"] {
         assert!(
             enable_help.contains(value),
@@ -470,12 +475,12 @@ fn mount_add_json_receipt_names_the_mount() {
             && message.contains("--token-env VAR"),
         "unexpected direct-token rejection: {message}"
     );
-    let telemetry = std::fs::read_to_string(fixture.home_path().join("telemetry/cli.jsonl"))
-        .expect("CLI telemetry record");
+    let metrics = std::fs::read_to_string(fixture.home_path().join("metrics/cli.jsonl"))
+        .expect("CLI metrics record");
     for (label, bytes) in [
         ("stdout", rejected.stdout.as_slice()),
         ("stderr", rejected.stderr.as_slice()),
-        ("workspace telemetry", telemetry.as_bytes()),
+        ("workspace metrics", metrics.as_bytes()),
     ] {
         assert!(
             !String::from_utf8_lossy(bytes).contains(sentinel),

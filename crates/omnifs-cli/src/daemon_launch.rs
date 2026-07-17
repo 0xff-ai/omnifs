@@ -13,7 +13,7 @@ use crate::process::ProcessRole;
 
 pub(crate) async fn launch(
     paths: &omnifs_workspace::layout::WorkspaceLayout,
-    telemetry_enabled: bool,
+    metrics_enabled: bool,
     mount_revision: &omnifs_workspace::mounts::Revision,
     mount_snapshot: &Path,
     offline: bool,
@@ -51,8 +51,8 @@ pub(crate) async fn launch(
     if std::env::var_os("RUST_LOG").is_none() {
         command.env("RUST_LOG", ProcessRole::Daemon.default_log_level());
     }
-    if !telemetry_enabled {
-        command.env(omnifs_workspace::telemetry::ENV_SWITCH, "0");
+    if !metrics_enabled {
+        command.env(omnifs_workspace::metrics::ENV_SWITCH, "0");
     }
     #[cfg(unix)]
     command.process_group(0);

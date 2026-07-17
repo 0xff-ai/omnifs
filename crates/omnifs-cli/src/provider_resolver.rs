@@ -19,6 +19,7 @@ use crate::provider_bundle::EmbeddedProviders;
 pub(crate) struct ResolvedProvider {
     pub(crate) reference: ProviderRef,
     pub(crate) manifest: ProviderManifest,
+    pub(crate) newly_retained: bool,
 }
 
 pub(crate) struct ProviderResolver<'a> {
@@ -124,7 +125,7 @@ impl<'a> ProviderResolver<'a> {
             _ => bail!("provider digest prefix `{selector}` is ambiguous"),
         };
         if index.providers.iter().any(|entry| entry.id == id) {
-            return self.resolve_id(&id);
+            return self.resolve_id(&id, false);
         }
         let embedded = self
             .embedded
@@ -137,11 +138,15 @@ impl<'a> ProviderResolver<'a> {
         &self,
         artifact: &omnifs_workspace::provider::Artifact,
     ) -> anyhow::Result<ResolvedProvider> {
-        let entry = self.store.retain(artifact)?;
-        self.resolve_id(&entry.id)
+        let newly_retained = self.store.retain(artifact)?;
+        self.resolve_id(&artifact.id(), newly_retained)
     }
 
-    fn resolve_id(&self, id: &ProviderId) -> anyhow::Result<ResolvedProvider> {
+    fn resolve_id(
+        &self,
+        id: &ProviderId,
+        newly_retained: bool,
+    ) -> anyhow::Result<ResolvedProvider> {
         let provider = self
             .catalog
             .get(id)?
@@ -150,6 +155,7 @@ impl<'a> ProviderResolver<'a> {
         Ok(ResolvedProvider {
             reference: provider.reference(),
             manifest,
+            newly_retained,
         })
     }
 }
@@ -257,5 +263,16 @@ mod tests {
         assert!(!is_digest_prefix(""));
         assert!(!is_digest_prefix("ABC123"));
         assert!(!is_digest_prefix(&"a".repeat(65)));
+    }
+
+    #[test]
+    fn artifact_resolution_reports_only_the_first_retention_as_new() {
+        let home = tempfile::tempdir().unwrap();
+        let embedded = EmbeddedProviders::load().unwrap();
+        let resolver = ProviderResolver::new(home.path(), &embedded);
+        let artifact = embedded.entries()[0].artifact();
+
+        assert!(resolver.resolve_artifact(artifact).unwrap().newly_retained);
+        assert!(!resolver.resolve_artifact(artifact).unwrap().newly_retained);
     }
 }

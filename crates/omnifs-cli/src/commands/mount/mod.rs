@@ -345,7 +345,7 @@ impl ReauthArgs {
                 "stored; takes effect on the next `omnifs up` or `omnifs apply`",
             ));
         }
-        crate::telemetry::maybe_print_health_nudge(workspace, output.clone()).await;
+        crate::metrics::maybe_print_health_nudge(workspace, output.clone()).await;
         Ok(())
     }
 }

@@ -46,7 +46,7 @@ impl UpArgs {
     pub async fn run(self, output: Output) -> anyhow::Result<ExitCode> {
         let workspace = Workspace::resolve()?;
         self.start_in_workspace(&workspace, output.clone()).await?;
-        crate::telemetry::maybe_print_health_nudge(&workspace, output.clone()).await;
+        crate::metrics::maybe_print_health_nudge(&workspace, output.clone()).await;
 
         if output.is_structured() {
             return emit_receipt(&workspace, output).await;

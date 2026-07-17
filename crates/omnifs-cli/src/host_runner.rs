@@ -81,11 +81,11 @@ pub(crate) struct HostRunner {
 }
 
 impl HostRunner {
-    pub(crate) fn new(
-        paths: WorkspaceLayout,
-        mount_point: PathBuf,
-        protocol: LocalProtocol,
-    ) -> Result<Self> {
+    pub(crate) fn probe(protocol: LocalProtocol) -> Result<()> {
+        Self::resolve_runner(protocol).map(|_| ())
+    }
+
+    fn resolve_runner(protocol: LocalProtocol) -> Result<PathBuf> {
         let current_exe = std::env::current_exe().context("resolve the omnifs executable")?;
         let runner = LocalProtocol::runner_beside(&current_exe)?;
         if !runner.is_file() {
@@ -95,6 +95,19 @@ impl HostRunner {
                 current_exe.display()
             );
         }
+        #[cfg(target_os = "linux")]
+        if protocol == LocalProtocol::Fuse && !Path::new("/dev/fuse").exists() {
+            anyhow::bail!("/dev/fuse is not available on this host");
+        }
+        Ok(runner)
+    }
+
+    pub(crate) fn new(
+        paths: WorkspaceLayout,
+        mount_point: PathBuf,
+        protocol: LocalProtocol,
+    ) -> Result<Self> {
+        let runner = Self::resolve_runner(protocol)?;
         Ok(Self {
             paths,
             mount_point,

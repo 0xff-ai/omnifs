@@ -123,7 +123,7 @@ fn spawn_and_propagate(mut cmd: Command, context: String) -> Result<()> {
     match status.code() {
         Some(0) | None => Ok(()),
         Some(code) => {
-            crate::telemetry::record_cli_exit("frontend.shell", code);
+            crate::metrics::record_cli_exit("frontend.shell", code);
             std::process::exit(code)
         },
     }
@@ -148,7 +148,6 @@ mod tests {
                 probe: crate::inventory::DaemonProbe::Stopped,
                 runtime: None,
             },
-            runners: Vec::new(),
             frontends: vec![FrontendStatus {
                 filesystem: FrontendFilesystem::Fuse,
                 runtime: FrontendRuntime::Docker,
@@ -159,6 +158,7 @@ mod tests {
                 fix: None,
             }],
             mounts: Vec::new(),
+            warmup: None,
         }
     }
 

@@ -11,6 +11,6 @@ pub mod daemon_record;
 pub mod ids;
 mod io;
 pub mod layout;
+pub mod metrics;
 pub mod mounts;
 pub mod provider;
-pub mod telemetry;

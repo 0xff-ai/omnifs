@@ -15,8 +15,7 @@ pub use crate::ops::namespace::{
     ChunkOutcome, DirEntry, DirListing, ListOutcome as NamespaceListOutcome, OpenOutcome,
     ReadBytes, ReadOutcome,
 };
-pub use crate::runtime::wasm::component_engine;
-pub use crate::{Engine, EngineError, GitCloner, HostContext};
+pub use crate::{ComponentEngine, Engine, EngineError, GitCloner, HostContext};
 
 /// Stable compiled-component cache shared by test processes.
 ///

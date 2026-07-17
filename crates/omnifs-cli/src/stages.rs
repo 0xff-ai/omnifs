@@ -128,7 +128,7 @@ pub(crate) async fn configure_mount(
         output.note(crate::ui::hint("omnifs up", "start serving"));
     }
 
-    crate::telemetry::maybe_print_health_nudge(workspace, output.clone()).await;
+    crate::metrics::maybe_print_health_nudge(workspace, output.clone()).await;
 
     Ok(MountInitOutcome {
         mount_name: plan.mount_name.to_string(),
@@ -181,6 +181,14 @@ pub(crate) fn spec_creation(
         output,
     )?;
     let resolved = ProviderResolver::new(&paths.providers_dir, &embedded).resolve(&selector)?;
+    if resolved.newly_retained
+        && let Err(error) = crate::provider_warmup::ProviderWarmup::new(workspace.layout())
+            .spawn_background(resolved.reference.id, output)
+    {
+        output.narrate(crate::ui::style::warn(format!(
+            "Couldn't start background provider warmup ({error:#}); daemon startup will load the provider."
+        )));
+    }
     let provider_name = resolved.reference.meta.name.to_string();
     let mount_name = provider_selection.mount_name(
         &resolved.manifest.default_mount,

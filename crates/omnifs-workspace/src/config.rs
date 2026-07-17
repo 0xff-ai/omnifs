@@ -8,7 +8,7 @@ use thiserror::Error;
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub system: System,
-    pub telemetry: Telemetry,
+    pub metrics: Metrics,
     pub frontend: FrontendAssets,
 }
 
@@ -20,11 +20,11 @@ pub struct System {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct Telemetry {
+pub struct Metrics {
     pub enabled: bool,
 }
 
-impl Default for Telemetry {
+impl Default for Metrics {
     fn default() -> Self {
         Self { enabled: true }
     }
@@ -85,7 +85,7 @@ mod tests {
         let path = dir.path().join("config.toml");
         std::fs::write(
             &path,
-            "[system]\nfrontend_image = \"example/frontend\"\n[telemetry]\nenabled = false\n[frontend]\nguest_image = \"guest.ext4\"\n",
+            "[system]\nfrontend_image = \"example/frontend\"\n[metrics]\nenabled = false\n[frontend]\nguest_image = \"guest.ext4\"\n",
         )
         .unwrap();
 
@@ -94,7 +94,7 @@ mod tests {
             config.system.frontend_image.as_deref(),
             Some("example/frontend")
         );
-        assert!(!config.telemetry.enabled);
+        assert!(!config.metrics.enabled);
         assert_eq!(config.frontend.guest_image.as_deref(), Some("guest.ext4"));
 
         std::fs::write(&path, "[[frontends]]\nfilesystem = \"fuse\"\n").unwrap();
@@ -106,7 +106,7 @@ mod tests {
     fn config_load_reports_invalid_utf8_and_defaults_missing_files() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        assert!(Config::load(&path).unwrap().telemetry.enabled);
+        assert!(Config::load(&path).unwrap().metrics.enabled);
 
         std::fs::write(&path, [0xff, 0xfe]).unwrap();
         let error = Config::load(&path).unwrap_err().to_string();

@@ -44,16 +44,16 @@ pub(crate) struct DaemonArgs {
 /// Bring up immutable runtime state, then hand the complete serving lifetime to
 /// [`server::Daemon::run`]. The caller owns the tokio runtime and tracing setup.
 pub(crate) async fn run(args: &DaemonArgs) -> anyhow::Result<()> {
-    use omnifs_workspace::telemetry::{self, DaemonEvent, TelemetrySink};
+    use omnifs_workspace::metrics::{self, DaemonEvent, Sink};
 
     let context = DaemonContext::resolve(args)?;
     context.prepare_startup_dirs(args.offline)?;
 
     // Local-only dogfood counters. The daemon's off-switch is the
-    // `OMNIFS_TELEMETRY` env var (the CLI propagates
-    // its `[telemetry] enabled = false` into it when launching the daemon).
-    let telemetry = TelemetrySink::new(context.config_dir(), telemetry::enabled_from_env());
-    telemetry.daemon_event(DaemonEvent::DaemonStart, 0);
+    // `OMNIFS_METRICS` env var (the CLI propagates
+    // its `[metrics] enabled = false` into it when launching the daemon).
+    let metrics = Sink::new(context.config_dir(), metrics::enabled_from_env());
+    metrics.daemon_event(DaemonEvent::DaemonStart, 0);
 
     let desired = Registry::load(&args.mount_snapshot).with_context(|| {
         format!(
@@ -116,7 +116,7 @@ pub(crate) async fn run(args: &DaemonArgs) -> anyhow::Result<()> {
     daemon.set_namespace(Arc::clone(&namespace));
     let result = daemon.run().await;
     let served_mounts = registry.mounts().len();
-    telemetry.daemon_event(DaemonEvent::FrontendStopped, served_mounts);
-    telemetry.daemon_event(DaemonEvent::DaemonStop, served_mounts);
+    metrics.daemon_event(DaemonEvent::FrontendStopped, served_mounts);
+    metrics.daemon_event(DaemonEvent::DaemonStop, served_mounts);
     result
 }

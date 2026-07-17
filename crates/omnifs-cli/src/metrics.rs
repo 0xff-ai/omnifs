@@ -1,9 +1,9 @@
-//! CLI-side dogfood telemetry.
+//! CLI-side dogfood metrics.
 //!
 //! Records one line per CLI invocation to the workspace-local `cli.jsonl`. The
 //! writer, privacy contract, and record schema live in
-//! [`omnifs_workspace::telemetry`]; this is the thin CLI adapter that resolves the
-//! workspace and reads the `[telemetry] enabled` off-switch.
+//! [`omnifs_workspace::metrics`]; this is the thin CLI adapter that resolves the
+//! workspace and reads the `[metrics] enabled` off-switch.
 //!
 //! It is called from every real exit point (main's return path, and the two
 //! subcommands that `std::process::exit` themselves), so it must be
@@ -20,13 +20,12 @@ pub(crate) fn record_cli_exit(cmd: &str, exit: i32) {
     let Ok(layout) = omnifs_workspace::layout::WorkspaceLayout::resolve() else {
         return;
     };
-    // A malformed config disables telemetry rather than guessing: telemetry is
+    // A malformed config disables metrics rather than guessing: metrics is
     // never allowed to surface an error, and off is the safe default.
     let enabled = omnifs_workspace::config::Config::load(&layout.config_file).is_ok_and(|config| {
-        config.telemetry.enabled && omnifs_workspace::telemetry::enabled_from_env()
+        config.metrics.enabled && omnifs_workspace::metrics::enabled_from_env()
     });
-    omnifs_workspace::telemetry::TelemetrySink::new(&layout.config_dir, enabled)
-        .cli_event(cmd, exit);
+    omnifs_workspace::metrics::Sink::new(&layout.config_dir, enabled).cli_event(cmd, exit);
 }
 
 pub(crate) async fn maybe_print_health_nudge(
@@ -36,7 +35,7 @@ pub(crate) async fn maybe_print_health_nudge(
     let path = workspace
         .layout()
         .config_dir
-        .join("telemetry")
+        .join(omnifs_workspace::metrics::SUBDIR)
         .join("last-nudge");
     if !nudge_due(&path) {
         return;

@@ -29,13 +29,14 @@ mod inspector;
 mod inventory;
 mod launch;
 mod libkrun_runner;
+mod metrics;
 mod mount_config;
 mod process;
 mod provider_bundle;
 mod provider_resolver;
+mod provider_warmup;
 mod stages;
 mod status;
-mod telemetry;
 #[cfg(test)]
 mod test_support;
 mod token_source;
@@ -107,16 +108,16 @@ async fn main() {
         .with_command(command_path)
         .with_no_input(cli.no_input)
         .with_yes(cli.yes);
-    // Capture the telemetry label before `run` consumes `cli`. `None` for the
+    // Capture the usage label before `run` consumes `cli`. `None` for the
     // internal `daemon` subcommand, which records `daemon.jsonl` itself.
     // Subcommands that `std::process::exit` on their own (shell, doctor) record
     // at their exit site; this covers every command that returns to `main`.
-    let telemetry_label = cli.telemetry_label();
+    let usage_label = cli.usage_label();
     match run(cli, output.clone()).await {
         Ok(exit_code) => {
             let code = exit_code.code();
-            if let Some(cmd) = telemetry_label {
-                telemetry::record_cli_exit(cmd, code);
+            if let Some(cmd) = usage_label {
+                metrics::record_cli_exit(cmd, code);
             }
             if code != 0 {
                 std::process::exit(code);
@@ -128,8 +129,8 @@ async fn main() {
             // (128 + SIGINT), the shell convention.
             if ui::prompt::is_canceled(&error) {
                 let code = ExitCode::Canceled;
-                if let Some(cmd) = telemetry_label {
-                    telemetry::record_cli_exit(cmd, code.code());
+                if let Some(cmd) = usage_label {
+                    metrics::record_cli_exit(cmd, code.code());
                 }
                 if output.is_structured() {
                     let _ = output.emit_error(error::canceled_envelope(command_path, "canceled"));
@@ -139,8 +140,8 @@ async fn main() {
                 std::process::exit(code.code());
             }
             let exit_code = error::exit_code(&error).code();
-            if let Some(cmd) = telemetry_label {
-                telemetry::record_cli_exit(cmd, exit_code);
+            if let Some(cmd) = usage_label {
+                metrics::record_cli_exit(cmd, exit_code);
             }
             // A structured invocation that fails before its result emits one
             // terminal error envelope on stdout rather than a human block.

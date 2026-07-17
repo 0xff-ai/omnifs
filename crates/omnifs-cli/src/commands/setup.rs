@@ -79,7 +79,7 @@ impl SetupArgs {
             for (filesystem, runtime) in Self::default_frontends()? {
                 let result = FrontendEnableArgs {
                     filesystem,
-                    runtime,
+                    runtime: Some(runtime),
                     location: None,
                 }
                 .enable(workspace, output.clone())

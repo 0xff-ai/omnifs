@@ -101,6 +101,17 @@ fn write_runner_observation(fixture: &Fixture, location: &Path) {
     .expect("write frontend state fixture");
 }
 
+#[cfg(target_os = "macos")]
+fn write_libkrun_observation(fixture: &Fixture) {
+    let state_dir = fixture.home().join("libkrun");
+    std::fs::create_dir_all(&state_dir).expect("libkrun state directory");
+    std::fs::write(
+        state_dir.join("libkrun.pid"),
+        std::process::id().to_string(),
+    )
+    .expect("write libkrun pidfile");
+}
+
 fn write_mount_fixture(fixture: &Fixture, name: &str) {
     std::fs::write(
         fixture.home().join(format!("mounts/{name}.json")),
@@ -111,6 +122,20 @@ fn write_mount_fixture(fixture: &Fixture, name: &str) {
         ),
     )
     .expect("write mount fixture");
+}
+
+fn write_warmup_observation(fixture: &Fixture, complete: bool) {
+    let cache = fixture.home().join("cache");
+    std::fs::create_dir_all(&cache).unwrap();
+    std::fs::write(
+        cache.join("provider-warmup.json"),
+        format!(
+            "{{\"pid\":{},\"completed\":{},\"total\":1}}",
+            std::process::id(),
+            usize::from(complete)
+        ),
+    )
+    .unwrap();
 }
 
 #[test]
@@ -178,6 +203,56 @@ fn cli_redesign_contract_frontends_report_whole_namespace_coverage() {
 }
 
 #[test]
+fn cli_redesign_contract_frontend_list_separates_support_from_instances() {
+    let fixture = Fixture::new();
+
+    let human = fixture.run(&["frontend", "ls", "--output", "human"]);
+    let text = stdout_text(&human);
+    let os = if cfg!(target_os = "macos") {
+        "macOS"
+    } else if cfg!(target_os = "linux") {
+        "Linux"
+    } else {
+        std::env::consts::OS
+    };
+    assert!(
+        text.contains(&format!("Supported frontends on {os}")),
+        "{text}"
+    );
+    assert!(text.contains("Instantiated frontends  0"), "{text}");
+    if cfg!(any(target_os = "macos", target_os = "linux")) {
+        assert!(text.contains("multiple locations"), "{text}");
+        assert!(text.contains("one per workspace"), "{text}");
+    }
+
+    let json_output = fixture.run(&["frontend", "ls", "--output", "json"]);
+    let json = stdout_json(&json_output);
+    let result = &json["result"];
+    assert_eq!(result["platform"]["os"], std::env::consts::OS);
+    assert_eq!(result["platform"]["arch"], std::env::consts::ARCH);
+    assert!(result["supported_frontends"].is_array(), "{json}");
+    assert_eq!(result["frontends"], serde_json::json!([]));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn cli_redesign_contract_reports_detached_libkrun_runner() {
+    let fixture = Fixture::new();
+    write_libkrun_observation(&fixture);
+
+    let output = fixture.run(&["status", "--output", "json"]);
+    let json = stdout_json(&output);
+    let frontends = json["result"]["frontends"].as_array().expect("frontends");
+    let libkrun = frontends
+        .iter()
+        .find(|frontend| frontend["runtime"] == "libkrun")
+        .unwrap_or_else(|| panic!("missing libkrun runner: {json}"));
+    assert_eq!(libkrun["filesystem"], "fuse");
+    assert_eq!(libkrun["location"], "/omnifs");
+    assert_eq!(libkrun["state"], "running");
+}
+
+#[test]
 fn cli_redesign_contract_actions_are_contextual_rows_without_fix_column() {
     let fixture = Fixture::new();
     std::fs::write(
@@ -228,11 +303,41 @@ fn cli_redesign_contract_status_json_exposes_observed_frontends_and_mounts() {
     for key in ["frontends", "mounts"] {
         assert!(result[key].is_array(), "missing result.{key}: {json}");
     }
+    assert!(
+        result.get("runners").is_none(),
+        "status must expose only canonical frontend rows"
+    );
     assert!(result.get("providers").is_none());
     assert!(
         result.get("access").is_none(),
         "default status must keep access focused"
     );
+}
+
+#[test]
+fn cli_redesign_contract_status_exposes_provider_warmup() {
+    let fixture = Fixture::new();
+    write_warmup_observation(&fixture, true);
+
+    let output = fixture.run(&["status", "--output", "json"]);
+    let json = stdout_json(&output);
+    let warmup = &json["result"]["warmup"];
+    assert_eq!(warmup["state"], "complete");
+    assert_eq!(warmup["completed"], 1);
+    assert_eq!(warmup["total"], 1);
+
+    let human = fixture.run(&["status", "--output", "human"]);
+    assert!(stdout_text(&human).contains("provider warmup 1/1 complete"));
+}
+
+#[test]
+fn cli_redesign_contract_marks_abandoned_warmup_interrupted() {
+    let fixture = Fixture::new();
+    write_warmup_observation(&fixture, false);
+
+    let output = fixture.run(&["status", "--output", "json"]);
+    let json = stdout_json(&output);
+    assert_eq!(json["result"]["warmup"]["state"], "interrupted");
 }
 
 #[test]

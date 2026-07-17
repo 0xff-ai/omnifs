@@ -52,6 +52,8 @@ pub use namespace::{
 #[cfg(feature = "runtime")]
 pub use runtime::registry::{MountTable, RegistryError};
 #[cfg(feature = "runtime")]
+pub use runtime::wasm::{ComponentEngine, WarmOutcome};
+#[cfg(feature = "runtime")]
 pub use runtime::{BuildError, EngineError, HostContext, Runtime as Engine};
 #[cfg(feature = "runtime")]
 pub(crate) use tree::{Cursor, Node, RequestCtx, TreeError, TreeErrorKind, spawn_live_follow_pump};
@@ -73,7 +75,6 @@ pub(crate) use omnifs_wit::provider::Provider;
 #[cfg(feature = "runtime")]
 pub(crate) use ops::validate as op_validate;
 #[cfg(feature = "runtime")]
-pub(crate) use runtime::wasm::component_engine;
 #[cfg(feature = "runtime")]
 pub(crate) use runtime::{ProviderErrorClass, Runtime};
 #[cfg(feature = "runtime")]

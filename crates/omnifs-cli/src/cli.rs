@@ -89,6 +89,10 @@ pub enum Commands {
     #[command(hide = true)]
     Daemon(crate::daemon::DaemonArgs),
 
+    /// Warm retained providers. Internal: launched as detached cache work.
+    #[command(hide = true)]
+    WarmProviders(crate::provider_warmup::WarmProvidersArgs),
+
     /// Manage filesystem frontends attached to the host-native daemon
     ///
     /// Enable, disable, restart, or list FUSE and NFS frontends. Every
@@ -105,10 +109,10 @@ impl Cli {
         false
     }
 
-    pub(crate) fn telemetry_label(&self) -> Option<&'static str> {
+    pub(crate) fn usage_label(&self) -> Option<&'static str> {
         self.command
             .as_ref()
-            .map_or(Some("bare"), Commands::telemetry_label)
+            .map_or(Some("bare"), Commands::usage_label)
     }
 
     pub(crate) fn command_path(&self) -> &'static str {
@@ -150,7 +154,8 @@ impl Commands {
             Self::Completions(_) => (Some("completions"), "completions"),
             Self::Version(_) => (Some("version"), "version"),
             Self::Daemon(_) => (None, "daemon"),
-            // Every `frontend` subcommand shares one telemetry label; there is
+            Self::WarmProviders(_) => (None, "warm-providers"),
+            // Every `frontend` subcommand shares one usage label; there is
             // no longer a hidden internal one (like `daemon`'s) to exclude.
             Self::Frontend(args) => (
                 Some("frontend"),
@@ -169,10 +174,10 @@ impl Commands {
         self.labels().1
     }
 
-    /// Top-level subcommand label for `cli.jsonl` telemetry, or `None` for the
+    /// Top-level subcommand label for `cli.jsonl` usage metrics, or `None` for the
     /// internal `daemon` subcommand (which records `daemon.jsonl` instead of
     /// counting as CLI usage).
-    pub(crate) fn telemetry_label(&self) -> Option<&'static str> {
+    pub(crate) fn usage_label(&self) -> Option<&'static str> {
         self.labels().0
     }
 
@@ -193,6 +198,7 @@ impl Commands {
             Self::Completions(args) => args.run(&output).map(|()| ExitCode::Success),
             Self::Version(args) => args.run(output).await,
             Self::Daemon(args) => crate::daemon::run(&args).await.map(|()| ExitCode::Success),
+            Self::WarmProviders(args) => args.run().await.map(|()| ExitCode::Success),
             Self::Frontend(args) => args.run(output).await,
         }
     }
