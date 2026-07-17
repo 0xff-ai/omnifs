@@ -354,7 +354,6 @@ fn format_scopes(scopes: &[String]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::test_support::{fixture_workspace, install_fixture_provider, spec_with_reference};
 
     #[test]

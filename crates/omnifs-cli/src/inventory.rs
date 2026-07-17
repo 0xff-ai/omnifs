@@ -572,7 +572,7 @@ pub(crate) enum Verdict {
 fn discovered_frontends(
     frontend: &omnifs_workspace::FrontendState,
     mount_count: usize,
-    libkrun_root: &Path,
+    _libkrun_root: &Path,
 ) -> Result<Vec<FrontendStatus>> {
     let mut rows = Vec::new();
     for path in MountState::files_under(frontend.state_root())? {
@@ -620,7 +620,7 @@ fn discovered_frontends(
     }
 
     #[cfg(target_os = "macos")]
-    match crate::libkrun_runner::LibkrunRunner::new(libkrun_root.to_path_buf()).is_running() {
+    match crate::libkrun_runner::LibkrunRunner::new(_libkrun_root.to_path_buf()).is_running() {
         Ok(Some(running)) => rows.push(FrontendStatus {
             filesystem: Filesystem::Fuse,
             runtime: Runtime::Libkrun,

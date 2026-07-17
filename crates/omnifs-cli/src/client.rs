@@ -117,7 +117,7 @@ impl DaemonClient {
 
     fn control_socket_target(&self) -> Option<Target> {
         let socket = self.daemon.control_socket();
-        socket.exists().then(|| Target::Unix {
+        socket.exists().then_some(Target::Unix {
             socket,
             instance: None,
         })
