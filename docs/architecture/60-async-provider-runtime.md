@@ -64,11 +64,11 @@ Commands sent to the driver are:
 
 Lifecycle and close-file calls use Wasmtime's concurrent typed function path. `initialize` passes owned config bytes so it satisfies the concurrent API's static parameter requirement.
 
-## Component preparation
+## Component warmup
 
-Provider retention can start a detached compiler that loads exact retained components with the production engine configuration and drops the resulting `Component` values. This warms Wasmtime's own content-and-engine-keyed cache without instantiating a component, calling provider exports, or creating a store.
+Provider retention can start detached work that asks `ComponentEngine` to load exact retained components and drop the resulting `Component` values. This warms Wasmtime's own content-and-engine-keyed cache without instantiating a component, calling provider exports, or creating a store. Serving uses the same `ComponentEngine::load` path, so warmup cannot drift from production compilation.
 
-The compiler progress record is operational history only. Online daemon launch joins the cross-process compiler lock and loads the desired revision's unique components again before replacing the current daemon. Wasmtime therefore remains the sole authority for compiled compatibility, including after cache eviction or an engine upgrade; Omnifs owns coordination and user-visible progress but no independent compilation fingerprint.
+The warmup progress record is operational history only. Online daemon launch joins the cross-process warmup lock and loads the desired revision's unique components again before replacing the current daemon. Wasmtime therefore remains the sole authority for compiled compatibility, including after cache eviction or an engine upgrade; Omnifs owns coordination and user-visible progress but no independent compilation fingerprint.
 
 ## SDK runtime
 

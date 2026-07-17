@@ -7,7 +7,7 @@ use crate::auth::credential_service_for_file;
 use crate::cache::{Caches, MountResources, ProjectionError, ProjectionId};
 use crate::cloner::GitCloner;
 use crate::tree_refs::TreeRefs;
-use crate::{BuildError, HostContext, Runtime, component_engine};
+use crate::{BuildError, ComponentEngine, HostContext, Runtime};
 use omnifs_auth::CredentialService;
 use omnifs_workspace::mounts::{LoadedSpec, Name, Registry};
 use omnifs_workspace::provider::ProviderWasm;
@@ -81,7 +81,7 @@ impl MountTable {
         // Compiled component artifacts live with the rest of the host's state,
         // under `<cache>/wasm`, rather than a global per-user wasmtime cache.
         let wasm_cache = context.wasm_cache_dir();
-        let engine = component_engine(Some(wasm_cache), |_| {})
+        let engine = ComponentEngine::new(Some(wasm_cache))
             .map_err(|e| RegistryError::RuntimeError(format!("provider engine init: {e}")))?;
 
         // One global body store and projection database. Each selected exact
@@ -152,7 +152,7 @@ impl MountTable {
     fn build_online_mount(
         name: &Name,
         loaded: &LoadedSpec,
-        engine: &wasmtime::Engine,
+        engine: &ComponentEngine,
         caches: &Arc<Caches>,
         cloner: &Arc<GitCloner>,
         context: &HostContext,

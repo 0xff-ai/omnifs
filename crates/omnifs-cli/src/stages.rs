@@ -182,11 +182,11 @@ pub(crate) fn spec_creation(
     )?;
     let resolved = ProviderResolver::new(&paths.providers_dir, &embedded).resolve(&selector)?;
     if resolved.newly_retained
-        && let Err(error) = crate::provider_preparation::Preparation::new(workspace.layout())
+        && let Err(error) = crate::provider_warmup::ProviderWarmup::new(workspace.layout())
             .spawn_background(resolved.reference.id, output)
     {
         output.narrate(crate::ui::style::warn(format!(
-            "Couldn't start background provider preparation ({error:#}); daemon startup will compile the provider."
+            "Couldn't start background provider warmup ({error:#}); daemon startup will load the provider."
         )));
     }
     let provider_name = resolved.reference.meta.name.to_string();

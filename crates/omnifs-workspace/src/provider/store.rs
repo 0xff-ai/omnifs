@@ -127,7 +127,11 @@ impl ProviderStore {
 
     /// Retain one validated provider artifact without replacing any existing
     /// artifact or selecting another version.
-    pub fn retain(&self, artifact: &Artifact) -> Result<IndexEntry, StoreError> {
+    ///
+    /// Returns `true` only when this call inserts the provider's index entry.
+    /// The result is decided while holding the store lock, so concurrent
+    /// callers cannot both report a newly retained provider.
+    pub fn retain(&self, artifact: &Artifact) -> Result<bool, StoreError> {
         let entry = IndexEntry {
             id: artifact.id,
             name: artifact.meta.name.clone(),
@@ -135,9 +139,9 @@ impl ProviderStore {
         };
         create_dir_all(&self.root)?;
         let lock = self.lock()?;
-        let result = self.retain_locked(artifact, entry.clone());
+        let result = self.retain_locked(artifact, entry);
         let _ = FileExt::unlock(&lock);
-        result.map(|()| entry)
+        result
     }
 
     /// Read the index, or an empty (version-stamped) one if it does not exist yet.
@@ -164,13 +168,15 @@ impl ProviderStore {
         Ok(index)
     }
 
-    fn retain_locked(&self, artifact: &Artifact, entry: IndexEntry) -> Result<(), StoreError> {
+    fn retain_locked(&self, artifact: &Artifact, entry: IndexEntry) -> Result<bool, StoreError> {
         self.publish_artifact(artifact)?;
         let mut index = self.read_index()?;
-        if !index.providers.iter().any(|current| current.id == entry.id) {
-            index.providers.push(entry);
+        if index.providers.iter().any(|current| current.id == entry.id) {
+            return Ok(false);
         }
-        self.write_index(&index)
+        index.providers.push(entry);
+        self.write_index(&index)?;
+        Ok(true)
     }
 
     fn publish_artifact(&self, artifact: &Artifact) -> Result<(), StoreError> {
@@ -372,14 +378,14 @@ mod tests {
         let store = ProviderStore::new(dir.path());
         let (id, artifact) = artifact("demo");
 
-        let entry = store.retain(&artifact).unwrap();
+        assert!(store.retain(&artifact).unwrap());
 
-        assert_eq!(entry.id, id);
-        assert_eq!(entry.name.as_str(), "demo");
         assert!(store.artifact_path(&id).is_file());
         assert!(!dir.path().join("by-hash").exists());
         let index = store.read_index().unwrap();
         assert_eq!(index.providers.len(), 1);
+        assert_eq!(index.providers[0].id, id);
+        assert_eq!(index.providers[0].name.as_str(), "demo");
     }
 
     #[test]
@@ -388,8 +394,8 @@ mod tests {
         let store = ProviderStore::new(dir.path());
         let (id, artifact) = artifact("demo");
 
-        store.retain(&artifact).unwrap();
-        store.retain(&artifact).unwrap();
+        assert!(store.retain(&artifact).unwrap());
+        assert!(!store.retain(&artifact).unwrap());
         assert_eq!(
             std::fs::read(store.artifact_path(&id)).unwrap(),
             artifact.bytes
@@ -623,7 +629,7 @@ mod tests {
         let (_, source) = artifact("demo");
         let bytes = source.bytes.clone();
 
-        std::thread::scope(|scope| {
+        let inserted = std::thread::scope(|scope| {
             let handles = (0..8)
                 .map(|_| {
                     let root = root.clone();
@@ -634,12 +640,14 @@ mod tests {
                     })
                 })
                 .collect::<Vec<_>>();
-            for handle in handles {
-                handle.join().unwrap().unwrap();
-            }
+            handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap().unwrap())
+                .collect::<Vec<_>>()
         });
 
         let store = ProviderStore::new(root);
         assert_eq!(store.read_index().unwrap().providers.len(), 1);
+        assert_eq!(inserted.into_iter().filter(|inserted| *inserted).count(), 1);
     }
 }

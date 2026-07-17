@@ -59,8 +59,8 @@ impl InventoryReport {
             ),
             TableMeta::new("namespace", "/"),
         ];
-        if let Some(preparation) = &self.inventory.preparation {
-            metadata.push(TableMeta::new("providers", preparation.summary()));
+        if let Some(warmup) = &self.inventory.warmup {
+            metadata.push(TableMeta::new("provider warmup", warmup.summary()));
         }
         let mut context = TableContext::new(
             "omnifs",

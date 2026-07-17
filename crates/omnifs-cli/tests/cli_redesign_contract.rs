@@ -124,11 +124,11 @@ fn write_mount_fixture(fixture: &Fixture, name: &str) {
     .expect("write mount fixture");
 }
 
-fn write_preparation_observation(fixture: &Fixture, complete: bool) {
+fn write_warmup_observation(fixture: &Fixture, complete: bool) {
     let cache = fixture.home().join("cache");
     std::fs::create_dir_all(&cache).unwrap();
     std::fs::write(
-        cache.join("provider-preparation.json"),
+        cache.join("provider-warmup.json"),
         format!(
             "{{\"pid\":{},\"completed\":{},\"total\":1}}",
             std::process::id(),
@@ -303,6 +303,10 @@ fn cli_redesign_contract_status_json_exposes_observed_frontends_and_mounts() {
     for key in ["frontends", "mounts"] {
         assert!(result[key].is_array(), "missing result.{key}: {json}");
     }
+    assert!(
+        result.get("runners").is_none(),
+        "status must expose only canonical frontend rows"
+    );
     assert!(result.get("providers").is_none());
     assert!(
         result.get("access").is_none(),
@@ -311,29 +315,29 @@ fn cli_redesign_contract_status_json_exposes_observed_frontends_and_mounts() {
 }
 
 #[test]
-fn cli_redesign_contract_status_exposes_provider_preparation() {
+fn cli_redesign_contract_status_exposes_provider_warmup() {
     let fixture = Fixture::new();
-    write_preparation_observation(&fixture, true);
+    write_warmup_observation(&fixture, true);
 
     let output = fixture.run(&["status", "--output", "json"]);
     let json = stdout_json(&output);
-    let preparation = &json["result"]["preparation"];
-    assert_eq!(preparation["state"], "complete");
-    assert_eq!(preparation["completed"], 1);
-    assert_eq!(preparation["total"], 1);
+    let warmup = &json["result"]["warmup"];
+    assert_eq!(warmup["state"], "complete");
+    assert_eq!(warmup["completed"], 1);
+    assert_eq!(warmup["total"], 1);
 
     let human = fixture.run(&["status", "--output", "human"]);
-    assert!(stdout_text(&human).contains("providers 1/1 complete"));
+    assert!(stdout_text(&human).contains("provider warmup 1/1 complete"));
 }
 
 #[test]
-fn cli_redesign_contract_marks_abandoned_preparation_interrupted() {
+fn cli_redesign_contract_marks_abandoned_warmup_interrupted() {
     let fixture = Fixture::new();
-    write_preparation_observation(&fixture, false);
+    write_warmup_observation(&fixture, false);
 
     let output = fixture.run(&["status", "--output", "json"]);
     let json = stdout_json(&output);
-    assert_eq!(json["result"]["preparation"]["state"], "interrupted");
+    assert_eq!(json["result"]["warmup"]["state"], "interrupted");
 }
 
 #[test]

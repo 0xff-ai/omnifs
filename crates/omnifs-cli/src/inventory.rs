@@ -23,7 +23,7 @@ use crate::commands::frontend::GUEST_MOUNT;
 use crate::commands::frontend::{FrontendFilesystem as Filesystem, FrontendRuntime as Runtime};
 #[cfg(target_os = "macos")]
 use crate::libkrun_runner::LibkrunRunner;
-use crate::provider_preparation::{Preparation, Status as PreparationStatus};
+use crate::provider_warmup::{ProviderWarmup, WarmupStatus};
 use crate::workspace::Workspace;
 
 #[derive(Debug, Clone, Serialize)]
@@ -32,11 +32,10 @@ pub(crate) struct Inventory {
     pub(crate) mount_revision: Option<Revision>,
     pub(crate) applied_revision: Option<Revision>,
     pub(crate) daemon: DaemonObservation,
-    pub(crate) runners: Vec<RunnerStatus>,
     pub(crate) frontends: Vec<FrontendStatus>,
     pub(crate) mounts: Vec<MountStatus>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) preparation: Option<PreparationStatus>,
+    pub(crate) warmup: Option<WarmupStatus>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -53,22 +52,6 @@ pub(crate) enum DaemonProbe {
     Responding,
     Stopped,
     Unreachable { message: String },
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub(crate) struct RunnerStatus {
-    pub(crate) filesystem: Filesystem,
-    pub(crate) runtime: Runtime,
-    pub(crate) location: Option<PathBuf>,
-    pub(crate) state: RunnerState,
-    pub(crate) error: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, PartialOrd, Ord)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum RunnerState {
-    Attached,
-    Failed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -465,9 +448,9 @@ impl Inventory {
             online_mount_statuses(registry, catalog, &credentials, daemon_status)
         };
         let mount_count = mounts.len();
-        let runners = runner_statuses(&layout)?;
-        let frontends = frontend_statuses(daemon_status, mount_count, &runners);
-        let preparation = Preparation::new(&layout).status();
+        let discovered = discovered_frontends(&layout, mount_count)?;
+        let frontends = frontend_statuses(daemon_status, mount_count, discovered);
+        let warmup = ProviderWarmup::new(&layout).status();
         let access_count = frontends
             .iter()
             .filter(|frontend| {
@@ -487,10 +470,9 @@ impl Inventory {
             mount_revision,
             applied_revision,
             daemon,
-            runners,
             frontends,
             mounts,
-            preparation,
+            warmup,
         })
     }
 
@@ -572,10 +554,9 @@ impl Inventory {
             mount_revision: None,
             applied_revision: None,
             daemon: DaemonObservation::test(state),
-            runners: Vec::new(),
             frontends,
             mounts,
-            preparation: None,
+            warmup: None,
         }
     }
 }
@@ -587,10 +568,12 @@ pub(crate) enum Verdict {
     Degraded,
 }
 
-/// Discover host-owned runner records when the daemon cannot answer. These
-/// records are the runner's observable access surface, so a daemon-down status
-/// must retain them instead of reporting every local frontend as stopped.
-fn runner_statuses(layout: &WorkspaceLayout) -> Result<Vec<RunnerStatus>> {
+/// Discover runner-owned frontend observations. A daemon-down inventory keeps
+/// these rows because runner and attachment lifetimes are independent.
+fn discovered_frontends(
+    layout: &WorkspaceLayout,
+    mount_count: usize,
+) -> Result<Vec<FrontendStatus>> {
     let mut rows = Vec::new();
     for path in MountState::files_under(&layout.frontend_state_root())? {
         match MountState::read_file(&path) {
@@ -599,12 +582,14 @@ fn runner_statuses(layout: &WorkspaceLayout) -> Result<Vec<RunnerStatus>> {
                     MountKind::Fuse => Filesystem::Fuse,
                     MountKind::Nfs { .. } => Filesystem::Nfs,
                 };
-                rows.push(RunnerStatus {
+                rows.push(FrontendStatus {
                     filesystem,
                     runtime: Runtime::Host,
                     location: Some(state.mount_point),
-                    state: RunnerState::Attached,
-                    error: None,
+                    state: FrontendState::Running,
+                    scope: "all",
+                    mount_count,
+                    fix: None,
                 });
             },
             Err(error) => {
@@ -621,12 +606,14 @@ fn runner_statuses(layout: &WorkspaceLayout) -> Result<Vec<RunnerStatus>> {
                         _ => None,
                     })
                     .unwrap_or(Filesystem::Fuse);
-                rows.push(RunnerStatus {
+                rows.push(FrontendStatus {
                     filesystem,
                     runtime: Runtime::Host,
                     location: None,
-                    state: RunnerState::Failed,
-                    error: Some(error.to_string()),
+                    state: FrontendState::Failed,
+                    scope: "all",
+                    mount_count,
+                    fix: Some(format!("omnifs logs ({error})")),
                 });
             },
         }
@@ -634,24 +621,28 @@ fn runner_statuses(layout: &WorkspaceLayout) -> Result<Vec<RunnerStatus>> {
 
     #[cfg(target_os = "macos")]
     match LibkrunRunner::new(layout.config_dir.clone()).is_running() {
-        Ok(Some(running)) => rows.push(RunnerStatus {
+        Ok(Some(running)) => rows.push(FrontendStatus {
             filesystem: Filesystem::Fuse,
             runtime: Runtime::Libkrun,
             location: Some(PathBuf::from(GUEST_MOUNT)),
             state: if running {
-                RunnerState::Attached
+                FrontendState::Running
             } else {
-                RunnerState::Failed
+                FrontendState::Failed
             },
-            error: (!running).then(|| "libkrun process is not running".to_owned()),
+            scope: "all",
+            mount_count,
+            fix: (!running).then(|| "omnifs logs (libkrun process is not running)".to_owned()),
         }),
         Ok(None) => {},
-        Err(error) => rows.push(RunnerStatus {
+        Err(error) => rows.push(FrontendStatus {
             filesystem: Filesystem::Fuse,
             runtime: Runtime::Libkrun,
             location: Some(PathBuf::from(GUEST_MOUNT)),
-            state: RunnerState::Failed,
-            error: Some(error.to_string()),
+            state: FrontendState::Failed,
+            scope: "all",
+            mount_count,
+            fix: Some(format!("omnifs logs ({error})")),
         }),
     }
     Ok(rows)
@@ -660,7 +651,7 @@ fn runner_statuses(layout: &WorkspaceLayout) -> Result<Vec<RunnerStatus>> {
 fn frontend_statuses(
     daemon: Option<&DaemonStatus>,
     mount_count: usize,
-    runners: &[RunnerStatus],
+    discovered: Vec<FrontendStatus>,
 ) -> Vec<FrontendStatus> {
     let mut rows = daemon
         .into_iter()
@@ -685,29 +676,14 @@ fn frontend_statuses(
         })
         .collect::<Vec<_>>();
 
-    for runner in runners {
+    for runner in discovered {
         let matched = rows.iter().any(|row| {
             row.filesystem == runner.filesystem
                 && row.runtime == runner.runtime
                 && row.location == runner.location
         });
-        if daemon.is_none() || !matched {
-            let state = match runner.state {
-                RunnerState::Attached => FrontendState::Running,
-                RunnerState::Failed => FrontendState::Failed,
-            };
-            rows.push(FrontendStatus {
-                filesystem: runner.filesystem,
-                runtime: runner.runtime,
-                location: runner.location.clone(),
-                state,
-                scope: "all",
-                mount_count,
-                fix: runner.error.as_ref().map_or_else(
-                    || state.fix().map(str::to_owned),
-                    |error| Some(format!("omnifs logs ({error})")),
-                ),
-            });
+        if !matched {
+            rows.push(runner);
         }
     }
     rows.sort_by(frontend_cmp);
@@ -1306,8 +1282,8 @@ mod tests {
             &mount_point,
         );
         let _guard = StateFile::write_fuse(&mount_point, &state_dir).unwrap();
-        let fallback = runner_statuses(&layout).unwrap();
-        let rows = frontend_statuses(None, 1, &fallback);
+        let fallback = discovered_frontends(&layout, 1).unwrap();
+        let rows = frontend_statuses(None, 1, fallback);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].state, FrontendState::Running);
         assert_eq!(rows[0].location, Some(mount_point));

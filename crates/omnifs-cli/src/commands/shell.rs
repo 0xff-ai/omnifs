@@ -148,7 +148,6 @@ mod tests {
                 probe: crate::inventory::DaemonProbe::Stopped,
                 runtime: None,
             },
-            runners: Vec::new(),
             frontends: vec![FrontendStatus {
                 filesystem: FrontendFilesystem::Fuse,
                 runtime: FrontendRuntime::Docker,
@@ -159,7 +158,7 @@ mod tests {
                 fix: None,
             }],
             mounts: Vec::new(),
-            preparation: None,
+            warmup: None,
         }
     }
 

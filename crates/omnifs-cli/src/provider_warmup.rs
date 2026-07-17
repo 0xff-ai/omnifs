@@ -1,4 +1,4 @@
-//! Detached provider compilation and foreground joining for daemon startup.
+//! Detached provider warmup and foreground joining for daemon startup.
 
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
@@ -13,25 +13,25 @@ use fs2::FileExt as _;
 use futures_util::StreamExt as _;
 use omnifs_workspace::ids::ProviderId;
 use omnifs_workspace::layout::{WorkspaceLayout, wasm_cache_dir};
+use omnifs_workspace::provider::Catalog;
 use serde::{Deserialize, Serialize};
 
 use crate::ui::output::Output;
 
 const CHILD_READY_POLL: Duration = Duration::from_millis(10);
 const CHILD_READY_TIMEOUT: Duration = Duration::from_secs(5);
-const MAX_PARALLELISM: usize = 4;
-const LOCK_FILE: &str = "provider-preparation.lock";
-const PROGRESS_FILE: &str = "provider-preparation.json";
+const LOCK_FILE: &str = "provider-warmup.lock";
+const PROGRESS_FILE: &str = "provider-warmup.json";
 
 #[derive(Args, Debug, Clone)]
-pub(crate) struct PrepareProvidersArgs {
+pub(crate) struct WarmProvidersArgs {
     #[arg(long)]
     id: ProviderId,
 }
 
-impl PrepareProvidersArgs {
+impl WarmProvidersArgs {
     pub(crate) async fn run(self) -> Result<()> {
-        Preparation::new(&WorkspaceLayout::resolve()?)
+        ProviderWarmup::new(&WorkspaceLayout::resolve()?)
             .run_background(self.id)
             .await
     }
@@ -39,7 +39,7 @@ impl PrepareProvidersArgs {
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-enum State {
+enum WarmupState {
     Running,
     Complete,
     Failed,
@@ -47,7 +47,7 @@ enum State {
     Unreadable,
 }
 
-impl State {
+impl WarmupState {
     const fn label(self) -> &'static str {
         match self {
             Self::Running => "running",
@@ -60,8 +60,8 @@ impl State {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub(crate) struct Status {
-    state: State,
+pub(crate) struct WarmupStatus {
+    state: WarmupState,
     completed: usize,
     total: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -70,7 +70,7 @@ pub(crate) struct Status {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Progress {
+struct WarmupProgress {
     pid: u32,
     completed: usize,
     total: usize,
@@ -78,10 +78,10 @@ struct Progress {
     error: Option<String>,
 }
 
-impl Status {
+impl WarmupStatus {
     fn unreadable(error: &impl std::fmt::Display) -> Self {
         Self {
-            state: State::Unreadable,
+            state: WarmupState::Unreadable,
             completed: 0,
             total: 0,
             error: Some(error.to_string()),
@@ -97,33 +97,33 @@ impl Status {
     }
 }
 
-/// Provider preparation for one resolved workspace.
+/// Provider warmup for one resolved workspace.
 #[derive(Clone)]
-pub(crate) struct Preparation {
+pub(crate) struct ProviderWarmup {
     layout: WorkspaceLayout,
 }
 
-impl Preparation {
+impl ProviderWarmup {
     pub(crate) fn new(layout: &WorkspaceLayout) -> Self {
         Self {
             layout: layout.clone(),
         }
     }
 
-    pub(crate) fn status(&self) -> Option<Status> {
+    pub(crate) fn status(&self) -> Option<WarmupStatus> {
         let progress = match self.read_progress() {
             Ok(Some(progress)) => progress,
             Ok(None) => return None,
-            Err(error) => return Some(Status::unreadable(&error)),
+            Err(error) => return Some(WarmupStatus::unreadable(&error)),
         };
         let state = match self.is_active() {
-            Ok(true) => State::Running,
-            Ok(false) if progress.error.is_some() => State::Failed,
-            Ok(false) if progress.completed == progress.total => State::Complete,
-            Ok(false) => State::Interrupted,
-            Err(error) => return Some(Status::unreadable(&error)),
+            Ok(true) => WarmupState::Running,
+            Ok(false) if progress.error.is_some() => WarmupState::Failed,
+            Ok(false) if progress.completed == progress.total => WarmupState::Complete,
+            Ok(false) => WarmupState::Interrupted,
+            Err(error) => return Some(WarmupStatus::unreadable(&error)),
         };
-        Some(Status {
+        Some(WarmupStatus {
             state,
             completed: progress.completed,
             total: progress.total,
@@ -131,12 +131,10 @@ impl Preparation {
         })
     }
 
-    /// Start a compiler process that survives this foreground command.
+    /// Start a warmup process that survives this foreground command.
     pub(crate) fn spawn_background(&self, id: ProviderId, output: &Output) -> Result<()> {
         if self.is_active()? {
-            output.narrate(
-                "Provider runtime preparation is already running; `omnifs up` will join it.",
-            );
+            output.narrate("Provider warmup is already running; `omnifs up` will join it.");
             return Ok(());
         }
 
@@ -146,7 +144,7 @@ impl Preparation {
         let binary = std::env::current_exe().context("resolve the omnifs executable")?;
         let mut command = std::process::Command::new(&binary);
         command
-            .arg("prepare-providers")
+            .arg("warm-providers")
             .arg("--id")
             .arg(id.to_string())
             .stdin(Stdio::null())
@@ -161,7 +159,7 @@ impl Preparation {
 
         let mut child = command
             .spawn()
-            .with_context(|| format!("spawn provider preparation ({})", binary.display()))?;
+            .with_context(|| format!("spawn provider warmup ({})", binary.display()))?;
         let child_pid = child.id();
         let deadline = Instant::now() + CHILD_READY_TIMEOUT;
         loop {
@@ -176,31 +174,31 @@ impl Preparation {
             }
             if let Some(status) = child
                 .try_wait()
-                .context("observe provider preparation startup")?
+                .context("observe provider warmup startup")?
             {
                 if status.success() {
                     break;
                 }
-                bail!("provider preparation exited before becoming ready ({status})");
+                bail!("provider warmup exited before becoming ready ({status})");
             }
             if Instant::now() >= deadline {
                 let _ = child.kill();
                 let _ = child.wait();
                 bail!(
-                    "provider preparation did not become ready within {}s",
+                    "provider warmup did not become ready within {}s",
                     CHILD_READY_TIMEOUT.as_secs()
                 );
             }
             std::thread::sleep(CHILD_READY_POLL);
         }
         output.narrate(
-            "Preparing the provider runtime in the background; check `omnifs status` for progress.",
+            "Warming the provider runtime in the background; check `omnifs status` for progress.",
         );
         Ok(())
     }
 
-    /// Join detached work, then compile the exact providers before daemon replacement.
-    pub(crate) async fn prepare_for_up(
+    /// Join detached work, then warm the exact providers before daemon replacement.
+    pub(crate) async fn warm_for_up(
         &self,
         ids: impl IntoIterator<Item = ProviderId>,
         output: &Output,
@@ -213,39 +211,39 @@ impl Preparation {
         if ids.is_empty() {
             return Ok(());
         }
-        let mut progress = output.progress("providers");
+        let mut progress = output.progress("provider warmup");
         if self.is_active()? {
-            progress.update("waiting for background preparation");
+            progress.update("waiting for background provider warmup");
         }
         // ponytail: one workspace lock; split by provider only if contention is measurable.
         let _lock = tokio::task::spawn_blocking({
-            let preparation = self.clone();
-            move || preparation.acquire()
+            let warmup = self.clone();
+            move || warmup.acquire()
         })
         .await
-        .context("join provider preparation lock task")??;
-        progress.update("preparing selected providers");
-        let result = self.compile(ids).await;
+        .context("join provider warmup lock task")??;
+        progress.update("warming selected providers");
+        let result = self.warm(ids).await;
         match &result {
             Ok(()) => progress.settle_ok("ready"),
-            Err(_) => progress.settle_fail("preparation failed"),
+            Err(_) => progress.settle_fail("warmup failed"),
         }
         result
     }
 
     async fn run_background(&self, id: ProviderId) -> Result<()> {
         let _lock = tokio::task::spawn_blocking({
-            let preparation = self.clone();
-            move || preparation.acquire()
+            let warmup = self.clone();
+            move || warmup.acquire()
         })
         .await
-        .context("join provider preparation lock task")??;
-        self.compile(vec![id]).await
+        .context("join provider warmup lock task")??;
+        self.warm(vec![id]).await
     }
 
-    async fn compile(&self, ids: Vec<ProviderId>) -> Result<()> {
+    async fn warm(&self, ids: Vec<ProviderId>) -> Result<()> {
         let total = ids.len();
-        let mut progress = Progress {
+        let mut progress = WarmupProgress {
             pid: std::process::id(),
             completed: 0,
             total,
@@ -256,40 +254,43 @@ impl Preparation {
             return Ok(());
         }
 
-        let compiler = match omnifs_engine::ComponentCompiler::new(
-            &wasm_cache_dir(&self.layout.cache_dir),
-            &self.layout.providers_dir,
-        ) {
-            Ok(compiler) => compiler,
+        let catalog = Catalog::open(&self.layout.providers_dir);
+        let providers = ids
+            .into_iter()
+            .map(|id| {
+                catalog
+                    .get(&id)
+                    .with_context(|| format!("resolve retained provider {id}"))?
+                    .with_context(|| format!("retained provider {id} is missing"))
+            })
+            .collect::<Result<Vec<_>>>();
+        let providers = match providers {
+            Ok(providers) => providers,
             Err(error) => {
-                let message = format!("initialize provider compiler: {error:#}");
+                let message = format!("resolve providers for warmup: {error:#}");
                 progress.error = Some(message.clone());
                 self.write_progress(&progress)?;
                 return Err(anyhow::anyhow!(message));
             },
         };
-        let parallelism = std::thread::available_parallelism()
-            .map_or(1, std::num::NonZeroUsize::get)
-            .min(MAX_PARALLELISM)
-            .min(total);
-        let jobs = futures_util::stream::iter(ids.into_iter().map(|id| {
-            let compiler = compiler.clone();
-            async move {
-                let result = tokio::task::spawn_blocking(move || compiler.prepare(&id)).await;
-                match result {
-                    Ok(Ok(())) => None,
-                    Ok(Err(error)) => Some(format!("{id}: {error:#}")),
-                    Err(error) => Some(format!("{id}: provider compiler task failed: {error}")),
-                }
-            }
-        }))
-        .buffer_unordered(parallelism);
-        tokio::pin!(jobs);
+        let engine = match omnifs_engine::ComponentEngine::new(Some(&wasm_cache_dir(
+            &self.layout.cache_dir,
+        ))) {
+            Ok(engine) => engine,
+            Err(error) => {
+                let message = format!("initialize provider component engine: {error:#}");
+                progress.error = Some(message.clone());
+                self.write_progress(&progress)?;
+                return Err(anyhow::anyhow!(message));
+            },
+        };
+        let mut outcomes = engine.warm(providers);
 
         let mut failures = Vec::new();
-        while let Some(error) = jobs.next().await {
+        while let Some(outcome) = outcomes.next().await {
             progress.completed += 1;
-            if let Some(error) = error {
+            if let Err(error) = outcome.result {
+                let error = format!("{}: {error:#}", outcome.provider_id);
                 failures.push(error);
                 progress.error = Some(failures.join("; "));
             }
@@ -299,7 +300,7 @@ impl Preparation {
             Ok(())
         } else {
             bail!(
-                "failed to prepare {} provider(s): {}",
+                "failed to warm {} provider(s): {}",
                 failures.len(),
                 failures.join("; ")
             )
@@ -340,7 +341,7 @@ impl Preparation {
         }
     }
 
-    fn read_progress(&self) -> io::Result<Option<Progress>> {
+    fn read_progress(&self) -> io::Result<Option<WarmupProgress>> {
         let bytes = match std::fs::read(self.layout.cache_dir.join(PROGRESS_FILE)) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -351,7 +352,7 @@ impl Preparation {
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
     }
 
-    fn write_progress(&self, progress: &Progress) -> io::Result<()> {
+    fn write_progress(&self, progress: &WarmupProgress) -> io::Result<()> {
         let bytes = serde_json::to_vec(progress).map_err(io::Error::other)?;
         let mut options = AtomicOpenOptions::new();
         #[cfg(unix)]
@@ -372,7 +373,7 @@ mod tests {
     use crate::ui::output::OutputMode;
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn foreground_preparation_joins_an_existing_worker() {
+    async fn foreground_warmup_joins_an_existing_worker() {
         let home = tempfile::tempdir().unwrap();
         let layout = WorkspaceLayout::under_root(home.path());
         std::fs::create_dir_all(&layout.providers_dir).unwrap();
@@ -384,12 +385,12 @@ mod tests {
         omnifs_workspace::provider::ProviderStore::new(&layout.providers_dir)
             .retain(&artifact)
             .unwrap();
-        let holder_state = Preparation::new(&layout);
+        let holder_state = ProviderWarmup::new(&layout);
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let holder = std::thread::spawn(move || {
             let _lock = holder_state.acquire().unwrap();
             holder_state
-                .write_progress(&Progress {
+                .write_progress(&WarmupProgress {
                     pid: std::process::id(),
                     completed: 0,
                     total: 1,
@@ -402,16 +403,16 @@ mod tests {
         ready_rx.recv().unwrap();
 
         let started = Instant::now();
-        Preparation::new(&layout)
-            .prepare_for_up([id], &Output::new(OutputMode::Human, true))
+        ProviderWarmup::new(&layout)
+            .warm_for_up([id], &Output::new(OutputMode::Human, true))
             .await
             .unwrap();
         holder.join().unwrap();
 
         assert!(started.elapsed() >= Duration::from_millis(200));
         assert_eq!(
-            Preparation::new(&layout).status().unwrap().state,
-            State::Complete
+            ProviderWarmup::new(&layout).status().unwrap().state,
+            WarmupState::Complete
         );
     }
 }

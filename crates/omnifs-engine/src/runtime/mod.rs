@@ -36,6 +36,7 @@ pub(crate) mod wasm;
 
 use crate::clock;
 use crate::op_validate;
+use crate::runtime::wasm::ComponentEngine;
 
 pub(crate) const HTTP_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 // Host-side 429 cooldown when the provider error carried no Retry-After.
@@ -254,7 +255,7 @@ impl Runtime {
     // provider initialization, auth, caches, and runtime wiring are coupled.
     #[allow(clippy::too_many_lines)]
     pub(crate) fn build(
-        engine: &wasmtime::Engine,
+        engine: &ComponentEngine,
         wasm_path: &StdPath,
         config: &Spec,
         manifest: &ProviderManifest,

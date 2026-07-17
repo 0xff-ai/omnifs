@@ -16,10 +16,11 @@ use crate::authority::RuntimeAuthority;
 use crate::callouts::{CalloutHost, ParkSignal};
 use futures::StreamExt;
 use tracing::Instrument;
-use wasmtime::component::{Component, Linker, ResourceTable};
+use wasmtime::component::{Linker, ResourceTable};
 use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
 
 use crate::Provider;
+use crate::runtime::wasm::ComponentEngine;
 use crate::wasi::HostState;
 use crate::{BuildError, EngineError};
 use omnifs_wit::provider::types as wit_types;
@@ -143,7 +144,7 @@ type EventTransport = std::result::Result<
 
 impl Instance {
     pub(crate) fn new(
-        engine: &wasmtime::Engine,
+        engine: &ComponentEngine,
         wasm_path: &Path,
         config_bytes: Vec<u8>,
         authority: Arc<RuntimeAuthority>,
@@ -374,18 +375,18 @@ impl Instance {
 }
 
 async fn build_driver_state(
-    engine: &wasmtime::Engine,
+    engine: &ComponentEngine,
     wasm_path: &Path,
     authority: &RuntimeAuthority,
 ) -> std::result::Result<(wasmtime::Store<HostState>, Provider), BuildError> {
-    let mut linker = Linker::<HostState>::new(engine);
+    let mut linker = Linker::<HostState>::new(engine.inner());
     wasmtime_wasi::p2::add_to_linker_async::<HostState>(&mut linker)?;
     Provider::add_to_linker::<HostState, HostState>(&mut linker, |state| state)?;
 
-    let component = Component::from_file(engine, wasm_path)?;
+    let component = engine.load(wasm_path)?;
     let wasi = build_wasi_ctx(authority)?;
     let mut store = wasmtime::Store::new(
-        engine,
+        engine.inner(),
         HostState {
             wasi,
             table: ResourceTable::new(),

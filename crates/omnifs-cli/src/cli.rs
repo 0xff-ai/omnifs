@@ -89,9 +89,9 @@ pub enum Commands {
     #[command(hide = true)]
     Daemon(crate::daemon::DaemonArgs),
 
-    /// Prepare retained providers. Internal: launched as detached cache work.
+    /// Warm retained providers. Internal: launched as detached cache work.
     #[command(hide = true)]
-    PrepareProviders(crate::provider_preparation::PrepareProvidersArgs),
+    WarmProviders(crate::provider_warmup::WarmProvidersArgs),
 
     /// Manage filesystem frontends attached to the host-native daemon
     ///
@@ -154,7 +154,7 @@ impl Commands {
             Self::Completions(_) => (Some("completions"), "completions"),
             Self::Version(_) => (Some("version"), "version"),
             Self::Daemon(_) => (None, "daemon"),
-            Self::PrepareProviders(_) => (None, "prepare-providers"),
+            Self::WarmProviders(_) => (None, "warm-providers"),
             // Every `frontend` subcommand shares one usage label; there is
             // no longer a hidden internal one (like `daemon`'s) to exclude.
             Self::Frontend(args) => (
@@ -198,7 +198,7 @@ impl Commands {
             Self::Completions(args) => args.run(&output).map(|()| ExitCode::Success),
             Self::Version(args) => args.run(output).await,
             Self::Daemon(args) => crate::daemon::run(&args).await.map(|()| ExitCode::Success),
-            Self::PrepareProviders(args) => args.run().await.map(|()| ExitCode::Success),
+            Self::WarmProviders(args) => args.run().await.map(|()| ExitCode::Success),
             Self::Frontend(args) => args.run(output).await,
         }
     }

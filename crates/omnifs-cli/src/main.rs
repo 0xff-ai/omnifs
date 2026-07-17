@@ -33,8 +33,8 @@ mod metrics;
 mod mount_config;
 mod process;
 mod provider_bundle;
-mod provider_preparation;
 mod provider_resolver;
+mod provider_warmup;
 mod stages;
 mod status;
 #[cfg(test)]

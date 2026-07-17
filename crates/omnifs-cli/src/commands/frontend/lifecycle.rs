@@ -247,62 +247,45 @@ fn disable_fix(id: &FrontendId) -> String {
     fix
 }
 
-fn stopped(id: FrontendId, changed: bool) -> FrontendResult {
-    FrontendResult {
-        id,
-        state: FrontendResultState::Stopped,
-        changed,
-        fix: None,
-        detail: None,
+impl FrontendResult {
+    fn stopped(id: FrontendId, changed: bool) -> Self {
+        Self {
+            id,
+            state: FrontendResultState::Stopped,
+            changed,
+            fix: None,
+            detail: None,
+        }
     }
-}
 
-fn stopped_for_daemon(id: FrontendId) -> FrontendResult {
-    FrontendResult {
-        id,
-        state: FrontendResultState::Stopped,
-        changed: false,
-        fix: Some("omnifs up".into()),
-        detail: None,
+    fn stopped_for_daemon(id: FrontendId) -> Self {
+        Self {
+            id,
+            state: FrontendResultState::Stopped,
+            changed: false,
+            fix: Some("omnifs up".into()),
+            detail: None,
+        }
     }
-}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum EnableAction {
-    Stopped,
-    Attached,
-    Reconnect,
-    Launch,
-}
-
-fn enable_action(
-    daemon_running: bool,
-    observed: Option<FrontendState>,
-    runner_running: bool,
-) -> EnableAction {
-    if !daemon_running {
-        EnableAction::Stopped
-    } else if observed == Some(FrontendState::Attached) {
-        EnableAction::Attached
-    } else if observed == Some(FrontendState::Running) || runner_running {
-        EnableAction::Reconnect
-    } else {
-        EnableAction::Launch
+    fn attached(id: FrontendId, changed: bool) -> Self {
+        Self {
+            id,
+            state: FrontendResultState::Attached,
+            changed,
+            fix: None,
+            detail: None,
+        }
     }
-}
 
-fn failed(
-    id: FrontendId,
-    changed: bool,
-    fix: String,
-    error: impl std::fmt::Display,
-) -> FrontendResult {
-    FrontendResult {
-        id,
-        state: FrontendResultState::Failed,
-        changed,
-        fix: Some(fix),
-        detail: Some(error.to_string()),
+    fn failed(id: FrontendId, changed: bool, fix: String, error: impl std::fmt::Display) -> Self {
+        Self {
+            id,
+            state: FrontendResultState::Failed,
+            changed,
+            fix: Some(fix),
+            detail: Some(error.to_string()),
+        }
     }
 }
 
@@ -326,55 +309,35 @@ impl FrontendEnableArgs {
             );
         }
         if inventory.daemon.status.is_none() {
-            return Ok(stopped_for_daemon(id));
+            return Ok(FrontendResult::stopped_for_daemon(id));
         }
         let observed = inventory
             .frontends
             .iter()
             .find(|row| matches(row, &id))
             .map(|row| row.state);
-        match enable_action(true, observed, false) {
-            EnableAction::Attached => {
-                return Ok(FrontendResult {
-                    id,
-                    state: FrontendResultState::Attached,
-                    changed: false,
-                    fix: None,
-                    detail: None,
-                });
-            },
-            EnableAction::Reconnect => return Ok(reconnect_result(workspace, id).await),
-            EnableAction::Stopped => unreachable!("daemon state checked above"),
-            EnableAction::Launch => {},
+        if observed == Some(FrontendState::Attached) {
+            return Ok(FrontendResult::attached(id, false));
+        }
+        if observed == Some(FrontendState::Running) {
+            return Ok(reconnect_result(workspace, id).await);
         }
         let runner_running = match runner_running(workspace, &id, output.clone()).await {
             Ok(running) => running,
             Err(error) => {
                 let fix = restart_fix(&id);
-                return Ok(failed(id, false, fix, error));
+                return Ok(FrontendResult::failed(id, false, fix, error));
             },
         };
-        match enable_action(true, observed, runner_running) {
-            EnableAction::Attached => {
-                return Ok(FrontendResult {
-                    id,
-                    state: FrontendResultState::Attached,
-                    changed: false,
-                    fix: None,
-                    detail: None,
-                });
-            },
-            EnableAction::Reconnect => return Ok(reconnect_result(workspace, id).await),
-            EnableAction::Stopped => unreachable!("daemon state checked above"),
-            EnableAction::Launch => {},
+        if runner_running {
+            return Ok(reconnect_result(workspace, id).await);
         }
         let mount = inventory.mounts.first().map(|mount| mount.name.as_str());
         match launch(workspace, &id, mount, output.clone()).await {
-            Ok(()) if id.runtime() == FrontendRuntime::Libkrun => Ok(attached_result(id, true)),
-            Ok(()) => Ok(wait_attached_result(workspace, id).await),
+            Ok(()) => Ok(FrontendResult::attached(id, true)),
             Err(error) => {
                 let fix = restart_fix(&id);
-                Ok(failed(id, true, fix, error))
+                Ok(FrontendResult::failed(id, true, fix, error))
             },
         }
     }
@@ -411,17 +374,17 @@ impl FrontendDisableArgs {
             Ok(value) => value,
             Err(error) => {
                 let fix = disable_fix(&id);
-                return Ok(failed(id.clone(), false, fix, error));
+                return Ok(FrontendResult::failed(id.clone(), false, fix, error));
             },
         };
         if !running && (!observed || id.runtime() != FrontendRuntime::Host) {
-            return Ok(stopped(id, false));
+            return Ok(FrontendResult::stopped(id, false));
         }
         match stop(workspace, &id, output.clone()).await {
-            Ok(()) => Ok(stopped(id, true)),
+            Ok(()) => Ok(FrontendResult::stopped(id, true)),
             Err(error) => {
                 let fix = disable_fix(&id);
-                Ok(failed(id.clone(), false, fix, error))
+                Ok(FrontendResult::failed(id.clone(), false, fix, error))
             },
         }
     }
@@ -472,7 +435,10 @@ impl FrontendRestartArgs {
             bail!("no frontend matches the selector");
         }
         if inventory.daemon.status.is_none() {
-            return Ok(targets.into_iter().map(stopped_for_daemon).collect());
+            return Ok(targets
+                .into_iter()
+                .map(FrontendResult::stopped_for_daemon)
+                .collect());
         }
         let mut results = Vec::with_capacity(targets.len());
         for id in targets {
@@ -481,21 +447,21 @@ impl FrontendRestartArgs {
                 Ok(true) => {
                     if let Err(error) = stop(workspace, &id, output.clone()).await {
                         let fix = restart_fix(&id);
-                        results.push(failed(id, false, fix, error));
+                        results.push(FrontendResult::failed(id, false, fix, error));
                         continue;
                     }
                 },
                 Ok(false) if id.runtime() == FrontendRuntime::Host => {
                     if let Err(error) = stop(workspace, &id, output.clone()).await {
                         let fix = restart_fix(&id);
-                        results.push(failed(id, false, fix, error));
+                        results.push(FrontendResult::failed(id, false, fix, error));
                         continue;
                     }
                 },
                 Ok(false) => {},
                 Err(error) => {
                     let fix = restart_fix(&id);
-                    results.push(failed(id, false, fix, error));
+                    results.push(FrontendResult::failed(id, false, fix, error));
                     continue;
                 },
             }
@@ -509,9 +475,8 @@ impl FrontendRestartArgs {
                 )
                 .await
                 {
-                    Ok(()) if id.runtime() == FrontendRuntime::Libkrun => attached_result(id, true),
-                    Ok(()) => wait_attached_result(workspace, id).await,
-                    Err(error) => failed(id, true, fix, error),
+                    Ok(()) => FrontendResult::attached(id, true),
+                    Err(error) => FrontendResult::failed(id, true, fix, error),
                 },
             );
         }
@@ -594,26 +559,11 @@ fn resolve_observed_selector(
 }
 
 async fn reconnect_result(workspace: &Workspace, id: FrontendId) -> FrontendResult {
-    let deadline = tokio::time::Instant::now() + RECONNECT_TIMEOUT;
-    while tokio::time::Instant::now() < deadline {
-        if let Ok(inventory) = Inventory::collect(workspace).await
-            && inventory
-                .frontends
-                .iter()
-                .any(|row| matches(row, &id) && row.state == FrontendState::Attached)
-        {
-            return FrontendResult {
-                id,
-                state: FrontendResultState::Attached,
-                changed: false,
-                fix: None,
-                detail: None,
-            };
-        }
-        tokio::time::sleep(POLL).await;
+    if wait_for_attachment(workspace, &id).await {
+        return FrontendResult::attached(id, false);
     }
     let fix = restart_fix(&id);
-    failed(
+    FrontendResult::failed(
         id,
         false,
         fix,
@@ -621,36 +571,20 @@ async fn reconnect_result(workspace: &Workspace, id: FrontendId) -> FrontendResu
     )
 }
 
-async fn wait_attached_result(workspace: &Workspace, id: FrontendId) -> FrontendResult {
+async fn wait_for_attachment(workspace: &Workspace, id: &FrontendId) -> bool {
     let deadline = tokio::time::Instant::now() + RECONNECT_TIMEOUT;
     while tokio::time::Instant::now() < deadline {
         if let Ok(inventory) = Inventory::collect(workspace).await
             && inventory
                 .frontends
                 .iter()
-                .any(|row| matches(row, &id) && row.state == FrontendState::Attached)
+                .any(|row| matches(row, id) && row.state == FrontendState::Attached)
         {
-            return attached_result(id, true);
+            return true;
         }
         tokio::time::sleep(POLL).await;
     }
-    let fix = restart_fix(&id);
-    failed(
-        id,
-        true,
-        fix,
-        "frontend launched but did not attach to the daemon",
-    )
-}
-
-fn attached_result(id: FrontendId, changed: bool) -> FrontendResult {
-    FrontendResult {
-        id,
-        state: FrontendResultState::Attached,
-        changed,
-        fix: None,
-        detail: None,
-    }
+    false
 }
 
 async fn runner_running(workspace: &Workspace, id: &FrontendId, output: Output) -> Result<bool> {
@@ -727,11 +661,20 @@ async fn launch(
                 .into(),
             )?
             .launch(mount)
-            .await
+            .await?;
         },
-        FrontendRuntime::Docker => launch_docker(workspace, &paths, mount, output).await,
-        FrontendRuntime::Libkrun => launch_libkrun(workspace, &paths, id, mount, output).await,
+        FrontendRuntime::Docker => {
+            launch_docker(workspace, &paths, mount, output).await?;
+        },
+        FrontendRuntime::Libkrun => {
+            return launch_libkrun(workspace, &paths, id, mount, output).await;
+        },
     }
+    ensure!(
+        wait_for_attachment(workspace, id).await,
+        "frontend launched but did not attach to the daemon"
+    );
+    Ok(())
 }
 
 async fn launch_docker(
@@ -780,17 +723,11 @@ async fn launch_libkrun(
     let attach = workspace.daemon().frontend_attach_target_vsock().await?;
     let runner = LibkrunRunner::new(paths.config_dir.clone());
     let attached = async {
-        let result = wait_attached_result(workspace, id.clone()).await;
-        if result.state == FrontendResultState::Attached {
-            Ok(())
-        } else {
-            bail!(
-                "{}",
-                result
-                    .detail
-                    .unwrap_or_else(|| "frontend launched but did not attach to the daemon".into())
-            )
-        }
+        ensure!(
+            wait_for_attachment(workspace, id).await,
+            "frontend launched but did not attach to the daemon"
+        );
+        Ok(())
     };
     runner
         .launch(
@@ -1008,20 +945,5 @@ mod tests {
         )
         .unwrap();
         assert_eq!(selected.location(), Some(Path::new("/b")));
-    }
-
-    #[test]
-    fn enable_decision_covers_runtime_states() {
-        assert_eq!(enable_action(false, None, false), EnableAction::Stopped);
-        assert_eq!(
-            enable_action(true, Some(FrontendState::Attached), true),
-            EnableAction::Attached
-        );
-        assert_eq!(
-            enable_action(true, Some(FrontendState::Running), true),
-            EnableAction::Reconnect
-        );
-        assert_eq!(enable_action(true, None, true), EnableAction::Reconnect);
-        assert_eq!(enable_action(true, None, false), EnableAction::Launch);
     }
 }

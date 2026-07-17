@@ -138,14 +138,8 @@ impl<'a> ProviderResolver<'a> {
         &self,
         artifact: &omnifs_workspace::provider::Artifact,
     ) -> anyhow::Result<ResolvedProvider> {
-        let newly_retained = !self
-            .store
-            .read_index()?
-            .providers
-            .iter()
-            .any(|entry| entry.id == artifact.id());
-        let entry = self.store.retain(artifact)?;
-        self.resolve_id(&entry.id, newly_retained)
+        let newly_retained = self.store.retain(artifact)?;
+        self.resolve_id(&artifact.id(), newly_retained)
     }
 
     fn resolve_id(
