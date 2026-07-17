@@ -64,7 +64,7 @@ impl HostContext {
     ) -> Self {
         let cache_dir = cache_dir.as_ref().to_path_buf();
         Self {
-            wasm_cache_dir: omnifs_workspace::layout::wasm_cache_dir(&cache_dir),
+            wasm_cache_dir: omnifs_workspace::wasm_cache_dir(&cache_dir),
             cache_dir,
             config_dir: config_dir.as_ref().to_path_buf(),
             providers_dir: providers_dir.as_ref().to_path_buf(),

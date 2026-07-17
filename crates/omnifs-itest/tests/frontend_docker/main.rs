@@ -855,6 +855,12 @@ fn kill_and_reattach_fuse_semantics() {
         "a restarted daemon must mint a new instance id"
     );
 
+    // `up` publishes daemon readiness before surviving frontends finish their
+    // independent reconnect backoff. `frontend enable` observes the live
+    // container and waits for its attachment without replacing it.
+    let reattached = fixture.frontend_enable();
+    fixture.assert_frontend_enable_ok(&reattached, "after daemon restart");
+
     let id_3 = container_id(&container);
     assert_eq!(
         id_2, id_3,

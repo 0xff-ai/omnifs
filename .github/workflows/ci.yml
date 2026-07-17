@@ -58,6 +58,7 @@ jobs:
               - '!CHANGELOG.md'
             guest_image:
               - 'scripts/guest-image/**'
+              - 'scripts/ci/check-guest-image.sh'
               - 'crates/omnifs-fuse/**'
               - 'crates/omnifs-vfs-wire/**'
               - '.github/workflows/ci.yml'

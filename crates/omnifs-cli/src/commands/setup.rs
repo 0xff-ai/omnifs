@@ -19,7 +19,7 @@ use crate::status::InventoryReport;
 use crate::ui::output::Output;
 use crate::ui::report::Row;
 use crate::ui::style::Glyph;
-use crate::workspace::Workspace;
+use omnifs_workspace::Workspace;
 
 const FINISH: &str = "__omnifs_setup_finish__";
 
@@ -71,7 +71,7 @@ impl SetupArgs {
             .await?;
         }
 
-        if !self.no_up && !workspace.mounts()?.is_empty() {
+        if !self.no_up && !crate::mount_config::load_mounts(workspace)?.is_empty() {
             output.narrate("Starting the daemon.");
             UpArgs::default()
                 .start_in_workspace(workspace, output.clone())
@@ -109,7 +109,7 @@ impl SetupArgs {
         prompt: PromptMode,
     ) -> Result<Vec<String>> {
         let embedded = EmbeddedProviders::load()?;
-        let mounts = workspace.mounts()?;
+        let mounts = crate::mount_config::load_mounts(workspace)?;
         let mut configured = mounts
             .iter()
             .map(|mount| {

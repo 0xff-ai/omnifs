@@ -1,18 +1,15 @@
 //! omnifs home directory layout and path resolution.
 //!
 //! This crate is the single source of truth for the omnifs on-disk layout.
-//! Both the CLI and daemon depend on it; neither duplicates the resolution
-//! logic. Higher-level CLI factories layer config and daemon handles on top of
-//! this path-only layout.
+//! Lower-level storage code and hermetic fixtures may construct this layout;
+//! application code should use [`crate::Workspace`] so component ownership
+//! stays behind typed brokers.
 //!
 //! Resolution order:
 //!   1. `OMNIFS_HOME`
 //!   2. Default: `$HOME/.omnifs`
 
-use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
-
-use serde::Serialize;
 
 const DEFAULT_HOME_SUBDIR: &str = ".omnifs";
 
@@ -52,33 +49,18 @@ pub const OMNIFS_HOME_ENV: &str = "OMNIFS_HOME";
 /// Overrides the host-visible mount point the daemon serves at.
 pub const OMNIFS_MOUNT_POINT_ENV: &str = "OMNIFS_MOUNT_POINT";
 
-/// Role marker for code that only needs the shared workspace layout.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Shared;
-
-/// Role marker for daemon-side workspace use.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Daemon;
-
-/// A resolved omnifs workspace, parameterized by the capability set using it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Workspace<Role = Shared> {
-    layout: WorkspaceLayout,
-    _role: PhantomData<Role>,
-}
-
 /// The fully resolved omnifs directory layout.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct WorkspaceLayout {
-    pub config_dir: PathBuf,
-    pub cache_dir: PathBuf,
+#[derive(Debug)]
+pub(crate) struct WorkspaceLayout {
+    pub(crate) config_dir: PathBuf,
+    pub(crate) cache_dir: PathBuf,
     /// Staging directory holding one JSON file per mount.
-    pub mounts_dir: PathBuf,
+    pub(crate) mounts_dir: PathBuf,
     /// Directory holding compiled provider WASM components, looked up
     /// by the `provider:` field of each mount config.
-    pub providers_dir: PathBuf,
-    pub credentials_file: PathBuf,
-    pub config_file: PathBuf,
+    pub(crate) providers_dir: PathBuf,
+    pub(crate) credentials_file: PathBuf,
+    pub(crate) config_file: PathBuf,
 }
 
 /// Path resolution failed because no default root could be derived.
@@ -95,7 +77,7 @@ impl std::error::Error for ResolveError {}
 
 impl WorkspaceLayout {
     /// Resolve paths from env, `OMNIFS_HOME`, then the `$HOME/.omnifs` default.
-    pub fn resolve() -> Result<Self, ResolveError> {
+    pub(crate) fn resolve() -> Result<Self, ResolveError> {
         let omnifs_home = std::env::var_os(OMNIFS_HOME_ENV).map(PathBuf::from);
         let default_root =
             std::env::var_os("HOME").map(|home| PathBuf::from(home).join(DEFAULT_HOME_SUBDIR));
@@ -110,7 +92,7 @@ impl WorkspaceLayout {
     /// This is the one place that maps the omnifs structure to concrete paths.
     /// Both host default resolution and the in-container guest layout build on
     /// this so they always stay in sync.
-    pub fn under_root(root: &Path) -> Self {
+    pub(crate) fn under_root(root: &Path) -> Self {
         let config_dir = root.to_path_buf();
         WorkspaceLayout {
             config_file: config_dir.join(CONFIG_FILE),
@@ -123,84 +105,20 @@ impl WorkspaceLayout {
     }
 
     /// Discoverable parent of all local frontend state directories.
-    pub fn frontend_state_root(&self) -> PathBuf {
+    pub(crate) fn frontend_state_root(&self) -> PathBuf {
         self.cache_dir.join(FRONTEND_STATE_SUBDIR)
     }
+}
 
-    /// Root of immutable mount desired-state snapshots keyed by Git revision.
-    pub fn mount_revisions_root(&self) -> PathBuf {
-        self.cache_dir.join(MOUNT_REVISIONS_SUBDIR)
-    }
-
-    /// Stable state directory for one local frontend mount.
-    ///
-    /// Each leaf owns its runner discovery record and, for NFS, its persistent
-    /// filehandle table. Isolating leaves prevents two NFS mounts from sharing
-    /// protocol identity.
-    pub fn frontend_state_dir(
-        &self,
-        kind: crate::daemon_record::FrontendKind,
-        mount_point: &Path,
-    ) -> PathBuf {
-        let normalized = mount_point.components().collect::<PathBuf>();
-        let digest = blake3::hash(normalized.as_os_str().as_encoded_bytes()).to_hex();
-        self.frontend_state_root()
-            .join(kind.label())
-            .join(digest.as_str())
-    }
-
-    /// The daemon-owned daemon record (`<config_dir>/daemon.json`). The daemon
-    /// writes it on start and removes it on graceful exit; the CLI reads it to
-    /// resolve which endpoint to dial.
-    pub fn daemon_record_file(&self) -> PathBuf {
-        self.config_dir
-            .join(crate::daemon_record::DAEMON_RECORD_FILE)
-    }
-
-    /// The durable token-authenticated namespace attach targets.
-    pub fn attach_targets_file(&self) -> PathBuf {
-        self.frontends_dir().join(ATTACH_TARGETS_FILE)
-    }
-
-    /// The host-native control socket (`<config_dir>/control.sock`). Auth on
-    /// this socket is filesystem permissions, not a bearer token.
-    pub fn control_socket(&self) -> PathBuf {
-        self.config_dir
-            .join(crate::daemon_record::CONTROL_SOCKET_FILE)
-    }
-
-    /// Directory holding the daemon's namespace attach sockets
-    /// (`<config_dir>/frontends`). The daemon creates it `0700` when it binds an
-    /// attach socket.
-    pub fn frontends_dir(&self) -> PathBuf {
-        self.config_dir.join(FRONTENDS_SUBDIR)
-    }
-
-    /// The daemon's fixed namespace attach socket for local frontend runners
-    /// (`<config_dir>/frontends/local.sock`). Auth on the socket is
-    /// filesystem permissions.
-    pub fn local_attach_socket(&self) -> PathBuf {
-        self.frontends_dir().join(LOCAL_ATTACH_SOCKET_NAME)
-    }
-
-    /// The token-checking UDS namespace attach listener
-    /// (`<config_dir>/frontends/vsock-attach.sock`). See
-    /// [`VSOCK_ATTACH_SOCKET_NAME`].
-    pub fn vsock_attach_socket(&self) -> PathBuf {
-        self.frontends_dir().join(VSOCK_ATTACH_SOCKET_NAME)
-    }
-
-    /// Home-relativize a path for display (e.g. `~/.omnifs/config.toml`).
-    /// Falls back to the full path if HOME is unset or stripping fails.
-    pub fn display(path: &Path) -> String {
-        if let Some(home) = std::env::var_os("HOME") {
-            let home = PathBuf::from(home);
-            if let Ok(stripped) = path.strip_prefix(&home) {
-                return format!("~/{}", stripped.display());
-            }
+/// Home-relativize a path for human display, falling back to the full path.
+pub fn display(path: &Path) -> String {
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = PathBuf::from(home);
+        if let Ok(stripped) = path.strip_prefix(&home) {
+            return format!("~/{}", stripped.display());
         }
-        path.display().to_string()
     }
+    path.display().to_string()
 }
 
 /// Compiled provider-component artifacts live under `<cache_dir>/wasm`, with
@@ -224,40 +142,4 @@ pub fn resolve_mount_point() -> Option<PathBuf> {
         return Some(PathBuf::from(explicit));
     }
     std::env::var_os("HOME").map(|home| PathBuf::from(home).join("omnifs"))
-}
-
-impl<Role> Workspace<Role> {
-    /// Resolve a role-specific workspace from env, `OMNIFS_HOME`, then the
-    /// `$HOME/.omnifs` default.
-    pub fn resolve() -> Result<Self, ResolveError> {
-        Ok(Self::from_layout(WorkspaceLayout::resolve()?))
-    }
-
-    /// Wrap an already-resolved layout.
-    pub fn from_layout(layout: WorkspaceLayout) -> Self {
-        Self {
-            layout,
-            _role: PhantomData,
-        }
-    }
-
-    pub fn layout(&self) -> &WorkspaceLayout {
-        &self.layout
-    }
-
-    pub fn into_layout(self) -> WorkspaceLayout {
-        self.layout
-    }
-
-    pub fn mounts_dir(&self) -> &Path {
-        &self.layout.mounts_dir
-    }
-
-    pub fn providers_dir(&self) -> &Path {
-        &self.layout.providers_dir
-    }
-
-    pub fn config_file(&self) -> &Path {
-        &self.layout.config_file
-    }
 }

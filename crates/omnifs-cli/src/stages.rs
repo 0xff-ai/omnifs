@@ -7,7 +7,6 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context, anyhow};
-use omnifs_workspace::layout::WorkspaceLayout;
 use omnifs_workspace::mounts::{Limits, Name as MountName, Spec};
 use omnifs_workspace::provider::{ProviderAuthManifest, ProviderManifest};
 use serde::de::DeserializeOwned;
@@ -22,7 +21,7 @@ use crate::error::{ExitCode, WithExitCode};
 use crate::provider_bundle::EmbeddedProviders;
 use crate::provider_resolver::ProviderResolver;
 use crate::token_source::TokenSource;
-use crate::workspace::Workspace;
+use omnifs_workspace::Workspace;
 
 pub(crate) struct MountInitOutcome {
     pub(crate) mount_name: String,
@@ -113,11 +112,16 @@ pub(crate) async fn configure_mount(
             ),
         )),
     }
-    if !workspace.daemon().ready().await {
+    if !crate::client::DaemonClient::for_workspace(workspace)
+        .ready()
+        .await
+    {
         output.note("run `omnifs up` to start serving it");
     }
 
-    let running = workspace.daemon().ready().await;
+    let running = crate::client::DaemonClient::for_workspace(workspace)
+        .ready()
+        .await;
     if running {
         let path = browse_path(plan.mount_name.as_str());
         output.note(crate::ui::hint(
@@ -151,9 +155,8 @@ pub(crate) fn spec_creation(
     output: &crate::ui::output::Output,
     prompt: PromptMode,
 ) -> anyhow::Result<MountInitPlan> {
-    let paths = workspace.layout();
     let interactive = init_interactive(prompt);
-    let mounts = workspace.mounts()?;
+    let mounts = crate::mount_config::load_mounts(workspace)?;
     let embedded = EmbeddedProviders::load()?;
     let provider_selection = ProviderSelection::new(&mounts, &embedded);
 
@@ -180,10 +183,13 @@ pub(crate) fn spec_creation(
         interactive,
         output,
     )?;
-    let resolved = ProviderResolver::new(&paths.providers_dir, &embedded).resolve(&selector)?;
+    let resolved = ProviderResolver::new(workspace.catalog(), &embedded).resolve(&selector)?;
     if resolved.newly_retained
-        && let Err(error) = crate::provider_warmup::ProviderWarmup::new(workspace.layout())
-            .spawn_background(resolved.reference.id, output)
+        && let Err(error) = crate::provider_warmup::ProviderWarmup::new(
+            workspace.warmup().clone(),
+            workspace.catalog().clone(),
+        )
+        .spawn_background(resolved.reference.id, output)
     {
         output.narrate(crate::ui::style::warn(format!(
             "Couldn't start background provider warmup ({error:#}); daemon startup will load the provider."
@@ -261,7 +267,7 @@ pub(crate) fn spec_creation(
         created,
     );
     let spec = mount_file.into_spec();
-    let mount_path = paths.mounts_dir.join(format!("{mount_name}.json"));
+    let mount_path = workspace.desired_state().spec_path(&mount_name);
 
     Ok(MountInitPlan {
         mount_name,
@@ -292,7 +298,7 @@ impl MountInitPlan {
                 &plan.manifest,
                 auth,
                 token,
-                &workspace.layout().credentials_file,
+                workspace.credentials(),
                 !args.no_validate,
                 output,
             )
@@ -360,7 +366,7 @@ impl MountInitPlan {
                 &plan.manifest,
                 auth,
                 token,
-                &workspace.layout().credentials_file,
+                workspace.credentials(),
                 !args.no_validate,
                 output,
             )
@@ -406,8 +412,8 @@ fn persist_mount_spec(
     plan: &MountInitPlan,
     output: &crate::ui::output::Output,
 ) -> anyhow::Result<()> {
-    workspace.put_mount_uncommitted(&plan.spec)?;
-    workspace.commit_mounts()?;
+    workspace.desired_state().put_uncommitted(&plan.spec)?;
+    workspace.desired_state().commit()?;
     output.row(&crate::ui::report::Row::new(
         crate::ui::style::Glyph::Done,
         "desired state",
@@ -416,7 +422,7 @@ fn persist_mount_spec(
     // `Wrote <path>` collapses to a single dim continuation, printed once.
     output.note(format!(
         "wrote {}",
-        WorkspaceLayout::display(&plan.mount_path)
+        omnifs_workspace::display(&plan.mount_path)
     ));
     Ok(())
 }
@@ -449,7 +455,7 @@ fn parse_json_flag<T: DeserializeOwned>(flag: &'static str, raw: &str) -> anyhow
 }
 
 fn browse_path(mount_name: &str) -> PathBuf {
-    omnifs_workspace::layout::resolve_mount_point()
+    omnifs_workspace::resolve_mount_point()
         .unwrap_or_else(|| PathBuf::from("~/omnifs"))
         .join(mount_name)
 }

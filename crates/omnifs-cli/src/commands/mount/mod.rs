@@ -25,8 +25,7 @@ use crate::stages::PromptMode;
 use crate::token_source::TokenSource;
 use crate::ui::consent::{Decision, Outcome, Plan, Row};
 use crate::ui::output::{Output, ResultVerdict};
-use crate::workspace::Workspace;
-use omnifs_workspace::layout::WorkspaceLayout;
+use omnifs_workspace::Workspace;
 
 #[derive(Args, Debug, Clone)]
 pub struct MountArgs {
@@ -266,9 +265,8 @@ impl ReauthArgs {
         output: &crate::ui::output::Output,
         prompt: PromptMode,
     ) -> anyhow::Result<()> {
-        let paths = workspace.layout();
         let mount_name = self.name.as_str();
-        let mounts = workspace.mounts()?;
+        let mounts = crate::mount_config::load_mounts(workspace)?;
         let mount_config = mounts
             .iter()
             .find(|m| m.name.as_str() == mount_name)
@@ -332,7 +330,7 @@ impl ReauthArgs {
                 &manifest,
                 &selection,
                 token,
-                &paths.credentials_file,
+                workspace.credentials(),
                 !self.no_validate,
                 output,
             )
@@ -370,10 +368,9 @@ fn rm_with_options(
     dry_run: bool,
     output: &Output,
 ) -> anyhow::Result<crate::commands::receipt::MountRemoveReceipt> {
-    let layout = workspace.layout();
     output.intro(format!("omnifs mount rm {name}"))?;
     let output = output.clone();
-    let mounts = workspace.mounts()?;
+    let mounts = crate::mount_config::load_mounts(workspace)?;
     let name =
         MountName::new(name.to_owned()).with_context(|| format!("invalid mount name `{name}`"))?;
 
@@ -388,7 +385,7 @@ fn rm_with_options(
             "spec",
             format!(
                 "{} (already absent)",
-                WorkspaceLayout::display(&layout.mounts_dir.join(format!("{name}.json")))
+                omnifs_workspace::display(&workspace.desired_state().spec_path(&name))
             ),
         ));
         output.plan(&plan);
@@ -436,14 +433,14 @@ fn rm_with_options(
         Decision::Apply => {},
     }
 
-    let spec_outcome = match workspace.remove_mount_uncommitted(&name) {
+    let spec_outcome = match workspace.desired_state().remove_uncommitted(&name) {
         Ok(true) => Outcome::done("spec", "desired-state deletion recorded"),
         Ok(false) => Outcome::skip("spec", "already absent"),
         Err(error) => Outcome::fail("spec", format!("spec kept; local delete failed: {error:#}")),
     };
     let mut outcomes = vec![spec_outcome];
     if outcomes[0].state != crate::ui::consent::OutcomeState::Fail
-        && let Err(error) = workspace.commit_mounts()
+        && let Err(error) = workspace.desired_state().commit()
     {
         outcomes[0] = Outcome::fail(
             "spec",
@@ -481,7 +478,7 @@ fn mount_remove_plan(config_path: &Path) -> Plan {
     plan.push(Row::remove(
         "spec",
         "spec",
-        WorkspaceLayout::display(config_path).clone(),
+        omnifs_workspace::display(config_path).clone(),
     ));
     plan
 }
@@ -489,20 +486,19 @@ fn mount_remove_plan(config_path: &Path) -> Plan {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::fixture_paths as base_fixture_paths;
+    use crate::test_support::fixture_workspace as base_fixture_workspace;
     use tempfile::TempDir;
 
-    fn fixture_paths(root: &Path) -> WorkspaceLayout {
-        let paths = base_fixture_paths(root);
-        std::fs::create_dir_all(&paths.mounts_dir).unwrap();
-        paths
+    fn fixture_workspace(root: &Path) -> omnifs_workspace::Workspace {
+        let workspace = base_fixture_workspace(root);
+        std::fs::create_dir_all(root.join("mounts")).unwrap();
+        workspace
     }
 
     #[tokio::test]
     async fn rejects_invalid_mount_name() {
         let tmp = TempDir::new().unwrap();
-        let paths = fixture_paths(tmp.path());
-        let workspace = Workspace::from_layout(paths);
+        let workspace = fixture_workspace(tmp.path());
         let err = rm(&workspace, "../leak", true).unwrap_err();
         assert!(format!("{err:#}").contains("invalid mount name"));
     }
@@ -510,10 +506,9 @@ mod tests {
     #[tokio::test]
     async fn removing_missing_valid_mount_is_a_noop_without_credentials() {
         let tmp = TempDir::new().unwrap();
-        let paths = fixture_paths(tmp.path());
-        let workspace = Workspace::from_layout(paths.clone());
+        let workspace = fixture_workspace(tmp.path());
         rm(&workspace, "missing", true).unwrap();
-        assert!(!paths.credentials_file.exists());
+        assert!(!tmp.path().join("credentials.json").exists());
     }
 
     #[test]

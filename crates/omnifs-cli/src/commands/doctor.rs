@@ -4,7 +4,7 @@ use clap::Args;
 use serde::Serialize;
 use std::path::Path;
 
-use omnifs_workspace::creds::{CredentialStore, FileStore};
+use omnifs_workspace::creds::CredentialStore;
 
 use crate::docker::DockerClient;
 use crate::docker::DockerTarget;
@@ -18,8 +18,7 @@ use crate::ui::table::{
     Priority as TablePriority, ResourceRow as TableRow, ResourceTable as TableResources,
     StateToken as TableState, WidthPolicy as TableWidth,
 };
-use crate::workspace::Workspace;
-use omnifs_workspace::layout::WorkspaceLayout;
+use omnifs_workspace::Workspace;
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct DoctorArgs {}
@@ -54,9 +53,9 @@ impl DoctorArgs {
 /// runs host-native, so there is no daemon Docker target to resolve here.
 fn resolve_frontend_target(workspace: &Workspace) -> anyhow::Result<DockerTarget> {
     let config = workspace.config()?;
-    let paths = workspace.layout();
     let image = resolve_frontend_image(None, &config)?;
-    let container_name = frontend_container_name(paths)?;
+    let identity = workspace.identity();
+    let container_name = frontend_container_name(identity.container_label())?;
     DockerTarget::new(
         container_name.as_str().to_string(),
         image.as_str().to_string(),
@@ -322,37 +321,31 @@ impl Doctor<'_> {
     }
 
     fn probe_credential_store(&self) -> ProbeResult {
-        let credentials_file = &self.workspace.layout().credentials_file;
-        let Some(parent) = credentials_file.parent() else {
-            return ProbeResult::Err(format!(
-                "credential file has no parent: {}",
-                credentials_file.display()
-            ));
-        };
-        if !parent.exists() {
+        let diagnostic = self.workspace.credentials().diagnostic();
+        if !diagnostic.parent_exists {
             ProbeResult::Warn(format!(
                 "credential directory will be created on first write: {}",
-                WorkspaceLayout::display(parent)
+                diagnostic.display
             ))
-        } else if !credentials_file.exists() {
+        } else if !diagnostic.exists {
             ProbeResult::Warn(format!(
                 "credential store not created yet: {}",
-                WorkspaceLayout::display(credentials_file)
+                diagnostic.display
             ))
         } else {
-            match FileStore::new(credentials_file).list() {
+            match self.workspace.credentials().list() {
                 Ok(Some(keys)) => ProbeResult::Ok(format!(
                     "{} credential(s) in {}",
                     keys.len(),
-                    WorkspaceLayout::display(credentials_file)
+                    diagnostic.display
                 )),
                 Ok(None) => ProbeResult::Ok(format!(
                     "credential store available at {}",
-                    WorkspaceLayout::display(credentials_file)
+                    diagnostic.display
                 )),
                 Err(error) => ProbeResult::Err(format!(
                     "credential store {} unreadable: {error}",
-                    WorkspaceLayout::display(credentials_file)
+                    diagnostic.display
                 )),
             }
         }
@@ -362,7 +355,7 @@ impl Doctor<'_> {
     fn probe_ssh_agent(&self) -> ProbeResult {
         match std::env::var_os("SSH_AUTH_SOCK") {
             Some(sock) if Path::new(&sock).exists() => {
-                ProbeResult::Ok(WorkspaceLayout::display(Path::new(&sock)))
+                ProbeResult::Ok(omnifs_workspace::display(Path::new(&sock)))
             },
             Some(_) => ProbeResult::Warn("SSH_AUTH_SOCK set but socket not found".into()),
             None => ProbeResult::Warn("SSH_AUTH_SOCK unset; git callouts will fail".into()),
@@ -370,14 +363,11 @@ impl Doctor<'_> {
     }
 
     fn probe_config_file(&self) -> ProbeResult {
-        let config_file = &self.workspace.layout().config_file;
-        if config_file.exists() {
-            ProbeResult::Ok(WorkspaceLayout::display(config_file))
+        let diagnostic = self.workspace.config_diagnostic();
+        if diagnostic.exists {
+            ProbeResult::Ok(diagnostic.display)
         } else {
-            ProbeResult::Ok(format!(
-                "(default; {} absent)",
-                WorkspaceLayout::display(config_file)
-            ))
+            ProbeResult::Ok(format!("(default; {} absent)", diagnostic.display))
         }
     }
 
@@ -399,7 +389,7 @@ impl Doctor<'_> {
 #[cfg(test)]
 mod golden {
     use super::*;
-    use crate::test_support::fixture_paths;
+    use crate::test_support::fixture_workspace;
     use crate::ui::strip_ansi;
     use crate::ui::table::Report as TableReport;
     use tempfile::TempDir;
@@ -513,8 +503,7 @@ mod golden {
     }
 
     fn probe_credential_result(root: &std::path::Path) -> ProbeResult {
-        let layout = fixture_paths(root);
-        let workspace = Workspace::from_layout(layout.clone());
+        let workspace = fixture_workspace(root);
         let doctor = Doctor {
             workspace: &workspace,
             inventory: Inventory::test(
@@ -537,7 +526,7 @@ mod golden {
         );
 
         let valid = TempDir::new().unwrap();
-        let valid_path = fixture_paths(valid.path()).credentials_file;
+        let valid_path = valid.path().join("credentials.json");
         std::fs::create_dir_all(valid.path()).unwrap();
         std::fs::write(&valid_path, r#"{"version":1,"entries":{}}"#).unwrap();
         let result = probe_credential_result(valid.path());
@@ -546,7 +535,7 @@ mod golden {
         );
 
         let invalid = TempDir::new().unwrap();
-        let invalid_path = fixture_paths(invalid.path()).credentials_file;
+        let invalid_path = invalid.path().join("credentials.json");
         std::fs::write(&invalid_path, "not json").unwrap();
         let result = probe_credential_result(invalid.path());
         assert!(
@@ -554,7 +543,7 @@ mod golden {
         );
 
         let unsupported = TempDir::new().unwrap();
-        let unsupported_path = fixture_paths(unsupported.path()).credentials_file;
+        let unsupported_path = unsupported.path().join("credentials.json");
         std::fs::write(&unsupported_path, r#"{"version":99,"entries":{}}"#).unwrap();
         let result = probe_credential_result(unsupported.path());
         assert!(
@@ -562,7 +551,7 @@ mod golden {
         );
 
         let bad_key = TempDir::new().unwrap();
-        let bad_key_path = fixture_paths(bad_key.path()).credentials_file;
+        let bad_key_path = bad_key.path().join("credentials.json");
         std::fs::write(
             &bad_key_path,
             r#"{"version":1,"entries":{"not-a-credential-key":{"kind":"static-token","access_token":"x","refresh_token":null,"expires_at":null,"token_type":"Bearer","stored_at":"1970-01-01T00:00:00Z","last_validated":null,"scopes":[],"upstream_identity":null,"extras":{}}}}"#,

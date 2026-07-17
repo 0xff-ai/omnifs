@@ -7,7 +7,7 @@ use clap::Args;
 
 use crate::inspector::{ConnectionMode, SourceKind, run_plain, run_tui};
 use crate::ui::output::Output;
-use crate::workspace::Workspace;
+use omnifs_workspace::Workspace;
 
 /// The inspector's connection label for a live daemon. The daemon always runs
 /// host-native and is addressed through the workspace's daemon record, so
@@ -49,12 +49,10 @@ impl InspectArgs {
             // Probe readiness before entering the TUI so a down daemon exits 3
             // (DaemonUnavailable) the same as the `--plain` path, instead of
             // opening an empty canvas and exiting 0.
-            workspace.daemon().require_status().await?;
+            let client = crate::client::DaemonClient::for_workspace(&workspace);
+            client.require_status().await?;
             check_record_path(self.record.as_deref())?;
-            let endpoint = workspace
-                .daemon()
-                .event_endpoint()?
-                .context("daemon is not running")?;
+            let endpoint = client.event_endpoint()?.context("daemon is not running")?;
             (
                 ConnectionMode::Inspector,
                 SourceKind::Socket {
@@ -76,12 +74,10 @@ impl InspectArgs {
             return run_plain(SourceKind::Replay(path), output);
         }
         let workspace = Workspace::resolve()?;
-        workspace.daemon().require_status().await?;
+        let client = crate::client::DaemonClient::for_workspace(&workspace);
+        client.require_status().await?;
         check_record_path(self.record.as_deref())?;
-        let endpoint = workspace
-            .daemon()
-            .event_endpoint()?
-            .context("daemon is not running")?;
+        let endpoint = client.event_endpoint()?.context("daemon is not running")?;
         let record = self.record.clone();
         let output = output.clone();
         tokio::task::spawn_blocking(move || {

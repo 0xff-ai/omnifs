@@ -1,31 +1,8 @@
-//! Shared test helpers for wasm fixture construction and path layout.
+//! Shared test helpers for wasm fixture construction.
 
-/// Build a workspace layout rooted at `root` with the standard subdirectory layout
-/// our test fixtures use. Directories are not created; callers that need
-/// `mounts_dir` or `providers_dir` to exist should mkdir them explicitly.
 #[cfg(test)]
-pub(crate) fn fixture_paths(root: &std::path::Path) -> omnifs_workspace::layout::WorkspaceLayout {
-    omnifs_workspace::layout::WorkspaceLayout::under_root(root)
-}
-
-/// A `ProviderRef` JSON value pinned to a placeholder id, for building mount
-/// spec fixtures whose serving path is never resolved.
-#[cfg(test)]
-fn provider_ref_value(name: &str) -> serde_json::Value {
-    use omnifs_workspace::ids::ProviderId;
-    serde_json::json!({
-        "id": ProviderId::from_wasm_bytes(name.as_bytes()).to_string(),
-        "meta": { "name": name }
-    })
-}
-
-/// Build a mount `Spec` from a JSON `body` (with no `provider` field) plus a
-/// placeholder `ProviderRef` named `name`.
-#[cfg(test)]
-pub(crate) fn spec_with_provider(name: &str, body: &str) -> omnifs_workspace::mounts::Spec {
-    let mut value: serde_json::Value = serde_json::from_str(body).expect("parse test spec body");
-    value["provider"] = provider_ref_value(name);
-    serde_json::from_value(value).expect("build test spec")
+pub(crate) fn fixture_workspace(root: &std::path::Path) -> omnifs_workspace::Workspace {
+    omnifs_workspace::Workspace::under_root(root)
 }
 
 /// Build a mount `Spec` from a JSON `body` (no `provider` field) plus an

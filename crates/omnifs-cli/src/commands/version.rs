@@ -8,7 +8,7 @@ use crate::error::ExitCode;
 use crate::image::BUILD_CHANNEL;
 use crate::inventory::Inventory;
 use crate::ui::output::{Output, ResultVerdict};
-use crate::workspace::Workspace;
+use omnifs_workspace::Workspace;
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct VersionArgs {}

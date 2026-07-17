@@ -44,7 +44,7 @@ pub(crate) struct DaemonArgs {
 /// Bring up immutable runtime state, then hand the complete serving lifetime to
 /// [`server::Daemon::run`]. The caller owns the tokio runtime and tracing setup.
 pub(crate) async fn run(args: &DaemonArgs) -> anyhow::Result<()> {
-    use omnifs_workspace::metrics::{self, DaemonEvent, Sink};
+    use omnifs_workspace::metrics::{self, DaemonEvent};
 
     let context = DaemonContext::resolve(args)?;
     context.prepare_startup_dirs(args.offline)?;
@@ -52,7 +52,7 @@ pub(crate) async fn run(args: &DaemonArgs) -> anyhow::Result<()> {
     // Local-only dogfood counters. The daemon's off-switch is the
     // `OMNIFS_METRICS` env var (the CLI propagates
     // its `[metrics] enabled = false` into it when launching the daemon).
-    let metrics = Sink::new(context.config_dir(), metrics::enabled_from_env());
+    let metrics = context.metrics().sink(metrics::enabled_from_env());
     metrics.daemon_event(DaemonEvent::DaemonStart, 0);
 
     let desired = Registry::load(&args.mount_snapshot).with_context(|| {
@@ -65,7 +65,7 @@ pub(crate) async fn run(args: &DaemonArgs) -> anyhow::Result<()> {
     let registry = if args.offline {
         Arc::new(MountTable::load_offline(context.host_context(), &desired)?)
     } else {
-        let cloner = Arc::new(GitCloner::new(context.cache_dir().join("clones"))?);
+        let cloner = Arc::new(GitCloner::new(context.clone_cache())?);
         let host_context = context.host_context();
         info!(
             config = %host_context.config_dir().display(),
@@ -90,11 +90,12 @@ pub(crate) async fn run(args: &DaemonArgs) -> anyhow::Result<()> {
         }
     }
 
-    let record_path = context.daemon_record_file();
     let daemon_record = context.daemon_record();
-    let daemon_record = server::DaemonRecordStore::new(record_path, daemon_record);
+    let daemon_record =
+        server::DaemonRecordStore::new(context.daemon_state().clone(), daemon_record);
     let attach_store = Arc::new(
-        omnifs_workspace::attach::Store::open(context.attach_targets_file())
+        context
+            .attach_store()
             .with_context(|| "open durable frontend attach targets")?,
     );
     let daemon = Arc::new(server::Daemon::new(

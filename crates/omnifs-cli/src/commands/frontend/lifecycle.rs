@@ -8,7 +8,7 @@ use anyhow::{Context as _, Result, bail, ensure};
 use clap::{Args, ValueEnum};
 use omnifs_mtab::{MountKind, MountState, StateError};
 use omnifs_workspace::daemon_record::FrontendKind;
-use omnifs_workspace::layout::{WorkspaceLayout, resolve_mount_point};
+use omnifs_workspace::resolve_mount_point;
 use serde::{Deserialize, Serialize};
 
 use crate::commands::frontend::GUEST_MOUNT;
@@ -17,9 +17,10 @@ use crate::docker::{DockerClient, DockerRunner, DockerTarget};
 use crate::frontend_container::{frontend_container_name, resolve_frontend_image};
 use crate::host_runner::HostRunner;
 use crate::inventory::{FrontendState, FrontendStatus, Inventory};
-use crate::libkrun_runner::{LibkrunLaunchRequest, LibkrunRunner};
+use crate::libkrun_runner::LibkrunLaunchRequest;
+use crate::libkrun_runner::LibkrunRunner;
 use crate::ui::output::Output;
-use crate::workspace::Workspace;
+use omnifs_workspace::Workspace;
 
 const DOCKER_TIMEOUT: Duration = Duration::from_secs(5);
 const LIBKRUN_TIMEOUT: Duration = Duration::from_secs(90);
@@ -188,7 +189,7 @@ fn resolve_id(
         FrontendRuntime::Host => {
             let location = location.unwrap_or_else(|| {
                 resolve_mount_point()
-                    .unwrap_or_else(|| workspace.layout().config_dir.join("omnifs"))
+                    .unwrap_or_else(|| workspace.frontend().default_host_location())
             });
             ensure!(
                 location.is_absolute(),
@@ -591,7 +592,7 @@ async fn runner_running(workspace: &Workspace, id: &FrontendId, output: Output) 
     match id.runtime() {
         FrontendRuntime::Host => {
             let location = id.location().context("host frontend has no location")?;
-            let state_dir = workspace.layout().frontend_state_dir(
+            let state_dir = workspace.frontend().state_dir(
                 match id.filesystem() {
                     FrontendFilesystem::Fuse => FrontendKind::Fuse,
                     FrontendFilesystem::Nfs => FrontendKind::Nfs,
@@ -625,7 +626,8 @@ async fn runner_running(workspace: &Workspace, id: &FrontendId, output: Output) 
         FrontendRuntime::Docker => {
             let config = workspace.config()?;
             let image = resolve_frontend_image(None, &config)?;
-            let name = frontend_container_name(workspace.layout())?;
+            let identity = workspace.identity();
+            let name = frontend_container_name(identity.container_label())?;
             let target = DockerTarget::new(name.as_str().to_owned(), image.as_str().to_owned())?;
             Ok(
                 DockerRunner::new(DockerClient::connect_for(&target, output)?)
@@ -634,7 +636,7 @@ async fn runner_running(workspace: &Workspace, id: &FrontendId, output: Output) 
                     .unwrap_or(false),
             )
         },
-        FrontendRuntime::Libkrun => Ok(LibkrunRunner::new(workspace.layout().config_dir.clone())
+        FrontendRuntime::Libkrun => Ok(LibkrunRunner::new(workspace.frontend().libkrun_root())
             .is_running()?
             .unwrap_or(false)),
     }
@@ -646,11 +648,10 @@ async fn launch(
     mount: Option<&str>,
     output: Output,
 ) -> Result<()> {
-    let paths = workspace.layout().clone();
     match id.runtime() {
         FrontendRuntime::Host => {
             HostRunner::new(
-                paths.clone(),
+                workspace.frontend(),
                 id.location()
                     .context("host frontend has no location")?
                     .to_path_buf(),
@@ -664,10 +665,10 @@ async fn launch(
             .await?;
         },
         FrontendRuntime::Docker => {
-            launch_docker(workspace, &paths, mount, output).await?;
+            launch_docker(workspace, mount, output).await?;
         },
         FrontendRuntime::Libkrun => {
-            return launch_libkrun(workspace, &paths, id, mount, output).await;
+            return launch_libkrun(workspace, id, mount, output).await;
         },
     }
     ensure!(
@@ -677,15 +678,11 @@ async fn launch(
     Ok(())
 }
 
-async fn launch_docker(
-    workspace: &Workspace,
-    paths: &WorkspaceLayout,
-    mount: Option<&str>,
-    output: Output,
-) -> Result<()> {
+async fn launch_docker(workspace: &Workspace, mount: Option<&str>, output: Output) -> Result<()> {
     let config = workspace.config()?;
     let image = resolve_frontend_image(None, &config)?;
-    let name = frontend_container_name(paths)?;
+    let identity = workspace.identity();
+    let name = frontend_container_name(identity.container_label())?;
     let target = DockerTarget::new(name.as_str().to_owned(), image.as_str().to_owned())?;
     let runtime = DockerClient::connect_ready(&target, "omnifs frontend enable", output).await?;
     #[cfg(target_os = "linux")]
@@ -695,7 +692,9 @@ async fn launch_docker(
     };
     #[cfg(not(target_os = "linux"))]
     let (bind_ip, expected) = (None, std::net::Ipv4Addr::LOCALHOST);
-    let attach = workspace.daemon().frontend_attach_target(bind_ip).await?;
+    let attach = crate::client::DaemonClient::for_workspace(workspace)
+        .frontend_attach_target(bind_ip)
+        .await?;
     let addr: SocketAddr = attach
         .addr
         .parse()
@@ -706,22 +705,26 @@ async fn launch_docker(
         addr.ip()
     );
     let runner = DockerRunner::new(runtime);
+    let identity = workspace.identity();
     runner
-        .launch(&paths.config_dir, addr.port(), &attach.token)
+        .launch(identity.container_label(), addr.port(), &attach.token)
         .await?;
     wait_for_mount(&runner, mount, DOCKER_TIMEOUT).await
 }
 
 async fn launch_libkrun(
     workspace: &Workspace,
-    paths: &WorkspaceLayout,
     id: &FrontendId,
     mount: Option<&str>,
     output: Output,
 ) -> Result<()> {
     let config = workspace.config()?;
-    let attach = workspace.daemon().frontend_attach_target_vsock().await?;
-    let runner = LibkrunRunner::new(paths.config_dir.clone());
+    let attach = crate::client::DaemonClient::for_workspace(workspace)
+        .frontend_attach_target_vsock()
+        .await?;
+    let frontend = workspace.frontend();
+    let guest_image_cache = frontend.guest_image_cache();
+    let runner = LibkrunRunner::new(frontend.libkrun_root());
     let attached = async {
         ensure!(
             wait_for_attachment(workspace, id).await,
@@ -735,7 +738,7 @@ async fn launch_libkrun(
                 daemon_attach_socket: Path::new(&attach.socket_path),
                 attach_token: &attach.token,
                 config: &config,
-                cache_dir: &paths.cache_dir,
+                guest_image_cache: &guest_image_cache,
                 output,
                 mount,
                 timeout: LIBKRUN_TIMEOUT,
@@ -748,21 +751,22 @@ async fn launch_libkrun(
 async fn stop(workspace: &Workspace, id: &FrontendId, output: Output) -> Result<()> {
     match id.runtime() {
         FrontendRuntime::Host => crate::host_teardown::teardown_local_frontend(
-            &workspace.layout().frontend_state_root(),
+            workspace.frontend().state_root(),
             id.location().context("host frontend has no location")?,
             id.filesystem() == FrontendFilesystem::Nfs,
         ),
         FrontendRuntime::Docker => {
             let config = workspace.config()?;
             let image = resolve_frontend_image(None, &config)?;
-            let name = frontend_container_name(workspace.layout())?;
+            let identity = workspace.identity();
+            let name = frontend_container_name(identity.container_label())?;
             let target = DockerTarget::new(name.as_str().to_owned(), image.as_str().to_owned())?;
             DockerRunner::new(DockerClient::connect_for(&target, output)?)
                 .tear_down()
                 .await
         },
         FrontendRuntime::Libkrun => {
-            LibkrunRunner::new(workspace.layout().config_dir.clone())
+            LibkrunRunner::new(workspace.frontend().libkrun_root())
                 .tear_down()
                 .await
         },

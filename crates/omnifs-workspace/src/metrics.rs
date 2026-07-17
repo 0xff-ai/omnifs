@@ -7,8 +7,8 @@
 //! - Records are written only under `<config_dir>/metrics/`, inside the user's
 //!   own `OMNIFS_HOME`. The directory is created `0700` and every file `0600`.
 //! - Nothing here is ever transmitted anywhere. This module performs no network
-//!   I/O and pulls in no networking dependency; the only side effect is
-//!   appending a line to a local file.
+//!   I/O and pulls in no networking dependency; the only side effects are
+//!   appending local event records and updating the health-nudge marker.
 //! - Writes are strictly best-effort. Any failure (directory, permissions,
 //!   serialization, or the write itself) is logged at `debug` and swallowed;
 //!   metric recording never propagates an error into a real code path.
@@ -17,6 +17,7 @@
 //! record schemas so the on-disk format has a single owner.
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use tracing::debug;
@@ -38,6 +39,8 @@ pub const ENV_SWITCH: &str = "OMNIFS_METRICS";
 
 const DAEMON_FILE: &str = "daemon.jsonl";
 const CLI_FILE: &str = "cli.jsonl";
+const HEALTH_NUDGE_FILE: &str = "last-nudge";
+const HEALTH_NUDGE_INTERVAL: Duration = Duration::from_hours(24);
 
 /// Read the process-wide metrics kill switch from [`ENV_SWITCH`]. Enabled
 /// unless the variable is explicitly set to a falsey token.
@@ -88,17 +91,55 @@ pub struct Sink {
     enabled: bool,
 }
 
-impl Sink {
-    /// Build a sink writing under `<config_dir>/metrics/`. When `enabled` is
-    /// false every method is a no-op and no files are touched.
+/// Persistent metrics component for one workspace. It owns both the event
+/// sink and the health-nudge marker used by the CLI.
+#[derive(Debug, Clone)]
+pub struct Store {
+    dir: PathBuf,
+}
+
+impl Store {
     #[must_use]
-    pub fn new(config_dir: &Path, enabled: bool) -> Self {
+    pub(crate) fn new(config_dir: &Path) -> Self {
         Self {
             dir: config_dir.join(SUBDIR),
+        }
+    }
+
+    #[must_use]
+    pub fn sink(&self, enabled: bool) -> Sink {
+        Sink {
+            dir: self.dir.clone(),
             enabled,
         }
     }
 
+    /// Whether the workspace health nudge has not been shown recently.
+    #[must_use]
+    pub fn health_nudge_due(&self) -> bool {
+        let Ok(metadata) = std::fs::metadata(self.dir.join(HEALTH_NUDGE_FILE)) else {
+            return true;
+        };
+        let Ok(modified) = metadata.modified() else {
+            return true;
+        };
+        modified
+            .elapsed()
+            .map_or(true, |elapsed| elapsed >= HEALTH_NUDGE_INTERVAL)
+    }
+
+    /// Record that the workspace health nudge was shown.
+    pub fn record_health_nudge(&self) -> std::io::Result<()> {
+        ensure_private_dir(&self.dir)?;
+        let path = self.dir.join(HEALTH_NUDGE_FILE);
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_secs());
+        crate::io::write_atomic(&path, format!("{now}\n").as_bytes(), 0o600)
+    }
+}
+
+impl Sink {
     /// Record a daemon lifecycle event to `daemon.jsonl`.
     pub fn daemon_event(&self, event: DaemonEvent, mounts: usize) {
         if !self.enabled {
@@ -185,6 +226,10 @@ fn open_private_append(path: &Path) -> std::io::Result<std::fs::File> {
 mod tests {
     use super::*;
 
+    fn sink(config_dir: &Path, enabled: bool) -> Sink {
+        Store::new(config_dir).sink(enabled)
+    }
+
     #[cfg(unix)]
     fn mode_of(path: &Path) -> u32 {
         use std::os::unix::fs::PermissionsExt as _;
@@ -194,7 +239,7 @@ mod tests {
     #[test]
     fn disabled_sink_writes_nothing() {
         let tmp = tempfile::tempdir().unwrap();
-        let sink = Sink::new(tmp.path(), false);
+        let sink = sink(tmp.path(), false);
         sink.daemon_event(DaemonEvent::DaemonStart, 0);
         sink.cli_event("status", 0);
         assert!(
@@ -206,7 +251,7 @@ mod tests {
     #[test]
     fn daemon_event_appends_one_json_line_per_call() {
         let tmp = tempfile::tempdir().unwrap();
-        let sink = Sink::new(tmp.path(), true);
+        let sink = sink(tmp.path(), true);
         sink.daemon_event(DaemonEvent::DaemonStart, 0);
         sink.daemon_event(DaemonEvent::FrontendServing, 3);
 
@@ -228,7 +273,7 @@ mod tests {
     #[test]
     fn cli_event_records_cmd_and_exit() {
         let tmp = tempfile::tempdir().unwrap();
-        let sink = Sink::new(tmp.path(), true);
+        let sink = sink(tmp.path(), true);
         sink.cli_event("up", 0);
         sink.cli_event("doctor", 2);
 
@@ -242,18 +287,32 @@ mod tests {
         assert_eq!(last["exit"], 2);
     }
 
+    #[test]
+    fn health_nudge_marker_is_owned_by_the_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::new(tmp.path());
+        assert!(store.health_nudge_due());
+
+        store.record_health_nudge().unwrap();
+
+        assert!(!store.health_nudge_due());
+    }
+
     #[cfg(unix)]
     #[test]
     fn directory_is_0700_and_files_are_0600() {
         let tmp = tempfile::tempdir().unwrap();
-        let sink = Sink::new(tmp.path(), true);
+        let store = Store::new(tmp.path());
+        let sink = store.sink(true);
         sink.daemon_event(DaemonEvent::DaemonStart, 0);
         sink.cli_event("status", 0);
+        store.record_health_nudge().unwrap();
 
         let dir = tmp.path().join(SUBDIR);
         assert_eq!(mode_of(&dir), 0o700, "metrics dir must be private");
         assert_eq!(mode_of(&dir.join(DAEMON_FILE)), 0o600);
         assert_eq!(mode_of(&dir.join(CLI_FILE)), 0o600);
+        assert_eq!(mode_of(&dir.join(HEALTH_NUDGE_FILE)), 0o600);
     }
 
     #[cfg(unix)]
@@ -267,7 +326,7 @@ mod tests {
         std::fs::write(&path, b"{\"pre\":true}\n").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
 
-        let sink = Sink::new(tmp.path(), true);
+        let sink = sink(tmp.path(), true);
         sink.daemon_event(DaemonEvent::DaemonStop, 0);
 
         assert_eq!(mode_of(&path), 0o600, "a loose file is tightened on append");

@@ -1,27 +1,22 @@
 //! Detached provider warmup and foreground joining for daemon startup.
 
 use std::collections::HashSet;
-use std::fs::{File, OpenOptions};
-use std::io::{self, Write as _};
+use std::fs::File;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail};
-use atomic_write_file::OpenOptions as AtomicOpenOptions;
 use clap::Args;
-use fs2::FileExt as _;
 use futures_util::StreamExt as _;
 use omnifs_workspace::ids::ProviderId;
-use omnifs_workspace::layout::{WorkspaceLayout, wasm_cache_dir};
 use omnifs_workspace::provider::Catalog;
-use serde::{Deserialize, Serialize};
+use omnifs_workspace::{WarmupProgress, WarmupStore, Workspace};
+use serde::Serialize;
 
 use crate::ui::output::Output;
 
 const CHILD_READY_POLL: Duration = Duration::from_millis(10);
 const CHILD_READY_TIMEOUT: Duration = Duration::from_secs(5);
-const LOCK_FILE: &str = "provider-warmup.lock";
-const PROGRESS_FILE: &str = "provider-warmup.json";
 
 #[derive(Args, Debug, Clone)]
 pub(crate) struct WarmProvidersArgs {
@@ -31,7 +26,8 @@ pub(crate) struct WarmProvidersArgs {
 
 impl WarmProvidersArgs {
     pub(crate) async fn run(self) -> Result<()> {
-        ProviderWarmup::new(&WorkspaceLayout::resolve()?)
+        let workspace = Workspace::resolve()?;
+        ProviderWarmup::new(workspace.warmup().clone(), workspace.catalog().clone())
             .run_background(self.id)
             .await
     }
@@ -68,16 +64,6 @@ pub(crate) struct WarmupStatus {
     error: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct WarmupProgress {
-    pid: u32,
-    completed: usize,
-    total: usize,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
-}
-
 impl WarmupStatus {
     fn unreadable(error: &impl std::fmt::Display) -> Self {
         Self {
@@ -100,7 +86,8 @@ impl WarmupStatus {
 /// Provider warmup for one resolved workspace.
 #[derive(Clone)]
 pub(crate) struct ProviderWarmup {
-    layout: WorkspaceLayout,
+    store: WarmupStore,
+    catalog: Catalog,
 }
 
 /// Exclusive warmup ownership retained by `omnifs up` through daemon readiness.
@@ -110,19 +97,17 @@ pub(crate) struct WarmupLease {
 }
 
 impl ProviderWarmup {
-    pub(crate) fn new(layout: &WorkspaceLayout) -> Self {
-        Self {
-            layout: layout.clone(),
-        }
+    pub(crate) fn new(store: WarmupStore, catalog: Catalog) -> Self {
+        Self { store, catalog }
     }
 
     pub(crate) fn status(&self) -> Option<WarmupStatus> {
-        let progress = match self.read_progress() {
+        let progress = match self.store.read_progress() {
             Ok(Some(progress)) => progress,
             Ok(None) => return None,
             Err(error) => return Some(WarmupStatus::unreadable(&error)),
         };
-        let state = match self.is_active() {
+        let state = match self.store.is_active() {
             Ok(true) => WarmupState::Running,
             Ok(false) if progress.error.is_some() => WarmupState::Failed,
             Ok(false) if progress.completed == progress.total => WarmupState::Complete,
@@ -139,14 +124,14 @@ impl ProviderWarmup {
 
     /// Start a warmup process that survives this foreground command.
     pub(crate) fn spawn_background(&self, id: ProviderId, output: &Output) -> Result<()> {
-        if self.is_active()? {
+        if self.store.is_active()? {
             output.narrate("Provider warmup is already running; `omnifs up` will join it.");
             return Ok(());
         }
 
-        std::fs::create_dir_all(&self.layout.cache_dir).with_context(|| {
-            format!("create cache directory {}", self.layout.cache_dir.display())
-        })?;
+        self.store
+            .prepare()
+            .context("prepare provider warmup storage")?;
         let binary = std::env::current_exe().context("resolve the omnifs executable")?;
         let mut command = std::process::Command::new(&binary);
         command
@@ -156,7 +141,7 @@ impl ProviderWarmup {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .env("OMNIFS_HOME", &self.layout.config_dir);
+            .env("OMNIFS_HOME", self.store.workspace_home());
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt as _;
@@ -170,11 +155,12 @@ impl ProviderWarmup {
         let deadline = Instant::now() + CHILD_READY_TIMEOUT;
         loop {
             let child_has_lock = self
+                .store
                 .read_progress()
                 .ok()
                 .flatten()
                 .is_some_and(|progress| progress.pid == child_pid)
-                && self.is_active()?;
+                && self.store.is_active()?;
             if child_has_lock {
                 break;
             }
@@ -215,13 +201,13 @@ impl ProviderWarmup {
             .into_iter()
             .collect();
         let mut progress = output.progress("provider warmup");
-        if self.is_active()? {
+        if self.store.is_active()? {
             progress.update("waiting for background provider warmup");
         }
         // ponytail: one workspace lock; split by provider only if contention is measurable.
         let lock = tokio::task::spawn_blocking({
-            let warmup = self.clone();
-            move || warmup.acquire()
+            let store = self.store.clone();
+            move || store.acquire()
         })
         .await
         .context("join provider warmup lock task")??;
@@ -237,8 +223,8 @@ impl ProviderWarmup {
 
     async fn run_background(&self, id: ProviderId) -> Result<()> {
         let _lock = tokio::task::spawn_blocking({
-            let warmup = self.clone();
-            move || warmup.acquire()
+            let store = self.store.clone();
+            move || store.acquire()
         })
         .await
         .context("join provider warmup lock task")??;
@@ -253,12 +239,12 @@ impl ProviderWarmup {
             total,
             error: None,
         };
-        self.write_progress(&progress)?;
+        self.store.write_progress(&progress)?;
         if total == 0 {
             return Ok(());
         }
 
-        let catalog = Catalog::open(&self.layout.providers_dir);
+        let catalog = &self.catalog;
         let providers = ids
             .into_iter()
             .map(|id| {
@@ -273,18 +259,16 @@ impl ProviderWarmup {
             Err(error) => {
                 let message = format!("resolve providers for warmup: {error:#}");
                 progress.error = Some(message.clone());
-                self.write_progress(&progress)?;
+                self.store.write_progress(&progress)?;
                 return Err(anyhow::anyhow!(message));
             },
         };
-        let engine = match omnifs_engine::ComponentEngine::new(Some(&wasm_cache_dir(
-            &self.layout.cache_dir,
-        ))) {
+        let engine = match omnifs_engine::ComponentEngine::new(Some(&self.store.wasm_cache_dir())) {
             Ok(engine) => engine,
             Err(error) => {
                 let message = format!("initialize provider component engine: {error:#}");
                 progress.error = Some(message.clone());
-                self.write_progress(&progress)?;
+                self.store.write_progress(&progress)?;
                 return Err(anyhow::anyhow!(message));
             },
         };
@@ -298,7 +282,7 @@ impl ProviderWarmup {
                 failures.push(error);
                 progress.error = Some(failures.join("; "));
             }
-            self.write_progress(&progress)?;
+            self.store.write_progress(&progress)?;
         }
         if failures.is_empty() {
             Ok(())
@@ -310,65 +294,6 @@ impl ProviderWarmup {
             )
         }
     }
-
-    fn acquire(&self) -> io::Result<File> {
-        std::fs::create_dir_all(&self.layout.cache_dir)?;
-        let mut options = OpenOptions::new();
-        options.read(true).write(true).create(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            options.mode(0o600);
-        }
-        let file = options.open(self.layout.cache_dir.join(LOCK_FILE))?;
-        file.lock_exclusive()?;
-        Ok(file)
-    }
-
-    fn is_active(&self) -> io::Result<bool> {
-        let file = match OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(self.layout.cache_dir.join(LOCK_FILE))
-        {
-            Ok(file) => file,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
-            Err(error) => return Err(error),
-        };
-        match file.try_lock_exclusive() {
-            Ok(()) => {
-                file.unlock()?;
-                Ok(false)
-            },
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(true),
-            Err(error) => Err(error),
-        }
-    }
-
-    fn read_progress(&self) -> io::Result<Option<WarmupProgress>> {
-        let bytes = match std::fs::read(self.layout.cache_dir.join(PROGRESS_FILE)) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error),
-        };
-        serde_json::from_slice(&bytes)
-            .map(Some)
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
-    }
-
-    fn write_progress(&self, progress: &WarmupProgress) -> io::Result<()> {
-        let bytes = serde_json::to_vec(progress).map_err(io::Error::other)?;
-        let mut options = AtomicOpenOptions::new();
-        #[cfg(unix)]
-        {
-            use atomic_write_file::unix::OpenOptionsExt as _;
-            use std::os::unix::fs::OpenOptionsExt as _;
-            options.preserve_mode(false).mode(0o600);
-        }
-        let mut file = options.open(self.layout.cache_dir.join(PROGRESS_FILE))?;
-        file.write_all(&bytes)?;
-        file.commit()
-    }
 }
 
 #[cfg(test)]
@@ -379,21 +304,23 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn foreground_warmup_joins_an_existing_worker_and_retains_the_lease() {
         let home = tempfile::tempdir().unwrap();
-        let layout = WorkspaceLayout::under_root(home.path());
-        std::fs::create_dir_all(&layout.providers_dir).unwrap();
+        let workspace = Workspace::under_root(home.path());
+        std::fs::create_dir_all(workspace.catalog().store().root()).unwrap();
         let artifact = omnifs_workspace::provider::Artifact::from_file(
             omnifs_itest::provider_wasm_path("test_provider.wasm"),
         )
         .unwrap();
         let id = artifact.id();
-        omnifs_workspace::provider::ProviderStore::new(&layout.providers_dir)
+        omnifs_workspace::provider::ProviderStore::new(workspace.catalog().store().root())
             .retain(&artifact)
             .unwrap();
-        let holder_state = ProviderWarmup::new(&layout);
+        let holder_state =
+            ProviderWarmup::new(workspace.warmup().clone(), workspace.catalog().clone());
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let holder = std::thread::spawn(move || {
-            let _lock = holder_state.acquire().unwrap();
+            let _lock = holder_state.store.acquire().unwrap();
             holder_state
+                .store
                 .write_progress(&WarmupProgress {
                     pid: std::process::id(),
                     completed: 0,
@@ -407,7 +334,7 @@ mod tests {
         ready_rx.recv().unwrap();
 
         let started = Instant::now();
-        let warmup = ProviderWarmup::new(&layout);
+        let warmup = ProviderWarmup::new(workspace.warmup().clone(), workspace.catalog().clone());
         let lease = warmup
             .warm_for_up([id], &Output::new(OutputMode::Human, true))
             .await
@@ -415,10 +342,10 @@ mod tests {
         holder.join().unwrap();
 
         assert!(started.elapsed() >= Duration::from_millis(200));
-        assert!(warmup.is_active().unwrap());
+        assert!(warmup.store.is_active().unwrap());
         assert_eq!(warmup.status().unwrap().state, WarmupState::Running);
         drop(lease);
-        assert!(!warmup.is_active().unwrap());
+        assert!(!warmup.store.is_active().unwrap());
         assert_eq!(warmup.status().unwrap().state, WarmupState::Complete);
     }
 }

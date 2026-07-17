@@ -3,8 +3,8 @@
 use crate::error::ExitCode;
 use crate::status::InventoryReport;
 use crate::ui::output::Output;
-use crate::workspace::Workspace;
 use clap::Args;
+use omnifs_workspace::Workspace;
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct StatusArgs {}

@@ -18,7 +18,7 @@ pub(crate) struct InventoryReport {
 }
 
 impl InventoryReport {
-    pub(crate) async fn collect(workspace: &crate::workspace::Workspace) -> anyhow::Result<Self> {
+    pub(crate) async fn collect(workspace: &omnifs_workspace::Workspace) -> anyhow::Result<Self> {
         Ok(Self {
             inventory: Inventory::collect(workspace).await?,
         })
@@ -64,7 +64,7 @@ impl InventoryReport {
         }
         let mut context = TableContext::new(
             "omnifs",
-            omnifs_workspace::layout::WorkspaceLayout::display(&self.inventory.home),
+            omnifs_workspace::display(&self.inventory.home),
             context_state,
         )
         .with_metadata(metadata);

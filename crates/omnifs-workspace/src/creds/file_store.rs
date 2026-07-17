@@ -29,6 +29,13 @@ pub struct FileStore {
     lock_path: PathBuf,
 }
 
+/// Non-secret filesystem state for doctor/status surfaces.
+pub struct FileStoreDiagnostic {
+    pub exists: bool,
+    pub parent_exists: bool,
+    pub display: String,
+}
+
 impl FileStore {
     /// Creates a `FileStore` targeting `path`. The file is not created until
     /// the first `put` call.
@@ -36,6 +43,15 @@ impl FileStore {
         let path = path.into();
         let lock_path = Self::lock_path_for(&path);
         Self { path, lock_path }
+    }
+
+    /// Observe the store without exposing its backing path.
+    pub fn diagnostic(&self) -> FileStoreDiagnostic {
+        FileStoreDiagnostic {
+            exists: self.path.exists(),
+            parent_exists: self.path.parent().is_some_and(Path::exists),
+            display: crate::layout::display(&self.path),
+        }
     }
 
     fn lock_path_for(path: &Path) -> PathBuf {

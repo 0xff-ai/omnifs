@@ -9,7 +9,7 @@ use crate::host_runner::{HostRunner, LocalProtocol};
 use crate::inventory::{FrontendStatus, Inventory};
 use crate::libkrun_runner::LibkrunRunner;
 use crate::ui::output::{Output, ResultVerdict};
-use crate::workspace::Workspace;
+use omnifs_workspace::Workspace;
 
 #[derive(Args, Debug, Clone, Default)]
 pub(crate) struct FrontendLsArgs {}

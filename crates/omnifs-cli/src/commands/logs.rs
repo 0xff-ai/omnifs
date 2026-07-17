@@ -8,7 +8,7 @@ use anyhow::Context as _;
 use clap::Args;
 
 use crate::ui::output::Output;
-use crate::workspace::Workspace;
+use omnifs_workspace::Workspace;
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct LogsArgs {
@@ -22,8 +22,7 @@ impl LogsArgs {
             anyhow::bail!("logs is a passthrough command and only supports human output")
         }
         let workspace = Workspace::resolve()?;
-        let paths = workspace.layout();
-        tail_native_log(&paths.cache_dir.join("daemon.log"), self.follow)
+        tail_native_log(&workspace.daemon().log_file(), self.follow)
     }
 }
 

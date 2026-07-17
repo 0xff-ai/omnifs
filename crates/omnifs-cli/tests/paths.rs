@@ -1,52 +1,35 @@
-//! Integration tests for the omnifs home path layout used by the CLI.
+//! Integration tests for the workspace broker's home resolution.
 
-// env variable names share common stems; allow similar names in this file.
 #![allow(clippy::similar_names)]
 
 mod common;
 
 use common::with_env;
-use omnifs_workspace::daemon_record::{CONTROL_SOCKET_FILE, DAEMON_RECORD_FILE};
-use omnifs_workspace::layout::{
-    ATTACH_TARGETS_FILE, CACHE_SUBDIR, CONFIG_FILE, CREDENTIALS_FILE, FRONTENDS_SUBDIR,
-    OMNIFS_HOME_ENV, ResolveError, WorkspaceLayout,
-};
+use omnifs_workspace::{OMNIFS_HOME_ENV, ResolveError, Workspace};
 
 #[test]
-fn under_root_builds_the_workspace_layout() {
+fn workspace_under_root_owns_component_paths() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("workspace");
+    let workspace = Workspace::under_root(&root);
 
-    let paths = WorkspaceLayout::under_root(&root);
-
-    assert_eq!(paths.config_dir, root);
-    assert_eq!(paths.config_file, paths.config_dir.join(CONFIG_FILE));
+    assert_eq!(workspace.daemon().record_file(), root.join("daemon.json"));
     assert_eq!(
-        paths.credentials_file,
-        paths.config_dir.join(CREDENTIALS_FILE)
+        workspace.frontend().local_attach_socket(),
+        root.join("frontends/local.sock")
     );
     assert_eq!(
-        paths.daemon_record_file(),
-        paths.config_dir.join(DAEMON_RECORD_FILE)
+        workspace.frontend().default_host_location(),
+        root.join("omnifs")
     );
-    assert_eq!(
-        paths.control_socket(),
-        paths.config_dir.join(CONTROL_SOCKET_FILE)
-    );
-    assert_eq!(
-        paths.attach_targets_file(),
-        paths
-            .config_dir
-            .join(FRONTENDS_SUBDIR)
-            .join(ATTACH_TARGETS_FILE)
-    );
-    assert_eq!(paths.cache_dir, paths.config_dir.join(CACHE_SUBDIR));
 }
 
 #[test]
-fn workspace_layout_resolve_requires_home_or_omnifs_home() {
+fn workspace_resolve_requires_home_or_omnifs_home() {
     with_env(&[("HOME", None), (OMNIFS_HOME_ENV, None)], || {
-        let error = WorkspaceLayout::resolve().unwrap_err();
+        let Err(error) = Workspace::resolve() else {
+            panic!("workspace unexpectedly resolved");
+        };
         assert_eq!(error, ResolveError);
     });
 
@@ -59,9 +42,8 @@ fn workspace_layout_resolve_requires_home_or_omnifs_home() {
             (OMNIFS_HOME_ENV, Some(root.to_str().unwrap())),
         ],
         || {
-            let paths = WorkspaceLayout::resolve().unwrap();
-            assert_eq!(paths.config_dir, root);
-            assert_eq!(paths.config_file, paths.config_dir.join(CONFIG_FILE));
+            let workspace = Workspace::resolve().unwrap();
+            assert_eq!(workspace.identity().output_home(), root);
         },
     );
 }

@@ -4,7 +4,7 @@
 //! sends one versioned JSON line, and reads one versioned reply line. Inspector
 //! uses the same socket with a persistent subscription connection.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -15,8 +15,8 @@ use omnifs_api::{
     TcpAttachTarget, VsockAttachTarget,
 };
 use omnifs_workspace::daemon_record::{DaemonRecord, Endpoint};
-use omnifs_workspace::layout::WorkspaceLayout;
 use omnifs_workspace::mounts::Revision;
+use omnifs_workspace::{DaemonState, Workspace};
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::UnixStream;
 
@@ -51,46 +51,59 @@ impl Target {
 }
 
 pub(crate) struct DaemonClient {
-    record_path: Option<PathBuf>,
-    control_socket: Option<PathBuf>,
+    daemon: DaemonState,
     cleaned_stale: AtomicBool,
 }
 
 impl DaemonClient {
-    pub(crate) fn for_layout(layout: &WorkspaceLayout) -> Self {
+    pub(crate) fn for_workspace(workspace: &Workspace) -> Self {
         Self {
-            record_path: Some(layout.daemon_record_file()),
-            control_socket: Some(layout.control_socket()),
+            daemon: workspace.daemon().clone(),
             cleaned_stale: AtomicBool::new(false),
         }
     }
 
-    #[cfg(test)]
-    fn with_record_path(record_path: Option<PathBuf>) -> Self {
-        Self {
-            record_path,
-            control_socket: None,
-            cleaned_stale: AtomicBool::new(false),
-        }
+    pub(crate) fn record(&self) -> anyhow::Result<Option<DaemonRecord>> {
+        Ok(self.daemon.record()?)
+    }
+
+    pub(crate) fn remove_record(&self) -> anyhow::Result<()> {
+        self.daemon.remove_record()?;
+        Ok(())
+    }
+
+    pub(crate) fn log_file(&self) -> PathBuf {
+        self.daemon.log_file()
+    }
+
+    pub(crate) fn matches_status(&self, status: &DaemonStatus) -> bool {
+        same_path(&status.config_dir, self.daemon.config_dir())
+            && same_path(&status.cache_dir, &self.daemon.cache_dir())
+    }
+
+    pub(crate) fn config_display(&self) -> String {
+        self.daemon.config_dir().display().to_string()
+    }
+
+    pub(crate) fn cache_display(&self) -> String {
+        self.daemon.cache_dir().display().to_string()
     }
 
     fn resolve(&self) -> Result<Target> {
-        let record = match &self.record_path {
-            Some(record_path) => match DaemonRecord::read(record_path) {
-                Ok(record) => record,
-                Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
-                    if let Some(target) = self.control_socket_target() {
-                        return Ok(target);
-                    }
-                    self.clean_stale_record();
-                    return Ok(Target::Absent);
-                },
-                Err(error) => {
-                    return Err(error)
-                        .with_context(|| format!("read daemon record {}", record_path.display()));
-                },
+        let record = match self.daemon.record() {
+            Ok(record) => record,
+            Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
+                if let Some(target) = self.control_socket_target() {
+                    return Ok(target);
+                }
+                self.clean_stale_record();
+                return Ok(Target::Absent);
             },
-            None => None,
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("read daemon record {}", self.daemon.record_file().display())
+                });
+            },
         };
         if let Some(record) = record {
             let Endpoint::Unix { path } = record.endpoint;
@@ -103,9 +116,9 @@ impl DaemonClient {
     }
 
     fn control_socket_target(&self) -> Option<Target> {
-        let socket = self.control_socket.as_ref()?;
-        socket.exists().then(|| Target::Unix {
-            socket: socket.clone(),
+        let socket = self.daemon.control_socket();
+        socket.exists().then_some(Target::Unix {
+            socket,
             instance: None,
         })
     }
@@ -156,9 +169,7 @@ impl DaemonClient {
     }
 
     fn clean_stale_record(&self) {
-        if let Some(path) = &self.record_path {
-            let _ = DaemonRecord::remove(path);
-        }
+        let _ = self.daemon.remove_record();
         self.cleaned_stale.store(true, Ordering::Relaxed);
     }
 
@@ -243,8 +254,7 @@ impl DaemonClient {
         if status.instance_id == expected {
             return Ok(());
         }
-        if let Some(path) = &self.record_path
-            && let Ok(Some(record)) = DaemonRecord::read(path)
+        if let Ok(Some(record)) = self.daemon.record()
             && record.instance_id == status.instance_id
         {
             return Ok(());
@@ -337,6 +347,12 @@ impl DaemonClient {
             Ok(ControlOutcome::Ready)
         )
     }
+}
+
+fn same_path(left: &Path, right: &Path) -> bool {
+    let canonical =
+        |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    canonical(left) == canonical(right)
 }
 
 #[derive(Clone)]
@@ -445,27 +461,20 @@ mod tests {
     #[test]
     fn absent_record_is_daemon_unavailable() {
         let home = tempfile::tempdir().unwrap();
-        let record = home.path().join("daemon.json");
-        let client = DaemonClient::with_record_path(Some(record));
+        let workspace = Workspace::under_root(home.path());
+        let client = DaemonClient::for_workspace(&workspace);
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let error = runtime.block_on(client.require_status()).unwrap_err();
         assert_eq!(crate::error::exit_code(&error), ExitCode::DaemonUnavailable);
     }
 
-    fn client_without_record(record: PathBuf, control_socket: PathBuf) -> DaemonClient {
-        DaemonClient {
-            record_path: Some(record),
-            control_socket: Some(control_socket),
-            cleaned_stale: AtomicBool::new(false),
-        }
-    }
-
     #[test]
     fn resolve_falls_back_to_control_socket_when_record_is_absent() {
         let home = tempfile::tempdir().unwrap();
-        let socket = home.path().join("control.sock");
+        let workspace = Workspace::under_root(home.path());
+        let socket = workspace.daemon().control_socket();
         std::fs::write(&socket, b"").unwrap();
-        let client = client_without_record(home.path().join("daemon.json"), socket.clone());
+        let client = DaemonClient::for_workspace(&workspace);
         match client.resolve().unwrap() {
             Target::Unix {
                 socket: dialed,
@@ -481,21 +490,20 @@ mod tests {
     #[test]
     fn resolve_is_absent_without_record_or_control_socket() {
         let home = tempfile::tempdir().unwrap();
-        let client = client_without_record(
-            home.path().join("daemon.json"),
-            home.path().join("control.sock"),
-        );
+        let workspace = Workspace::under_root(home.path());
+        let client = DaemonClient::for_workspace(&workspace);
         assert!(matches!(client.resolve().unwrap(), Target::Absent));
     }
 
     #[test]
     fn corrupt_daemon_record_falls_back_to_fixed_control_socket() {
         let home = tempfile::tempdir().unwrap();
-        let record = home.path().join("daemon.json");
-        let socket = home.path().join("control.sock");
+        let workspace = Workspace::under_root(home.path());
+        let record = workspace.daemon().record_file();
+        let socket = workspace.daemon().control_socket();
         std::fs::write(&record, b"not json").unwrap();
         std::fs::write(&socket, b"reserved").unwrap();
-        let client = client_without_record(record, socket.clone());
+        let client = DaemonClient::for_workspace(&workspace);
         assert!(matches!(
             client.resolve().unwrap(),
             Target::Unix { socket: dialed, instance: None } if dialed == socket
@@ -505,9 +513,10 @@ mod tests {
     #[test]
     fn corrupt_daemon_record_without_socket_is_cleaned_and_absent() {
         let home = tempfile::tempdir().unwrap();
-        let record = home.path().join("daemon.json");
+        let workspace = Workspace::under_root(home.path());
+        let record = workspace.daemon().record_file();
         std::fs::write(&record, b"not json").unwrap();
-        let client = client_without_record(record.clone(), home.path().join("control.sock"));
+        let client = DaemonClient::for_workspace(&workspace);
         assert!(matches!(client.resolve().unwrap(), Target::Absent));
         assert!(!record.exists());
     }
@@ -515,11 +524,12 @@ mod tests {
     #[test]
     fn unreadable_daemon_record_is_not_treated_as_stale() {
         let home = tempfile::tempdir().unwrap();
-        let record = home.path().join("daemon.json");
+        let workspace = Workspace::under_root(home.path());
+        let record = workspace.daemon().record_file();
         std::fs::create_dir(&record).unwrap();
-        let socket = home.path().join("control.sock");
+        let socket = workspace.daemon().control_socket();
         std::fs::write(&socket, b"reserved").unwrap();
-        let client = client_without_record(record.clone(), socket);
+        let client = DaemonClient::for_workspace(&workspace);
         let error = client.resolve().unwrap_err();
         assert!(format!("{error:#}").contains("read daemon record"));
         assert!(record.exists());
