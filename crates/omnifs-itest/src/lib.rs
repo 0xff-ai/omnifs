@@ -71,7 +71,6 @@ impl RuntimeHarness {
         let config_dir = tempdir()?;
         let providers_dir = tempdir()?;
         let mounts_dir = tempdir()?;
-        let paths = omnifs_workspace::layout::WorkspaceLayout::under_root(config_dir.path());
         let (handle, owned_runtime) = if let Ok(handle) = tokio::runtime::Handle::try_current() {
             (handle, None)
         } else {
@@ -124,9 +123,9 @@ impl RuntimeHarness {
         })?);
         let context = HostContext::new(
             cache_dir.path(),
-            &paths.config_dir,
+            config_dir.path(),
             providers_dir.path(),
-            &paths.credentials_file,
+            &config_dir.path().join("credentials.json"),
         )
         .with_wasm_cache_dir(omnifs_engine::test_support::wasm_cache_dir());
         let mut desired = omnifs_workspace::mounts::Registry::load(mounts_dir.path())

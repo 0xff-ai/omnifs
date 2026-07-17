@@ -560,7 +560,6 @@ mod tests {
         let cache_dir = tempfile::tempdir().expect("temp cache dir");
         let mounts_dir = tempfile::tempdir().expect("temp mounts dir");
         let providers_dir = tempfile::tempdir().expect("temp providers dir");
-        let paths = omnifs_workspace::layout::WorkspaceLayout::under_root(config_dir.path());
 
         let base_wasm = test_provider_wasm_path();
         assert!(
@@ -590,9 +589,9 @@ mod tests {
         let result = MountTable::load_online(
             HostContext::new(
                 cache_dir.path(),
-                &paths.config_dir,
+                config_dir.path(),
                 providers_dir.path(),
-                &paths.credentials_file,
+                &config_dir.path().join("credentials.json"),
             )
             .with_wasm_cache_dir(crate::test_support::wasm_cache_dir()),
             &Arc::new(GitCloner::new(cache_dir.path().join("clones")).unwrap()),

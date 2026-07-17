@@ -8,6 +8,7 @@ use omnifs_api::{
     MountInfo,
 };
 use omnifs_engine::{Inspector, MountTable};
+use omnifs_workspace::DaemonState;
 use omnifs_workspace::attach::{Store as AttachStore, Target as AttachTarget};
 use omnifs_workspace::daemon_record::DaemonRecord;
 use omnifs_workspace::mounts::{Registry, Revision};
@@ -84,15 +85,15 @@ fn attach_target(target: &ListenerTarget) -> anyhow::Result<AttachTarget> {
 }
 
 pub(crate) struct DaemonRecordStore {
-    path: PathBuf,
+    daemon: DaemonState,
     record: Mutex<Option<DaemonRecord>>,
     published: AtomicBool,
 }
 
 impl DaemonRecordStore {
-    pub(crate) fn new(path: PathBuf, record: DaemonRecord) -> Arc<Self> {
+    pub(crate) fn new(daemon: DaemonState, record: DaemonRecord) -> Arc<Self> {
         Arc::new(Self {
-            path,
+            daemon,
             record: Mutex::new(Some(record)),
             published: AtomicBool::new(false),
         })
@@ -106,7 +107,7 @@ impl DaemonRecordStore {
         let Some(record) = guard.as_ref() else {
             anyhow::bail!("daemon record has already been removed");
         };
-        record.write(&self.path)?;
+        self.daemon.write_record(record)?;
         self.published.store(true, Ordering::Release);
         Ok(())
     }
@@ -118,8 +119,12 @@ impl DaemonRecordStore {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let published = self.published.swap(false, Ordering::AcqRel);
         guard.take();
-        if published && let Err(error) = DaemonRecord::remove(&self.path) {
-            warn!(%error, path = %self.path.display(), "failed to remove daemon record");
+        if published && let Err(error) = self.daemon.remove_record() {
+            warn!(
+                %error,
+                path = %self.daemon.record_file().display(),
+                "failed to remove daemon record"
+            );
         }
     }
 }
@@ -908,7 +913,7 @@ mod tests {
             .unwrap(),
         );
         let daemon_record =
-            super::DaemonRecordStore::new(context.daemon_record_file(), context.daemon_record());
+            super::DaemonRecordStore::new(context.daemon_state().clone(), context.daemon_record());
         let attach_store = Arc::new(context.attach_store().unwrap());
         Arc::new(super::Daemon::new(
             context,

@@ -21,7 +21,7 @@ use crate::auth::{AuthReadiness, MountAuth};
 use crate::commands::frontend::GUEST_MOUNT;
 use crate::commands::frontend::{FrontendFilesystem as Filesystem, FrontendRuntime as Runtime};
 use crate::provider_warmup::WarmupStatus;
-use omnifs_workspace::{FrontendFiles, Workspace};
+use omnifs_workspace::Workspace;
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct Inventory {
@@ -443,7 +443,7 @@ impl Inventory {
             online_mount_statuses(registry, catalog, workspace.credentials(), daemon_status)
         };
         let mount_count = mounts.len();
-        let discovered = discovered_frontends(frontend, mount_count)?;
+        let discovered = discovered_frontends(frontend, mount_count, &frontend.libkrun_root())?;
         let frontends = frontend_statuses(daemon_status, mount_count, discovered);
         let warmup = crate::provider_warmup::ProviderWarmup::new(
             workspace.warmup().clone(),
@@ -465,7 +465,7 @@ impl Inventory {
         let mut daemon = DaemonObservation::from(daemon_probe);
         daemon.runtime = runtime;
         Ok(Self {
-            home: frontend.home_for_output(),
+            home: workspace.identity().output_home(),
             mount_revision,
             applied_revision,
             daemon,
@@ -570,11 +570,12 @@ pub(crate) enum Verdict {
 /// Discover runner-owned frontend observations. A daemon-down inventory keeps
 /// these rows because runner and attachment lifetimes are independent.
 fn discovered_frontends(
-    frontend: &FrontendFiles,
+    frontend: &omnifs_workspace::FrontendState,
     mount_count: usize,
+    libkrun_root: &Path,
 ) -> Result<Vec<FrontendStatus>> {
     let mut rows = Vec::new();
-    for path in MountState::files_under(&frontend.frontend_state_root())? {
+    for path in MountState::files_under(frontend.state_root())? {
         match MountState::read_file(&path) {
             Ok(state) => {
                 let filesystem = match state.kind {
@@ -619,7 +620,7 @@ fn discovered_frontends(
     }
 
     #[cfg(target_os = "macos")]
-    match crate::libkrun_runner::LibkrunRunner::new(frontend.libkrun_root()).is_running() {
+    match crate::libkrun_runner::LibkrunRunner::new(libkrun_root.to_path_buf()).is_running() {
         Ok(Some(running)) => rows.push(FrontendStatus {
             filesystem: Filesystem::Fuse,
             runtime: Runtime::Libkrun,
@@ -1281,7 +1282,8 @@ mod tests {
             &mount_point,
         );
         let _guard = StateFile::write_fuse(&mount_point, &state_dir).unwrap();
-        let fallback = discovered_frontends(workspace.frontend(), 1).unwrap();
+        let frontend = workspace.frontend();
+        let fallback = discovered_frontends(frontend, 1, &frontend.libkrun_root()).unwrap();
         let rows = frontend_statuses(None, 1, fallback);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].state, FrontendState::Running);

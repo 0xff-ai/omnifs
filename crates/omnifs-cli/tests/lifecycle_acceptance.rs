@@ -33,7 +33,7 @@ use common::{
 use omnifs_api::{ControlOperation, ControlOutcome};
 use omnifs_itest::live::control_request;
 use omnifs_mtab::MountState;
-use omnifs_workspace::layout::WorkspaceLayout;
+use omnifs_workspace::Workspace;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -210,7 +210,9 @@ impl Fixture {
 
     fn host_frontend_states(&self) -> Vec<MountState> {
         MountState::files_under(
-            &WorkspaceLayout::under_root(self.home_path()).frontend_state_root(),
+            Workspace::under_root(self.home_path())
+                .frontend()
+                .state_root(),
         )
         .expect("read frontend state files")
         .into_iter()

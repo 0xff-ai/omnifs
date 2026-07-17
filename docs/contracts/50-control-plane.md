@@ -4,10 +4,11 @@ Status: current-contract
 Owns: CLI/daemon split, typed local control protocol, mount desired state, frontend runtimes, workspace layout, and dev home.
 
 `omnifs_workspace::Workspace` is the central broker for one workspace. It does
-not expose `WorkspaceLayout`, the home root, or generic directory getters. CLI
-and daemon code request typed component owners, and a concrete path may leave a
-component only at the immediate filesystem, process, protocol, engine,
-test-fixture, or final-output boundary that consumes it.
+not expose `WorkspaceLayout`, the home root, generic directory getters, or
+path-transfer objects. CLI and daemon code request behavior-owning components,
+and a concrete path may leave a component only at the immediate filesystem,
+process, protocol, engine, test-fixture, or final-output boundary that consumes
+it.
 
 ## Read when
 

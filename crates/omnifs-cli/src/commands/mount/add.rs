@@ -334,8 +334,7 @@ mod tests {
     #[test]
     fn add_dns_writes_snapshot_spec() {
         let dir = tempfile::tempdir().unwrap();
-        let paths = omnifs_workspace::layout::WorkspaceLayout::under_root(dir.path());
-        let workspace = Workspace::under_root(&paths.config_dir);
+        let workspace = Workspace::under_root(dir.path());
         let args = AddArgs {
             provider: Some("dns".to_string()),
             as_name: None,
@@ -360,7 +359,7 @@ mod tests {
             ))
             .unwrap();
 
-        let spec = std::fs::read_to_string(paths.mounts_dir.join("dns.json")).unwrap();
+        let spec = std::fs::read_to_string(dir.path().join("mounts/dns.json")).unwrap();
         // The provider content id hashes the built wasm, which differs across
         // build environments; normalize it before the byte comparison.
         let parsed: serde_json::Value = serde_json::from_str(&spec).unwrap();

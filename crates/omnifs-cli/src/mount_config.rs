@@ -115,8 +115,7 @@ mod tests {
     }
 
     fn test_catalog(root: &std::path::Path) -> Catalog {
-        let paths = omnifs_workspace::layout::WorkspaceLayout::under_root(root);
-        Catalog::open(paths.providers_dir)
+        Catalog::open(root.join("providers"))
     }
 
     /// Validate `config`'s host-managed credential. Authority belongs to daemon
@@ -133,9 +132,9 @@ mod tests {
     #[test]
     fn preflight_validates_host_managed_static_token() {
         let tmp = tempfile::tempdir().unwrap();
-        let paths = omnifs_workspace::layout::WorkspaceLayout::under_root(tmp.path());
-        std::fs::create_dir_all(&paths.providers_dir).unwrap();
-        let reference = install_fixture_provider(&paths.providers_dir, "github");
+        let providers_dir = tmp.path().join("providers");
+        std::fs::create_dir_all(&providers_dir).unwrap();
+        let reference = install_fixture_provider(&providers_dir, "github");
 
         let store = MemoryStore::new();
         let key = CredentialId::new("github", "pat", "default").unwrap();
@@ -157,9 +156,9 @@ mod tests {
     #[test]
     fn preflight_validates_oauth_mount_configs() {
         let tmp = tempfile::tempdir().unwrap();
-        let paths = omnifs_workspace::layout::WorkspaceLayout::under_root(tmp.path());
-        std::fs::create_dir_all(&paths.providers_dir).unwrap();
-        let reference = install_fixture_provider(&paths.providers_dir, "github");
+        let providers_dir = tmp.path().join("providers");
+        std::fs::create_dir_all(&providers_dir).unwrap();
+        let reference = install_fixture_provider(&providers_dir, "github");
 
         let store = MemoryStore::new();
         let key = CredentialId::new("github", "device", "default").unwrap();
@@ -188,9 +187,9 @@ mod tests {
     #[test]
     fn preflight_errors_when_credential_missing() {
         let tmp = tempfile::tempdir().unwrap();
-        let paths = omnifs_workspace::layout::WorkspaceLayout::under_root(tmp.path());
-        std::fs::create_dir_all(&paths.providers_dir).unwrap();
-        let reference = install_fixture_provider(&paths.providers_dir, "github");
+        let providers_dir = tmp.path().join("providers");
+        std::fs::create_dir_all(&providers_dir).unwrap();
+        let reference = install_fixture_provider(&providers_dir, "github");
 
         let store = MemoryStore::new();
         let config = MountConfig {

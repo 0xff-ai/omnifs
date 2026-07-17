@@ -52,8 +52,8 @@ impl ShellArgs {
 
         match self.runtime {
             FrontendRuntime::Docker => {
-                let container_name =
-                    frontend_container_name(workspace.frontend().workspace_label())?;
+                let identity = workspace.identity();
+                let container_name = frontend_container_name(identity.container_label())?;
                 self.exec_in_container(&container_name, output)
             },
             FrontendRuntime::Libkrun => self.exec_in_libkrun_guest(workspace.frontend()),
@@ -75,9 +75,9 @@ impl ShellArgs {
     }
 
     /// Attach to the running libkrun guest over ssh-over-vsock.
-    fn exec_in_libkrun_guest(&self, paths: &omnifs_workspace::FrontendFiles) -> Result<()> {
+    fn exec_in_libkrun_guest(&self, frontend: &omnifs_workspace::FrontendState) -> Result<()> {
         libkrun_runner::ensure_socat_available()?;
-        let runner = crate::libkrun_runner::LibkrunRunner::new(paths.libkrun_root());
+        let runner = crate::libkrun_runner::LibkrunRunner::new(frontend.libkrun_root());
         let cmd = runner.shell_command(self.shell.as_deref(), &self.command);
         spawn_and_propagate(cmd, "open shell in the libkrun guest".to_string())
     }

@@ -64,7 +64,6 @@ struct FuseHarness {
 fn build_harness() -> FuseHarness {
     let cache_dir = tempfile::tempdir().expect("cache dir");
     let config_dir = tempfile::tempdir().expect("config dir");
-    let paths = omnifs_workspace::layout::WorkspaceLayout::under_root(config_dir.path());
     let providers_dir = tempfile::tempdir().expect("providers dir");
 
     let test_src = wasm_artifact_path("test_provider.wasm");
@@ -99,9 +98,9 @@ fn build_harness() -> FuseHarness {
         MountTable::load_online(
             HostContext::new(
                 cache_dir.path(),
-                &paths.config_dir,
+                config_dir.path(),
                 providers_dir.path(),
-                &paths.credentials_file,
+                &config_dir.path().join("credentials.json"),
             ),
             &cloner,
             &desired,

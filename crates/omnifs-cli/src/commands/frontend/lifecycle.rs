@@ -8,7 +8,7 @@ use anyhow::{Context as _, Result, bail, ensure};
 use clap::{Args, ValueEnum};
 use omnifs_mtab::{MountKind, MountState, StateError};
 use omnifs_workspace::daemon_record::FrontendKind;
-use omnifs_workspace::layout::resolve_mount_point;
+use omnifs_workspace::resolve_mount_point;
 use serde::{Deserialize, Serialize};
 
 use crate::commands::frontend::GUEST_MOUNT;
@@ -626,7 +626,8 @@ async fn runner_running(workspace: &Workspace, id: &FrontendId, output: Output) 
         FrontendRuntime::Docker => {
             let config = workspace.config()?;
             let image = resolve_frontend_image(None, &config)?;
-            let name = frontend_container_name(workspace.frontend().workspace_label())?;
+            let identity = workspace.identity();
+            let name = frontend_container_name(identity.container_label())?;
             let target = DockerTarget::new(name.as_str().to_owned(), image.as_str().to_owned())?;
             Ok(
                 DockerRunner::new(DockerClient::connect_for(&target, output)?)
@@ -651,7 +652,6 @@ async fn launch(
         FrontendRuntime::Host => {
             HostRunner::new(
                 workspace.frontend(),
-                workspace.daemon(),
                 id.location()
                     .context("host frontend has no location")?
                     .to_path_buf(),
@@ -681,7 +681,8 @@ async fn launch(
 async fn launch_docker(workspace: &Workspace, mount: Option<&str>, output: Output) -> Result<()> {
     let config = workspace.config()?;
     let image = resolve_frontend_image(None, &config)?;
-    let name = frontend_container_name(workspace.frontend().workspace_label())?;
+    let identity = workspace.identity();
+    let name = frontend_container_name(identity.container_label())?;
     let target = DockerTarget::new(name.as_str().to_owned(), image.as_str().to_owned())?;
     let runtime = DockerClient::connect_ready(&target, "omnifs frontend enable", output).await?;
     #[cfg(target_os = "linux")]
@@ -704,12 +705,9 @@ async fn launch_docker(workspace: &Workspace, mount: Option<&str>, output: Outpu
         addr.ip()
     );
     let runner = DockerRunner::new(runtime);
+    let identity = workspace.identity();
     runner
-        .launch(
-            workspace.frontend().docker_home(),
-            addr.port(),
-            &attach.token,
-        )
+        .launch(identity.container_label(), addr.port(), &attach.token)
         .await?;
     wait_for_mount(&runner, mount, DOCKER_TIMEOUT).await
 }
@@ -724,8 +722,9 @@ async fn launch_libkrun(
     let attach = crate::client::DaemonClient::for_workspace(workspace)
         .frontend_attach_target_vsock()
         .await?;
-    let runner = LibkrunRunner::new(workspace.frontend().libkrun_root());
-    let guest_image_cache = workspace.frontend().guest_image_cache();
+    let frontend = workspace.frontend();
+    let guest_image_cache = frontend.guest_image_cache();
+    let runner = LibkrunRunner::new(frontend.libkrun_root());
     let attached = async {
         ensure!(
             wait_for_attachment(workspace, id).await,
@@ -752,14 +751,15 @@ async fn launch_libkrun(
 async fn stop(workspace: &Workspace, id: &FrontendId, output: Output) -> Result<()> {
     match id.runtime() {
         FrontendRuntime::Host => crate::host_teardown::teardown_local_frontend(
-            &workspace.frontend().frontend_state_root(),
+            workspace.frontend().state_root(),
             id.location().context("host frontend has no location")?,
             id.filesystem() == FrontendFilesystem::Nfs,
         ),
         FrontendRuntime::Docker => {
             let config = workspace.config()?;
             let image = resolve_frontend_image(None, &config)?;
-            let name = frontend_container_name(workspace.frontend().workspace_label())?;
+            let identity = workspace.identity();
+            let name = frontend_container_name(identity.container_label())?;
             let target = DockerTarget::new(name.as_str().to_owned(), image.as_str().to_owned())?;
             DockerRunner::new(DockerClient::connect_for(&target, output)?)
                 .tear_down()

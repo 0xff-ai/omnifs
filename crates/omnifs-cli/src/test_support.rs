@@ -1,11 +1,8 @@
-//! Shared test helpers for wasm fixture construction and path layout.
+//! Shared test helpers for wasm fixture construction.
 
-/// Build a workspace layout rooted at `root` with the standard subdirectory layout
-/// our test fixtures use. Directories are not created; callers that need
-/// `mounts_dir` or `providers_dir` to exist should mkdir them explicitly.
 #[cfg(test)]
-pub(crate) fn fixture_paths(root: &std::path::Path) -> omnifs_workspace::layout::WorkspaceLayout {
-    omnifs_workspace::layout::WorkspaceLayout::under_root(root)
+pub(crate) fn fixture_workspace(root: &std::path::Path) -> omnifs_workspace::Workspace {
+    omnifs_workspace::Workspace::under_root(root)
 }
 
 /// Build a mount `Spec` from a JSON `body` (no `provider` field) plus an

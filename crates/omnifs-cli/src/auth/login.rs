@@ -355,16 +355,17 @@ fn format_scopes(scopes: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{fixture_paths, install_fixture_provider, spec_with_reference};
+    use crate::test_support::{fixture_workspace, install_fixture_provider, spec_with_reference};
 
     #[test]
     fn planned_spec_constructs_oauth_without_reloading_workspace_mounts() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let paths = fixture_paths(tmp.path());
-        std::fs::create_dir_all(&paths.mounts_dir).unwrap();
-        std::fs::create_dir_all(&paths.providers_dir).unwrap();
-        let reference = install_fixture_provider(&paths.providers_dir, "planned-oauth");
-        let workspace = Workspace::under_root(&paths.config_dir);
+        let workspace = fixture_workspace(tmp.path());
+        let mounts_dir = tmp.path().join("mounts");
+        let providers_dir = tmp.path().join("providers");
+        std::fs::create_dir_all(&mounts_dir).unwrap();
+        std::fs::create_dir_all(&providers_dir).unwrap();
+        let reference = install_fixture_provider(&providers_dir, "planned-oauth");
 
         assert!(
             crate::mount_config::load_mounts(&workspace)

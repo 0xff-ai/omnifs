@@ -385,7 +385,7 @@ fn rm_with_options(
             "spec",
             format!(
                 "{} (already absent)",
-                omnifs_workspace::layout::display(&workspace.desired_state().spec_path(&name))
+                omnifs_workspace::display(&workspace.desired_state().spec_path(&name))
             ),
         ));
         output.plan(&plan);
@@ -478,7 +478,7 @@ fn mount_remove_plan(config_path: &Path) -> Plan {
     plan.push(Row::remove(
         "spec",
         "spec",
-        omnifs_workspace::layout::display(config_path).clone(),
+        omnifs_workspace::display(config_path).clone(),
     ));
     plan
 }
@@ -486,21 +486,19 @@ fn mount_remove_plan(config_path: &Path) -> Plan {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::fixture_paths as base_fixture_paths;
-    use omnifs_workspace::layout::WorkspaceLayout;
+    use crate::test_support::fixture_workspace as base_fixture_workspace;
     use tempfile::TempDir;
 
-    fn fixture_paths(root: &Path) -> WorkspaceLayout {
-        let paths = base_fixture_paths(root);
-        std::fs::create_dir_all(&paths.mounts_dir).unwrap();
-        paths
+    fn fixture_workspace(root: &Path) -> omnifs_workspace::Workspace {
+        let workspace = base_fixture_workspace(root);
+        std::fs::create_dir_all(root.join("mounts")).unwrap();
+        workspace
     }
 
     #[tokio::test]
     async fn rejects_invalid_mount_name() {
         let tmp = TempDir::new().unwrap();
-        let paths = fixture_paths(tmp.path());
-        let workspace = Workspace::under_root(&paths.config_dir);
+        let workspace = fixture_workspace(tmp.path());
         let err = rm(&workspace, "../leak", true).unwrap_err();
         assert!(format!("{err:#}").contains("invalid mount name"));
     }
@@ -508,10 +506,9 @@ mod tests {
     #[tokio::test]
     async fn removing_missing_valid_mount_is_a_noop_without_credentials() {
         let tmp = TempDir::new().unwrap();
-        let paths = fixture_paths(tmp.path());
-        let workspace = Workspace::under_root(&paths.config_dir);
+        let workspace = fixture_workspace(tmp.path());
         rm(&workspace, "missing", true).unwrap();
-        assert!(!paths.credentials_file.exists());
+        assert!(!tmp.path().join("credentials.json").exists());
     }
 
     #[test]

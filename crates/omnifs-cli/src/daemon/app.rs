@@ -90,9 +90,9 @@ pub(crate) async fn run(args: &DaemonArgs) -> anyhow::Result<()> {
         }
     }
 
-    let record_path = context.daemon_record_file();
     let daemon_record = context.daemon_record();
-    let daemon_record = server::DaemonRecordStore::new(record_path, daemon_record);
+    let daemon_record =
+        server::DaemonRecordStore::new(context.daemon_state().clone(), daemon_record);
     let attach_store = Arc::new(
         context
             .attach_store()

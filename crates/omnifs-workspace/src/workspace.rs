@@ -16,19 +16,20 @@ use serde::{Deserialize, Serialize};
 
 /// The central broker for one omnifs home.
 ///
-/// `Workspace` owns the persistent components under `OMNIFS_HOME`, not a
-/// bag of paths. It never exposes [`WorkspaceLayout`], the home root, or
-/// generic directory getters. Callers request a typed component owner and a
-/// concrete path can leave that owner only at the immediate filesystem,
-/// process, protocol, engine, test-fixture, or final-output boundary that
-/// consumes it.
+/// `Workspace` owns the persistent components under `OMNIFS_HOME`, not a bag
+/// of paths. It never exposes `WorkspaceLayout`, the home root, generic
+/// directory getters, or path-transfer objects. Callers request a
+/// behavior-owning component, and a concrete path can leave that component
+/// only at the immediate filesystem, process, protocol, engine, test-fixture,
+/// or final-output boundary that consumes it.
 pub struct Workspace {
     config_file: PathBuf,
     credentials: FileStore,
     catalog: Catalog,
     desired_state: DesiredState,
-    daemon: DaemonFiles,
-    frontend: FrontendFiles,
+    daemon: DaemonState,
+    frontend: FrontendState,
+    identity: WorkspaceIdentity,
     metrics: crate::metrics::Store,
     warmup: WarmupStore,
 }
@@ -52,13 +53,21 @@ impl Workspace {
         let mounts_dir = layout.mounts_dir.clone();
         let cache_dir = layout.cache_dir.clone();
         let config_dir = layout.config_dir.clone();
+        let credentials = FileStore::new(layout.credentials_file.clone());
+        let catalog = Catalog::open(layout.providers_dir.clone());
+        let daemon = DaemonState::new(&layout);
+        let frontend = FrontendState::new(&layout);
+        let identity = WorkspaceIdentity {
+            home: config_dir.clone(),
+        };
         Self {
-            config_file: layout.config_file.clone(),
-            credentials: FileStore::new(layout.credentials_file.clone()),
-            catalog: Catalog::open(layout.providers_dir.clone()),
+            config_file: layout.config_file,
+            credentials,
+            catalog,
             desired_state: DesiredState::new(mounts_dir, cache_dir.clone()),
-            daemon: DaemonFiles::new(layout),
-            frontend: FrontendFiles::new(config_dir.clone(), cache_dir.clone()),
+            daemon,
+            frontend,
+            identity,
             metrics: crate::metrics::Store::new(&config_dir),
             warmup: WarmupStore::new(config_dir, cache_dir),
         }
@@ -94,13 +103,19 @@ impl Workspace {
     }
 
     #[must_use]
-    pub fn daemon(&self) -> &DaemonFiles {
+    pub fn daemon(&self) -> &DaemonState {
         &self.daemon
     }
 
     #[must_use]
-    pub fn frontend(&self) -> &FrontendFiles {
+    pub fn frontend(&self) -> &FrontendState {
         &self.frontend
+    }
+
+    /// Workspace identity consumed by Docker naming and final output.
+    #[must_use]
+    pub fn identity(&self) -> &WorkspaceIdentity {
+        &self.identity
     }
 
     #[must_use]
@@ -114,7 +129,25 @@ impl Workspace {
     }
 }
 
-#[derive(Debug, Clone)]
+/// Workspace identity consumed only by Docker naming and final output.
+#[derive(Debug)]
+pub struct WorkspaceIdentity {
+    home: PathBuf,
+}
+
+impl WorkspaceIdentity {
+    #[must_use]
+    pub fn container_label(&self) -> &Path {
+        &self.home
+    }
+
+    #[must_use]
+    pub fn output_home(&self) -> PathBuf {
+        self.home.clone()
+    }
+}
+
+#[derive(Debug)]
 pub struct ConfigDiagnostic {
     pub exists: bool,
     pub display: String,
@@ -197,145 +230,154 @@ impl DesiredState {
     }
 }
 
-/// Daemon and control-plane persistent resources.
+/// Persistent daemon control and runtime state for one workspace.
+///
+/// This component owns daemon-record I/O and derives concrete paths only for
+/// the immediate socket, process, runtime, or diagnostic boundary that needs
+/// them. It is cloneable because the daemon keeps it across spawned tasks.
 #[derive(Debug, Clone)]
-pub struct DaemonFiles {
-    config_dir: PathBuf,
-    cache_dir: PathBuf,
-    providers_dir: PathBuf,
-    credentials_file: PathBuf,
-    record_file: PathBuf,
-    control_socket: PathBuf,
-    attach_targets_file: PathBuf,
-    local_attach_socket: PathBuf,
-    vsock_attach_socket: PathBuf,
-    mount_revisions_root: PathBuf,
+pub struct DaemonState {
+    home: PathBuf,
 }
 
-impl DaemonFiles {
-    fn new(layout: WorkspaceLayout) -> Self {
-        let record_file = layout.daemon_record_file();
-        let control_socket = layout.control_socket();
-        let attach_targets_file = layout.attach_targets_file();
-        let local_attach_socket = layout.local_attach_socket();
-        let vsock_attach_socket = layout.vsock_attach_socket();
-        let mount_revisions_root = layout.mount_revisions_root();
+impl DaemonState {
+    fn new(layout: &WorkspaceLayout) -> Self {
         Self {
-            config_dir: layout.config_dir,
-            cache_dir: layout.cache_dir,
-            providers_dir: layout.providers_dir,
-            credentials_file: layout.credentials_file,
-            record_file,
-            control_socket,
-            attach_targets_file,
-            local_attach_socket,
-            vsock_attach_socket,
-            mount_revisions_root,
+            home: layout.config_dir.clone(),
         }
+    }
+
+    pub fn record(&self) -> io::Result<Option<crate::daemon_record::DaemonRecord>> {
+        crate::daemon_record::DaemonRecord::read(&self.record_file())
+    }
+
+    pub fn write_record(&self, record: &crate::daemon_record::DaemonRecord) -> io::Result<()> {
+        record.write(&self.record_file())
+    }
+
+    pub fn remove_record(&self) -> io::Result<()> {
+        crate::daemon_record::DaemonRecord::remove(&self.record_file())
+    }
+
+    #[must_use]
+    pub fn record_file(&self) -> PathBuf {
+        self.home.join(crate::daemon_record::DAEMON_RECORD_FILE)
+    }
+
+    #[must_use]
+    pub fn control_socket(&self) -> PathBuf {
+        self.home.join(crate::daemon_record::CONTROL_SOCKET_FILE)
+    }
+
+    #[must_use]
+    pub fn log_file(&self) -> PathBuf {
+        self.cache_dir().join("daemon.log")
+    }
+
+    #[must_use]
+    pub fn clone_cache(&self) -> PathBuf {
+        self.cache_dir().join("clones")
+    }
+
+    #[must_use]
+    pub fn mount_snapshot(&self, revision: &Revision) -> PathBuf {
+        Repository::snapshot_path(&self.cache_dir(), revision)
     }
 
     #[must_use]
     pub fn config_dir(&self) -> &Path {
-        &self.config_dir
+        &self.home
     }
+
     #[must_use]
-    pub fn cache_dir(&self) -> &Path {
-        &self.cache_dir
+    pub fn cache_dir(&self) -> PathBuf {
+        self.home.join(layout::CACHE_SUBDIR)
     }
+
     #[must_use]
-    pub fn clone_cache(&self) -> PathBuf {
-        self.cache_dir.join("clones")
+    pub fn providers_dir(&self) -> PathBuf {
+        self.home.join(layout::PROVIDERS_SUBDIR)
     }
+
     #[must_use]
-    pub fn providers_dir(&self) -> &Path {
-        &self.providers_dir
-    }
-    #[must_use]
-    pub fn credentials_file(&self) -> &Path {
-        &self.credentials_file
-    }
-    #[must_use]
-    pub fn record_file(&self) -> &Path {
-        &self.record_file
-    }
-    #[must_use]
-    pub fn control_socket(&self) -> &Path {
-        &self.control_socket
-    }
-    pub fn attach_store(&self) -> io::Result<crate::attach::Store> {
-        crate::attach::Store::open(self.attach_targets_file.clone())
-    }
-    #[must_use]
-    pub fn local_attach_socket(&self) -> &Path {
-        &self.local_attach_socket
-    }
-    #[must_use]
-    pub fn vsock_attach_socket(&self) -> &Path {
-        &self.vsock_attach_socket
-    }
-    #[must_use]
-    pub fn mount_snapshot(&self, revision: &Revision) -> PathBuf {
-        self.mount_revisions_root.join(revision.as_str())
-    }
-    #[must_use]
-    pub fn log_file(&self) -> PathBuf {
-        self.cache_dir.join("daemon.log")
+    pub fn credentials_file(&self) -> PathBuf {
+        self.home.join(layout::CREDENTIALS_FILE)
     }
 }
 
-/// Persistent frontend state and process-boundary paths.
+/// Frontend lifecycle state and launch resources for one workspace.
+///
+/// The component owns durable attach authority, runner discovery leaves, and
+/// frontend-specific runtime locations. It derives a concrete path only when a
+/// frontend process, state scan, teardown, or output boundary consumes it.
 #[derive(Debug, Clone)]
-pub struct FrontendFiles {
+pub struct FrontendState {
     config_dir: PathBuf,
     cache_dir: PathBuf,
+    state_root: PathBuf,
 }
 
-impl FrontendFiles {
-    fn new(config_dir: PathBuf, cache_dir: PathBuf) -> Self {
+impl FrontendState {
+    fn new(layout: &WorkspaceLayout) -> Self {
         Self {
-            config_dir,
-            cache_dir,
+            config_dir: layout.config_dir.clone(),
+            cache_dir: layout.cache_dir.clone(),
+            state_root: layout.frontend_state_root(),
         }
     }
-    #[must_use]
-    pub fn workspace_label(&self) -> &Path {
-        &self.config_dir
+
+    pub fn attach_store(&self) -> io::Result<crate::attach::Store> {
+        crate::attach::Store::open(
+            self.config_dir
+                .join(layout::FRONTENDS_SUBDIR)
+                .join(layout::ATTACH_TARGETS_FILE),
+        )
     }
+
     #[must_use]
-    pub fn home_for_output(&self) -> PathBuf {
-        self.config_dir.clone()
-    }
-    #[must_use]
-    pub fn default_host_location(&self) -> PathBuf {
-        self.config_dir.join("omnifs")
-    }
-    #[must_use]
-    pub fn docker_home(&self) -> &Path {
-        &self.config_dir
-    }
-    #[must_use]
-    pub fn guest_image_cache(&self) -> PathBuf {
-        self.cache_dir.join("guest-images")
-    }
-    #[must_use]
-    pub fn libkrun_root(&self) -> PathBuf {
-        self.config_dir.join("libkrun")
-    }
-    #[must_use]
-    pub fn host_log(&self, protocol: &str) -> PathBuf {
-        self.cache_dir.join(format!("frontend-{protocol}.log"))
-    }
-    #[must_use]
-    pub fn frontend_state_root(&self) -> PathBuf {
-        self.cache_dir.join(layout::FRONTEND_STATE_SUBDIR)
+    pub fn state_root(&self) -> &Path {
+        &self.state_root
     }
     #[must_use]
     pub fn state_dir(&self, kind: crate::daemon_record::FrontendKind, mount: &Path) -> PathBuf {
         let normalized = mount.components().collect::<PathBuf>();
         let digest = blake3::hash(normalized.as_os_str().as_encoded_bytes()).to_hex();
-        self.frontend_state_root()
-            .join(kind.label())
-            .join(digest.as_str())
+        self.state_root.join(kind.label()).join(digest.as_str())
+    }
+
+    #[must_use]
+    pub fn local_attach_socket(&self) -> PathBuf {
+        self.config_dir
+            .join(layout::FRONTENDS_SUBDIR)
+            .join(layout::LOCAL_ATTACH_SOCKET_NAME)
+    }
+
+    #[must_use]
+    pub fn vsock_attach_socket(&self) -> PathBuf {
+        self.config_dir
+            .join(layout::FRONTENDS_SUBDIR)
+            .join(layout::VSOCK_ATTACH_SOCKET_NAME)
+    }
+
+    #[must_use]
+    pub fn host_log(&self, kind: crate::daemon_record::FrontendKind) -> PathBuf {
+        self.cache_dir
+            .join(format!("frontend-{}.log", kind.label()))
+    }
+
+    #[must_use]
+    pub fn libkrun_root(&self) -> PathBuf {
+        self.config_dir.join("libkrun")
+    }
+
+    #[must_use]
+    pub fn guest_image_cache(&self) -> PathBuf {
+        self.cache_dir.join("guest-images")
+    }
+
+    #[must_use]
+    pub fn default_host_location(&self) -> PathBuf {
+        self.config_dir.join("omnifs")
     }
 }
 
@@ -481,8 +523,26 @@ mod tests {
     #[test]
     fn relative_roots_are_absolute_at_the_workspace_boundary() {
         let workspace = Workspace::under_root(Path::new(".omnifs-test"));
-        assert!(workspace.frontend().workspace_label().is_absolute());
-        assert!(workspace.daemon().log_file().is_absolute());
+        assert!(workspace.identity().output_home().is_absolute());
+        assert!(workspace.daemon().cache_dir().is_absolute());
+    }
+
+    #[test]
+    fn daemon_state_resolves_the_requested_mount_snapshot() {
+        let workspace = Workspace::under_root(Path::new("/tmp/omnifs-test"));
+        let first = Revision::new("a".repeat(40)).unwrap();
+        let second = Revision::new("b".repeat(40)).unwrap();
+        let daemon = workspace.daemon();
+
+        assert_ne!(
+            daemon.mount_snapshot(&first),
+            daemon.mount_snapshot(&second)
+        );
+        assert!(
+            daemon
+                .mount_snapshot(&second)
+                .ends_with(Path::new("mount-revisions").join(second.as_str()))
+        );
     }
 
     #[test]

@@ -9,9 +9,8 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result};
 use omnifs_mtab::{MountKind, MountState};
+use omnifs_workspace::FrontendState;
 use omnifs_workspace::daemon_record::FrontendKind;
-
-use omnifs_workspace::{DaemonFiles, FrontendFiles};
 
 const MOUNT_TIMEOUT: Duration = Duration::from_secs(10);
 const MOUNT_POLL_INTERVAL: Duration = Duration::from_millis(200);
@@ -75,8 +74,9 @@ impl fmt::Display for LocalProtocol {
 }
 
 pub(crate) struct HostRunner {
-    paths: FrontendFiles,
+    state_dir: PathBuf,
     attach_socket: PathBuf,
+    log_file: PathBuf,
     mount_point: PathBuf,
     protocol: LocalProtocol,
     runner: PathBuf,
@@ -105,15 +105,15 @@ impl HostRunner {
     }
 
     pub(crate) fn new(
-        paths: &FrontendFiles,
-        daemon: &DaemonFiles,
+        frontend: &FrontendState,
         mount_point: PathBuf,
         protocol: LocalProtocol,
     ) -> Result<Self> {
         let runner = Self::resolve_runner(protocol)?;
         Ok(Self {
-            paths: paths.clone(),
-            attach_socket: daemon.local_attach_socket().to_path_buf(),
+            state_dir: frontend.state_dir(protocol.kind(), &mount_point),
+            attach_socket: frontend.local_attach_socket(),
+            log_file: frontend.host_log(protocol.kind()),
             mount_point,
             protocol,
             runner,
@@ -128,7 +128,7 @@ impl HostRunner {
         {
             self.validate_active_mount_recovery()?;
         }
-        let log_path = self.paths.host_log(self.protocol.subcommand());
+        let log_path = self.log_file.clone();
         let cache_dir = log_path
             .parent()
             .context("frontend log path has no cache directory")?;
@@ -171,15 +171,14 @@ impl HostRunner {
             .arg("--mount-point")
             .arg(&self.mount_point)
             .arg("--state-dir")
-            .arg(self.state_dir())
+            .arg(&self.state_dir)
             .arg("--attach")
             .arg(&self.attach_socket);
         command
     }
 
-    fn state_dir(&self) -> PathBuf {
-        self.paths
-            .state_dir(self.protocol.kind(), &self.mount_point)
+    fn state_dir(&self) -> &Path {
+        &self.state_dir
     }
 
     fn validate_active_mount_recovery(&self) -> Result<()> {
@@ -194,7 +193,7 @@ impl HostRunner {
     }
 
     fn persisted_nfs_addr(&self) -> Result<SocketAddr> {
-        MountState::read_unique(&self.state_dir())
+        MountState::read_unique(self.state_dir())
             .and_then(|state| state.nfs_addr_for(&self.mount_point))
             .with_context(|| {
                 format!(
@@ -205,7 +204,7 @@ impl HostRunner {
     }
 
     fn direct_child_owns_mount(&self, pid: u32) -> bool {
-        MountState::read_unique(&self.state_dir()).is_ok_and(|state| {
+        MountState::read_unique(self.state_dir()).is_ok_and(|state| {
             self.protocol.matches_child(&state, &self.mount_point, pid)
                 && crate::host_teardown::local_mount_is_owned(&state)
         })
@@ -299,10 +298,17 @@ impl HostRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn frontend_owner(root: &Path) -> FrontendFiles {
-        omnifs_workspace::Workspace::under_root(root)
-            .frontend()
-            .clone()
+
+    fn runner(root: &Path, mount: &Path, protocol: LocalProtocol) -> HostRunner {
+        let workspace = omnifs_workspace::Workspace::under_root(root);
+        HostRunner {
+            runner: PathBuf::from(THIN_RUNNER_NAME),
+            state_dir: workspace.frontend().state_dir(protocol.kind(), mount),
+            attach_socket: workspace.frontend().local_attach_socket(),
+            log_file: workspace.frontend().host_log(protocol.kind()),
+            mount_point: mount.to_path_buf(),
+            protocol,
+        }
     }
 
     #[test]
@@ -313,15 +319,12 @@ mod tests {
 
     #[test]
     fn runner_argv_names_local_mount_state_and_attach_paths() {
-        let paths = frontend_owner(Path::new("/home/user/.omnifs"));
         for protocol in [LocalProtocol::Fuse, LocalProtocol::Nfs] {
-            let runner = HostRunner {
-                runner: PathBuf::from(THIN_RUNNER_NAME),
-                paths: paths.clone(),
-                attach_socket: PathBuf::from("/home/user/.omnifs/frontends/local.sock"),
-                mount_point: PathBuf::from("/home/user/omnifs"),
+            let runner = runner(
+                Path::new("/home/user/.omnifs"),
+                Path::new("/home/user/omnifs"),
                 protocol,
-            };
+            );
             let command = runner.runner_command();
             let args = command
                 .get_args()
@@ -342,13 +345,15 @@ mod tests {
 
     #[test]
     fn both_protocols_use_one_thin_runner_with_distinct_subcommands() {
-        let paths = frontend_owner(Path::new("/home/user/.omnifs"));
-        let runner = |protocol: LocalProtocol| HostRunner {
-            runner: LocalProtocol::runner_beside(Path::new("/opt/omnifs/bin/omnifs")).unwrap(),
-            paths: paths.clone(),
-            attach_socket: PathBuf::from("/home/user/.omnifs/frontends/local.sock"),
-            mount_point: PathBuf::from("/home/user/omnifs"),
-            protocol,
+        let runner = |protocol: LocalProtocol| {
+            let mut runner = runner(
+                Path::new("/home/user/.omnifs"),
+                Path::new("/home/user/omnifs"),
+                protocol,
+            );
+            runner.runner =
+                LocalProtocol::runner_beside(Path::new("/opt/omnifs/bin/omnifs")).unwrap();
+            runner
         };
         let fuse = runner(LocalProtocol::Fuse).runner_command();
         let nfs = runner(LocalProtocol::Nfs).runner_command();
@@ -359,13 +364,12 @@ mod tests {
 
     #[test]
     fn state_dirs_are_stable_and_isolated_by_protocol_and_mount() {
-        let paths = frontend_owner(Path::new("/home/user/.omnifs"));
-        let runner = |protocol: LocalProtocol, mount_point: &'static str| HostRunner {
-            runner: PathBuf::from(THIN_RUNNER_NAME),
-            paths: paths.clone(),
-            attach_socket: PathBuf::from("/home/user/.omnifs/frontends/local.sock"),
-            mount_point: PathBuf::from(mount_point),
-            protocol,
+        let runner = |protocol: LocalProtocol, mount_point: &'static str| {
+            runner(
+                Path::new("/home/user/.omnifs"),
+                Path::new(mount_point),
+                protocol,
+            )
         };
         let first = runner(LocalProtocol::Nfs, "/mnt/first");
         let same = runner(LocalProtocol::Nfs, "/mnt/first");
@@ -377,29 +381,28 @@ mod tests {
         assert_eq!(first.state_dir(), normalized_same.state_dir());
         assert_ne!(first.state_dir(), other.state_dir());
         assert_ne!(first.state_dir(), fuse.state_dir());
-        assert!(first.state_dir().starts_with(paths.frontend_state_root()));
+        assert!(
+            first.state_dir().starts_with(
+                omnifs_workspace::Workspace::under_root(Path::new("/home/user/.omnifs"))
+                    .frontend()
+                    .state_root()
+            )
+        );
     }
 
     #[test]
     fn nfs_recovery_requires_unique_matching_nfs_state() {
         let tmp = tempfile::tempdir().unwrap();
-        let paths = frontend_owner(tmp.path());
-        let runner = HostRunner {
-            runner: PathBuf::from("omnifs-thin"),
-            paths,
-            attach_socket: tmp.path().join("frontends/local.sock"),
-            mount_point: PathBuf::from("/mnt/omnifs"),
-            protocol: LocalProtocol::Nfs,
-        };
+        let runner = runner(tmp.path(), Path::new("/mnt/omnifs"), LocalProtocol::Nfs);
         let addr: SocketAddr = "127.0.0.1:2049".parse().unwrap();
         let state =
-            omnifs_mtab::StateFile::write_nfs(&runner.mount_point, addr, &runner.state_dir())
+            omnifs_mtab::StateFile::write_nfs(&runner.mount_point, addr, runner.state_dir())
                 .unwrap();
         assert_eq!(runner.persisted_nfs_addr().unwrap(), addr);
 
         drop(state);
         let wrong =
-            omnifs_mtab::StateFile::write_fuse(&runner.mount_point, &runner.state_dir()).unwrap();
+            omnifs_mtab::StateFile::write_fuse(&runner.mount_point, runner.state_dir()).unwrap();
         assert!(runner.persisted_nfs_addr().is_err());
         drop(wrong);
     }

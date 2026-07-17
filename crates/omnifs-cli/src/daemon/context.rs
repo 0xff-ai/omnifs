@@ -10,7 +10,7 @@ use omnifs_api::{
 use omnifs_engine::HostContext;
 use omnifs_workspace::daemon_record::{DaemonRecord, Endpoint};
 use omnifs_workspace::mounts::Revision;
-use omnifs_workspace::{DaemonFiles, Workspace};
+use omnifs_workspace::{DaemonState, FrontendState, Workspace};
 use std::fmt::Write as _;
 use std::os::unix::fs::{FileTypeExt as _, PermissionsExt as _};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -18,7 +18,8 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug)]
 pub(crate) struct DaemonContext {
-    files: DaemonFiles,
+    daemon: DaemonState,
+    frontend: FrontendState,
     metrics: omnifs_workspace::metrics::Store,
     mount_revision: Revision,
     offline: bool,
@@ -41,7 +42,8 @@ impl DaemonContext {
     pub(crate) fn resolve(args: &DaemonArgs) -> anyhow::Result<Self> {
         let attach_tcp = args.attach_tcp;
         let workspace = Workspace::resolve()?;
-        let files = workspace.daemon().clone();
+        let daemon = workspace.daemon().clone();
+        let frontend = workspace.frontend().clone();
         let metrics = workspace.metrics().clone();
         let process = ProcessInfo::current();
         anyhow::ensure!(
@@ -51,7 +53,8 @@ impl DaemonContext {
         );
 
         Ok(Self {
-            files,
+            daemon,
+            frontend,
             metrics,
             mount_revision: args.mount_revision.clone(),
             offline: args.offline,
@@ -62,31 +65,31 @@ impl DaemonContext {
     }
 
     pub(crate) fn prepare_startup_dirs(&self, offline: bool) -> anyhow::Result<()> {
-        std::fs::create_dir_all(self.files.config_dir())?;
+        std::fs::create_dir_all(self.daemon.config_dir())?;
         if !offline {
-            std::fs::create_dir_all(self.files.cache_dir())?;
+            std::fs::create_dir_all(self.daemon.cache_dir())?;
         }
         Ok(())
     }
 
     pub(crate) fn control_socket(&self) -> PathBuf {
-        self.files.control_socket().to_path_buf()
+        self.daemon.control_socket()
     }
 
-    pub(crate) fn daemon_record_file(&self) -> PathBuf {
-        self.files.record_file().to_path_buf()
+    pub(crate) fn daemon_state(&self) -> &DaemonState {
+        &self.daemon
     }
 
     pub(crate) fn attach_store(&self) -> anyhow::Result<omnifs_workspace::attach::Store> {
-        Ok(self.files.attach_store()?)
+        Ok(self.frontend.attach_store()?)
     }
 
     pub(crate) fn vsock_attach_socket(&self) -> PathBuf {
-        self.files.vsock_attach_socket().to_path_buf()
+        self.frontend.vsock_attach_socket()
     }
 
     pub(crate) fn local_attach_socket(&self) -> PathBuf {
-        self.files.local_attach_socket().to_path_buf()
+        self.frontend.local_attach_socket()
     }
 
     /// Bind the host-native control socket at `<config_dir>/control.sock`.
@@ -99,15 +102,15 @@ impl DaemonContext {
     /// unlinked and rebound.
     pub(crate) fn bind_control_socket(&self) -> anyhow::Result<UnixListener> {
         let path = self.control_socket();
-        std::fs::create_dir_all(self.files.config_dir())?;
+        std::fs::create_dir_all(self.daemon.config_dir())?;
         std::fs::set_permissions(
-            self.files.config_dir(),
+            self.daemon.config_dir(),
             std::fs::Permissions::from_mode(0o700),
         )
         .with_context(|| {
             format!(
                 "restrict config dir {} to 0700",
-                self.files.config_dir().display()
+                self.daemon.config_dir().display()
             )
         })?;
 
@@ -178,19 +181,19 @@ impl DaemonContext {
 
     pub(crate) fn host_context(&self) -> HostContext {
         HostContext::new(
-            self.files.cache_dir(),
-            self.files.config_dir(),
-            self.files.providers_dir(),
-            self.files.credentials_file(),
+            self.daemon.cache_dir(),
+            self.daemon.config_dir(),
+            self.daemon.providers_dir(),
+            self.daemon.credentials_file(),
         )
     }
 
     pub(crate) fn clone_cache(&self) -> PathBuf {
-        self.files.clone_cache()
+        self.daemon.clone_cache()
     }
 
     pub(crate) fn mount_snapshot(&self, revision: &Revision) -> PathBuf {
-        self.files.mount_snapshot(revision)
+        self.daemon.mount_snapshot(revision)
     }
 
     pub(crate) fn metrics(&self) -> &omnifs_workspace::metrics::Store {
@@ -216,9 +219,9 @@ impl DaemonContext {
             pid: self.process.pid,
             instance_id: self.instance_id.clone(),
             executable: self.process.executable.clone(),
-            config_dir: self.files.config_dir().to_path_buf(),
-            cache_dir: self.files.cache_dir().to_path_buf(),
-            providers_dir: self.files.providers_dir().to_path_buf(),
+            config_dir: self.daemon.config_dir().to_path_buf(),
+            cache_dir: self.daemon.cache_dir(),
+            providers_dir: self.daemon.providers_dir(),
             frontends,
             mounts,
             offline: self.offline,
@@ -238,7 +241,7 @@ impl DaemonContext {
                 HealthState::Healthy,
                 format!(
                     "control socket serving on {}",
-                    self.files.control_socket().display()
+                    self.daemon.control_socket().display()
                 ),
             ),
             Self::frontend_health(attach_serving, frontends),
@@ -339,10 +342,12 @@ mod tests {
 
     fn context(root: &Path) -> DaemonContext {
         let workspace = Workspace::under_root(root);
+        let mount_revision = Revision::new("a".repeat(40)).unwrap();
         DaemonContext {
-            files: workspace.daemon().clone(),
+            daemon: workspace.daemon().clone(),
+            frontend: workspace.frontend().clone(),
             metrics: workspace.metrics().clone(),
-            mount_revision: Revision::new("a".repeat(40)).unwrap(),
+            mount_revision,
             offline: false,
             instance_id: "test-instance".to_owned(),
             attach_tcp: None,
@@ -357,7 +362,7 @@ mod tests {
     fn prepare_control_path_replaces_reserved_regular_file() {
         let temp = TempDir::new().unwrap();
         let daemon = context(temp.path());
-        std::fs::create_dir_all(daemon.files.config_dir()).unwrap();
+        std::fs::create_dir_all(daemon.daemon.config_dir()).unwrap();
         let path = daemon.control_socket();
         std::fs::write(&path, b"reserved").unwrap();
 
@@ -369,7 +374,7 @@ mod tests {
     fn prepare_control_path_unlinks_symlink_without_touching_target() {
         let temp = TempDir::new().unwrap();
         let daemon = context(temp.path());
-        std::fs::create_dir_all(daemon.files.config_dir()).unwrap();
+        std::fs::create_dir_all(daemon.daemon.config_dir()).unwrap();
         let target = temp.path().join("target");
         std::fs::write(&target, b"keep").unwrap();
         let path = daemon.control_socket();

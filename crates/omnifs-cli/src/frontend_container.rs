@@ -11,7 +11,7 @@ use std::path::Path;
 
 use bollard::models::{ContainerCreateBody, DeviceMapping, HostConfig, MountPoint};
 use omnifs_api::{OMNIFS_ATTACH_ADDR_ENV, OMNIFS_ATTACH_TOKEN_ENV};
-use omnifs_workspace::layout::OMNIFS_HOME_ENV;
+use omnifs_workspace::OMNIFS_HOME_ENV;
 
 use crate::docker::ContainerName;
 use crate::image::{BUILD_CHANNEL, BuildChannel, ImageRef};

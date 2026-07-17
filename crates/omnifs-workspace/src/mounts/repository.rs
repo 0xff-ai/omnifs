@@ -215,10 +215,7 @@ impl Repository {
         cache_dir: impl AsRef<Path>,
     ) -> Result<(PathBuf, Registry), RepositoryError> {
         self.verify_revision(revision)?;
-        let snapshot = cache_dir
-            .as_ref()
-            .join(crate::layout::MOUNT_REVISIONS_SUBDIR)
-            .join(revision.as_str());
+        let snapshot = Self::snapshot_path(cache_dir.as_ref(), revision);
         if !snapshot.exists() {
             let parent = snapshot.parent().unwrap_or(cache_dir.as_ref());
             fs::create_dir_all(parent).map_err(|source| RepositoryError::Io {
@@ -249,6 +246,12 @@ impl Repository {
         }
         let registry = self.validate_snapshot(revision, &snapshot)?;
         Ok((snapshot, registry))
+    }
+
+    pub(crate) fn snapshot_path(cache_dir: &Path, revision: &Revision) -> PathBuf {
+        cache_dir
+            .join(crate::layout::MOUNT_REVISIONS_SUBDIR)
+            .join(revision.as_str())
     }
 
     /// Return the revision recorded in `refs/omnifs/applied`, if present.

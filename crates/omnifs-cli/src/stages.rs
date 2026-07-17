@@ -422,7 +422,7 @@ fn persist_mount_spec(
     // `Wrote <path>` collapses to a single dim continuation, printed once.
     output.note(format!(
         "wrote {}",
-        omnifs_workspace::layout::display(&plan.mount_path)
+        omnifs_workspace::display(&plan.mount_path)
     ));
     Ok(())
 }
@@ -455,7 +455,7 @@ fn parse_json_flag<T: DeserializeOwned>(flag: &'static str, raw: &str) -> anyhow
 }
 
 fn browse_path(mount_name: &str) -> PathBuf {
-    omnifs_workspace::layout::resolve_mount_point()
+    omnifs_workspace::resolve_mount_point()
         .unwrap_or_else(|| PathBuf::from("~/omnifs"))
         .join(mount_name)
 }

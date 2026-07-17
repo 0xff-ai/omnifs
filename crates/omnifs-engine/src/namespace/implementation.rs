@@ -1514,12 +1514,11 @@ mod tests {
         }))
         .expect("test mount spec");
         desired.put(&spec).expect("write test mount");
-        let layout = omnifs_workspace::layout::WorkspaceLayout::under_root(&config);
         let context = HostContext::new(
             &cache,
-            &layout.config_dir,
+            &config,
             &providers,
-            &layout.credentials_file,
+            &config.join("credentials.json"),
         )
         .with_wasm_cache_dir(crate::test_support::wasm_cache_dir());
         Arc::new(

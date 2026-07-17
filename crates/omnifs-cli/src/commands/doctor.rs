@@ -54,7 +54,8 @@ impl DoctorArgs {
 fn resolve_frontend_target(workspace: &Workspace) -> anyhow::Result<DockerTarget> {
     let config = workspace.config()?;
     let image = resolve_frontend_image(None, &config)?;
-    let container_name = frontend_container_name(workspace.frontend().workspace_label())?;
+    let identity = workspace.identity();
+    let container_name = frontend_container_name(identity.container_label())?;
     DockerTarget::new(
         container_name.as_str().to_string(),
         image.as_str().to_string(),
@@ -354,7 +355,7 @@ impl Doctor<'_> {
     fn probe_ssh_agent(&self) -> ProbeResult {
         match std::env::var_os("SSH_AUTH_SOCK") {
             Some(sock) if Path::new(&sock).exists() => {
-                ProbeResult::Ok(omnifs_workspace::layout::display(Path::new(&sock)))
+                ProbeResult::Ok(omnifs_workspace::display(Path::new(&sock)))
             },
             Some(_) => ProbeResult::Warn("SSH_AUTH_SOCK set but socket not found".into()),
             None => ProbeResult::Warn("SSH_AUTH_SOCK unset; git callouts will fail".into()),
@@ -388,7 +389,7 @@ impl Doctor<'_> {
 #[cfg(test)]
 mod golden {
     use super::*;
-    use crate::test_support::fixture_paths;
+    use crate::test_support::fixture_workspace;
     use crate::ui::strip_ansi;
     use crate::ui::table::Report as TableReport;
     use tempfile::TempDir;
@@ -502,8 +503,7 @@ mod golden {
     }
 
     fn probe_credential_result(root: &std::path::Path) -> ProbeResult {
-        let layout = fixture_paths(root);
-        let workspace = Workspace::under_root(&layout.config_dir);
+        let workspace = fixture_workspace(root);
         let doctor = Doctor {
             workspace: &workspace,
             inventory: Inventory::test(
@@ -526,7 +526,7 @@ mod golden {
         );
 
         let valid = TempDir::new().unwrap();
-        let valid_path = fixture_paths(valid.path()).credentials_file;
+        let valid_path = valid.path().join("credentials.json");
         std::fs::create_dir_all(valid.path()).unwrap();
         std::fs::write(&valid_path, r#"{"version":1,"entries":{}}"#).unwrap();
         let result = probe_credential_result(valid.path());
@@ -535,7 +535,7 @@ mod golden {
         );
 
         let invalid = TempDir::new().unwrap();
-        let invalid_path = fixture_paths(invalid.path()).credentials_file;
+        let invalid_path = invalid.path().join("credentials.json");
         std::fs::write(&invalid_path, "not json").unwrap();
         let result = probe_credential_result(invalid.path());
         assert!(
@@ -543,7 +543,7 @@ mod golden {
         );
 
         let unsupported = TempDir::new().unwrap();
-        let unsupported_path = fixture_paths(unsupported.path()).credentials_file;
+        let unsupported_path = unsupported.path().join("credentials.json");
         std::fs::write(&unsupported_path, r#"{"version":99,"entries":{}}"#).unwrap();
         let result = probe_credential_result(unsupported.path());
         assert!(
@@ -551,7 +551,7 @@ mod golden {
         );
 
         let bad_key = TempDir::new().unwrap();
-        let bad_key_path = fixture_paths(bad_key.path()).credentials_file;
+        let bad_key_path = bad_key.path().join("credentials.json");
         std::fs::write(
             &bad_key_path,
             r#"{"version":1,"entries":{"not-a-credential-key":{"kind":"static-token","access_token":"x","refresh_token":null,"expires_at":null,"token_type":"Bearer","stored_at":"1970-01-01T00:00:00Z","last_validated":null,"scopes":[],"upstream_identity":null,"extras":{}}}}"#,
