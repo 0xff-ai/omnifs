@@ -1514,13 +1514,9 @@ mod tests {
         }))
         .expect("test mount spec");
         desired.put(&spec).expect("write test mount");
-        let context = HostContext::new(
-            &cache,
-            &config,
-            &providers,
-            &config.join("credentials.json"),
-        )
-        .with_wasm_cache_dir(crate::test_support::wasm_cache_dir());
+        let context =
+            HostContext::new(&cache, &config, &providers, config.join("credentials.json"))
+                .with_wasm_cache_dir(crate::test_support::wasm_cache_dir());
         Arc::new(
             MountTable::load_online_with_options(
                 context,

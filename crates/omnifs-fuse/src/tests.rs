@@ -100,7 +100,7 @@ fn build_harness() -> FuseHarness {
                 cache_dir.path(),
                 config_dir.path(),
                 providers_dir.path(),
-                &config_dir.path().join("credentials.json"),
+                config_dir.path().join("credentials.json"),
             ),
             &cloner,
             &desired,

@@ -591,7 +591,7 @@ mod tests {
                 cache_dir.path(),
                 config_dir.path(),
                 providers_dir.path(),
-                &config_dir.path().join("credentials.json"),
+                config_dir.path().join("credentials.json"),
             )
             .with_wasm_cache_dir(crate::test_support::wasm_cache_dir()),
             &Arc::new(GitCloner::new(cache_dir.path().join("clones")).unwrap()),
