@@ -2,13 +2,14 @@
 
 use std::collections::VecDeque;
 
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use omnifs_api::events::{InspectorLine, InspectorRecord, TraceId};
 
 use super::filter::{FilterMode, ViewFilter};
 use super::metrics::MountWindow;
 use super::source::SourceMessage;
-use super::trace_state::{MAX_RECENT_TRACES, MountPalette, Operation, TraceReducer};
-use super::tree::{ACTIVE_FOCUS_WINDOW_US, MountForest};
+use super::trace_state::{MAX_RECENT_TRACES, MountPalette, Operation, SessionStats, TraceReducer};
+use super::tree::{ACTIVE_FOCUS_WINDOW_US, MountForest, RenderRow};
 
 const EVENT_WINDOW: usize = 128;
 
@@ -18,6 +19,11 @@ pub enum ConnectionMode {
     Replay,
 }
 
+// Every bool here is an independent, orthogonal toggle (connection status,
+// view pause, idle-mount filter, quit signal) rather than encoded state
+// machine phases, so collapsing them into an enum would just reintroduce
+// the same four-way cross product under a different name.
+#[allow(clippy::struct_excessive_bools)]
 pub struct App {
     pub mode: ConnectionMode,
     pub container: String,
@@ -29,6 +35,9 @@ pub struct App {
     /// `None` in [`ConnectionMode::Replay`].
     pub addr: Option<String>,
     pub paused: bool,
+    /// Hides mounts (and their tree rows) with no activity in the current
+    /// metrics window. Toggled by the `i` binding.
+    pub hide_idle: bool,
     pub filter: ViewFilter,
     pub focus: PaneFocus,
     pub tree_cursor: Option<TreeCursor>,
@@ -36,8 +45,26 @@ pub struct App {
     pub quit: bool,
     pub dropped_events: u64,
     pub events_per_sec: f64,
+    /// A real-ish path to teach in the empty state, e.g. `cat <this>/...`.
+    /// Resolved once at startup from local mount specs (see
+    /// `commands/inspect.rs`); never a daemon round trip.
+    pub teaching_path: String,
+    /// The live, ever-advancing reducer. `apply_record` always writes here,
+    /// paused or not, so pausing the view can never drop data.
     traces: TraceReducer,
+    /// Snapshot of `traces` taken the moment the user paused, plus the count
+    /// of records folded into `traces` since. Rendering and read-only
+    /// navigation go through [`App::active`]/[`App::view_now_mono`], which
+    /// prefer this snapshot while it's set; resuming drops it so the view
+    /// jumps straight to the caught-up live state.
+    frozen: Option<FrozenView>,
     event_times: VecDeque<u64>,
+}
+
+struct FrozenView {
+    traces: TraceReducer,
+    now_mono: u64,
+    buffered: u64,
 }
 
 /// Which pane has keyboard focus. Tab cycles; arrow keys dispatch
@@ -70,7 +97,7 @@ pub struct TreeCursor {
 impl TreeCursor {
     /// Locate this cursor in `rows`; if absent, fall back to its deepest
     /// visible ancestor, then the mount root, then row zero.
-    fn locate_or_nearest_ancestor(&self, rows: &[super::tree::RenderRow]) -> usize {
+    fn locate_or_nearest_ancestor(&self, rows: &[RenderRow]) -> usize {
         if let Some(index) = rows
             .iter()
             .position(|row| row.mount == self.mount && row.path == self.path)
@@ -94,7 +121,12 @@ impl TreeCursor {
 }
 
 impl App {
-    pub fn new(mode: ConnectionMode, container: impl Into<String>, addr: Option<String>) -> Self {
+    pub fn new(
+        mode: ConnectionMode,
+        container: impl Into<String>,
+        addr: Option<String>,
+        teaching_path: impl Into<String>,
+    ) -> Self {
         Self {
             mode,
             container: container.into(),
@@ -104,6 +136,7 @@ impl App {
             connected: false,
             addr,
             paused: false,
+            hide_idle: false,
             filter: ViewFilter::default(),
             focus: PaneFocus::default(),
             tree_cursor: None,
@@ -111,61 +144,150 @@ impl App {
             quit: false,
             dropped_events: 0,
             events_per_sec: 0.0,
+            teaching_path: teaching_path.into(),
             traces: TraceReducer::default(),
+            frozen: None,
             event_times: VecDeque::new(),
         }
     }
 
-    pub fn forest(&self) -> &MountForest {
-        &self.traces.forest
+    /// The reducer state to render and navigate: the live reducer normally,
+    /// or the snapshot frozen at pause time while `paused`.
+    fn active(&self) -> &TraceReducer {
+        self.frozen.as_ref().map_or(&self.traces, |f| &f.traces)
     }
 
-    pub fn forest_mut(&mut self) -> &mut MountForest {
-        &mut self.traces.forest
+    /// Mutable counterpart of [`App::active`], for user-driven navigation
+    /// (selection, collapse) that should feel live even while paused. Takes
+    /// the two fields directly rather than being a `&mut self` method so
+    /// callers can still borrow `self.filter` in the same expression.
+    fn active_mut<'a>(
+        traces: &'a mut TraceReducer,
+        frozen: &'a mut Option<FrozenView>,
+    ) -> &'a mut TraceReducer {
+        frozen.as_mut().map_or(traces, |f| &mut f.traces)
+    }
+
+    /// The `now_mono` to render against: frozen at pause time so active-focus
+    /// windows and sparklines don't visibly age while the screen is frozen.
+    pub fn view_now_mono(&self) -> u64 {
+        self.frozen.as_ref().map_or(self.now_mono, |f| f.now_mono)
+    }
+
+    /// Records folded into the live reducer since the user paused. Zero
+    /// while not paused.
+    pub fn buffered_since_pause(&self) -> u64 {
+        self.frozen.as_ref().map_or(0, |f| f.buffered)
+    }
+
+    fn toggle_pause(&mut self) {
+        if self.paused {
+            // Resume: drop the snapshot so the very next frame renders
+            // everything that accrued while paused.
+            self.paused = false;
+            self.frozen = None;
+        } else {
+            self.paused = true;
+            self.frozen = Some(FrozenView {
+                traces: self.traces.clone(),
+                now_mono: self.now_mono,
+                buffered: 0,
+            });
+        }
+    }
+
+    pub fn forest(&self) -> &MountForest {
+        &self.active().forest
+    }
+
+    fn forest_mut(&mut self) -> &mut MountForest {
+        &mut Self::active_mut(&mut self.traces, &mut self.frozen).forest
     }
 
     pub fn palette(&self) -> &MountPalette {
-        &self.traces.palette
+        &self.active().palette
     }
 
     pub fn selected_trace(&self) -> Option<TraceId> {
-        self.traces.selected()
+        self.active().selected()
     }
 
     pub fn mount_window(&self, mount: &str) -> Option<&MountWindow> {
-        self.traces.mount_window(mount)
+        self.active().mount_window(mount)
+    }
+
+    /// True when `mount` has no samples in its current metrics window (or no
+    /// window at all yet). Drives the `i` idle-hide toggle; matches the
+    /// sparkline strip's own "idle" label so the two never disagree.
+    pub fn mount_is_idle(&self, mount: &str) -> bool {
+        self.mount_window(mount).is_none_or(MountWindow::is_empty)
     }
 
     pub fn ordered_mounts_for_strip(&self, cap: usize) -> Vec<String> {
-        self.traces.ordered_mounts_for_strip(cap)
+        let mounts = self.active().ordered_mounts_for_strip(cap);
+        if self.hide_idle {
+            mounts
+                .into_iter()
+                .filter(|mount| !self.mount_is_idle(mount))
+                .collect()
+        } else {
+            mounts
+        }
+    }
+
+    /// Flattened, render-ready tree rows under the active-focus policy,
+    /// filtered by the idle-hide toggle. The single source both the
+    /// renderer and keyboard navigation read, so a hidden idle mount can
+    /// never still be reachable by the cursor.
+    pub fn visible_tree_rows(&self) -> Vec<RenderRow> {
+        let rows = self
+            .forest()
+            .render_rows(self.view_now_mono(), ACTIVE_FOCUS_WINDOW_US);
+        if self.hide_idle {
+            rows.into_iter()
+                .filter(|row| !self.mount_is_idle(&row.mount))
+                .collect()
+        } else {
+            rows
+        }
     }
 
     pub fn operation(&self, trace_id: TraceId) -> Option<&Operation> {
-        self.traces.operation(trace_id)
+        self.active().operation(trace_id)
     }
 
     pub fn visible_trace_ids(&self) -> Vec<TraceId> {
-        self.traces.visible_trace_ids(&self.filter)
+        self.active().visible_trace_ids(&self.filter)
     }
 
     /// Number of operations currently retained in memory. Pairs with
     /// [`MAX_RECENT_TRACES`] so subscribers can show eviction pressure.
     pub fn retained_trace_count(&self) -> usize {
-        self.traces.retained_trace_count()
+        self.active().retained_trace_count()
     }
 
     pub const fn max_retained_traces() -> usize {
         MAX_RECENT_TRACES
     }
 
+    /// Durable, whole-session counters for the quit receipt. Always reads
+    /// the live reducer (never the paused snapshot): quitting while paused
+    /// must still report everything that happened.
+    pub fn session(&self) -> &SessionStats {
+        self.traces.session()
+    }
+
     pub fn apply_record(&mut self, record: &InspectorRecord) {
-        if self.paused {
-            return;
-        }
+        // Pausing freezes the *view*, not the reducer: the live state below
+        // keeps advancing so nothing that happened while paused is lost,
+        // and resuming jumps straight to the caught-up state.
         self.now_mono = record.mono_us;
         self.tick_event_window(record.mono_us);
         self.traces.apply_record(record);
         self.traces.ensure_selected_visible(&self.filter);
+        if let Some(frozen) = &mut self.frozen {
+            frozen.buffered = frozen.buffered.saturating_add(1);
+        }
     }
 
     pub fn apply_line(&mut self, line: &InspectorLine) {
@@ -194,43 +316,13 @@ impl App {
         }
     }
 
-    pub fn handle_key(&mut self, key: crossterm::event::KeyEvent) {
-        use crossterm::event::{KeyCode, KeyModifiers};
-
+    pub fn handle_key(&mut self, key: KeyEvent) {
         if self.filter.editing {
             self.handle_filter_key(key.code);
             return;
         }
-
-        match key.code {
-            KeyCode::Char('q' | 'c') | KeyCode::Esc
-                if matches!(key.code, KeyCode::Char('q') | KeyCode::Esc)
-                    || key.modifiers.contains(KeyModifiers::CONTROL) =>
-            {
-                self.quit = true;
-            },
-            KeyCode::Tab => self.focus = self.focus.cycle(),
-            KeyCode::Char(' ') => self.paused = !self.paused,
-            KeyCode::Up => self.move_focus_cursor(-1),
-            KeyCode::Down => self.move_focus_cursor(1),
-            KeyCode::Enter if self.focus == PaneFocus::Tree => {
-                self.toggle_tree_cursor_collapse();
-            },
-            KeyCode::Char('j' | 'n') => self.select_next(),
-            KeyCode::Char('k' | 'p') => self.select_prev(),
-            KeyCode::Char('e') => {
-                self.filter.mode = match self.filter.mode {
-                    FilterMode::ErrorsOnly => FilterMode::All,
-                    FilterMode::All => FilterMode::ErrorsOnly,
-                };
-                self.traces.ensure_selected_visible(&self.filter);
-            },
-            KeyCode::Char('r') => self.reset_recent(),
-            KeyCode::Char('/') => {
-                self.filter.editing = true;
-                self.filter.query.clear();
-            },
-            _ => {},
+        if let Some(binding) = KEYMAP.iter().find(|binding| (binding.matches)(&key)) {
+            (binding.handler)(self, &key);
         }
     }
 
@@ -248,9 +340,7 @@ impl App {
     }
 
     fn move_tree_cursor(&mut self, delta: isize) {
-        let rows = self
-            .forest()
-            .render_rows(self.now_mono, ACTIVE_FOCUS_WINDOW_US);
+        let rows = self.visible_tree_rows();
         if rows.is_empty() {
             self.tree_cursor = None;
             return;
@@ -279,7 +369,7 @@ impl App {
         let Some(cursor) = self.tree_cursor.clone() else {
             return;
         };
-        self.traces
+        Self::active_mut(&mut self.traces, &mut self.frozen)
             .select_latest_for_path(&cursor.mount, &cursor.path);
     }
 
@@ -291,8 +381,7 @@ impl App {
             .toggle_collapsed(&cursor.mount, &cursor.path);
     }
 
-    fn handle_filter_key(&mut self, code: crossterm::event::KeyCode) {
-        use crossterm::event::KeyCode;
+    fn handle_filter_key(&mut self, code: KeyCode) {
         match code {
             KeyCode::Esc => {
                 self.filter.editing = false;
@@ -333,15 +422,32 @@ impl App {
     }
 
     fn reset_recent(&mut self) {
-        self.traces.reset_recent(&self.filter);
+        Self::active_mut(&mut self.traces, &mut self.frozen).reset_recent(&self.filter);
     }
 
     fn select_next(&mut self) {
-        self.traces.select_next(&self.filter);
+        Self::active_mut(&mut self.traces, &mut self.frozen).select_next(&self.filter);
     }
 
     fn select_prev(&mut self) {
-        self.traces.select_prev(&self.filter);
+        Self::active_mut(&mut self.traces, &mut self.frozen).select_prev(&self.filter);
+    }
+
+    fn toggle_errors_only(&mut self) {
+        self.filter.mode = match self.filter.mode {
+            FilterMode::ErrorsOnly => FilterMode::All,
+            FilterMode::All => FilterMode::ErrorsOnly,
+        };
+        Self::active_mut(&mut self.traces, &mut self.frozen).ensure_selected_visible(&self.filter);
+    }
+
+    fn toggle_idle(&mut self) {
+        self.hide_idle = !self.hide_idle;
+    }
+
+    fn start_filter_edit(&mut self) {
+        self.filter.editing = true;
+        self.filter.query.clear();
     }
 }
 
@@ -354,5 +460,368 @@ fn step_clamped(current: usize, delta: isize, max_inclusive: usize) -> usize {
         current.saturating_add(step).min(max_inclusive)
     } else {
         current.saturating_sub(delta.unsigned_abs())
+    }
+}
+
+/// One entry in the keymap: the raw-key predicate that selects it, the
+/// footer/help label, and the handler it dispatches to. This is the single
+/// source of truth for "what does this key do" — `handle_key` dispatches
+/// through it and `footer_text` renders it, so the two can't drift the way
+/// a hand-written footer string and a hand-written `match` could.
+struct KeyBinding {
+    matches: fn(&KeyEvent) -> bool,
+    label: &'static str,
+    description: &'static str,
+    handler: fn(&mut App, &KeyEvent),
+    /// Handled but intentionally left out of the footer (vim-style aliases
+    /// duplicating an already-advertised binding). Still required to be
+    /// wired to a real handler, and still covered by the consistency test.
+    hidden: bool,
+}
+
+fn is_quit(key: &KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char('q') | KeyCode::Esc)
+        || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
+}
+
+fn is_tab(key: &KeyEvent) -> bool {
+    key.code == KeyCode::Tab
+}
+
+fn is_pause(key: &KeyEvent) -> bool {
+    key.code == KeyCode::Char(' ')
+}
+
+fn is_nav(key: &KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Up | KeyCode::Down)
+}
+
+fn is_collapse(key: &KeyEvent) -> bool {
+    key.code == KeyCode::Enter
+}
+
+fn is_select_next(key: &KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char('j' | 'n'))
+}
+
+fn is_select_prev(key: &KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char('k' | 'p'))
+}
+
+fn is_toggle_errors(key: &KeyEvent) -> bool {
+    key.code == KeyCode::Char('e')
+}
+
+fn is_toggle_idle(key: &KeyEvent) -> bool {
+    key.code == KeyCode::Char('i')
+}
+
+fn is_filter(key: &KeyEvent) -> bool {
+    key.code == KeyCode::Char('/')
+}
+
+fn is_reset(key: &KeyEvent) -> bool {
+    key.code == KeyCode::Char('r')
+}
+
+fn handle_quit(app: &mut App, _key: &KeyEvent) {
+    app.quit = true;
+}
+
+fn handle_focus(app: &mut App, _key: &KeyEvent) {
+    app.focus = app.focus.cycle();
+}
+
+fn handle_pause(app: &mut App, _key: &KeyEvent) {
+    app.toggle_pause();
+}
+
+fn handle_nav(app: &mut App, key: &KeyEvent) {
+    let delta = if key.code == KeyCode::Up { -1 } else { 1 };
+    app.move_focus_cursor(delta);
+}
+
+fn handle_collapse(app: &mut App, _key: &KeyEvent) {
+    if app.focus == PaneFocus::Tree {
+        app.toggle_tree_cursor_collapse();
+    }
+}
+
+fn handle_select_next(app: &mut App, _key: &KeyEvent) {
+    app.select_next();
+}
+
+fn handle_select_prev(app: &mut App, _key: &KeyEvent) {
+    app.select_prev();
+}
+
+fn handle_toggle_errors(app: &mut App, _key: &KeyEvent) {
+    app.toggle_errors_only();
+}
+
+fn handle_toggle_idle(app: &mut App, _key: &KeyEvent) {
+    app.toggle_idle();
+}
+
+fn handle_filter(app: &mut App, _key: &KeyEvent) {
+    app.start_filter_edit();
+}
+
+fn handle_reset(app: &mut App, _key: &KeyEvent) {
+    app.reset_recent();
+}
+
+const KEYMAP: &[KeyBinding] = &[
+    KeyBinding {
+        matches: is_quit,
+        label: "q",
+        description: "quit",
+        handler: handle_quit,
+        hidden: false,
+    },
+    KeyBinding {
+        matches: is_tab,
+        label: "tab",
+        description: "focus",
+        handler: handle_focus,
+        hidden: false,
+    },
+    KeyBinding {
+        matches: is_pause,
+        label: "space",
+        description: "pause",
+        handler: handle_pause,
+        hidden: false,
+    },
+    KeyBinding {
+        matches: is_nav,
+        label: "↑/↓",
+        description: "navigate",
+        handler: handle_nav,
+        hidden: false,
+    },
+    KeyBinding {
+        matches: is_collapse,
+        label: "↵",
+        description: "collapse",
+        handler: handle_collapse,
+        hidden: false,
+    },
+    KeyBinding {
+        matches: is_select_next,
+        label: "j/n",
+        description: "next op",
+        handler: handle_select_next,
+        hidden: true,
+    },
+    KeyBinding {
+        matches: is_select_prev,
+        label: "k/p",
+        description: "prev op",
+        handler: handle_select_prev,
+        hidden: true,
+    },
+    KeyBinding {
+        matches: is_toggle_errors,
+        label: "e",
+        description: "errors",
+        handler: handle_toggle_errors,
+        hidden: false,
+    },
+    KeyBinding {
+        matches: is_toggle_idle,
+        label: "i",
+        description: "idle",
+        handler: handle_toggle_idle,
+        hidden: false,
+    },
+    KeyBinding {
+        matches: is_filter,
+        label: "/",
+        description: "filter",
+        handler: handle_filter,
+        hidden: false,
+    },
+    KeyBinding {
+        matches: is_reset,
+        label: "r",
+        description: "reset",
+        handler: handle_reset,
+        hidden: false,
+    },
+];
+
+/// The header's key-help strip, generated from [`KEYMAP`] so it can never
+/// advertise a key with no handler or hide one that has one.
+pub fn footer_text() -> String {
+    let parts: Vec<String> = KEYMAP
+        .iter()
+        .filter(|binding| !binding.hidden)
+        .map(|binding| format!("{} {}", binding.label, binding.description))
+        .collect();
+    format!(" {} ", parts.join("  "))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn footer_advertises_every_visible_binding() {
+        let footer = footer_text();
+        for binding in KEYMAP.iter().filter(|binding| !binding.hidden) {
+            assert!(
+                footer.contains(binding.label),
+                "footer missing `{}`: {footer:?}",
+                binding.label
+            );
+        }
+    }
+
+    #[test]
+    fn every_binding_is_reachable_by_exactly_one_representative_key() {
+        // Each binding must own a key nothing else in the table also claims,
+        // or dispatch would be ambiguous and the footer/help text would be
+        // lying about which key does what. Keeping this table separate from
+        // `KEYMAP` (rather than deriving it) is deliberate: it's the
+        // independent check that the predicates actually partition the
+        // keyboard the way their labels claim.
+        let samples: &[(&str, KeyEvent)] = &[
+            ("q", key(KeyCode::Char('q'))),
+            ("tab", key(KeyCode::Tab)),
+            ("space", key(KeyCode::Char(' '))),
+            ("↑/↓", key(KeyCode::Up)),
+            ("↵", key(KeyCode::Enter)),
+            ("j/n", key(KeyCode::Char('j'))),
+            ("k/p", key(KeyCode::Char('k'))),
+            ("e", key(KeyCode::Char('e'))),
+            ("i", key(KeyCode::Char('i'))),
+            ("/", key(KeyCode::Char('/'))),
+            ("r", key(KeyCode::Char('r'))),
+        ];
+        assert_eq!(
+            samples.len(),
+            KEYMAP.len(),
+            "every KEYMAP entry needs a representative sample key here"
+        );
+        for (label, event) in samples {
+            let matches: Vec<&str> = KEYMAP
+                .iter()
+                .filter(|binding| (binding.matches)(event))
+                .map(|binding| binding.label)
+                .collect();
+            assert_eq!(matches, vec![*label], "{event:?}");
+        }
+    }
+
+    #[test]
+    fn pausing_keeps_reducing_but_freezes_the_rendered_view_until_resume() {
+        use omnifs_api::events::InspectorEvent;
+
+        fn record(trace_id: TraceId, mono_us: u64, path: &str) -> InspectorRecord {
+            InspectorRecord::new(
+                "2026-05-23T00:00:00Z",
+                mono_us,
+                trace_id,
+                InspectorEvent::FuseStart {
+                    op: "lookup".into(),
+                    mount: "github".into(),
+                    path: path.into(),
+                },
+            )
+        }
+
+        let mut app = App::new(
+            ConnectionMode::Replay,
+            "test",
+            None,
+            "~/omnifs/dns/example.com/A",
+        );
+        app.apply_record(&record(1, 10, "/before-pause"));
+        assert_eq!(app.retained_trace_count(), 1);
+
+        app.handle_key(key(KeyCode::Char(' ')));
+        assert!(app.paused);
+
+        // Feed more records while paused: the reducer must keep advancing
+        // (nothing dropped)...
+        app.apply_record(&record(2, 20, "/during-pause-1"));
+        app.apply_record(&record(3, 30, "/during-pause-2"));
+        assert_eq!(
+            app.traces.retained_trace_count(),
+            3,
+            "live reducer must keep reducing while paused"
+        );
+        // ...but the rendered/navigable view must not have moved.
+        assert_eq!(
+            app.retained_trace_count(),
+            1,
+            "paused view must stay frozen at the pre-pause snapshot"
+        );
+        assert_eq!(app.buffered_since_pause(), 2);
+
+        app.handle_key(key(KeyCode::Char(' ')));
+        assert!(!app.paused);
+        assert_eq!(
+            app.retained_trace_count(),
+            3,
+            "resume must render the caught-up state"
+        );
+        assert_eq!(app.buffered_since_pause(), 0);
+    }
+
+    #[test]
+    fn idle_toggle_hides_and_restores_mounts_with_no_recent_activity() {
+        use omnifs_api::events::InspectorEvent;
+
+        let mut app = App::new(
+            ConnectionMode::Replay,
+            "test",
+            None,
+            "~/omnifs/dns/example.com/A",
+        );
+        // A `FuseStart` alone puts `github` in the forest (so it's
+        // strip-eligible) without ever recording a completion or cache-hit
+        // sample. That's exactly the idle case: registered, but nothing in
+        // its metrics window, matching the sparkline strip's own "idle"
+        // label (`MountWindow::is_empty`).
+        app.apply_record(&InspectorRecord::new(
+            "2026-05-23T00:00:00Z",
+            10,
+            1,
+            InspectorEvent::FuseStart {
+                op: "lookup".into(),
+                mount: "github".into(),
+                path: "/a".into(),
+            },
+        ));
+
+        assert!(!app.hide_idle);
+        assert!(
+            app.ordered_mounts_for_strip(8)
+                .contains(&"github".to_string()),
+            "mount stays visible before the idle toggle"
+        );
+        assert!(app.mount_is_idle("github"));
+
+        app.handle_key(key(KeyCode::Char('i')));
+        assert!(app.hide_idle);
+        assert!(
+            !app.ordered_mounts_for_strip(8)
+                .contains(&"github".to_string()),
+            "idle mount must be hidden from the strip once toggled"
+        );
+
+        app.handle_key(key(KeyCode::Char('i')));
+        assert!(!app.hide_idle);
+        assert!(
+            app.ordered_mounts_for_strip(8)
+                .contains(&"github".to_string()),
+            "toggling back off must restore the mount"
+        );
     }
 }

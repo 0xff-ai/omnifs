@@ -10,14 +10,23 @@ use ratatui::{
 
 use omnifs_api::events::InspectorOutcome;
 
-use super::app::{App, ConnectionMode, PaneFocus};
+use super::app::{App, ConnectionMode, PaneFocus, footer_text};
 use super::filter::FilterMode;
 use super::format;
 use super::metrics::{MountWindow, render_sparkline};
 use super::trace_state::{Operation, OperationStatus, Stage, StageKind};
-use super::tree::{ACTIVE_FOCUS_WINDOW_US, NodeStatus, RenderRow};
+use super::tree::{NodeStatus, RenderRow};
 
-const CURSOR_BG: Color = Color::Rgb(40, 50, 60);
+/// Cursor/selection highlight background. Plain `DarkGray` (ANSI-16, not
+/// truecolor) so the highlight survives 16-color terminals; the previous
+/// `Color::Rgb` silently vanished outside a truecolor-capable emulator. The
+/// `›` marker (see `CURSOR_MARKER`) carries the same signal without relying
+/// on color at all.
+const CURSOR_BG: Color = Color::DarkGray;
+/// Prefixes the cursor row / selected operation block so the highlight
+/// still reads when a terminal renders `CURSOR_BG` indistinguishably from
+/// the surrounding rows.
+const CURSOR_MARKER: &str = "› ";
 
 const SPARK_BUCKETS: usize = 12;
 const SPARK_MOUNT_CAP: usize = 8;
@@ -70,11 +79,19 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
         },
         ConnectionMode::Replay => format!("replay · {}", app.container),
     };
-    let pause = if app.paused { " paused" } else { "" };
+    let pause = if app.paused {
+        format!(
+            " paused  +{} buffered  (space to resume)",
+            app.buffered_since_pause()
+        )
+    } else {
+        String::new()
+    };
     let filter = match app.filter.mode {
         FilterMode::All => "",
         FilterMode::ErrorsOnly => " errors-only",
     };
+    let idle = if app.hide_idle { " idle-hidden" } else { "" };
     let edit = if app.filter.editing {
         format!(" filter:{}", app.filter.query)
     } else if !app.filter.query.is_empty() {
@@ -86,11 +103,11 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
         " omnifs inspect · recent activity │ {source}{pause} │ {:.1} evt/s │ dropped {} ",
         app.events_per_sec, app.dropped_events
     );
-    let keys = " q quit  tab focus  ↑/↓ navigate  ↵ collapse  space pause  e errors  i idle  / filter  r reset ";
+    let keys = footer_text();
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan))
-        .title(title + filter + &edit)
+        .title(title + filter + idle + &edit)
         .title_bottom(keys);
     frame.render_widget(block, area);
 }
@@ -110,10 +127,11 @@ fn render_sparkline_strip(frame: &mut Frame, app: &App, area: Rect) {
 
     let mut lines = Vec::with_capacity(mounts.len());
     let empty_window = MountWindow::default();
+    let now_mono = app.view_now_mono();
     for mount in &mounts {
         let window = app.mount_window(mount).unwrap_or(&empty_window);
         let color = app.palette().peek(mount).unwrap_or(Color::DarkGray);
-        lines.push(sparkline_line(mount, window, color, app.now_mono));
+        lines.push(sparkline_line(mount, window, color, now_mono));
     }
     let paragraph = Paragraph::new(lines);
     frame.render_widget(paragraph, inner);
@@ -164,6 +182,27 @@ fn render_main(frame: &mut Frame, app: &App, area: Rect) {
     render_operations_log(frame, app, columns[1]);
 }
 
+/// The "nothing happened yet" message shared by the tree pane and the
+/// operations log: a real (or best-effort static) path to `cat`, so a new
+/// user staring at a blank canvas has something concrete to try rather than
+/// a dead end. `app.teaching_path` is resolved once at startup from local
+/// mount specs (see `commands/inspect.rs`); it's never a daemon round trip.
+fn empty_state_lines(app: &App) -> Vec<Line<'static>> {
+    vec![
+        Line::from(Span::styled(
+            "Nothing yet. Generate some:",
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                format!("cat {}/...", app.teaching_path),
+                Style::default().fg(Color::Cyan),
+            ),
+        ]),
+    ]
+}
+
 fn render_tree(frame: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
@@ -172,12 +211,9 @@ fn render_tree(frame: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let rows = app
-        .forest()
-        .render_rows(app.now_mono, ACTIVE_FOCUS_WINDOW_US);
+    let rows = app.visible_tree_rows();
     if rows.is_empty() {
-        let msg =
-            Paragraph::new("no paths touched yet").style(Style::default().fg(Color::DarkGray));
+        let msg = Paragraph::new(empty_state_lines(app));
         frame.render_widget(msg, inner);
         return;
     }
@@ -229,7 +265,11 @@ impl TreeRowView<'_> {
             .as_ref()
             .is_some_and(|c| c.mount == row.mount && c.path == row.path);
 
+        // Reserve the marker column on every row (blank when not the
+        // cursor) so the cursor row's `›` never shifts that row's columns
+        // out of alignment with its neighbors.
         let mut spans = vec![
+            Span::raw(if is_cursor { CURSOR_MARKER } else { "  " }),
             Span::raw("  ".repeat(row.depth)),
             Span::styled(
                 format!("{} ", row.status.glyph()),
@@ -303,6 +343,12 @@ fn render_operations_log(frame: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
 
+    if blocks.is_empty() {
+        let msg = Paragraph::new(empty_state_lines(app));
+        frame.render_widget(msg, inner);
+        return;
+    }
+
     // Newest-first rendering; advance `start` until the selected trace's
     // full block fits within `capacity`. Each block carries a trailing
     // separator row so blocks visually break apart.
@@ -315,8 +361,17 @@ fn render_operations_log(frame: &mut Frame, app: &App, area: Rect) {
         if lines.len() + block.len() > capacity {
             break;
         }
-        for raw in block {
-            let mut line = raw.clone();
+        for (index, raw) in block.iter().enumerate() {
+            let mut line = if is_selected && index == 0 {
+                // Only the block's header row gets the marker: stage rows
+                // already right-align their elapsed/outcome column against
+                // `width`, and prepending it there would throw that off.
+                let mut spans = vec![Span::raw(CURSOR_MARKER)];
+                spans.extend(raw.spans.clone());
+                Line::from(spans)
+            } else {
+                raw.clone()
+            };
             if is_selected {
                 line = line.patch_style(Style::default().bg(CURSOR_BG));
             }
@@ -570,7 +625,12 @@ mod tests {
 
     #[test]
     fn tree_rollup_badge_explains_failure_count() {
-        let app = App::new(ConnectionMode::Replay, "test", None);
+        let app = App::new(
+            ConnectionMode::Replay,
+            "test",
+            None,
+            "~/omnifs/dns/example.com/A",
+        );
         let row = RenderRow {
             depth: 0,
             name: "github".to_string(),

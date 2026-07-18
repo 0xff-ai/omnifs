@@ -7,12 +7,18 @@ use clap::Args;
 
 use crate::inspector::{ConnectionMode, SourceKind, run_plain, run_tui};
 use crate::ui::output::Output;
-use omnifs_workspace::Workspace;
+use omnifs_workspace::{Workspace, mounts};
 
 /// The inspector's connection label for a live daemon. The daemon always runs
 /// host-native and is addressed through the workspace's daemon record, so
 /// there is no container identity to display here.
 const LIVE_LABEL: &str = "daemon";
+
+/// Fallback empty-state teaching path when no local mount specs resolve to
+/// one: the `dns` provider ships with every dev bundle and needs no
+/// credentials, so it reads as a real path even though it's not derived
+/// from this workspace's actual configuration.
+const STATIC_TEACHING_PATH: &str = "~/omnifs/dns/example.com/A";
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct InspectArgs {
@@ -37,6 +43,14 @@ impl InspectArgs {
         if self.plain {
             return self.run_plain(&output).await;
         }
+
+        // Local-only and best-effort: a replay session or a workspace with
+        // no mounts yet still gets a usable empty-state hint, never a hard
+        // failure, and never a daemon round trip.
+        let teaching_path = Workspace::resolve()
+            .ok()
+            .and_then(|workspace| pick_teaching_path(&workspace))
+            .unwrap_or_else(|| STATIC_TEACHING_PATH.to_string());
 
         let (mode, source, label) = if let Some(path) = self.replay.clone() {
             (
@@ -63,7 +77,7 @@ impl InspectArgs {
             )
         };
 
-        tokio::task::spawn_blocking(move || run_tui(mode, label, source))
+        tokio::task::spawn_blocking(move || run_tui(mode, label, source, teaching_path))
             .await
             .context("inspector TUI task")??;
         Ok(())
@@ -86,6 +100,33 @@ impl InspectArgs {
         .await
         .context("inspector plain task")?
     }
+}
+
+/// Pick a directory to `cat` from for the inspector's empty-state hint:
+/// prefer a configured mount whose pinned provider needs no credentials (so
+/// the suggested command works without an extra `omnifs auth` step first),
+/// else fall back to any configured mount. Reads only local specs and the
+/// provider artifact store — no daemon round trip — so it's safe to call
+/// before probing daemon readiness, and cheap enough to call unconditionally.
+fn pick_teaching_path(workspace: &Workspace) -> Option<String> {
+    let registry = workspace.desired_state().registry().ok()?;
+    let mut fallback = None;
+    for (name, spec) in registry.iter() {
+        let location = workspace
+            .frontend()
+            .default_host_location()
+            .join(name.as_str());
+        let text = location.display().to_string();
+        let no_auth = mounts::pinned_manifest(workspace.catalog(), spec)
+            .ok()
+            .flatten()
+            .is_some_and(|manifest| manifest.auth.is_none());
+        if no_auth {
+            return Some(text);
+        }
+        fallback.get_or_insert(text);
+    }
+    fallback
 }
 
 fn check_record_path(path: Option<&Path>) -> anyhow::Result<()> {
