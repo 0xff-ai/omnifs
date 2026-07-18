@@ -140,6 +140,16 @@ pub(crate) fn ledger_row_line(row: &LedgerRow, key_width: usize, caps: Capabilit
     )
 }
 
+/// The column where a ledger row's value begins, counting from the row's own
+/// left edge (glyph column 0). Shared by [`ledger_row_line`] and any caller
+/// that must align a continuation line under a row's value without
+/// duplicating the gap math: doctor's per-row `fix:` line (spec 3.9) is one
+/// such caller.
+pub(crate) fn ledger_value_column(key_width: usize) -> usize {
+    // Glyph (1) + one space (1) precede the key, then the key's own field.
+    key_width + LEDGER_GAP + 2
+}
+
 /// Render one contiguous ledger block. Left-anchored, no leading indent: the
 /// glyph starts at column 0. The key column is sized to the longest key in
 /// `rows` alone, never truncated and never fixed across blocks, so a report
@@ -480,6 +490,15 @@ mod tests {
         };
         let rendered = error_block(&block, caps(120, false));
         assert_eq!(rendered.matches("(id: mount-degraded)").count(), 1);
+    }
+
+    #[test]
+    fn ledger_value_column_matches_where_ledger_row_line_actually_starts_the_value() {
+        let row = LedgerRow::new(Glyph::Warn, "credentials", "github token expired");
+        let key_width = ledger_key_width(std::slice::from_ref(&row));
+        let rendered = ledger_row_line(&row, key_width, caps(120, false));
+        let value_start = rendered.find("github").expect("value present");
+        assert_eq!(value_start, ledger_value_column(key_width));
     }
 
     #[test]

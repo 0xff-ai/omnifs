@@ -14,10 +14,22 @@ pub(crate) const SCHEMA_VERSION: u8 = 1;
 /// Real terminal capabilities for the flat renderer (`render.rs`), read fresh
 /// per call rather than cached: a prompt or progress handle can change the
 /// terminal state (raw mode, size) between one narration line and the next.
-fn stderr_capabilities(quiet: bool) -> super::render::Capabilities {
+/// `pub(crate)` so the top-level error boundary (`error.rs`) can build the
+/// same stderr capabilities the rest of this module's narration uses.
+///
+/// Mirrors `render.rs::stdout_capabilities`'s is-tty gate: piped stderr gets
+/// the stable 120-column width, never the `crossterm::terminal::size` error
+/// fallback of 80, which would word-wrap content mid-path (a real path or
+/// command embedded in a sentence) the moment stderr is redirected.
+pub(crate) fn stderr_capabilities(quiet: bool) -> super::render::Capabilities {
+    let is_tty = io::stderr().is_terminal();
     super::render::Capabilities {
-        width: crossterm::terminal::size().map_or(80, |(columns, _rows)| usize::from(columns)),
-        is_tty: io::stderr().is_terminal(),
+        width: if is_tty {
+            crossterm::terminal::size().map_or(80, |(columns, _rows)| usize::from(columns))
+        } else {
+            120
+        },
+        is_tty,
         color: super::style::color_enabled(super::style::Stream::Stderr),
         quiet,
     }
