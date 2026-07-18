@@ -10,6 +10,8 @@ use unicode_width::UnicodeWidthChar as _;
 
 use crossterm::terminal;
 
+use super::render::display_width;
+
 /// A complete human report made up of context strips and resource tables.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Report {
@@ -570,13 +572,6 @@ fn shared_actions_for_render<'a>(rows: &'a [ResourceRow], commands: &[String]) -
             })
         })
         .collect()
-}
-
-fn display_width(text: &str) -> usize {
-    super::strip_ansi(text)
-        .chars()
-        .map(|ch| ch.width().unwrap_or(0))
-        .sum()
 }
 
 fn truncate_display(value: &str, max_width: usize) -> String {

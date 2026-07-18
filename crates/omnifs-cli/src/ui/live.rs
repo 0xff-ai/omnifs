@@ -340,15 +340,13 @@ impl LiveRegion {
     /// through the existing cancel path (`main.rs` already renders
     /// `canceled` and exits 130 for `prompt::Canceled`).
     pub(crate) fn cancel(
-        mut self,
+        self,
         glyph: Glyph,
         key: impl Into<String>,
         value: impl Into<String>,
         key_width: usize,
     ) {
-        self.erase();
-        self.output
-            .ledger_row(&render::LedgerRow::new(glyph, key, value), key_width);
+        self.finish(glyph, key, value, key_width);
     }
 
     /// Race a future against Ctrl-C while a live region may be on screen.

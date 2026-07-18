@@ -1,4 +1,4 @@
-//! The flat human renderer: ledger blocks, sentences, headings, hints, and the
+//! The flat human renderer: ledger blocks, sentences, headings, and the
 //! error block. This is the one place that turns typed report content into
 //! bytes for the CLI experience v2 register (spec 2.1): a left-anchored
 //! stream with no frames, no gutters, and no repetition of the command the
@@ -10,13 +10,6 @@
 //! `render_with`-style capability injection for the responsive report and
 //! this module follows it.
 //!
-//! `Output::outro`/`plan`/`receipt` (`ui/output.rs`) construct a real
-//! `Capabilities` from the process and call `sentence`/`heading`; the rest of
-//! this module (`ledger_block`, `hint`, `error_block`, ...) is still
-//! exercised only by its own unit tests until a later slice in the CLI
-//! experience v2 campaign migrates full command reports onto it.
-#![allow(dead_code)]
-
 use std::io::IsTerminal as _;
 
 use super::style::{self, Glyph};
@@ -226,20 +219,6 @@ pub(crate) fn sentence(text: &str, caps: Capabilities) -> String {
 /// blue heading role: spec 2.4 prefers plain bold for report sections.
 pub(crate) fn heading(text: &str, caps: Capabilities) -> String {
     style::bold(text, caps.color)
-}
-
-/// The single most-actionable next step: a command in the accent color plus
-/// a dim description. `--quiet` suppresses it, since it exists to prompt a
-/// human, not to carry information a script needs.
-pub(crate) fn hint(cmd: &str, desc: &str, caps: Capabilities) -> Option<String> {
-    if caps.quiet {
-        return None;
-    }
-    Some(format!(
-        "{}  {}",
-        style::accent(cmd, caps.color),
-        style::dim(desc, caps.color)
-    ))
 }
 
 /// The indented "Last daemon log lines:"-style detail under an error
@@ -523,21 +502,6 @@ mod tests {
             style::bold("Frontends", true)
         );
         assert_eq!(heading("Frontends", caps(120, false)), "Frontends");
-    }
-
-    #[test]
-    fn hint_accents_the_command_and_quiet_suppresses_it() {
-        let line = hint(
-            "omnifs mount add github",
-            "connect a provider",
-            caps(120, false),
-        )
-        .expect("hint renders when not quiet");
-        assert_eq!(line, "omnifs mount add github  connect a provider");
-
-        let mut quiet = caps(120, false);
-        quiet.quiet = true;
-        assert!(hint("omnifs up", "start the daemon", quiet).is_none());
     }
 
     #[test]

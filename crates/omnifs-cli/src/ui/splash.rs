@@ -1,21 +1,18 @@
 //! The one-time `omnifs setup` wordmark reveal (spec 2.5). No other command
 //! ever prints a banner; [`should_splash`] is the single gate that keeps it
 //! that way across every output mode and terminal state this crate supports.
-//! The reveal itself follows `prompt.rs`'s raw-mode dance (save cursor, draw,
-//! erase) and stays untested here for the same reason `run_prompt_loop`
-//! does: a live terminal loop cannot run under `cargo nextest` without a
-//! PTY. `should_splash` is the pure boundary, and it carries the whole
-//! suppression matrix.
+//! The reveal itself runs on `prompt.rs`'s raw-mode primitives
+//! ([`prompt::RawTerminal`], [`prompt::redraw`], [`prompt::erase`]) and stays
+//! untested here for the same reason `run_prompt_loop` does: a live terminal
+//! loop cannot run under `cargo nextest` without a PTY. `should_splash` is
+//! the pure boundary, and it carries the whole suppression matrix.
 
-use std::io::{self, Write};
+use std::io;
 use std::time::{Duration, Instant};
 
-use crossterm::cursor::{Hide, MoveUp, Show};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
-use crossterm::queue;
-use crossterm::terminal::{Clear, ClearType, disable_raw_mode, enable_raw_mode};
 
-use super::prompt::Canceled;
+use super::prompt::{self, Canceled};
 use super::render::Capabilities;
 use super::style::{self, Stream};
 
@@ -42,14 +39,8 @@ pub(crate) fn show(caps: Capabilities, no_input: bool, structured: bool) -> anyh
     if !should_splash(caps, no_input, structured) {
         return Ok(());
     }
-    enable_raw_mode()?;
-    let mut out = io::stderr();
-    let _ = queue!(out, Hide);
-    let result = run(&mut out);
-    let _ = queue!(out, Show);
-    let _ = out.flush();
-    let _ = disable_raw_mode();
-    result
+    let _raw = prompt::RawTerminal::enter()?;
+    run()
 }
 
 enum Interrupt {
@@ -84,37 +75,13 @@ fn poll_interrupt(timeout: Duration) -> io::Result<Option<Interrupt>> {
     }
 }
 
-/// Redraw the transient frame in place, matching `prompt.rs::redraw`: move up
-/// over the previous frame, clear below the cursor, then print with explicit
-/// line breaks (raw mode disables CR-on-LF translation).
-fn redraw(out: &mut impl Write, drawn: &mut usize, lines: &[String]) -> io::Result<()> {
-    if *drawn > 0 {
-        queue!(out, MoveUp(u16::try_from(*drawn).unwrap_or(u16::MAX)))?;
-    }
-    queue!(out, Clear(ClearType::FromCursorDown))?;
-    for line in lines {
-        write!(out, "{line}\r\n")?;
-    }
-    out.flush()?;
-    *drawn = lines.len();
-    Ok(())
-}
-
-fn erase(out: &mut impl Write, drawn: usize) -> io::Result<()> {
-    if drawn > 0 {
-        queue!(out, MoveUp(u16::try_from(drawn).unwrap_or(u16::MAX)))?;
-    }
-    queue!(out, Clear(ClearType::FromCursorDown))?;
-    out.flush()
-}
-
-fn run(out: &mut impl Write) -> anyhow::Result<()> {
+fn run() -> anyhow::Result<()> {
     let stream = Stream::Stderr;
     let mut drawn = 0usize;
     let mut interrupted = false;
     for count in 1..=WORDMARK.chars().count() {
         let partial: String = WORDMARK.chars().take(count).collect();
-        redraw(out, &mut drawn, &[style::bold(partial, stream)])?;
+        prompt::redraw(&mut drawn, &[style::bold(partial, stream)])?;
         match poll_interrupt(LETTER_DELAY)? {
             None => {},
             Some(Interrupt::Skip) => {
@@ -122,13 +89,12 @@ fn run(out: &mut impl Write) -> anyhow::Result<()> {
                 break;
             },
             Some(Interrupt::Cancel) => {
-                erase(out, drawn)?;
+                prompt::erase(drawn)?;
                 return Err(Canceled.into());
             },
         }
     }
-    redraw(
-        out,
+    prompt::redraw(
         &mut drawn,
         &[style::bold(WORDMARK, stream), style::dim(TAGLINE, stream)],
     )?;
@@ -136,12 +102,12 @@ fn run(out: &mut impl Write) -> anyhow::Result<()> {
         match poll_interrupt(HOLD)? {
             None | Some(Interrupt::Skip) => {},
             Some(Interrupt::Cancel) => {
-                erase(out, drawn)?;
+                prompt::erase(drawn)?;
                 return Err(Canceled.into());
             },
         }
     }
-    erase(out, drawn)?;
+    prompt::erase(drawn)?;
     Ok(())
 }
 

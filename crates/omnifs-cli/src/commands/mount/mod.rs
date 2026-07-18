@@ -437,17 +437,6 @@ impl ReauthArgs {
                 auth_key_width,
             )
             .await?;
-            // Matches `mount add`'s OAuth branch (spec 3.5): no upstream
-            // identity is available from the exchange itself, so this names
-            // the scheme kind rather than fabricating a username.
-            output.ledger_row(
-                &crate::ui::render::LedgerRow::new(
-                    crate::ui::style::Glyph::Done,
-                    "signed in",
-                    "oauth",
-                ),
-                auth_key_width,
-            );
             target
         } else {
             let source = TokenSource::resolve(

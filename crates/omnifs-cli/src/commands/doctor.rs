@@ -366,14 +366,6 @@ fn render_group(heading: &str, rows: &[Row], caps: Capabilities) -> String {
     out
 }
 
-fn count_noun(n: usize, noun: &str) -> String {
-    if n == 1 {
-        format!("{n} {noun}")
-    } else {
-        format!("{n} {noun}s")
-    }
-}
-
 /// The verdict line (spec 3.9): a plain "Everything checks out." when clean,
 /// otherwise a failure/warning count plus the single actionable fix when
 /// every problem row shares one.
@@ -391,10 +383,10 @@ fn verdict_line(rows: &[&Row], verdict: DoctorVerdict, caps: Capabilities) -> St
         .count();
     let mut parts = Vec::new();
     if failures > 0 {
-        parts.push(count_noun(failures, "failure"));
+        parts.push(render::count(failures, "failure"));
     }
     if warnings > 0 {
-        parts.push(count_noun(warnings, "warning"));
+        parts.push(render::count(warnings, "warning"));
     }
     let summary = if parts.is_empty() {
         // The daemon/inventory verdict is degraded for a reason this

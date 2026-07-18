@@ -406,19 +406,6 @@ impl MountInitPlan {
                     plan.mount_name
                 ));
             })?;
-            // No upstream identity is available from the OAuth exchange
-            // itself (the flow never probes "who am I"), so this names the
-            // scheme kind rather than fabricating a username; static-token
-            // sign-in below does carry a real identity when the provider's
-            // validation probe returns one.
-            output.ledger_row(
-                &crate::ui::render::LedgerRow::new(
-                    crate::ui::style::Glyph::Done,
-                    "signed in",
-                    "oauth",
-                ),
-                key_width,
-            );
         } else {
             if interactive && let Ok(scheme) = auth.static_token_scheme(&plan.manifest) {
                 let guidance = plan

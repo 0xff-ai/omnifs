@@ -130,6 +130,16 @@ async fn login(
             "GitHub granted no scopes. Public resources will work; rerun with `--scope repo` for private repositories.",
         );
     }
+    // No upstream identity is available from the OAuth exchange itself (the
+    // flow never probes "who am I"), so the completed-auth row names the
+    // scheme kind rather than fabricating a username; static-token sign-in
+    // does carry a real identity when the provider's validation probe returns
+    // one. Emitted here so `mount add` and `mount reauth` settle the same row
+    // without each re-asserting it.
+    output.ledger_row(
+        &crate::ui::render::LedgerRow::new(crate::ui::style::Glyph::Done, "signed in", "oauth"),
+        key_width,
+    );
     Ok(target)
 }
 

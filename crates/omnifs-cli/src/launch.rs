@@ -277,11 +277,15 @@ impl<'a> Launcher<'a> {
         let total = expected.len();
         let mut region = LiveRegion::new(self.output.clone(), ["frontends"]);
         let deadline = tokio::time::Instant::now() + RECONNECT_GRACE;
+        let client = crate::client::DaemonClient::for_workspace(self.workspace);
         loop {
-            let inventory = Inventory::collect(self.workspace).await.ok();
-            let observed = inventory
-                .as_ref()
-                .map_or(&[][..], |inv| inv.frontends.as_slice());
+            // Reattachment only ever shows up as a live daemon attachment, so
+            // poll the daemon status directly instead of re-running the full
+            // `Inventory::collect` join (registry parse, credential lookups,
+            // runner discovery I/O) every tick for one signal.
+            let status = client.status_optional().await.ok().flatten();
+            let observed = crate::inventory::frontend_statuses(status.as_ref(), 0, Vec::new());
+            let observed = observed.as_slice();
             let (reattached, pending) = reattach_progress(&expected, observed);
             region.update("frontends", format!("{reattached}/{total} reattached…"));
 

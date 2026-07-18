@@ -75,14 +75,8 @@ impl InventoryReport {
             context_state,
         )
         .with_metadata(metadata);
-        match daemon_state {
-            DaemonState::Stopped => {
-                context = context.with_action(TableAction::fix("omnifs up"));
-            },
-            DaemonState::Failed | DaemonState::Unreachable => {
-                context = context.with_action(TableAction::fix("omnifs logs"));
-            },
-            DaemonState::Starting | DaemonState::Running | DaemonState::Degraded => {},
+        if let Some(fix) = daemon_state.context_fix() {
+            context = context.with_action(TableAction::fix(fix));
         }
         report.push(TableBlock::Context(context));
 
@@ -100,13 +94,7 @@ fn attached_frontend_count(inventory: &Inventory) -> usize {
     inventory
         .frontends
         .iter()
-        .filter(|frontend| {
-            matches!(
-                frontend.state,
-                crate::inventory::FrontendState::Attached
-                    | crate::inventory::FrontendState::Running
-            )
-        })
+        .filter(|frontend| frontend.state.provides_access())
         .count()
 }
 
@@ -194,16 +182,19 @@ pub(crate) fn mount_table(mounts: &[MountStatus]) -> TableResources {
     table
 }
 
-/// One honest headline label per explicit precedence: a provider error
-/// outranks an auth needing attention, which outranks the serving state
-/// itself (healthy or not). This is a fixed priority order, never a generic
-/// "most severe of three" tie-break: a merely-informational `Severity`
-/// (auth `not needed` is `Neutral`, the same rank as `stopped`) must never
-/// beat a genuinely live mount's serving state just because it sorts
-/// alongside a higher-severity row elsewhere.
+/// One honest headline label per explicit precedence: a provider pin
+/// needing attention or failing outranks an auth needing attention, which
+/// outranks the serving state itself (healthy or not). This is a fixed
+/// priority order, never a generic "most severe of three" tie-break: a
+/// merely-informational `Severity` (auth `not needed` is `Neutral`, the
+/// same rank as `stopped`) must never beat a genuinely live mount's serving
+/// state just because it sorts alongside a higher-severity row elsewhere.
 pub(crate) fn mount_row_state(mount: &MountStatus) -> TableState {
-    if mount.provider.state.severity() == Severity::Error {
-        return table_state(Severity::Error, mount.provider.state.label());
+    if mount.provider.state.severity() >= Severity::Attention {
+        return table_state(
+            mount.provider.state.severity(),
+            mount.provider.state.label(),
+        );
     }
     if mount.auth.severity() >= Severity::Attention {
         return table_state(mount.auth.severity(), mount.auth.label());

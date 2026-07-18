@@ -79,14 +79,14 @@ fn print_canceled(stream: Stream) {
 // Raw-mode terminal loop
 // ---------------------------------------------------------------------------
 
-/// Raw mode plus a hidden cursor for the lifetime of one interactive prompt.
-/// Both are restored on every exit path, including an early return from a
-/// failed terminal call, because teardown lives in `Drop` rather than at each
-/// call site.
-struct RawTerminal;
+/// Raw mode plus a hidden cursor for the lifetime of one interactive prompt
+/// (or `splash.rs`'s reveal, which shares this guard). Both are restored on
+/// every exit path, including an early return from a failed terminal call,
+/// because teardown lives in `Drop` rather than at each call site.
+pub(crate) struct RawTerminal;
 
 impl RawTerminal {
-    fn enter() -> io::Result<Self> {
+    pub(crate) fn enter() -> io::Result<Self> {
         enable_raw_mode()?;
         let mut stderr = io::stderr();
         queue!(stderr, Hide)?;
@@ -131,7 +131,8 @@ fn next_key_press() -> io::Result<Option<KeyEvent>> {
 /// Redraw the transient frame in place: move up over the previous frame,
 /// clear everything below the cursor, then print the new lines with explicit
 /// line breaks (raw mode disables the terminal's own CR-on-LF translation).
-fn redraw(drawn: &mut usize, lines: &[String]) -> io::Result<()> {
+/// Shared with `splash.rs`, the other raw-mode frame drawer.
+pub(crate) fn redraw(drawn: &mut usize, lines: &[String]) -> io::Result<()> {
     let mut out = io::stderr();
     if *drawn > 0 {
         queue!(out, MoveUp(u16::try_from(*drawn).unwrap_or(u16::MAX)))?;
@@ -148,7 +149,7 @@ fn redraw(drawn: &mut usize, lines: &[String]) -> io::Result<()> {
 
 /// Erase a drawn frame and leave the cursor where the frame started, so the
 /// durable echo prints immediately below whatever preceded the prompt.
-fn erase(drawn: usize) -> io::Result<()> {
+pub(crate) fn erase(drawn: usize) -> io::Result<()> {
     let mut out = io::stderr();
     if drawn > 0 {
         queue!(out, MoveUp(u16::try_from(drawn).unwrap_or(u16::MAX)))?;
@@ -485,20 +486,6 @@ fn item_from_value<T: std::fmt::Display>(value: T) -> SelectItem<T> {
     }
 }
 
-fn item_from_option<T>(value: T, label: String, hint: String) -> SelectItem<T> {
-    let detail = if hint.is_empty() {
-        Vec::new()
-    } else {
-        vec![hint]
-    };
-    SelectItem {
-        value,
-        label,
-        detail,
-        checked: false,
-    }
-}
-
 /// Which way a browse key moves the picker cursor.
 #[derive(Clone, Copy)]
 enum Direction {
@@ -602,7 +589,6 @@ fn select_frame<T>(
 
 pub(crate) struct Select<T> {
     question: String,
-    key: Option<String>,
     items: Vec<SelectItem<T>>,
 }
 
@@ -610,19 +596,8 @@ impl<T: Clone + Eq + std::fmt::Display> Select<T> {
     pub(crate) fn new(question: impl Into<String>) -> Self {
         Self {
             question: question.into(),
-            key: None,
             items: Vec::new(),
         }
-    }
-
-    /// Echo the resolved answer as a `render.rs` ledger row keyed by `key`
-    /// instead of the default question-plus-answer sentence. No current call
-    /// site needs this; it exists so a later slice can key select echoes the
-    /// same way multi-select already must.
-    #[allow(dead_code)]
-    pub(crate) fn key(mut self, key: impl Into<String>) -> Self {
-        self.key = Some(key.into());
-        self
     }
 
     pub(crate) fn items(mut self, items: impl IntoIterator<Item = T>) -> Self {
@@ -630,24 +605,10 @@ impl<T: Clone + Eq + std::fmt::Display> Select<T> {
         self
     }
 
-    /// Add explicit `(value, label, hint)` choices when a value's display text
-    /// is not the right prompt label. `hint` becomes the detail-panel text
-    /// shown while the option is highlighted.
-    #[allow(dead_code)] // no current single-select needs a bare hint over `detailed_options`'s full sentences
-    pub(crate) fn options(mut self, items: impl IntoIterator<Item = (T, String, String)>) -> Self {
-        self.items.extend(
-            items
-                .into_iter()
-                .map(|(value, label, hint)| item_from_option(value, label, hint)),
-        );
-        self
-    }
-
     /// Add explicit `(value, label, detail)` choices whose panel is several
     /// complete sentences rather than one hint line (spec 2.6's provider
     /// consent panel: domains called, memory ceiling, and auth scheme, each
-    /// its own line, never truncated). `options` remains the single-hint
-    /// entry point for simpler pickers.
+    /// its own line, never truncated).
     pub(crate) fn detailed_options(
         mut self,
         items: impl IntoIterator<Item = (T, String, Vec<String>)>,
@@ -672,7 +633,6 @@ impl<T: Clone + Eq + std::fmt::Display> Select<T> {
         }
         let stream = Stream::Stderr;
         let question = self.question;
-        let key = self.key;
         let items = self.items;
         let len = items.len();
         let hint_line = format!(
@@ -693,17 +653,7 @@ impl<T: Clone + Eq + std::fmt::Display> Select<T> {
         match resolution {
             Resolution::Resolved(cursor) => {
                 let chosen = &items[cursor];
-                match &key {
-                    // A standalone single-row block: no `Select` call site in
-                    // this codebase sets `key` today (every current caller
-                    // takes the unlabeled `None` echo below), so this has no
-                    // sibling row to align against.
-                    Some(key) => output.ledger_row(
-                        &LedgerRow::new(Glyph::Done, key.clone(), &chosen.label),
-                        Output::ledger_block_width(&[key.as_str()]),
-                    ),
-                    None => output.answer(&question, &chosen.label),
-                }
+                output.answer(&question, &chosen.label);
                 Ok(chosen.value.clone())
             },
             Resolution::Canceled => {
@@ -773,8 +723,8 @@ fn multi_select_frame<T>(
 }
 
 /// A multi-select prompt. Unlike [`Select`], its echo is always a ledger row
-/// (spec 2.6's `✓ services    github, dns` example), so `key` is required at
-/// construction rather than optional.
+/// (spec 2.6's `✓ services    github, dns` example), so construction takes
+/// the row's `key` alongside the question.
 pub(crate) struct MultiSelect<T> {
     question: String,
     key: String,
@@ -788,22 +738,6 @@ impl<T: Clone + Eq + std::fmt::Display> MultiSelect<T> {
             key: key.into(),
             items: Vec::new(),
         }
-    }
-
-    #[allow(dead_code)] // symmetric with `Select::items`; no current caller needs a bare-value multi-select
-    pub(crate) fn items(mut self, items: impl IntoIterator<Item = T>) -> Self {
-        self.items.extend(items.into_iter().map(item_from_value));
-        self
-    }
-
-    #[allow(dead_code)] // symmetric with `Select::options`; current callers need per-item defaults, so they use `detailed_options`
-    pub(crate) fn options(mut self, items: impl IntoIterator<Item = (T, String, String)>) -> Self {
-        self.items.extend(
-            items
-                .into_iter()
-                .map(|(value, label, hint)| item_from_option(value, label, hint)),
-        );
-        self
     }
 
     /// Add `(value, label, detail, checked)` choices: `detail` is the panel's

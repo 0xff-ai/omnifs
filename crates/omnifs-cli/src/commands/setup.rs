@@ -23,7 +23,7 @@ use crate::provider_resolver::{provider_options, safe_for_setup};
 use crate::stages::{PromptMode, ReceiptStyle};
 use crate::ui::live::LiveRegion;
 use crate::ui::output::Output;
-use crate::ui::render::Capabilities;
+use crate::ui::render::{self, Capabilities};
 use crate::ui::style::{self, Glyph};
 use omnifs_workspace::Workspace;
 
@@ -450,7 +450,7 @@ fn render_tree_lines(
     let mut lines = vec![root.to_owned()];
     let name_width = rows
         .iter()
-        .map(|(name, _)| name.chars().count() + 1)
+        .map(|(name, _)| render::display_width(name) + 1)
         .max()
         .unwrap_or(0);
     let last = rows.len().saturating_sub(1);
@@ -463,7 +463,7 @@ fn render_tree_lines(
         let label = format!("{name}/");
         let mut line = format!("{connector}{label}");
         if let Some(annotation) = annotation {
-            let pad = name_width.saturating_sub(label.chars().count()) + TREE_GAP;
+            let pad = name_width.saturating_sub(render::display_width(&label)) + TREE_GAP;
             line.push_str(&" ".repeat(pad));
             line.push_str(&style::dim(annotation, caps.color));
         }

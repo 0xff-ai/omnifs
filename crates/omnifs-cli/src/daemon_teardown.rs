@@ -251,32 +251,27 @@ impl DaemonTeardown {
 
 /// The exact human lines `down` prints (spec 3.7), pure and independent of
 /// the real terminal so it is deterministically testable. Human output shows
-/// exactly the `daemon` row: the `runtime-record` bookkeeping outcome is
-/// real for the JSON receipt (it can independently fail and needs its own
-/// machine-visible row there) but is implementation detail a human never
-/// asked to see, so it never reaches this transcript.
+/// the `daemon` row plus any *failing* `runtime-record` outcome: successful
+/// record bookkeeping is implementation detail a human never asked to see,
+/// but a kept record is exactly why the command is about to exit nonzero,
+/// so hiding it would print a transcript that contradicts the error block.
 ///
-/// No `daemon`-identified outcome at all means the daemon was never running:
-/// whatever else happened was runtime-record bookkeeping, not a stop, so it
-/// stays off the human transcript too (an already-absent record needs no
-/// cleanup line, and a removed stale record isn't a "stop" either, since
-/// nothing was actually running).
-/// `down`'s block ever prints exactly one key, `daemon` (spec 3.7): the width
-/// is trivially its own display width, computed the same way any other
-/// block's shared width is (spec 2.1), even though a single-key block never
-/// actually needs alignment against a sibling row.
-fn down_key_width() -> usize {
-    render::key_field_width(&["daemon"])
-}
-
+/// No visible outcome at all means the daemon was never running and its
+/// bookkeeping succeeded: an already-absent record needs no cleanup line,
+/// and a removed stale record isn't a "stop" either, since nothing was
+/// actually running.
 fn transcript(outcomes: &[TeardownOutcome], caps: Capabilities) -> Vec<String> {
-    if outcomes.iter().all(|outcome| outcome.id() != "daemon") {
+    let visible: Vec<&TeardownOutcome> = outcomes
+        .iter()
+        .filter(|outcome| outcome.id() == "daemon" || outcome.is_failure())
+        .collect();
+    if visible.is_empty() {
         return vec!["Nothing to stop. The daemon isn't running.".to_owned()];
     }
-    let key_width = down_key_width();
-    let mut lines = outcomes
+    let keys: Vec<&str> = visible.iter().map(|outcome| outcome.id()).collect();
+    let key_width = render::key_field_width(&keys);
+    let mut lines = visible
         .iter()
-        .filter(|outcome| outcome.id() == "daemon")
         .map(|outcome| render::ledger_row_line(&outcome.outcome().ledger_row(), key_width, caps))
         .collect::<Vec<_>>();
     // Frontends are independent processes and outlive a daemon stop; this is
@@ -359,6 +354,22 @@ mod tests {
             transcript(&[TeardownOutcome::StaleRecordRemoved], caps(false)),
             vec!["Nothing to stop. The daemon isn't running.".to_owned()]
         );
+    }
+
+    /// A kept record is why `down` is about to exit nonzero, so it must show
+    /// as its own fail row instead of the contradictory "Nothing to stop"
+    /// claim that hid it before the error block.
+    #[test]
+    fn a_failing_record_outcome_is_never_hidden_behind_nothing_to_stop() {
+        let lines = transcript(
+            &[TeardownOutcome::StaleRecordKept {
+                error: "the recorded daemon process is still alive".to_owned(),
+            }],
+            caps(false),
+        );
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("record kept"), "{lines:?}");
+        assert!(!lines[0].contains("Nothing to stop"), "{lines:?}");
     }
 
     #[test]

@@ -15,18 +15,13 @@
 use std::path::Path;
 
 use crate::commands::frontend::FrontendRuntime as Runtime;
-use crate::inventory::{FrontendState, FrontendStatus, Inventory};
+use crate::inventory::{FrontendStatus, Inventory};
 
 fn attached_frontends(inventory: &Inventory) -> Vec<&FrontendStatus> {
     inventory
         .frontends
         .iter()
-        .filter(|frontend| {
-            matches!(
-                frontend.state,
-                FrontendState::Attached | FrontendState::Running
-            )
-        })
+        .filter(|frontend| frontend.state.provides_access())
         .collect()
 }
 
@@ -106,19 +101,13 @@ fn browse_or_guest_fallback(inventory: &Inventory) -> String {
 
 /// Whether `omnifs status`'s closing `Browse:` line should print at all
 /// (spec 3.1): suppressed whenever the context strip already carries a
-/// `fix:` action naming the next step (`Stopped` -> `omnifs up`,
-/// `Failed`/`Unreachable` -> `omnifs logs`, see `status.rs::render`'s own
-/// `TableAction::fix` branches), so the human register never states two
-/// competing "what to do next" facts in the same report. Bare `omnifs`
-/// (`cli.rs::run_bare`) already branches on `DaemonState::Running` itself
-/// (spec 3.1's `Start serving:  omnifs up` sentence) and does not use this.
+/// `fix:` action naming the next step ([`DaemonState::context_fix`]), so the
+/// human register never states two competing "what to do next" facts in the
+/// same report. Bare `omnifs` (`cli.rs::run_bare`) already branches on
+/// `DaemonState::Running` itself (spec 3.1's `Start serving:  omnifs up`
+/// sentence) and does not use this.
 pub(crate) fn show_browse_line(daemon_state: crate::inventory::DaemonState) -> bool {
-    !matches!(
-        daemon_state,
-        crate::inventory::DaemonState::Stopped
-            | crate::inventory::DaemonState::Failed
-            | crate::inventory::DaemonState::Unreachable
-    )
+    daemon_state.context_fix().is_none()
 }
 
 /// The single derived browse action for `omnifs status`'s closing
@@ -167,7 +156,7 @@ pub(crate) fn access_row(path: &crate::inventory::AccessPath) -> String {
 mod tests {
     use super::*;
     use crate::commands::frontend::FrontendFilesystem as Filesystem;
-    use crate::inventory::{AuthState, ServingState};
+    use crate::inventory::{AuthState, FrontendState, ServingState};
     use crate::inventory::{DaemonState, MountStatus, ProviderPin, ProviderPinState};
     use omnifs_workspace::mounts::Name as MountName;
     use std::path::PathBuf;

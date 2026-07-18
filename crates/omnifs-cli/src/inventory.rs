@@ -61,6 +61,21 @@ pub(crate) enum DaemonState {
     Unreachable,
 }
 
+impl DaemonState {
+    /// The context strip's `fix:` action for this state, if any. This is the
+    /// one owner of "which daemon states already name a next step": `status`
+    /// renders the action from it, and the closing `Browse:` line suppresses
+    /// itself through it so the report never states two competing "what to do
+    /// next" facts.
+    pub(crate) const fn context_fix(self) -> Option<&'static str> {
+        match self {
+            Self::Stopped => Some("omnifs up"),
+            Self::Failed | Self::Unreachable => Some("omnifs logs"),
+            Self::Running | Self::Starting | Self::Degraded => None,
+        }
+    }
+}
+
 impl DaemonObservation {
     pub(crate) fn state(&self) -> DaemonState {
         match (&self.probe, self.status.as_ref()) {
@@ -226,6 +241,14 @@ impl FrontendState {
             Self::Failed => Some("omnifs logs"),
             Self::Attached | Self::Running => None,
         }
+    }
+
+    /// Whether a frontend in this state counts as a live access surface
+    /// (spec 2.9). The one owner of that predicate: the access lines,
+    /// `status`'s frontend count, and each mount's `access_count` all filter
+    /// through it.
+    pub(crate) const fn provides_access(self) -> bool {
+        matches!(self, Self::Attached | Self::Running)
     }
 }
 
@@ -447,12 +470,7 @@ impl Inventory {
         .status();
         let access_count = frontends
             .iter()
-            .filter(|frontend| {
-                matches!(
-                    frontend.state,
-                    FrontendState::Attached | FrontendState::Running
-                )
-            })
+            .filter(|frontend| frontend.state.provides_access())
             .count();
         for mount in &mut mounts {
             mount.access_count = access_count;
@@ -647,7 +665,11 @@ fn discovered_frontends(
     Ok(rows)
 }
 
-fn frontend_statuses(
+/// Join the daemon's live attachments with workspace runner observations.
+/// Also the cheap path for a caller that only needs the attachment-derived
+/// rows (`launch.rs`'s reconnect-grace poll passes no discovered runners and
+/// a zero mount count rather than re-collecting the whole [`Inventory`]).
+pub(crate) fn frontend_statuses(
     daemon: Option<&DaemonStatus>,
     mount_count: usize,
     discovered: Vec<FrontendStatus>,

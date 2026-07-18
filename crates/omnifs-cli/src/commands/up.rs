@@ -55,16 +55,22 @@ impl UpArgs {
         // The closing line is the single most actionable next thing (spec
         // 2.1): a no-op collapses to one "already serving" sentence naming
         // only the primary surface; a real start prints the full access
-        // block below the ledger rows `Launcher` already printed.
-        let inventory = Inventory::collect(&workspace).await?;
-        match outcome {
-            LaunchOutcome::AlreadyServing => output.outro(no_op_message(&inventory)),
-            LaunchOutcome::Started => {
-                output.narrate("");
-                for line in crate::ui::access::lines(&inventory) {
-                    output.narrate(line);
-                }
+        // block below the ledger rows `Launcher` already printed. The daemon
+        // is already up at this point, so a failure to read the inventory
+        // only costs the closing summary, never the command's success.
+        match Inventory::collect(&workspace).await {
+            Ok(inventory) => match outcome {
+                LaunchOutcome::AlreadyServing => output.outro(no_op_message(&inventory)),
+                LaunchOutcome::Started => {
+                    output.narrate("");
+                    for line in crate::ui::access::lines(&inventory) {
+                        output.narrate(line);
+                    }
+                },
             },
+            Err(error) => output.note(format!(
+                "daemon is up, but the closing summary is unavailable: {error:#}"
+            )),
         }
         Ok(ExitCode::Success)
     }

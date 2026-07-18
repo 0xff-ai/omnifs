@@ -115,11 +115,26 @@ fn follow_native_log(log_path: &Path, color: bool) -> anyhow::Result<()> {
         .spawn()
         .with_context(|| format!("tail -F {}", log_path.display()))?;
     let stdout = child.stdout.take().expect("stdout was piped");
-    for line in BufReader::new(stdout).lines() {
-        let Ok(line) = line else { break };
-        crate::ui::print_raw(&format!("{}\n", colorize_log_line(&line, color)));
-        let _ = std::io::stdout().flush();
+    let mut reader = BufReader::new(stdout);
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        // Read raw bytes and decode lossily: a single non-UTF-8 byte in the
+        // log must not end the follow (`BufRead::lines` would error on it),
+        // and a real I/O error must not leave us blocked in `wait()` on a
+        // `tail -F` that never exits on its own.
+        match reader.read_until(b'\n', &mut buf) {
+            Ok(0) => break,
+            Ok(_) => {
+                let line = String::from_utf8_lossy(&buf);
+                let line = line.trim_end_matches(['\n', '\r']);
+                crate::ui::print_raw(&format!("{}\n", colorize_log_line(line, color)));
+                let _ = std::io::stdout().flush();
+            },
+            Err(_) => break,
+        }
     }
+    let _ = child.kill();
     let _ = child.wait();
     Ok(())
 }
