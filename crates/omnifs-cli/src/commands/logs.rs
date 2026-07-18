@@ -124,14 +124,13 @@ fn follow_native_log(log_path: &Path, color: bool) -> anyhow::Result<()> {
         // and a real I/O error must not leave us blocked in `wait()` on a
         // `tail -F` that never exits on its own.
         match reader.read_until(b'\n', &mut buf) {
-            Ok(0) => break,
+            Ok(0) | Err(_) => break,
             Ok(_) => {
                 let line = String::from_utf8_lossy(&buf);
                 let line = line.trim_end_matches(['\n', '\r']);
                 crate::ui::print_raw(&format!("{}\n", colorize_log_line(line, color)));
                 let _ = std::io::stdout().flush();
             },
-            Err(_) => break,
         }
     }
     let _ = child.kill();

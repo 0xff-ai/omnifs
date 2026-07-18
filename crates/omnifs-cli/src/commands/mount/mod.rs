@@ -423,7 +423,7 @@ impl ReauthArgs {
         let auth_key_width = crate::auth::auth_receipt_key_width();
         let target = if selection.is_oauth() {
             output.note(format!("re-authenticating `{mount_name}` over OAuth"));
-            let target = crate::auth::login_with_workspace(
+            crate::auth::login_with_workspace(
                 workspace,
                 mount_name,
                 selection.account.as_deref(),
@@ -435,8 +435,7 @@ impl ReauthArgs {
                 output,
                 auth_key_width,
             )
-            .await?;
-            target
+            .await?
         } else {
             let source = TokenSource::resolve(
                 self.token.as_deref(),
