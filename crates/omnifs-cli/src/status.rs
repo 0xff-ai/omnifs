@@ -211,7 +211,7 @@ pub(crate) fn mount_table(mounts: &[MountStatus]) -> TableResources {
 /// (auth `not needed` is `Neutral`, the same rank as `stopped`) must never
 /// beat a genuinely live mount's serving state just because it sorts
 /// alongside a higher-severity row elsewhere.
-fn mount_row_state(mount: &MountStatus) -> TableState {
+pub(crate) fn mount_row_state(mount: &MountStatus) -> TableState {
     if mount.provider.state.severity() == Severity::Error {
         return table_state(Severity::Error, mount.provider.state.label());
     }

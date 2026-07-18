@@ -173,9 +173,6 @@ pub(crate) enum Glyph {
     /// receipt.
     Plan,
     /// `=` dim: planned keep in a consent plan, the counterpart to `Plan`.
-    /// Not yet constructed by any consent renderer; wiring lands with the
-    /// render.rs command migration in a later slice.
-    #[allow(dead_code)]
     Keep,
 }
 

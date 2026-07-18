@@ -24,9 +24,6 @@ pub(crate) mod table;
 
 use std::path::PathBuf;
 
-/// Command column width for `hint` rows.
-const HINT_WIDTH: usize = 16;
-
 /// Emit a complete pre-rendered document to stdout.
 pub(crate) fn print_raw(text: &str) {
     anstream::print!("{text}");
@@ -51,20 +48,6 @@ pub(crate) fn truncate(text: &str, max_chars: usize) -> String {
         out.push('…');
     }
     out
-}
-
-/// Command hint row: `  <cmd padded to 16><desc>`. Always narration, so
-/// always stderr: every caller reaches this through `Output::narrate`/`note`.
-pub(crate) fn hint(cmd: &str, desc: &str) -> String {
-    // A command longer than the column still needs a gap before the desc.
-    let cmd_pad = HINT_WIDTH.saturating_sub(cmd.chars().count()).max(1);
-    format!(
-        "  {}{:pad$}{}",
-        style::accent(cmd, style::Stream::Stderr),
-        "",
-        style::dim(desc, style::Stream::Stderr),
-        pad = cmd_pad
-    )
 }
 
 /// Parse a path typed at a prompt, expanding a leading `~/` when `HOME` is set.
@@ -109,13 +92,5 @@ mod tests {
         assert_eq!(truncate("🚀火é", 2), "🚀…");
         assert_eq!(truncate("hi", 1), "…");
         assert_eq!(truncate("hello", 0), "");
-    }
-
-    #[test]
-    fn hint_command_column_is_16_wide() {
-        let plain = strip_ansi(&hint("frontend shell", "browse your files"));
-        assert_eq!(plain.chars().nth(18), Some('b'), "{plain:?}");
-        let long = strip_ansi(&hint("omnifs completions", "tab completion"));
-        assert!(long.contains("omnifs completions tab"), "{long:?}");
     }
 }

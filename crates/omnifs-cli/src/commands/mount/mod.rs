@@ -130,6 +130,14 @@ pub(crate) struct MountShowResult {
     frontends: Vec<crate::inventory::FrontendStatus>,
     access_paths: Vec<crate::inventory::AccessPath>,
     verdict: crate::inventory::Verdict,
+    /// Local desired-state spec path. Absent when the mount is only observed
+    /// through the daemon (no local spec, e.g. `observed_mount_rows`) or the
+    /// local registry itself failed to parse.
+    spec_path: Option<std::path::PathBuf>,
+    auth_kind: Option<omnifs_workspace::authn::AuthKind>,
+    /// Compact `key: value, ...` rendering of the provider config object, if
+    /// the mount configures one.
+    config_summary: Option<String>,
 }
 
 async fn ls(_args: &LsArgs, output: Output) -> anyhow::Result<ExitCode> {
@@ -184,12 +192,46 @@ pub(crate) async fn show_with_output(
     let mount_name = MountName::new(name.to_owned())?;
     let access_paths = inventory.access_paths(&mount_name);
     let verdict = inventory.verdict();
+    // A best-effort local-spec lookup: an observed-but-not-locally-configured
+    // mount, or a workspace whose registry has an unrelated parse failure,
+    // still gets a card, just without these locally-sourced facts.
+    let local = crate::mount_config::load_mounts(workspace)
+        .ok()
+        .and_then(|mounts| mounts.into_iter().find(|entry| entry.name == mount_name));
+    let spec_path = local.as_ref().map(|entry| entry.source.clone());
+    let auth_kind = local
+        .as_ref()
+        .and_then(|entry| entry.config.auth.as_ref())
+        .map(omnifs_workspace::mounts::Auth::kind);
+    let config_summary = local
+        .as_ref()
+        .and_then(|entry| entry.config.config_raw.as_ref())
+        .and_then(config_summary_line);
     Ok(MountShowResult {
         mount,
         frontends: inventory.frontends,
         access_paths,
         verdict,
+        spec_path,
+        auth_kind,
+        config_summary,
     })
+}
+
+/// `key: value, ...` for a provider config object, or `None` for an empty or
+/// non-object config value.
+fn config_summary_line(value: &serde_json::Value) -> Option<String> {
+    let object = value.as_object()?;
+    if object.is_empty() {
+        return None;
+    }
+    Some(
+        object
+            .iter()
+            .map(|(key, value)| format!("{key}: {value}"))
+            .collect::<Vec<_>>()
+            .join(", "),
+    )
 }
 
 fn render_mounts(result: &MountsResult) -> String {
@@ -200,44 +242,112 @@ fn render_mounts(result: &MountsResult) -> String {
     report.render()
 }
 
+/// `mount show`'s detail card (spec 3.4): a header line naming the mount with
+/// its headline state right-aligned (the same precedence `mount ls` uses,
+/// [`crate::status::mount_row_state`]), then an indented definition list of
+/// the facts a maintainer actually reaches for: provider pin, auth, spec
+/// path, access, and provider config. `mount ls` keeps owning the tabular
+/// summary; this is deliberately a different shape, not a one-row table.
 fn render_mount_show(result: &MountShowResult) -> String {
-    use crate::ui::table::{
-        Cell, Column, CountLabel, Priority, Report, ResourceRow, ResourceTable, StateToken,
-        WidthPolicy,
-    };
-    let mut table = ResourceTable::new(
-        "Access paths",
-        CountLabel::number(result.access_paths.len()),
-        vec![
-            Column::new("Filesystem", Priority::Identity, WidthPolicy::Auto),
-            Column::new("Runtime", Priority::Essential, WidthPolicy::Auto),
-            Column::new("Path", Priority::Essential, WidthPolicy::Path),
-            Column::new("State", Priority::Secondary, WidthPolicy::Auto),
-        ],
-    );
-    for path in &result.access_paths {
-        let state = match path.state {
-            crate::inventory::AccessState::Available => StateToken::positive(path.state.label()),
-            crate::inventory::AccessState::Offline => StateToken::neutral(path.state.label()),
-            crate::inventory::AccessState::Failed => StateToken::failure(path.state.label()),
-        };
-        let row_state = state.clone();
-        table.push(ResourceRow::new(
-            [
-                Cell::new(path.filesystem.label()),
-                Cell::new(path.runtime.label()),
-                Cell::new(path.path.display().to_string()),
-                Cell::state(state),
-            ],
-            row_state,
-        ));
-    }
+    use crate::ui::table::{Block, ContextStrip, Report};
+
+    let state = crate::status::mount_row_state(&result.mount);
     let mut report = Report::new();
-    report.push(crate::ui::table::Block::Resources(
-        crate::status::mount_table(std::slice::from_ref(&result.mount)),
-    ));
-    report.push(crate::ui::table::Block::Resources(table));
-    report.render()
+    report.push(Block::Context(ContextStrip::new(
+        result.mount.name.clone(),
+        String::new(),
+        state,
+    )));
+    let mut card = report.render();
+
+    card.push_str(&detail_rows(&detail_card_facts(result)));
+    card.push('\n');
+    card
+}
+
+/// The ordered `(key, value)` facts below a `mount show` card's header.
+/// `auth` and `config` are omitted, not shown empty, when the mount has
+/// neither (spec 3.4 shows `config` only for a provider that configures
+/// one). `access` always has at least one row: a fallback fact when nothing
+/// currently reaches the mount, never a silently missing key.
+fn detail_card_facts(result: &MountShowResult) -> Vec<(&'static str, String)> {
+    let mut facts = vec![("provider", provider_fact(&result.mount.provider))];
+    if let Some(fact) = auth_fact(result) {
+        facts.push(("auth", fact));
+    }
+    if let Some(path) = &result.spec_path {
+        facts.push(("spec", omnifs_workspace::display(path)));
+    }
+    let access_rows: Vec<String> = result
+        .access_paths
+        .iter()
+        .filter(|path| {
+            matches!(
+                path.state,
+                crate::inventory::AccessState::Available | crate::inventory::AccessState::Offline
+            )
+        })
+        .map(crate::ui::access::access_row)
+        .collect();
+    if access_rows.is_empty() {
+        facts.push(("access", "no frontend attached yet".to_owned()));
+    } else {
+        facts.extend(access_rows.into_iter().map(|row| ("access", row)));
+    }
+    if let Some(config) = &result.config_summary {
+        facts.push(("config", config.clone()));
+    }
+    facts
+}
+
+/// `<name>@<version>  (pin <digest8>…)`, with the provider's own state
+/// parenthesized only when it is not the healthy default (spec's clean
+/// example never shows a healthy pin's state; a missing/corrupt pin still
+/// must not go silent on this card).
+fn provider_fact(pin: &crate::inventory::ProviderPin) -> String {
+    use std::fmt::Write as _;
+
+    let mut value = format!(
+        "{}@{}",
+        pin.name,
+        pin.version.as_deref().unwrap_or("unpinned")
+    );
+    if !matches!(pin.state, crate::inventory::ProviderPinState::Available) {
+        let _ = write!(value, " ({})", pin.state.label());
+    }
+    let short = &pin.artifact[..pin.artifact.len().min(8)];
+    let _ = write!(value, "  (pin {short}…)");
+    value
+}
+
+/// `<kind>, <state>` when a local spec resolved the auth kind (spec's
+/// `oauth, signed in as raulk`, minus the upstream identity: neither the
+/// OAuth flow nor the CLI-visible credential API surfaces one today, so this
+/// card states the kind and state it can actually observe rather than
+/// fabricating a username). `None` for a mount needing no auth at all, or one
+/// whose local spec could not be resolved.
+fn auth_fact(result: &MountShowResult) -> Option<String> {
+    let kind = result.auth_kind?;
+    Some(format!("{kind}, {}", result.mount.auth.label()))
+}
+
+/// One line per fact, two-space indented, no glyph column: a definition list
+/// reads differently from a settled-operation ledger, so this deliberately
+/// does not reuse `render.rs`'s glyph-led `LedgerRow` vocabulary.
+fn detail_rows(facts: &[(&'static str, String)]) -> String {
+    use std::fmt::Write as _;
+
+    let key_width = facts
+        .iter()
+        .map(|(key, _)| key.chars().count())
+        .max()
+        .unwrap_or(0);
+    let mut out = String::new();
+    for (key, value) in facts {
+        let pad = key_width.saturating_sub(key.chars().count()) + 3;
+        let _ = writeln!(out, "  {key}{}{value}", " ".repeat(pad));
+    }
+    out
 }
 
 impl ReauthArgs {
@@ -308,7 +418,7 @@ impl ReauthArgs {
 
         let target = if selection.is_oauth() {
             output.note(format!("re-authenticating `{mount_name}` over OAuth"));
-            crate::auth::login_with_workspace(
+            let target = crate::auth::login_with_workspace(
                 workspace,
                 mount_name,
                 selection.account.as_deref(),
@@ -317,7 +427,16 @@ impl ReauthArgs {
                 &self.scopes,
                 output,
             )
-            .await?
+            .await?;
+            // Matches `mount add`'s OAuth branch (spec 3.5): no upstream
+            // identity is available from the exchange itself, so this names
+            // the scheme kind rather than fabricating a username.
+            output.row(&crate::ui::report::Row::new(
+                crate::ui::style::Glyph::Done,
+                "signed in",
+                "oauth",
+            ));
+            target
         } else {
             let source = TokenSource::resolve(
                 self.token.as_deref(),
@@ -377,7 +496,7 @@ fn rm_with_options(
         // operation. Emit the same plan/receipt shape as other destructive
         // commands, but never construct a credential service or touch the
         // credential store when there is no spec to remove.
-        let mut plan = Plan::new("plan");
+        let mut plan = Plan::new(format!("Removing mount `{name}`"));
         plan.push(Row::keep(
             "spec",
             "spec",
@@ -395,7 +514,7 @@ fn rm_with_options(
             output.note(format!("Did you mean `{suggestion}`?"));
         }
         if dry_run {
-            output.outro("Dry run; no changes made.");
+            output.outro("Dry run, nothing changed.");
             return Ok(crate::commands::receipt::MountRemoveReceipt::dry_run(
                 name.to_string(),
                 plan,
@@ -413,16 +532,17 @@ fn rm_with_options(
     let config_path = mount.source.clone();
     // Build the plan without constructing an HTTP client or registering an
     // OAuth revocation. A dry run must stop before any apply-only work.
-    let plan = mount_remove_plan(&config_path);
+    let plan = mount_remove_plan(&name, &config_path);
     output.plan(&plan);
     match Decision::resolve(
         PromptMode::from_flags(yes || output.yes(), output.no_input()),
         dry_run,
+        "Remove?",
         "-y",
         &output,
     )? {
         Decision::DryRun => {
-            output.outro("Dry run; no changes made.");
+            output.outro("Dry run, nothing changed.");
             return Ok(crate::commands::receipt::MountRemoveReceipt::dry_run(
                 name.to_string(),
                 plan,
@@ -447,7 +567,7 @@ fn rm_with_options(
     }
     let receipt = plan.receipt(outcomes);
     output.receipt(&receipt);
-    output.outro(format!("Removed `{name}`."));
+    output.outro(format!("Removed `{name}`. {}", plan.settled_summary()));
     if receipt
         .rows
         .iter()
@@ -471,8 +591,8 @@ fn rm_with_options(
     ))
 }
 
-fn mount_remove_plan(config_path: &Path) -> Plan {
-    let mut plan = Plan::new("plan");
+fn mount_remove_plan(name: &MountName, config_path: &Path) -> Plan {
+    let mut plan = Plan::new(format!("Removing mount `{name}`"));
     plan.push(Row::remove(
         "spec",
         "spec",
@@ -511,10 +631,62 @@ mod tests {
 
     #[test]
     fn removal_plan_names_desired_state_row() {
+        let name = MountName::try_from("github").unwrap();
         let path = Path::new("/tmp/omnifs/mounts/github.json");
-        let plan = mount_remove_plan(path);
+        let plan = mount_remove_plan(&name, path);
         assert_eq!(plan.remove_count(), 1);
         assert_eq!(plan.rows[0].id, "spec");
+        assert_eq!(plan.title, "Removing mount `github`");
+    }
+
+    #[tokio::test]
+    async fn removing_an_absent_mount_exits_zero_and_settles_a_skip_receipt() {
+        let tmp = TempDir::new().unwrap();
+        let workspace = fixture_workspace(tmp.path());
+        let output = Output::new(crate::ui::output::OutputMode::Human, false);
+        let receipt = rm_with_options(&workspace, "missing", true, false, &output).unwrap();
+        assert_eq!(receipt.mount, "missing");
+        assert!(
+            receipt
+                .rows
+                .iter()
+                .any(|row| row.id == "spec" && row.state == crate::ui::consent::OutcomeState::Skip)
+        );
+    }
+
+    /// `--dry-run` prints the plan and settles nothing (spec 2.7): the
+    /// desired-state directory is untouched.
+    #[tokio::test]
+    async fn dry_run_prints_the_plan_and_removes_nothing() {
+        let tmp = TempDir::new().unwrap();
+        let workspace = fixture_workspace(tmp.path());
+        AddArgs {
+            provider: Some("dns".to_string()),
+            as_name: None,
+            no_browser: true,
+            token: None,
+            token_env: None,
+            no_validate: false,
+            scopes: Vec::new(),
+            scheme: None,
+            no_auth: false,
+            config_json: None,
+            limits_json: None,
+        }
+        .run_in_workspace(
+            &workspace,
+            Output::new(crate::ui::output::OutputMode::Human, false),
+        )
+        .await
+        .unwrap();
+        let spec_path = tmp.path().join("mounts/dns.json");
+        assert!(spec_path.exists(), "fixture must create the spec first");
+
+        let output = Output::new(crate::ui::output::OutputMode::Human, false);
+        let receipt = rm_with_options(&workspace, "dns", true, true, &output).unwrap();
+        assert!(spec_path.exists(), "dry run must not remove the spec file");
+        assert_eq!(receipt.rows.len(), 0, "a dry run settles no receipt rows");
+        assert!(receipt.dry_run);
     }
 
     /// `omnifs mount ls` renders exactly the Mounts section of the status
@@ -551,5 +723,109 @@ mod tests {
             crate::status::mount_table(&mounts),
         ));
         assert_eq!(rendered, expected.render());
+    }
+
+    fn show_result(mount: crate::inventory::MountStatus) -> MountShowResult {
+        MountShowResult {
+            mount,
+            frontends: Vec::new(),
+            access_paths: Vec::new(),
+            verdict: crate::inventory::Verdict::Ok,
+            spec_path: Some("/home/.omnifs/mounts/github.json".into()),
+            auth_kind: Some(omnifs_workspace::authn::AuthKind::OAuth),
+            config_summary: Some(r#"org_filter: "raulk""#.to_owned()),
+        }
+    }
+
+    fn healthy_mount() -> crate::inventory::MountStatus {
+        crate::inventory::MountStatus {
+            name: "github".into(),
+            root: "/github".into(),
+            provider: crate::inventory::ProviderPin {
+                name: "github".into(),
+                version: Some("0.3.2".into()),
+                artifact: "a1b2c3d4".to_owned() + &"e".repeat(56),
+                state: crate::inventory::ProviderPinState::Available,
+            },
+            auth: crate::inventory::AuthState::Ready,
+            serving: crate::inventory::ServingState::Live,
+            access_count: 1,
+            fix: None,
+        }
+    }
+
+    /// `mount show` is a detail card (spec 3.4), never the tabular
+    /// single-row table `render_mounts` (`mount ls`) already owns.
+    #[test]
+    fn render_mount_show_is_a_detail_card_not_a_table() {
+        let rendered = render_mount_show(&show_result(healthy_mount()));
+        let lines = rendered.lines().collect::<Vec<_>>();
+        assert!(lines[0].starts_with("github"), "{rendered:?}");
+        assert!(lines[0].trim_end().ends_with("live"), "{rendered:?}");
+        assert!(!rendered.contains("Mounts"), "{rendered:?}");
+        assert!(!rendered.contains("Access paths"), "{rendered:?}");
+
+        let provider_line = lines
+            .iter()
+            .find(|line| line.trim_start().starts_with("provider"))
+            .expect("provider row");
+        assert!(provider_line.contains("github@0.3.2"), "{rendered:?}");
+        assert!(provider_line.contains("(pin a1b2c3d4…)"), "{rendered:?}");
+
+        let auth_line = lines
+            .iter()
+            .find(|line| line.trim_start().starts_with("auth"))
+            .expect("auth row");
+        assert!(auth_line.contains("oauth"), "{rendered:?}");
+        assert!(auth_line.contains("ready"), "{rendered:?}");
+
+        let spec_line = lines
+            .iter()
+            .find(|line| line.trim_start().starts_with("spec"))
+            .expect("spec row");
+        assert!(spec_line.contains("mounts/github.json"), "{rendered:?}");
+
+        let config_line = lines
+            .iter()
+            .find(|line| line.trim_start().starts_with("config"))
+            .expect("config row");
+        assert!(
+            config_line.contains(r#"org_filter: "raulk""#),
+            "{rendered:?}"
+        );
+    }
+
+    /// `access` states "no frontend attached yet" rather than silently
+    /// omitting the row when nothing currently reaches the mount.
+    #[test]
+    fn detail_card_access_row_falls_back_without_a_reachable_frontend() {
+        let mut result = show_result(healthy_mount());
+        result.access_paths = Vec::new();
+        let facts = detail_card_facts(&result);
+        let access = facts
+            .iter()
+            .find(|(key, _)| *key == "access")
+            .expect("access fact");
+        assert_eq!(access.1, "no frontend attached yet");
+    }
+
+    /// `auth` and `config` are omitted, not shown empty, when the mount has
+    /// neither (most providers have no config; a mount with no local spec has
+    /// no locally-resolvable auth kind).
+    #[test]
+    fn detail_card_omits_auth_and_config_when_absent() {
+        let mut result = show_result(healthy_mount());
+        result.auth_kind = None;
+        result.config_summary = None;
+        let facts = detail_card_facts(&result);
+        assert!(!facts.iter().any(|(key, _)| *key == "auth"), "{facts:?}");
+        assert!(!facts.iter().any(|(key, _)| *key == "config"), "{facts:?}");
+    }
+
+    #[test]
+    fn provider_fact_surfaces_a_degraded_pin_state() {
+        let mut pin = healthy_mount().provider;
+        pin.state = crate::inventory::ProviderPinState::Missing;
+        assert!(provider_fact(&pin).contains("(missing)"));
     }
 }

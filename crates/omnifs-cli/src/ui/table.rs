@@ -506,7 +506,7 @@ impl StateToken {
         self.severity.symbol()
     }
 
-    fn render(&self, color: bool) -> String {
+    pub(crate) fn render(&self, color: bool) -> String {
         let token = format!("{} {}", self.symbol(), self.label);
         if !color {
             return token;

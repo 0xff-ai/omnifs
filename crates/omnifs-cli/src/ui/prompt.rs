@@ -637,6 +637,24 @@ impl<T: Clone + Eq + std::fmt::Display> Select<T> {
         self
     }
 
+    /// Add explicit `(value, label, detail)` choices whose panel is several
+    /// complete sentences rather than one hint line (spec 2.6's provider
+    /// consent panel: domains called, memory ceiling, and auth scheme, each
+    /// its own line, never truncated). `options` remains the single-hint
+    /// entry point for simpler pickers.
+    pub(crate) fn detailed_options(
+        mut self,
+        items: impl IntoIterator<Item = (T, String, Vec<String>)>,
+    ) -> Self {
+        self.items
+            .extend(items.into_iter().map(|(value, label, detail)| SelectItem {
+                value,
+                label,
+                detail,
+            }));
+        self
+    }
+
     pub(crate) fn ask_with_output(self, output: &Output) -> anyhow::Result<T> {
         output.ensure_prompt_allowed()?;
         if !is_terminal() {

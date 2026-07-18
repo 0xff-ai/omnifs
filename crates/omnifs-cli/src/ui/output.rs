@@ -424,42 +424,40 @@ impl Output {
         }
     }
 
+    /// The consent plan preview (spec 2.7): a headline sentence naming the
+    /// operation (`plan.title`), then its rows indented two spaces under it
+    /// with the `-`/`=` glyph vocabulary, then a blank line so the confirm
+    /// prompt (or, for `--dry-run`, the closing sentence) reads as its own
+    /// block.
     pub(crate) fn plan(&self, plan: &super::consent::Plan) {
         if self.mode != OutputMode::Human {
             return;
         }
         let caps = stderr_capabilities(self.quiet);
-        crate::ui::eprint_raw(&format!("{}\n", super::render::heading("plan", caps)));
         let rows = plan
             .rows
             .iter()
-            .map(super::consent::Row::render_plan)
+            .map(super::consent::Row::ledger_row)
             .collect::<Vec<_>>();
-        crate::ui::eprint_raw(&format!(
-            "{}\n",
-            super::report::render_rows(&rows, crate::ui::style::Stream::Stderr)
-        ));
-        crate::ui::eprint_raw(&format!(
-            "{}\n",
-            crate::ui::style::dim(plan.summary(), crate::ui::style::Stream::Stderr)
-        ));
+        crate::ui::eprint_raw(&super::render::plan_block(&plan.title, &rows, caps));
+        crate::ui::eprint_raw("\n");
     }
 
+    /// The consent receipt (spec 2.7): settled rows at column 0 (never
+    /// indented under the plan's headline, since the operation already
+    /// happened), then a blank line before the caller's closing sentence.
     pub(crate) fn receipt(&self, receipt: &super::consent::Receipt) {
         if self.mode != OutputMode::Human {
             return;
         }
         let caps = stderr_capabilities(self.quiet);
-        crate::ui::eprint_raw(&format!("{}\n", super::render::heading("apply", caps)));
         let rows = receipt
             .rows
             .iter()
-            .map(super::consent::Outcome::render_receipt)
+            .map(super::consent::Outcome::ledger_row)
             .collect::<Vec<_>>();
-        crate::ui::eprint_raw(&format!(
-            "{}\n",
-            super::report::render_rows(&rows, crate::ui::style::Stream::Stderr)
-        ));
+        crate::ui::eprint_raw(&format!("{}\n", super::render::ledger_block(&rows, caps)));
+        crate::ui::eprint_raw("\n");
     }
 
     /// The v2 register never repeats the command the user just typed, so
@@ -479,6 +477,15 @@ impl Output {
                 super::render::sentence(&message.into(), caps)
             ));
         }
+    }
+
+    /// Whether this invocation already printed its own closing line (via
+    /// [`Self::outro`]). The top-level cancel handler checks this so a
+    /// consent decline's `Kept everything as it was.` (spec 2.7) is not
+    /// followed by the generic `canceled` line every other prompt cancel
+    /// prints.
+    pub(crate) fn is_closed(&self) -> bool {
+        state(self).closed
     }
 
     pub(crate) fn progress(&self, key: impl Into<String>) -> crate::ui::live::Spinner {

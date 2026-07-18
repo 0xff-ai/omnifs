@@ -3,7 +3,6 @@
 //! Commands own narration. This module owns the stage behavior so mount
 //! creation and authentication stay in one path.
 
-use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context, anyhow};
@@ -40,7 +39,6 @@ pub(crate) struct MountInitPlan {
     effective_auth: Option<AuthSelection>,
     imported_token: Option<secrecy::SecretString>,
     spec: Spec,
-    mount_path: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -97,41 +95,21 @@ pub(crate) async fn configure_mount(
     let status = plan.authenticate(&args, workspace, output, prompt).await?;
     persist_mount_spec(workspace, &plan, output)?;
 
-    match status {
-        MountInitStatus::Ready => output.row(&crate::ui::report::Row::new(
-            crate::ui::style::Glyph::Done,
-            "mount ready",
-            plan.mount_name.as_str(),
-        )),
-        MountInitStatus::SignInDeclined => output.row(&crate::ui::report::Row::new(
+    if status == MountInitStatus::SignInDeclined {
+        output.row(&crate::ui::report::Row::new(
             crate::ui::style::Glyph::Skip,
             "sign in",
             format!(
                 "skipped; run `omnifs mount reauth {}` later",
                 plan.mount_name
             ),
-        )),
-    }
-    if !crate::client::DaemonClient::for_workspace(workspace)
-        .ready()
-        .await
-    {
-        output.note("run `omnifs up` to start serving it");
-    }
-
-    let running = crate::client::DaemonClient::for_workspace(workspace)
-        .ready()
-        .await;
-    if running {
-        let path = browse_path(plan.mount_name.as_str());
-        output.note(crate::ui::hint(
-            &format!("ls {}", path.display()),
-            "browse it",
         ));
-    } else {
-        output.note(crate::ui::hint("omnifs up", "start serving"));
     }
 
+    // The single closing line (spec 3.3) is the caller's job: `mount add`
+    // names the mount it just created, while `omnifs setup` calls this in a
+    // loop across several providers and prints its own summary once at the
+    // end, so no per-provider closing line belongs here.
     crate::metrics::maybe_print_health_nudge(workspace, output.clone()).await;
 
     Ok(MountInitOutcome {
@@ -161,18 +139,25 @@ pub(crate) fn spec_creation(
     let provider_selection = ProviderSelection::new(&mounts, &embedded);
 
     // No provider argument in an interactive output: choose one with the
-    // generic single-select prompt instead of a bare list.
+    // generic single-select prompt instead of a bare list. The panel carries
+    // the full, untruncated consent facts (spec 2.6): domains called, memory
+    // ceiling, and auth scheme, one sentence per line, never the compact
+    // truncated summary `mount add`'s later consent block uses.
     let picked = if args.provider.is_none() && interactive {
         let options = crate::provider_resolver::provider_options(
             &embedded,
             &std::collections::BTreeMap::new(),
         );
-        let choices = options
-            .into_iter()
-            .map(|option| (option.name.clone(), option.name, option.hint));
+        let choices = options.into_iter().map(|option| {
+            let detail = embedded
+                .by_name(&option.name)
+                .map(|entry| crate::capability::consent_detail(entry.manifest()))
+                .unwrap_or_default();
+            (option.name.clone(), option.name, detail)
+        });
         Some(
             crate::ui::prompt::Select::new("Which provider?")
-                .options(choices)
+                .detailed_options(choices)
                 .ask_with_output(output)?,
         )
     } else {
@@ -213,6 +198,26 @@ pub(crate) fn spec_creation(
             "mount `{mount_name}` already exists; remove it first or choose a different name"
         );
     }
+    // Receipt rows for the two facts already true at this point: the
+    // provider artifact is retained in the store (`ProviderResolver::resolve`
+    // above either found it there or just retained it), and the mount name is
+    // validated and free. The remaining work below (auth, then the actual
+    // spec write in `persist_mount_spec`) either fills in these two rows'
+    // consequences or fails outright, so nothing here overclaims (spec 3.3).
+    let provider_identity = reference.meta.version.as_ref().map_or_else(
+        || provider_name.clone(),
+        |version| format!("{provider_name}@{version}"),
+    );
+    output.row(&crate::ui::report::Row::new(
+        crate::ui::style::Glyph::Done,
+        "provider",
+        format!("{provider_identity} retained"),
+    ));
+    output.row(&crate::ui::report::Row::new(
+        crate::ui::style::Glyph::Done,
+        "mount",
+        format!("/{mount_name} created"),
+    ));
 
     let auth_manifest = manifest
         .auth
@@ -270,7 +275,6 @@ pub(crate) fn spec_creation(
         created,
     );
     let spec = mount_file.into_spec();
-    let mount_path = workspace.desired_state().spec_path(&mount_name);
 
     Ok(MountInitPlan {
         mount_name,
@@ -278,7 +282,6 @@ pub(crate) fn spec_creation(
         effective_auth: auth,
         imported_token: token,
         spec,
-        mount_path,
     })
 }
 
@@ -312,7 +315,7 @@ impl MountInitPlan {
             if interactive && !prompt.yes {
                 let proceed = crate::ui::prompt::Confirm::new(format!(
                     "Sign in to {} in your browser now?",
-                    plan.mount_name
+                    plan.manifest.display_name
                 ))
                 .with_default(true)
                 .ask_with_output(output)?;
@@ -336,10 +339,15 @@ impl MountInitPlan {
                     plan.mount_name
                 ));
             })?;
+            // No upstream identity is available from the OAuth exchange
+            // itself (the flow never probes "who am I"), so this names the
+            // scheme kind rather than fabricating a username; static-token
+            // sign-in below does carry a real identity when the provider's
+            // validation probe returns one.
             output.row(&crate::ui::report::Row::new(
                 crate::ui::style::Glyph::Done,
                 "signed in",
-                "done",
+                "oauth",
             ));
         } else {
             if interactive && let Ok(scheme) = auth.static_token_scheme(&plan.manifest) {
@@ -349,14 +357,18 @@ impl MountInitPlan {
                     .as_ref()
                     .map(|auth| auth.guidance_for(&scheme.key))
                     .unwrap_or_default();
+                // Dim sentences (spec 3.3): informational setup guidance the
+                // user reads once before pasting a token, not a settled fact.
+                let dim =
+                    |text: String| crate::ui::style::dim(text, crate::ui::style::Stream::Stderr);
                 if let Some(url) = &scheme.creation_url {
-                    output.note(format!("create a token at {url}"));
+                    output.note(dim(format!("create a token at {url}")));
                 }
                 for step in &guidance.setup_steps {
-                    output.note(step);
+                    output.note(dim(step.clone()));
                 }
                 if let Some(url) = &guidance.docs_url {
-                    output.note(url);
+                    output.note(dim(url.clone()));
                 }
             }
             let source = TokenSource::resolve(
@@ -410,23 +422,17 @@ fn selected_auth(
     ))
 }
 
+/// Write the mount spec. Silent: `spec_creation`'s `mount ... created` row
+/// (spec 3.3) already announced this outcome before authentication started,
+/// since everything this write needs was already validated by then. A second
+/// row here would just restate the same fact in different words.
 fn persist_mount_spec(
     workspace: &Workspace,
     plan: &MountInitPlan,
-    output: &crate::ui::output::Output,
+    _output: &crate::ui::output::Output,
 ) -> anyhow::Result<()> {
     workspace.desired_state().put_uncommitted(&plan.spec)?;
     workspace.desired_state().commit()?;
-    output.row(&crate::ui::report::Row::new(
-        crate::ui::style::Glyph::Done,
-        "desired state",
-        format!("{} recorded", plan.mount_name),
-    ));
-    // `Wrote <path>` collapses to a single dim continuation, printed once.
-    output.note(format!(
-        "wrote {}",
-        omnifs_workspace::display(&plan.mount_path)
-    ));
     Ok(())
 }
 
@@ -455,12 +461,6 @@ fn apply_mount_overrides(
 
 fn parse_json_flag<T: DeserializeOwned>(flag: &'static str, raw: &str) -> anyhow::Result<T> {
     serde_json::from_str(raw).with_context(|| format!("parse {flag}"))
-}
-
-fn browse_path(mount_name: &str) -> PathBuf {
-    omnifs_workspace::resolve_mount_point()
-        .unwrap_or_else(|| PathBuf::from("~/omnifs"))
-        .join(mount_name)
 }
 
 #[cfg(test)]

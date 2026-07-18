@@ -655,8 +655,13 @@ fn mount_add_collision_renames_with_yes() {
         "--yes collision rename must stay visible: {stderr}"
     );
     // The outro is a flat sentence with no `└` frame closer, and its inline
-    // `` `test-2` `` span has its backticks stripped by the renderer.
-    assert!(stderr.contains("Mounted test-2."), "{stderr}");
+    // `` `test-2` `` span has its backticks stripped by the renderer. No
+    // daemon is running in this fixture, so the closing line names `up`
+    // rather than a browse action (spec 3.3).
+    assert!(
+        stderr.contains("Mounted test-2 at /test-2. Serve it: omnifs up"),
+        "{stderr}"
+    );
     assert!(
         !stderr.contains('`'),
         "backticks must never reach the terminal: {stderr}"

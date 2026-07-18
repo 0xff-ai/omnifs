@@ -155,6 +155,24 @@ pub(crate) fn ledger_block(rows: &[LedgerRow], caps: Capabilities) -> String {
         .join("\n")
 }
 
+/// The consent plan preview block (spec 2.7): a headline sentence naming the
+/// operation, then its rows indented two spaces under it with the `-`/`=`
+/// glyph vocabulary (`rows` is expected to carry only [`Glyph::Plan`] and
+/// [`Glyph::Keep`] rows; the receipt that settles a plan uses
+/// [`ledger_block`] directly, unindented, since the operation already
+/// happened by then). Pure, so `Output::plan`'s exact transcript is testable
+/// without capturing real stderr.
+pub(crate) fn plan_block(title: &str, rows: &[LedgerRow], caps: Capabilities) -> String {
+    let mut out = sentence(title, caps);
+    out.push('\n');
+    for line in ledger_block(rows, caps).lines() {
+        out.push_str("  ");
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
 /// A plain sentence-case line, wrapped to `caps.width`. Inline command spans
 /// (`` `cmd` ``) accent-color and drop their backticks per line, so a wrap
 /// point can never leave a dangling escape sequence.
@@ -373,6 +391,58 @@ mod tests {
             "{rendered:?}"
         );
         assert!(!rendered.contains('`'), "{rendered:?}");
+    }
+
+    #[test]
+    fn plan_block_matches_spec_2_7s_documented_shape() {
+        // The exact 2.7 illustrative transcript: a headline, then three
+        // indented rows mixing the `-` (removal) and `=` (keep) glyphs. No
+        // current command reaches a three-row plan (`mount rm`/`mount revoke`
+        // each only ever plan one row today), so this exercises the
+        // primitive directly against the documented shape rather than
+        // through a live command.
+        let rows = [
+            LedgerRow::new(Glyph::Plan, "mount", "/github"),
+            LedgerRow::new(Glyph::Plan, "credential", "github oauth, revoked upstream"),
+            LedgerRow::new(Glyph::Keep, "provider", "artifact kept in store"),
+        ];
+        let rendered = plan_block("Removing mount github", &rows, caps(120, false));
+        let lines = rendered.lines().collect::<Vec<_>>();
+        assert_eq!(lines[0], "Removing mount github");
+        assert_eq!(lines.len(), 4, "{rendered:?}");
+        // Every row is indented two spaces under the headline, and the
+        // indented block is byte-for-byte the same rows `ledger_block` alone
+        // would produce (plan_block only adds the headline and the indent).
+        let unindented = ledger_block(&rows, caps(120, false));
+        for (line, expected) in lines[1..].iter().zip(unindented.lines()) {
+            assert_eq!(*line, format!("  {expected}"));
+        }
+        assert!(lines[1].trim_start().starts_with("- mount"), "{rendered:?}");
+        assert!(
+            lines[2].trim_start().starts_with("- credential"),
+            "{rendered:?}"
+        );
+        assert!(
+            lines[3].trim_start().starts_with("= provider"),
+            "{rendered:?}"
+        );
+        // Every row's value starts at the same column: the plan reads as one
+        // aligned block, not three independently-sized rows.
+        let columns = [
+            lines[1].find("/github").unwrap(),
+            lines[2].find("github oauth").unwrap(),
+            lines[3].find("artifact").unwrap(),
+        ];
+        assert_eq!(columns[0], columns[1], "{rendered:?}");
+        assert_eq!(columns[1], columns[2], "{rendered:?}");
+    }
+
+    #[test]
+    fn plan_block_is_empty_bodied_for_a_plan_with_no_rows() {
+        assert_eq!(
+            plan_block("Removing mount x", &[], caps(120, false)),
+            "Removing mount x\n"
+        );
     }
 
     #[test]

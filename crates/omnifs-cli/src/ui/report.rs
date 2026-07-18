@@ -40,37 +40,6 @@ impl Row {
     }
 }
 
-/// Render a group of rail rows as one borderless block so the key and value
-/// columns size to the complete operation, rather than truncating each key at
-/// a fixed width. `mode` is copied per row, not per call, so every row in the
-/// block agrees on whether color is on.
-pub(super) fn render_rows(rows: &[Row], mode: impl Into<style::ColorMode> + Copy) -> String {
-    if rows.is_empty() {
-        return String::new();
-    }
-
-    let key_width = rows
-        .iter()
-        .map(|row| row.key.chars().count())
-        .max()
-        .unwrap_or(0);
-    rows.iter()
-        .map(|row| {
-            let key_pad = key_width - row.key.chars().count();
-            format!(
-                "{} {}{} {}",
-                row.glyph.render(mode),
-                row.key,
-                " ".repeat(key_pad),
-                style::accentuate(&row.value, mode)
-            )
-            .trim_end()
-            .to_owned()
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -81,30 +50,5 @@ mod tests {
         let row = Row::new(Glyph::Done, "frontends observed", "2 attached");
         let plain = strip_ansi(&row.render(false));
         assert!(plain.contains("frontends obs… 2 attached"), "{plain:?}");
-    }
-
-    #[test]
-    fn grouped_rows_keep_full_keys_and_align_values() {
-        let rows = [
-            Row::new(
-                Glyph::Plan,
-                "frontend nfs (host)",
-                "tear down /Users/raul/omnifs",
-            ),
-            Row::new(Glyph::Plan, "frontend fuse (docker)", "tear down /omnifs"),
-            Row::new(Glyph::Plan, "daemon", "stop if running"),
-        ];
-        let plain = strip_ansi(&render_rows(&rows, false));
-        assert!(plain.contains("frontend nfs (host)"), "{plain:?}");
-        assert!(plain.contains("frontend fuse (docker)"), "{plain:?}");
-        let nfs = plain
-            .lines()
-            .find(|line| line.contains("frontend nfs"))
-            .unwrap();
-        let fuse = plain
-            .lines()
-            .find(|line| line.contains("frontend fuse"))
-            .unwrap();
-        assert_eq!(nfs.find("tear down"), fuse.find("tear down"), "{plain:?}");
     }
 }
