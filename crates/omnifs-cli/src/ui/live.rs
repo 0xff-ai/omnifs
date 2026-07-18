@@ -1,4 +1,4 @@
-//! The transient layer (spec 2.5): spinners, live regions, and byte
+//! The transient layer: spinners, live regions, and byte
 //! progress. Everything here exists only on a TTY and never survives in
 //! scrollback; every primitive settles into a durable row (`ui/report.rs`)
 //! once its operation finishes. This module owns cursor movement, redraw
@@ -26,7 +26,7 @@ const APPEARANCE_DELAY: Duration = Duration::from_millis(150);
 const UPDATE_INTERVAL: Duration = Duration::from_millis(100);
 
 /// The transient spinner frame, indented two spaces to match
-/// [`region_frame`]'s in-flight rows (spec 2.5): `key_width` is the same
+/// [`region_frame`]'s in-flight rows: `key_width` is the same
 /// block-scoped width its settled row (via [`Spinner::settle`]) renders at,
 /// so the frame never jumps column when it resolves.
 fn spinner_line(frame: &str, key: &str, text: &str, key_width: usize) -> String {
@@ -63,7 +63,7 @@ fn format_duration(duration: Duration) -> String {
     }
 }
 
-/// A single pending operation (spec 2.5 "Spinner"): appears after a short
+/// A single pending operation: appears after a short
 /// delay, redraws at a throttled cadence, and is replaced in place by its
 /// durable ledger row with a dim duration suffix once it settles.
 pub(crate) struct Spinner {
@@ -113,7 +113,7 @@ impl Spinner {
         self.next_update = now + UPDATE_INTERVAL;
         // Setup folds several concurrent enables' narration into one
         // aggregate live region instead of letting each print its own row
-        // (spec 3.2); redirecting here rather than drawing keeps this
+        // redirecting here rather than drawing keeps this
         // spinner's row suppressed the same way `Output::narrate` and
         // `Output::ledger_row` already redirect for the same sink.
         if let Some(sink) = self.output.narration_sink() {
@@ -240,7 +240,7 @@ fn region_frame(units: &[Unit], frame_symbol: &str) -> Vec<String> {
 }
 
 /// Parallel operations rendered as one block of two-space-indented lines
-/// (spec 2.5 "Live region"). Non-TTY or `--quiet` never draws a region at
+/// Non-TTY or `--quiet` never draws a region at
 /// all: `update`/`settle` become no-ops and [`LiveRegion::finish`] /
 /// [`LiveRegion::cancel`] still emit exactly the one durable row a TTY run
 /// would leave behind, so both paths agree on the record that survives.
@@ -411,7 +411,7 @@ impl LiveRegion {
 }
 
 /// A `done / total` byte counter with decimal units, and (only once the
-/// total is known and stable) a fixed-width bar. Spec 2.5 forbids a fake
+/// total is known and stable) a fixed-width bar. The renderer forbids a fake
 /// percentage, so there is no bar-only rendering: a caller with an unknown
 /// total uses the counter text alone (`Spinner::update_bytes_with` already
 /// does this). The bar primitive is built now; its first real caller

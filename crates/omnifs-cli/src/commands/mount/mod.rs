@@ -243,7 +243,7 @@ fn render_mounts(result: &MountsResult) -> String {
     report.render()
 }
 
-/// `mount show`'s detail card (spec 3.4): a header line naming the mount with
+/// `mount show`'s detail card: a header line naming the mount with
 /// its headline state right-aligned (the same precedence `mount ls` uses,
 /// [`crate::status::mount_row_state`]), then an indented definition list of
 /// the facts a maintainer actually reaches for: provider pin, auth, spec
@@ -268,8 +268,7 @@ fn render_mount_show(result: &MountShowResult) -> String {
 
 /// The ordered `(key, value)` facts below a `mount show` card's header.
 /// `auth` and `config` are omitted, not shown empty, when the mount has
-/// neither (spec 3.4 shows `config` only for a provider that configures
-/// one). `access` always has at least one row: a fallback fact when nothing
+/// neither. `access` always has at least one row: a fallback fact when nothing
 /// currently reaches the mount, never a silently missing key.
 fn detail_card_facts(result: &MountShowResult) -> Vec<(&'static str, String)> {
     let mut facts = vec![("provider", provider_fact(&result.mount.provider))];
@@ -302,7 +301,7 @@ fn detail_card_facts(result: &MountShowResult) -> Vec<(&'static str, String)> {
 }
 
 /// `<name>@<version>  (pin <digest8>…)`, with the provider's own state
-/// parenthesized only when it is not the healthy default (spec's clean
+/// parenthesized only when it is not the healthy default (the clean
 /// example never shows a healthy pin's state; a missing/corrupt pin still
 /// must not go silent on this card).
 fn provider_fact(pin: &crate::inventory::ProviderPin) -> String {
@@ -321,7 +320,7 @@ fn provider_fact(pin: &crate::inventory::ProviderPin) -> String {
     value
 }
 
-/// `<kind>, <state>` when a local spec resolved the auth kind (spec's
+/// `<kind>, <state>` when a local spec resolved the auth kind (the
 /// `oauth, signed in as raulk`, minus the upstream identity: neither the
 /// OAuth flow nor the CLI-visible credential API surfaces one today, so this
 /// card states the kind and state it can actually observe rather than
@@ -674,7 +673,7 @@ mod tests {
         );
     }
 
-    /// `--dry-run` prints the plan and settles nothing (spec 2.7): the
+    /// `--dry-run` prints the plan and settles nothing: the
     /// desired-state directory is untouched.
     #[tokio::test]
     async fn dry_run_prints_the_plan_and_removes_nothing() {
@@ -710,7 +709,7 @@ mod tests {
     }
 
     /// `omnifs mount ls` renders exactly the Mounts section of the status
-    /// report (spec 3.10's per-command scope), never the context strip or
+    /// report, never the context strip or
     /// the Frontends table alongside it.
     #[test]
     fn render_mounts_is_exactly_the_status_mounts_section() {
@@ -774,7 +773,7 @@ mod tests {
         }
     }
 
-    /// `mount show` is a detail card (spec 3.4), never the tabular
+    /// `mount show` is a detail card, never the tabular
     /// single-row table `render_mounts` (`mount ls`) already owns.
     #[test]
     fn render_mount_show_is_a_detail_card_not_a_table() {

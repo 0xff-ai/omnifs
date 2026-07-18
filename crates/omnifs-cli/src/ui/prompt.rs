@@ -1,9 +1,9 @@
-//! Unified interactive prompts, built directly on crossterm (spec 2.6).
+//! Unified interactive prompts, built directly on crossterm.
 //!
 //! Every prompt draws a transient frame to stderr while raw mode is active,
 //! erases it once the answer resolves, and hands the durable one-line echo to
 //! [`Output`] so the transcript reads complete after the terminal settles
-//! (spec 2.5). Keyboard handling is split in two: `map_*_key` turns a
+//!. Keyboard handling is split in two: `map_*_key` turns a
 //! `crossterm::event::KeyEvent` into a domain event, and `*_transition` folds
 //! that event into prompt state. Both are pure functions with no I/O, so the
 //! state machines are unit-tested directly; `run_prompt_loop` is the only
@@ -626,9 +626,7 @@ impl<T: Clone + Eq + std::fmt::Display> Select<T> {
     }
 
     /// Add explicit `(value, label, detail)` choices whose panel is several
-    /// complete sentences rather than one hint line (spec 2.6's provider
-    /// consent panel: domains called, memory ceiling, and auth scheme, each
-    /// its own line, never truncated).
+    /// complete sentences rather than one hint line.
     pub(crate) fn detailed_options(
         mut self,
         items: impl IntoIterator<Item = (T, String, Vec<String>)>,
@@ -743,7 +741,7 @@ fn multi_select_frame<T>(
 }
 
 /// A multi-select prompt. Unlike [`Select`], its echo is always a ledger row
-/// (spec 2.6's `✓ services    github, dns` example), so construction takes
+/// so construction takes
 /// the row's `key` alongside the question.
 pub(crate) struct MultiSelect<T> {
     question: String,
@@ -761,11 +759,8 @@ impl<T: Clone + Eq + std::fmt::Display> MultiSelect<T> {
     }
 
     /// Add `(value, label, detail, checked)` choices: `detail` is the panel's
-    /// full-sentence description (spec 2.6's provider consent panel and the
-    /// frontend education copy both need several complete sentences, never a
-    /// single truncated hint), and `checked` is the option's initial state
-    /// (spec 3.2's frontend picker starts with the platform's recommended
-    /// default already checked, not empty).
+    /// full-sentence description, and `checked` is the option's initial state
+    ///
     pub(crate) fn detailed_options(
         mut self,
         items: impl IntoIterator<Item = (T, String, Vec<String>, bool)>,
@@ -831,8 +826,7 @@ impl<T: Clone + Eq + std::fmt::Display> MultiSelect<T> {
     }
 }
 
-/// The resolved chosen values and the ledger-row echo text (spec 2.6's
-/// `✓ services    github, dns` example, or `none` for an empty selection).
+/// The resolved chosen values and the ledger-row echo text.
 /// Pure so the echo shape is testable without a terminal loop.
 fn multi_select_echo<T: Clone>(items: &[SelectItem<T>], checked: &[bool]) -> (Vec<T>, String) {
     let chosen: Vec<T> = items

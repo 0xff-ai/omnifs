@@ -83,8 +83,7 @@ pub(crate) fn compact_limits(manifest: &ProviderManifest) -> Option<String> {
 }
 
 /// Full, untruncated consent facts for one provider: one complete sentence
-/// per needs group, one per limit, and the default auth scheme (spec 2.6's
-/// provider picker detail panel). Unlike [`compact_needs`]/[`compact_limits`],
+/// per needs group, one per limit, and the default auth scheme. Unlike [`compact_needs`]/[`compact_limits`],
 /// nothing here is truncated: the picker's detail panel has its own line per
 /// fact rather than one budget-constrained summary line.
 pub(crate) fn consent_detail(manifest: &ProviderManifest) -> Vec<String> {

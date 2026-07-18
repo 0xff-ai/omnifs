@@ -88,7 +88,7 @@ impl AddArgs {
                 // revision it applied at its own last start, so the mount
                 // just added is never already serving. The `omnifs up` hint
                 // is the only honest closing line here, exactly once,
-                // regardless of daemon liveness (spec 3.3).
+                // regardless of daemon liveness.
                 output.outro(format!(
                     "Mounted `{0}` at /{0}. Serve it: `omnifs up`",
                     outcome.mount_name

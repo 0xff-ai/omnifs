@@ -319,7 +319,7 @@ where
     }
 }
 
-/// Bare `omnifs` adapts to the workspace (spec 3.1): a fresh workspace with
+/// Bare `omnifs` adapts to the workspace: a fresh workspace with
 /// no mounts at all shows a dedicated short screen instead of an empty
 /// status report; a configured workspace shows the shared status report
 /// (`InventoryReport`, so this never drifts from `omnifs status`) closed by
@@ -369,8 +369,7 @@ const FRESH_CMD_WIDTH: usize = 20;
 
 /// One `<label> <accent(cmd)> <dim(desc)>` row of `fresh_workspace_block`,
 /// column-aligned against its sibling row rather than against the general
-/// ledger primitives (spec 2.1's ledger row has a glyph column this screen
-/// does not; this is its own fixed two-row layout).
+/// ledger primitives.
 fn fresh_workspace_row(
     label: &str,
     cmd: &str,
@@ -388,7 +387,7 @@ fn fresh_workspace_row(
     )
 }
 
-/// Bare `omnifs` on a workspace with no mounts at all (spec 3.1): no status
+/// Bare `omnifs` on a workspace with no mounts at all: no status
 /// probe, no empty report, just the two ways to get started.
 fn fresh_workspace_block(caps: crate::ui::render::Capabilities) -> String {
     let intro = crate::ui::render::sentence(
@@ -501,7 +500,7 @@ mod tests {
         }
     }
 
-    /// Spec 3.1, the fresh-workspace screen:
+    /// The fresh-workspace screen:
     /// ```text
     /// No mounts yet. omnifs projects external services as files.
     ///

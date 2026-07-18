@@ -69,7 +69,7 @@ pub(crate) async fn launch(
         loop {
             if let Some(status) = child.try_wait().context("poll daemon child status")? {
                 let cause = log_cause_suffix(&log_path);
-                // Daemon-shaped so the top-level human error block (spec 2.8)
+                // Daemon-shaped so the top-level human error block
                 // quotes the log tail inline instead of only pointing at
                 // `omnifs logs`; this message no longer repeats that pointer.
                 return Err(anyhow::anyhow!(

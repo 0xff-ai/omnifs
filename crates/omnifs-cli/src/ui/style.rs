@@ -126,7 +126,7 @@ pub(crate) fn accent(s: impl Display, mode: impl Into<ColorMode>) -> String {
 }
 
 /// Identity: mount names, provider names, and section headings (`render.rs`'s
-/// `heading` primitive uses this role, not a separate blue one: spec 2.4
+/// `heading` primitive uses this role, not a separate blue one: the
 /// prefers plain bold for report sections).
 pub(crate) fn bold(s: impl Display, mode: impl Into<ColorMode>) -> String {
     paint(s, mode, |t| t.bold().to_string())

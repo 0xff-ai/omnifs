@@ -614,7 +614,7 @@ fn image_age_words(created: Option<&str>) -> Option<String> {
 }
 
 /// Coarse duration-to-words for image age: seconds, minutes, hours, or days.
-/// `pub(crate)` so doctor's daemon-uptime row (spec 3.9) reuses the same
+/// `pub(crate)` so doctor's daemon-uptime row reuses the same
 /// wording instead of a second bucket table.
 pub(crate) fn duration_words(secs: i64) -> String {
     const MINUTE: i64 = 60;

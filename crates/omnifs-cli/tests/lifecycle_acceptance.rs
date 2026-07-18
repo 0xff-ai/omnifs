@@ -292,7 +292,7 @@ fn scenario_2_down_nothing_running() {
     );
     assert!(
         combined.contains("Nothing to stop. The daemon isn't running."),
-        "expected the spec 3.7 no-op sentence in output; got:\n{combined}"
+        "expected the no-op sentence in output; got:\n{combined}"
     );
 }
 

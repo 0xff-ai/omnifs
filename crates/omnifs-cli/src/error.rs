@@ -2,7 +2,7 @@
 //!
 //! Hints are accumulated on a `HintedError` wrapper that sits at the head of
 //! the anyhow error chain. `with_hint` either appends to an existing
-//! `HintedError` or creates a new one. The human renderer (spec 2.8) walks
+//! `HintedError` or creates a new one. The human renderer walks
 //! the chain, collects hints from the wrapper, and turns them into the
 //! `render.rs` error block: a headline, an optional detail (a daemon log
 //! tail when the failure is daemon-shaped, otherwise the cause chain), and
@@ -203,7 +203,7 @@ pub(crate) fn canceled_envelope(
 }
 
 /// The tail of the daemon log quoted inline under a daemon-shaped failure
-/// (spec 2.8), plus the display path used for the accompanying `Log:`
+/// plus the display path used for the accompanying `Log:`
 /// action. Read once at the top-level error boundary; never constructed
 /// speculatively for a non-daemon failure.
 struct DaemonLogTail {
@@ -212,7 +212,7 @@ struct DaemonLogTail {
 }
 
 /// Filter a daemon log to the final error and its immediate context, capped
-/// at 5 lines (spec 2.8): the quoted block is a diagnosis, not a dump. Pure
+/// at 5 lines: the quoted block is a diagnosis, not a dump. Pure
 /// so the filtering itself is testable without a real log file.
 const DAEMON_LOG_TAIL_MAX_LINES: usize = 5;
 
@@ -236,9 +236,7 @@ fn tail_log_lines(contents: &str) -> Vec<String> {
 }
 
 /// Best-effort read of the current workspace's daemon log tail. Any I/O or
-/// workspace-resolution failure degrades to `None` (spec 2.8: "missing/
-/// unreadable log degrades to no detail block, never an error-inside-an-
-/// error").
+/// workspace-resolution failure degrades to `None`.
 fn read_daemon_log_tail() -> Option<DaemonLogTail> {
     let workspace = omnifs_workspace::Workspace::resolve().ok()?;
     let log_path = workspace.daemon().log_file();
@@ -253,7 +251,7 @@ fn read_daemon_log_tail() -> Option<DaemonLogTail> {
     })
 }
 
-/// Assemble the human error block (spec 2.8) from an error chain and an
+/// Assemble the human error block from an error chain and an
 /// optional daemon log tail. Pure: the caller decides whether the failure is
 /// daemon-shaped and does the (real or injected) log read, so this function
 /// stays testable without touching a filesystem.
@@ -306,7 +304,7 @@ fn build_error_block(
     }
 }
 
-/// Renders the top-level human error block (spec 2.8). A daemon-shaped
+/// Renders the top-level human error block. A daemon-shaped
 /// failure (`ExitCode::DaemonUnavailable`) quotes the daemon log tail inline
 /// instead of only pointing at `omnifs logs`; every other failure falls back
 /// to the plain cause chain.
@@ -395,7 +393,7 @@ mod tests {
 
     #[test]
     fn human_error_block_matches_the_documented_shape_with_a_daemon_log_tail() {
-        // Spec 2.8's worked example, exercised through error.rs's own
+        // the worked example, exercised through error.rs's own
         // construction (not just render.rs's primitive test) to prove the
         // wiring: headline, `Last daemon log lines:` detail, `Fix:`/`Log:`.
         let error = daemon_unreachable_error(

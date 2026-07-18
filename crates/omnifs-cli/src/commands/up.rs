@@ -52,8 +52,8 @@ impl UpArgs {
             return emit_receipt(&workspace, output).await;
         }
 
-        // The closing line is the single most actionable next thing (spec
-        // 2.1): a no-op collapses to one "already serving" sentence naming
+        // The closing line is the single most actionable next thing: a no-op
+        // collapses to one "already serving" sentence naming
         // only the primary surface; a real start prints the full access
         // block below the ledger rows `Launcher` already printed. The daemon
         // is already up at this point, so a failure to read the inventory
@@ -76,7 +76,7 @@ impl UpArgs {
     }
 }
 
-/// `Already serving revision <sha>. Files at <location>` (spec 2.9), or a
+/// `Already serving revision <sha>. Files at <location>`, or a
 /// shorter fallback when there is no revision yet or no attached host
 /// frontend to name.
 fn no_op_message(inventory: &Inventory) -> String {
@@ -122,7 +122,7 @@ mod tests {
     use omnifs_workspace::mounts::Revision;
     use std::path::PathBuf;
 
-    /// Spec 3.6's no-op line: `Already serving revision 3f69473. Files at
+    /// the no-op line: `Already serving revision 3f69473. Files at
     /// ~/omnifs`.
     #[test]
     fn no_op_message_names_the_revision_and_the_primary_host_surface() {

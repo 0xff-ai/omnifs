@@ -244,7 +244,7 @@ impl FrontendState {
     }
 
     /// Whether a frontend in this state counts as a live access surface
-    /// (spec 2.9). The one owner of that predicate: the access lines,
+    /// The one owner of that predicate: the access lines,
     /// `status`'s frontend count, and each mount's `access_count` all filter
     /// through it.
     pub(crate) const fn provides_access(self) -> bool {

@@ -1,4 +1,4 @@
-//! The one-time `omnifs setup` wordmark reveal (spec 2.5). No other command
+//! The one-time `omnifs setup` wordmark reveal. No other command
 //! ever prints a banner; [`should_splash`] is the single gate that keeps it
 //! that way across every output mode and terminal state this crate supports.
 //! The reveal itself runs on `prompt.rs`'s raw-mode primitives
@@ -21,7 +21,7 @@ const TAGLINE: &str = "your services, as files";
 const LETTER_DELAY: Duration = Duration::from_millis(55);
 const HOLD: Duration = Duration::from_millis(1300);
 
-/// Whether the splash may draw at all (spec 2.5): a real stderr TTY, human
+/// Whether the splash may draw at all: a real stderr TTY, human
 /// non-quiet output, and an interactive run. Pure so the whole suppression
 /// matrix ("non-TTY stderr, --quiet, --no-input, structured output") is
 /// testable without a terminal.

@@ -146,9 +146,7 @@ fn cli_redesign_contract_human_status_has_context_and_resource_sections() {
 
     assert!(text.contains("omnifs  "), "{text}");
     // The daemon is stopped in this fixture: the context metadata names
-    // configured mounts rather than a stale pid/namespace (spec 3.10's
-    // running-daemon shape, `daemon pid <pid>, serving <n> mounts, <m>
-    // frontends`, is covered by the up/down lifecycle tests instead).
+    // configured mounts rather than a stale pid/namespace.
     assert!(text.contains("mounts configured"), "{text}");
     assert!(!text.contains("API -"), "{text}");
     for heading in ["Frontends  ", "Mounts  "] {
@@ -268,7 +266,7 @@ fn cli_redesign_contract_actions_are_contextual_rows_without_fix_column() {
 
     assert!(!text.lines().any(|line| line.trim() == "fix:"));
     assert!(text.contains("omnifs doctor"), "{text}");
-    // Spec 2.10: a degraded row's recovery command reads `fix:  <command>`.
+    // The a degraded row's recovery command reads `fix:  <command>`.
     assert!(
         text.lines()
             .any(|line| line.trim_start().starts_with("fix:  ")),

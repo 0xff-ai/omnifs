@@ -689,7 +689,7 @@ fn every_json_command_keeps_its_error_contract_before_workspace_resolution() {
 
 #[test]
 fn bare_invocation_without_mounts_points_to_mount_add() {
-    // Spec 3.1: a workspace with no mounts at all skips the status report
+    // The a workspace with no mounts at all skips the status report
     // entirely (there is nothing to report) and shows the dedicated
     // fresh-workspace screen instead, closing on both ways to get started.
     let fixture = Fixture::new();
@@ -751,7 +751,7 @@ fn mount_add_collision_renames_with_yes() {
     // The outro is a flat sentence with no `└` frame closer, and its inline
     // `` `test-2` `` span has its backticks stripped by the renderer. No
     // daemon is running in this fixture, so the closing line names `up`
-    // rather than a browse action (spec 3.3).
+    // rather than a browse action.
     assert!(
         stderr.contains("Mounted test-2 at /test-2. Serve it: omnifs up"),
         "{stderr}"

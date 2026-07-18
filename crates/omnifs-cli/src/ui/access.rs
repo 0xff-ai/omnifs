@@ -1,4 +1,4 @@
-//! The access-line owner (spec 2.9): "where are my files." `up`, `status`,
+//! The access-line owner: "where are my files." `up`, `status`,
 //! and bare `omnifs` all speak through this module rather than each
 //! reimplementing the join.
 //!
@@ -66,7 +66,7 @@ fn no_frontend_line(mount_count: usize) -> String {
 /// runtime, or the single "no frontend attached yet" nudge when nothing is
 /// observed at all. Commands are backtick-marked, per the crate-wide
 /// convention that the caller's narration (`Output::narrate`) turns
-/// backtick spans into the accent color and drops the backticks (spec 2.4),
+/// backtick spans into the accent color and drops the backticks,
 /// so this module never has to probe or receive real terminal capabilities.
 pub(crate) fn lines(inventory: &Inventory) -> Vec<String> {
     let attached = attached_frontends(inventory);
@@ -100,12 +100,11 @@ fn browse_or_guest_fallback(inventory: &Inventory) -> String {
 }
 
 /// Whether `omnifs status`'s closing `Browse:` line should print at all
-/// (spec 3.1): suppressed whenever the context strip already carries a
+/// suppressed whenever the context strip already carries a
 /// `fix:` action naming the next step ([`DaemonState::context_fix`]), so the
 /// human register never states two competing "what to do next" facts in the
 /// same report. Bare `omnifs` (`cli.rs::run_bare`) already branches on
-/// `DaemonState::Running` itself (spec 3.1's `Start serving:  omnifs up`
-/// sentence) and does not use this.
+/// `DaemonState::Running` itself and does not use this.
 pub(crate) fn show_browse_line(daemon_state: crate::inventory::DaemonState) -> bool {
     daemon_state.context_fix().is_none()
 }
@@ -125,7 +124,7 @@ pub(crate) fn browse_command(inventory: &Inventory) -> String {
     }
 }
 
-/// One compact access fact for `mount show`'s detail card (spec 3.4):
+/// One compact access fact for `mount show`'s detail card:
 /// `<path>  (<filesystem> <runtime>)`, reusing the same filesystem/runtime
 /// vocabulary as [`lines`]'s full sentences. Callers filter
 /// [`crate::inventory::AccessPath`]s to the ones worth showing (a card has no

@@ -53,7 +53,7 @@ impl Row {
     }
 
     /// Render as one ledger row: `-` for a planned removal, `=` for a planned
-    /// keep (spec 2.7's glyph vocabulary). This is the only consumer of
+    /// keep. This is the only consumer of
     /// [`Glyph::Keep`]; a plan row that survives is stated, never omitted.
     pub(crate) fn ledger_row(&self) -> LedgerRow {
         let glyph = if self.remove {
@@ -93,7 +93,7 @@ impl Plan {
     }
 
     /// Past-tense counts for the closing sentence once a plan has settled
-    /// (spec 2.7: `Removed github. 2 removed, 1 kept.`). Kept rows are stated
+    /// Kept rows are stated
     /// here rather than in the plan preview, since a plan preview already
     /// marks each row `-`/`=` individually.
     pub(crate) fn settled_summary(&self) -> String {
@@ -144,7 +144,7 @@ impl Decision {
     /// non-TTY prints its plan first and then receives the standard actionable
     /// flag hint from `PromptMode::resolve`. `question` is the confirm
     /// prompt's verb (`"Remove?"`), so the transcript names the actual
-    /// operation rather than a generic "Proceed?" (spec 3.5).
+    /// operation rather than a generic "Proceed?".
     pub(crate) fn resolve(
         mode: PromptMode,
         dry_run: bool,
@@ -171,8 +171,7 @@ impl Decision {
     /// A negative confirmation is cancellation, not successful application.
     /// Returning the shared marker keeps exit-code and JSON handling at the
     /// top-level CLI boundary for every consent-driven command. An interactive
-    /// decline prints the closing line itself (spec 2.7: `Kept everything as
-    /// it was.`) since the caller never regains control after the `?`
+    /// decline prints the closing line itself since the caller never regains control after the `?`
     /// propagates the cancellation.
     fn from_confirmation(proceed: bool, output: &Output) -> anyhow::Result<Self> {
         if proceed {
@@ -268,7 +267,7 @@ impl Outcome {
         format!("{}; {details}", self.value)
     }
 
-    /// Render as one v2-register ledger row (spec 2.1/2.7): `✓`/`✗`/`•` per
+    /// Render as one v2-register ledger row: `✓`/`✗`/`•` per
     /// [`OutcomeState`], never `-`/`=` (those are plan-preview-only glyphs).
     pub(crate) fn ledger_row(&self) -> LedgerRow {
         LedgerRow::new(self.glyph(), self.key.clone(), self.settled_value())

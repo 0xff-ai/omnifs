@@ -270,10 +270,10 @@ mod tests {
         );
     }
 
-    /// Spec 3.10's full shape: context line, `Frontends` and `Mounts`
+    /// the full shape: context line, `Frontends` and `Mounts`
     /// sections, and a degraded mount row carrying its `fix:` line on the
     /// following line, full width, never truncated. (`Inventory::test`
-    /// fixes the daemon pid at 1 rather than the spec's illustrative
+    /// fixes the daemon pid at 1 rather than the illustrative
     /// 31114; the row shapes below are asserted structurally, not against
     /// that placeholder digit.)
     #[test]
@@ -334,7 +334,7 @@ mod tests {
         assert!(lines[0].starts_with("omnifs  "), "{rendered}");
         // The `linear` mount's expired auth makes this inventory genuinely
         // degraded, so the header state honestly reflects that rather than
-        // spec 3.10's illustrative all-clear `● healthy`.
+        // the illustrative all-clear `● healthy`.
         assert!(lines[0].trim_end().ends_with("▲ degraded"), "{rendered}");
         assert!(
             lines[1].contains("daemon pid 1, serving 2 mounts, 1 frontend"),
@@ -345,8 +345,8 @@ mod tests {
         assert!(rendered.contains("github"), "{rendered}");
         assert!(rendered.contains("● live"), "{rendered}");
 
-        // The degraded `linear` row headlines its own auth state (spec item
-        // 4's precedence) and carries its fix on the following line.
+        // The degraded `linear` row headlines its own auth state and carries
+        // its fix on the following line.
         let linear_index = lines
             .iter()
             .position(|line| line.contains("linear"))

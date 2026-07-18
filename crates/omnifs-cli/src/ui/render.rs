@@ -1,6 +1,6 @@
 //! The flat human renderer: ledger blocks, sentences, headings, and the
 //! error block. This is the one place that turns typed report content into
-//! bytes for the CLI experience v2 register (spec 2.1): a left-anchored
+//! bytes for the CLI experience v2 register: a left-anchored
 //! stream with no frames, no gutters, and no repetition of the command the
 //! user just typed.
 //!
@@ -119,7 +119,7 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
 }
 
 /// One row of a ledger block: `<glyph> <key>` followed by the value, key
-/// column sized to the block it belongs to (spec 2.1).
+/// column sized to the block it belongs to.
 #[derive(Debug, Clone)]
 pub(crate) struct LedgerRow {
     pub(crate) glyph: Glyph,
@@ -137,7 +137,7 @@ impl LedgerRow {
     }
 }
 
-/// The fixed gap after the widest key in a block. Derived from the spec 2.1
+/// The fixed gap after the widest key in a block. Derived from the
 /// worked example (`providers` at 9 columns leaves a 3-space gap, `daemon` at
 /// 6 columns leaves a 6-space gap: both resolve to a 12-column key field, i.e.
 /// `max_key_width + 3`). `pub(crate)` so `ui/live.rs`'s transient spinner
@@ -199,7 +199,7 @@ pub(crate) fn ledger_row_line(row: &LedgerRow, key_width: usize, caps: Capabilit
 /// The column where a ledger row's value begins, counting from the row's own
 /// left edge (glyph column 0). Shared by [`ledger_row_line`] and any caller
 /// that must align a continuation line under a row's value without
-/// duplicating the gap math: doctor's per-row `fix:` line (spec 3.9) is one
+/// duplicating the gap math: doctor's per-row `fix:` line is one
 /// such caller.
 pub(crate) fn ledger_value_column(key_width: usize) -> usize {
     // Glyph (1) + one space (1) precede the key, then the key's own field.
@@ -221,7 +221,7 @@ pub(crate) fn ledger_block(rows: &[LedgerRow], caps: Capabilities) -> String {
         .join("\n")
 }
 
-/// The consent plan preview block (spec 2.7): a headline sentence naming the
+/// The consent plan preview block: a headline sentence naming the
 /// operation, then its rows indented two spaces under it with the `-`/`=`
 /// glyph vocabulary (`rows` is expected to carry only [`Glyph::Plan`] and
 /// [`Glyph::Keep`] rows; the receipt that settles a plan uses
@@ -251,7 +251,7 @@ pub(crate) fn sentence(text: &str, caps: Capabilities) -> String {
 }
 
 /// A bold section heading word (`Frontends`, `Mounts`). Plain bold, not the
-/// blue heading role: spec 2.4 prefers plain bold for report sections.
+/// blue heading role: this uses plain bold for report sections.
 pub(crate) fn heading(text: &str, caps: Capabilities) -> String {
     style::bold(text, caps.color)
 }
@@ -294,8 +294,8 @@ impl ErrorAction {
     }
 }
 
-/// The error block shape from spec 2.8. Wiring a live error into this shape
-/// is slice S5's job; this module only owns the render primitive.
+/// The error block shape. Wiring a live error into this shape belongs to the
+/// caller; this module only owns the render primitive.
 #[derive(Debug, Clone)]
 pub(crate) struct ErrorBlock {
     pub(crate) headline: String,
@@ -446,7 +446,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_block_matches_spec_2_7s_documented_shape() {
+    fn plan_block_matches_documented_shape() {
         // The exact 2.7 illustrative transcript: a headline, then three
         // indented rows mixing the `-` (removal) and `=` (keep) glyphs. No
         // current command reaches a three-row plan (`mount rm`/`mount revoke`

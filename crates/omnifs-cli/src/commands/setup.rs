@@ -1,4 +1,4 @@
-//! `omnifs setup`: the guided first-run walkthrough (spec 3.2). A thin
+//! `omnifs setup`: the guided first-run walkthrough. A thin
 //! composition over `mount add`'s stages, `up`'s launch choreography, and
 //! `frontend enable`, narrated as three numbered steps rather than as a
 //! sequence of separate command invocations.
@@ -210,11 +210,11 @@ impl SetupArgs {
     }
 
     /// Enable every selected frontend, aggregating the outcome into one
-    /// `frontends` ledger row (spec 3.2: `✓ frontends   2/2 attached`)
+    /// `frontends` ledger row
     /// instead of one row per runtime: the multi-select echo above already
     /// named which frontends setup chose, so the outcome only needs a count.
-    /// Spec 2.9 exempts setup from the reconnect-grace machinery precisely
-    /// because it runs these enables itself, so this reuses
+    /// Setup uses no reconnect-grace machinery because it runs these enables
+    /// itself, so this reuses
     /// `FrontendEnableArgs::enable` directly rather than `Launcher`'s
     /// reattachment wait.
     ///
@@ -299,7 +299,7 @@ impl SetupArgs {
         Ok(results)
     }
 
-    /// The closing block (spec 3.2/2.11): the tree reveal, the access lines,
+    /// The closing block: the tree reveal, the access lines,
     /// then the single closing sentence naming elapsed time and the
     /// suggested first command.
     fn print_closing_block(
@@ -349,7 +349,7 @@ fn split_requested_providers(
     (new, skipped)
 }
 
-/// Which frontends setup enables (spec 3.2's step 3 multi-select): every
+/// Which frontends setup enables: every
 /// frontend supported on this OS, pre-checked at the platform's recommended
 /// default (`FrontendFilesystem::default_runtime`). `--yes`, `--no-input`,
 /// and a non-interactive run all take that recommended default without
@@ -408,12 +408,12 @@ impl std::fmt::Display for FrontendChoice {
     }
 }
 
-/// The frontend multi-select's option label (spec 3.2: `nfs (host)`).
+/// The frontend multi-select's option label (`nfs (host)`).
 fn frontend_label(filesystem: FrontendFilesystem, runtime: FrontendRuntime) -> String {
     format!("{filesystem} ({runtime})")
 }
 
-/// The frontend multi-select's detail-panel education copy (spec 3.2): one
+/// The frontend multi-select's detail-panel education copy: one
 /// plain sentence naming what each filesystem/runtime combination actually
 /// is, since a first-run user has no other way to know the difference
 /// between, say, a libkrun and a Docker FUSE frontend.
@@ -435,7 +435,7 @@ fn frontend_detail(filesystem: FrontendFilesystem, runtime: FrontendRuntime) -> 
     }
 }
 
-/// The tree-reveal root label (spec 3.2): the attached host frontend's
+/// The tree-reveal root label: the attached host frontend's
 /// location when one exists, else the guest wire mount point (display-only,
 /// but still the right label when only a guest attach is live).
 fn tree_root_label(inventory: &Inventory) -> String {
@@ -450,7 +450,7 @@ fn tree_root_label(inventory: &Inventory) -> String {
 /// failure, an empty/dynamic root (a namespace like `dns/` that has nothing
 /// to enumerate at its own root), or without a host frontend to list
 /// through at all (a guest-only attach cannot be read from the host). Never
-/// an error (spec 3.2): every failure mode just omits the annotation.
+/// an error: every failure mode just omits the annotation.
 fn mount_annotation(host_root: Option<&Path>, mount_name: &str) -> Option<String> {
     let root = host_root?;
     let entries = std::fs::read_dir(root.join(mount_name)).ok()?;
@@ -465,7 +465,7 @@ fn mount_annotation(host_root: Option<&Path>, mount_name: &str) -> Option<String
     Some(names.join(", "))
 }
 
-/// The tree-reveal lines for every mount in `inventory` (spec 3.2), root
+/// The tree-reveal lines for every mount in `inventory`, root
 /// label plus per-mount listing via [`mount_annotation`].
 fn tree_lines(inventory: &Inventory, caps: Capabilities) -> Vec<String> {
     let root = tree_root_label(inventory);
@@ -482,7 +482,7 @@ fn tree_lines(inventory: &Inventory, caps: Capabilities) -> Vec<String> {
 /// `render.rs::LEDGER_GAP`'s role for ledger rows.
 const TREE_GAP: usize = 4;
 
-/// Pure tree-reveal render (spec 2.11's sanctioned delight device): the root
+/// Pure tree-reveal render: the root
 /// label, then one `├──`/`└──` row per mount with its annotation dim and
 /// column-aligned to the longest mount name. Pure and split into lines (not
 /// one joined block) so a fixed listing fixture can assert the exact shape,
@@ -518,7 +518,7 @@ fn render_tree_lines(
     lines
 }
 
-/// The closing block's ordered content (spec 3.2): a blank line, the tree
+/// The closing block's ordered content: a blank line, the tree
 /// reveal, a blank line, the access lines, then the closing sentence
 /// (rendered separately through [`Output::outro`] so its wrapping and
 /// "already closed" bookkeeping stay owned by `Output`).
@@ -542,8 +542,7 @@ fn closing_block(inventory: &Inventory, tree: Vec<String>, elapsed: Duration) ->
     }
 }
 
-/// `38s` under a minute, `2m 10s` at or above one (spec 2.11's sanctioned
-/// elapsed-time delight in the closing sentence).
+/// `38s` under a minute, `2m 10s` at or above one.
 fn format_elapsed(elapsed: Duration) -> String {
     let secs = elapsed.as_secs();
     if secs < 60 {

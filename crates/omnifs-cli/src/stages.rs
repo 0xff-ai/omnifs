@@ -47,7 +47,7 @@ pub(crate) struct MountInitPlan {
     no_auth_needed: bool,
 }
 
-/// How much a per-mount receipt says (spec 3.2 vs 3.3). Exactly two honest
+/// How much a per-mount receipt says. Exactly two honest
 /// callers need different verbosity from the same mount-creation path:
 /// `mount add`'s [`Full`](ReceiptStyle::Full) receipt names every settled
 /// fact including the provider artifact retained in the store, while `omnifs
@@ -104,8 +104,8 @@ impl PromptMode {
     }
 }
 
-/// Keys `configure_mount`'s block may ever print, across every branch (spec
-/// 2.1: a block's key column is sized to the whole block, computed once up
+/// Keys `configure_mount`'s block may ever print, across every branch: a
+/// block's key column is sized to the whole block, computed once up
 /// front, even though rows settle one at a time as each stage of mount
 /// creation completes). `mount name` only fires on an interactive/`--yes`
 /// name collision ([`crate::commands::mount::provider_selection`]);
@@ -136,7 +136,7 @@ pub(crate) async fn configure_mount(
     persist_mount_spec(workspace, &plan, output)?;
 
     // The `mount ... created` row prints only once the spec is actually on
-    // disk (spec 3.2/3.3): an auth failure above returns before this line
+    // disk: an auth failure above returns before this line
     // runs (`?` on `authenticate`), so the transcript never claims a mount
     // exists when persist never happened. A declined sign-in still reaches
     // here (it resolves to `Ok(SignInDeclined)`, not an error), so this row
@@ -161,7 +161,7 @@ pub(crate) async fn configure_mount(
         );
     }
 
-    // The single closing line (spec 3.3) is the caller's job: `mount add`
+    // The single closing line is the caller's job: `mount add`
     // names the mount it just created, while `omnifs setup` calls this in a
     // loop across several providers and prints its own summary once at the
     // end, so no per-provider closing line belongs here.
@@ -196,7 +196,7 @@ pub(crate) fn spec_creation(
 
     // No provider argument in an interactive output: choose one with the
     // generic single-select prompt instead of a bare list. The panel carries
-    // the full, untruncated consent facts (spec 2.6): domains called, memory
+    // the full, untruncated consent facts: domains called, memory
     // ceiling, and auth scheme, one sentence per line, never the compact
     // truncated summary `mount add`'s later consent block uses.
     let picked = if args.provider.is_none() && interactive {
@@ -256,7 +256,7 @@ pub(crate) fn spec_creation(
         );
     }
     // Auth is resolved before either receipt row prints, not just before
-    // `authenticate` runs, because the compact receipt (spec 3.2) folds
+    // `authenticate` runs, because the compact receipt folds
     // whether this provider needs a sign-in step into the `mount` row's
     // value itself (`no sign-in needed`) rather than relying on the reader
     // to infer it from the absence of a later `signed in` row.
@@ -277,7 +277,7 @@ pub(crate) fn spec_creation(
     // above either found it there or just retained it), and the mount name is
     // validated and free. The remaining work below (auth, then the actual
     // spec write in `persist_mount_spec`) either fills in these two rows'
-    // consequences or fails outright, so nothing here overclaims (spec 3.3).
+    // consequences or fails outright, so nothing here overclaims.
     // The compact style (setup) drops the `provider` row: the provider
     // already appeared in the services multi-select moments earlier, so
     // repeating its retained-artifact fact here would be noise.
@@ -421,7 +421,7 @@ impl MountInitPlan {
             .await
             .inspect_err(|_| {
                 // `persist_mount_spec` runs only after this call returns
-                // `Ok` (spec 3.3), so a login failure here means nothing was
+                // `Ok`, so a login failure here means nothing was
                 // ever written: the recovery is re-running the whole add,
                 // not `reauth` against a mount name that does not exist on
                 // disk.
@@ -435,7 +435,7 @@ impl MountInitPlan {
                     .as_ref()
                     .map(|auth| auth.guidance_for(&scheme.key))
                     .unwrap_or_default();
-                // Dim sentences (spec 3.3): informational setup guidance the
+                // Dim sentences: informational setup guidance the
                 // user reads once before pasting a token, not a settled fact.
                 let dim =
                     |text: String| crate::ui::style::dim(text, crate::ui::style::Stream::Stderr);
@@ -470,7 +470,7 @@ impl MountInitPlan {
     }
 }
 
-/// The `mount` receipt row's value (spec 3.2/3.3): `/<name> created`, plus a
+/// The `mount` receipt row's value: `/<name> created`, plus a
 /// `(no sign-in needed)` annotation only for the compact style when the
 /// provider has no default auth at all. Pure so the exact wording is
 /// testable without a workspace.
@@ -486,7 +486,7 @@ fn mount_created_value(
     }
 }
 
-/// The `sign in` skip row's value (spec 3.2) when interactive sign-in is
+/// The `sign in` skip row's value when interactive sign-in is
 /// declined: names the exact recovery command rather than just "skipped".
 /// A decline still reaches `persist_mount_spec` (it resolves to
 /// `Ok(SignInDeclined)`, not an error), so the mount really exists on disk
@@ -496,7 +496,7 @@ fn sign_in_declined_value(mount_name: &MountName) -> String {
     format!("skipped; run `omnifs mount reauth {mount_name}` later")
 }
 
-/// The OAuth sign-in failure note (spec 3.3): unlike a decline, an actual
+/// The OAuth sign-in failure note: unlike a decline, an actual
 /// login error propagates as `Err` out of `authenticate`, so
 /// `persist_mount_spec` never runs and nothing exists on disk. The recovery
 /// is re-running the whole add, not `reauth` against a mount name nothing
@@ -537,7 +537,7 @@ fn selected_auth(
 }
 
 /// Write the mount spec. Silent: `configure_mount` prints the `mount ...
-/// created` row (spec 3.3) right after this call returns `Ok`, so the
+/// created` row right after this call returns `Ok`, so the
 /// transcript never claims the mount exists before it actually does. A
 /// second row here would just restate the same fact in different words.
 fn persist_mount_spec(

@@ -367,9 +367,7 @@ impl Output {
     /// instead of printing it. A caller that runs several operations whose
     /// narration would otherwise each print their own rows (each one
     /// fighting a shared live region's own redraw) instead folds every one
-    /// of those rows into whatever single visible line it owns (spec 3.2's
-    /// setup, which aggregates each frontend enable's narration into its
-    /// `frontends n/m attaching…` region row). This is an `Output`-owned
+    /// of those rows into whatever single visible line it owns. This is an `Output`-owned
     /// capability rather than a caller-side workaround so every existing
     /// `narrate`/`note`/`ledger_row`/progress call site is redirected
     /// automatically, with no changes needed at those call sites.
@@ -447,8 +445,7 @@ impl Output {
         self.narrate(line);
     }
 
-    /// A bold section heading line (spec 2.1's numbered step headings, e.g.
-    /// `1. Services`): plain bold, never the accent color, so it reads as
+    /// A bold section heading line: plain bold, never the accent color, so it reads as
     /// structure rather than something the user can type. Human-only; quiet
     /// suppresses it like every other narration line.
     pub(crate) fn heading(&self, text: impl Into<String>) {
@@ -470,9 +467,7 @@ impl Output {
         }
     }
 
-    /// The key column width one contiguous ledger block needs (spec 2.1:
-    /// `max key width + 3`, no `+3` here since [`Self::ledger_row`] adds the
-    /// fixed gap itself). Every flow that emits rows one at a time as async
+    /// The key column width one contiguous ledger block needs. Every flow that emits rows one at a time as async
     /// work settles (a spinner settling into its ledger row, a live region's
     /// summary, `up`'s streamed `daemon`/`mounts`/`frontends` rows) computes
     /// this once from its full possible key set before the first row prints,
@@ -484,7 +479,7 @@ impl Output {
         super::render::key_field_width(keys)
     }
 
-    /// Print one durable v2-register ledger row (spec 2.1) at an externally
+    /// Print one durable v2-register ledger row at an externally
     /// supplied key width, so a block whose rows are printed one at a time
     /// as async work settles still reads as one aligned unit rather than
     /// each row sizing its own key column.
@@ -503,7 +498,7 @@ impl Output {
         ));
     }
 
-    /// The consent plan preview (spec 2.7): a headline sentence naming the
+    /// The consent plan preview: a headline sentence naming the
     /// operation (`plan.title`), then its rows indented two spaces under it
     /// with the `-`/`=` glyph vocabulary, then a blank line so the confirm
     /// prompt (or, for `--dry-run`, the closing sentence) reads as its own
@@ -522,7 +517,7 @@ impl Output {
         crate::ui::eprint_raw("\n");
     }
 
-    /// The consent receipt (spec 2.7): settled rows at column 0 (never
+    /// The consent receipt: settled rows at column 0 (never
     /// indented under the plan's headline, since the operation already
     /// happened), then a blank line before the caller's closing sentence.
     pub(crate) fn receipt(&self, receipt: &super::consent::Receipt) {
@@ -560,7 +555,7 @@ impl Output {
 
     /// Whether this invocation already printed its own closing line (via
     /// [`Self::outro`]). The top-level cancel handler checks this so a
-    /// consent decline's `Kept everything as it was.` (spec 2.7) is not
+    /// consent decline's `Kept everything as it was.` is not
     /// followed by the generic `canceled` line every other prompt cancel
     /// prints.
     pub(crate) fn is_closed(&self) -> bool {
@@ -568,7 +563,7 @@ impl Output {
     }
 
     /// Start a spinner whose transient frame and settled row share
-    /// `key_width` with the rest of its ledger block (spec 2.1).
+    /// `key_width` with the rest of its ledger block.
     pub(crate) fn progress(
         &self,
         key: impl Into<String>,

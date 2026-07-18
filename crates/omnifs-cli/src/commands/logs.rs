@@ -1,5 +1,5 @@
 #![allow(clippy::disallowed_macros)] // permanent: raw log passthrough
-//! `omnifs logs` — tail the daemon's log file (spec 3.8). Content on stdout
+//! `omnifs logs` — tail the daemon's log file. Content on stdout
 //! is the daemon log verbatim, never restructured; the one narration line
 //! (following vs. down, and the empty state) is stderr.
 
@@ -20,7 +20,7 @@ pub struct LogsArgs {
     pub follow: bool,
 }
 
-/// Default tail length (spec 3.8): last 50 lines when not following.
+/// Default tail length: last 50 lines when not following.
 const DEFAULT_TAIL_LINES: usize = 50;
 
 impl LogsArgs {
@@ -66,7 +66,7 @@ fn daemon_is_running(workspace: &Workspace) -> bool {
         .is_some_and(|record| crate::process::is_alive(record.pid))
 }
 
-/// The one stderr header line (spec 3.8). Pure so the exact wording is
+/// The one stderr header line. Pure so the exact wording is
 /// testable without a live daemon.
 fn header_line(log_path: &Path, follow: bool, running: bool) -> String {
     if !running {
@@ -139,7 +139,7 @@ fn follow_native_log(log_path: &Path, color: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// TTY-only level coloring (spec 3.8): `ERROR` red, `WARN` yellow, a leading
+/// TTY-only level coloring: `ERROR` red, `WARN` yellow, a leading
 /// RFC3339-shaped timestamp token dim. Splits and rejoins on a single space
 /// so exact spacing round-trips; `color = false` (piped output) returns the
 /// line untouched.

@@ -22,7 +22,7 @@ impl StatusArgs {
             // up`/`fix:  omnifs logs`) whenever the daemon is not running;
             // repeating a `Browse:` line derived from a daemon that cannot
             // currently serve anything would state two competing "what to
-            // do next" facts (spec 3.1).
+            // do next" facts.
             if crate::ui::access::show_browse_line(report.inventory.daemon_state()) {
                 output.narrate("");
                 output.narrate(format!(

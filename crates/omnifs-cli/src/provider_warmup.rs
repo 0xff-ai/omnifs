@@ -197,8 +197,8 @@ impl ProviderWarmup {
     }
 
     /// Join detached work, then warm the exact providers before daemon
-    /// replacement. `key_width` is `up`'s whole ledger block width (spec
-    /// 2.1), not just this row's own key: the caller (`Launcher::launch`)
+    /// replacement. `key_width` is `up`'s whole ledger block width, not just
+    /// this row's own key: the caller (`Launcher::launch`)
     /// owns that block's full key set, since this function only knows its
     /// own `providers` row.
     pub(crate) async fn warm_for_up(

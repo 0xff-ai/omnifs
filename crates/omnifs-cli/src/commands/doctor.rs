@@ -1,5 +1,5 @@
 //! `omnifs doctor` — runtime + auth diagnostics, presented as a grouped
-//! checklist (spec 3.9). The only remediation doctor can execute itself is a
+//! checklist. The only remediation doctor can execute itself is a
 //! mount reauth, spawned as a fresh `omnifs mount reauth <name>` subprocess
 //! (mirroring how `daemon_launch.rs` spawns the daemon) rather than calling
 //! into `commands::mount`'s internal API, so this module never couples to
@@ -73,7 +73,7 @@ struct Doctor<'a> {
     output: Output,
 }
 
-/// Which group of spec 3.9's checklist a finding belongs to. A closed enum
+/// Which group of the checklist a finding belongs to. A closed enum
 /// rather than matching on the `check` string, so grouping cannot drift from
 /// spelling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -176,8 +176,7 @@ impl Finding {
         }
     }
 
-    /// One finding per mount whose credential needs attention (spec 3.9's
-    /// worked `credentials` example), built entirely from data `Inventory`
+    /// One finding per mount whose credential needs attention, built entirely from data `Inventory`
     /// already collected: doctor invents no new auth check here.
     fn mount_auth(mount: &MountStatus) -> Option<Self> {
         let (message, command) = match &mount.auth {
@@ -255,7 +254,7 @@ impl From<&Finding> for Row {
     }
 }
 
-/// Split findings into the Environment/Workspace groups (spec 3.9); the
+/// Split findings into the Environment/Workspace groups; the
 /// Daemon group's single row comes from `daemon_row`, not from `findings`.
 fn build_rows(findings: &[Finding]) -> (Vec<Row>, Vec<Row>) {
     let mut environment = Vec::new();
@@ -310,8 +309,7 @@ fn daemon_row(inventory: &Inventory) -> Row {
     }
 }
 
-/// The running daemon's value cell (spec 3.9: `pid 31114, revision
-/// 3f69473, up 2h`). Each part degrades independently: a fact `Inventory`
+/// The running daemon's value cell. Each part degrades independently: a fact `Inventory`
 /// did not collect is omitted rather than faked.
 fn daemon_running_value(inventory: &Inventory) -> String {
     let mut parts = Vec::new();
@@ -343,7 +341,7 @@ fn daemon_uptime(inventory: &Inventory) -> Option<String> {
 
 /// Render one group: a bold heading, then each row indented two spaces
 /// under it with its own `fix:` continuation line when it carries one
-/// (spec 3.9). Key sizing is per group, matching the register's per-block
+/// Key sizing is per group, matching the register's per-block
 /// rule (2.1).
 fn render_group(heading: &str, rows: &[Row], caps: Capabilities) -> String {
     let mut out = String::new();
@@ -366,7 +364,7 @@ fn render_group(heading: &str, rows: &[Row], caps: Capabilities) -> String {
     out
 }
 
-/// The verdict line (spec 3.9): a plain "Everything checks out." when clean,
+/// The verdict line: a plain "Everything checks out." when clean,
 /// otherwise a failure/warning count plus the single actionable fix when
 /// every problem row shares one.
 fn verdict_line(rows: &[&Row], verdict: DoctorVerdict, caps: Capabilities) -> String {
@@ -407,7 +405,7 @@ fn verdict_line(rows: &[&Row], verdict: DoctorVerdict, caps: Capabilities) -> St
     }
 }
 
-/// Assemble the complete human checklist (spec 3.9): Environment, Workspace,
+/// Assemble the complete human checklist: Environment, Workspace,
 /// and Daemon groups, each separated by one blank line, then the verdict
 /// line.
 fn render_report(
@@ -437,8 +435,7 @@ fn render_report(
 
 /// The remediations doctor is willing to offer to run, or `None` when the
 /// warnings/failures on this run are not all fixable through a known,
-/// doctor-owned remediation (spec 3.9: "when every warning has a safe known
-/// remediation").
+/// doctor-owned remediation.
 fn remediable_fixes(findings: &[Finding]) -> Option<Vec<&Remediation>> {
     let actionable: Vec<&Finding> = findings
         .iter()
@@ -454,7 +451,7 @@ fn remediable_fixes(findings: &[Finding]) -> Option<Vec<&Remediation>> {
     (remediations.len() == actionable.len()).then_some(remediations)
 }
 
-/// Offer to apply every remediable fix (spec 3.9). `--no-input`, structured
+/// Offer to apply every remediable fix. `--no-input`, structured
 /// modes, and a non-interactive session all degrade to report-only, matching
 /// the rest of the CLI's prompt policy rather than inventing a doctor-local
 /// rule.
@@ -791,7 +788,7 @@ mod golden {
             rendered.trim_end().ends_with("Everything checks out."),
             "{rendered}"
         );
-        // Groups are separated by a blank line (spec 2.1's block rule), not
+        // Groups are separated by a blank line, not
         // run together.
         assert!(rendered.contains("\n\nWorkspace\n"), "{rendered}");
         assert!(rendered.contains("\n\nDaemon\n"), "{rendered}");

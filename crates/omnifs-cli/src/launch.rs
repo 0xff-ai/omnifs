@@ -21,7 +21,7 @@ use crate::ui::style::Glyph;
 use omnifs_workspace::Workspace;
 
 /// A short grace window for independent frontend runners to reattach after
-/// this command replaces the daemon they were talking to (spec 2.9).
+/// this command replaces the daemon they were talking to.
 const RECONNECT_GRACE: Duration = Duration::from_secs(3);
 const RECONNECT_POLL: Duration = Duration::from_millis(250);
 
@@ -29,8 +29,8 @@ const RECONNECT_POLL: Duration = Duration::from_millis(250);
 /// at a time as async work finishes rather than as one batch (provider
 /// warmup's spinner settles first, then `daemon`/`mounts` print together,
 /// then `frontends` settles last from the reconnect-grace live region), so
-/// the shared key width is computed once from this fixed set up front (spec
-/// 2.1: a block's key column is sized to the whole block, never truncated).
+/// the shared key width is computed once from this fixed set up front: a
+/// block's key column is sized to the whole block, never truncated.
 pub(crate) const UP_LEDGER_KEYS: [&str; 4] = ["providers", "daemon", "mounts", "frontends"];
 
 pub(crate) fn up_key_width() -> usize {
@@ -111,7 +111,7 @@ impl<'a> Launcher<'a> {
         }
 
         // A no-op invocation collapses to one sentence and does none of the
-        // work below (spec 3.6): checked before provider warmup or any
+        // work below: checked before provider warmup or any
         // narration runs, not just before the ledger rows print, so a
         // `--offline` or already-serving `up` never even joins the warmup
         // lock it has nothing to do with.
@@ -267,7 +267,7 @@ impl<'a> Launcher<'a> {
 
     /// Wait a short grace period for every frontend observed just before
     /// replacement to reappear as attached, rendering the live-region row
-    /// and settled summary from spec 2.9. Timing out is not a failure:
+    /// and settled summary from the live region. Timing out is not a failure:
     /// `up` still returns `Ok`, and the caller's exit code stays 0.
     async fn wait_for_reattachment(
         &self,
@@ -373,14 +373,13 @@ impl FrontendTrack {
 }
 
 /// The settled `frontends` row value once every expected track reattached
-/// (spec 2.9/3.6: `2/2 reattached (nfs host, fuse libkrun)`).
+///`).
 fn reattached_value(reattached: usize, total: usize, detail: &str) -> String {
     format!("{reattached}/{total} reattached ({detail})")
 }
 
 /// The settled `frontends` row value when the grace window elapsed with at
-/// least one track still pending (spec 2.9: `1/2 reattached, fuse libkrun
-/// pending`).
+/// least one track still pending.
 fn pending_value(reattached: usize, total: usize, first_pending: &str) -> String {
     format!("{reattached}/{total} reattached, {first_pending} pending")
 }
@@ -553,8 +552,8 @@ fn display_path(path: &Path) -> String {
     }
 }
 
-/// The `daemon` row's value (spec 3.6: `running (pid 31114), revision
-/// 3f69473`, or `running (offline, revision <sha>)` for `--offline`). Pure so
+/// The `daemon` row's value, `running (pid 31114), revision 3f69473`, or
+/// `running (offline, revision <sha>)` for `--offline`). Pure so
 /// the exact wording is testable without a live daemon.
 fn daemon_row_value(pid: u32, revision: &Revision, offline: bool) -> String {
     if offline {
@@ -564,7 +563,7 @@ fn daemon_row_value(pid: u32, revision: &Revision, offline: bool) -> String {
     }
 }
 
-/// The `mounts` row's value (spec 3.6: `/github /dns serving`). Pure so the
+/// The `mounts` row's value. Pure so the
 /// exact wording is testable without a live daemon.
 fn mounts_row_value(mounts: &[omnifs_api::MountInfo]) -> String {
     let mount_names = mounts
@@ -579,7 +578,7 @@ fn mounts_row_value(mounts: &[omnifs_api::MountInfo]) -> String {
     }
 }
 
-/// Print the `daemon` and `mounts` rows of `up`'s ledger block (spec 3.6).
+/// Print the `daemon` and `mounts` rows of `up`'s ledger block.
 /// The former generic `frontend`/`mounts` subsystem-health rows are gone:
 /// `daemon` now carries the identity a successful launch actually answers
 /// (pid, revision), and the frontend row is owned entirely by
@@ -725,7 +724,7 @@ mod tests {
         );
     }
 
-    /// The `daemon`/`mounts`/`frontends` three-row fragment of spec 3.6's
+    /// The `daemon`/`mounts`/`frontends` three-row fragment of the
     /// ledger block, reproduced byte-for-byte from the same pure value
     /// functions and the same streamed-row primitive `report_launch_status`/
     /// `wait_for_reattachment` call in production:

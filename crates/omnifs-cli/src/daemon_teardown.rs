@@ -249,7 +249,7 @@ impl DaemonTeardown {
     }
 }
 
-/// The exact human lines `down` prints (spec 3.7), pure and independent of
+/// The exact human lines `down` prints, pure and independent of
 /// the real terminal so it is deterministically testable. Human output shows
 /// the `daemon` row plus any *failing* `runtime-record` outcome: successful
 /// record bookkeeping is implementation detail a human never asked to see,
@@ -318,7 +318,7 @@ mod tests {
         assert!(failed.value.contains("busy"));
     }
 
-    /// Spec 3.7, the "daemon was running" branch. `down`'s block has exactly
+    /// The "daemon was running" branch. `down`'s block has exactly
     /// one key (`daemon`, 6 columns), so the field width is `6 + 3 = 9`, a
     /// 3-space gap rather than the retired fixed-14-column rail's 8:
     /// ```text
@@ -341,7 +341,7 @@ mod tests {
         );
     }
 
-    /// Spec 3.7, the "nothing running" branch: `Nothing to stop. The daemon
+    /// The "nothing running" branch: `Nothing to stop. The daemon
     /// isn't running.` No orphan `runtime-record` ledger fragment leaks
     /// through even when a stale record needed cleanup.
     #[test]

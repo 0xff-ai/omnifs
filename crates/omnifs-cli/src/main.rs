@@ -134,7 +134,7 @@ async fn main() {
                     let _ = output.emit_error(error::canceled_envelope(command_path, "canceled"));
                 } else if !output.is_closed() {
                     // A consent decline already printed its own closing line
-                    // (`Kept everything as it was.`, spec 2.7) before
+                    // (`Kept everything as it was.`) before
                     // returning this same cancellation, so the generic
                     // `canceled` line would be a second, redundant close.
                     ui::eprint_raw(&format!(

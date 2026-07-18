@@ -445,7 +445,7 @@ pub(crate) struct Action {
 }
 
 impl Action {
-    /// Spec 2.10: a degraded row's recovery command reads `fix:  <command>`,
+    /// The a degraded row's recovery command reads `fix:  <command>`,
     /// full width and never truncated.
     pub(crate) fn fix(command: impl Into<String>) -> Self {
         Self {
