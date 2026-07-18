@@ -4,6 +4,7 @@ mod format;
 mod metrics;
 mod run;
 mod source;
+mod timeline;
 mod trace_state;
 mod tree;
 pub mod ui;

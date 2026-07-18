@@ -7,6 +7,7 @@ use omnifs_api::events::{InspectorEvent, InspectorLine, InspectorRecord, TraceId
 use super::filter::{FilterMode, ViewFilter};
 use super::metrics::MountWindow;
 use super::source::SourceMessage;
+use super::timeline::Timeline;
 use super::trace_state::{MAX_RECENT_TRACES, MountPalette, Operation, TraceReducer};
 use super::tree::{ACTIVE_FOCUS_WINDOW_US, MountForest};
 
@@ -28,7 +29,6 @@ pub struct App {
     /// Inspector address shown in the header while disconnected.
     /// `None` in [`ConnectionMode::Replay`].
     pub addr: Option<String>,
-    pub paused: bool,
     pub filter: ViewFilter,
     pub focus: PaneFocus,
     pub tree_cursor: Option<TreeCursor>,
@@ -45,6 +45,97 @@ pub struct App {
     pub collapsed: HashSet<(String, String)>,
     traces: TraceReducer,
     event_times: VecDeque<u64>,
+    /// Every record that has arrived, bounded and addressed by absolute
+    /// ordinal. Backs pause/scrub; `traces` never reads from it directly.
+    timeline: Timeline,
+    /// `Some` while paused: a reducer frozen (or stepped) at some point
+    /// in the timeline, read by every render/selection accessor instead
+    /// of `traces`. `None` means live.
+    scrub: Option<Scrub>,
+}
+
+/// A paused view: a `TraceReducer` folded up to `cursor`, an absolute
+/// timeline ordinal one past the last folded record. Rebuilt by
+/// refolding a prefix of the ring rather than trying to run the fold
+/// backward, since `TraceReducer::apply_record` has no inverse.
+struct Scrub {
+    cursor: u64,
+    reducer: TraceReducer,
+}
+
+impl Scrub {
+    /// Fold the entire ring: the state a fresh pause freezes on.
+    fn paused_at(timeline: &Timeline) -> Self {
+        Self::at(timeline, timeline.end())
+    }
+
+    /// Rebuild from scratch by folding `ring[evicted..ordinal)`, clamped
+    /// into the retained range. O(ring length), but this only runs on
+    /// pause, backward steps, and second-granularity jumps, never once
+    /// per frame.
+    fn at(timeline: &Timeline, ordinal: u64) -> Self {
+        let target = timeline.clamp_ordinal(ordinal);
+        let mut reducer = TraceReducer::default();
+        for idx in timeline.evicted()..target {
+            if let Some(record) = timeline.get(idx) {
+                reducer.apply_record(record);
+            }
+        }
+        Self {
+            cursor: target,
+            reducer,
+        }
+    }
+
+    /// Snap `cursor` back inside the ring's retained range. A long pause
+    /// can let live eviction advance the horizon past `cursor`; the
+    /// records in between are gone from the ring and unrecoverable, so
+    /// the honest move is to drop to the horizon rather than fake a
+    /// state that never happened.
+    fn clamp_to_horizon(&mut self, timeline: &Timeline) {
+        if self.cursor < timeline.evicted() {
+            *self = Self::at(timeline, timeline.evicted());
+        }
+    }
+
+    fn step_forward(&mut self, timeline: &Timeline) {
+        self.clamp_to_horizon(timeline);
+        if self.cursor >= timeline.end() {
+            return;
+        }
+        if let Some(record) = timeline.get(self.cursor) {
+            self.reducer.apply_record(record);
+            self.cursor += 1;
+        }
+    }
+
+    fn step_backward(&mut self, timeline: &Timeline) {
+        self.clamp_to_horizon(timeline);
+        if self.cursor > timeline.evicted() {
+            *self = Self::at(timeline, self.cursor - 1);
+        }
+    }
+
+    /// Jump by whole seconds from the last-folded record's `mono_us`,
+    /// resolved to an ordinal through the ring's monotone `mono_us` index.
+    fn jump_seconds(&mut self, timeline: &Timeline, delta_secs: i64) {
+        self.clamp_to_horizon(timeline);
+        let reference = self
+            .cursor
+            .checked_sub(1)
+            .and_then(|idx| timeline.get(idx))
+            .map(|record| record.mono_us)
+            .or_else(|| timeline.oldest_mono_us())
+            .unwrap_or(0);
+        let delta_us = delta_secs.unsigned_abs() * 1_000_000;
+        let target_mono = if delta_secs >= 0 {
+            reference.saturating_add(delta_us)
+        } else {
+            reference.saturating_sub(delta_us)
+        };
+        let ordinal = timeline.ordinal_at_or_after(target_mono);
+        *self = Self::at(timeline, ordinal);
+    }
 }
 
 /// Which pane has keyboard focus. Tab cycles; arrow keys dispatch
@@ -110,7 +201,6 @@ impl App {
             // mode ignores this flag in the header.
             connected: false,
             addr,
-            paused: false,
             filter: ViewFilter::default(),
             focus: PaneFocus::default(),
             tree_cursor: None,
@@ -122,15 +212,48 @@ impl App {
             collapsed: HashSet::new(),
             traces: TraceReducer::default(),
             event_times: VecDeque::new(),
+            timeline: Timeline::new(),
+            scrub: None,
         }
     }
 
+    /// `true` while a scrub cursor is active, i.e. the view is frozen (or
+    /// stepped) at some point in the past rather than tracking live.
+    pub fn paused(&self) -> bool {
+        self.scrub.is_some()
+    }
+
+    /// Single read accessor for render/selection code: the live reducer
+    /// normally, or the scrub reducer while paused. Every accessor below
+    /// that used to read `self.traces` forwards through this instead, so
+    /// nothing has to remember to branch on `scrub` itself.
+    fn view_reducer(&self) -> &TraceReducer {
+        self.scrub
+            .as_ref()
+            .map_or(&self.traces, |scrub| &scrub.reducer)
+    }
+
+    /// Clock paired with [`Self::view_reducer`]: the live wall clock
+    /// normally, or the `mono_us` of the last-folded record while
+    /// scrubbed, so active-window pruning matches what the scrub reducer
+    /// actually contains.
+    pub fn view_now_mono(&self) -> u64 {
+        let Some(scrub) = &self.scrub else {
+            return self.now_mono;
+        };
+        scrub
+            .cursor
+            .checked_sub(1)
+            .and_then(|idx| self.timeline.get(idx))
+            .map_or(self.now_mono, |record| record.mono_us)
+    }
+
     pub fn forest(&self) -> &MountForest {
-        &self.traces.forest
+        &self.view_reducer().forest
     }
 
     pub fn palette(&self) -> &MountPalette {
-        &self.traces.palette
+        &self.view_reducer().palette
     }
 
     pub fn selected_trace(&self) -> Option<TraceId> {
@@ -138,45 +261,48 @@ impl App {
     }
 
     pub fn mount_window(&self, mount: &str) -> Option<&MountWindow> {
-        self.traces.mount_window(mount)
+        self.view_reducer().mount_window(mount)
     }
 
     pub fn ordered_mounts_for_strip(&self, cap: usize) -> Vec<String> {
-        self.traces.ordered_mounts_for_strip(cap)
+        self.view_reducer().ordered_mounts_for_strip(cap)
     }
 
     pub fn operation(&self, trace_id: TraceId) -> Option<&Operation> {
-        self.traces.operation(trace_id)
+        self.view_reducer().operation(trace_id)
     }
 
     pub fn visible_trace_ids(&self) -> Vec<TraceId> {
-        self.traces.visible_trace_ids(&self.filter)
+        self.view_reducer().visible_trace_ids(&self.filter)
     }
 
     /// Number of operations currently retained in memory. Pairs with
     /// [`MAX_RECENT_TRACES`] so subscribers can show eviction pressure.
     pub fn retained_trace_count(&self) -> usize {
-        self.traces.retained_trace_count()
+        self.view_reducer().retained_trace_count()
     }
 
     pub const fn max_retained_traces() -> usize {
         MAX_RECENT_TRACES
     }
 
-    pub fn apply_record(&mut self, record: &InspectorRecord) {
-        if self.paused {
-            return;
-        }
+    /// Fold one record end-to-end: always into the live reducer and the
+    /// timeline ring, regardless of pause. Pause freezes the *view*, not
+    /// ingestion, so nothing is ever silently dropped while paused.
+    pub fn apply_record(&mut self, record: InspectorRecord) {
         self.now_mono = record.mono_us;
         self.tick_event_window(record.mono_us);
-        self.traces.apply_record(record);
+        self.traces.apply_record(&record);
 
-        // The fold evicts the oldest retained trace once MAX_RECENT_TRACES
-        // is exceeded; it no longer owns selection, so a pointer to a
-        // just-evicted trace has to be caught and cleared here.
+        // The live fold evicts the oldest retained trace once
+        // MAX_RECENT_TRACES is exceeded; it no longer owns selection, so
+        // a pointer to a just-evicted trace has to be caught and cleared
+        // here. Checked against the current view (the scrub reducer
+        // while paused) so a selection that's still visible there
+        // survives unrelated live eviction during a long pause.
         if self
             .selected
-            .is_some_and(|id| self.traces.operation(id).is_none())
+            .is_some_and(|id| self.view_reducer().operation(id).is_none())
         {
             self.selected = None;
         }
@@ -189,28 +315,35 @@ impl App {
             self.selected = Some(record.trace_id);
         }
 
+        self.timeline.push(record);
         self.ensure_selected_visible();
     }
 
     /// Reassign selection when it points at a trace that's no longer
     /// visible: evicted from the fold, or filtered out by the active
     /// [`ViewFilter`]. Falls back to the first currently visible trace.
+    /// Runs against the view reducer, so pausing or stepping never resets
+    /// a selection that's still valid at the current cursor.
     fn ensure_selected_visible(&mut self) {
         let selected_is_visible = self.selected.is_some_and(|id| {
-            self.traces
+            self.view_reducer()
                 .operation(id)
                 .is_some_and(|op| self.filter.matches(op))
         });
         if !selected_is_visible {
-            self.selected = self.traces.visible_trace_ids(&self.filter).first().copied();
+            self.selected = self
+                .view_reducer()
+                .visible_trace_ids(&self.filter)
+                .first()
+                .copied();
         }
     }
 
-    pub fn apply_line(&mut self, line: &InspectorLine) {
+    pub fn apply_line(&mut self, line: InspectorLine) {
         match line {
             InspectorLine::Record(record) => self.apply_record(record),
             InspectorLine::Dropped { count } => {
-                self.dropped_events = self.dropped_events.saturating_add(*count);
+                self.dropped_events = self.dropped_events.saturating_add(count);
             },
         }
     }
@@ -220,7 +353,7 @@ impl App {
     pub fn apply_source_message(&mut self, message: SourceMessage) {
         match message {
             SourceMessage::Line(line) => {
-                self.apply_line(&line);
+                self.apply_line(line);
             },
             SourceMessage::Connected => {
                 self.connected = true;
@@ -248,7 +381,7 @@ impl App {
                 self.quit = true;
             },
             KeyCode::Tab => self.focus = self.focus.cycle(),
-            KeyCode::Char(' ') => self.paused = !self.paused,
+            KeyCode::Char(' ') => self.toggle_pause(),
             KeyCode::Up => self.move_focus_cursor(-1),
             KeyCode::Down => self.move_focus_cursor(1),
             KeyCode::Enter if self.focus == PaneFocus::Tree => {
@@ -268,8 +401,60 @@ impl App {
                 self.filter.editing = true;
                 self.filter.query.clear();
             },
+            // Scrub controls: only meaningful while paused. While live
+            // these keys are no-ops, matching the plain `_` arm below.
+            KeyCode::Char('g') if self.scrub.is_some() => self.go_live(),
+            KeyCode::Left
+                if self.scrub.is_some() && key.modifiers.contains(KeyModifiers::SHIFT) =>
+            {
+                self.jump_scrub_seconds(-1);
+            },
+            KeyCode::Right
+                if self.scrub.is_some() && key.modifiers.contains(KeyModifiers::SHIFT) =>
+            {
+                self.jump_scrub_seconds(1);
+            },
+            KeyCode::Left if self.scrub.is_some() => self.step_scrub_backward(),
+            KeyCode::Right if self.scrub.is_some() => self.step_scrub_forward(),
             _ => {},
         }
+    }
+
+    /// Space: pause freezes the view at the current timeline position;
+    /// pressing it again resumes live. Ingestion never stops either way.
+    fn toggle_pause(&mut self) {
+        if self.scrub.is_some() {
+            self.go_live();
+        } else {
+            self.scrub = Some(Scrub::paused_at(&self.timeline));
+            self.ensure_selected_visible();
+        }
+    }
+
+    fn go_live(&mut self) {
+        self.scrub = None;
+        self.ensure_selected_visible();
+    }
+
+    fn step_scrub_forward(&mut self) {
+        if let Some(scrub) = &mut self.scrub {
+            scrub.step_forward(&self.timeline);
+        }
+        self.ensure_selected_visible();
+    }
+
+    fn step_scrub_backward(&mut self) {
+        if let Some(scrub) = &mut self.scrub {
+            scrub.step_backward(&self.timeline);
+        }
+        self.ensure_selected_visible();
+    }
+
+    fn jump_scrub_seconds(&mut self, delta_secs: i64) {
+        if let Some(scrub) = &mut self.scrub {
+            scrub.jump_seconds(&self.timeline, delta_secs);
+        }
+        self.ensure_selected_visible();
     }
 
     fn move_focus_cursor(&mut self, delta: isize) {
@@ -286,9 +471,11 @@ impl App {
     }
 
     fn move_tree_cursor(&mut self, delta: isize) {
-        let rows =
-            self.forest()
-                .render_rows(self.now_mono, ACTIVE_FOCUS_WINDOW_US, &self.collapsed);
+        let rows = self.forest().render_rows(
+            self.view_now_mono(),
+            ACTIVE_FOCUS_WINDOW_US,
+            &self.collapsed,
+        );
         if rows.is_empty() {
             self.tree_cursor = None;
             return;
@@ -327,8 +514,11 @@ impl App {
     /// reducer-owned behavior of scanning all operations.
     fn select_latest_for_path(&mut self, mount: &str, path: &str) {
         let mut best: Option<(u64, TraceId)> = None;
-        for id in self.traces.visible_trace_ids(&ViewFilter::default()) {
-            let Some(op) = self.traces.operation(id) else {
+        for id in self
+            .view_reducer()
+            .visible_trace_ids(&ViewFilter::default())
+        {
+            let Some(op) = self.view_reducer().operation(id) else {
                 continue;
             };
             if op.mount != mount {
@@ -406,7 +596,7 @@ impl App {
     }
 
     fn select_next(&mut self) {
-        let visible = self.traces.visible_trace_ids(&self.filter);
+        let visible = self.view_reducer().visible_trace_ids(&self.filter);
         if visible.is_empty() {
             return;
         }
@@ -418,7 +608,7 @@ impl App {
     }
 
     fn select_prev(&mut self) {
-        let visible = self.traces.visible_trace_ids(&self.filter);
+        let visible = self.view_reducer().visible_trace_ids(&self.filter);
         if visible.is_empty() {
             return;
         }
@@ -439,5 +629,119 @@ fn step_clamped(current: usize, delta: isize, max_inclusive: usize) -> usize {
         current.saturating_add(step).min(max_inclusive)
     } else {
         current.saturating_sub(delta.unsigned_abs())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use omnifs_api::events::{OpEnd, OutcomeFields};
+
+    use super::*;
+
+    fn record(trace_id: TraceId, mono_us: u64, event: InspectorEvent) -> InspectorRecord {
+        InspectorRecord::new("2026-05-23T12:00:00Z", mono_us, trace_id, event)
+    }
+
+    fn fuse_start(trace_id: TraceId, mono_us: u64, mount: &str, path: &str) -> InspectorRecord {
+        record(
+            trace_id,
+            mono_us,
+            InspectorEvent::FuseStart {
+                op: "lookup".into(),
+                mount: mount.into(),
+                path: path.into(),
+            },
+        )
+    }
+
+    fn fuse_end(trace_id: TraceId, mono_us: u64, elapsed_us: u64) -> InspectorRecord {
+        record(
+            trace_id,
+            mono_us,
+            InspectorEvent::FuseEnd {
+                op: "lookup".into(),
+                end: OpEnd {
+                    elapsed_us,
+                    result: OutcomeFields::ok(),
+                },
+            },
+        )
+    }
+
+    #[test]
+    fn pause_is_lossless_new_records_land_live_but_not_in_the_frozen_view() {
+        let mut app = App::new(ConnectionMode::Replay, "test", None);
+        app.apply_record(fuse_start(1, 10, "github", "/a"));
+        app.apply_record(fuse_end(1, 20, 10));
+
+        app.toggle_pause();
+        assert!(app.paused());
+
+        // Records keep arriving while paused; ingestion never drops them.
+        app.apply_record(fuse_start(2, 30, "github", "/b"));
+        app.apply_record(fuse_end(2, 40, 10));
+        assert_eq!(app.timeline.end(), 4);
+
+        // The frozen view doesn't show them yet...
+        assert!(app.operation(2).is_none());
+        // ...but resuming live surfaces the full history, including what
+        // arrived during the pause.
+        app.go_live();
+        assert!(!app.paused());
+        assert!(app.operation(2).is_some());
+    }
+
+    #[test]
+    fn scrub_stepping_reflects_prefix_state() {
+        let mut app = App::new(ConnectionMode::Replay, "test", None);
+        app.apply_record(fuse_start(1, 10, "github", "/a"));
+        app.apply_record(fuse_end(1, 20, 10));
+        app.apply_record(fuse_start(2, 30, "github", "/b"));
+        app.apply_record(fuse_end(2, 40, 10));
+
+        app.toggle_pause();
+        assert!(app.operation(2).is_some());
+
+        // Undo trace 2's fuse.end: it's back to running.
+        app.step_scrub_backward();
+        assert_eq!(
+            app.operation(2)
+                .expect("trace 2 started in this prefix")
+                .status,
+            crate::inspector::trace_state::OperationStatus::Running
+        );
+
+        // Undo trace 2's fuse.start: it hasn't happened yet in this prefix.
+        app.step_scrub_backward();
+        assert!(app.operation(2).is_none());
+
+        // Step forward again: trace 2 reappears.
+        app.step_scrub_forward();
+        assert!(app.operation(2).is_some());
+    }
+
+    #[test]
+    fn horizon_clamp_does_not_panic_when_the_cursor_falls_behind_the_ring() {
+        let mut timeline = Timeline::with_capacity(2);
+        timeline.push(fuse_start(1, 10, "github", "/a"));
+        timeline.push(fuse_end(1, 20, 10));
+
+        let mut scrub = Scrub::paused_at(&timeline);
+        scrub.step_backward(&timeline);
+        scrub.step_backward(&timeline);
+        assert_eq!(scrub.cursor, 0);
+
+        // Push past capacity: the ring evicts every record the cursor
+        // referenced.
+        timeline.push(fuse_start(2, 30, "github", "/b"));
+        timeline.push(fuse_end(2, 40, 10));
+        timeline.push(fuse_start(3, 50, "github", "/c"));
+        assert_eq!(timeline.evicted(), 3);
+
+        // Stepping must clamp to the horizon instead of indexing an
+        // evicted ordinal.
+        scrub.step_forward(&timeline);
+        assert_eq!(scrub.cursor, 4);
+        assert!(scrub.reducer.operation(3).is_none());
     }
 }

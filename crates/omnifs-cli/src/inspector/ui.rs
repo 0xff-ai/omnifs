@@ -70,7 +70,7 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
         },
         ConnectionMode::Replay => format!("replay · {}", app.container),
     };
-    let pause = if app.paused { " paused" } else { "" };
+    let pause = if app.paused() { " paused" } else { "" };
     let filter = match app.filter.mode {
         FilterMode::All => "",
         FilterMode::ErrorsOnly => " errors-only",
@@ -113,7 +113,7 @@ fn render_sparkline_strip(frame: &mut Frame, app: &App, area: Rect) {
     for mount in &mounts {
         let window = app.mount_window(mount).unwrap_or(&empty_window);
         let color = app.palette().peek(mount).unwrap_or(Color::DarkGray);
-        lines.push(sparkline_line(mount, window, color, app.now_mono));
+        lines.push(sparkline_line(mount, window, color, app.view_now_mono()));
     }
     let paragraph = Paragraph::new(lines);
     frame.render_widget(paragraph, inner);
@@ -172,9 +172,9 @@ fn render_tree(frame: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let rows = app
-        .forest()
-        .render_rows(app.now_mono, ACTIVE_FOCUS_WINDOW_US, &app.collapsed);
+    let rows =
+        app.forest()
+            .render_rows(app.view_now_mono(), ACTIVE_FOCUS_WINDOW_US, &app.collapsed);
     if rows.is_empty() {
         let msg =
             Paragraph::new("no paths touched yet").style(Style::default().fg(Color::DarkGray));
