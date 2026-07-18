@@ -13,7 +13,7 @@ use omnifs_api::events::{
 use super::filter::ViewFilter;
 use super::format;
 use super::metrics::MountWindow;
-use super::sandbox::{MountSandbox, SandboxStats};
+use super::sandbox::{MountSandboxView, SandboxStats};
 use super::tree::MountForest;
 use ratatui::style::Color;
 
@@ -226,13 +226,17 @@ impl TraceReducer {
 
     /// Sandbox port stats for one mount: per-export-method and
     /// per-import-kind windows, open-call counts, and lifetime totals.
-    pub fn mount_sandbox(&self, mount: &str) -> Option<&MountSandbox> {
-        self.sandbox.mount(mount)
+    pub fn mount_sandbox(&self, mount: &str) -> Option<MountSandboxView<'_>> {
+        self.sandbox.mount_view(mount)
     }
 
     /// Mounts with any sandbox activity, most recent first.
     pub fn sandbox_mounts_by_activity(&self) -> Vec<&str> {
         self.sandbox.mounts_by_activity()
+    }
+
+    pub fn sandbox_active_mount(&self, preferred: Option<&str>) -> Option<&str> {
+        self.sandbox.active_mount(preferred)
     }
 
     pub fn ordered_mounts_for_strip(&self, cap: usize) -> Vec<String> {
@@ -264,6 +268,7 @@ impl TraceReducer {
     }
 
     pub fn apply_record(&mut self, record: &InspectorRecord) {
+        self.sandbox.touch_trace(record.trace_id, MAX_RECENT_TRACES);
         let trace_id = record.trace_id;
         match &record.event {
             InspectorEvent::FuseStart { op, mount, path } => {
@@ -457,21 +462,19 @@ impl TraceReducer {
         outcome: InspectorOutcome,
         mono_us: u64,
     ) {
-        let Some(operation) = self.operations.get_mut(&trace_id) else {
-            return;
-        };
-        let method = operation.provider_method.clone();
-        let mount = operation.mount.clone();
-        operation.close_in_flight(
-            |s| {
-                s.in_flight
-                    && matches!(&s.kind, StageKind::Provider(m) if Some(m.as_str()) == method.as_deref())
-            },
-            elapsed_us,
-            outcome,
-        );
+        if let Some(operation) = self.operations.get_mut(&trace_id) {
+            let method = operation.provider_method.clone();
+            operation.close_in_flight(
+                |s| {
+                    s.in_flight
+                        && matches!(&s.kind, StageKind::Provider(m) if Some(m.as_str()) == method.as_deref())
+                },
+                elapsed_us,
+                outcome,
+            );
+        }
         self.sandbox
-            .on_provider_end(&mount, trace_id, operation_id, elapsed_us, outcome, mono_us);
+            .on_provider_end(trace_id, operation_id, elapsed_us, outcome, mono_us);
     }
 
     fn on_callout_start(
@@ -514,17 +517,14 @@ impl TraceReducer {
         outcome: InspectorOutcome,
         mono_us: u64,
     ) {
-        let Some(operation) = self.operations.get_mut(&trace_id) else {
-            return;
-        };
-        let mount = operation.mount.clone();
-        operation.close_in_flight(
-            |s| matches!(&s.kind, StageKind::Callout(idx) if *idx == callout_index),
-            elapsed_us,
-            outcome,
-        );
+        if let Some(operation) = self.operations.get_mut(&trace_id) {
+            operation.close_in_flight(
+                |s| matches!(&s.kind, StageKind::Callout(idx) if *idx == callout_index),
+                elapsed_us,
+                outcome,
+            );
+        }
         self.sandbox.on_callout_end(
-            &mount,
             trace_id,
             operation_id,
             callout_index,
@@ -833,6 +833,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn sandbox_stats_track_open_calls_lifetime_counts_and_windows() {
         let mut traces = TraceReducer::default();
         traces.apply_record(&record(
@@ -869,8 +870,16 @@ mod tests {
         // Mid-trace: one export call and one import call are in flight,
         // and nothing else on either port.
         let sandbox = traces.mount_sandbox("github").expect("mount sandbox");
-        assert_eq!(sandbox.export_open_count("lookup_child"), 1);
-        assert_eq!(sandbox.import_open_count(CalloutKind::Fetch), 1);
+        assert_eq!(
+            sandbox.open_count(&super::super::sandbox::PortId::Export(
+                "lookup_child".into()
+            )),
+            1
+        );
+        assert_eq!(
+            sandbox.open_count(&super::super::sandbox::PortId::Import(CalloutKind::Fetch)),
+            1
+        );
         assert_eq!(sandbox.total_open_exports(), 1);
         assert_eq!(sandbox.total_open_imports(), 1);
 
@@ -910,24 +919,50 @@ mod tests {
         ));
 
         let sandbox = traces.mount_sandbox("github").expect("mount sandbox");
-        assert_eq!(sandbox.export_open_count("lookup_child"), 0);
-        assert_eq!(sandbox.import_open_count(CalloutKind::Fetch), 0);
+        assert_eq!(
+            sandbox.open_count(&super::super::sandbox::PortId::Export(
+                "lookup_child".into()
+            )),
+            0
+        );
+        assert_eq!(
+            sandbox.open_count(&super::super::sandbox::PortId::Import(CalloutKind::Fetch)),
+            0
+        );
         assert_eq!(sandbox.total_open_exports(), 0);
         assert_eq!(sandbox.total_open_imports(), 0);
         assert!(
             !sandbox
-                .export_window("lookup_child")
+                .port_stats(&super::super::sandbox::PortId::Export(
+                    "lookup_child".into()
+                ))
                 .expect("export window")
+                .window
                 .is_empty()
         );
         assert!(
             !sandbox
-                .import_window(CalloutKind::Fetch)
+                .port_stats(&super::super::sandbox::PortId::Import(CalloutKind::Fetch))
                 .expect("import window")
+                .window
                 .is_empty()
         );
-        assert_eq!(sandbox.export_lifetime_count("lookup_child"), 1);
-        assert_eq!(sandbox.import_lifetime_count(CalloutKind::Fetch), 1);
+        assert_eq!(
+            sandbox
+                .port_stats(&super::super::sandbox::PortId::Export(
+                    "lookup_child".into()
+                ))
+                .unwrap()
+                .lifetime,
+            1
+        );
+        assert_eq!(
+            sandbox
+                .port_stats(&super::super::sandbox::PortId::Import(CalloutKind::Fetch))
+                .unwrap()
+                .lifetime,
+            1
+        );
     }
 
     #[test]
@@ -992,6 +1027,43 @@ mod tests {
                 .total_open_exports(),
             0
         );
+    }
+
+    #[test]
+    fn completion_settles_sandbox_after_operation_eviction() {
+        let mut traces = TraceReducer::default();
+        traces.apply_record(&record(
+            120,
+            10,
+            InspectorEvent::ProviderStart {
+                operation_id: 7,
+                mount: "github".into(),
+                provider: "github".into(),
+                method: "lookup_child".into(),
+                path: "/a".into(),
+            },
+        ));
+        traces.operations.remove(&120);
+        traces.apply_record(&record(
+            120,
+            20,
+            InspectorEvent::ProviderEnd {
+                operation_id: 7,
+                end: OpEnd {
+                    elapsed_us: 10,
+                    result: OutcomeFields::ok(),
+                },
+            },
+        ));
+        let sandbox = traces.mount_sandbox("github").expect("sandbox");
+        assert_eq!(sandbox.total_open_exports(), 0);
+        let stats = sandbox
+            .port_stats(&super::super::sandbox::PortId::Export(
+                "lookup_child".into(),
+            ))
+            .unwrap();
+        assert_eq!(stats.lifetime, 1);
+        assert!(!stats.window.is_empty());
     }
 
     #[test]

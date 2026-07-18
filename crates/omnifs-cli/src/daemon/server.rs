@@ -762,7 +762,11 @@ async fn handle_control_connection(
                 .await?;
                 return Ok(());
             };
-            write_control_reply(&mut stream, ControlReply::inspector_ready()).await?;
+            write_control_reply(
+                &mut stream,
+                ControlReply::inspector_ready(daemon.context.instance_id()),
+            )
+            .await?;
             let subscription = inspector.subscribe();
             for record in subscription.history {
                 write_inspector_line(&mut stream, InspectorLine::Record((*record).clone())).await?;

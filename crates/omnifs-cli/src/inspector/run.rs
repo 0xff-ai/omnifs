@@ -100,7 +100,7 @@ pub fn run_plain(source: SourceKind, output: &crate::ui::output::Output) -> anyh
             while let Some(message) = event_source.recv() {
                 match message {
                     SourceMessage::Line(line) => emit_plain_line(&line)?,
-                    SourceMessage::Connected => {
+                    SourceMessage::Connected { .. } => {
                         output.narrate(format!("omnifs inspect: connected to {addr}"));
                     },
                     SourceMessage::Disconnected => {

@@ -6,12 +6,10 @@ use omnifs_api::events::{InspectorEvent, InspectorLine, InspectorRecord, TraceId
 
 use super::filter::{FilterMode, ViewFilter};
 use super::metrics::MountWindow;
-use super::sandbox::{self, MountSandbox, PortId};
+use super::sandbox::{self, MountSandboxView, PortId};
 use super::source::SourceMessage;
 use super::timeline::Timeline;
-use super::trace_state::{
-    MAX_RECENT_TRACES, MountPalette, Operation, OperationStatus, TraceReducer,
-};
+use super::trace_state::{MAX_RECENT_TRACES, MountPalette, Operation, TraceReducer};
 use super::tree::{ACTIVE_FOCUS_WINDOW_US, MountForest};
 
 const EVENT_WINDOW: usize = 128;
@@ -41,20 +39,21 @@ impl AppView {
     }
 }
 
-/// Sandbox view submode. `t` enters [`Self::Theater`] from anywhere in
-/// the sandbox view; `esc` backs out to [`Self::Map`]. Orthogonal to
-/// [`AppView`]: only meaningful while `view == AppView::Sandbox`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum SandboxMode {
-    #[default]
-    Map,
-    Theater,
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SandboxMapState {
+    pub active_mount: Option<String>,
+    pub selection: Option<PortSelection>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PortSelection {
+    pub port: PortId,
+    pub pinned: bool,
 }
 
 // This is a UI-state struct whose bools are independent toggles
-// (connection observed by the source thread, quit signal, port pin,
-// theater live-follow), not an implicit state machine crying out for
-// an enum; there's nothing to encode by merging them.
+// (connection observed by the source thread and quit signal), not an
+// implicit state machine crying out for an enum.
 #[allow(clippy::struct_excessive_bools)]
 pub struct App {
     pub mode: ConnectionMode,
@@ -63,6 +62,7 @@ pub struct App {
     /// successful TCP connect. Stays false through every silent
     /// reconnect attempt so the header never lies about reachability.
     pub connected: bool,
+    daemon_epoch: Option<String>,
     /// Inspector address shown in the header while disconnected.
     /// `None` in [`ConnectionMode::Replay`].
     pub addr: Option<String>,
@@ -71,32 +71,7 @@ pub struct App {
     pub tree_cursor: Option<TreeCursor>,
     /// Which full-screen view is active. Toggled by `v`.
     pub view: AppView,
-    /// Sandbox view: the mount whose rails are shown. `None` means "let
-    /// [`App::sandbox_active_mount`] pick the most active one"; `m`
-    /// cycles this explicitly.
-    pub active_mount: Option<String>,
-    /// Sandbox view: the port the ↑/↓ cursor is on.
-    pub port_cursor: Option<PortId>,
-    /// Sandbox view: whether `port_cursor`'s detail is pinned to the
-    /// footer line.
-    pub port_pinned: bool,
-    /// Sandbox view: which submode is active. `t` enters
-    /// [`SandboxMode::Theater`]; `esc` returns to
-    /// [`SandboxMode::Map`].
-    pub sandbox_mode: SandboxMode,
-    /// Theater: the trace currently being played. `None` before the
-    /// first `t`, or once its operation is evicted from the fold (see
-    /// [`Self::sync_theater`]).
-    pub theater_trace: Option<TraceId>,
-    /// Theater: 1-based position into `theater_trace`'s `stages`. `N`
-    /// means `stages[0..N]` have happened; the stage the theater is
-    /// "looking at" is `stages[N - 1]`.
-    pub stage_cursor: usize,
-    /// Theater: `true` while `stage_cursor` tracks a running trace's
-    /// newest stage automatically. Cleared the moment the user steps
-    /// back, so live traffic never yanks the view out from under a
-    /// deliberate backward step.
-    theater_follow: bool,
+    pub sandbox: SandboxMapState,
     pub now_mono: u64,
     pub quit: bool,
     pub dropped_events: u64,
@@ -265,18 +240,13 @@ impl App {
             // honest once the source thread actually attaches. Replay
             // mode ignores this flag in the header.
             connected: false,
+            daemon_epoch: None,
             addr,
             filter: ViewFilter::default(),
             focus: PaneFocus::default(),
             tree_cursor: None,
             view: AppView::default(),
-            active_mount: None,
-            port_cursor: None,
-            port_pinned: false,
-            sandbox_mode: SandboxMode::default(),
-            theater_trace: None,
-            stage_cursor: 0,
-            theater_follow: false,
+            sandbox: SandboxMapState::default(),
             now_mono: 0,
             quit: false,
             dropped_events: 0,
@@ -340,7 +310,7 @@ impl App {
     /// Sandbox port stats for one mount. Reads through [`Self::view_reducer`]
     /// like every other accessor, so time travel covers the sandbox map
     /// for free.
-    pub fn mount_sandbox(&self, mount: &str) -> Option<&MountSandbox> {
+    pub fn mount_sandbox(&self, mount: &str) -> Option<MountSandboxView<'_>> {
         self.view_reducer().mount_sandbox(mount)
     }
 
@@ -350,19 +320,11 @@ impl App {
     }
 
     /// The mount the sandbox map renders this frame: `active_mount` if
-    /// it still shows sandbox activity, otherwise the most recently
-    /// active mount, otherwise `None` when nothing has any sandbox
-    /// activity yet. Recomputed every frame rather than cached, so a
-    /// mount going quiet (its traces evicted) can't leave the view
-    /// stuck pointing at a mount that has vanished from the list.
-    pub fn sandbox_active_mount(&self) -> Option<String> {
-        let mounts = self.sandbox_mounts_by_activity();
-        if let Some(active) = self.active_mount.as_deref()
-            && mounts.contains(&active)
-        {
-            return Some(active.to_string());
-        }
-        mounts.first().map(|m| (*m).to_string())
+    /// it has sandbox activity, otherwise the most recently active
+    /// mount, otherwise `None`.
+    pub fn sandbox_active_mount(&self) -> Option<&str> {
+        self.view_reducer()
+            .sandbox_active_mount(self.sandbox.active_mount.as_deref())
     }
 
     /// Number of records currently retained in the timeline ring: what
@@ -384,16 +346,6 @@ impl App {
 
     pub fn operation(&self, trace_id: TraceId) -> Option<&Operation> {
         self.view_reducer().operation(trace_id)
-    }
-
-    /// The operation the theater is currently playing, or `None` if
-    /// there's no theater trace yet or it has since been evicted from
-    /// the fold. Rendering falls back to the map for this frame on
-    /// `None` rather than assuming `sandbox_mode` is already
-    /// reconciled; [`Self::sync_theater`] flips it back on the next
-    /// mutation.
-    pub fn theater_operation(&self) -> Option<&Operation> {
-        self.theater_trace.and_then(|id| self.operation(id))
     }
 
     pub fn visible_trace_ids(&self) -> Vec<TraceId> {
@@ -441,26 +393,6 @@ impl App {
 
         self.timeline.push(record);
         self.ensure_selected_visible();
-        self.sync_theater();
-    }
-
-    /// Keep theater state honest against the fold after every record:
-    /// drop back to the map if the trace it's playing was evicted, and
-    /// otherwise keep a following cursor pinned to "caught up" as new
-    /// stages land on a still-running operation.
-    fn sync_theater(&mut self) {
-        let Some(trace_id) = self.theater_trace else {
-            return;
-        };
-        let Some(op) = self.view_reducer().operation(trace_id) else {
-            self.sandbox_mode = SandboxMode::Map;
-            self.theater_trace = None;
-            self.theater_follow = false;
-            return;
-        };
-        if self.theater_follow && op.status == OperationStatus::Running {
-            self.stage_cursor = op.stages.len().max(1);
-        }
     }
 
     /// Reassign selection when it points at a trace that's no longer
@@ -492,6 +424,26 @@ impl App {
         }
     }
 
+    fn begin_epoch(&mut self, epoch: String) {
+        if self.daemon_epoch.as_deref() == Some(epoch.as_str()) {
+            self.connected = true;
+            return;
+        }
+        self.daemon_epoch = Some(epoch);
+        self.connected = true;
+        self.traces = TraceReducer::default();
+        self.timeline = Timeline::new();
+        self.event_times.clear();
+        self.scrub = None;
+        self.selected = None;
+        self.tree_cursor = None;
+        self.collapsed.clear();
+        self.sandbox = SandboxMapState::default();
+        self.now_mono = 0;
+        self.events_per_sec = 0.0;
+        self.dropped_events = 0;
+    }
+
     /// Consume one source message: line payload or a connection-state
     /// transition. Pairs with [`super::source::EventSource::drain`].
     pub fn apply_source_message(&mut self, message: SourceMessage) {
@@ -499,9 +451,7 @@ impl App {
             SourceMessage::Line(line) => {
                 self.apply_line(line);
             },
-            SourceMessage::Connected => {
-                self.connected = true;
-            },
+            SourceMessage::Connected { epoch } => self.begin_epoch(epoch),
             SourceMessage::Disconnected => {
                 self.connected = false;
             },
@@ -518,17 +468,6 @@ impl App {
         }
 
         match key.code {
-            // Theater exit takes precedence over the global quit
-            // binding below: esc backs out to the map instead of
-            // quitting while the theater is playing a trace. Gated on
-            // the sandbox view too, so a stale `Theater` submode left
-            // over after `v` switched away to the activity view can't
-            // silently swallow esc's quit there.
-            KeyCode::Esc
-                if self.view == AppView::Sandbox && self.sandbox_mode == SandboxMode::Theater =>
-            {
-                self.exit_theater();
-            },
             KeyCode::Char('q' | 'c') | KeyCode::Esc
                 if matches!(key.code, KeyCode::Char('q') | KeyCode::Esc)
                     || key.modifiers.contains(KeyModifiers::CONTROL) =>
@@ -549,20 +488,6 @@ impl App {
             KeyCode::Char('/') => {
                 self.filter.editing = true;
                 self.filter.query.clear();
-            },
-
-            // Theater step controls take precedence over the
-            // paused-scrub ←/→ handling below: scrub stepping stays
-            // reachable only from the sandbox map, never the theater.
-            KeyCode::Left
-                if self.view == AppView::Sandbox && self.sandbox_mode == SandboxMode::Theater =>
-            {
-                self.theater_step_backward();
-            },
-            KeyCode::Right
-                if self.view == AppView::Sandbox && self.sandbox_mode == SandboxMode::Theater =>
-            {
-                self.theater_step_forward();
             },
 
             // Scrub controls: only meaningful while paused. While live
@@ -591,23 +516,11 @@ impl App {
             KeyCode::Char('j' | 'n') if self.view == AppView::Activity => self.select_next(),
             KeyCode::Char('k' | 'p') if self.view == AppView::Activity => self.select_prev(),
 
-            // Sandbox-only: port cursor movement, pin, mount cycling,
-            // theater entry, and (once inside the theater) trace switching.
+            // Sandbox-only: port cursor movement, pin, and mount cycling.
             KeyCode::Up if self.view == AppView::Sandbox => self.move_port_cursor(-1),
             KeyCode::Down if self.view == AppView::Sandbox => self.move_port_cursor(1),
             KeyCode::Enter if self.view == AppView::Sandbox => self.toggle_port_pin(),
             KeyCode::Char('m') if self.view == AppView::Sandbox => self.cycle_active_mount(),
-            KeyCode::Char('t') if self.view == AppView::Sandbox => self.enter_theater(),
-            KeyCode::Char('j')
-                if self.view == AppView::Sandbox && self.sandbox_mode == SandboxMode::Theater =>
-            {
-                self.theater_select_next();
-            },
-            KeyCode::Char('k')
-                if self.view == AppView::Sandbox && self.sandbox_mode == SandboxMode::Theater =>
-            {
-                self.theater_select_prev();
-            },
 
             _ => {},
         }
@@ -703,15 +616,14 @@ impl App {
     fn cycle_active_mount(&mut self) {
         let mounts = self.sandbox_mounts_by_activity();
         if mounts.is_empty() {
-            self.active_mount = None;
+            self.sandbox.active_mount = None;
             return;
         }
         let current = self.sandbox_active_mount();
         let idx = current
-            .as_deref()
             .and_then(|cur| mounts.iter().position(|m| *m == cur))
             .map_or(0, |i| (i + 1) % mounts.len());
-        self.active_mount = Some(mounts[idx].to_string());
+        self.sandbox.active_mount = Some(mounts[idx].to_string());
     }
 
     /// ↑/↓ in the sandbox view: move the port cursor through the
@@ -719,138 +631,32 @@ impl App {
     /// mount, clamping at both ends (no wrap, unlike mount cycling).
     fn move_port_cursor(&mut self, delta: isize) {
         let mount = self.sandbox_active_mount();
-        let sandbox = mount.as_deref().and_then(|m| self.mount_sandbox(m));
-        let ports = sandbox::all_port_ids(sandbox);
+        let sandbox = mount.and_then(|m| self.mount_sandbox(m));
+        let ports = sandbox::all_port_ids(sandbox.as_ref());
         if ports.is_empty() {
-            self.port_cursor = None;
+            self.sandbox.selection = None;
             return;
         }
         let last = ports.len() - 1;
-        let idx = match &self.port_cursor {
-            Some(cursor) => {
-                let current = ports.iter().position(|p| p == cursor).unwrap_or(0);
+        let idx = match &self.sandbox.selection {
+            Some(selection) => {
+                let current = ports.iter().position(|p| *p == selection.port).unwrap_or(0);
                 step_clamped(current, delta, last)
             },
             None if delta < 0 => last,
             None => 0,
         };
-        self.port_cursor = Some(ports[idx].clone());
+        let pinned = self.sandbox.selection.as_ref().is_some_and(|s| s.pinned);
+        self.sandbox.selection = Some(PortSelection {
+            port: ports[idx].clone(),
+            pinned,
+        });
     }
 
     fn toggle_port_pin(&mut self) {
-        if self.port_cursor.is_some() {
-            self.port_pinned = !self.port_pinned;
+        if let Some(selection) = &mut self.sandbox.selection {
+            selection.pinned = !selection.pinned;
         }
-    }
-
-    /// `t` (sandbox view, either submode): enter the trace theater.
-    /// Picks a trace by precedence: the export port under a pin, else
-    /// the current selection if it's still visible, else the newest
-    /// visible trace. No-op if nothing is visible to play at all, so
-    /// pressing `t` against an empty fold leaves the view untouched.
-    fn enter_theater(&mut self) {
-        let Some(trace_id) = self.pick_theater_trace() else {
-            return;
-        };
-        self.set_theater_trace(trace_id);
-        self.sandbox_mode = SandboxMode::Theater;
-    }
-
-    /// `esc` while in the theater: back to the map. Leaves `quit`
-    /// untouched; that's the separate global binding gated ahead of
-    /// this one in [`Self::handle_key`].
-    fn exit_theater(&mut self) {
-        self.sandbox_mode = SandboxMode::Map;
-    }
-
-    fn pick_theater_trace(&self) -> Option<TraceId> {
-        if self.port_pinned
-            && let Some(PortId::Export(method)) = &self.port_cursor
-            && let Some(trace_id) = self.newest_visible_by_provider_method(method)
-        {
-            return Some(trace_id);
-        }
-        if let Some(selected) = self.selected
-            && self
-                .view_reducer()
-                .operation(selected)
-                .is_some_and(|op| self.filter.matches(op))
-        {
-            return Some(selected);
-        }
-        self.visible_trace_ids().first().copied()
-    }
-
-    /// Newest (by end-or-start time) visible operation whose
-    /// `provider_method` matches, mirroring the same "last call on this
-    /// port" ordering [`super::sandbox_ui`]'s pinned footer detail uses.
-    fn newest_visible_by_provider_method(&self, method: &str) -> Option<TraceId> {
-        self.visible_trace_ids()
-            .into_iter()
-            .filter_map(|id| self.operation(id).map(|op| (id, op)))
-            .filter(|(_, op)| op.provider_method.as_deref() == Some(method))
-            .max_by_key(|(_, op)| op.ended_mono.unwrap_or(op.started_mono))
-            .map(|(id, _)| id)
-    }
-
-    /// Point the theater at `trace_id`, "caught up": the stage cursor
-    /// starts at the operation's current stage count and follows a
-    /// still-running trace until the user steps back.
-    fn set_theater_trace(&mut self, trace_id: TraceId) {
-        self.theater_trace = Some(trace_id);
-        self.stage_cursor = self
-            .operation(trace_id)
-            .map_or(1, |op| op.stages.len().max(1));
-        self.theater_follow = true;
-    }
-
-    fn theater_select_next(&mut self) {
-        self.theater_step_trace(1);
-    }
-
-    fn theater_select_prev(&mut self) {
-        self.theater_step_trace(-1);
-    }
-
-    /// `j`/`k` in the theater: move through `visible_trace_ids()`'s
-    /// newest-first ordering. Positive `delta` (`j`) steps toward the
-    /// list's tail, i.e. older traces, matching `select_next`'s
-    /// direction in the activity view; negative `delta` (`k`) steps
-    /// toward newer traces, matching `select_prev`.
-    fn theater_step_trace(&mut self, delta: isize) {
-        let visible = self.visible_trace_ids();
-        if visible.is_empty() {
-            return;
-        }
-        let idx = self
-            .theater_trace
-            .and_then(|id| visible.iter().position(|v| *v == id))
-            .map_or(0, |i| step_clamped(i, delta, visible.len() - 1));
-        self.set_theater_trace(visible[idx]);
-    }
-
-    fn theater_step_forward(&mut self) {
-        self.theater_step_stage(1);
-    }
-
-    fn theater_step_backward(&mut self) {
-        self.theater_step_stage(-1);
-    }
-
-    /// ←/→ in the theater: move `stage_cursor` within `[1,
-    /// stages.len()]`. Stepping back turns live-follow off; stepping
-    /// all the way back to the end turns it back on, so nudging
-    /// forward again resumes tracking a still-running trace.
-    fn theater_step_stage(&mut self, delta: isize) {
-        let Some(trace_id) = self.theater_trace else {
-            return;
-        };
-        let Some(stage_count) = self.operation(trace_id).map(|op| op.stages.len().max(1)) else {
-            return;
-        };
-        let index = step_clamped(self.stage_cursor.saturating_sub(1), delta, stage_count - 1);
-        self.stage_cursor = index + 1;
-        self.theater_follow = self.stage_cursor == stage_count;
     }
 
     fn sync_selection_to_tree_cursor(&mut self) {
@@ -987,7 +793,7 @@ fn step_clamped(current: usize, delta: isize, max_inclusive: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use omnifs_api::events::{CalloutKind, OpEnd, OutcomeFields};
+    use omnifs_api::events::{OpEnd, OutcomeFields};
 
     use super::*;
 
@@ -1043,53 +849,6 @@ mod tests {
         )
     }
 
-    fn provider_end(trace_id: TraceId, mono_us: u64, elapsed_us: u64) -> InspectorRecord {
-        record(
-            trace_id,
-            mono_us,
-            InspectorEvent::ProviderEnd {
-                operation_id: trace_id,
-                end: OpEnd {
-                    elapsed_us,
-                    result: OutcomeFields::ok(),
-                },
-            },
-        )
-    }
-
-    fn callout_start(trace_id: TraceId, mono_us: u64, callout_index: u32) -> InspectorRecord {
-        record(
-            trace_id,
-            mono_us,
-            InspectorEvent::CalloutStart {
-                operation_id: trace_id,
-                callout_index,
-                kind: CalloutKind::Fetch,
-                summary: "GET example.test".into(),
-            },
-        )
-    }
-
-    fn callout_end(
-        trace_id: TraceId,
-        mono_us: u64,
-        callout_index: u32,
-        elapsed_us: u64,
-    ) -> InspectorRecord {
-        record(
-            trace_id,
-            mono_us,
-            InspectorEvent::CalloutEnd {
-                operation_id: trace_id,
-                callout_index,
-                end: OpEnd {
-                    elapsed_us,
-                    result: OutcomeFields::ok(),
-                },
-            },
-        )
-    }
-
     fn key(code: crossterm::event::KeyCode) -> crossterm::event::KeyEvent {
         crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::NONE)
     }
@@ -1115,6 +874,32 @@ mod tests {
         app.go_live();
         assert!(!app.paused());
         assert!(app.operation(2).is_some());
+    }
+
+    #[test]
+    fn inspector_epoch_reset_drops_old_timeline_but_same_epoch_reconnect_keeps_it() {
+        let mut app = App::new(ConnectionMode::Inspector, "test", Some("daemon".into()));
+        app.apply_source_message(SourceMessage::Connected {
+            epoch: "one".into(),
+        });
+        app.apply_source_message(SourceMessage::Line(InspectorLine::Record(
+            fuse_start(1, 100, "github", "/a").with_seq(1),
+        )));
+        app.apply_source_message(SourceMessage::Connected {
+            epoch: "one".into(),
+        });
+        assert_eq!(app.timeline_retained_count(), 1);
+
+        app.apply_source_message(SourceMessage::Connected {
+            epoch: "two".into(),
+        });
+        assert_eq!(app.timeline_retained_count(), 0);
+        assert_eq!(app.now_mono, 0);
+        app.apply_source_message(SourceMessage::Line(InspectorLine::Record(
+            fuse_start(2, 3, "github", "/b").with_seq(1),
+        )));
+        assert_eq!(app.timeline_oldest_mono_us(), Some(3));
+        assert_eq!(app.selected_trace(), Some(2));
     }
 
     #[test]
@@ -1191,24 +976,36 @@ mod tests {
 
         app.handle_key(key(KeyCode::Down));
         assert_eq!(
-            app.port_cursor,
-            Some(PortId::Export(sandbox::EXPORT_PORTS[0].to_string()))
+            app.sandbox
+                .selection
+                .as_ref()
+                .map(|selection| &selection.port),
+            Some(&PortId::Export(sandbox::EXPORT_PORTS[0].to_string()))
         );
 
         // Up from the first row must clamp, not go negative or wrap.
         app.handle_key(key(KeyCode::Up));
         assert_eq!(
-            app.port_cursor,
-            Some(PortId::Export(sandbox::EXPORT_PORTS[0].to_string()))
+            app.sandbox
+                .selection
+                .as_ref()
+                .map(|selection| &selection.port),
+            Some(&PortId::Export(sandbox::EXPORT_PORTS[0].to_string()))
         );
 
         // Walking past the end of the combined list must clamp on Log,
         // the last row, rather than panicking or wrapping.
-        let total = sandbox::all_port_ids(app.mount_sandbox("github")).len();
+        let total = sandbox::all_port_ids(app.mount_sandbox("github").as_ref()).len();
         for _ in 0..total + 3 {
             app.handle_key(key(KeyCode::Down));
         }
-        assert_eq!(app.port_cursor, Some(PortId::Log));
+        assert_eq!(
+            app.sandbox
+                .selection
+                .as_ref()
+                .map(|selection| &selection.port),
+            Some(&PortId::Log)
+        );
     }
 
     #[test]
@@ -1221,140 +1018,12 @@ mod tests {
         app.view = AppView::Sandbox;
 
         // Most-recently-active mount first, with nothing pinned yet.
-        assert_eq!(app.sandbox_active_mount().as_deref(), Some("gitlab"));
+        assert_eq!(app.sandbox_active_mount(), Some("gitlab"));
 
         app.handle_key(key(KeyCode::Char('m')));
-        assert_eq!(app.active_mount.as_deref(), Some("github"));
+        assert_eq!(app.sandbox.active_mount.as_deref(), Some("github"));
 
         app.handle_key(key(KeyCode::Char('m')));
-        assert_eq!(app.active_mount.as_deref(), Some("gitlab"));
-    }
-
-    #[test]
-    fn theater_stage_cursor_clamps_to_stage_bounds_stepping_both_ways() {
-        use crossterm::event::KeyCode;
-
-        let mut app = App::new(ConnectionMode::Replay, "test", None);
-        app.apply_record(fuse_start(1, 10, "github", "/a"));
-        app.apply_record(provider_start(1, 20, "github", "lookup_child"));
-        app.apply_record(callout_start(1, 30, 0));
-        app.apply_record(callout_end(1, 40, 0, 1_000));
-        app.apply_record(provider_end(1, 50, 2_000));
-        app.apply_record(fuse_end(1, 60, 3_000));
-        app.view = AppView::Sandbox;
-
-        app.handle_key(key(KeyCode::Char('t')));
-        let stage_count = app.operation(1).expect("trace").stages.len();
-        assert_eq!(app.stage_cursor, stage_count);
-
-        // Stepping past the end must clamp at the last stage, not panic
-        // or wrap.
-        for _ in 0..3 {
-            app.handle_key(key(KeyCode::Right));
-        }
-        assert_eq!(app.stage_cursor, stage_count);
-
-        // Stepping past the start must clamp at 1.
-        for _ in 0..stage_count + 3 {
-            app.handle_key(key(KeyCode::Left));
-        }
-        assert_eq!(app.stage_cursor, 1);
-    }
-
-    #[test]
-    fn t_picks_pinned_export_match_else_selected_else_newest_visible() {
-        use crossterm::event::KeyCode;
-
-        let mut app = App::new(ConnectionMode::Replay, "test", None);
-        // Trace 1: the first fuse.start, so it claims the initial
-        // selection. Calls read_file, not lookup_child.
-        app.apply_record(fuse_start(1, 10, "github", "/a"));
-        app.apply_record(provider_start(1, 20, "github", "read_file"));
-        app.apply_record(provider_end(1, 30, 500));
-        app.apply_record(fuse_end(1, 40, 600));
-        // Trace 2: newer, calls lookup_child.
-        app.apply_record(fuse_start(2, 50, "github", "/b"));
-        app.apply_record(provider_start(2, 60, "github", "lookup_child"));
-        app.apply_record(provider_end(2, 70, 500));
-        app.apply_record(fuse_end(2, 80, 600));
-
-        app.view = AppView::Sandbox;
-        assert_eq!(
-            app.selected_trace(),
-            Some(1),
-            "first fuse.start claims the initial selection"
-        );
-
-        // No pin yet: falls back to the current selection (trace 1).
-        app.handle_key(key(KeyCode::Char('t')));
-        assert_eq!(app.theater_trace, Some(1));
-        app.handle_key(key(KeyCode::Esc));
-        assert_eq!(app.sandbox_mode, SandboxMode::Map);
-
-        // Move the port cursor onto lookup_child and pin it: only
-        // trace 2 called that method, so pinning must override the
-        // selection fallback.
-        app.handle_key(key(KeyCode::Down)); // initialize
-        app.handle_key(key(KeyCode::Down)); // lookup_child
-        assert_eq!(
-            app.port_cursor,
-            Some(PortId::Export("lookup_child".to_string()))
-        );
-        app.handle_key(key(KeyCode::Enter));
-        assert!(app.port_pinned);
-
-        app.handle_key(key(KeyCode::Char('t')));
-        assert_eq!(app.theater_trace, Some(2));
-    }
-
-    #[test]
-    fn theater_follow_stays_pinned_to_the_end_until_the_user_steps_back() {
-        use crossterm::event::KeyCode;
-
-        let mut app = App::new(ConnectionMode::Replay, "test", None);
-        app.apply_record(fuse_start(1, 10, "github", "/a"));
-        app.apply_record(provider_start(1, 20, "github", "lookup_child"));
-        app.view = AppView::Sandbox;
-
-        app.handle_key(key(KeyCode::Char('t')));
-        let stage_count = app.operation(1).expect("trace").stages.len();
-        assert_eq!(app.stage_cursor, stage_count);
-
-        // A new stage lands on the still-running trace: the following
-        // cursor advances to stay caught up.
-        app.apply_record(callout_start(1, 30, 0));
-        let after_first = app.operation(1).expect("trace").stages.len();
-        assert!(after_first > stage_count);
-        assert_eq!(app.stage_cursor, after_first);
-
-        // Step back once: following turns off.
-        app.handle_key(key(KeyCode::Left));
-        assert_eq!(app.stage_cursor, after_first - 1);
-
-        // Another stage lands: since the user stepped back, the cursor
-        // must stay put rather than snapping back to "caught up".
-        app.apply_record(callout_start(1, 40, 1));
-        let after_second = app.operation(1).expect("trace").stages.len();
-        assert!(after_second > after_first);
-        assert_eq!(app.stage_cursor, after_first - 1);
-    }
-
-    #[test]
-    fn esc_in_theater_returns_to_map_without_quitting_and_still_quits_from_map() {
-        use crossterm::event::KeyCode;
-
-        let mut app = App::new(ConnectionMode::Replay, "test", None);
-        app.apply_record(fuse_start(1, 10, "github", "/a"));
-        app.view = AppView::Sandbox;
-
-        app.handle_key(key(KeyCode::Char('t')));
-        assert_eq!(app.sandbox_mode, SandboxMode::Theater);
-
-        app.handle_key(key(KeyCode::Esc));
-        assert_eq!(app.sandbox_mode, SandboxMode::Map);
-        assert!(!app.quit);
-
-        app.handle_key(key(KeyCode::Esc));
-        assert!(app.quit);
+        assert_eq!(app.sandbox.active_mount.as_deref(), Some("gitlab"));
     }
 }

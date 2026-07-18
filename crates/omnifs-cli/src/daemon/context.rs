@@ -80,6 +80,10 @@ impl DaemonContext {
         &self.daemon
     }
 
+    pub(crate) fn instance_id(&self) -> &str {
+        &self.instance_id
+    }
+
     pub(crate) fn attach_store(&self) -> anyhow::Result<omnifs_workspace::attach::Store> {
         Ok(self.frontend.attach_store()?)
     }

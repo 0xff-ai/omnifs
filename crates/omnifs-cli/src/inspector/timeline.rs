@@ -103,7 +103,6 @@ mod tests {
 
     use super::*;
     use crate::inspector::filter::ViewFilter;
-    use crate::inspector::sandbox::MountSandbox;
     use crate::inspector::trace_state::TraceReducer;
 
     fn record(trace_id: TraceId, mono_us: u64, event: InspectorEvent) -> InspectorRecord {
@@ -412,16 +411,20 @@ mod tests {
         // lifetime counter and the open-call count must agree between
         // the whole-stream fold and the split-then-resumed fold.
         let export_lifetime = |reducer: &TraceReducer| -> u64 {
-            reducer
-                .mount_sandbox("github")
-                .map_or(0, |sandbox| sandbox.export_lifetime_count("lookup_child"))
+            reducer.mount_sandbox("github").map_or(0, |sandbox| {
+                sandbox
+                    .port_stats(&crate::inspector::sandbox::PortId::Export(
+                        "lookup_child".into(),
+                    ))
+                    .map_or(0, |stats| stats.lifetime)
+            })
         };
         assert_eq!(export_lifetime(&full), export_lifetime(&incremental));
 
         let open_exports = |reducer: &TraceReducer| -> usize {
             reducer
                 .mount_sandbox("github")
-                .map_or(0, MountSandbox::total_open_exports)
+                .map_or(0, |sandbox| sandbox.total_open_exports())
         };
         assert_eq!(open_exports(&full), open_exports(&incremental));
     }

@@ -10,11 +10,11 @@ use ratatui::{
 
 use omnifs_api::events::InspectorOutcome;
 
-use super::app::{App, AppView, ConnectionMode, PaneFocus, SandboxMode};
+use super::app::{App, AppView, ConnectionMode, PaneFocus};
 use super::filter::FilterMode;
-use super::format::{self, StageCell};
+use super::format;
 use super::metrics::{MountWindow, render_sparkline};
-use super::trace_state::{Operation, OperationStatus, Stage};
+use super::trace_state::{Operation, OperationStatus, Stage, StageKind};
 use super::tree::{ACTIVE_FOCUS_WINDOW_US, NodeStatus, RenderRow};
 
 // Shared with `sandbox_ui`: both full-screen views highlight a cursor
@@ -23,6 +23,56 @@ pub(super) const CURSOR_BG: Color = Color::Rgb(40, 50, 60);
 
 const SPARK_BUCKETS: usize = 12;
 const SPARK_MOUNT_CAP: usize = 8;
+
+struct StageCell {
+    indent: &'static str,
+    glyph: &'static str,
+    glyph_color: Color,
+    display: String,
+}
+
+impl StageCell {
+    fn for_stage(stage: &Stage) -> Self {
+        match &stage.kind {
+            StageKind::Provider(method) => Self {
+                indent: "  ",
+                glyph: "▸",
+                glyph_color: Color::LightCyan,
+                display: method.clone(),
+            },
+            StageKind::Callout(_) => Self {
+                indent: "    ",
+                glyph: "◇",
+                glyph_color: Color::LightYellow,
+                display: stage.detail.clone(),
+            },
+            StageKind::Cache(_) => Self {
+                indent: "  ",
+                glyph: "◐",
+                glyph_color: Color::LightGreen,
+                display: format!("{} {}", stage.kind.display_label(), stage.detail),
+            },
+            StageKind::SubtreeStart | StageKind::SubtreeEnd => Self {
+                indent: "  ",
+                glyph: "▸",
+                glyph_color: Color::Magenta,
+                display: format!("{} {}", stage.kind.display_label(), stage.detail),
+            },
+            StageKind::CloneStart | StageKind::CloneEnd => Self {
+                indent: "    ",
+                glyph: "⇣",
+                glyph_color: Color::LightMagenta,
+                display: format!("{} {}", stage.kind.display_label(), stage.detail),
+            },
+            StageKind::Fuse(_) => Self {
+                indent: "  ",
+                glyph: "·",
+                glyph_color: Color::DarkGray,
+                display: stage.kind.display_label().into_owned(),
+            },
+        }
+    }
+}
 
 pub fn render(frame: &mut Frame, app: &App) {
     let area = frame.area();
@@ -101,13 +151,10 @@ pub(super) fn render_header(frame: &mut Frame, app: &App, area: Rect) {
     );
     let keys = match app.view {
         AppView::Activity => {
-            " q quit  v view  tab focus  ↑/↓ navigate  ↵ collapse  space pause  e errors  i idle  / filter  r reset "
+            " q quit  v view  tab focus  ↑/↓ navigate  ↵ collapse  space pause  e errors  / filter  r reset "
         },
-        AppView::Sandbox => match app.sandbox_mode {
-            SandboxMode::Map => {
-                " q quit  v view  ↑/↓ port  ↵ pin  m mount  t theater  space pause  ←/→ step  g live "
-            },
-            SandboxMode::Theater => " q quit  v view  esc map  ←/→ step  j/k trace  space pause ",
+        AppView::Sandbox => {
+            " q quit  v view  ↑/↓ port  ↵ pin  m mount  space pause  ←/→ step  g live "
         },
     };
     let block = Block::default()
