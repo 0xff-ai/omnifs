@@ -154,8 +154,8 @@ const IMAGE_DEFAULT_ENV_NAMES: [&str; 2] = ["PATH", "HOME"];
 pub(crate) fn assert_locked_down(mounts: &[MountPoint], env: &[String]) -> Result<(), String> {
     if !mounts.is_empty() {
         return Err(format!(
-            "frontend container has {} mount(s); the no-credentials contract allows none",
-            mounts.len()
+            "frontend container has {}; the no-credentials contract allows none",
+            crate::ui::render::count(mounts.len(), "mount")
         ));
     }
     if let Some(bad) = env.iter().find(|var| !env_var_allowed(var)) {

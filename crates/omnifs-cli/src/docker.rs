@@ -304,7 +304,10 @@ impl DockerClient {
             ..Default::default()
         };
         let source = image.split('/').next().unwrap_or(image);
-        let mut row = self.output.progress("frontend image");
+        // Its own standalone single-row block: no sibling ledger row prints
+        // alongside a frontend image pull, so the width is just its own key.
+        let key_width = Output::ledger_block_width(&["frontend image"]);
+        let mut row = self.output.progress("frontend image", key_width);
         let mut layers: HashMap<String, LayerProgress> = HashMap::new();
         let mut stream = self.docker.create_image(Some(opts), None, None);
         let result: Result<()> = async {

@@ -98,6 +98,23 @@ impl PromptMode {
     }
 }
 
+/// Keys `configure_mount`'s block may ever print, across every branch (spec
+/// 2.1: a block's key column is sized to the whole block, computed once up
+/// front, even though rows settle one at a time as each stage of mount
+/// creation completes). `mount name` only fires on an interactive/`--yes`
+/// name collision ([`crate::commands::mount::provider_selection`]);
+/// `provider` only for [`ReceiptStyle::Full`]; the sign-in branch prints
+/// exactly one of `sign in` (declined) or the shared
+/// [`crate::auth::AUTH_RECEIPT_KEYS`] (`oauth`/`signed in`/`credential`,
+/// completed) depending on the auth path taken. A key that never actually
+/// fires still counts toward the width, so the block stays aligned
+/// regardless of which branch runs.
+const MOUNT_ADD_KEYS: [&str; 4] = ["mount name", "provider", "mount", "sign in"];
+
+pub(crate) fn mount_add_key_width() -> usize {
+    crate::ui::render::key_field_width(&MOUNT_ADD_KEYS).max(crate::auth::auth_receipt_key_width())
+}
+
 #[allow(clippy::too_many_lines)] // linear narration reads best inline
 pub(crate) async fn configure_mount(
     args: AddArgs,
@@ -113,11 +130,14 @@ pub(crate) async fn configure_mount(
     persist_mount_spec(workspace, &plan, output)?;
 
     if status == MountInitStatus::SignInDeclined {
-        output.row(&crate::ui::report::Row::new(
-            crate::ui::style::Glyph::Skip,
-            "sign in",
-            sign_in_declined_value(&plan.mount_name),
-        ));
+        output.ledger_row(
+            &crate::ui::render::LedgerRow::new(
+                crate::ui::style::Glyph::Skip,
+                "sign in",
+                sign_in_declined_value(&plan.mount_name),
+            ),
+            mount_add_key_width(),
+        );
     }
 
     // The single closing line (spec 3.3) is the caller's job: `mount add`
@@ -205,6 +225,7 @@ pub(crate) fn spec_creation(
         interactive,
         prompt.yes,
         output,
+        mount_add_key_width(),
     )?;
     let reference = resolved.reference;
     let manifest = resolved.manifest;
@@ -239,22 +260,29 @@ pub(crate) fn spec_creation(
     // The compact style (setup) drops the `provider` row: the provider
     // already appeared in the services multi-select moments earlier, so
     // repeating its retained-artifact fact here would be noise.
+    let key_width = mount_add_key_width();
     if receipt_style == ReceiptStyle::Full {
         let provider_identity = reference.meta.version.as_ref().map_or_else(
             || provider_name.clone(),
             |version| format!("{provider_name}@{version}"),
         );
-        output.row(&crate::ui::report::Row::new(
-            crate::ui::style::Glyph::Done,
-            "provider",
-            format!("{provider_identity} retained"),
-        ));
+        output.ledger_row(
+            &crate::ui::render::LedgerRow::new(
+                crate::ui::style::Glyph::Done,
+                "provider",
+                format!("{provider_identity} retained"),
+            ),
+            key_width,
+        );
     }
-    output.row(&crate::ui::report::Row::new(
-        crate::ui::style::Glyph::Done,
-        "mount",
-        mount_created_value(&mount_name, receipt_style, default_auth.is_none()),
-    ));
+    output.ledger_row(
+        &crate::ui::render::LedgerRow::new(
+            crate::ui::style::Glyph::Done,
+            "mount",
+            mount_created_value(&mount_name, receipt_style, default_auth.is_none()),
+        ),
+        key_width,
+    );
 
     // An ambient credential (imported under --yes or on the interactive
     // prompt) promotes an OAuth default to a static token, which lets a
@@ -267,7 +295,7 @@ pub(crate) fn spec_creation(
         interactive,
         prompt.yes,
     )
-    .resolve(output)?;
+    .resolve(output, mount_add_key_width())?;
     let ImportOutcome { auth, token } = import_outcome;
 
     if !interactive && token.is_none() && auth.as_ref().is_some_and(AuthSelection::is_oauth) {
@@ -333,6 +361,7 @@ impl MountInitPlan {
             return Ok(MountInitStatus::Ready);
         };
         let interactive = init_interactive(prompt);
+        let key_width = mount_add_key_width();
         if let Some(token) = plan.imported_token.take() {
             crate::commands::mount::run_static_token_init(
                 &plan.manifest,
@@ -341,6 +370,7 @@ impl MountInitPlan {
                 workspace.credentials(),
                 !args.no_validate,
                 output,
+                key_width,
             )
             .await?;
         } else if auth.is_oauth() {
@@ -361,10 +391,13 @@ impl MountInitPlan {
                 workspace,
                 &plan.spec,
                 auth.account.as_deref(),
-                args.no_browser,
-                prompt.no_input,
-                &args.scopes,
+                crate::auth::LoginInteractivity {
+                    no_browser: args.no_browser,
+                    no_input: prompt.no_input,
+                    scopes: &args.scopes,
+                },
                 output,
+                key_width,
             )
             .await
             .inspect_err(|_| {
@@ -378,11 +411,14 @@ impl MountInitPlan {
             // scheme kind rather than fabricating a username; static-token
             // sign-in below does carry a real identity when the provider's
             // validation probe returns one.
-            output.row(&crate::ui::report::Row::new(
-                crate::ui::style::Glyph::Done,
-                "signed in",
-                "oauth",
-            ));
+            output.ledger_row(
+                &crate::ui::render::LedgerRow::new(
+                    crate::ui::style::Glyph::Done,
+                    "signed in",
+                    "oauth",
+                ),
+                key_width,
+            );
         } else {
             if interactive && let Ok(scheme) = auth.static_token_scheme(&plan.manifest) {
                 let guidance = plan
@@ -418,6 +454,7 @@ impl MountInitPlan {
                 workspace.credentials(),
                 !args.no_validate,
                 output,
+                key_width,
             )
             .await?;
         }

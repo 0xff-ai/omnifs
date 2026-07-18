@@ -20,6 +20,7 @@ use clap::{Args, Subcommand};
 use omnifs_workspace::mounts::Name as MountName;
 use std::path::Path;
 
+use crate::credential_target::CredentialTarget;
 use crate::error::{ExitCode, WithExitCode};
 use crate::stages::PromptMode;
 use crate::token_source::TokenSource;
@@ -416,26 +417,37 @@ impl ReauthArgs {
             .with_exit_code(ExitCode::AuthRequired);
         }
 
+        // `reauth`'s own auth-outcome block shares the same key set `mount
+        // add` uses for its completed-auth rows (`oauth`/`signed in`/
+        // `credential`), since both flows route through the same
+        // `login`/`run_static_token_init` primitives.
+        let auth_key_width = crate::auth::auth_receipt_key_width();
         let target = if selection.is_oauth() {
             output.note(format!("re-authenticating `{mount_name}` over OAuth"));
             let target = crate::auth::login_with_workspace(
                 workspace,
                 mount_name,
                 selection.account.as_deref(),
-                self.no_browser,
-                prompt.no_input,
-                &self.scopes,
+                crate::auth::LoginInteractivity {
+                    no_browser: self.no_browser,
+                    no_input: prompt.no_input,
+                    scopes: &self.scopes,
+                },
                 output,
+                auth_key_width,
             )
             .await?;
             // Matches `mount add`'s OAuth branch (spec 3.5): no upstream
             // identity is available from the exchange itself, so this names
             // the scheme kind rather than fabricating a username.
-            output.row(&crate::ui::report::Row::new(
-                crate::ui::style::Glyph::Done,
-                "signed in",
-                "oauth",
-            ));
+            output.ledger_row(
+                &crate::ui::render::LedgerRow::new(
+                    crate::ui::style::Glyph::Done,
+                    "signed in",
+                    "oauth",
+                ),
+                auth_key_width,
+            );
             target
         } else {
             let source = TokenSource::resolve(
@@ -451,18 +463,37 @@ impl ReauthArgs {
                 workspace.credentials(),
                 !self.no_validate,
                 output,
+                auth_key_width,
             )
             .await?
         };
-        for key in target.keys() {
-            output.row(&crate::ui::report::Row::new(
-                crate::ui::style::Glyph::Done,
-                format!("credential `{key}`"),
-                "stored; takes effect on the next `omnifs up` or `omnifs apply`",
-            ));
-        }
+        print_stored_credential_rows(output, &target);
         crate::metrics::maybe_print_health_nudge(workspace, output.clone()).await;
         Ok(())
+    }
+}
+
+/// `reauth`'s second, independent ledger block: the exact credential keys
+/// just stored. Its key set is dynamic (one row per `target.keys()`) but
+/// known before this block's first row prints, so it sizes itself rather than
+/// reusing the auth-outcome block's width the caller already printed.
+fn print_stored_credential_rows(output: &crate::ui::output::Output, target: &CredentialTarget) {
+    let rows: Vec<String> = target
+        .keys()
+        .into_iter()
+        .map(|key| format!("credential `{key}`"))
+        .collect();
+    let key_width =
+        Output::ledger_block_width(&rows.iter().map(String::as_str).collect::<Vec<_>>());
+    for key in &rows {
+        output.ledger_row(
+            &crate::ui::render::LedgerRow::new(
+                crate::ui::style::Glyph::Done,
+                key.clone(),
+                "stored; takes effect on the next `omnifs up` or `omnifs apply`",
+            ),
+            key_width,
+        );
     }
 }
 

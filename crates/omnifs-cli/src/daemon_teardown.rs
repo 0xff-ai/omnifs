@@ -6,6 +6,7 @@
 
 use crate::inventory::{DaemonProbe, Inventory};
 use crate::ui::consent::Outcome;
+use crate::ui::render::{self, Capabilities};
 use crate::ui::style;
 use omnifs_workspace::Workspace;
 use std::time::Duration;
@@ -98,7 +99,7 @@ impl DaemonTeardown {
         // so the whole transcript prints unconditionally: it is this
         // command's entire receipt, not narration a script would want `-q`
         // to drop.
-        for line in transcript(&outcomes, style::Stream::Stderr) {
+        for line in transcript(&outcomes, crate::ui::output::stderr_capabilities(false)) {
             crate::ui::eprint_raw(&format!("{line}\n"));
         }
         if let Some(outcome) = outcomes.iter().find(|outcome| outcome.is_failure()) {
@@ -260,24 +261,23 @@ impl DaemonTeardown {
 /// stays off the human transcript too (an already-absent record needs no
 /// cleanup line, and a removed stale record isn't a "stop" either, since
 /// nothing was actually running).
-fn transcript(
-    outcomes: &[TeardownOutcome],
-    mode: impl Into<style::ColorMode> + Copy,
-) -> Vec<String> {
+/// `down`'s block ever prints exactly one key, `daemon` (spec 3.7): the width
+/// is trivially its own display width, computed the same way any other
+/// block's shared width is (spec 2.1), even though a single-key block never
+/// actually needs alignment against a sibling row.
+fn down_key_width() -> usize {
+    render::key_field_width(&["daemon"])
+}
+
+fn transcript(outcomes: &[TeardownOutcome], caps: Capabilities) -> Vec<String> {
     if outcomes.iter().all(|outcome| outcome.id() != "daemon") {
         return vec!["Nothing to stop. The daemon isn't running.".to_owned()];
     }
+    let key_width = down_key_width();
     let mut lines = outcomes
         .iter()
         .filter(|outcome| outcome.id() == "daemon")
-        .map(|outcome| {
-            outcome
-                .outcome()
-                .render_receipt()
-                .render(mode)
-                .trim_start()
-                .to_owned()
-        })
+        .map(|outcome| render::ledger_row_line(&outcome.outcome().ledger_row(), key_width, caps))
         .collect::<Vec<_>>();
     // Frontends are independent processes and outlive a daemon stop; this is
     // the one fact worth restating, never shown for a failed/no-op teardown.
@@ -287,7 +287,7 @@ fn transcript(
     {
         lines.push(style::accentuate(
             "  Frontends stay attached. Your files return with `omnifs up`.",
-            mode,
+            caps.color,
         ));
     }
     lines
@@ -297,6 +297,15 @@ fn transcript(
 mod tests {
     use super::*;
     use crate::ui::style::Glyph;
+
+    fn caps(color: bool) -> Capabilities {
+        Capabilities {
+            width: 120,
+            is_tty: color,
+            color,
+            quiet: false,
+        }
+    }
 
     #[test]
     fn teardown_outcomes_have_truthful_severity_and_ids() {
@@ -314,9 +323,11 @@ mod tests {
         assert!(failed.value.contains("busy"));
     }
 
-    /// Spec 3.7, the "daemon was running" branch:
+    /// Spec 3.7, the "daemon was running" branch. `down`'s block has exactly
+    /// one key (`daemon`, 6 columns), so the field width is `6 + 3 = 9`, a
+    /// 3-space gap rather than the retired fixed-14-column rail's 8:
     /// ```text
-    /// ✓ daemon      stopped (pid 31114)
+    /// ✓ daemon   stopped (pid 31114)
     ///   Frontends stay attached. Your files return with omnifs up.
     /// ```
     #[test]
@@ -325,11 +336,11 @@ mod tests {
             TeardownOutcome::DaemonStopped { pid: 31114 },
             TeardownOutcome::StaleRecordRemoved,
         ];
-        let lines = transcript(&outcomes, false);
+        let lines = transcript(&outcomes, caps(false));
         assert_eq!(
             lines,
             vec![
-                "✓ daemon        stopped (pid 31114)".to_owned(),
+                "✓ daemon   stopped (pid 31114)".to_owned(),
                 "  Frontends stay attached. Your files return with omnifs up.".to_owned(),
             ]
         );
@@ -341,11 +352,11 @@ mod tests {
     #[test]
     fn transcript_matches_the_nothing_running_shape() {
         assert_eq!(
-            transcript(&[TeardownOutcome::StaleRecordAbsent], false),
+            transcript(&[TeardownOutcome::StaleRecordAbsent], caps(false)),
             vec!["Nothing to stop. The daemon isn't running.".to_owned()]
         );
         assert_eq!(
-            transcript(&[TeardownOutcome::StaleRecordRemoved], false),
+            transcript(&[TeardownOutcome::StaleRecordRemoved], caps(false)),
             vec!["Nothing to stop. The daemon isn't running.".to_owned()]
         );
     }
@@ -355,7 +366,7 @@ mod tests {
         let outcomes = vec![TeardownOutcome::DaemonShutdownFailed {
             error: "busy".to_owned(),
         }];
-        let lines = transcript(&outcomes, false);
+        let lines = transcript(&outcomes, caps(false));
         assert_eq!(lines.len(), 1);
         assert!(lines[0].contains("shutdown failed"), "{lines:?}");
     }

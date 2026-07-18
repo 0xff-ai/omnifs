@@ -428,13 +428,18 @@ impl Output {
         }
     }
 
-    pub(crate) fn row(&self, row: &super::report::Row) {
-        if self.mode == OutputMode::Human {
-            crate::ui::eprint_raw(&format!(
-                "{}\n",
-                row.render(crate::ui::style::Stream::Stderr).trim_start()
-            ));
-        }
+    /// The key column width one contiguous ledger block needs (spec 2.1:
+    /// `max key width + 3`, no `+3` here since [`Self::ledger_row`] adds the
+    /// fixed gap itself). Every flow that emits rows one at a time as async
+    /// work settles (a spinner settling into its ledger row, a live region's
+    /// summary, `up`'s streamed `daemon`/`mounts`/`frontends` rows) computes
+    /// this once from its full possible key set before the first row prints,
+    /// so the block still reads as one aligned unit. An associated function,
+    /// not a method: the width depends only on the declared key set, never on
+    /// invocation state, so callers reach it as `Output::ledger_block_width`
+    /// beside the other row primitives without an instance in scope.
+    pub(crate) fn ledger_block_width(keys: &[&str]) -> usize {
+        super::render::key_field_width(keys)
     }
 
     /// Print one durable v2-register ledger row (spec 2.1) at an externally
@@ -515,8 +520,14 @@ impl Output {
         state(self).closed
     }
 
-    pub(crate) fn progress(&self, key: impl Into<String>) -> crate::ui::live::Spinner {
-        crate::ui::live::Spinner::new(self.clone(), key)
+    /// Start a spinner whose transient frame and settled row share
+    /// `key_width` with the rest of its ledger block (spec 2.1).
+    pub(crate) fn progress(
+        &self,
+        key: impl Into<String>,
+        key_width: usize,
+    ) -> crate::ui::live::Spinner {
+        crate::ui::live::Spinner::new(self.clone(), key, key_width)
     }
 
     pub(crate) const fn with_no_input(mut self, no_input: bool) -> Self {

@@ -11,7 +11,6 @@ use serde::Serialize;
 
 use super::output::Output;
 use super::render::LedgerRow;
-use super::report;
 use super::style::Glyph;
 use crate::stages::PromptMode;
 
@@ -267,15 +266,6 @@ impl Outcome {
             .collect::<Vec<_>>()
             .join("; ");
         format!("{}; {details}", self.value)
-    }
-
-    /// Render through the old fixed-width rail (`report::Row`). Kept for
-    /// `daemon_teardown.rs`'s independent transcript, which settles `Outcome`s
-    /// outside the [`Plan`]/[`Receipt`] engine and predates this slice's
-    /// ledger vocabulary; the v2 register's own receipt renderer uses
-    /// [`Self::ledger_row`] instead.
-    pub(crate) fn render_receipt(&self) -> report::Row {
-        report::Row::new(self.glyph(), self.key.clone(), self.settled_value())
     }
 
     /// Render as one v2-register ledger row (spec 2.1/2.7): `✓`/`✗`/`•` per

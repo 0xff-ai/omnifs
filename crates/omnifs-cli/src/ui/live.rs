@@ -19,21 +19,23 @@ use crossterm::{
 use super::output::Output;
 use super::prompt::Canceled;
 use super::render;
-use super::report::Row;
 use super::style::{self, Glyph};
 
 const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const APPEARANCE_DELAY: Duration = Duration::from_millis(150);
 const UPDATE_INTERVAL: Duration = Duration::from_millis(100);
-const KEY_WIDTH: usize = 14;
 
-fn spinner_line(frame: &str, key: &str, text: &str) -> String {
-    let key_pad = KEY_WIDTH.saturating_sub(key.chars().count()).max(1);
+/// The transient spinner frame, indented two spaces to match
+/// [`region_frame`]'s in-flight rows (spec 2.5): `key_width` is the same
+/// block-scoped width its settled row (via [`Spinner::settle`]) renders at,
+/// so the frame never jumps column when it resolves.
+fn spinner_line(frame: &str, key: &str, text: &str, key_width: usize) -> String {
+    let pad = key_width.saturating_sub(render::display_width(key)) + render::LEDGER_GAP;
     format!(
         "  {} {key}{:pad$}{text}",
         style::dim(frame, style::Stream::Stderr),
         "",
-        pad = key_pad
+        pad = pad
     )
 }
 
@@ -67,6 +69,7 @@ fn format_duration(duration: Duration) -> String {
 pub(crate) struct Spinner {
     output: Output,
     key: String,
+    key_width: usize,
     tty: bool,
     started: Instant,
     frame: usize,
@@ -75,10 +78,11 @@ pub(crate) struct Spinner {
 }
 
 impl Spinner {
-    pub(crate) fn new(output: Output, key: impl Into<String>) -> Self {
+    pub(crate) fn new(output: Output, key: impl Into<String>, key_width: usize) -> Self {
         Self {
             output,
             key: key.into(),
+            key_width,
             tty: std::io::stderr().is_terminal(),
             started: Instant::now(),
             frame: 0,
@@ -110,7 +114,7 @@ impl Spinner {
         let _ = write!(
             err,
             "{}",
-            spinner_line(SPINNER_FRAMES[self.frame], &self.key, text)
+            spinner_line(SPINNER_FRAMES[self.frame], &self.key, text, self.key_width)
         );
         let _ = err.flush();
         self.drawn = true;
@@ -163,8 +167,10 @@ impl Spinner {
                 )
             )
         };
-        self.output
-            .row(&Row::new(glyph, std::mem::take(&mut self.key), value));
+        self.output.ledger_row(
+            &render::LedgerRow::new(glyph, std::mem::take(&mut self.key), value),
+            self.key_width,
+        );
     }
 }
 
@@ -391,9 +397,21 @@ mod tests {
     }
 
     #[test]
-    fn spinner_line_aligns_to_the_grid() {
-        let plain = super::super::strip_ansi(&spinner_line("⠋", "daemon", "starting"));
-        assert_eq!(plain.chars().nth(18), Some('s'), "{plain:?}");
+    fn spinner_line_aligns_to_the_block_scoped_key_width() {
+        // `key_width` 9 mirrors `up`'s real block (`providers`/`frontends`
+        // tie at 9 chars): "daemon" (6) plus the 3-space gap this test's
+        // width leaves after the wider sibling keys lands "starting" at
+        // column 16 (2-space indent + 1 frame + 1 space + 6 key + 6 pad).
+        let plain = super::super::strip_ansi(&spinner_line("⠋", "daemon", "starting", 9));
+        assert_eq!(plain.chars().nth(16), Some('s'), "{plain:?}");
+    }
+
+    #[test]
+    fn spinner_line_never_drops_the_gap_for_a_single_key_block() {
+        // A standalone single-key block (`key_width` equal to the key's own
+        // width) still gets the full 3-space `LEDGER_GAP`, never truncates.
+        let plain = super::super::strip_ansi(&spinner_line("⠋", "daemon", "starting", 6));
+        assert_eq!(plain.chars().nth(13), Some('s'), "{plain:?}");
     }
 
     #[test]

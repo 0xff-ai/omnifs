@@ -53,8 +53,10 @@ pub(crate) struct Capabilities {
 /// Measure a string's terminal column width, ignoring SGR escapes and
 /// counting wide glyphs (CJK, emoji) as two columns. Shared by every
 /// alignment computation in this module so key columns, wrapping, and the
-/// error block agree on what "one column" means.
-fn display_width(text: &str) -> usize {
+/// error block agree on what "one column" means. `pub(crate)` so callers that
+/// render their own transient frame outside this module (`ui/live.rs`'s
+/// spinner) still measure keys the same way a settled ledger row does.
+pub(crate) fn display_width(text: &str) -> usize {
     use unicode_width::UnicodeWidthChar as _;
     super::strip_ansi(text)
         .chars()
@@ -110,8 +112,11 @@ impl LedgerRow {
 /// The fixed gap after the widest key in a block. Derived from the spec 2.1
 /// worked example (`providers` at 9 columns leaves a 3-space gap, `daemon` at
 /// 6 columns leaves a 6-space gap: both resolve to a 12-column key field, i.e.
-/// `max_key_width + 3`).
-const LEDGER_GAP: usize = 3;
+/// `max_key_width + 3`). `pub(crate)` so `ui/live.rs`'s transient spinner
+/// frame (which never sees a full `LedgerRow` slice, only a bare key) can
+/// share the exact same pad math as [`ledger_row_line`] instead of
+/// duplicating the constant.
+pub(crate) const LEDGER_GAP: usize = 3;
 
 /// The key width a block of `rows` needs so every row's value column lines
 /// up. Callers that print rows one at a time as async work settles (rather
@@ -123,6 +128,29 @@ pub(crate) fn ledger_key_width(rows: &[LedgerRow]) -> usize {
         .map(|row| display_width(&row.key))
         .max()
         .unwrap_or(0)
+}
+
+/// The same block-sizing math as [`ledger_key_width`], but from bare key
+/// text rather than fully-formed rows: a flow that emits its rows one at a
+/// time as async work settles (spinner settle, `Output::ledger_row`) knows
+/// every key it might ever print before the first one lands, but not the
+/// values, so it cannot build a `[LedgerRow]` slice up front. Declaring the
+/// key set once and sizing from it here is what keeps such a block aligned
+/// even though no single call ever sees every row at once; a key that ends
+/// up not emitted still counts toward the width.
+pub(crate) fn key_field_width(keys: &[&str]) -> usize {
+    keys.iter().copied().map(display_width).max().unwrap_or(0)
+}
+
+/// A counted noun that agrees in number (`1 mount`, `3 mounts`, `0
+/// credentials`): the shared pluralization the human register uses instead
+/// of a parenthetical `(s)`, which the style register forbids outright.
+pub(crate) fn count(n: usize, noun: &str) -> String {
+    if n == 1 {
+        format!("{n} {noun}")
+    } else {
+        format!("{n} {noun}s")
+    }
 }
 
 /// Render one ledger row against an externally supplied key width. Never
@@ -569,6 +597,31 @@ mod tests {
         let rendered = ledger_row_line(&row, key_width, caps(120, false));
         let value_start = rendered.find("github").expect("value present");
         assert_eq!(value_start, ledger_value_column(key_width));
+    }
+
+    #[test]
+    fn key_field_width_matches_ledger_key_width_for_the_same_keys() {
+        let keys = ["providers", "daemon", "mounts", "frontends"];
+        let rows = keys
+            .iter()
+            .map(|key| LedgerRow::new(Glyph::Done, (*key).to_owned(), String::new()))
+            .collect::<Vec<_>>();
+        assert_eq!(key_field_width(&keys), ledger_key_width(&rows));
+        assert_eq!(
+            key_field_width(&keys),
+            9,
+            "`providers`/`frontends` tie at 9"
+        );
+    }
+
+    #[test]
+    fn count_agrees_in_number_and_never_uses_a_parenthetical_plural() {
+        assert_eq!(count(1, "credential"), "1 credential");
+        assert_eq!(count(0, "credential"), "0 credentials");
+        assert_eq!(count(3, "credential"), "3 credentials");
+        for text in [count(0, "mount"), count(1, "mount"), count(2, "mount")] {
+            assert!(!text.contains("(s)"), "{text:?}");
+        }
     }
 
     #[test]

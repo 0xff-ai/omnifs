@@ -290,7 +290,7 @@ fn mount_health(mounts: &[MountInfo]) -> SubsystemHealth {
     } else {
         HealthState::Degraded
     };
-    let mut message = format!("{} mount(s) loaded", mounts.len());
+    let mut message = format!("{} loaded", crate::ui::render::count(mounts.len(), "mount"));
     if degraded > 0 {
         let detail = mounts
             .iter()
@@ -304,7 +304,8 @@ fn mount_health(mounts: &[MountInfo]) -> SubsystemHealth {
             .join("; ");
         let _ = write!(
             message,
-            ", {degraded} mount(s) with a degraded credential ({detail})"
+            ", {} with a degraded credential ({detail})",
+            crate::ui::render::count(degraded, "mount")
         );
     }
     SubsystemHealth::new(DaemonSubsystem::Mounts, state, message)

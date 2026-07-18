@@ -23,12 +23,14 @@ use omnifs_workspace::provider::Catalog;
 const MANUAL_PROMPT_CANCELED: &str = "omnifs-manual-oauth-prompt-canceled";
 
 /// Whether to suppress the system browser and whether prompts are allowed.
-/// Bundled so `login` keeps a readable argument list.
+/// Bundled so `login` and its two public wrappers keep a readable argument
+/// list (each would otherwise carry `no_browser`/`no_input`/`scopes` as three
+/// separate positional bools/slices).
 #[derive(Clone, Copy)]
-struct LoginInteractivity<'a> {
-    no_browser: bool,
-    no_input: bool,
-    scopes: &'a [String],
+pub(crate) struct LoginInteractivity<'a> {
+    pub(crate) no_browser: bool,
+    pub(crate) no_input: bool,
+    pub(crate) scopes: &'a [String],
 }
 
 async fn login(
@@ -38,6 +40,7 @@ async fn login(
     account: Option<&str>,
     interactivity: LoginInteractivity<'_>,
     output: &crate::ui::output::Output,
+    key_width: usize,
 ) -> anyhow::Result<CredentialTarget> {
     let LoginInteractivity {
         no_browser,
@@ -95,11 +98,14 @@ async fn login(
                 })
                 .await;
             if result.is_ok() {
-                output.row(&crate::ui::report::Row::new(
-                    crate::ui::style::Glyph::Done,
-                    "oauth",
-                    "authorized",
-                ));
+                output.ledger_row(
+                    &crate::ui::render::LedgerRow::new(
+                        crate::ui::style::Glyph::Done,
+                        "oauth",
+                        "authorized",
+                    ),
+                    key_width,
+                );
             }
             result.with_hint(format!("Re-run `omnifs mount reauth {mount}` to retry"))?
         },
@@ -168,10 +174,9 @@ pub(crate) async fn login_with_workspace(
     workspace: &Workspace,
     mount: &str,
     account: Option<&str>,
-    no_browser: bool,
-    no_input: bool,
-    scopes: &[String],
+    interactivity: LoginInteractivity<'_>,
     output: &crate::ui::output::Output,
+    key_width: usize,
 ) -> anyhow::Result<CredentialTarget> {
     let store = workspace.credentials();
     let mounts = crate::mount_config::load_mounts(workspace)?;
@@ -181,12 +186,9 @@ pub(crate) async fn login_with_workspace(
         mount_auth,
         store,
         account,
-        LoginInteractivity {
-            no_browser,
-            no_input,
-            scopes,
-        },
+        interactivity,
         output,
+        key_width,
     )
     .await
 }
@@ -199,10 +201,9 @@ pub(crate) async fn login_with_spec(
     workspace: &Workspace,
     spec: &Spec,
     account: Option<&str>,
-    no_browser: bool,
-    no_input: bool,
-    scopes: &[String],
+    interactivity: LoginInteractivity<'_>,
     output: &crate::ui::output::Output,
+    key_width: usize,
 ) -> anyhow::Result<CredentialTarget> {
     let store = workspace.credentials();
     let mount_auth = crate::auth::MountAuth::from_spec(workspace.catalog(), spec.clone());
@@ -211,12 +212,9 @@ pub(crate) async fn login_with_spec(
         mount_auth,
         store,
         account,
-        LoginInteractivity {
-            no_browser,
-            no_input,
-            scopes,
-        },
+        interactivity,
         output,
+        key_width,
     )
     .await
 }

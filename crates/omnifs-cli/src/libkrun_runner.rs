@@ -439,8 +439,9 @@ fn assert_libkrun_locked_down(
     let device_count = argv.matches("--device").count();
     if device_count != EXPECTED_DEVICE_COUNT {
         return Err(format!(
-            "the process has {device_count} --device flag(s), expected exactly \
-             {EXPECTED_DEVICE_COUNT} (root disk, seed disk, attach/ready/ssh vsock, serial log)"
+            "the process has {}, expected exactly {EXPECTED_DEVICE_COUNT} (root disk, seed \
+             disk, attach/ready/ssh vsock, serial log)",
+            crate::ui::render::count(device_count, "--device flag")
         ));
     }
     let blk_count = argv.matches("virtio-blk,path=").count();

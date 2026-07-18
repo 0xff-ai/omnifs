@@ -36,6 +36,7 @@ impl<'a> AuthImportDecision<'a> {
     pub(crate) fn resolve(
         self,
         output: &crate::ui::output::Output,
+        key_width: usize,
     ) -> anyhow::Result<ImportOutcome> {
         if self.default_auth.is_none() {
             return Ok(ImportOutcome {
@@ -49,11 +50,14 @@ impl<'a> AuthImportDecision<'a> {
         // non-interactively, so the documented behavior is reachable in scripts.
         if self.yes {
             if let Some(credential) = detected.first() {
-                output.row(&crate::ui::report::Row::new(
-                    crate::ui::style::Glyph::Done,
-                    "credential",
-                    format!("imported from {}", credential.source()),
-                ));
+                output.ledger_row(
+                    &crate::ui::render::LedgerRow::new(
+                        crate::ui::style::Glyph::Done,
+                        "credential",
+                        format!("imported from {}", credential.source()),
+                    ),
+                    key_width,
+                );
                 return self.promote(credential.value());
             }
             return Ok(ImportOutcome {

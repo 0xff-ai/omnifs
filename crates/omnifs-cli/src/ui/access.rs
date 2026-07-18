@@ -104,6 +104,23 @@ fn browse_or_guest_fallback(inventory: &Inventory) -> String {
     "omnifs frontend enable nfs".to_owned()
 }
 
+/// Whether `omnifs status`'s closing `Browse:` line should print at all
+/// (spec 3.1): suppressed whenever the context strip already carries a
+/// `fix:` action naming the next step (`Stopped` -> `omnifs up`,
+/// `Failed`/`Unreachable` -> `omnifs logs`, see `status.rs::render`'s own
+/// `TableAction::fix` branches), so the human register never states two
+/// competing "what to do next" facts in the same report. Bare `omnifs`
+/// (`cli.rs::run_bare`) already branches on `DaemonState::Running` itself
+/// (spec 3.1's `Start serving:  omnifs up` sentence) and does not use this.
+pub(crate) fn show_browse_line(daemon_state: crate::inventory::DaemonState) -> bool {
+    !matches!(
+        daemon_state,
+        crate::inventory::DaemonState::Stopped
+            | crate::inventory::DaemonState::Failed
+            | crate::inventory::DaemonState::Unreachable
+    )
+}
+
 /// The single derived browse action for `omnifs status`'s closing
 /// `Browse:` line: a host `ls` example when a host frontend is attached,
 /// else the guest shell command, else the enable nudge. Never a bare path
@@ -181,6 +198,29 @@ mod tests {
             scope: "all",
             mount_count: 1,
             fix: None,
+        }
+    }
+
+    #[test]
+    fn browse_line_is_suppressed_exactly_when_the_context_strip_already_has_a_fix_action() {
+        use crate::inventory::DaemonState;
+
+        // Stopped/Failed/Unreachable all print a `fix:` action in
+        // `status.rs::render`'s context strip, so the closing `Browse:` line
+        // would restate a competing "what to do next" fact.
+        for suppressed in [
+            DaemonState::Stopped,
+            DaemonState::Failed,
+            DaemonState::Unreachable,
+        ] {
+            assert!(!show_browse_line(suppressed), "{suppressed:?}");
+        }
+        for shown in [
+            DaemonState::Running,
+            DaemonState::Starting,
+            DaemonState::Degraded,
+        ] {
+            assert!(show_browse_line(shown), "{shown:?}");
         }
     }
 

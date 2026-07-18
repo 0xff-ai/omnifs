@@ -26,17 +26,15 @@ const RECONNECT_GRACE: Duration = Duration::from_secs(3);
 const RECONNECT_POLL: Duration = Duration::from_millis(250);
 
 /// The keys `up`'s ledger block ever prints, in print order. Rows settle one
-/// at a time as async work finishes rather than as one batch, so the shared
-/// key width is computed once from this fixed set up front (spec 2.1: a
-/// block's key column is sized to the whole block, never truncated).
-const UP_LEDGER_KEYS: [&str; 3] = ["daemon", "mounts", "frontends"];
+/// at a time as async work finishes rather than as one batch (provider
+/// warmup's spinner settles first, then `daemon`/`mounts` print together,
+/// then `frontends` settles last from the reconnect-grace live region), so
+/// the shared key width is computed once from this fixed set up front (spec
+/// 2.1: a block's key column is sized to the whole block, never truncated).
+pub(crate) const UP_LEDGER_KEYS: [&str; 4] = ["providers", "daemon", "mounts", "frontends"];
 
-fn up_key_width() -> usize {
-    UP_LEDGER_KEYS
-        .iter()
-        .map(|key| key.chars().count())
-        .max()
-        .unwrap_or(0)
+pub(crate) fn up_key_width() -> usize {
+    crate::ui::render::key_field_width(&UP_LEDGER_KEYS)
 }
 
 /// Whether replacing the daemon actually happened, or the daemon was already
@@ -147,6 +145,7 @@ impl<'a> Launcher<'a> {
         .warm_for_up(
             configs.iter().map(|config| config.config.provider.id),
             &self.output,
+            up_key_width(),
         )
         .await?;
 

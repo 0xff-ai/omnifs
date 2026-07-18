@@ -2,6 +2,7 @@
 
 use crate::error::ExitCode;
 use crate::inventory::{DaemonState, FrontendStatus, Inventory, MountStatus, Severity};
+use crate::ui::render::count;
 use crate::ui::table::{
     Action as TableAction, Block as TableBlock, Cell as TableCell, Column as TableColumn,
     ContextStrip as TableContext, Meta as TableMeta, Priority as TablePriority,
@@ -92,17 +93,6 @@ impl InventoryReport {
         report.push(TableBlock::Resources(mount_table(&self.inventory.mounts)));
 
         report
-    }
-}
-
-/// A counted noun that agrees in number (`1 mount`, `3 mounts`): the context
-/// strip and access cells read as prose, so a lone resource must not claim a
-/// plural.
-fn count(n: usize, noun: &str) -> String {
-    if n == 1 {
-        format!("{n} {noun}")
-    } else {
-        format!("{n} {noun}s")
     }
 }
 

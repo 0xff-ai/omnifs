@@ -676,8 +676,8 @@ impl Doctor<'_> {
         } else {
             match self.workspace.credentials().list() {
                 Ok(Some(keys)) => ProbeResult::Ok(format!(
-                    "{} credential(s) in {}",
-                    keys.len(),
+                    "{} in {}",
+                    crate::ui::render::count(keys.len(), "credential"),
                     diagnostic.display
                 )),
                 Ok(None) => ProbeResult::Ok(format!(
@@ -948,7 +948,7 @@ mod golden {
         std::fs::write(&valid_path, r#"{"version":1,"entries":{}}"#).unwrap();
         let result = probe_credential_result(valid.path());
         assert!(
-            matches!(result, ProbeResult::Ok(message) if message.contains("0 credential(s)") && message.contains("credentials.json"))
+            matches!(result, ProbeResult::Ok(message) if message.contains("0 credentials") && message.contains("credentials.json"))
         );
 
         let invalid = TempDir::new().unwrap();

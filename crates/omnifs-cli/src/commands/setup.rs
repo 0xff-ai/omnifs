@@ -24,7 +24,6 @@ use crate::stages::{PromptMode, ReceiptStyle};
 use crate::ui::live::LiveRegion;
 use crate::ui::output::Output;
 use crate::ui::render::Capabilities;
-use crate::ui::report::Row;
 use crate::ui::style::{self, Glyph};
 use omnifs_workspace::Workspace;
 
@@ -139,12 +138,18 @@ impl SetupArgs {
                 }
             }
             let (new, skipped) = split_requested_providers(&self.providers, &configured_names);
+            // Every skip repeats the same literal key, so the block's width
+            // is just that key's own width regardless of how many print.
+            let key_width = Output::ledger_block_width(&["provider"]);
             for provider in &skipped {
-                output.row(&Row::new(
-                    Glyph::Skip,
-                    "provider",
-                    format!("{provider} already configured"),
-                ));
+                output.ledger_row(
+                    &crate::ui::render::LedgerRow::new(
+                        Glyph::Skip,
+                        "provider",
+                        format!("{provider} already configured"),
+                    ),
+                    key_width,
+                );
             }
             return Ok(new);
         }
@@ -217,7 +222,7 @@ impl SetupArgs {
         frontends: &[(FrontendFilesystem, FrontendRuntime)],
     ) -> Result<Vec<FrontendResult>> {
         let total = frontends.len();
-        let key_width = "frontends".chars().count();
+        let key_width = Output::ledger_block_width(&["frontends"]);
         let mut region = LiveRegion::new(output.clone(), ["frontends"]);
         region.update("frontends", format!("0/{total} attaching…"));
         let mut results = Vec::with_capacity(total);

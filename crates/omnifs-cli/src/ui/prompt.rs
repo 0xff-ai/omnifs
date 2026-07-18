@@ -18,7 +18,7 @@ use crossterm::queue;
 use crossterm::terminal::{Clear, ClearType, disable_raw_mode, enable_raw_mode};
 
 use super::output::Output;
-use super::report::Row;
+use super::render::LedgerRow;
 use super::style::{self, Glyph, Stream};
 
 /// Marker error returned when an interactive prompt is canceled with Esc or
@@ -694,7 +694,14 @@ impl<T: Clone + Eq + std::fmt::Display> Select<T> {
             Resolution::Resolved(cursor) => {
                 let chosen = &items[cursor];
                 match &key {
-                    Some(key) => output.row(&Row::new(Glyph::Done, key.clone(), &chosen.label)),
+                    // A standalone single-row block: no `Select` call site in
+                    // this codebase sets `key` today (every current caller
+                    // takes the unlabeled `None` echo below), so this has no
+                    // sibling row to align against.
+                    Some(key) => output.ledger_row(
+                        &LedgerRow::new(Glyph::Done, key.clone(), &chosen.label),
+                        Output::ledger_block_width(&[key.as_str()]),
+                    ),
                     None => output.answer(&question, &chosen.label),
                 }
                 Ok(chosen.value.clone())
@@ -855,7 +862,11 @@ impl<T: Clone + Eq + std::fmt::Display> MultiSelect<T> {
         match resolution {
             Resolution::Resolved(state) => {
                 let (chosen, value) = multi_select_echo(&items, &state.checked);
-                output.row(&Row::new(Glyph::Done, key, value));
+                // A standalone single-row block: every current `MultiSelect`
+                // call site (`setup.rs`'s services/frontends pickers) prints
+                // this echo on its own, with no sibling ledger row nearby.
+                let key_width = Output::ledger_block_width(&[key.as_str()]);
+                output.ledger_row(&LedgerRow::new(Glyph::Done, key, value), key_width);
                 Ok(chosen)
             },
             Resolution::Canceled => {

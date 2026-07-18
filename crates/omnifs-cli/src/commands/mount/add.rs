@@ -159,6 +159,7 @@ pub(crate) async fn run_static_token_init(
     store: &dyn CredentialStore,
     validate: bool,
     output: &crate::ui::output::Output,
+    key_width: usize,
 ) -> anyhow::Result<CredentialTarget> {
     let static_token_scheme = auth.static_token_scheme(manifest)?;
 
@@ -183,13 +184,16 @@ pub(crate) async fn run_static_token_init(
     let identity = validation
         .as_ref()
         .and_then(|outcome| outcome.identity.clone());
-    output.row(&crate::ui::report::Row::new(
-        crate::ui::style::Glyph::Done,
-        "signed in",
-        identity
-            .clone()
-            .unwrap_or_else(|| "token accepted".to_string()),
-    ));
+    output.ledger_row(
+        &crate::ui::render::LedgerRow::new(
+            crate::ui::style::Glyph::Done,
+            "signed in",
+            identity
+                .clone()
+                .unwrap_or_else(|| "token accepted".to_string()),
+        ),
+        key_width,
+    );
     if let Some(outcome) = &validation
         && let Some(workspace) = &outcome.workspace
     {
@@ -219,11 +223,10 @@ pub(crate) async fn run_static_token_init(
             .put(key, &entry)
             .with_context(|| "failed to store credential")?;
     }
-    output.row(&crate::ui::report::Row::new(
-        crate::ui::style::Glyph::Done,
-        "credential",
-        "stored",
-    ));
+    output.ledger_row(
+        &crate::ui::render::LedgerRow::new(crate::ui::style::Glyph::Done, "credential", "stored"),
+        key_width,
+    );
     Ok(target)
 }
 
@@ -467,10 +470,10 @@ mod tests {
             true,
             true,
         )
-        .resolve(&crate::ui::output::Output::new(
-            crate::ui::output::OutputMode::Human,
-            false,
-        ))
+        .resolve(
+            &crate::ui::output::Output::new(crate::ui::output::OutputMode::Human, false),
+            crate::auth::auth_receipt_key_width(),
+        )
         .unwrap();
 
         let promoted = outcome.auth.expect("auth");
@@ -529,10 +532,10 @@ mod tests {
             false, // non-interactive
             true,  // --yes
         )
-        .resolve(&crate::ui::output::Output::new(
-            crate::ui::output::OutputMode::Human,
-            false,
-        ))
+        .resolve(
+            &crate::ui::output::Output::new(crate::ui::output::OutputMode::Human, false),
+            crate::auth::auth_receipt_key_width(),
+        )
         .unwrap();
 
         assert!(

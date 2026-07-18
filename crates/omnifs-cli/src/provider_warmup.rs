@@ -196,11 +196,16 @@ impl ProviderWarmup {
         Ok(())
     }
 
-    /// Join detached work, then warm the exact providers before daemon replacement.
+    /// Join detached work, then warm the exact providers before daemon
+    /// replacement. `key_width` is `up`'s whole ledger block width (spec
+    /// 2.1), not just this row's own key: the caller (`Launcher::launch`)
+    /// owns that block's full key set, since this function only knows its
+    /// own `providers` row.
     pub(crate) async fn warm_for_up(
         &self,
         ids: impl IntoIterator<Item = ProviderId>,
         output: &Output,
+        key_width: usize,
     ) -> Result<WarmupLease> {
         let ids: Vec<_> = ids
             .into_iter()
@@ -208,7 +213,7 @@ impl ProviderWarmup {
             .into_iter()
             .collect();
         let total = ids.len();
-        let mut progress = output.progress("providers");
+        let mut progress = output.progress("providers", key_width);
         if self.store.is_active()? {
             progress.update("waiting for background provider warmup");
         }
@@ -219,7 +224,10 @@ impl ProviderWarmup {
         })
         .await
         .context("join provider warmup lock task")??;
-        progress.update(&format!("warming {total} provider(s)"));
+        progress.update(&format!(
+            "warming {}",
+            crate::ui::render::count(total, "provider")
+        ));
         let result = self.warm(ids).await;
         match &result {
             Ok(()) => progress.settle_ok(format!("{total}/{total} warm")),
@@ -296,8 +304,8 @@ impl ProviderWarmup {
             Ok(())
         } else {
             bail!(
-                "failed to warm {} provider(s): {}",
-                failures.len(),
+                "failed to warm {}: {}",
+                crate::ui::render::count(failures.len(), "provider"),
                 failures.join("; ")
             )
         }
@@ -343,10 +351,9 @@ mod tests {
 
         let started = Instant::now();
         let warmup = ProviderWarmup::new(workspace.warmup().clone(), workspace.catalog().clone());
-        let lease = warmup
-            .warm_for_up([id], &Output::new(OutputMode::Human, true))
-            .await
-            .unwrap();
+        let output = Output::new(OutputMode::Human, true);
+        let key_width = Output::ledger_block_width(&["providers"]);
+        let lease = warmup.warm_for_up([id], &output, key_width).await.unwrap();
         holder.join().unwrap();
 
         assert!(started.elapsed() >= Duration::from_millis(200));
