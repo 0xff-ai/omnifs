@@ -634,15 +634,22 @@ fn port_label(port: &PortId) -> String {
     }
 }
 
-/// The pinned footer's detail text: for an export, the newest matching
-/// operation's path/outcome/elapsed; for an import, an in-flight
-/// callout's live summary if one is open, else the port's lifetime
-/// count and p95 (there's no per-kind "last completed" detail to show,
-/// since callouts aren't retained past their own operation); for Log,
-/// there's nothing to show at all.
+/// The pinned footer's detail text: for an export, an in-flight call's
+/// running elapsed if one is open, else the newest matching operation's
+/// path/outcome/elapsed; for an import, an in-flight callout's live
+/// summary if one is open, else the port's lifetime count and p95
+/// (there's no per-kind "last completed" detail to show, since callouts
+/// aren't retained past their own operation); for Log, there's nothing
+/// to show at all.
 fn pinned_detail(app: &App, sandbox: Option<&MountSandbox>, port: &PortId) -> String {
     match port {
         PortId::Export(method) => {
+            if let Some((_, start_mono)) =
+                sandbox.and_then(|s| s.open_export_calls().find(|(m, _)| *m == method.as_str()))
+            {
+                let elapsed = app.view_now_mono().saturating_sub(start_mono);
+                return format!("running {}", format::format_latency_us(elapsed));
+            }
             let best = app
                 .visible_trace_ids()
                 .into_iter()

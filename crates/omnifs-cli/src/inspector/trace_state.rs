@@ -414,6 +414,9 @@ impl TraceReducer {
         }
     }
 
+    // The parameter list mirrors the wire event's fields one-to-one; a
+    // params struct would just restate `InspectorEvent::ProviderStart`.
+    #[allow(clippy::too_many_arguments)]
     fn on_provider_start(
         &mut self,
         trace_id: TraceId,

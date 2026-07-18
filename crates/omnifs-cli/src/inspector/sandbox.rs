@@ -290,6 +290,9 @@ impl SandboxStats {
         sandbox.note_activity(mono_us);
     }
 
+    // The parameter list mirrors the wire event's fields one-to-one; a
+    // params struct would just restate `InspectorEvent::CalloutStart`.
+    #[allow(clippy::too_many_arguments)]
     pub fn on_callout_start(
         &mut self,
         mount: &str,
@@ -313,6 +316,9 @@ impl SandboxStats {
         sandbox.note_activity(mono_us);
     }
 
+    // Mirrors `InspectorEvent::CalloutEnd` the same way `on_callout_start`
+    // mirrors its start event.
+    #[allow(clippy::too_many_arguments)]
     pub fn on_callout_end(
         &mut self,
         mount: &str,
@@ -341,7 +347,7 @@ impl SandboxStats {
     /// Sweep every open-call entry belonging to an evicted trace, across
     /// every mount. Without this, a trace evicted mid-flight (its
     /// `provider.start` seen, its `provider.end` never arriving before
-    /// eviction) would leak an open_exports/open_imports entry forever.
+    /// eviction) would leak an `open_exports`/`open_imports` entry forever.
     pub fn evict_trace(&mut self, trace_id: TraceId) {
         for sandbox in self.mounts.values_mut() {
             sandbox.open_exports.retain(|(tid, _), _| *tid != trace_id);
