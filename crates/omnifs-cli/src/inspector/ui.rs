@@ -174,7 +174,7 @@ fn render_tree(frame: &mut Frame, app: &App, area: Rect) {
 
     let rows = app
         .forest()
-        .render_rows(app.now_mono, ACTIVE_FOCUS_WINDOW_US);
+        .render_rows(app.now_mono, ACTIVE_FOCUS_WINDOW_US, &app.collapsed);
     if rows.is_empty() {
         let msg =
             Paragraph::new("no paths touched yet").style(Style::default().fg(Color::DarkGray));

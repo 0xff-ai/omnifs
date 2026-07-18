@@ -1,8 +1,8 @@
 //! TUI state: operation store, mount windows, filters.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 
-use omnifs_api::events::{InspectorLine, InspectorRecord, TraceId};
+use omnifs_api::events::{InspectorEvent, InspectorLine, InspectorRecord, TraceId};
 
 use super::filter::{FilterMode, ViewFilter};
 use super::metrics::MountWindow;
@@ -36,6 +36,13 @@ pub struct App {
     pub quit: bool,
     pub dropped_events: u64,
     pub events_per_sec: f64,
+    /// Currently highlighted trace. View state, not fold state: a later
+    /// time-travel slice refolds `TraceReducer` from scratch, so this
+    /// must survive independently of the fold.
+    selected: Option<TraceId>,
+    /// Manually collapsed tree nodes, keyed by (mount, mount-relative
+    /// path). Also view state for the same reason `selected` is.
+    pub collapsed: HashSet<(String, String)>,
     traces: TraceReducer,
     event_times: VecDeque<u64>,
 }
@@ -111,6 +118,8 @@ impl App {
             quit: false,
             dropped_events: 0,
             events_per_sec: 0.0,
+            selected: None,
+            collapsed: HashSet::new(),
             traces: TraceReducer::default(),
             event_times: VecDeque::new(),
         }
@@ -120,16 +129,12 @@ impl App {
         &self.traces.forest
     }
 
-    pub fn forest_mut(&mut self) -> &mut MountForest {
-        &mut self.traces.forest
-    }
-
     pub fn palette(&self) -> &MountPalette {
         &self.traces.palette
     }
 
     pub fn selected_trace(&self) -> Option<TraceId> {
-        self.traces.selected()
+        self.selected
     }
 
     pub fn mount_window(&self, mount: &str) -> Option<&MountWindow> {
@@ -165,7 +170,40 @@ impl App {
         self.now_mono = record.mono_us;
         self.tick_event_window(record.mono_us);
         self.traces.apply_record(record);
-        self.traces.ensure_selected_visible(&self.filter);
+
+        // The fold evicts the oldest retained trace once MAX_RECENT_TRACES
+        // is exceeded; it no longer owns selection, so a pointer to a
+        // just-evicted trace has to be caught and cleared here.
+        if self
+            .selected
+            .is_some_and(|id| self.traces.operation(id).is_none())
+        {
+            self.selected = None;
+        }
+
+        // A fresh FuseStart claims the initial selection so the very
+        // first operation the user sees is highlighted without a keypress.
+        if self.selected.is_none()
+            && let InspectorEvent::FuseStart { .. } = &record.event
+        {
+            self.selected = Some(record.trace_id);
+        }
+
+        self.ensure_selected_visible();
+    }
+
+    /// Reassign selection when it points at a trace that's no longer
+    /// visible: evicted from the fold, or filtered out by the active
+    /// [`ViewFilter`]. Falls back to the first currently visible trace.
+    fn ensure_selected_visible(&mut self) {
+        let selected_is_visible = self.selected.is_some_and(|id| {
+            self.traces
+                .operation(id)
+                .is_some_and(|op| self.filter.matches(op))
+        });
+        if !selected_is_visible {
+            self.selected = self.traces.visible_trace_ids(&self.filter).first().copied();
+        }
     }
 
     pub fn apply_line(&mut self, line: &InspectorLine) {
@@ -223,7 +261,7 @@ impl App {
                     FilterMode::ErrorsOnly => FilterMode::All,
                     FilterMode::All => FilterMode::ErrorsOnly,
                 };
-                self.traces.ensure_selected_visible(&self.filter);
+                self.ensure_selected_visible();
             },
             KeyCode::Char('r') => self.reset_recent(),
             KeyCode::Char('/') => {
@@ -248,9 +286,9 @@ impl App {
     }
 
     fn move_tree_cursor(&mut self, delta: isize) {
-        let rows = self
-            .forest()
-            .render_rows(self.now_mono, ACTIVE_FOCUS_WINDOW_US);
+        let rows =
+            self.forest()
+                .render_rows(self.now_mono, ACTIVE_FOCUS_WINDOW_US, &self.collapsed);
         if rows.is_empty() {
             self.tree_cursor = None;
             return;
@@ -279,16 +317,46 @@ impl App {
         let Some(cursor) = self.tree_cursor.clone() else {
             return;
         };
-        self.traces
-            .select_latest_for_path(&cursor.mount, &cursor.path);
+        self.select_latest_for_path(&cursor.mount, &cursor.path);
+    }
+
+    /// Select the most recently active operation at or below `mount`/`path`,
+    /// so moving the tree cursor onto a node also highlights the operations
+    /// log entry the user is looking at. Considers every retained trace
+    /// (not just the currently filtered-visible ones), matching the old
+    /// reducer-owned behavior of scanning all operations.
+    fn select_latest_for_path(&mut self, mount: &str, path: &str) {
+        let mut best: Option<(u64, TraceId)> = None;
+        for id in self.traces.visible_trace_ids(&ViewFilter::default()) {
+            let Some(op) = self.traces.operation(id) else {
+                continue;
+            };
+            if op.mount != mount {
+                continue;
+            }
+            let matches_path =
+                path.is_empty() || op.path == path || op.path.starts_with(&format!("{path}/"));
+            if !matches_path {
+                continue;
+            }
+            let ts = op.ended_mono.unwrap_or(op.started_mono);
+            if best.is_none_or(|(prev, _)| ts >= prev) {
+                best = Some((ts, id));
+            }
+        }
+        if let Some((_, trace_id)) = best {
+            self.selected = Some(trace_id);
+        }
     }
 
     fn toggle_tree_cursor_collapse(&mut self) {
         let Some(cursor) = self.tree_cursor.clone() else {
             return;
         };
-        self.forest_mut()
-            .toggle_collapsed(&cursor.mount, &cursor.path);
+        let key = (cursor.mount, cursor.path);
+        if !self.collapsed.remove(&key) {
+            self.collapsed.insert(key);
+        }
     }
 
     fn handle_filter_key(&mut self, code: crossterm::event::KeyCode) {
@@ -333,15 +401,32 @@ impl App {
     }
 
     fn reset_recent(&mut self) {
-        self.traces.reset_recent(&self.filter);
+        self.traces.reset_recent();
+        self.ensure_selected_visible();
     }
 
     fn select_next(&mut self) {
-        self.traces.select_next(&self.filter);
+        let visible = self.traces.visible_trace_ids(&self.filter);
+        if visible.is_empty() {
+            return;
+        }
+        let idx = self
+            .selected
+            .and_then(|sel| visible.iter().position(|id| *id == sel))
+            .map_or(0, |i| (i + 1).min(visible.len() - 1));
+        self.selected = Some(visible[idx]);
     }
 
     fn select_prev(&mut self) {
-        self.traces.select_prev(&self.filter);
+        let visible = self.traces.visible_trace_ids(&self.filter);
+        if visible.is_empty() {
+            return;
+        }
+        let idx = self
+            .selected
+            .and_then(|sel| visible.iter().position(|id| *id == sel))
+            .map_or(0, |i| i.saturating_sub(1));
+        self.selected = Some(visible[idx]);
     }
 }
 

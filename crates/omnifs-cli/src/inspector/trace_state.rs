@@ -212,17 +212,12 @@ impl Operation {
 pub struct TraceReducer {
     pub forest: MountForest,
     pub palette: MountPalette,
-    selected: Option<TraceId>,
     operations: HashMap<TraceId, Operation>,
     trace_order: VecDeque<TraceId>,
     mount_windows: HashMap<String, MountWindow>,
 }
 
 impl TraceReducer {
-    pub fn selected(&self) -> Option<TraceId> {
-        self.selected
-    }
-
     pub fn mount_window(&self, mount: &str) -> Option<&MountWindow> {
         self.mount_windows.get(mount)
     }
@@ -309,66 +304,11 @@ impl TraceReducer {
         }
     }
 
-    pub fn reset_recent(&mut self, filter: &ViewFilter) {
+    pub fn reset_recent(&mut self) {
         self.operations
             .retain(|_, op| op.status == OperationStatus::Running);
         self.trace_order
             .retain(|id| self.operations.contains_key(id));
-        self.ensure_selected_visible(filter);
-    }
-
-    pub fn select_next(&mut self, filter: &ViewFilter) {
-        let visible = self.visible_trace_ids(filter);
-        if visible.is_empty() {
-            return;
-        }
-        let idx = self
-            .selected
-            .and_then(|sel| visible.iter().position(|id| *id == sel))
-            .map_or(0, |i| (i + 1).min(visible.len() - 1));
-        self.selected = Some(visible[idx]);
-    }
-
-    pub fn select_prev(&mut self, filter: &ViewFilter) {
-        let visible = self.visible_trace_ids(filter);
-        if visible.is_empty() {
-            return;
-        }
-        let idx = self
-            .selected
-            .and_then(|sel| visible.iter().position(|id| *id == sel))
-            .map_or(0, |i| i.saturating_sub(1));
-        self.selected = Some(visible[idx]);
-    }
-
-    pub fn select_latest_for_path(&mut self, mount: &str, path: &str) {
-        let mut best: Option<(u64, TraceId)> = None;
-        for op in self.operations.values() {
-            if op.mount != mount {
-                continue;
-            }
-            let matches_path =
-                path.is_empty() || op.path == path || op.path.starts_with(&format!("{path}/"));
-            if !matches_path {
-                continue;
-            }
-            let ts = op.ended_mono.unwrap_or(op.started_mono);
-            if best.is_none_or(|(prev, _)| ts >= prev) {
-                best = Some((ts, op.trace_id));
-            }
-        }
-        if let Some((_, trace_id)) = best {
-            self.selected = Some(trace_id);
-        }
-    }
-
-    pub fn ensure_selected_visible(&mut self, filter: &ViewFilter) {
-        let selected_is_visible = self
-            .selected
-            .is_some_and(|id| self.operation(id).is_some_and(|op| filter.matches(op)));
-        if !selected_is_visible {
-            self.selected = self.visible_trace_ids(filter).first().copied();
-        }
     }
 
     fn on_fuse_start(
@@ -393,9 +333,6 @@ impl TraceReducer {
         self.forest
             .mount_tree_mut(mount)
             .mark_in_flight(&normalized_path, trace_id, mono_us);
-        if self.selected.is_none() {
-            self.selected = Some(trace_id);
-        }
     }
 
     fn on_fuse_end(
@@ -611,9 +548,6 @@ impl TraceReducer {
 
     fn evict_trace(&mut self, trace_id: TraceId) {
         self.operations.remove(&trace_id);
-        if self.selected == Some(trace_id) {
-            self.selected = None;
-        }
     }
 
     fn trace_visible(&self, trace_id: TraceId, filter: &ViewFilter) -> bool {
@@ -634,6 +568,8 @@ fn outcome_status(outcome: InspectorOutcome) -> OperationStatus {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
     use omnifs_api::events::{OpEnd, OutcomeFields};
 
@@ -761,7 +697,7 @@ mod tests {
         ));
         let op = traces.operation(8).expect("trace");
         assert_eq!(op.path, "/notifications");
-        let rows = traces.forest.render_rows(10, 30_000_000);
+        let rows = traces.forest.render_rows(10, 30_000_000, &HashSet::new());
         let paths: Vec<_> = rows.iter().map(|row| row.path.as_str()).collect();
         assert!(paths.contains(&"notifications"));
         assert!(!paths.contains(&"github/notifications"));
@@ -794,7 +730,7 @@ mod tests {
             traces.operation(9).expect("trace").outcome,
             Some(InspectorOutcome::NotFound)
         );
-        let rows = traces.forest.render_rows(20, 30_000_000);
+        let rows = traces.forest.render_rows(20, 30_000_000, &HashSet::new());
         let missing = rows
             .iter()
             .find(|row| row.path == "notifications/missing")

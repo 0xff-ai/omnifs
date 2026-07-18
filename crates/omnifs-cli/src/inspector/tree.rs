@@ -41,8 +41,6 @@ pub struct PathNode {
     /// True when a subtree handoff lookup returned this path; reads
     /// below this node bypass the provider entirely.
     pub is_subtree_handoff: bool,
-    /// User has manually collapsed this subtree.
-    pub manually_collapsed: bool,
 }
 
 impl PathNode {
@@ -56,7 +54,6 @@ impl PathNode {
             last_latency_us: None,
             in_flight: HashSet::new(),
             is_subtree_handoff: false,
-            manually_collapsed: false,
         }
     }
 
@@ -118,18 +115,6 @@ impl PathNode {
         self.children
             .values()
             .any(|child| child.is_in_active_focus(now_mono, window_us))
-    }
-
-    fn lookup_mut(&mut self, path: &str) -> Option<&mut PathNode> {
-        if path.is_empty() {
-            return Some(self);
-        }
-        let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-        let mut node = self;
-        for segment in segments {
-            node = node.children.get_mut(segment)?;
-        }
-        Some(node)
     }
 }
 
@@ -314,18 +299,6 @@ impl MountForest {
             .or_insert_with(|| MountTree::new(mount))
     }
 
-    /// Toggle the manual collapse flag on the node at `(mount, path)`.
-    /// Returns the new flag; no-op (returns `None`) when the node
-    /// doesn't exist.
-    pub fn toggle_collapsed(&mut self, mount: &str, path: &str) -> Option<bool> {
-        let tree = self.mounts.get_mut(mount)?;
-        let node = tree.root.lookup_mut(path)?;
-        node.manually_collapsed = !node.manually_collapsed;
-        Some(node.manually_collapsed)
-    }
-}
-
-impl MountForest {
     pub fn iter(&self) -> impl Iterator<Item = &MountTree> {
         self.mounts.values()
     }
@@ -338,7 +311,16 @@ impl MountForest {
     ///     OR is an error.
     ///   - Subtrees collapsed by the user or out-of-window collapse
     ///     into a single summary row with descendant counts.
-    pub fn render_rows(&self, now_mono: u64, recent_window_us: u64) -> Vec<RenderRow> {
+    ///
+    /// `collapsed` is caller-owned view state (keyed by `(mount,
+    /// mount-relative path)`) rather than fold state, so it survives a
+    /// full reducer refold unchanged.
+    pub fn render_rows(
+        &self,
+        now_mono: u64,
+        recent_window_us: u64,
+        collapsed: &HashSet<(String, String)>,
+    ) -> Vec<RenderRow> {
         // Order mounts by recency so the busiest sit at the top of the
         // tree, matching the sparkline strip's ordering.
         let mut trees: Vec<&MountTree> = self.mounts.values().collect();
@@ -360,8 +342,14 @@ impl MountForest {
                 in_flight: tree.root.in_flight_count(),
                 errors_below: tree.root.error_count_below(),
             });
-            tree.root
-                .flatten_into(1, &tree.mount, now_mono, recent_window_us, &mut rows);
+            tree.root.flatten_into(
+                1,
+                &tree.mount,
+                now_mono,
+                recent_window_us,
+                collapsed,
+                &mut rows,
+            );
         }
         rows
     }
@@ -400,9 +388,14 @@ impl PathNode {
         mount: &str,
         now_mono: u64,
         window_us: u64,
+        collapsed: &HashSet<(String, String)>,
         out: &mut Vec<RenderRow>,
     ) {
-        if self.manually_collapsed {
+        // Guard the tuple allocation: the set is empty in the common case
+        // and `HashSet<(String, String)>` can't be probed with `&str`s.
+        if !collapsed.is_empty()
+            && collapsed.contains(&(mount.to_string(), self.mount_relative_path.clone()))
+        {
             self.push_collapsed_summary(depth, mount, out);
             return;
         }
@@ -421,7 +414,7 @@ impl PathNode {
                 in_flight: child.in_flight_count(),
                 errors_below: child.error_count_below(),
             });
-            child.flatten_into(depth + 1, mount, now_mono, window_us, out);
+            child.flatten_into(depth + 1, mount, now_mono, window_us, collapsed, out);
         }
     }
 
@@ -478,7 +471,7 @@ mod tests {
         tree.mark_in_flight("a/old", 2, 100);
         tree.complete("a/old", 2, 1_000, true, 100);
 
-        let rows = forest.render_rows(100_000_000, 1_000_000);
+        let rows = forest.render_rows(100_000_000, 1_000_000, &HashSet::new());
         let names: Vec<_> = rows.iter().map(|r| r.name.as_str()).collect();
         assert!(names.contains(&"github"));
         assert!(names.contains(&"a"));
@@ -496,7 +489,7 @@ mod tests {
         tree.mark_in_flight("2401.99999/title", 1, 100);
         tree.complete("2401.99999/title", 1, 1_000, false, 100);
 
-        let rows = forest.render_rows(10_000_000_000, 1_000_000);
+        let rows = forest.render_rows(10_000_000_000, 1_000_000, &HashSet::new());
         let names: Vec<_> = rows.iter().map(|r| r.name.as_str()).collect();
         assert!(!names.contains(&"title"), "old errors should age out");
     }
