@@ -28,6 +28,7 @@ omnifs-api = { version = "0.2.1", path = "crates/omnifs-api" }
 omnifs-auth = { version = "0.2.1", path = "crates/omnifs-auth" }
 omnifs-engine = { version = "0.2.1", path = "crates/omnifs-engine", default-features = false }
 omnifs-fuse = { version = "0.2.1", path = "crates/omnifs-fuse", default-features = false }
+omnifs-libkrun = { version = "0.2.1", path = "crates/omnifs-libkrun" }
 omnifs-workspace = { version = "0.2.1", path = "crates/omnifs-workspace" }
 omnifs-core = { version = "0.2.1", path = "crates/omnifs-core" }
 omnifs-mtab = { version = "0.2.1", path = "crates/omnifs-mtab" }
@@ -58,6 +59,7 @@ dashmap = "6"
 parking_lot = "0.12"
 tempfile = "3"
 libc = "0.2"
+libloading = "0.8"
 anyhow = "1"
 cap-std = "3.4.5"
 fjall = "3.1.5"

@@ -64,11 +64,23 @@ frontend-image:
 guest-image:
     bash scripts/guest-image/build.sh
 
+# Build the fixed-purpose libkrun helper and stage its pinned dylib, firmware,
+# manifest, and licenses beside the debug CLI. macOS Apple Silicon only.
+[group('dev')]
+libkrun-runtime:
+    cargo build -p omnifs-cli -p omnifs-libkrun
+    bash scripts/ci/build-libkrun-runtime.sh target/debug
+    codesign --force --sign - target/debug/libexec/omnifs/libkrun.1.dylib
+    codesign --force --sign - \
+        --entitlements scripts/ci/omnifs-libkrun.entitlements.plist \
+        target/debug/omnifs-libkrun
+
 # Boot the guest image once with a throwaway seed ISO and check the serial
 # console for a successful boot and the frontend runner starting. See
 # scripts/guest-image/smoke.sh for the intentionally boot-only success criteria.
 [group('dev')]
 guest-image-smoke:
+    just libkrun-runtime
     bash scripts/guest-image/smoke.sh
 
 # Run the libkrun runtime conformance lane against a live guest: builds the
@@ -76,7 +88,8 @@ guest-image-smoke:
 # with the live-acceptance opt-in set. macOS (Apple Silicon) only, and
 # LOCAL-ONLY: GitHub-hosted macOS runners cannot nest virtualization, so this
 # never runs in CI (see docs/contracts/60-build-validation.md). Requires
-# the `krunkit` executable and `socat` on PATH.
+# the staged private libkrun payload (`just libkrun-runtime`) and `socat` on
+# PATH.
 [group('dev')]
 libkrun-conformance:
     #!/usr/bin/env bash
@@ -85,4 +98,5 @@ libkrun-conformance:
       echo "guest image missing; building it now (run \`just guest-image\` yourself to rebuild after guest-image source changes)"
       just guest-image
     fi
+    just libkrun-runtime
     OMNIFS_ACCEPTANCE_LIVE=1 cargo nextest run -p omnifs-itest --test frontend_libkrun

@@ -78,9 +78,194 @@ jobs:
           path: release-notes.md
           retention-days: 1
 
-  github-release:
+  darwin_arm64_sign:
+    name: sign and submit darwin arm64
     if: needs.plan.outputs.should_ship == 'true'
     needs: plan
+    runs-on: macos-15
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          persist-credentials: false
+
+      - name: Resolve CI workflow run
+        id: ci_run
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_CI_RUN_ID: ${{ inputs.ci_run_id || '' }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$INPUT_CI_RUN_ID" ]]; then
+            echo "run_id=$INPUT_CI_RUN_ID" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [[ "${{ github.event_name }}" == "workflow_run" ]]; then
+            echo "run_id=${{ github.event.workflow_run.id }}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          run_id="$(gh run list --workflow ci.yml --branch main --limit 30 --json databaseId,conclusion \
+            | jq -r '[.[] | select(.conclusion == "success")] | first | .databaseId')"
+          if [[ -z "$run_id" || "$run_id" == "null" ]]; then
+            echo "no successful ci.yml run found on main" >&2
+            exit 1
+          fi
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+
+      - name: Download Darwin arm64 CI payload
+        uses: actions/download-artifact@v8
+        with:
+          name: omnifs-cli-darwin-arm64
+          run-id: ${{ steps.ci_run.outputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: ci-payload
+
+      - name: Sign payload and submit once for notarization
+        env:
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_CERTIFICATE_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION }}
+          APPLE_NOTARY_APPLE_ID: ${{ secrets.APPLE_NOTARY_APPLE_ID }}
+          APPLE_NOTARY_PASSWORD: ${{ secrets.APPLE_NOTARY_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          : "${APPLE_CERTIFICATE_BASE64:?APPLE_DEVELOPER_ID_CERTIFICATE_BASE64 is required}"
+          : "${APPLE_CERTIFICATE_PASSWORD:?APPLE_DEVELOPER_ID_CERTIFICATE_PASSWORD is required}"
+          : "${APPLE_SIGNING_IDENTITY:?APPLE_DEVELOPER_ID_APPLICATION is required}"
+          : "${APPLE_NOTARY_APPLE_ID:?APPLE_NOTARY_APPLE_ID is required}"
+          : "${APPLE_NOTARY_PASSWORD:?APPLE_NOTARY_PASSWORD is required}"
+          : "${APPLE_TEAM_ID:?APPLE_TEAM_ID is required}"
+
+          archive="ci-payload/omnifs-cli-darwin-arm64.tar.xz"
+          checksum="ci-payload/omnifs-cli-darwin-arm64.tar.xz.sha256"
+          expected="$(awk '{print $1}' "$checksum")"
+          actual="$(shasum -a 256 "$archive" | awk '{print $1}')"
+          [[ "$actual" == "$expected" ]] || {
+            echo "Darwin arm64 CI archive checksum mismatch" >&2
+            exit 1
+          }
+
+          payload="$RUNNER_TEMP/omnifs-darwin-arm64"
+          mkdir -p "$payload"
+          tar -xJf "$archive" -C "$payload"
+          scripts/ci/check-darwin-arm64-payload.sh "$payload"
+
+          keychain="$RUNNER_TEMP/omnifs-signing.keychain-db"
+          certificate="$RUNNER_TEMP/developer-id.p12"
+          keychain_password="$(uuidgen)"
+          cleanup() {
+            security delete-keychain "$keychain" 2>/dev/null || true
+            rm -f "$certificate"
+          }
+          trap cleanup EXIT
+
+          printf '%s' "$APPLE_CERTIFICATE_BASE64" | /usr/bin/base64 -D >"$certificate"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$certificate" \
+            -k "$keychain" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s \
+            -k "$keychain_password" \
+            "$keychain"
+          security list-keychains -d user -s "$keychain"
+          security find-identity -v -p codesigning "$keychain" \
+            | grep -F "$APPLE_SIGNING_IDENTITY"
+
+          scripts/ci/sign-darwin-arm64-payload.sh \
+            "$payload" \
+            "$APPLE_SIGNING_IDENTITY" \
+            "$APPLE_TEAM_ID"
+
+          signed_tar="$RUNNER_TEMP/signed-payload.tar"
+          tar -C "$payload" -cf "$signed_tar" .
+          notary_zip="$RUNNER_TEMP/omnifs-darwin-arm64-notary.zip"
+          ditto -c -k --keepParent "$payload" "$notary_zip"
+          xcrun notarytool submit "$notary_zip" \
+            --apple-id "$APPLE_NOTARY_APPLE_ID" \
+            --password "$APPLE_NOTARY_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --output-format json >"$RUNNER_TEMP/notary-submission.json"
+          jq -er '.id' "$RUNNER_TEMP/notary-submission.json" \
+            >"$RUNNER_TEMP/notary-submission-id"
+
+      - name: Upload signed payload and submission identity
+        uses: actions/upload-artifact@v7
+        with:
+          name: omnifs-cli-darwin-arm64-signed
+          path: |
+            ${{ runner.temp }}/signed-payload.tar
+            ${{ runner.temp }}/notary-submission.json
+            ${{ runner.temp }}/notary-submission-id
+          retention-days: 7
+          if-no-files-found: error
+
+  darwin_arm64_notarize:
+    name: wait for darwin arm64 notarization
+    if: needs.plan.outputs.should_ship == 'true'
+    needs: [plan, darwin_arm64_sign]
+    runs-on: macos-15
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          persist-credentials: false
+
+      - name: Download signed payload
+        uses: actions/download-artifact@v8
+        with:
+          name: omnifs-cli-darwin-arm64-signed
+          path: signed
+
+      - name: Wait for the existing submission to reach Accepted
+        env:
+          APPLE_NOTARY_APPLE_ID: ${{ secrets.APPLE_NOTARY_APPLE_ID }}
+          APPLE_NOTARY_PASSWORD: ${{ secrets.APPLE_NOTARY_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          submission_id="$(cat signed/notary-submission-id)"
+          scripts/ci/wait-for-notarization.sh "$submission_id" \
+            >signed/notary-result.json
+          [[ "$(jq -r '.status' signed/notary-result.json)" == "Accepted" ]]
+
+      - name: Package the accepted signed payload
+        run: |
+          set -euo pipefail
+          payload="$RUNNER_TEMP/omnifs-darwin-arm64"
+          mkdir -p "$payload"
+          tar -xf signed/signed-payload.tar -C "$payload"
+          scripts/ci/check-darwin-arm64-payload.sh "$payload"
+          scripts/ci/package-cli.sh darwin-arm64 --payload-dir "$payload"
+
+      - name: Attest accepted Darwin arm64 CLI archive
+        uses: actions/attest-build-provenance@v4.1.0
+        with:
+          subject-path: dist/cli/darwin-arm64/omnifs-cli-darwin-arm64.tar.xz
+
+      - name: Upload accepted Darwin arm64 CLI archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: omnifs-cli-darwin-arm64-notarized
+          path: dist/cli/darwin-arm64/omnifs-cli-darwin-arm64.tar.xz*
+          retention-days: 90
+          if-no-files-found: error
+
+  github-release:
+    if: needs.plan.outputs.should_ship == 'true'
+    needs: [plan, darwin_arm64_notarize]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -126,6 +311,15 @@ jobs:
           run-id: ${{ steps.ci_run.outputs.run_id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
           path: release-assets
+
+      - name: Remove unsigned Darwin arm64 CI archive
+        run: rm -rf release-assets/omnifs-cli-darwin-arm64
+
+      - name: Download accepted Darwin arm64 archive
+        uses: actions/download-artifact@v8
+        with:
+          name: omnifs-cli-darwin-arm64-notarized
+          path: release-assets/omnifs-cli-darwin-arm64
 
       - name: Verify release assets
         run: |
@@ -270,6 +464,14 @@ jobs:
           path: dist-download
           merge-multiple: false
 
+      - name: Replace Darwin arm64 with the accepted signed archive
+        run: rm -rf dist-download/omnifs-cli-darwin-arm64
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: omnifs-cli-darwin-arm64-notarized
+          path: dist-download/omnifs-cli-darwin-arm64
+
       - uses: actions/setup-node@v6
         with:
           node-version: 22
@@ -338,6 +540,20 @@ jobs:
             cp "$thin_binary" "$pkg/bin/omnifs-thin"
             chmod 755 "$pkg/bin/omnifs"
             chmod 755 "$pkg/bin/omnifs-thin"
+            if [[ "$platform" == "darwin-arm64" ]]; then
+              helper="$extract_dir/omnifs-libkrun"
+              runtime="$extract_dir/libexec/omnifs"
+              if [[ ! -x "$helper" || ! -d "$runtime" ]]; then
+                echo "missing signed libkrun payload in $archive" >&2
+                find "$extract_dir" -type f >&2 || true
+                exit 1
+              fi
+              cp "$helper" "$pkg/bin/omnifs-libkrun"
+              rm -rf "$pkg/bin/libexec"
+              mkdir -p "$pkg/bin/libexec"
+              cp -R "$runtime" "$pkg/bin/libexec/omnifs"
+              chmod 755 "$pkg/bin/omnifs-libkrun"
+            fi
             npm pack "$pkg" --pack-destination "$RUNNER_TEMP"
 
             if [[ "$SHOULD_PUBLISH" == "true" ]]; then

@@ -52,7 +52,7 @@ fn guest_shell_command(frontend: &FrontendStatus) -> String {
     )
 }
 
-fn guest_shell_line(frontend: &FrontendStatus) -> String {
+pub(crate) fn guest_shell_line(frontend: &FrontendStatus) -> String {
     format!("In the microVM:  `{}`", guest_shell_command(frontend))
 }
 

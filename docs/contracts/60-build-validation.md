@@ -47,9 +47,11 @@ The daemon always runs host-native, so `OMNIFS_HOME` and `OMNIFS_MOUNT_POINT` re
 
 ### Frontend image artifact
 
-Platform CLI archives include exactly `omnifs` and the sibling `omnifs-thin` runner. Linux thin supports `fuse` and `nfs`; Darwin thin supports `nfs`. The matching npm platform package must whitelist the same files, and CI extraction smokes assert every expected executable before running acceptance lanes.
+Linux and Darwin x64 CLI archives include exactly `omnifs` and the sibling `omnifs-thin` runner. Linux thin supports `fuse` and `nfs`; Darwin thin supports `nfs`. Darwin arm64 also carries `omnifs-libkrun` plus `libexec/omnifs/{libkrun.1.dylib,KRUN_EFI.silent.fd,runtime-manifest.json,licenses/}`. The matching npm platform package must whitelist the same files, and CI extraction smokes assert every expected executable before running acceptance lanes.
 
-CI has one authoritative Linux `omnifs-thin` producer per architecture. CLI packaging consumes that binary together with the separately built full CLI, while frontend and guest-image jobs consume the same artifact. Darwin x64 and arm64 packages build in independent matrix jobs so target-specific code generation runs in parallel; the four platform archive names and their two-executable payload contract remain stable.
+CI has one authoritative Linux `omnifs-thin` producer per architecture. CLI packaging consumes that binary together with the separately built full CLI, while frontend and guest-image jobs consume the same artifact. Darwin x64 cross-links on Linux. Darwin arm64 builds on the standard native `macos-15` Apple Silicon runner, builds pinned libkrun 1.19.4 from revision `728df8125077d0db44265f6e997c72b81b65c015` with only its EFI feature set, stages the pinned EFI firmware and license sources, rejects GPU and forbidden dynamic links, and applies an ad hoc CI signature so the payload can be checked. CI never boots the guest because hosted runners do not support nested virtualization.
+
+Release replaces the CI Darwin arm64 archive with the same payload signed under one Developer ID team. It signs the dylib before the helper, grants only the Hypervisor entitlement to `omnifs-libkrun`, submits one zip to Apple's notary service, records that submission ID, and polls the same submission in a later job. GitHub and npm publication cannot start until the status is `Accepted`; rejected, invalid, missing, or timed-out submissions fail the release. The final archive comes from the signed payload saved before submission, so polling never rebuilds, resigns, or resubmits it.
 
 The Docker-hosted FUSE frontend (`omnifs frontend enable fuse --runtime docker`) ships a minimal image from `Dockerfile`: `frontend-base` (`debian:trixie-slim`, chosen because Debian's default coreutils/findutils are GNU, which `tail -f` fidelity requires), `frontend-dev` (contributor, built by `just frontend-image`, copies the binary from the `thin-builder` stage), and `frontend-release` (built by `scripts/ci/build-frontend-image.sh`, injects a prebuilt Linux binary as the `omnifs-thin-bin` build context). The image runs `omnifs-thin fuse` with no engine runtime, Wasmtime, or provider bundle, not the full `omnifs` CLI/daemon binary, so neither stage needs a provider-store build context. The frontend image carries no launch-protocol/min-launcher-version label: `DockerRunner::launch` (`crates/omnifs-cli/src/docker.rs`) starts the container and checks its credential-free shape without consulting such a label.
 
@@ -61,7 +63,7 @@ The libkrun runtime's guest ships as a bootable raw disk image, not a container:
 
 Root login is split into two `mkosi` profiles selected by `--profile` (`build.sh`'s passthrough, or `GUEST_IMAGE_PROFILE`), via `mkosi.profiles/{dev,release}/mkosi.conf`: `dev` (the `just guest-image` default) keeps an unlocked, autologin-enabled root console for the boot smoke and manual debugging; `release` sets neither `RootPassword=` nor `Autologin=`, so root has no password login (mkosi never touches `/etc/shadow` when `RootPassword=` is unset, leaving Debian's own locked default) and no getty unit autologins. `scripts/ci/check-guest-image.sh IMAGE_PATH {dev|release}` asserts the built image's static shape — fail-closed, non-zero exit on any violation — by loop-mounting it read-only inside a throwaway privileged container (works identically on macOS and Linux, since loop-mounting a GPT image needs kernel facilities macOS lacks natively): `/usr/local/bin/omnifs-thin` present and executable; all six `omnifs-*` units present, with the three that declare `[Install]` (`omnifs-seed-mount.service`, `omnifs-frontend.service`, `omnifs-ssh-setup.service`) enabled; no cloud-init anywhere; and, for `release` only, the locked `/etc/shadow` root entry and the absence of the three autologin drop-ins (`console-getty.service.d`, `getty@tty1.service.d`, `serial-getty@hvc0.service.d`). It is runnable locally against either profile's build output, not just in CI.
 
-Attach parameters (`OMNIFS_ATTACH_ADDR`, `OMNIFS_ATTACH_TOKEN`, `OMNIFS_READY_VSOCK_PORT`, `OMNIFS_SSH_PUBKEY`) reach the guest through a per-launch seed ISO, not cloud-init: `LibkrunRunner::launch` (`crates/omnifs-cli/src/libkrun_runner.rs`) builds an ISO9660+Joliet volume labeled `OMNIFS-SEED` with `hdiutil makehybrid`, auditing the staging directory against the exact expected key set before burning it (only the attach token among them is sensitive). The guest's `omnifs-seed-mount.service` mounts it by label before `omnifs-frontend.service` and `omnifs-ssh-setup.service` source it via `EnvironmentFile=`/a plain read. A missing seed volume or config file fails both units loudly in the journal; neither hangs silently, and an omitted `OMNIFS_SSH_PUBKEY` leaves the guest's vsock ssh socket un-started (logged, not silent) rather than accepting into a guest with no `authorized_keys`. `scripts/guest-image/make-seed-iso.sh` is the standalone bash equivalent `just guest-image-smoke` (`scripts/guest-image/smoke.sh`) uses to boot the image under `libkrun` with a throwaway seed carrying an unreachable placeholder address (and no ssh key), checking the serial console log for the guest reaching `multi-user.target` and `omnifs-frontend.service` starting.
+Attach parameters (`OMNIFS_ATTACH_ADDR`, `OMNIFS_ATTACH_TOKEN`, `OMNIFS_READY_VSOCK_PORT`, `OMNIFS_SSH_PUBKEY`) reach the guest through a per-launch seed ISO, not cloud-init: `LibkrunRunner::launch` (`crates/omnifs-cli/src/libkrun_runner.rs`) builds an ISO9660+Joliet volume labeled `OMNIFS-SEED` with `hdiutil makehybrid`, auditing the staging directory against the exact expected key set before burning it (only the attach token among them is sensitive). The guest's `omnifs-seed-mount.service` mounts it by label before `omnifs-frontend.service` and `omnifs-ssh-setup.service` source it via `EnvironmentFile=`/a plain read. A missing seed volume or config file fails both units loudly in the journal; neither hangs silently, and an omitted `OMNIFS_SSH_PUBKEY` leaves the guest's vsock ssh socket un-started (logged, not silent) rather than accepting into a guest with no `authorized_keys`. `scripts/guest-image/make-seed-iso.sh` is the standalone bash equivalent `just guest-image-smoke` (`scripts/guest-image/smoke.sh`) uses to boot the image through `omnifs-libkrun` with a throwaway seed and no ssh key, checking the serial console log for the guest reaching `multi-user.target` and `omnifs-frontend.service` starting.
 
 The libkrun BOOT smoke (`just guest-image-smoke`) and the libkrun conformance lane are both local-only gates: GitHub-hosted runners cannot nest virtualization, so neither runs in CI. Run them yourself before landing a change that touches guest boot behavior, the seed protocol, or the libkrun runtime.
 
@@ -71,7 +73,7 @@ The CLI's libkrun runtime mirrors the frontend image's channel split (`resolve_g
 
 ### Libkrun conformance lane (local-only, never CI)
 
-`crates/omnifs-itest/tests/frontend_libkrun` runs the `fuse-libkrun` conformance column (the same shared row table and scorecard machinery `tests/frontend_docker` uses for the Docker-hosted frontend) against a live libkrun guest: `omnifs up --no-frontend`, `omnifs frontend enable fuse --runtime libkrun`, the matrix over ssh-over-vsock via `omnifs shell -- <cmd>`, then `omnifs down` with a teardown-cleanliness assertion (no leftover libkrun process, pidfile, or socket). Run it with `just libkrun-conformance` (builds the guest image first if missing, then sets `OMNIFS_ACCEPTANCE_LIVE=1` and runs the suite). Gated on `cfg(target_os = "macos")` plus the `OMNIFS_ACCEPTANCE_LIVE` opt-in, mirroring the live NFS lanes' skip-not-pass convention, and serialized against every other live-mount lane through this crate's one cross-process lock (`omnifs_itest::live::nfs_serial_lock`).
+`crates/omnifs-itest/tests/frontend_libkrun` runs the `fuse-libkrun` conformance column (the same shared row table and scorecard machinery `tests/frontend_docker` uses for the Docker-hosted frontend) against a live libkrun guest: `omnifs up --no-frontend`, `omnifs frontend enable fuse --runtime libkrun`, the matrix over ssh-over-vsock via `omnifs frontend shell fuse --runtime libkrun -- <cmd>`, then `omnifs down` with a teardown-cleanliness assertion (no leftover libkrun process, pidfile, or socket). It also asserts that the guest sees only loopback networking and no `tsi_hijack` kernel argument. Run it with `just libkrun-conformance`, which builds and stages the private helper runtime, builds the guest image first if missing, sets `OMNIFS_ACCEPTANCE_LIVE=1`, and runs the suite. Gated on `cfg(target_os = "macos")` plus the `OMNIFS_ACCEPTANCE_LIVE` opt-in, mirroring the live NFS lanes' skip-not-pass convention, and serialized against every other live-mount lane through this crate's one cross-process lock (`omnifs_itest::live::nfs_serial_lock`).
 
 This lane can **never** run in GitHub-hosted CI: libkrun boots a libkrun microVM, and GitHub's hosted macOS runners do not support nested virtualization. It stays a declared local-only gate a contributor runs by hand before a libkrun-affecting change, not a lane that silently skips in CI and reads green.
 
@@ -121,10 +123,16 @@ This lane can **never** run in GitHub-hosted CI: libkrun boots a libkrun microVM
 - `scripts/ci/promote-image.sh`
 - `scripts/ci/check-guest-image.sh`
 - `scripts/ci/promote-guest-image.sh`
+- `scripts/ci/build-libkrun-runtime.sh`
+- `scripts/ci/check-libkrun-runtime.sh`
+- `scripts/ci/check-darwin-arm64-payload.sh`
+- `scripts/ci/sign-darwin-arm64-payload.sh`
+- `scripts/ci/wait-for-notarization.sh`
 - `scripts/guest-image/build.sh`
 - `scripts/guest-image/mkosi/mkosi.profiles/dev/mkosi.conf`
 - `scripts/guest-image/mkosi/mkosi.profiles/release/mkosi.conf`
 - `crates/omnifs-cli/src/libkrun_runner.rs`
+- `crates/omnifs-libkrun/src`
 - `crates/omnifs-cli/src/guest_image_pull.rs`
 - `CONTRIBUTING.md`
 
@@ -139,6 +147,7 @@ This lane can **never** run in GitHub-hosted CI: libkrun boots a libkrun microVM
 - `just refresh`
 - `just schema`
 - `just docs-check`
+- `just libkrun-runtime` (macOS Apple Silicon only; stages the pinned private helper payload under `target/debug`)
 - `just libkrun-conformance` (macOS Apple Silicon only, local-only, never CI: see "Libkrun conformance lane" above)
 
 Live runtime path (the daemon runs host-native; only the frontend needs `docker exec`):
@@ -160,7 +169,7 @@ docker run --rm --entrypoint tail omnifs-frontend:dev --version | head -1
 docker run --rm omnifs-frontend:dev # fails loudly: OMNIFS_ATTACH_ADDR is unset
 ```
 
-Guest image, both `mkosi` profiles plus the libkrun boot smoke (local-only; `just guest-image-smoke` requires `libkrun` on `PATH`, and the libkrun conformance lane needs the same):
+Guest image, both `mkosi` profiles plus the libkrun boot smoke (local-only; `just guest-image-smoke` and the conformance lane build the private runtime through `just libkrun-runtime`):
 
 ```bash
 just guest-image
