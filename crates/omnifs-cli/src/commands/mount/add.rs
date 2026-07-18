@@ -73,7 +73,14 @@ impl AddArgs {
             output.yes(),
             output.no_input() || output.is_structured(),
         );
-        let outcome = crate::stages::configure_mount(self, workspace, &output, prompt).await?;
+        let outcome = crate::stages::configure_mount(
+            self,
+            workspace,
+            &output,
+            prompt,
+            crate::stages::ReceiptStyle::Full,
+        )
+        .await?;
         match outcome.status {
             crate::stages::MountInitStatus::Ready => {
                 // The single closing line (spec 3.3) depends on whether

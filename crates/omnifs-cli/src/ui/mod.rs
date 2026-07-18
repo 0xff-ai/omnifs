@@ -19,6 +19,7 @@ pub(crate) mod output;
 pub(crate) mod prompt;
 pub(crate) mod render;
 pub(crate) mod report;
+pub(crate) mod splash;
 pub(crate) mod style;
 pub(crate) mod table;
 

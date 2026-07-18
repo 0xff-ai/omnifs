@@ -463,13 +463,16 @@ impl Confirm {
 // ---------------------------------------------------------------------------
 
 /// One picker choice: `value` is what the caller gets back, `label` is what
-/// is drawn in the option row, and `detail` is the full-sentence description
+/// is drawn in the option row, `detail` is the full-sentence description
 /// shown in the panel below the list while the row is highlighted (empty for
-/// options with nothing more to say than their label).
+/// options with nothing more to say than their label), and `checked` is the
+/// initial checkbox state a [`MultiSelect`] draws it with ([`Select`] never
+/// reads this field: a single-select has no checkbox to initialize).
 struct SelectItem<T> {
     value: T,
     label: String,
     detail: Vec<String>,
+    checked: bool,
 }
 
 fn item_from_value<T: std::fmt::Display>(value: T) -> SelectItem<T> {
@@ -478,6 +481,7 @@ fn item_from_value<T: std::fmt::Display>(value: T) -> SelectItem<T> {
         value,
         label,
         detail: Vec::new(),
+        checked: false,
     }
 }
 
@@ -491,6 +495,7 @@ fn item_from_option<T>(value: T, label: String, hint: String) -> SelectItem<T> {
         value,
         label,
         detail,
+        checked: false,
     }
 }
 
@@ -628,6 +633,7 @@ impl<T: Clone + Eq + std::fmt::Display> Select<T> {
     /// Add explicit `(value, label, hint)` choices when a value's display text
     /// is not the right prompt label. `hint` becomes the detail-panel text
     /// shown while the option is highlighted.
+    #[allow(dead_code)] // no current single-select needs a bare hint over `detailed_options`'s full sentences
     pub(crate) fn options(mut self, items: impl IntoIterator<Item = (T, String, String)>) -> Self {
         self.items.extend(
             items
@@ -651,6 +657,7 @@ impl<T: Clone + Eq + std::fmt::Display> Select<T> {
                 value,
                 label,
                 detail,
+                checked: false,
             }));
         self
     }
@@ -761,14 +768,12 @@ fn multi_select_frame<T>(
 /// A multi-select prompt. Unlike [`Select`], its echo is always a ledger row
 /// (spec 2.6's `✓ services    github, dns` example), so `key` is required at
 /// construction rather than optional.
-#[allow(dead_code)] // wired up by a later slice (S3/S4) once a command needs it
 pub(crate) struct MultiSelect<T> {
     question: String,
     key: String,
     items: Vec<SelectItem<T>>,
 }
 
-#[allow(dead_code)] // wired up by a later slice (S3/S4) once a command needs it
 impl<T: Clone + Eq + std::fmt::Display> MultiSelect<T> {
     pub(crate) fn new(question: impl Into<String>, key: impl Into<String>) -> Self {
         Self {
@@ -778,16 +783,41 @@ impl<T: Clone + Eq + std::fmt::Display> MultiSelect<T> {
         }
     }
 
+    #[allow(dead_code)] // symmetric with `Select::items`; no current caller needs a bare-value multi-select
     pub(crate) fn items(mut self, items: impl IntoIterator<Item = T>) -> Self {
         self.items.extend(items.into_iter().map(item_from_value));
         self
     }
 
+    #[allow(dead_code)] // symmetric with `Select::options`; current callers need per-item defaults, so they use `detailed_options`
     pub(crate) fn options(mut self, items: impl IntoIterator<Item = (T, String, String)>) -> Self {
         self.items.extend(
             items
                 .into_iter()
                 .map(|(value, label, hint)| item_from_option(value, label, hint)),
+        );
+        self
+    }
+
+    /// Add `(value, label, detail, checked)` choices: `detail` is the panel's
+    /// full-sentence description (spec 2.6's provider consent panel and the
+    /// frontend education copy both need several complete sentences, never a
+    /// single truncated hint), and `checked` is the option's initial state
+    /// (spec 3.2's frontend picker starts with the platform's recommended
+    /// default already checked, not empty).
+    pub(crate) fn detailed_options(
+        mut self,
+        items: impl IntoIterator<Item = (T, String, Vec<String>, bool)>,
+    ) -> Self {
+        self.items.extend(
+            items
+                .into_iter()
+                .map(|(value, label, detail, checked)| SelectItem {
+                    value,
+                    label,
+                    detail,
+                    checked,
+                }),
         );
         self
     }
@@ -815,7 +845,7 @@ impl<T: Clone + Eq + std::fmt::Display> MultiSelect<T> {
         let resolution = run_prompt_loop(
             MultiSelectState {
                 cursor: 0,
-                checked: vec![false; len],
+                checked: items.iter().map(|item| item.checked).collect(),
             },
             |state| multi_select_frame(&hint_line, &items, state, stream),
             map_picker_key,
@@ -824,23 +854,7 @@ impl<T: Clone + Eq + std::fmt::Display> MultiSelect<T> {
         .map_err(prompt_error)?;
         match resolution {
             Resolution::Resolved(state) => {
-                let chosen: Vec<T> = items
-                    .iter()
-                    .zip(&state.checked)
-                    .filter(|(_, checked)| **checked)
-                    .map(|(item, _)| item.value.clone())
-                    .collect();
-                let labels: Vec<&str> = items
-                    .iter()
-                    .zip(&state.checked)
-                    .filter(|(_, checked)| **checked)
-                    .map(|(item, _)| item.label.as_str())
-                    .collect();
-                let value = if labels.is_empty() {
-                    "none".to_owned()
-                } else {
-                    labels.join(", ")
-                };
+                let (chosen, value) = multi_select_echo(&items, &state.checked);
                 output.row(&Row::new(Glyph::Done, key, value));
                 Ok(chosen)
             },
@@ -850,6 +864,30 @@ impl<T: Clone + Eq + std::fmt::Display> MultiSelect<T> {
             },
         }
     }
+}
+
+/// The resolved chosen values and the ledger-row echo text (spec 2.6's
+/// `✓ services    github, dns` example, or `none` for an empty selection).
+/// Pure so the echo shape is testable without a terminal loop.
+fn multi_select_echo<T: Clone>(items: &[SelectItem<T>], checked: &[bool]) -> (Vec<T>, String) {
+    let chosen: Vec<T> = items
+        .iter()
+        .zip(checked)
+        .filter(|(_, checked)| **checked)
+        .map(|(item, _)| item.value.clone())
+        .collect();
+    let labels: Vec<&str> = items
+        .iter()
+        .zip(checked)
+        .filter(|(_, checked)| **checked)
+        .map(|(item, _)| item.label.as_str())
+        .collect();
+    let value = if labels.is_empty() {
+        "none".to_owned()
+    } else {
+        labels.join(", ")
+    };
+    (chosen, value)
 }
 
 #[cfg(test)]
@@ -1151,5 +1189,50 @@ mod tests {
 
     fn strip_ansi_local(text: &str) -> String {
         crate::ui::strip_ansi(text)
+    }
+
+    #[test]
+    fn multi_select_echo_joins_checked_labels_or_reports_none() {
+        let items = vec![
+            item_from_value("github".to_owned()),
+            item_from_value("dns".to_owned()),
+        ];
+        let (chosen, value) = multi_select_echo(&items, &[true, true]);
+        assert_eq!(chosen, vec!["github".to_owned(), "dns".to_owned()]);
+        assert_eq!(value, "github, dns");
+
+        let (chosen, value) = multi_select_echo(&items, &[true, false]);
+        assert_eq!(chosen, vec!["github".to_owned()]);
+        assert_eq!(value, "github");
+
+        let (chosen, value) = multi_select_echo(&items, &[false, false]);
+        assert!(chosen.is_empty());
+        assert_eq!(value, "none");
+    }
+
+    #[test]
+    fn multi_select_detailed_options_carries_the_initial_checked_state() {
+        let multi = MultiSelect::new("Which frontends?", "frontends").detailed_options([
+            (
+                "nfs-host".to_owned(),
+                "nfs (host)".to_owned(),
+                vec!["Native mount, nothing to install.".to_owned()],
+                true,
+            ),
+            (
+                "fuse-docker".to_owned(),
+                "fuse (docker)".to_owned(),
+                vec!["FUSE in a container, for containerized workflows.".to_owned()],
+                false,
+            ),
+        ]);
+        assert_eq!(
+            multi
+                .items
+                .iter()
+                .map(|item| item.checked)
+                .collect::<Vec<_>>(),
+            vec![true, false]
+        );
     }
 }

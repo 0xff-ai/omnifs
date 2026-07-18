@@ -371,6 +371,10 @@ impl Output {
         self.no_input
     }
 
+    pub(crate) const fn quiet(&self) -> bool {
+        self.quiet
+    }
+
     pub(crate) const fn yes(&self) -> bool {
         self.yes
     }
@@ -399,6 +403,17 @@ impl Output {
 
     pub(crate) fn note(&self, line: impl std::fmt::Display) {
         self.narrate(line);
+    }
+
+    /// A bold section heading line (spec 2.1's numbered step headings, e.g.
+    /// `1. Services`): plain bold, never the accent color, so it reads as
+    /// structure rather than something the user can type. Human-only; quiet
+    /// suppresses it like every other narration line.
+    pub(crate) fn heading(&self, text: impl Into<String>) {
+        if self.mode == OutputMode::Human && !self.quiet {
+            let caps = stderr_capabilities(self.quiet);
+            crate::ui::eprint_raw(&format!("{}\n", super::render::heading(&text.into(), caps)));
+        }
     }
 
     /// The durable echo a prompt leaves behind once it resolves: the question

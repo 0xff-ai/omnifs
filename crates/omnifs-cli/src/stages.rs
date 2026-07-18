@@ -41,6 +41,20 @@ pub(crate) struct MountInitPlan {
     spec: Spec,
 }
 
+/// How much a per-mount receipt says (spec 3.2 vs 3.3). Exactly two honest
+/// callers need different verbosity from the same mount-creation path:
+/// `mount add`'s [`Full`](ReceiptStyle::Full) receipt names every settled
+/// fact including the provider artifact retained in the store, while `omnifs
+/// setup`'s [`Compact`](ReceiptStyle::Compact) receipt drops that row (the
+/// provider already appeared in the services multi-select moments earlier)
+/// and annotates a mount needing no authentication inline instead of relying
+/// on the reader to infer it from the absence of a `signed in` row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReceiptStyle {
+    Full,
+    Compact,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct PromptMode {
     pub(crate) interactive: bool,
@@ -90,19 +104,19 @@ pub(crate) async fn configure_mount(
     workspace: &Workspace,
     output: &crate::ui::output::Output,
     prompt: PromptMode,
+    receipt_style: ReceiptStyle,
 ) -> anyhow::Result<MountInitOutcome> {
-    let mut plan = spec_creation(&args, workspace, output, prompt)?;
-    let status = plan.authenticate(&args, workspace, output, prompt).await?;
+    let mut plan = spec_creation(&args, workspace, output, prompt, receipt_style)?;
+    let status = plan
+        .authenticate(&args, workspace, output, prompt, receipt_style)
+        .await?;
     persist_mount_spec(workspace, &plan, output)?;
 
     if status == MountInitStatus::SignInDeclined {
         output.row(&crate::ui::report::Row::new(
             crate::ui::style::Glyph::Skip,
             "sign in",
-            format!(
-                "skipped; run `omnifs mount reauth {}` later",
-                plan.mount_name
-            ),
+            sign_in_declined_value(&plan.mount_name),
         ));
     }
 
@@ -132,6 +146,7 @@ pub(crate) fn spec_creation(
     workspace: &Workspace,
     output: &crate::ui::output::Output,
     prompt: PromptMode,
+    receipt_style: ReceiptStyle,
 ) -> anyhow::Result<MountInitPlan> {
     let interactive = init_interactive(prompt);
     let mounts = crate::mount_config::load_mounts(workspace)?;
@@ -198,27 +213,11 @@ pub(crate) fn spec_creation(
             "mount `{mount_name}` already exists; remove it first or choose a different name"
         );
     }
-    // Receipt rows for the two facts already true at this point: the
-    // provider artifact is retained in the store (`ProviderResolver::resolve`
-    // above either found it there or just retained it), and the mount name is
-    // validated and free. The remaining work below (auth, then the actual
-    // spec write in `persist_mount_spec`) either fills in these two rows'
-    // consequences or fails outright, so nothing here overclaims (spec 3.3).
-    let provider_identity = reference.meta.version.as_ref().map_or_else(
-        || provider_name.clone(),
-        |version| format!("{provider_name}@{version}"),
-    );
-    output.row(&crate::ui::report::Row::new(
-        crate::ui::style::Glyph::Done,
-        "provider",
-        format!("{provider_identity} retained"),
-    ));
-    output.row(&crate::ui::report::Row::new(
-        crate::ui::style::Glyph::Done,
-        "mount",
-        format!("/{mount_name} created"),
-    ));
-
+    // Auth is resolved before either receipt row prints, not just before
+    // `authenticate` runs, because the compact receipt (spec 3.2) folds
+    // whether this provider needs a sign-in step into the `mount` row's
+    // value itself (`no sign-in needed`) rather than relying on the reader
+    // to infer it from the absence of a later `signed in` row.
     let auth_manifest = manifest
         .auth
         .as_ref()
@@ -230,9 +229,36 @@ pub(crate) fn spec_creation(
         &manifest,
         auth_manifest.as_ref(),
     )?;
-    // Resolve auth first: an ambient credential (imported under --yes or on the
-    // interactive prompt) promotes an OAuth default to a static token, which lets
-    // a `--no-input` run of an OAuth-default provider complete headlessly. The
+
+    // Receipt rows for the two facts already true at this point: the
+    // provider artifact is retained in the store (`ProviderResolver::resolve`
+    // above either found it there or just retained it), and the mount name is
+    // validated and free. The remaining work below (auth, then the actual
+    // spec write in `persist_mount_spec`) either fills in these two rows'
+    // consequences or fails outright, so nothing here overclaims (spec 3.3).
+    // The compact style (setup) drops the `provider` row: the provider
+    // already appeared in the services multi-select moments earlier, so
+    // repeating its retained-artifact fact here would be noise.
+    if receipt_style == ReceiptStyle::Full {
+        let provider_identity = reference.meta.version.as_ref().map_or_else(
+            || provider_name.clone(),
+            |version| format!("{provider_name}@{version}"),
+        );
+        output.row(&crate::ui::report::Row::new(
+            crate::ui::style::Glyph::Done,
+            "provider",
+            format!("{provider_identity} retained"),
+        ));
+    }
+    output.row(&crate::ui::report::Row::new(
+        crate::ui::style::Glyph::Done,
+        "mount",
+        mount_created_value(&mount_name, receipt_style, default_auth.is_none()),
+    ));
+
+    // An ambient credential (imported under --yes or on the interactive
+    // prompt) promotes an OAuth default to a static token, which lets a
+    // `--no-input` run of an OAuth-default provider complete headlessly. The
     // OAuth bail only fires when nothing was imported.
     let import_outcome = AuthImportDecision::new(
         default_auth,
@@ -292,8 +318,16 @@ impl MountInitPlan {
         workspace: &Workspace,
         output: &crate::ui::output::Output,
         prompt: PromptMode,
+        receipt_style: ReceiptStyle,
     ) -> anyhow::Result<MountInitStatus> {
-        crate::commands::mount::render_consent_block(output, &self.manifest);
+        // The compact receipt (setup) skips the description/needs/limits
+        // lines: the services multi-select's detail panel already showed the
+        // same consent facts (`capability.rs::consent_detail`) moments
+        // earlier, so repeating them here would be noise rather than new
+        // information.
+        if receipt_style == ReceiptStyle::Full {
+            crate::commands::mount::render_consent_block(output, &self.manifest);
+        }
         let plan = self;
         let Some(auth) = plan.effective_auth.as_ref() else {
             return Ok(MountInitStatus::Ready);
@@ -391,6 +425,29 @@ impl MountInitPlan {
     }
 }
 
+/// The `mount` receipt row's value (spec 3.2/3.3): `/<name> created`, plus a
+/// `(no sign-in needed)` annotation only for the compact style when the
+/// provider has no default auth at all. Pure so the exact wording is
+/// testable without a workspace.
+fn mount_created_value(
+    mount_name: &MountName,
+    receipt_style: ReceiptStyle,
+    no_auth_needed: bool,
+) -> String {
+    if receipt_style == ReceiptStyle::Compact && no_auth_needed {
+        format!("/{mount_name} created  (no sign-in needed)")
+    } else {
+        format!("/{mount_name} created")
+    }
+}
+
+/// The `sign in` skip row's value (spec 3.2) when interactive sign-in is
+/// declined: names the exact recovery command rather than just "skipped".
+/// Pure so the wording is testable without a workspace.
+fn sign_in_declined_value(mount_name: &MountName) -> String {
+    format!("skipped; run `omnifs mount reauth {mount_name}` later")
+}
+
 pub(crate) fn parse_wait_duration(raw: &str) -> anyhow::Result<Duration> {
     let Some(value) = raw.strip_suffix('s') else {
         anyhow::bail!("duration `{raw}` must use seconds, for example 30s");
@@ -465,7 +522,39 @@ fn parse_json_flag<T: DeserializeOwned>(flag: &'static str, raw: &str) -> anyhow
 
 #[cfg(test)]
 mod tests {
-    use super::PromptMode;
+    use super::{MountName, PromptMode, ReceiptStyle, mount_created_value, sign_in_declined_value};
+
+    #[test]
+    fn mount_created_value_is_plain_for_full_receipts_even_without_auth() {
+        let name = MountName::try_from("dns").unwrap();
+        assert_eq!(
+            mount_created_value(&name, ReceiptStyle::Full, true),
+            "/dns created"
+        );
+    }
+
+    #[test]
+    fn mount_created_value_annotates_no_sign_in_needed_only_for_compact_without_auth() {
+        let name = MountName::try_from("dns").unwrap();
+        assert_eq!(
+            mount_created_value(&name, ReceiptStyle::Compact, true),
+            "/dns created  (no sign-in needed)"
+        );
+        let name = MountName::try_from("github").unwrap();
+        assert_eq!(
+            mount_created_value(&name, ReceiptStyle::Compact, false),
+            "/github created"
+        );
+    }
+
+    #[test]
+    fn sign_in_declined_value_names_the_exact_reauth_command() {
+        let name = MountName::try_from("github").unwrap();
+        assert_eq!(
+            sign_in_declined_value(&name),
+            "skipped; run `omnifs mount reauth github` later"
+        );
+    }
 
     fn mode(interactive: bool, yes: bool, no_input: bool) -> PromptMode {
         PromptMode {
