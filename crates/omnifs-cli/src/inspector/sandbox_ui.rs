@@ -15,10 +15,13 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
 };
 
-use super::app::App;
-use super::format;
+use omnifs_api::events::InspectorOutcome;
+
+use super::app::{App, SandboxMode};
+use super::format::{self, StageCell};
 use super::metrics::{MountWindow, render_sparkline};
 use super::sandbox::{self, MountSandbox, PortId};
+use super::trace_state::{Operation, OperationStatus, Stage, StageKind};
 use super::ui;
 
 /// 12-bucket sparkline per port row, matching the activity view's
@@ -36,6 +39,9 @@ const BOX_WIDTH: u16 = 28;
 const BOX_INTERIOR_LINES: u16 = 5;
 /// Widest dashed port label ("list-children" / "git-open-repo").
 const LABEL_WIDTH: usize = 14;
+/// Theater box interior lines: "<state at cursor>", "stage N/M". Fixed
+/// so the pad-top math never has to cast a `Vec` length into `u16`.
+const THEATER_BOX_INTERIOR_LINES: u16 = 2;
 
 pub fn render(frame: &mut Frame, app: &App, area: Rect) {
     let chunks = Layout::vertical([Constraint::Length(3), Constraint::Min(6)]).split(area);
@@ -44,6 +50,21 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_body(frame: &mut Frame, app: &App, area: Rect) {
+    match app.sandbox_mode {
+        SandboxMode::Map => render_map_body(frame, app, area),
+        SandboxMode::Theater => match app.theater_operation() {
+            Some(op) => render_theater_body(frame, app, area, op),
+            // The trace this theater was playing was evicted from the
+            // fold since the last key/apply reconciled state; fall
+            // back to the map for this one frame rather than indexing
+            // a trace that no longer exists. `App::sync_theater`
+            // flips `sandbox_mode` itself on the next mutation.
+            None => render_map_body(frame, app, area),
+        },
+    }
+}
+
+fn render_map_body(frame: &mut Frame, app: &App, area: Rect) {
     let Some(mount) = app.sandbox_active_mount() else {
         render_empty_state(frame, app, area);
         return;
@@ -62,6 +83,346 @@ fn render_body(frame: &mut Frame, app: &App, area: Rect) {
     render_rails(frame, app, chunks[1], &mount, sandbox);
     render_pinned_footer(frame, app, chunks[2], sandbox);
     render_scrub_bar(frame, app, chunks[3]);
+}
+
+// ---------------------------------------------------------------------
+// Trace theater: `t` plays one trace's journey across the same
+// rail/box geometry as the map, stepping stage by stage instead of
+// showing aggregate port stats. Every helper below reads through the
+// `Operation` the caller already resolved, rather than re-deriving it,
+// and through `App`'s view accessors for palette/clock, so pausing and
+// scrubbing the global timeline still compose with the theater.
+// ---------------------------------------------------------------------
+
+fn render_theater_body(frame: &mut Frame, app: &App, area: Rect, op: &Operation) {
+    let chunks = Layout::vertical([
+        Constraint::Length(1), // trace headline
+        Constraint::Min(5),    // rails + box, trace-local
+        Constraint::Length(1), // stage timeline strip
+        Constraint::Length(1), // neighboring-traces strip
+    ])
+    .split(area);
+
+    render_theater_headline(frame, app, chunks[0], op);
+    render_theater_map(frame, app, chunks[1], op);
+    render_theater_timeline(frame, chunks[2], op, app.stage_cursor);
+    render_theater_trace_strip(frame, app, chunks[3], op);
+}
+
+/// Trace id, mount, fuse op, path, "step N/M", and outcome-or-running.
+fn render_theater_headline(frame: &mut Frame, app: &App, area: Rect, op: &Operation) {
+    let color = app.palette().peek(&op.mount).unwrap_or(Color::White);
+    let stage_count = op.stages.len().max(1);
+    let cursor = app.stage_cursor.clamp(1, stage_count);
+    let path_budget = (area.width as usize).saturating_sub(36).max(8);
+    let (outcome_text, outcome_color) = match op.status {
+        OperationStatus::Running => ("running".to_string(), Color::LightYellow),
+        OperationStatus::Ok => (
+            op.outcome
+                .map_or_else(|| "ok".to_string(), |o| o.to_string()),
+            Color::LightGreen,
+        ),
+        OperationStatus::Error => (
+            op.outcome
+                .map_or_else(|| "error".to_string(), |o| o.to_string()),
+            Color::LightRed,
+        ),
+    };
+    let line = Line::from(vec![
+        Span::styled(
+            format!("  #{} ", op.trace_id),
+            Style::default().fg(Color::White),
+        ),
+        Span::styled(
+            format!("{} ", op.mount),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(format!("{} ", op.fuse_op)),
+        Span::styled(
+            format::shorten_path(&op.path, path_budget),
+            Style::default().fg(Color::White),
+        ),
+        Span::raw(format!("   step {cursor}/{stage_count}   ")),
+        Span::styled(
+            outcome_text,
+            Style::default()
+                .fg(outcome_color)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]);
+    frame.render_widget(Paragraph::new(line), area);
+}
+
+/// The rail/box region, populated from this one operation's story
+/// instead of the mount's aggregate port stats.
+fn render_theater_map(frame: &mut Frame, app: &App, area: Rect, op: &Operation) {
+    let sandbox = app.mount_sandbox(&op.mount);
+    let exports = sandbox::export_port_ids(sandbox);
+    let callouts: Vec<(usize, &Stage)> = op
+        .stages
+        .iter()
+        .enumerate()
+        .filter(|(_, stage)| matches!(stage.kind, StageKind::Callout(_)))
+        .collect();
+
+    if area.width < STACK_WIDTH {
+        let export_h = u16::try_from(exports.len()).unwrap_or(u16::MAX);
+        let callout_h = u16::try_from(callouts.len()).unwrap_or(u16::MAX);
+        let chunks = Layout::vertical([
+            Constraint::Length(export_h),
+            Constraint::Length(BOX_INTERIOR_LINES + 2),
+            Constraint::Length(callout_h),
+        ])
+        .split(area);
+        render_theater_export_rail(frame, chunks[0], op, &exports);
+        render_theater_box(frame, app, chunks[1], op);
+        render_theater_callout_rail(frame, app, chunks[2], &callouts);
+        return;
+    }
+
+    let col_width = area.width.saturating_sub(BOX_WIDTH) / 2;
+    let chunks = Layout::horizontal([
+        Constraint::Length(col_width),
+        Constraint::Length(BOX_WIDTH),
+        Constraint::Min(0),
+    ])
+    .split(area);
+    render_theater_export_rail(frame, chunks[0], op, &exports);
+    render_theater_box(frame, app, chunks[1], op);
+    render_theater_callout_rail(frame, app, chunks[2], &callouts);
+}
+
+/// Left rail: every export port for this trace's mount, dim by
+/// default; the one method this operation actually dispatched to is
+/// highlighted with the operation's path and its provider stage's
+/// current state. Other ports render dim, name only, since they have
+/// nothing to do with this trace's story.
+fn render_theater_export_rail(frame: &mut Frame, area: Rect, op: &Operation, exports: &[PortId]) {
+    let lines: Vec<Line<'static>> = exports
+        .iter()
+        .map(|port| {
+            let PortId::Export(method) = port else {
+                unreachable!("export_port_ids only ever yields Export rows")
+            };
+            if op.provider_method.as_deref() == Some(method.as_str()) {
+                theater_active_export_line(op, method)
+            } else {
+                Line::styled(
+                    format!("{:<LABEL_WIDTH$}", dashed(method)),
+                    Style::default().fg(Color::DarkGray),
+                )
+            }
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+fn theater_active_export_line(op: &Operation, method: &str) -> Line<'static> {
+    let stage = op
+        .stages
+        .iter()
+        .find(|stage| matches!(&stage.kind, StageKind::Provider(m) if m == method));
+    let detail = match stage {
+        Some(stage) if stage.in_flight => "in flight".to_string(),
+        Some(stage) => stage
+            .elapsed_us
+            .map_or_else(|| "completed".to_string(), format::format_latency_us),
+        None => String::new(),
+    };
+    Line::from(vec![
+        Span::styled(
+            format!("{:<LABEL_WIDTH$}", dashed(method)),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled(
+            format::shorten_path(&op.path, 24),
+            Style::default().fg(Color::White),
+        ),
+        Span::raw("  "),
+        Span::styled(detail, Style::default().fg(Color::LightGreen)),
+    ])
+}
+
+/// Right rail: one row per callout this operation opened, in order,
+/// marked completed / current / future relative to `app.stage_cursor`.
+/// Cache, subtree, and clone stages never appear here: they aren't
+/// imports, so they only show up in the timeline strip below.
+fn render_theater_callout_rail(
+    frame: &mut Frame,
+    app: &App,
+    area: Rect,
+    callouts: &[(usize, &Stage)],
+) {
+    let cursor = app.stage_cursor;
+    let lines: Vec<Line<'static>> = callouts
+        .iter()
+        .map(|(idx, stage)| {
+            // `detail` already carries "<kind> <summary>" (see
+            // `TraceReducer::on_callout_start`); reuse the generic
+            // truncator rather than re-deriving a shorter label.
+            let label = format::shorten_path(&stage.detail, 28);
+            Line::styled(label, theater_stage_style(idx + 1, cursor, stage.outcome))
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+/// Bordered like the map's box (mount palette color, provider title),
+/// but its interior shows the trace-local state at `app.stage_cursor`
+/// instead of aggregate mount stats.
+fn render_theater_box(frame: &mut Frame, app: &App, area: Rect, op: &Operation) {
+    let color = app.palette().peek(&op.mount).unwrap_or(Color::White);
+    let title = op
+        .provider_name
+        .clone()
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| op.mount.clone());
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(color))
+        .title(format!(" {title} "));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let stage_count = op.stages.len().max(1);
+    let cursor = app.stage_cursor.clamp(1, stage_count);
+    let state_line = theater_stage_state_line(op.stages.get(cursor - 1));
+
+    let content = vec![
+        Line::styled(state_line, Style::default().fg(color)),
+        Line::styled(
+            format!("stage {cursor}/{stage_count}"),
+            Style::default().fg(Color::DarkGray),
+        ),
+    ];
+    let pad_top = inner.height.saturating_sub(THEATER_BOX_INTERIOR_LINES) / 2;
+    let mut lines = Vec::with_capacity(inner.height as usize);
+    for _ in 0..pad_top {
+        lines.push(Line::raw(""));
+    }
+    lines.extend(content);
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// "suspended on callout N" / "executing <method>" while the current
+/// stage is still open; "completed <outcome>" once it's closed.
+fn theater_stage_state_line(stage: Option<&Stage>) -> String {
+    let Some(stage) = stage else {
+        return "…".to_string();
+    };
+    if stage.in_flight {
+        return match &stage.kind {
+            StageKind::Callout(idx) => format!("suspended on callout {idx}"),
+            StageKind::Provider(method) => format!("executing {}", dashed(method)),
+            _ => "in flight".to_string(),
+        };
+    }
+    let outcome = stage
+        .outcome
+        .map_or_else(|| "…".to_string(), |o| o.to_string());
+    format!("completed {outcome}")
+}
+
+/// Shared completed/current/future styling for one stage's 1-based
+/// `position` in `op.stages`, relative to the theater's `cursor`. Used
+/// by both the callout rail and the timeline strip so the tri-state
+/// coloring rule only lives in one place.
+fn theater_stage_style(position: usize, cursor: usize, outcome: Option<InspectorOutcome>) -> Style {
+    match position.cmp(&cursor) {
+        std::cmp::Ordering::Less => {
+            let color = match outcome {
+                Some(o) if o != InspectorOutcome::Ok => Color::LightRed,
+                _ => Color::LightGreen,
+            };
+            Style::default().fg(color)
+        },
+        std::cmp::Ordering::Equal => Style::default()
+            .fg(Color::White)
+            .bg(ui::CURSOR_BG)
+            .add_modifier(Modifier::BOLD),
+        std::cmp::Ordering::Greater => Style::default().fg(Color::DarkGray),
+    }
+}
+
+fn render_theater_timeline(frame: &mut Frame, area: Rect, op: &Operation, stage_cursor: usize) {
+    frame.render_widget(
+        Paragraph::new(theater_timeline_line(op, stage_cursor)),
+        area,
+    );
+}
+
+/// Pure builder for the stage timeline strip: "glyph label" tokens
+/// (the same glyphs the activity view's operations log uses, via
+/// [`StageCell`]) joined with spaces, styled completed / current /
+/// future relative to `stage_cursor`. Split out from the render call
+/// so the highlighting math is unit-testable without a live frame.
+fn theater_timeline_line(op: &Operation, stage_cursor: usize) -> Line<'static> {
+    let cursor = stage_cursor.clamp(1, op.stages.len().max(1));
+    let mut spans = Vec::with_capacity(op.stages.len().saturating_mul(2));
+    for (idx, stage) in op.stages.iter().enumerate() {
+        if idx > 0 {
+            spans.push(Span::raw(" "));
+        }
+        let cell = StageCell::for_stage(stage);
+        let token = format!("{} {}", cell.glyph, stage.kind.display_label());
+        spans.push(Span::styled(
+            token,
+            theater_stage_style(idx + 1, cursor, stage.outcome),
+        ));
+    }
+    Line::from(spans)
+}
+
+/// Up to a handful of neighboring visible traces around the one the
+/// theater is playing, so `j`/`k` has visible feedback.
+const TRACE_STRIP_NEIGHBORS: usize = 2;
+
+fn render_theater_trace_strip(frame: &mut Frame, app: &App, area: Rect, op: &Operation) {
+    let visible = app.visible_trace_ids();
+    let Some(position) = visible.iter().position(|id| *id == op.trace_id) else {
+        frame.render_widget(Paragraph::new(Line::raw("")), area);
+        return;
+    };
+    let start = position.saturating_sub(TRACE_STRIP_NEIGHBORS);
+    let end = (position + TRACE_STRIP_NEIGHBORS + 1).min(visible.len());
+
+    let mut spans = vec![Span::styled(
+        "  traces  ",
+        Style::default().fg(Color::DarkGray),
+    )];
+    for id in &visible[start..end] {
+        let Some(other) = app.operation(*id) else {
+            continue;
+        };
+        if spans.len() > 1 {
+            spans.push(Span::raw("  "));
+        }
+        let outcome = match other.status {
+            OperationStatus::Running => "…".to_string(),
+            _ => other
+                .outcome
+                .map_or_else(|| "…".to_string(), |o| o.to_string()),
+        };
+        let label = format!(
+            "#{} {} {} {outcome}",
+            other.trace_id,
+            other.fuse_op,
+            format::shorten_path(&other.path, 18)
+        );
+        let style = if *id == op.trace_id {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::White)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        spans.push(Span::styled(label, style));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn render_empty_state(frame: &mut Frame, app: &App, area: Rect) {
@@ -623,6 +984,39 @@ mod tests {
         )
     }
 
+    fn callout_start(trace_id: TraceId, mono_us: u64, callout_index: u32) -> InspectorRecord {
+        record(
+            trace_id,
+            mono_us,
+            InspectorEvent::CalloutStart {
+                operation_id: trace_id,
+                callout_index,
+                kind: omnifs_api::events::CalloutKind::Fetch,
+                summary: "GET example.test".into(),
+            },
+        )
+    }
+
+    fn callout_end(
+        trace_id: TraceId,
+        mono_us: u64,
+        callout_index: u32,
+        elapsed_us: u64,
+    ) -> InspectorRecord {
+        record(
+            trace_id,
+            mono_us,
+            InspectorEvent::CalloutEnd {
+                operation_id: trace_id,
+                callout_index,
+                end: omnifs_api::events::OpEnd {
+                    elapsed_us,
+                    result: omnifs_api::events::OutcomeFields::ok(),
+                },
+            },
+        )
+    }
+
     #[test]
     fn traced_port_with_open_call_renders_hot_wire_and_lifetime_count() {
         let mut app = App::new(ConnectionMode::Replay, "test", None);
@@ -680,5 +1074,43 @@ mod tests {
         // Degenerate range (nothing retained yet, or now hasn't moved
         // past oldest): never divide by zero or go negative.
         assert!((scrub_fraction(50, 50, 25) - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn theater_timeline_marks_completed_current_and_future_stages() {
+        let mut app = App::new(ConnectionMode::Replay, "test", None);
+        app.apply_record(record(
+            1,
+            10,
+            InspectorEvent::FuseStart {
+                op: "lookup".into(),
+                mount: "github".into(),
+                path: "/a".into(),
+            },
+        ));
+        app.apply_record(provider_start(1, 20, "github", "lookup_child"));
+        app.apply_record(callout_start(1, 30, 0));
+        app.apply_record(callout_end(1, 40, 0, 1_200));
+
+        let op = app.operation(1).expect("trace");
+        assert_eq!(op.stages.len(), 3, "fuse, provider, callout stages");
+
+        // Cursor at stage 2 (the still-open provider stage).
+        let line = theater_timeline_line(op, 2);
+        assert_eq!(line.spans.len(), 5, "3 tokens joined by 2 separators");
+
+        // Stage 1 (fuse): before the cursor, completed, green.
+        assert_eq!(line.spans[0].style.fg, Some(Color::LightGreen));
+        assert!(line.spans[0].content.contains("fuse.lookup"));
+
+        // Stage 2 (provider): at the cursor, bold and highlighted.
+        assert_eq!(line.spans[2].style.fg, Some(Color::White));
+        assert_eq!(line.spans[2].style.bg, Some(ui::CURSOR_BG));
+        assert!(line.spans[2].style.add_modifier.contains(Modifier::BOLD));
+        assert!(line.spans[2].content.contains("provider.lookup_child"));
+
+        // Stage 3 (callout): after the cursor, future, dim.
+        assert_eq!(line.spans[4].style.fg, Some(Color::DarkGray));
+        assert!(line.spans[4].content.contains("callout.0"));
     }
 }

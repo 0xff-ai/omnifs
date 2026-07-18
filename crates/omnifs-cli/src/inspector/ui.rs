@@ -10,11 +10,11 @@ use ratatui::{
 
 use omnifs_api::events::InspectorOutcome;
 
-use super::app::{App, AppView, ConnectionMode, PaneFocus};
+use super::app::{App, AppView, ConnectionMode, PaneFocus, SandboxMode};
 use super::filter::FilterMode;
-use super::format;
+use super::format::{self, StageCell};
 use super::metrics::{MountWindow, render_sparkline};
-use super::trace_state::{Operation, OperationStatus, Stage, StageKind};
+use super::trace_state::{Operation, OperationStatus, Stage};
 use super::tree::{ACTIVE_FOCUS_WINDOW_US, NodeStatus, RenderRow};
 
 // Shared with `sandbox_ui`: both full-screen views highlight a cursor
@@ -103,8 +103,11 @@ pub(super) fn render_header(frame: &mut Frame, app: &App, area: Rect) {
         AppView::Activity => {
             " q quit  v view  tab focus  ↑/↓ navigate  ↵ collapse  space pause  e errors  i idle  / filter  r reset "
         },
-        AppView::Sandbox => {
-            " q quit  v view  ↑/↓ port  ↵ pin  m mount  space pause  ←/→ step  g live "
+        AppView::Sandbox => match app.sandbox_mode {
+            SandboxMode::Map => {
+                " q quit  v view  ↑/↓ port  ↵ pin  m mount  t theater  space pause  ←/→ step  g live "
+            },
+            SandboxMode::Theater => " q quit  v view  esc map  ←/→ step  j/k trace  space pause ",
         },
     };
     let block = Block::default()
@@ -451,65 +454,6 @@ impl OperationBlockView<'_> {
 struct StageView<'a> {
     stage: &'a Stage,
     width: usize,
-}
-
-/// Visual cell of a `StageView`: indent, glyph, glyph color, and the
-/// formatted display string for the stage's left half. Selected by
-/// pattern-matching on `Stage::kind` so the mapping is exhaustive
-/// and the renderer doesn't string-parse the label per frame.
-struct StageCell {
-    indent: &'static str,
-    glyph: &'static str,
-    glyph_color: Color,
-    display: String,
-}
-
-impl StageCell {
-    /// Pick the visual cell for a stage based on its kind.
-    fn for_stage(stage: &Stage) -> Self {
-        match &stage.kind {
-            StageKind::Provider(method) => Self {
-                indent: "  ",
-                glyph: "▸",
-                glyph_color: Color::LightCyan,
-                display: method.clone(),
-            },
-            StageKind::Callout(_) => Self {
-                indent: "    ",
-                glyph: "◇",
-                glyph_color: Color::LightYellow,
-                display: stage.detail.clone(),
-            },
-            // Keep the `cache.<kind>` prefix in the visible text so
-            // a row like `◐ cache.browse_hit /github/...` reads
-            // unambiguously without relying on the user knowing what
-            // the ◐ glyph means.
-            StageKind::Cache(_) => Self {
-                indent: "  ",
-                glyph: "◐",
-                glyph_color: Color::LightGreen,
-                display: format!("{} {}", stage.kind.display_label(), stage.detail),
-            },
-            StageKind::SubtreeStart | StageKind::SubtreeEnd => Self {
-                indent: "  ",
-                glyph: "▸",
-                glyph_color: Color::Magenta,
-                display: format!("{} {}", stage.kind.display_label(), stage.detail),
-            },
-            StageKind::CloneStart | StageKind::CloneEnd => Self {
-                indent: "    ",
-                glyph: "⇣",
-                glyph_color: Color::LightMagenta,
-                display: format!("{} {}", stage.kind.display_label(), stage.detail),
-            },
-            StageKind::Fuse(_) => Self {
-                indent: "  ",
-                glyph: "·",
-                glyph_color: Color::DarkGray,
-                display: stage.kind.display_label().into_owned(),
-            },
-        }
-    }
 }
 
 impl StageView<'_> {

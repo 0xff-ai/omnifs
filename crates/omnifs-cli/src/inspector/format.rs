@@ -1,6 +1,9 @@
 //! Formatting policies shared by the inspector UI and trace model.
 
 use omnifs_api::events::CacheKind;
+use ratatui::style::Color;
+
+use super::trace_state::{Stage, StageKind};
 
 /// Map a wire `CacheKind` to the user-facing display label. The wire
 /// schema distinguishes browse/file/blob tiers so a debugger can see
@@ -68,6 +71,66 @@ pub(super) fn format_latency_us(us: u64) -> String {
 
 pub(super) fn compact_mode(cols: u16, rows: u16) -> bool {
     cols < 80 || rows < 24
+}
+
+/// Visual cell for one [`Stage`]: indent, glyph, glyph color, and the
+/// formatted display string for its left-hand text. Shared by the
+/// activity view's operations log (`ui::StageView`) and the sandbox
+/// theater's stage timeline (`sandbox_ui`), so the glyph mapping only
+/// lives in one place.
+pub(super) struct StageCell {
+    pub(super) indent: &'static str,
+    pub(super) glyph: &'static str,
+    pub(super) glyph_color: Color,
+    pub(super) display: String,
+}
+
+impl StageCell {
+    /// Pick the visual cell for a stage based on its kind.
+    pub(super) fn for_stage(stage: &Stage) -> Self {
+        match &stage.kind {
+            StageKind::Provider(method) => Self {
+                indent: "  ",
+                glyph: "▸",
+                glyph_color: Color::LightCyan,
+                display: method.clone(),
+            },
+            StageKind::Callout(_) => Self {
+                indent: "    ",
+                glyph: "◇",
+                glyph_color: Color::LightYellow,
+                display: stage.detail.clone(),
+            },
+            // Keep the `cache.<kind>` prefix in the visible text so a
+            // row like `◐ cache.browse_hit /github/...` reads
+            // unambiguously without relying on the user knowing what
+            // the ◐ glyph means.
+            StageKind::Cache(_) => Self {
+                indent: "  ",
+                glyph: "◐",
+                glyph_color: Color::LightGreen,
+                display: format!("{} {}", stage.kind.display_label(), stage.detail),
+            },
+            StageKind::SubtreeStart | StageKind::SubtreeEnd => Self {
+                indent: "  ",
+                glyph: "▸",
+                glyph_color: Color::Magenta,
+                display: format!("{} {}", stage.kind.display_label(), stage.detail),
+            },
+            StageKind::CloneStart | StageKind::CloneEnd => Self {
+                indent: "    ",
+                glyph: "⇣",
+                glyph_color: Color::LightMagenta,
+                display: format!("{} {}", stage.kind.display_label(), stage.detail),
+            },
+            StageKind::Fuse(_) => Self {
+                indent: "  ",
+                glyph: "·",
+                glyph_color: Color::DarkGray,
+                display: stage.kind.display_label().into_owned(),
+            },
+        }
+    }
 }
 
 #[cfg(test)]
