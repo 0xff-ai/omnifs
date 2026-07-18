@@ -246,7 +246,6 @@ impl ReauthArgs {
         output: Output,
     ) -> anyhow::Result<crate::commands::receipt::MountReauthReceipt> {
         let workspace = Workspace::resolve()?;
-        output.intro(format!("omnifs mount reauth {}", self.name))?;
         let prompt = PromptMode::from_flags(output.yes(), output.no_input());
         let result = self.run_with_output(&workspace, &output, prompt).await;
         if result.is_ok() {
@@ -368,7 +367,6 @@ fn rm_with_options(
     dry_run: bool,
     output: &Output,
 ) -> anyhow::Result<crate::commands::receipt::MountRemoveReceipt> {
-    output.intro(format!("omnifs mount rm {name}"))?;
     let output = output.clone();
     let mounts = crate::mount_config::load_mounts(workspace)?;
     let name =

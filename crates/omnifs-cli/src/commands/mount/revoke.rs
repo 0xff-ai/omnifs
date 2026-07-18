@@ -23,7 +23,6 @@ impl RevokeArgs {
     #[allow(clippy::too_many_lines)] // keep consent and upstream-before-local ordering linear
     pub(crate) async fn run(self, output: Output) -> anyhow::Result<Receipt> {
         let workspace = Workspace::resolve()?;
-        output.intro(format!("omnifs mount revoke {}", self.name))?;
         let mounts = crate::mount_config::load_mounts(&workspace)?;
         let requested = mounts
             .iter()

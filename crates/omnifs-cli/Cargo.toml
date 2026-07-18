@@ -39,7 +39,6 @@ toml = "0.8"
 secrecy = "0.10"
 anstream = "1"
 owo-colors = "4"
-cliclack = "0.5.5"
 arboard = { version = "3", default-features = false }
 time = { workspace = true }
 bollard = { workspace = true }

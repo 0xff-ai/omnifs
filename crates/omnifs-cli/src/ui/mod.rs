@@ -1,7 +1,7 @@
 //! Commands construct typed values while this module owns every byte that
 //! reaches the terminal: the closed vocabulary ([`style`]), human-only
-//! responsive [`table`]s, report rows, direct [`progress`] handles, and the
-//! cliclack theme. Stream discipline is
+//! responsive [`table`]s, report rows, direct [`progress`] handles, and
+//! [`prompt`]s built on crossterm. Stream discipline is
 //! owned here, not by commands:
 //! reports go to stdout, while narration, prompts, and progress go to stderr.
 //!

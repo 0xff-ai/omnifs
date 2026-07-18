@@ -101,7 +101,6 @@ async fn main() {
         .then(omnifs_engine::init_global_from_env)
         .flatten();
     init_tracing(cli.verbose, inspector.as_ref());
-    ui::output::install_theme();
     let command_path = cli.command_path();
     let output = Output::new(cli.output, cli.quiet)
         .with_command(command_path)

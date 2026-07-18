@@ -6,124 +6,21 @@
 //! No command should add another boolean cluster or process-global switch.
 
 use serde::Serialize;
-use std::fmt::Write as _;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::sync::{Arc, Mutex, MutexGuard};
-
-use super::style::Glyph;
 
 pub(crate) const SCHEMA_VERSION: u8 = 1;
 
-struct DefaultTheme;
-impl cliclack::Theme for DefaultTheme {}
-
-struct OmnifsTheme;
-
-impl cliclack::Theme for OmnifsTheme {
-    fn format_intro(&self, title: &str) -> String {
-        format!("┌ {title}\n│\n")
+/// Real terminal capabilities for the flat renderer (`render.rs`), read fresh
+/// per call rather than cached: a prompt or progress handle can change the
+/// terminal state (raw mode, size) between one narration line and the next.
+fn stderr_capabilities(quiet: bool) -> super::render::Capabilities {
+    super::render::Capabilities {
+        width: crossterm::terminal::size().map_or(80, |(columns, _rows)| usize::from(columns)),
+        is_tty: io::stderr().is_terminal(),
+        color: super::style::color_enabled(super::style::Stream::Stderr),
+        quiet,
     }
-
-    fn format_outro(&self, message: &str) -> String {
-        format!("└ {message}\n")
-    }
-
-    fn remark_symbol(&self) -> String {
-        String::new()
-    }
-
-    fn format_log(&self, text: &str, symbol: &str) -> String {
-        let mut lines = text.lines();
-        let Some(first) = lines.next() else {
-            return "│\n".to_string();
-        };
-        let mut out = if symbol.is_empty() {
-            format!("│  {first}\n")
-        } else {
-            format!(
-                "│\n{symbol} {}\n",
-                super::style::heading(first, super::style::Stream::Stderr)
-            )
-        };
-        for line in lines {
-            let _ = writeln!(out, "│  {line}");
-        }
-        out
-    }
-
-    fn format_header(&self, state: &cliclack::ThemeState, prompt: &str) -> String {
-        if matches!(state, cliclack::ThemeState::Cancel) {
-            String::new()
-        } else {
-            format!(
-                "│\n{}",
-                <DefaultTheme as cliclack::Theme>::format_header(&DefaultTheme, state, prompt)
-            )
-        }
-    }
-
-    fn format_footer(&self, state: &cliclack::ThemeState) -> String {
-        if matches!(state, cliclack::ThemeState::Cancel) {
-            String::new()
-        } else {
-            <DefaultTheme as cliclack::Theme>::format_footer(&DefaultTheme, state)
-        }
-    }
-
-    fn format_input(
-        &self,
-        state: &cliclack::ThemeState,
-        cursor: &cliclack::StringCursor,
-    ) -> String {
-        if matches!(state, cliclack::ThemeState::Cancel) {
-            String::new()
-        } else {
-            <DefaultTheme as cliclack::Theme>::format_input(&DefaultTheme, state, cursor)
-        }
-    }
-
-    fn format_placeholder(
-        &self,
-        state: &cliclack::ThemeState,
-        cursor: &cliclack::StringCursor,
-    ) -> String {
-        if matches!(state, cliclack::ThemeState::Cancel) {
-            String::new()
-        } else {
-            <DefaultTheme as cliclack::Theme>::format_placeholder(&DefaultTheme, state, cursor)
-        }
-    }
-
-    fn format_select_item(
-        &self,
-        state: &cliclack::ThemeState,
-        selected: bool,
-        label: &str,
-        hint: &str,
-    ) -> String {
-        if matches!(state, cliclack::ThemeState::Cancel) {
-            String::new()
-        } else {
-            <DefaultTheme as cliclack::Theme>::format_select_item(
-                &DefaultTheme,
-                state,
-                selected,
-                label,
-                hint,
-            )
-        }
-    }
-
-    fn format_confirm(&self, state: &cliclack::ThemeState, confirm: bool) -> String {
-        if matches!(state, cliclack::ThemeState::Cancel) {
-            String::new()
-        } else {
-            <DefaultTheme as cliclack::Theme>::format_confirm(&DefaultTheme, state, confirm)
-        }
-    }
-}
-pub(crate) fn install_theme() {
-    cliclack::set_theme(OmnifsTheme);
 }
 
 #[derive(Debug, Default)]
@@ -477,11 +374,13 @@ impl Output {
 
     /// Optional narration belongs to the invocation policy: it is human-only
     /// and quiet suppresses it, while structured streams stay machine-clean.
+    /// A flat, ungated line: no gutter, no step marker, nothing that repeats
+    /// once the terminal scrolls it away.
     pub(crate) fn narrate(&self, line: impl std::fmt::Display) {
         if self.mode == OutputMode::Human && !self.quiet {
-            let _ = cliclack::log::remark(crate::ui::style::accentuate(
-                &line.to_string(),
-                crate::ui::style::Stream::Stderr,
+            crate::ui::eprint_raw(&format!(
+                "{}\n",
+                crate::ui::style::accentuate(&line.to_string(), crate::ui::style::Stream::Stderr)
             ));
         }
     }
@@ -490,27 +389,24 @@ impl Output {
         self.narrate(line);
     }
 
+    /// The durable echo a prompt leaves behind once it resolves: the question
+    /// it asked, plus the answer in accent. No glyph, since this is a
+    /// one-line fact, not a settled operation.
     pub(crate) fn answer(&self, question: &str, answer: impl std::fmt::Display) {
         if self.mode == OutputMode::Human && !self.quiet {
-            let _ = cliclack::log::remark(format!(
-                "{} {question} {}",
-                Glyph::Done.render(crate::ui::style::Stream::Stderr),
+            crate::ui::eprint_raw(&format!(
+                "{question} {}\n",
                 crate::ui::style::accent(answer, crate::ui::style::Stream::Stderr)
             ));
         }
     }
 
-    pub(crate) fn intro(&self, title: impl std::fmt::Display) -> anyhow::Result<()> {
-        if self.mode == OutputMode::Human && !self.quiet {
-            cliclack::intro(title)?;
-        }
-        Ok(())
-    }
-
     pub(crate) fn row(&self, row: &super::report::Row) {
         if self.mode == OutputMode::Human {
-            let _ =
-                cliclack::log::remark(row.render(crate::ui::style::Stream::Stderr).trim_start());
+            crate::ui::eprint_raw(&format!(
+                "{}\n",
+                row.render(crate::ui::style::Stream::Stderr).trim_start()
+            ));
         }
     }
 
@@ -518,19 +414,20 @@ impl Output {
         if self.mode != OutputMode::Human {
             return;
         }
-        let _ = cliclack::log::step("plan");
+        let caps = stderr_capabilities(self.quiet);
+        crate::ui::eprint_raw(&format!("{}\n", super::render::heading("plan", caps)));
         let rows = plan
             .rows
             .iter()
             .map(super::consent::Row::render_plan)
             .collect::<Vec<_>>();
-        let _ = cliclack::log::remark(super::report::render_rows(
-            &rows,
-            crate::ui::style::Stream::Stderr,
+        crate::ui::eprint_raw(&format!(
+            "{}\n",
+            super::report::render_rows(&rows, crate::ui::style::Stream::Stderr)
         ));
-        let _ = cliclack::log::remark(crate::ui::style::dim(
-            plan.summary(),
-            crate::ui::style::Stream::Stderr,
+        crate::ui::eprint_raw(&format!(
+            "{}\n",
+            crate::ui::style::dim(plan.summary(), crate::ui::style::Stream::Stderr)
         ));
     }
 
@@ -538,18 +435,22 @@ impl Output {
         if self.mode != OutputMode::Human {
             return;
         }
-        let _ = cliclack::log::step("apply");
+        let caps = stderr_capabilities(self.quiet);
+        crate::ui::eprint_raw(&format!("{}\n", super::render::heading("apply", caps)));
         let rows = receipt
             .rows
             .iter()
             .map(super::consent::Outcome::render_receipt)
             .collect::<Vec<_>>();
-        let _ = cliclack::log::remark(super::report::render_rows(
-            &rows,
-            crate::ui::style::Stream::Stderr,
+        crate::ui::eprint_raw(&format!(
+            "{}\n",
+            super::report::render_rows(&rows, crate::ui::style::Stream::Stderr)
         ));
     }
 
+    /// The v2 register never repeats the command the user just typed, so
+    /// there is no frame opener to print; this exists only to close out the
+    /// invocation with a plain sentence.
     pub(crate) fn outro(&self, message: impl Into<String>) {
         let mut current = state(self);
         if current.closed {
@@ -558,7 +459,11 @@ impl Output {
         current.closed = true;
         drop(current);
         if self.mode == OutputMode::Human && !self.quiet {
-            let _ = cliclack::outro(message.into());
+            let caps = stderr_capabilities(self.quiet);
+            crate::ui::eprint_raw(&format!(
+                "{}\n",
+                super::render::sentence(&message.into(), caps)
+            ));
         }
     }
 

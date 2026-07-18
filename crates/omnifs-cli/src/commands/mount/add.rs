@@ -69,7 +69,6 @@ impl AddArgs {
         workspace: &Workspace,
         output: crate::ui::output::Output,
     ) -> anyhow::Result<crate::error::ExitCode> {
-        output.intro("omnifs mount add")?;
         let prompt = crate::stages::PromptMode::from_flags(
             output.yes(),
             output.no_input() || output.is_structured(),

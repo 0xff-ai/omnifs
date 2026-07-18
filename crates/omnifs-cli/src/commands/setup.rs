@@ -43,7 +43,6 @@ impl SetupArgs {
     }
 
     async fn run_in_workspace(self, workspace: &Workspace, output: Output) -> Result<ExitCode> {
-        output.intro("omnifs setup")?;
         let prompt =
             PromptMode::from_flags(output.yes(), output.no_input() || output.is_structured());
         let selected = self.select_providers(workspace, &output, prompt)?;

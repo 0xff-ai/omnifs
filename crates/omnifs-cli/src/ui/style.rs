@@ -30,8 +30,8 @@ pub(crate) enum Stream {
 }
 
 /// How a caller supplies the color decision to a role function: either "ask
-/// the real process, for this stream" (the cliclack/progress narration rail,
-/// which always targets one live OS stream) or "use exactly this" (the flat
+/// the real process, for this stream" (live narration, prompts, and progress,
+/// which always target one real OS stream) or "use exactly this" (the flat
 /// renderer and responsive tables, which take color as an injected capability
 /// so tests never have to fake a TTY).
 #[derive(Debug, Clone, Copy)]
@@ -125,16 +125,11 @@ pub(crate) fn accent(s: impl Display, mode: impl Into<ColorMode>) -> String {
     paint(s, mode, |t| t.cyan().to_string())
 }
 
-/// Identity: mount names, provider names, intro/outro lines.
+/// Identity: mount names, provider names, and section headings (`render.rs`'s
+/// `heading` primitive uses this role, not a separate blue one: spec 2.4
+/// prefers plain bold for report sections).
 pub(crate) fn bold(s: impl Display, mode: impl Into<ColorMode>) -> String {
     paint(s, mode, |t| t.bold().to_string())
-}
-
-/// Section heading: bold plus a structural blue so a section title separates
-/// from its rows at a glance. Blue is kept distinct from the cyan accent (which
-/// means "actionable") so headings never read as something to type.
-pub(crate) fn heading(s: impl Display, mode: impl Into<ColorMode>) -> String {
-    paint(s, mode, |t| t.blue().bold().to_string())
 }
 
 /// Render inline command spans written as `` `cmd` `` in the cyan accent,

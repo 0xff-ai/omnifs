@@ -86,8 +86,8 @@ async fn login(
         LoginRequest::ManualCode(request) => login_manual(&client, request, &mount, output).await?,
         LoginRequest::DeviceCode(request) => {
             // The callback runs before the await inside login_device_code, so we cannot
-            // borrow &mut output across the future. Emit directly with cliclack log
-            // remark on the same output rail used by the command.
+            // borrow &mut output across the future. `present_device_prompt` prints
+            // directly through the raw stderr writer instead.
             let result = client
                 .login_device_code(request, move |prompt| {
                     present_device_prompt(&prompt, no_browser);
@@ -222,15 +222,16 @@ pub(crate) async fn login_with_spec(
 }
 
 fn present_device_prompt(prompt: &DeviceCodePrompt, no_browser: bool) {
-    // Each line goes through cliclack log remark. This produces the same
-    // rail-framed stderr used by the command and drops the spinner bar from
-    // the device-code path.
+    // Printed directly through the `ui` toolkit's raw stderr writer rather
+    // than through `Output`: the callback runs before the await inside
+    // `login_device_code`, so it cannot borrow `&mut output` across the
+    // future (see `login_manual` above for the same constraint spelled out).
     let url = prompt
         .verification_uri_complete
         .as_deref()
         .unwrap_or(&prompt.verification_uri);
     let stream = style::Stream::Stderr;
-    let _ = cliclack::log::remark(crate::ui::style::accent(url, stream));
+    crate::ui::eprint_raw(&format!("{}\n", crate::ui::style::accent(url, stream)));
 
     // Clipboard copy is best effort only. Failure must not prevent showing
     // the code or continuing the flow.
@@ -243,7 +244,7 @@ fn present_device_prompt(prompt: &DeviceCodePrompt, no_browser: bool) {
             ),
             Err(_) => crate::ui::style::bold(&prompt.user_code, stream),
         };
-    let _ = cliclack::log::remark(code_line);
+    crate::ui::eprint_raw(&format!("{code_line}\n"));
 
     // Show the code lifetime so the user knows how long they have before the
     // prompt on the provider side expires.
@@ -254,26 +255,34 @@ fn present_device_prompt(prompt: &DeviceCodePrompt, no_browser: bool) {
         let mins = secs / 60;
         format!("expires in {mins}m")
     };
-    let _ = cliclack::log::remark(crate::ui::style::dim(expiry_text, stream));
+    crate::ui::eprint_raw(&format!("{}\n", crate::ui::style::dim(expiry_text, stream)));
 
     // Only attempt browser open when allowed and a complete uri is present.
     // Report outcome only on real success so we never overstate what happened.
     if !no_browser && let Some(complete_url) = &prompt.verification_uri_complete {
         match webbrowser::open(complete_url) {
             Ok(()) => {
-                let _ =
-                    cliclack::log::remark(crate::ui::style::dim("(opened your browser)", stream));
+                crate::ui::eprint_raw(&format!(
+                    "{}\n",
+                    crate::ui::style::dim("(opened your browser)", stream)
+                ));
             },
             Err(_) => {
-                let _ = cliclack::log::remark(crate::ui::style::dim(
-                    "(could not open a browser; visit the URL above)",
-                    stream,
+                crate::ui::eprint_raw(&format!(
+                    "{}\n",
+                    crate::ui::style::dim(
+                        "(could not open a browser; visit the URL above)",
+                        stream,
+                    )
                 ));
             },
         }
     }
 
-    let _ = cliclack::log::remark(crate::ui::style::dim("waiting for confirmation", stream));
+    crate::ui::eprint_raw(&format!(
+        "{}\n",
+        crate::ui::style::dim("waiting for confirmation", stream)
+    ));
 }
 
 fn print_oauth_consent_summary(

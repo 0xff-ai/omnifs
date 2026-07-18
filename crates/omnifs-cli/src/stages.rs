@@ -462,3 +462,74 @@ fn browse_path(mount_name: &str) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("~/omnifs"))
         .join(mount_name)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::PromptMode;
+
+    fn mode(interactive: bool, yes: bool, no_input: bool) -> PromptMode {
+        PromptMode {
+            interactive,
+            yes,
+            no_input,
+        }
+    }
+
+    #[test]
+    fn explicit_value_wins_without_touching_yes_no_input_or_the_prompt() {
+        let called = mode(false, false, true).resolve(
+            Some("explicit"),
+            || "default",
+            "--as",
+            || panic!("explicit value must short-circuit before the prompt runs"),
+        );
+        assert_eq!(called.unwrap(), "explicit");
+    }
+
+    #[test]
+    fn yes_takes_the_default_without_prompting() {
+        let resolved = mode(true, true, false).resolve(
+            None,
+            || "default",
+            "--as",
+            || panic!("--yes must short-circuit before the prompt runs"),
+        );
+        assert_eq!(resolved.unwrap(), "default");
+    }
+
+    #[test]
+    fn no_input_bails_naming_the_flag_hint_before_yes_or_the_prompt() {
+        let error = mode(true, false, true)
+            .resolve(
+                None,
+                || "default",
+                "--as <name>",
+                || panic!("--no-input must bail before the prompt runs"),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("--as <name>"));
+        assert!(error.to_string().contains("--yes"));
+    }
+
+    #[test]
+    fn non_interactive_without_no_input_still_bails_naming_the_flag() {
+        // A piped stdin with neither --yes nor --no-input is still
+        // non-interactive: the bail message is the same shape as --no-input's.
+        let error = mode(false, false, false)
+            .resolve(
+                None,
+                || "default",
+                "--as <name>",
+                || panic!("a non-interactive run must bail before the prompt runs"),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("--as <name>"));
+        assert!(error.to_string().contains("terminal"));
+    }
+
+    #[test]
+    fn interactive_without_yes_or_no_input_calls_the_prompt() {
+        let resolved = mode(true, false, false).resolve(None, || "default", "--as", || Ok("typed"));
+        assert_eq!(resolved.unwrap(), "typed");
+    }
+}

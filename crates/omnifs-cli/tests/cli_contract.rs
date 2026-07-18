@@ -643,12 +643,19 @@ fn mount_add_collision_renames_with_yes() {
     );
     assert!(second.stdout.is_empty(), "session prose belongs on stderr");
     let stderr = String::from_utf8_lossy(&second.stderr);
-    assert!(stderr.contains("┌ omnifs mount add"), "{stderr}");
+    // The v2 register never repeats the command the user just typed, so
+    // there is no `┌ omnifs mount add` frame opener to assert on.
     assert!(
         stderr.contains("mount name") && stderr.contains("test taken, using test-2"),
         "--yes collision rename must stay visible: {stderr}"
     );
-    assert!(stderr.contains("└ Mounted `test-2`."), "{stderr}");
+    // The outro is a flat sentence with no `└` frame closer, and its inline
+    // `` `test-2` `` span has its backticks stripped by the renderer.
+    assert!(stderr.contains("Mounted test-2."), "{stderr}");
+    assert!(
+        !stderr.contains('`'),
+        "backticks must never reach the terminal: {stderr}"
+    );
     assert!(
         fixture.home_path().join("mounts/test.json").is_file(),
         "first mount add must write the test mount spec"

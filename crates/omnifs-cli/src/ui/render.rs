@@ -10,10 +10,11 @@
 //! `render_with`-style capability injection for the responsive report and
 //! this module follows it.
 //!
-//! Not yet called from command code: no command constructs a
-//! [`Capabilities`] from the real process yet, or calls these primitives, so
-//! every item here is exercised only by its own unit tests until a later
-//! slice in the CLI experience v2 campaign migrates commands onto it.
+//! `Output::outro`/`plan`/`receipt` (`ui/output.rs`) construct a real
+//! `Capabilities` from the process and call `sentence`/`heading`; the rest of
+//! this module (`ledger_block`, `hint`, `error_block`, ...) is still
+//! exercised only by its own unit tests until a later slice in the CLI
+//! experience v2 campaign migrates full command reports onto it.
 #![allow(dead_code)]
 
 use super::style::{self, Glyph};
