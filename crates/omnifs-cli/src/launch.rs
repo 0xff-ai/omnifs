@@ -372,8 +372,7 @@ impl FrontendTrack {
     }
 }
 
-/// The settled `frontends` row value once every expected track reattached
-///`).
+/// The settled `frontends` row value once every expected track reattached.
 fn reattached_value(reattached: usize, total: usize, detail: &str) -> String {
     format!("{reattached}/{total} reattached ({detail})")
 }

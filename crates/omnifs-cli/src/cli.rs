@@ -2,6 +2,7 @@
 
 use clap::{Parser, Subcommand, ValueEnum};
 use std::ffi::OsString;
+use std::fmt::Write as _;
 
 use crate::commands;
 use crate::commands::doctor::DoctorVerdict;
@@ -419,7 +420,7 @@ fn fresh_workspace_screen(
 ) -> String {
     let mut screen = fresh_workspace_block(caps);
     if let Some((what, fix)) = fresh_workspace_degradation(inventory) {
-        screen.push_str(&format!("\n\n{what}:  `{fix}`"));
+        let _ = write!(screen, "\n\n{what}:  `{fix}`");
     }
     screen
 }
