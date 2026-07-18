@@ -26,45 +26,47 @@ impl Row {
 
     /// Render the row with a stable key column. Inline command spans are
     /// accentuated by the rail style owner.
-    pub(super) fn render(&self) -> String {
+    pub(super) fn render(&self, mode: impl Into<style::ColorMode>) -> String {
+        let mode = mode.into();
         let display_key = super::truncate(&self.key, LEDGER_KEY_WIDTH);
         let key_pad = (LEDGER_KEY_WIDTH - display_key.chars().count()).max(1);
         format!(
             "  {} {}{}{}",
-            self.glyph.render(),
+            self.glyph.render(mode),
             display_key,
             " ".repeat(key_pad),
-            style::accentuate(&self.value)
+            style::accentuate(&self.value, mode)
         )
     }
 }
 
-/// Render a group of rail rows as one borderless table so the key and value
+/// Render a group of rail rows as one borderless block so the key and value
 /// columns size to the complete operation, rather than truncating each key at
-/// a fixed width.
-pub(super) fn render_rows(rows: &[Row]) -> String {
-    use tabled::builder::Builder;
-    use tabled::settings::{Padding, Style};
-
+/// a fixed width. `mode` is copied per row, not per call, so every row in the
+/// block agrees on whether color is on.
+pub(super) fn render_rows(rows: &[Row], mode: impl Into<style::ColorMode> + Copy) -> String {
     if rows.is_empty() {
         return String::new();
     }
 
-    let mut builder = Builder::default();
-    for row in rows {
-        builder.push_record([
-            row.glyph.render(),
-            row.key.clone(),
-            style::accentuate(&row.value),
-        ]);
-    }
-
-    let mut table = builder.build();
-    table.with(Style::empty()).with(Padding::new(0, 1, 0, 0));
-    table
-        .to_string()
-        .lines()
-        .map(str::trim_end)
+    let key_width = rows
+        .iter()
+        .map(|row| row.key.chars().count())
+        .max()
+        .unwrap_or(0);
+    rows.iter()
+        .map(|row| {
+            let key_pad = key_width - row.key.chars().count();
+            format!(
+                "{} {}{} {}",
+                row.glyph.render(mode),
+                row.key,
+                " ".repeat(key_pad),
+                style::accentuate(&row.value, mode)
+            )
+            .trim_end()
+            .to_owned()
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -77,7 +79,7 @@ mod tests {
     #[test]
     fn rows_keep_a_separator_before_the_value() {
         let row = Row::new(Glyph::Done, "frontends observed", "2 attached");
-        let plain = strip_ansi(&row.render());
+        let plain = strip_ansi(&row.render(false));
         assert!(plain.contains("frontends obs… 2 attached"), "{plain:?}");
     }
 
@@ -92,7 +94,7 @@ mod tests {
             Row::new(Glyph::Plan, "frontend fuse (docker)", "tear down /omnifs"),
             Row::new(Glyph::Plan, "daemon", "stop if running"),
         ];
-        let plain = strip_ansi(&render_rows(&rows));
+        let plain = strip_ansi(&render_rows(&rows, false));
         assert!(plain.contains("frontend nfs (host)"), "{plain:?}");
         assert!(plain.contains("frontend fuse (docker)"), "{plain:?}");
         let nfs = plain

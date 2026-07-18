@@ -220,8 +220,10 @@ pub fn render(error: &anyhow::Error) -> String {
     let messages = message_chain(error);
 
     // Command spans written as `` `cmd` `` render in the cyan accent, never as
-    // literal backticks: this is terminal output, not markdown.
-    let accent = crate::ui::style::accentuate;
+    // literal backticks: this is terminal output, not markdown. This whole
+    // block is only ever written to stderr (see `main`'s top-level handler).
+    let stream = crate::ui::style::Stream::Stderr;
+    let accent = |text: &str| crate::ui::style::accentuate(text, stream);
     if let Some(first) = messages.first() {
         let _ = writeln!(&mut out, "Error: {}", accent(first));
     }
@@ -242,7 +244,7 @@ pub fn render(error: &anyhow::Error) -> String {
     let _ = writeln!(
         &mut out,
         "\n{}",
-        crate::ui::style::dim(format!("(id: {})", exit_code(error).slug()))
+        crate::ui::style::dim(format!("(id: {})", exit_code(error).slug()), stream)
     );
     out
 }

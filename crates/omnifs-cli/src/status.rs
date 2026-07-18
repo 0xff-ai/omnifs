@@ -230,7 +230,7 @@ mod tests {
                     width: 120,
                     color: false,
                 });
-        assert!(rendered.contains("Daemon stopped · namespace /"));
+        assert!(rendered.contains("Daemon stopped, namespace /"));
         assert!(!rendered.contains("Namespace namespace"));
         assert!(rendered.contains("Fix  omnifs up"));
     }

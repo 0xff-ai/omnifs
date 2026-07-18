@@ -25,7 +25,7 @@ fn spinner_line(frame: &str, key: &str, text: &str) -> String {
     let key_pad = KEY_WIDTH.saturating_sub(key.chars().count()).max(1);
     format!(
         "  {} {key}{:pad$}{text}",
-        style::dim(frame),
+        style::dim(frame, style::Stream::Stderr),
         "",
         pad = key_pad
     )
@@ -138,7 +138,10 @@ impl Progress {
         } else {
             format!(
                 "{value} {}",
-                style::dim(format!("({})", format_duration(self.started.elapsed())))
+                style::dim(
+                    format!("({})", format_duration(self.started.elapsed())),
+                    style::Stream::Stderr
+                )
             )
         };
         self.output.row(&super::report::Row::new(

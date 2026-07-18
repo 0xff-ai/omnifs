@@ -36,7 +36,10 @@ impl Report {
         };
         self.render_with(RenderOptions {
             width,
-            color: is_tty && std::env::var_os("NO_COLOR").is_none(),
+            // The stdout color decision has one owner (`style::color_enabled`)
+            // so `NO_COLOR` and `CLICOLOR_FORCE` behave identically here and
+            // on every other stdout-bound render.
+            color: super::style::color_enabled(super::style::Stream::Stdout),
         })
     }
 
@@ -118,7 +121,7 @@ impl ContextStrip {
                     .iter()
                     .map(Meta::render)
                     .collect::<Vec<_>>()
-                    .join(" · ")
+                    .join(", ")
             );
         }
         if let Some(action) = self.action.as_ref() {
@@ -267,7 +270,7 @@ impl ResourceTable {
                 })
                 .collect::<Vec<_>>();
             if !metadata.is_empty() {
-                let _ = writeln!(out, "    {}", metadata.join(" · "));
+                let _ = writeln!(out, "    {}", metadata.join(", "));
             }
             if let Some(action) = row.action.as_ref()
                 && !shared.contains(&action.command)
@@ -727,7 +730,7 @@ mod tests {
                 .lines()
                 .nth(1)
                 .unwrap()
-                .contains("daemon running · mounts 2")
+                .contains("daemon running, mounts 2")
         );
         assert!(output.lines().nth(2).unwrap().contains("Fix  omnifs up"));
     }

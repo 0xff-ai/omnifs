@@ -113,10 +113,16 @@ pub(crate) fn render_consent_block(
         .unwrap_or(&manifest.display_name);
     output.note(description);
     if let Some(needs) = crate::capability::compact_needs(manifest) {
-        output.note(crate::ui::style::dim(needs));
+        output.note(crate::ui::style::dim(
+            needs,
+            crate::ui::style::Stream::Stderr,
+        ));
     }
     if let Some(limits) = crate::capability::compact_limits(manifest) {
-        output.note(crate::ui::style::dim(limits));
+        output.note(crate::ui::style::dim(
+            limits,
+            crate::ui::style::Stream::Stderr,
+        ));
     }
 }
 

@@ -569,6 +569,10 @@ pub(crate) enum Verdict {
 
 /// Discover runner-owned frontend observations. A daemon-down inventory keeps
 /// these rows because runner and attachment lifetimes are independent.
+// `_libkrun_root` is genuinely unused off macOS (only the libkrun cfg branch
+// below reads it), which is what earns it the leading underscore; on macOS
+// that same branch does read it, which is what earns this the narrow allow.
+#[cfg_attr(target_os = "macos", allow(clippy::used_underscore_binding))]
 fn discovered_frontends(
     frontend: &omnifs_workspace::FrontendState,
     mount_count: usize,

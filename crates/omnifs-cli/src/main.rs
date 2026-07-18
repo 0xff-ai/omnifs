@@ -134,7 +134,10 @@ async fn main() {
                 if output.is_structured() {
                     let _ = output.emit_error(error::canceled_envelope(command_path, "canceled"));
                 } else {
-                    ui::eprint_raw(&format!("{}\n", ui::style::dim("canceled")));
+                    ui::eprint_raw(&format!(
+                        "{}\n",
+                        ui::style::dim("canceled", ui::style::Stream::Stderr)
+                    ));
                 }
                 std::process::exit(code.code());
             }

@@ -40,7 +40,10 @@ impl cliclack::Theme for OmnifsTheme {
         let mut out = if symbol.is_empty() {
             format!("│  {first}\n")
         } else {
-            format!("│\n{symbol} {}\n", super::style::heading(first))
+            format!(
+                "│\n{symbol} {}\n",
+                super::style::heading(first, super::style::Stream::Stderr)
+            )
         };
         for line in lines {
             let _ = writeln!(out, "│  {line}");
@@ -476,7 +479,10 @@ impl Output {
     /// and quiet suppresses it, while structured streams stay machine-clean.
     pub(crate) fn narrate(&self, line: impl std::fmt::Display) {
         if self.mode == OutputMode::Human && !self.quiet {
-            let _ = cliclack::log::remark(crate::ui::style::accentuate(&line.to_string()));
+            let _ = cliclack::log::remark(crate::ui::style::accentuate(
+                &line.to_string(),
+                crate::ui::style::Stream::Stderr,
+            ));
         }
     }
 
@@ -488,8 +494,8 @@ impl Output {
         if self.mode == OutputMode::Human && !self.quiet {
             let _ = cliclack::log::remark(format!(
                 "{} {question} {}",
-                Glyph::Done.render(),
-                crate::ui::style::accent(answer)
+                Glyph::Done.render(crate::ui::style::Stream::Stderr),
+                crate::ui::style::accent(answer, crate::ui::style::Stream::Stderr)
             ));
         }
     }
@@ -503,7 +509,8 @@ impl Output {
 
     pub(crate) fn row(&self, row: &super::report::Row) {
         if self.mode == OutputMode::Human {
-            let _ = cliclack::log::remark(row.render().trim_start());
+            let _ =
+                cliclack::log::remark(row.render(crate::ui::style::Stream::Stderr).trim_start());
         }
     }
 
@@ -517,8 +524,14 @@ impl Output {
             .iter()
             .map(super::consent::Row::render_plan)
             .collect::<Vec<_>>();
-        let _ = cliclack::log::remark(super::report::render_rows(&rows));
-        let _ = cliclack::log::remark(crate::ui::style::dim(plan.summary()));
+        let _ = cliclack::log::remark(super::report::render_rows(
+            &rows,
+            crate::ui::style::Stream::Stderr,
+        ));
+        let _ = cliclack::log::remark(crate::ui::style::dim(
+            plan.summary(),
+            crate::ui::style::Stream::Stderr,
+        ));
     }
 
     pub(crate) fn receipt(&self, receipt: &super::consent::Receipt) {
@@ -531,7 +544,10 @@ impl Output {
             .iter()
             .map(super::consent::Outcome::render_receipt)
             .collect::<Vec<_>>();
-        let _ = cliclack::log::remark(super::report::render_rows(&rows));
+        let _ = cliclack::log::remark(super::report::render_rows(
+            &rows,
+            crate::ui::style::Stream::Stderr,
+        ));
     }
 
     pub(crate) fn outro(&self, message: impl Into<String>) {

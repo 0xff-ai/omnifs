@@ -16,6 +16,7 @@ pub(crate) mod consent;
 pub(crate) mod output;
 pub(crate) mod progress;
 pub(crate) mod prompt;
+pub(crate) mod render;
 pub(crate) mod report;
 pub(crate) mod style;
 pub(crate) mod table;
@@ -51,15 +52,16 @@ pub(crate) fn truncate(text: &str, max_chars: usize) -> String {
     out
 }
 
-/// Command hint row: `  <cmd padded to 16><desc>`.
+/// Command hint row: `  <cmd padded to 16><desc>`. Always narration, so
+/// always stderr: every caller reaches this through `Output::narrate`/`note`.
 pub(crate) fn hint(cmd: &str, desc: &str) -> String {
     // A command longer than the column still needs a gap before the desc.
     let cmd_pad = HINT_WIDTH.saturating_sub(cmd.chars().count()).max(1);
     format!(
         "  {}{:pad$}{}",
-        style::accent(cmd),
+        style::accent(cmd, style::Stream::Stderr),
         "",
-        style::dim(desc),
+        style::dim(desc, style::Stream::Stderr),
         pad = cmd_pad
     )
 }

@@ -191,9 +191,12 @@ pub(crate) fn spec_creation(
         )
         .spawn_background(resolved.reference.id, output)
     {
-        output.narrate(crate::ui::style::warn(format!(
-            "Couldn't start background provider warmup ({error:#}); daemon startup will load the provider."
-        )));
+        output.narrate(crate::ui::style::warn(
+            format!(
+                "Couldn't start background provider warmup ({error:#}); daemon startup will load the provider."
+            ),
+            crate::ui::style::Stream::Stderr,
+        ));
     }
     let provider_name = resolved.reference.meta.name.to_string();
     let mount_name = provider_selection.mount_name(

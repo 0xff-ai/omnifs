@@ -229,7 +229,8 @@ fn present_device_prompt(prompt: &DeviceCodePrompt, no_browser: bool) {
         .verification_uri_complete
         .as_deref()
         .unwrap_or(&prompt.verification_uri);
-    let _ = cliclack::log::remark(crate::ui::style::accent(url));
+    let stream = style::Stream::Stderr;
+    let _ = cliclack::log::remark(crate::ui::style::accent(url, stream));
 
     // Clipboard copy is best effort only. Failure must not prevent showing
     // the code or continuing the flow.
@@ -237,10 +238,10 @@ fn present_device_prompt(prompt: &DeviceCodePrompt, no_browser: bool) {
         match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(prompt.user_code.clone())) {
             Ok(()) => format!(
                 "{} {}",
-                crate::ui::style::bold(&prompt.user_code),
-                crate::ui::style::dim("(copied to clipboard)")
+                crate::ui::style::bold(&prompt.user_code, stream),
+                crate::ui::style::dim("(copied to clipboard)", stream)
             ),
-            Err(_) => crate::ui::style::bold(&prompt.user_code),
+            Err(_) => crate::ui::style::bold(&prompt.user_code, stream),
         };
     let _ = cliclack::log::remark(code_line);
 
@@ -253,24 +254,26 @@ fn present_device_prompt(prompt: &DeviceCodePrompt, no_browser: bool) {
         let mins = secs / 60;
         format!("expires in {mins}m")
     };
-    let _ = cliclack::log::remark(crate::ui::style::dim(expiry_text));
+    let _ = cliclack::log::remark(crate::ui::style::dim(expiry_text, stream));
 
     // Only attempt browser open when allowed and a complete uri is present.
     // Report outcome only on real success so we never overstate what happened.
     if !no_browser && let Some(complete_url) = &prompt.verification_uri_complete {
         match webbrowser::open(complete_url) {
             Ok(()) => {
-                let _ = cliclack::log::remark(crate::ui::style::dim("(opened your browser)"));
+                let _ =
+                    cliclack::log::remark(crate::ui::style::dim("(opened your browser)", stream));
             },
             Err(_) => {
                 let _ = cliclack::log::remark(crate::ui::style::dim(
                     "(could not open a browser; visit the URL above)",
+                    stream,
                 ));
             },
         }
     }
 
-    let _ = cliclack::log::remark(crate::ui::style::dim("waiting for confirmation"));
+    let _ = cliclack::log::remark(crate::ui::style::dim("waiting for confirmation", stream));
 }
 
 fn print_oauth_consent_summary(
@@ -278,27 +281,32 @@ fn print_oauth_consent_summary(
     request: &OAuthRequest,
     guidance: &SchemeGuidance,
 ) {
+    let stream = style::Stream::Stderr;
     let scheme = request.scheme();
     let mode = AuthMode::from_oauth_flow(&scheme.flow);
-    output.note(crate::ui::style::dim(mode.experience()));
+    output.note(crate::ui::style::dim(mode.experience(), stream));
     if !guidance.setup_steps.is_empty() {
-        output.note(crate::ui::style::dim("Guidance:"));
+        output.note(crate::ui::style::dim("Guidance:", stream));
         for (index, step) in guidance.setup_steps.iter().enumerate() {
             output.note(format!("{}. {step}", index + 1));
         }
     }
     if let Some(url) = &guidance.docs_url {
-        output.note(format!("{} {}", style::dim("Docs:"), style::accent(url)));
+        output.note(format!(
+            "{} {}",
+            style::dim("Docs:", stream),
+            style::accent(url, stream)
+        ));
     }
     output.note(format!(
         "{} {}",
-        style::dim("Scopes:"),
+        style::dim("Scopes:", stream),
         format_scopes(&scheme.default_scopes)
     ));
     if !scheme.inject_domains.is_empty() {
         output.note(format!(
             "{} {}",
-            style::dim("Applies to:"),
+            style::dim("Applies to:", stream),
             scheme.inject_domains.join(", ")
         ));
     }
