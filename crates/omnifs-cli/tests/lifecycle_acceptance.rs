@@ -271,7 +271,8 @@ fn scenario_1_status_nothing_running() {
 
 // Shutdown when no daemon is running.
 
-/// `down` when nothing is running: exit 0, prints "Nothing to tear down."
+/// `down` when nothing is running: exit 0, prints "Nothing to stop. The
+/// daemon isn't running."
 #[test]
 fn scenario_2_down_nothing_running() {
     let fixture = Fixture::new();
@@ -290,8 +291,8 @@ fn scenario_2_down_nothing_running() {
         String::from_utf8_lossy(&out.stderr),
     );
     assert!(
-        combined.contains("Nothing to tear down."),
-        "expected 'Nothing to tear down.' in output; got:\n{combined}"
+        combined.contains("Nothing to stop. The daemon isn't running."),
+        "expected the no-op sentence in output; got:\n{combined}"
     );
 }
 

@@ -1165,9 +1165,8 @@ mod tests {
 
         let unknown = raw_request(
             &control_socket,
-            br#"{"version":3,"operation":"unknown"}
-"#
-            .to_vec(),
+            format!("{{\"version\":{CONTROL_PROTOCOL_VERSION},\"operation\":\"unknown\"}}\n")
+                .into_bytes(),
         )
         .await;
         assert!(matches!(
@@ -1177,9 +1176,11 @@ mod tests {
 
         let invalid_offline_revision = raw_request(
             &control_socket,
-            br#"{"version":3,"operation":"validate_offline","revision":"invalid"}
-"#
-            .to_vec(),
+            format!(
+                "{{\"version\":{CONTROL_PROTOCOL_VERSION},\
+                 \"operation\":\"validate_offline\",\"revision\":\"invalid\"}}\n"
+            )
+            .into_bytes(),
         )
         .await;
         assert!(matches!(

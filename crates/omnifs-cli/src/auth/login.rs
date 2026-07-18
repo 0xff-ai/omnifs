@@ -23,12 +23,14 @@ use omnifs_workspace::provider::Catalog;
 const MANUAL_PROMPT_CANCELED: &str = "omnifs-manual-oauth-prompt-canceled";
 
 /// Whether to suppress the system browser and whether prompts are allowed.
-/// Bundled so `login` keeps a readable argument list.
+/// Bundled so `login` and its two public wrappers keep a readable argument
+/// list (each would otherwise carry `no_browser`/`no_input`/`scopes` as three
+/// separate positional bools/slices).
 #[derive(Clone, Copy)]
-struct LoginInteractivity<'a> {
-    no_browser: bool,
-    no_input: bool,
-    scopes: &'a [String],
+pub(crate) struct LoginInteractivity<'a> {
+    pub(crate) no_browser: bool,
+    pub(crate) no_input: bool,
+    pub(crate) scopes: &'a [String],
 }
 
 async fn login(
@@ -38,6 +40,7 @@ async fn login(
     account: Option<&str>,
     interactivity: LoginInteractivity<'_>,
     output: &crate::ui::output::Output,
+    key_width: usize,
 ) -> anyhow::Result<CredentialTarget> {
     let LoginInteractivity {
         no_browser,
@@ -86,8 +89,8 @@ async fn login(
         LoginRequest::ManualCode(request) => login_manual(&client, request, &mount, output).await?,
         LoginRequest::DeviceCode(request) => {
             // The callback runs before the await inside login_device_code, so we cannot
-            // borrow &mut output across the future. Emit directly with cliclack log
-            // remark on the same output rail used by the command.
+            // borrow &mut output across the future. `present_device_prompt` prints
+            // directly through the raw stderr writer instead.
             let result = client
                 .login_device_code(request, move |prompt| {
                     present_device_prompt(&prompt, no_browser);
@@ -95,11 +98,14 @@ async fn login(
                 })
                 .await;
             if result.is_ok() {
-                output.row(&crate::ui::report::Row::new(
-                    crate::ui::style::Glyph::Done,
-                    "oauth",
-                    "authorized",
-                ));
+                output.ledger_row(
+                    &crate::ui::render::LedgerRow::new(
+                        crate::ui::style::Glyph::Done,
+                        "oauth",
+                        "authorized",
+                    ),
+                    key_width,
+                );
             }
             result.with_hint(format!("Re-run `omnifs mount reauth {mount}` to retry"))?
         },
@@ -124,6 +130,16 @@ async fn login(
             "GitHub granted no scopes. Public resources will work; rerun with `--scope repo` for private repositories.",
         );
     }
+    // No upstream identity is available from the OAuth exchange itself (the
+    // flow never probes "who am I"), so the completed-auth row names the
+    // scheme kind rather than fabricating a username; static-token sign-in
+    // does carry a real identity when the provider's validation probe returns
+    // one. Emitted here so `mount add` and `mount reauth` settle the same row
+    // without each re-asserting it.
+    output.ledger_row(
+        &crate::ui::render::LedgerRow::new(crate::ui::style::Glyph::Done, "signed in", "oauth"),
+        key_width,
+    );
     Ok(target)
 }
 
@@ -168,10 +184,9 @@ pub(crate) async fn login_with_workspace(
     workspace: &Workspace,
     mount: &str,
     account: Option<&str>,
-    no_browser: bool,
-    no_input: bool,
-    scopes: &[String],
+    interactivity: LoginInteractivity<'_>,
     output: &crate::ui::output::Output,
+    key_width: usize,
 ) -> anyhow::Result<CredentialTarget> {
     let store = workspace.credentials();
     let mounts = crate::mount_config::load_mounts(workspace)?;
@@ -181,12 +196,9 @@ pub(crate) async fn login_with_workspace(
         mount_auth,
         store,
         account,
-        LoginInteractivity {
-            no_browser,
-            no_input,
-            scopes,
-        },
+        interactivity,
         output,
+        key_width,
     )
     .await
 }
@@ -199,10 +211,9 @@ pub(crate) async fn login_with_spec(
     workspace: &Workspace,
     spec: &Spec,
     account: Option<&str>,
-    no_browser: bool,
-    no_input: bool,
-    scopes: &[String],
+    interactivity: LoginInteractivity<'_>,
     output: &crate::ui::output::Output,
+    key_width: usize,
 ) -> anyhow::Result<CredentialTarget> {
     let store = workspace.credentials();
     let mount_auth = crate::auth::MountAuth::from_spec(workspace.catalog(), spec.clone());
@@ -211,25 +222,24 @@ pub(crate) async fn login_with_spec(
         mount_auth,
         store,
         account,
-        LoginInteractivity {
-            no_browser,
-            no_input,
-            scopes,
-        },
+        interactivity,
         output,
+        key_width,
     )
     .await
 }
 
 fn present_device_prompt(prompt: &DeviceCodePrompt, no_browser: bool) {
-    // Each line goes through cliclack log remark. This produces the same
-    // rail-framed stderr used by the command and drops the spinner bar from
-    // the device-code path.
+    // Printed directly through the `ui` toolkit's raw stderr writer rather
+    // than through `Output`: the callback runs before the await inside
+    // `login_device_code`, so it cannot borrow `&mut output` across the
+    // future (see `login_manual` above for the same constraint spelled out).
     let url = prompt
         .verification_uri_complete
         .as_deref()
         .unwrap_or(&prompt.verification_uri);
-    let _ = cliclack::log::remark(crate::ui::style::accent(url));
+    let stream = style::Stream::Stderr;
+    crate::ui::eprint_raw(&format!("{}\n", crate::ui::style::accent(url, stream)));
 
     // Clipboard copy is best effort only. Failure must not prevent showing
     // the code or continuing the flow.
@@ -237,12 +247,12 @@ fn present_device_prompt(prompt: &DeviceCodePrompt, no_browser: bool) {
         match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(prompt.user_code.clone())) {
             Ok(()) => format!(
                 "{} {}",
-                crate::ui::style::bold(&prompt.user_code),
-                crate::ui::style::dim("(copied to clipboard)")
+                crate::ui::style::bold(&prompt.user_code, stream),
+                crate::ui::style::dim("(copied to clipboard)", stream)
             ),
-            Err(_) => crate::ui::style::bold(&prompt.user_code),
+            Err(_) => crate::ui::style::bold(&prompt.user_code, stream),
         };
-    let _ = cliclack::log::remark(code_line);
+    crate::ui::eprint_raw(&format!("{code_line}\n"));
 
     // Show the code lifetime so the user knows how long they have before the
     // prompt on the provider side expires.
@@ -253,24 +263,34 @@ fn present_device_prompt(prompt: &DeviceCodePrompt, no_browser: bool) {
         let mins = secs / 60;
         format!("expires in {mins}m")
     };
-    let _ = cliclack::log::remark(crate::ui::style::dim(expiry_text));
+    crate::ui::eprint_raw(&format!("{}\n", crate::ui::style::dim(expiry_text, stream)));
 
     // Only attempt browser open when allowed and a complete uri is present.
     // Report outcome only on real success so we never overstate what happened.
     if !no_browser && let Some(complete_url) = &prompt.verification_uri_complete {
         match webbrowser::open(complete_url) {
             Ok(()) => {
-                let _ = cliclack::log::remark(crate::ui::style::dim("(opened your browser)"));
+                crate::ui::eprint_raw(&format!(
+                    "{}\n",
+                    crate::ui::style::dim("(opened your browser)", stream)
+                ));
             },
             Err(_) => {
-                let _ = cliclack::log::remark(crate::ui::style::dim(
-                    "(could not open a browser; visit the URL above)",
+                crate::ui::eprint_raw(&format!(
+                    "{}\n",
+                    crate::ui::style::dim(
+                        "(could not open a browser; visit the URL above)",
+                        stream,
+                    )
                 ));
             },
         }
     }
 
-    let _ = cliclack::log::remark(crate::ui::style::dim("waiting for confirmation"));
+    crate::ui::eprint_raw(&format!(
+        "{}\n",
+        crate::ui::style::dim("waiting for confirmation", stream)
+    ));
 }
 
 fn print_oauth_consent_summary(
@@ -278,27 +298,32 @@ fn print_oauth_consent_summary(
     request: &OAuthRequest,
     guidance: &SchemeGuidance,
 ) {
+    let stream = style::Stream::Stderr;
     let scheme = request.scheme();
     let mode = AuthMode::from_oauth_flow(&scheme.flow);
-    output.note(crate::ui::style::dim(mode.experience()));
+    output.note(crate::ui::style::dim(mode.experience(), stream));
     if !guidance.setup_steps.is_empty() {
-        output.note(crate::ui::style::dim("Guidance:"));
+        output.note(crate::ui::style::dim("Guidance:", stream));
         for (index, step) in guidance.setup_steps.iter().enumerate() {
             output.note(format!("{}. {step}", index + 1));
         }
     }
     if let Some(url) = &guidance.docs_url {
-        output.note(format!("{} {}", style::dim("Docs:"), style::accent(url)));
+        output.note(format!(
+            "{} {}",
+            style::dim("Docs:", stream),
+            style::accent(url, stream)
+        ));
     }
     output.note(format!(
         "{} {}",
-        style::dim("Scopes:"),
+        style::dim("Scopes:", stream),
         format_scopes(&scheme.default_scopes)
     ));
     if !scheme.inject_domains.is_empty() {
         output.note(format!(
             "{} {}",
-            style::dim("Applies to:"),
+            style::dim("Applies to:", stream),
             scheme.inject_domains.join(", ")
         ));
     }

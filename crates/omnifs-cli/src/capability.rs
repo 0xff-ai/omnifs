@@ -4,6 +4,7 @@
 //! renders a manifest's needs and limits through these helpers, so the wording
 //! stays consistent.
 
+use omnifs_workspace::authn::AuthScheme;
 use omnifs_workspace::provider::{
     AccessNeed, LimitDeclarations, PreopenMode, PreopenedPath, ProviderManifest,
 };
@@ -79,6 +80,40 @@ pub(crate) fn compact_limits(manifest: &ProviderManifest) -> Option<String> {
         .map(|line| format!("up to {} {}", line.value, limit_noun(line.label)))
         .collect();
     Some(parts.join(", "))
+}
+
+/// Full, untruncated consent facts for one provider: one complete sentence
+/// per needs group, one per limit, and the default auth scheme. Unlike [`compact_needs`]/[`compact_limits`],
+/// nothing here is truncated: the picker's detail panel has its own line per
+/// fact rather than one budget-constrained summary line.
+pub(crate) fn consent_detail(manifest: &ProviderManifest) -> Vec<String> {
+    let mut lines = Vec::new();
+    for (values, why) in need_groups(manifest) {
+        lines.push(format!("Calls {values} ({why})."));
+    }
+    for limit in limit_lines(&manifest.limits) {
+        lines.push(format!("{}: up to {}.", limit.label, limit.value));
+    }
+    if let Some(auth) = auth_summary(manifest) {
+        lines.push(auth);
+    }
+    lines
+}
+
+/// One sentence naming the provider's default auth scheme, or `None` for a
+/// provider with no auth manifest at all (a real, common case: not every
+/// provider needs credentials).
+fn auth_summary(manifest: &ProviderManifest) -> Option<String> {
+    let auth = manifest.auth.as_ref()?;
+    let scheme = auth
+        .schemes
+        .iter()
+        .find(|scheme| scheme.key() == Some(auth.default.as_str()))?;
+    Some(match scheme {
+        AuthScheme::Oauth(oauth) => format!("Auth: signs in with {} (OAuth).", oauth.display_name),
+        AuthScheme::StaticToken(token) => format!("Auth: {} (static token).", token.description),
+        AuthScheme::None => "Auth: none.".to_owned(),
+    })
 }
 
 /// Short noun for a limit kind used in compact and detail rendering.

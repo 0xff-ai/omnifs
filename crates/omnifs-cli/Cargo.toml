@@ -39,7 +39,6 @@ toml = "0.8"
 secrecy = "0.10"
 anstream = "1"
 owo-colors = "4"
-cliclack = "0.5.5"
 arboard = { version = "3", default-features = false }
 time = { workspace = true }
 bollard = { workspace = true }
@@ -51,7 +50,6 @@ ratatui = "0.29"
 crossterm = "0.28"
 tar = { workspace = true }
 zstd = { workspace = true }
-tabled = { version = "0.21.0", features = ["ansi"] }
 unicode-width = { workspace = true }
 getrandom = "0.3"
 

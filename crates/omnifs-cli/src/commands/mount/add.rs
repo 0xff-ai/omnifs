@@ -69,15 +69,30 @@ impl AddArgs {
         workspace: &Workspace,
         output: crate::ui::output::Output,
     ) -> anyhow::Result<crate::error::ExitCode> {
-        output.intro("omnifs mount add")?;
         let prompt = crate::stages::PromptMode::from_flags(
             output.yes(),
             output.no_input() || output.is_structured(),
         );
-        let outcome = crate::stages::configure_mount(self, workspace, &output, prompt).await?;
+        let outcome = crate::stages::configure_mount(
+            self,
+            workspace,
+            &output,
+            prompt,
+            crate::stages::ReceiptStyle::Full,
+        )
+        .await?;
         match outcome.status {
             crate::stages::MountInitStatus::Ready => {
-                output.outro(format!("Mounted `{}`.", outcome.mount_name));
+                // `mount add` only ever commits a new desired revision; a
+                // daemon (if one happens to be running) still serves whatever
+                // revision it applied at its own last start, so the mount
+                // just added is never already serving. The `omnifs up` hint
+                // is the only honest closing line here, exactly once,
+                // regardless of daemon liveness.
+                output.outro(format!(
+                    "Mounted `{0}` at /{0}. Serve it: `omnifs up`",
+                    outcome.mount_name
+                ));
             },
             crate::stages::MountInitStatus::SignInDeclined => {
                 output.outro(format!(
@@ -113,10 +128,16 @@ pub(crate) fn render_consent_block(
         .unwrap_or(&manifest.display_name);
     output.note(description);
     if let Some(needs) = crate::capability::compact_needs(manifest) {
-        output.note(crate::ui::style::dim(needs));
+        output.note(crate::ui::style::dim(
+            needs,
+            crate::ui::style::Stream::Stderr,
+        ));
     }
     if let Some(limits) = crate::capability::compact_limits(manifest) {
-        output.note(crate::ui::style::dim(limits));
+        output.note(crate::ui::style::dim(
+            limits,
+            crate::ui::style::Stream::Stderr,
+        ));
     }
 }
 
@@ -127,6 +148,7 @@ pub(crate) async fn run_static_token_init(
     store: &dyn CredentialStore,
     validate: bool,
     output: &crate::ui::output::Output,
+    key_width: usize,
 ) -> anyhow::Result<CredentialTarget> {
     let static_token_scheme = auth.static_token_scheme(manifest)?;
 
@@ -151,13 +173,16 @@ pub(crate) async fn run_static_token_init(
     let identity = validation
         .as_ref()
         .and_then(|outcome| outcome.identity.clone());
-    output.row(&crate::ui::report::Row::new(
-        crate::ui::style::Glyph::Done,
-        "signed in",
-        identity
-            .clone()
-            .unwrap_or_else(|| "token accepted".to_string()),
-    ));
+    output.ledger_row(
+        &crate::ui::render::LedgerRow::new(
+            crate::ui::style::Glyph::Done,
+            "signed in",
+            identity
+                .clone()
+                .unwrap_or_else(|| "token accepted".to_string()),
+        ),
+        key_width,
+    );
     if let Some(outcome) = &validation
         && let Some(workspace) = &outcome.workspace
     {
@@ -187,11 +212,10 @@ pub(crate) async fn run_static_token_init(
             .put(key, &entry)
             .with_context(|| "failed to store credential")?;
     }
-    output.row(&crate::ui::report::Row::new(
-        crate::ui::style::Glyph::Done,
-        "credential",
-        "stored",
-    ));
+    output.ledger_row(
+        &crate::ui::render::LedgerRow::new(crate::ui::style::Glyph::Done, "credential", "stored"),
+        key_width,
+    );
     Ok(target)
 }
 
@@ -435,10 +459,10 @@ mod tests {
             true,
             true,
         )
-        .resolve(&crate::ui::output::Output::new(
-            crate::ui::output::OutputMode::Human,
-            false,
-        ))
+        .resolve(
+            &crate::ui::output::Output::new(crate::ui::output::OutputMode::Human, false),
+            crate::auth::auth_receipt_key_width(),
+        )
         .unwrap();
 
         let promoted = outcome.auth.expect("auth");
@@ -497,10 +521,10 @@ mod tests {
             false, // non-interactive
             true,  // --yes
         )
-        .resolve(&crate::ui::output::Output::new(
-            crate::ui::output::OutputMode::Human,
-            false,
-        ))
+        .resolve(
+            &crate::ui::output::Output::new(crate::ui::output::OutputMode::Human, false),
+            crate::auth::auth_receipt_key_width(),
+        )
         .unwrap();
 
         assert!(

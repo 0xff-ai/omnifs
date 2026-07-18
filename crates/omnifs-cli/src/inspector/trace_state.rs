@@ -2,7 +2,7 @@
 //!
 //! This module owns the state derived from the inspector event stream:
 //! retained operations for the waterfall, the live path forest, mount
-//! metric windows, palette assignment, and operation selection.
+//! metric windows, palette assignment, sandbox stats, and session stats.
 
 use std::collections::{HashMap, VecDeque};
 
@@ -142,6 +142,40 @@ impl Stage {
     }
 }
 
+/// Durable whole-session counters for the quit receipt. Timeline refolds
+/// derive their own prefix counters, while [`App`](super::app::App) reads the
+/// live reducer so pausing and scrubbing never undercount the session.
+#[derive(Debug, Default, Clone)]
+pub struct SessionStats {
+    pub events: u64,
+    completions: u64,
+    pub errors: u64,
+    cache_hits: u64,
+    pub slowest: Option<SlowOp>,
+}
+
+/// The single slowest completed FUSE operation seen this session.
+#[derive(Debug, Clone)]
+pub struct SlowOp {
+    pub mount: String,
+    pub path: String,
+    pub op: String,
+    pub elapsed_us: u64,
+}
+
+impl SessionStats {
+    /// Fraction of completions served from cache. Uses the same
+    /// hit/(hit+completion) definition as [`MountWindow::cache_hit_ratio`].
+    #[allow(clippy::cast_precision_loss)]
+    pub fn cache_hit_ratio(&self) -> Option<f64> {
+        let total = self.cache_hits + self.completions;
+        if total == 0 {
+            return None;
+        }
+        Some(self.cache_hits as f64 / total as f64)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Operation {
     pub trace_id: TraceId,
@@ -217,9 +251,16 @@ pub struct TraceReducer {
     trace_order: VecDeque<TraceId>,
     mount_windows: HashMap<String, MountWindow>,
     sandbox: SandboxStats,
+    session: SessionStats,
 }
 
 impl TraceReducer {
+    /// Durable counters for the whole record sequence folded into this
+    /// reducer. Quit receipts use the live reducer, never a scrub prefix.
+    pub fn session(&self) -> &SessionStats {
+        &self.session
+    }
+
     pub fn mount_window(&self, mount: &str) -> Option<&MountWindow> {
         self.mount_windows.get(mount)
     }
@@ -268,6 +309,7 @@ impl TraceReducer {
     }
 
     pub fn apply_record(&mut self, record: &InspectorRecord) {
+        self.session.events = self.session.events.saturating_add(1);
         self.sandbox.touch_trace(record.trace_id, MAX_RECENT_TRACES);
         let trace_id = record.trace_id;
         match &record.event {
@@ -401,6 +443,23 @@ impl TraceReducer {
             .entry(mount.clone())
             .or_default()
             .record_completion(mono_us, elapsed_us, outcome);
+        self.session.completions = self.session.completions.saturating_add(1);
+        if outcome_status(outcome) == OperationStatus::Error {
+            self.session.errors = self.session.errors.saturating_add(1);
+        }
+        if self
+            .session
+            .slowest
+            .as_ref()
+            .is_none_or(|previous| elapsed_us > previous.elapsed_us)
+        {
+            self.session.slowest = Some(SlowOp {
+                mount: mount.clone(),
+                path: path.clone(),
+                op: op.to_string(),
+                elapsed_us,
+            });
+        }
         // A negative lookup is expected while browsing a projected namespace;
         // keep it in the operation log, but don't make the path look like a
         // permanent hard failure in the activity tree.
@@ -566,6 +625,7 @@ impl TraceReducer {
             self.forest
                 .mount_tree_mut(mount)
                 .cache_hit(&normalized_path, mono_us);
+            self.session.cache_hits = self.session.cache_hits.saturating_add(1);
         }
     }
 

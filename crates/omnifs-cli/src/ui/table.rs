@@ -10,6 +10,8 @@ use unicode_width::UnicodeWidthChar as _;
 
 use crossterm::terminal;
 
+use super::render::display_width;
+
 /// A complete human report made up of context strips and resource tables.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Report {
@@ -36,7 +38,10 @@ impl Report {
         };
         self.render_with(RenderOptions {
             width,
-            color: is_tty && std::env::var_os("NO_COLOR").is_none(),
+            // The stdout color decision has one owner (`style::color_enabled`)
+            // so `NO_COLOR` and `CLICOLOR_FORCE` behave identically here and
+            // on every other stdout-bound render.
+            color: super::style::color_enabled(super::style::Stream::Stdout),
         })
     }
 
@@ -118,7 +123,7 @@ impl ContextStrip {
                     .iter()
                     .map(Meta::render)
                     .collect::<Vec<_>>()
-                    .join(" · ")
+                    .join(", ")
             );
         }
         if let Some(action) = self.action.as_ref() {
@@ -142,7 +147,11 @@ impl Meta {
     }
 
     fn render(&self) -> String {
-        format!("{} {}", self.label, self.value)
+        if self.label.is_empty() {
+            self.value.clone()
+        } else {
+            format!("{} {}", self.label, self.value)
+        }
     }
 }
 
@@ -267,7 +276,7 @@ impl ResourceTable {
                 })
                 .collect::<Vec<_>>();
             if !metadata.is_empty() {
-                let _ = writeln!(out, "    {}", metadata.join(" · "));
+                let _ = writeln!(out, "    {}", metadata.join(", "));
             }
             if let Some(action) = row.action.as_ref()
                 && !shared.contains(&action.command)
@@ -436,9 +445,11 @@ pub(crate) struct Action {
 }
 
 impl Action {
+    /// The a degraded row's recovery command reads `fix:  <command>`,
+    /// full width and never truncated.
     pub(crate) fn fix(command: impl Into<String>) -> Self {
         Self {
-            label: "Fix",
+            label: "fix:",
             command: command.into(),
         }
     }
@@ -497,7 +508,7 @@ impl StateToken {
         self.severity.symbol()
     }
 
-    fn render(&self, color: bool) -> String {
+    pub(crate) fn render(&self, color: bool) -> String {
         let token = format!("{} {}", self.symbol(), self.label);
         if !color {
             return token;
@@ -561,13 +572,6 @@ fn shared_actions_for_render<'a>(rows: &'a [ResourceRow], commands: &[String]) -
             })
         })
         .collect()
-}
-
-fn display_width(text: &str) -> usize {
-    super::strip_ansi(text)
-        .chars()
-        .map(|ch| ch.width().unwrap_or(0))
-        .sum()
 }
 
 fn truncate_display(value: &str, max_width: usize) -> String {
@@ -727,9 +731,9 @@ mod tests {
                 .lines()
                 .nth(1)
                 .unwrap()
-                .contains("daemon running · mounts 2")
+                .contains("daemon running, mounts 2")
         );
-        assert!(output.lines().nth(2).unwrap().contains("Fix  omnifs up"));
+        assert!(output.lines().nth(2).unwrap().contains("fix:  omnifs up"));
     }
 
     #[test]
@@ -749,7 +753,10 @@ mod tests {
         assert!(first_row.contains("▲ reauth required"));
         assert!(first_row.find("github").unwrap() < first_row.find("▲ reauth required").unwrap());
         assert!(display_width(&first_row) <= 71);
-        assert_eq!(output.matches("Fix  omnifs mount reauth github").count(), 1);
+        assert_eq!(
+            output.matches("fix:  omnifs mount reauth github").count(),
+            1
+        );
         assert!(output.contains("Location  /very/long/location"));
     }
 

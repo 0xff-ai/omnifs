@@ -10,16 +10,18 @@ use ratatui::{
 
 use omnifs_api::events::InspectorOutcome;
 
-use super::app::{App, AppView, ConnectionMode, PaneFocus};
+use super::app::{App, AppView, ConnectionMode, PaneFocus, footer_text};
 use super::filter::FilterMode;
 use super::format;
 use super::metrics::{MountWindow, render_sparkline};
 use super::trace_state::{Operation, OperationStatus, Stage, StageKind};
-use super::tree::{ACTIVE_FOCUS_WINDOW_US, NodeStatus, RenderRow};
+use super::tree::{NodeStatus, RenderRow};
 
 // Shared with `sandbox_ui`: both full-screen views highlight a cursor
-// row the same way.
-pub(super) const CURSOR_BG: Color = Color::Rgb(40, 50, 60);
+// row the same way. ANSI-16 color keeps the cue visible on terminals
+// without truecolor support, while `CURSOR_MARKER` provides a non-color cue.
+pub(super) const CURSOR_BG: Color = Color::DarkGray;
+const CURSOR_MARKER: &str = "› ";
 
 const SPARK_BUCKETS: usize = 12;
 const SPARK_MOUNT_CAP: usize = 8;
@@ -129,11 +131,19 @@ pub(super) fn render_header(frame: &mut Frame, app: &App, area: Rect) {
         },
         ConnectionMode::Replay => format!("replay · {}", app.container),
     };
-    let pause = if app.paused() { " paused" } else { "" };
+    let pause = if app.paused() {
+        format!(
+            " paused  +{} buffered  (space to resume)",
+            app.buffered_since_pause()
+        )
+    } else {
+        String::new()
+    };
     let filter = match app.filter.mode {
         FilterMode::All => "",
         FilterMode::ErrorsOnly => " errors-only",
     };
+    let idle = if app.hide_idle { " idle-hidden" } else { "" };
     let edit = if app.filter.editing {
         format!(" filter:{}", app.filter.query)
     } else if !app.filter.query.is_empty() {
@@ -149,18 +159,11 @@ pub(super) fn render_header(frame: &mut Frame, app: &App, area: Rect) {
         " omnifs inspect · {view_name} │ {source}{pause} │ {:.1} evt/s │ dropped {} ",
         app.events_per_sec, app.dropped_events
     );
-    let keys = match app.view {
-        AppView::Activity => {
-            " q quit  v view  tab focus  ↑/↓ navigate  ↵ collapse  space pause  e errors  / filter  r reset "
-        },
-        AppView::Sandbox => {
-            " q quit  v view  ↑/↓ port  ↵ pin  m mount  space pause  ←/→ step  g live "
-        },
-    };
+    let keys = footer_text(app);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan))
-        .title(title + filter + &edit)
+        .title(title + filter + idle + &edit)
         .title_bottom(keys);
     frame.render_widget(block, area);
 }
@@ -234,6 +237,22 @@ fn render_main(frame: &mut Frame, app: &App, area: Rect) {
     render_operations_log(frame, app, columns[1]);
 }
 
+fn empty_state_lines(app: &App) -> Vec<Line<'static>> {
+    vec![
+        Line::from(Span::styled(
+            "Nothing yet. Generate some:",
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                format!("cat {}/...", app.teaching_path),
+                Style::default().fg(Color::Cyan),
+            ),
+        ]),
+    ]
+}
+
 fn render_tree(frame: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
@@ -242,12 +261,9 @@ fn render_tree(frame: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let rows =
-        app.forest()
-            .render_rows(app.view_now_mono(), ACTIVE_FOCUS_WINDOW_US, &app.collapsed);
+    let rows = app.visible_tree_rows();
     if rows.is_empty() {
-        let msg =
-            Paragraph::new("no paths touched yet").style(Style::default().fg(Color::DarkGray));
+        let msg = Paragraph::new(empty_state_lines(app));
         frame.render_widget(msg, inner);
         return;
     }
@@ -300,6 +316,7 @@ impl TreeRowView<'_> {
             .is_some_and(|c| c.mount == row.mount && c.path == row.path);
 
         let mut spans = vec![
+            Span::raw(if is_cursor { CURSOR_MARKER } else { "  " }),
             Span::raw("  ".repeat(row.depth)),
             Span::styled(
                 format!("{} ", row.status.glyph()),
@@ -373,6 +390,12 @@ fn render_operations_log(frame: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
 
+    if blocks.is_empty() {
+        let msg = Paragraph::new(empty_state_lines(app));
+        frame.render_widget(msg, inner);
+        return;
+    }
+
     // Newest-first rendering; advance `start` until the selected trace's
     // full block fits within `capacity`. Each block carries a trailing
     // separator row so blocks visually break apart.
@@ -385,8 +408,14 @@ fn render_operations_log(frame: &mut Frame, app: &App, area: Rect) {
         if lines.len() + block.len() > capacity {
             break;
         }
-        for raw in block {
-            let mut line = raw.clone();
+        for (index, raw) in block.iter().enumerate() {
+            let mut line = if is_selected && index == 0 {
+                let mut spans = vec![Span::raw(CURSOR_MARKER)];
+                spans.extend(raw.spans.clone());
+                Line::from(spans)
+            } else {
+                raw.clone()
+            };
             if is_selected {
                 line = line.patch_style(Style::default().bg(CURSOR_BG));
             }
@@ -581,7 +610,7 @@ mod tests {
 
     #[test]
     fn tree_rollup_badge_explains_failure_count() {
-        let app = App::new(ConnectionMode::Replay, "test", None);
+        let app = App::new(ConnectionMode::Replay, "test", None, "/omnifs");
         let row = RenderRow {
             depth: 0,
             name: "github".to_string(),

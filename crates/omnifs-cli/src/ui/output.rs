@@ -6,121 +6,33 @@
 //! No command should add another boolean cluster or process-global switch.
 
 use serde::Serialize;
-use std::fmt::Write as _;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::sync::{Arc, Mutex, MutexGuard};
-
-use super::style::Glyph;
 
 pub(crate) const SCHEMA_VERSION: u8 = 1;
 
-struct DefaultTheme;
-impl cliclack::Theme for DefaultTheme {}
-
-struct OmnifsTheme;
-
-impl cliclack::Theme for OmnifsTheme {
-    fn format_intro(&self, title: &str) -> String {
-        format!("┌ {title}\n│\n")
-    }
-
-    fn format_outro(&self, message: &str) -> String {
-        format!("└ {message}\n")
-    }
-
-    fn remark_symbol(&self) -> String {
-        String::new()
-    }
-
-    fn format_log(&self, text: &str, symbol: &str) -> String {
-        let mut lines = text.lines();
-        let Some(first) = lines.next() else {
-            return "│\n".to_string();
-        };
-        let mut out = if symbol.is_empty() {
-            format!("│  {first}\n")
+/// Real terminal capabilities for the flat renderer (`render.rs`), read fresh
+/// per call rather than cached: a prompt or progress handle can change the
+/// terminal state (raw mode, size) between one narration line and the next.
+/// `pub(crate)` so the top-level error boundary (`error.rs`) can build the
+/// same stderr capabilities the rest of this module's narration uses.
+///
+/// Mirrors `render.rs::stdout_capabilities`'s is-tty gate: piped stderr gets
+/// the stable 120-column width, never the `crossterm::terminal::size` error
+/// fallback of 80, which would word-wrap content mid-path (a real path or
+/// command embedded in a sentence) the moment stderr is redirected.
+pub(crate) fn stderr_capabilities(quiet: bool) -> super::render::Capabilities {
+    let is_tty = io::stderr().is_terminal();
+    super::render::Capabilities {
+        width: if is_tty {
+            crossterm::terminal::size().map_or(80, |(columns, _rows)| usize::from(columns))
         } else {
-            format!("│\n{symbol} {}\n", super::style::heading(first))
-        };
-        for line in lines {
-            let _ = writeln!(out, "│  {line}");
-        }
-        out
+            120
+        },
+        is_tty,
+        color: super::style::color_enabled(super::style::Stream::Stderr),
+        quiet,
     }
-
-    fn format_header(&self, state: &cliclack::ThemeState, prompt: &str) -> String {
-        if matches!(state, cliclack::ThemeState::Cancel) {
-            String::new()
-        } else {
-            format!(
-                "│\n{}",
-                <DefaultTheme as cliclack::Theme>::format_header(&DefaultTheme, state, prompt)
-            )
-        }
-    }
-
-    fn format_footer(&self, state: &cliclack::ThemeState) -> String {
-        if matches!(state, cliclack::ThemeState::Cancel) {
-            String::new()
-        } else {
-            <DefaultTheme as cliclack::Theme>::format_footer(&DefaultTheme, state)
-        }
-    }
-
-    fn format_input(
-        &self,
-        state: &cliclack::ThemeState,
-        cursor: &cliclack::StringCursor,
-    ) -> String {
-        if matches!(state, cliclack::ThemeState::Cancel) {
-            String::new()
-        } else {
-            <DefaultTheme as cliclack::Theme>::format_input(&DefaultTheme, state, cursor)
-        }
-    }
-
-    fn format_placeholder(
-        &self,
-        state: &cliclack::ThemeState,
-        cursor: &cliclack::StringCursor,
-    ) -> String {
-        if matches!(state, cliclack::ThemeState::Cancel) {
-            String::new()
-        } else {
-            <DefaultTheme as cliclack::Theme>::format_placeholder(&DefaultTheme, state, cursor)
-        }
-    }
-
-    fn format_select_item(
-        &self,
-        state: &cliclack::ThemeState,
-        selected: bool,
-        label: &str,
-        hint: &str,
-    ) -> String {
-        if matches!(state, cliclack::ThemeState::Cancel) {
-            String::new()
-        } else {
-            <DefaultTheme as cliclack::Theme>::format_select_item(
-                &DefaultTheme,
-                state,
-                selected,
-                label,
-                hint,
-            )
-        }
-    }
-
-    fn format_confirm(&self, state: &cliclack::ThemeState, confirm: bool) -> String {
-        if matches!(state, cliclack::ThemeState::Cancel) {
-            String::new()
-        } else {
-            <DefaultTheme as cliclack::Theme>::format_confirm(&DefaultTheme, state, confirm)
-        }
-    }
-}
-pub(crate) fn install_theme() {
-    cliclack::set_theme(OmnifsTheme);
 }
 
 #[derive(Debug, Default)]
@@ -401,6 +313,14 @@ impl Output {
     }
 }
 
+/// A caller-supplied destination for narration/progress text that this
+/// invocation would otherwise print itself. Boxed as a trait object (rather
+/// than a generic parameter) because [`Output`] is cloned freely through
+/// short-lived progress handles and command call chains, and every clone
+/// must carry the same concrete sink without infecting `Output`'s own type
+/// with a caller's closure type.
+type NarrationSink = Arc<dyn Fn(&str) + Send + Sync>;
+
 /// Output policy owned by one CLI invocation. Commands clone this handle and
 /// pass it through short-lived progress handles instead of consulting
 /// process-global switches.
@@ -413,6 +333,7 @@ pub(crate) struct Output {
     command: &'static str,
     state: Arc<Mutex<OutputState>>,
     stdout: Arc<Mutex<OutputWriter>>,
+    narration_sink: Option<NarrationSink>,
 }
 
 impl std::fmt::Debug for Output {
@@ -438,7 +359,32 @@ impl Output {
             command: "invocation",
             state: Arc::new(Mutex::new(OutputState::default())),
             stdout: Arc::new(Mutex::new(Box::new(io::stdout()))),
+            narration_sink: None,
         }
+    }
+
+    /// Redirect this invocation's narration and progress text into `sink`
+    /// instead of printing it. A caller that runs several operations whose
+    /// narration would otherwise each print their own rows (each one
+    /// fighting a shared live region's own redraw) instead folds every one
+    /// of those rows into whatever single visible line it owns. This is an `Output`-owned
+    /// capability rather than a caller-side workaround so every existing
+    /// `narrate`/`note`/`ledger_row`/progress call site is redirected
+    /// automatically, with no changes needed at those call sites.
+    pub(crate) fn with_narration_sink(
+        mut self,
+        sink: impl Fn(&str) + Send + Sync + 'static,
+    ) -> Self {
+        self.narration_sink = Some(Arc::new(sink));
+        self
+    }
+
+    /// The sink this invocation's narration is redirected into, if any.
+    /// `Spinner`/`LiveRegion` read this directly (rather than going through
+    /// `narrate`/`ledger_row`) because their transient draw/erase mechanics
+    /// have no equivalent of those two methods to redirect through.
+    pub(crate) fn narration_sink(&self) -> Option<&NarrationSink> {
+        self.narration_sink.as_ref()
     }
 
     #[cfg(test)]
@@ -459,6 +405,10 @@ impl Output {
         self.no_input
     }
 
+    pub(crate) const fn quiet(&self) -> bool {
+        self.quiet
+    }
+
     pub(crate) const fn yes(&self) -> bool {
         self.yes
     }
@@ -474,66 +424,119 @@ impl Output {
 
     /// Optional narration belongs to the invocation policy: it is human-only
     /// and quiet suppresses it, while structured streams stay machine-clean.
+    /// A flat, ungated line: no gutter, no step marker, nothing that repeats
+    /// once the terminal scrolls it away.
     pub(crate) fn narrate(&self, line: impl std::fmt::Display) {
-        if self.mode == OutputMode::Human && !self.quiet {
-            let _ = cliclack::log::remark(crate::ui::style::accentuate(&line.to_string()));
+        if self.mode != OutputMode::Human || self.quiet {
+            return;
         }
+        let text = line.to_string();
+        if let Some(sink) = &self.narration_sink {
+            sink(&text);
+            return;
+        }
+        crate::ui::eprint_raw(&format!(
+            "{}\n",
+            crate::ui::style::accentuate(&text, crate::ui::style::Stream::Stderr)
+        ));
     }
 
     pub(crate) fn note(&self, line: impl std::fmt::Display) {
         self.narrate(line);
     }
 
+    /// A bold section heading line: plain bold, never the accent color, so it reads as
+    /// structure rather than something the user can type. Human-only; quiet
+    /// suppresses it like every other narration line.
+    pub(crate) fn heading(&self, text: impl Into<String>) {
+        if self.mode == OutputMode::Human && !self.quiet {
+            let caps = stderr_capabilities(self.quiet);
+            crate::ui::eprint_raw(&format!("{}\n", super::render::heading(&text.into(), caps)));
+        }
+    }
+
+    /// The durable echo a prompt leaves behind once it resolves: the question
+    /// it asked, plus the answer in accent. No glyph, since this is a
+    /// one-line fact, not a settled operation.
     pub(crate) fn answer(&self, question: &str, answer: impl std::fmt::Display) {
         if self.mode == OutputMode::Human && !self.quiet {
-            let _ = cliclack::log::remark(format!(
-                "{} {question} {}",
-                Glyph::Done.render(),
-                crate::ui::style::accent(answer)
+            crate::ui::eprint_raw(&format!(
+                "{question} {}\n",
+                crate::ui::style::accent(answer, crate::ui::style::Stream::Stderr)
             ));
         }
     }
 
-    pub(crate) fn intro(&self, title: impl std::fmt::Display) -> anyhow::Result<()> {
-        if self.mode == OutputMode::Human && !self.quiet {
-            cliclack::intro(title)?;
-        }
-        Ok(())
+    /// The key column width one contiguous ledger block needs. Every flow that emits rows one at a time as async
+    /// work settles (a spinner settling into its ledger row, a live region's
+    /// summary, `up`'s streamed `daemon`/`mounts`/`frontends` rows) computes
+    /// this once from its full possible key set before the first row prints,
+    /// so the block still reads as one aligned unit. An associated function,
+    /// not a method: the width depends only on the declared key set, never on
+    /// invocation state, so callers reach it as `Output::ledger_block_width`
+    /// beside the other row primitives without an instance in scope.
+    pub(crate) fn ledger_block_width(keys: &[&str]) -> usize {
+        super::render::key_field_width(keys)
     }
 
-    pub(crate) fn row(&self, row: &super::report::Row) {
-        if self.mode == OutputMode::Human {
-            let _ = cliclack::log::remark(row.render().trim_start());
+    /// Print one durable v2-register ledger row at an externally
+    /// supplied key width, so a block whose rows are printed one at a time
+    /// as async work settles still reads as one aligned unit rather than
+    /// each row sizing its own key column.
+    pub(crate) fn ledger_row(&self, row: &super::render::LedgerRow, key_width: usize) {
+        if self.mode != OutputMode::Human {
+            return;
         }
+        if let Some(sink) = &self.narration_sink {
+            sink(&row.value);
+            return;
+        }
+        let caps = stderr_capabilities(self.quiet);
+        crate::ui::eprint_raw(&format!(
+            "{}\n",
+            super::render::ledger_row_line(row, key_width, caps)
+        ));
     }
 
+    /// The consent plan preview: a headline sentence naming the
+    /// operation (`plan.title`), then its rows indented two spaces under it
+    /// with the `-`/`=` glyph vocabulary, then a blank line so the confirm
+    /// prompt (or, for `--dry-run`, the closing sentence) reads as its own
+    /// block.
     pub(crate) fn plan(&self, plan: &super::consent::Plan) {
         if self.mode != OutputMode::Human {
             return;
         }
-        let _ = cliclack::log::step("plan");
+        let caps = stderr_capabilities(self.quiet);
         let rows = plan
             .rows
             .iter()
-            .map(super::consent::Row::render_plan)
+            .map(super::consent::Row::ledger_row)
             .collect::<Vec<_>>();
-        let _ = cliclack::log::remark(super::report::render_rows(&rows));
-        let _ = cliclack::log::remark(crate::ui::style::dim(plan.summary()));
+        crate::ui::eprint_raw(&super::render::plan_block(&plan.title, &rows, caps));
+        crate::ui::eprint_raw("\n");
     }
 
+    /// The consent receipt: settled rows at column 0 (never
+    /// indented under the plan's headline, since the operation already
+    /// happened), then a blank line before the caller's closing sentence.
     pub(crate) fn receipt(&self, receipt: &super::consent::Receipt) {
         if self.mode != OutputMode::Human {
             return;
         }
-        let _ = cliclack::log::step("apply");
+        let caps = stderr_capabilities(self.quiet);
         let rows = receipt
             .rows
             .iter()
-            .map(super::consent::Outcome::render_receipt)
+            .map(super::consent::Outcome::ledger_row)
             .collect::<Vec<_>>();
-        let _ = cliclack::log::remark(super::report::render_rows(&rows));
+        crate::ui::eprint_raw(&format!("{}\n", super::render::ledger_block(&rows, caps)));
+        crate::ui::eprint_raw("\n");
     }
 
+    /// The v2 register never repeats the command the user just typed, so
+    /// there is no frame opener to print; this exists only to close out the
+    /// invocation with a plain sentence.
     pub(crate) fn outro(&self, message: impl Into<String>) {
         let mut current = state(self);
         if current.closed {
@@ -542,12 +545,31 @@ impl Output {
         current.closed = true;
         drop(current);
         if self.mode == OutputMode::Human && !self.quiet {
-            let _ = cliclack::outro(message.into());
+            let caps = stderr_capabilities(self.quiet);
+            crate::ui::eprint_raw(&format!(
+                "{}\n",
+                super::render::sentence(&message.into(), caps)
+            ));
         }
     }
 
-    pub(crate) fn progress(&self, key: impl Into<String>) -> crate::ui::progress::Progress {
-        crate::ui::progress::Progress::new(self.clone(), key)
+    /// Whether this invocation already printed its own closing line (via
+    /// [`Self::outro`]). The top-level cancel handler checks this so a
+    /// consent decline's `Kept everything as it was.` is not
+    /// followed by the generic `canceled` line every other prompt cancel
+    /// prints.
+    pub(crate) fn is_closed(&self) -> bool {
+        state(self).closed
+    }
+
+    /// Start a spinner whose transient frame and settled row share
+    /// `key_width` with the rest of its ledger block.
+    pub(crate) fn progress(
+        &self,
+        key: impl Into<String>,
+        key_width: usize,
+    ) -> crate::ui::live::Spinner {
+        crate::ui::live::Spinner::new(self.clone(), key, key_width)
     }
 
     pub(crate) const fn with_no_input(mut self, no_input: bool) -> Self {
@@ -667,6 +689,62 @@ impl From<crate::inventory::Verdict> for ResultVerdict {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- narration sink: setup's per-enable suppression mechanism -----------
+
+    #[test]
+    fn narrate_redirects_into_a_narration_sink_instead_of_printing() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sink_seen = Arc::clone(&seen);
+        let output = Output::new(OutputMode::Human, false)
+            .with_narration_sink(move |text| sink_seen.lock().unwrap().push(text.to_owned()));
+        output.narrate("Connecting to Docker");
+        assert_eq!(*seen.lock().unwrap(), ["Connecting to Docker".to_owned()]);
+    }
+
+    #[test]
+    fn quiet_suppresses_narration_even_with_a_sink_set() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sink_seen = Arc::clone(&seen);
+        let output = Output::new(OutputMode::Human, true)
+            .with_narration_sink(move |text| sink_seen.lock().unwrap().push(text.to_owned()));
+        output.narrate("should never appear");
+        assert!(seen.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn ledger_row_redirects_its_value_into_a_narration_sink_instead_of_printing() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sink_seen = Arc::clone(&seen);
+        let output = Output::new(OutputMode::Human, false)
+            .with_narration_sink(move |text| sink_seen.lock().unwrap().push(text.to_owned()));
+        let row = crate::ui::render::LedgerRow::new(
+            crate::ui::style::Glyph::Done,
+            "frontend image",
+            "ghcr.io/omnifs:latest ready",
+        );
+        output.ledger_row(&row, 9);
+        assert_eq!(
+            *seen.lock().unwrap(),
+            ["ghcr.io/omnifs:latest ready".to_owned()]
+        );
+    }
+
+    #[test]
+    fn structured_output_never_reads_a_narration_sink() {
+        // The sink is a human-narration substitution; a structured
+        // invocation's `ledger_row` stays a no-op regardless of whether a
+        // sink happens to be set, the same as it already was without one.
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sink_seen = Arc::clone(&seen);
+        let output = Output::new(OutputMode::Json, false)
+            .with_narration_sink(move |text| sink_seen.lock().unwrap().push(text.to_owned()));
+        output.ledger_row(
+            &crate::ui::render::LedgerRow::new(crate::ui::style::Glyph::Done, "k", "v"),
+            1,
+        );
+        assert!(seen.lock().unwrap().is_empty());
+    }
 
     #[test]
     fn invocation_policy_is_cloneable_and_explicit() {

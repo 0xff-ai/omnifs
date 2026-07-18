@@ -2,6 +2,7 @@
 
 use std::collections::{HashSet, VecDeque};
 
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use omnifs_api::events::{InspectorEvent, InspectorLine, InspectorRecord, TraceId};
 
 use super::filter::{FilterMode, ViewFilter};
@@ -9,8 +10,8 @@ use super::metrics::MountWindow;
 use super::sandbox::{self, MountSandboxView, PortId};
 use super::source::SourceMessage;
 use super::timeline::Timeline;
-use super::trace_state::{MAX_RECENT_TRACES, MountPalette, Operation, TraceReducer};
-use super::tree::{ACTIVE_FOCUS_WINDOW_US, MountForest};
+use super::trace_state::{MAX_RECENT_TRACES, MountPalette, Operation, SessionStats, TraceReducer};
+use super::tree::{ACTIVE_FOCUS_WINDOW_US, MountForest, RenderRow};
 
 const EVENT_WINDOW: usize = 128;
 
@@ -66,6 +67,8 @@ pub struct App {
     /// Inspector address shown in the header while disconnected.
     /// `None` in [`ConnectionMode::Replay`].
     pub addr: Option<String>,
+    /// Hides mounts with no samples in the current metrics window.
+    pub hide_idle: bool,
     pub filter: ViewFilter,
     pub focus: PaneFocus,
     pub tree_cursor: Option<TreeCursor>,
@@ -76,6 +79,8 @@ pub struct App {
     pub quit: bool,
     pub dropped_events: u64,
     pub events_per_sec: f64,
+    /// A usable path shown in the activity view's empty state.
+    pub teaching_path: String,
     /// Currently highlighted trace. View state, not fold state: a later
     /// time-travel slice refolds `TraceReducer` from scratch, so this
     /// must survive independently of the fold.
@@ -100,20 +105,22 @@ pub struct App {
 /// backward, since `TraceReducer::apply_record` has no inverse.
 struct Scrub {
     cursor: u64,
+    live_at_pause: u64,
     reducer: TraceReducer,
 }
 
 impl Scrub {
     /// Fold the entire ring: the state a fresh pause freezes on.
     fn paused_at(timeline: &Timeline) -> Self {
-        Self::at(timeline, timeline.end())
+        let end = timeline.end();
+        Self::at(timeline, end, end)
     }
 
     /// Rebuild from scratch by folding `ring[evicted..ordinal)`, clamped
     /// into the retained range. O(ring length), but this only runs on
     /// pause, backward steps, and second-granularity jumps, never once
     /// per frame.
-    fn at(timeline: &Timeline, ordinal: u64) -> Self {
+    fn at(timeline: &Timeline, ordinal: u64, live_at_pause: u64) -> Self {
         let target = timeline.clamp_ordinal(ordinal);
         let mut reducer = TraceReducer::default();
         for idx in timeline.evicted()..target {
@@ -123,6 +130,7 @@ impl Scrub {
         }
         Self {
             cursor: target,
+            live_at_pause,
             reducer,
         }
     }
@@ -134,7 +142,7 @@ impl Scrub {
     /// state that never happened.
     fn clamp_to_horizon(&mut self, timeline: &Timeline) {
         if self.cursor < timeline.evicted() {
-            *self = Self::at(timeline, timeline.evicted());
+            *self = Self::at(timeline, timeline.evicted(), self.live_at_pause);
         }
     }
 
@@ -152,7 +160,7 @@ impl Scrub {
     fn step_backward(&mut self, timeline: &Timeline) {
         self.clamp_to_horizon(timeline);
         if self.cursor > timeline.evicted() {
-            *self = Self::at(timeline, self.cursor - 1);
+            *self = Self::at(timeline, self.cursor - 1, self.live_at_pause);
         }
     }
 
@@ -174,7 +182,7 @@ impl Scrub {
             reference.saturating_sub(delta_us)
         };
         let ordinal = timeline.ordinal_at_or_after(target_mono);
-        *self = Self::at(timeline, ordinal);
+        *self = Self::at(timeline, ordinal, self.live_at_pause);
     }
 }
 
@@ -208,7 +216,7 @@ pub struct TreeCursor {
 impl TreeCursor {
     /// Locate this cursor in `rows`; if absent, fall back to its deepest
     /// visible ancestor, then the mount root, then row zero.
-    fn locate_or_nearest_ancestor(&self, rows: &[super::tree::RenderRow]) -> usize {
+    fn locate_or_nearest_ancestor(&self, rows: &[RenderRow]) -> usize {
         if let Some(index) = rows
             .iter()
             .position(|row| row.mount == self.mount && row.path == self.path)
@@ -232,7 +240,12 @@ impl TreeCursor {
 }
 
 impl App {
-    pub fn new(mode: ConnectionMode, container: impl Into<String>, addr: Option<String>) -> Self {
+    pub fn new(
+        mode: ConnectionMode,
+        container: impl Into<String>,
+        addr: Option<String>,
+        teaching_path: impl Into<String>,
+    ) -> Self {
         Self {
             mode,
             container: container.into(),
@@ -242,6 +255,7 @@ impl App {
             connected: false,
             daemon_epoch: None,
             addr,
+            hide_idle: false,
             filter: ViewFilter::default(),
             focus: PaneFocus::default(),
             tree_cursor: None,
@@ -251,6 +265,7 @@ impl App {
             quit: false,
             dropped_events: 0,
             events_per_sec: 0.0,
+            teaching_path: teaching_path.into(),
             selected: None,
             collapsed: HashSet::new(),
             traces: TraceReducer::default(),
@@ -264,6 +279,14 @@ impl App {
     /// stepped) at some point in the past rather than tracking live.
     pub fn paused(&self) -> bool {
         self.scrub.is_some()
+    }
+
+    /// Records received after the current pause began. Moving the scrub
+    /// cursor does not change this count.
+    pub fn buffered_since_pause(&self) -> u64 {
+        self.scrub.as_ref().map_or(0, |scrub| {
+            self.timeline.end().saturating_sub(scrub.live_at_pause)
+        })
     }
 
     /// Single read accessor for render/selection code: the live reducer
@@ -307,6 +330,11 @@ impl App {
         self.view_reducer().mount_window(mount)
     }
 
+    /// True when a mount has no samples in its current metrics window.
+    pub fn mount_is_idle(&self, mount: &str) -> bool {
+        self.mount_window(mount).is_none_or(MountWindow::is_empty)
+    }
+
     /// Sandbox port stats for one mount. Reads through [`Self::view_reducer`]
     /// like every other accessor, so time travel covers the sandbox map
     /// for free.
@@ -341,7 +369,32 @@ impl App {
     }
 
     pub fn ordered_mounts_for_strip(&self, cap: usize) -> Vec<String> {
-        self.view_reducer().ordered_mounts_for_strip(cap)
+        let mounts = self.view_reducer().ordered_mounts_for_strip(cap);
+        if self.hide_idle {
+            mounts
+                .into_iter()
+                .filter(|mount| !self.mount_is_idle(mount))
+                .collect()
+        } else {
+            mounts
+        }
+    }
+
+    /// Tree rows shared by rendering and navigation, including external
+    /// collapse state and the idle-mount filter.
+    pub fn visible_tree_rows(&self) -> Vec<RenderRow> {
+        let rows = self.forest().render_rows(
+            self.view_now_mono(),
+            ACTIVE_FOCUS_WINDOW_US,
+            &self.collapsed,
+        );
+        if self.hide_idle {
+            rows.into_iter()
+                .filter(|row| !self.mount_is_idle(&row.mount))
+                .collect()
+        } else {
+            rows
+        }
     }
 
     pub fn operation(&self, trace_id: TraceId) -> Option<&Operation> {
@@ -360,6 +413,12 @@ impl App {
 
     pub const fn max_retained_traces() -> usize {
         MAX_RECENT_TRACES
+    }
+
+    /// Durable whole-session counters from the live reducer. Scrubbing
+    /// affects the view, never the quit receipt.
+    pub fn session(&self) -> &SessionStats {
+        self.traces.session()
     }
 
     /// Fold one record end-to-end: always into the live reducer and the
@@ -459,70 +518,13 @@ impl App {
         }
     }
 
-    pub fn handle_key(&mut self, key: crossterm::event::KeyEvent) {
-        use crossterm::event::{KeyCode, KeyModifiers};
-
+    pub fn handle_key(&mut self, key: KeyEvent) {
         if self.filter.editing {
             self.handle_filter_key(key.code);
             return;
         }
-
-        match key.code {
-            KeyCode::Char('q' | 'c') | KeyCode::Esc
-                if matches!(key.code, KeyCode::Char('q') | KeyCode::Esc)
-                    || key.modifiers.contains(KeyModifiers::CONTROL) =>
-            {
-                self.quit = true;
-            },
-            // Global keys: identical in both views.
-            KeyCode::Char('v') => self.view = self.view.toggle(),
-            KeyCode::Char(' ') => self.toggle_pause(),
-            KeyCode::Char('e') => {
-                self.filter.mode = match self.filter.mode {
-                    FilterMode::ErrorsOnly => FilterMode::All,
-                    FilterMode::All => FilterMode::ErrorsOnly,
-                };
-                self.ensure_selected_visible();
-            },
-            KeyCode::Char('r') => self.reset_recent(),
-            KeyCode::Char('/') => {
-                self.filter.editing = true;
-                self.filter.query.clear();
-            },
-
-            // Scrub controls: only meaningful while paused. While live
-            // these keys are no-ops, matching the plain `_` arm below.
-            KeyCode::Char('g') if self.scrub.is_some() => self.go_live(),
-            KeyCode::Left
-                if self.scrub.is_some() && key.modifiers.contains(KeyModifiers::SHIFT) =>
-            {
-                self.jump_scrub_seconds(-1);
-            },
-            KeyCode::Right
-                if self.scrub.is_some() && key.modifiers.contains(KeyModifiers::SHIFT) =>
-            {
-                self.jump_scrub_seconds(1);
-            },
-            KeyCode::Left if self.scrub.is_some() => self.step_scrub_backward(),
-            KeyCode::Right if self.scrub.is_some() => self.step_scrub_forward(),
-
-            // Activity-only: tree/log focus, cursor movement, selection.
-            KeyCode::Tab if self.view == AppView::Activity => self.focus = self.focus.cycle(),
-            KeyCode::Up if self.view == AppView::Activity => self.move_focus_cursor(-1),
-            KeyCode::Down if self.view == AppView::Activity => self.move_focus_cursor(1),
-            KeyCode::Enter if self.view == AppView::Activity && self.focus == PaneFocus::Tree => {
-                self.toggle_tree_cursor_collapse();
-            },
-            KeyCode::Char('j' | 'n') if self.view == AppView::Activity => self.select_next(),
-            KeyCode::Char('k' | 'p') if self.view == AppView::Activity => self.select_prev(),
-
-            // Sandbox-only: port cursor movement, pin, and mount cycling.
-            KeyCode::Up if self.view == AppView::Sandbox => self.move_port_cursor(-1),
-            KeyCode::Down if self.view == AppView::Sandbox => self.move_port_cursor(1),
-            KeyCode::Enter if self.view == AppView::Sandbox => self.toggle_port_pin(),
-            KeyCode::Char('m') if self.view == AppView::Sandbox => self.cycle_active_mount(),
-
-            _ => {},
+        if let Some(binding) = KEYMAP.iter().find(|binding| binding.handles(self, &key)) {
+            binding.command.run(self, &key);
         }
     }
 
@@ -577,11 +579,7 @@ impl App {
     }
 
     fn move_tree_cursor(&mut self, delta: isize) {
-        let rows = self.forest().render_rows(
-            self.view_now_mono(),
-            ACTIVE_FOCUS_WINDOW_US,
-            &self.collapsed,
-        );
+        let rows = self.visible_tree_rows();
         if rows.is_empty() {
             self.tree_cursor = None;
             return;
@@ -708,8 +706,7 @@ impl App {
         }
     }
 
-    fn handle_filter_key(&mut self, code: crossterm::event::KeyCode) {
-        use crossterm::event::KeyCode;
+    fn handle_filter_key(&mut self, code: KeyCode) {
         match code {
             KeyCode::Esc => {
                 self.filter.editing = false;
@@ -751,6 +748,9 @@ impl App {
 
     fn reset_recent(&mut self) {
         self.traces.reset_recent();
+        if let Some(scrub) = &mut self.scrub {
+            scrub.reducer.reset_recent();
+        }
         self.ensure_selected_visible();
     }
 
@@ -777,6 +777,23 @@ impl App {
             .map_or(0, |i| i.saturating_sub(1));
         self.selected = Some(visible[idx]);
     }
+
+    fn toggle_errors_only(&mut self) {
+        self.filter.mode = match self.filter.mode {
+            FilterMode::ErrorsOnly => FilterMode::All,
+            FilterMode::All => FilterMode::ErrorsOnly,
+        };
+        self.ensure_selected_visible();
+    }
+
+    fn toggle_idle(&mut self) {
+        self.hide_idle = !self.hide_idle;
+    }
+
+    fn start_filter_edit(&mut self) {
+        self.filter.editing = true;
+        self.filter.query.clear();
+    }
 }
 
 /// Apply `delta` to `current`, clamped to `[0, max_inclusive]`. Handles
@@ -789,6 +806,258 @@ fn step_clamped(current: usize, delta: isize, max_inclusive: usize) -> usize {
     } else {
         current.saturating_sub(delta.unsigned_abs())
     }
+}
+
+#[derive(Clone, Copy)]
+enum BindingScope {
+    Global,
+    Activity,
+    Sandbox,
+    Paused,
+}
+
+impl BindingScope {
+    fn active(self, app: &App) -> bool {
+        match self {
+            Self::Global => true,
+            Self::Activity => app.view == AppView::Activity,
+            Self::Sandbox => app.view == AppView::Sandbox,
+            Self::Paused => app.paused(),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Command {
+    Quit,
+    ToggleView,
+    CycleFocus,
+    TogglePause,
+    Navigate,
+    Activate,
+    SelectNext,
+    SelectPrev,
+    ToggleErrors,
+    ToggleIdle,
+    EditFilter,
+    Reset,
+    CycleMount,
+    GoLive,
+    StepScrub,
+}
+
+impl Command {
+    fn matches(self, key: &KeyEvent) -> bool {
+        match self {
+            Self::Quit => {
+                matches!(key.code, KeyCode::Char('q') | KeyCode::Esc)
+                    || (key.code == KeyCode::Char('c')
+                        && key.modifiers.contains(KeyModifiers::CONTROL))
+            },
+            Self::ToggleView => key.code == KeyCode::Char('v'),
+            Self::CycleFocus => key.code == KeyCode::Tab,
+            Self::TogglePause => key.code == KeyCode::Char(' '),
+            Self::Navigate => matches!(key.code, KeyCode::Up | KeyCode::Down),
+            Self::Activate => key.code == KeyCode::Enter,
+            Self::SelectNext => matches!(key.code, KeyCode::Char('j' | 'n')),
+            Self::SelectPrev => matches!(key.code, KeyCode::Char('k' | 'p')),
+            Self::ToggleErrors => key.code == KeyCode::Char('e'),
+            Self::ToggleIdle => key.code == KeyCode::Char('i'),
+            Self::EditFilter => key.code == KeyCode::Char('/'),
+            Self::Reset => key.code == KeyCode::Char('r'),
+            Self::CycleMount => key.code == KeyCode::Char('m'),
+            Self::GoLive => key.code == KeyCode::Char('g'),
+            Self::StepScrub => matches!(key.code, KeyCode::Left | KeyCode::Right),
+        }
+    }
+
+    fn run(self, app: &mut App, key: &KeyEvent) {
+        match self {
+            Self::Quit => app.quit = true,
+            Self::ToggleView => app.view = app.view.toggle(),
+            Self::CycleFocus => app.focus = app.focus.cycle(),
+            Self::TogglePause => app.toggle_pause(),
+            Self::Navigate => {
+                let delta = if key.code == KeyCode::Up { -1 } else { 1 };
+                match app.view {
+                    AppView::Activity => app.move_focus_cursor(delta),
+                    AppView::Sandbox => app.move_port_cursor(delta),
+                }
+            },
+            Self::Activate => match app.view {
+                AppView::Activity if app.focus == PaneFocus::Tree => {
+                    app.toggle_tree_cursor_collapse();
+                },
+                AppView::Sandbox => app.toggle_port_pin(),
+                AppView::Activity => {},
+            },
+            Self::SelectNext => app.select_next(),
+            Self::SelectPrev => app.select_prev(),
+            Self::ToggleErrors => app.toggle_errors_only(),
+            Self::ToggleIdle => app.toggle_idle(),
+            Self::EditFilter => app.start_filter_edit(),
+            Self::Reset => app.reset_recent(),
+            Self::CycleMount => app.cycle_active_mount(),
+            Self::GoLive => app.go_live(),
+            Self::StepScrub => {
+                let direction = if key.code == KeyCode::Left { -1 } else { 1 };
+                if key.modifiers.contains(KeyModifiers::SHIFT) {
+                    app.jump_scrub_seconds(direction);
+                } else if direction < 0 {
+                    app.step_scrub_backward();
+                } else {
+                    app.step_scrub_forward();
+                }
+            },
+        }
+    }
+}
+
+struct KeyBinding {
+    scope: BindingScope,
+    command: Command,
+    label: &'static str,
+    description: &'static str,
+    hidden: bool,
+}
+
+impl KeyBinding {
+    fn handles(&self, app: &App, key: &KeyEvent) -> bool {
+        self.scope.active(app) && self.command.matches(key)
+    }
+}
+
+const KEYMAP: &[KeyBinding] = &[
+    KeyBinding {
+        scope: BindingScope::Global,
+        command: Command::Quit,
+        label: "q",
+        description: "quit",
+        hidden: false,
+    },
+    KeyBinding {
+        scope: BindingScope::Global,
+        command: Command::ToggleView,
+        label: "v",
+        description: "view",
+        hidden: false,
+    },
+    KeyBinding {
+        scope: BindingScope::Activity,
+        command: Command::CycleFocus,
+        label: "tab",
+        description: "focus",
+        hidden: false,
+    },
+    KeyBinding {
+        scope: BindingScope::Activity,
+        command: Command::Navigate,
+        label: "↑/↓",
+        description: "navigate",
+        hidden: false,
+    },
+    KeyBinding {
+        scope: BindingScope::Activity,
+        command: Command::Activate,
+        label: "↵",
+        description: "collapse",
+        hidden: false,
+    },
+    KeyBinding {
+        scope: BindingScope::Activity,
+        command: Command::SelectNext,
+        label: "j/n",
+        description: "next op",
+        hidden: true,
+    },
+    KeyBinding {
+        scope: BindingScope::Activity,
+        command: Command::SelectPrev,
+        label: "k/p",
+        description: "prev op",
+        hidden: true,
+    },
+    KeyBinding {
+        scope: BindingScope::Sandbox,
+        command: Command::Navigate,
+        label: "↑/↓",
+        description: "port",
+        hidden: false,
+    },
+    KeyBinding {
+        scope: BindingScope::Sandbox,
+        command: Command::Activate,
+        label: "↵",
+        description: "pin",
+        hidden: false,
+    },
+    KeyBinding {
+        scope: BindingScope::Sandbox,
+        command: Command::CycleMount,
+        label: "m",
+        description: "mount",
+        hidden: false,
+    },
+    KeyBinding {
+        scope: BindingScope::Global,
+        command: Command::TogglePause,
+        label: "space",
+        description: "pause",
+        hidden: false,
+    },
+    KeyBinding {
+        scope: BindingScope::Global,
+        command: Command::ToggleErrors,
+        label: "e",
+        description: "errors",
+        hidden: false,
+    },
+    KeyBinding {
+        scope: BindingScope::Global,
+        command: Command::ToggleIdle,
+        label: "i",
+        description: "idle",
+        hidden: false,
+    },
+    KeyBinding {
+        scope: BindingScope::Global,
+        command: Command::EditFilter,
+        label: "/",
+        description: "filter",
+        hidden: false,
+    },
+    KeyBinding {
+        scope: BindingScope::Global,
+        command: Command::Reset,
+        label: "r",
+        description: "reset",
+        hidden: false,
+    },
+    KeyBinding {
+        scope: BindingScope::Paused,
+        command: Command::StepScrub,
+        label: "←/→",
+        description: "step",
+        hidden: false,
+    },
+    KeyBinding {
+        scope: BindingScope::Paused,
+        command: Command::GoLive,
+        label: "g",
+        description: "live",
+        hidden: false,
+    },
+];
+
+/// Context-sensitive footer text generated from the same bindings that
+/// dispatch input.
+pub fn footer_text(app: &App) -> String {
+    let parts: Vec<String> = KEYMAP
+        .iter()
+        .filter(|binding| binding.scope.active(app) && !binding.hidden)
+        .map(|binding| format!("{} {}", binding.label, binding.description))
+        .collect();
+    format!(" {} ", parts.join("  "))
 }
 
 #[cfg(test)]
@@ -855,7 +1124,7 @@ mod tests {
 
     #[test]
     fn pause_is_lossless_new_records_land_live_but_not_in_the_frozen_view() {
-        let mut app = App::new(ConnectionMode::Replay, "test", None);
+        let mut app = App::new(ConnectionMode::Replay, "test", None, "/omnifs");
         app.apply_record(fuse_start(1, 10, "github", "/a"));
         app.apply_record(fuse_end(1, 20, 10));
 
@@ -866,6 +1135,7 @@ mod tests {
         app.apply_record(fuse_start(2, 30, "github", "/b"));
         app.apply_record(fuse_end(2, 40, 10));
         assert_eq!(app.timeline.end(), 4);
+        assert_eq!(app.buffered_since_pause(), 2);
 
         // The frozen view doesn't show them yet...
         assert!(app.operation(2).is_none());
@@ -874,11 +1144,17 @@ mod tests {
         app.go_live();
         assert!(!app.paused());
         assert!(app.operation(2).is_some());
+        assert_eq!(app.buffered_since_pause(), 0);
     }
 
     #[test]
     fn inspector_epoch_reset_drops_old_timeline_but_same_epoch_reconnect_keeps_it() {
-        let mut app = App::new(ConnectionMode::Inspector, "test", Some("daemon".into()));
+        let mut app = App::new(
+            ConnectionMode::Inspector,
+            "test",
+            Some("daemon".into()),
+            "/omnifs",
+        );
         app.apply_source_message(SourceMessage::Connected {
             epoch: "one".into(),
         });
@@ -904,7 +1180,7 @@ mod tests {
 
     #[test]
     fn scrub_stepping_reflects_prefix_state() {
-        let mut app = App::new(ConnectionMode::Replay, "test", None);
+        let mut app = App::new(ConnectionMode::Replay, "test", None, "/omnifs");
         app.apply_record(fuse_start(1, 10, "github", "/a"));
         app.apply_record(fuse_end(1, 20, 10));
         app.apply_record(fuse_start(2, 30, "github", "/b"));
@@ -958,7 +1234,7 @@ mod tests {
 
     #[test]
     fn v_toggles_between_activity_and_sandbox_views() {
-        let mut app = App::new(ConnectionMode::Replay, "test", None);
+        let mut app = App::new(ConnectionMode::Replay, "test", None, "/omnifs");
         assert_eq!(app.view, AppView::Activity);
         app.handle_key(key(crossterm::event::KeyCode::Char('v')));
         assert_eq!(app.view, AppView::Sandbox);
@@ -970,7 +1246,7 @@ mod tests {
     fn port_cursor_moves_through_exports_then_imports_and_clamps_at_both_ends() {
         use crossterm::event::KeyCode;
 
-        let mut app = App::new(ConnectionMode::Replay, "test", None);
+        let mut app = App::new(ConnectionMode::Replay, "test", None, "/omnifs");
         app.apply_record(provider_start(1, 10, "github", "lookup_child"));
         app.view = AppView::Sandbox;
 
@@ -1012,7 +1288,7 @@ mod tests {
     fn m_cycles_active_mount_through_sandbox_activity_order() {
         use crossterm::event::KeyCode;
 
-        let mut app = App::new(ConnectionMode::Replay, "test", None);
+        let mut app = App::new(ConnectionMode::Replay, "test", None, "/omnifs");
         app.apply_record(provider_start(1, 10, "github", "lookup_child"));
         app.apply_record(provider_start(2, 20, "gitlab", "lookup_child"));
         app.view = AppView::Sandbox;
@@ -1025,5 +1301,115 @@ mod tests {
 
         app.handle_key(key(KeyCode::Char('m')));
         assert_eq!(app.sandbox.active_mount.as_deref(), Some("gitlab"));
+    }
+
+    #[test]
+    fn footer_and_dispatch_use_the_same_contextual_keymap() {
+        use crossterm::event::KeyCode;
+
+        let mut app = App::new(ConnectionMode::Replay, "test", None, "/omnifs");
+        let activity_footer = footer_text(&app);
+        assert!(activity_footer.contains("tab focus"));
+        assert!(!activity_footer.contains("m mount"));
+        assert!(!activity_footer.contains("←/→ step"));
+
+        let activity_samples = [
+            KeyCode::Char('q'),
+            KeyCode::Char('v'),
+            KeyCode::Tab,
+            KeyCode::Up,
+            KeyCode::Enter,
+            KeyCode::Char('j'),
+            KeyCode::Char('k'),
+            KeyCode::Char(' '),
+            KeyCode::Char('e'),
+            KeyCode::Char('i'),
+            KeyCode::Char('/'),
+            KeyCode::Char('r'),
+        ];
+        for code in activity_samples {
+            let event = key(code);
+            assert_eq!(
+                KEYMAP
+                    .iter()
+                    .filter(|binding| binding.handles(&app, &event))
+                    .count(),
+                1,
+                "{event:?}"
+            );
+        }
+
+        app.view = AppView::Sandbox;
+        let sandbox_footer = footer_text(&app);
+        assert!(sandbox_footer.contains("m mount"));
+        assert!(!sandbox_footer.contains("tab focus"));
+        for code in [KeyCode::Up, KeyCode::Enter, KeyCode::Char('m')] {
+            let event = key(code);
+            assert_eq!(
+                KEYMAP
+                    .iter()
+                    .filter(|binding| binding.handles(&app, &event))
+                    .count(),
+                1,
+                "{event:?}"
+            );
+        }
+
+        app.toggle_pause();
+        let paused_footer = footer_text(&app);
+        assert!(paused_footer.contains("←/→ step"));
+        assert!(paused_footer.contains("g live"));
+        for code in [KeyCode::Left, KeyCode::Right, KeyCode::Char('g')] {
+            let event = key(code);
+            assert_eq!(
+                KEYMAP
+                    .iter()
+                    .filter(|binding| binding.handles(&app, &event))
+                    .count(),
+                1,
+                "{event:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn pause_time_selection_and_collapse_survive_resume() {
+        let mut app = App::new(ConnectionMode::Replay, "test", None, "/omnifs");
+        app.apply_record(fuse_start(1, 10, "github", "/dir/one"));
+        app.apply_record(fuse_start(2, 20, "github", "/dir/two"));
+        assert_eq!(app.selected_trace(), Some(1));
+
+        app.toggle_pause();
+        app.select_prev();
+        assert_eq!(app.selected_trace(), Some(2));
+        app.move_tree_cursor(1);
+        app.toggle_tree_cursor_collapse();
+        assert!(app.visible_tree_rows().iter().any(|row| {
+            row.path
+                .ends_with(super::super::tree::COLLAPSED_SUMMARY_SUFFIX)
+        }));
+
+        app.go_live();
+        assert_eq!(app.selected_trace(), Some(2));
+        assert!(app.visible_tree_rows().iter().any(|row| {
+            row.path
+                .ends_with(super::super::tree::COLLAPSED_SUMMARY_SUFFIX)
+        }));
+    }
+
+    #[test]
+    fn idle_toggle_hides_and_restores_mounts() {
+        let mut app = App::new(ConnectionMode::Replay, "test", None, "/omnifs");
+        app.apply_record(fuse_start(1, 10, "github", "/a"));
+        assert!(app.mount_is_idle("github"));
+        assert_eq!(app.ordered_mounts_for_strip(8), vec!["github"]);
+
+        app.handle_key(key(crossterm::event::KeyCode::Char('i')));
+        assert!(app.ordered_mounts_for_strip(8).is_empty());
+        assert!(app.visible_tree_rows().is_empty());
+
+        app.handle_key(key(crossterm::event::KeyCode::Char('i')));
+        assert_eq!(app.ordered_mounts_for_strip(8), vec!["github"]);
+        assert!(!app.visible_tree_rows().is_empty());
     }
 }

@@ -23,7 +23,6 @@ impl RevokeArgs {
     #[allow(clippy::too_many_lines)] // keep consent and upstream-before-local ordering linear
     pub(crate) async fn run(self, output: Output) -> anyhow::Result<Receipt> {
         let workspace = Workspace::resolve()?;
-        output.intro(format!("omnifs mount revoke {}", self.name))?;
         let mounts = crate::mount_config::load_mounts(&workspace)?;
         let requested = mounts
             .iter()
@@ -109,7 +108,7 @@ impl RevokeArgs {
         debug_assert!(affected_mounts.iter().any(|mount| mount == &self.name));
         let affected_mounts = affected_mounts.join(", ");
         let label = format!("{credential_id} (used by mounts: {affected_mounts})");
-        let mut plan = Plan::new("revoke");
+        let mut plan = Plan::new(format!("Revoking credential for `{}`", self.name));
         plan.push(if entry.is_some() {
             let action = oauth_request.as_ref().map_or("remove locally", |request| {
                 if request.scheme().revocation_endpoint.is_some() {
@@ -143,6 +142,7 @@ impl RevokeArgs {
         Decision::resolve(
             PromptMode::from_flags(output.yes(), output.no_input() || output.is_structured()),
             false,
+            "Revoke?",
             "--yes",
             &output,
         )?;

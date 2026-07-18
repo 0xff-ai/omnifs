@@ -640,7 +640,7 @@ mod tests {
 
     #[test]
     fn traced_port_with_open_call_renders_hot_wire_and_lifetime_count() {
-        let mut app = App::new(ConnectionMode::Replay, "test", None);
+        let mut app = App::new(ConnectionMode::Replay, "test", None, "/omnifs");
         app.apply_record(provider_start(1, 10, "github", "lookup_child"));
 
         let sandbox = app.mount_sandbox("github");
@@ -665,7 +665,7 @@ mod tests {
 
     #[test]
     fn untraced_port_renders_the_untraced_tag_and_dotted_wire() {
-        let app = App::new(ConnectionMode::Replay, "test", None);
+        let app = App::new(ConnectionMode::Replay, "test", None, "/omnifs");
         let line = port_row_line(
             &app,
             None,
@@ -680,7 +680,7 @@ mod tests {
 
     #[test]
     fn log_pseudo_port_is_always_untraced() {
-        let app = App::new(ConnectionMode::Replay, "test", None);
+        let app = App::new(ConnectionMode::Replay, "test", None, "/omnifs");
         let line = port_row_line(&app, None, &PortId::Log, PortDirection::Import, true);
         let text = line.to_string();
         assert!(text.contains("untraced"));

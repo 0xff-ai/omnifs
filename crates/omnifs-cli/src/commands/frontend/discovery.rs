@@ -17,7 +17,11 @@ pub(crate) struct FrontendLsArgs {}
 impl FrontendFilesystem {
     const ALL: [Self; 2] = [Self::Fuse, Self::Nfs];
 
-    pub(super) const fn default_runtime(self) -> FrontendRuntime {
+    /// `pub(crate)`, not `pub(super)`: `omnifs setup`'s frontend multi-select
+    /// (`commands::setup`, a sibling of `commands::frontend`) reads this to
+    /// pre-check the platform's recommended default alongside every other
+    /// caller inside `commands::frontend` itself.
+    pub(crate) const fn default_runtime(self) -> FrontendRuntime {
         match self {
             Self::Fuse if cfg!(target_os = "macos") => FrontendRuntime::Libkrun,
             Self::Fuse | Self::Nfs => FrontendRuntime::Host,
@@ -38,6 +42,24 @@ impl FrontendRuntime {
             Self::Docker | Self::Libkrun => InstancePolicy::OnePerWorkspace,
         }
     }
+}
+
+/// Every filesystem/runtime pair supported on this OS, in `FrontendFilesystem`
+/// then `FrontendRuntime` enumeration order. The single owner of "which
+/// frontends exist on this platform": `frontend ls`'s support table and
+/// `omnifs setup`'s frontend multi-select both read this rather than each
+/// re-deriving the platform table.
+pub(crate) fn available_frontends() -> Vec<(FrontendFilesystem, FrontendRuntime)> {
+    let platform = Platform::current();
+    let mut out = Vec::new();
+    for filesystem in FrontendFilesystem::ALL {
+        for runtime in FrontendRuntime::ALL {
+            if platform.supports(filesystem, runtime) {
+                out.push((filesystem, runtime));
+            }
+        }
+    }
+    out
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

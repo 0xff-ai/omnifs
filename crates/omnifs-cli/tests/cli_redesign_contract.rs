@@ -145,8 +145,9 @@ fn cli_redesign_contract_human_status_has_context_and_resource_sections() {
     let text = stdout_text(&output);
 
     assert!(text.contains("omnifs  "), "{text}");
-    assert!(text.contains("Daemon "), "{text}");
-    assert!(text.contains("namespace /"), "{text}");
+    // The daemon is stopped in this fixture: the context metadata names
+    // configured mounts rather than a stale pid/namespace.
+    assert!(text.contains("mounts configured"), "{text}");
     assert!(!text.contains("API -"), "{text}");
     for heading in ["Frontends  ", "Mounts  "] {
         assert!(text.contains(heading), "missing {heading:?} in {text}");
@@ -263,11 +264,12 @@ fn cli_redesign_contract_actions_are_contextual_rows_without_fix_column() {
     let output = fixture.run(&["status", "--output", "human"]);
     let text = stdout_text(&output);
 
-    assert!(!text.lines().any(|line| line.trim() == "Fix"));
+    assert!(!text.lines().any(|line| line.trim() == "fix:"));
     assert!(text.contains("omnifs doctor"), "{text}");
+    // The a degraded row's recovery command reads `fix:  <command>`.
     assert!(
         text.lines()
-            .any(|line| line.trim_start().starts_with("Fix  ")),
+            .any(|line| line.trim_start().starts_with("fix:  ")),
         "{text}"
     );
 }
@@ -326,8 +328,10 @@ fn cli_redesign_contract_status_exposes_provider_warmup() {
     assert_eq!(warmup["completed"], 1);
     assert_eq!(warmup["total"], 1);
 
+    // A complete warmup is the steady state: JSON keeps the full status, the
+    // human context strip omits it rather than narrating a non-event.
     let human = fixture.run(&["status", "--output", "human"]);
-    assert!(stdout_text(&human).contains("provider warmup 1/1 complete"));
+    assert!(!stdout_text(&human).contains("provider warmup"));
 }
 
 #[test]
