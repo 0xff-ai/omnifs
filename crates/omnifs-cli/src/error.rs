@@ -2,12 +2,15 @@
 //!
 //! Hints are accumulated on a `HintedError` wrapper that sits at the head of
 //! the anyhow error chain. `with_hint` either appends to an existing
-//! `HintedError` or creates a new one. The renderer walks the chain,
-//! collects hints from the wrapper, and prints them as a `Try:` block beneath
-//! the standard "Caused by:" formatting.
+//! `HintedError` or creates a new one. The human renderer (spec 2.8) walks
+//! the chain, collects hints from the wrapper, and turns them into the
+//! `render.rs` error block: a headline, an optional detail (a daemon log
+//! tail when the failure is daemon-shaped, otherwise the cause chain), and
+//! `Fix:`/`Log:`/`Try:` action lines.
 
 use std::borrow::Cow;
-use std::fmt::Write as _;
+
+use crate::ui::render;
 
 pub(crate) use crate::ui::output::{ErrorEnvelope, ErrorPayload, ErrorVerdict};
 
@@ -199,54 +202,121 @@ pub(crate) fn canceled_envelope(
     )
 }
 
-/// Walks the error chain and renders it as:
-///
-/// ```text
-/// Error: <root message>
-///
-/// Caused by:
-///   <next>
-///   <next>
-///
-/// Try:
-///   • <hint>
-///   • <hint>
-/// ```
-pub fn render(error: &anyhow::Error) -> String {
-    let mut out = String::new();
+/// The tail of the daemon log quoted inline under a daemon-shaped failure
+/// (spec 2.8), plus the display path used for the accompanying `Log:`
+/// action. Read once at the top-level error boundary; never constructed
+/// speculatively for a non-daemon failure.
+struct DaemonLogTail {
+    lines: Vec<String>,
+    display_path: String,
+}
 
-    // Collect hints from the HintedError wrapper if present.
-    let hints: &[Cow<'static, str>] = HintedError::find(error).map_or(&[], |h| h.hints.as_slice());
+/// Filter a daemon log to the final error and its immediate context, capped
+/// at 5 lines (spec 2.8): the quoted block is a diagnosis, not a dump. Pure
+/// so the filtering itself is testable without a real log file.
+const DAEMON_LOG_TAIL_MAX_LINES: usize = 5;
+
+fn tail_log_lines(contents: &str) -> Vec<String> {
+    let lines: Vec<&str> = contents
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    if lines.is_empty() {
+        return Vec::new();
+    }
+    let start = lines
+        .iter()
+        .rposition(|line| line.contains("ERROR"))
+        .unwrap_or_else(|| lines.len().saturating_sub(DAEMON_LOG_TAIL_MAX_LINES));
+    let end = lines.len().min(start + DAEMON_LOG_TAIL_MAX_LINES);
+    lines[start..end]
+        .iter()
+        .map(|line| (*line).to_owned())
+        .collect()
+}
+
+/// Best-effort read of the current workspace's daemon log tail. Any I/O or
+/// workspace-resolution failure degrades to `None` (spec 2.8: "missing/
+/// unreadable log degrades to no detail block, never an error-inside-an-
+/// error").
+fn read_daemon_log_tail() -> Option<DaemonLogTail> {
+    let workspace = omnifs_workspace::Workspace::resolve().ok()?;
+    let log_path = workspace.daemon().log_file();
+    let contents = std::fs::read_to_string(&log_path).ok()?;
+    let lines = tail_log_lines(&contents);
+    if lines.is_empty() {
+        return None;
+    }
+    Some(DaemonLogTail {
+        lines,
+        display_path: omnifs_workspace::display(&log_path),
+    })
+}
+
+/// Assemble the human error block (spec 2.8) from an error chain and an
+/// optional daemon log tail. Pure: the caller decides whether the failure is
+/// daemon-shaped and does the (real or injected) log read, so this function
+/// stays testable without touching a filesystem.
+fn build_error_block(
+    error: &anyhow::Error,
+    daemon_log: Option<&DaemonLogTail>,
+) -> render::ErrorBlock {
+    let code = exit_code(error);
     let messages = message_chain(error);
+    let hints: Vec<String> = HintedError::find(error)
+        .map(|hinted| hinted.hints.iter().map(ToString::to_string).collect())
+        .unwrap_or_default();
 
-    // Command spans written as `` `cmd` `` render in the cyan accent, never as
-    // literal backticks: this is terminal output, not markdown. This whole
-    // block is only ever written to stderr (see `main`'s top-level handler).
-    let stream = crate::ui::style::Stream::Stderr;
-    let accent = |text: &str| crate::ui::style::accentuate(text, stream);
-    if let Some(first) = messages.first() {
-        let _ = writeln!(&mut out, "Error: {}", accent(first));
+    let headline = messages
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "omnifs failed.".to_owned());
+
+    let detail = if let Some(tail) = daemon_log {
+        Some(render::ErrorDetail {
+            heading: "Last daemon log lines:".to_owned(),
+            lines: tail.lines.clone(),
+        })
+    } else if messages.len() > 1 {
+        Some(render::ErrorDetail {
+            heading: "Caused by:".to_owned(),
+            lines: messages[1..].to_vec(),
+        })
+    } else {
+        None
+    };
+
+    let mut actions = Vec::new();
+    let mut hints_iter = hints.into_iter();
+    if let Some(fix) = hints_iter.next() {
+        actions.push(render::ErrorAction::fix(fix));
     }
-    if messages.len() > 1 {
-        out.push_str("\nCaused by:\n");
-        for msg in &messages[1..] {
-            let _ = writeln!(&mut out, "  {}", accent(msg));
-        }
+    if let Some(tail) = daemon_log {
+        actions.push(render::ErrorAction::log(tail.display_path.clone()));
     }
-    if !hints.is_empty() {
-        out.push_str("\nTry:\n");
-        for hint in hints {
-            let _ = writeln!(&mut out, "  \u{2022} {}", accent(hint));
-        }
+    for hint in hints_iter {
+        actions.push(render::ErrorAction::try_(hint));
     }
-    // The stable identity, dim, so support and agents can name the failure
-    // without matching on wording. Same slug as the JSON `id`.
-    let _ = writeln!(
-        &mut out,
-        "\n{}",
-        crate::ui::style::dim(format!("(id: {})", exit_code(error).slug()), stream)
-    );
-    out
+
+    render::ErrorBlock {
+        headline,
+        detail,
+        actions,
+        id: Some(code.slug().to_owned()),
+    }
+}
+
+/// Renders the top-level human error block (spec 2.8). A daemon-shaped
+/// failure (`ExitCode::DaemonUnavailable`) quotes the daemon log tail inline
+/// instead of only pointing at `omnifs logs`; every other failure falls back
+/// to the plain cause chain.
+pub fn render(error: &anyhow::Error) -> String {
+    let daemon_log = (exit_code(error) == ExitCode::DaemonUnavailable)
+        .then(read_daemon_log_tail)
+        .flatten();
+    let block = build_error_block(error, daemon_log.as_ref());
+    let caps = crate::ui::output::stderr_capabilities(false);
+    render::error_block(&block, caps)
 }
 
 #[cfg(test)]
@@ -310,5 +380,103 @@ mod tests {
                 }
             })
         );
+    }
+
+    fn daemon_unreachable_error(message: &str, fix: &str) -> anyhow::Error {
+        WithHint::with_hint(
+            WithExitCode::with_exit_code(
+                Err::<(), anyhow::Error>(anyhow::anyhow!(message.to_owned())),
+                ExitCode::DaemonUnavailable,
+            ),
+            fix.to_owned(),
+        )
+        .unwrap_err()
+    }
+
+    #[test]
+    fn human_error_block_matches_the_documented_shape_with_a_daemon_log_tail() {
+        // Spec 2.8's worked example, exercised through error.rs's own
+        // construction (not just render.rs's primitive test) to prove the
+        // wiring: headline, `Last daemon log lines:` detail, `Fix:`/`Log:`.
+        let error = daemon_unreachable_error(
+            "The daemon exited before your mounts came ready.",
+            "omnifs mount add github",
+        );
+        let tail = DaemonLogTail {
+            lines: vec!["ERROR provider github: pinned artifact missing from store".to_owned()],
+            display_path: "~/.omnifs/cache/daemon.log".to_owned(),
+        };
+        let block = build_error_block(&error, Some(&tail));
+        let caps = crate::ui::render::Capabilities {
+            width: 120,
+            is_tty: false,
+            color: false,
+            quiet: false,
+        };
+        let rendered = crate::ui::render::error_block(&block, caps);
+        assert_eq!(
+            rendered,
+            "✗ The daemon exited before your mounts came ready.\n\
+             \n\
+             \x20\x20Last daemon log lines:\n\
+             \x20\x20\x20\x20ERROR provider github: pinned artifact missing from store\n\
+             \n\
+             Fix:  omnifs mount add github\n\
+             Log:  ~/.omnifs/cache/daemon.log\n\
+             \n\
+             (id: daemon-unavailable)\n"
+        );
+    }
+
+    #[test]
+    fn human_error_block_falls_back_to_the_cause_chain_without_a_daemon_log() {
+        let error = anyhow::anyhow!("boom").context("outer");
+        let block = build_error_block(&error, None);
+        assert_eq!(block.headline, "outer");
+        let detail = block.detail.expect("cause chain becomes the detail");
+        assert_eq!(detail.heading, "Caused by:");
+        assert_eq!(detail.lines, vec!["boom".to_owned()]);
+    }
+
+    #[test]
+    fn human_error_block_never_duplicates_a_nested_id_trailer() {
+        // A cause that already carries a rendered `(id: ...)` trailer (e.g. a
+        // pre-rendered nested error folded into the message chain) must not
+        // duplicate it once the outer block adds its own trailer.
+        let error =
+            anyhow::anyhow!("upstream failed (id: mount-degraded)").context("Mount degraded.");
+        let block = build_error_block(&error, None);
+        let caps = crate::ui::render::Capabilities {
+            width: 120,
+            is_tty: false,
+            color: false,
+            quiet: false,
+        };
+        let rendered = crate::ui::render::error_block(&block, caps);
+        assert_eq!(rendered.matches("(id: ").count(), 1, "{rendered}");
+    }
+
+    #[test]
+    fn tail_log_lines_finds_the_final_error_and_caps_at_five_lines() {
+        let contents = (0..10)
+            .map(|i| format!("INFO line {i}"))
+            .chain(std::iter::once("ERROR boom".to_owned()))
+            .chain((0..10).map(|i| format!("INFO after {i}")))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let tail = tail_log_lines(&contents);
+        assert_eq!(tail.len(), 5);
+        assert_eq!(tail[0], "ERROR boom");
+
+        let no_error = (0..20)
+            .map(|i| format!("INFO line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let tail = tail_log_lines(&no_error);
+        assert_eq!(tail.len(), 5);
+        assert_eq!(tail[4], "INFO line 19");
+
+        assert!(tail_log_lines("").is_empty());
+        assert!(tail_log_lines("\n\n  \n").is_empty());
     }
 }
