@@ -13,6 +13,7 @@ use omnifs_api::events::{
 use super::filter::ViewFilter;
 use super::format;
 use super::metrics::MountWindow;
+use super::sandbox::{MountSandbox, SandboxStats};
 use super::tree::MountForest;
 use ratatui::style::Color;
 
@@ -215,11 +216,23 @@ pub struct TraceReducer {
     operations: HashMap<TraceId, Operation>,
     trace_order: VecDeque<TraceId>,
     mount_windows: HashMap<String, MountWindow>,
+    sandbox: SandboxStats,
 }
 
 impl TraceReducer {
     pub fn mount_window(&self, mount: &str) -> Option<&MountWindow> {
         self.mount_windows.get(mount)
+    }
+
+    /// Sandbox port stats for one mount: per-export-method and
+    /// per-import-kind windows, open-call counts, and lifetime totals.
+    pub fn mount_sandbox(&self, mount: &str) -> Option<&MountSandbox> {
+        self.sandbox.mount(mount)
+    }
+
+    /// Mounts with any sandbox activity, most recent first.
+    pub fn sandbox_mounts_by_activity(&self) -> Vec<&str> {
+        self.sandbox.mounts_by_activity()
     }
 
     pub fn ordered_mounts_for_strip(&self, cap: usize) -> Vec<String> {
@@ -265,23 +278,53 @@ impl TraceReducer {
             ),
             InspectorEvent::ProviderStart {
                 operation_id,
+                mount,
                 provider,
                 method,
                 path,
-                ..
-            } => self.on_provider_start(trace_id, *operation_id, provider, method, path),
-            InspectorEvent::ProviderEnd { end, .. } => {
-                self.on_provider_end(trace_id, end.elapsed_us, end.result.outcome);
+            } => self.on_provider_start(
+                trace_id,
+                *operation_id,
+                mount,
+                provider,
+                method,
+                path,
+                record.mono_us,
+            ),
+            InspectorEvent::ProviderEnd { operation_id, end } => {
+                self.on_provider_end(
+                    trace_id,
+                    *operation_id,
+                    end.elapsed_us,
+                    end.result.outcome,
+                    record.mono_us,
+                );
             },
             InspectorEvent::CalloutStart {
+                operation_id,
                 callout_index,
                 kind,
                 summary,
-                ..
-            } => self.on_callout_start(trace_id, *callout_index, *kind, summary),
+            } => self.on_callout_start(
+                trace_id,
+                *operation_id,
+                *callout_index,
+                *kind,
+                summary,
+                record.mono_us,
+            ),
             InspectorEvent::CalloutEnd {
-                callout_index, end, ..
-            } => self.on_callout_end(trace_id, *callout_index, end.elapsed_us, end.result.outcome),
+                operation_id,
+                callout_index,
+                end,
+            } => self.on_callout_end(
+                trace_id,
+                *operation_id,
+                *callout_index,
+                end.elapsed_us,
+                end.result.outcome,
+                record.mono_us,
+            ),
             InspectorEvent::CacheEvent {
                 mount,
                 path,
@@ -375,9 +418,11 @@ impl TraceReducer {
         &mut self,
         trace_id: TraceId,
         operation_id: u64,
+        mount: &str,
         provider: &str,
         method: &str,
         path: &str,
+        mono_us: u64,
     ) {
         if let Some(operation) = self.operations.get_mut(&trace_id) {
             operation.provider_name = Some(provider.to_string());
@@ -393,13 +438,27 @@ impl TraceReducer {
                 "",
             ));
         }
+        // Unlike provider.end and the callout events, provider.start
+        // carries its own mount, so sandbox stats don't need the
+        // operation log to resolve it and stay correct even if the
+        // matching fuse.start was already evicted.
+        self.sandbox
+            .on_provider_start(mount, trace_id, operation_id, provider, method, mono_us);
     }
 
-    fn on_provider_end(&mut self, trace_id: TraceId, elapsed_us: u64, outcome: InspectorOutcome) {
+    fn on_provider_end(
+        &mut self,
+        trace_id: TraceId,
+        operation_id: u64,
+        elapsed_us: u64,
+        outcome: InspectorOutcome,
+        mono_us: u64,
+    ) {
         let Some(operation) = self.operations.get_mut(&trace_id) else {
             return;
         };
         let method = operation.provider_method.clone();
+        let mount = operation.mount.clone();
         operation.close_in_flight(
             |s| {
                 s.in_flight
@@ -408,37 +467,68 @@ impl TraceReducer {
             elapsed_us,
             outcome,
         );
+        self.sandbox
+            .on_provider_end(&mount, trace_id, operation_id, elapsed_us, outcome, mono_us);
     }
 
     fn on_callout_start(
         &mut self,
         trace_id: TraceId,
+        operation_id: u64,
         callout_index: u32,
         kind: CalloutKind,
         summary: &str,
+        mono_us: u64,
     ) {
-        if let Some(operation) = self.operations.get_mut(&trace_id) {
-            operation.stages.push(Stage::in_flight(
-                StageKind::Callout(callout_index),
-                format!("{kind} {summary}"),
-            ));
-        }
+        // Callout events carry no mount; resolve it through the trace's
+        // operation. If the trace was already evicted there's nothing to
+        // correlate the callout to, so skip silently rather than guess.
+        let Some(operation) = self.operations.get_mut(&trace_id) else {
+            return;
+        };
+        let mount = operation.mount.clone();
+        operation.stages.push(Stage::in_flight(
+            StageKind::Callout(callout_index),
+            format!("{kind} {summary}"),
+        ));
+        self.sandbox.on_callout_start(
+            &mount,
+            trace_id,
+            operation_id,
+            callout_index,
+            kind,
+            summary,
+            mono_us,
+        );
     }
 
     fn on_callout_end(
         &mut self,
         trace_id: TraceId,
+        operation_id: u64,
         callout_index: u32,
         elapsed_us: u64,
         outcome: InspectorOutcome,
+        mono_us: u64,
     ) {
-        if let Some(operation) = self.operations.get_mut(&trace_id) {
-            operation.close_in_flight(
-                |s| matches!(&s.kind, StageKind::Callout(idx) if *idx == callout_index),
-                elapsed_us,
-                outcome,
-            );
-        }
+        let Some(operation) = self.operations.get_mut(&trace_id) else {
+            return;
+        };
+        let mount = operation.mount.clone();
+        operation.close_in_flight(
+            |s| matches!(&s.kind, StageKind::Callout(idx) if *idx == callout_index),
+            elapsed_us,
+            outcome,
+        );
+        self.sandbox.on_callout_end(
+            &mount,
+            trace_id,
+            operation_id,
+            callout_index,
+            elapsed_us,
+            outcome,
+            mono_us,
+        );
     }
 
     fn on_cache(
@@ -548,6 +638,7 @@ impl TraceReducer {
 
     fn evict_trace(&mut self, trace_id: TraceId) {
         self.operations.remove(&trace_id);
+        self.sandbox.evict_trace(trace_id);
     }
 
     fn trace_visible(&self, trace_id: TraceId, filter: &ViewFilter) -> bool {
@@ -736,5 +827,198 @@ mod tests {
             .find(|row| row.path == "notifications/missing")
             .expect("missing path row");
         assert_eq!(missing.status, super::super::tree::NodeStatus::Miss);
+    }
+
+    #[test]
+    fn sandbox_stats_track_open_calls_lifetime_counts_and_windows() {
+        let mut traces = TraceReducer::default();
+        traces.apply_record(&record(
+            11,
+            10,
+            InspectorEvent::FuseStart {
+                op: "lookup".into(),
+                mount: "github".into(),
+                path: "/raulk/omnifs".into(),
+            },
+        ));
+        traces.apply_record(&record(
+            11,
+            20,
+            InspectorEvent::ProviderStart {
+                operation_id: 55,
+                mount: "github".into(),
+                provider: "github".into(),
+                method: "lookup_child".into(),
+                path: "/raulk/omnifs".into(),
+            },
+        ));
+        traces.apply_record(&record(
+            11,
+            30,
+            InspectorEvent::CalloutStart {
+                operation_id: 55,
+                callout_index: 0,
+                kind: CalloutKind::Fetch,
+                summary: "GET api.github.com/repos/raulk/omnifs".into(),
+            },
+        ));
+
+        // Mid-trace: one export call and one import call are in flight,
+        // and nothing else on either port.
+        let sandbox = traces.mount_sandbox("github").expect("mount sandbox");
+        assert_eq!(sandbox.export_open_count("lookup_child"), 1);
+        assert_eq!(sandbox.import_open_count(CalloutKind::Fetch), 1);
+        assert_eq!(sandbox.total_open_exports(), 1);
+        assert_eq!(sandbox.total_open_imports(), 1);
+
+        traces.apply_record(&record(
+            11,
+            40,
+            InspectorEvent::CalloutEnd {
+                operation_id: 55,
+                callout_index: 0,
+                end: OpEnd {
+                    elapsed_us: 1_200,
+                    result: OutcomeFields::ok(),
+                },
+            },
+        ));
+        traces.apply_record(&record(
+            11,
+            50,
+            InspectorEvent::ProviderEnd {
+                operation_id: 55,
+                end: OpEnd {
+                    elapsed_us: 2_000,
+                    result: OutcomeFields::ok(),
+                },
+            },
+        ));
+        traces.apply_record(&record(
+            11,
+            60,
+            InspectorEvent::FuseEnd {
+                op: "lookup".into(),
+                end: OpEnd {
+                    elapsed_us: 2_500,
+                    result: OutcomeFields::ok(),
+                },
+            },
+        ));
+
+        let sandbox = traces.mount_sandbox("github").expect("mount sandbox");
+        assert_eq!(sandbox.export_open_count("lookup_child"), 0);
+        assert_eq!(sandbox.import_open_count(CalloutKind::Fetch), 0);
+        assert_eq!(sandbox.total_open_exports(), 0);
+        assert_eq!(sandbox.total_open_imports(), 0);
+        assert!(
+            !sandbox
+                .export_window("lookup_child")
+                .expect("export window")
+                .is_empty()
+        );
+        assert!(
+            !sandbox
+                .import_window(CalloutKind::Fetch)
+                .expect("import window")
+                .is_empty()
+        );
+        assert_eq!(sandbox.export_lifetime_count("lookup_child"), 1);
+        assert_eq!(sandbox.import_lifetime_count(CalloutKind::Fetch), 1);
+    }
+
+    #[test]
+    fn callout_for_unknown_trace_is_skipped_without_panicking_or_state() {
+        let mut traces = TraceReducer::default();
+        traces.apply_record(&record(
+            99,
+            10,
+            InspectorEvent::CalloutStart {
+                operation_id: 1,
+                callout_index: 0,
+                kind: CalloutKind::Fetch,
+                summary: "GET nowhere".into(),
+            },
+        ));
+        traces.apply_record(&record(
+            99,
+            20,
+            InspectorEvent::CalloutEnd {
+                operation_id: 1,
+                callout_index: 0,
+                end: OpEnd {
+                    elapsed_us: 100,
+                    result: OutcomeFields::ok(),
+                },
+            },
+        ));
+        // No fuse.start ever named a mount for trace 99, so there's
+        // nothing to resolve the callout against; it must be dropped
+        // silently rather than creating a phantom mount.
+        assert!(traces.sandbox_mounts_by_activity().is_empty());
+    }
+
+    #[test]
+    fn evict_trace_sweeps_open_sandbox_entries() {
+        let mut traces = TraceReducer::default();
+        traces.apply_record(&record(
+            12,
+            10,
+            InspectorEvent::ProviderStart {
+                operation_id: 7,
+                mount: "github".into(),
+                provider: "github".into(),
+                method: "lookup_child".into(),
+                path: "/raulk/omnifs".into(),
+            },
+        ));
+        assert_eq!(
+            traces
+                .mount_sandbox("github")
+                .expect("mount sandbox")
+                .total_open_exports(),
+            1
+        );
+
+        traces.evict_trace(12);
+
+        assert_eq!(
+            traces
+                .mount_sandbox("github")
+                .expect("mount sandbox")
+                .total_open_exports(),
+            0
+        );
+    }
+
+    #[test]
+    fn sandbox_mounts_by_activity_orders_by_recency() {
+        let mut traces = TraceReducer::default();
+        traces.apply_record(&record(
+            13,
+            10,
+            InspectorEvent::ProviderStart {
+                operation_id: 1,
+                mount: "github".into(),
+                provider: "github".into(),
+                method: "lookup_child".into(),
+                path: "/a".into(),
+            },
+        ));
+        traces.apply_record(&record(
+            14,
+            20,
+            InspectorEvent::ProviderStart {
+                operation_id: 2,
+                mount: "scratch".into(),
+                provider: "scratch".into(),
+                method: "read_file".into(),
+                path: "/b".into(),
+            },
+        ));
+        assert_eq!(
+            traces.sandbox_mounts_by_activity(),
+            vec!["scratch", "github"]
+        );
     }
 }

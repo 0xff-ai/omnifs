@@ -103,6 +103,7 @@ mod tests {
 
     use super::*;
     use crate::inspector::filter::ViewFilter;
+    use crate::inspector::sandbox::MountSandbox;
     use crate::inspector::trace_state::TraceReducer;
 
     fn record(trace_id: TraceId, mono_us: u64, event: InspectorEvent) -> InspectorRecord {
@@ -404,6 +405,25 @@ mod tests {
                 .collect()
         };
         assert_eq!(labels(&full), labels(&incremental));
+
+        // Same determinism property, projected through the sandbox fold:
+        // trace 1's provider.start/end pair on github's lookup_child
+        // export completes fully in the synthetic stream, so both the
+        // lifetime counter and the open-call count must agree between
+        // the whole-stream fold and the split-then-resumed fold.
+        let export_lifetime = |reducer: &TraceReducer| -> u64 {
+            reducer
+                .mount_sandbox("github")
+                .map_or(0, |sandbox| sandbox.export_lifetime_count("lookup_child"))
+        };
+        assert_eq!(export_lifetime(&full), export_lifetime(&incremental));
+
+        let open_exports = |reducer: &TraceReducer| -> usize {
+            reducer
+                .mount_sandbox("github")
+                .map_or(0, MountSandbox::total_open_exports)
+        };
+        assert_eq!(open_exports(&full), open_exports(&incremental));
     }
 
     #[test]

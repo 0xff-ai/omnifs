@@ -6,6 +6,7 @@ use omnifs_api::events::{InspectorEvent, InspectorLine, InspectorRecord, TraceId
 
 use super::filter::{FilterMode, ViewFilter};
 use super::metrics::MountWindow;
+use super::sandbox::MountSandbox;
 use super::source::SourceMessage;
 use super::timeline::Timeline;
 use super::trace_state::{MAX_RECENT_TRACES, MountPalette, Operation, TraceReducer};
@@ -262,6 +263,18 @@ impl App {
 
     pub fn mount_window(&self, mount: &str) -> Option<&MountWindow> {
         self.view_reducer().mount_window(mount)
+    }
+
+    /// Sandbox port stats for one mount. Reads through [`Self::view_reducer`]
+    /// like every other accessor, so time travel covers the sandbox map
+    /// for free.
+    pub fn mount_sandbox(&self, mount: &str) -> Option<&MountSandbox> {
+        self.view_reducer().mount_sandbox(mount)
+    }
+
+    /// Mounts with any sandbox activity, most recent first.
+    pub fn sandbox_mounts_by_activity(&self) -> Vec<&str> {
+        self.view_reducer().sandbox_mounts_by_activity()
     }
 
     pub fn ordered_mounts_for_strip(&self, cap: usize) -> Vec<String> {

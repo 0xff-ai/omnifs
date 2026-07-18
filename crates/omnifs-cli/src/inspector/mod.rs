@@ -3,6 +3,7 @@ mod filter;
 mod format;
 mod metrics;
 mod run;
+mod sandbox;
 mod source;
 mod timeline;
 mod trace_state;
